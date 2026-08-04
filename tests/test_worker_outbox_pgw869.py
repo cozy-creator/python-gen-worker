@@ -339,7 +339,7 @@ def test_beats_coalesce_in_place_and_facts_never_do() -> None:
     asyncio.run(_run())
 
 
-def test_a_result_never_enters_the_evidence_lane() -> None:
+def test_a_result_never_enters_the_evidence_execution_lane() -> None:
     """The precondition that makes `_evidence_bytes` total.
 
     `_message_key` returns None for a JobResult deliberately — a result is not

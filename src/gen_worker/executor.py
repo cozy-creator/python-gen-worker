@@ -34,7 +34,7 @@ import msgspec
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import cpu_budget
-from . import kernel_lane
+from . import kernel_path
 from . import mint_budget
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
@@ -94,7 +94,7 @@ from .models.memory import (
 from .models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from .models.download import ensure_local, lookup_provider_for_ref
 from .models.errors import MissingSnapshotError, UrlExpiredError
-from .models.lanes import LaneUnavailableError
+from .models.execution_lanes import ExecutionLaneUnavailableError
 from .models.residency import Residency
 from .topology import (
     ExecutionTopology,
@@ -575,7 +575,7 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
 
 #: Traced weight lanes a stored flavor MANDATES (fail-closed serving):
 #: `#fp8-w8a8` -> "w8a8" (gw#534), `#nvfp4-w4a4` -> "w4a4" (gw#540).
-_MANDATORY_LANES = ("w8a8", "w4a4")
+_MANDATORY_EXECUTION_LANES = ("w8a8", "w4a4")
 
 # pgw#671 eager-first boot: background-mint driver pacing. The abandon grace
 # bounds "finish the current unit" (one eager forward) before a hard cancel.
@@ -621,11 +621,11 @@ def _bg_yield_enabled() -> bool:
     return os.environ.get("GEN_WORKER_BG_YIELD", "1").strip() != "0"
 
 
-def _cell_lane_matches(
+def _cell_execution_lane_matches(
     ref: str,
     family: str,
     *,
-    want_lane: str,
+    want_execution_lane: str,
     want_bucket: int,
     candidate_keys: typing.AbstractSet[str] = frozenset(),
 ) -> bool:
@@ -643,15 +643,15 @@ def _cell_lane_matches(
     _fam, flavor = compile_cache.parse_cell_ref(ref)
     if cell_key.is_key(flavor):
         return flavor in candidate_keys
-    base, bucket = compile_cache.lane_bucket(compile_cache.cell_lane(ref))
+    base, bucket = compile_cache.execution_lane_bucket(compile_cache.cell_execution_lane(ref))
     if bucket != int(want_bucket or 0):
         return False
-    if want_lane:
-        return base == want_lane
-    return base not in _MANDATORY_LANES
+    if want_execution_lane:
+        return base == want_execution_lane
+    return base not in _MANDATORY_EXECUTION_LANES
 
 
-def _ref_mandatory_lane(ref: str) -> str:
+def _ref_mandatory_execution_lane(ref: str) -> str:
     """The traced weight lane one canonical Tensorhub model ref MANDATES:
     "w8a8" for `#fp8-w8a8` flavors, "w4a4" for `#nvfp4-w4a4`, "" otherwise."""
     from .models.refs import parse_model_ref
@@ -670,12 +670,12 @@ def _ref_mandatory_lane(ref: str) -> str:
     return ""
 
 
-def _mandatory_lane_of(refs: typing.Iterable[str]) -> str:
+def _mandatory_execution_lane_of(refs: typing.Iterable[str]) -> str:
     """The single mandatory lane a binding set selects ("" when none)."""
     for ref in refs:
-        lane = _ref_mandatory_lane(ref)
-        if lane:
-            return lane
+        execution_lane = _ref_mandatory_execution_lane(ref)
+        if execution_lane:
+            return execution_lane
     return ""
 
 
@@ -691,7 +691,7 @@ def _model_failure_vocab(exc: BaseException) -> str:
     return "load_failed"
 
 
-def _shared_lanes_need_fp8(
+def _shared_execution_lanes_need_fp8(
     slot_sizes: Dict[str, Dict[str, int]],
     shared_components: typing.Iterable[str],
     free_vram_bytes: int,
@@ -2488,7 +2488,7 @@ class ModelStore:
 # for two more lanes, in the constant whose own comment describes the
 # incident. It is now the loader's own list, so a new lane cannot be stamped
 # without appearing here.
-_SPECULATIVE_CELL_BASE_LANES: Tuple[str, ...] = loading.STAMPABLE_BASE_LANES
+_SPECULATIVE_CELL_BASE_EXECUTION_LANES: Tuple[str, ...] = loading.STAMPABLE_BASE_EXECUTION_LANES
 
 
 # ---------------------------------------------------------------------------
@@ -2658,9 +2658,9 @@ def _setup_error_will_retry(exc: BaseException) -> bool:
     """
     if not isinstance(exc, _TRANSIENT_SETUP_ERRORS):
         return False
-    from .compile_cache import CompiledLaneUnavailableError
+    from .compile_cache import CompiledExecutionLaneUnavailableError
 
-    return not isinstance(exc, CompiledLaneUnavailableError)
+    return not isinstance(exc, CompiledExecutionLaneUnavailableError)
 
 
 @dataclass
@@ -2720,10 +2720,10 @@ class _ClassRecord:
     # held_refs; the instance serves the OLD pick and must be vacated.
     stale: bool = False
     # gw#551: wire refs of lane-registered slots (gw#479). Lane residency is
-    # call-time-owned (LaneGate promotes + pins around each pipeline call);
+    # call-time-owned (ExecutionLaneGate promotes + pins around each pipeline call);
     # the executor must neither whole-job-pin nor eagerly promote them, or
     # the idle sibling can never be LRU-swapped out.
-    lane_refs: set = dc_field(default_factory=set)
+    execution_lane_refs: set = dc_field(default_factory=set)
     # pgw#572: exact compile-capable objects owned by this READY record. The
     # IDs are minted after successful setup and cleared before vacate; they do
     # not derive from mutable refs, authored specs, or object memory addresses.
@@ -2887,10 +2887,10 @@ class _InjectionResult:
     # residency/movement handle, so ``loaded``/``residency.obj`` is not the
     # object adapters, offload rungs or the LoRA registry may act on.
     slot_pipelines: Dict[str, Any] = dc_field(default_factory=dict)
-    lane_slots: set = dc_field(default_factory=set)
+    execution_lane_slots: set = dc_field(default_factory=set)
     shared_keys: List[Any] = dc_field(default_factory=list)
     shared_bytes: int = 0
-    # gw#551: slots whose pipeline __call__ the LaneGate wrapped. Only these
+    # gw#551: slots whose pipeline __call__ the ExecutionLaneGate wrapped. Only these
     # may become call-time-owned; an un-gateable pipeline (no instance
     # __call__) keeps the eager whole-job pin + promote path.
     gated_slots: set = dc_field(default_factory=set)
@@ -2959,7 +2959,7 @@ class _Job:
     finalizing: bool = False
     # th#913/gw#596: the CONCRETE lane serving this job (stamped post-setup,
     # reported on JobMetrics.lane). "" = not yet determined.
-    lane: str = ""
+    execution_lane: str = ""
     # pgw#789 (th#1293 dimensions): this request was served EAGER by a compiled
     # lane — a pgw#680 guard miss, a router heal/volatile verdict, or an
     # aot_serve ingress refusal. Set from the guard-miss callback, which fires
@@ -3477,7 +3477,7 @@ class Executor:
                 pick = resolutions.get(base_ref)
                 new_binding = base_binding
                 if pick is not None:
-                    resolved_ref, cast, _lane = pick
+                    resolved_ref, cast, _execution_lane = pick
                     try:
                         new_binding = rebind_pick(
                             base_binding,
@@ -3880,7 +3880,7 @@ class Executor:
         assert cfg is not None
         contract_digest = compile_cache.execution_contract_digest(
             target.pipeline, cfg)
-        lane = pipeline_weight_lane(target.pipeline)
+        execution_lane = pipeline_weight_lane(target.pipeline)
         bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
         requested_key = ""
         requested_axes: Tuple[Tuple[str, str], ...] = ()
@@ -3888,21 +3888,21 @@ class Executor:
             from . import cell_key
 
             # pgw#686: the KEY lane resolves through the one shared brain
-            # (compile_cache.cell_base_lane — probe, then denoiser markers),
+            # (compile_cache.cell_base_execution_lane — probe, then denoiser markers),
             # never the raw probe alone: the raw probe is blind to the w8a8
             # GEMM mode, so its key names a cell no mint ever publishes and
             # the fleet's armed cells are never adopted. The raw probe stays
             # authoritative for the wire lane descriptor below.
             key = cell_key.compute(
                 str(getattr(cfg, "family", "") or ""),
-                compile_cache.cell_base_lane(target.pipeline), bucket,
+                compile_cache.cell_base_execution_lane(target.pipeline), bucket,
                 contract=cfg.contract_digest(),
                 regional=bool(getattr(cfg, "regional", False)))
             requested_key, requested_axes = key.digest, key.axes
         except Exception:
             pass  # no computable identity on this runtime => no key
         with target.state_lock:
-            target.pipeline_weight_lane = lane
+            target.pipeline_weight_lane = execution_lane
             target.lora_bucket = bucket
             target.contract_digest = contract_digest
             target.requested_cell_key = requested_key
@@ -4293,7 +4293,7 @@ class Executor:
             else _CompileObjectCandidate(item, set(all_slots))
             for item in objects
         ]
-        requested_lane = self._mandatory_lane_of_bound(
+        requested_execution_lane = self._mandatory_execution_lane_of_bound(
             wire_ref(spec.models[slot]) for slot in self._setup_slots(spec)
         )
         active_artifacts = active_artifacts or {}
@@ -4392,14 +4392,14 @@ class Executor:
                 permitted_names = set(compatible_names)
             target.function_names = tuple(sorted(
                 compatible_names & permitted_names))
-            target_quant_lane = next(
-                (lane for lane in _MANDATORY_LANES
-                 if target.pipeline_weight_lane.startswith(lane)), "")
-            candidate_requested_lane = self._mandatory_lane_of_bound(
+            target_quant_execution_lane = next(
+                (execution_lane for execution_lane in _MANDATORY_EXECUTION_LANES
+                 if target.pipeline_weight_lane.startswith(execution_lane)), "")
+            candidate_requested_execution_lane = self._mandatory_execution_lane_of_bound(
                 ref for _slot, ref, _digest in bindings)
-            mandatory_quant = bool(target_quant_lane)
+            mandatory_quant = bool(target_quant_execution_lane)
             if (
-                (mandatory_quant or candidate_requested_lane)
+                (mandatory_quant or candidate_requested_execution_lane)
                 and not expected_names <= set(target.function_names)
             ):
                 # Every REQUIRED alias should be proven; a proven superset
@@ -4429,18 +4429,18 @@ class Executor:
                 self._note_eager_posture(
                     rec, "target_applicability_incomplete", detail)
                 continue
-            lane_error = compile_cache.compile_target_lane_error(
+            execution_lane_error = compile_cache.compile_target_execution_lane_error(
                 target.pipeline_weight_lane, target.lora_bucket)
-            if lane_error:
+            if execution_lane_error:
                 logger.warning(
-                    "compile target omitted for %s: %s", spec.name, lane_error)
+                    "compile target omitted for %s: %s", spec.name, execution_lane_error)
                 self._note_eager_posture(
-                    rec, "target_lane_unsupported", lane_error)
+                    rec, "target_lane_unsupported", execution_lane_error)
                 continue
-            if (candidate_requested_lane
-                    and target_quant_lane != candidate_requested_lane):
-                raise compile_cache.CompiledLaneUnavailableError(
-                    f"{candidate_requested_lane.upper()} binding for "
+            if (candidate_requested_execution_lane
+                    and target_quant_execution_lane != candidate_requested_execution_lane):
+                raise compile_cache.CompiledExecutionLaneUnavailableError(
+                    f"{candidate_requested_execution_lane.upper()} binding for "
                     f"{spec.name!r} materialized pipeline lane "
                     f"{target.pipeline_weight_lane!r}"
                 )
@@ -4468,11 +4468,11 @@ class Executor:
                     "%s compile target for %r has no proven active Forge "
                     "artifact; registering active-less — its aliases serve "
                     "explicit eager (pgw#672)",
-                    target_quant_lane.upper(), spec.name,
+                    target_quant_execution_lane.upper(), spec.name,
                 )
                 self._note_eager_posture(
                     rec, "mandatory_lane_active_less",
-                    f"{target_quant_lane.upper()} target registered with no "
+                    f"{target_quant_execution_lane.upper()} target registered with no "
                     f"proven active artifact")
             with target.state_lock:
                 target.active_compile_ref = active_ref
@@ -4508,17 +4508,17 @@ class Executor:
                         spec.name)
                 else:
                     self._report_no_growth_path(spec, target, pipeline)
-        if requested_lane and not rec.compile_targets:
+        if requested_execution_lane and not rec.compile_targets:
             # pgw#672: degrade, never die — the loaded pipeline serves its
             # functions eagerly; the missing compile target is loud on the
             # wire (serving_tier=eager) and in the activity stream.
             logger.error(
                 "%s setup for %r produced no addressable compile-capable "
                 "pipeline target; serving explicit eager (pgw#672)",
-                requested_lane.upper(), spec.name,
+                requested_execution_lane.upper(), spec.name,
             )
             activity_mod.current_note(
-                f"{requested_lane} lane serving eager: no addressable "
+                f"{requested_execution_lane} lane serving eager: no addressable "
                 "compile target survived the proof")
 
     def compile_targets(self) -> List[pb.CompileTarget]:
@@ -4580,16 +4580,16 @@ class Executor:
                 if cfg is None or not family:
                     continue
                 bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-                want_lane = self._mandatory_lane_of_bound(
+                want_execution_lane = self._mandatory_execution_lane_of_bound(
                     wire_ref(binding) for binding in spec.models.values()
                 )
-                lanes = (
-                    (want_lane,) if want_lane
-                    else _SPECULATIVE_CELL_BASE_LANES)
-                for lane in lanes:
+                execution_lanes = (
+                    (want_execution_lane,) if want_execution_lane
+                    else _SPECULATIVE_CELL_BASE_EXECUTION_LANES)
+                for execution_lane in execution_lanes:
                     try:
                         digest = cell_key.compute(
-                            family, lane, bucket,
+                            family, execution_lane, bucket,
                             contract=cfg.contract_digest(),
                             regional=bool(getattr(cfg, "regional", False)),
                         ).digest
@@ -4613,7 +4613,7 @@ class Executor:
                 return rec, target
         return None
 
-    def _resolved_mandatory_lane(self, ref: str) -> str:
+    def _resolved_mandatory_execution_lane(self, ref: str) -> str:
         """th#1059 twin (hub: ``mandatoryTracedLane``): the flavor token names
         the STORAGE format, not the execution. Mandatory-ness follows the
         hub-resolved EXECUTION lane whenever one is known for this ref —
@@ -4623,35 +4623,35 @@ class Executor:
         token remains the fallback; conflicting evidence fails closed to the
         mandatory reading.
         """
-        from .models import lanes as lanespec
+        from .models import execution_lanes as lanespec
 
         ref = (ref or "").strip()
         known = False
         mandatory = ""
         for declared, pick in (self._model_resolutions or {}).items():
             resolved_ref = (pick[0] or declared).strip()
-            lane_str = (pick[2] or "").strip()
-            if not lane_str or ref not in (declared.strip(), resolved_ref):
+            execution_lane_str = (pick[2] or "").strip()
+            if not execution_lane_str or ref not in (declared.strip(), resolved_ref):
                 continue
             try:
-                lane = lanespec.parse_lane(lane_str)
+                execution_lane = lanespec.parse_execution_lane(execution_lane_str)
             except ValueError:
                 continue
             known = True
-            if lane.activation == lanespec.ACT_W8A8:
+            if execution_lane.activation == lanespec.ACT_W8A8:
                 mandatory = "w8a8"
-            elif lane.activation == lanespec.ACT_W4A4:
+            elif execution_lane.activation == lanespec.ACT_W4A4:
                 mandatory = "w4a4"
         if known:
             return mandatory
-        return _ref_mandatory_lane(ref)
+        return _ref_mandatory_execution_lane(ref)
 
-    def _mandatory_lane_of_bound(self, refs: typing.Iterable[str]) -> str:
+    def _mandatory_execution_lane_of_bound(self, refs: typing.Iterable[str]) -> str:
         """Resolution-aware :func:`_mandatory_lane_of` (th#1059)."""
         for ref in refs:
-            lane = self._resolved_mandatory_lane(ref)
-            if lane:
-                return lane
+            execution_lane = self._resolved_mandatory_execution_lane(ref)
+            if execution_lane:
+                return execution_lane
         return ""
 
     def _execution_lane_for_ref(self, ref: str) -> str:
@@ -4665,10 +4665,10 @@ class Executor:
         ref = (ref or "").strip()
         for declared, pick in (self._model_resolutions or {}).items():
             resolved_ref = (pick[0] or declared).strip()
-            lane_str = (pick[2] or "").strip()
-            if lane_str and ref in (declared.strip(), resolved_ref):
+            execution_lane_str = (pick[2] or "").strip()
+            if execution_lane_str and ref in (declared.strip(), resolved_ref):
                 pinned = bool(pick[3]) if len(pick) > 3 else False
-                return lane_str, pinned
+                return execution_lane_str, pinned
         return "", False
 
     def _validate_required_compile(
@@ -4682,13 +4682,13 @@ class Executor:
         than execute on a merely same-family pipeline.
         """
         setup_slots = self._setup_slots(spec)
-        want_lane = self._mandatory_lane_of_bound(
+        want_execution_lane = self._mandatory_execution_lane_of_bound(
             wire_ref(spec.models[slot]) for slot in setup_slots
         )
         if not run.HasField("required_compile"):
-            if want_lane:
+            if want_execution_lane:
                 raise RetryableError(
-                    f"required_compile_missing: {want_lane.upper()} dispatch "
+                    f"required_compile_missing: {want_execution_lane.upper()} dispatch "
                     "requires an exact active compile incarnation"
                 )
             return
@@ -4712,7 +4712,7 @@ class Executor:
             )
         _rec, target = found
         with target.state_lock:
-            target_lane = target.pipeline_weight_lane
+            target_execution_lane = target.pipeline_weight_lane
             target_functions = target.function_names
             target_active = (
                 target.active_compile_ref,
@@ -4720,11 +4720,11 @@ class Executor:
                 target.contract_digest,
             )
             target_bindings = target.model_bindings
-        if want_lane and not target_lane.startswith(want_lane):
+        if want_execution_lane and not target_execution_lane.startswith(want_execution_lane):
             raise RetryableError(
-                f"required_compile_lane_mismatch: {want_lane.upper()} "
+                f"required_compile_lane_mismatch: {want_execution_lane.upper()} "
                 "dispatch selected a live pipeline on lane "
-                f"{target_lane!r}"
+                f"{target_execution_lane!r}"
             )
         if spec.name not in target_functions:
             raise RetryableError(
@@ -5062,7 +5062,7 @@ class Executor:
             return spec
         return dc_replace(spec, models=effective)
 
-    def _lane_effective_spec(self, spec: EndpointSpec, lane_str: str) -> EndpointSpec:
+    def _execution_lane_effective_spec(self, spec: EndpointSpec, execution_lane_str: str) -> EndpointSpec:
         """th#913/gw#596: rebind the spec's declared tensorhub models to the
         instructed lane. A family instruction expands through the hub's
         per-card resolution picks (or the local cast lane for fp8-w8a16); a
@@ -5072,13 +5072,13 @@ class Executor:
         a new instance key, so warm workers keep both variants resident and
         cycle them via the gw#551 lane machinery."""
         from .api.binding import rebind_pick
-        from .models import lanes as lanespec
+        from .models import execution_lanes as lanespec
 
-        raw = str(lane_str or "").strip()
+        raw = str(execution_lane_str or "").strip()
         if not raw:
             return spec
         try:
-            req = lanespec.parse_lane_spec(raw)
+            req = lanespec.parse_execution_lane_spec(raw)
         except ValueError as exc:
             raise ValidationError(str(exc)) from None
         if req.is_zero:
@@ -5086,15 +5086,15 @@ class Executor:
         # th#1050: a lane the endpoint DECLARES (handles=) is served by the
         # author's own code branching on ctx.lane — satisfiable with no
         # laddered rebind (custom loaders/kernels have nothing to rebind).
-        declared_lane = (
-            req.lane is not None
-            and lanespec.lane_body_id(req.lane) in getattr(spec, "handles", ())
+        declared_execution_lane = (
+            req.execution_lane is not None
+            and lanespec.execution_lane_body_id(req.execution_lane) in getattr(spec, "handles", ())
         )
-        def pick_lane_of(pick: "Optional[Tuple[Any, ...]]") -> "Optional[Any]":
+        def pick_execution_lane_of(pick: "Optional[Tuple[Any, ...]]") -> "Optional[Any]":
             if pick is None or not pick[2]:
                 return None
             try:
-                return lanespec.parse_lane(pick[2])
+                return lanespec.parse_execution_lane(pick[2])
             except ValueError:
                 return None
 
@@ -5107,8 +5107,8 @@ class Executor:
         # bf16 is trivially serveable (the declared base IS bf16); quantized
         # lanes must find at least one laddered ref that can serve them —
         # unless the endpoint declares the lane (author code serves it).
-        satisfied = req.family == lanespec.FAMILY_BF16 or declared_lane
-        want_w8a8 = req.lane is not None and req.lane.activation == lanespec.ACT_W8A8
+        satisfied = req.family == lanespec.FAMILY_BF16 or declared_execution_lane
+        want_w8a8 = req.execution_lane is not None and req.execution_lane.activation == lanespec.ACT_W8A8
         for slot, base_binding in declared.items():
             if slot not in effective:
                 continue
@@ -5118,13 +5118,13 @@ class Executor:
             pick = self._model_resolutions.get(base_ref)
             if pick is None:
                 continue
-            plane = pick_lane_of(pick)
+            plane = pick_execution_lane_of(pick)
             new_binding = base_binding  # bf16 family: revert to the declared base
             if req.family == lanespec.FAMILY_BF16:
                 satisfied = True
             elif req.family == lanespec.FAMILY_FP8:
                 if plane is not None and lanespec.family_of(plane) == lanespec.FAMILY_FP8 and (
-                    req.lane is None or plane.activation == req.lane.activation
+                    req.execution_lane is None or plane.activation == req.execution_lane.activation
                 ):
                     resolved_ref, cast, _ = pick
                     new_binding = rebind_pick(
@@ -5141,7 +5141,7 @@ class Executor:
                     satisfied = True
             elif req.family == lanespec.FAMILY_4BIT:
                 if plane is None or lanespec.family_of(plane) != lanespec.FAMILY_4BIT or (
-                    req.lane is not None and plane.weights != req.lane.weights
+                    req.execution_lane is not None and plane.weights != req.execution_lane.weights
                 ):
                     continue
                 resolved_ref, cast, _ = pick
@@ -5158,7 +5158,7 @@ class Executor:
                 self.store.register_binding(wire_ref(new_binding), new_binding)
                 changed = True
         if not satisfied:
-            raise lanespec.LaneUnavailableError(
+            raise lanespec.ExecutionLaneUnavailableError(
                 raw, f"no laddered binding of {spec.name!r} can serve this lane "
                      "on this worker (flavor never resolved for its card)")
         if not changed:
@@ -5263,29 +5263,29 @@ class Executor:
             return serving_mode_mod.POSTURE_ARM_PENDING
         return serving_mode_mod.POSTURE_UNCOMPILED
 
-    def _handled_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
+    def _handled_execution_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
         """th#1050: the instructed lane's body when the endpoint DECLARES it
         (handles=) — the author's code, not binding surgery, serves it."""
-        from .models import lanes as lanespec
+        from .models import execution_lanes as lanespec
 
         if not instructed or not getattr(spec, "handles", ()):
             return ""
         try:
-            req = lanespec.parse_lane_spec(instructed)
+            req = lanespec.parse_execution_lane_spec(instructed)
         except ValueError:
             return ""
-        if req.lane is None:
+        if req.execution_lane is None:
             return ""
-        body = lanespec.lane_body_id(req.lane)
+        body = lanespec.execution_lane_body_id(req.execution_lane)
         return body if body in spec.handles else ""
 
-    def _served_lane(self, spec: EndpointSpec, instructed: str = "") -> str:
+    def _served_execution_lane(self, spec: EndpointSpec, instructed: str = "") -> str:
         """The CONCRETE lane this spec's instance executes as, for
         JobMetrics.lane and ctx.lane reporting: the most-quantized pipeline
         binding's lane (table rank), with live compile state as a preference.
         Fixed-mode bodies override it; a declared (handles=) instruction owns
         the full lane outright."""
-        from .models import lanes as lanespec
+        from .models import execution_lanes as lanespec
 
         compiled = False
         if spec.cls is not None:
@@ -5294,29 +5294,29 @@ class Executor:
                 compiled = any(
                     getattr(t, "active_compile_ref", "")
                     for t in rec.compile_targets.values())
-        handled = self._handled_lane_body(spec, instructed)
+        handled = self._handled_execution_lane_body(spec, instructed)
         if handled:
-            return lanespec.lane_id(lanespec.parse_lane(instructed))
+            return lanespec.execution_lane_id(lanespec.parse_execution_lane(instructed))
         # Report the most-quantized binding's lane: quantized lanes always
         # outrank bf16 (a bf16 VAE riding a w8a16 pipeline is still the
         # w8a16 lane), ties by table rank.
-        ranked = {body: i for i, body in enumerate(lanespec.known_lanes())}
+        ranked = {body: i for i, body in enumerate(lanespec.known_execution_lanes())}
         best = None
         best_key: Tuple[int, int] = (2, len(ranked) + 1)
         for binding in spec.models.values():
-            lane = lanespec.lane_of_binding(
+            execution_lane = lanespec.execution_lane_of_binding(
                 getattr(binding, "flavor", "") or "",
                 getattr(binding, "storage_dtype", "") or "",
                 compiled)
-            quant = 1 if lanespec.family_of(lane) == lanespec.FAMILY_BF16 else 0
-            key = (quant, ranked.get(lanespec.lane_id(lane), len(ranked)))
+            quant = 1 if lanespec.family_of(execution_lane) == lanespec.FAMILY_BF16 else 0
+            key = (quant, ranked.get(lanespec.execution_lane_id(execution_lane), len(ranked)))
             if best is None or key < best_key:
-                best, best_key = lane, key
+                best, best_key = execution_lane, key
         if best is None:
-            best = lanespec.Lane(
+            best = lanespec.ExecutionLane(
                 weights=lanespec.WEIGHTS_BF16, activation=lanespec.ACT_W16A16,
                 execution=lanespec.EXEC_COMPILED if compiled else lanespec.EXEC_EAGER)
-        return lanespec.lane_id(best)
+        return lanespec.execution_lane_id(best)
 
     async def ensure_desired_instance(
         self,
@@ -5426,7 +5426,7 @@ class Executor:
         block demotion, so an executing job must pin the TE/VAE entries its
         pipeline aliases)."""
         rec = self._classes.get(spec.instance_key) if spec.cls is not None else None
-        lane_refs = rec.lane_refs if rec is not None else set()
+        execution_lane_refs = rec.execution_lane_refs if rec is not None else set()
         shared_ids = (
             [k.cache_id() for k in rec.shared_keys] if rec is not None else []
         )
@@ -5434,7 +5434,7 @@ class Executor:
             [
                 r for s in slots
                 for r in _binding_wire_refs(spec.models[s])
-                if r not in lane_refs
+                if r not in execution_lane_refs
             ]
             + shared_ids
         ))
@@ -5575,7 +5575,7 @@ class Executor:
                         rec.stale = True
                         break
             if rec.ready and not rec.stale and spec.compile is not None:
-                mandatory_lane = self._mandatory_lane_of_bound(
+                mandatory_execution_lane = self._mandatory_execution_lane_of_bound(
                     wire_ref(spec.models[slot])
                     for slot in self._setup_slots(spec)
                 )
@@ -5584,8 +5584,8 @@ class Executor:
                 try:
                     desired_cell = await self._fetch_compile_snapshot(
                         spec, snapshots)
-                except compile_cache.CompiledLaneUnavailableError as exc:
-                    if mandatory_lane:
+                except compile_cache.CompiledExecutionLaneUnavailableError as exc:
+                    if mandatory_execution_lane:
                         # Desired state no longer supplies a mandatory exact
                         # cell. Remove the old READY incarnation before
                         # reporting the state-driven failure; it must not keep
@@ -5775,9 +5775,9 @@ class Executor:
                 # pipeline setup fails must surface a terminal per-function
                 # error to the hub, not sit in loading_functions forever
                 # while the worker reports READY.
-                from .compile_cache import CompiledLaneUnavailableError
+                from .compile_cache import CompiledExecutionLaneUnavailableError
 
-                if isinstance(exc, CompiledLaneUnavailableError):
+                if isinstance(exc, CompiledExecutionLaneUnavailableError):
                     self._mark_compile_setup_unavailable(rec, spec, str(exc))
                     self._on_state_change()
                 self._mark_setup_failed(rec, exc, exhausted=exhausted)
@@ -6155,7 +6155,7 @@ class Executor:
                 ctx: RequestContext[Any] = warmup.warm_context(
                     wj.spec, request_id=f"boot-warmup-{wj.spec.name}",
                     local_output_dir=tmp,
-                    lane=self._served_lane(wj.spec),
+                    execution_lane=self._served_execution_lane(wj.spec),
                     config=self._effective_config(wj.spec))
                 try:
                     await self._invoke_warmup(wj.spec, instance, ctx, payload, handler_kwargs)
@@ -6510,24 +6510,24 @@ class Executor:
         # lane — the ONE serveability brain compile_cache.mandatory_serving
         # reads. ContextVars ride to_thread, so the tenant setup thread and
         # its arms inherit the window.
-        from . import compile_cache as _cc_lane
+        from . import compile_cache as _cc_execution_lane
 
-        _setup_exec_lane, _setup_lane_pinned = "", False
+        _setup_exec_execution_lane, _setup_execution_lane_pinned = "", False
         for _slot in setup_slots:
-            _setup_exec_lane, _setup_lane_pinned = (
+            _setup_exec_execution_lane, _setup_execution_lane_pinned = (
                 self._execution_lane_pick_for_ref(
                     wire_ref(spec.models[_slot])))
-            if _setup_exec_lane:
+            if _setup_exec_execution_lane:
                 break
-        _lane_token = _cc_lane._SETUP_EXEC_LANE.set(_setup_exec_lane)
-        _pin_token = _cc_lane._SETUP_EXEC_LANE_PINNED.set(_setup_lane_pinned)
+        _execution_lane_token = _cc_execution_lane._SETUP_EXEC_EXECUTION_LANE.set(_setup_exec_execution_lane)
+        _pin_token = _cc_execution_lane._SETUP_EXEC_EXECUTION_LANE_PINNED.set(_setup_execution_lane_pinned)
         try:
             return await self._setup_locked_inner(
                 spec, rec, snapshots, intent_id=intent_id,
                 setup_slots=setup_slots)
         finally:
-            _cc_lane._SETUP_EXEC_LANE_PINNED.reset(_pin_token)
-            _cc_lane._SETUP_EXEC_LANE.reset(_lane_token)
+            _cc_execution_lane._SETUP_EXEC_EXECUTION_LANE_PINNED.reset(_pin_token)
+            _cc_execution_lane._SETUP_EXEC_EXECUTION_LANE.reset(_execution_lane_token)
 
     async def _setup_locked_inner(
         self, spec: EndpointSpec, rec: _ClassRecord,
@@ -6595,7 +6595,7 @@ class Executor:
         # and the lane is not a key axis, so a 96 GB card's winner can reach a
         # 32 GB card of the same SM. adopt() re-applies the fit constraint
         # against THIS device before pinning.
-        kernel_lane.adopt_from_artifact(
+        kernel_path.adopt_from_artifact(
             compile_artifact, source=f"{spec.name} boot")
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
@@ -7150,9 +7150,9 @@ class Executor:
                 if unproven:
                     from .models.loading import pipeline_weight_lane
 
-                    quant_lane = any(
+                    quant_execution_lane = any(
                         pipeline_weight_lane(
-                            candidate.pipeline).startswith(_MANDATORY_LANES)
+                            candidate.pipeline).startswith(_MANDATORY_EXECUTION_LANES)
                         for candidate in unproven
                     )
                     for candidate in unproven:
@@ -7167,10 +7167,10 @@ class Executor:
                         if aot_serve.unwrap(pipe):
                             from .models import lora_lifted
 
-                            lora_lifted.remove_lifted_lora_lanes(pipe)
+                            lora_lifted.remove_lifted_lora_execution_lanes(pipe)
                         compile_cache.unwrap(pipe)
                         if spec.lora_bucket:
-                            compile_cache.drop_lora_lane(pipe)
+                            compile_cache.drop_lora_execution_lane(pipe)
                         # pgw#672: quarantine the disproven identity in this
                         # process so neither selection nor a fresh self-mint
                         # arm loops on it this boot.
@@ -7238,7 +7238,7 @@ class Executor:
                             # the wire; keep the leading counts + first
                             # divergence intact.
                             detail += f"; fx forensics: {forensics[:1500]}"
-                    if quant_lane:
+                    if quant_execution_lane:
                         # pgw#672 posture change: a failed serve/finalize
                         # proof on a mandatory (w8a8/w4a4) lane used to raise
                         # here -> cell_quarantined -> every declared function
@@ -7278,7 +7278,7 @@ class Executor:
                 for candidate in unexercised:
                     pipe = candidate.pipeline
                     mandatory = pipeline_weight_lane(pipe).startswith(
-                        _MANDATORY_LANES)
+                        _MANDATORY_EXECUTION_LANES)
                     if mandatory:
                         pending_mint = inj.pending_self_mints.pop(
                             id(pipe), None)
@@ -7337,10 +7337,10 @@ class Executor:
                     if aot_serve.unwrap(pipe):
                         from .models import lora_lifted
 
-                        lora_lifted.remove_lifted_lora_lanes(pipe)
+                        lora_lifted.remove_lifted_lora_execution_lanes(pipe)
                     compile_cache.unwrap(pipe)
                     if spec.lora_bucket:
-                        compile_cache.drop_lora_lane(pipe)
+                        compile_cache.drop_lora_execution_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
                     self._abandon_pending_mint(inj, pipe)
                 if mint_by_id:
@@ -7492,16 +7492,16 @@ class Executor:
                     process_vram_bytes, rec.server.process.pid)
             self._register_residency(
                 spec, setup_slots, inj.loaded, vram_delta,
-                lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes,
+                execution_lane_slots=inj.execution_lane_slots, shared_bytes=inj.shared_bytes,
                 slot_refs=slot_refs, slot_identities=slot_identities)
             # gw#551: call-time-owned refs. Any record holding 2+ worker-
             # constructed pipelines can overcommit VRAM (content-keyed lanes
             # AND monolithic siblings alike) — those swap per use via the
-            # LaneGate instead of being job-pinned + eagerly promoted.
+            # ExecutionLaneGate instead of being job-pinned + eagerly promoted.
             pipe_slots = {s for s, (obj, _) in inj.loaded.items() if obj is not None}
-            swap_owned = pipe_slots if len(pipe_slots) >= 2 else set(inj.lane_slots)
+            swap_owned = pipe_slots if len(pipe_slots) >= 2 else set(inj.execution_lane_slots)
             swap_owned &= inj.gated_slots  # un-gateable pipes stay eager
-            rec.lane_refs = {slot_refs[s] for s in swap_owned if s in slot_refs}
+            rec.execution_lane_refs = {slot_refs[s] for s in swap_owned if s in slot_refs}
             rec.held_objects = {}
             for slot, ref in slot_refs.items():
                 obj = inj.loaded.get(slot, (None, 0))[0]
@@ -7598,7 +7598,7 @@ class Executor:
         # Rank 0 DECIDES; every rank obeys. Nothing below rank 0 ever measures
         # its own card and adapts (pgw#748 §5.4).
         plan = GroupPlan(
-            precision_lane=compile_cache.cell_base_lane(pipe),
+            precision_execution_lane=compile_cache.cell_base_execution_lane(pipe),
             gemm_mode=w8a8_gemm_mode(pipe),
             sp_degree=topo.degree,
         )
@@ -7650,7 +7650,7 @@ class Executor:
         loaded: Dict[str, Tuple[Any, int]],
         total_delta: int,
         *,
-        lane_slots: Optional[set] = None,
+        execution_lane_slots: Optional[set] = None,
         shared_bytes: int = 0,
         slot_refs: Optional[Dict[str, str]] = None,
         slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
@@ -7664,13 +7664,13 @@ class Executor:
         the shared-entry bytes still reduce the residual, but re-tracking
         them here would clobber a mid-setup demotion."""
         res = self.store.residency
-        lanes = lane_slots or set()
+        execution_lanes = execution_lane_slots or set()
         refs = slot_refs or {}
         identities = slot_identities or {}
         per_ref: Dict[str, Tuple[Any, int]] = {}
         per_ref_identity: Dict[str, _ResidencyIdentity] = {}
         for slot in setup_slots:
-            if slot in lanes:
+            if slot in execution_lanes:
                 continue
             # gw#494: book under the SAME key the setup derived (never a
             # fresh wire_ref over possibly-rebound spec.models).
@@ -7687,9 +7687,9 @@ class Executor:
                 )
             if identity[0] or prior_identity is None:
                 per_ref_identity[ref] = identity
-        lane_bytes = sum(loaded[s][1] for s in lanes if s in loaded)
+        execution_lane_bytes = sum(loaded[s][1] for s in execution_lanes if s in loaded)
         residual = max(0, total_delta - sum(b for _, b in per_ref.values())
-                       - lane_bytes - max(0, int(shared_bytes)))
+                       - execution_lane_bytes - max(0, int(shared_bytes)))
         opaque = [r for r, (obj, _) in per_ref.items() if obj is None]
         share = residual // len(opaque) if opaque else 0
         for ref, (obj, measured) in per_ref.items():
@@ -7719,10 +7719,10 @@ class Executor:
         setup_slots = self._setup_slots(spec)
         if slots is not None:
             setup_slots = [s for s in setup_slots if s in slots]
-        lane_refs = rec.lane_refs if rec is not None else set()
+        execution_lane_refs = rec.execution_lane_refs if rec is not None else set()
         refs = [
             r for s in setup_slots
-            if (r := wire_ref(spec.models[s])) not in lane_refs
+            if (r := wire_ref(spec.models[s])) not in execution_lane_refs
         ]
         # pgw#636: shared-component entries (TE/VAE) the record's pipelines
         # alias are independently demotable now — swap any that went warm
@@ -8281,7 +8281,7 @@ class Executor:
         # checkpoints. Snapshot maps also contain attached cells and may carry
         # unrelated/prepositioned models, so they must not choose the lane.
         model_refs = [wire_ref(binding) for binding in spec.models.values()]
-        want_lane = self._mandatory_lane_of_bound(model_refs)
+        want_execution_lane = self._mandatory_execution_lane_of_bound(model_refs)
         want_bucket = int(ccell.lora_bucket or 0)
         # th#883 pull-by-key: a key-flavored cell is selected only when its
         # key is one this runtime computed for itself (the same candidates
@@ -8289,24 +8289,24 @@ class Executor:
         from . import cell_key
 
         candidate_keys: set[str] = set()
-        for lane in (
-                (want_lane,) if want_lane else _SPECULATIVE_CELL_BASE_LANES):
+        for execution_lane in (
+                (want_execution_lane,) if want_execution_lane else _SPECULATIVE_CELL_BASE_EXECUTION_LANES):
             try:
                 candidate_keys.add(cell_key.compute(
-                    family, lane, want_bucket,
+                    family, execution_lane, want_bucket,
                     contract=ccell.contract_digest(),
                     regional=bool(ccell.regional),
                 ).digest)
             except Exception:
                 continue
-        if want_lane:
+        if want_execution_lane:
             # TensorRT cells currently expose only their plain fp16 contract.
             # A Forge Inductor cell of the mandated lane is the sole artifact
             # proven to preserve the scaled_mm semantics (gw#534/gw#540).
             candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
-                if _cell_lane_matches(
-                    ref, family, want_lane=want_lane, want_bucket=want_bucket,
+                if _cell_execution_lane_matches(
+                    ref, family, want_execution_lane=want_execution_lane, want_bucket=want_bucket,
                     candidate_keys=candidate_keys)
             ]
         else:
@@ -8316,8 +8316,8 @@ class Executor:
             ] if not want_bucket else []
             inductor_candidates = [
                 (ref, snap) for ref, snap in snapshots.items()
-                if _cell_lane_matches(
-                    ref, family, want_lane="", want_bucket=want_bucket,
+                if _cell_execution_lane_matches(
+                    ref, family, want_execution_lane="", want_bucket=want_bucket,
                     candidate_keys=candidate_keys)
             ]
             # Explicit kind policy, then uniqueness within that kind. A map's
@@ -8341,7 +8341,7 @@ class Executor:
                 if ref not in set(quarantined)
             ]
         candidates = sorted(candidates, key=lambda item: item[0])
-        if want_lane and not candidates:
+        if want_execution_lane and not candidates:
             # gw#587: the fail-closed cell WAIT is retired. A mandatory-lane
             # key with no delivered cell proceeds to load and SELF-MINTS in
             # _enable_compiled (the boot warmup is the mint); the quantized
@@ -8350,19 +8350,19 @@ class Executor:
             logger.info(
                 "no %s cell attached for family=%r lora_bucket=%d — "
                 "proceeding to self-mint (gw#587)",
-                want_lane.upper(), family, want_bucket)
+                want_execution_lane.upper(), family, want_bucket)
             return None
         if len(candidates) > 1:
             refs = ", ".join(ref for ref, _snap in candidates)
             detail = (
                 "multiple compatible compiled artifacts were attached for "
-                f"family={family!r} lane={want_lane or 'plain'}: "
+                f"family={family!r} lane={want_execution_lane or 'plain'}: "
                 f"{refs}; refusing map-order selection"
             )
-            if want_lane:
+            if want_execution_lane:
                 # Mandated lanes have no eager-compatible fallback: setup's
                 # lane gate must surface this as retryable before GPU load.
-                raise compile_cache.CompiledLaneUnavailableError(detail)
+                raise compile_cache.CompiledExecutionLaneUnavailableError(detail)
             logger.warning("%s; serving eager", detail)
             return None
         if candidates:
@@ -8370,17 +8370,17 @@ class Executor:
             digest = str(snap.digest or "").strip()
             if not digest:
                 detail = f"compiled-artifact snapshot {ref!r} has no immutable digest"
-                if want_lane:
-                    raise compile_cache.CompiledLaneUnavailableError(detail)
+                if want_execution_lane:
+                    raise compile_cache.CompiledExecutionLaneUnavailableError(detail)
                 logger.warning("%s; serving eager", detail)
                 return None
             try:
                 local = await self.store.ensure_local(ref, snap)
                 artifact = compile_cache.find_artifact(local)
                 if artifact is None:
-                    if want_lane:
-                        raise compile_cache.CompiledLaneUnavailableError(
-                            f"{want_lane.upper()} Forge snapshot {ref!r} "
+                    if want_execution_lane:
+                        raise compile_cache.CompiledExecutionLaneUnavailableError(
+                            f"{want_execution_lane.upper()} Forge snapshot {ref!r} "
                             "contains no artifact")
                     logger.warning(
                         "compiled-artifact snapshot %s contains no artifact; "
@@ -8389,13 +8389,13 @@ class Executor:
                 return _CompileArtifactSelection(
                     path=artifact, ref=ref, snapshot_digest=digest)
             except Exception as exc:
-                if want_lane and isinstance(
-                    exc, compile_cache.CompiledLaneUnavailableError
+                if want_execution_lane and isinstance(
+                    exc, compile_cache.CompiledExecutionLaneUnavailableError
                 ):
                     raise
-                if want_lane:
-                    raise compile_cache.CompiledLaneUnavailableError(
-                        f"{want_lane.upper()} Forge snapshot {ref!r} is "
+                if want_execution_lane:
+                    raise compile_cache.CompiledExecutionLaneUnavailableError(
+                        f"{want_execution_lane.upper()} Forge snapshot {ref!r} is "
                         f"unusable: {exc}") from exc
                 logger.warning(
                     "compiled-artifact snapshot %s unusable (%s); serving eager", ref, exc
@@ -8506,7 +8506,7 @@ class Executor:
                 return set()
             slot_sizes[slot] = self.store.component_sizes(wire_ref(binding))
         free = self.store.residency.free_vram_bytes()
-        if not _shared_lanes_need_fp8(slot_sizes, shared_components, free):
+        if not _shared_execution_lanes_need_fp8(slot_sizes, shared_components, free):
             return set()
         logger.info(
             "th#1043: shared-lane group %s for %s doesn't fit resident at "
@@ -8749,16 +8749,16 @@ class Executor:
                         # read the ONE serveability brain
                         # (compile_cache.mandatory_serving) instead of the
                         # weight-lane prefix. Never overwritten once set.
-                        exec_lane, lane_pinned = (
+                        exec_execution_lane, lane_pinned = (
                             self._execution_lane_pick_for_ref(ref))
-                        if exec_lane and not getattr(
+                        if exec_execution_lane and not getattr(
                                 pipe, compile_cache.EXECUTION_LANE_ATTR,
                                 None):
                             try:
                                 setattr(
                                     pipe,
                                     compile_cache.EXECUTION_LANE_ATTR,
-                                    exec_lane)
+                                    exec_execution_lane)
                                 setattr(
                                     pipe,
                                     compile_cache.EXECUTION_LANE_PINNED_ATTR,
@@ -8772,7 +8772,7 @@ class Executor:
                                 pipe, spec.compile_cell(), compile_artifact,
                                 compile_selection,
                             )
-                        except compile_cache.CompiledLaneUnavailableError as exc:
+                        except compile_cache.CompiledExecutionLaneUnavailableError as exc:
                             # Mandatory (w8a8/w4a4) lane: self-mint also hit a
                             # genuine impossibility (no CUDA/toolchain/target).
                             # When this refusal was chained from a caught
@@ -8828,7 +8828,7 @@ class Executor:
                                     result.pending_self_mints[id(pipe)] = pipe_mint
                     delta = max(0, self._vram_allocated() - before)
                     if slot_share:
-                        lane_obj, lane_bytes = self._register_lane(
+                        execution_lane_obj, execution_lane_bytes = self._register_execution_lane(
                             slot,
                             ref,
                             pipe,
@@ -8838,11 +8838,11 @@ class Executor:
                             result,
                             (slot_identities or {}).get(slot, ("", 0)),
                         )
-                        loaded[slot] = (lane_obj, lane_bytes)
-                        result.lane_slots.add(slot)
+                        loaded[slot] = (execution_lane_obj, execution_lane_bytes)
+                        result.execution_lane_slots.add(slot)
                     else:
                         loaded[slot] = (pipe, delta)
-                        if self._arm_lane_gate(pipe, ref, spec=spec):
+                        if self._arm_execution_lane_gate(pipe, ref, spec=spec):
                             result.gated_slots.add(slot)
                     kwargs[slot] = pipe
                 else:
@@ -8863,7 +8863,7 @@ class Executor:
             raise
         return result
 
-    def _register_lane(
+    def _register_execution_lane(
         self,
         slot: str,
         ref: str,
@@ -8903,27 +8903,27 @@ class Executor:
             name: m for name, m in comps.items()
             if isinstance(m, nn.Module) and name not in slot_share
         }
-        lane_obj: Any = nn.ModuleDict(exclusive) if exclusive else pipe
-        lane_bytes = max(0, delta - fresh_bytes)
+        execution_lane_obj: Any = nn.ModuleDict(exclusive) if exclusive else pipe
+        execution_lane_bytes = max(0, delta - fresh_bytes)
         result.shared_bytes += fresh_bytes
         logger.info(
             "lane %s (%s): exclusive %s (%.2f GiB), shared %s (%.2f GiB %s)",
-            slot, ref, sorted(exclusive) or ["<none>"], lane_bytes / _GiB,
+            slot, ref, sorted(exclusive) or ["<none>"], execution_lane_bytes / _GiB,
             sorted(slot_share), fresh_bytes / _GiB,
             "fresh" if fresh_bytes else "reused",
         )
         self.store.activate_load_identity(ref, load_identity)
-        if lane_bytes > 0:
-            res.track_vram(ref, lane_obj, vram_bytes=lane_bytes)
-        elif int(estimate_cuda_resident_gb(lane_obj) * _GiB) > 0:
-            res.track_vram(ref, lane_obj)
+        if execution_lane_bytes > 0:
+            res.track_vram(ref, execution_lane_obj, vram_bytes=execution_lane_bytes)
+        elif int(estimate_cuda_resident_gb(execution_lane_obj) * _GiB) > 0:
+            res.track_vram(ref, execution_lane_obj)
         else:
-            res.track_ram(ref, lane_obj)
-        if self._arm_lane_gate(pipe, ref):
+            res.track_ram(ref, execution_lane_obj)
+        if self._arm_execution_lane_gate(pipe, ref):
             result.gated_slots.add(slot)
-        return lane_obj, lane_bytes
+        return execution_lane_obj, execution_lane_bytes
 
-    def _arm_lane_gate(
+    def _arm_execution_lane_gate(
         self, pipe: Any, ref: str, spec: Optional[EndpointSpec] = None,
     ) -> bool:
         """gw#551: wrap a worker-constructed pipeline's ``__call__`` so a
@@ -8933,7 +8933,7 @@ class Executor:
         Monolithic pipelines (``spec`` given) additionally get the last-resort
         offload fallback; shared-component lanes never do (hooks on a shared
         module would poison sibling lanes)."""
-        from .models.lane_gate import LaneGate, arm_lane_gate
+        from .models.execution_lane_gate import ExecutionLaneGate, arm_execution_lane_gate
 
         fallback = None
         if spec is not None:
@@ -8941,7 +8941,7 @@ class Executor:
 
             def fallback() -> bool:
                 return self._serve_offload_fallback(bound_spec, pipe, ref)
-        return arm_lane_gate(pipe, LaneGate(
+        return arm_execution_lane_gate(pipe, ExecutionLaneGate(
             ref=ref, residency=self.store.residency, label=ref,
             retry_exc=RetryableError, offload_fallback=fallback,
         ))
@@ -9202,7 +9202,7 @@ class Executor:
             try:
                 compile_cache.unwrap(pipe)
                 if spec.lora_bucket:
-                    compile_cache.drop_lora_lane(pipe)
+                    compile_cache.drop_lora_execution_lane(pipe)
             except Exception:
                 logger.exception("declined mint target unwrap failed")
         flush_memory()
@@ -9314,7 +9314,7 @@ class Executor:
                     router.close()
                 compile_cache.unwrap(pipe)
                 if bg.spec.lora_bucket:
-                    compile_cache.drop_lora_lane(pipe)
+                    compile_cache.drop_lora_execution_lane(pipe)
             except Exception:
                 logger.exception("mint target unwrap failed")
         flush_memory()
@@ -9528,7 +9528,7 @@ class Executor:
                 ctx: RequestContext[Any] = warmup.warm_context(
                     wj.spec, request_id=f"bg-mint-{wj.spec.name}",
                     local_output_dir=tmp,
-                    lane=self._served_lane(wj.spec),
+                    execution_lane=self._served_execution_lane(wj.spec),
                     config=self._effective_config(wj.spec))
                 if preemptible:
                     bg.seed_ctx = ctx
@@ -9747,7 +9747,7 @@ class Executor:
                 fleet_cells_mod.abandon_self_mint(pending_mint)
             compile_cache.unwrap(pipe)
             if spec.lora_bucket:
-                compile_cache.drop_lora_lane(pipe)
+                compile_cache.drop_lora_execution_lane(pipe)
         sharers: Dict[int, List[int]] = {}
         mints: Dict[int, Any] = {}
         for pid, pending_mint in bg.pendings.items():
@@ -9880,8 +9880,8 @@ class Executor:
                         slot: dict(comps)
                         for slot, comps in bg.component_paths.items()
                     },
-                    weight_lane=compile_cache.cell_base_lane(pipe),
-                    lane=self._served_lane(spec),
+                    weight_lane=compile_cache.cell_base_execution_lane(pipe),
+                    execution_lane=self._served_execution_lane(spec),
                     configs={spec.name: self._effective_config(spec)},
                     device=mint_budget.device_of(pipe),
                 ),
@@ -10546,7 +10546,7 @@ class Executor:
                 assert cfg is not None
                 obj = target.pipeline
                 wrapped = False
-                lane_applied = False
+                execution_lane_applied = False
                 trt_before = trt_engine.execution_count(obj) if is_trt else 0
                 aot_before = aot_serve.execution_count(obj) if is_aot else 0
                 inductor_before = (0, 0, 0)
@@ -10560,8 +10560,8 @@ class Executor:
                     if wrapped:
                         if not is_trt and not is_aot:
                             compile_cache.unwrap(obj)
-                    if lane_applied:
-                        compile_cache.drop_lora_lane(obj)
+                    if execution_lane_applied:
+                        compile_cache.drop_lora_execution_lane(obj)
                     live = self._compile_target(target_incarnation_id)
                     if live is not None and live[0] is rec and live[1] is target:
                         self._refresh_compile_target(target)
@@ -10570,8 +10570,8 @@ class Executor:
                 bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
                 if bucket and not is_trt and not is_aot:
                     try:
-                        compile_cache.apply_lora_lane(obj, bucket)
-                        lane_applied = True
+                        compile_cache.apply_lora_execution_lane(obj, bucket)
+                        execution_lane_applied = True
                     except Exception as exc:
                         await rollback()
                         return await fail("lane_apply", str(exc))
@@ -10900,7 +10900,7 @@ class Executor:
         rec.held_refs = []
         rec.held_snapshot_digests = {}
         rec.held_bindings = []
-        rec.lane_refs = set()
+        rec.execution_lane_refs = set()
         rec.held_objects = {}
         rec.slot_pipelines = {}  # pgw#678: pipelines die with the instance
         # pgw#748: the rank siblings are an implementation detail of THIS
@@ -11488,8 +11488,8 @@ class Executor:
             # unserveable lane is a TYPED refusal naming it (INVALID) —
             # never a silent fallback.
             if run.lane:
-                spec = job.spec = self._lane_effective_spec(spec, run.lane)
-        except LaneUnavailableError as exc:
+                spec = job.spec = self._execution_lane_effective_spec(spec, run.lane)
+        except ExecutionLaneUnavailableError as exc:
             await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
             return
         except Exception as exc:
@@ -11523,7 +11523,7 @@ class Executor:
         # book the same free VRAM and OOM each other mid-load. Lane refs are
         # NOT leased (gw#551): lane dispatch is handler-side, so leasing every
         # declared lane would make the idle sibling un-demotable and the used
-        # lane un-promotable on an overcommitted card; the LaneGate pins
+        # lane un-promotable on an overcommitted card; the ExecutionLaneGate pins
         # exactly the lane it executes, at call time.
         try:
             with self.store.residency.admit(
@@ -11698,7 +11698,7 @@ class Executor:
             # th#913/gw#596: the concrete lane actually serving this job.
             # th#1050: ctx.lane exposes the same post-degrade truth to the
             # handler (declared-lane endpoints branch on it).
-            job.lane = self._served_lane(spec, instructed=run.lane)
+            job.execution_lane = self._served_execution_lane(spec, instructed=run.lane)
             # pgw#789: the shape coordinate, taken from the EXECUTED payload
             # with endpoint defaults applied. runtime_terms carries these only
             # when the endpoint declares a runtime formula (and the hub drops
@@ -11706,7 +11706,7 @@ class Executor:
             # shape axis at all for most endpoints.
             job.shape = serving_mode_mod.shape_of(
                 payload, self._effective_config(spec))
-            ctx._set_lane(job.lane)
+            ctx._set_execution_lane(job.execution_lane)
             # th#1087: effective declared-config values for this dispatch.
             effective_config = self._effective_config(spec, run)
             invocation_snapshot = None
@@ -11822,7 +11822,7 @@ class Executor:
             started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
             # uses are not eviction candidates for its duration. Lane refs
-            # excluded (gw#551): the LaneGate pins the one lane the handler
+            # excluded (gw#551): the ExecutionLaneGate pins the one lane the handler
             # actually calls; pinning all of them here would deadlock the
             # gate's promote against its own job's pins.
             exec_refs = self._job_pin_refs(spec, routed)
@@ -11985,7 +11985,7 @@ class Executor:
             # total.tail and the map still closes against runtime_ms.
             ctx._stages.handler_close()
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
-                                    output=output, lane=job.lane,
+                                    output=output, execution_lane=job.execution_lane,
                                     runtime_terms=_runtime_term_values(spec, payload, ctx),
                                     peak_vram_bytes=peak_vram)
             # pgw#652: the request just told us what a concurrent one costs.
@@ -12036,13 +12036,13 @@ class Executor:
                                    metrics=metrics)
         except _DeadlineExceeded:
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
-                                    lane=job.lane)
+                                    execution_lane=job.execution_lane)
             await self._finish(job, pb.JOB_STATUS_FATAL, safe_message="deadline exceeded",
                                metrics=metrics)
         except BaseException as exc:
-            from .compile_cache import CompiledLaneUnavailableError
+            from .compile_cache import CompiledExecutionLaneUnavailableError
 
-            if isinstance(exc, CompiledLaneUnavailableError):
+            if isinstance(exc, CompiledExecutionLaneUnavailableError):
                 # pgw#672: a compiled lane failing at call time fails THIS
                 # request, never the function — the guard wrapper has already
                 # degraded the object to explicit eager and revoked the
@@ -12060,7 +12060,7 @@ class Executor:
             if status == pb.JOB_STATUS_FATAL:
                 logger.exception("handler %s failed", spec.name)
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
-                                    lane=job.lane)
+                                    execution_lane=job.execution_lane)
             await self._finish(job, status, safe_message=msg, metrics=metrics)
         finally:
             if lease is not None:
@@ -12604,7 +12604,7 @@ class Executor:
 
     def _metrics(
         self, queue_ms: int, started: float, concurrency_at_start: int, gpu_index: int,
-        output: Any = None, lane: str = "",
+        output: Any = None, execution_lane: str = "",
         runtime_terms: "Optional[Dict[str, float]]" = None,
         peak_vram_bytes: "Optional[int]" = None,
     ) -> pb.JobMetrics:
@@ -12634,7 +12634,7 @@ class Executor:
             input_tokens=usage.prompt_tokens if usage is not None else 0,
             input_cached_tokens=usage.cached_tokens if usage is not None else 0,
             output_tokens=usage.completion_tokens if usage is not None else 0,
-            lane=lane,
+            lane=execution_lane,
             # th#1051: declared-formula term features from the EXECUTED
             # payload (defaults applied); empty = no declared formula.
             runtime_terms=runtime_terms or {},

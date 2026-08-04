@@ -129,8 +129,8 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
-    monkeypatch.setattr(fleet_cells.cc, "apply_lora_lane", lambda p, b: None)
-    monkeypatch.setattr(fleet_cells.cc, "drop_lora_lane", lambda p: None)
+    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
+    monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
     # No GPU on a dev box: the ck5 `sm` axis is a real-runtime fact, and this
@@ -250,9 +250,9 @@ def test_a_compile_block_without_graph_classes_is_not_a_declaration() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("base_lane", loading.STAMPABLE_BASE_LANES)
-def test_every_lane_a_pod_can_serve_reaches_the_aot_recipe(
-    base_lane: str,
+@pytest.mark.parametrize("base_execution_lane", loading.STAMPABLE_BASE_EXECUTION_LANES)
+def test_every_execution_lane_a_pod_can_serve_reaches_the_aot_recipe(
+    base_execution_lane: str,
     _miss: None, _events: List[Tuple[str, str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -276,19 +276,19 @@ def test_every_lane_a_pod_can_serve_reaches_the_aot_recipe(
     """
     register_export_declaration(_declaration())
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: base_lane)
+        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: base_execution_lane)
 
     pending = _arm(delegate=True).self_mint
 
     assert pending is not None and pending.recipe == fleet_cells.RECIPE_AOT, (
-        f"lane {base_lane!r} did not reach the AOT recipe — a mint-side lane "
+        f"lane {base_execution_lane!r} did not reach the AOT recipe — a mint-side lane "
         f"judgement has grown back")
     assert not _phases(_events, "self_mint_skipped"), (
-        f"lane {base_lane!r} was declined: "
+        f"lane {base_execution_lane!r} was declined: "
         f"{[d for k, _p, d in _events if k == 'self_mint_skipped']}")
 
 
-def test_the_bucketed_lora_form_of_a_lane_mints_too(
+def test_the_bucketed_lora_form_of_a_execution_lane_mints_too(
     _miss: None, _events: List[Tuple[str, str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -306,7 +306,7 @@ def test_the_bucketed_lora_form_of_a_lane_mints_too(
     assert not _phases(_events, "self_mint_skipped")
 
 
-def test_the_mint_holds_no_lane_predicate() -> None:
+def test_the_mint_holds_no_execution_lane_predicate() -> None:
     """The deletion itself. `lane_admitted`/`PARITY_LANES` were a SECOND
     opinion about a lane the hub's resolution tree had already chosen; two
     opinions in two repos is what composed into the total block. Every
@@ -399,7 +399,7 @@ def test_the_parent_reemits_the_childs_aot_phase_table(
             "unet/nocfg": {"export_s": 30.0, "compile_s": 400.0},
         },
     }
-    aot_mint.emit_phase_events(family=FAMILY, lane="w8a8-lora64", table=table)
+    aot_mint.emit_phase_events(family=FAMILY, execution_lane="w8a8-lora64", table=table)
 
     kinds = {(k, p) for k, p, _ in rows}
     assert ("aot_mint_phases", "minted") in kinds
@@ -420,7 +420,7 @@ def test_a_mint_that_produced_no_cell_still_reports_its_seconds(
         status=mint_process.CRASHED, detail="boom", elapsed_s=120.0,
         report=MintReport(status="failed", elapsed_s=120.0, recipe="aot"))
     assert not outcome.minted
-    mint_delegate._emit_aot_phases(outcome, family=FAMILY, lane="w8a8")
+    mint_delegate._emit_aot_phases(outcome, family=FAMILY, execution_lane="w8a8")
 
     assert ("aot_mint_phases", "aborted") in [(k, p) for k, p, _ in _events]
 

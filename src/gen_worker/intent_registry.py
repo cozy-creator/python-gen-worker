@@ -1136,7 +1136,7 @@ class IntentRegistry:
                 model_refs = sorted(
                     {model.ref for model in (instance.models if instance else ()) if model.ref}
                 )
-                lanes = sorted(
+                execution_lanes = sorted(
                     {
                         resolutions.get(ref, ("", "", ""))[2]
                         for ref in model_refs
@@ -1163,7 +1163,7 @@ class IntentRegistry:
                         release_id=self.release_id,
                         config_generation=target_generation,
                         binding_digest=_binding_digest(name, instance),
-                        lane=",".join(lanes),
+                        lane=",".join(execution_lanes),
                         models=[
                             pb.ModelIdentity(
                                 ref=ref,

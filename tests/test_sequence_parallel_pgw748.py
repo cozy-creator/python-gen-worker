@@ -59,7 +59,7 @@ def _follower_echo(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no
     pg = init_rank(spec)
     cmd = chan.next_command(timeout=120)
     plan = cmd["plan"]
-    assert plan.precision_lane == "w8a8"
+    assert plan.precision_execution_lane == "w8a8"
     assert plan.gemm_mode == "rowwise"
     chan.report_ready(spec.rank)
     dist.barrier(group=pg)
@@ -72,7 +72,7 @@ def _follower_disagrees(spec: RankSpec, chan: FollowerChannel) -> None:  # pragm
     against the delivered plan)."""
     init_rank(spec)
     cmd = chan.next_command(timeout=120)
-    mine = GroupPlan(precision_lane="bf16", sp_degree=2)
+    mine = GroupPlan(precision_execution_lane="bf16", sp_degree=2)
     mine.assert_agrees(cmd["plan"], rank=spec.rank)
 
 
@@ -97,7 +97,7 @@ def test_rank_zero_decides_and_every_rank_obeys() -> None:
     try:
         assert spec.rank == 0 and spec.world_size == 2
         plan = GroupPlan(
-            precision_lane="w8a8", gemm_mode="rowwise", sp_degree=2,
+            precision_execution_lane="w8a8", gemm_mode="rowwise", sp_degree=2,
             loras=(("style", 0.8),),
         )
         group.send({"op": "arm", "plan": plan})
@@ -115,7 +115,7 @@ def test_a_follower_that_disagrees_fails_the_group() -> None:
     group.form()
     try:
         group.send({"op": "arm",
-                    "plan": GroupPlan(precision_lane="w8a8", sp_degree=2)})
+                    "plan": GroupPlan(precision_execution_lane="w8a8", sp_degree=2)})
         with pytest.raises(RankGroupError):
             for _ in range(200):
                 group.check_alive()
@@ -177,8 +177,8 @@ def test_degree_one_group_forms_nothing() -> None:
 
 
 def test_plan_agreement_names_the_exact_field() -> None:
-    a = GroupPlan(precision_lane="w8a8", compile_armed=True, sp_degree=2)
-    b = GroupPlan(precision_lane="w8a8", compile_armed=False, sp_degree=2)
+    a = GroupPlan(precision_execution_lane="w8a8", compile_armed=True, sp_degree=2)
+    b = GroupPlan(precision_execution_lane="w8a8", compile_armed=False, sp_degree=2)
     with pytest.raises(RankDivergence) as exc:
         a.assert_agrees(b, rank=1)
     assert exc.value.field_name == "compile_armed"
@@ -300,7 +300,7 @@ def test_degree_four_group_forms_and_every_rank_obeys_rank_zero() -> None:
         assert (spec.rank, spec.world_size) == (0, 4)
         assert group.degree == 4
         plan = GroupPlan(
-            precision_lane="w8a8", gemm_mode="rowwise", sp_degree=4,
+            precision_execution_lane="w8a8", gemm_mode="rowwise", sp_degree=4,
             compile_armed=False, loras=(("style", 0.8),),
         )
         group.send({"op": "arm", "plan": plan})

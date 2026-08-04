@@ -446,7 +446,7 @@ def _plain_compile_spec(setup_calls: List[str]) -> EndpointSpec:
     )
 
 
-def test_plain_lane_runjob_cold_setup_after_deferral(tmp_path, monkeypatch) -> None:
+def test_plain_execution_lane_runjob_cold_setup_after_deferral(tmp_path, monkeypatch) -> None:
     setup_calls: List[str] = []
     ex, sent, _enables = _harness(tmp_path, monkeypatch,
                                   [_plain_compile_spec(setup_calls)])

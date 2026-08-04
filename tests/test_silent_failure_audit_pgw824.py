@@ -651,7 +651,7 @@ def test_an_eager_request_on_a_compile_declaring_release_names_its_reason() -> N
     ("w8a8", "w8a8_partial_swap"),
     ("w4a4", "w4a4_partial_swap"),
 ])
-def test_a_partially_swapped_quant_lane_confesses_with_counts(
+def test_a_partially_swapped_quant_execution_lane_confesses_with_counts(
     mod_name: str, phase: str,
 ) -> None:
     """RED before pgw#824.
@@ -684,7 +684,7 @@ def test_a_partially_swapped_quant_lane_confesses_with_counts(
         "per model — not once per skipped layer")
 
 
-def test_an_unqualified_fp8_gemm_is_a_lane_decision_that_reports_itself() -> None:
+def test_an_unqualified_fp8_gemm_is_a_execution_lane_decision_that_reports_itself() -> None:
     """The whole point of the w8a8 artifact is the fused fp8 GEMM. Falling to
     the dequant lane keeps the memory saving and gives up the speed, so every
     request is slower than the lane the pod advertises — and a fleet-wide

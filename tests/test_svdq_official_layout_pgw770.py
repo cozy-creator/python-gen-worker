@@ -51,9 +51,9 @@ E2M1_MAX, FP8_MAX = 6.0, 448.0
 # ---------------------------------------------------------------------------
 
 MEM_N, MEM_K = 128, 64
-NUM_N_PACKS, N_PACK_SIZE, NUM_N_LANES, REG_N = 8, 2, 8, 1
-NUM_K_PACKS, K_PACK_SIZE, NUM_K_LANES, REG_K = 1, 2, 4, 8
-WARP_N, NUM_LANES, INSN_K = 128, 32, 64
+NUM_N_PACKS, N_PACK_SIZE, NUM_N_EXECUTION_LANES, REG_N = 8, 2, 8, 1
+NUM_K_PACKS, K_PACK_SIZE, NUM_K_EXECUTION_LANES, REG_K = 1, 2, 4, 8
+WARP_N, NUM_EXECUTION_LANES, INSN_K = 128, 32, 64
 
 
 def dc_pack_weight(weight: torch.Tensor) -> torch.Tensor:
@@ -61,8 +61,8 @@ def dc_pack_weight(weight: torch.Tensor) -> torch.Tensor:
     n, k = weight.shape
     n_tiles, k_tiles = n // MEM_N, k // MEM_K
     weight = weight.to(torch.int32).reshape(
-        n_tiles, NUM_N_PACKS, N_PACK_SIZE, NUM_N_LANES, REG_N,
-        k_tiles, NUM_K_PACKS, K_PACK_SIZE, NUM_K_LANES, REG_K)
+        n_tiles, NUM_N_PACKS, N_PACK_SIZE, NUM_N_EXECUTION_LANES, REG_N,
+        k_tiles, NUM_K_PACKS, K_PACK_SIZE, NUM_K_EXECUTION_LANES, REG_K)
     weight = weight.permute(0, 5, 6, 1, 3, 8, 2, 7, 4, 9).contiguous()
     assert weight.shape[4:-2] == (8, 4, 2, 2)
     weight = weight.bitwise_and_(0xF)
@@ -81,7 +81,7 @@ def dc_pack_micro_scale(scale: torch.Tensor, group_size: int = 16,
     if cast:
         scale = scale.to(dtype=torch.float8_e4m3fn)
     n = scale.shape[0]
-    s_pack_size = min(max(WARP_N // NUM_LANES, 1), 4)
+    s_pack_size = min(max(WARP_N // NUM_EXECUTION_LANES, 1), 4)
     num_s_lanes = 4 * 8
     num_s_packs = -(-WARP_N // (s_pack_size * num_s_lanes))
     warp_s = num_s_packs * num_s_lanes * s_pack_size
@@ -95,8 +95,8 @@ def dc_pack_micro_scale(scale: torch.Tensor, group_size: int = 16,
 def dc_pack_scale(scale: torch.Tensor) -> torch.Tensor:
     """deepcompressor NunchakuWeightPacker.pack_scale, group_size=-1."""
     n = scale.shape[0]
-    s_pack_size = min(max(WARP_N // NUM_LANES, 2), 8)
-    num_s_lanes = min(NUM_LANES, WARP_N // s_pack_size)
+    s_pack_size = min(max(WARP_N // NUM_EXECUTION_LANES, 2), 8)
+    num_s_lanes = min(NUM_EXECUTION_LANES, WARP_N // s_pack_size)
     num_s_packs = WARP_N // (s_pack_size * num_s_lanes)
     warp_s = num_s_packs * num_s_lanes * s_pack_size
     assert warp_s == WARP_N
@@ -109,8 +109,8 @@ def dc_pack_scale(scale: torch.Tensor) -> torch.Tensor:
 def dc_pack_lowrank_weight(weight: torch.Tensor, down: bool) -> torch.Tensor:
     """deepcompressor NunchakuWeightPacker.pack_lowrank_weight."""
     reg_n, reg_k = 1, 2
-    pack_n = N_PACK_SIZE * NUM_N_LANES * reg_n
-    pack_k = K_PACK_SIZE * NUM_K_LANES * reg_k
+    pack_n = N_PACK_SIZE * NUM_N_EXECUTION_LANES * reg_n
+    pack_k = K_PACK_SIZE * NUM_K_EXECUTION_LANES * reg_k
     if down:
         r, c = weight.shape
         r_packs, c_packs = r // pack_n, c // pack_k
@@ -121,8 +121,8 @@ def dc_pack_lowrank_weight(weight: torch.Tensor, down: bool) -> torch.Tensor:
         c_packs, r_packs = c // pack_n, r // pack_k
         weight = weight.view(c_packs, pack_n, r_packs,
                              pack_k).permute(0, 2, 1, 3)
-    weight = weight.reshape(c_packs, r_packs, N_PACK_SIZE, NUM_N_LANES, reg_n,
-                            K_PACK_SIZE, NUM_K_LANES, reg_k)
+    weight = weight.reshape(c_packs, r_packs, N_PACK_SIZE, NUM_N_EXECUTION_LANES, reg_n,
+                            K_PACK_SIZE, NUM_K_EXECUTION_LANES, reg_k)
     weight = weight.permute(0, 1, 3, 6, 2, 5, 4, 7).contiguous()
     return weight.reshape(c, r)
 

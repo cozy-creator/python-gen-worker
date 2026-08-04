@@ -64,7 +64,7 @@ def _runtime_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
 
 
-def _pilot_meta(key: str, *, lane: str = "w8a8", bucket: int = 64,
+def _pilot_meta(key: str, *, execution_lane: str = "w8a8", bucket: int = 64,
                 **over: Any) -> Dict[str, Any]:
     """A published-cell metadata dict shaped like the real (format-2,
     multi-graph) cells — one entry is simply the N=1 case."""
@@ -76,7 +76,7 @@ def _pilot_meta(key: str, *, lane: str = "w8a8", bucket: int = 64,
             "constants": [dict(r) for r in CONSTANTS], "graph": {},
         }},
         lora_bucket=bucket)
-    meta["weight_lane"] = lane
+    meta["weight_lane"] = execution_lane
     meta.update(over)
     return meta
 
@@ -123,7 +123,7 @@ def test_candidates_filter_and_newest_wins(_runtime_key: None) -> None:
     good_old = _pilot_meta(_key("a"))
     good_new = _pilot_meta(_key("b"))
     wrong_kind = _pilot_meta(_key("c"), kind="torch-inductor-cache")
-    wrong_lane = _pilot_meta(_key("d"), lane="w8a16")
+    wrong_execution_lane = _pilot_meta(_key("d"), execution_lane="w8a16")
     wrong_bucket = _pilot_meta(_key("e"), bucket=0)
     wrong_sm = _pilot_meta(_key("f"), sm="sm_80")
     unkeyed = _pilot_meta(_key("1"), cell_key="not-a-key")
@@ -135,7 +135,7 @@ def test_candidates_filter_and_newest_wins(_runtime_key: None) -> None:
         {"checkpoint_id": "x1", "updated_at": "2026-07-29T00:00:00Z",
          "metadata": wrong_kind},
         {"checkpoint_id": "x2", "updated_at": "2026-07-29T00:00:00Z",
-         "metadata": wrong_lane},
+         "metadata": wrong_execution_lane},
         {"checkpoint_id": "x3", "updated_at": "2026-07-29T00:00:00Z",
          "metadata": wrong_bucket},
         {"checkpoint_id": "x4", "updated_at": "2026-07-29T00:00:00Z",
@@ -278,14 +278,14 @@ class _Cfg:
 
 
 @pytest.fixture()
-def _plain_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+def _plain_execution_lane(monkeypatch: pytest.MonkeyPatch) -> None:
     from gen_worker import compile_cache as cc
 
-    monkeypatch.setattr(cc, "cell_base_lane", lambda pipe: "w8a8")
+    monkeypatch.setattr(cc, "cell_base_execution_lane", lambda pipe: "w8a8")
 
 
 def test_discover_downloads_newest_and_registers_key(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    tmp_path: Path, _runtime_key: None, _plain_execution_lane: None,
 ) -> None:
     key = _key("9")
     meta = _pilot_meta(key)
@@ -324,7 +324,7 @@ def test_discover_downloads_newest_and_registers_key(
 
 
 def test_discover_names_a_refusal_and_never_retries_anonymously(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    tmp_path: Path, _runtime_key: None, _plain_execution_lane: None,
     monkeypatch: Any,
 ) -> None:
     """th#1335 (was: test_discover_retries_anonymously_on_401).
@@ -366,7 +366,7 @@ def test_discover_names_a_refusal_and_never_retries_anonymously(
 
 
 def test_discover_never_raises(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    tmp_path: Path, _runtime_key: None, _plain_execution_lane: None,
 ) -> None:
     hub = _StubHub([], {}, fail_all=True)
     try:
@@ -412,7 +412,7 @@ def _discover_against(
 
 
 def test_discover_refuses_a_v1_blake3_only_cell_th1303(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    tmp_path: Path, _runtime_key: None, _plain_execution_lane: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """th#1303 S1 replaces `test_discover_digest_mismatch_is_a_miss`.
@@ -432,7 +432,7 @@ def test_discover_refuses_a_v1_blake3_only_cell_th1303(
 
 
 def test_discover_refuses_a_v2_cell_whose_bytes_do_not_match_th1303(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    tmp_path: Path, _runtime_key: None, _plain_execution_lane: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """th#1303 landmine 2 — the empty-guard class, on EXECUTABLE bytes.
@@ -458,7 +458,7 @@ def test_discover_refuses_a_v2_cell_whose_bytes_do_not_match_th1303(
 
 
 def test_discover_verifies_a_v2_cell_with_sha256_th1303(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    tmp_path: Path, _runtime_key: None, _plain_execution_lane: None,
 ) -> None:
     """The green half: a correct v2 entry is verified UNDER SHA-256 and armed.
 
@@ -471,7 +471,7 @@ def test_discover_verifies_a_v2_cell_with_sha256_th1303(
 
 
 def test_discover_refuses_an_entry_with_no_digest_at_all_th1303(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    tmp_path: Path, _runtime_key: None, _plain_execution_lane: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No digest is a REFUSAL, never a skip. A cell artifact is compiled code
@@ -490,7 +490,7 @@ def test_discover_refuses_an_entry_with_no_digest_at_all_th1303(
 
 
 def test_discover_refetches_a_cached_artifact_that_stopped_matching_th1303(
-    tmp_path: Path, _runtime_key: None, _plain_lane: None,
+    tmp_path: Path, _runtime_key: None, _plain_execution_lane: None,
 ) -> None:
     """The cache-hit guard is the SECOND site the empty digest disarmed.
 
@@ -723,7 +723,7 @@ def test_f2_flag_on_installs_before_enable_in_proven_order(
     assert observed == [True]
     binding = lora_lifted.lifted_binding(pipe.unet)
     assert binding is not None and binding.plan.bucket == BUCKET
-    # ... and ON the canonical branch containers apply_lora_lane allocated.
+    # ... and ON the canonical branch containers apply_lora_execution_lane allocated.
     assert w8a8_lora.branch_bucket(pipe.unet) == BUCKET
 
 
@@ -778,7 +778,7 @@ def test_f3_flag_off_attach_is_the_buffer_copy(
     pipe = _Pipe()
     from gen_worker import compile_cache as cc
 
-    cc.apply_lora_lane(pipe, BUCKET)
+    cc.apply_lora_execution_lane(pipe, BUCKET)
     sd = _adapter(pipe.unet, seed=3)
     AdapterResidency().activate(
         "ref", pipe, [_prepared(sd, "hub/adapter@1")], request_id="off")
@@ -794,7 +794,7 @@ def test_f3_lifted_attach_writes_through_the_binding_views(
     pipe = _Pipe()
     from gen_worker import compile_cache as cc
 
-    cc.apply_lora_lane(pipe, BUCKET)
+    cc.apply_lora_execution_lane(pipe, BUCKET)
     binding = lora_lifted.install_lifted_lora_forward(pipe.unet, BUCKET)
     sd = _adapter(pipe.unet, seed=4)
     residency = AdapterResidency()

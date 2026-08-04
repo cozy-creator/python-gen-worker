@@ -474,7 +474,7 @@ def enable_compiled(
         # The loud no-denoiser error remains for real compile targets.
         bucket = 0
     if bucket:
-        compile_cache.apply_lora_lane(pipe, bucket)
+        compile_cache.apply_lora_execution_lane(pipe, bucket)
     if artifact is not None:
         # ONE kind sniff for every non-inductor backend. `metadata.json` is
         # the shared envelope member across all artifact kinds (the pgw#709
@@ -505,10 +505,10 @@ def enable_compiled(
         # th#883: the loud invariant propagates, but the caller continuing
         # eager must not inherit the branch-bearing lane.
         if bucket:
-            compile_cache.drop_lora_lane(pipe)
+            compile_cache.drop_lora_execution_lane(pipe)
         raise
     if bucket and not armed:
-        compile_cache.drop_lora_lane(pipe)
+        compile_cache.drop_lora_execution_lane(pipe)
     if armed:
         return AdoptOutcome.hit()
     # The inductor lane declines without a classified token of its own — "no

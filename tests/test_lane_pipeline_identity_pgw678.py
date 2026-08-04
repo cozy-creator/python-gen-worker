@@ -126,13 +126,13 @@ class _ExecStub:
 
     _slot_pipeline = Executor._slot_pipeline
     _adapter_target = Executor._adapter_target
-    _register_lane = Executor._register_lane
+    _register_execution_lane = Executor._register_execution_lane
 
     def __init__(self) -> None:
         self.store = _StoreStub()
         self._classes: Dict[Any, _ClassRecord] = {}
 
-    def _arm_lane_gate(self, pipe: Any, ref: str, spec: Any = None) -> bool:
+    def _arm_execution_lane_gate(self, pipe: Any, ref: str, spec: Any = None) -> bool:
         return False
 
 
@@ -166,9 +166,9 @@ def _register(pipe: Any, *, override: bool) -> _ExecStub:
     injected: Dict[str, Any] = {"vae": pipe.vae} if override else {}
     result = _InjectionResult(kwargs={}, loaded={})
     result.slot_pipelines[_SLOT] = pipe          # the pgw#678 fix
-    lane_obj, _bytes = ex._register_lane(
+    execution_lane_obj, _bytes = ex._register_execution_lane(
         _SLOT, _REF, pipe, shared, injected, 0, result, ("", 0))
-    ex.store.residency.track_ram(_REF, lane_obj)
+    ex.store.residency.track_ram(_REF, execution_lane_obj)
     rec = _ClassRecord(cls=type(pipe), specs=[])  # type: ignore[call-arg]
     rec.slot_pipelines = dict(result.slot_pipelines)
     ex._classes["sdxl:SDXLFamily"] = rec
@@ -195,7 +195,7 @@ def test_component_override_makes_the_residency_handle_a_moduledict() -> None:
         no_override.store.residency.obj(_REF), torch.nn.ModuleDict)
 
 
-def test_the_lane_handle_reproduces_the_live_refusal_verbatim() -> None:
+def test_the_execution_lane_handle_reproduces_the_live_refusal_verbatim() -> None:
     """RED, byte-for-byte: handing the residency handle to the real
     `AdapterResidency.activate` — which is what `_adapter_target` did — raises
     the exact live message, for a UNet-only adapter on a branch-capable
@@ -216,7 +216,7 @@ def test_the_lane_handle_reproduces_the_live_refusal_verbatim() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_slot_pipeline_returns_the_pipeline_not_the_lane_handle() -> None:
+def test_slot_pipeline_returns_the_pipeline_not_the_execution_lane_handle() -> None:
     """`_slot_pipeline` (what `_adapter_target`, the explicit-deactivation
     sweep and the OOM offload rung all read now) returns the pipeline even
     when residency books a ModuleDict."""
@@ -234,7 +234,7 @@ def test_override_and_deploy_bound_lora_compose() -> None:
     pipe = _tiny_pipe()
     ex = _register(pipe, override=True)
     spec = _SpecStub()
-    compile_cache.apply_lora_lane(pipe, _RANK)
+    compile_cache.apply_lora_execution_lane(pipe, _RANK)
     overridden_vae = pipe.vae
 
     target = ex._adapter_target(spec, _SLOT)

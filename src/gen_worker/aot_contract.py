@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from .compile_cache import lane_bucket, lane_token
+from .compile_cache import execution_lane_bucket, execution_lane_token
 
 
 class MintRefused(RuntimeError):
@@ -144,10 +144,10 @@ class ExportSpec:
     source_digest: str = ""
     closure_roots: Tuple[str, ...] = ()
 
-    def lane_label(self) -> str:
-        base, observed = lane_bucket(self.weight_lane)
+    def execution_lane_label(self) -> str:
+        base, observed = execution_lane_bucket(self.weight_lane)
         bucket = observed or self.lora_bucket
-        token = lane_token(base)
+        token = execution_lane_token(base)
         if bucket:
             return f"{token}-lora{bucket}" if token else f"lora{bucket}"
         return token

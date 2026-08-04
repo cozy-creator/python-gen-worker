@@ -47,7 +47,7 @@ from .binding import BINDING_TYPES, Binding
 from .export_contract import Arg, Dim, Fork, GraphClass, Input, validate_contract
 from .formula import RuntimeFormula
 from .slot import OBJECTIVES, TASKS, Slot
-from ..models import lanes as lanespec
+from ..models import execution_lanes as lanespec
 from ..runtimes.server import ServerHandle
 from .tree import is_introspectable
 
@@ -528,7 +528,7 @@ def _validate_handles(owner: str, handles: Any) -> Tuple[str, ...]:
             f"@endpoint {owner}: handles= must be a list/tuple of lane body "
             f"strings, got {type(handles).__name__}"
         )
-    known = lanespec.known_lane_bodies()
+    known = lanespec.known_execution_lane_bodies()
     out: list[str] = []
     for token in handles:
         t = str(token or "").strip().lower()

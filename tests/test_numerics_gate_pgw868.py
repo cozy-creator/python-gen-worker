@@ -444,7 +444,7 @@ def test_the_verdict_is_bisectable_to_ONE_named_axis(
     del provision  # imported for the arm path above; nothing else needs it
 
 
-def test_an_axis_names_its_entry_row_lane_and_seed_and_reproduces():
+def test_an_axis_names_its_entry_row_execution_lane_and_seed_and_reproduces():
     """Every verdict carries its inputs. The seed is DERIVED from the axis, so
     two rows of one cell are never fed the same latent and any reader can
     rebuild the exact feed."""
@@ -453,12 +453,12 @@ def test_an_axis_names_its_entry_row_lane_and_seed_and_reproduces():
     axes = axes_from_meta(metadata())
     assert [a.name for a in axes] == sorted(entry_name(h, w) for h, w in ROWS)
     a, b = axes
-    assert a.lane == "w8a8" and a.target == TARGET
+    assert a.execution_lane == "w8a8" and a.target == TARGET
     assert {a.shape_row, b.shape_row} == {"h=8,w=8", "h=16,w=16"}
     assert a.seed != b.seed, "two axes share a seed; a shape-independent bug " \
                              "would read as agreement"
     # Reproducible across processes: the seed is a pure function of the axis.
-    assert ProbeAxis(entry=a.entry, target=a.target, lane=a.lane).seed == a.seed
+    assert ProbeAxis(entry=a.entry, target=a.target, execution_lane=a.execution_lane).seed == a.seed
     assert str(a).startswith(f"entry={a.entry} target={TARGET}")
 
 

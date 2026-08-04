@@ -560,9 +560,9 @@ class AdapterResidency:
                     # (it IS that path, through views), canonical placement,
                     # no resize — the traced bucket is the floor, and a set
                     # that needs more refuses instead of recompiling.
-                    lora_lifted.swap_lifted_lane_set(
+                    lora_lifted.swap_lifted_execution_lane_set(
                         pipe, branch_set, request_id=request_id)
-                    w8a8_lora.stamp_lane(pipe, targets)
+                    w8a8_lora.stamp_execution_lane(pipe, targets)
                 elif targets and branch_set:
                     # Compiled pipelines keep canonical placement and ONE
                     # traced bucket (a resize would mean a recompile at swap
@@ -578,7 +578,7 @@ class AdapterResidency:
                         )
                     except RefCompatibilitySurprise:
                         if (sole is not None
-                                and w8a8_lora.branch_lane(sole) == ""
+                                and w8a8_lora.branch_execution_lane(sole) == ""
                                 and not compiled
                                 and isinstance(pipe, LoraCapablePipeline)):
                             logger.info(
@@ -586,13 +586,13 @@ class AdapterResidency:
                                 "branch Linears; falling back to the peft path "
                                 "(plain lane)", request_id,
                             )
-                            w8a8_lora.clear_branch_lanes(pipe)
-                            w8a8_lora.stamp_lane(pipe, targets)
+                            w8a8_lora.clear_branch_execution_lanes(pipe)
+                            w8a8_lora.stamp_execution_lane(pipe, targets)
                             adapters = all_adapters
                         else:
                             raise
                     else:
-                        w8a8_lora.stamp_lane(pipe, targets)
+                        w8a8_lora.stamp_execution_lane(pipe, targets)
                 elif targets:
                     # Adapter set has no denoiser half: make sure a previous
                     # request's branches are off. Lifted denoisers clear
@@ -606,8 +606,8 @@ class AdapterResidency:
                             else:
                                 w8a8_lora.clear_branch_adapters(model)
                     else:
-                        w8a8_lora.clear_branch_lanes(pipe)
-                    w8a8_lora.stamp_lane(pipe, targets)
+                        w8a8_lora.clear_branch_execution_lanes(pipe)
+                    w8a8_lora.stamp_execution_lane(pipe, targets)
                 if targets and not adapters:
                     # No peft half — make sure a previous request's peft
                     # adapters are off, then we're done. Only touch the peft
@@ -691,7 +691,7 @@ class AdapterResidency:
                             binding.clear()
                         else:
                             w8a8_lora.clear_branch_adapters(model)
-                    w8a8_lora.stamp_lane(pipe, targets)
+                    w8a8_lora.stamp_execution_lane(pipe, targets)
             except Exception as exc:
                 logger.warning(
                     "[request_id=%s] lora branch clear failed", request_id,
@@ -756,8 +756,8 @@ class AdapterResidency:
                 # bucket guard: never-lora pipelines skip the module walk
                 # entirely — this runs on EVERY demote (gw#551 swaps).
                 if targets and w8a8_lora.pipeline_branch_bucket(pipe):
-                    w8a8_lora.disable_branch_lanes(pipe)
-                    w8a8_lora.stamp_lane(pipe, targets)
+                    w8a8_lora.disable_branch_execution_lanes(pipe)
+                    w8a8_lora.stamp_execution_lane(pipe, targets)
             except Exception as exc:
                 logger.warning("lora branch drop on demote failed for %s",
                                ref, exc_info=True)

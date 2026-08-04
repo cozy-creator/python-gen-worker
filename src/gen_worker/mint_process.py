@@ -217,7 +217,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: declared-parameter values per function (th#1087). Both STEER the warm
     #: forwards, so both must be the parent's values — a child warming at
     #: different config traces different graphs and the parent's proof misses.
-    lane: str = ""
+    execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = {}
     #: pgw#805: ``"dynamo"`` (inductor FX capture, the original recipe) or
     #: ``"aot"`` (torch.export + AOTInductor). The parent decides; the child

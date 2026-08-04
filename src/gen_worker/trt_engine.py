@@ -48,7 +48,7 @@ from . import activity as activity_mod
 from .cell_adopt import AdoptOutcome
 from .compile_cache import (
     AdoptError,
-    CompiledLaneUnavailableError,
+    CompiledExecutionLaneUnavailableError,
     _clean_tarinfo,
     parse_cell_ref,
     sku_slug,
@@ -515,7 +515,7 @@ def wrap_module(
 
     def trt_forward(*args: Any, **kwargs: Any) -> Any:
         if state["revocation_error"]:
-            raise CompiledLaneUnavailableError(state["revocation_error"])
+            raise CompiledExecutionLaneUnavailableError(state["revocation_error"])
         if state["failed"]:
             return original(*args, **kwargs)
         try:
@@ -539,7 +539,7 @@ def wrap_module(
                     )
                     logger.exception(
                         "trt-engine: %s", state["revocation_error"])
-                    raise CompiledLaneUnavailableError(
+                    raise CompiledExecutionLaneUnavailableError(
                         state["revocation_error"]
                     ) from callback_exc
             logger.warning(

@@ -198,10 +198,10 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         assert table["pool"]["oom_entry"] == "probe/entry"
 
         # 5. ...and the parent banks it, so the RETRY is narrower
-        fam, lane = "pgw848-oom", "w8a8-lora64"
+        fam, execution_lane = "pgw848-oom", "w8a8-lora64"
         mint_budget.record_entry_peak_rss(
-            fam, lane, int(table["pool"]["peak_child_rss_bytes"]))
-        banked = mint_budget.entry_peak_rss(fam, lane)
+            fam, execution_lane, int(table["pool"]["peak_child_rss_bytes"]))
+        banked = mint_budget.entry_peak_rss(fam, execution_lane)
         assert banked > 0
         common = dict(
             vcpus=16, available_bytes=8 * _GIB, free_vram_bytes=0,

@@ -249,7 +249,7 @@ class _Rig:
             return provision.SlotLoad(obj=pipe, is_pipeline=True)
 
         def _mandatory_miss(*a: Any, **k: Any) -> bool:
-            raise cc.CompiledLaneUnavailableError("no delivered cell")
+            raise cc.CompiledExecutionLaneUnavailableError("no delivered cell")
 
         monkeypatch.setattr(executor_mod, "ensure_local", _download)
         monkeypatch.setattr(provision, "load_slot", _load_slot)
@@ -375,7 +375,7 @@ def test_same_key_rearm_reuses_finalized_cell_with_a_real_fx_hit(
         assert fleet_cells._PENDING == {}
 
 
-def test_genuinely_unservable_lane_degrades_to_eager_not_death(
+def test_genuinely_unservable_execution_lane_degrades_to_eager_not_death(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -398,7 +398,7 @@ def test_genuinely_unservable_lane_degrades_to_eager_not_death(
     with caplog.at_level(logging.ERROR):
         rig.boot(gen)
 
-    # The 0.64.0 outcome was CompiledLaneUnavailableError -> generate
+    # The 0.64.0 outcome was CompiledExecutionLaneUnavailableError -> generate
     # disabled -> pod retired. Now: alive, eager, loud.
     assert "generate" not in rig.ex.unavailable
     assert rig.ex.serving_tiers()["generate"] == "eager"
@@ -422,7 +422,7 @@ def test_genuinely_unservable_lane_degrades_to_eager_not_death(
         assert fleet_cells._PENDING == {}
 
 
-def test_compile_failure_on_mandatory_lane_degrades_per_sku(
+def test_compile_failure_on_mandatory_execution_lane_degrades_per_sku(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:

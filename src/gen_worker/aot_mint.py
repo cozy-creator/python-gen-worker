@@ -100,7 +100,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import activity as activity_mod
 from . import (
     aot_compile_pool, aot_export_parallel, aot_export_reuse, aot_package,
-    aot_serve, aot_wrapper_split, cell_key, graph_hash, kernel_lane)
+    aot_serve, aot_wrapper_split, cell_key, graph_hash, kernel_path)
 from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
     DynamicDim,
@@ -1358,8 +1358,8 @@ def _disarm_branches(pipeline: Any) -> None:
     """
     from .models import lora_lifted, w8a8_lora
 
-    lora_lifted.remove_lifted_lora_lanes(pipeline)
-    w8a8_lora.disable_branch_lanes(pipeline)
+    lora_lifted.remove_lifted_lora_execution_lanes(pipeline)
+    w8a8_lora.disable_branch_execution_lanes(pipeline)
     logger.info(
         "aot-mint: branch containers dropped — exporting the adapter=false "
         "graph class(es)")
@@ -1388,7 +1388,7 @@ def _arm_branches(pipeline: Any, bucket: int) -> None:
     """
     from .models import lora_lifted
 
-    lora_lifted.arm_lifted_lora_lanes(pipeline, int(bucket or 0))
+    lora_lifted.arm_lifted_lora_execution_lanes(pipeline, int(bucket or 0))
 
 
 # pgw#824: the phase tokens the in-mint progress callback reports under.
@@ -1465,7 +1465,7 @@ def mint(
     entry_device_peak_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     phase_snapshot: Optional[Path] = None,
-    lane_verdict: Optional[kernel_lane.Verdict] = None,
+    execution_lane_verdict: Optional[kernel_path.Verdict] = None,
 ) -> MintResult:
     """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
 
@@ -1519,7 +1519,7 @@ def mint(
             entry_workers=entry_workers,
             entry_peak_rss_bytes=entry_peak_rss_bytes,
             entry_device_peak_bytes=entry_device_peak_bytes,
-            lane_verdict=lane_verdict,
+            execution_lane_verdict=execution_lane_verdict,
             progress=progress)
     except BaseException as exc:
         _attach_partial_phases(exc, progress)
@@ -1707,7 +1707,7 @@ def _mint_cell(
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
     entry_device_peak_bytes: int = 0,
-    lane_verdict: Optional[kernel_lane.Verdict] = None,
+    execution_lane_verdict: Optional[kernel_path.Verdict] = None,
     progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
@@ -1995,12 +1995,12 @@ def _mint_cell(
         raise MintRefused(
             f"envelope refused the declared contract: {exc}") from exc
     meta.update(shared_identity_blocks(spec))
-    if lane_verdict is not None:
+    if execution_lane_verdict is not None:
         # pgw#947: the DISCRETE verdict only. Milliseconds in metadata.json
         # would break the #699 double-mint byte-compare — the artifact
         # deliberately carries no wall clocks — and the margin threshold is
         # what makes the discrete answer reproducible across two mints.
-        meta[kernel_lane.META_KEY] = kernel_lane.envelope_block(lane_verdict)
+        meta[kernel_path.META_KEY] = kernel_path.envelope_block(execution_lane_verdict)
     mode_drift = aot_package.strict_mode_drift(meta, spec.strict)
     if mode_drift:
         raise MintRefused("trace-mode drift: " + "; ".join(mode_drift))
@@ -2020,18 +2020,18 @@ def _mint_cell(
     # metadata.json would break the #699 double-mint byte-compare — the
     # artifact deliberately carries no timestamps and no wall clocks.
     meta["mint_phases"] = phase_table
-    if lane_verdict is not None:
+    if execution_lane_verdict is not None:
         # The EVIDENCE: both lanes' ms/step and peak bytes, the margin, the
         # headroom terms, and the device it was all measured on. Same channel
         # as the phase table (published checkpoint metadata + the typed
         # event), so a verdict is auditable long after the pod is gone.
-        meta[kernel_lane.EVIDENCE_KEY] = kernel_lane.evidence_block(
-            lane_verdict)
+        meta[kernel_path.EVIDENCE_KEY] = kernel_path.evidence_block(
+            execution_lane_verdict)
 
     logger.info(
         "aot-mint: %s lane=%s -> %s (%d entr%s across %d target(s), %.1f MB "
         "package, combined=%s, %s)",
-        spec.family, spec.lane_label() or "(plain)", key,
+        spec.family, spec.execution_lane_label() or "(plain)", key,
         len(minted), "y" if len(minted) == 1 else "ies",
         len({row.spec.target for row in minted}),
         package.stat().st_size / 1e6, meta.get("combined_graph_hash"),
@@ -2074,7 +2074,7 @@ def _entry_device_bytes(
 
         budget = mint_budget.co_residency(
             family=str(spec.family or ""),
-            weight_lane=str(spec.lane_label() or ""))
+            weight_lane=str(spec.execution_lane_label() or ""))
     except Exception:  # noqa: BLE001
         return 0, "unmeasured"
     if not budget.probed:
@@ -2612,11 +2612,11 @@ def _emit_phase_event(spec: ExportSpec, table: Mapping[str, Any]) -> None:
     telemetry.
     """
     try:
-        family, lane = spec.family, spec.lane_label() or "plain"
+        family, execution_lane = spec.family, spec.execution_lane_label() or "plain"
     except Exception:  # pragma: no cover — telemetry never fails a mint
         logger.debug("aot-mint: phase event emission failed", exc_info=True)
         return
-    emit_phase_events(family=family, lane=lane, table=table)
+    emit_phase_events(family=family, execution_lane=execution_lane, table=table)
 
 
 #: pgw#842: the mint's WIDTH decision, as its own hub row.
@@ -2624,7 +2624,7 @@ POOL_PHASE = "pool"
 
 
 def _emit_pool_event(
-    *, family: str, lane: str, table: Mapping[str, Any],
+    *, family: str, execution_lane: str, table: Mapping[str, Any],
 ) -> None:
     """pgw#842: one event that says what K was, what chose it, and what it
     bought — the standing "no silent decisions" rule applied to the mint's
@@ -2650,7 +2650,7 @@ def _emit_pool_event(
     under = int(pool.get("underwidth") or 0)
     wall_s = float(pool.get("pool_wall_s") or 0.0)
     head = (
-        f"family={family} lane={lane} entry_workers={workers} "
+        f"family={family} lane={execution_lane} entry_workers={workers} "
         f"binding={binding} underwidth={under}")
     if under > 0:
         # Named in the FIRST line, so a narrow pool is legible without
@@ -2666,7 +2666,7 @@ def _emit_pool_event(
 
 
 def emit_phase_events(
-    *, family: str, lane: str, table: Mapping[str, Any],
+    *, family: str, execution_lane: str, table: Mapping[str, Any],
     terminus: str = "",
 ) -> None:
     """Typed telemetry event — the phase table must reach observability,
@@ -2687,7 +2687,7 @@ def emit_phase_events(
         from . import activity as activity_mod
 
         totals = dict(table.get("totals") or {})
-        lane = lane or "plain"
+        execution_lane = execution_lane or "plain"
         total_s = float(totals.get("total_s") or 0.0)
         # pgw#825: the roll-up's PHASE is the mint's terminus. An aborted mint
         # measured real entries and must report them — under `aborted`, never
@@ -2697,7 +2697,7 @@ def emit_phase_events(
             or activity_mod.PHASE_MINTED
         activity_mod.emit_event(
             MINT_PHASES_KIND,
-            f"family={family} lane={lane} status={roll_up} "
+            f"family={family} lane={execution_lane} status={roll_up} "
             f"n_entries={table.get('n_entries')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
             f"overlays={dict(table.get('overlays') or {})} "
@@ -2705,7 +2705,7 @@ def emit_phase_events(
             phase=roll_up,
             duration_ms=int(round(total_s * 1000)),
         )
-        _emit_pool_event(family=family, lane=lane, table=table)
+        _emit_pool_event(family=family, execution_lane=execution_lane, table=table)
         for name, timings in sorted((table.get("entries") or {}).items()):
             if not isinstance(timings, Mapping):
                 continue
@@ -2714,7 +2714,7 @@ def emit_phase_events(
                 continue
             activity_mod.emit_event(
                 MINT_PHASES_KIND,
-                f"family={family} lane={lane} entry={name} "
+                f"family={family} lane={execution_lane} entry={name} "
                 f"timings={dict(timings)}",
                 phase=f"entry:{name}",
                 duration_ms=int(round(entry_s * 1000)),
@@ -2895,7 +2895,7 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         "format": str(meta.get("format") or ""),
         "kind": aot_serve.ARTIFACT_KIND,
         "family": str(meta.get("family") or ""),
-        "lane": spec.lane_label(),
+        "lane": spec.execution_lane_label(),
         # pgw#846: an exported cell is always whole-graph again; "" is the
         # optional-axis value `from_axes` omits, matching every pre-regional
         # whole-graph key.

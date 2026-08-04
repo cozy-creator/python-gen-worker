@@ -144,12 +144,12 @@ def from_axes(axes: Mapping[str, str]) -> CellKey:
     return CellKey(axes=tuple(sorted(clean.items())))
 
 
-def _canonical_lane(weight_lane: str, lora_bucket: int = 0) -> str:
+def _canonical_execution_lane(weight_lane: str, lora_bucket: int = 0) -> str:
     from . import compile_cache as cc  # cycle: compile_cache imports cell_key
 
-    base, observed = cc.lane_bucket(str(weight_lane or ""))
+    base, observed = cc.execution_lane_bucket(str(weight_lane or ""))
     bucket = observed or int(lora_bucket or 0)
-    token = cc.lane_token(base)
+    token = cc.execution_lane_token(base)
     if bucket:
         return f"{token}-lora{bucket}" if token else f"lora{bucket}"
     return token
@@ -203,7 +203,7 @@ def compute(
         "format": str(cc.ARTIFACT_FORMAT),
         "kind": "inductor",
         "family": str(family or ""),
-        "lane": _canonical_lane(weight_lane, lora_bucket),
+        "lane": _canonical_execution_lane(weight_lane, lora_bucket),
         "mode": "regional" if regional else "",
         "sm": rt["sm"],
         "contract": str(contract or ""),
@@ -266,7 +266,7 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         "format": str(meta.get("format") or ""),
         "kind": "inductor",
         "family": str(meta.get("family") or ""),
-        "lane": _canonical_lane(
+        "lane": _canonical_execution_lane(
             str(meta.get("weight_lane") or ""),
             int(meta.get("lora_bucket") or 0),
         ),

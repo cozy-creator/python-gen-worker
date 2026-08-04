@@ -491,13 +491,13 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
         if text:
             fallback[name] = text
     try:
-        base, observed = cc.lane_bucket(str(meta.get("weight_lane") or ""))
+        base, observed = cc.execution_lane_bucket(str(meta.get("weight_lane") or ""))
         bucket = observed or int(meta.get("lora_bucket") or 0)
-        token = cc.lane_token(base)
-        lane = f"{token}-lora{bucket}" if bucket and token else (
+        token = cc.execution_lane_token(base)
+        execution_lane = f"{token}-lora{bucket}" if bucket and token else (
             f"lora{bucket}" if bucket else token)
-        if lane:
-            fallback["lane"] = lane
+        if execution_lane:
+            fallback["lane"] = execution_lane
     except Exception:  # noqa: BLE001
         pass
     return fallback
@@ -863,7 +863,7 @@ def _arming_policy(
                     snapshot_digest=adopted.snapshot_digest,
                     artifact_kind=aot_serve.ARTIFACT_KIND,
                 )
-            except cc.CompiledLaneUnavailableError:
+            except cc.CompiledExecutionLaneUnavailableError:
                 # The AOT arm refused and the mandatory-lane no-artifact
                 # fallthrough raised — the ordinary policy below (with the
                 # delivered artifact) is still to run, so this is not
@@ -933,7 +933,7 @@ def _arming_policy(
             "fleet-cells: cell_selection_bug (%s); self-minting instead of "
             "retrying the same unusable cell", exc)
         selection_bug = exc
-    except cc.CompiledLaneUnavailableError:
+    except cc.CompiledExecutionLaneUnavailableError:
         # Mandatory (w8a8/w4a4) miss: production used to fail closed here.
         # The whole point of self-mint is that this worker can produce the
         # cell itself.
@@ -981,7 +981,7 @@ def _arming_policy(
     # the branch lane; the mint must key + trace the DECLARED graph family.
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if bucket:
-        cc.apply_lora_lane(pipe, bucket)
+        cc.apply_lora_execution_lane(pipe, bucket)
 
     # ``cell_key`` is computable from STATIC axes (sku/torch/image/weight
     # lane/declared shapes+targets/module structure) — never the traced FX
@@ -998,7 +998,7 @@ def _arming_policy(
     except Exception as exc:  # noqa: BLE001 — key axes must be computable
         logger.warning("fleet-cells: self-mint key computation failed (%s)", exc)
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         return _fail_closed(
             pipe, f"self-mint key computation failed: {exc}", selection_bug,
             phase=EagerPhase.KEY_COMPUTATION_FAILED)
@@ -1015,7 +1015,7 @@ def _arming_policy(
             "was quarantined by a failed proof in this process; serving "
             "eager (pgw#672)", family, key)
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         # pgw#824: the ONE eager exit in this function that never rode a typed
         # event — it returns before `_fail_closed` and only logged. A pod that
         # quarantined its own cell serves eager for the rest of its life, which
@@ -1080,7 +1080,7 @@ def _arming_policy(
             "pending for key=%s (one inductor capture dir per process)",
             family, key, conflict)
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         return _fail_closed(
             pipe, f"another self-mint capture is pending (key {conflict})",
             selection_bug, phase=EagerPhase.CAPTURE_CONFLICT)
@@ -1164,7 +1164,7 @@ def _arming_policy(
             "worker runs %d execution groups in one process and the inductor "
             "capture env is process-global (pgw#777)", family, key, topo.execution_groups)
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         return _fail_closed(
             pipe,
             f"in-process mint refused at groups={topo.execution_groups}: the inductor "
@@ -1178,7 +1178,7 @@ def _arming_policy(
         if existing is None:
             shutil.rmtree(mint_root, ignore_errors=True)
         if bucket:
-            cc.drop_lora_lane(pipe)
+            cc.drop_lora_execution_lane(pipe)
         return _fail_closed(
             pipe, f"self-mint arm failed: {exc}", selection_bug,
             phase=EagerPhase.CAPTURE_ARM_FAILED)
@@ -1817,13 +1817,13 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
     from . import aot_mint
     from .models import lora_lifted
 
-    lane = loading.pipeline_weight_lane(pipe)
+    execution_lane = loading.pipeline_weight_lane(pipe)
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     return aot_mint.ExportSpec(
         family=str(getattr(cfg, "family", "") or ""),
         target="",
-        weight_lane=lane,
-        precision=lane or "bf16",
+        weight_lane=execution_lane,
+        precision=execution_lane or "bf16",
         lora_bucket=bucket,
         shapes=tuple(
             tuple(int(v) for v in row) for row in (getattr(cfg, "shapes", ()) or ())),
@@ -1850,14 +1850,14 @@ def _fail_closed(
     ALSO followed a caught cell_selection_bug (th#1031) — chained onto the
     raised refusal so the caller's report is never dropped."""
 
-    lane = loading.pipeline_weight_lane(pipe)
+    execution_lane = loading.pipeline_weight_lane(pipe)
     # pgw#677 reopen: ONE serveability brain (cc.mandatory_serving) — the
     # hub-resolved execution lane outranks the weight-lane prefix, so an
     # eager-serveable mixed lane (sdxl #fp8-w8a8 storage on fp8-w8a16
     # execution) degrades to eager here instead of a typed refusal.
     if cc.mandatory_serving(pipe):
-        refusal = cc.CompiledLaneUnavailableError(
-            f"{lane[:4].upper()} requires a compile cell and the self-mint "
+        refusal = cc.CompiledExecutionLaneUnavailableError(
+            f"{execution_lane[:4].upper()} requires a compile cell and the self-mint "
             f"is unavailable ({reason})")
         if selection_bug is not None:
             raise refusal from selection_bug
@@ -1877,7 +1877,7 @@ def _fail_closed(
     logger.info("fleet-cells: serving eager (%s)", reason)
     activity_mod.emit_event(
         "self_mint_skipped",
-        f"lane={lane or 'plain'}: no cell and no mint — {reason}; this "
+        f"lane={execution_lane or 'plain'}: no cell and no mint — {reason}; this "
         f"worker serves eager and publishes nothing",
         phase=phase,
     )

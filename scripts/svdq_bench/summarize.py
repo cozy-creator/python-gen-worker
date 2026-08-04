@@ -86,9 +86,9 @@ def main() -> int:
                 continue
             s = a["summary"]
             rt = a.get("runtime", {})
-            lane = rt.get("lane") or rt.get("runtime", "?")
+            execution_lane = rt.get("lane") or rt.get("runtime", "?")
             e2e, src = steady_e2e(a)
-            print(f"| {ARM_LABEL.get(name, name)} | {lane} "
+            print(f"| {ARM_LABEL.get(name, name)} | {execution_lane} "
                   f"| {fmt(s['step_mean_s'], '.0f', 1000)} "
                   f"| {fmt(e2e, '.2f')} ({src}) "
                   f"| {fmt(3600.0 / e2e, '.1f')} "

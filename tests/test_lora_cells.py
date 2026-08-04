@@ -18,7 +18,7 @@ pytest.importorskip("diffusers")
 pytest.importorskip("accelerate")
 
 from gen_worker import Compile, endpoint, compile_cache
-from gen_worker.executor import _cell_lane_matches
+from gen_worker.executor import _cell_execution_lane_matches
 from gen_worker.models import provision
 from gen_worker.models.w8a8 import detect_w8a8_artifact, load_w8a8_denoiser, quantize_tree_w8a8
 from gen_worker.models.w8a8_lora import RANK_BUCKETS, branch_bucket
@@ -122,31 +122,31 @@ def test_endpoint_lora_bucket_validation() -> None:
         Compile(shapes=((64, 64),), family="f", lora_bucket=32)  # type: ignore[call-arg]
 
 
-def test_lane_bucket_parses_stamp_and_token_forms() -> None:
-    assert compile_cache.lane_bucket("") == ("", 0)
-    assert compile_cache.lane_bucket("w8a8") == ("w8a8", 0)
-    assert compile_cache.lane_bucket("w8a8-lora128") == ("w8a8", 128)
-    assert compile_cache.lane_bucket("w8a16-lora32") == ("w8a16", 32)
-    assert compile_cache.lane_bucket("fp8-hooks-lora64") == ("fp8-hooks", 64)
-    assert compile_cache.lane_bucket("lora32") == ("", 32)
+def test_execution_lane_bucket_parses_stamp_and_token_forms() -> None:
+    assert compile_cache.execution_lane_bucket("") == ("", 0)
+    assert compile_cache.execution_lane_bucket("w8a8") == ("w8a8", 0)
+    assert compile_cache.execution_lane_bucket("w8a8-lora128") == ("w8a8", 128)
+    assert compile_cache.execution_lane_bucket("w8a16-lora32") == ("w8a16", 32)
+    assert compile_cache.execution_lane_bucket("fp8-hooks-lora64") == ("fp8-hooks", 64)
+    assert compile_cache.execution_lane_bucket("lora32") == ("", 32)
     # sparse stamps are eager-only and never parse as a cell bucket
-    assert compile_cache.lane_bucket("w8a8-lora32-sparse") == ("w8a8-lora32-sparse", 0)
+    assert compile_cache.execution_lane_bucket("w8a8-lora32-sparse") == ("w8a8-lora32-sparse", 0)
 
 
-def test_lane_token_and_label_carry_bucket() -> None:
-    assert compile_cache.lane_token("w8a8-lora128") == "w8a8-lora128"
-    assert compile_cache.lane_token("fp8-hooks-lora32") == "w8a16-lora32"
-    assert compile_cache.lane_token("lora32") == "lora32"
+def test_execution_lane_token_and_label_carry_bucket() -> None:
+    assert compile_cache.execution_lane_token("w8a8-lora128") == "w8a8-lora128"
+    assert compile_cache.execution_lane_token("fp8-hooks-lora32") == "w8a16-lora32"
+    assert compile_cache.execution_lane_token("lora32") == "lora32"
     assert compile_cache.flavor_label("h100-sxm", "2.13.0+cu130", "w8a8-lora128") == (
         "inductor-h100-sxm-torch2.13-w8a8-lora128")
     assert compile_cache.flavor_label("rtx-4090", "2.13.0", "lora32") == (
         "inductor-rtx-4090-torch2.13-lora32")
 
 
-def test_cell_lane_roundtrip_through_ref() -> None:
+def test_cell_execution_lane_roundtrip_through_ref() -> None:
     ref = "root/family-qwen-image#inductor-h100-sxm-torch2.13-w8a8-lora128"
-    assert compile_cache.cell_lane(ref) == "w8a8-lora128"
-    assert compile_cache.lane_bucket(compile_cache.cell_lane(ref)) == ("w8a8", 128)
+    assert compile_cache.cell_execution_lane(ref) == "w8a8-lora128"
+    assert compile_cache.execution_lane_bucket(compile_cache.cell_execution_lane(ref)) == ("w8a8", 128)
 
 
 # ---------------------------------------------------------------------------
@@ -154,33 +154,33 @@ def test_cell_lane_roundtrip_through_ref() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_apply_lora_lane_stamps_and_allocates(w8a8_pipe: Any) -> None:
-    assert compile_cache.apply_lora_lane(w8a8_pipe, 128)
+def test_apply_lora_execution_lane_stamps_and_allocates(w8a8_pipe: Any) -> None:
+    assert compile_cache.apply_lora_execution_lane(w8a8_pipe, 128)
     assert branch_bucket(w8a8_pipe.unet) == 128
     assert w8a8_pipe._cozy_weight_lane == "w8a8-lora128"
     meta = compile_cache.artifact_metadata(
         family="f", weight_lane="w8a8-lora128", lora_bucket=128)
-    assert compile_cache.lane_drift(meta, w8a8_pipe) == ""
+    assert compile_cache.execution_lane_drift(meta, w8a8_pipe) == ""
     assert meta["lora_bucket"] == 128
     # branchless cells refuse the branch-bearing pipeline (symmetric guard)
-    assert "weight_lane" in compile_cache.lane_drift(
+    assert "weight_lane" in compile_cache.execution_lane_drift(
         compile_cache.artifact_metadata(family="f", weight_lane="w8a8"), w8a8_pipe)
-    compile_cache.drop_lora_lane(w8a8_pipe)
+    compile_cache.drop_lora_execution_lane(w8a8_pipe)
     assert branch_bucket(w8a8_pipe.unet) == 0
     assert w8a8_pipe._cozy_weight_lane == "w8a8"
 
 
-def test_apply_lora_lane_zero_bucket_is_noop(w8a8_pipe: Any) -> None:
-    assert compile_cache.apply_lora_lane(w8a8_pipe, 0) is False
+def test_apply_lora_execution_lane_zero_bucket_is_noop(w8a8_pipe: Any) -> None:
+    assert compile_cache.apply_lora_execution_lane(w8a8_pipe, 0) is False
     assert branch_bucket(w8a8_pipe.unet) == 0
 
 
-def test_apply_lora_lane_requires_denoiser() -> None:
+def test_apply_lora_execution_lane_requires_denoiser() -> None:
     class _NoDenoiser:
         pass
 
     with pytest.raises(RuntimeError, match="branch-capable"):
-        compile_cache.apply_lora_lane(_NoDenoiser(), 32)
+        compile_cache.apply_lora_execution_lane(_NoDenoiser(), 32)
 
 
 def test_enable_compiled_rolls_back_branches_when_eager(plain_pipe: Any) -> None:
@@ -197,7 +197,7 @@ def test_enable_compiled_rolls_back_branches_when_eager(plain_pipe: Any) -> None
 
 def test_enable_compiled_w8a8_fail_closed_keeps_contract(w8a8_pipe: Any) -> None:
     cfg = _cfg("loracells-test", lora_bucket=128)
-    with pytest.raises(compile_cache.CompiledLaneUnavailableError):
+    with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
         provision.enable_compiled(w8a8_pipe, cfg, cache_dir=None, artifact=None)
 
 
@@ -206,7 +206,7 @@ def test_enable_compiled_w8a8_fail_closed_keeps_contract(w8a8_pipe: Any) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_cell_pick_is_lane_and_bucket_exact() -> None:
+def test_cell_pick_is_execution_lane_and_bucket_exact() -> None:
     fam = "qwen-image"
     plain = f"root/family-{fam}#inductor-h100-sxm-torch2.13"
     w8a8 = f"root/family-{fam}#inductor-h100-sxm-torch2.13-w8a8"
@@ -214,32 +214,32 @@ def test_cell_pick_is_lane_and_bucket_exact() -> None:
     w8a8_l32 = f"root/family-{fam}#inductor-h100-sxm-torch2.13-w8a8-lora32"
     plain_l32 = f"root/family-{fam}#inductor-h100-sxm-torch2.13-lora32"
 
-    def pick(ref: str, *, w8a8_lane: bool, bucket: int) -> bool:
-        return _cell_lane_matches(ref, fam, want_lane="w8a8" if w8a8_lane else "", want_bucket=bucket)
+    def pick(ref: str, *, w8a8_execution_lane: bool, bucket: int) -> bool:
+        return _cell_execution_lane_matches(ref, fam, want_execution_lane="w8a8" if w8a8_execution_lane else "", want_bucket=bucket)
 
     # branchless w8a8 endpoint: exactly the branchless w8a8 cell
-    assert pick(w8a8, w8a8_lane=True, bucket=0)
-    assert not pick(w8a8_l128, w8a8_lane=True, bucket=0)
-    assert not pick(plain, w8a8_lane=True, bucket=0)
+    assert pick(w8a8, w8a8_execution_lane=True, bucket=0)
+    assert not pick(w8a8_l128, w8a8_execution_lane=True, bucket=0)
+    assert not pick(plain, w8a8_execution_lane=True, bucket=0)
     # lora128 w8a8 endpoint: exactly the lora128 w8a8 cell
-    assert pick(w8a8_l128, w8a8_lane=True, bucket=128)
-    assert not pick(w8a8, w8a8_lane=True, bucket=128)
-    assert not pick(w8a8_l32, w8a8_lane=True, bucket=128)
-    assert not pick(plain_l32, w8a8_lane=True, bucket=128)
+    assert pick(w8a8_l128, w8a8_execution_lane=True, bucket=128)
+    assert not pick(w8a8, w8a8_execution_lane=True, bucket=128)
+    assert not pick(w8a8_l32, w8a8_execution_lane=True, bucket=128)
+    assert not pick(plain_l32, w8a8_execution_lane=True, bucket=128)
     # plain lora32 endpoint: never a w8a8 cell, never branchless
-    assert pick(plain_l32, w8a8_lane=False, bucket=32)
-    assert not pick(w8a8_l32, w8a8_lane=False, bucket=32)
-    assert not pick(plain, w8a8_lane=False, bucket=32)
+    assert pick(plain_l32, w8a8_execution_lane=False, bucket=32)
+    assert not pick(w8a8_l32, w8a8_execution_lane=False, bucket=32)
+    assert not pick(plain, w8a8_execution_lane=False, bucket=32)
     # wrong family never matches
-    assert not _cell_lane_matches(
-        w8a8_l128, "sdxl", want_lane="w8a8", want_bucket=128)
+    assert not _cell_execution_lane_matches(
+        w8a8_l128, "sdxl", want_execution_lane="w8a8", want_bucket=128)
     # w4a4 (gw#540): mandated-lane exactness, and plain endpoints never
     # fetch a quantized-lane cell
     w4a4 = f"root/family-{fam}#inductor-rtx-5090-torch2.13-w4a4"
-    assert _cell_lane_matches(w4a4, fam, want_lane="w4a4", want_bucket=0)
-    assert not _cell_lane_matches(w4a4, fam, want_lane="w8a8", want_bucket=0)
-    assert not _cell_lane_matches(w4a4, fam, want_lane="", want_bucket=0)
-    assert not _cell_lane_matches(w8a8, fam, want_lane="w4a4", want_bucket=0)
+    assert _cell_execution_lane_matches(w4a4, fam, want_execution_lane="w4a4", want_bucket=0)
+    assert not _cell_execution_lane_matches(w4a4, fam, want_execution_lane="w8a8", want_bucket=0)
+    assert not _cell_execution_lane_matches(w4a4, fam, want_execution_lane="", want_bucket=0)
+    assert not _cell_execution_lane_matches(w8a8, fam, want_execution_lane="w4a4", want_bucket=0)
 
 
 def test_rank_buckets_cover_declared_cells() -> None:
@@ -270,7 +270,7 @@ def test_discovery_carries_lora_bucket() -> None:
     assert meta["lora_bucket"] == 64
 
 
-def test_enable_compiled_skips_lane_on_component_slot_without_target() -> None:
+def test_enable_compiled_skips_execution_lane_on_component_slot_without_target() -> None:
     """gw#627 live find: enable_compiled runs for EVERY worker-loaded setup
     slot — a bare component slot (sdxl's standalone AutoencoderKL vae)
     resolves none of cfg.targets and must stay branchless-eager instead of

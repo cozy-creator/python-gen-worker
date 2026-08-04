@@ -31,8 +31,8 @@ class _Resolutions:
     def __init__(self, resolutions):
         self._model_resolutions = resolutions
 
-    _resolved_mandatory_lane = Executor._resolved_mandatory_lane
-    _mandatory_lane_of_bound = Executor._mandatory_lane_of_bound
+    _resolved_mandatory_execution_lane = Executor._resolved_mandatory_execution_lane
+    _mandatory_execution_lane_of_bound = Executor._mandatory_execution_lane_of_bound
     _validate_required_compile = Executor._validate_required_compile
     _setup_slots = staticmethod(Executor._setup_slots)
 
@@ -60,37 +60,37 @@ def _spec() -> EndpointSpec:
     )
 
 
-def test_w8a16_resolution_lane_is_not_mandatory() -> None:
+def test_w8a16_resolution_execution_lane_is_not_mandatory() -> None:
     ex = _Resolutions({BARE: (MIXED, "", "fp8-w8a16+compiled")})
-    assert ex._resolved_mandatory_lane(MIXED) == ""
-    assert ex._resolved_mandatory_lane(BARE) == ""
-    assert ex._mandatory_lane_of_bound([MIXED]) == ""
+    assert ex._resolved_mandatory_execution_lane(MIXED) == ""
+    assert ex._resolved_mandatory_execution_lane(BARE) == ""
+    assert ex._mandatory_execution_lane_of_bound([MIXED]) == ""
 
 
-def test_w8a8_resolution_lane_stays_mandatory() -> None:
+def test_w8a8_resolution_execution_lane_stays_mandatory() -> None:
     ex = _Resolutions({BARE: (MIXED, "", "fp8-w8a8-dynamic+compiled")})
-    assert ex._resolved_mandatory_lane(MIXED) == "w8a8"
-    assert ex._mandatory_lane_of_bound([MIXED]) == "w8a8"
+    assert ex._resolved_mandatory_execution_lane(MIXED) == "w8a8"
+    assert ex._mandatory_execution_lane_of_bound([MIXED]) == "w8a8"
 
 
-def test_flavor_token_fallback_without_lane_evidence() -> None:
+def test_flavor_token_fallback_without_execution_lane_evidence() -> None:
     ex = _Resolutions({})
-    assert ex._resolved_mandatory_lane(MIXED) == "w8a8"
-    assert ex._resolved_mandatory_lane("acme/other#nvfp4-w4a4") == "w4a4"
-    assert ex._resolved_mandatory_lane(BARE) == ""
-    empty_lane = _Resolutions({BARE: (MIXED, "", "")})
-    assert empty_lane._resolved_mandatory_lane(MIXED) == "w8a8"
+    assert ex._resolved_mandatory_execution_lane(MIXED) == "w8a8"
+    assert ex._resolved_mandatory_execution_lane("acme/other#nvfp4-w4a4") == "w4a4"
+    assert ex._resolved_mandatory_execution_lane(BARE) == ""
+    empty_execution_lane = _Resolutions({BARE: (MIXED, "", "")})
+    assert empty_execution_lane._resolved_mandatory_execution_lane(MIXED) == "w8a8"
 
 
-def test_conflicting_lane_evidence_fails_closed() -> None:
+def test_conflicting_execution_lane_evidence_fails_closed() -> None:
     ex = _Resolutions({
         BARE: (MIXED, "", "fp8-w8a16+compiled"),
         "acme/alias": (MIXED, "", "fp8-w8a8-dynamic+compiled"),
     })
-    assert ex._resolved_mandatory_lane(MIXED) == "w8a8"
+    assert ex._resolved_mandatory_execution_lane(MIXED) == "w8a8"
 
 
-def test_mixed_lane_dispatch_admits_without_required_compile() -> None:
+def test_mixed_execution_lane_dispatch_admits_without_required_compile() -> None:
     """The live failure shape: RunJob without required_compile for the mixed
     checkpoint must ADMIT (JIT setup), not raise required_compile_missing."""
     ex = _Resolutions({BARE: (MIXED, "", "fp8-w8a16+compiled")})

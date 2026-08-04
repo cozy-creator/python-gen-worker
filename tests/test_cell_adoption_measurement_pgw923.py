@@ -90,7 +90,7 @@ def test_an_armed_adoption_reports_its_arm_time_AND_its_warm_time() -> None:
     assert ev.operation_id == "" and ev.target_incarnation_id == ""
 
 
-def test_a_refused_adoption_reports_the_classified_reason_on_the_same_lane() -> None:
+def test_a_refused_adoption_reports_the_classified_reason_on_the_same_execution_lane() -> None:
     """th#1352's half. `adopt_failed:<reason>` is the same grammar the
     hub-commanded path uses, so ONE `kind=compile_cache_adopt` query returns
     the whole outcome distribution instead of two half-populations."""

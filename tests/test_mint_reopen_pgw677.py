@@ -126,7 +126,7 @@ class _Harness:
         seed_forward_s: float = 0.0,
         tenant_forward_s: float = 0.02,
         weight_lane: str = "",
-        hub_lane: str = "",
+        hub_execution_lane: str = "",
         seed_oom_after: int = 0,
     ) -> None:
         self.tmp_path = tmp_path
@@ -200,9 +200,9 @@ class _Harness:
                                     "entry": 0, "guards": []}],
                 "verdicts": {}, "leaks": []})
         self.ex = Executor(self.specs, _send, store=store)
-        if hub_lane:
+        if hub_execution_lane:
             ref = wire_ref(self.spec.models["model"])
-            self.ex._model_resolutions = {ref: (ref, "", hub_lane)}
+            self.ex._model_resolutions = {ref: (ref, "", hub_execution_lane)}
 
     def _fake_enable_compiled(
         self, pipe: Any, cfg: Any, cache_dir: Any = None,
@@ -337,7 +337,7 @@ def test_w8a8_stamp_with_hub_execution_lane_boots_eager_first(
     h = _Harness(
         tmp_path, monkeypatch,
         compile_delay_s=0.4, seed_forward_s=0.05, tenant_forward_s=0.02,
-        weight_lane="w8a8", hub_lane="fp8-w8a16+eager")
+        weight_lane="w8a8", hub_execution_lane="fp8-w8a16+eager")
 
     async def _run() -> None:
         boot_t0 = time.monotonic()
@@ -359,7 +359,7 @@ def test_w8a8_stamp_with_hub_execution_lane_boots_eager_first(
     asyncio.run(_run())
 
 
-def test_true_mandatory_lane_still_refuses_eager_first(
+def test_true_mandatory_execution_lane_still_refuses_eager_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The qwen shape: hub lane says real w8a8 activations — eager is not
@@ -369,7 +369,7 @@ def test_true_mandatory_lane_still_refuses_eager_first(
     h = _Harness(
         tmp_path, monkeypatch,
         compile_delay_s=0.0, seed_forward_s=0.0, tenant_forward_s=0.01,
-        weight_lane="w8a8", hub_lane="fp8-w8a8-dynamic+compiled")
+        weight_lane="w8a8", hub_execution_lane="fp8-w8a8-dynamic+compiled")
 
     async def _run() -> None:
         await h.boot()
@@ -379,7 +379,7 @@ def test_true_mandatory_lane_still_refuses_eager_first(
     asyncio.run(_run())
 
 
-def test_w8a8_stamp_without_lane_evidence_stays_foreground(
+def test_w8a8_stamp_without_execution_lane_evidence_stays_foreground(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No hub lane evidence: the weight-lane stamp remains the fail-closed
@@ -387,7 +387,7 @@ def test_w8a8_stamp_without_lane_evidence_stays_foreground(
     monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h = _Harness(
         tmp_path, monkeypatch,
-        weight_lane="w8a8", hub_lane="")
+        weight_lane="w8a8", hub_execution_lane="")
 
     async def _run() -> None:
         await h.boot()

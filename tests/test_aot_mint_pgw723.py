@@ -918,7 +918,7 @@ def test_cell_key_differs_when_ONLY_the_declared_range_differs(
         "8..32")
 
 
-def test_cell_key_differs_by_lane(
+def test_cell_key_differs_by_execution_lane(
     _gpu_runtime: None, packages: Dict[str, Path],
 ) -> None:
     program = _export_lifted()
@@ -1055,7 +1055,7 @@ def test_cli_loads_a_full_request(tmp_path: Path) -> None:
     spec, body = aot_mint._load_spec(request)
     assert spec.family == "sdxl"
     assert spec.target == ""
-    assert spec.lane_label() == "w8a8-lora64"
+    assert spec.execution_lane_label() == "w8a8-lora64"
     assert spec.shapes == ((1024, 1024), (1152, 896))
     assert spec.strict is True
     assert body["specialization"] == {"gemm_mode": "pertensor"}

@@ -407,7 +407,7 @@ def test_failed_background_compile_stays_eager_and_reports_typed_failure(
     asyncio.run(_run())
 
 
-def test_mandatory_quantized_lane_keeps_the_sequential_gate(
+def test_mandatory_quantized_execution_lane_keeps_the_sequential_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """gw#586: eager is not a production lane for w8a8 — the boot must keep

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **th#1582 Phase A: the EXECUTION LANE concept is spelled `execution_lane`.**
+  A names-only pass — 1,655 Python identifier tokens across 113 files (`Lane` ->
+  `ExecutionLane`, `lane` -> `execution_lane`, `parse_lane_spec` ->
+  `parse_execution_lane_spec`, ...) plus 18 identifier references inside `#`
+  comments, rewritten through `tokenize` over NAME tokens ONLY, so string
+  VALUES could not be touched by construction. Three modules move with their
+  concept: `gen_worker.kernel_lane` -> **`gen_worker.kernel_path`** (pgw#947:
+  which GEMM realizes a lane on this card is a kernel PATH, not a lane),
+  `gen_worker.models.lanes` -> `gen_worker.models.execution_lanes`, and
+  `gen_worker.models.lane_gate` -> `gen_worker.models.execution_lane_gate`.
+  **No value moved**: the lane grammar (`"fp8-w8a8-dynamic+compiled"`), every
+  proto field, `JobMetrics.lane`, the cell-key axis `lane`, the CLI flag
+  `--lane`, `kernel_lane.META_KEY == "kernel_lane"` in minted cell metadata,
+  and the `weight_lane` family (th#1580 Phase B) are byte-identical.
+
 - **pgw#943: a child-call wait now YIELDS the GPU permit — the worker
   pipelines while parked on a child request.** #455 measured the defect: at
   `gpu_slots=1` a parent in `ctx.call_endpoint` held its group permit for the

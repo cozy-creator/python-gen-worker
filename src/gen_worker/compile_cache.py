@@ -76,7 +76,7 @@ from . import cell_key, env_seal, guard_closure, hot_swap
 from .api.errors import RetryableError
 from .models import w8a8_lora
 from .models.loading import load_from_pretrained, pipeline_weight_lane
-from .models.loading import pipeline_weight_lane as _traced_lane
+from .models.loading import pipeline_weight_lane as _traced_execution_lane
 from .models.memory import low_vram_mode, place_pipeline, reconcile_resident_mode
 from .models.refs import parse_model_ref
 from .models.w8a8_lora import RANK_BUCKETS
@@ -601,19 +601,19 @@ def gen_worker_version() -> str:
         return ""
 
 
-def lane_bucket(lane: str) -> Tuple[str, int]:
+def execution_lane_bucket(execution_lane: str) -> Tuple[str, int]:
     """(base lane, rank bucket) for a weight lane in stamp OR label-token
     form: ``"w8a8-lora128"`` -> ``("w8a8", 128)``, ``"lora32"`` -> ``("", 32)``,
     ``"w8a8"`` -> ``("w8a8", 0)``. Sparse stamps (eager-only, never cells)
     do not parse as bucketed — they pass through as their whole string."""
-    m = re.search(r"(?:^|-)lora(\d+)$", str(lane or ""))
+    m = re.search(r"(?:^|-)lora(\d+)$", str(execution_lane or ""))
     if m is None:
-        return str(lane or ""), 0
-    base = lane[: m.start()]
+        return str(execution_lane or ""), 0
+    base = execution_lane[: m.start()]
     return base, int(m.group(1))
 
 
-def lane_token(weight_lane: str) -> str:
+def execution_lane_token(weight_lane: str) -> str:
     """Label token for a traced weight lane (gw#534): cells of different
     lanes are DIFFERENT graphs and must not collide on one flavor label.
     "" (plain resident, incl. bf16-resident) stays unsuffixed. LoRA-branch
@@ -621,7 +621,7 @@ def lane_token(weight_lane: str) -> str:
     ``w8a8-lora128`` -> ``w8a8-lora128``, ``fp8-hooks-lora32`` ->
     ``w8a16-lora32``, ``lora32`` -> ``lora32`` — one graph family per
     (base lane, rank bucket)."""
-    base, bucket = lane_bucket(str(weight_lane or ""))
+    base, bucket = execution_lane_bucket(str(weight_lane or ""))
     tok = {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8",
            "w4a4": "w4a4"}.get(base, base)
     if bucket:
@@ -629,17 +629,17 @@ def lane_token(weight_lane: str) -> str:
     return tok
 
 
-def cell_base_lane(pipeline: Any) -> str:
+def cell_base_execution_lane(pipeline: Any) -> str:
     """Base weight lane for CELL-IDENTITY computation (advertised requested
     keys, pull-by-key lookups, local-store lookups): the pipeline probe
     first, then the denoiser's own lane markers — the identical resolution
     the mint's ``stamp_lane`` memoizes, so requested == published by
     construction (pgw#686). Dispatch/policy surfaces keep the raw
     :func:`loading.pipeline_weight_lane` probe; this is cell identity only."""
-    return w8a8_lora.effective_base_lane(pipeline)
+    return w8a8_lora.effective_base_execution_lane(pipeline)
 
 
-def compile_target_lane_error(weight_lane: str, lora_bucket: int) -> str:
+def compile_target_execution_lane_error(weight_lane: str, lora_bucket: int) -> str:
     """Return why a worker compile-target lane is not wire-canonical.
 
     This is the Python half of Tensorhub's compile-target descriptor contract:
@@ -648,19 +648,19 @@ def compile_target_lane_error(weight_lane: str, lora_bucket: int) -> str:
     Keeping this vocabulary explicit prevents a test or future loader from
     advertising a target the scheduler must reject.
     """
-    lane = str(weight_lane or "")
+    execution_lane = str(weight_lane or "")
     declared = int(lora_bucket or 0)
-    base, observed = lane_bucket(lane)
+    base, observed = execution_lane_bucket(execution_lane)
     if base not in ("", "fp8-hooks", "w8a16", "w8a8", "w4a4"):
-        return f"unsupported pipeline_weight_lane {lane!r}"
+        return f"unsupported pipeline_weight_lane {execution_lane!r}"
 
     if observed not in (0, *RANK_BUCKETS):
-        return f"unsupported LoRA bucket {observed} in lane {lane!r}"
+        return f"unsupported LoRA bucket {observed} in lane {execution_lane!r}"
     canonical = f"{base}-lora{observed}" if base and observed else (
         f"lora{observed}" if observed else base
     )
-    if lane != canonical:
-        return f"non-canonical pipeline_weight_lane {lane!r}; expected {canonical!r}"
+    if execution_lane != canonical:
+        return f"non-canonical pipeline_weight_lane {execution_lane!r}; expected {canonical!r}"
     if observed != declared:
         return (
             f"pipeline lane LoRA bucket {observed} != declared "
@@ -676,7 +676,7 @@ def flavor_label(sku: str, torch_version: str, weight_lane: str = "") -> str:
     byte-compatible with tensorhub's compilecache.FlavorLabel."""
     short = ".".join(str(torch_version).split("+")[0].split(".")[:2])
     label = f"inductor-{sku}-torch{short}"
-    tok = lane_token(weight_lane)
+    tok = execution_lane_token(weight_lane)
     return f"{label}-{tok}" if tok else label
 
 
@@ -703,7 +703,7 @@ def parse_cell_ref(ref: str) -> Tuple[str, str]:
     return th.repo[len("family-"):], th.flavor or ""
 
 
-def cell_lane(ref: str) -> str:
+def cell_execution_lane(ref: str) -> str:
     """The compiled weight-lane token encoded in a system-cell ref.
 
     The flavor is human/routing metadata; artifact metadata remains the
@@ -715,8 +715,8 @@ def cell_lane(ref: str) -> str:
     _prefix, sep, suffix = flavor.partition("-torch")
     if not sep:
         return ""
-    _version, sep, lane = suffix.partition("-")
-    return lane if sep else ""
+    _version, sep, execution_lane = suffix.partition("-")
+    return execution_lane if sep else ""
 
 
 def family_from_ref(ref: str) -> str:
@@ -1412,12 +1412,12 @@ def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
     already hashes them natively (system info, config, dtypes) and the ck5
     outer key pins them via env_seal/toolchain/code_closure — the tag's job
     is semantics only."""
-    lane = cell_key._canonical_lane(
+    execution_lane = cell_key._canonical_execution_lane(
         pipeline_weight_lane(pipeline),
         int(getattr(cfg, "lora_bucket", 0) or 0))
     payload = "|".join((
         str(ARTIFACT_FORMAT), "inductor",
-        str(getattr(cfg, "family", "") or ""), lane,
+        str(getattr(cfg, "family", "") or ""), execution_lane,
         "regional" if bool(getattr(cfg, "regional", False)) else "whole",
         cell_key.contract_digest(declared_contract_facts(cfg)),
     ))
@@ -1936,7 +1936,7 @@ class CellSelectionBugError(RuntimeError):
         self.detail = detail
 
 
-class CompiledLaneUnavailableError(RetryableError):
+class CompiledExecutionLaneUnavailableError(RetryableError):
     """A precision lane whose production contract requires a cell is unsafe."""
 
 
@@ -2100,7 +2100,7 @@ def mode_drift(meta: Dict[str, Any], pipeline: Any) -> str:
     return ""
 
 
-def apply_lora_lane(pipeline: Any, bucket: int) -> bool:
+def apply_lora_execution_lane(pipeline: Any, bucket: int) -> bool:
     """Put the pipeline on the branch-bearing graph family for ``bucket``
     (gw#561): canonical zeroed rank-``bucket`` branches on every
     branch-capable denoiser Linear (the gw#547 compiled-lane contract) + the
@@ -2115,17 +2115,17 @@ def apply_lora_lane(pipeline: Any, bucket: int) -> bool:
     if not bucket:
         return False
 
-    targets = w8a8_lora.enable_branch_lanes(pipeline, int(bucket))
+    targets = w8a8_lora.enable_branch_execution_lanes(pipeline, int(bucket))
     if not targets:
         raise RuntimeError(
             "Compile.lora_bucket declared but the pipeline has no "
             "branch-capable denoiser (transformer/transformer_2/unet)"
         )
-    w8a8_lora.stamp_lane(pipeline, targets)
+    w8a8_lora.stamp_execution_lane(pipeline, targets)
     return True
 
 
-def drop_lora_lane(pipeline: Any) -> None:
+def drop_lora_execution_lane(pipeline: Any) -> None:
     """Undo :func:`apply_lora_lane`: drop the branch buffers on every
     denoiser and restore the branchless lane stamp (the eager rollback —
     canonical zeroed branches cost +21-32% eager, gw#547)."""
@@ -2133,11 +2133,11 @@ def drop_lora_lane(pipeline: Any) -> None:
     targets = w8a8_lora.branch_targets(pipeline)
     if not targets:
         return
-    w8a8_lora.disable_branch_lanes(pipeline)
-    w8a8_lora.stamp_lane(pipeline, targets)
+    w8a8_lora.disable_branch_execution_lanes(pipeline)
+    w8a8_lora.stamp_execution_lane(pipeline, targets)
 
 
-def lane_drift(meta: Dict[str, Any], pipeline: Any) -> str:
+def execution_lane_drift(meta: Dict[str, Any], pipeline: Any) -> str:
     """'' when the cell's traced weight lane matches this pipeline's, else the
     mismatch (gw#534). Enforced SYMMETRICALLY (unlike ``mode_drift``): a
     bf16-resident pipeline must never adopt hook-cast-traced graphs and vice
@@ -2407,16 +2407,16 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     }
     encoded = json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()
 
-    lane = pipeline_weight_lane(pipeline)
-    weight_contract: Dict[str, Any] = {"lane": lane}
-    if lane.startswith(("w8a8", "w4a4")):
+    execution_lane = pipeline_weight_lane(pipeline)
+    weight_contract: Dict[str, Any] = {"lane": execution_lane}
+    if execution_lane.startswith(("w8a8", "w4a4")):
         activations = sorted({str(r["activation"]) for r in quantized})
         weight_contract.update({
             "artifact_schema": (
-                "nvfp4-w4a4-v1" if lane.startswith("w4a4") else "fp8-w8a8-v1"),
+                "nvfp4-w4a4-v1" if execution_lane.startswith("w4a4") else "fp8-w8a8-v1"),
             "operator": "torch._scaled_mm",
             "weight_scaling": (
-                "per-16-block+per-tensor" if lane.startswith("w4a4")
+                "per-16-block+per-tensor" if execution_lane.startswith("w4a4")
                 else "per-output-channel"),
             "activation_scaling": activations,
             "quantized": sorted(quantized, key=lambda r: str(r["path"])),
@@ -2640,10 +2640,10 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
             "weight-lane artifact schema/exclusion manifest mismatch: "
             + _first_contract_difference(meta_weights, weight_contract)
         )
-    cell_lane_base = str(weight_contract.get("lane") or "")
-    if cell_lane_base.startswith(("w8a8", "w4a4")):
+    cell_execution_lane_base = str(weight_contract.get("lane") or "")
+    if cell_execution_lane_base.startswith(("w8a8", "w4a4")):
         activations = weight_contract.get("activation_scaling") or []
-        if cell_lane_base.startswith("w8a8"):
+        if cell_execution_lane_base.startswith("w8a8"):
             # DYNAMIC only, one homogeneous granularity per graph (gw#564:
             # per-row = rowwise sm_90+, per-tensor = the sm_89 epilogue lane).
             if activations not in (["dynamic-per-row"], ["dynamic-per-tensor"]):
@@ -2656,7 +2656,7 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
                 return (f"W4A4 activation scaling must be homogeneous "
                         f"static or dynamic-per-tensor, got {activations!r}")
         if not weight_contract.get("quantized"):
-            return (f"{cell_lane_base[:4].upper()} graph contains no "
+            return (f"{cell_execution_lane_base[:4].upper()} graph contains no "
                     "torch._scaled_mm modules")
         here_digest = runtime_key()["image_digest"]
         # cuda_driver excluded (gw#577): host-lottery axis, see verify().
@@ -2700,7 +2700,7 @@ def _guarded(
                     f"{type(exc).__name__}: {exc}"
                 )
                 logger.exception("compile-cache: %s", state["revocation_error"])
-                raise CompiledLaneUnavailableError(
+                raise CompiledExecutionLaneUnavailableError(
                     state["revocation_error"]
                 ) from exc
 
@@ -2739,7 +2739,7 @@ def _guarded(
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if state["revocation_error"]:
-            raise CompiledLaneUnavailableError(state["revocation_error"])
+            raise CompiledExecutionLaneUnavailableError(state["revocation_error"])
         if state["failed"]:
             return original(*args, **kwargs)
         # pgw#622: a novel input signature serves EAGER immediately while a
@@ -2869,7 +2869,7 @@ def _guarded_regional(
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if state["revocation_error"]:
-            raise CompiledLaneUnavailableError(state["revocation_error"])
+            raise CompiledExecutionLaneUnavailableError(state["revocation_error"])
         if not state["failed"]:
             before = proof_before()
             try:
@@ -2905,7 +2905,7 @@ def _guarded_regional(
                         )
                         logger.exception(
                             "compile-cache: %s", state["revocation_error"])
-                        raise CompiledLaneUnavailableError(
+                        raise CompiledExecutionLaneUnavailableError(
                             state["revocation_error"]
                         ) from callback_exc
                 # pgw#672/pgw#673 posture: mandatory lanes degrade to explicit
@@ -2944,7 +2944,7 @@ EXECUTION_LANE_ATTR = "_cozy_execution_lane"
 #: around one record's whole setup, so pipelines armed through ANY path —
 #: slot injection or a self-loaded ``arm_compile`` inside ``setup()``
 #: (ArmingScope) — get the same lane stamped by :func:`apply`.
-_SETUP_EXEC_LANE: contextvars.ContextVar[str] = contextvars.ContextVar(
+_SETUP_EXEC_EXECUTION_LANE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "gw_setup_execution_lane", default="")
 
 #: pgw#714: pin provenance of the stamped execution lane. True only when the
@@ -2953,7 +2953,7 @@ _SETUP_EXEC_LANE: contextvars.ContextVar[str] = contextvars.ContextVar(
 #: refuses to arm at all (no router, no background mint, no foreground
 #: compile) instead of treating the pin as merely "serve eager while minting".
 EXECUTION_LANE_PINNED_ATTR = "_cozy_execution_lane_pinned"
-_SETUP_EXEC_LANE_PINNED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+_SETUP_EXEC_EXECUTION_LANE_PINNED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "gw_setup_execution_lane_pinned", default=False)
 
 #: pgw#714: process-wide compile kill switch. Set once (with a reason) when
@@ -2981,25 +2981,25 @@ def operator_eager_pin(pipeline: Any) -> bool:
     """True when the hub-resolved execution lane stamped on ``pipeline`` was
     OPERATOR-PINNED to the eager execution axis (pgw#714 kill switch)."""
     pinned = bool(getattr(pipeline, EXECUTION_LANE_PINNED_ATTR, False))
-    lane_str = str(getattr(pipeline, EXECUTION_LANE_ATTR, "") or "").strip()
-    if not lane_str:
-        lane_str = _SETUP_EXEC_LANE.get().strip()
-        pinned = _SETUP_EXEC_LANE_PINNED.get()
-        if lane_str:
+    execution_lane_str = str(getattr(pipeline, EXECUTION_LANE_ATTR, "") or "").strip()
+    if not execution_lane_str:
+        execution_lane_str = _SETUP_EXEC_EXECUTION_LANE.get().strip()
+        pinned = _SETUP_EXEC_EXECUTION_LANE_PINNED.get()
+        if execution_lane_str:
             try:
-                setattr(pipeline, EXECUTION_LANE_ATTR, lane_str)
+                setattr(pipeline, EXECUTION_LANE_ATTR, execution_lane_str)
                 setattr(pipeline, EXECUTION_LANE_PINNED_ATTR, pinned)
             except Exception:
                 pass
-    if not (lane_str and pinned):
+    if not (execution_lane_str and pinned):
         return False
-    from .models import lanes as lanespec
+    from .models import execution_lanes as lanespec
 
     try:
-        lane = lanespec.parse_lane(lane_str)
+        execution_lane = lanespec.parse_execution_lane(execution_lane_str)
     except ValueError:
         return False
-    return lane.execution == lanespec.EXEC_EAGER
+    return execution_lane.execution == lanespec.EXEC_EAGER
 
 
 def eager_tier_available(pipeline: Any) -> bool:
@@ -3055,23 +3055,23 @@ def mandatory_serving(pipeline: Any) -> bool:
     routed the whole boot into the FOREGROUND compile-then-serve mint (the
     reopen's measured 26-minute tenant starvation). Without lane evidence
     the stamp remains the fail-closed fallback."""
-    lane_str = str(getattr(pipeline, EXECUTION_LANE_ATTR, "") or "").strip()
-    if not lane_str:
-        lane_str = _SETUP_EXEC_LANE.get().strip()
-        if lane_str:
+    execution_lane_str = str(getattr(pipeline, EXECUTION_LANE_ATTR, "") or "").strip()
+    if not execution_lane_str:
+        execution_lane_str = _SETUP_EXEC_EXECUTION_LANE.get().strip()
+        if execution_lane_str:
             try:
-                setattr(pipeline, EXECUTION_LANE_ATTR, lane_str)
+                setattr(pipeline, EXECUTION_LANE_ATTR, execution_lane_str)
             except Exception:
                 pass
-    if lane_str:
-        from .models import lanes as lanespec
+    if execution_lane_str:
+        from .models import execution_lanes as lanespec
 
         try:
-            lane = lanespec.parse_lane(lane_str)
+            execution_lane = lanespec.parse_execution_lane(execution_lane_str)
         except ValueError:
             pass
         else:
-            return lane.activation in (lanespec.ACT_W8A8, lanespec.ACT_W4A4)
+            return execution_lane.activation in (lanespec.ACT_W8A8, lanespec.ACT_W4A4)
     # Module-attr call (not the top-level import): tests monkeypatch
     # models.loading.pipeline_weight_lane; stay late-bound.
     from .models import loading as _loading
@@ -3391,7 +3391,7 @@ def artifact_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     """The complete pipeline/config compatibility verdict for one cell."""
     drift = (
         mode_drift(meta, pipeline)
-        or lane_drift(meta, pipeline)
+        or execution_lane_drift(meta, pipeline)
         or contract_drift(meta, pipeline, cfg)
     )
     if drift:
@@ -3518,7 +3518,7 @@ def enable(
 
                     # gw#632: the EFFECTIVE bucket — a slot object with no
                     # resolvable compile target (sdxl's bare vae) never rides
-                    # the branch lane (provision downgrades apply_lora_lane
+                    # the branch lane (provision downgrades apply_lora_execution_lane
                     # the same way, 0.52.1), so its self-key must not claim
                     # the family's lora<bucket> cell and then explode on
                     # lane drift (live: `weight_lane 'lora64' != pipeline ''`
@@ -3571,15 +3571,15 @@ def enable(
                 )
             from .models.loading import pipeline_weight_lane
 
-            quant_lane = pipeline_weight_lane(pipeline)
-            if quant_lane.startswith(("w8a8", "w4a4")) and not armed:
+            quant_execution_lane = pipeline_weight_lane(pipeline)
+            if quant_execution_lane.startswith(("w8a8", "w4a4")) and not armed:
                 if meta is not None:
                     refusal = "verified cell armed no compile target"
-                lane_name = quant_lane[:4].upper()
-                raise CompiledLaneUnavailableError(
-                    f"{lane_name} requires an exact compatible Forge cell "
+                execution_lane_name = quant_execution_lane[:4].upper()
+                raise CompiledExecutionLaneUnavailableError(
+                    f"{execution_lane_name} requires an exact compatible Forge cell "
                     f"({refusal}); eager/dequantized execution is not a "
-                    f"{lane_name} production lane"
+                    f"{execution_lane_name} production lane"
                 )
             return armed
     finally:
@@ -3820,7 +3820,7 @@ def build(
     # on a pod with the same free-VRAM class as the target workers.
     placed = place_pipeline(pipe)
 
-    if _traced_lane(pipe).startswith(("w8a8", "w4a4")) and not str(
+    if _traced_execution_lane(pipe).startswith(("w8a8", "w4a4")) and not str(
         serving_image_digest
     ).strip():
         # The lane can materialize as w8a8/w4a4 from the SOURCE flavor alone
@@ -3831,7 +3831,7 @@ def build(
     # branches installed — zeroed slots are bit-exact with branchless output
     # (gw#547), so the warm calls render normally while the traced graphs
     # carry the branch GEMMs.
-    apply_lora_lane(pipe, int(lora_bucket))
+    apply_lora_execution_lane(pipe, int(lora_bucket))
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
     # Cold compilation is an explicit producer-library operation; serving
@@ -3859,7 +3859,7 @@ def build(
     # is watching the producer run; the event is for whoever asks the hub next
     # week how long a JIT mint takes.
     emit_jit_compile_event(
-        timings, family=family, lane=pipeline_weight_lane(pipe), route="build")
+        timings, family=family, execution_lane=pipeline_weight_lane(pipe), route="build")
 
     captured = [p for p in (capture_root / "inductor").rglob("*") if p.is_file()]
     if not captured:
@@ -3935,7 +3935,7 @@ def emit_jit_compile_event(
     timings: Mapping[str, float],
     *,
     family: str,
-    lane: str = "",
+    execution_lane: str = "",
     route: str = "",
     n_graphs: int = 0,
 ) -> None:
@@ -3956,8 +3956,8 @@ def emit_jit_compile_event(
 
         total_s = sum(float(v or 0.0) for v in timings.values())
         head = f"family={family or '(unset)'}"
-        if lane:
-            head += f" lane={lane}"
+        if execution_lane:
+            head += f" lane={execution_lane}"
         if route:
             head += f" route={route}"
         for key, seconds in timings.items():
@@ -4016,7 +4016,7 @@ def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -
     # a column too.
     emit_jit_compile_event(
         timings, family=getattr(cfg, "family", "") or "",
-        lane=pipeline_weight_lane(pipe), route="compile_and_warm")
+        execution_lane=pipeline_weight_lane(pipe), route="compile_and_warm")
 
 
 def mint_artifact(
@@ -4241,17 +4241,17 @@ __all__ = [
     "ARTIFACT_FORMAT",
     "AdoptError",
     "CellSelectionBugError",
-    "CompiledLaneUnavailableError",
+    "CompiledExecutionLaneUnavailableError",
     "build",
     "apply",
-    "apply_lora_lane",
+    "apply_lora_execution_lane",
     "artifact_fx_lines",
     "artifact_metadata",
     "begin_fleet_mint",
     "capture_env",
-    "cell_base_lane",
-    "drop_lora_lane",
-    "cell_lane",
+    "cell_base_execution_lane",
+    "drop_lora_execution_lane",
+    "cell_execution_lane",
     "contract_drift",
     "counters_delta",
     "delivered_cell_seeded",
@@ -4279,9 +4279,9 @@ __all__ = [
     "tenant_serve_window",
     "inductor_counters",
     "is_cache_ref",
-    "lane_bucket",
-    "lane_token",
-    "lane_drift",
+    "execution_lane_bucket",
+    "execution_lane_token",
+    "execution_lane_drift",
     "live_fx_lines",
     "mint_artifact",
     "mode_drift",

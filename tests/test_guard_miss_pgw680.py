@@ -512,7 +512,7 @@ class _Rig:
             return provision.SlotLoad(obj=pipe, is_pipeline=True)
 
         def _mandatory_miss(*a: Any, **k: Any) -> bool:
-            raise cc.CompiledLaneUnavailableError("no delivered cell")
+            raise cc.CompiledExecutionLaneUnavailableError("no delivered cell")
 
         monkeypatch.setattr(executor_mod, "ensure_local", _download)
         monkeypatch.setattr(provision, "load_slot", _load_slot)
