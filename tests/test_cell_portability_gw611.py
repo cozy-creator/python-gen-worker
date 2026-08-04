@@ -154,7 +154,7 @@ def test_fresh_process_adopt_serves_from_the_packed_cell(tmp_path):
     )
 
 
-def test_union_cell_serves_both_lanes_in_a_fresh_process(tmp_path):
+def test_union_cell_serves_both_execution_lanes_in_a_fresh_process(tmp_path):
     """gw#614: a family cell minted with BOTH lanes' graphs (the synthesized
     media-variant warmup exercises the sibling lane, so the union publishes)
     must serve BOTH lanes as FX hits in a fresh adopting process — zero

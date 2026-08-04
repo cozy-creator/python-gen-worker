@@ -141,13 +141,13 @@ def test_setup_window_carries_pin_provenance(reset_compile_disable):
     class Pipe:
         pass
 
-    lane_tok = cc._SETUP_EXEC_LANE.set("bf16-w16a16+eager")
-    pin_tok = cc._SETUP_EXEC_LANE_PINNED.set(True)
+    execution_lane_tok = cc._SETUP_EXEC_EXECUTION_LANE.set("bf16-w16a16+eager")
+    pin_tok = cc._SETUP_EXEC_EXECUTION_LANE_PINNED.set(True)
     try:
         pipe = Pipe()
         assert cc.operator_eager_pin(pipe) is True
         # Stamped through, like the lane itself.
         assert getattr(pipe, cc.EXECUTION_LANE_PINNED_ATTR) is True
     finally:
-        cc._SETUP_EXEC_LANE_PINNED.reset(pin_tok)
-        cc._SETUP_EXEC_LANE.reset(lane_tok)
+        cc._SETUP_EXEC_EXECUTION_LANE_PINNED.reset(pin_tok)
+        cc._SETUP_EXEC_EXECUTION_LANE.reset(execution_lane_tok)

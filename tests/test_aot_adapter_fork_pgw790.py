@@ -84,8 +84,8 @@ def _declare() -> Any:
 
 def _armed_pipe() -> Any:
     pipe = types.SimpleNamespace(unet=TinyUNet().eval())
-    w8a8_lora.enable_branch_lanes(pipe, BUCKET)
-    lora_lifted.install_lifted_lora_lanes(pipe, BUCKET)
+    w8a8_lora.enable_branch_execution_lanes(pipe, BUCKET)
+    lora_lifted.install_lifted_lora_execution_lanes(pipe, BUCKET)
     return pipe
 
 

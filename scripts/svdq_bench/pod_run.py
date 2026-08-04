@@ -304,7 +304,7 @@ def main() -> int:
                 armed["dockerEntrypoint"] = sc
             return rest(api, "POST", "/pods", armed)
 
-        lease = podguard.rent(api, body, lane=f"svdq-bench-{args.gpu}",
+        lease = podguard.rent(api, body, execution_lane=f"svdq-bench-{args.gpu}",
                               lease_seconds=args.wall_min * 60,
                               orig_cmd=["/bin/bash", "-lc", SSHD],
                               post=entrypoint_post)
@@ -312,7 +312,7 @@ def main() -> int:
         print(f"[pod] created {pod_id} rate=${lease.rate_per_hr}/hr",
               flush=True)
     else:
-        podguard.attend(api, pod_id, lane=f"svdq-bench-{args.gpu}")
+        podguard.attend(api, pod_id, execution_lane=f"svdq-bench-{args.gpu}")
         print(f"[pod] attached {pod_id}", flush=True)
     (res / "pod.txt").write_text(f"{pod_id} {int(started)} {args.gpu}\n")
 

@@ -123,7 +123,7 @@ def test_benchmark_loads_a_quantized_component_via_the_serve_path(
     assert rel < 0.13
 
 
-def test_unquantized_siblings_still_load_and_honor_the_lane_dtype(
+def test_unquantized_siblings_still_load_and_honor_the_execution_lane_dtype(
     w8a8_tree: Path,
 ) -> None:
     """A w8a8 tree's NON-denoiser components take the ordinary path — and
@@ -160,7 +160,7 @@ def test_bench_load_walks_a_quantized_tree_end_to_end(
     assert any(r.bytes > 0 for r in rows)
 
 
-def test_lanes_without_a_component_loader_refuse_by_name(
+def test_execution_lanes_without_a_component_loader_refuse_by_name(
     tmp_path: Path,
 ) -> None:
     """svdq builds its denoiser inside the pipeline load. Handing back a
@@ -169,7 +169,7 @@ def test_lanes_without_a_component_loader_refuse_by_name(
     import json
 
     from gen_worker.models.loading import (
-        ComponentLaneUnsupported, load_component,
+        ComponentExecutionLaneUnsupported, load_component,
     )
 
     tree = tmp_path / "svdq"
@@ -191,7 +191,7 @@ def test_lanes_without_a_component_loader_refuse_by_name(
                       "weight": {"dtype": "int4"}})},
     )
     assert detect_svdq_artifact(tree) is not None
-    with pytest.raises(ComponentLaneUnsupported, match="svdq"):
+    with pytest.raises(ComponentExecutionLaneUnsupported, match="svdq"):
         load_component(tree, "transformer")
 
 

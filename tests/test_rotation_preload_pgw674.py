@@ -386,7 +386,7 @@ def test_preload_component_staging_feeds_injection(
     asyncio.run(_run())
 
 
-def test_preload_component_staging_skips_quantized_lanes(
+def test_preload_component_staging_skips_quantized_execution_lanes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Quantized/flavored bindings load through special lanes a vanilla

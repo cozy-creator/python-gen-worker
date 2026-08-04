@@ -203,7 +203,7 @@ def test_eager_boot_reduces_and_instance_swaps_verify_once(
     asyncio.run(_run())
 
 
-def test_warm_contract_key_splits_on_lane_and_overrides_not_ref(
+def test_warm_contract_key_splits_on_execution_lane_and_overrides_not_ref(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ex = _executor(tmp_path, monkeypatch)

@@ -211,7 +211,7 @@ def sequence_rank_main(spec: RankSpec, channel: FollowerChannel) -> None:  # pra
     from .cp import w8a8_gemm_mode
 
     mine = GroupPlan(
-        precision_lane=plan.precision_lane,
+        precision_execution_lane=plan.precision_execution_lane,
         gemm_mode=w8a8_gemm_mode(pipe) or plan.gemm_mode,
         degraded_plan=plan.degraded_plan,
         compile_armed=plan.compile_armed,

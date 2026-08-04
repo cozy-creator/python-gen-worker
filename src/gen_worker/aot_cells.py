@@ -139,13 +139,13 @@ def _get(
         "GET", path, base_url=base_url, bearer=bearer, params=params, timeout=timeout)
 
 
-def _lane_of_meta(meta: Dict[str, Any]) -> str:
-    return cell_key._canonical_lane(
+def _execution_lane_of_meta(meta: Dict[str, Any]) -> str:
+    return cell_key._canonical_execution_lane(
         str(meta.get("weight_lane") or ""), int(meta.get("lora_bucket") or 0))
 
 
 def _candidates(
-    items: List[Dict[str, Any]], family: str, want_lane: str,
+    items: List[Dict[str, Any]], family: str, want_execution_lane: str,
     rejected: Optional[Dict[str, int]] = None,
 ) -> List[Tuple[str, str, Dict[str, Any]]]:
     """(updated_at, checkpoint_id, metadata) rows that pass the filter, best
@@ -199,7 +199,7 @@ def _candidates(
             # rather than as a generic "verify failed".
             _reject(f"verify:{reason}")
             continue
-        if _lane_of_meta(meta) != want_lane:
+        if _execution_lane_of_meta(meta) != want_execution_lane:
             _reject("lane_mismatch")
             continue
         out.append((
@@ -405,7 +405,7 @@ def _discover_inner(
         return None
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     try:
-        want_lane = cell_key._canonical_lane(cc.cell_base_lane(pipe), bucket)
+        want_execution_lane = cell_key._canonical_execution_lane(cc.cell_base_execution_lane(pipe), bucket)
         repo = cc.system_repo(family)
         bearer = str(worker_jwt() or "").strip()
         resp = _get(
@@ -427,7 +427,7 @@ def _discover_inner(
             return None
         items = (resp.json() or {}).get("items") or []
         rejected: Dict[str, int] = {}
-        rows = _candidates(items, family, want_lane, rejected)
+        rows = _candidates(items, family, want_execution_lane, rejected)
         if not rows:
             # pgw#824: WHY every candidate lost, as counts. "No matching cell
             # among 12 checkpoints" was true and useless — it could not tell an
@@ -437,7 +437,7 @@ def _discover_inner(
                 f"{cls}={n}" for cls, n in sorted(
                     rejected.items(), key=lambda kv: (-kv[1], kv[0])))
             _emit("miss",
-                  f"family={family} lane={want_lane or 'plain'}: no matching "
+                  f"family={family} lane={want_execution_lane or 'plain'}: no matching "
                   f"aot-inductor cell among {len(items)} checkpoint(s)"
                   + (f" — rejected by class: {histogram}" if histogram
                      else " (the family has no published cells at all)"))
@@ -464,7 +464,7 @@ def _discover_inner(
         )
         _emit("hit",
               f"family={family} key={key} checkpoint={checkpoint_id[:16]} "
-              f"lane={want_lane or 'plain'}")
+              f"lane={want_execution_lane or 'plain'}")
         logger.info(
             "aot-cells: discovered %s (checkpoint %s, %.1f MB)",
             adopted.ref, checkpoint_id[:16],

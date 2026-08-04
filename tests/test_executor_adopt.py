@@ -838,13 +838,13 @@ def test_same_family_base_and_lora_targets_remain_distinct(tmp_path):
         return None
 
     ex = Executor([base, turbo], _send)
-    for spec, lane, digest in (
+    for spec, execution_lane, digest in (
         (base, "w8a8", MODEL_DIGEST),
         (turbo, "w8a8-lora128", DIGEST_B),
     ):
         rec = ex._classes[spec.instance_key]
         pipe = _Pipe()
-        setattr(pipe, "_cozy_weight_lane", lane)
+        setattr(pipe, "_cozy_weight_lane", execution_lane)
         rec.instance = spec.cls()
         rec.ready = True
         ref = wire_ref(spec.models["pipeline"])
@@ -1445,7 +1445,7 @@ def _pending_mint_rig(tmp_path, monkeypatch, *, pipe, publisher):
         fleet_cells._PENDING.clear()
 
     def _mandatory_miss(*a, **k):
-        raise cc.CompiledLaneUnavailableError("no delivered cell")
+        raise cc.CompiledExecutionLaneUnavailableError("no delivered cell")
 
     monkeypatch.setattr(provision, "enable_compiled", _mandatory_miss)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
@@ -2396,7 +2396,7 @@ def test_w8a8_without_exact_cell_self_mints_and_fails_typed_without_cuda(
     )
     _ColdEndpoint.setups = _ColdEndpoint.warmups = _ColdEndpoint.runs = 0
 
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="self-mint is unavailable"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="self-mint is unavailable"):
         asyncio.run(ex.ensure_setup(
             spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
     # The load is the mint's precondition now (the boot warmup IS the mint).
@@ -2560,7 +2560,7 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
     assert not ex.unavailable
 
 
-def _merged_lane_endpoint(record_warm):
+def _merged_execution_lane_endpoint(record_warm):
     """Two w8a8 lane pipes behind ONE handler (the qwen merged shape): the
     declared warmup can only exercise the t2i lane — edit needs an input
     image, so its object has no warmup modality by design (gw#595)."""
@@ -2585,7 +2585,7 @@ def _merged_lane_endpoint(record_warm):
     return _MergedEndpoint
 
 
-def _wire_merged_lane(ex_cls_specs, tmp_path, monkeypatch):
+def _wire_merged_execution_lane(ex_cls_specs, tmp_path, monkeypatch):
     import gen_worker.executor as executor_mod
 
     family = "qwen-image"
@@ -2623,10 +2623,10 @@ def test_w8a8_unexercised_sibling_stays_armed_unproven(
     """gw#595(b): an armed MANDATORY-lane object the warmup has no modality
     to exercise must not block adoption by the sibling that proves; it stays
     armed unproven and is logged explicitly."""
-    cls = _merged_lane_endpoint(lambda self: _record_fake_warm(self.t2i))
+    cls = _merged_execution_lane_endpoint(lambda self: _record_fake_warm(self.t2i))
     specs = extract_specs(cls)
     (generate,) = specs
-    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+    ex, pipes, cell_ref = _wire_merged_execution_lane(specs, tmp_path, monkeypatch)
 
     with caplog.at_level("WARNING"):
         asyncio.run(ex.ensure_setup(generate, {
@@ -2652,11 +2652,11 @@ def test_w8a8_exercised_miss_degrades_despite_unexercised_sibling(
     warmup graph disproves the cell — the unexercised sibling exemption
     never launders a genuine parity defect. pgw#672: the disproof now
     degrades to explicit eager instead of killing the boot."""
-    cls = _merged_lane_endpoint(
+    cls = _merged_execution_lane_endpoint(
         lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
     specs = extract_specs(cls)
     (generate,) = specs
-    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+    ex, pipes, cell_ref = _wire_merged_execution_lane(specs, tmp_path, monkeypatch)
 
     # pgw#672: the disproven proof DEGRADES to explicit eager — setup
     # completes, nothing is advertised, and the gw#608 self-discriminating
@@ -2685,11 +2685,11 @@ def test_store_served_failure_names_diverging_fx_key_component(
     boot's freshly saved FX entries against the seeded cell's and puts the
     diverging FxGraphHashDetails component in the CompiledLaneUnavailable
     detail. Revert the executor wiring and this goes red."""
-    cls = _merged_lane_endpoint(
+    cls = _merged_execution_lane_endpoint(
         lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
     specs = extract_specs(cls)
     (generate,) = specs
-    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+    ex, pipes, cell_ref = _wire_merged_execution_lane(specs, tmp_path, monkeypatch)
 
     monkeypatch.setattr(
         cc, "fx_cache_failure_report",
@@ -2718,10 +2718,10 @@ def test_w8a8_all_objects_unexercised_degrades_to_eager(tmp_path, monkeypatch):
     """gw#595(b): with ZERO proven objects the cell is entirely unverified —
     a warmup that exercises nothing cannot arm anything. pgw#672: the boot
     completes at explicit eager instead of failing closed."""
-    cls = _merged_lane_endpoint(lambda self: None)
+    cls = _merged_execution_lane_endpoint(lambda self: None)
     specs = extract_specs(cls)
     (generate,) = specs
-    ex, pipes, cell_ref = _wire_merged_lane(specs, tmp_path, monkeypatch)
+    ex, pipes, cell_ref = _wire_merged_execution_lane(specs, tmp_path, monkeypatch)
 
     asyncio.run(ex.ensure_setup(generate, {
         wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
@@ -2773,7 +2773,7 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
     # local/producer env cells (if the env were honored this would arm and
     # succeed); in a CUDA-less env the typed quantized refusal fires from
     # the self-mint exit.
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="self-mint is unavailable"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="self-mint is unavailable"):
         asyncio.run(ex.ensure_desired_instance(
             desired, {model_ref: snapshot},
         ))
@@ -2812,7 +2812,7 @@ def test_w8a8_binding_cannot_advertise_plain_materialized_pipeline(tmp_path):
         "snapshot_digest": DIGEST_A,
         "path": tmp_path / "cell.tar.gz",
     })()
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="materialized pipeline lane"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="materialized pipeline lane"):
         ex._install_compile_targets(
             rec, spec, [pipe], {id(pipe): selection}, {id(pipe): {spec.name}},
         )
@@ -3675,11 +3675,11 @@ def test_fetch_compile_snapshot_finds_family_cache_and_ignores_others(tmp_path):
     assert asyncio.run(ex._fetch_compile_snapshot(spec, None)) is None
 
 
-@pytest.mark.parametrize("lane", ["w8a8", "plain"])
-def test_fetch_compile_snapshot_selects_exact_lane(tmp_path, lane):
+@pytest.mark.parametrize("execution_lane", ["w8a8", "plain"])
+def test_fetch_compile_snapshot_selects_exact_execution_lane(tmp_path, execution_lane):
     """The spec's weight lane picks exactly its own cell — w8a8 specs take
     the -w8a8 cell, plain specs ignore it — and only that cell is fetched."""
-    if lane == "w8a8":
+    if execution_lane == "w8a8":
         spec = replace(
             _spec(), models={"pipeline": Hub(
                 "acme/klein-finetune", flavor="fp8-w8a8")},
@@ -3711,7 +3711,7 @@ def test_fetch_compile_snapshot_selects_exact_lane(tmp_path, lane):
     }
     got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
     assert got is not None
-    if lane == "w8a8":
+    if execution_lane == "w8a8":
         assert got.path == w8a8 / "w8a8.tar.gz"
         assert got.ref == w8a8_ref and got.snapshot_digest == DIGEST_B
         assert seen == [w8a8_ref]
@@ -3828,8 +3828,8 @@ def test_fresh_boot_advertises_candidate_cell_lookups(monkeypatch):
     class _Key:
         digest = "ck5-" + "5" * 56
 
-    def _compute(family, lane="", bucket=0, **kw):
-        computed.append((family, lane))
+    def _compute(family, execution_lane="", bucket=0, **kw):
+        computed.append((family, execution_lane))
         return _Key()
 
     monkeypatch.setattr(cell_key_mod, "compute", _compute)
@@ -3925,7 +3925,7 @@ def _dual_mint_boot(tmp_path, monkeypatch, *, publisher, warm_second: bool):
     return ex, spec, pipes, mint_key, snapshots
 
 
-def test_two_lane_mint_with_unexercised_sibling_completes_and_withholds_publish(
+def test_two_execution_lane_mint_with_unexercised_sibling_completes_and_withholds_publish(
     tmp_path, monkeypatch, caplog,
 ):
     """gw#612 regression, the ie#501 run-26 qwen shape: a two-lane
@@ -3986,7 +3986,7 @@ def test_two_lane_mint_with_unexercised_sibling_completes_and_withholds_publish(
         assert fleet_cells._PENDING == {}
 
 
-def test_two_lane_mint_fully_exercised_publishes_the_union_cell(
+def test_two_execution_lane_mint_fully_exercised_publishes_the_union_cell(
     tmp_path, monkeypatch,
 ):
     """Coverage-complete counterpart: when the warmup exercises BOTH lanes,
@@ -4134,7 +4134,7 @@ def _routed_mint_boot(tmp_path, monkeypatch, *, publisher):
     return ex, spec, pipes, _RoutedMerged, snapshots
 
 
-def test_routed_two_lane_mint_synthesized_media_coverage_publishes_union(
+def test_routed_two_execution_lane_mint_synthesized_media_coverage_publishes_union(
     tmp_path, monkeypatch, caplog,
 ):
     """gw#614 red-first: the declared warmup carries no media, so pre-fix the

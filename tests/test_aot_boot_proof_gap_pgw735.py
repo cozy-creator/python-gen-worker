@@ -77,9 +77,9 @@ RIG: Dict[str, Any] = {}
 class AotFamily:
     def setup(self, pipeline: str) -> None:
         self.pipe = _Pipe()
-        lane = RIG.get("weight_lane")
-        if lane:
-            setattr(self.pipe, "_cozy_weight_lane", lane)
+        execution_lane = RIG.get("weight_lane")
+        if execution_lane:
+            setattr(self.pipe, "_cozy_weight_lane", execution_lane)
         RIG["pipe"] = self.pipe
         gen_worker.arm_compile(self.pipe)
 
@@ -194,7 +194,7 @@ def test_unexercised_pure_aot_arm_disarms_to_true_eager(
     assert not compile_cache.cell_proven_in_process(ref)
 
 
-def test_mandatory_lane_disarm_degrades_without_killing_the_boot(
+def test_mandatory_execution_lane_disarm_degrades_without_killing_the_boot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _key, ref = _rig(monkeypatch, seed="c", exercise=False,

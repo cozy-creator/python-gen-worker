@@ -824,7 +824,7 @@ _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 #:
 #: THE single source of this vocabulary. It is authored here, next to the
 #: attribute itself, because this is where the assignments live — and
-#: ``tests/test_speculative_lane_completeness_pgw918.py`` parses every
+#: ``tests/test_speculative_execution_lane_completeness_pgw918.py`` parses every
 #: assignment site under ``gen_worker/models`` and fails if a loader stamps a
 #: lane this tuple does not name. An authored list nothing checks is what
 #: ie#546 cost 9 pods, and what pgw#918 found still open for two more lanes.
@@ -832,9 +832,9 @@ _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 #: ``"bf16-resident"`` is deliberately absent: :func:`pipeline_weight_lane`
 #: folds it to ``""`` (it traces identically to plain bf16), so it is never a
 #: distinct cell-identity lane. Bucketed LoRA lanes
-#: (``w8a8_lora.lora_lane``) are these bases with a rank suffix and are
-#: decomposed by ``compile_cache.lane_bucket``, so the BASE set is complete.
-STAMPABLE_BASE_LANES: Tuple[str, ...] = (
+#: (``w8a8_lora.lora_execution_lane``) are these bases with a rank suffix and are
+#: decomposed by ``compile_cache.execution_lane_bucket``, so the BASE set is complete.
+STAMPABLE_BASE_EXECUTION_LANES: Tuple[str, ...] = (
     "",              # loading.py (plain/bf16-resident, folded)
     "fp8-hooks",     # loading.py fp8 storage cast
     "w8a8",          # models/w8a8.py
@@ -844,11 +844,11 @@ STAMPABLE_BASE_LANES: Tuple[str, ...] = (
 
 
 def pipeline_weight_lane(pipeline: Any) -> str:
-    lane = str(getattr(pipeline, _WEIGHT_LANE_ATTR, "") or "")
-    if lane == "bf16-resident":
+    execution_lane = str(getattr(pipeline, _WEIGHT_LANE_ATTR, "") or "")
+    if execution_lane == "bf16-resident":
         return ""  # traces identically to plain bf16
-    if lane:
-        return lane
+    if execution_lane:
+        return execution_lane
     for name in _fp8_storage_components():
         if getattr(getattr(pipeline, name, None), "_cozy_fp8_storage_applied", False):
             return "fp8-hooks"
@@ -971,7 +971,7 @@ def model_index_entry(path: str | Path, component: str) -> Optional[tuple]:
 #: Compute dtype of the quantized-artifact lanes when the binding declares
 #: none — MUST equal the ``compute_dtype or torch.bfloat16`` default in
 #: load_w8a8_pipeline / load_w4a4_pipeline / the svdq lane (test-guarded).
-QUANT_LANE_COMPUTE_DEFAULT = "bf16"
+QUANT_EXECUTION_LANE_COMPUTE_DEFAULT = "bf16"
 
 
 def composition_compute_dtype(base_path: str | Path, dtype: str = "") -> str:
@@ -998,7 +998,7 @@ def composition_compute_dtype(base_path: str | Path, dtype: str = "") -> str:
         or detect_w8a8_artifact(base) is not None
         or detect_w4a4_artifact(base) is not None
     ):
-        return QUANT_LANE_COMPUTE_DEFAULT
+        return QUANT_EXECUTION_LANE_COMPUTE_DEFAULT
     sniffed = detect_on_disk_dtype(base)
     if sniffed == "fp8":
         # Scale-free fp8 storage flavors compute at the bf16 default;
@@ -1177,7 +1177,7 @@ def _component_dtype_map(
     return out
 
 
-class ComponentLaneUnsupported(RuntimeError):
+class ComponentExecutionLaneUnsupported(RuntimeError):
     """This flavor has no component-level loader, so no honest one exists.
 
     svdq and gguf materialize their denoiser INSIDE the pipeline build (a
@@ -1302,14 +1302,14 @@ def load_component(
             root, w4a4_art, compute_dtype=torch_dtype, cls=cls)
     svdq_art = detect_svdq_artifact(root)
     if svdq_art is not None and _covers(svdq_art.component):
-        raise ComponentLaneUnsupported(
+        raise ComponentExecutionLaneUnsupported(
             f"component {component!r} of {root} is an svdq-{svdq_art.precision} "
             f"artifact ({svdq_art.file.name}): its denoiser is built by the "
             f"svdq engine during the PIPELINE load, so there is no "
             f"component-level production loader to borrow"
         )
     if component in denoiser_components() and detect_gguf_snapshot(root):
-        raise ComponentLaneUnsupported(
+        raise ComponentExecutionLaneUnsupported(
             f"component {component!r} of {root} is a GGUF denoiser: it is "
             f"dequantized by the pipeline's own gguf loader, so there is no "
             f"component-level production loader to borrow"
@@ -1828,7 +1828,7 @@ __all__ = [
     "assert_uniform_compute_dtype",
     "MixedComputeDtypeError",
     "composition_compute_dtype",
-    "QUANT_LANE_COMPUTE_DEFAULT",
+    "QUANT_EXECUTION_LANE_COMPUTE_DEFAULT",
     "apply_block_window_offload",
     "block_offload_active",
     "pipeline_weight_lane",

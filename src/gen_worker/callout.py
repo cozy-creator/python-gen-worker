@@ -17,7 +17,8 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from contextlib import nullcontext
+from typing import Any, Callable, ContextManager, Dict, List, Optional
 from urllib.parse import quote
 
 from .api.errors import (
@@ -260,11 +261,27 @@ class CalloutClient:
 
 
 class ChildRequest:
-    """Handle for one submitted child request (``wait=False`` variant)."""
+    """Handle for one submitted child request (``wait=False`` variant).
 
-    def __init__(self, client: CalloutClient, request_id: str) -> None:
+    ``wait_guard`` (worker-internal, pgw#943): a context manager factory the
+    :meth:`result` wait runs under. The executor's ``RequestContext`` passes
+    its child-call slot guard here so a handler parked on ``.result()`` yields
+    its GPU permit exactly like ``ctx.call_endpoint(wait=True)`` — the yield
+    must not depend on which of the two waiting styles tenant code picked.
+    Single status reads (:meth:`status`) stay unguarded: one bounded HTTP GET
+    is not a park, and bouncing the permit per poll would thrash it.
+    """
+
+    def __init__(
+        self,
+        client: CalloutClient,
+        request_id: str,
+        *,
+        wait_guard: Optional[Callable[[], ContextManager[None]]] = None,
+    ) -> None:
         self._client = client
         self._request_id = request_id
+        self._wait_guard = wait_guard
 
     @property
     def request_id(self) -> str:
@@ -281,9 +298,11 @@ class ChildRequest:
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
     ) -> List[Any]:
         """Poll to terminal; return output items or raise the typed error."""
-        return self._client.wait(
-            self._request_id, timeout_s=timeout_s, poll_interval_s=poll_interval_s
-        )
+        guard = self._wait_guard() if self._wait_guard is not None else nullcontext()
+        with guard:
+            return self._client.wait(
+                self._request_id, timeout_s=timeout_s, poll_interval_s=poll_interval_s
+            )
 
     def cancel(self) -> None:
         """Cancel this child (and, hub-side, its own descendants)."""

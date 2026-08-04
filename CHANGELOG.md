@@ -2,6 +2,72 @@
 
 ## Unreleased
 
+- **th#1582 Phase A: the EXECUTION LANE concept is spelled `execution_lane`.**
+  A names-only pass — 1,655 Python identifier tokens across 113 files (`Lane` ->
+  `ExecutionLane`, `lane` -> `execution_lane`, `parse_lane_spec` ->
+  `parse_execution_lane_spec`, ...) plus 18 identifier references inside `#`
+  comments, rewritten through `tokenize` over NAME tokens ONLY, so string
+  VALUES could not be touched by construction. Three modules move with their
+  concept: `gen_worker.kernel_lane` -> **`gen_worker.kernel_path`** (pgw#947:
+  which GEMM realizes a lane on this card is a kernel PATH, not a lane),
+  `gen_worker.models.lanes` -> `gen_worker.models.execution_lanes`, and
+  `gen_worker.models.lane_gate` -> `gen_worker.models.execution_lane_gate`.
+  **No value moved**: the lane grammar (`"fp8-w8a8-dynamic+compiled"`), every
+  proto field, `JobMetrics.lane`, the cell-key axis `lane`, the CLI flag
+  `--lane`, `kernel_lane.META_KEY == "kernel_lane"` in minted cell metadata,
+  and the `weight_lane` family (th#1580 Phase B) are byte-identical.
+
+- **pgw#955: a hub plan re-send that landed WHILE a residency reconcile was
+  running was dropped on the floor — the redrive's re-report never happened.**
+  It presented as a load-only test flake (`test_reissued_plan_republishes_held_
+  identity` stalling at "1 of 2 ON_DISK re-reports" on both attempts of PR
+  #470's `tests` job) and it is a product bug. gw#614 taught
+  `_replace_residency_reconcile` not to CANCEL an in-flight reconcile when the
+  re-sent plan's semantic model set is unchanged — a running `self_mint_compile`
+  needs its window — but it then returned having told the running loop nothing.
+  Meanwhile `replace_desired_snapshots` had already opened a republish epoch,
+  and only a reconcile pass ever reads one: no cancel, no restart, no
+  re-announce, and no later event to heal it. Under pgw#628/th#1070 v2 that
+  epoch IS the hub asking for a resync of the lost success observation, so the
+  swallow silently defeated the resync precisely when the worker was busiest —
+  the state in which observations get lost. The branch now signals the
+  level-triggered restart (gw#623's mechanism) instead of returning silently:
+  the loop finishes the item it is on, then re-converges and re-announces under
+  the new epoch. gw#614's no-cancel guarantee is untouched, the re-pass
+  short-circuits everything already satisfied, and the epoch guard still caps
+  emission at one re-report per ref per applied ack. The window was ~one
+  event-loop step wide when the plan materialized instantly, which is the whole
+  reason it read as a flake; the new test holds it open on purpose (a second
+  ref in the same plan parked on a blob the test does not answer until it has
+  proven the re-sent plan was applied) and reproduces the exact CI failure
+  message deterministically.
+
+- **pgw#943: a child-call wait now YIELDS the GPU permit — the worker
+  pipelines while parked on a child request.** #455 measured the defect: at
+  `gpu_slots=1` a parent in `ctx.call_endpoint` held its group permit for the
+  whole child call, so the cozy-eval shape (quantize → call eval → continue)
+  rented an accelerator to wait on a network round trip and a second request
+  parked in `WAIT_GPU_SLOT` for the duration. Both waiting styles
+  (`wait=True` and the `wait=False` handle's `.result()`) now run under
+  `ctx._child_call_wait`, which yields the #382 GPU-slot lease and
+  re-acquires before returning to tenant code; the park is bracketed as a
+  `child_call_wait` stage (GPU-idle) so it stops masquerading as compute.
+  Re-acquire rides `asyncio.Semaphore`, which is FIFO on Python ≥3.12
+  (`locked()` counts waiters — verified empirically), so a resuming parent
+  cannot be starved by late arrivals. **The yield is deliberately SCOPED**:
+  a job holding its instance gate (non-reentrant class endpoint) or
+  per-request adapters keeps the permit — both permit acquirers (`_run_job`,
+  `_bg_turn`) take the permit BEFORE the instance gate, so a parked parent
+  still holding `run_lock` would wedge its own re-acquire (follower/mint
+  holds the permit while waiting on `run_lock`; parent waits on the permit —
+  hold-and-wait cycle), and a follower on a shared pipeline would clobber
+  adapter state mid-handler. Same-function pipelining is impossible for that
+  shape anyway (single-flight per instance, pgw#647). The #455 pinning
+  assertion is inverted per its own instruction; new tests cover re-acquire
+  under a deliberately-held contender, sequential child calls
+  (yield→reacquire→yield), child failure mid-yield, cancel mid-yield, and
+  the gate-holding scope itself.
+
 - **pgw#952: a lane -> `dev` PR used to run NO CI AT ALL; `ci.yml` now runs on
   `[dev, master]` as two parallel jobs.** Verified on PR #466 (215+/178-, merged
   into `dev`): `statusCheckRollup` was `[]` — not a check that passed, no check

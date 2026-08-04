@@ -344,9 +344,9 @@ class ConfigKnobsEndpoint:
 class LaneAwareEndpoint:
     def lane_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
         # The divergence the declaration marks: an author kernel branch.
-        if ctx.lane.startswith("fp8-w8a8-dynamic"):
-            return EchoOut(response=f"author-kernel:{ctx.lane}")
-        return EchoOut(response=f"reference:{ctx.lane}")
+        if ctx.execution_lane.startswith("fp8-w8a8-dynamic"):
+            return EchoOut(response=f"author-kernel:{ctx.execution_lane}")
+        return EchoOut(response=f"reference:{ctx.execution_lane}")
 
 
 @endpoint
@@ -380,7 +380,7 @@ OPTIONAL_EDIT = Hub("harness/optional-lane-edit", tag="prod")
     "t2i": Slot(str, default_checkpoint=OPTIONAL_T2I, root=True),
     "edit": Slot(str, default_checkpoint=OPTIONAL_EDIT),
 })
-class OptionalLaneEndpoint:
+class OptionalExecutionLaneEndpoint:
     def setup(self, t2i: str, edit: str | None = None) -> None:
         self.t2i_path = t2i
         self.edit_path = edit

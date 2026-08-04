@@ -91,10 +91,10 @@ def test_the_child_and_the_executor_build_the_SAME_context(spec) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         child = warmup.warm_context(
             spec, request_id="mint-child-x", local_output_dir=tmp,
-            lane="w8a8", config={})
+            execution_lane="w8a8", config={})
         served = warmup.warm_context(
             spec, request_id="boot-warmup-x", local_output_dir=tmp,
-            lane="w8a8", config={})
+            execution_lane="w8a8", config={})
     assert sorted(child.slots) == sorted(served.slots)
     assert sorted(child.slots) == sorted(spec.slots)
     for name in spec.slots:

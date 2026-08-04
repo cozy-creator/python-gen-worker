@@ -103,55 +103,55 @@ def main() -> None:
     print(f"snapshot: {src}")
     print(f"scaled_mm_supported: {scaled_mm_supported()}")
 
-    lanes = [x.strip() for x in args.lanes.split(",") if x.strip()]
+    execution_lanes = [x.strip() for x in args.execution_lanes.split(",") if x.strip()]
     images: dict = {}
     walls: dict = {}
 
-    for lane in lanes:
-        print(f"--- lane {lane}")
-        if lane == "bf16":
+    for execution_lane in execution_lanes:
+        print(f"--- lane {execution_lane}")
+        if execution_lane == "bf16":
             pipe = DiffusionPipeline.from_pretrained(
                 str(src), torch_dtype=torch.bfloat16).to("cuda")
-        elif lane == "w8a16":
+        elif execution_lane == "w8a16":
             pipe = DiffusionPipeline.from_pretrained(
                 str(src), torch_dtype=torch.bfloat16)
             assert apply_fp8_storage(pipe, compute_dtype=torch.bfloat16)
             pipe.to("cuda")
-        elif lane == "w8a8":
+        elif execution_lane == "w8a8":
             tree = out / "w8a8-tree"
             if not tree.exists():
                 quantize_tree_w8a8(src, tree)
             pipe = load_from_pretrained(DiffusionPipeline, tree)
-            lane_attr = getattr(pipe, "_cozy_weight_lane", "")
-            print(f"w8a8 weight lane: {lane_attr!r}")
-            assert lane_attr == "w8a8", "scaled_mm lane did not engage"
+            execution_lane_attr = getattr(pipe, "_cozy_weight_lane", "")
+            print(f"w8a8 weight lane: {execution_lane_attr!r}")
+            assert execution_lane_attr == "w8a8", "scaled_mm lane did not engage"
             pipe.to("cuda")
         else:
-            raise SystemExit(f"unknown lane {lane}")
+            raise SystemExit(f"unknown lane {execution_lane}")
         img, wall = _render(pipe, prompt=args.prompt, seed=args.seed,
                             steps=args.steps, size=args.size)
-        images[lane] = img
-        walls[lane] = wall
+        images[execution_lane] = img
+        walls[execution_lane] = wall
         from PIL import Image
 
-        Image.fromarray(img).save(out / f"{lane}.png")
-        print(f"{lane}: {wall:.2f}s for {args.steps} steps "
+        Image.fromarray(img).save(out / f"{execution_lane}.png")
+        print(f"{execution_lane}: {wall:.2f}s for {args.steps} steps "
               f"({wall / args.steps * 1000:.0f} ms/step)")
         _free(pipe)
 
     report: dict = {"model": args.model, "steps": args.steps, "size": args.size,
                     "seed": args.seed, "walls_s": walls, "deltas": {}}
     ref = images.get("bf16")
-    for lane, img in images.items():
-        if ref is None or lane == "bf16":
+    for execution_lane, img in images.items():
+        if ref is None or execution_lane == "bf16":
             continue
         mae, psnr = _mae_psnr(ref, img)
         d = {"mae": round(mae, 5), "psnr_db": round(psnr, 2)}
         lp = _lpips(ref, img)
         if lp is not None:
             d["lpips"] = round(lp, 4)
-        report["deltas"][lane] = d
-        print(f"{lane} vs bf16: {d}")
+        report["deltas"][execution_lane] = d
+        print(f"{execution_lane} vs bf16: {d}")
     if "w8a16" in walls and "w8a8" in walls:
         report["speedup_w8a8_vs_w8a16"] = round(walls["w8a16"] / walls["w8a8"], 3)
         print(f"speedup w8a8 vs w8a16: {report['speedup_w8a8_vs_w8a16']}x")

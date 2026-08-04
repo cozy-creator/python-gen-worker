@@ -89,7 +89,7 @@ from .cell_adopt import AdoptOutcome
 from . import shape_growth
 from .compile_cache import (
     AdoptError,
-    CompiledLaneUnavailableError,
+    CompiledExecutionLaneUnavailableError,
     _clean_tarinfo,
     parse_cell_ref,
     sku_slug,
@@ -1820,7 +1820,7 @@ def wrap_module(
 
     def aot_forward(*args: Any, **kwargs: Any) -> Any:
         if state["revocation_error"]:
-            raise CompiledLaneUnavailableError(state["revocation_error"])
+            raise CompiledExecutionLaneUnavailableError(state["revocation_error"])
         # The lifted pair is resolved PER CALL, not captured at wrap time:
         # the LoRA lane may install/remove lifting independently of arming,
         # and a stale capture would either starve the graph of a mandatory
@@ -1926,7 +1926,7 @@ def _revoke(state: Dict[str, Any], detail: str) -> None:
             f"compiled-state revocation failed: "
             f"{type(callback_exc).__name__}: {callback_exc}")
         logger.exception("aot-serve: %s", state["revocation_error"])
-        raise CompiledLaneUnavailableError(state["revocation_error"]) from callback_exc
+        raise CompiledExecutionLaneUnavailableError(state["revocation_error"]) from callback_exc
 
 
 def report_ingress_refusal(state: Dict[str, Any], reason: str, detail: str) -> None:

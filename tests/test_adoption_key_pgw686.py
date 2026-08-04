@@ -151,7 +151,7 @@ class _Pipe:
 # --- the defect, reproduced from the live evidence -------------------------
 
 
-def test_burst_divergence_reproduced_lane_only(burst_runtime: None) -> None:
+def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) -> None:
     """All three observed keys are ONE identity varying only the lane axis:
     the advertised lanes name keys nobody publishes; the published lane
     names a key nobody advertises. Adoption was structurally impossible."""
@@ -170,24 +170,24 @@ def test_burst_divergence_reproduced_lane_only(burst_runtime: None) -> None:
 # --- the fix: one base-lane resolution for every cell-identity surface -----
 
 
-def test_cell_base_lane_sees_w8a8_mode(burst_runtime: None) -> None:
+def test_cell_base_execution_lane_sees_w8a8_mode(burst_runtime: None) -> None:
     pipe = _Pipe()
-    assert w8a8_lora.effective_base_lane(pipe) == "w8a8"
-    assert cc.cell_base_lane(pipe) == "w8a8"
+    assert w8a8_lora.effective_base_execution_lane(pipe) == "w8a8"
+    assert cc.cell_base_execution_lane(pipe) == "w8a8"
     # An identical worker now requests exactly the key the mint published.
-    assert _requested(cc.cell_base_lane(pipe)) \
+    assert _requested(cc.cell_base_execution_lane(pipe)) \
         == ck.from_artifact_metadata(_BURST_META).digest
 
 
-def test_cell_base_lane_precedence() -> None:
+def test_cell_base_execution_lane_precedence() -> None:
     # Explicit pipeline stamp wins.
     pipe = _Pipe()
     pipe._cozy_weight_lane = "w8a8-lora64"
-    assert cc.cell_base_lane(pipe) == "w8a8-lora64"
+    assert cc.cell_base_execution_lane(pipe) == "w8a8-lora64"
     # fp8-hooks marker (w8a16 storage lane) wins over the denoiser fallback.
     pipe2 = _Pipe()
     pipe2.unet._cozy_fp8_storage_applied = True
-    assert cc.cell_base_lane(pipe2) == "fp8-hooks"
+    assert cc.cell_base_execution_lane(pipe2) == "fp8-hooks"
     # Plain pipeline stays plain.
     class _PlainDenoiser:
         def named_modules(self) -> Iterator[Any]:
@@ -197,16 +197,16 @@ def test_cell_base_lane_precedence() -> None:
         def __init__(self) -> None:
             self.unet = _PlainDenoiser()
 
-    assert cc.cell_base_lane(_PlainPipe()) == ""
+    assert cc.cell_base_execution_lane(_PlainPipe()) == ""
 
 
-def test_stamp_lane_memoizes_the_same_base() -> None:
+def test_stamp_execution_lane_memoizes_the_same_base() -> None:
     """Parity by construction: the base stamp_lane memoizes at mint time is
     exactly what effective_base_lane resolved before the mint — so the
     requested key (advertise) and the stamped key (publish) share one lane."""
     pipe = _Pipe()
-    expected = w8a8_lora.effective_base_lane(pipe)
-    w8a8_lora.stamp_lane(pipe, {"unet": pipe.unet})
+    expected = w8a8_lora.effective_base_execution_lane(pipe)
+    w8a8_lora.stamp_execution_lane(pipe, {"unet": pipe.unet})
     assert pipe._cozy_lora_base_lane == expected == "w8a8"
     # bucket 0 on the stub: the stamp restores the branchless base lane.
     assert pipe._cozy_weight_lane == "w8a8"

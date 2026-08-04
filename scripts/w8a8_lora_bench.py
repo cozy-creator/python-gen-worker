@@ -207,9 +207,9 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
             continue
         lora_sds[ref] = load_file(f)
 
-    def render_lane(w8a8_lane: bool) -> dict:
+    def render_execution_lane(w8a8_execution_lane: bool) -> dict:
         imgs: dict = {}
-        if w8a8_lane:
+        if w8a8_execution_lane:
             art = detect_w8a8_artifact(tree)
             assert art is not None
             pipe = load_w8a8_pipeline(
@@ -229,7 +229,7 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
             imgs[("base", i)] = _render(pipe, p, 1234 + i, steps)
         swap_stats = []
         for ref, sd in lora_sds.items():
-            if w8a8_lane:
+            if w8a8_execution_lane:
                 targets = w8a8_lora.branch_targets(pipe)
                 dsd, rest = w8a8_lora.split_state_dict(sd)
                 routed = w8a8_lora.route_denoiser_keys(dsd, targets, ref=ref)
@@ -249,8 +249,8 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
                 pipe.enable_lora()
             for i, p in enumerate(PROMPTS):
                 imgs[(ref, i)] = _render(pipe, p, 4321 + i, steps)
-            if w8a8_lane:
-                w8a8_lora.clear_branch_lanes(pipe)
+            if w8a8_execution_lane:
+                w8a8_lora.clear_branch_execution_lanes(pipe)
                 if hasattr(pipe, "disable_lora"):
                     try:
                         pipe.disable_lora()
@@ -263,8 +263,8 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
         torch.cuda.empty_cache()
         return imgs
 
-    ref_imgs = render_lane(False)
-    cand_imgs = render_lane(True)
+    ref_imgs = render_execution_lane(False)
+    cand_imgs = render_execution_lane(True)
 
     report: dict = {"base": base, "steps": steps, "loras": list(lora_sds),
                     "swap_stats": cand_imgs.pop("swap_stats"),

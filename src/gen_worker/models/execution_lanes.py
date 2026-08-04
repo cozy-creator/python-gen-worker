@@ -37,26 +37,26 @@ EXEC_EAGER = "eager"
 EXEC_COMPILED = "compiled"
 
 
-class Lane(msgspec.Struct, frozen=True, kw_only=True):
+class ExecutionLane(msgspec.Struct, frozen=True, kw_only=True):
     weights: str
     activation: str
     scale: str = ""  # "" when the lane has no scale axis
     execution: str
 
 
-def lane_id(lane: Lane) -> str:
-    body = f"{lane.weights}-{lane.activation}"
-    if lane.scale:
-        body += f"-{lane.scale}"
-    return f"{body}+{lane.execution}"
+def execution_lane_id(execution_lane: ExecutionLane) -> str:
+    body = f"{execution_lane.weights}-{execution_lane.activation}"
+    if execution_lane.scale:
+        body += f"-{execution_lane.scale}"
+    return f"{body}+{execution_lane.execution}"
 
 
-def family_of(lane: Lane) -> str:
-    if lane.weights == WEIGHTS_BF16:
+def family_of(execution_lane: ExecutionLane) -> str:
+    if execution_lane.weights == WEIGHTS_BF16:
         return FAMILY_BF16
-    if lane.weights == WEIGHTS_FP8:
+    if execution_lane.weights == WEIGHTS_FP8:
         return FAMILY_FP8
-    if lane.weights in (WEIGHTS_SVDQ_FP4, WEIGHTS_SVDQ_INT4, WEIGHTS_NVFP4):
+    if execution_lane.weights in (WEIGHTS_SVDQ_FP4, WEIGHTS_SVDQ_INT4, WEIGHTS_NVFP4):
         return FAMILY_4BIT
     return ""
 
@@ -64,7 +64,7 @@ def family_of(lane: Lane) -> str:
 _EXECUTION_EITHER = "either"
 
 
-class _LaneBody(msgspec.Struct, frozen=True, kw_only=True):
+class _ExecutionLaneBody(msgspec.Struct, frozen=True, kw_only=True):
     weights: str
     activation: str
     execution_support: str
@@ -73,41 +73,41 @@ class _LaneBody(msgspec.Struct, frozen=True, kw_only=True):
 
 # THE lane table's rows, ranked best-first. Execution support is authoritative:
 # lane enumeration, validation, and binding resolution all read this one field.
-_KNOWN_BODIES: tuple[_LaneBody, ...] = (
+_KNOWN_BODIES: tuple[_ExecutionLaneBody, ...] = (
     # Eager w8a8 has not been measured; keep Tensorhub's compiled-only answer.
-    _LaneBody(weights=WEIGHTS_FP8, activation=ACT_W8A8,
+    _ExecutionLaneBody(weights=WEIGHTS_FP8, activation=ACT_W8A8,
               scale=SCALE_DYNAMIC, execution_support=EXEC_COMPILED),
     # Eager nvfp4 has not been measured; keep Tensorhub's compiled-only answer.
-    _LaneBody(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
+    _ExecutionLaneBody(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
               scale=SCALE_STATIC, execution_support=EXEC_COMPILED),
-    _LaneBody(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4,
+    _ExecutionLaneBody(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4,
               execution_support=EXEC_EAGER),
-    _LaneBody(weights=WEIGHTS_SVDQ_INT4, activation=ACT_W4A4,
+    _ExecutionLaneBody(weights=WEIGHTS_SVDQ_INT4, activation=ACT_W4A4,
               execution_support=EXEC_EAGER),
-    _LaneBody(weights=WEIGHTS_BF16, activation=ACT_W16A16,
+    _ExecutionLaneBody(weights=WEIGHTS_BF16, activation=ACT_W16A16,
               execution_support=_EXECUTION_EITHER),
-    _LaneBody(weights=WEIGHTS_FP8, activation=ACT_W8A16,
+    _ExecutionLaneBody(weights=WEIGHTS_FP8, activation=ACT_W8A16,
               execution_support=_EXECUTION_EITHER),
 )
 
 
-def _supports(body: _LaneBody, execution: str) -> bool:
+def _supports(body: _ExecutionLaneBody, execution: str) -> bool:
     return body.execution_support == _EXECUTION_EITHER or body.execution_support == execution
 
 
-def _body_for_lane(lane: Lane) -> Optional[_LaneBody]:
+def _body_for_execution_lane(execution_lane: ExecutionLane) -> Optional[_ExecutionLaneBody]:
     for body in _KNOWN_BODIES:
         if (
-            body.weights == lane.weights
-            and body.activation == lane.activation
-            and body.scale == lane.scale
+            body.weights == execution_lane.weights
+            and body.activation == execution_lane.activation
+            and body.scale == execution_lane.scale
         ):
             return body
     return None
 
 
-def _lane_for_body(body: _LaneBody, execution: str) -> Lane:
-    return Lane(
+def _execution_lane_for_body(body: _ExecutionLaneBody, execution: str) -> ExecutionLane:
+    return ExecutionLane(
         weights=body.weights,
         activation=body.activation,
         scale=body.scale,
@@ -115,43 +115,43 @@ def _lane_for_body(body: _LaneBody, execution: str) -> Lane:
     )
 
 
-def known_lanes() -> list[str]:
+def known_execution_lanes() -> list[str]:
     """Every concrete lane id, ranked (table order, compiled before eager)."""
     out: list[str] = []
     for body in _KNOWN_BODIES:
         if _supports(body, EXEC_COMPILED):
-            out.append(lane_id(_lane_for_body(body, EXEC_COMPILED)))
+            out.append(execution_lane_id(_execution_lane_for_body(body, EXEC_COMPILED)))
         if _supports(body, EXEC_EAGER):
-            out.append(lane_id(_lane_for_body(body, EXEC_EAGER)))
+            out.append(execution_lane_id(_execution_lane_for_body(body, EXEC_EAGER)))
     return out
 
 
-def lane_body_id(lane: Lane) -> str:
+def execution_lane_body_id(execution_lane: ExecutionLane) -> str:
     """The lane id without the execution axis (verdict/declaration token)."""
-    body = f"{lane.weights}-{lane.activation}"
-    if lane.scale:
-        body += f"-{lane.scale}"
+    body = f"{execution_lane.weights}-{execution_lane.activation}"
+    if execution_lane.scale:
+        body += f"-{execution_lane.scale}"
     return body
 
 
-def known_lane_bodies() -> list[str]:
+def known_execution_lane_bodies() -> list[str]:
     """Every concrete lane BODY token, ranked (table order). These are the
     valid `handles=` declaration tokens (th#1050) — execution axis excluded:
     author kernels declare the quant scheme, the platform owns eager/compiled."""
     return [
-        lane_body_id(_lane_for_body(body, EXEC_EAGER))
+        execution_lane_body_id(_execution_lane_for_body(body, EXEC_EAGER))
         for body in _KNOWN_BODIES
     ]
 
 
-def valid_lane(lane: Lane) -> bool:
-    if lane.execution not in (EXEC_EAGER, EXEC_COMPILED):
+def valid_execution_lane(execution_lane: ExecutionLane) -> bool:
+    if execution_lane.execution not in (EXEC_EAGER, EXEC_COMPILED):
         return False
-    body = _body_for_lane(lane)
-    return body is not None and _supports(body, lane.execution)
+    body = _body_for_execution_lane(execution_lane)
+    return body is not None and _supports(body, execution_lane.execution)
 
 
-def parse_lane(s: str) -> Lane:
+def parse_execution_lane(s: str) -> ExecutionLane:
     """Parse a FULL descriptor id. Raises ValueError on anything else."""
     raw = str(s or "").strip().lower()
     parts = raw.split("+")
@@ -171,38 +171,38 @@ def parse_lane(s: str) -> Lane:
     rest = body[len(weights):].lstrip("-")
     segs = rest.split("-") if rest else []
     if len(segs) == 1:
-        lane = Lane(weights=weights, activation=segs[0], execution=execution)
+        execution_lane = ExecutionLane(weights=weights, activation=segs[0], execution=execution)
     elif len(segs) == 2:
-        lane = Lane(weights=weights, activation=segs[0], scale=segs[1], execution=execution)
+        execution_lane = ExecutionLane(weights=weights, activation=segs[0], scale=segs[1], execution=execution)
     else:
         raise ValueError(
             f"lane {s!r}: want `<weights>-<activation>[-<scale>]+<execution>`")
-    if not valid_lane(lane):
+    if not valid_execution_lane(execution_lane):
         raise ValueError(
-            f"lane {s!r} is not a known lane (known: {', '.join(known_lanes())})")
-    return lane
+            f"lane {s!r} is not a known lane (known: {', '.join(known_execution_lanes())})")
+    return execution_lane
 
 
-class LaneSpec(msgspec.Struct, frozen=True, kw_only=True):
+class ExecutionLaneSpec(msgspec.Struct, frozen=True, kw_only=True):
     """Dual-form parse result: a family (lane is None) or a full descriptor."""
 
     family: str = ""
-    lane: Optional[Lane] = None
+    execution_lane: Optional[ExecutionLane] = None
 
     @property
     def is_zero(self) -> bool:
-        return not self.family and self.lane is None
+        return not self.family and self.execution_lane is None
 
 
-def parse_lane_spec(s: str) -> LaneSpec:
+def parse_execution_lane_spec(s: str) -> ExecutionLaneSpec:
     """Dual-form: "" = auto, a family, or a full descriptor id."""
     raw = str(s or "").strip().lower()
     if not raw:
-        return LaneSpec()
+        return ExecutionLaneSpec()
     if raw in FAMILIES:
-        return LaneSpec(family=raw)
-    lane = parse_lane(raw)
-    return LaneSpec(family=family_of(lane), lane=lane)
+        return ExecutionLaneSpec(family=raw)
+    execution_lane = parse_execution_lane(raw)
+    return ExecutionLaneSpec(family=family_of(execution_lane), execution_lane=execution_lane)
 
 
 def is_w8a8_flavor(token: str) -> bool:
@@ -210,20 +210,20 @@ def is_w8a8_flavor(token: str) -> bool:
     return t == "fp8-w8a8" or t.startswith("fp8-w8a8-")
 
 
-def _with_supported_execution(lane: Lane, compiled: bool) -> Lane:
+def _with_supported_execution(execution_lane: ExecutionLane, compiled: bool) -> ExecutionLane:
     execution = EXEC_COMPILED if compiled else EXEC_EAGER
-    body = _body_for_lane(lane)
+    body = _body_for_execution_lane(execution_lane)
     if body is not None and not _supports(body, execution):
         execution = EXEC_COMPILED if _supports(body, EXEC_COMPILED) else EXEC_EAGER
-    return Lane(
-        weights=lane.weights,
-        activation=lane.activation,
-        scale=lane.scale,
+    return ExecutionLane(
+        weights=execution_lane.weights,
+        activation=execution_lane.activation,
+        scale=execution_lane.scale,
         execution=execution,
     )
 
 
-def lane_of_binding(flavor: str, storage_dtype: str, compiled: bool) -> Lane:
+def execution_lane_of_binding(flavor: str, storage_dtype: str, compiled: bool) -> ExecutionLane:
     """The concrete lane a (flavor, cast/storage_dtype) binding executes as —
     the twin of tensorhub's ``LaneOfResolution``."""
     # cycle: ladder imports lanes at module top
@@ -236,33 +236,33 @@ def lane_of_binding(flavor: str, storage_dtype: str, compiled: bool) -> Lane:
     )
 
     if str(storage_dtype or "").strip().lower() in ("fp8", "fp8+te"):
-        lane = Lane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
+        execution_lane = ExecutionLane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
     elif (cls := classify_flavor_token(flavor)) == CLASS_FP8:
         if is_w8a8_flavor(flavor):
-            lane = Lane(weights=WEIGHTS_FP8, activation=ACT_W8A8,
+            execution_lane = ExecutionLane(weights=WEIGHTS_FP8, activation=ACT_W8A8,
                         scale=SCALE_DYNAMIC, execution="")
         else:
-            lane = Lane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
+            execution_lane = ExecutionLane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
     elif cls == CLASS_SVDQ_FP4:
-        lane = Lane(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4, execution="")
+        execution_lane = ExecutionLane(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4, execution="")
     elif cls == CLASS_SVDQ_INT4:
-        lane = Lane(weights=WEIGHTS_SVDQ_INT4, activation=ACT_W4A4, execution="")
+        execution_lane = ExecutionLane(weights=WEIGHTS_SVDQ_INT4, activation=ACT_W4A4, execution="")
     elif cls == CLASS_NVFP4_W4A4:
-        lane = Lane(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
+        execution_lane = ExecutionLane(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
                     scale=SCALE_STATIC, execution="")
     else:
-        lane = Lane(weights=WEIGHTS_BF16, activation=ACT_W16A16, execution="")
-    return _with_supported_execution(lane, compiled)
+        execution_lane = ExecutionLane(weights=WEIGHTS_BF16, activation=ACT_W16A16, execution="")
+    return _with_supported_execution(execution_lane, compiled)
 
 
-class LaneUnavailableError(ValueError):
+class ExecutionLaneUnavailableError(ValueError):
     """Typed refusal: the instructed lane cannot be served on this worker.
     Always names the lane — never a silent fallback."""
 
-    def __init__(self, lane: str, detail: str) -> None:
-        self.lane = lane
+    def __init__(self, execution_lane: str, detail: str) -> None:
+        self.execution_lane = execution_lane
         self.detail = detail
-        super().__init__(f"lane_unavailable: {lane} — {detail}")
+        super().__init__(f"lane_unavailable: {execution_lane} — {detail}")
 
 
 __all__ = [
@@ -276,9 +276,9 @@ __all__ = [
     "FAMILY_4BIT",
     "FAMILY_BF16",
     "FAMILY_FP8",
-    "Lane",
-    "LaneSpec",
-    "LaneUnavailableError",
+    "ExecutionLane",
+    "ExecutionLaneSpec",
+    "ExecutionLaneUnavailableError",
     "SCALE_DYNAMIC",
     "SCALE_STATIC",
     "WEIGHTS_BF16",
@@ -288,12 +288,12 @@ __all__ = [
     "WEIGHTS_SVDQ_INT4",
     "family_of",
     "is_w8a8_flavor",
-    "known_lane_bodies",
-    "known_lanes",
-    "lane_body_id",
-    "lane_id",
-    "lane_of_binding",
-    "parse_lane",
-    "parse_lane_spec",
-    "valid_lane",
+    "known_execution_lane_bodies",
+    "known_execution_lanes",
+    "execution_lane_body_id",
+    "execution_lane_id",
+    "execution_lane_of_binding",
+    "parse_execution_lane",
+    "parse_execution_lane_spec",
+    "valid_execution_lane",
 ]

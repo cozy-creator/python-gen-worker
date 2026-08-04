@@ -23,7 +23,7 @@ import pytest
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.api.errors import ValidationError
 from gen_worker.executor import Executor
-from gen_worker.models.lanes import LaneUnavailableError
+from gen_worker.models.execution_lanes import ExecutionLaneUnavailableError
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 
@@ -75,7 +75,7 @@ def test_bf16_override_rebinds_to_declared_base() -> None:
     assert wire_ref(spec.models["pipeline"]) == W8A8
     warm_key = spec.instance_key
 
-    derived = ex._lane_effective_spec(spec, "bf16")
+    derived = ex._execution_lane_effective_spec(spec, "bf16")
     assert wire_ref(derived.models["pipeline"]) == BASE
     assert derived.models["pipeline"].storage_dtype == ""
     assert wire_ref(derived.models["vae"]) == VAE
@@ -88,7 +88,7 @@ def test_w8a8_descriptor_keeps_the_pick() -> None:
     ex = _executor()
     _with_w8a8_pick(ex)
     spec = ex.specs["generate"]
-    derived = ex._lane_effective_spec(spec, "fp8-w8a8-dynamic+compiled")
+    derived = ex._execution_lane_effective_spec(spec, "fp8-w8a8-dynamic+compiled")
     assert wire_ref(derived.models["pipeline"]) == W8A8
     # Same bindings -> same spec object (no needless instance split).
     assert derived is spec
@@ -97,8 +97,8 @@ def test_w8a8_descriptor_keeps_the_pick() -> None:
 def test_w8a8_without_pick_refuses_typed() -> None:
     ex = _executor()  # no resolutions applied
     spec = ex.specs["generate"]
-    with pytest.raises(LaneUnavailableError) as e:
-        ex._lane_effective_spec(spec, "fp8-w8a8-dynamic+compiled")
+    with pytest.raises(ExecutionLaneUnavailableError) as e:
+        ex._execution_lane_effective_spec(spec, "fp8-w8a8-dynamic+compiled")
     assert "lane_unavailable: fp8-w8a8-dynamic+compiled" in str(e.value)
     assert "generate" in str(e.value)
 
@@ -107,16 +107,16 @@ def test_w8a8_eager_refuses() -> None:
     ex = _executor()
     _with_w8a8_pick(ex)
     with pytest.raises(ValidationError, match="not a known lane"):
-        ex._lane_effective_spec(ex.specs["generate"], "fp8-w8a8-dynamic+eager")
+        ex._execution_lane_effective_spec(ex.specs["generate"], "fp8-w8a8-dynamic+eager")
 
 
-def test_fp8_family_without_stored_pick_expands_to_cast_lane() -> None:
+def test_fp8_family_without_stored_pick_expands_to_cast_execution_lane() -> None:
     ex = _executor()
     # The hub laddered the pipeline but picked base (e.g. no fp8 flavor
     # published): family fp8 expands to the local cast lane on that ref.
     ex.apply_model_resolutions({BASE: (BASE, "", "bf16-w16a16+eager")})
     spec = ex.specs["generate"]
-    derived = ex._lane_effective_spec(spec, "fp8")
+    derived = ex._execution_lane_effective_spec(spec, "fp8")
     assert wire_ref(derived.models["pipeline"]) == BASE
     assert derived.models["pipeline"].storage_dtype == "fp8"
     # The never-laddered vae keeps its binding untouched.
@@ -125,44 +125,44 @@ def test_fp8_family_without_stored_pick_expands_to_cast_lane() -> None:
 
 def test_fp8_family_with_no_laddered_refs_refuses_typed() -> None:
     ex = _executor()  # hub delivered no resolutions at all
-    with pytest.raises(LaneUnavailableError):
-        ex._lane_effective_spec(ex.specs["generate"], "fp8")
+    with pytest.raises(ExecutionLaneUnavailableError):
+        ex._execution_lane_effective_spec(ex.specs["generate"], "fp8")
 
 
 def test_fp8_family_with_pick_uses_it() -> None:
     ex = _executor()
     _with_w8a8_pick(ex)
     spec = ex.specs["generate"]
-    derived = ex._lane_effective_spec(spec, "fp8")
+    derived = ex._execution_lane_effective_spec(spec, "fp8")
     assert wire_ref(derived.models["pipeline"]) == W8A8
 
 
-def test_unknown_lane_is_invalid() -> None:
+def test_unknown_execution_lane_is_invalid() -> None:
     ex = _executor()
     with pytest.raises(ValidationError):
-        ex._lane_effective_spec(ex.specs["generate"], "int8-w8a8+eager")
+        ex._execution_lane_effective_spec(ex.specs["generate"], "int8-w8a8+eager")
 
 
 def test_4bit_without_pick_refuses_typed() -> None:
     ex = _executor()
-    with pytest.raises(LaneUnavailableError):
-        ex._lane_effective_spec(ex.specs["generate"], "4bit")
+    with pytest.raises(ExecutionLaneUnavailableError):
+        ex._execution_lane_effective_spec(ex.specs["generate"], "4bit")
 
 
-def test_served_lane_reports_concrete_lane() -> None:
+def test_served_execution_lane_reports_concrete_execution_lane() -> None:
     ex = _executor()
     spec = ex.specs["generate"]
     # Declared base, no compile targets: bf16 eager.
-    assert ex._served_lane(spec) == "bf16-w16a16+eager"
+    assert ex._served_execution_lane(spec) == "bf16-w16a16+eager"
     # w8a8 pick applied: the pipeline's lane wins over the bf16 vae.
     _with_w8a8_pick(ex)
-    assert ex._served_lane(ex.specs["generate"]) == "fp8-w8a8-dynamic+compiled"
+    assert ex._served_execution_lane(ex.specs["generate"]) == "fp8-w8a8-dynamic+compiled"
     # cast pick: w8a16.
     ex.apply_model_resolutions({BASE: (BASE, "fp8", "fp8-w8a16+eager")})
-    assert ex._served_lane(ex.specs["generate"]) == "fp8-w8a16+eager"
+    assert ex._served_execution_lane(ex.specs["generate"]) == "fp8-w8a16+eager"
 
 
-def test_hello_ack_lane_field_flows_into_resolutions() -> None:
+def test_hello_ack_execution_lane_field_flows_into_resolutions() -> None:
     ex = _executor()
     ack = pb.HelloAck(resolutions=[pb.ModelResolution(
         ref=BASE, resolved_ref=W8A8, cast="", lane="fp8-w8a8-dynamic+compiled",

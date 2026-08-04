@@ -148,46 +148,46 @@ def main() -> None:
     print(f"snapshot: {src}")
     print(f"w8a8_gemm_mode: {w8a8_gemm_mode()!r}  w4a4_gemm_mode: {w4a4_gemm_mode()!r}")
 
-    lanes = [x.strip() for x in args.lanes.split(",") if x.strip()]
+    execution_lanes = [x.strip() for x in args.execution_lanes.split(",") if x.strip()]
     images: dict = {}
     walls: dict = {}
     compiled_walls: dict = {}
     denoiser_gb: dict = {}
 
-    for lane in lanes:
-        print(f"--- lane {lane}")
-        if lane == "bf16":
+    for execution_lane in execution_lanes:
+        print(f"--- lane {execution_lane}")
+        if execution_lane == "bf16":
             pipe = DiffusionPipeline.from_pretrained(
                 str(src), torch_dtype=torch.bfloat16)
-        elif lane in ("w8a8", "w4a4"):
-            tree = out / f"{lane}-tree"
+        elif execution_lane in ("w8a8", "w4a4"):
+            tree = out / f"{execution_lane}-tree"
             if not tree.exists():
-                (quantize_tree_w8a8 if lane == "w8a8"
+                (quantize_tree_w8a8 if execution_lane == "w8a8"
                  else quantize_tree_w4a4)(src, tree)
             pipe = load_from_pretrained(DiffusionPipeline, tree)
-            lane_attr = getattr(pipe, "_cozy_weight_lane", "")
-            print(f"{lane} weight lane: {lane_attr!r}")
-            assert lane_attr == lane, f"{lane} scaled_mm lane did not engage"
+            execution_lane_attr = getattr(pipe, "_cozy_weight_lane", "")
+            print(f"{execution_lane} weight lane: {execution_lane_attr!r}")
+            assert execution_lane_attr == execution_lane, f"{execution_lane} scaled_mm lane did not engage"
         else:
-            raise SystemExit(f"unknown lane {lane}")
+            raise SystemExit(f"unknown lane {execution_lane}")
         pipe.to("cuda")
-        denoiser_gb[lane] = round(_module_bytes(_denoiser(pipe)) / 2**30, 3)
-        print(f"{lane} denoiser resident: {denoiser_gb[lane]} GiB")
+        denoiser_gb[execution_lane] = round(_module_bytes(_denoiser(pipe)) / 2**30, 3)
+        print(f"{execution_lane} denoiser resident: {denoiser_gb[execution_lane]} GiB")
         img, wall = _render(pipe, prompt=args.prompt, seed=args.seed,
                             steps=args.steps, size=args.size)
-        images[lane] = img
-        walls[lane] = wall
+        images[execution_lane] = img
+        walls[execution_lane] = wall
         from PIL import Image
 
-        Image.fromarray(img).save(out / f"{lane}.png")
-        print(f"{lane} eager: {wall:.2f}s for {args.steps} steps "
+        Image.fromarray(img).save(out / f"{execution_lane}.png")
+        print(f"{execution_lane} eager: {wall:.2f}s for {args.steps} steps "
               f"({wall / args.steps * 1000:.0f} ms/step)")
         if args.compiled:
             cw = _compiled_wall(pipe, prompt=args.prompt, seed=args.seed,
                                 steps=args.steps, size=args.size)
             if cw is not None:
-                compiled_walls[lane] = cw
-                print(f"{lane} compiled: {cw:.2f}s "
+                compiled_walls[execution_lane] = cw
+                print(f"{execution_lane} compiled: {cw:.2f}s "
                       f"({cw / args.steps * 1000:.0f} ms/step)")
         _free(pipe)
 
@@ -196,16 +196,16 @@ def main() -> None:
                     "compiled_walls_s": compiled_walls,
                     "denoiser_resident_gib": denoiser_gb, "deltas": {}}
     ref = images.get("bf16")
-    for lane, img in images.items():
-        if ref is None or lane == "bf16":
+    for execution_lane, img in images.items():
+        if ref is None or execution_lane == "bf16":
             continue
         mae, psnr = _mae_psnr(ref, img)
         d = {"mae": round(mae, 5), "psnr_db": round(psnr, 2)}
         lp = _lpips(ref, img)
         if lp is not None:
             d["lpips"] = round(lp, 4)
-        report["deltas"][lane] = d
-        print(f"{lane} vs bf16: {d}")
+        report["deltas"][execution_lane] = d
+        print(f"{execution_lane} vs bf16: {d}")
     for a, b in (("w8a8", "w4a4"), ("bf16", "w4a4")):
         if a in walls and b in walls:
             key = f"speedup_{b}_vs_{a}_eager"

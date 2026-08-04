@@ -277,7 +277,7 @@ def test_no_family_no_mint(_local_env):
 
 # ---------------------------------------------------------------------------
 # gw#564: w8a8 fail-closed x local mint. Production's no-delivered-cell
-# refusal (CompiledLaneUnavailableError) must fall through to the LOCAL
+# refusal (CompiledExecutionLaneUnavailableError) must fall through to the LOCAL
 # store/mint path — found live on a 4090 where the raise aborted the mint —
 # and every exit that cannot produce a cell keeps the refusal TYPED.
 # ---------------------------------------------------------------------------
@@ -294,7 +294,7 @@ def _w8a8_env(_local_env, monkeypatch):
     from gen_worker.models import provision
 
     def refuse(*a, **k):
-        raise cc.CompiledLaneUnavailableError("no delivered w8a8 cell")
+        raise cc.CompiledExecutionLaneUnavailableError("no delivered w8a8 cell")
 
     monkeypatch.setattr(provision, "enable_compiled", refuse)
     return _local_env
@@ -314,7 +314,7 @@ def test_w8a8_delivered_refusal_falls_through_to_mint(_w8a8_env, monkeypatch):
 
 def test_w8a8_no_toolchain_refusal_stays_typed(_w8a8_env, monkeypatch):
     monkeypatch.setattr(cc, "toolchain_present", lambda: False)
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="C compiler"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="C compiler"):
         lc.enable_compiled(_W8a8Pipe(), _Cfg())
 
 
@@ -325,7 +325,7 @@ def test_w8a8_mint_failure_refusal_stays_typed(_w8a8_env, monkeypatch):
         raise RuntimeError("compile exploded")
 
     monkeypatch.setattr(cc, "_compile_and_warm", boom)
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="mint failed"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="mint failed"):
         lc.enable_compiled(_W8a8Pipe(), _Cfg())
     assert not lc.cell_path("fam", "w8a8").exists()
 

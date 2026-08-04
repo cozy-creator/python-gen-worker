@@ -368,7 +368,7 @@ def test_fleet_armed_other_path_never_advertises_aot(
     assert row.ref == _f1.ref and KEY in row.detail
 
 
-def test_fleet_lane_unavailable_is_recorded_against_the_candidate(
+def test_fleet_execution_lane_unavailable_is_recorded_against_the_candidate(
     monkeypatch: pytest.MonkeyPatch, _f1: Any, tmp_path: Path,
 ) -> None:
     from gen_worker import compile_cache as cc
@@ -380,7 +380,7 @@ def test_fleet_lane_unavailable_is_recorded_against_the_candidate(
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> Any:
         calls.append(artifact)
         if len(calls) == 1:
-            raise cc.CompiledLaneUnavailableError("no cell for w8a8")
+            raise cc.CompiledExecutionLaneUnavailableError("no cell for w8a8")
         return AdoptOutcome.hit()
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _enable)

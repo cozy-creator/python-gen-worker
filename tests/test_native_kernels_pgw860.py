@@ -8,7 +8,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import kernel_lane  # noqa: E402
+from gen_worker import kernel_path  # noqa: E402
 from gen_worker.models import native_kernels as nk  # noqa: E402
 from gen_worker.models import svdq_fused  # noqa: E402
 from gen_worker.models import svdq_native as native  # noqa: E402
@@ -19,10 +19,10 @@ from gen_worker.models.svdq_layout import DecodedLinear  # noqa: E402
 @pytest.fixture(autouse=True)
 def _reset_arming(monkeypatch: pytest.MonkeyPatch):
     nk.reset_native_kernels_arming()
-    kernel_lane.clear()
+    kernel_path.clear()
     yield
     nk.reset_native_kernels_arming()
-    kernel_lane.clear()
+    kernel_path.clear()
 
 
 # --- env gating ------------------------------------------------------------
@@ -30,36 +30,36 @@ def _reset_arming(monkeypatch: pytest.MonkeyPatch):
 
 def test_unset_env_stays_baseline_dormant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(nk.NATIVE_ENV, raising=False)
-    assert nk.svdq_linear_lane() == "baseline"
-    assert "env-gated" in nk.svdq_linear_lane_reason()
-    assert nk.svdq_modulation_lane() == "dense"
-    assert "env-gated" in nk.svdq_modulation_lane_reason()
+    assert nk.svdq_linear_execution_lane() == "baseline"
+    assert "env-gated" in nk.svdq_linear_execution_lane_reason()
+    assert nk.svdq_modulation_execution_lane() == "dense"
+    assert "env-gated" in nk.svdq_modulation_execution_lane_reason()
 
 
 def test_kill_switch_forces_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "0")
     # Even an armed verdict + passing self-checks must not arm past the
     # kill-switch, on either axis.
-    kernel_lane.pin("fused+packed", "test")
+    kernel_path.pin("fused+packed", "test")
     monkeypatch.setattr(nk, "_fused_linear_self_check", lambda: None)
     monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
-    assert nk.svdq_linear_lane() == "baseline"
-    assert "kill-switch" in nk.svdq_linear_lane_reason()
-    assert nk.svdq_modulation_lane() == "dense"
-    assert "kill-switch" in nk.svdq_modulation_lane_reason()
+    assert nk.svdq_linear_execution_lane() == "baseline"
+    assert "kill-switch" in nk.svdq_linear_execution_lane_reason()
+    assert nk.svdq_modulation_execution_lane() == "dense"
+    assert "kill-switch" in nk.svdq_modulation_execution_lane_reason()
 
 
 def test_armed_verdict_with_passing_self_checks_arms_both_axes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_lane.pin("fused+packed", "cell verdict")
+    kernel_path.pin("fused+packed", "cell verdict")
     monkeypatch.setattr(nk, "_fused_linear_self_check", lambda: None)
     monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
-    assert nk.svdq_linear_lane() == "fused"
-    assert nk.svdq_modulation_lane() == "packed"
-    assert "cell verdict" in nk.svdq_linear_lane_reason()
-    assert "cell verdict" in nk.svdq_modulation_lane_reason()
+    assert nk.svdq_linear_execution_lane() == "fused"
+    assert nk.svdq_modulation_execution_lane() == "packed"
+    assert "cell verdict" in nk.svdq_linear_execution_lane_reason()
+    assert "cell verdict" in nk.svdq_modulation_execution_lane_reason()
 
 
 def test_the_axes_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,10 +68,10 @@ def test_the_axes_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
     win or 19% of its step time, with no way to take both — so the verdict
     vocabulary has to be able to say `baseline+packed`, and B200's does."""
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_lane.pin("baseline+packed", "cell verdict: B200 228 vs 350 ms")
+    kernel_path.pin("baseline+packed", "cell verdict: B200 228 vs 350 ms")
     monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
-    assert nk.svdq_linear_lane() == "baseline"
-    assert nk.svdq_modulation_lane() == "packed"
+    assert nk.svdq_linear_execution_lane() == "baseline"
+    assert nk.svdq_modulation_execution_lane() == "packed"
 
 
 def test_a_baseline_axis_never_runs_its_self_check(
@@ -83,24 +83,24 @@ def test_a_baseline_axis_never_runs_its_self_check(
         raise AssertionError("the self-check must not run for a degraded axis")
 
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_lane.pin("baseline+dense", "cell verdict: B200 measured 228 vs 350")
+    kernel_path.pin("baseline+dense", "cell verdict: B200 measured 228 vs 350")
     monkeypatch.setattr(nk, "_fused_linear_self_check", boom)
     monkeypatch.setattr(nk, "_packed_modulation_self_check", boom)
-    assert nk.svdq_linear_lane() == "baseline"
-    assert nk.svdq_modulation_lane() == "dense"
-    assert "228 vs 350" in nk.svdq_linear_lane_reason()
+    assert nk.svdq_linear_execution_lane() == "baseline"
+    assert nk.svdq_modulation_execution_lane() == "dense"
+    assert "228 vs 350" in nk.svdq_linear_execution_lane_reason()
 
 
 def test_a_failing_self_check_degrades_only_its_own_axis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_lane.pin("fused+packed", "cell verdict")
+    kernel_path.pin("fused+packed", "cell verdict")
     monkeypatch.setattr(nk, "_fused_linear_self_check", lambda: "no fp4 here")
     monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
-    assert nk.svdq_linear_lane() == "baseline"
-    assert "no fp4 here" in nk.svdq_linear_lane_reason()
-    assert nk.svdq_modulation_lane() == "packed"
+    assert nk.svdq_linear_execution_lane() == "baseline"
+    assert "no fp4 here" in nk.svdq_linear_execution_lane_reason()
+    assert nk.svdq_modulation_execution_lane() == "packed"
 
 
 def test_self_check_raise_degrades_not_raises(
@@ -110,10 +110,10 @@ def test_self_check_raise_degrades_not_raises(
         raise RuntimeError("driver exploded")
 
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_lane.pin("fused+packed", "cell verdict")
+    kernel_path.pin("fused+packed", "cell verdict")
     monkeypatch.setattr(nk, "_fused_linear_self_check", boom)
-    assert nk.svdq_linear_lane() == "baseline"
-    assert "driver exploded" in nk.svdq_linear_lane_reason()
+    assert nk.svdq_linear_execution_lane() == "baseline"
+    assert "driver exploded" in nk.svdq_linear_execution_lane_reason()
 
 
 def test_no_verdict_is_the_declared_default_and_says_so(
@@ -122,13 +122,13 @@ def test_no_verdict_is_the_declared_default_and_says_so(
     """pgw#947 (d): nothing pinned a lane => the conservative default on BOTH
     axes, with a TYPED reason. Never a silent fall-through to a hand tuple."""
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_lane.clear()
-    assert nk.svdq_linear_lane() == kernel_lane.linear_of(
-        kernel_lane.DEFAULT_LANE)
-    assert nk.svdq_modulation_lane() == kernel_lane.modulation_of(
-        kernel_lane.DEFAULT_LANE)
-    assert kernel_lane.REASON_ABSENT in nk.svdq_linear_lane_reason()
-    assert kernel_lane.REASON_ABSENT in nk.svdq_modulation_lane_reason()
+    kernel_path.clear()
+    assert nk.svdq_linear_execution_lane() == kernel_path.linear_of(
+        kernel_path.DEFAULT_EXECUTION_LANE)
+    assert nk.svdq_modulation_execution_lane() == kernel_path.modulation_of(
+        kernel_path.DEFAULT_EXECUTION_LANE)
+    assert kernel_path.REASON_ABSENT in nk.svdq_linear_execution_lane_reason()
+    assert kernel_path.REASON_ABSENT in nk.svdq_modulation_execution_lane_reason()
 
 
 def test_no_sm_allowlist_survives() -> None:
@@ -141,7 +141,7 @@ def test_no_sm_allowlist_survives() -> None:
     assert not hasattr(nk, "FUSED_LINEAR_SMS")
     assert not hasattr(nk, "PACKED_MODULATION_SMS")
     assert not hasattr(nk, "BLACKWELL_SMS")
-    assert kernel_lane.FUSED_MIN_SM == 100
+    assert kernel_path.FUSED_MIN_SM == 100
 
 
 def test_real_self_checks_on_this_host_degrade_cleanly(
@@ -151,11 +151,11 @@ def test_real_self_checks_on_this_host_degrade_cleanly(
     reason, never raise (on a Blackwell runner they instead arm — also
     fine)."""
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_lane.pin("fused+packed", "cell verdict")
-    assert nk.svdq_linear_lane() in ("baseline", "fused")
-    assert nk.svdq_linear_lane_reason()
-    assert nk.svdq_modulation_lane() in ("dense", "packed")
-    assert nk.svdq_modulation_lane_reason()
+    kernel_path.pin("fused+packed", "cell verdict")
+    assert nk.svdq_linear_execution_lane() in ("baseline", "fused")
+    assert nk.svdq_linear_execution_lane_reason()
+    assert nk.svdq_modulation_execution_lane() in ("dense", "packed")
+    assert nk.svdq_modulation_execution_lane_reason()
 
 
 # --- extension probe -------------------------------------------------------
@@ -255,26 +255,26 @@ class _Model(torch.nn.Module):
         self.proj = torch.nn.Linear(in_f, out_f, bias=True)
 
 
-def test_swap_picks_fused_lane_when_armed(
+def test_swap_picks_fused_execution_lane_when_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     if svdq_fused.fused_ops() is None:
         pytest.skip("triton unavailable")
     dec = _tiny_decoded()
     model = _Model(dec.out_features, dec.in_features)
-    monkeypatch.setattr(nk, "svdq_linear_lane", lambda: "fused")
-    monkeypatch.setattr(nk, "svdq_modulation_lane", lambda: "packed")
+    monkeypatch.setattr(nk, "svdq_linear_execution_lane", lambda: "fused")
+    monkeypatch.setattr(nk, "svdq_modulation_execution_lane", lambda: "packed")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts == {"blockwise": 0, "dense": 0, "fused": 1, "prefixes": 1,
                       "linears": 1}
     assert getattr(model.proj, "_cozy_svdq_fused", False)
 
 
-def test_swap_baseline_when_lane_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_swap_baseline_when_execution_lane_off(monkeypatch: pytest.MonkeyPatch) -> None:
     dec = _tiny_decoded()
     model = _Model(dec.out_features, dec.in_features)
-    monkeypatch.setattr(nk, "svdq_linear_lane", lambda: "baseline")
-    monkeypatch.setattr(nk, "svdq_modulation_lane", lambda: "dense")
+    monkeypatch.setattr(nk, "svdq_linear_execution_lane", lambda: "baseline")
+    monkeypatch.setattr(nk, "svdq_modulation_execution_lane", lambda: "dense")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts["fused"] == 0
     assert counts["blockwise"] == 1
@@ -293,8 +293,8 @@ def test_swap_unsupported_shape_degrades_to_blockwise(
         second_kind=dec.second_kind, rank=0, proj_down=None, proj_up=None,
         smooth_factor=dec.smooth_factor, bias=dec.bias)
     model = _Model(dec.out_features, dec.in_features)
-    monkeypatch.setattr(nk, "svdq_linear_lane", lambda: "fused")
-    monkeypatch.setattr(nk, "svdq_modulation_lane", lambda: "packed")
+    monkeypatch.setattr(nk, "svdq_linear_execution_lane", lambda: "fused")
+    monkeypatch.setattr(nk, "svdq_modulation_execution_lane", lambda: "packed")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts["fused"] == 0
     assert counts["blockwise"] == 1

@@ -182,7 +182,7 @@ def test_cell_selection_bug_still_fail_closed_when_mint_impossible(
 
     monkeypatch.setattr(
         "gen_worker.models.loading.pipeline_weight_lane", lambda pipe: "w8a8")
-    with pytest.raises(cc.CompiledLaneUnavailableError) as exc:
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError) as exc:
         fc.enable_compiled(
             _W8A8Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))
     assert isinstance(exc.value.__cause__, cc.CellSelectionBugError)
@@ -374,7 +374,7 @@ def test_mint_impossible_keeps_quantized_typed_refusal(monkeypatch, tmp_path):
     setattr(w8a8, "_cozy_weight_lane", "w8a8")
     monkeypatch.setattr(
         "gen_worker.models.loading.pipeline_weight_lane", lambda p: "w8a8")
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="self-mint is unavailable"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="self-mint is unavailable"):
         fc.enable_compiled(w8a8, _Cfg(), tmp_path, None, publisher=None)
 
 
@@ -620,10 +620,10 @@ def test_delivered_seed_declines_later_self_mint(tmp_path, monkeypatch):
     assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(seeded)
 
 
-def test_delivered_seed_mandatory_lane_keeps_typed_refusal(tmp_path, monkeypatch):
+def test_delivered_seed_mandatory_execution_lane_keeps_typed_refusal(tmp_path, monkeypatch):
     _mintable(monkeypatch)
     monkeypatch.setattr(cc, "_DELIVERED_SEEDED", True)
     pipe = _Pipe()
     pipe._cozy_weight_lane = "w8a8"
-    with pytest.raises(cc.CompiledLaneUnavailableError, match="delivered cell"):
+    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="delivered cell"):
         fc.enable_compiled(pipe, _Cfg(), tmp_path, None)

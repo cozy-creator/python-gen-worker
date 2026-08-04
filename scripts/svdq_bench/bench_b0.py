@@ -234,14 +234,14 @@ def run_bench(args) -> int:
     from gen_worker.models.svdq import detect_svdq_artifact
 
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
-    lane = nk.svdq_linear_lane()
+    execution_lane = nk.svdq_linear_execution_lane()
     report: dict = {"device": torch.cuda.get_device_name(0),
                     "torch": torch.__version__,
                     "gen_worker": getattr(gen_worker, "__version__", "?"),
-                    "lane": lane,
-                    "modulation_lane": nk.svdq_modulation_lane(),
-                    "lane_reason": nk.svdq_linear_lane_reason()}
-    print(f"[bench] lane={lane} ({report['lane_reason']})", flush=True)
+                    "lane": execution_lane,
+                    "modulation_lane": nk.svdq_modulation_execution_lane(),
+                    "lane_reason": nk.svdq_linear_execution_lane_reason()}
+    print(f"[bench] lane={execution_lane} ({report['lane_reason']})", flush=True)
 
     art = detect_svdq_artifact(Path(args.ckpt))
     assert art is not None
@@ -264,7 +264,7 @@ def run_bench(args) -> int:
     report["resident_after_load_gb"] = torch.cuda.memory_allocated() / 2**30
     print(f"[bench] load {report['load_s']:.1f}s census={census} "
           f"resident={report['resident_after_load_gb']:.1f}GB", flush=True)
-    if lane == "fused":
+    if execution_lane == "fused":
         assert census["fused"] > 0, "fused lane armed but zero fused modules"
 
     kw = synth_inputs(model, "cuda", torch.bfloat16)
@@ -285,7 +285,7 @@ def run_bench(args) -> int:
     report["top_kernels_per_forward_ms"] = [
         {"key": r.key[:120], "cuda_ms": r.device_time_total / 1e3 / 10,
          "count": r.count} for r in top]
-    (out_dir / f"profile_{lane}.txt").write_text(
+    (out_dir / f"profile_{execution_lane}.txt").write_text(
         prof.key_averages().table(sort_by="cuda_time_total", row_limit=50))
 
     t0 = time.perf_counter()
@@ -302,9 +302,9 @@ def run_bench(args) -> int:
           f"{comp['mean_ms']:.1f}ms -> step {comp['mean_ms'] * 2:.0f}ms "
           f"peak {report['peak_vram_gb']:.1f}GB", flush=True)
 
-    (out_dir / f"bench_{lane}.json").write_text(json.dumps(report, indent=1))
+    (out_dir / f"bench_{execution_lane}.json").write_text(json.dumps(report, indent=1))
     print("[bench] DONE " + json.dumps({
-        "lane": lane, "eager_step_ms": report["eager_step_ms"],
+        "lane": execution_lane, "eager_step_ms": report["eager_step_ms"],
         "compiled_step_ms": report["compiled_step_ms"]}), flush=True)
     return 0
 

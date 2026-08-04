@@ -23,7 +23,7 @@ import pytest
 
 from gen_worker import activity, capability_renewal, hot_swap, preload, trt_engine
 from gen_worker.compile_cache import AdoptError
-from gen_worker.models import lane_gate, residency
+from gen_worker.models import execution_lane_gate, residency
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.utils import lora
 
@@ -274,13 +274,13 @@ class _SlotsPipe:
         pass
 
 
-def test_lane_gate_wrap_failure_rides_typed_event(events: List[Any]) -> None:
-    gate = lane_gate.LaneGate(
+def test_execution_lane_gate_wrap_failure_rides_typed_event(events: List[Any]) -> None:
+    gate = execution_lane_gate.ExecutionLaneGate(
         ref="ref-c", residency=object(), label="lane-c")  # type: ignore[arg-type]
     pipe = _SlotsPipe()
     # __class__ assignment onto a __dict__-bearing subclass of a __slots__
     # class fails with a layout TypeError — the wrap's failure mode.
-    assert lane_gate.arm_lane_gate(pipe, gate) is False
+    assert execution_lane_gate.arm_execution_lane_gate(pipe, gate) is False
 
     got = _by_kind(events, activity.KIND_SERVE_DEGRADE)
     assert [e.phase for e in got] == ["lane_gate_unarmed"]

@@ -14,9 +14,9 @@ import time
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
-from harness.blob_host import BlobHost
+from harness.blob_host import BlobHost, GatedBlobHost
 from harness.hub_double import Conn, WorkerHarness, hub_double, is_model_event, is_ready
-from harness.progress_wait import Cadence, await_count
+from harness.progress_wait import Cadence, await_count, await_progress
 
 # pgw#795 (the v0.78.0 release blocker): this ref must NOT be one a toy
 # endpoint declares. It used to be `harness/residency-tiny`, which
@@ -30,6 +30,11 @@ from harness.progress_wait import Cadence, await_count
 # property holds at any spacing (verified at 0.5 s and 5 s gaps).
 _MODEL_REF = "harness/republish-tiny"
 
+# pgw#955: a SECOND undeclared ref, materialized after _MODEL_REF in the same
+# plan, whose blob the test can hold open — that is what keeps a reconcile pass
+# genuinely in flight while the hub re-sends the plan.
+_GATE_REF = "harness/republish-gate"
+
 
 def _disk_only_ack(snapshot: pb.Snapshot, generation: int) -> pb.HelloAck:
     return pb.HelloAck(
@@ -38,6 +43,20 @@ def _disk_only_ack(snapshot: pb.Snapshot, generation: int) -> pb.HelloAck:
             generation=generation,
             disk_refs=[_MODEL_REF],
             snapshots={_MODEL_REF: snapshot},
+        ),
+    )
+
+
+def _gated_ack(
+    held: pb.Snapshot, gated: pb.Snapshot, generation: int,
+) -> pb.HelloAck:
+    """The same plan every time: two disk refs, _MODEL_REF declared first."""
+    return pb.HelloAck(
+        protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+        desired_residency=pb.DesiredResidency(
+            generation=generation,
+            disk_refs=[_MODEL_REF, _GATE_REF],
+            snapshots={_MODEL_REF: held, _GATE_REF: gated},
         ),
     )
 
@@ -141,5 +160,95 @@ def test_reissued_plan_republishes_held_identity(tmp_path) -> None:
             _wait_on_disk_count(conn, harness, baseline + 2)
             _settle()
             assert _count_on_disk(conn) == baseline + 2
+    finally:
+        blobs.shutdown()
+
+
+def _await_gate_request(blobs: GatedBlobHost, harness: WorkerHarness) -> None:
+    """Wait until the reconcile pass is parked on the gated blob's GET."""
+    await_progress(
+        blobs.requested.is_set,
+        bool,
+        what=f"the reconcile pass to reach {_GATE_REF}'s download",
+        cadence=Cadence(),
+        gone=lambda: None if harness.alive else "the worker thread exited",
+    )
+
+
+def _await_applied_ack(harness: WorkerHarness, after: int) -> None:
+    """Wait until an ack past ``after`` has been APPLIED to desired state.
+
+    The republish epoch is bumped by ``replace_desired_snapshots``, which
+    ``on_hello_ack`` runs immediately before it decides what to do with the
+    running reconcile — so an advanced epoch is proof the decision under test
+    has already been taken, with no clock and no guessing.
+    """
+    store = harness.worker.executor.store
+    await_progress(
+        lambda: int(store._residency_republish_epoch),
+        lambda seen: seen > after,
+        what="the re-sent plan to be applied",
+        cadence=Cadence(),
+        gone=lambda: None if harness.alive else "the worker thread exited",
+    )
+
+
+def test_reissued_plan_republishes_across_an_in_flight_reconcile(tmp_path) -> None:
+    """pgw#955: a plan re-send that lands WHILE the reconcile is still running
+    must still produce its re-report.
+
+    This is the same property as the test above, at the moment it was being
+    lost. gw#614 taught ``_replace_residency_reconcile`` not to cancel an
+    in-flight reconcile when the re-sent plan's model set is unchanged — a
+    running self_mint_compile needs its window — but it returned there without
+    telling the running loop anything. So the ack bumped the republish epoch
+    and nothing ever read it: no cancel, no restart, no re-announce, and no
+    later event to heal it. The hub's redrive vanished, permanently.
+
+    That window is ~one event-loop step wide when the plan materializes
+    instantly, which is why it presented as a load-only flake ("1 of 2 ON_DISK
+    re-reports", both attempts of PR #470's `tests` job) rather than as the
+    product bug it is. Here the window is held open on purpose: the second ref
+    of the same plan parks on a blob the test does not answer until it has
+    proven the re-sent plan was applied.
+    """
+    blobs = GatedBlobHost(tmp_path, gated="gate-blob")
+    try:
+        held = blobs.one_file_snapshot("snap-1", "blob", b"tiny-weights")
+        gated = blobs.one_file_snapshot("snap-gate", "gate-blob", b"gated-weights")
+        ack = _gated_ack(held, gated, generation=1)
+        with hub_double() as (scheduler, harness):
+            conn = scheduler.wait_connection(0)
+            conn.wait_for(is_ready)
+
+            conn.send(hello_ack=ack)
+            conn.wait_for(is_model_event(_MODEL_REF, pb.MODEL_STATE_ON_DISK))
+            baseline = _count_on_disk(conn)
+
+            # _MODEL_REF is on disk and reported; the pass has moved on to
+            # _GATE_REF and is now parked inside its download.
+            _await_gate_request(blobs, harness)
+            epoch = int(harness.worker.executor.store._residency_republish_epoch)
+            conn.send(hello_ack=ack)
+            _await_applied_ack(harness, epoch)
+
+            # Only now does the held download answer, so the reconcile the ack
+            # met was unambiguously still in flight.
+            blobs.release()
+            _wait_on_disk_count(conn, harness, baseline + 1)
+            events = [
+                m.model_event
+                for m in conn.received
+                if m.WhichOneof("msg") == "model_event"
+                and m.model_event.ref == _MODEL_REF
+                and m.model_event.state == pb.MODEL_STATE_ON_DISK
+            ]
+            assert events[-1].snapshot_digest == "snap-1"
+            assert events[-1].residency_generation == 1
+
+            # Still exactly one per applied plan — the re-converge pass does
+            # not re-announce inside its own epoch.
+            _settle()
+            assert _count_on_disk(conn) == baseline + 1
     finally:
         blobs.shutdown()

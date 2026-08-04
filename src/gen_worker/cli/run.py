@@ -33,7 +33,7 @@ from ..discovery.project import load_project_config
 from gen_worker.registry import collect_from_namespace
 from .args import ArgError, build_payload
 from ..api.slot import resolve_slot
-from ..models import lanes as lanespec
+from ..models import execution_lanes as lanespec
 from ..api.binding import rebind_pick
 from .serve import DEFAULT_SOCKET_PATH
 from . import invoke as invoke_mod
@@ -117,7 +117,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         ),
     )
     p.add_argument(
-        "--lane", dest="lane", default="",
+        "--lane", dest="execution_lane", default="",
         help=(
             "Execution lane (th#913 dual-form): a family 'bf16'|'fp8', or a "
             "full descriptor like 'fp8-w8a8-dynamic+compiled'. Default: auto "
@@ -758,34 +758,34 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
         set_slots(resolved, errors, root_slot=root)
 
 
-def _local_executing_lane(
-    bindings: Dict[str, Any], lane_str: str, handles: Tuple[str, ...]
+def _local_executing_execution_lane(
+    bindings: Dict[str, Any], execution_lane_str: str, handles: Tuple[str, ...]
 ) -> str:
     """th#1050 ctx.lane for local runs: a --lane the endpoint DECLARES wins
     (author kernels execute it); otherwise the most-quantized binding's lane
     (the local twin of Executor._served_lane, eager execution)."""
 
-    if lane_str and handles:
+    if execution_lane_str and handles:
         try:
-            req = lanespec.parse_lane_spec(lane_str)
-            if req.lane is not None and lanespec.lane_body_id(req.lane) in handles:
-                return lanespec.lane_id(req.lane)
+            req = lanespec.parse_execution_lane_spec(execution_lane_str)
+            if req.execution_lane is not None and lanespec.execution_lane_body_id(req.execution_lane) in handles:
+                return lanespec.execution_lane_id(req.execution_lane)
         except ValueError:
             pass
-    ranked = {b: i for i, b in enumerate(lanespec.known_lanes())}
+    ranked = {b: i for i, b in enumerate(lanespec.known_execution_lanes())}
     best, best_key = None, (2, len(ranked) + 1)
     for b in (bindings or {}).values():
-        lane = lanespec.lane_of_binding(
+        execution_lane = lanespec.execution_lane_of_binding(
             getattr(b, "flavor", "") or "",
             getattr(b, "storage_dtype", "") or "", False)
-        quant = 1 if lanespec.family_of(lane) == lanespec.FAMILY_BF16 else 0
-        key = (quant, ranked.get(lanespec.lane_id(lane), len(ranked)))
+        quant = 1 if lanespec.family_of(execution_lane) == lanespec.FAMILY_BF16 else 0
+        key = (quant, ranked.get(lanespec.execution_lane_id(execution_lane), len(ranked)))
         if best is None or key < best_key:
-            best, best_key = lane, key
-    return lanespec.lane_id(best) if best is not None else "bf16-w16a16+eager"
+            best, best_key = execution_lane, key
+    return lanespec.execution_lane_id(best) if best is not None else "bf16-w16a16+eager"
 
 
-def _apply_lane_to_bindings(bindings: Dict[str, Any], lane_str: str) -> Dict[str, Any]:
+def _apply_execution_lane_to_bindings(bindings: Dict[str, Any], execution_lane_str: str) -> Dict[str, Any]:
     """th#913/gw#596: fold a --lane choice into the declared bindings.
 
     bf16 = the declared base (no transform); fp8 family = the local cast
@@ -794,7 +794,7 @@ def _apply_lane_to_bindings(bindings: Dict[str, Any], lane_str: str) -> Dict[str
     lanes need an exact ref#flavor and are refused here."""
 
     try:
-        req = lanespec.parse_lane_spec(lane_str)
+        req = lanespec.parse_execution_lane_spec(execution_lane_str)
     except ValueError as e:
         raise _UsageError(f"--lane: {e}") from None
     if req.is_zero or req.family == lanespec.FAMILY_BF16:
@@ -803,7 +803,7 @@ def _apply_lane_to_bindings(bindings: Dict[str, Any], lane_str: str) -> Dict[str
         raise _UsageError(
             "--lane: 4bit lanes carry rank/engine-specific flavor tokens; "
             "bind the exact ref#flavor (e.g. '#svdq-int4-r128') instead.")
-    want_w8a8 = req.lane is not None and req.lane.activation == lanespec.ACT_W8A8
+    want_w8a8 = req.execution_lane is not None and req.execution_lane.activation == lanespec.ACT_W8A8
     out: Dict[str, Any] = {}
     for name, binding in bindings.items():
         try:
@@ -1038,8 +1038,8 @@ def _run_inner(args: argparse.Namespace) -> int:
 
     # th#913/gw#596: optional human lane choice, mapped onto the bindings
     # before resolution (the ladder twin's local expansion).
-    if getattr(args, "lane", ""):
-        selected.bindings = _apply_lane_to_bindings(selected.bindings, args.lane)
+    if getattr(args, "execution_lane", ""):
+        selected.bindings = _apply_execution_lane_to_bindings(selected.bindings, args.execution_lane)
 
     # Ergonomic `field=value` tokens -> payload bytes (coerced via the function's
     # msgspec type), merged over any --payload base.
@@ -1065,8 +1065,8 @@ def _run_inner(args: argparse.Namespace) -> int:
         kind=selected.kind,
         allow_publish=bool(args.allow_publish),
     )
-    ctx._set_lane(_local_executing_lane(
-        selected.bindings, getattr(args, "lane", ""), selected.handles))
+    ctx._set_execution_lane(_local_executing_execution_lane(
+        selected.bindings, getattr(args, "execution_lane", ""), selected.handles))
     if source_path is not None:
         set_source = getattr(ctx, "_set_source_path", None)
         if not callable(set_source):

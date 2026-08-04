@@ -343,7 +343,7 @@ def test_warm_override_on_axis_field_is_a_walk_time_error() -> None:
         extract_specs(BadWarm)
 
 
-def test_dual_pin_lanes_never_dedupe_across_text_pins() -> None:
+def test_dual_pin_execution_lanes_never_dedupe_across_text_pins() -> None:
     from gen_worker import warmup as warmup_mod
 
     specs = extract_specs(DualPin)

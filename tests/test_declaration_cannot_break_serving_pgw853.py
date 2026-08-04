@@ -251,8 +251,8 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
-    monkeypatch.setattr(fleet_cells.cc, "apply_lora_lane", lambda p, b: None)
-    monkeypatch.setattr(fleet_cells.cc, "drop_lora_lane", lambda p: None)
+    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
+    monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
     monkeypatch.setattr(

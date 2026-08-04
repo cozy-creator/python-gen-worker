@@ -43,7 +43,7 @@ def test_manifest_emits_handles_block() -> None:
     assert all("handles" not in f for f in plain)
 
 
-def test_declared_lane_executes_and_ctx_lane_reports_it() -> None:
+def test_declared_execution_lane_executes_and_ctx_execution_lane_reports_it() -> None:
     with hub_double() as (scheduler, _harness):
         conn = scheduler.wait_connection(0)
         conn.wait_for(is_ready)
@@ -72,7 +72,7 @@ def test_undeclared_dispatch_is_todays_behavior() -> None:
         assert res.metrics.lane == "bf16-w16a16+eager"
 
 
-def test_unhandled_lane_still_refuses_typed() -> None:
+def test_unhandled_execution_lane_still_refuses_typed() -> None:
     with hub_double() as (scheduler, _harness):
         conn = scheduler.wait_connection(0)
         conn.wait_for(is_ready)

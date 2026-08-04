@@ -105,7 +105,7 @@ class ProbeAxis:
     target: str
     fork: Tuple[Tuple[str, Any], ...] = ()
     class_dims: Tuple[Tuple[str, int], ...] = ()
-    lane: str = ""
+    execution_lane: str = ""
     lora_bucket: int = 0
 
     @property
@@ -122,7 +122,7 @@ class ProbeAxis:
         re-litigates from a screenshot.
         """
         digest = hashlib.sha256(
-            f"{self.entry}|{self.lane}|{self.lora_bucket}".encode()).hexdigest()
+            f"{self.entry}|{self.execution_lane}|{self.lora_bucket}".encode()).hexdigest()
         return int(digest[:8], 16)
 
     @property
@@ -133,7 +133,7 @@ class ProbeAxis:
 
     def __str__(self) -> str:
         return (f"entry={self.entry} target={self.target} "
-                f"row={self.shape_row} lane={self.lane or '(plain)'} "
+                f"row={self.shape_row} lane={self.execution_lane or '(plain)'} "
                 f"bucket={self.lora_bucket} seed={self.seed}")
 
 
@@ -147,7 +147,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     from . import aot_serve
 
     entries = aot_serve.entries_from_meta(dict(meta))
-    lane = str(meta.get("precision") or "")
+    execution_lane = str(meta.get("precision") or "")
     cell_bucket = int(meta.get("lora_bucket") or 0)
     axes: List[ProbeAxis] = []
     for name in sorted(entries):
@@ -166,7 +166,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
             fork=tuple((str(n), v) for n, v in (block.get("fork") or ())),
             class_dims=tuple(
                 (str(n), int(v)) for n, v in (block.get("class_dims") or ())),
-            lane=lane,
+            execution_lane=execution_lane,
             lora_bucket=bucket,
         ))
     if not axes:

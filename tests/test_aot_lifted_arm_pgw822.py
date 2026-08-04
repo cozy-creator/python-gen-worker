@@ -93,7 +93,7 @@ def _container_only_pipe() -> Any:
     state the mint child handed to ``aot_mint.mint`` in the measured run.
     Branch containers allocated, denoiser forward untouched."""
     pipe = types.SimpleNamespace(unet=TinyUNet().eval())
-    w8a8_lora.enable_branch_lanes(pipe, BUCKET)
+    w8a8_lora.enable_branch_execution_lanes(pipe, BUCKET)
     assert lora_lifted.lifted_binding(pipe.unet) is None
     return pipe
 
@@ -124,7 +124,7 @@ def _fresh_registry():
 
 def test_the_arm_installs_both_halves_over_a_container_only_pipeline() -> None:
     pipe = _container_only_pipe()
-    lora_lifted.arm_lifted_lora_lanes(pipe, BUCKET)
+    lora_lifted.arm_lifted_lora_execution_lanes(pipe, BUCKET)
     binding = lora_lifted.lifted_binding(pipe.unet)
     assert binding is not None
     import inspect
@@ -135,15 +135,15 @@ def test_the_arm_installs_both_halves_over_a_container_only_pipeline() -> None:
 
 def test_the_arm_is_idempotent_and_a_noop_at_bucket_zero() -> None:
     pipe = _container_only_pipe()
-    first = lora_lifted.arm_lifted_lora_lanes(pipe, BUCKET)["unet"]
-    again = lora_lifted.arm_lifted_lora_lanes(pipe, BUCKET)["unet"]
+    first = lora_lifted.arm_lifted_lora_execution_lanes(pipe, BUCKET)["unet"]
+    again = lora_lifted.arm_lifted_lora_execution_lanes(pipe, BUCKET)["unet"]
     assert again is first
     plain = types.SimpleNamespace(unet=TinyUNet().eval())
-    assert lora_lifted.arm_lifted_lora_lanes(plain, 0) == {}
+    assert lora_lifted.arm_lifted_lora_execution_lanes(plain, 0) == {}
     assert lora_lifted.lifted_binding(plain.unet) is None
 
 
-def test_the_declared_feed_binds_once_the_lane_is_armed() -> None:
+def test_the_declared_feed_binds_once_the_execution_lane_is_armed() -> None:
     """The measured refusal, at its exact site: ``declared_inputs`` binding
     the declaration to the module's own signature."""
     decl = _declare()
@@ -153,7 +153,7 @@ def test_the_declared_feed_binds_once_the_lane_is_armed() -> None:
     with pytest.raises(aot_mint.MintRefused, match="are not parameters of"):
         aot_declaration.declared_inputs(pipe.unet, spec, decl)
 
-    lora_lifted.arm_lifted_lora_lanes(pipe, BUCKET)
+    lora_lifted.arm_lifted_lora_execution_lanes(pipe, BUCKET)
     args, kwargs = aot_declaration.declared_inputs(pipe.unet, spec, decl)
     assert kwargs == {}
     assert len(args) == 3          # sample + the lifted pair, all positional

@@ -24,12 +24,12 @@ from pathlib import Path
 from typing import Dict, Set, Tuple
 
 from gen_worker import aot_mint, executor
-from gen_worker.compile_cache import lane_bucket
+from gen_worker.compile_cache import execution_lane_bucket
 from gen_worker.models import loading
-from gen_worker.models.w8a8_lora import lora_lane
+from gen_worker.models.w8a8_lora import lora_execution_lane
 
 #: Assignment targets that mean "this pipeline's base weight lane".
-_LANE_TARGETS = frozenset({"_cozy_weight_lane", "_WEIGHT_LANE_ATTR"})
+_EXECUTION_LANE_TARGETS = frozenset({"_cozy_weight_lane", "_WEIGHT_LANE_ATTR"})
 
 #: Folded by :func:`loading.pipeline_weight_lane` to ``""`` — it traces
 #: identically to plain bf16 and is therefore not a distinct cell lane.
@@ -56,15 +56,15 @@ def _string_literals(node: ast.AST) -> Set[str]:
     return set()
 
 
-def _is_lane_target(target: ast.AST) -> bool:
+def _is_execution_lane_target(target: ast.AST) -> bool:
     if isinstance(target, ast.Attribute):
-        return target.attr in _LANE_TARGETS
+        return target.attr in _EXECUTION_LANE_TARGETS
     if isinstance(target, ast.Name):
-        return target.id in _LANE_TARGETS
+        return target.id in _EXECUTION_LANE_TARGETS
     return False
 
 
-def stamped_lanes() -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+def stamped_execution_lanes() -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
     """``(literal lanes, derived lanes)`` keyed by ``file:line``.
 
     ``setattr(pipe, _WEIGHT_LANE_ATTR, "fp8-hooks")`` is a Call, not an
@@ -78,7 +78,7 @@ def stamped_lanes() -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
         for node in ast.walk(tree):
             value: ast.AST | None = None
             if isinstance(node, ast.Assign) and any(
-                _is_lane_target(t) for t in node.targets
+                _is_execution_lane_target(t) for t in node.targets
             ):
                 value = node.value
             elif (
@@ -86,7 +86,7 @@ def stamped_lanes() -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "setattr"
                 and len(node.args) == 3
-                and _is_lane_target(node.args[1])
+                and _is_execution_lane_target(node.args[1])
             ):
                 value = node.args[2]
             if value is None:
@@ -106,13 +106,13 @@ def stamped_lanes() -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
     return literal, derived
 
 
-def test_every_stampable_lane_is_in_the_single_source_of_truth():
-    literal, _derived = stamped_lanes()
+def test_every_stampable_execution_lane_is_in_the_single_source_of_truth():
+    literal, _derived = stamped_execution_lanes()
     assert literal, "found no _cozy_weight_lane assignment sites to check"
-    known = set(loading.STAMPABLE_BASE_LANES) | _FOLDED
+    known = set(loading.STAMPABLE_BASE_EXECUTION_LANES) | _FOLDED
     unknown = {
-        where: sorted(lanes - known)
-        for where, lanes in literal.items() if lanes - known
+        where: sorted(execution_lanes - known)
+        for where, execution_lanes in literal.items() if execution_lanes - known
     }
     assert not unknown, (
         f"loaders stamp base lanes that loading.STAMPABLE_BASE_LANES does not "
@@ -122,20 +122,20 @@ def test_every_stampable_lane_is_in_the_single_source_of_truth():
     )
 
 
-def test_the_ie546_lanes_and_the_two_pgw918_found_are_all_covered():
+def test_the_ie546_execution_lanes_and_the_two_pgw918_found_are_all_covered():
     """The regression this issue IS: w4a4 and svdq-native were missing."""
-    for lane in ("", "fp8-hooks", "w8a8", "w4a4", "svdq-native"):
-        assert lane in loading.STAMPABLE_BASE_LANES
+    for execution_lane in ("", "fp8-hooks", "w8a8", "w4a4", "svdq-native"):
+        assert execution_lane in loading.STAMPABLE_BASE_EXECUTION_LANES
 
 
 def test_the_executor_speculates_exactly_the_loader_vocabulary():
     """One list, not two. The pre-load pull-by-key lookup speculates every
     lane a loader can leave, because there is no second copy to drift."""
-    assert (tuple(executor._SPECULATIVE_CELL_BASE_LANES)
-            == tuple(loading.STAMPABLE_BASE_LANES))
+    assert (tuple(executor._SPECULATIVE_CELL_BASE_EXECUTION_LANES)
+            == tuple(loading.STAMPABLE_BASE_EXECUTION_LANES))
 
 
-def test_the_mint_holds_no_lane_allowlist_at_all():
+def test_the_mint_holds_no_execution_lane_allowlist_at_all():
     """pgw#850 superseded pgw#918's second half by DELETION.
 
     ``PARITY_LANES`` was the surviving half of that allowlist — one member,
@@ -156,23 +156,23 @@ def test_the_one_derived_stamp_site_decomposes_to_a_named_base():
     as a literal.  It is the BUCKETED form of a base lane, so the base set
     stays complete iff every base it can be handed decomposes back out of
     ``lane_bucket`` into the same list."""
-    _literal, derived = stamped_lanes()
+    _literal, derived = stamped_execution_lanes()
     assert derived, "expected the bucketed lora_lane stamp site"
-    for base in loading.STAMPABLE_BASE_LANES:
+    for base in loading.STAMPABLE_BASE_EXECUTION_LANES:
         for sparse in (False, True):
-            stamp = lora_lane(64, sparse, base=base)
-            decomposed, bucket = lane_bucket(stamp)
+            stamp = lora_execution_lane(64, sparse, base=base)
+            decomposed, bucket = execution_lane_bucket(stamp)
             if sparse:
                 # Sparse placement is eager-only and never produces a cell —
                 # it deliberately does not parse as bucketed.
                 assert bucket == 0
                 continue
             assert bucket == 64
-            assert decomposed in loading.STAMPABLE_BASE_LANES, (
+            assert decomposed in loading.STAMPABLE_BASE_EXECUTION_LANES, (
                 f"lora_lane(base={base!r}) decomposes to {decomposed!r}, "
                 f"which is not a named base lane")
 
 
-def test_the_dead_regressed_lanes_constant_is_gone():
+def test_the_dead_regressed_execution_lanes_constant_is_gone():
     """It had no reader in src/ and named an unstampable lane."""
     assert not hasattr(aot_mint, "REGRESSED_LANES")
