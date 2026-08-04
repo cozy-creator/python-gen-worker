@@ -11771,6 +11771,21 @@ class Executor:
                 self._loop = asyncio.get_running_loop()
                 lease = _GpuSlotLease(gpu_permit, self._loop)
                 ctx._gpu_slot_lease = lease
+                # pgw#943: a child-call wait may yield this permit ONLY when
+                # the job holds nothing another permit-holder could block on.
+                # Both permit acquirers (this path and _bg_turn) take the
+                # permit BEFORE the instance gate, so a parked parent still
+                # holding run_lock would wedge its own re-acquire: the
+                # follower/mint holds the permit waiting on run_lock, the
+                # parent waits on the permit — hold-and-wait cycle. And a
+                # follower on a shared pipeline would clobber this request's
+                # per-request adapter state mid-handler. Gate-holding or
+                # adapter-carrying parents therefore keep the permit across
+                # child calls (same-function pipelining is impossible for
+                # them anyway — single-flight per instance, pgw#647).
+                ctx._child_call_slot_yieldable = (
+                    (spec.cls is None or spec.reentrant) and not adapters
+                )
                 # gw#516: the handler thread reports the terminal
                 # decode->finalize slot release so the hub sees the job as
                 # "finalizing" while its encode/upload tail runs slotless.

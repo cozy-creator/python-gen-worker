@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **pgw#943: a child-call wait now YIELDS the GPU permit — the worker
+  pipelines while parked on a child request.** #455 measured the defect: at
+  `gpu_slots=1` a parent in `ctx.call_endpoint` held its group permit for the
+  whole child call, so the cozy-eval shape (quantize → call eval → continue)
+  rented an accelerator to wait on a network round trip and a second request
+  parked in `WAIT_GPU_SLOT` for the duration. Both waiting styles
+  (`wait=True` and the `wait=False` handle's `.result()`) now run under
+  `ctx._child_call_wait`, which yields the #382 GPU-slot lease and
+  re-acquires before returning to tenant code; the park is bracketed as a
+  `child_call_wait` stage (GPU-idle) so it stops masquerading as compute.
+  Re-acquire rides `asyncio.Semaphore`, which is FIFO on Python ≥3.12
+  (`locked()` counts waiters — verified empirically), so a resuming parent
+  cannot be starved by late arrivals. **The yield is deliberately SCOPED**:
+  a job holding its instance gate (non-reentrant class endpoint) or
+  per-request adapters keeps the permit — both permit acquirers (`_run_job`,
+  `_bg_turn`) take the permit BEFORE the instance gate, so a parked parent
+  still holding `run_lock` would wedge its own re-acquire (follower/mint
+  holds the permit while waiting on `run_lock`; parent waits on the permit —
+  hold-and-wait cycle), and a follower on a shared pipeline would clobber
+  adapter state mid-handler. Same-function pipelining is impossible for that
+  shape anyway (single-flight per instance, pgw#647). The #455 pinning
+  assertion is inverted per its own instruction; new tests cover re-acquire
+  under a deliberately-held contender, sequential child calls
+  (yield→reacquire→yield), child failure mid-yield, cancel mid-yield, and
+  the gate-holding scope itself.
+
 - **pgw#952: a lane -> `dev` PR used to run NO CI AT ALL; `ci.yml` now runs on
   `[dev, master]` as two parallel jobs.** Verified on PR #466 (215+/178-, merged
   into `dev`): `statusCheckRollup` was `[]` — not a check that passed, no check

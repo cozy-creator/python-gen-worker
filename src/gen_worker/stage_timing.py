@@ -54,6 +54,8 @@ _CLASS_BY_STAGE: Dict[str, str] = {
     "adapter_activate": SMALL_GPU,
     # CPU / network
     "gpu_permit_wait": GPU_IDLE,
+    # pgw#943: parked on a child request's result — slot yielded when safe.
+    "child_call_wait": GPU_IDLE,
     "input_fetch": GPU_IDLE,
     "setup_wait": GPU_IDLE,
     "image_encode": GPU_IDLE,
