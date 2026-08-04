@@ -24,12 +24,26 @@ cell is being minted for, recorded INTO the cell, and adopted by serving:
     mint      probe(candidates, ...) -> Verdict     (every buildable
               combination built, compiled, and timed on the target card, in
               the pgw#784 mint process)
-    envelope  metadata.json["kernel_lane"] — the DISCRETE verdict only
+    envelope  metadata.json["kernel_lane"] — the DISCRETE verdict, plus each
+              candidate's QUANTIZED peak and the fallback order
     result    metadata["kernel_lane_evidence"] — the numbers, published with
               the checkpoint, never packed (the #699 double-mint byte-compare
               forbids wall clocks inside the artifact)
-    serve     adopt(meta) -> pin(); the load-time swap reads the pin, each
-              axis projecting its own value out of it
+    serve     adopt(meta) -> re-apply the fit rule on THIS card -> pin(); the
+              load-time swap reads the pin, each axis projecting its own
+              value out of it
+
+CELL KEYS ARE KEYED ON SM, AND THE LANE IS DELIBERATELY NOT A KEY AXIS (that
+would fork the namespace and halve reuse). One SM class is therefore many
+cards: a cell minted on a 96 GB RTX PRO 6000 and a 32 GB RTX 5090 share a
+key. Two GPUs of one compute capability cannot be assumed to want the same
+kernels, so a recorded verdict is EVIDENCE, not an instruction — serving
+RE-APPLIES the fit constraint against its own detected total before it
+adopts, and falls to the fastest candidate that does fit here with a typed
+reason when the minting card's winner does not. That is why each candidate's
+peak rides the packed envelope beside the winner: bytes are discrete, wall
+clocks are not, so the fit half of the rule can be re-applied by a worker
+that will never see the timings.
 
 A lane is therefore a COMBINATION, written ``"<linear>+<modulation>"``
 (``"baseline+packed"``, ``"fused+dense"``, ...). Measuring the combinations
@@ -58,7 +72,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple)
 
 import msgspec
 
@@ -141,6 +156,16 @@ MARGIN_FRACTION = 0.05
 ACTIVATION_SPIKE_FRACTION = 0.20
 FRAGMENTATION_HEADROOM_BYTES = 1 << 30  # 1 GiB
 
+# Peaks recorded in the PACKED envelope are quantized (rounded UP). A raw
+# `max_memory_allocated()` is a MEASUREMENT, and an unrounded measurement in
+# metadata.json is precisely what the #699 double-mint byte-compare forbids —
+# an autotuned kernel picking a different workspace on the second mint would
+# move the number and strand the cell. Rounding to a coarse grain makes the
+# recorded byte count reproducible for the same reason `MARGIN_FRACTION`
+# makes the winner reproducible, and rounding UP can only make the fit test
+# stricter, never optimistic (the strict_vram rule).
+PEAK_QUANTUM_BYTES = 1 << 28  # 256 MiB
+
 # Fixed measurement protocol — part of the verdict's determinism, recorded
 # with it so a re-measurement is comparable.
 BENCH_WARMUP = 3
@@ -159,6 +184,15 @@ REASON_UNREADABLE = "kernel_lane_verdict_unreadable"
 REASON_UNKNOWN_LANE = "kernel_lane_verdict_unknown_lane"
 REASON_NO_CELL = "kernel_lane_no_cell"
 REASON_ADOPTED = "kernel_lane_verdict_adopted"
+# The recorded winner does not fit THIS card (same SM class, smaller card):
+# the rule was re-applied locally and a different lane was pinned.
+REASON_REFIT_LOCAL = "kernel_lane_refit_local"
+# Nothing the cell measured fits this card. The smallest peak is pinned and
+# says so — obeying a verdict into an OOM is not conservatism.
+REASON_REFIT_NO_FIT = "kernel_lane_refit_no_fit"
+# The fit could not be re-applied here (no per-candidate peaks recorded, or
+# no detectable device total). Adopted, and marked as unverified across cards.
+REASON_FIT_UNVERIFIED = "kernel_lane_fit_unverified"
 
 # Which term bound a verdict.
 BIND_SPEED = "speed"
@@ -174,6 +208,31 @@ class LaneProbeError(RuntimeError):
 
 
 # --- value types ------------------------------------------------------------
+
+
+def required_for(peak_bytes: int) -> int:
+    """A measured peak's ASK: the peak plus the stated allowance. One
+    formula, used by the mint and re-used verbatim by every serving worker
+    that re-applies the constraint on its own card."""
+    return int(int(peak_bytes or 0) * (1.0 + ACTIVATION_SPIKE_FRACTION)) \
+        + FRAGMENTATION_HEADROOM_BYTES
+
+
+def fits_bytes(peak_bytes: int, device_total_bytes: int) -> bool:
+    """Does a peak fit a card with the stated allowance? A total of 0 is
+    "unknown" and constrains nothing."""
+    if not device_total_bytes:
+        return True
+    return required_for(peak_bytes) <= int(device_total_bytes)
+
+
+def quantize_peak(peak_bytes: int) -> int:
+    """A peak rounded UP to ``PEAK_QUANTUM_BYTES`` — the form that may ride
+    the packed envelope without moving between two mints."""
+    n = int(peak_bytes or 0)
+    if n <= 0:
+        return 0
+    return -(-n // PEAK_QUANTUM_BYTES) * PEAK_QUANTUM_BYTES
 
 
 class Measurement(msgspec.Struct, frozen=True, kw_only=True):
@@ -192,8 +251,7 @@ class Measurement(msgspec.Struct, frozen=True, kw_only=True):
     def required_bytes(self) -> int:
         """The peak plus the stated allowance for the shapes the mint did not
         measure (activation spikes, resolution variance, fragmentation)."""
-        return int(self.peak_bytes * (1.0 + ACTIVATION_SPIKE_FRACTION)) \
-            + FRAGMENTATION_HEADROOM_BYTES
+        return required_for(self.peak_bytes)
 
 
 class Verdict(msgspec.Struct, frozen=True, kw_only=True):
@@ -229,9 +287,7 @@ def fits(row: Measurement, device_total_bytes: int) -> bool:
     """Does this lane fit the card with the stated allowance? A card whose
     total is unknown (0) constrains nothing — the mint measured it there, so
     it ran there."""
-    if not device_total_bytes:
-        return True
-    return row.required_bytes() <= int(device_total_bytes)
+    return fits_bytes(row.peak_bytes, device_total_bytes)
 
 
 def select(
@@ -528,16 +584,80 @@ def candidates_here() -> Tuple[str, ...]:
 # --- recording and reading --------------------------------------------------
 
 
+def refit_order(
+    measurements: Sequence[Measurement], *, winner: str = "",
+) -> Tuple[str, ...]:
+    """The lanes best-first, as a DISCRETE fact a second mint reproduces.
+
+    A serving worker that has to drop the recorded winner needs to know what
+    to fall to, and it has no timings — so the ORDER travels instead. It is
+    discretized exactly the way the winner is: lanes within
+    ``MARGIN_FRACTION`` of the fastest remaining lane are one tie class,
+    ordered inside the class by quantized peak then name. Jitter therefore
+    has to cross the margin to move the order, which is the same bar that
+    already has to be cleared to move the winner.
+
+    The recorded ``winner`` is forced to the front so the order and the
+    verdict can never disagree about what won on the minting card.
+    """
+    usable = [r for r in measurements if r.usable]
+    ranked: List[str] = []
+    remaining = sorted(usable, key=lambda r: (r.ms_per_step, r.lane))
+    while remaining:
+        head = remaining[0]
+        tie = [
+            r for r in remaining
+            if (r.ms_per_step - head.ms_per_step)
+            / max(head.ms_per_step, 1e-9) < MARGIN_FRACTION
+        ]
+        ranked.extend(
+            r.lane for r in sorted(
+                tie, key=lambda r: (quantize_peak(r.peak_bytes), r.lane)))
+        remaining = [r for r in remaining if r not in tie]
+    if winner in ranked:
+        ranked = [winner] + [lane for lane in ranked if lane != winner]
+    return tuple(ranked)
+
+
+def fit_block(verdict: Verdict) -> Dict[str, Any]:
+    """Everything a DIFFERENT card of the same SM class needs to re-apply the
+    fit half of the rule: each measured candidate's quantized peak, and the
+    order to fall through when the recorded winner does not fit locally.
+
+    All discrete, all reproducible, no wall clocks — so it can ride the
+    packed envelope. ``{}`` when nothing was measured (a ``sole_candidate``
+    verdict), which is the honest signal that the fit cannot be re-applied.
+    """
+    peaks = {
+        r.lane: quantize_peak(r.peak_bytes)
+        for r in sorted(verdict.measurements, key=lambda r: r.lane)
+        if r.usable
+    }
+    if not peaks:
+        return {}
+    return {
+        "quantum_bytes": PEAK_QUANTUM_BYTES,
+        "activation_spike_fraction": float(verdict.activation_spike_fraction),
+        "fragmentation_headroom_bytes":
+            int(verdict.fragmentation_headroom_bytes),
+        "peaks": peaks,
+        "order": list(refit_order(verdict.measurements,
+                                  winner=verdict.winner)),
+    }
+
+
 def envelope_block(verdict: Verdict) -> Dict[str, Any]:
     """The DISCRETE verdict, for ``metadata.json`` inside the packed cell.
 
-    Deliberately carries no wall clocks and no measured numbers: the #699
-    double-mint byte-compare requires the artifact to be reproducible, and
-    milliseconds are not. What a serving worker needs is the winner; what an
-    auditor needs is :func:`evidence_block`, which rides the published
-    checkpoint metadata beside ``mint_phases``.
+    Deliberately carries no wall clocks: the #699 double-mint byte-compare
+    requires the artifact to be reproducible, and milliseconds are not. Peak
+    BYTES are a different kind of number — discrete, quantized here, and
+    load-bearing for a card that shares this cell's SM but not its memory —
+    so they ride the envelope while the timings stay in
+    :func:`evidence_block`, which rides the published checkpoint metadata
+    beside ``mint_phases``.
     """
-    return {
+    block = {
         "schema": int(verdict.schema),
         "winner": str(verdict.winner),
         "rule": str(verdict.rule),
@@ -545,6 +665,10 @@ def envelope_block(verdict: Verdict) -> Dict[str, Any]:
         "margin_fraction": float(verdict.margin_fraction),
         "candidates": sorted(r.lane for r in verdict.measurements),
     }
+    fit = fit_block(verdict)
+    if fit:
+        block["fit"] = fit
+    return block
 
 
 def evidence_block(verdict: Verdict) -> Dict[str, Any]:
@@ -646,6 +770,121 @@ def lane_from_metadata(meta: Mapping[str, Any]) -> Tuple[str, str]:
         f"rule={block.get('rule') or '?'})")
 
 
+# --- re-applying the rule on THIS card --------------------------------------
+
+
+def recorded_fit(
+    meta: Mapping[str, Any],
+) -> Tuple[Dict[str, int], Tuple[str, ...], Tuple[Measurement, ...], str]:
+    """``(peaks, order, measurements, provenance)`` for the local re-fit.
+
+    Two channels, ranked by how much they carry:
+
+    * ``kernel_lane_evidence`` — the full record (ms/step AND peak bytes).
+      Present when the caller has the PUBLISHED checkpoint metadata, and
+      enough to re-run :func:`select` outright.
+    * the packed envelope's ``fit`` block — quantized peaks and the fallback
+      order, and nothing else. This is what a serving worker actually holds,
+      because it reads ``metadata.json`` out of the delivered cell.
+
+    Empty when neither is there (a cell minted before this block existed, or
+    a ``sole_candidate`` verdict that measured nothing) — the caller must
+    then say so rather than pretend the fit was checked.
+    """
+    evidence = meta.get(EVIDENCE_KEY)
+    if isinstance(evidence, Mapping):
+        rows = tuple(
+            r for r in verdict_from_evidence(evidence).measurements
+            if r.usable and r.lane in LANES)
+        if rows:
+            return (
+                {r.lane: r.peak_bytes for r in rows},
+                refit_order(rows, winner=str(evidence.get("winner") or "")),
+                rows, EVIDENCE_KEY)
+    block = meta.get(META_KEY)
+    fit = block.get("fit") if isinstance(block, Mapping) else None
+    if isinstance(fit, Mapping):
+        peaks = {
+            str(lane): int(peak)
+            for lane, peak in (fit.get("peaks") or {}).items()
+            if str(lane) in LANES and int(peak or 0) > 0
+        }
+        if peaks:
+            order = tuple(
+                str(lane) for lane in (fit.get("order") or ())
+                if str(lane) in peaks)
+            return peaks, order or tuple(sorted(peaks)), (), META_KEY
+    return {}, (), (), ""
+
+
+def refit(
+    lane: str, reason: str, meta: Mapping[str, Any],
+) -> Tuple[str, str]:
+    """Re-apply the fit constraint against THIS card and return the lane to
+    pin with the reason it is pinned.
+
+    Cells are keyed on SM and the lane is not a key axis, so the card that
+    minted this verdict may be much larger than the card serving it — a
+    96 GB RTX PRO 6000 and a 32 GB RTX 5090 are one cell key. The recorded
+    winner is therefore checked against this device's honestly detected
+    total before it is obeyed:
+
+    * it fits -> the recorded verdict, unchanged (the fast path);
+    * it does not -> the fastest RECORDED candidate that does fit here,
+      pinned with ``kernel_lane_refit_local``;
+    * nothing fits -> the smallest recorded peak, pinned with
+      ``kernel_lane_refit_no_fit``. Never the declared default: the default
+      carries the DENSE modulation, which is the LARGER residency, so
+      "fall back to the default" on a card that ran out of memory would
+      choose the biggest lane of all;
+    * the fit is not re-applicable here (no recorded peaks, or no detectable
+      device total) -> the recorded verdict, marked
+      ``kernel_lane_fit_unverified``.
+    """
+    total, name, sm = device_facts()
+    peaks, order, rows, provenance = recorded_fit(meta)
+    device = f"{name or 'this device'} ({sm or 'sm unknown'})"
+    if not total:
+        return lane, (
+            f"{reason}; {REASON_FIT_UNVERIFIED}: this process cannot detect a "
+            f"device total, so the cell's fit constraint could not be "
+            f"re-applied here")
+    if lane not in peaks:
+        return lane, (
+            f"{reason}; {REASON_FIT_UNVERIFIED}: the cell records no measured "
+            f"peak for {lane!r}, so its fit could not be re-applied on "
+            f"{device}, {total} B — adopting it unverified across cards "
+            f"(cells are keyed on SM, not on card memory)")
+    if fits_bytes(peaks[lane], total):
+        return lane, (
+            f"{reason}; re-checked here: {required_for(peaks[lane])} B "
+            f"required of {total} B on {device} [{provenance}]")
+    if rows:
+        # The full record is present: re-run THE rule, not a reduction of it.
+        local = select(rows, device_total_bytes=total, device_name=name, sm=sm)
+        winner, binding, detail = local.winner, local.binding, local.detail
+    else:
+        fitting = tuple(
+            cand for cand in order if fits_bytes(peaks[cand], total))
+        if fitting:
+            winner, binding = fitting[0], BIND_FIT
+            detail = (
+                f"{winner!r} is the fastest recorded candidate that fits "
+                f"({required_for(peaks[winner])} B required); order "
+                f"{list(order)!r}")
+        else:
+            winner = min(peaks, key=lambda cand: (peaks[cand], cand))
+            binding, detail = BIND_NO_FIT, (
+                f"no recorded candidate fits {total} B; the smallest peak "
+                f"wins ({winner!r}, {required_for(peaks[winner])} B required)")
+    tag = REASON_REFIT_LOCAL if binding != BIND_NO_FIT else REASON_REFIT_NO_FIT
+    return winner, (
+        f"{tag}: the cell's verdict {lane!r} asks "
+        f"{required_for(peaks[lane])} B and {device} has {total} B, so it "
+        f"does not fit here; re-applied the rule locally -> {winner!r} "
+        f"(binding={binding}) — {detail} [{provenance}]")
+
+
 # --- the process pin --------------------------------------------------------
 
 _PIN: Optional[str] = None
@@ -680,11 +919,17 @@ def clear() -> None:
 
 
 def adopt(meta: Optional[Mapping[str, Any]], *, source: str = "") -> str:
-    """Adopt the lane a delivered cell's metadata states, and return it.
+    """Adopt the lane a delivered cell's metadata states, RE-CHECKED against
+    this card, and return it.
 
     ``None`` (no cell for this boot) is the declared default with its own
     typed reason — an eager or self-minting boot has no verdict yet and must
     say so rather than guessing that a hand-written tuple was right.
+
+    A verdict that IS present is not obeyed on sight. The cell key is keyed
+    on SM and the lane is not one of its axes, so the minting card and this
+    one can differ by 64 GB of memory; :func:`refit` re-applies the fit
+    constraint here before the lane is pinned.
     """
     if meta is None:
         lane, reason = DEFAULT_LANE, (
@@ -692,6 +937,8 @@ def adopt(meta: Optional[Mapping[str, Any]], *, source: str = "") -> str:
             f"serving the declared default {DEFAULT_LANE!r}")
     else:
         lane, reason = lane_from_metadata(meta)
+        if reason.startswith(REASON_ADOPTED):
+            lane, reason = refit(lane, reason, meta)
     if source:
         reason = f"{reason} [{source}]"
     pin(lane, reason)
@@ -755,9 +1002,13 @@ __all__ = [
     "MOD_DENSE",
     "MOD_LANES",
     "MOD_PACKED",
+    "PEAK_QUANTUM_BYTES",
     "REASON_ABSENT",
     "REASON_ADOPTED",
+    "REASON_FIT_UNVERIFIED",
     "REASON_NO_CELL",
+    "REASON_REFIT_LOCAL",
+    "REASON_REFIT_NO_FIT",
     "REASON_UNKNOWN_LANE",
     "REASON_UNREADABLE",
     "SCHEMA",
@@ -773,7 +1024,9 @@ __all__ = [
     "device_facts",
     "envelope_block",
     "evidence_block",
+    "fit_block",
     "fits",
+    "fits_bytes",
     "fused_candidate_gap",
     "lane_from_metadata",
     "lane_of",
@@ -784,6 +1037,11 @@ __all__ = [
     "pin",
     "pinned",
     "probe",
+    "quantize_peak",
+    "recorded_fit",
+    "refit",
+    "refit_order",
+    "required_for",
     "select",
     "sole",
     "split_lane",

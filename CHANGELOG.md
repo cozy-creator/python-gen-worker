@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **pgw#947: a kernel-lane verdict is evidence, not an instruction — serving
+  re-applies the fit rule on its own card.** Cell keys are keyed on SM and the
+  lane is deliberately not a key axis, so one key spans a 96 GB RTX PRO 6000
+  and a 32 GB RTX 5090. Adoption used to `pin()` the recorded winner with no
+  local re-validation, so the small card could pin a lane whose measured peak
+  does not fit it — the kernels' numerics self-checks are correctness checks
+  and know nothing about memory, so the symptom is an OOM or a silent slide
+  into CPU-offload degraded mode. `kernel_lane.adopt()` now re-applies the fit
+  constraint (`peak x1.20 + 1 GiB` against the honestly detected total)
+  before pinning: the recorded winner fits, it stands; it does not, the
+  fastest recorded candidate that fits here is pinned
+  (`kernel_lane_refit_local`); nothing fits, the smallest recorded peak is
+  (`kernel_lane_refit_no_fit`) — never the declared default, which carries
+  the larger DENSE modulation and would be the biggest ask of all. With the
+  published `kernel_lane_evidence` in hand the re-fit is `select()` itself
+  re-run against the local total. A cell with no recorded peaks is adopted
+  and marked `kernel_lane_fit_unverified`.
+- **Peak bytes now ride the packed cell (pgw#947).** The envelope gained a
+  `fit` block — each measured candidate's peak QUANTIZED up to 256 MiB, plus
+  the fallback order — so a worker that will never see the timings can still
+  re-apply the fit half of the rule. Bytes are admissible under the #699
+  double-mint byte-compare where wall clocks are not, because quantizing them
+  makes them reproducible across two mints the same way `MARGIN_FRACTION`
+  makes the winner reproducible; rounding UP can only make the constraint
+  stricter. Cell keys do not move (`cell_identity` keys named facts, not the
+  envelope). The SPEED axis is a recorded, unfixed limitation: a ranking
+  minted on one card of an SM class can still be wrong on another, and
+  detecting it would need re-benchmarking at serve time.
+
 - **th#1566: distillation `false` no longer means “unknown.”** The vendored
   worker protocol now carries `ModelBinding.distilled_status`; the SDK exposes
   it on resolved slots and refuses an explicitly unclassified or inconclusive

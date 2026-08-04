@@ -33,6 +33,15 @@ def _m(lane: str, ms: float, peak_gb: float) -> kl.Measurement:
         samples_ms=(ms,))
 
 
+def _on_card(
+    monkeypatch: pytest.MonkeyPatch, total: int, name: str, sm: str,
+) -> None:
+    """Serve as if this process were on that card. Adoption re-applies the
+    fit rule against the LOCAL device, so a test of adoption has to say which
+    device it is adopting on — that is the whole point of the mechanism."""
+    monkeypatch.setattr(kl, "device_facts", lambda: (total, name, sm))
+
+
 @pytest.fixture(autouse=True)
 def _clear_pin():
     kl.clear()
@@ -183,8 +192,21 @@ def test_envelope_is_discrete_and_evidence_round_trips() -> None:
         "rule": "fit_constrained_speed", "binding": kl.BIND_SPEED,
         "margin_fraction": kl.MARGIN_FRACTION,
         "candidates": ["baseline+dense", "fused+packed"],
+        # The FIT half of the rule travels with the artifact, because a card
+        # of the same SM but a different size has to re-apply it. Quantized
+        # BYTES only — discrete, reproducible, and not a wall clock.
+        "fit": {
+            "quantum_bytes": kl.PEAK_QUANTUM_BYTES,
+            "activation_spike_fraction": kl.ACTIVATION_SPIKE_FRACTION,
+            "fragmentation_headroom_bytes": kl.FRAGMENTATION_HEADROOM_BYTES,
+            "peaks": {
+                "baseline+dense": kl.quantize_peak(int(44.1 * GB)),
+                "fused+packed": kl.quantize_peak(int(35.1 * GB)),
+            },
+            "order": ["baseline+dense", "fused+packed"],
+        },
     }
-    # No wall clocks, no measurements, JSON-clean.
+    # No wall clocks, no timings, JSON-clean.
     flat = json.dumps(envelope)
     assert "ms" not in flat and "measured_at" not in flat
 
@@ -214,7 +236,10 @@ def _packed(tmp_path: Path, meta: dict) -> Path:
     return artifact
 
 
-def test_serving_adopts_the_lane_the_cell_names(tmp_path: Path) -> None:
+def test_serving_adopts_the_lane_the_cell_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
     verdict = kl.select(
         [_m("baseline+dense", 1189.0, 22.4), _m("fused+packed", 975.0, 15.6)],
         device_total_bytes=32 * GB, sm="sm_120")
@@ -285,6 +310,247 @@ def test_verdict_survives_the_real_pack_unpack_round_trip(
     meta = aot_serve.unpack_metadata(artifact)
     assert meta[kl.META_KEY]["winner"] == "baseline+dense"
     assert kl.adopt_from_artifact(artifact) == "baseline+dense"
+
+
+# --- the same SM, a different card -----------------------------------------
+#
+# Cell keys are keyed on SM and the lane is deliberately NOT a key axis, so a
+# 96 GB RTX PRO 6000 and a 32 GB RTX 5090 are ONE cell key. Paul: "we cannot
+# guarantee that two separate GPUs with the same sm_x capability will both
+# want to use the same set of kernels." Serving therefore re-applies the FIT
+# half of the rule against its own detected total instead of obeying the
+# minting card.
+
+# The workload the PRO 6000 minted: the fast lane is 48 GB resident and the
+# small lane is 20 GB. Both fit 96 GB; only one fits 32 GB.
+_BIG = _m("baseline+dense", 1063.0, 48.0)
+_SMALL = _m("fused+packed", 1240.0, 20.0)
+
+
+def _minted_on_the_big_card(**extra) -> dict:
+    """A cell as the 96 GB card would have packed it."""
+    verdict = kl.select(
+        [_BIG, _SMALL], device_total_bytes=96 * GB,
+        device_name="NVIDIA RTX PRO 6000", sm="sm_120")
+    assert verdict.winner == "baseline+dense"  # correct ON THAT CARD
+    meta = {"kind": "aot-inductor", kl.META_KEY: kl.envelope_block(verdict)}
+    meta.update(extra)
+    return meta
+
+
+def test_a_verdict_from_a_bigger_card_of_the_same_sm_is_refit_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE gap this closes. The 96 GB card measured `baseline+dense` fastest
+    and recorded it. The 32 GB 5090 shares the cell key and would have pinned
+    a lane whose measured peak cannot fit its card — an OOM, or a silent
+    slide into CPU-offload degraded mode, because the kernels' self-checks
+    are CORRECTNESS checks and know nothing about memory.
+
+    Serving re-applies the rule here and falls to the fastest recorded
+    candidate that does fit, loudly."""
+    _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
+    assert kl.adopt(_minted_on_the_big_card()) == "fused+packed"
+
+    lane, reason = kl.pinned()
+    assert lane == "fused+packed"
+    assert kl.REASON_REFIT_LOCAL in reason
+    # It names the recorded winner, this card, and the binding term.
+    assert "baseline+dense" in reason
+    assert str(32 * GB) in reason and "NVIDIA RTX 5090" in reason
+    assert f"binding={kl.BIND_FIT}" in reason
+
+
+def test_the_fast_path_is_unchanged_when_the_recorded_winner_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same cell, adopted on a card that CAN hold the recorded winner: the
+    verdict is obeyed exactly as before, and nothing calls itself a re-fit."""
+    _on_card(monkeypatch, 96 * GB, "NVIDIA RTX PRO 6000", "sm_120")
+    assert kl.adopt(_minted_on_the_big_card()) == "baseline+dense"
+
+    reason = kl.pinned()[1]
+    assert kl.REASON_ADOPTED in reason
+    assert kl.REASON_REFIT_LOCAL not in reason
+    assert kl.REASON_REFIT_NO_FIT not in reason
+    assert kl.REASON_FIT_UNVERIFIED not in reason
+
+
+def test_nothing_fitting_locally_takes_the_smallest_not_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 16 GB card holds neither lane. Obeying the verdict would OOM; so
+    would "fall back to the declared default", because the default carries
+    the DENSE modulation and is the LARGER of the two. The smallest recorded
+    peak is pinned instead, with its own typed reason, and the degrade path
+    owns what happens next."""
+    _on_card(monkeypatch, 16 * GB, "NVIDIA RTX 5080", "sm_120")
+    assert kl.adopt(_minted_on_the_big_card()) == "fused+packed"
+
+    lane, reason = kl.pinned()
+    assert kl.REASON_REFIT_NO_FIT in reason
+    assert lane != kl.DEFAULT_LANE  # the default is the 48 GB lane here
+    assert f"binding={kl.BIND_NO_FIT}" in reason
+
+
+def test_the_recorded_winner_survives_when_it_is_the_one_that_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-regression case: a verdict minted ON a small card names the
+    small lane, and adoption on that same class of card must not invent a
+    re-fit or drift to anything else."""
+    verdict = kl.select(
+        [_BIG, _SMALL], device_total_bytes=32 * GB,
+        device_name="NVIDIA RTX 5090", sm="sm_120")
+    assert verdict.winner == "fused+packed"
+    _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
+    meta = {kl.META_KEY: kl.envelope_block(verdict)}
+    assert kl.adopt(meta) == "fused+packed"
+    assert kl.REASON_ADOPTED in kl.pinned()[1]
+    assert kl.REASON_REFIT_LOCAL not in kl.pinned()[1]
+
+
+def test_full_evidence_reruns_the_whole_rule_against_this_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the caller holds the PUBLISHED metadata, the evidence block has
+    both lanes' ms/step AND peaks — so the local re-fit is not a reduced
+    rule, it is `select()` itself re-run against this card's total. The
+    detail therefore carries the recorded timings, which the envelope-only
+    path cannot know."""
+    _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
+    # Three lanes, so the local answer is a genuine SPEED decision among the
+    # survivors rather than "the one thing left".
+    mid = _m("baseline+packed", 1150.0, 22.0)
+    verdict = kl.select(
+        [_BIG, mid, _SMALL], device_total_bytes=96 * GB, sm="sm_120")
+    assert verdict.winner == "baseline+dense"
+    meta = json.loads(json.dumps({
+        kl.META_KEY: kl.envelope_block(verdict),
+        kl.EVIDENCE_KEY: kl.evidence_block(verdict),
+    }))
+    assert kl.adopt(meta) == "baseline+packed"
+    reason = kl.pinned()[1]
+    assert kl.REASON_REFIT_LOCAL in reason
+    assert kl.EVIDENCE_KEY in reason  # the provenance of the numbers used
+    # `select()`'s own speed detail — the envelope-only path has no timings
+    # and could not produce this sentence.
+    assert f"binding={kl.BIND_SPEED}" in reason
+    assert "1150.0" in reason and "1240.0" in reason
+
+
+def test_a_cell_with_no_recorded_peaks_is_adopted_but_marked_unverified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DECIDED: a cell that records no per-candidate peaks (a verdict minted
+    before the fit block existed, or a `sole_candidate` verdict that measured
+    nothing) is ADOPTED, not dropped — and it says the fit is unverified
+    across cards.
+
+    Falling to the declared default here would not be the conservative
+    choice: the default is `baseline+dense`, and DENSE is the larger
+    residency of the two modulation values, so "be safe, take the default"
+    would trade a possibly-too-big lane for a certainly-bigger one. The
+    numerics self-checks still gate arming on the box, and every verdict
+    minted from here on carries its peaks."""
+    _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
+    meta = _minted_on_the_big_card()
+    meta[kl.META_KEY].pop("fit")  # a pre-fit-block pgw#947 cell
+
+    assert kl.adopt(meta) == "baseline+dense"
+    reason = kl.pinned()[1]
+    assert kl.REASON_ADOPTED in reason
+    assert kl.REASON_FIT_UNVERIFIED in reason
+    assert "baseline+dense" in reason
+
+
+def test_a_sole_candidate_verdict_records_no_peaks_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card with one buildable lane pays for no benchmark, so there is
+    nothing to re-fit — and the envelope carries no fit block rather than an
+    empty one that would look like a checked constraint."""
+    _on_card(monkeypatch, 24 * GB, "NVIDIA L4", "sm_89")
+    verdict = kl.sole("baseline+dense", "sm_89 is not Blackwell")
+    envelope = kl.envelope_block(verdict)
+    assert "fit" not in envelope
+    assert kl.adopt({kl.META_KEY: envelope}) == "baseline+dense"
+    assert kl.REASON_FIT_UNVERIFIED in kl.pinned()[1]
+
+
+def test_a_worker_that_cannot_detect_its_card_adopts_and_says_unverified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _on_card(monkeypatch, 0, "", "")
+    assert kl.adopt(_minted_on_the_big_card()) == "baseline+dense"
+    assert kl.REASON_FIT_UNVERIFIED in kl.pinned()[1]
+
+
+def test_the_refit_runs_through_the_packed_artifact_the_executor_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end on the path the executor actually calls: a tar on disk,
+    read by `adopt_from_artifact`, re-fit against this card."""
+    _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
+    artifact = _packed(tmp_path, _minted_on_the_big_card())
+    assert kl.adopt_from_artifact(artifact, source="unit") == "fused+packed"
+    assert kl.REASON_REFIT_LOCAL in kl.pinned()[1]
+
+
+def test_recorded_peaks_survive_the_double_mint_byte_compare() -> None:
+    """(c) Peak BYTES may ride the packed envelope; raw ones may not.
+
+    The #699 gate compares two mints' `metadata.json` byte for byte. A raw
+    `max_memory_allocated()` is a measurement — an autotuned kernel picking a
+    different workspace moves it — so the envelope carries the peak QUANTIZED
+    up to a coarse grain, which is the same trick `MARGIN_FRACTION` already
+    plays on the winner. Here two mints disagree by 40 MB of peak and 3 ms of
+    step time and produce byte-identical envelopes."""
+    def _mint(peak_jitter: float, ms_jitter: float) -> str:
+        verdict = kl.select(
+            [_m("baseline+dense", 1063.0 + ms_jitter, 48.0 + peak_jitter),
+             _m("fused+packed", 1240.0 - ms_jitter, 20.0 - peak_jitter)],
+            device_total_bytes=96 * GB, sm="sm_120")
+        return json.dumps(kl.envelope_block(verdict), sort_keys=True)
+
+    assert _mint(0.0, 0.0) == _mint(0.04, 3.0) == _mint(-0.04, -3.0)
+    # And the quantization only ever rounds UP, so the re-applied constraint
+    # is never more permissive than the measurement it came from.
+    assert kl.quantize_peak(int(48.0 * GB)) >= int(48.0 * GB)
+    assert kl.quantize_peak(1) == kl.PEAK_QUANTUM_BYTES
+    assert kl.quantize_peak(0) == 0
+
+
+def test_the_fallback_order_is_the_ranking_and_the_winner_leads_it() -> None:
+    """The order is what a serving worker falls THROUGH when the winner does
+    not fit, so it has to be the rule's own ranking — and it has to be
+    discrete, or it could not ride the envelope. Speed ranks it; ties inside
+    the margin are ordered by the smaller peak; the recorded winner leads."""
+    rows = [
+        _m("baseline+dense", 228.0, 44.1),
+        _m("baseline+packed", 231.0, 34.6),   # within the 5% margin
+        _m("fused+dense", 350.0, 44.6),
+        _m("fused+packed", 350.0, 35.1),
+    ]
+    verdict = kl.select(rows, device_total_bytes=180 * GB, sm="sm_100")
+    order = kl.refit_order(rows, winner=verdict.winner)
+    assert order[0] == verdict.winner == "baseline+packed"
+    assert order == ("baseline+packed", "baseline+dense",
+                     "fused+packed", "fused+dense")
+
+
+def test_the_refit_never_pins_a_lane_this_worker_cannot_implement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cell from a newer worker may record candidates this one has no
+    vocabulary for. They are dropped from the re-fit rather than pinned, and
+    `pin()` would refuse them anyway."""
+    _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
+    meta = _minted_on_the_big_card()
+    meta[kl.META_KEY]["fit"]["peaks"]["tcgen05-v2"] = 1
+    meta[kl.META_KEY]["fit"]["order"].insert(0, "tcgen05-v2")
+    assert kl.adopt(meta) == "fused+packed"
+    assert kl.pinned()[0] in kl.LANES
 
 
 # --- the mint-side A/B -----------------------------------------------------
