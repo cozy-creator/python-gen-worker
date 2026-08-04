@@ -16,8 +16,15 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args: Any, directory: str, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, directory: str, host: "BlobHost", **kwargs: Any,
+    ) -> None:
+        self._host = host
         super().__init__(*args, directory=directory, **kwargs)
+
+    def send_head(self) -> Any:
+        self._host.before_serve(self.path.lstrip("/"))
+        return super().send_head()
 
     def log_message(self, *_args: Any) -> None:  # silence
         pass
@@ -31,7 +38,8 @@ class BlobHost:
         self._dir.mkdir(parents=True, exist_ok=True)
 
         def _handler(*args: Any, **kwargs: Any) -> _QuietHandler:
-            return _QuietHandler(*args, directory=str(self._dir), **kwargs)
+            return _QuietHandler(
+                *args, directory=str(self._dir), host=self, **kwargs)
 
         self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _handler)
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
@@ -40,6 +48,9 @@ class BlobHost:
     @property
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self._httpd.server_address[1]}"
+
+    def before_serve(self, name: str) -> None:
+        """Hook run on the handler thread just before ``name`` is served."""
 
     def put(self, name: str, payload: bytes) -> str:
         (self._dir / name).write_bytes(payload)
@@ -81,3 +92,33 @@ class CorruptingBlobHost(BlobHost):
         if name == self._corrupt:
             payload = b"\x00" * len(payload) if payload else b"\x00"
         return super().put(name, payload)
+
+
+class GatedBlobHost(BlobHost):
+    """Holds the GET for ONE named blob until :meth:`release`.
+
+    pgw#955: a deterministic way to keep a residency reconcile pass genuinely
+    in flight while the test does something else — the download the pass is
+    awaiting simply does not answer yet. ``requested`` fires when the gated GET
+    arrives, so the test waits on the EVENT rather than on a sleep. ``shutdown``
+    releases, so a failing test cannot leave the handler thread parked.
+    """
+
+    def __init__(self, root: Path, *, gated: str) -> None:
+        super().__init__(root)
+        self._gated = gated
+        self.requested = threading.Event()
+        self._release = threading.Event()
+
+    def before_serve(self, name: str) -> None:
+        if name != self._gated:
+            return
+        self.requested.set()
+        self._release.wait()
+
+    def release(self) -> None:
+        self._release.set()
+
+    def shutdown(self) -> None:
+        self.release()
+        super().shutdown()
