@@ -1,4 +1,4 @@
-"""pgw#943: does a worker yield its request slot while awaiting a child call?
+"""pgw#943: a worker YIELDS its GPU permit while awaiting a child call.
 
 Paul named the first real consumer of ``ctx.call_endpoint``:
 
@@ -7,39 +7,31 @@ Paul named the first real consumer of ``ctx.call_endpoint``:
     this and get the results back. It can process more requests (pipelining)
     while it's waiting for the results of the previous request."*
 
-That last clause is a requirement, and ``async def`` proves nothing about it —
-the question is whether the SCHEDULER releases the slot. So this is measured,
-on the real executor, over the real ``@endpoint`` -> ``RequestContext`` ->
-``callout.CalloutClient`` path, with a real HTTP server on the other end
-speaking the documented callout wire contract (the platform API is external
-to the worker; standing it up is not standing in for the worker runtime).
+PR #455 measured the defect: ``_run_job`` took the group permit before the
+handler and held it until the handler returned, and ``call_endpoint`` never
+entered ``_gpu_slot_yielded`` — so at ``gpu_slots=1`` every cozy-eval-shaped
+pipeline serialized while renting an accelerator to wait on a network round
+trip. The fix routes every child-call wait (``wait=True`` and the
+``wait=False`` handle's ``.result()``) through ``ctx._child_call_wait``,
+which yields the #382 GPU-slot lease for the park and re-acquires before
+returning to tenant code.
 
-No model is loaded and no inference runs: the fixture is the two-function
-endpoint the issue asks for, A calling B.
+The yield is SCOPED to jobs that hold no instance gate and no per-request
+adapters, because both permit acquirers (``_run_job`` and ``_bg_turn``) take
+the permit BEFORE the instance gate: a parked parent still holding
+``run_lock`` would wedge its own re-acquire (the follower holds the permit
+waiting on ``run_lock``; the parent waits on the permit — hold-and-wait
+cycle), and a follower on a shared pipeline would clobber per-request
+adapter state mid-handler. That scope is pinned below too.
 
-The measured answer, at ``gpu_slots=1`` (G == 1, every pod today):
-
-* The EVENT LOOP is free. Sync handlers run in ``asyncio.to_thread``, so a
-  handler parked in ``CalloutClient.wait``'s ``time.sleep``/``Event.wait``
-  poll does not block intake. A second dispatch is accepted, ``JobAccepted``
-  goes out, and its job task runs.
-* The GPU PERMIT is NOT free. ``executor._run_job`` acquires the group permit
-  BEFORE the handler and holds it until the handler returns
-  (``executor.py:11741-11758``), and ``RequestContext.call_endpoint``
-  (``request_context/__init__.py:719``) never enters ``_gpu_slot_yielded`` —
-  the lease that ``save_bytes`` uses for exactly this reason (#382). So the
-  second GPU request parks in ``WAIT_GPU_SLOT`` for the whole child call.
-
-Both facts are pinned below, so a future change to either is a test failure
-rather than a silent regression of a requirement nobody was measuring.
+Everything runs on the real executor, over the real ``@endpoint`` ->
+``RequestContext`` -> ``callout.CalloutClient`` path, with a real HTTP server
+on the other end speaking the documented callout wire contract. No model is
+loaded and no inference runs.
 
 pgw#949: every wait here is progress-gated and every assertion is about a
-property, not about the runner's speed. The observation window is denominated
-in child-status polls the platform actually answered, so a slow machine
-observes the SAME thing more slowly rather than observing less of it; the
-promptness claim is a share of a baseline this same run measured. That is what
-the finding always was — an ordering fact ("the second handler entered only
-once the permit came free"), never a stopwatch reading.
+property — an ordering, or a share of a baseline measured in the same run —
+never about the runner's speed.
 """
 
 from __future__ import annotations
@@ -48,8 +40,9 @@ import asyncio
 import json
 import threading
 import time
+from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 import msgspec
 
@@ -59,20 +52,17 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 from harness.progress_wait import Cadence, await_count, await_progress
 
-CHILD_REQUEST_ID = "child-req-pgw943"
-
-#: How much of the child call's OWN progress the observation window spans,
-#: counted in status polls the platform answered. The parent provably cannot
-#: finish during it (the platform reports `completed` only after `release()`),
-#: so this bounds the observation by work the system under test performed
-#: rather than by elapsed time: a slower runner takes longer to reach the same
-#: count and observes exactly the same window of behaviour.
+#: How much of the child call's OWN progress the observation window spans for
+#: the gate-holding (non-yielding) case, counted in status polls the platform
+#: answered. The parent provably cannot finish during it (the platform reports
+#: `completed` only after `release()`), so this bounds the observation by work
+#: the system under test performed rather than by elapsed time.
 _OBSERVED_CHILD_POLLS = 100
 
 #: The second handler's entry, once the permit comes free, must be a small
 #: SHARE of how long the same permit had it blocked in this run. #455 measured
-#: 10.7 ms against a multi-second block. Stating it as a ratio keeps it a claim
-#: about WHAT GATED the handler: a slow runner lengthens both sides.
+#: 10.7 ms against a multi-second block. A ratio keeps it a claim about WHAT
+#: GATED the handler: a slow runner lengthens both sides.
 _PROMPT_ENTRY_SHARE = 0.25
 
 
@@ -87,17 +77,19 @@ class _Out(msgspec.Struct):
 class _Platform:
     """The hub half of the callout contract, as a real local HTTP server.
 
-    ``submit`` hands back a request id; the child stays ``in_progress`` until
-    ``release()`` is called, then reports ``completed``. Every request the
-    worker actually made is recorded, so "the await path was exercised" is an
-    observation rather than an assumption.
+    Each ``submit`` allocates ``child-req-N``; a child stays ``in_progress``
+    until :meth:`release` (or :meth:`fail`) names it terminal. Every request
+    the worker actually made is recorded, so "the await path was exercised"
+    is an observation rather than an assumption.
     """
 
     def __init__(self) -> None:
-        self.released = threading.Event()
         self.submitted = threading.Event()
         self.calls: List[Tuple[str, str]] = []
         self._lock = threading.Lock()
+        self._children: List[str] = []
+        self._terminal: Dict[str, Dict[str, Any]] = {}
+        self._terminal_polls: Dict[str, int] = {}
         platform = self
 
         class _Handler(BaseHTTPRequestHandler):
@@ -126,13 +118,23 @@ class _Platform:
                 if self.path.startswith("/v1/requests/"):
                     self._reply(200, {})
                     return
+                with platform._lock:
+                    child_id = f"child-req-{len(platform._children) + 1}"
+                    platform._children.append(child_id)
                 platform.submitted.set()
-                self._reply(200, {"request_id": CHILD_REQUEST_ID})
+                self._reply(200, {"request_id": child_id})
 
             def do_GET(self) -> None:  # noqa: N802
                 self._record()
-                if platform.released.is_set():
-                    self._reply(200, {"status": "completed", "output": ["child-ok"]})
+                child_id = self.path.rstrip("/").rsplit("/", 1)[-1]
+                with platform._lock:
+                    doc = platform._terminal.get(child_id)
+                    if doc is not None:
+                        platform._terminal_polls[child_id] = (
+                            platform._terminal_polls.get(child_id, 0) + 1
+                        )
+                if doc is not None:
+                    self._reply(200, doc)
                 else:
                     self._reply(200, {"status": "in_progress"})
 
@@ -153,52 +155,153 @@ class _Platform:
         host, port = self._server.server_address[:2]
         return f"http://{host}:{port}"
 
-    def release(self) -> None:
-        self.released.set()
-
-    def polls(self) -> int:
+    def children(self) -> List[str]:
         with self._lock:
-            return sum(1 for method, _ in self.calls if method == "GET")
+            return list(self._children)
+
+    def release(self, request_id: Optional[str] = None) -> None:
+        """Mark one child (or every submitted child) completed."""
+        with self._lock:
+            targets = [request_id] if request_id else list(self._children)
+            for rid in targets:
+                self._terminal[rid] = {
+                    "status": "completed",
+                    "output": [f"child-ok:{rid}"],
+                }
+
+    def fail(self, request_id: Optional[str] = None) -> None:
+        with self._lock:
+            targets = [request_id] if request_id else list(self._children)
+            for rid in targets:
+                self._terminal[rid] = {
+                    "status": "failed",
+                    "error": {"type": "boom", "message": "child exploded"},
+                }
+
+    def polls(self, request_id: Optional[str] = None) -> int:
+        with self._lock:
+            if request_id is None:
+                return sum(1 for method, _ in self.calls if method == "GET")
+            return sum(
+                1
+                for method, path in self.calls
+                if method == "GET" and path.rstrip("/").endswith(request_id)
+            )
+
+    def terminal_polls(self, request_id: str) -> int:
+        with self._lock:
+            return self._terminal_polls.get(request_id, 0)
 
 
 # --------------------------------------------------------------------------
-# the fixture the issue asks for: two functions, A calls B
+# fixtures: the two-function endpoint the issue asks for, plus variants
 # --------------------------------------------------------------------------
 
-_parent_entered = threading.Event()
-_second_ran = threading.Event()
-_parent_result: List[Any] = []
+
+class _Probe:
+    """Per-run observation points, set from inside the handlers."""
+
+    def __init__(self) -> None:
+        self.parent_entered = threading.Event()
+        #: Set the moment the (final) child-call wait returned to tenant code
+        #: — i.e. after the slot re-acquire. Its ORDER against other events is
+        #: what the re-acquire tests assert.
+        self.parent_resumed = threading.Event()
+        self.first_child_done = threading.Event()
+        self.second_ran = threading.Event()
+        self.blocker_entered = threading.Event()
+        self.blocker_release = threading.Event()
+        self.parent_result: List[Any] = []
 
 
-def _endpoints(*, gpu: bool) -> List[Any]:
-    """The two-function fixture, decorated for the resource shape under test.
+_CHILD_CALL = dict(poll_interval_s=0.02, timeout_s=60.0)
 
-    Declared inside a factory only because ``EndpointSpec`` is frozen —
-    ``resources=`` has to reach ``@endpoint`` itself. These are ordinary
-    ``@endpoint`` functions and go through the ordinary
-    ``extract_specs`` -> ``Executor`` path.
-    """
+
+def _endpoints(probe: _Probe, *, gpu: bool) -> List[Any]:
+    """Plain-function fixtures (no instance gate — the yieldable shape)."""
     res = Resources(gpu=gpu)
 
     @endpoint(kind="inference", child_calls=True, resources=res, name="parent")
     def parent(ctx: Any, payload: _In) -> _Out:
-        _parent_entered.set()
+        probe.parent_entered.set()
         out = ctx.call_endpoint(
-            "harness/child-endpoint",
-            "child",
-            {"tag": payload.tag},
-            poll_interval_s=0.02,
-            timeout_s=60.0,
+            "harness/child-endpoint", "child", {"tag": payload.tag}, **_CHILD_CALL
         )
-        _parent_result.append(out)
+        probe.parent_resumed.set()
+        probe.parent_result.append(out)
+        return _Out(tag="parent-done")
+
+    @endpoint(
+        kind="inference", child_calls=True, resources=res, name="parent-deferred"
+    )
+    def parent_deferred(ctx: Any, payload: _In) -> _Out:
+        probe.parent_entered.set()
+        handle = ctx.call_endpoint(
+            "harness/child-endpoint", "child", {"tag": payload.tag}, wait=False
+        )
+        out = handle.result(60.0, poll_interval_s=0.02)
+        probe.parent_resumed.set()
+        probe.parent_result.append(out)
+        return _Out(tag="parent-done")
+
+    @endpoint(kind="inference", child_calls=True, resources=res, name="parent-twice")
+    def parent_twice(ctx: Any, payload: _In) -> _Out:
+        probe.parent_entered.set()
+        out1 = ctx.call_endpoint(
+            "harness/child-endpoint", "child", {"tag": "one"}, **_CHILD_CALL
+        )
+        probe.parent_result.append(out1)
+        probe.first_child_done.set()
+        out2 = ctx.call_endpoint(
+            "harness/child-endpoint", "child", {"tag": "two"}, **_CHILD_CALL
+        )
+        probe.parent_result.append(out2)
+        probe.parent_resumed.set()
         return _Out(tag="parent-done")
 
     @endpoint(kind="inference", resources=res, name="second")
     def second(ctx: Any, payload: _In) -> _Out:
-        _second_ran.set()
+        probe.second_ran.set()
         return _Out(tag="second-done")
 
-    return [parent, second]
+    @endpoint(kind="inference", resources=res, name="blocker")
+    def blocker(ctx: Any, payload: _In) -> _Out:
+        probe.blocker_entered.set()
+        # No timeout: the tests release it in a ``finally``; a wedge here is
+        # exactly what the surrounding progress-waits exist to report.
+        probe.blocker_release.wait()
+        return _Out(tag="blocker-done")
+
+    return [parent, parent_deferred, parent_twice, second, blocker]
+
+
+def _gated_endpoints(probe: _Probe) -> List[Any]:
+    """A class-based (non-reentrant) parent: holds its instance gate for the
+    whole handler, so its child calls must NOT yield the permit."""
+    res = Resources(gpu=True)
+
+    @endpoint(kind="inference", child_calls=True, resources=res)
+    class GatedParent:
+        def gated_parent(self, ctx: Any, payload: _In) -> _Out:
+            if not payload.tag:
+                # ensure_setup's warmup forward invokes the handler with a
+                # synthetic default payload and a warmup ctx that has no
+                # platform base URL — a child call there is meaningless.
+                return _Out(tag="warmup")
+            probe.parent_entered.set()
+            out = ctx.call_endpoint(
+                "harness/child-endpoint", "child", {"tag": payload.tag}, **_CHILD_CALL
+            )
+            probe.parent_resumed.set()
+            probe.parent_result.append(out)
+            return _Out(tag="parent-done")
+
+    @endpoint(kind="inference", resources=res, name="second")
+    def second(ctx: Any, payload: _In) -> _Out:
+        probe.second_ran.set()
+        return _Out(tag="second-done")
+
+    return [GatedParent, second]
 
 
 def _run_job(request_id: str, function_name: str) -> pb.RunJob:
@@ -272,152 +375,76 @@ async def _progress_count(
     )
 
 
-class _Measurement(msgspec.Struct):
-    """What the two-request run observed."""
-
-    child_call_made: bool
-    second_accepted: bool
-    second_handler_ran_while_parent_waited: bool
-    child_polls_while_waiting: int
-    #: Had the parent still NOT produced a result when the observation window
-    #: closed? Load-independent proof it really was suspended throughout.
-    parent_still_in_flight: bool
-    #: Was group 0's permit held for the whole observation window? This is
-    #: what names the BLOCKING SITE: the semaphore, not intake, not the loop.
-    gpu_permit_locked_throughout: bool
-    #: Seconds from the child completing to the second handler entering. Only
-    #: ever compared against the baseline below, never against a constant.
-    second_handler_latency_after_child_s: Optional[float]
-    #: Seconds the second request spent blocked while the child was in flight —
-    #: the baseline the field above is a share of. Both are measured in the
-    #: same run on the same machine, so their RATIO is a property of what
-    #: gated the handler rather than of how fast the runner is.
-    blocked_while_child_in_flight_s: float
-    parent_status: Optional[int]
-    second_status: Optional[int]
+# --------------------------------------------------------------------------
+# shared run scaffolding
+# --------------------------------------------------------------------------
 
 
-async def _measure(*, gpu: bool) -> _Measurement:
-    _parent_entered.clear()
-    _second_ran.clear()
-    _parent_result.clear()
+class _Run:
+    def __init__(
+        self, probe: _Probe, ex: Executor, platform: _Platform,
+        sent: List[pb.WorkerMessage],
+    ) -> None:
+        self.probe = probe
+        self.ex = ex
+        self.platform = platform
+        self.sent = sent
 
+    def parent_done_early(self) -> Optional[str]:
+        """Definitive failure: the parent answered before its child was
+        released — it was supposed to be suspended on it. No clock involved."""
+        if "req-parent" in _results(self.sent):
+            return "the parent produced a result before its child was released"
+        return None
+
+    async def park_parent(self, function_name: str = "parent") -> None:
+        """Dispatch the parent and wait until it is genuinely PARKED in the
+        callout poll — gated on the platform answering `in_progress` twice."""
+        await self.ex.handle_run_job(_run_job("req-parent", function_name))
+        await _progress_count(
+            self.platform.polls, 2,
+            what="child-status polls proving the parent is parked",
+            gone=self.parent_done_early,
+        )
+        assert self.platform.submitted.is_set(), "the child call was never submitted"
+
+    async def finish(self) -> Dict[str, int]:
+        await _progress(
+            lambda: all(
+                j.task.done() for j in self.ex.jobs.values() if j.task is not None
+            ),
+            lambda done: bool(done),
+            what="every job task to finish",
+        )
+        for job in self.ex.jobs.values():
+            if job.task is not None:
+                await job.task  # surfaces a handler exception the results hid
+        return _results(self.sent)
+
+
+@asynccontextmanager
+async def _running(
+    specs_of: Callable[[_Probe], List[Any]],
+) -> AsyncIterator[_Run]:
+    probe = _Probe()
     sent: List[pb.WorkerMessage] = []
 
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
-    fns = _endpoints(gpu=gpu)
+    fns = specs_of(probe)
     specs = [s for fn in fns for s in extract_specs(fn)]
     # gpu_slots=1: the G == 1 packing every pod runs today. Group 0's permit
-    # IS the whole pool (executor.py:3100), which is the configuration the
-    # cozy-eval pipelining claim is about.
+    # IS the whole pool, which is the configuration the cozy-eval pipelining
+    # claim is about.
     ex = Executor(specs, _send, gpu_slots=1)
-
     with _Platform() as platform:
         ex.file_base_url = platform.base_url
-
-        def _parent_done_early() -> Optional[str]:
-            """Nothing further can be learned once the parent has answered —
-            it was supposed to be suspended on its child. Definitive, and no
-            clock is involved."""
-            if "req-parent" in _results(sent):
-                return "the parent produced a result before its child was released"
-            return None
-
-        await ex.handle_run_job(_run_job("req-parent", "parent"))
-        # The parent is genuinely PARKED in the callout poll once the platform
-        # has answered `in_progress` twice — it is inside CalloutClient.wait,
-        # not merely about to enter it. Gated on the platform's own answers, so
-        # a parent that never gets there stalls the wait (and says what it saw)
-        # instead of a clock deciding for it.
-        await _progress_count(
-            platform.polls, 2,
-            what="child-status polls before the second dispatch",
-            gone=_parent_done_early,
-        )
-        assert platform.submitted.is_set(), "the child call was never submitted"
-
-        polls_at_dispatch = platform.polls()
-        blocked_from = time.monotonic()
-        await ex.handle_run_job(_run_job("req-second", "second"))
-
-        # The observation window: _OBSERVED_CHILD_POLLS of the child call's own
-        # progress, ending early the moment the second handler enters. The
-        # parent cannot finish during it (the platform reports `completed` only
-        # after release(), below), so the window is a quantity of work the
-        # system performed rather than a duration the runner had to keep up
-        # with. Group 0's permit is sampled on every observation.
-        permit_samples: List[bool] = []
-
-        def _observe() -> Tuple[int, bool]:
-            permit_samples.append(ex._gpu_permits[0].locked())
-            return platform.polls(), _second_ran.is_set()
-
-        await _progress(
-            _observe,
-            lambda seen: (seen[1]
-                          or seen[0] - polls_at_dispatch >= _OBSERVED_CHILD_POLLS),
-            what=(
-                f"{_OBSERVED_CHILD_POLLS} child-status polls with the parent "
-                f"suspended, or the second handler entering first"
-            ),
-            gone=_parent_done_early,
-        )
-        second_ran_while_waiting = _second_ran.is_set()
-        permit_locked_throughout = all(permit_samples)
-        polls_during_window = platform.polls() - polls_at_dispatch
-        # The parent is still suspended: it has produced no result, and the
-        # platform has not yet reported its child terminal.
-        parent_in_flight = "req-parent" not in _results(sent)
-        assert not platform.released.is_set()
-
-        blocked_s = time.monotonic() - blocked_from
-        released_at = time.monotonic()
-        platform.release()
-        second_latency: Optional[float] = None
-        if not second_ran_while_waiting:
-            # It must now enter, and the wait ends on that happening — never on
-            # a deadline. If the permit was NOT what gated it, nothing advances
-            # and the wait fails saying so.
-            await _progress(
-                _second_ran.is_set, lambda entered: entered,
-                what="the second handler entering once the permit is free",
-                poll_s=0.005,
-            )
-            second_latency = time.monotonic() - released_at
-
-        await _progress(
-            lambda: frozenset(_results(sent)),
-            lambda seen: {"req-parent", "req-second"} <= seen,
-            what="both job results",
-        )
-        tasks = [j.task for j in ex.jobs.values() if j.task is not None]
-        await _progress(
-            lambda: sum(1 for t in tasks if t.done()),
-            lambda done: done == len(tasks),
-            what="every job task to finish",
-        )
-        for task in tasks:
-            await task  # surfaces a handler exception the results hid
-
-    statuses = _results(sent)
-    return _Measurement(
-        child_call_made=bool(_parent_result),
-        second_accepted="req-second" in _accepted(sent),
-        second_handler_ran_while_parent_waited=second_ran_while_waiting,
-        child_polls_while_waiting=polls_during_window,
-        parent_still_in_flight=parent_in_flight,
-        gpu_permit_locked_throughout=permit_locked_throughout,
-        second_handler_latency_after_child_s=second_latency,
-        blocked_while_child_in_flight_s=blocked_s,
-        parent_status=statuses.get("req-parent"),
-        second_status=statuses.get("req-second"),
-    )
+        yield _Run(probe, ex, platform, sent)
 
 
 # --------------------------------------------------------------------------
-# 1. the await path is exercised at all — it never had been
+# 1. the await path is exercised at all — it never had been before #455
 # --------------------------------------------------------------------------
 
 
@@ -425,74 +452,302 @@ def test_ctx_call_endpoint_actually_reaches_the_platform() -> None:
     """`requests.parent_request_id` was non-empty on 0 of 800 rows and
     `max(call_depth)` was 0: no worker had ever invoked `ctx.call`. This is
     the first execution of the submit -> poll -> result path end to end."""
-    m = asyncio.run(_measure(gpu=False))
-    assert m.child_call_made, "ctx.call_endpoint returned no child output"
-    assert m.parent_status == pb.JOB_STATUS_OK, m.parent_status
-    assert _parent_result[0] == ["child-ok"]
+
+    async def _measure() -> None:
+        async with _running(
+            lambda probe: _endpoints(probe, gpu=False)
+        ) as run:
+            await run.park_parent()
+            run.platform.release()
+            statuses = await run.finish()
+            assert run.probe.parent_result, "ctx.call_endpoint returned no output"
+            assert run.probe.parent_result[0] == ["child-ok:child-req-1"]
+            assert statuses.get("req-parent") == pb.JOB_STATUS_OK
+
+    asyncio.run(_measure())
 
 
 # --------------------------------------------------------------------------
-# 2. the answer, both halves
+# 2. pipelining, both resource shapes
 # --------------------------------------------------------------------------
+
+
+async def _measure_pipelining(*, gpu: bool, parent_fn: str) -> None:
+    """The fixed behaviour: while the parent is parked on its child, a second
+    request is accepted, runs, and COMPLETES — then the parent resumes and
+    completes once the child does. Pure ordering; no clocks."""
+    async with _running(lambda probe: _endpoints(probe, gpu=gpu)) as run:
+        await run.park_parent(parent_fn)
+        await run.ex.handle_run_job(_run_job("req-second", "second"))
+        await _progress(
+            run.probe.second_ran.is_set, lambda entered: entered,
+            what="the second handler entering while the parent is parked",
+            gone=run.parent_done_early,
+        )
+        await _progress(
+            lambda: "req-second" in _results(run.sent), lambda done: done,
+            what="the second request completing while the parent is parked",
+            gone=run.parent_done_early,
+        )
+        # The parent really was still suspended on its child throughout.
+        assert not run.probe.parent_resumed.is_set()
+        assert "req-parent" not in _results(run.sent)
+        run.platform.release()
+        statuses = await run.finish()
+        assert "req-second" in _accepted(run.sent)
+        assert statuses.get("req-parent") == pb.JOB_STATUS_OK, statuses
+        assert statuses.get("req-second") == pb.JOB_STATUS_OK, statuses
+        assert run.probe.parent_result[0] == ["child-ok:child-req-1"]
 
 
 def test_the_event_loop_keeps_accepting_and_running_during_a_child_call() -> None:
-    """CPU function endpoints (no GPU permit) DO pipeline.
-
-    Intake is not blocked by a parked handler — the sync handler is on a
-    `asyncio.to_thread` worker, so `handle_run_job` accepts, `JobAccepted`
-    goes out, and the second handler body runs to completion while the first
-    is still polling its child.
-    """
-    m = asyncio.run(_measure(gpu=False))
-    assert m.second_accepted
-    assert m.second_handler_ran_while_parent_waited, (
-        "a second request made no progress while a child call was in flight"
-    )
-    assert m.second_status == pb.JOB_STATUS_OK
-    # The parent really was still suspended when the second one ran.
-    assert m.parent_still_in_flight
+    """CPU function endpoints (no GPU permit) pipeline — intake was never the
+    blocking site. Sync handlers run in ``asyncio.to_thread``, so a handler
+    parked in ``CalloutClient.wait`` does not block the loop."""
+    asyncio.run(_measure_pipelining(gpu=False, parent_fn="parent"))
 
 
-def test_a_gpu_request_holds_its_permit_across_the_whole_child_call() -> None:
-    """THE FINDING. At `gpu_slots=1` the second GPU request does NOT progress.
-
-    `_run_job` takes the group permit before the handler and releases it after
-    (`executor.py:11741-11758`); `call_endpoint` never yields the lease the way
-    `save_bytes` does (`request_context/__init__.py:719` vs `_gpu_slot_yielded`).
-    So the parent rents the accelerator for the duration of a network round
-    trip, and every cozy-eval-shaped pipeline serializes while holding a GPU.
-
-    This test pins the CURRENT behaviour so the fix flips it deliberately.
-    """
-    m = asyncio.run(_measure(gpu=True))
-    assert m.second_accepted, "intake itself is not the blocking site"
-    assert not m.second_handler_ran_while_parent_waited, (
-        "the GPU permit is now yielded across child calls — pgw#943 is fixed; "
-        "invert this assertion and delete the finding"
-    )
-    # The blocking site, named: group 0's permit was held for every sample of
-    # the window, and the second handler entered only once the child completed.
-    assert m.parent_still_in_flight
-    assert m.gpu_permit_locked_throughout
-    # The window really did span the child call's own progress — the permit
-    # samples above are not a handful taken while nothing was happening.
-    assert m.child_polls_while_waiting >= _OBSERVED_CHILD_POLLS
-    assert m.second_handler_latency_after_child_s is not None
-    # THE ORDERING, as a share of a baseline measured in this same run: the
-    # handler entered on the permit coming free, in a small fraction of the
-    # time that same permit had it blocked (#455: 10.7 ms against a
-    # multi-second block). So the permit was the ONLY thing gating it — and a
-    # slow runner lengthens both sides, which is why this is a claim about the
-    # code rather than about the machine.
-    assert m.second_handler_latency_after_child_s < (
-        m.blocked_while_child_in_flight_s * _PROMPT_ENTRY_SHARE
-    ), (m.second_handler_latency_after_child_s, m.blocked_while_child_in_flight_s)
-    # It is only parked, not lost: both finish once the child completes.
-    assert m.parent_status == pb.JOB_STATUS_OK
-    assert m.second_status == pb.JOB_STATUS_OK
+def test_a_gpu_request_yields_its_permit_across_the_whole_child_call() -> None:
+    """THE pgw#943 FIX, pinned. At `gpu_slots=1` the second GPU request now
+    runs TO COMPLETION while the parent is parked on its child: the child-call
+    wait yields the #382 lease instead of renting the accelerator for a
+    network round trip, and the parent re-acquires and completes once the
+    child does. (#455 pinned the opposite — the permit held across the whole
+    call — and its assertion was inverted into this one, per its own
+    instruction.)"""
+    asyncio.run(_measure_pipelining(gpu=True, parent_fn="parent"))
 
 
-if __name__ == "__main__":  # pragma: no cover - manual measurement run
-    for gpu in (False, True):
-        print(f"gpu={gpu}: {asyncio.run(_measure(gpu=gpu))}")
+def test_wait_false_handle_result_also_yields() -> None:
+    """The yield must not depend on which waiting style tenant code picked:
+    ``wait=False`` + ``handle.result()`` parks in the same guard."""
+    asyncio.run(_measure_pipelining(gpu=True, parent_fn="parent-deferred"))
+
+
+# --------------------------------------------------------------------------
+# 3. re-acquisition: contention, composition, failure, cancellation
+# --------------------------------------------------------------------------
+
+
+def test_reacquire_waits_out_a_contender_then_the_parent_resumes() -> None:
+    """The re-acquire path under contention, made deterministic: a follower
+    HOLDS the permit (its handler blocks on an event) while the parent's
+    child completes. The parent cannot resume until the follower releases —
+    ``parent_resumed`` staying unset is gated on the semaphore itself, not on
+    timing — and then it does resume and completes. No wedge, no leak."""
+
+    async def _measure() -> None:
+        async with _running(
+            lambda probe: _endpoints(probe, gpu=True)
+        ) as run:
+            try:
+                await run.park_parent()
+                await run.ex.handle_run_job(_run_job("req-blocker", "blocker"))
+                # The follower could only enter because the parked parent
+                # YIELDED the permit — this is the yield, observed.
+                await _progress(
+                    run.probe.blocker_entered.is_set, lambda e: e,
+                    what="the blocker entering on the yielded permit",
+                    gone=run.parent_done_early,
+                )
+                run.platform.release()
+                # The parent has SEEN its child terminal...
+                await _progress_count(
+                    lambda: run.platform.terminal_polls("child-req-1"), 1,
+                    what="the parent observing its child's terminal status",
+                )
+                # ...but cannot have resumed: resuming requires re-acquiring
+                # the permit the blocker still holds. This is a property of
+                # the semaphore, not of how long we waited.
+                assert not run.probe.parent_resumed.is_set()
+                assert "req-parent" not in _results(run.sent)
+                assert run.ex._gpu_permits[0].locked()
+            finally:
+                run.probe.blocker_release.set()
+            statuses = await run.finish()
+            assert run.probe.parent_resumed.is_set()
+            assert statuses.get("req-parent") == pb.JOB_STATUS_OK, statuses
+            assert statuses.get("req-blocker") == pb.JOB_STATUS_OK, statuses
+            assert not run.ex._gpu_permits[0].locked(), "permit leaked"
+
+    asyncio.run(_measure())
+
+
+def test_sequential_child_calls_compose_yield_reacquire_yield() -> None:
+    """Depth composition on one worker: two sequential child calls in one
+    handler yield, re-acquire, and yield again — a follower pipelines inside
+    EACH wait, and the balance stays exact."""
+
+    async def _measure() -> None:
+        async with _running(
+            lambda probe: _endpoints(probe, gpu=True)
+        ) as run:
+            await run.park_parent("parent-twice")
+            # Yield #1: a follower completes inside the first wait.
+            await run.ex.handle_run_job(_run_job("req-second", "second"))
+            await _progress(
+                lambda: "req-second" in _results(run.sent), lambda done: done,
+                what="a follower completing inside the FIRST child wait",
+                gone=run.parent_done_early,
+            )
+            run.platform.release("child-req-1")
+            # Re-acquire #1 worked: the parent moved on to its second call...
+            await _progress(
+                run.probe.first_child_done.is_set, lambda done: done,
+                what="the parent resuming after its first child",
+                gone=run.parent_done_early,
+            )
+            # ...and is parked on child 2 (the platform answered for it twice).
+            await _progress_count(
+                lambda: run.platform.polls("child-req-2"), 2,
+                what="child-status polls proving the parent is parked again",
+                gone=run.parent_done_early,
+            )
+            # Yield #2: another follower completes inside the second wait.
+            await run.ex.handle_run_job(_run_job("req-third", "second"))
+            await _progress(
+                lambda: "req-third" in _results(run.sent), lambda done: done,
+                what="a follower completing inside the SECOND child wait",
+                gone=run.parent_done_early,
+            )
+            assert not run.probe.parent_resumed.is_set()
+            run.platform.release("child-req-2")
+            statuses = await run.finish()
+            assert statuses.get("req-parent") == pb.JOB_STATUS_OK, statuses
+            assert run.probe.parent_result == [
+                ["child-ok:child-req-1"], ["child-ok:child-req-2"],
+            ]
+            assert not run.ex._gpu_permits[0].locked(), "permit leaked"
+
+    asyncio.run(_measure())
+
+
+def test_child_failure_mid_yield_reacquires_and_fails_cleanly() -> None:
+    """A child that FAILS while the parent's slot is yielded: the wait raises
+    the typed error only after re-acquiring, the job fails cleanly, and the
+    permit balance stays exact — a subsequent GPU request runs fine."""
+
+    async def _measure() -> None:
+        async with _running(
+            lambda probe: _endpoints(probe, gpu=True)
+        ) as run:
+            await run.park_parent()
+            run.platform.fail("child-req-1")
+            await _progress(
+                lambda: "req-parent" in _results(run.sent), lambda done: done,
+                what="the parent failing on its child's failure",
+            )
+            statuses = _results(run.sent)
+            assert statuses["req-parent"] != pb.JOB_STATUS_OK, statuses
+            assert statuses["req-parent"] != pb.JOB_STATUS_CANCELED, statuses
+            assert not run.probe.parent_resumed.is_set()
+            # The permit came back on the failure path: a follower serves.
+            assert not run.ex._gpu_permits[0].locked(), "permit leaked"
+            await run.ex.handle_run_job(_run_job("req-second", "second"))
+            statuses = await run.finish()
+            assert statuses.get("req-second") == pb.JOB_STATUS_OK, statuses
+
+    asyncio.run(_measure())
+
+
+def test_cancel_mid_yield_leaves_the_permit_free() -> None:
+    """A parent cancelled while parked: the callout wait raises promptly (the
+    cancel event, not a poll deadline), the re-acquired slot is released
+    again for the dying job (#382's cancel discipline), and the permit is
+    free for the next request."""
+
+    async def _measure() -> None:
+        async with _running(
+            lambda probe: _endpoints(probe, gpu=True)
+        ) as run:
+            await run.park_parent()
+            run.ex.handle_cancel(pb.CancelJob(request_id="req-parent", attempt=1))
+            await _progress(
+                lambda: "req-parent" in _results(run.sent), lambda done: done,
+                what="the cancelled parent reaching a terminal result",
+            )
+            statuses = _results(run.sent)
+            assert statuses["req-parent"] == pb.JOB_STATUS_CANCELED, statuses
+            assert not run.ex._gpu_permits[0].locked(), "permit leaked"
+            await run.ex.handle_run_job(_run_job("req-second", "second"))
+            statuses = await run.finish()
+            assert statuses.get("req-second") == pb.JOB_STATUS_OK, statuses
+
+    asyncio.run(_measure())
+
+
+# --------------------------------------------------------------------------
+# 4. the scope: a gate-holding parent must KEEP its permit
+# --------------------------------------------------------------------------
+
+
+def test_gate_holding_parent_keeps_the_permit_across_child_calls() -> None:
+    """A non-reentrant CLASS endpoint holds its instance gate (``run_lock``)
+    for the whole handler. Yielding its permit would wedge: both `_run_job`
+    and `_bg_turn` take the permit BEFORE the gate, so a same-instance
+    follower (or mint turn) would hold the permit while waiting on the
+    parked parent's `run_lock`, and the parent's re-acquire would wait on
+    that permit forever — hold-and-wait cycle. So for this shape the child
+    call KEEPS the permit (pre-#943 behaviour), pinned here so widening the
+    yield is a deliberate act (it requires inverting the permit/gate lock
+    order first — see the pgw#943 tracker entry)."""
+
+    async def _measure() -> None:
+        async with _running(_gated_endpoints) as run:
+            gated_name = next(
+                s.name for fn in _gated_endpoints(_Probe())
+                for s in extract_specs(fn) if s.cls is not None
+            )
+            await run.park_parent(gated_name)
+            polls_at_dispatch = run.platform.polls()
+            blocked_from = time.monotonic()
+            await run.ex.handle_run_job(_run_job("req-second", "second"))
+            # The observation window: _OBSERVED_CHILD_POLLS of the child
+            # call's own progress, ending early if the second handler enters
+            # (which would be the fix's scope leaking). Group 0's permit is
+            # sampled on every observation.
+            permit_samples: List[bool] = []
+
+            def _observe() -> Tuple[int, bool]:
+                permit_samples.append(run.ex._gpu_permits[0].locked())
+                return run.platform.polls(), run.probe.second_ran.is_set()
+
+            await _progress(
+                _observe,
+                lambda seen: (
+                    seen[1]
+                    or seen[0] - polls_at_dispatch >= _OBSERVED_CHILD_POLLS
+                ),
+                what=(
+                    f"{_OBSERVED_CHILD_POLLS} child-status polls with the "
+                    f"gate-holding parent suspended"
+                ),
+                gone=run.parent_done_early,
+            )
+            assert not run.probe.second_ran.is_set(), (
+                "a gate-holding parent yielded its permit — that shape wedges "
+                "on re-acquire (see docstring); the scope stamp regressed"
+            )
+            assert all(permit_samples)
+            assert run.platform.polls() - polls_at_dispatch >= _OBSERVED_CHILD_POLLS
+            blocked_s = time.monotonic() - blocked_from
+            released_at = time.monotonic()
+            run.platform.release()
+            await _progress(
+                run.probe.second_ran.is_set, lambda entered: entered,
+                what="the second handler entering once the permit is free",
+                poll_s=0.005,
+            )
+            second_latency = time.monotonic() - released_at
+            # The ordering, as a share of a baseline measured in this same
+            # run: the handler entered on the permit coming free, in a small
+            # fraction of the time that same permit had it blocked. A slow
+            # runner lengthens both sides.
+            assert second_latency < blocked_s * _PROMPT_ENTRY_SHARE, (
+                second_latency, blocked_s,
+            )
+            statuses = await run.finish()
+            assert statuses.get("req-parent") == pb.JOB_STATUS_OK, statuses
+            assert statuses.get("req-second") == pb.JOB_STATUS_OK, statuses
+
+    asyncio.run(_measure())

@@ -260,6 +260,10 @@ class RequestContext(Generic[D]):
         # blocking uploads release the GPU slot while they wait on the
         # network. None for CPU jobs and local (CLI) runs.
         self._gpu_slot_lease: Optional[Any] = None
+        # pgw#943: may a CHILD-CALL wait yield the GPU slot? Stamped per job
+        # by the executor: True only when this job holds no instance gate and
+        # no per-request adapters — see _child_call_wait for why both matter.
+        self._child_call_slot_yieldable: bool = False
         # gw#516: executor callback fired on the TERMINAL slot release at the
         # decode->finalize handoff, so the worker's finalizing-job count (and
         # the hub's StateDelta view of it) tracks the encode/upload tail.
@@ -743,6 +747,13 @@ class RequestContext(Generic[D]):
         :class:`~gen_worker.callout.ChildRequest` handle
         (``.status()`` / ``.result()`` / ``.cancel()``).
 
+        While parked on the child (``wait=True`` here, or the handle's
+        ``.result()``), the job's GPU slot is YIELDED when that is safe
+        (pgw#943, see :meth:`_child_call_wait`) so the worker pipelines:
+        another request — or a background mint turn — runs on the permit
+        instead of the accelerator idling on a network round trip, and the
+        wait re-acquires before returning to this handler.
+
         Raises ``ChildCallRefusedError`` (typed admission refusals),
         ``ChildRequestFailedError`` / ``ChildRequestCanceledError``,
         ``ChildCallTimeoutError``, and ``CanceledError`` when this invocation
@@ -753,7 +764,7 @@ class RequestContext(Generic[D]):
         request_id = client.submit(endpoint, function, payload, tag=tag, tier=tier)
         from ..callout import ChildRequest
 
-        handle = ChildRequest(client, request_id)
+        handle = ChildRequest(client, request_id, wait_guard=self._child_call_wait)
         if not wait:
             return handle
         return handle.result(timeout_s, poll_interval_s=poll_interval_s)
@@ -797,6 +808,41 @@ class RequestContext(Generic[D]):
             lease.reacquire()
             if self._canceled:
                 lease.yield_slot()
+
+    @contextmanager
+    def _child_call_wait(self) -> "Iterator[None]":
+        """Worker-internal: park for a child request's result with the GPU
+        slot YIELDED (pgw#943) — a parent waiting on a network round trip
+        must not rent the accelerator, so another request (or a background
+        mint turn) runs on the permit and the wait re-acquires before
+        returning to tenant code. Same lease discipline as ``save_bytes``
+        (#382); the wait itself stays on the handler thread, so heartbeats
+        and StateDeltas ride the free event loop exactly as before.
+
+        SCOPED to jobs the executor stamped yieldable, because both permit
+        acquirers (`_run_job` and `_bg_turn`) take the permit BEFORE the
+        instance gate:
+
+        * a job holding its instance gate (non-reentrant class endpoint)
+          must NOT yield — a same-instance follower or background turn
+          would hold the permit while waiting on this job's ``run_lock``,
+          and the re-acquire would wedge (hold-and-wait cycle);
+        * a job with per-request adapters active must NOT yield — a
+          follower on the shared pipeline would deactivate/replace this
+          request's adapter state mid-handler.
+
+        For those jobs the child call keeps the permit (the pre-pgw#943
+        behaviour); same-function pipelining was impossible for them anyway
+        (single-flight per instance, pgw#647). The wait is bracketed as its
+        own stage so the child park shows up as GPU-idle time in the stage
+        map instead of masquerading as compute.
+        """
+        with self._stages.stage("child_call_wait"):
+            if not self._child_call_slot_yieldable:
+                yield
+                return
+            with self._gpu_slot_yielded():
+                yield
 
     def _release_gpu_slot_for_finalize(self) -> None:
         """Worker-internal: TERMINAL GPU-slot release at the decode->finalize
