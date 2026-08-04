@@ -33,28 +33,25 @@ from typing import Any, ClassVar, Optional, Tuple
 import msgspec
 import pytest
 
-# pgw#797 adjudication (test-health audit): SKIP, do not FAIL. Unlike its two
-# pgw#738 siblings, this file's src half exists NOWHERE — all three cases fail
-# against HEAD *and* against the worktree carrying every sibling's WIP, so it is
-# a test written ahead of a fix that was never made. It still describes a real,
-# expensive incident (62922680 + d0cbf910, one H100, ~$24.6, 3h51m of
-# heartbeating silence), and the contract it states — run_lock-first admission,
-# a typed GpuSlotReacquireTimeout, a reaped terminal JobResult — is the design
-# pgw#738 asked for. So it is preserved as the executable specification of that
-# fix rather than deleted, and named as unimplemented rather than left red.
-# REMOVE THIS GUARD as the first step of implementing pgw#738: it should go red,
-# then green.
-_ADMISSION_FIX_LANDED = hasattr(
+# pgw#954 landed the FIRST of this file's three contract clauses —
+# gate-first admission — so `test_two_packed_jobs_survive_a_mid_handler_save`
+# (the incident shape itself: 62922680 + d0cbf910) now RUNS. The other two
+# clauses are still unimplemented and skip individually:
+#
+#   * a typed `GpuSlotReacquireTimeout` bound on the re-acquire. Note this
+#     clause predates the no-magic-timeouts rule (gw#666/pgw#795) — a fixed
+#     `REACQUIRE_TIMEOUT_S` is exactly the shape that rule forbids, so pgw#738
+#     should re-derive it as a progress/liveness bound before implementing.
+#   * a dead-job-task reaper turning an escaped `_run_job` into a terminal
+#     JobResult (the never-silent guarantee).
+_REACQUIRE_BOUND_LANDED = hasattr(
     __import__("gen_worker.api.errors", fromlist=["errors"]),
     "GpuSlotReacquireTimeout",
 )
-if not _ADMISSION_FIX_LANDED:
-    pytest.skip(
-        "pgw#738 UNIMPLEMENTED: the upload/publish admission fix (run_lock-first "
-        "admission + typed GpuSlotReacquireTimeout + dead-task reaper) has not "
-        "landed on any branch. This file is its executable specification.",
-        allow_module_level=True,
-    )
+_needs_reacquire_bound = pytest.mark.skipif(
+    not _REACQUIRE_BOUND_LANDED,
+    reason="pgw#738 UNIMPLEMENTED: typed GpuSlotReacquireTimeout bound",
+)
 
 from gen_worker import executor as executor_mod
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -153,6 +150,7 @@ def test_two_packed_jobs_survive_a_mid_handler_save() -> None:
         httpd.shutdown()
 
 
+@_needs_reacquire_bound
 def test_reacquire_bound_fails_typed_never_silent() -> None:
     """If the yielded permit genuinely cannot come back (simulated thief on
     the semaphore), the job fails TYPED + RETRYABLE within the bound instead
@@ -190,6 +188,8 @@ async def _release(ex: Any) -> None:
     ex._gpu_semaphore.release()
 
 
+@pytest.mark.skip(
+    reason="pgw#738 UNIMPLEMENTED: dead-job-task reaper (never-silent terminal)")
 def test_dead_job_task_reports_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never-silent guarantee: a job task that dies without reporting (any
     escape from _run_job's own handlers) is reaped into a terminal
