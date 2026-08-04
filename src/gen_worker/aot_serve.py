@@ -879,8 +879,7 @@ def stage_artifact(
         # on by name before dlopen — the tier that keeps cross-SKU adoption
         # honest now that ``sku`` no longer stands in for the arch. Runs
         # after `verify` so a stamped axis mismatch keeps its own name.
-        sm_reason = verify_package_compute_capability(
-            meta, root / PACKAGE_NAME)
+        sm_reason = verify_package_compute_capability(root / PACKAGE_NAME)
         if sm_reason:
             raise AdoptError("sm_mismatch", sm_reason)
         return _StagedAotArtifact(meta, root, temporary)
@@ -2357,6 +2356,7 @@ __all__ = [
     "find_artifact",
     "flavor_label",
     "host_isa_reason",
+    "NO_HOST_ISA_STAMP",
     "ingress_class_name",
     "ingress_refusals",
     "is_aot_artifact",
@@ -2382,6 +2382,5 @@ __all__ = [
     "unwrap",
     "verify",
     "verify_package_compute_capability",
-    "verify_package_host_isa",
     "wrap_module",
 ]

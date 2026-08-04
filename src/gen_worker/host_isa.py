@@ -317,19 +317,6 @@ def requirement_of_meta(block: Mapping[str, object]) -> Tuple[str, str]:
     return str(block.get("level") or ""), str(block.get("machine") or "")
 
 
-def vec_isa_level(aoti_cpu_isa: str) -> str:
-    """Map torch's own ``AOTI_CPU_ISA`` package stamp (the mint host's picked
-    vector ISA, e.g. ``"AVX512 AVX512_VNNI"``) to the psABI level it implies.
-    Best-effort legacy gate for artifacts minted before the stamp existed —
-    a native-built wrapper's needs track the mint host the pick describes."""
-    text = aoti_cpu_isa.upper()
-    if "AMX" in text or "AVX512" in text:
-        return "x86-64-v4"
-    if "AVX2" in text:
-        return "x86-64-v3"
-    return ""
-
-
 __all__ = [
     "BASELINE",
     "HostIsaError",
@@ -343,5 +330,4 @@ __all__ = [
     "requirement_of_meta",
     "stamp",
     "unsupported_reason",
-    "vec_isa_level",
 ]
