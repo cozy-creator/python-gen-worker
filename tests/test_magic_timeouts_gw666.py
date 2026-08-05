@@ -17,6 +17,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -28,6 +29,7 @@ import requests
 import hashlib
 
 from gen_worker.stall import ProgressFloor, SilenceWindow
+from harness.progress_wait import Cadence, await_progress
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
@@ -164,37 +166,105 @@ def test_progress_floor_treats_a_trickle_as_no_progress() -> None:
 # B — runtimes/server.py: an engine boot is bounded by SILENCE
 # ---------------------------------------------------------------------------
 
-# A slow-booting engine: prints load progress for a while, THEN serves /health.
-# Under the deleted `_DEFAULT_BOOT_TIMEOUT_S` this shape died for the sole
-# crime of taking longer than the constant.
+#: The engine's own print cadence: an INDUCED duration (it produces the
+#: stimulus), never a budget for an awaited event.
+_ENGINE_TICK_S = 0.05
+#: The stall window is this many times the slowest advance the runner just
+#: showed, and the boot is this many windows long. Ratios, not durations.
+_STALL_HEADROOM = 5.0
+_BOOT_WINDOWS = 4.0
+
+# A slow-booting engine: logs load progress, and answers /health 503 until it
+# is loaded. Under the deleted `_DEFAULT_BOOT_TIMEOUT_S` this shape died for
+# the sole crime of taking longer than the constant.
+#
+# pgw#957: it used to print for `talk_s` and only THEN bind its port, so
+# becoming healthy cost a silent handoff — 53 ms idle, against a window the
+# boot fails the moment that gap outlives — that nothing kept talking across.
+# That is a bet on the runner's speed, in the file that polices exactly that
+# bet. The socket now listens from the first moment and the engine talks for
+# its whole life, so the only silence left is a real wedge.
 _CHATTY_ENGINE = """
-import sys, time
+import sys, threading, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-port, talk_s = int(sys.argv[1]), float(sys.argv[2])
-i = 0
-end = time.time() + talk_s
-while time.time() < end:
-    print("loading weights shard %d" % i, flush=True)
-    i += 1
-    time.sleep(0.05)
+port, talk_s, tick_s = int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
+loaded = threading.Event()
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
+        self.send_response(200 if loaded.is_set() else 503)
         self.send_header("Content-Length", "2")
         self.end_headers()
         self.wfile.write(b"ok")
     def log_message(self, *a):
         pass
-HTTPServer(("127.0.0.1", port), H).serve_forever()
+threading.Thread(
+    target=lambda: HTTPServer(("127.0.0.1", port), H).serve_forever(),
+    daemon=True,
+).start()
+end = time.time() + talk_s
+i = 0
+while True:
+    print("loading weights shard %d" % i, flush=True)
+    i += 1
+    if time.time() >= end:
+        loaded.set()
+    time.sleep(tick_s)
 """
 
 # An engine that says one thing and then wedges, never serving.
-_WEDGED_ENGINE = """
+_WEDGE_SLEEP_S = 600
+_WEDGED_ENGINE = f"""
 import sys, time
 open(sys.argv[1], "w").write(str(__import__("os").getpid()))
 print("initializing engine", flush=True)
-time.sleep(600)
+time.sleep({_WEDGE_SLEEP_S})
 """
+
+# Same interpreter, same imports, same cadence as the engine — minus the
+# server. What it costs to SPAWN this and hear from it is the boot's own
+# unavoidable silence, and it is a property of the loaded box, not of the code.
+_CADENCE_PROBE = """
+import sys, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+lines, tick_s = int(sys.argv[1]), float(sys.argv[2])
+for i in range(lines):
+    print("probe %d" % i, flush=True)
+    time.sleep(tick_s)
+"""
+
+
+def _measured_stall_window_s(lines: int = 8) -> float:
+    """A stall window this runner has EARNED, rather than one it is assumed to
+    deserve (pgw#957).
+
+    The window must cover the two silences a HEALTHY child really produces:
+    spawning it (a fresh interpreter plus the engine's imports — measured at
+    0.20 s idle and 0.35 s at 3x CPU oversubscription, against the 0.3 s
+    literal that used to sit here) and the gap between its lines. Both are
+    properties of the box under load, so they are measured now, through
+    ``Cadence``: window = headroom x the slowest advance THIS probe saw.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-c", _CADENCE_PROBE, str(lines), str(_ENGINE_TICK_S)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+    assert proc.stdout is not None
+    cadence = Cadence(floor_s=_ENGINE_TICK_S * 4, headroom=_STALL_HEADROOM)
+    last = time.monotonic()
+    for _ in proc.stdout:  # the first sample IS spawn -> first line
+        now = time.monotonic()
+        cadence.record(now - last)
+        last = now
+    proc.wait()
+    return cadence.window_s
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
 
 
 def _proc_for(script: str, *args: str, port: int, window_s: float):
@@ -207,17 +277,23 @@ def _proc_for(script: str, *args: str, port: int, window_s: float):
     )
 
 
+def _chatty(port: int, *, talk_s: float, window_s: float):
+    return _proc_for(_CHATTY_ENGINE, str(port), str(talk_s), str(_ENGINE_TICK_S),
+                     port=port, window_s=window_s)
+
+
 def test_a_talking_engine_boots_however_long_it_takes(caplog) -> None:
-    """The stall window is a FIFTH of the boot; only silence may fail it."""
+    """The stall window is a QUARTER of the boot; only silence may fail it."""
+    window_s = _measured_stall_window_s()
     port = _free_port()
-    boot = _proc_for(_CHATTY_ENGINE, str(port), "1.5", port=port, window_s=0.3)
+    boot = _chatty(port, talk_s=_BOOT_WINDOWS * window_s, window_s=window_s)
 
     caplog.set_level("INFO", logger="gen_worker.runtimes.server")
     start = time.monotonic()
     handle = boot.start()
     try:
         elapsed = time.monotonic() - start
-        assert elapsed > 0.3 * 3  # outlived several windows while advancing
+        assert elapsed > 3 * window_s  # outlived several windows while advancing
         assert handle.alive
         # The engine's own boot log now reaches the worker log, where an
         # operator can see it — it used to go to an unread inherited stdout.
@@ -233,7 +309,8 @@ def test_a_silent_engine_fails_on_the_stall_window_and_is_killed(tmp_path) -> No
 
     pidfile = tmp_path / "engine.pid"
     port = _free_port()
-    boot = _proc_for(_WEDGED_ENGINE, str(pidfile), port=port, window_s=0.5)
+    window_s = _measured_stall_window_s()
+    boot = _proc_for(_WEDGED_ENGINE, str(pidfile), port=port, window_s=window_s)
 
     start = time.monotonic()
     with pytest.raises(ServerBootError) as excinfo:
@@ -241,26 +318,28 @@ def test_a_silent_engine_fails_on_the_stall_window_and_is_killed(tmp_path) -> No
     elapsed = time.monotonic() - start
 
     assert "produced no output" in str(excinfo.value)
-    assert elapsed < 30.0  # NOT the child's own 600s sleep
+    assert elapsed < _WEDGE_SLEEP_S / 10  # NOT the child's own 600s sleep
     pid = int(pidfile.read_text())
-    for _ in range(100):  # SIGTERM -> exit is not instantaneous
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            break
-        time.sleep(0.1)
-    else:
-        pytest.fail(f"wedged engine pid {pid} survived the boot failure")
+    # SIGTERM -> exit is not instantaneous, and how long it takes is the box's
+    # business: wait on the pid leaving the process table (pgw#956), not a clock.
+    await_progress(
+        lambda: _pid_alive(pid),
+        lambda alive: not alive,
+        what=f"wedged engine pid {pid} to exit after the boot failure",
+        cadence=Cadence(),
+    )
 
 
 def test_the_boot_gate_keys_on_the_GAP_not_on_total_runtime() -> None:
     """Control for the two tapes above: the same chatty engine, with a window
-    narrower than its 0.05s inter-line gap, DOES fail — so the gate is live,
-    and what it measures is silence between lines rather than elapsed time."""
+    narrower than its own inter-line gap, DOES fail — so the gate is live, and
+    what it measures is silence between lines rather than elapsed time. A
+    window BELOW the induced cadence is the one safe literal here: load can
+    only make it fail sooner."""
     from gen_worker.runtimes.server import ServerBootError
 
     port = _free_port()
-    boot = _proc_for(_CHATTY_ENGINE, str(port), "5.0", port=port, window_s=0.01)
+    boot = _chatty(port, talk_s=_WEDGE_SLEEP_S, window_s=_ENGINE_TICK_S / 5)
     with pytest.raises(ServerBootError) as excinfo:
         boot.start()
     assert "produced no output" in str(excinfo.value)
@@ -270,9 +349,11 @@ def test_degrading_boot_degrades_on_silence_not_on_a_clock(tmp_path) -> None:
     from gen_worker.runtimes.server import DegradingBoot
 
     dead_port, live_port = _free_port(), _free_port()
+    window_s = _measured_stall_window_s()
     boot = DegradingBoot([
-        _proc_for(_WEDGED_ENGINE, str(tmp_path / "p"), port=dead_port, window_s=0.4),
-        _proc_for(_CHATTY_ENGINE, str(live_port), "0.3", port=live_port, window_s=0.4),
+        _proc_for(_WEDGED_ENGINE, str(tmp_path / "p"), port=dead_port,
+                  window_s=window_s),
+        _chatty(live_port, talk_s=window_s, window_s=window_s),
     ])
     handle = boot.start()
     try:
@@ -712,6 +793,9 @@ def _scan(root: Path, pattern: "re.Pattern[str]", *, match: bool = False) -> set
     hits = set()
     for path in sorted(root.rglob("*.py")):
         if path.name == Path(__file__).name:
+            # This file HOLDS the patterns, so scanning it only finds itself.
+            # pgw#957 is what that costs: the guard's OWN boot fixture ran on a
+            # literal 0.3s window, unpoliced. The rule here is manual.
             continue
         for line in _code_lines(path):
             found = pattern.match(line) if match else pattern.search(line)

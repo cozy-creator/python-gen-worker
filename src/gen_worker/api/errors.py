@@ -49,6 +49,24 @@ class CanceledError(WorkerError):
     """Job was canceled; do not retry."""
 
 
+class GpuSlotUnreachable(RetryableError):
+    """A mid-handler GPU-permit re-acquire (#382) can never be satisfied.
+
+    pgw#738: the #382 lease yields the permit across a blob upload and takes
+    it back before returning to tenant code. That wait has NO honest progress
+    signal of its own — FIFO position does not move while a healthy holder
+    computes for four hours, and a holder's silence is not the waiter's fault
+    (the publish phase is log-silent and GPU-idle by construction). So the
+    wait is bounded by REACHABILITY, never by a clock (gw#666): it is refused
+    only when the permit ledger proves an outstanding permit belongs to no
+    live holder — a raw acquirer outside the ledger, or a hold whose owning
+    task already finished. Neither state resolves itself.
+
+    RETRYABLE: nothing about the request is wrong and another worker (or this
+    one after a recycle) serves it fine.
+    """
+
+
 class FatalError(WorkerError):
     """Indicates the job should not be retried."""
 

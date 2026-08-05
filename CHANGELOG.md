@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **pgw#957: the gw#666 guard file's own boot fixture was a bet on the runner's
+  speed — the shape it exists to police.** `test_a_talking_engine_boots_however
+  _long_it_takes` drove a REAL engine boot on a hardcoded 0.3 s stall window and
+  red under contention. The product side was never wrong: the window is a
+  SILENCE window and the engine was alive. What failed was the fixture, twice
+  over. Its engine printed for 1.5 s and only THEN bound its port, so becoming
+  healthy cost a silent handoff nothing talked across; and the window also had
+  to cover spawning a fresh CPython plus `import http.server` before the child's
+  first line — measured at 0.20 s idle, 0.35 s at 3x CPU oversubscription and
+  **0.85 s at 6x**, against a give-up that fires past ~0.63 s. So the row now
+  (a) keeps the engine talking for its whole life with its socket listening from
+  the first moment, answering `503` until loaded, leaving no silence that is not
+  a real wedge, and (b) derives its window through `harness.progress_wait.
+  Cadence` from a probe child spawned right there — window = 5x the slowest
+  advance THIS runner just showed — with the boot sized at 4 of those windows so
+  "the boot outlives several windows" stays a measured ratio rather than a
+  literal. The wedged-engine and degrading-boot rows derive the same way; the
+  negative control keeps a literal window BELOW the engine's own induced tick,
+  which load can only make fail sooner. RED-verified against `origin/dev`
+  verbatim under a slow-child-start window: `ServerBootError: engine server
+  produced no output ... and never became healthy` at `server.py:173` — the
+  fixture's guard firing on a boot that was never stalled — where the derived
+  form passes in the same window.
+
 - **pgw#956: `proc.returncode` can confirm a reap but never deny one, so the
   pgw#858 reap row now waits on the PROCESS TABLE.** The row asserted
   `proc.returncode is not None` once after `close()`, and failed under heavy
