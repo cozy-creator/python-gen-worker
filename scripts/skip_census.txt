@@ -1,0 +1,128 @@
+# pgw#966 — every skip this suite takes, and what answers it.
+#
+# `scripts/lint_skip_census.py` reads this against the skips a run ACTUALLY took
+# (`pytest --skip-census-out=...`, wired by the repo-root conftest.py). Two
+# rules: an observed skip missing from this file fails the build; in `--ci` mode
+# an observed `CI-MUST-RUN` key fails the build. A skipped row and a passing row
+# look identical in a green log — this file is what makes the difference
+# readable, and the guard is what makes it enforceable.
+#
+# WHY THIS EXISTS. pgw#858's container row skipped on `ubuntu-latest` from the
+# day it landed, on a by-name skip for exit 127, and read as coverage in every
+# green run since. It measures a uid boundary — the one row proving tenant code
+# cannot read the RunPod account-authority key out of PID 1 — and it had only
+# ever executed on developer boxes. That is how the pgw#956 flake reached `dev`.
+#
+# FORMAT: `<DISPOSITION> <file>|<normalized reason>`, one per line. The key is
+# printed verbatim in the guard's failure message; paste it.
+#
+#   CI-MUST-RUN  Expected to EXECUTE on ubuntu-latest. Observing it skipped
+#                there is a build failure, not a note.
+#   CI-SKIPPED   Legitimately un-runnable on the runner. Says where the property
+#                IS measured, or that it is unverified.
+#   LOCAL-ONLY   Opt-in by design everywhere, CI included (benchmarks, rows keyed
+#                to a banked local artifact, explicit env switches).
+#   STAGED       Blocked on work that has not landed; names the issue.
+#
+# Do NOT pre-classify a skip you have not seen. An unobserved key that turns out
+# to be spelled differently is a line that can never match, and the guard firing
+# once with the exact line to paste costs less than a wrong guess.
+#
+# ─── WHAT IS NOT MEASURED ANYWHERE, STATED PLAINLY ────────────────────────────
+#
+# Nothing in this repository is tested on a GPU by any automated lane. There is
+# no CUDA device on `ubuntu-latest`, and GPU CI runners are out of scope
+# (pgw#953, parked in the tracker's future.md). Every `needs CUDA` /
+# `needs a CUDA device` / `triton unavailable` row below is therefore not
+# "covered by the nightly lane" — it is UNVERIFIED except by hand on a pod, and
+# a green CI is no evidence about any of it. Saying so here is the point; before
+# pgw#966 a reader had no way to find it out short of auditing 63 skip sites.
+#
+# ─── THIRD PARTIES ────────────────────────────────────────────────────────────
+#
+# A check that can go red because someone else's rate limiter had a bad minute
+# is not a check — the same property a silently-skipped row breaks, from the
+# other side. The suite reaches exactly three third parties, all of which now
+# degrade to a counted skip below rather than to a red:
+#
+#   github.com  the pinned llama-server tarball (ci.yml, continue-on-error).
+#   Docker Hub  `ubuntu:24.04` for the pgw#858 root parent (exit 125 -> skip).
+#   PyPI        `uv build` + `uv pip install` in the pgw#740 wheel row — the
+#               same PyPI `uv sync --locked` already required in step 5.
+#
+# huggingface.co used to be a fourth: `test_llama_runtime.py` ran an
+# `hf_hub_download` on every CI run, and PR #483's tests job went red on a `429`.
+# The model is now vendored (`tests/testdata/stories260K.gguf`, 1,185,376 bytes,
+# digest-checked at fixture time). There is no fourth any more.
+
+# ─── CI-MUST-RUN ──────────────────────────────────────────────────────────────
+#
+# pgw#966's whole point. This row containerises itself to get a real root parent
+# — nothing in it needs a GPU, a pod, or a paid resource — and it must run on the
+# runner. Root cause of the old skip: the command mounted ONE prefix
+# (`Path(sys.executable).resolve().parents[1]`) and exec'd a hardcoded
+# `{REPO}/.venv/bin/python`, but what `execve` follows is the symlink's stored
+# text, not its resolution. `_interpreter_mounts()` now mounts all four
+# candidate prefixes. If this key is ever observed again the fix regressed, and
+# CI says so instead of staying quiet.
+CI-MUST-RUN tests/test_pod_privilege_isolation_pgw858.py|the container cannot exec this interpreter, so no row ran: [fatal tini (#)] exec <path> failed: no such file or director
+
+# ─── CI-SKIPPED: no CUDA device, and no GPU lane anywhere ─────────────────────
+# UNVERIFIED except by hand on a pod. Do not read a green CI as evidence.
+CI-SKIPPED tests/test_svdq_load_device.py|needs cuda
+CI-SKIPPED tests/test_svdq_native_pgw685.py|needs a cuda device
+CI-SKIPPED tests/test_nvfp4_fused_quant_pgw685.py|needs a cuda device
+CI-SKIPPED tests/test_aot_input_alignment_pgw791.py|cpu aoti wrapper emits no alignment check (gpu wrapper only); the pointer contract is asserted directly below
+CI-SKIPPED tests/test_llama_runtime.py|gpu smoke runs on the nightly gpu ci lane
+
+# ─── CI-SKIPPED: host capability the runner genuinely lacks ───────────────────
+# Each is measured on a developer box or a pod; none is a property of the code
+# under test. The 13 pgw#858 rows here are the INNER half of the CI-MUST-RUN row
+# above — they run as root inside that container, and skipping them outside it
+# is the design (a uid boundary cannot be measured by a suite already at uid
+# 1000: every /proc read the fix denies is already denied).
+CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|pgw#858 is a uid boundary — the containerised row above measures it
+
+# ─── CI-SKIPPED: third-party availability ─────────────────────────────────────
+# Degrades to a counted skip, never a red: an unreachable third party may not
+# fail a required check.
+CI-SKIPPED tests/test_llama_runtime.py|llama-server binary not found (path or gen_worker_llama_server_bin)
+CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|docker could not start the container, so no row ran (image pull or daemon): <path>
+CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|docker is required: pgw#858 is a uid boundary and a non-root runner cannot observe it (every /proc read is already denie
+CI-SKIPPED tests/test_registry_contract_pgw740.py|uv not on path
+
+# ─── CI-SKIPPED: rows keyed to weights that are only on a developer box ───────
+# `test_adapter_fidelity_pgw794.py` reads SDXL and Z-Image tensors straight out
+# of a local HF cache — 8 rows, ALL of which skip on the runner. They must stay
+# that way: multi-GB weights never transit CI (nor this box — workspace
+# weights-locality rule), so the only honest home for these is a developer box
+# that already has the cache, or a pod. They are UNVERIFIED in CI, not covered.
+CI-SKIPPED tests/test_adapter_fidelity_pgw794.py|local hf cache carries no models--stabilityai--stable-diffusion-xl-base-#<path>
+CI-SKIPPED tests/test_adapter_fidelity_pgw794.py|local hf cache carries no models--alibaba-pai--z-image-fun-lora-distill/z-image-fun-lora-distill-#-steps-#.safetensors
+
+# ─── CI-SKIPPED: a cgroup the runner has but does not enforce ─────────────────
+# The runner presents a delegated cgroup v2 memory controller and then does not
+# apply `memory.max` to the process tree, so there is no OOM to classify. The
+# row already refuses to assert through that (it would be a coin flip); it is
+# measured on a box whose cgroup enforces.
+CI-SKIPPED tests/test_mint_oom_classification_pgw848.py|the memory cap did not oom-kill the child: this box has a delegated cgroup v# memory controller but it did not enforce m
+
+# ─── CI-SKIPPED: an empty set that is empty on purpose ────────────────────────
+# `divergent` is a DEFECT LEDGER and it is empty as of 2026-08-02 — th#1385 and
+# pgw#870 closed all nine recorded classes and their witnesses moved into
+# `agreed` (53 vectors, which DO run). An empty parametrize is pytest's own
+# version of the `go test -run` filter that matches nothing and prints `ok`, so
+# it is counted here rather than left to look like a passing row.
+CI-SKIPPED tests/test_topology_fuzz_pgw867.py|got empty parameter set for (vector)
+
+# ─── LOCAL-ONLY ───────────────────────────────────────────────────────────────
+LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (packs a real .pt#; needs g++)
+LOCAL-ONLY tests/test_chunk_cas_parallel_th1362.py|multi-gb throughput measurement; set chunk_cas_bench=#
+LOCAL-ONLY tests/test_aot_run_impl_split_pgw811.py|banked pgw#793 wrapper not present
+LOCAL-ONLY tests/test_topology_fuzz_pgw867.py|tensorhub checkout not present
+
+# ─── STAGED ───────────────────────────────────────────────────────────────────
+STAGED tests/test_p1_stream_lifecycle.py|pgw#605 open: hello.idle_heartbeat_interval_ms / workermessage.heartbeat proto fields are not generated in this tree yet
+STAGED tests/test_boot_phases_arm_pgw764.py|pgw#764 staged: the cell_arm boot-phase hook in aot_serve.py has not landed yet (sibling wip). the refusal contract is c
+STAGED tests/convert/test_publish_transport_pgw738.py|pgw#738 staged: publish-progress observability (_throttled_part_progress) has not landed in convert/publish.py
+STAGED tests/convert/test_p8_convert_publish_contract.py|pgw#566 open: normalize_adapter_state_dict only passes unet_config to converters with a named unet_config parameter (ins

@@ -53,6 +53,58 @@ IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 # ==========================================================================
 
 
+# Mounting anything in here over the image replaces its userland rather than
+# adding to it, which is a different test than the one this file is running.
+_TOO_BROAD = {Path("/"), Path("/usr"), Path("/usr/local"), Path("/etc"),
+              Path("/lib"), Path("/opt"), Path("/var"), Path("/home")}
+
+
+def _interpreter_mounts() -> list[Path]:
+    """Every prefix the container must see in order to exec THIS interpreter.
+
+    What ``execve`` follows is a symlink's stored TEXT, not its resolution, and
+    on a uv-managed venv four different paths can each name a different place:
+
+      sys.prefix            the venv
+      sys.base_prefix       the base install, as CPython's getpath resolved it
+      sys._base_executable  the base interpreter as the venv's `bin/python`
+                            symlink actually NAMES it
+      ...and each of those resolved.
+
+    pgw#966 measured the gap on the runner. `ubuntu-latest`:
+
+      base_prefix      .../uv/python/cpython-3.12.13-linux-x86_64-gnu
+      base_executable  .../uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12
+                                              ^^^^ no patch component
+
+    uv keeps a patch-less alias beside the versioned install and the venv's
+    symlink names the ALIAS, so mounting `base_prefix` alone put the resolved
+    directory in the container and left the path the symlink points at absent —
+    `[FATAL tini (7)] exec .../.venv/bin/python failed: No such file or
+    directory`. The row did not fail there; it SKIPPED, reading as coverage,
+    from the day it landed. Reproduced exactly by building a venv against an
+    alias symlink and mounting only the versioned dir; green with the alias
+    prefix added.
+    """
+    roots = {Path(sys.prefix), Path(sys.prefix).resolve(),
+             Path(sys.base_prefix), Path(sys.base_prefix).resolve()}
+    base_exe = getattr(sys, "_base_executable", None)
+    if base_exe:
+        named = Path(base_exe)
+        if named.parent.name == "bin":
+            roots |= {named.parent.parent, named.parent.parent.resolve()}
+    keep: list[Path] = []
+    for root in sorted(roots):
+        if root in _TOO_BROAD:
+            continue
+        if root == REPO or REPO in root.parents:
+            continue          # inside the worktree mount already
+        if any(parent in roots for parent in root.parents):
+            continue          # a broader mount in this same set covers it
+        keep.append(root)
+    return keep
+
+
 @pytest.mark.skipif(IS_ROOT, reason="already root — the rows below run directly")
 def test_privilege_isolation_rows_under_a_real_root_parent():
     """Run every row below inside a container whose PID 1 is root and carries
@@ -65,10 +117,7 @@ def test_privilege_isolation_rows_under_a_real_root_parent():
             "docker is required: pgw#858 is a uid boundary and a non-root "
             "runner cannot observe it (every /proc read is already denied)"
         )
-    interpreter = Path(sys.executable).resolve()
-    # uv keeps the real interpreter outside the venv; mount whichever prefix
-    # actually holds it so the container runs THIS environment, not a rebuild.
-    py_root = interpreter.parents[1]
+    mounts = _interpreter_mounts()
     cmd = [
         "docker", "run", "--rm", "--init",
         # This suite kills compute children on purpose. Without this the
@@ -81,29 +130,42 @@ def test_privilege_isolation_rows_under_a_real_root_parent():
         "-e", "PYTHONDONTWRITEBYTECODE=1",
         "-e", "HOME=/root",
         "-v", f"{REPO}:{REPO}",
-        "-v", f"{py_root}:{py_root}:ro",
+        *[arg for root in mounts for arg in ("-v", f"{root}:{root}:ro")],
         "-w", str(REPO),
         "ubuntu:24.04",
-        str(REPO / ".venv/bin/python"), "-m", "pytest",
+        sys.executable, "-m", "pytest",
         str(Path("tests") / Path(__file__).name),
         "-q", "-p", "no:cacheprovider", "--no-header",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    # pgw#966, the third-party half: `ubuntu:24.04` comes from Docker Hub, which
+    # has a rate limiter and outages of its own. Exit 125 is the docker CLI/daemon
+    # refusing before anything ran — a pull failure, not a uid-boundary failure —
+    # and a third party may never turn a required check red. Its own reason, so
+    # the census counts it apart from the exec case below, which IS ours to fix.
+    if proc.returncode == 125:
+        pytest.skip(
+            "docker could not start the container, so no row ran (image pull or "
+            f"daemon): {proc.stderr.strip().splitlines()[-1][:200] if proc.stderr.strip() else '(no stderr)'}"
+        )
     # The container failing to START is not the rows failing, and conflating
     # them is how this test read as a pgw#858 regression on GitHub CI while
-    # passing on every developer box. Measured there: exit 127 with
-    #   [FATAL tini (7)] exec .../.venv/bin/python failed: No such file or directory
-    # — `ubuntu:24.04` cannot exec the runner's uv-managed interpreter (the
-    # venv's python is a symlink into a prefix whose loader the image does not
-    # have). No row ran, so there is nothing to report about the uid boundary.
-    # Skip by NAME rather than assert: this is the same distinction the file's
-    # own `shutil.which("docker")` guard already makes, one layer deeper.
+    # passing on every developer box. It is also, until pgw#966, how this row
+    # read as GREEN COVERAGE on GitHub CI while never once executing: exit 127
+    # with `[FATAL tini (7)] exec .../.venv/bin/python failed: No such file or
+    # directory`, skipped by name, indistinguishable in a green log from a row
+    # that passed. `_interpreter_mounts()` above is the fix for the cause; this
+    # branch stays for anything it does not cover, and now carries the facts
+    # needed to diagnose it from a log rather than from a developer box.
     if proc.returncode == 127 and "exec" in proc.stderr and "failed" in proc.stderr:
         pytest.skip(
             "the container cannot exec this interpreter, so no row ran: "
-            f"{proc.stderr.strip().splitlines()[-1][:200]} — pgw#858 needs an "
-            "image that can run the host's python, not a verdict from a "
-            "container that never started"
+            f"{proc.stderr.strip().splitlines()[-1][:200]} | mounted "
+            f"{[str(m) for m in mounts]} | executable={sys.executable} "
+            f"prefix={sys.prefix} base_prefix={sys.base_prefix} "
+            f"base_executable={getattr(sys, '_base_executable', None)} "
+            "— pgw#858 needs an image that can run the host's python, not a "
+            "verdict from a container that never started"
         )
     assert proc.returncode == 0, (
         "the pgw#858 rows failed under a real root parent:\n"

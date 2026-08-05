@@ -30,3 +30,5 @@ src/gen_worker/pb/**/*.pyo
 # CodeGraph index (local, regenerated)
 .codegraph/
 .runtime/
+# pgw#966 skip census (per-run output of `pytest --skip-census-out=`)
+.skip-census-*.json
