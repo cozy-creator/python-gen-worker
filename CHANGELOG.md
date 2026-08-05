@@ -108,6 +108,48 @@
   the pod's abort string on a laptop — *"the mint process made no measured
   progress for 310s (window 300s): no process-tree CPU and no capture bytes"* —
   against a tree that was burning a full core throughout.
+- **pgw#966: CI now reports what it did NOT run, and refuses to let that set grow
+  silently.** A skipped row and a passing row are the same character of nothing
+  in a green log, and `tests/test_pod_privilege_isolation_pgw858.py`'s container
+  row had been skipping on `ubuntu-latest` since the day it landed — the one row
+  proving tenant code cannot read the RunPod account-authority key out of PID 1,
+  executing only on developer boxes, which is how the pgw#956 flake reached
+  `dev` behind a green CI. No CI log has ever contained the string `pgw858`.
+  Root cause: the row mounted ONE prefix
+  (`Path(sys.executable).resolve().parents[1]`) and exec'd a hardcoded
+  `{REPO}/.venv/bin/python`, but what `execve` follows is the symlink's stored
+  text, not its resolution — enough on a box where the two coincide, exit 127
+  (`[FATAL tini (7)] exec ... No such file or directory`) where they do not.
+  `_interpreter_mounts()` now mounts all four candidate prefixes (`sys.prefix`,
+  `sys.base_prefix`, and each resolved) minus the worktree mount and the
+  too-broad system roots, and execs `sys.executable`; reproduced and fixed —
+  the row goes `1 passed, 13 skipped` where it previously skipped by name.
+  Around that: a repo-root `conftest.py` records the skips a session ACTUALLY
+  took (`--skip-census-out=`, including module-level `allow_module_level` /
+  `importorskip` skips, which produce no test report at all), `-rs` puts the
+  reasons in the CI log, `scripts/skip_census.txt` classifies all 24 keys
+  (CI-MUST-RUN / CI-SKIPPED / LOCAL-ONLY / STAGED), and
+  `scripts/lint_skip_census.py` fails the build on an unclassified new skip or
+  on a CI-MUST-RUN row that skipped. The census states plainly what was
+  previously only inferable from 63 skip sites: **nothing in this repository is
+  tested on a GPU by any automated lane** (pgw#953 parked), so the eight
+  `needs CUDA` / `triton unavailable` rows are unverified, not covered.
+
+- **pgw#966: the suite no longer fetches a model from huggingface.co.**
+  `test_llama_runtime.py`'s `tiny_gguf_dir` ran an `hf_hub_download` on every CI
+  run, and PR #483's `tests` job went red on `429 Too Many Requests` — a
+  required check going red because someone else's rate limiter had a bad minute,
+  which is the same broken property a silently-skipped row has, from the other
+  side. The model is vendored at `tests/testdata/stories260K.gguf` (1,185,376
+  bytes, sha256-checked at fixture time). `stories260K` rather than the
+  `stories15M-q4_0` it replaces: same repo, same `llama` architecture,
+  llama.cpp's own CI model, 1.1 MB against 19.1 MB — nothing there measures the
+  weights, the SUT is our llama-server wrapper. Not an `actions/cache`: a
+  restore only sees the run's own ref or the DEFAULT branch (th#1114), and this
+  repo's PRs target `dev`, so it would never once be warm. The three remaining
+  third parties now degrade to a counted skip instead of a red — github.com (the
+  llama-server tarball, `continue-on-error`), Docker Hub (`ubuntu:24.04`, exit
+  125 → skip), PyPI (`uv build` / `uv pip install` in the pgw#740 wheel row).
 
 - **pgw#957: the gw#666 guard file's own boot fixture was a bet on the runner's
   speed — the shape it exists to police.** `test_a_talking_engine_boots_however
