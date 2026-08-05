@@ -91,6 +91,7 @@ from .compile_cache import (
     AdoptError,
     CompiledExecutionLaneUnavailableError,
     _clean_tarinfo,
+    _resolve_target,
     parse_cell_ref,
     sku_slug,
 )
@@ -1965,15 +1966,26 @@ def set_ingress_refusal_callback(pipeline: Any, callback: Any) -> bool:
 def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
     """``(owner module, attribute)`` one entry target names on a pipeline:
     ``"unet"`` -> ``(pipeline.unet, "forward")``; ``"vae.decode"`` ->
-    ``(pipeline.vae, "decode")``."""
-    owner_name, _, attr = str(target).partition(".")
-    module = getattr(pipeline, owner_name, None)
-    if module is None:
-        raise AdoptError("no_target", f"pipeline has no module {owner_name!r}")
-    attr = attr or "forward"
-    if not callable(getattr(module, attr, None)):
+    ``(pipeline.vae, "decode")``; ``"vae.decoder"`` ->
+    ``(pipeline.vae.decoder, "forward")``.
+
+    pgw#967: this delegates to ``compile_cache._resolve_target`` — ONE
+    resolver, because the two disagreed on a dotted target whose leaf is a
+    MODULE. This function partitioned on the FIRST dot and treated the rest
+    as a plain attribute, so ``vae.decoder`` resolved to
+    ``(pipeline.vae, "decoder")`` and the arm would have replaced a
+    SUBMODULE with a wrapped function, while the mint resolved the same
+    string to the decoder's ``forward`` and exported that. A cell whose
+    entries are traced from one callable and armed onto another is the
+    silent-wrongness class every gate in this stack exists to prevent, and
+    nothing would have caught it: ``vae.decode`` (a bound method) is the
+    only dotted target any family has ever named, and for it the two agreed.
+    """
+    resolved = _resolve_target(pipeline, str(target))
+    if resolved is None:
         raise AdoptError(
-            "no_target", f"module {owner_name!r} has no callable {attr!r}")
+            "no_target", f"pipeline has no callable target {target!r}")
+    module, attr, _fn = resolved
     return module, attr
 
 

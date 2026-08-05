@@ -196,12 +196,27 @@ def effective_shape_strategy(decl: Compile) -> str:
     return str(decl.shape_strategy or "")
 
 
+def target_classes(decl: Compile, target: str) -> Tuple[GraphClass, ...]:
+    """The graph classes declared for one target (pgw#967).
+
+    An unscoped row serves every target — the pre-scoping rule — so a
+    single-target family reads exactly as it always did.
+    """
+    return tuple(cls for cls in decl.classes if cls.serves(target))
+
+
 def mint_plans(decl: Compile, target: str) -> Tuple[MintPlan, ...]:
     """Every artifact the declaration says to mint for one target."""
     if not decl.classes:
         raise MintRefused(
             f"family {decl.family!r} declares no graph classes — there is "
             f"no coordinate to mint")
+    classes = target_classes(decl, target)
+    if not classes:
+        raise MintRefused(
+            f"family {decl.family!r} declares target {target!r} but no graph "
+            f"class scoped to it — every target states its own coordinates "
+            f"(pgw#967), and a target with none has nothing to mint")
     strategy = effective_shape_strategy(decl)
     if not strategy:
         raise MintRefused(
@@ -210,12 +225,12 @@ def mint_plans(decl: Compile, target: str) -> Tuple[MintPlan, ...]:
             f"({STATIC_ROWS!r} for conv-bearing families, "
             f"{DYNAMIC_COLLAPSE!r} for DiTs); declare it")
     groups: Dict[Tuple[Tuple[str, Any], ...], List[GraphClass]] = {}
-    for cls in decl.classes:
+    for cls in classes:
         groups.setdefault(cls.fork, []).append(cls)
 
     plans: List[MintPlan] = []
     if strategy == STATIC_ROWS:
-        for cls in decl.classes:
+        for cls in classes:
             plans.append(MintPlan(
                 family=decl.family, target=target, fork=cls.fork,
                 rows=(cls,), seed=cls, dynamic=()))
