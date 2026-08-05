@@ -89,17 +89,28 @@ def out_runtime(timer: StageTimer) -> int:
 
 
 def test_nested_stages_are_charged_exclusively() -> None:
+    parent_ms, child_ms = 20, 30
     timer = StageTimer()
     timer.handler_open()
     with timer.stage("upload"):
-        time.sleep(0.02)
+        time.sleep(parent_ms / 1000)
         with timer.stage("credential_stamp"):
-            time.sleep(0.03)
+            time.sleep(child_ms / 1000)
     timer.handler_close()
     out = timer.snapshot()
 
-    assert 15 <= out["upload"] <= 35, out
-    assert out["credential_stamp"] >= 25
+    # gw#666: bounds are DERIVED from the sleeps, never a literal band. A sleep
+    # is a floor at any box load, so the child's floor is a real ceiling on an
+    # exclusively-charged parent; the old `15 <= upload <= 35` was red at load
+    # 90 and green at load 17 while nothing about the code had changed.
+    assert out["credential_stamp"] >= child_ms, out
+    assert out["upload"] >= parent_ms, out
+    # THE claim: the child's time is not also charged to the parent. Inclusive
+    # charging would push `upload` past this ceiling and oversubscribe the
+    # handler window (surfacing as resid.overlap) — at any load.
+    assert out["upload"] <= out["total.handler"] - child_ms, out
+    assert abs(out["upload"] + out["credential_stamp"] - out["total.handler"]) <= 2, out
+    assert "resid.overlap" not in out, out
     attributed, total = reconciliation(out)
     assert abs(attributed - total) <= 2
 

@@ -140,13 +140,31 @@ someone else's red is worse than a slow cut.
 
 ---
 
+## The CHANGELOG is assembled, not edited (pgw#968)
+
+Lanes write `changelog.d/<issue>.md` and never touch `CHANGELOG.md`. One mutable
+file that every concurrent lane appends to made a conflict near-certain for any PR
+that sat through a sibling merge — one lane rebased three times in a night, every
+time on the same single CHANGELOG hunk. A per-issue path cannot conflict.
+
+The cut collapses them, ordered by issue number so the section does not depend on
+filesystem order:
+
+```bash
+scripts/assemble_changelog.py --check                     # names parse, none empty
+scripts/assemble_changelog.py --version <X.Y.Z> \
+    --headline "**the one thing this cut is about**"      # writes + `git rm`s fragments
+```
+
 ## Mechanics
 
 ```bash
+# 0. assemble the CHANGELOG section from changelog.d/ (above)
+
 # 1. version + lock, in ONE commit
 #    (edit pyproject.toml, then:)
 uv lock                      # updates the root package version; --locked is the gate
-git add pyproject.toml uv.lock CHANGELOG.md
+git add pyproject.toml uv.lock CHANGELOG.md changelog.d
 
 # 2. verify the range BY ANCESTRY, never from cut notes
 git merge-base --is-ancestor <commit> HEAD    # per must-ride
