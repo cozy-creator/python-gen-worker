@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.92.0 (2026-08-05) — **`fit_to_native`: one native bucket for the condition AND the output** (pgw#664/ie#599), and **`weight_set` is deleted from `@endpoint`** (pgw#919/th#1559)
+
+- **pgw#664/ie#599: `gen_worker.geometry` — edit lanes stop asking the model for
+  geometry it cannot natively produce.** Every image-edit lane was handing the
+  model a ~1.7 MP text-to-image aspect table while the edit pipeline's own native
+  area is 1 MP, so a 500² or 768² input was silently upscaled 3-7x in area before
+  the model ever saw it — blurring the base and, per Paul's report on the te#156
+  renders, making the edit itself fail more often. The module ships the MECHANISM
+  (families ship the data): `FamilyGeometry`, `nearest_bucket`, `fit_to_native ->
+  FitPlan`, `restore -> RestoreResult`, `set_upscaler`, and `FitMode.EDIT|COMPOSE`.
+  The condition and the output resolve to ONE native bucket at the input's aspect;
+  the input is padded in and the result cropped back to the submitted framing.
+  `FitMode.COMPOSE` deliberately REFUSES to inherit `references[0]`'s aspect —
+  in compose mode there is no original framing to fit to, so output geometry is
+  the caller's free parameter (aligned with ie#600). Secondary references keep
+  their own native row rather than being padded into the primary's bucket: a 16:9
+  style reference squashed 44% into a square is worse conditioning, and every row
+  is ~1 MP so all conditions still sit at the target latent's grid scale.
 
 - **pgw#957: the gw#666 guard file's own boot fixture was a bet on the runner's
   speed — the shape it exists to police.** `test_a_talking_engine_boots_however
@@ -193,7 +210,7 @@
   publishes propagate only evidenced values, so an unknown source can no
   longer mint a derived checkpoint classified as non-distilled.
 
-## 0.92.0 (2026-08-03) — **`weight_set` is deleted from `@endpoint`** (pgw#919/th#1559: NFS volumes follow `kind=`, not an author declaration), and child-call pipelining is answered by measurement (pgw#943)
+### **`weight_set` is deleted from `@endpoint`** (pgw#919/th#1559: NFS volumes follow `kind=`, not an author declaration), and child-call pipelining is answered by measurement (pgw#943)
 
 MINOR: `@endpoint(weight_set=)` is removed. It was declared by **0 of 1,129** function rows
 fleet-wide and shipped in no published tag, so nothing to migrate; passing it is now a
