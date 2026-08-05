@@ -361,38 +361,62 @@ def _decode_report(path: Path) -> Optional[MintReport]:
         return None
 
 
-def _tree_cpu_seconds(pid: int) -> float:
-    """The child's process-tree CPU seconds.
+def _tree_cpu_seconds(pid: int) -> Optional[float]:
+    """The child's process-tree CPU seconds — INCLUDING descendants that have
+    already exited.
 
-    Inductor forks its own compile workers, so the tree — not the child
-    alone — is what burns the CPU a mint is made of. Best-effort: a raced
-    exit contributes nothing rather than raising.
+    Inductor forks its own compile workers and a ``g++`` under each of those,
+    so the tree — not the child alone — is what burns the CPU a mint is made
+    of. The subtle half is the word *already*: on Linux a process's CPU leaves
+    its own ``utime/stime`` and lands in its parent's ``cutime/cstime`` the
+    instant the parent reaps it (recursively — a reaped subtree rolls all the
+    way up). Summing only the live members' ``user + system`` therefore makes
+    this quantity a SAWTOOTH: an entry compile child that FINISHES subtracts
+    its entire lifetime CPU from the total.
+
+    That is not a cosmetic wobble. ``_observe`` ratchets against a high-water
+    mark, so a finishing entry digs a hole one whole entry deep, and the mint
+    is killed for the crime of completing something (pgw#964; it killed
+    pgw#868 attempt eighteen twice, byte-identically, on two independent pods).
+    Adding the reaped-children counters makes the total monotonic for as long
+    as ``pid`` lives, which is exactly as long as it is consulted.
+
+    Returns ``None`` when the tree could not be sampled at all. A failure is
+    NOT zero: reporting zero would manufacture the same cliff from a transient
+    ``/proc`` race.
     """
     try:
         import psutil
     except Exception:  # pragma: no cover - psutil is a hard dep in practice
-        return 0.0
-    total = 0.0
+        return None
     try:
         proc = psutil.Process(pid)
         members = [proc] + proc.children(recursive=True)
     except Exception:
-        return 0.0
+        return None
+    total = 0.0
     for member in members:
         try:
             times = member.cpu_times()
         except Exception:
             continue
+        # A member's own time, plus the time of every descendant IT has
+        # already waited for. No double count: a process's CPU is in exactly
+        # one of the two places, never both.
         total += float(times.user) + float(times.system)
+        total += float(getattr(times, "children_user", 0.0) or 0.0)
+        total += float(getattr(times, "children_system", 0.0) or 0.0)
     return total
 
 
-def _capture_mib(capture: Path) -> float:
+def _capture_mib(capture: Path) -> Optional[float]:
     """MiB the child has written into its capture dir.
 
-    A compile whose CPU is briefly parked in a C++ toolchain still grows this,
-    and vice versa, so the two together are a much harder liveness signal than
-    either alone.
+    The inductor/triton cache root, not a stdio buffer. It grows in BURSTS —
+    generated sources land, then a single-threaded ``g++`` chews on them for
+    minutes writing nothing. So its growth proves work and its silence proves
+    nothing, which is why ``_observe`` treats it as an independent positive
+    signal that can never, on its own, vote to kill.
     """
     total = 0
     try:
@@ -403,12 +427,17 @@ def _capture_mib(capture: Path) -> float:
             except OSError:
                 continue
     except OSError:
-        return 0.0
+        return None
     return total / (1 << 20)
 
 
-def _evidence(pid: int, capture: Path) -> float:
-    return _tree_cpu_seconds(pid) + _capture_mib(capture)
+#: The measured signals, sampled together. Deliberately a PAIR and never a
+#: sum: they have different failure modes and different units, and adding them
+#: lets a fall in one cancel a rise in the other. That is precisely how a
+#: healthy mint died — a reaped entry's CPU drop swallowed the capture bytes
+#: its successor was writing.
+def _evidence(pid: int, capture: Path) -> Tuple[Optional[float], Optional[float]]:
+    return _tree_cpu_seconds(pid), _capture_mib(capture)
 
 
 def child_argv(request_path: Path, *, python: str = "") -> Sequence[str]:
@@ -514,25 +543,42 @@ async def _observe(
     interval_s: float,
 ) -> str:
     """Watch the child's MEASURED progress. Returns the stall reason, or ''
-    when cancelled because the child exited."""
-    last = _evidence(pid, capture)
+    when cancelled because the child exited.
+
+    Each signal keeps its OWN high-water mark and an advance in EITHER is
+    progress (pgw#964). Two properties fall out, and both are load-bearing:
+
+    * a signal that cannot be sampled this poll contributes nothing rather
+      than a cliff, and
+    * a signal that is merely quiet — capture bytes during a long ``g++`` —
+      cannot cancel one that is moving. Only the absence of BOTH advances is
+      silence, which is the only thing this window is entitled to judge.
+    """
+    cpu, mib = _evidence(pid, capture)
     window.touch()
     while True:
         await asyncio.sleep(interval_s)
-        now = _evidence(pid, capture)
-        if now - last >= _EVIDENCE_EPS:
-            last = now
+        now_cpu, now_mib = _evidence(pid, capture)
+        advanced = False
+        if now_cpu is not None and (cpu is None or now_cpu - cpu >= _EVIDENCE_EPS):
+            cpu, advanced = now_cpu, True
+        if now_mib is not None and (mib is None or now_mib - mib >= _EVIDENCE_EPS):
+            mib, advanced = now_mib, True
+        if advanced:
             window.touch()
             if on_evidence is not None:
                 try:
-                    on_evidence(now)
+                    on_evidence((cpu or 0.0) + (mib or 0.0))
                 except Exception:
                     logger.exception("mint evidence callback failed")
         elif window.stalled():
             return (
                 f"the mint process made no measured progress for "
                 f"{window.silent_for():.0f}s (window {window.window_s:.0f}s): "
-                f"no process-tree CPU and no capture bytes")
+                f"process-tree CPU {'unreadable' if now_cpu is None else f'{now_cpu:.1f}s'} "
+                f"and capture "
+                f"{'unreadable' if now_mib is None else f'{now_mib:.1f}MiB'} "
+                f"both flat")
 
 
 def _terminate_group(pid: int, *, grace_s: float = 10.0) -> None:

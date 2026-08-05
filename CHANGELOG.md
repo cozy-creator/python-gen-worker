@@ -50,6 +50,47 @@
   constant, tree-wide (`BOOT_TIMEOUT_S` was defined in one module and imported by
   four more, so a file-local scan saw one of six). It names all six pre-fix files
   on `origin/dev` and is green here.
+- **pgw#964: the mint stall monitor threw away a REAPED descendant's CPU, so
+  finishing a compile entry looked exactly like dying.** `_tree_cpu_seconds`
+  walked `psutil.Process(pid).children(recursive=True)` and summed
+  `cpu_times().user + .system` over the LIVE members only. On Linux a process's
+  CPU leaves its own `utime/stime` and enters its parent's `cutime/cstime` the
+  instant the parent reaps it, so that total is a **sawtooth**: an entry compile
+  child that FINISHES subtracts its whole lifetime from the tree. `_observe`
+  ratchets against a high-water mark, so one finished entry digs a hole one
+  entry deep and a fresh entry must burn all of it again before a single
+  `touch()` lands — at K=2 with ~390 s entries, a race the 300 s window loses by
+  construction. Two further compounding defects: a `psutil` miss returned `0.0`
+  (a manufactured cliff) rather than "unknown", and CPU-seconds were **added to**
+  capture-MiB, so a fall in the non-monotonic term vetoed growth in the other —
+  the exact inverse of `activity._default_evidence`'s own stated contract,
+  *"Either source alone advancing proves genuine life"*.
+  This is what SIGTERM'd pgw#868 attempt eighteen: `self_mint_abort /
+  delegated_crashed … exit=-15 … no measured progress for 301s … no process-tree
+  CPU and no capture bytes`, twice, on two independent L40S pods 2.5 h apart,
+  byte-identically — while the pool ledger the dying process was itself writing
+  recorded `peak_concurrency: 2` and `idle_other_s: 0.069`, i.e. two live entry
+  compile children and essentially no free slot across the entire 301 s window.
+  (`pool_busy_s`/`pool_capacity_s`/`pool_wall_s` reading `0.0` on that row are
+  **not** measurements: they are assigned only in `compile()`'s `finally`, which
+  a SIGTERMed process never runs.)
+  Now: the tree sum includes `children_user + children_system` at every member,
+  so it is monotonic while the root lives; an unsamplable tree reads `None` and
+  is skipped, never zero; and the two signals are carried as a **pair** with
+  their own high-water marks, an advance in EITHER counting as progress — so
+  capture-byte silence during a long single-threaded `g++` can no longer vote
+  for a kill. Same defect class fixed at its two sibling sites,
+  `activity._process_cpu_evidence` and `procsplit.parent._child_evidence`.
+  Doctrine (gw#666): a 300 s `SilenceWindow` is legitimate only over a signal
+  that can register the work being done — over one that goes DOWN when work
+  completes it was a fixed-duration kill in a progress-staleness costume, and
+  raising the number would have fixed nothing.
+  RED-verified against `origin/dev` verbatim, with real processes and a real
+  CPU-burning grandchild: `process-tree CPU went BACKWARDS when a grandchild was
+  reaped: 0.49s while it ran -> 0.20s after wait()`, and `_observe` reproducing
+  the pod's abort string on a laptop — *"the mint process made no measured
+  progress for 310s (window 300s): no process-tree CPU and no capture bytes"* —
+  against a tree that was burning a full core throughout.
 
 - **pgw#957: the gw#666 guard file's own boot fixture was a bet on the runner's
   speed — the shape it exists to police.** `test_a_talking_engine_boots_however

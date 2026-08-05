@@ -1067,17 +1067,30 @@ class _ChildSlot:
                 pass
 
     def _child_evidence(self, pid: int) -> Optional[float]:
-        """This child tree's kernel-accounted work: process+LIVE-children CPU
-        seconds plus process disk I/O MB (the same combination
-        ``activity._default_evidence`` trusts, measured from /proc)."""
+        """This child tree's kernel-accounted work: CPU seconds for the whole
+        tree — live AND already-reaped descendants (pgw#964) — plus process
+        disk I/O MB (the same combination ``activity._default_evidence``
+        trusts, measured from /proc).
+
+        The reaped half is not optional. A descendant's CPU moves into its
+        parent's ``cutime/cstime`` when it is waited for, so a tree summed
+        over live members only goes DOWN whenever a subprocess finishes, and
+        every caller compares this against a high-water mark."""
         try:
             import psutil
         except Exception:
             return None
+
+        def _cpu(p: Any) -> float:
+            t = p.cpu_times()
+            return (
+                float(t.user) + float(t.system)
+                + float(getattr(t, "children_user", 0.0) or 0.0)
+                + float(getattr(t, "children_system", 0.0) or 0.0))
+
         try:
             proc = psutil.Process(pid)
-            times = proc.cpu_times()
-            total = float(times.user + times.system)
+            total = _cpu(proc)
             try:
                 io = proc.io_counters()
                 total += (io.read_bytes + io.write_bytes) / float(1 << 20)
@@ -1085,10 +1098,9 @@ class _ChildSlot:
                 pass
             for child in proc.children(recursive=True):
                 try:
-                    ct = child.cpu_times()
+                    total += _cpu(child)
                 except psutil.Error:
                     continue
-                total += float(ct.user + ct.system)
             return total
         except psutil.Error:
             return None
