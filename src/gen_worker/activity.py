@@ -444,15 +444,32 @@ _this_process = psutil.Process()
 
 
 def _process_cpu_evidence() -> float:
-    """Process CPU seconds, including LIVE (not just reaped) child
-    processes. torch's async_compile forks subprocess compile workers for
-    inductor phases — resource.getrusage(RUSAGE_CHILDREN) only accounts for
-    children that have already exited, which is useless for an in-flight
-    compile burning real CPU in a still-running child. psutil reads /proc
-    directly, so a live child's usage counts immediately. Best-effort: a
-    child that can't be inspected (raced exit, permissions) just doesn't
-    contribute — never fatal to the heartbeat."""
-    total = time.process_time()
+    """Process CPU seconds, counting live AND already-reaped descendants.
+
+    torch's async_compile forks subprocess compile workers for inductor
+    phases, so ``resource.getrusage(RUSAGE_CHILDREN)`` alone is useless for an
+    in-flight compile burning real CPU in a still-running child; psutil reads
+    /proc directly, so a live child's usage counts immediately.
+
+    pgw#964: it took BOTH. Counting only the live tree makes this a sawtooth —
+    a child's CPU leaves its own ``utime/stime`` and enters its parent's
+    ``cutime/cstime`` the instant it is reaped, so a finishing compile worker
+    SUBTRACTS its whole lifetime from the total. Every consumer here compares
+    against a high-water mark, so that reads as a pod that stopped working. A
+    process's CPU lives in exactly one of the two places and never both, so
+    adding the reaped counters is a clean sum and makes this monotonic.
+
+    Best-effort: a child that can't be inspected (raced exit, permissions)
+    just doesn't contribute — never fatal to the heartbeat."""
+    try:
+        times = _this_process.cpu_times()
+        total = float(times.user) + float(times.system)
+        total += float(getattr(times, "children_user", 0.0) or 0.0)
+        total += float(getattr(times, "children_system", 0.0) or 0.0)
+    except psutil.Error:
+        # Self is always readable in practice; if it somehow is not, fall back
+        # to the interpreter's own accounting rather than to zero.
+        total = time.process_time()
     try:
         children = _this_process.children(recursive=True)
     except psutil.Error:
@@ -462,7 +479,9 @@ def _process_cpu_evidence() -> float:
             ct = child.cpu_times()
         except psutil.Error:
             continue
-        total += ct.user + ct.system
+        total += float(ct.user) + float(ct.system)
+        total += float(getattr(ct, "children_user", 0.0) or 0.0)
+        total += float(getattr(ct, "children_system", 0.0) or 0.0)
     return total
 
 
