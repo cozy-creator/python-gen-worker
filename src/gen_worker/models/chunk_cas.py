@@ -37,6 +37,14 @@ to actually live.
     and refetched on a fresh connection instead of holding a 35 GB file hostage.
     Only when the whole route is bad does the aggregate floor raise a typed
     stall for the hub to re-place the pod.
+*   **Both stores are filled AT ONCE** (pgw#971). When an endpoint volume is
+    attached, every block is ``pwrite``-ed to its offset in the volume's part
+    file in the same pass as the local one, so the volume write hides behind
+    network latency instead of costing a second full read + write + hash of
+    every byte after the fetch. The mirror is BEST EFFORT and writer-unique: it
+    is published only after the LOCAL file passes its whole-file digest, so a
+    half-written volume blob is never readable under the digest name, and any
+    mirror failure disables the mirror rather than failing the fetch.
 *   Disk is proven UP FRONT with ``posix_fallocate``, so a 2 TB file that will
     not fit fails in milliseconds instead of 90% of the way through.
 """
@@ -47,7 +55,10 @@ import contextlib
 import hashlib
 import logging
 import os
+import random
 import threading
+import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +79,7 @@ __all__ = [
     "chunk_len_at",
     "download_chunked_file",
     "hash_file",
+    "hasher_for",
     "parse_cas_ref",
     "sha256_file",
     "verify_file_digest",
@@ -88,7 +100,42 @@ _READ_CHUNK_BYTES = 4 * 1024 * 1024
 # on ranged GETs (pgw#786 measured 250 MB/s), so 4 MiB per window is two orders
 # of magnitude below healthy and unambiguously a lemon.
 _CHUNK_PROGRESS_FLOOR_BYTES = 4 * 1024 * 1024
-_CHUNK_MAX_ATTEMPTS = 6
+# pgw#972: a chunk's retry budget is a STRIKE COUNT plus a wall-clock cap, and
+# the two failure shapes are told apart before either is charged.
+#
+#   * A `DigestMismatch` is a COMPLETE, wrong-hashing body: the route is
+#     demonstrably healthy and only the bytes are not, so it refetches at once.
+#     Sleeping here is pure loss — it delays the refetch of an object the store
+#     is perfectly willing to serve — and it is what made a permanently-bad
+#     chunk take ~60s to give up instead of milliseconds.
+#   * An attempt that DELIVERED ITS FLOOR and then died proves the route is
+#     alive. That is pgw#786's lemon CONNECTION: abandon it and open a fresh
+#     socket AT ONCE — no sleep, and the strike count starts over, exactly as
+#     `cozy_cas`'s whole-file loop has always done for a link that keeps
+#     delivering.
+#   * An attempt that delivered nothing is the network not being there. This is
+#     the shape behind the `SSLError` on pod 7tbxicc2yjfx49: the loop burned its
+#     whole budget on connect attempts inside a couple of seconds because it had
+#     NO delay between them. The whole-file loop in `cozy_cas` has had jittered
+#     `2**n` backoff all along; this was the one transfer in the SDK that retried
+#     instantly. It BACKS OFF.
+#
+# There is deliberately no third "trickle" case. `delivered` counts blocks
+# `iter_content` actually YIELDS, and a connection that dies mid-block yields
+# nothing at all — measured: a source that sent 64 bytes and hung up reported
+# `delivered=0`. So "some bytes, but under the floor" is unreachable below one
+# read block, and pretending to classify it would only mean reading the
+# above-floor case wrong.
+#
+# The give-up is a COUNT, never a clock (`stall.py`'s standing rule: a wall
+# clock cannot tell a healthy slow transfer from a wedge). Clearing the floor
+# resets the BACKOFF, not the budget — an attempt that restarts the chunk from
+# offset 0 every time has advanced nothing, however many bytes it moved, so
+# resetting the budget on it would loop forever. 8 attempts at this backoff is
+# ~45-90s of tolerated blackout per chunk, and the executor's 3 outer attempts
+# (`_DOWNLOAD_RETRIES`, which the journal resumes across) sit on top of it.
+_CHUNK_MAX_ATTEMPTS = 8
+_CHUNK_BACKOFF_CAP_S = 30.0
 # th#1362: with positional writes a worker holds one 4 MiB read block instead of
 # a whole 64 MiB chunk, so the window is priced in threads and sockets rather
 # than in gigabytes. 16 is where the measured curve flattens (see
@@ -174,6 +221,16 @@ def sha256_file(path: Path, chunk_size: int = _READ_CHUNK_BYTES) -> str:
     return h.hexdigest()
 
 
+def hasher_for(algo: str) -> "hashlib._Hash":
+    """A fresh incremental hasher for the named algorithm — the same dispatch
+    as :func:`hash_file`, in the same place, for callers that can FUSE the hash
+    into a read they already perform (pgw#769/pgw#971) rather than pay a second
+    pass over the bytes."""
+    if algo == "sha256":
+        return hashlib.sha256()
+    raise ValueError(f"unsupported hash algorithm {algo!r}")
+
+
 def hash_file(path: Path, algo: str) -> str:
     """Hash a file with the named algorithm. No default: the caller must have
     read the algorithm off the digest, never assumed it.
@@ -218,6 +275,77 @@ def _pwrite_all(fd: int, data: bytes, offset: int) -> None:
         offset += n
 
 
+class _Mirror:
+    """A SECOND positional destination written in the same pass (pgw#971).
+
+    The endpoint volume, filled at the same time as local CAS rather than by a
+    full re-read afterwards. Best effort in the strongest sense: the first
+    error of any kind disables it permanently for this file and is never
+    propagated — a volume that is full, slow, read-only or absent must cost the
+    request nothing. It is published only by ``close(publish=True)``, after the
+    LOCAL file has passed its whole-file digest, and it stages under a
+    WRITER-UNIQUE name so a concurrent pod on the same volume can neither
+    observe our partial bytes nor have its published blob written into.
+    """
+
+    __slots__ = ("fd", "tmp", "dst", "_ok", "_lock")
+
+    def __init__(self, fd: int, tmp: Path, dst: Path) -> None:
+        self.fd = fd
+        self.tmp = tmp
+        self.dst = dst
+        self._ok = True
+        self._lock = threading.Lock()
+
+    @property
+    def ok(self) -> bool:
+        return self._ok
+
+    def disable(self, why: BaseException) -> None:
+        with self._lock:
+            if not self._ok:
+                return
+            self._ok = False
+        _log.warning("mirror_disabled destination=%s: %s", self.dst.name, why)
+
+    def write(self, data: bytes, offset: int) -> None:
+        if not self._ok:
+            return
+        try:
+            _pwrite_all(self.fd, data, offset)
+        except OSError as exc:
+            self.disable(exc)
+
+    def close(self, *, publish: bool) -> bool:
+        """Publish (or discard) the mirror. Never raises."""
+        try:
+            if not (publish and self._ok):
+                return False
+            os.fsync(self.fd)
+            self.dst.parent.mkdir(parents=True, exist_ok=True)
+            self.tmp.replace(self.dst)
+            from .cozy_cas import fsync_dir
+
+            fsync_dir(self.dst.parent)
+            return True
+        except OSError as exc:
+            _log.warning("mirror_publish_failed destination=%s: %s", self.dst, exc)
+            return False
+        finally:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.tmp.unlink(missing_ok=True)
+
+
+def _retry_delay(strikes: int) -> float:
+    """Full-jitter exponential backoff, capped. Same shape as the whole-file
+    loop in ``cozy_cas`` — the chunked path was the only transfer in the SDK
+    that retried with no delay at all."""
+    return random.uniform(0.5, 1.0) * min(_CHUNK_BACKOFF_CAP_S, 2.0 ** strikes)
+
+
 def _fetch_chunk_to_offset(
     session: requests.Session,
     spec: ChunkSpec,
@@ -225,12 +353,15 @@ def _fetch_chunk_to_offset(
     offset: int,
     *,
     on_bytes: Optional[Callable[[int], None]],
+    mirror: Optional["_Mirror"] = None,
+    give_up: Optional[threading.Event] = None,
 ) -> None:
     """Stream ONE chunk straight into its byte range, verifying as it goes.
 
     Abandon-and-refetch is per attempt and per chunk (pgw#786): an attempt that
     stops clearing its own progress floor is dropped and retried on a FRESH
-    connection, so one bad connection cannot hold the file.
+    connection, so one bad connection cannot hold the file. pgw#972 splits that
+    from the case where NOTHING arrived — see ``_CHUNK_MAX_ATTEMPTS`` above.
 
     The chunk is verified AFTER it lands rather than before, which is safe
     precisely because the range belongs to this chunk alone: an attempt that
@@ -238,8 +369,10 @@ def _fetch_chunk_to_offset(
     until the caller marks the chunk done. That is the trade that drops RAM per
     worker from a whole 64 MiB chunk to one read block.
     """
-    last_exc: Optional[BaseException] = None
-    for attempt in range(1, _CHUNK_MAX_ATTEMPTS + 1):
+    strikes = 0
+    attempt = 0
+    while True:
+        attempt += 1
         floor = ProgressFloor(_CHUNK_PROGRESS_FLOOR_BYTES)
         delivered = 0
         hasher = hashlib.sha256()
@@ -261,6 +394,8 @@ def _fetch_chunk_to_offset(
                             f"chunk {spec.sha256[:12]}: source sent more than {spec.length} bytes"
                         )
                     _pwrite_all(fd, block, pos)
+                    if mirror is not None:
+                        mirror.write(block, pos)
                     pos += len(block)
                     hasher.update(block)
                     if on_bytes is not None:
@@ -280,18 +415,37 @@ def _fetch_chunk_to_offset(
         except UrlExpiredError:
             raise
         except (requests.RequestException, DigestMismatch, OSError) as exc:
-            last_exc = exc
-            stalled = not floor.cleared(delivered)
-            _log.warning(
-                "chunk_refetch sha256=%s attempt=%d/%d delivered=%d stalled=%s: %s",
-                spec.sha256[:12], attempt, _CHUNK_MAX_ATTEMPTS, delivered, stalled, exc,
+            # Backoff is for a route that is NOT THERE, and nothing else.
+            #   * A DigestMismatch means a complete, wrong-hashing body arrived:
+            #     the route is demonstrably healthy, the bytes are not. Retry at
+            #     once — sleeping would only delay the refetch of an object the
+            #     store is happy to serve.
+            #   * A transport error that still CLEARED THE FLOOR is pgw#786's
+            #     lemon connection: get a fresh socket now, not in 30s.
+            #   * A transport error that delivered nothing is the case that
+            #     needs to wait.
+            alive = isinstance(exc, DigestMismatch) or floor.cleared(delivered)
+            strikes = 0 if alive else strikes + 1
+            out_of_budget = (
+                attempt >= _CHUNK_MAX_ATTEMPTS
+                or (give_up is not None and give_up.is_set())
             )
-            # No sleep and no backoff on a STALL: the point is to abandon this
-            # connection immediately and open a new one. Real errors fall
-            # through to the same fresh-connection retry.
-            continue
-    assert last_exc is not None
-    raise last_exc
+            delay = 0.0 if (alive or out_of_budget) else _retry_delay(strikes)
+            _log.warning(
+                "chunk_refetch sha256=%s attempt=%d/%d delivered=%d "
+                "route_alive=%s retry_in=%.1fs: %s",
+                spec.sha256[:12], attempt, _CHUNK_MAX_ATTEMPTS,
+                delivered, alive, delay, exc,
+            )
+            if out_of_budget:
+                raise
+            if delay and give_up is not None:
+                # A sibling chunk's fatal failure must not have to wait out
+                # this loop's whole budget before the pool can drain.
+                if give_up.wait(delay):
+                    raise
+            elif delay:
+                time.sleep(delay)
 
 
 @contextlib.contextmanager
@@ -346,12 +500,19 @@ def download_chunked_file(
     window: int = _DEFAULT_WINDOW,
     on_bytes: Optional[Callable[[int], None]] = None,
     session_factory: Callable[[], requests.Session] = requests.Session,
-) -> None:
+    mirror_dst: Optional[Path] = None,
+) -> bool:
     """Reassemble a chunked file, verifying every chunk AND the whole-file hash.
 
     The whole-file hash is fused into the commit stream: there is exactly one
     pass over the bytes, and no second read. On mismatch the partial file is
     deleted so the next attempt starts clean.
+
+    ``mirror_dst`` (pgw#971) fills a SECOND store — the endpoint volume — in the
+    same pass, so the write-through costs neither a re-read nor a second hash of
+    every byte. Returns whether that mirror was published; ``False`` (including
+    always when ``mirror_dst`` is ``None``) means the caller still owes the
+    volume a copy.
     """
     if not chunks:
         raise ValueError("download_chunked_file: no chunks")
@@ -393,10 +554,11 @@ def download_chunked_file(
             # A sibling in this pod already materialised it while we waited.
             _log.info("chunk_cas dedup: %s already present (%d bytes); skipping "
                       "the fetch", dst.name, total_size)
-            return
-        _download_chunked_locked(
+            return False
+        return _download_chunked_locked(
             chunks, dst, want_whole=want_whole, total_size=total_size,
             window=window, on_bytes=on_bytes, session_factory=session_factory,
+            mirror_dst=mirror_dst,
         )
 
 
@@ -556,6 +718,64 @@ def _size_session_pool(session: requests.Session, window: int) -> None:
         pass
 
 
+def _open_mirror(mirror_dst: Optional[Path], total_size: int) -> Optional["_Mirror"]:
+    """Stage the volume-side part file, or return ``None``. Never raises: a
+    volume we cannot write to costs the request nothing but the write-through."""
+    if mirror_dst is None:
+        return None
+    try:
+        mirror_dst.parent.mkdir(parents=True, exist_ok=True)
+        # Writer-unique, exactly as `_copy_verified_blob` stages: several pods
+        # share one volume with no lock between them, and a stable name would
+        # let one pod's in-flight bytes land in another's published blob.
+        tmp = mirror_dst.parent / (
+            f".{mirror_dst.name}.mirror-{os.getpid()}-{uuid.uuid4().hex}"
+        )
+        fd = os.open(str(tmp), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+    except OSError as exc:
+        _log.warning("mirror_open_failed destination=%s: %s", mirror_dst, exc)
+        return None
+    try:
+        # `ftruncate` ONLY — deliberately NOT `_preallocate`. glibc's
+        # `posix_fallocate` zero-fills by hand when the filesystem has no
+        # `fallocate(2)`, and network storage frequently does not (NFSv4.1);
+        # that would be a full extra write pass to the volume, which is exactly
+        # what this change exists to delete. Local CAS keeps the real up-front
+        # allocation — "prove the disk now" belongs there — and the volume
+        # running out of space just disables the mirror.
+        os.ftruncate(fd, total_size)
+    except OSError as exc:
+        _log.warning("mirror_allocate_failed destination=%s: %s", mirror_dst, exc)
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        return None
+    return _Mirror(fd, tmp, mirror_dst)
+
+
+def _seed_mirror(
+    fd: int,
+    mirror: "_Mirror",
+    chunks: Sequence[ChunkSpec],
+    offsets: Sequence[int],
+    already: set[int],
+) -> None:
+    """Copy resumed (already-verified) ranges from local disk into the mirror."""
+    for i in sorted(already):
+        pos, remaining = offsets[i], chunks[i].length
+        while remaining > 0 and mirror.ok:
+            try:
+                b = os.pread(fd, min(_READ_CHUNK_BYTES, remaining), pos)
+            except OSError as exc:
+                mirror.disable(exc)
+                return
+            if not b:
+                mirror.disable(OSError(f"short read seeding mirror chunk {i}"))
+                return
+            mirror.write(b, pos)
+            pos += len(b)
+            remaining -= len(b)
+
+
 def _download_chunked_locked(
     chunks: Sequence[ChunkSpec],
     dst: Path,
@@ -565,7 +785,8 @@ def _download_chunked_locked(
     window: int,
     on_bytes: Optional[Callable[[int], None]],
     session_factory: Callable[[], requests.Session],
-) -> None:
+    mirror_dst: Optional[Path] = None,
+) -> bool:
     """The reassembly itself, run while holding the cross-process CAS fetch lock
     (``download_chunked_file`` does the shape checks and the dedup)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -587,9 +808,17 @@ def _download_chunked_locked(
     max_inflight = max(1, min(window, len(chunks)))
     fd = os.open(str(tmp), os.O_RDWR | os.O_CREAT, 0o644)
     jfd: Optional[int] = None
+    mirror: Optional[_Mirror] = None
+    published = False
     try:
         _preallocate(fd, total_size, tmp)
         already = _adopt_partial(fd, chunks, offsets, journal, header, max_inflight)
+        mirror = _open_mirror(mirror_dst, total_size)
+        if mirror is not None and already:
+            # Resumed ranges are already verified on local disk and will not be
+            # refetched, so the mirror takes them from there — otherwise it
+            # would publish a file with holes.
+            _seed_mirror(fd, mirror, chunks, offsets, already)
 
         prefix = _Prefix(len(chunks))
         for i in sorted(already):
@@ -615,6 +844,7 @@ def _download_chunked_locked(
                 chunks, offsets, prefix, jfd, fd, dst,
                 already=already, max_inflight=max_inflight,
                 on_bytes=on_bytes, session_factory=session_factory,
+                mirror=mirror,
             )
         except BaseException:
             prefix.abort()
@@ -626,7 +856,18 @@ def _download_chunked_locked(
             raise OSError(f"{dst.name}: whole-file hash did not complete")
         _finalize(fd, tmp, journal, dst, got=got, want_whole=want_whole,
                   total_size=total_size)
+        # ONLY here: the local file just proved its whole-file digest, and the
+        # mirror took the same in-memory blocks at the same offsets.
+        published = mirror is not None and mirror.close(publish=True)
+        mirror = None
+        if mirror_dst is not None:
+            _log.info("blob_fill_publish source=r2 destination=volume mode=tee "
+                      "digest=%s bytes=%d published=%s",
+                      want_whole[:16], total_size, published)
+        return published
     finally:
+        if mirror is not None:
+            mirror.close(publish=False)
         if jfd is not None:
             os.close(jfd)
         os.close(fd)
@@ -644,6 +885,7 @@ def _fetch_pending(
     max_inflight: int,
     on_bytes: Optional[Callable[[int], None]],
     session_factory: Callable[[], requests.Session],
+    mirror: Optional["_Mirror"] = None,
 ) -> None:
     pending = [i for i in range(len(chunks)) if i not in already]
     if not pending:
@@ -652,6 +894,10 @@ def _fetch_pending(
     aggregate = ProgressFloor(_CHUNK_PROGRESS_FLOOR_BYTES * max_inflight)
     delivered_total = 0
     counter = threading.Lock()
+    # pgw#972: per-chunk retries now sleep, so a fatal failure elsewhere has to
+    # be able to cut them short — otherwise the pool cannot drain until every
+    # sibling has spent its whole retry budget.
+    give_up = threading.Event()
 
     def _count(n: int) -> None:
         nonlocal delivered_total
@@ -664,7 +910,10 @@ def _fetch_pending(
     _size_session_pool(session, max_inflight)
 
     def _one(i: int) -> None:
-        _fetch_chunk_to_offset(session, chunks[i], fd, offsets[i], on_bytes=_count)
+        _fetch_chunk_to_offset(
+            session, chunks[i], fd, offsets[i], on_bytes=_count,
+            mirror=mirror, give_up=give_up,
+        )
         # O_APPEND makes a short line atomic across threads, so the journal
         # needs no lock of its own.
         os.write(jfd, f"{i}\n".encode())
@@ -682,6 +931,7 @@ def _fetch_pending(
                 except BaseException as exc:  # noqa: BLE001 - classified below
                     failure = (futures[fut], exc)
                     del exc
+                    give_up.set()
                     for other in futures:
                         other.cancel()
                     break

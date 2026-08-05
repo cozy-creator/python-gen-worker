@@ -19,6 +19,7 @@ from .chunk_cas import (
     ChunkSpec,
     download_chunked_file,
     hash_file,
+    hasher_for,
     parse_cas_ref,
     verify_file_digest,
 )
@@ -173,6 +174,15 @@ def _copy_verified_blob(src: Path, dst: Path, ref: str, expected_size: int) -> b
     ``ref`` is ALGORITHM-TAGGED and the hash dispatches on it (th#1303): a
     sha256 blob checked with blake3 fails every honest copy, and an empty
     digest must never reduce this to a size-only check.
+
+    pgw#971: the hash is FUSED INTO THE COPY, per pgw#769 — hashing stays
+    mandatory, but it rides the read this function already performs instead of
+    costing a second full pass. The old shape was `copyfileobj` and then
+    `hash_file(tmp)`: three passes over every byte (read source, write stage,
+    RE-READ the stage), and on the volume->local direction the re-read was of
+    the freshly-written NETWORK-storage file, the single most expensive pass of
+    the three. One pass now, same guarantee: the bytes that reach the stage are
+    exactly the bytes that went through the hasher.
     """
     algo, want_hex = parse_cas_ref(ref)
     digest = want_hex
@@ -191,8 +201,14 @@ def _copy_verified_blob(src: Path, dst: Path, ref: str, expected_size: int) -> b
             f".{dst.name}.writer-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
         )
         try:
+            hasher = hasher_for(algo)
             with src.open("rb") as source, tmp.open("xb") as staged:
-                shutil.copyfileobj(source, staged, length=4 * 1024 * 1024)
+                while True:
+                    block = source.read(4 * 1024 * 1024)
+                    if not block:
+                        break
+                    hasher.update(block)
+                    staged.write(block)
                 staged.flush()
                 os.fsync(staged.fileno())
             if expected_size and tmp.stat().st_size != expected_size:
@@ -201,7 +217,7 @@ def _copy_verified_blob(src: Path, dst: Path, ref: str, expected_size: int) -> b
                     src, digest[:16], expected_size, tmp.stat().st_size,
                 )
                 return False
-            if hash_file(tmp, algo).lower() != want_hex:
+            if hasher.hexdigest().lower() != want_hex:
                 _log.warning(
                     "blob_fill_corrupt source=%s digest=%s reason=%s", src, digest[:16], algo,
                 )
@@ -476,6 +492,10 @@ class CozySnapshotDownloader:
                 raise RuntimeError("concurrent snapshot build failed") from entry.exception
             return snap_dir
 
+        # pgw#971: volume write-throughs that could not be teed run in the
+        # background and are JOINED below, so the build never returns — or
+        # fails — with a publish still in flight.
+        publishes: List["asyncio.Task"] = []
         try:
             if snap_dir.exists():
                 # gw#598: a materialized tree this process has not produced or
@@ -502,6 +522,7 @@ class CozySnapshotDownloader:
                 res.files,
                 progress=progress,
                 fill_blobs_root=fill_blobs_root,
+                publishes=publishes,
             )
             # Materialization copies/concatenates multi-GB trees — strictly
             # off the event loop (gw#407: a loop blocked for the duration of
@@ -520,6 +541,12 @@ class CozySnapshotDownloader:
             entry.exception = exc
             raise
         finally:
+            # Join the background write-throughs unconditionally: they are
+            # best-effort in OUTCOME, never in LIFETIME. `return_exceptions`
+            # because a failed publish must not turn a good build into a
+            # failure — nor a failed build into a different error.
+            if publishes:
+                await asyncio.gather(*publishes, return_exceptions=True)
             # Digest-poisoning fix (#358): a FAILED build must not park a
             # set-event + stale exception under this digest forever. Evict the
             # entry so the next request creates a fresh builder and retries;
@@ -575,7 +602,12 @@ class CozySnapshotDownloader:
         *,
         progress: Optional[ProgressFn] = None,
         fill_blobs_root: Optional[Path] = None,
+        publishes: Optional[List["asyncio.Task"]] = None,
     ) -> None:
+        # pgw#971: background volume write-throughs land here; the caller joins
+        # them before returning, so none can outlive the build.
+        if publishes is None:
+            publishes = []
         # Deduplicate by digest — same blob referenced by multiple paths (e.g.
         # fp16 and normal variants sharing the same part) is downloaded once.
         seen: Set[str] = set()
@@ -716,15 +748,30 @@ class CozySnapshotDownloader:
         async def _fill_to_volume(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
             """Write-through (gw#599): a fresh R2 fetch warms the volume for
             the next same-endpoint pod. Best-effort — a publish failure never
-            fails the request; the next pod simply falls through to R2 too."""
+            fails the request; the next pod simply falls through to R2 too.
+
+            pgw#971: this is now the FALLBACK. Chunked blobs — which is where a
+            multi-GB keep-set's bytes actually live — fill both stores in one
+            pass inside ``download_chunked_file``; only whole-file blobs (a v2
+            manifest chunks anything over 64 MiB, so these are the small ones)
+            and tee failures still pay for a re-read. It also runs in the
+            BACKGROUND: the blob's own task completes on download, and
+            ``ensure_snapshot`` joins every publish before it returns, so the
+            copies overlap each other and the materialization instead of
+            sitting on each blob's critical path."""
             if fill_blobs_root is None:
                 return
-            published = await asyncio.to_thread(
-                _copy_verified_blob, dst, _blob_path(fill_blobs_root, digest),
-                digest, int(f.size_bytes or 0),
-            )
+            try:
+                published = await asyncio.to_thread(
+                    _copy_verified_blob, dst, _blob_path(fill_blobs_root, digest),
+                    digest, int(f.size_bytes or 0),
+                )
+            except Exception as exc:  # noqa: BLE001 - never fails the request
+                _log.warning("blob_fill_publish_failed digest=%s: %s", digest[:16], exc)
+                return
             _log.info(
-                "blob_fill_publish source=r2 destination=volume digest=%s bytes=%d published=%s",
+                "blob_fill_publish source=r2 destination=volume mode=copy "
+                "digest=%s bytes=%d published=%s",
                 digest[:16], int(f.size_bytes or 0), published,
             )
 
@@ -742,13 +789,17 @@ class CozySnapshotDownloader:
                     return
                 if await _fill_from_volume(f, digest, dst):
                     return
-                await _dl_locked(f, digest, dst)
-                await _fill_to_volume(f, digest, dst)
+                teed = await _dl_locked(f, digest, dst)
+            if fill_blobs_root is not None and not teed:
+                publishes.append(
+                    asyncio.create_task(_fill_to_volume(f, digest, dst))
+                )
 
-        async def _dl_locked(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
+        async def _dl_locked(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> bool:
+            teed = False
             async with sem:
                 if await _blob_trusted(dst, f, digest):
-                    return
+                    return False
                 _log.info("blob_download_start path=%s size=%s digest=%s chunks=%d",
                           f.path, f.size_bytes, digest[:24], len(f.chunks))
                 if f.chunks:
@@ -760,7 +811,10 @@ class CozySnapshotDownloader:
                         ChunkSpec(sha256=c.sha256, url=c.url, length=int(c.length))
                         for c in f.chunks
                     ]
-                    await asyncio.to_thread(
+                    # pgw#971: fill BOTH stores in this one pass when a volume
+                    # is attached — the NFS write hides behind network latency
+                    # and the extra read+hash pass disappears.
+                    teed = await asyncio.to_thread(
                         download_chunked_file,
                         specs,
                         dst,
@@ -769,6 +823,10 @@ class CozySnapshotDownloader:
                         chunk_size_bytes=int(f.chunk_size_bytes or 0)
                         or CAS_CHUNK_SIZE_BYTES,
                         on_bytes=lambda n: _on_bytes(n, network=True),
+                        mirror_dst=(
+                            _blob_path(fill_blobs_root, digest)
+                            if fill_blobs_root is not None else None
+                        ),
                     )
                 else:
                     # A WHOLE file. th#1303 S1: BOTH transports now take the
@@ -804,6 +862,7 @@ class CozySnapshotDownloader:
                 # algorithm the manifest named, before publishing.
                 _mark_trusted(_VERIFIED_BLOBS, (blobs_root_id, digest))
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:24])
+            return teed
 
         await asyncio.gather(*(_dl(f) for f in unique))
         # th#850 managed-tier runtime-assertion signal: on a volume-attached
