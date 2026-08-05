@@ -797,6 +797,11 @@ class RequestContext(Generic[D]):
         re-acquired slot is released again immediately: the executor's final
         release already saw ``held == False`` and skipped, so the balance
         stays exact and the freed slot isn't captured by a dying job.
+
+        pgw#738: ``reacquire`` raises ``GpuSlotUnreachable`` when the permit
+        provably cannot come back. That refusal only ever REPLACES a clean
+        exit — a failure raised by the block owns the outcome and is never
+        masked by it.
         """
         lease = self._gpu_slot_lease
         if lease is None or not lease.yield_slot():
@@ -804,10 +809,19 @@ class RequestContext(Generic[D]):
             return
         try:
             yield
-        finally:
-            lease.reacquire()
+        except BaseException:
+            try:
+                lease.reacquire()
+            except Exception:
+                logger.exception(
+                    "request %s: GPU permit unreachable while unwinding; the "
+                    "block's own failure stands", self.request_id)
             if self._canceled:
                 lease.yield_slot()
+            raise
+        lease.reacquire()
+        if self._canceled:
+            lease.yield_slot()
 
     @contextmanager
     def _child_call_wait(self) -> "Iterator[None]":

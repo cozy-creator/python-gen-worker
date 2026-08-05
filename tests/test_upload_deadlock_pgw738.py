@@ -12,7 +12,7 @@ sink (no mocks on the executor path):
   * two jobs packed on one gpu_slots=1 worker BOTH complete when the first
     saves a blob mid-handler (run_lock-first admission);
   * a permit that genuinely cannot come back fails the job TYPED
-    (GpuSlotReacquireTimeout -> RETRYABLE), never silently;
+    (GpuSlotUnreachable -> RETRYABLE), never silently;
   * a job task that dies without reporting is reaped into a terminal
     JobResult (never-silent guarantee).
 
@@ -33,25 +33,17 @@ from typing import Any, ClassVar, Optional, Tuple
 import msgspec
 import pytest
 
-# pgw#954 landed the FIRST of this file's three contract clauses —
-# gate-first admission — so `test_two_packed_jobs_survive_a_mid_handler_save`
-# (the incident shape itself: 62922680 + d0cbf910) now RUNS. The other two
-# clauses are still unimplemented and skip individually:
+# All three clauses have landed: gate-first admission (pgw#954), the typed
+# re-acquire refusal and the dead-task reaper (pgw#738 remainder). Nothing in
+# this file skips any more.
 #
-#   * a typed `GpuSlotReacquireTimeout` bound on the re-acquire. Note this
-#     clause predates the no-magic-timeouts rule (gw#666/pgw#795) — a fixed
-#     `REACQUIRE_TIMEOUT_S` is exactly the shape that rule forbids, so pgw#738
-#     should re-derive it as a progress/liveness bound before implementing.
-#   * a dead-job-task reaper turning an escaped `_run_job` into a terminal
-#     JobResult (the never-silent guarantee).
-_REACQUIRE_BOUND_LANDED = hasattr(
-    __import__("gen_worker.api.errors", fromlist=["errors"]),
-    "GpuSlotReacquireTimeout",
-)
-_needs_reacquire_bound = pytest.mark.skipif(
-    not _REACQUIRE_BOUND_LANDED,
-    reason="pgw#738 UNIMPLEMENTED: typed GpuSlotReacquireTimeout bound",
-)
+# The re-acquire clause was FILED as a fixed `_GpuSlotLease.REACQUIRE_TIMEOUT_S`
+# — exactly the shape gw#666/pgw#795 forbids — and was re-derived before it was
+# built. There is no honest PROGRESS signal for this wait (FIFO position does
+# not move while a healthy holder computes for hours, and a holder's silence is
+# the holder's problem, owned by pgw#687's unwind watch), so the bound is
+# REACHABILITY: an outstanding permit with no live holder, decided off the
+# executor's permit ledger with no seconds in it. See `_PermitLedger`.
 
 from gen_worker import executor as executor_mod
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -150,13 +142,12 @@ def test_two_packed_jobs_survive_a_mid_handler_save() -> None:
         httpd.shutdown()
 
 
-@_needs_reacquire_bound
-def test_reacquire_bound_fails_typed_never_silent() -> None:
-    """If the yielded permit genuinely cannot come back (simulated thief on
-    the semaphore), the job fails TYPED + RETRYABLE within the bound instead
-    of parking forever while the GPU bills."""
-    old = executor_mod._GpuSlotLease.REACQUIRE_TIMEOUT_S
-    executor_mod._GpuSlotLease.REACQUIRE_TIMEOUT_S = 1.0
+def test_reacquire_refuses_typed_when_the_permit_is_unreachable() -> None:
+    """If the yielded permit genuinely cannot come back — a raw acquirer
+    outside the permit ledger, i.e. nobody the worker knows holds it — the
+    job fails TYPED + RETRYABLE instead of parking forever while the GPU
+    bills. Decided off the LEDGER, not off a clock: there is no timeout to
+    shorten here and none to wait out."""
     httpd, base_url = _serve()
     thief: Optional[Any] = None
     try:
@@ -167,29 +158,69 @@ def test_reacquire_bound_fails_typed_never_silent() -> None:
             assert up.UPLOADER_STARTED.wait(timeout=10.0)
             ex = harness.worker.executor
             # Park a competing acquire; it wins the permit the moment the
-            # handler's save yields it, and never gives it back.
+            # handler's save yields it, and never gives it back. It never
+            # registers a hold, which is exactly what makes the permit
+            # provably unreachable rather than merely slow.
             thief = asyncio.run_coroutine_threadsafe(
                 ex._gpu_semaphore.acquire(), ex._loop)
             time.sleep(0.2)
             up.UPLOAD_GATE.set()
             res = _result(conn, "r-bound-a")
-            assert res is not None, "the bound must convert the hang into a result"
+            assert res is not None, "the refusal must convert the hang into a result"
             assert res.status == pb.JOB_STATUS_RETRYABLE, res.safe_message
             assert "reacquire" in res.safe_message.lower()
             if thief.done() and thief.exception() is None:
                 asyncio.run_coroutine_threadsafe(
                     _release(ex), ex._loop).result(timeout=5.0)
     finally:
-        executor_mod._GpuSlotLease.REACQUIRE_TIMEOUT_S = old
         httpd.shutdown()
+
+
+def test_a_live_holder_is_waited_out_however_long_it_takes() -> None:
+    """The discriminating half (gw#666): a permit held by a REGISTERED holder
+    is never condemned, no matter how long the re-acquire waits. Same shape as
+    the refusal above, but the competing acquire is a ledger-registered hold —
+    so the uploader waits, and completes the moment the hold is dropped."""
+    httpd, base_url = _serve()
+    try:
+        with hub_double(modules=(MODULE,), file_base_url=base_url) as (scheduler, harness):
+            conn = scheduler.wait_connection(0)
+            conn.wait_for(is_ready)
+            _send(conn, "r-live-a", "uploader")
+            assert up.UPLOADER_STARTED.wait(timeout=10.0)
+            ex = harness.worker.executor
+            pending = asyncio.run_coroutine_threadsafe(
+                _take_registered(ex), ex._loop)
+            time.sleep(0.2)
+            up.UPLOAD_GATE.set()
+            token = pending.result(timeout=10.0)
+            # Far longer than any probe cadence: a live holder buys unbounded
+            # patience, so there must be NO result yet.
+            assert _result(conn, "r-live-a", timeout=2.0) is None, (
+                "a live holder must never be condemned")
+            asyncio.run_coroutine_threadsafe(
+                _drop_registered(ex, token), ex._loop).result(timeout=5.0)
+            res = _result(conn, "r-live-a")
+            assert res is not None, "the job must resume once the holder lets go"
+            assert res.status == pb.JOB_STATUS_OK, res.safe_message
+    finally:
+        httpd.shutdown()
+
+
+async def _take_registered(ex: Any) -> int:
+    await ex._gpu_semaphore.acquire()
+    return int(ex._permits.take(ex._gpu_semaphore, "test holder", owned=False))
+
+
+async def _drop_registered(ex: Any, token: int) -> None:
+    ex._permits.drop(ex._gpu_semaphore, token)
+    ex._gpu_semaphore.release()
 
 
 async def _release(ex: Any) -> None:
     ex._gpu_semaphore.release()
 
 
-@pytest.mark.skip(
-    reason="pgw#738 UNIMPLEMENTED: dead-job-task reaper (never-silent terminal)")
 def test_dead_job_task_reports_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never-silent guarantee: a job task that dies without reporting (any
     escape from _run_job's own handlers) is reaped into a terminal
