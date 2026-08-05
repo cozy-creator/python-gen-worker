@@ -235,9 +235,53 @@ def finalized_in_process(key: str) -> Optional["SelfMint"]:
 ADOPTION_MARK = "equivalence_adopted"
 
 
+#: th#1423: the code a 401 gets when the credential we presented was ALREADY
+#: past its own `exp`. "Expired" and "revoked/wrong-worker" are different
+#: operator actions, and only the worker can tell them apart — the hub sees an
+#: unusable token either way.
+CREDENTIAL_EXPIRED_CODE = "worker_credential_expired"
+
+
 class CellPublishRefused(Exception):
     """Typed hub refusal (attestation / trust tier / quota). Terminal for
-    this publish attempt — never retried, never fatal to serving."""
+    this publish attempt — never retried, never fatal to serving.
+
+    Carries the hub's own ``status``/``code`` for the same reason
+    :class:`convert.hub.HubPublishError` does: a refusal reason re-derived from
+    ``str(exc)`` is prose that nothing can group by.
+    """
+
+    def __init__(self, message: str, *, status: int = 0, code: str = "") -> None:
+        super().__init__(message)
+        self.status = int(status or 0)
+        self.code = str(code or "")
+
+
+def _hub_error_code(body: Any) -> str:
+    """The hub's ``error.code``, accepting both envelope shapes it has used —
+    nested ``{"error": {"code": ...}}`` and the flat ``{"code": ...}`` the
+    worker-JWT refusals were observed with (th#1423)."""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if isinstance(err, dict):
+        return str(err.get("code") or "")
+    return str(body.get("code") or "")
+
+
+def _credential_lapse_s(token: str, *, now: float) -> float:
+    """Seconds ``token`` is PAST its own ``exp``; 0.0 when live or unreadable.
+
+    Not a timeout (gw#666): ``exp`` is an absolute instant the credential
+    itself carries, not a duration this code picked.
+    """
+    from .request_context._helpers import _decode_unverified_jwt_claims
+
+    try:
+        exp = float(_decode_unverified_jwt_claims(token).get("exp") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, now - exp) if exp > 0 else 0.0
 
 
 class CellPublisher:
@@ -277,6 +321,7 @@ class CellPublisher:
     # -- wire ---------------------------------------------------------------
 
     def _post(self, path: str, payload: dict, *, timeout: float) -> dict:
+        from .convert.hub import HubPublishError
 
         # pgw#763 delta 1: parent-mediated under the split — the compute child
         # holds no worker JWT, so the parent makes the attested-intent call and
@@ -284,11 +329,15 @@ class CellPublisher:
         # least-authority grant the child is explicitly allowed to hold. The
         # cell bytes still go child -> CAS directly under that token: the seam
         # carries control, not data.
+        # Read the credential ONCE: the bearer we present and the bearer whose
+        # expiry we blame must be the same string, or a rotation landing
+        # mid-call makes the diagnosis describe a token we never sent.
+        bearer = self._worker_jwt()
         resp = broker.request(
             "POST",
             path,
             base_url=self.base_url,
-            bearer=self._worker_jwt(),
+            bearer=bearer,
             json=payload,
             timeout=timeout,
         )
@@ -297,13 +346,26 @@ class CellPublisher:
             body = resp.json() if resp.text else {}
         except Exception:
             body = {}
+        code = _hub_error_code(body)
         if resp.status_code in (403, 429):
             # Typed refusals (cell_publish_forged_axis, _untrusted_tier,
             # _quota_exceeded, _family_undeclared): terminal by design.
             raise CellPublishRefused(
-                f"{path} refused ({resp.status_code}): {resp.text[:300]}")
+                f"{path} refused ({resp.status_code}): {resp.text[:300]}",
+                status=resp.status_code, code=code)
         if resp.status_code < 200 or resp.status_code >= 300:
-            raise RuntimeError(f"{path} failed ({resp.status_code}): {resp.text[:300]}")
+            # th#1423: this raised a BARE RuntimeError, so `_publish_failure_phase`
+            # had nothing to group by and three production 401s all landed under
+            # the phase `RuntimeError`. The typed carrier already exists.
+            lapse = (_credential_lapse_s(bearer, now=time.time())
+                     if resp.status_code == 401 else 0.0)
+            raise HubPublishError(
+                f"{path} failed ({resp.status_code}): {resp.text[:300]}"
+                + (f" — the credential presented was {lapse:.0f}s past its own exp"
+                   if lapse else ""),
+                status=resp.status_code,
+                code=CREDENTIAL_EXPIRED_CODE if lapse else code,
+            )
         return body if isinstance(body, dict) else {}
 
     # -- publish ------------------------------------------------------------
@@ -339,6 +401,14 @@ class CellPublisher:
             "image_digest": self.image_digest,
             "gen_worker": str(meta.get("gen_worker") or ""),
         }
+        # th#1423: a mint outliving its credential is only visible AFTER the
+        # compile, in a 401 nothing could group. The credential states its own
+        # `exp`, so the lapse is a MEASURED fact at the one moment it decides
+        # the outcome — on the wire before the intent, not inferred later.
+        lapse = _credential_lapse_s(self.worker_jwt(), now=time.time())
+        if lapse:
+            _publish_leg(family, key, "credential_expired",
+                         {"past_exp_s": int(lapse)})
         intent = self._post(
             "/v1/worker/cells/publish-intent",
             {

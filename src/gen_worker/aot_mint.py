@@ -3325,20 +3325,28 @@ def _publisher_from_settings() -> Any:
     settings = config.current()
     base_url = str(
         settings.tensorhub_public_url or settings.tensorhub_url or "").strip()
-    # pgw#876 §2: this read `getattr(settings, "worker_jwt", "")`, a field
-    # pgw#848 RENAMED — the getattr default swallowed the AttributeError the
-    # rename exists to raise, so WORKER_JWT was silently invisible here and
-    # `--publish` refused on every pod that had one and no TENSORHUB_TOKEN.
-    token = str(worker_credential.current()
-                or getattr(settings, "tensorhub_token", "") or "").strip()
-    if not base_url or not token:
+    # th#1423: `worker_credential.current()` only answers once someone HANDS it
+    # the boot token, and only `entrypoint` / the procsplit parent do — never
+    # this CLI. So pgw#876 §2's stated effect (WORKER_JWT visible here) was not
+    # actually reached in this process; the fallback was doing all the work.
+    worker_credential.install_bootstrap(settings)
+
+    def credential() -> str:
+        # th#1423: this was `lambda: token`, a token CAPTURED at construction.
+        # A mint runs for tens of minutes and the credential's TTL does not
+        # pause for it — the publisher must read the freshest one at USE time,
+        # which is the whole reason `CellPublisher` takes a provider.
+        return str(worker_credential.current()
+                   or getattr(settings, "tensorhub_token", "") or "").strip()
+
+    if not base_url or not credential():
         raise MintRefused(
             "cannot publish: TENSORHUB_PUBLIC_URL/TENSORHUB_URL and "
             "WORKER_JWT/TENSORHUB_TOKEN must both be set on a mint pod (the "
             "artifact was produced and is on disk)")
     publisher = CellPublisher(
         base_url=base_url,
-        worker_jwt=lambda: token,
+        worker_jwt=credential,
         image_digest=str(getattr(settings, "worker_image_digest", "") or ""),
     )
     if not publisher.enabled():
