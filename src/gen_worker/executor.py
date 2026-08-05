@@ -47,6 +47,7 @@ from .api.errors import (
     ArtifactTransferError,
     CanceledError,
     ComponentSubstitutionError,
+    GpuSlotUnreachable,
     IllegalCombination,
     ModelSlotIdentityError,
     RetryableError,
@@ -202,6 +203,12 @@ _CANCEL_UNWIND_GRACE_S = 45.0
 #: Further wait once quarantined. Past it the process is recycled so the pod
 #: is replaced — a wedged thread cannot be reclaimed any other way.
 _CANCEL_UNWIND_RECYCLE_S = 300.0
+# pgw#738: how often a blocked #382 re-acquire OBSERVES the permit ledger.
+# An observation cadence, never a bound: nothing gives up because this much
+# time elapsed. The refusal is the ledger predicate (an outstanding permit
+# with no live holder), confirmed across two probes that span no ledger
+# transition, so a permit handed off between them can never read as leaked.
+_PERMIT_PROBE_S = 0.1
 _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
 # th#763: how long a cold tensorhub ref waits for the hub's re-minted
@@ -2989,6 +2996,104 @@ class DispatchGroupUnresolved(RetryableError):
     floored onto group 0, which is the group that is always busiest."""
 
 
+class _PermitHold:
+    """One live claim on one GPU permit."""
+
+    __slots__ = ("label", "task")
+
+    def __init__(self, label: str, task: "Optional[asyncio.Task[Any]]") -> None:
+        self.label = label
+        self.task = task
+
+    def dead(self) -> bool:
+        return self.task is not None and self.task.done()
+
+    def __str__(self) -> str:
+        return f"{self.label}{' [task already finished]' if self.dead() else ''}"
+
+
+class _PermitLedger:
+    """Who holds each GPU permit — so *can this permit ever come back?* is a
+    decidable state question instead of a guess about how long to wait.
+
+    pgw#738 / gw#666. The #382 mid-handler re-acquire has no honest progress
+    signal of its own, and the two candidates are both wrong:
+
+    * **FIFO position.** With ``per_group=1`` the queue is one deep and a
+      healthy holder computing for four hours moves it zero times. "Position
+      did not advance" is the NORMAL state of a busy card, not a stall.
+    * **The holder's heartbeat / stage progress.** A holder's silence is not
+      the waiter's fault, and this very issue proves a healthy holder can be
+      log-silent and GPU-idle by construction — the ~20 GB publish phase that
+      got 6eb50902 killed on the dead-pod signature. And if a holder really is
+      wedged, the HOLDER is the thing to condemn; pgw#687's cancel-unwind
+      watch, the request deadline and the stuck-thread recycler already own
+      that. The waiter must not second-guess them.
+
+    So the wait is bounded by REACHABILITY, not by progress and not by a
+    clock: it is refused only in the one state that cannot resolve itself —
+    an outstanding permit attributable to no live holder, i.e. a raw acquirer
+    outside this ledger or a hold whose owning task already finished.
+    """
+
+    __slots__ = ("depth", "_holds", "_next_token", "transitions")
+
+    def __init__(self, depth: int) -> None:
+        self.depth = max(1, int(depth))
+        self._holds: Dict[int, Dict[int, _PermitHold]] = {}
+        self._next_token = 0
+        # Bumped on every take/drop. Two probes spanning no transition saw a
+        # settled ledger, which is what makes the predicate safe to act on: a
+        # permit handed to another waiter between them would otherwise read as
+        # unaccounted for exactly one loop turn.
+        self.transitions = 0
+
+    def take(
+        self, sem: asyncio.Semaphore, label: str, *, owned: bool = True,
+    ) -> int:
+        """Register a hold. Call with NO await between ``sem.acquire()``
+        returning and this call, so the ledger cannot miss a grant.
+
+        ``owned=False`` for a hold whose owner is a HANDLER THREAD rather than
+        the calling task (the #382 re-acquire): the calling task there is the
+        one-shot ``run_coroutine_threadsafe`` wrapper, which finishes
+        immediately and would read as a dead owner for the rest of the job.
+        """
+        self._next_token += 1
+        token = self._next_token
+        task: Optional[asyncio.Task[Any]] = None
+        if owned:
+            try:
+                task = asyncio.current_task()
+            except RuntimeError:
+                task = None
+        self._holds.setdefault(id(sem), {})[token] = _PermitHold(label, task)
+        self.transitions += 1
+        return token
+
+    def drop(self, sem: asyncio.Semaphore, token: int) -> None:
+        if self._holds.get(id(sem), {}).pop(token, None) is not None:
+            self.transitions += 1
+
+    def unreachable(self, sem: asyncio.Semaphore) -> Optional[str]:
+        """Reason iff some outstanding permit has no live holder, else None."""
+        free = getattr(sem, "_value", None)
+        if not isinstance(free, int):
+            return None  # unknown semaphore internals: never condemn
+        outstanding = self.depth - free
+        if outstanding <= 0:
+            return None
+        holds = list(self._holds.get(id(sem), {}).values())
+        live = [h for h in holds if not h.dead()]
+        if len(live) >= outstanding:
+            return None
+        who = ", ".join(str(h) for h in holds) or "nobody this worker knows"
+        return (
+            f"{outstanding} of {self.depth} GPU permit(s) outstanding but only "
+            f"{len(live)} live holder(s): {who}"
+        )
+
+
 class _GpuSlotLease:
     """Thread-safe handle for a job's GPU slot (#382).
 
@@ -3002,11 +3107,24 @@ class _GpuSlotLease:
     hold is released at most once.
     """
 
-    __slots__ = ("_sem", "_loop", "_lock", "_held", "released_at")
+    __slots__ = (
+        "_sem", "_loop", "_lock", "_held", "released_at",
+        "_ledger", "_label", "_token",
+    )
 
-    def __init__(self, sem: asyncio.Semaphore, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        sem: asyncio.Semaphore,
+        loop: asyncio.AbstractEventLoop,
+        ledger: _PermitLedger,
+        label: str,
+        token: int,
+    ) -> None:
         self._sem = sem
         self._loop = loop
+        self._ledger = ledger
+        self._label = label
+        self._token = token
         self._lock = threading.Lock()
         self._held = True
         # Monotonic time of the FIRST release — the terminal finalize handoff
@@ -3026,21 +3144,64 @@ class _GpuSlotLease:
         except RuntimeError:
             on_loop = False
         if on_loop:
-            self._sem.release()
+            self._release_on_loop()
         else:
-            self._loop.call_soon_threadsafe(self._sem.release)
+            self._loop.call_soon_threadsafe(self._release_on_loop)
         return True
+
+    def _release_on_loop(self) -> None:
+        # Ledger drop and semaphore release in one loop callback: the ledger
+        # never describes a permit this lease no longer owns.
+        self._ledger.drop(self._sem, self._token)
+        self._sem.release()
 
     def reacquire(self) -> None:
         """Blocking re-acquire from a handler thread.
 
-        Safe because of the pgw#954 order (instance gate -> permit): this
-        runs with the job's gates still held, and no permit acquirer anywhere
-        waits on a gate, so the permit is always reachable.
+        Waits for as long as a live holder takes — no clock (gw#666), and the
+        pgw#954 order (instance gate -> permit) guarantees the permit is
+        reachable while one exists. Raises :class:`GpuSlotUnreachable` only
+        when the ledger proves no live holder can return it; see
+        :class:`_PermitLedger` for why reachability, and not progress, is the
+        honest bound here.
         """
-        asyncio.run_coroutine_threadsafe(self._sem.acquire(), self._loop).result()
-        with self._lock:
-            self._held = True
+        asyncio.run_coroutine_threadsafe(self._reacquire(), self._loop).result()
+
+    async def _reacquire(self) -> None:
+        acquire = asyncio.ensure_future(self._sem.acquire())
+        watch = asyncio.ensure_future(self._watch_unreachable())
+        try:
+            await asyncio.wait(
+                {acquire, watch}, return_when=asyncio.FIRST_COMPLETED)
+            if acquire.done() and not acquire.cancelled():
+                acquire.result()
+                self._token = self._ledger.take(
+                    self._sem, self._label, owned=False)
+                with self._lock:
+                    self._held = True
+                return
+            raise GpuSlotUnreachable(
+                f"GPU permit reacquire refused for {self._label}: "
+                f"{watch.result()}"
+            )
+        finally:
+            for task in (acquire, watch):
+                if not task.done():
+                    task.cancel()
+
+    async def _watch_unreachable(self) -> str:
+        """Return the reason once the permit provably cannot come back."""
+        while True:
+            await asyncio.sleep(_PERMIT_PROBE_S)
+            settled = self._ledger.transitions
+            if self._ledger.unreachable(self._sem) is None:
+                continue
+            await asyncio.sleep(_PERMIT_PROBE_S)
+            if self._ledger.transitions != settled:
+                continue  # a handoff happened: the ledger was mid-transition
+            reason = self._ledger.unreachable(self._sem)
+            if reason is not None:
+                return reason
 
 
 class Executor:
@@ -3102,6 +3263,10 @@ class Executor:
             for _ in range(max(1, self.topology.execution_groups))
         )
         self._gpu_permits_each = per_group
+        # pgw#738: every permit acquisition in this file registers here, so a
+        # blocked #382 re-acquire can ASK whether the permit is reachable
+        # instead of guessing how long to wait for it.
+        self._permits = _PermitLedger(per_group)
         # Group 0's permit. At G == 1 — every pod today — this IS the pool.
         self._gpu_semaphore = self._gpu_permits[0]
         # pgw#782: the slot count is also the CPU divisor. torch sizes its
@@ -5510,6 +5675,7 @@ class Executor:
             for _ in range(self._gpu_permits_each)
         ]
         acquired = 0
+        tokens: List[Tuple[asyncio.Semaphore, int]] = []
         try:
             for permit in all_permits:
                 await self._intent_await(
@@ -5520,6 +5686,8 @@ class Executor:
                     stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
                     reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
                 )
+                tokens.append(
+                    (permit, self._permits.take(permit, "exclusive GPU warmup")))
                 acquired += 1
             self._intent_transition(
                 intent_id,
@@ -5540,7 +5708,8 @@ class Executor:
             )
             raise
         finally:
-            for permit in all_permits[:acquired]:
+            for permit, token in tokens:
+                self._permits.drop(permit, token)
                 permit.release()
 
     # ---- setup -------------------------------------------------------------
@@ -11052,7 +11221,8 @@ class Executor:
         logger.info("job admitted %s attempt=%d", run.request_id, run.attempt)
         await self._send(pb.WorkerMessage(job_accepted=pb.JobAccepted(
             request_id=run.request_id, attempt=run.attempt)))
-        job.task = asyncio.create_task(self._run_job(job, run), name=f"job-{run.request_id}")
+        job.task = asyncio.create_task(
+            self._supervise_job(job, run), name=f"job-{run.request_id}")
         # pgw#674: the serving set may have changed — re-derive what to
         # stage next while this job computes.
         self.preloader.poke()
@@ -11120,10 +11290,15 @@ class Executor:
                 return job.finished
             await asyncio.sleep(interval)
 
-    async def _enter_cancel_quarantine(self, job: _Job) -> None:
+    async def _enter_cancel_quarantine(
+        self, job: _Job, *, detail: str = "",
+    ) -> None:
         """Fail closed: stop advertising, and refuse work already parked
-        behind the wedged job instead of letting it sit eventless."""
-        detail = (
+        behind the wedged job instead of letting it sit eventless.
+
+        pgw#738: ``detail`` names the death-without-cancel face — the same
+        wedge reached without anyone cancelling anything."""
+        detail = detail or (
             f"cancel of request {job.request_id} attempt {job.attempt} has not "
             f"unwound after {_CANCEL_UNWIND_GRACE_S:.0f}s; the handler still "
             "holds the GPU permit / instance gate"
@@ -11353,9 +11528,11 @@ class Executor:
                     # did, so a mint anywhere stalled a tenant everywhere.
                     permit = self._gpu_permit_for_record(rec)
                     await permit.acquire()
+                    token = self._permits.take(permit, f"background {kind} turn")
                     try:
                         yield stole
                     finally:
+                        self._permits.drop(permit, token)
                         permit.release()
                 finally:
                     rec.turn_mutex.release()
@@ -11434,6 +11611,65 @@ class Executor:
             await self._finish(job, pb.JOB_STATUS_RETRYABLE, safe_message=safe_message)
 
     # ---- job execution -----------------------------------------------------
+
+    async def _supervise_job(self, job: _Job, run: pb.RunJob) -> None:
+        """pgw#738 never-silent guarantee: a job task that ends WITHOUT having
+        reported terminal state is reaped into one.
+
+        The 62922680 face of this issue was 3h51m of `assigned` on a live
+        heartbeat with a dead task — the worker is the only component
+        positioned to know its own task died, and it stayed silent. Every
+        escape from ``_run_job``'s own handlers lands here, as does a plain
+        return that somehow skipped ``_finish``.
+        """
+        escaped: Optional[BaseException] = None
+        try:
+            await self._run_job(job, run)
+        except asyncio.CancelledError:
+            # Worker shutdown / explicit task cancellation. The stream drop is
+            # itself a terminal signal to the hub and the loop is going away,
+            # so there is no silence to break here.
+            raise
+        except BaseException as exc:  # noqa: BLE001 — reporting IS the contract
+            escaped = exc
+            logger.exception(
+                "job task for %s attempt=%d escaped without reporting",
+                job.request_id, job.attempt)
+        if job.finished:
+            return
+        detail = (
+            f"{type(escaped).__name__}: {_sanitize(str(escaped))}"
+            if escaped is not None
+            else "the task returned with no result and no exception"
+        )
+        await self._reap_silent_job(job, detail)
+
+    async def _reap_silent_job(self, job: _Job, detail: str) -> None:
+        message = f"job task died without reporting terminal state: {detail}"[:512]
+        logger.critical(
+            "REAPED SILENT JOB %s attempt=%d: %s",
+            job.request_id, job.attempt, message)
+        try:
+            await self._finish(
+                job, pb.JOB_STATUS_RETRYABLE, safe_message=message)
+        except Exception:
+            logger.exception(
+                "failed to report the reaped terminal state for %s",
+                job.request_id)
+        # pgw#687 quarantine doctrine, DEATH-WITHOUT-CANCEL face: the task is
+        # gone but a sync handler thread cannot be killed. If it is still
+        # running it still owns the card, so the pod stops advertising and
+        # refuses the work parked behind it rather than absorbing it silently.
+        exec_task = job.exec_task
+        if job.executing and exec_task is not None and not exec_task.done():
+            await self._enter_cancel_quarantine(
+                job,
+                detail=(
+                    f"request {job.request_id} attempt {job.attempt} died "
+                    f"without reporting and its handler thread is still "
+                    f"running: {detail}"
+                ),
+            )
 
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
@@ -11816,12 +12052,16 @@ class Executor:
                         stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
                         reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
                     )
+                    permit_token = self._permits.take(
+                        gpu_permit, f"request {run.request_id}")
                     # th#1111: the permit wait was in NO metric — it precedes
                     # the handler window, so runtime_ms never saw it.
                     ctx._stages.record_pre(
                         "gpu_permit_wait", time.monotonic() - permit_t0)
                     self._loop = asyncio.get_running_loop()
-                    lease = _GpuSlotLease(gpu_permit, self._loop)
+                    lease = _GpuSlotLease(
+                        gpu_permit, self._loop, self._permits,
+                        f"request {run.request_id}", permit_token)
                     ctx._gpu_slot_lease = lease
                     # pgw#954: gate-holding parents may now yield. What still
                     # cannot is a job carrying per-request adapters — a
