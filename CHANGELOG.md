@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.92.1 (2026-08-05) — **the mint stall monitor stops killing mints for FINISHING an entry** (pgw#964)
+
+PATCH: no wire-contract, `@endpoint` or `Resources` change. One defect, three compounding
+causes, and it is the reason no whole-graph AOT mint has ever reached publish.
+
+- **pgw#964: a reaped descendant's CPU is still CPU.** `mint_process._tree_cpu_seconds` summed
+  `cpu_times().user + .system` over `psutil.Process(pid).children(recursive=True)` — live members
+  only. On Linux a process's CPU leaves its own `utime/stime` and lands in its parent's
+  `cutime/cstime` the moment it is reaped, so the total was a **sawtooth**: an entry compile child
+  that FINISHED subtracted its entire lifetime CPU from the sum. `_observe` ratchets against a
+  high-water mark, so one completed entry dug a hole one whole entry deep and a fresh entry had to
+  burn all of it back before a single `touch()` landed. At K=2 with ~390 s entries that race is
+  lost **by construction**, which is why two independent pods 2.5 h apart produced a byte-identical
+  abort string. In one line: it converted the completion of an entry — the one unambiguous proof a
+  mint is progressing — into the signal that killed it.
+
+  Three fixes, because the first alone would not have been enough: the CPU sample now includes
+  `children_user + children_system` so the total is monotonic while the root lives; a psutil
+  failure returns `None` (sample skipped) rather than `0.0`, so a transient `/proc` race cannot
+  manufacture the same cliff; and CPU-seconds and capture-MiB are carried as **separate** signals
+  with their own high-water marks, so a fall in one can no longer veto a rise in the other —
+  `activity._default_evidence`'s own docstring already said *"Either source alone advancing proves
+  genuine life"*, and the implementation contradicted it. Same defect class fixed at its two
+  sibling sites, `activity._process_cpu_evidence` and `procsplit/parent._child_evidence`.
+
+  Consequence worth stating: post-fix a genuine wedge shows a flat-but-monotonic total, so the
+  next abort out of `inductor_compile` is the first in this program's history entitled to be
+  believed.
+
+- **pgw#959 / pgw#960: two test waits that were clocks in disguise.** No runtime change.
+
 ## 0.92.0 (2026-08-05) — **`fit_to_native`: one native bucket for the condition AND the output** (pgw#664/ie#599), and **`weight_set` is deleted from `@endpoint`** (pgw#919/th#1559)
 
 - **pgw#664/ie#599: `gen_worker.geometry` — edit lanes stop asking the model for
