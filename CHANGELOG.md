@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+- **pgw#959: `test_cancelled_to_thread_join_releases_result` judged reachability
+  after five event-loop turns, and was watching the wrong actor.** A fixed turn
+  count is a wall clock spelled in turns; this one also gated on the loop while
+  the object was pinned by a THREAD. The holder at turn five is the
+  ThreadPoolExecutor worker: CPython's `_worker` does `work_item.run()` and only
+  then `del work_item`, so between setting the result and dropping the item the
+  cancelled load's buffer is still reachable from that thread — and whether the
+  five turns outran it was a bet on the scheduler. Measured on a purpose-built
+  probe at 80 iterations each: **11/80 still pinned** with the loop drained but
+  no proof about the worker, **0/80** once the worker is proven past its item.
+  The row now takes a default executor of KNOWN width (the process default is
+  `min(32, cpu+4)`, so a round-trip through it proves nothing) and waits on two
+  ORDERINGS: a `threading.Barrier` every worker must enter simultaneously — not
+  reachable until all of them are past that `del` — and a `call_soon` pass, which
+  runs strictly after every callback queued before it. The give-up is
+  reachability, not patience: with the loop quiesced and no task left to run,
+  nothing can still drop the reference, so the property is FALSE now rather than
+  in five turns' time. RED-verified against `origin/dev` verbatim under 48
+  spinners on 8 pinned cores: **4/20 red** pre-fix, **20/20 green** post-fix,
+  back to back.
+
+- **pgw#960: `wait_connection(0, timeout=BOOT_TIMEOUT_S)` opted the hub-double's
+  boot waits out of the progress gate — two lines under a comment saying "no
+  clock involved".** `Conn.wait_for` / `FakeScheduler.wait_connection` are
+  progress-gated by DEFAULT; passing an explicit `timeout=` takes the plain
+  deadline branch, the escape hatch pgw#795 left for rows whose assertion IS the
+  expiry. Five files were using it for events they EXPECT, on one shared 180 s
+  (or 120 s) literal. Dropping it alone would have been a regression: a dial-in
+  has no intermediate signal to advance on, so the default branch was a bare
+  30 s silence floor for split harnesses that never wired a liveness hook at
+  all. So the split harnesses now supply both gates. `worker_alive` — a parent
+  that exited can never dial in — is the definitive give-up. And the staleness
+  window is calibrated by MEASURING what a child boot costs on this runner at
+  the moment a wait is already at its floor (a fresh interpreter, the `Worker`
+  import, the child's endpoint modules), extending only while a fresh
+  measurement says the box got slower, which is self-limiting: on a steady box
+  the second sample matches the first and the wait ends. Measured here: 2.16 s
+  idle → the 30 s floor stands; **20.96 s at 48 spinners on 8 cores → a 219 s
+  window, already wider than the literal CI blew through.** `BOOT_TIMEOUT_S` is
+  deleted, along with `test_worker_outbox_pgw869.py`'s `_TIMEOUT = 20.0` doing
+  the same thing. RED-verified naturally at 96 spinners on 2 pinned cores: the
+  verbatim `origin/dev` row dies with `TimeoutError: connection #0 never arrived
+  within 180.0s (0 so far)` — the CI failure's exact shape — where the derived
+  form passes in 537 s under the identical load. Made unrepeatable: a new gw#666
+  guard row fails on any hub-double wait handed a module-level duration
+  constant, tree-wide (`BOOT_TIMEOUT_S` was defined in one module and imported by
+  four more, so a file-local scan saw one of six). It names all six pre-fix files
+  on `origin/dev` and is green here.
+
 - **pgw#957: the gw#666 guard file's own boot fixture was a bet on the runner's
   speed — the shape it exists to police.** `test_a_talking_engine_boots_however
   _long_it_takes` drove a REAL engine boot on a hardcoded 0.3 s stall window and

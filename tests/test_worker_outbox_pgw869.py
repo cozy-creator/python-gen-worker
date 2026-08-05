@@ -59,7 +59,6 @@ from gen_worker.transport import (
 
 from harness.hub_double import hub_double, is_ready
 
-_TIMEOUT = 20.0
 _RUNNING = pb.ActivityState.ACTIVITY_STATE_RUNNING
 _COMPLETED = pb.ActivityState.ACTIVITY_STATE_COMPLETED
 
@@ -140,12 +139,12 @@ def test_hub_killed_midactivity_replays_every_fact_exactly_once() -> None:
     kind = "self_mint_compile_pgw869"
     with hub_double(worker_id="outbox-acceptance") as (scheduler, harness):
         conn0 = scheduler.wait_connection(0)
-        conn0.wait_for(is_ready, _TIMEOUT)
+        conn0.wait_for(is_ready)
         _await_live_reporting(harness)
 
         # A fact produced while the hub is up, and confirmed shipped.
         activity_mod.emit_event(kind, "entries=36 ceiling=8", phase="pool")
-        conn0.wait_for(_is_activity(kind, "pool"), _TIMEOUT)
+        conn0.wait_for(_is_activity(kind, "pool"))
 
         # The hub dies. The worker process does not — exactly the incident.
         conn0.kill()
@@ -160,9 +159,9 @@ def test_hub_killed_midactivity_replays_every_fact_exactly_once() -> None:
             activity_mod.emit_event(kind, detail, phase=phase)
 
         # The hub comes back and the worker redials on its own.
-        conn1 = scheduler.wait_connection(1, timeout=_TIMEOUT)
+        conn1 = scheduler.wait_connection(1)
         for phase, _detail in during:
-            conn1.wait_for(_is_activity(kind, phase), _TIMEOUT)
+            conn1.wait_for(_is_activity(kind, phase))
 
         replayed = [u for u in _activities(conn1, kind)]
 
@@ -201,7 +200,7 @@ def test_terminal_produced_during_the_outage_still_lands() -> None:
     kind = "forge_terminal_pgw869"
     with hub_double(worker_id="outbox-terminal") as (scheduler, harness):
         conn0 = scheduler.wait_connection(0)
-        conn0.wait_for(is_ready, _TIMEOUT)
+        conn0.wait_for(is_ready)
         _await_live_reporting(harness)
         conn0.kill()
 
@@ -209,14 +208,13 @@ def test_terminal_produced_during_the_outage_still_lands() -> None:
         act.phase("publishing")
         act.completed()
 
-        conn1 = scheduler.wait_connection(1, timeout=_TIMEOUT)
+        conn1 = scheduler.wait_connection(1)
         terminal = conn1.wait_for(
             lambda m: (
                 m.WhichOneof("msg") == "activity_update"
                 and m.activity_update.kind == kind
                 and m.activity_update.state == _COMPLETED
             ),
-            _TIMEOUT,
         )
         assert terminal.activity_update.phase == "publishing"
 
@@ -231,7 +229,7 @@ def test_a_long_outage_coalesces_beats_and_keeps_every_measurement() -> None:
     kind = "outbox_longoutage_pgw869"
     with hub_double(worker_id="outbox-longoutage") as (scheduler, harness):
         conn0 = scheduler.wait_connection(0)
-        conn0.wait_for(is_ready, _TIMEOUT)
+        conn0.wait_for(is_ready)
         _await_live_reporting(harness)
         conn0.kill()
 
@@ -243,9 +241,9 @@ def test_a_long_outage_coalesces_beats_and_keeps_every_measurement() -> None:
                 activity_mod.emit_event(
                     kind, f"measurement {i}", phase=f"m{i}")
 
-        conn1 = scheduler.wait_connection(1, timeout=_TIMEOUT)
+        conn1 = scheduler.wait_connection(1)
         for i in range(0, 64, 16):
-            conn1.wait_for(_is_activity(kind, f"m{i}"), _TIMEOUT)
+            conn1.wait_for(_is_activity(kind, f"m{i}"))
 
         got = _activities(conn1, kind)
         # Every measurement survived, with its payload.

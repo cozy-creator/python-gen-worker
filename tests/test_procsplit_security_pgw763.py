@@ -32,7 +32,6 @@ from gen_worker.procsplit import actions
 
 from harness.hub_double import is_ready, is_result_for
 from test_procsplit_pgw763 import (  # noqa: F401 — fixtures come with it
-    BOOT_TIMEOUT_S,
     CHILD_MAIN,
     SplitHarness,
     _payload,
@@ -130,8 +129,8 @@ def test_delta1_tenant_code_finds_no_worker_jwt_in_its_process(credentialed_spli
     handler sweeps all three routes — environment, loaded Settings, the
     transport object — and must come back with nothing.
     """
-    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = credentialed_split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
 
     conn.send(run_job=pb.RunJob(
         request_id="r-steal", attempt=1, function_name="steal-credentials",
@@ -159,8 +158,8 @@ def test_delta1_parent_refuses_a_hub_call_the_allowlist_does_not_name(
     refused, the credential never goes on the wire, and the refusal is banked
     as a security event rather than logged and forgotten.
     """
-    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = credentialed_split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
 
     conn.send(run_job=pb.RunJob(
         request_id="r-forge", attempt=1, function_name="forge-hub-call",
@@ -185,8 +184,8 @@ def test_delta1_parent_refuses_capability_renewal_for_a_foreign_request(
     a renewal for a request this worker was never dispatched. A path allowlist
     alone would have forwarded it and let the hub decide with less context than
     the parent has."""
-    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = credentialed_split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
 
     conn.send(run_job=pb.RunJob(
         request_id="r-renew-forge", attempt=1,
@@ -207,8 +206,8 @@ def test_delta1_the_legitimate_mediated_call_still_works(credentialed_split, hub
     authenticated call, and the child gets the answer without ever holding the
     bearer."""
     pc = credentialed_split.pc
-    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = credentialed_split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
 
     # Stand in for a dispatched job (the relay records exactly this).
     pc._slots[0].in_flight[("r-live", 1)] = "echo"
@@ -283,7 +282,7 @@ def test_delta2_parent_measurement_replaces_a_forged_hello(forging_split):
         FORGED_WORKER_ID,
     )
 
-    conn = forging_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn = forging_split.scheduler.wait_connection(0)
     hello = conn.hello
     assert hello is not None
 
@@ -318,7 +317,7 @@ def test_delta2_the_parent_measures_the_real_host(forging_split):
     """The legitimate half: the numbers on the wire are the ones this box
     actually has, produced by the parent's pre-import measurement — not zeros
     from having simply deleted the child's report."""
-    forging_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    forging_split.scheduler.wait_connection(0)
     pc = forging_split.pc
     assert pc._measurement is not None, "the parent never measured the host"
 
@@ -405,7 +404,7 @@ def test_delta3_forged_billables_are_replaced_by_the_parents_observation(
         FORGED_RUNTIME_MS,
     )
 
-    conn = billing_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn = billing_split.scheduler.wait_connection(0)
     conn.send(run_job=pb.RunJob(
         request_id="r-bill", attempt=1, function_name="echo",
         input_payload=_payload()))
@@ -503,8 +502,8 @@ def test_delta5_the_child_signs_through_the_parent_holding_no_credential(
     import base64
 
     hub_http.reply = {"signature_b64": base64.b64encode(b"SIGNATURE").decode()}
-    conn = credentialed_split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = credentialed_split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
 
     # The handler passes a base URL of its own choosing. It is IGNORED: the
     # parent aims its own credential, at the host the hub named (th#1312).
@@ -626,7 +625,7 @@ def split_for_capability(tmp_path, captured_dials, monkeypatch):
         extra_child_env={"PGW763_FAKE_MODE": "result_then_exit"},
     )
     try:
-        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+        conn = h.scheduler.wait_connection(0)
         yield h.pc, conn
     finally:
         h.close()

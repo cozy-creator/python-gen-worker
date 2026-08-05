@@ -863,6 +863,53 @@ def test_no_new_fixed_deadline_wait_appears_in_a_test() -> None:
     )
 
 
+#: The hub-double waiters are progress-gated by DEFAULT; an explicit
+#: ``timeout=`` takes the plain-deadline branch. That escape hatch is for rows
+#: whose assertion IS the expiry ("no result within 2s"), and those spell the
+#: bound inline, at the assertion. A module-level duration constant handed to
+#: the same waiters is the opposite: one number, reused by every row in the
+#: file, none of which is probing for absence.
+_HUB_WAITERS = re.compile(r"\.(?:wait_connection|wait_for|wait_for_count)\s*\(")
+
+
+def _waits_opting_out_via_a_named_duration(root: Path) -> set:
+    # Tree-wide, not file-local: `BOOT_TIMEOUT_S` was defined in one module and
+    # IMPORTED by four more, so a per-file constant set saw only the definition
+    # site and missed most of the opt-outs.
+    per_file = {
+        path: _code_lines(path)
+        for path in sorted(root.rglob("*.py")) if path.name != Path(__file__).name
+    }
+    constants = {
+        m.group(1)
+        for lines in per_file.values()
+        for m in (_SIMPLE_CONST.match(line) for line in lines) if m
+    }
+    if not constants:
+        return set()
+    names = re.compile(r"\b(" + "|".join(sorted(constants)) + r")\b")
+    return {
+        path.relative_to(TESTS).as_posix()
+        for path, lines in per_file.items()
+        for line in lines
+        if _HUB_WAITERS.search(line) and names.search(line)
+    }
+
+
+def test_no_hub_double_wait_opts_out_of_the_progress_gate() -> None:
+    """pgw#960: `wait_connection(0, timeout=BOOT_TIMEOUT_S)` sat two lines under
+    a comment saying "no clock involved". The deadline branch is reachable only
+    by passing one, so passing a file-wide constant is how the gate gets turned
+    off wholesale — invisible to the deadline guards above, which look for the
+    place a deadline is BUILT, not the place one is handed in."""
+    found = _waits_opting_out_via_a_named_duration(TESTS)
+    assert not found, (
+        f"hub-double wait(s) opting out of the progress gate in {sorted(found)} "
+        f"— drop the `timeout=` so liveness plus the measured staleness window "
+        f"applies, or spell the bound inline if absence IS the assertion; pgw#960"
+    )
+
+
 def test_no_new_wall_clock_assertion_appears_in_a_test() -> None:
     found = _scan(TESTS, _ELAPSED_UPPER_BOUND, match=True)
     new = found - _ELAPSED_ASSERT_BURNDOWN

@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import os
 import queue
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 from concurrent import futures
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import grpc
 
@@ -36,6 +38,50 @@ DEFAULT_TIMEOUT_S = 15.0
 # the instant a message lands; this only bounds how stale the window estimate
 # may get when the peer is silent.
 _REEVALUATE_S = 0.25
+
+#: What a compute child pays before it can say anything: a fresh interpreter,
+#: the Worker import (torch rides in on it) and the endpoint modules the child
+#: was told to load. Nothing observes that gap from the hub side, so it is the
+#: one silence a healthy boot really produces — and it is what gets measured.
+_BOOT_PROBE_SRC = """
+import importlib, os
+from gen_worker.worker import Worker  # noqa: F401
+for m in os.environ.get("PGW763_CHILD_MODULES", "harness.procsplit_endpoints").split(","):
+    if m:
+        importlib.import_module(m)
+"""
+
+
+def measure_child_boot_cost_s(env: Optional[Mapping[str, str]] = None) -> float:
+    """Spawn-plus-import, measured on THIS runner at THIS moment (pgw#960).
+
+    Boot cost is a property of the loaded box, not of the code under test, so a
+    wait that must cover it asks rather than assumes. Called only when a wait is
+    already about to give up, so the common path pays nothing.
+    """
+    child_env: Dict[str, str] = dict(os.environ)
+    child_env.update(env or {})
+    started = time.monotonic()
+    subprocess.run(
+        [sys.executable, "-c", _BOOT_PROBE_SRC],
+        env=child_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return time.monotonic() - started
+
+
+def _extended(cadence: Cadence, boot_cost: Optional[Callable[[], float]]) -> bool:
+    """Re-measure the runner; keep waiting only if it says the box got slower.
+
+    Self-limiting: on a steady box the second measurement matches the first, the
+    window does not move, and the wait ends. Only evidence of a genuinely slower
+    runner buys more patience — never a repeat of a literal.
+    """
+    if boot_cost is None:
+        return False
+    before = cadence.window_s
+    cadence.record(boot_cost())
+    return cadence.window_s > before
 
 
 def _label(m: pb.WorkerMessage) -> str:
@@ -56,6 +102,10 @@ class Conn:
         self._recv_cond = threading.Condition()
         self._out: "queue.Queue[Any]" = queue.Queue()
         self.client_done = threading.Event()
+        # pgw#960: set by the scheduler that made this conn. A wait that spans a
+        # child boot (Ready needs every group advertised) has no in-band signal
+        # to gate on, so its window is measured instead of assumed.
+        self.boot_cost: Optional[Callable[[], float]] = None
 
     def send(self, **oneof: Any) -> None:
         self._out.put(pb.SchedulerMessage(**oneof))
@@ -128,10 +178,19 @@ class Conn:
                     )
                 silent = now - last_advance
                 if silent >= cadence.window_s:
-                    raise StalledError(
-                        f"{describe()}: no such message in {silent:.1f}s "
-                        f"(staleness window {cadence.describe()})"
-                    )
+                    # The probe spawns a process; recording must not be blocked
+                    # behind it, or a message arriving mid-probe reads as silence.
+                    self._recv_cond.release()
+                    try:
+                        widened = _extended(cadence, self.boot_cost)
+                    finally:
+                        self._recv_cond.acquire()
+                    if not widened:
+                        raise StalledError(
+                            f"{describe()}: no such message in {silent:.1f}s "
+                            f"(staleness window {cadence.describe()})"
+                        )
+                    continue
                 self._recv_cond.wait(min(_REEVALUATE_S, cadence.window_s - silent))
 
     def wait_for(
@@ -196,6 +255,9 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         # has EXITED can never dial in — that is the definitive give-up for
         # wait_connection, and it needs no clock.
         self.worker_alive: Optional[Callable[[], bool]] = None
+        # pgw#960: set by harnesses whose worker boots in a SUBPROCESS, where
+        # the silence a wait must tolerate is the child's spawn-plus-import.
+        self.boot_cost: Optional[Callable[[], float]] = None
 
     def Connect(self, request_iterator: Any, context: grpc.ServicerContext) -> Any:
         if self.reject_unauthenticated:
@@ -205,6 +267,7 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         assert first.WhichOneof("msg") == "hello", "first message must be Hello"
         conn = Conn()
         conn.hello = first.hello
+        conn.boot_cost = self.boot_cost
         # Queue the HelloAck BEFORE exposing the connection: the contract says
         # HelloAck precedes all other scheduler->worker traffic.
         conn.send(hello_ack=pb.HelloAck(
@@ -240,6 +303,12 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         A boot on a loaded runner is slow, not broken — the honest give-up is
         "the worker process is gone", which is definitive, plus a staleness
         window calibrated from the advances this run has measured.
+
+        pgw#960: a dial-in has no intermediate signal to advance on — the boot
+        is silent until it lands — so the window is calibrated from what a boot
+        COSTS on this runner, measured only when the wait is already at its
+        floor. That is the difference between a bound the box earns and the
+        180 s literal callers used to pass in to escape this branch entirely.
         """
         cadence = Cadence()
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -263,11 +332,19 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
                     )
                 waited = now - started
                 if waited >= cadence.window_s:
-                    raise StalledError(
-                        f"connection #{index} never arrived in {waited:.1f}s of "
-                        f"silence (staleness window {cadence.describe()}); "
-                        f"{len(self.connections)} connections so far"
-                    )
+                    # Probe outside the lock — Connect() appends under it.
+                    self._conn_cond.release()
+                    try:
+                        widened = _extended(cadence, self.boot_cost)
+                    finally:
+                        self._conn_cond.acquire()
+                    if not widened:
+                        raise StalledError(
+                            f"connection #{index} never arrived in {waited:.1f}s of "
+                            f"silence (staleness window {cadence.describe()}); "
+                            f"{len(self.connections)} connections so far"
+                        )
+                    continue
                 self._conn_cond.wait(min(_REEVALUATE_S, cadence.window_s - waited))
             return self.connections[index]
 

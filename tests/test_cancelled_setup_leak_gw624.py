@@ -18,6 +18,7 @@ Two guards, both revert-turns-red here:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import gc
 import threading
 import weakref
@@ -48,6 +49,51 @@ class _Buffer:
         self.cycle = self
 
 
+#: The load runs on the loop's default executor, so the test owns one of a
+#: KNOWN width — the process default is ``min(32, cpu+4)`` and a round-trip
+#: through it proves nothing about which thread served it.
+_POOL_WIDTH = 2
+
+
+async def _workers_past_their_work_items(pool: concurrent.futures.Executor) -> None:
+    """Prove every pool thread returned to ``work_queue.get()`` (pgw#959).
+
+    CPython's worker does ``work_item.run()`` -> ``del work_item``, and between
+    those two the item — hence the load's result — is still reachable from the
+    thread. A rendezvous every worker must enter simultaneously cannot be
+    reached until all of them are past that ``del``: an ordering fact, with no
+    clock and no turn count in it.
+    """
+    loop = asyncio.get_running_loop()
+    barrier = threading.Barrier(_POOL_WIDTH)
+    await asyncio.gather(*(loop.run_in_executor(pool, barrier.wait)
+                           for _ in range(_POOL_WIDTH)))
+
+
+async def _released(refs: List[weakref.ref]) -> None:
+    """Wait for the reference to go, or for proof it never can.
+
+    A ``call_soon`` queued now runs after every callback queued before it, so
+    one pass drains what is pending; when no task is left to run either, there
+    is nothing that could still drop the reference and the property is FALSE
+    now rather than in five turns' time.
+    """
+    loop = asyncio.get_running_loop()
+    me = asyncio.current_task()
+    while True:
+        drained = loop.create_future()
+        loop.call_soon(drained.set_result, None)
+        await drained
+        gc.collect()
+        if refs and refs[0]() is None:
+            return
+        if not any(t is not me for t in asyncio.all_tasks(loop)):
+            raise AssertionError(
+                "the cancelled load's result is still pinned with the loop "
+                "quiesced and every executor thread past its work item — "
+                "rollback cannot free it")
+
+
 def test_cancelled_to_thread_join_releases_result() -> None:
     """While the CancelledError (and its traceback) is still alive — the
     exact window setup rollback runs in — the joined thread's result must
@@ -64,19 +110,21 @@ def test_cancelled_to_thread_join_releases_result() -> None:
         return buf
 
     async def run() -> None:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=_POOL_WIDTH)
+        asyncio.get_running_loop().set_default_executor(pool)
         task = asyncio.create_task(_to_thread_complete(load))
         await asyncio.to_thread(started.wait, 10)
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError) as excinfo:
             await task
-        # Let shield/done callbacks drain before judging reachability.
-        for _ in range(5):
-            await asyncio.sleep(0)
-        gc.collect()
-        assert refs and refs[0]() is None, (
-            "the cancelled load's result is still pinned while the "
-            "exception lives — rollback cannot free it")
+        # pgw#959: this used to judge reachability after five event-loop turns
+        # — a wall clock spelled in turns, and the wrong clock besides. The
+        # holder at turn five is the EXECUTOR thread, which had set the result
+        # but not yet dropped its work item, so the row red whenever that
+        # thread lost the CPU (11/80 locally). Both waits below are orderings.
+        await _workers_past_their_work_items(pool)
+        await _released(refs)
         del excinfo
 
     asyncio.run(run())
