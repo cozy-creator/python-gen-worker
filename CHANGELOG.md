@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **ie#600/ie#605: `gen_worker.references` — edit/compose mode, named
+  references, and a reference cap that states OUR reason.** An edit model is a
+  generator that takes references, and the pipeline sees one undifferentiated
+  ordered list — so mode is our declaration, not an inference, and it is what
+  `fit_to_native` needs to know whose framing to preserve. `plan_edit(family=,
+  mode=EDIT|COMPOSE, image=, references=)` normalizes list OR name->asset map
+  into one ordered list (map form by sorted key, matching the asset walker and
+  the hub's `*` traversal), rewrites `{name}` into the family's rendered
+  positional label, and refuses — never truncates — over the cap, before
+  dispatch. `fit_edit_request` is the other half of the one stage.
+  `EditFamily` is DATA the endpoint declares, the `FamilyGeometry` split.
+  **Its label domain admits `None`** (ie#603): Qwen renders `Picture {n}`
+  (proven in the token stream), Klein `image {n}` (BFL-documented user
+  convention, training basis unpublished), and HiDream-O1 renders NOTHING —
+  it has no index channel and its own report publishes an entity-description
+  caption recipe, so a `{name}` there is a typed refusal rather than an
+  invented ordinal. `EditFamily` refuses at declaration time to carry a cap
+  with no stated basis or a label with no provenance: three of our caps were
+  a competitor's product decision or a test-harness ceiling.
+
 - **pgw#957: the gw#666 guard file's own boot fixture was a bet on the runner's
   speed — the shape it exists to police.** `test_a_talking_engine_boots_however
   _long_it_takes` drove a REAL engine boot on a hardcoded 0.3 s stall window and
