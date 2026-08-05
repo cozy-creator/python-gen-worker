@@ -51,6 +51,18 @@ from .geometry import (
     restore,
     set_upscaler,
 )
+from .references import (
+    EditFamily,
+    EditRequest,
+    PromptRewrite,
+    Reference,
+    ReferenceRefusal,
+    condition_tokens,
+    fit_edit_request,
+    normalize_references,
+    plan_edit,
+    rewrite_prompt,
+)
 from .url_fetch import FetchedUrl, fetch_bytes, fetch_image
 from .view import for_request
 from .api.errors import (
@@ -131,6 +143,17 @@ __all__ = [
     "nearest_bucket",
     "restore",
     "set_upscaler",
+    # ie#600 edit/compose references: mechanism here, EditFamily row in the family.
+    "EditFamily",
+    "EditRequest",
+    "PromptRewrite",
+    "Reference",
+    "ReferenceRefusal",
+    "condition_tokens",
+    "fit_edit_request",
+    "normalize_references",
+    "plan_edit",
+    "rewrite_prompt",
     "pad_text_sequence",
     "TextLengthExceededError",
     "HF",
