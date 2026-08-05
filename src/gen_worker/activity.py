@@ -461,10 +461,15 @@ def _process_cpu_evidence() -> float:
 
     Best-effort: a child that can't be inspected (raced exit, permissions)
     just doesn't contribute — never fatal to the heartbeat."""
-    times = _this_process.cpu_times()
-    total = float(times.user) + float(times.system)
-    total += float(getattr(times, "children_user", 0.0) or 0.0)
-    total += float(getattr(times, "children_system", 0.0) or 0.0)
+    try:
+        times = _this_process.cpu_times()
+        total = float(times.user) + float(times.system)
+        total += float(getattr(times, "children_user", 0.0) or 0.0)
+        total += float(getattr(times, "children_system", 0.0) or 0.0)
+    except psutil.Error:
+        # Self is always readable in practice; if it somehow is not, fall back
+        # to the interpreter's own accounting rather than to zero.
+        total = time.process_time()
     try:
         children = _this_process.children(recursive=True)
     except psutil.Error:
