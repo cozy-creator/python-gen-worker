@@ -2824,6 +2824,13 @@ class _BackgroundMint:
     # component's files from the base fetch, so `snapshot_paths` alone names
     # a narrowed tree (`<digest>__x<fp>`) that no loader can open.
     component_paths: Dict[str, Dict[str, str]] = dc_field(default_factory=dict)
+    # pgw#969: and the FOURTH — slot -> the RESOLVED ModelRef behind that
+    # path. `snapshot_paths` says which bytes to load; `ctx.slots` is built
+    # from bindings, and the child re-runs discovery, so a hub-catalog slot
+    # (no code `default_checkpoint=`) rediscovers NOTHING. Its warm request
+    # reached the endpoint's own handler unbound and died at
+    # `ctx.slots["pipeline"]` 0.0s into `warmup_forward`.
+    slot_bindings: Dict[str, ModelRef] = dc_field(default_factory=dict)
     # th#1299: WHY this mint was asked to stop. The abort event used to report
     # "(adopt-on-arm / vacate / shutdown)" — three unrelated causes in one
     # string — so a mint that died could not be told from a mint that was
@@ -2832,6 +2839,17 @@ class _BackgroundMint:
     # handler; a code (queryable) and the human sentence beside it.
     abandon_code: str = "unspecified"
     abandon_reason: str = ""
+
+
+def _mint_origin(bg: "_BackgroundMint", spec: EndpointSpec) -> str:
+    """WHICH mint a warm context belongs to (pgw#969), for the deferred
+    slot-resolution errors it may raise. The delegated child's twin is
+    ``mint_child.mint_identity``; both exist because ``ValueError: slot
+    'pipeline': no resolved model ref`` named a symptom and no mint."""
+    keys = sorted({str(getattr(p, "cell_key", "")) for p in bg.pendings.values()})
+    return (
+        f"in-process mint fn={spec.name!r} "
+        f"key={(keys[0] if len(keys) == 1 else keys) or '(none)'!r}")
 
 
 def _mint_modules(spec: EndpointSpec) -> Tuple[str, ...]:
@@ -6720,6 +6738,10 @@ class Executor:
         }
         slot_identities: Dict[str, _ResidencyIdentity] = {}
         paths: Dict[str, str] = {}
+        # pgw#969: the BINDING behind each of those paths, kept in step with
+        # `paths` by construction — the two are one resolution, and a mint
+        # child handed only the paths cannot say which checkpoint they are.
+        slot_bindings: Dict[str, ModelRef] = {}
         # pgw#617: component-override materializations, slot -> comp -> local
         # path, plus per-override-ref snapshot digests (identity facts).
         component_paths: Dict[str, Dict[str, str]] = {}
@@ -6736,6 +6758,7 @@ class Executor:
             materialized = await self.store._materialize_local(
                 ref, snap, binding=binding)
             paths[slot] = str(materialized.path)
+            slot_bindings[slot] = binding
             slot_identities[slot] = materialized.identity
             for comp, comp_ref in _component_overrides(binding):
                 try:
@@ -6992,6 +7015,7 @@ class Executor:
                     selections=mint_selections,
                     modules=_mint_modules(spec),
                     snapshot_paths=dict(paths),
+                    slot_bindings=dict(slot_bindings),
                     component_paths={
                         slot: dict(comps)
                         for slot, comps in component_paths.items() if comps
@@ -9703,7 +9727,10 @@ class Executor:
                     wj.spec, request_id=f"bg-mint-{wj.spec.name}",
                     local_output_dir=tmp,
                     execution_lane=self._served_execution_lane(wj.spec),
-                    config=self._effective_config(wj.spec))
+                    config=self._effective_config(wj.spec),
+                    # pgw#969: the in-process mint is a mint too — a slot that
+                    # cannot resolve here must say which one it killed.
+                    origin=_mint_origin(bg, wj.spec))
                 if preemptible:
                     bg.seed_ctx = ctx
                     # Registration race: demand that arrived after the turn
@@ -10050,6 +10077,7 @@ class Executor:
                     function=spec.name,
                     modules=bg.modules or _mint_modules(spec),
                     snapshots=dict(bg.snapshot_paths),
+                    slot_bindings=dict(bg.slot_bindings),
                     component_paths={
                         slot: dict(comps)
                         for slot, comps in bg.component_paths.items()

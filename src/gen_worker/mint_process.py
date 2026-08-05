@@ -70,6 +70,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
+from .api.binding import ModelRef
 from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
@@ -176,6 +177,24 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     report: str          # typed terminal report the child writes
     cfg: CompileCellSpec
     snapshots: Dict[str, str] = {}
+    #: pgw#969: the parent's RESOLVED per-slot bindings, slot -> ModelRef —
+    #: the same objects ``spec.models`` held when the parent materialized
+    #: ``snapshots`` above, so the two halves of one resolution travel
+    #: together.
+    #:
+    #: A path says which BYTES to load; a binding says which CHECKPOINT the
+    #: request is for, and only the second one reaches ``ctx.slots``. The
+    #: child re-runs discovery, so its ``spec.models`` holds only what the
+    #: DECORATOR declared — and a hub-catalog slot (``Slot(selected_by=...)``
+    #: with no ``default_checkpoint=``, which is the sdxl shape) declares
+    #: nothing at all. Its warmup request therefore reached the endpoint's own
+    #: handler with the slot unbound and died at ``ctx.slots["pipeline"]``
+    #: 0.0 s into ``warmup_forward``, twice, on two independent L40S pods.
+    #:
+    #: A slot WITH a code default is the quieter half of the same defect: the
+    #: child would resolve the DECLARED checkpoint while the parent serves the
+    #: hub's pick, and trace graphs for a model this pod never runs.
+    slot_bindings: Dict[str, ModelRef] = {}
     #: pgw#816: slot -> component -> the OVERRIDE component's own local tree
     #: (pgw#617 hierarchical bindings). A directory path alone does not
     #: describe the composition: th#1330 B2 EXCLUDES an overridden

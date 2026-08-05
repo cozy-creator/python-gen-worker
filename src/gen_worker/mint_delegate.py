@@ -101,6 +101,11 @@ class MintTask:
     # fetched with these components EXCLUDED (th#1330 B2), so a child handed
     # only `snapshots` is handed a tree that cannot load.
     component_paths: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # pgw#969: and the FOURTH — the resolved binding behind each of those
+    # paths. `snapshots` names bytes; only a binding names a checkpoint, and
+    # `ctx.slots` is built from bindings. Resolved by the parent in
+    # `_setup_locked_inner`, in the same loop that produced `snapshots`.
+    slot_bindings: Dict[str, Any] = field(default_factory=dict)
     weight_lane: str = ""
     execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -197,6 +202,7 @@ def build_request(
         resume=str(aot_resume.bank_root(pending.cell_key)),
         cfg=cfg_spec(pending.cfg),
         snapshots=dict(task.snapshots),
+        slot_bindings=dict(task.slot_bindings),
         component_paths={
             slot: dict(comps)
             for slot, comps in task.component_paths.items() if comps
