@@ -83,6 +83,16 @@ CI-SKIPPED tests/test_llama_runtime.py|gpu smoke runs on the nightly gpu ci lane
 # 1000: every /proc read the fix denies is already denied).
 CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|pgw#858 is a uid boundary — the containerised row above measures it
 
+# ─── CI-SKIPPED: a host capability the runner HAS, which the row needs absent ──
+# Inverse of the section above, and the only key here whose presence depends on
+# which `ubuntu-latest` machine the run draws: the two pgw#754 rows exercise the
+# genuine-lack refusal, so they skip when the host reports avx512f. GitHub's pool
+# is mixed, so this key is observed on some runs and absent on others (PRs #490
+# and #492 did not see it; #491 did, an hour later, on the same base). Classified
+# rather than left to the draw — an unclassified key that appears on a coin flip
+# fails an unrelated PR, which is what it did.
+CI-SKIPPED tests/test_host_isa_pgw754.py|host has avx-#; the genuine-lack refusal needs a host without it
+
 # ─── CI-SKIPPED: third-party availability ─────────────────────────────────────
 # Degrades to a counted skip, never a red: an unreachable third party may not
 # fail a required check.

@@ -41,6 +41,7 @@ from typing import (
     Dict,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     Union,
 )
@@ -372,10 +373,24 @@ class GraphClass(msgspec.Struct, frozen=True):
     Accepts mappings at construction (``GraphClass(fork={...}, dims={...})``,
     the LTX §2.3 draft form) and normalizes to sorted pairs, so instances
     are hashable and endpoint generators can dedupe with ``dict.fromkeys``.
+
+    ``targets`` scopes the row, exactly as it does on :class:`Input`,
+    :class:`Arg` and :class:`Fork`; empty means every target (pgw#967). A
+    cell's targets are unrelated modules with unrelated call contracts —
+    sdxl's UNet traces 9 aspect rows x 2 CFG arms, its VAE decoder traces
+    the 9 aspect rows at batch 1 (CFG has collapsed by decode time), and its
+    two text encoders trace ONE row each (77 tokens, batch 1, both
+    aspect- and CFG-invariant). Without scoping, ``mint_plans`` hands every
+    target the whole class table, so declaring a text encoder alongside the
+    denoiser would mint 18 identical text-encoder graphs under 18 different
+    entry names and pay for each. That is why the SDK's own
+    ``("transformer", "vae.decode")`` default has never been exercised by a
+    fleet family: it was not expressible, only payable.
     """
 
     dims: Any
     fork: Any = ()
+    targets: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -388,6 +403,7 @@ class GraphClass(msgspec.Struct, frozen=True):
                     f"GraphClass dim {name!r} has non-positive value {value!r}")
         force(self, "dims", tuple((n, int(v)) for n, v in dims))
         force(self, "fork", _sorted_pairs("fork", "GraphClass", self.fork))
+        force(self, "targets", tuple(str(t).strip() for t in self.targets))
 
     @property
     def dim_map(self) -> Dict[str, int]:
@@ -397,8 +413,21 @@ class GraphClass(msgspec.Struct, frozen=True):
     def fork_map(self) -> Dict[str, ForkValue]:
         return dict(self.fork)
 
+    def serves(self, target: str) -> bool:
+        """Whether this row is one of ``target``'s coordinates."""
+        return not self.targets or str(target) in self.targets
+
     def as_row(self) -> Dict[str, Any]:
-        return {"dims": dict(self.dims), "fork": dict(self.fork)}
+        row: Dict[str, Any] = {"dims": dict(self.dims), "fork": dict(self.fork)}
+        # pgw#846 discipline: an absent field is OMITTED, so every
+        # declaration written before this vocabulary existed serialises
+        # byte-identically and no published cell re-keys on the SDK change
+        # alone (`Compile.contract_axes` feeds the cell key's contract
+        # digest). A declaration that ADOPTS scoping re-keys, correctly: it
+        # is a different class set.
+        if self.targets:
+            row["targets"] = list(self.targets)
+        return row
 
 
 class Input(msgspec.Struct, frozen=True):
@@ -539,6 +568,59 @@ class Arg(msgspec.Struct, frozen=True):
         return row
 
 
+def _carrier_names(
+    inputs: Tuple[Input, ...], args: Tuple[Arg, ...], targets: Sequence[str],
+) -> set:
+    """Every name a dim may be carried by, for the given target scope."""
+    names: set = set()
+    for target in targets:
+        for inp in inputs:
+            if not inp.targets or target in inp.targets:
+                names.add(inp.name)
+                names.add(inp.top_name)
+        for arg in args:
+            if arg.template is not None and (not arg.targets or target in arg.targets):
+                names.add(arg.name)
+    return names
+
+
+def dims_for_targets(
+    dims: Tuple[Dim, ...],
+    inputs: Tuple[Input, ...],
+    args: Tuple[Arg, ...],
+    targets: Sequence[str],
+) -> set:
+    """The dim NAMES a target-scoped graph class must state (pgw#967).
+
+    A dim belongs to a target when one of its ``carried_by`` bindings names
+    an :class:`Input` (or a templated :class:`Arg`) that target declares.
+    That relation is already written down — deriving it beats adding a
+    second place for an endpoint to say the same thing and drift.
+
+    Unscoped rows, and any declaration carrying no input templates, keep the
+    original rule: every row states every declared dim.
+    """
+    all_names = {d.name for d in dims}
+    if not targets or not inputs:
+        return all_names
+    known = _carrier_names(inputs, args, targets)
+    scoped: set = set()
+    for d in dims:
+        for bound, _axis in d.carried_by:
+            if bound in known or bound.split(".", 1)[0] in known:
+                scoped.add(d.name)
+                break
+    return scoped
+
+
+def forks_for_targets(forks: Tuple[Fork, ...], targets: Sequence[str]) -> set:
+    """The fork NAMES a target-scoped graph class must state (pgw#967)."""
+    if not targets:
+        return {f.name for f in forks}
+    want = set(targets)
+    return {f.name for f in forks if not f.targets or (set(f.targets) & want)}
+
+
 def validate_contract(compile_decl: Any) -> None:
     """Cross-validate the #739 declaration fields on a ``Compile``.
 
@@ -583,6 +665,12 @@ def validate_contract(compile_decl: Any) -> None:
             raise DeclarationError(
                 f"{type(row).__name__} {row.name!r} names target(s) {bad!r} "
                 f"not in Compile.targets {list(targets)!r}")
+    for i, cls in enumerate(classes):
+        bad = sorted(set(cls.targets) - set(targets))
+        if bad:
+            raise DeclarationError(
+                f"graph class #{i} names target(s) {bad!r} not in "
+                f"Compile.targets {list(targets)!r}")
 
     if classes and not dims:
         raise DeclarationError(
@@ -596,7 +684,12 @@ def validate_contract(compile_decl: Any) -> None:
         if cls in seen:
             raise DeclarationError(f"Compile.classes repeats row #{i}: {cls.as_row()!r}")
         seen.add(cls)
-        missing = sorted(set(dim_names) - set(cls.dim_map))
+        # pgw#967: a row scoped to a target states that TARGET's dims and
+        # forks. An unscoped row states all of them — the original rule,
+        # unchanged for every declaration written before scoping existed.
+        want_dims = dims_for_targets(dims, inputs, args, cls.targets)
+        want_forks = forks_for_targets(forks, cls.targets)
+        missing = sorted(want_dims - set(cls.dim_map))
         if missing:
             raise DeclarationError(
                 f"graph class #{i} omits declared dim(s) {missing!r}")
@@ -604,11 +697,18 @@ def validate_contract(compile_decl: Any) -> None:
         if unknown:
             raise DeclarationError(
                 f"graph class #{i} carries undeclared dim(s) {unknown!r}")
+        extra = sorted(set(cls.dim_map) - want_dims)
+        if extra:
+            raise DeclarationError(
+                f"graph class #{i} is scoped to target(s) {list(cls.targets)!r} "
+                f"and carries dim(s) {extra!r} that no input those targets "
+                f"declare can carry — a coordinate the traced call cannot "
+                f"receive is not a coordinate")
         # The omitted-fork refusal (#739 red test): a coordinate that varies
         # on a flag the vocabulary does not declare would be silently
         # exported into one class; a declared flag a coordinate does not
         # state is the same defect read the other way.
-        missing_f = sorted(set(fork_names) - set(cls.fork_map))
+        missing_f = sorted(want_forks - set(cls.fork_map))
         if missing_f:
             raise DeclarationError(
                 f"graph class #{i} omits declared fork(s) {missing_f!r} — "
@@ -620,6 +720,13 @@ def validate_contract(compile_decl: Any) -> None:
                 f"graph class #{i} carries fork(s) {unknown_f!r} that "
                 f"Compile.forks does not declare — declare the forking flag "
                 f"by name rather than silently exporting into one class")
+        extra_f = sorted(set(cls.fork_map) - want_forks - set(unknown_f))
+        if extra_f:
+            raise DeclarationError(
+                f"graph class #{i} is scoped to target(s) {list(cls.targets)!r} "
+                f"and carries fork(s) {extra_f!r} that Compile.forks scopes "
+                f"to other targets — a fork the target does not take splits "
+                f"its entries on nothing")
         for name, value in cls.fork:
             if value in unserved_by_fork.get(name, set()):
                 raise DeclarationError(
