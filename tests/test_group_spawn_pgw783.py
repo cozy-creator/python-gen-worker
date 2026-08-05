@@ -33,13 +33,18 @@ from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
 from gen_worker.procsplit.parent import DEATH_LABEL, ParentControl
 from gen_worker.topology import ExecutionTopology
 
-from harness.hub_double import FakeScheduler, is_accept_for, is_ready, is_result_for
+from harness.hub_double import (
+    FakeScheduler,
+    is_accept_for,
+    is_ready,
+    is_result_for,
+    measure_child_boot_cost_s,
+)
 from harness.progress_wait import Cadence, await_count, await_progress
 
 TESTS_DIR = Path(__file__).resolve().parent
 SRC_DIR = TESTS_DIR.parent / "src"
 CHILD_MAIN = TESTS_DIR / "harness" / "procsplit_child_main.py"
-BOOT_TIMEOUT_S = 180.0  # two children import the worker; generous but real
 
 
 class _In(msgspec.Struct):
@@ -94,6 +99,10 @@ class G2Harness:
         )
         self.exit_code: Optional[int] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
+        # pgw#960: same two gates as SplitHarness — a dead parent is definitive,
+        # and TWO children's spawn-plus-import is what the silence is worth here.
+        self.scheduler.worker_alive = lambda: self.alive
+        self.scheduler.boot_cost = lambda: measure_child_boot_cost_s(child_env)
         self._thread.start()
 
     def _run(self) -> None:
@@ -149,9 +158,9 @@ def test_two_children_boot_and_each_group_serves_its_own_dispatch(g2):
     """The whole worker is READY only once BOTH groups are (the fan-in merges
     phase to the least-ready), and a dispatch to each group's rank-0 device is
     served by THAT group's child — proven by the ordinal it reports."""
-    conn = g2.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
+    conn = g2.scheduler.wait_connection(0)
     # READY requires the parent to have merged two children's state to READY.
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn.wait_for(is_ready)
 
     # Two real children exist, one per group.
     assert g2.pc.execution_groups == 2
@@ -186,8 +195,8 @@ def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(
     """A group where one of the children dies is not a dead group: only the dead
     child's in-flight job is attributed, only its group respawns, and the sibling
     group serves throughout — the pgw#783 failure model on real processes."""
-    conn = g2.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = g2.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
 
     slot1_pid_before = g2.pc._slots[1].proc.pid
 

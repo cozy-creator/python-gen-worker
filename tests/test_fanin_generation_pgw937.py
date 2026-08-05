@@ -40,7 +40,6 @@ from gen_worker.topology import ExecutionTopology
 
 from harness.hub_double import is_ready, is_result_for
 from test_group_spawn_pgw783 import (  # the real two-process harness
-    BOOT_TIMEOUT_S,
     G2Harness,
     _dials,          # noqa: F401  (fixture)
     _isolated_postmortem,  # noqa: F401  (fixture)
@@ -85,8 +84,8 @@ def test_a_dead_groups_open_activity_is_terminated_for_the_worker(g2):
     Pre-fix this hangs on the FAILED wait: the only updates for the kind are the
     dead child's RUNNING ones.
     """
-    conn = g2.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = g2.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
 
     conn.send(run_job=pb.RunJob(
         request_id="r-die-g1", attempt=1, function_name="activity-die",
@@ -124,8 +123,8 @@ def test_the_dead_generation_is_retired_and_the_respawn_starts_a_new_one(g2):
     "absent" means the live-group default again (§4.15), not an inherited fact.
     The surviving group's own entry is untouched throughout.
     """
-    conn = g2.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = g2.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
     pc = g2.pc
     assert pc._slots[1].generation == 1 and pc._slots[1].participating
 
@@ -155,7 +154,7 @@ def test_the_dead_generation_is_retired_and_the_respawn_starts_a_new_one(g2):
     # `_on_child_connect` calls `begin_generation()` and THEN cycles the stream
     # to re-sync the worker, so the hub's second connection is the ordered proof
     # that the new generation exists — no clock involved.
-    g2.scheduler.wait_connection(1, timeout=BOOT_TIMEOUT_S)
+    g2.scheduler.wait_connection(1)
     assert pc._slots[1].generation >= 2
     assert pc._slots[1].participating
     assert pc._group_activities.get(1, {}) == {}

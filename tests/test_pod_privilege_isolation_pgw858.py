@@ -131,7 +131,6 @@ root_only = pytest.mark.skipif(
 from harness.hub_double import is_ready, is_result_for  # noqa: E402
 from harness.progress_wait import Cadence, await_progress  # noqa: E402
 from test_procsplit_pgw763 import (  # noqa: E402,F401 — fixtures come with it
-    BOOT_TIMEOUT_S,
     SplitHarness,
     _payload,
     captured_dials,
@@ -163,8 +162,8 @@ def _split(tmp_path, *, drop: bool, monkeypatch=None) -> SplitHarness:
 
 
 def _probe(h: SplitHarness, fn: str, text: str = "") -> str:
-    conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = h.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
     rid = f"r-{fn}-{time.time_ns()}"
     conn.send(run_job=pb.RunJob(
         request_id=rid, attempt=1, function_name=fn, input_payload=_payload(text)))

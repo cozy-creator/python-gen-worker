@@ -43,15 +43,19 @@ from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
 from gen_worker.procsplit import frames
 from gen_worker.procsplit.parent import DEATH_LABEL, ParentControl
 
-from harness.hub_double import FakeScheduler, is_accept_for, is_ready, is_result_for
+from harness.hub_double import (
+    FakeScheduler,
+    is_accept_for,
+    is_ready,
+    is_result_for,
+    measure_child_boot_cost_s,
+)
 from harness.progress_wait import Cadence, await_count, await_progress
 
 TESTS_DIR = Path(__file__).resolve().parent
 SRC_DIR = TESTS_DIR.parent / "src"
 CHILD_MAIN = TESTS_DIR / "harness" / "procsplit_child_main.py"
 FAKE_CHILD = TESTS_DIR / "harness" / "procsplit_fake_child.py"
-
-BOOT_TIMEOUT_S = 120.0  # child imports torch; generous but real
 
 _BOOT_RECORD_NAME = "gen-worker-boot-record.json"
 _INFLIGHT_NAME = "gen-worker-inflight.json"
@@ -129,6 +133,10 @@ class SplitHarness:
         )
         self.exit_code: Optional[int] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
+        # pgw#960: a parent that exited can never dial in (definitive), and a
+        # child boot's silence is worth whatever it costs on THIS runner.
+        self.scheduler.worker_alive = lambda: self.alive
+        self.scheduler.boot_cost = lambda: measure_child_boot_cost_s(child_env)
         self._thread.start()
 
     def _run(self) -> None:
@@ -195,8 +203,8 @@ def split(tmp_path, captured_dials):
 def test_child_death_keeps_stream_attributes_job_and_respawn_serves_next(
     split, captured_dials,
 ):
-    conn0 = split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn0.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn0 = split.scheduler.wait_connection(0)
+    conn0.wait_for(is_ready)
 
     # A normal job completes through the seam.
     conn0.send(run_job=pb.RunJob(
@@ -218,8 +226,8 @@ def test_child_death_keeps_stream_attributes_job_and_respawn_serves_next(
     # The parent (and the pod) survived; the stream identity was kept and the
     # respawned child re-syncs on a fresh connection and serves the NEXT job.
     assert split.alive and split.exit_code is None
-    conn1 = split.scheduler.wait_connection(1, timeout=BOOT_TIMEOUT_S)
-    conn1.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn1 = split.scheduler.wait_connection(1)
+    conn1.wait_for(is_ready)
     conn1.send(run_job=pb.RunJob(
         request_id="r-echo-2", attempt=1, function_name="echo",
         input_payload=_payload("again")))
@@ -234,8 +242,8 @@ def test_child_death_keeps_stream_attributes_job_and_respawn_serves_next(
 
 
 def test_cancel_stays_prompt_across_the_boundary(split):
-    conn = split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
     conn.send(run_job=pb.RunJob(
         request_id="r-sleepy", attempt=1, function_name="sleepy",
         input_payload=_payload()))
@@ -324,8 +332,8 @@ def test_boot_hardware_fatal_is_terminal_reported_and_exits_1(
 def test_wedged_child_is_killed_by_watchdog_and_pod_recovers(tmp_path, captured_dials):
     h = SplitHarness(tmp_path, watchdog_budget_s=3.0)
     try:
-        conn0 = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-        conn0.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn0 = h.scheduler.wait_connection(0)
+        conn0.wait_for(is_ready)
         conn0.send(run_job=pb.RunJob(
             request_id="r-freeze", attempt=1, function_name="freeze",
             input_payload=_payload()))
@@ -335,8 +343,8 @@ def test_wedged_child_is_killed_by_watchdog_and_pod_recovers(tmp_path, captured_
         assert died.job_result.status == pb.JOB_STATUS_FATAL
         assert DEATH_LABEL in died.job_result.safe_message
         assert "watchdog_hang" in died.job_result.safe_message
-        conn1 = h.scheduler.wait_connection(1, timeout=BOOT_TIMEOUT_S)
-        conn1.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn1 = h.scheduler.wait_connection(1)
+        conn1.wait_for(is_ready)
         conn1.send(run_job=pb.RunJob(
             request_id="r-after-freeze", attempt=1, function_name="echo",
             input_payload=_payload("thawed")))
@@ -497,8 +505,8 @@ def test_hub_drain_exits_zero_and_lets_the_child_finish(split, captured_dials):
     exits 0. The parent must exit 0 too — and must not SIGKILL the child that
     is still unloading instances just because the stream ended first.
     """
-    conn = split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
     conn.send(run_job=pb.RunJob(
         request_id="r-pre-drain", attempt=1, function_name="echo",
         input_payload=_payload("bye")))
@@ -529,8 +537,8 @@ def test_child_death_during_drain_reports_the_job_and_does_not_respawn(
     to be attributed, and that FATAL has to survive the shutdown flush that
     is running concurrently.
     """
-    conn = split.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-    conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+    conn = split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
     conn.send(run_job=pb.RunJob(
         request_id="r-drain-victim", attempt=1, function_name="sleepy",
         input_payload=_payload()))
@@ -665,8 +673,8 @@ def test_signal_death_consumes_the_inflight_marker_and_records_the_streak(
     registry = isolated_postmortem / _CRASH_REGISTRY_NAME
     h = SplitHarness(tmp_path)
     try:
-        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn = h.scheduler.wait_connection(0)
+        conn.wait_for(is_ready)
         conn.send(run_job=pb.RunJob(
             request_id="r-marker", attempt=1, function_name="die-hard",
             input_payload=_payload()))
@@ -728,8 +736,8 @@ def test_starved_compile_is_held_while_a_dead_child_is_still_killed(
     """
     h = SplitHarness(tmp_path, watchdog_budget_s=3.0)
     try:
-        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn = h.scheduler.wait_connection(0)
+        conn.wait_for(is_ready)
         conn.send(run_job=pb.RunJob(
             request_id="r-starve", attempt=1, function_name="starve-loop",
             input_payload=_payload("9")))   # 3x the watchdog budget
@@ -764,8 +772,8 @@ def test_parent_originates_the_beat_while_the_child_is_starved(
     """
     h = SplitHarness(tmp_path, watchdog_budget_s=60.0, beat_interval_s=1.0)
     try:
-        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn = h.scheduler.wait_connection(0)
+        conn.wait_for(is_ready)
         before = sum(1 for m in conn.received if m.WhichOneof("msg") == "state_delta")
         conn.send(run_job=pb.RunJob(
             request_id="r-beat", attempt=1, function_name="starve-loop",
@@ -809,8 +817,8 @@ def test_wedged_child_keeps_the_stream_alive_and_is_reported_not_hidden(
         beat_interval_s=1.0,
     )
     try:
-        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn = h.scheduler.wait_connection(0)
+        conn.wait_for(is_ready)
         before = sum(1 for m in conn.received if m.WhichOneof("msg") == "state_delta")
         conn.send(run_job=pb.RunJob(
             request_id="r-wedge-beat", attempt=1, function_name="freeze",
@@ -862,8 +870,8 @@ def test_a_waiting_job_is_never_called_stalled(tmp_path, captured_dials):
     """
     h = SplitHarness(tmp_path, watchdog_budget_s=60.0, beat_interval_s=1.0)
     try:
-        conn = h.scheduler.wait_connection(0, timeout=BOOT_TIMEOUT_S)
-        conn.wait_for(is_ready, timeout=BOOT_TIMEOUT_S)
+        conn = h.scheduler.wait_connection(0)
+        conn.wait_for(is_ready)
         conn.send(run_job=pb.RunJob(
             request_id="r-wait", attempt=1, function_name="async-wait",
             input_payload=_payload("8")))   # 8s of pure awaiting
