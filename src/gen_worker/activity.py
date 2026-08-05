@@ -198,18 +198,36 @@ class Activity:
         self._step = 0
         self._total = 0
         self._done = False
-        self._counters: list[progress_mod.Counter] = []
+        # name -> (phase that registered it, counter). PHASE-scoped: see counter().
+        self._counters: dict[str, tuple[str, progress_mod.Counter]] = {}
 
     def counter(
         self, name: str, unit: str, total: float = 0.0,
     ) -> progress_mod.Counter:
-        """Register-or-get a progress counter owned by this activity —
-        finished automatically when the activity ends, so a reused name
-        never carries a stale age into the next activity (gw#621)."""
+        """Register-or-get a progress counter owned by this activity's CURRENT
+        PHASE — finished when the phase changes, and again when the activity
+        ends (gw#621).
+
+        pgw#962: activity-scoped lifetime was too long. `self_mint_compile`
+        spans load -> warmup_forward -> load for every function on the pod, so
+        `infer:steps` stayed open and frozen after its warmup finished; the
+        next phase has no counter producer, `progress.self_diagnosis()` is a
+        registry-wide min-age query, and the beat confessed `self_stalled`
+        about work that had already succeeded. The hub kills on that confession
+        without waiting out its own window. Producers re-acquire per tick, so a
+        counter that is still being fed is simply re-registered under the new
+        phase."""
         c = progress_mod.counter(name, unit, total)
-        if c not in self._counters:
-            self._counters.append(c)
+        self._counters[name] = (self._phase, c)
         return c
+
+    def _finish_counters(self, keep_phase: Optional[str] = None) -> None:
+        """Close counters the given phase does not own (all of them when None)."""
+        for name, (phase, c) in list(self._counters.items()):
+            if keep_phase is not None and phase == keep_phase:
+                continue
+            c.finish()
+            del self._counters[name]
 
     def _report(self, state: "pb.ActivityState", error: str = "", detail: str = "") -> None:
         _emit(pb.ActivityUpdate(
@@ -221,6 +239,7 @@ class Activity:
 
     def phase(self, phase: str, step: int = 0, total: int = 0) -> None:
         self._phase, self._step, self._total = phase, step, total
+        self._finish_counters(keep_phase=phase)
         self._report(pb.ActivityState.ACTIVITY_STATE_RUNNING)
 
     def heartbeat(self) -> None:
@@ -357,9 +376,7 @@ def _end(act: Activity) -> None:
     with _lock:
         if _current is act:
             _current = None
-    for c in act._counters:
-        c.finish()
-    act._counters = []
+    act._finish_counters()
 
 
 def current() -> Optional[Activity]:
