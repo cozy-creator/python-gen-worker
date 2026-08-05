@@ -62,12 +62,19 @@ def measure_child_boot_cost_s(env: Optional[Mapping[str, str]] = None) -> float:
     child_env: Dict[str, str] = dict(os.environ)
     child_env.update(env or {})
     started = time.monotonic()
-    subprocess.run(
+    done = subprocess.run(
         [sys.executable, "-c", _BOOT_PROBE_SRC],
-        env=child_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        check=False,
+        env=child_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        check=False, text=True,
     )
-    return time.monotonic() - started
+    cost = time.monotonic() - started
+    # A probe that failed to import measured nothing, and a too-small sample
+    # SHRINKS the window it is supposed to widen. Say so instead.
+    assert done.returncode == 0, (
+        f"the child-boot probe could not run ({done.returncode}) — it is not "
+        f"measuring what a child boot costs:\n{done.stderr[-2000:]}"
+    )
+    return cost
 
 
 def _extended(cadence: Cadence, boot_cost: Optional[Callable[[], float]]) -> bool:
