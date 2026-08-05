@@ -120,6 +120,14 @@ name: CI
 #   * CROSS-REPO CONTRACT DRIFT against tensorhub's canonical proto. That is
 #     proto-contract.yml layer 1 here and layer 2 in tensorhub, by design.
 #
+# The list above used to be the only place a reader could learn what a green run
+# did not measure, and it could only ever name CLASSES. pgw#963 makes the actual
+# set visible per run: the two pytest steps carry `-rs` (reasons in the log) and
+# `--skip-census-out=` (the same set as JSON), and the guard after them refuses
+# an unclassified skip and refuses a `CI-MUST-RUN` row that skipped. Read
+# `scripts/skip_census.txt` for what is deliberately not measured here and where
+# each of those IS measured — starting with: nothing on a GPU is, anywhere.
+#
 # What it DOES catch is the class that has actually been costing lanes time:
 # a behavioural regression in the ~3,000-test suite, and the three tree-scanning
 # guards. pgw#950's own lane found a 57-failure regression only by running a
@@ -231,8 +239,17 @@ jobs:
       # real llama-server codepath (tests skip when the binary is absent).
       # Measured 1s on the runner — a ~20 MB tarball fetch, NOT part of what
       # makes this suite expensive, so there is no version of this job worth
-      # running without it. Dropping it silently skips five tests.
+      # running without it. Dropping it skips five tests — which, since pgw#963,
+      # the census at the end of this job PRINTS and COUNTS rather than swallows.
+      #
+      # `continue-on-error` (pgw#963): this is the one third party the suite
+      # still reaches, and an unreachable third party must degrade to a loud
+      # counted skip, never to a red required check. The MODEL those five tests
+      # run is no longer fetched at all — it is vendored at
+      # tests/testdata/stories260K.gguf, because an `hf_hub_download` here is
+      # what put PR #483's tests job red on a `429` from huggingface.co.
       - name: Install llama-server (pinned, CPU)
+        continue-on-error: true
         run: |
           curl -sSL --retry 3 -o /tmp/llama.tgz \
             https://github.com/ggml-org/llama.cpp/releases/download/b9964/llama-b9964-bin-ubuntu-x64.tar.gz
@@ -248,8 +265,16 @@ jobs:
       # process. This is TEST-SYSTEM-DESIGN.md §7's wiring, finally landed.
       # `-v` is dropped: xdist's per-worker interleaving makes it unreadable,
       # and failures print in full either way.
+      #
+      # pgw#963: `-rs` and `--skip-census-out=` are not decoration. Until this
+      # issue, a skipped row and a passing row were the same character of
+      # nothing in this log, and the pgw#858 container row had been skipping
+      # here since it landed — reading as coverage, executing only on developer
+      # boxes, which is how the pgw#956 flake reached `dev` behind a green CI.
+      # `-rs` puts the reasons in the log for a human; the JSON feeds the guard
+      # at the end of this job, which is what makes the NEXT one fail a build.
       - name: Run tests (v1)
-        run: uv run pytest tests/ -n 4 --dist loadfile
+        run: uv run pytest tests/ -n 4 --dist loadfile -rs --skip-census-out=.skip-census-v1.json
 
       # pgw#808: the zero-based suite, as its OWN gate.
       #
@@ -277,4 +302,15 @@ jobs:
       # spend four more minutes on a result nobody will read.
       - name: Run tests (v2, zero-based — pgw#808)
         if: ${{ !cancelled() }}
-        run: uv run pytest tests_v2/ -n 4 --dist loadfile
+        run: uv run pytest tests_v2/ -n 4 --dist loadfile -rs --skip-census-out=.skip-census-v2.json
+
+      # GATING (pgw#963). Two rules: every skip this run took is CLASSIFIED in
+      # scripts/skip_census.txt, and no row classified CI-MUST-RUN was among
+      # them. The first stops the skip set growing invisibly; the second is the
+      # pgw#858 shape stated positively — that row is expected to EXECUTE here,
+      # so seeing it skip is a failure and not a note. `!cancelled()` for the
+      # same reason as the step above: a red suite must not erase this answer,
+      # since a red suite is exactly when the skip set tends to move.
+      - name: pgw#963 guard - the skip census
+        if: ${{ !cancelled() }}
+        run: uv run python scripts/lint_skip_census.py --ci .skip-census-v1.json .skip-census-v2.json

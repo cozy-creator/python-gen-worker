@@ -22,26 +22,44 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check_registry_contract.py"
 
 
+# pgw#963: the three `uv` calls below build an isolated environment, which means
+# PyPI — the one remaining third party in this suite. It is the SAME PyPI the
+# job's own `uv sync --locked` already required, so this adds no new dependency;
+# what it did add was a way for a transient 503 mid-run to turn a required check
+# red on a fetch that has nothing to do with the change under test. A third
+# party may degrade this row to a counted skip and may not fail the build. The
+# match list is deliberately narrow: anything that is not recognisably a network
+# failure still reds, because that is a real defect in the wheel.
+_FETCH_FAILURES = (
+    "Failed to fetch", "error sending request", "Could not connect",
+    "Temporary failure in name resolution", "Network is unreachable",
+    "operation timed out", "429 Too Many Requests", "503 Service Unavailable",
+)
+
+
+def _uv(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+    proc = subprocess.run(argv, capture_output=True, **kw)  # type: ignore[call-overload]
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", "replace")
+        if any(marker in err for marker in _FETCH_FAILURES):
+            pytest.skip(f"PyPI unreachable, so the wheel was never built: "
+                        f"{err.strip().splitlines()[-1][:200]}")
+        raise AssertionError(f"{argv[1]} failed ({proc.returncode}):\n{err}")
+    return proc
+
+
 @pytest.mark.integration
 def test_contract_holds_from_installed_wheel(tmp_path: Path) -> None:
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv not on PATH")
     dist = tmp_path / "dist"
-    subprocess.run(
-        [uv, "build", "--wheel", "--out-dir", str(dist)],
-        cwd=REPO, check=True, capture_output=True,
-    )
+    _uv([uv, "build", "--wheel", "--out-dir", str(dist)], cwd=REPO)
     wheel = next(dist.glob("gen_worker-*.whl"))
     venv = tmp_path / "venv"
-    subprocess.run(
-        [uv, "venv", "--python", "3.12", str(venv)], check=True, capture_output=True
-    )
+    _uv([uv, "venv", "--python", "3.12", str(venv)])
     py = venv / "bin" / "python"
-    subprocess.run(
-        [uv, "pip", "install", "--python", str(py), str(wheel)],
-        check=True, capture_output=True,
-    )
+    _uv([uv, "pip", "install", "--python", str(py), str(wheel)])
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     proc = subprocess.run(
         [str(py), str(SCRIPT), "--installed"],

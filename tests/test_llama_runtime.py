@@ -1,14 +1,19 @@
 """gw#402: llama.cpp/GGUF serving runtime.
 
 Unit: GGUF resolution, fit planning, stream accumulation, command shapes.
-Integration (real llama-server + tiny stories15M gguf, CPU): boot, stream,
-terminal output, token counts. Binary resolution: $GEN_WORKER_LLAMA_SERVER_BIN
-or PATH; tests skip when absent. GPU smoke is GEN_WORKER_GPU_SMOKE-gated.
+Integration (real llama-server + the VENDORED tiny stories260K gguf, CPU): boot,
+stream, terminal output, token counts. No network: the model is
+`tests/testdata/stories260K.gguf` (pgw#963 — it used to be an hf_hub_download on
+every CI run, and HF's rate limiter reddened PR #483). Binary resolution:
+$GEN_WORKER_LLAMA_SERVER_BIN or PATH; tests skip when absent — the binary is
+still a third-party fetch, so it degrades to a counted skip and never a red.
+GPU smoke is GEN_WORKER_GPU_SMOKE-gated.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -242,8 +247,30 @@ def test_stream_mode_terminal_output_retrievable() -> None:
 # Integration: real llama-server, tiny real GGUF, CPU inference.
 # ---------------------------------------------------------------------------
 
-_TINY_REPO = "ggml-org/models-moved"
-_TINY_FILE = "tinyllamas/stories15M-q4_0.gguf"
+# pgw#963: the model is VENDORED, not fetched.
+#
+# Until this issue this fixture ran `hf_hub_download("ggml-org/models-moved",
+# "tinyllamas/stories15M-q4_0.gguf")` on every CI run, and PR #483's `tests` job
+# went red on `429 Too Many Requests` from huggingface.co. A required check that
+# can go red because somebody else's rate limiter had a bad minute is not a
+# check — the same property a silently-skipped row breaks, from the other side.
+#
+# Why vendoring and not a cache: an `actions/cache` restore only sees caches
+# from the run's own ref or the DEFAULT branch (th#1114). This repo's PRs target
+# `dev`, which is neither, so the cache would never once be warm without a
+# scheduled master-side seeding job — machinery, for an immutable 1.1 MB file.
+# Our own object storage means credentials in a public repo's CI; a release
+# asset means out-of-band state to maintain. 1,185,376 bytes in git, once,
+# beats all three.
+#
+# Why stories260K rather than the stories15M-q4_0 this replaced: same repo, same
+# `llama` architecture, same role (it is llama.cpp's own CI model) — and 1.1 MB
+# against 19.1 MB, which is the difference between a fixture and a 20% bump in
+# clone size for every checkout forever. Nothing here measures the WEIGHTS; what
+# is under test is our llama-server wrapper, and a real server serving a real
+# GGUF is the production path either way.
+_TINY_GGUF = Path(__file__).resolve().parent / "testdata" / "stories260K.gguf"
+_TINY_GGUF_SHA256 = "270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d"
 
 
 def _llama_bin() -> str | None:
@@ -261,11 +288,17 @@ needs_llama = pytest.mark.skipif(
 
 @pytest.fixture(scope="session")
 def tiny_gguf_dir(tmp_path_factory) -> Path:
-    from gen_worker.net import hf
+    """A directory holding the vendored GGUF — `resolve_gguf` takes a dir.
 
-    path = hf().hf_hub_download(repo_id=_TINY_REPO, filename=_TINY_FILE)
+    The digest is checked rather than trusted: a truncated checkout (git-lfs not
+    installed, a partial clone) would otherwise surface as an inscrutable
+    llama-server boot failure instead of the one-line cause."""
+    got = hashlib.sha256(_TINY_GGUF.read_bytes()).hexdigest()
+    assert got == _TINY_GGUF_SHA256, (
+        f"{_TINY_GGUF} is not the vendored model (sha256 {got}, expected "
+        f"{_TINY_GGUF_SHA256})")
     snap = tmp_path_factory.mktemp("gguf-snap")
-    (snap / Path(_TINY_FILE).name).symlink_to(path)
+    (snap / _TINY_GGUF.name).symlink_to(_TINY_GGUF)
     return snap
 
 
@@ -359,7 +392,10 @@ def test_real_server_terminal_output_via_executor(tiny_gguf_dir, llama_path) -> 
 def test_real_gguf_header_info(tiny_gguf_dir) -> None:
     info = read_gguf_info(resolve_gguf(tiny_gguf_dir))
     assert info.architecture == "llama"
-    assert info.n_layers > 0 and info.size_bytes > 1_000_000
+    # `size_bytes` sums the shard files; the bound only has to separate "read a
+    # real model" from "read a header and stopped" — the vendored file is
+    # 1,185,376 bytes, so do not raise this to something it cannot clear.
+    assert info.n_layers > 0 and info.size_bytes > 100_000
     plan = plan_fit(info, free_vram_gb=80.0)
     assert plan.n_gpu_layers == info.n_layers + 1
 
