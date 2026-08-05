@@ -177,6 +177,46 @@
   invented ordinal. `EditFamily` refuses at declaration time to carry a cap
   with no stated basis or a label with no provenance: three of our caps were
   a competitor's product decision or a test-harness ceiling.
+- **pgw#963 / th#1423 pgw half: a mint that outlived its credential could not
+  say so, and the CLI publisher held a token frozen at construction.** Three
+  production failures, one shape: a 28-minute inductor compile, then
+  `/v1/worker/cells/publish-intent failed (401)` at 32m30s against a 30m worker
+  JWT TTL. The hub half (durable typed `pod_events` on every worker-JWT refusal)
+  merged separately; these are the worker's three.
+  **(1) The 401 was untyped.** `CellPublisher._post` raised a BARE `RuntimeError`
+  for every non-2xx, so `_publish_failure_phase` — which exists to read
+  `status`/`code` — had nothing, and all three landed under the phase
+  `RuntimeError`, one group with every other exception type. It now raises the
+  `HubPublishError` the v2 leg already uses, carrying the hub's `status` and
+  `error.code` (both envelope shapes: nested `{"error":{"code"}}` and the flat
+  `{"code"}` these refusals were observed with). The bearer is read ONCE per
+  call, so the token blamed is the token sent.
+  **(2) A 401 from an already-lapsed credential is now named.** `exp` is an
+  absolute instant the credential itself carries — not a duration this code
+  picked (gw#666) — so "expired" separates from "revoked/wrong-worker", which the
+  hub cannot distinguish and only the worker can. Code
+  `worker_credential_expired`, plus a `credential_expired` publish leg carrying
+  the measured lapse on the wire BEFORE the intent is spent.
+  **(3) `aot_mint._publisher_from_settings` captured its token** as
+  `worker_jwt=lambda: token`, defeating the provider `CellPublisher` takes
+  precisely so rotation is picked up per call. It reads the credential at USE
+  time now. Found while fixing it: `worker_credential.current()` answers only
+  once something HANDS it the boot token, and only `entrypoint` / the procsplit
+  parent ever do — never this CLI. So **pgw#876 §2's stated effect (WORKER_JWT
+  visible here) was never actually reached in that process**; the
+  `tensorhub_token` fallback was doing all the work. `install_bootstrap` now
+  runs there.
+  **Deliberately NOT done: "always try publish-complete".** `{ok:false}` is
+  authenticated by the same check that just refused the intent, so it is refused
+  identically — and there is no worker-JWT refresh route to call either:
+  rotation exists ONLY as `TokenRefresh` down the live gRPC scheduler stream, and
+  `worker/capability/renew` renews the *capability* token while itself requiring
+  a live worker JWT. Presenting the freshest credential the process holds, and
+  naming the lapse, is the whole of what the worker can do here.
+  RED-verified in `tests/test_mint_credential_expiry_th1423.py` against
+  `origin/dev` verbatim: all six rows fail, the production entry point
+  (`_publish_async`) emitting `('self_mint_publish_failed', 'RuntimeError')` —
+  the exact phase the three production events carried.
 
 - **pgw#957: the gw#666 guard file's own boot fixture was a bet on the runner's
   speed — the shape it exists to police.** `test_a_talking_engine_boots_however
