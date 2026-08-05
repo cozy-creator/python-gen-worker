@@ -152,9 +152,15 @@ def freshest() -> Optional[Snapshot]:
 
 
 def self_diagnosis() -> Optional[Snapshot]:
-    """Non-None when EVERY open counter is stale past its own window (i.e.
-    even the freshest one) — the typed self_stalled confession the beat
-    reports so the hub kills on fact, not inference."""
+    """Non-None when even the FRESHEST open counter is stale past its own
+    window — the typed self_stalled confession the beat reports so the hub
+    kills on fact, not inference.
+
+    Registry-wide by design (any advancing counter proves the process is
+    alive), which is why counter LIFETIME has to be honest: a counter left
+    open after its producer's phase ended is the min-age counter of a phase it
+    knows nothing about, and confesses for it. `Activity.counter()` scopes
+    them to the phase for that reason (pgw#962)."""
     fresh = freshest()
     if fresh is not None and fresh.age_s > fresh.window_s:
         return fresh
