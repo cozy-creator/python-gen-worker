@@ -62,17 +62,37 @@ _TOO_BROAD = {Path("/"), Path("/usr"), Path("/usr/local"), Path("/etc"),
 def _interpreter_mounts() -> list[Path]:
     """Every prefix the container must see in order to exec THIS interpreter.
 
-    Three paths can each be somewhere different, and the exec needs all of them:
-    the venv (``sys.prefix``), the base install its ``bin/python`` symlink NAMES
-    (``sys.base_prefix``), and where that install actually is once symlinked
-    parents are collapsed. pgw#966: mounting only the last of the three —
-    ``Path(sys.executable).resolve().parents[1]`` — is enough on a developer box
-    and was not on `ubuntu-latest`, because what ``execve`` follows is the
-    symlink's stored text, not its resolution. The row did not fail there; it
-    SKIPPED, for six weeks, while reading as coverage.
+    What ``execve`` follows is a symlink's stored TEXT, not its resolution, and
+    on a uv-managed venv four different paths can each name a different place:
+
+      sys.prefix            the venv
+      sys.base_prefix       the base install, as CPython's getpath resolved it
+      sys._base_executable  the base interpreter as the venv's `bin/python`
+                            symlink actually NAMES it
+      ...and each of those resolved.
+
+    pgw#966 measured the gap on the runner. `ubuntu-latest`:
+
+      base_prefix      .../uv/python/cpython-3.12.13-linux-x86_64-gnu
+      base_executable  .../uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12
+                                              ^^^^ no patch component
+
+    uv keeps a patch-less alias beside the versioned install and the venv's
+    symlink names the ALIAS, so mounting `base_prefix` alone put the resolved
+    directory in the container and left the path the symlink points at absent —
+    `[FATAL tini (7)] exec .../.venv/bin/python failed: No such file or
+    directory`. The row did not fail there; it SKIPPED, reading as coverage,
+    from the day it landed. Reproduced exactly by building a venv against an
+    alias symlink and mounting only the versioned dir; green with the alias
+    prefix added.
     """
     roots = {Path(sys.prefix), Path(sys.prefix).resolve(),
              Path(sys.base_prefix), Path(sys.base_prefix).resolve()}
+    base_exe = getattr(sys, "_base_executable", None)
+    if base_exe:
+        named = Path(base_exe)
+        if named.parent.name == "bin":
+            roots |= {named.parent.parent, named.parent.parent.resolve()}
     keep: list[Path] = []
     for root in sorted(roots):
         if root in _TOO_BROAD:

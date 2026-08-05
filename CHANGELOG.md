@@ -115,19 +115,26 @@
   proving tenant code cannot read the RunPod account-authority key out of PID 1,
   executing only on developer boxes, which is how the pgw#956 flake reached
   `dev` behind a green CI. No CI log has ever contained the string `pgw858`.
-  Root cause: the row mounted ONE prefix
-  (`Path(sys.executable).resolve().parents[1]`) and exec'd a hardcoded
+  Root cause, measured on the runner rather than guessed: the row mounted ONE
+  prefix (`Path(sys.executable).resolve().parents[1]`) and exec'd a hardcoded
   `{REPO}/.venv/bin/python`, but what `execve` follows is the symlink's stored
-  text, not its resolution — enough on a box where the two coincide, exit 127
-  (`[FATAL tini (7)] exec ... No such file or directory`) where they do not.
-  `_interpreter_mounts()` now mounts all four candidate prefixes (`sys.prefix`,
-  `sys.base_prefix`, and each resolved) minus the worktree mount and the
-  too-broad system roots, and execs `sys.executable`; reproduced and fixed —
-  the row goes `1 passed, 13 skipped` where it previously skipped by name.
+  TEXT, not its resolution. On `ubuntu-latest` those are two different
+  directories — `base_prefix` is `.../uv/python/cpython-3.12.13-linux-x86_64-gnu`
+  while `_base_executable`, which is what the venv's `bin/python` actually names,
+  is `.../cpython-3.12-linux-x86_64-gnu/bin/python3.12` (**no patch component**:
+  uv keeps a patch-less alias beside the versioned install and the venv points at
+  the alias). So the container got the resolved directory and not the one the
+  symlink names, and tini reported `exec ... No such file or directory`.
+  `_interpreter_mounts()` now mounts every candidate — `sys.prefix`,
+  `sys.base_prefix`, `sys._base_executable`'s prefix, and each resolved — minus
+  the worktree mount and the too-broad system roots, and execs `sys.executable`.
+  Reproduced exactly (a venv built against an alias symlink with only the
+  versioned dir mounted fails identically; green with the alias added) and the
+  row goes `1 passed, 13 skipped` where it previously skipped by name.
   Around that: a repo-root `conftest.py` records the skips a session ACTUALLY
   took (`--skip-census-out=`, including module-level `allow_module_level` /
   `importorskip` skips, which produce no test report at all), `-rs` puts the
-  reasons in the CI log, `scripts/skip_census.txt` classifies all 24 keys
+  reasons in the CI log, `scripts/skip_census.txt` classifies all 23 keys
   (CI-MUST-RUN / CI-SKIPPED / LOCAL-ONLY / STAGED), and
   `scripts/lint_skip_census.py` fails the build on an unclassified new skip or
   on a CI-MUST-RUN row that skipped. The census states plainly what was

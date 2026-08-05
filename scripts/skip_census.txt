@@ -91,6 +91,22 @@ CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|docker could not start t
 CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|docker is required: pgw#858 is a uid boundary and a non-root runner cannot observe it (every /proc read is already denie
 CI-SKIPPED tests/test_registry_contract_pgw740.py|uv not on path
 
+# ─── CI-SKIPPED: rows keyed to weights that are only on a developer box ───────
+# `test_adapter_fidelity_pgw794.py` reads SDXL and Z-Image tensors straight out
+# of a local HF cache — 8 rows, ALL of which skip on the runner. They must stay
+# that way: multi-GB weights never transit CI (nor this box — workspace
+# weights-locality rule), so the only honest home for these is a developer box
+# that already has the cache, or a pod. They are UNVERIFIED in CI, not covered.
+CI-SKIPPED tests/test_adapter_fidelity_pgw794.py|local hf cache carries no models--stabilityai--stable-diffusion-xl-base-#<path>
+CI-SKIPPED tests/test_adapter_fidelity_pgw794.py|local hf cache carries no models--alibaba-pai--z-image-fun-lora-distill/z-image-fun-lora-distill-#-steps-#.safetensors
+
+# ─── CI-SKIPPED: a cgroup the runner has but does not enforce ─────────────────
+# The runner presents a delegated cgroup v2 memory controller and then does not
+# apply `memory.max` to the process tree, so there is no OOM to classify. The
+# row already refuses to assert through that (it would be a coin flip); it is
+# measured on a box whose cgroup enforces.
+CI-SKIPPED tests/test_mint_oom_classification_pgw848.py|the memory cap did not oom-kill the child: this box has a delegated cgroup v# memory controller but it did not enforce m
+
 # ─── CI-SKIPPED: an empty set that is empty on purpose ────────────────────────
 # `divergent` is a DEFECT LEDGER and it is empty as of 2026-08-02 — th#1385 and
 # pgw#870 closed all nine recorded classes and their witnesses moved into
