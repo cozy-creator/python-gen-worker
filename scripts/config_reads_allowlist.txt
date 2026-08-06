@@ -77,6 +77,8 @@ src/gen_worker/procsplit/__init__.py::GEN_WORKER_COMPUTE_CHILD BOOTSTRAP GEN_WOR
 src/gen_worker/supervisor.py::GEN_WORKER_SUPERVISOR BOOTSTRAP pre-fork supervisor predicate; runs before the worker process entry.
 src/gen_worker/supervisor.py::GEN_WORKER_SUPERVISED BOOTSTRAP pre-fork re-entry guard, same.
 src/gen_worker/aot_compile_child.py::GEN_WORKER_LOG_LEVEL BOOTSTRAP child log level, applied before the child has any config.
+src/gen_worker/procsplit/actions.py::GEN_WORKER_PROBE BOOTSTRAP pgw#980: marks the pod a live-edit probe and DISARMS cell publish in the parent's action allowlist. It must be readable with no Settings in hand, because `authorize` is the security boundary and a guard that depends on a config load having succeeded is a guard with an unarmed window. Deliberately not a Settings field for the same reason the C2PA key is not: the value must not be reachable through the config surface tenant-adjacent code can read.
+src/gen_worker/procsplit/actions.py::GEN_WORKER_PROBE_PUBLISH_ARMED BOOTSTRAP pgw#980: the second, separate decision that re-arms publish on a marked probe. Same reasoning as its sibling above; two names so that "this is a probe" and "this probe may write to the store" can never be satisfied by one value.
 
 # ---------------------------------------------------------------------------
 # IPC — parent to child across exec. §1.17 routes these to argv (pgw#929).
