@@ -215,9 +215,9 @@ def publish_disarmed() -> bool:
     site-packages can reach either. Disarming here is structural — a probe
     cannot publish by editing the code it is running.
     """
-    return probe_pod() and not (
+    return probe_pod() and (
         str(os.environ.get(_PROBE_PUBLISH_ARM_ENV, "")).strip().lower()
-        in ("1", "true", "yes"))
+        not in ("1", "true", "yes"))
 
 
 def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[Dict[str, Any]]]:
