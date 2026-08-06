@@ -47,6 +47,16 @@ if __name__ == "__main__":
 
         os._exit(run_parent())
 
+    # pgw#975: "the OOM killer picks the fat child, not the reporter" (below)
+    # was true only by accident — the margin is the 479 MiB of torch, worth
+    # under 4 oom_score_adj points out of 1000 on a real pod and NEGATIVE for
+    # the seconds this child spends pre-torch. Declare it here, first thing and
+    # before any import of ours, so a child that dies during its own boot is
+    # already ranked. Descendants (mint child, AOT entry children) inherit.
+    from .procsplit.oom_rank import raise_own_oom_score_adj  # noqa: E402
+
+    raise_own_oom_score_adj()
+
 # gw#640: fork the supervisor BEFORE the heavy imports below. The parent stays
 # a bare interpreter (so the OOM killer picks the fat child, not the reporter)
 # and outlives the worker to report WTERMSIG / cgroup oom_kill over the wire.
@@ -89,6 +99,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("WorkerEntrypoint")
+
+# FILE-WIDE IMPORT RULE (the one sanctioned exception to top-of-file imports):
+# this module runs as TWO process roles. The control parent must stay a bare
+# interpreter — no torch, no credentials — for OOM-victim ordering (gw#640,
+# pgw#763), and the env `setdefault`s at the top are read once at torch import,
+# so anything that could reach torch stays inside a function body below.
 
 
 def _startup_payload(phase: str, status: str = "ok", **extra: Any) -> Dict[str, Any]:

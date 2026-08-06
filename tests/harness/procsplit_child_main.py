@@ -14,7 +14,14 @@ import sys
 def main() -> int:
     from gen_worker import postmortem
     from gen_worker.config import load_settings
+    from gen_worker.procsplit.oom_rank import raise_own_oom_score_adj
     from gen_worker.worker import Worker
+
+    # pgw#975: the production entrypoint does this first thing in the
+    # compute-child branch. The harness enters one layer lower, so reproduce it
+    # here — otherwise the split's OOM victim order is tested on a process that
+    # never declared one.
+    raise_own_oom_score_adj()
 
     # The container entrypoint installs this before constructing Worker.  The
     # harness enters one layer lower, so reproduce that production hook here

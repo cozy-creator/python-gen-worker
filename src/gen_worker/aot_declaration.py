@@ -47,6 +47,8 @@ from .api.export_contract import (
     GraphClass,
     Input,
 )
+import inspect
+from .aot_inputs import lifted_lora_values, module_dtype_device
 
 logger = logging.getLogger(__name__)
 
@@ -579,8 +581,6 @@ def declared_inputs(
     """
     import torch
 
-    from .aot_inputs import lifted_lora_values, module_dtype_device
-
     rows = target_inputs(decl, spec.target)
     if not rows:
         raise MintRefused(
@@ -674,7 +674,6 @@ def call_signature(module: Any, target: str, family: str) -> Tuple[List[Any], Se
     Two implementations of "what does this forward take" would diverge, and
     the whole value of the pre-spawn check is that it predicts the mint.
     """
-    import inspect
 
     attr = target_attr(target)
     fn = getattr(module, attr, None)
@@ -709,7 +708,6 @@ def _positionalize(
     keyword-only declared name (cannot meet the positional serve marshal),
     and a required in-between parameter with no default and no declaration.
     """
-    import inspect
 
     attr = target_attr(target)
     positional, keyword_only = call_signature(module, target, family)

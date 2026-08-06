@@ -117,7 +117,10 @@ def test_the_parent_declines_the_AOT_recipe_by_name(
         classes=(GraphClass(dims={"B": 2}),),
         inputs=(Input("sample", shape=("B", 4)),),
         shape_strategy="static-rows", warm_changes_key=False)
+    # Patch the caller's binding too: fleet_cells imports the name at module
+    # scope (pgw#976), so patching only export_contract leaves the real one bound.
     monkeypatch.setattr(ec, "export_declaration", lambda _f: decl)
+    monkeypatch.setattr(fleet_cells, "export_declaration", lambda _f: decl)
 
     events: list = []
     monkeypatch.setattr(
@@ -145,7 +148,7 @@ def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
     monkeypatch.setattr(cc, "cxx_toolchain_present", lambda: False)
 
     req = types.SimpleNamespace(
-        snapshots={}, component_paths={}, recipe=mint_child.RECIPE_AOT,
+        slots={}, recipe=mint_child.RECIPE_AOT,
         target="/tmp/x", capture="/tmp/y", device=0, vram_cap_bytes=0,
         modules=[], function="generate", cfg=None, configs={}, execution_lane="",
         report="/tmp/r", cell_key="")
@@ -174,7 +177,7 @@ def test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate(
     monkeypatch.setattr(registry, "collect_endpoints", _reached)
 
     req = types.SimpleNamespace(
-        snapshots={}, component_paths={}, recipe=mint_child.RECIPE_DYNAMO,
+        slots={}, recipe=mint_child.RECIPE_DYNAMO,
         target="/tmp/x", capture="/tmp/y", device=0, vram_cap_bytes=0,
         modules=[], function="generate", cfg=None, configs={}, execution_lane="",
         report="/tmp/r", cell_key="")

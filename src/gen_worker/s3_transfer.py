@@ -13,6 +13,9 @@ from typing import Any, Mapping, Optional
 from .api.errors import ArtifactTransferError
 from .models.chunk_cas import DigestMismatch, verify_file_digest
 from .models.cozy_cas import fsync_dir, fsync_file
+from boto3.s3.transfer import TransferConfig
+from botocore.config import Config
+import boto3
 
 _MULTIPART_CHUNK_BYTES = 64 * 1024 * 1024
 _MULTIPART_MAX_WORKERS = 10
@@ -245,8 +248,6 @@ class _BotoTransferProgress:
 
 
 def _s3_client(grant: S3TransferGrant) -> Any:
-    import boto3
-    from botocore.config import Config
 
     return boto3.client(
         "s3",
@@ -274,7 +275,6 @@ def _sdk_workers_for_attempt(attempt: int) -> int:
 
 
 def _transfer_config(*, max_concurrency: int = _MULTIPART_MAX_WORKERS) -> Any:
-    from boto3.s3.transfer import TransferConfig
 
     return TransferConfig(
         multipart_threshold=_MULTIPART_CHUNK_BYTES,

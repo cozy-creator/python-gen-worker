@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from . import guard_closure, host_isa, torch_capability
+import importlib.util
 
 logger = logging.getLogger(__name__)
 
@@ -420,7 +421,6 @@ _TOOLCHAIN_LIB_DIRS_OVERRIDE: Optional[Tuple[Path, ...]] = None
 def _toolchain_lib_dirs() -> Tuple[Path, ...]:
     if _TOOLCHAIN_LIB_DIRS_OVERRIDE is not None:
         return _TOOLCHAIN_LIB_DIRS_OVERRIDE
-    import importlib.util
 
     dirs: List[Path] = []
     for name in _TOOLCHAIN_LIB_PACKAGES:

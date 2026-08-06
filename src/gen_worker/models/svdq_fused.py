@@ -34,6 +34,10 @@ import logging
 from typing import Any, Optional
 
 from .nvfp4_quant import BLOCK, E2M1_MAX, FP8_MAX, SCALE_MIN
+from .nvfp4_quant import blocked_scale_numel
+from .nvfp4_quant import cast_e2m1, pack_e2m1
+from .nvfp4_quant import quantize_activation_torch
+from .w4a4 import _gemm_w4a4
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +330,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
 
     def _quant_launch(x2: Any, smooth: Optional[Any], s2: Any,
                       blocked: bool) -> tuple[Any, Any]:
-        from .nvfp4_quant import blocked_scale_numel
 
         m, k = int(x2.shape[0]), int(x2.shape[1])
         kb = k // BLOCK
@@ -373,7 +376,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
     @quant_op.register_fake
     def _(x2: Any, smooth: Optional[Any], s2: Any,
           blocked: bool) -> tuple[Any, Any]:
-        from .nvfp4_quant import blocked_scale_numel
 
         m, k = int(x2.shape[0]), int(x2.shape[1])
         s_shape = ((blocked_scale_numel(m, k // BLOCK),) if blocked
@@ -484,8 +486,6 @@ def _reference_quant_flat(xs: Any, s2: Any) -> tuple[Any, Any]:
     consumes plain scales; flat->blocked bijectivity is proven separately)."""
     import torch
 
-    from .nvfp4_quant import cast_e2m1, pack_e2m1
-
     in_f = int(xs.shape[1])
     xb = xs.reshape(-1, in_f // BLOCK, BLOCK).float()
     bmax = xb.abs().amax(dim=-1)
@@ -520,7 +520,6 @@ def fused_self_check() -> Optional[str]:
     if ops is None:
         return "triton unavailable"
     quant_op, _gemm_op, epi_op = ops
-    from .nvfp4_quant import quantize_activation_torch
 
     rank = 128
     for m, k, n in _SELF_CHECK_PROBES:
@@ -617,7 +616,6 @@ def _build_fused_linear_class() -> type:
                 self.bias = None
 
         def forward(self, x: Any) -> Any:
-            from .w4a4 import _gemm_w4a4
 
             shape = x.shape
             x2 = x.reshape(-1, self.in_features).contiguous()
@@ -652,7 +650,7 @@ def build_svdq_fused_linear(dec: Any, *, compute_dtype: Any = None,
     import torch
     import torch.nn as nn
 
-    from .nvfp4_quant import pack_e2m1, to_blocked_scales
+    from .nvfp4_quant import to_blocked_scales
 
     if fused_ops() is None:
         raise SvdqFusedError("fused ops unavailable (no triton)")

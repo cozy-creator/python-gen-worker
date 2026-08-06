@@ -60,6 +60,7 @@ from . import adapter_fidelity
 from .fp8_storage import structural_base
 from .w8a8 import fp8_scaled_linear_class
 import inspect
+from .loading import pipeline_weight_lane
 
 logger = logging.getLogger(__name__)
 
@@ -1028,7 +1029,6 @@ def effective_base_execution_lane(pipe: Any) -> str:
     base = getattr(pipe, "_cozy_lora_base_lane", None)
     if base is not None:
         return str(base)
-    from .loading import pipeline_weight_lane
 
     execution_lane = pipeline_weight_lane(pipe)
     if execution_lane:

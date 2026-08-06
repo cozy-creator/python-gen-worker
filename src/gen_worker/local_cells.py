@@ -62,6 +62,7 @@ from . import activity as activity_mod
 from . import compile_cache as cc
 from .models.loading import pipeline_weight_lane
 from .models import provision
+from . import cell_key
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,6 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
     # and library use. There ``cc.verify`` is the only brain that can answer at
     # all, so it is the no-GPU path, not a legacy one. Typed, so a real bug in
     # the key brain surfaces instead of being read as "no GPU".
-    from . import cell_key
 
     try:
         # pgw#686: the ONE base-lane resolution the mint's stamp uses —

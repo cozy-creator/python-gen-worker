@@ -34,6 +34,7 @@ import torch
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, mint_budget, mint_delegate
 from gen_worker import mint_process as mp
+from gen_worker.api.binding import ModelRef
 from gen_worker.api.decorators import DynamicDim
 from gen_worker.registry import CompileCell
 from gen_worker.cell_adopt import AdoptOutcome
@@ -156,13 +157,15 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
         mint_root=tmp_path)
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="gen",
-        modules=("app",), snapshots={"pipeline": "/cas/sdxl"},
+        modules=("app",), slots={"pipeline": mp.MintSlot(
+            ref=ModelRef(source="tensorhub", path="harness/sdxl",
+                         tag="prod"), path="/cas/sdxl")},
         execution_lane="fp8-w8a16", configs={"gen": {"steps": 28}}, device=3)
     req = mint_delegate.build_request(
         task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
     assert req.execution_lane == "fp8-w8a16"
     assert req.configs == {"gen": {"steps": 28}}
-    assert req.snapshots == {"pipeline": "/cas/sdxl"}
+    assert req.slots["pipeline"].path == "/cas/sdxl"
     assert req.device == 3 and req.vram_cap_bytes == 7 * GIB
     assert req.capture == str(tmp_path / "capture")
 

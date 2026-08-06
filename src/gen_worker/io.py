@@ -22,6 +22,8 @@ from typing import IO, TYPE_CHECKING, Any, Optional
 from .api.errors import ValidationError
 from .api.types import Asset
 from .stage_timing import stage_of as _stage
+import os
+import tempfile
 
 if TYPE_CHECKING:
     import numpy as np
@@ -223,6 +225,8 @@ def write_image(
     # release is TERMINAL and once-only — safe here because this call is the
     # handler's last GPU-relevant act, which is why it is not applied to
     # ctx.save_image (endpoints call that mid-pipeline and in N-image loops).
+    # Deferred: video_encode is not on the `import gen_worker` path and must
+    # stay off it (+2 modules; `python -m gen_worker.discover` stays cheap).
     from .video_encode import finalize_permit
 
     with finalize_permit():
@@ -331,9 +335,6 @@ def write_video(
             raise ValidationError("write_video: audio_sample_rate is required with audio")
         sample_rate = int(audio_sample_rate)
 
-    import os
-    import tempfile
-
     streaming = _is_chunk_iterator(frames)
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as handle:
@@ -389,7 +390,6 @@ def _release_gpu_slot_for_finalize(ctx: Any) -> None:
     release = getattr(ctx, "_release_gpu_slot_for_finalize", None)
     if callable(release):
         release()
-
 
 
 __all__ = [

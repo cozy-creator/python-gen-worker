@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .chunk_cas import DigestMismatch, hash_file, parse_cas_ref
+from .cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
 
 __all__ = [
     "VerifyReport",
@@ -195,7 +196,6 @@ def snapshot_verify_targets(
     returned as SKIPPED so the caller must account for them explicitly instead
     of losing them into a pass.
     """
-    from .cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
 
     targets: List[VerifyTarget] = []
     skipped: List[str] = []

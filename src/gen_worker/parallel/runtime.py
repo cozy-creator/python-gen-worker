@@ -58,6 +58,9 @@ from .group import (
     init_rank,
 )
 from .plan import GroupPlan
+from .cp import w8a8_gemm_mode
+from ..models import provision
+from ..registry import collect_endpoints
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +211,6 @@ def sequence_rank_main(spec: RankSpec, channel: FollowerChannel) -> None:  # pra
     # This rank's own view of the group facts, held against rank 0's
     # broadcast plan: a disagreement (mismatched card, different toolchain)
     # fails the group LOUDLY — a rank never adapts locally.
-    from .cp import w8a8_gemm_mode
 
     mine = GroupPlan(
         precision_execution_lane=plan.precision_execution_lane,
@@ -241,8 +243,6 @@ def sequence_rank_main(spec: RankSpec, channel: FollowerChannel) -> None:  # pra
 
 
 def _materialize(boot: BootPlan, spec: RankSpec) -> Any:  # pragma: no cover
-    from ..models import provision
-    from ..registry import collect_endpoints
 
     if boot.cache_dir:
         os.environ["TENSORHUB_CACHE_DIR"] = boot.cache_dir

@@ -70,6 +70,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
+from .api.binding import ModelRef, wire_ref
 from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
@@ -159,13 +160,53 @@ class CompileCellSpec(msgspec.Struct, frozen=True, kw_only=True):
     text_lens: Tuple[int, ...] = ()
 
 
-class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
-    """Everything the child needs, and nothing live.
+class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
+    """One setup slot, as the parent resolved it. Present and complete, or absent.
 
-    ``snapshots`` are LOCAL paths the parent already materialized, so the
-    child never touches the network: a mint is compute, and a mint process
-    that could download is a mint process that can stall on a lemon host.
+    pgw#974. This used to be THREE parallel slot-keyed dicts on
+    ``MintRequest`` — ``snapshots`` (bytes), ``slot_bindings`` (identity,
+    pgw#969) and ``component_paths`` (composition, pgw#816) — written by three
+    separate statements, each independently allowed to be empty. Two of the
+    three combinations that describes are incoherent, and one of them cost two
+    L40S pods: ``{"pipeline": "/tmp/x"}`` with no binding decoded, type-checked
+    and looked complete, and the child died 0.0 s into ``warmup_forward`` at
+    ``ctx.slots["pipeline"]``. ``ref`` and ``path`` therefore carry no
+    defaults: a slot with bytes and no identity cannot be constructed and
+    cannot be decoded.
+
+    A slot the parent did not resolve is ABSENT from the map — never a present
+    entry with a hole in it. ``mint_child.assert_slots_resolvable`` still
+    refuses one that the endpoint declares and does not mark optional.
+
+    * ``ref`` — WHICH checkpoint. ``ctx.slots`` is built from bindings, and a
+      child re-runs discovery, so a hub-catalog slot (``Slot(selected_by=...)``
+      with no ``default_checkpoint=``, which is sdxl's shape) rediscovers
+      nothing at all. A slot WITH a code default is the quieter half of the
+      same defect: the child resolves the DECLARED checkpoint while the parent
+      serves the hub's pick, and traces graphs for a model this pod never runs.
+    * ``path`` — WHERE its bytes already are, materialized by the parent, so
+      the child never touches the network: a mint is compute, and a mint
+      process that could download is one that can stall on a lemon host.
+    * ``component_paths`` — pgw#617 per-component overrides, comp -> that
+      component's own local tree. Empty for most slots and part of the
+      composition when not: th#1330 B2 EXCLUDES an overridden component's
+      files from the base fetch, so ``path`` alone then names a narrowed tree
+      (``<digest>__x<fp>``) that no loader can open.
     """
+
+    ref: ModelRef
+    path: str
+    component_paths: Dict[str, str] = {}
+
+    def __post_init__(self) -> None:
+        if not self.path:
+            raise ValueError(
+                f"a resolved slot must name the tree its bytes are in; got an "
+                f"empty path for {wire_ref(self.ref)!r}")
+
+
+class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
+    """Everything the child needs, and nothing live."""
 
     function: str
     modules: Tuple[str, ...]
@@ -175,15 +216,9 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     capture: str         # TORCHINDUCTOR_CACHE_DIR / TRITON_CACHE_DIR root
     report: str          # typed terminal report the child writes
     cfg: CompileCellSpec
-    snapshots: Dict[str, str] = {}
-    #: pgw#816: slot -> component -> the OVERRIDE component's own local tree
-    #: (pgw#617 hierarchical bindings). A directory path alone does not
-    #: describe the composition: th#1330 B2 EXCLUDES an overridden
-    #: component's files from the base fetch, so the base tree the parent
-    #: hands over is narrowed (`<digest>__x<fp>`) and is not loadable on its
-    #: own. The parent resolved these; the child must load the same ones or
-    #: it is not compiling the pipeline the parent serves.
-    component_paths: Dict[str, Dict[str, str]] = {}
+    #: The parent's resolution, whole — slot -> identity + bytes + composition.
+    #: See ``MintSlot``: the three views this replaced could disagree.
+    slots: Dict[str, MintSlot] = {}
     device: int = -1     # CUDA ordinal; -1 = leave the child's default
     vram_cap_bytes: int = 0   # 0 = uncapped (see mint_budget.co_residency)
     #: pgw#848: where the child rewrites its live phase table, so a mint the

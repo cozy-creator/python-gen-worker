@@ -44,6 +44,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from .postmortem import effective_cpu_count
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -521,7 +522,6 @@ def measure_peer_collective(
     which bounds the host-staged floor — NCCL reads it at init, so it can
     only be varied across process groups, never within one.
     """
-    import tempfile
 
     import torch
     import torch.multiprocessing as mp

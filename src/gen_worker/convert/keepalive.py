@@ -35,6 +35,8 @@ import logging
 import threading
 import time
 from typing import Any, Callable, Optional
+from ..http_origin import is_definite_hub_answer
+from .hub import _http_session
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +123,6 @@ class HubKeepalive:
 
     def probe(self) -> bool:
         """One touch. Returns whether the hub itself answered."""
-        from ..http_origin import is_definite_hub_answer
-        from .hub import _http_session
 
         self.probes += 1
         answered = False

@@ -43,6 +43,7 @@ from . import worker_credential
 from . import mint_goal as mint_goal_mod
 from . import worker_goals
 from .api.binding import ModelRef, wire_ref
+from .mint_process import MintSlot
 from .api.errors import (
     ArtifactTransferError,
     CanceledError,
@@ -127,6 +128,46 @@ from .request_context import (
 )
 from .request_context._helpers import _decode_unverified_jwt_claims
 from .utils import lora as lora_util
+import errno as _errno
+import inspect as _inspect
+import struct as _struct
+from .models.refs import DEFAULT_REF_TAG, parse_model_ref
+from .models.hub_client import WorkerResolvedChunk, WorkerResolvedRepo, WorkerResolvedRepoFile
+from . import cell_key, compile_cache
+from .models.config_identity import CANONICAL_JSON_MAX_BYTES, canonical_json_digest
+from .models.cozy_snapshot import _norm_rel_path
+from .models.loading import safetensors_file_valid
+from .models.volume_verify import snapshot_verify_targets, verify_files
+from .models.cozy_snapshot import delete_blobs
+from .compile_cache import CompiledExecutionLaneUnavailableError
+from .preload import Preloader
+from .api.binding import rebind_pick
+from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
+from .models.serve_fit import RUN_CPU, RUN_OFFLOAD, plan_serve
+from . import postmortem
+from .models.serve_fit import demoted
+from .models.serve_fit import load_rung_engaged
+from .models.serve_fit import cast_dropped
+from .models.loading import pipeline_weight_lane
+from .models import execution_lanes as lanespec
+from . import warmup as warmup_mod
+from .api.decorators import ATTR as _DECL_ATTR
+from . import compile_cache as _cc_execution_lane
+from .parallel import ContextParallelUnavailable
+from .parallel import GroupPlan
+from .parallel.cp import w8a8_gemm_mode
+from .parallel.runtime import BootPlan, SequenceRuntime, arm_sequence_gate
+from .runtimes.server import RUNTIME_FACTORIES
+from .models.loading import composition_compute_dtype
+from .runtimes.server import ServerHandle
+from .models.execution_lane_gate import ExecutionLaneGate, arm_execution_lane_gate
+from .models.memory import rearm_offload
+from . import fleet_cells
+from . import aot_serve, shape_growth, trt_engine
+from . import fleet_cells as fleet_cells_mod
+from . import hot_swap
+from . import mint_delegate
+from . import hot_swap as hot_swap_mod
 
 _CONTEXT_BY_KIND: Dict[str, type] = {
     "inference": RequestContext,
@@ -357,7 +398,6 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     re-mint — never an upstream self-fetch). Raises ``ValueError`` when
     ``ref`` does not parse under that grammar (e.g. a raw upstream id the
     hub stamped for an unmirrored slot default)."""
-    from .models.refs import DEFAULT_REF_TAG, parse_model_ref
 
     parsed = parse_model_ref(ref)
     th = parsed.tensorhub
@@ -538,11 +578,6 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
     """pb.Snapshot -> the typed resolved-manifest struct (gw#497): the ONE
     wire-boundary conversion; everything downstream (ensure_local,
     ensure_snapshot_async) is typed — no dict laundering."""
-    from .models.hub_client import (
-        WorkerResolvedChunk,
-        WorkerResolvedRepo,
-        WorkerResolvedRepoFile,
-    )
 
     return WorkerResolvedRepo(
         snapshot_digest=snap.digest,
@@ -643,7 +678,6 @@ def _cell_execution_lane_matches(
     a guaranteed lane_drift that would shadow the right cell and serve
     eager). Key-flavored cells (th#883 pull-by-key, ``#ck2-…``) match only
     when their key is one this runtime computed for itself."""
-    from . import cell_key, compile_cache
 
     if not compile_cache.is_cache_ref(ref, family):
         return False
@@ -661,7 +695,6 @@ def _cell_execution_lane_matches(
 def _ref_mandatory_execution_lane(ref: str) -> str:
     """The traced weight lane one canonical Tensorhub model ref MANDATES:
     "w8a8" for `#fp8-w8a8` flavors, "w4a4" for `#nvfp4-w4a4`, "" otherwise."""
-    from .models.refs import parse_model_ref
 
     try:
         parsed = parse_model_ref(ref).tensorhub
@@ -767,8 +800,6 @@ def _is_corrupt_load_error(exc: BaseException) -> bool:
     (gw#408). Broad on purpose: the digest re-verify gate downstream
     separates real corruption from code bugs — a verified-clean tree
     re-raises the original error instead of quarantining."""
-    import errno as _errno
-    import struct as _struct
 
     if isinstance(exc, OSError):
         # e.g. "Unable to load weights from checkpoint file" (raised as
@@ -1604,7 +1635,6 @@ class ModelStore:
         (never shared — model_index.json etc. differ per repo). Empty when
         no digest-carrying snapshot was seen — sharing stays off; weights
         are never hashed from disk."""
-        from .models.config_identity import CANONICAL_JSON_MAX_BYTES, canonical_json_digest
 
         snap = self._snapshots.get(ref)
         if snap is None:
@@ -2362,9 +2392,6 @@ class ModelStore:
         (hf/civitai) get the structural safetensors check (header parses +
         every declared tensor byte present). Returns ``(ok, bad_digests)`` —
         the digests name blobs to quarantine."""
-        from .models.cozy_snapshot import _norm_rel_path
-        from .models.loading import safetensors_file_valid
-        from .models.volume_verify import snapshot_verify_targets, verify_files
 
         p = Path(path)
         bad: List[str] = []
@@ -2432,7 +2459,6 @@ class ModelStore:
         """Evict + delete a corrupt materialization AND the corrupt blobs it
         was built from, so re-materialization re-downloads instead of
         re-linking the same bad bytes. Emits EVICTED via residency."""
-        from .models.cozy_snapshot import delete_blobs
 
         self._verified.discard(ref)
         self.residency.evict(ref, force=True)
@@ -2665,7 +2691,6 @@ def _setup_error_will_retry(exc: BaseException) -> bool:
     """
     if not isinstance(exc, _TRANSIENT_SETUP_ERRORS):
         return False
-    from .compile_cache import CompiledExecutionLaneUnavailableError
 
     return not isinstance(exc, CompiledExecutionLaneUnavailableError)
 
@@ -2812,18 +2837,15 @@ class _BackgroundMint:
     seed_ctx: Optional[Any] = None
     # pgw#784: the two facts a DELEGATED mint's child process needs and cannot
     # rediscover for itself — the endpoint module(s) to walk (the child re-runs
-    # discovery in a fresh interpreter) and the ALREADY-materialized local
-    # snapshot path per setup slot. The paths matter: a mint is compute, and a
-    # mint process that could download is a mint process that can stall on a
-    # lemon host (pgw#786).
+    # discovery in a fresh interpreter) and the parent's own RESOLUTION of each
+    # setup slot: identity, already-materialized local tree, and pgw#617
+    # composition, in ONE value per slot (pgw#974, `mint_process.MintSlot`).
+    # The paths matter because a mint is compute, and a mint process that could
+    # download is one that can stall on a lemon host (pgw#786); the refs matter
+    # because `ctx.slots` is built from bindings and the child rediscovers none
+    # for a hub-catalog slot (pgw#969).
     modules: Tuple[str, ...] = ()
-    snapshot_paths: Dict[str, str] = dc_field(default_factory=dict)
-    # pgw#816: and the THIRD fact, which the first delegated mint in
-    # production died without — the resolved component overrides (pgw#617),
-    # slot -> comp -> local tree. th#1330 B2 excludes an overridden
-    # component's files from the base fetch, so `snapshot_paths` alone names
-    # a narrowed tree (`<digest>__x<fp>`) that no loader can open.
-    component_paths: Dict[str, Dict[str, str]] = dc_field(default_factory=dict)
+    slots: Dict[str, MintSlot] = dc_field(default_factory=dict)
     # th#1299: WHY this mint was asked to stop. The abort event used to report
     # "(adopt-on-arm / vacate / shutdown)" — three unrelated causes in one
     # string — so a mint that died could not be told from a mint that was
@@ -2832,6 +2854,17 @@ class _BackgroundMint:
     # handler; a code (queryable) and the human sentence beside it.
     abandon_code: str = "unspecified"
     abandon_reason: str = ""
+
+
+def _mint_origin(bg: "_BackgroundMint", spec: EndpointSpec) -> str:
+    """WHICH mint a warm context belongs to (pgw#969), for the deferred
+    slot-resolution errors it may raise. The delegated child's twin is
+    ``mint_child.mint_identity``; both exist because ``ValueError: slot
+    'pipeline': no resolved model ref`` named a symptom and no mint."""
+    keys = sorted({str(getattr(p, "cell_key", "")) for p in bg.pendings.values()})
+    return (
+        f"in-process mint fn={spec.name!r} "
+        f"key={(keys[0] if len(keys) == 1 else keys) or '(none)'!r}")
 
 
 def _mint_modules(spec: EndpointSpec) -> Tuple[str, ...]:
@@ -3369,7 +3402,6 @@ class Executor:
         # pgw#674 rotation preload: stages the hub's desired NEXT instances
         # (download -> pinned host -> VRAM double-buffer) WHILE jobs compute.
         # Lifecycle feeds it desired state; job admit/finish pokes it.
-        from .preload import Preloader
 
         self.preloader = Preloader(self)
         # gw#516: count of jobs in their slotless finalize tail. Mutated from
@@ -3632,7 +3664,6 @@ class Executor:
         the next setup/LOAD loads the new pick — and the hardware gates +
         serve plans re-run against the rebound bindings.
         """
-        from .api.binding import rebind_pick
 
         self._model_resolutions = dict(resolutions)
         changed = False
@@ -3792,8 +3823,6 @@ class Executor:
         reported structurally (FnDegraded) so the orchestrator can move the
         release to a bigger card.
         """
-        from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
-        from .models.serve_fit import RUN_CPU, RUN_OFFLOAD, plan_serve
 
         # Idempotent re-gate (gw#494): drop only the marks THIS gate made
         # last time; setup failures and other owners survive. Remember the
@@ -3819,7 +3848,6 @@ class Executor:
         # so its siblings keep serving instead of the whole pod crash-looping
         # into th#878's wedge terminate. Per-SKU-instance by construction:
         # the registry lives on the pod's container fs.
-        from . import postmortem
 
         crash_streaks = postmortem.native_crash_streaks()
         # pgw#714: a previous PROCESS DEATH attributed to a background
@@ -3948,7 +3976,6 @@ class Executor:
         """One ladder-demotion bookkeeper (gw#463): learned per-ref floor +
         updated ServePlan + loud DEGRADED_MODE warning + FnDegraded re-emit
         via the state-delta path."""
-        from .models.serve_fit import demoted
 
         if ref:
             self.degraded_floor[ref] = deeper_offload_mode(
@@ -3971,7 +3998,6 @@ class Executor:
         rung (runtime fp8 storage / nf4). Surface it exactly like the
         plan-time rungs — updated ServePlan + FnDegraded via the state-delta
         path — never as a log-line-only fallback."""
-        from .models.serve_fit import load_rung_engaged
 
         logger.warning(
             "LOAD_RUNG_ENGAGED fn=%s model=%s rung=%s detail=%s",
@@ -3987,7 +4013,6 @@ class Executor:
         surface it STRUCTURALLY (FnDegraded wanted=fp8 ran=bf16 via the
         state-delta path), never as a silent log-line fallback: the recipe
         budgeted the cast's VRAM headroom."""
-        from .models.serve_fit import cast_dropped
 
         logger.warning(
             "CAST_DROPPED fn=%s model=%s wanted=%s ran=%s detail=%s",
@@ -4043,8 +4068,6 @@ class Executor:
     @staticmethod
     def _refresh_compile_target(target: _CompileTargetRecord) -> None:
         """Refresh compatibility evidence after an in-place lane mutation."""
-        from . import compile_cache
-        from .models.loading import pipeline_weight_lane
 
         cfg = target.spec.compile_cell()
         assert cfg is not None
@@ -4055,7 +4078,6 @@ class Executor:
         requested_key = ""
         requested_axes: Tuple[Tuple[str, str], ...] = ()
         try:
-            from . import cell_key
 
             # pgw#686: the KEY lane resolves through the one shared brain
             # (compile_cache.cell_base_execution_lane — probe, then denoiser markers),
@@ -4131,7 +4153,6 @@ class Executor:
             target.active_compile_ref = ""
             target.active_compile_snapshot_digest = ""
             target.active_adoption_operation_id = ""
-        from . import compile_cache
 
         compile_cache.record_cell_quarantined(failed_ref)
         logger.warning(
@@ -4255,7 +4276,6 @@ class Executor:
         be packed or published — only a passed proof produces the mint."""
         pending = inj.pending_self_mints.pop(id(pipe), None)
         if pending is not None:
-            from . import fleet_cells as fleet_cells_mod
 
             fleet_cells_mod.abandon_self_mint(pending)
 
@@ -4263,7 +4283,6 @@ class Executor:
         self, rec: _ClassRecord, target: _CompileTargetRecord,
     ) -> bool:
         """Bind one live wrapper's first failure to exact target revocation."""
-        from . import aot_serve, compile_cache, trt_engine
 
         # pgw#677: every shape-warm/heal compile for this pipeline must run
         # inside a background GPU turn (yield to tenant demand; mutual
@@ -4318,7 +4337,6 @@ class Executor:
         activity stream so the hub can count misses per (release, SKU,
         guard-reason): kind=guard_miss, phase=reason class, detail=the
         verbatim torch reason + shape identity + cell key + request id."""
-        from . import compile_cache, postmortem
 
         with target.state_lock:
             cell = target.active_compile_ref
@@ -4373,7 +4391,6 @@ class Executor:
         Observability only: the artifact stays armed and the target keeps its
         active identity, exactly as the per-call refusal contract says.
         """
-        from . import postmortem
 
         request_id = postmortem.current_inflight_request()
         if not request_id:
@@ -4434,7 +4451,6 @@ class Executor:
         function_proofs: Optional[Dict[int, set[str]]] = None,
     ) -> None:
         """Mint one incarnation for every compile-capable object just set up."""
-        from . import compile_cache
 
         cfg = spec.compile_cell()
         rec.compile_targets = {}
@@ -4666,7 +4682,6 @@ class Executor:
                 # pgw#622: post-proof, novel request shapes serve eager while
                 # the compiled path warms in the background; each completed
                 # warm republishes the grown cell for the fleet.
-                from . import hot_swap
 
                 if hot_swap.enable(
                     pipeline,
@@ -4729,7 +4744,6 @@ class Executor:
         resident-upgrade decision is unknown before load, so both plain
         lanes are candidates). Lookup hints only: the hub may attach store
         hits at boot; forge demand comes exclusively from live targets."""
-        from . import cell_key
 
         seen: set[Tuple[str, str]] = set()
         for rec in self._classes.values():
@@ -4793,7 +4807,6 @@ class Executor:
         token remains the fallback; conflicting evidence fails closed to the
         mandatory reading.
         """
-        from .models import execution_lanes as lanespec
 
         ref = (ref or "").strip()
         known = False
@@ -5241,8 +5254,6 @@ class Executor:
         naming the lane — never a silent fallback). The rebound spec derives
         a new instance key, so warm workers keep both variants resident and
         cycle them via the gw#551 lane machinery."""
-        from .api.binding import rebind_pick
-        from .models import execution_lanes as lanespec
 
         raw = str(execution_lane_str or "").strip()
         if not raw:
@@ -5436,7 +5447,6 @@ class Executor:
     def _handled_execution_lane_body(self, spec: EndpointSpec, instructed: str) -> str:
         """th#1050: the instructed lane's body when the endpoint DECLARES it
         (handles=) — the author's code, not binding surgery, serves it."""
-        from .models import execution_lanes as lanespec
 
         if not instructed or not getattr(spec, "handles", ()):
             return ""
@@ -5455,7 +5465,6 @@ class Executor:
         binding's lane (table rank), with live compile state as a preference.
         Fixed-mode bodies override it; a declared (handles=) instruction owns
         the full lane outright."""
-        from .models import execution_lanes as lanespec
 
         compiled = False
         if spec.cls is not None:
@@ -5753,7 +5762,6 @@ class Executor:
                     wire_ref(spec.models[slot])
                     for slot in self._setup_slots(spec)
                 )
-                from . import compile_cache
 
                 try:
                     desired_cell = await self._fetch_compile_snapshot(
@@ -5949,7 +5957,6 @@ class Executor:
                 # pipeline setup fails must surface a terminal per-function
                 # error to the hub, not sit in loading_functions forever
                 # while the worker reports READY.
-                from .compile_cache import CompiledExecutionLaneUnavailableError
 
                 if isinstance(exc, CompiledExecutionLaneUnavailableError):
                     self._mark_compile_setup_unavailable(rec, spec, str(exc))
@@ -6123,8 +6130,6 @@ class Executor:
         """Return gw#470's authoritative per-handler warmup contract."""
         if spec.kind != "inference" or spec.cls is None:
             return [], []
-        from . import warmup as warmup_mod
-        from .api.decorators import ATTR as _DECL_ATTR
 
         decl = getattr(spec.cls, _DECL_ATTR, None)
         if decl is None:
@@ -6227,8 +6232,6 @@ class Executor:
         proven). The hot-adopt path never passes it: a NEW cell on a live
         instance requires its own full proof.
         """
-        from . import aot_serve, compile_cache, trt_engine
-        from . import warmup as warmup_mod
 
         jobs, skips = self._warmup_plan(spec, rec)
         for skip in skips:
@@ -6528,7 +6531,6 @@ class Executor:
         self, spec: EndpointSpec, instance: Any, ctx: "RequestContext",
         payload: Any, kwargs: Dict[str, Any],
     ) -> None:
-        from . import postmortem
 
         bound = getattr(instance, spec.attr_name)
         call_kwargs = {spec.ctx_param: ctx, spec.payload_param: payload, **kwargs}
@@ -6684,7 +6686,6 @@ class Executor:
         # lane — the ONE serveability brain compile_cache.mandatory_serving
         # reads. ContextVars ride to_thread, so the tenant setup thread and
         # its arms inherit the window.
-        from . import compile_cache as _cc_execution_lane
 
         _setup_exec_execution_lane, _setup_execution_lane_pinned = "", False
         for _slot in setup_slots:
@@ -6719,10 +6720,13 @@ class Executor:
             slot: wire_ref(spec.models[slot]) for slot in setup_slots
         }
         slot_identities: Dict[str, _ResidencyIdentity] = {}
-        paths: Dict[str, str] = {}
-        # pgw#617: component-override materializations, slot -> comp -> local
-        # path, plus per-override-ref snapshot digests (identity facts).
-        component_paths: Dict[str, Dict[str, str]] = {}
+        # pgw#974: ONE resolution per slot — the binding, the tree its bytes
+        # were materialized into, and the pgw#617 component overrides that
+        # complete the composition. Written by a single statement per slot, so
+        # the three cannot drift apart or arrive without one another; the
+        # plain-path and plain-override views the local loaders take are
+        # DERIVED from it below, never maintained beside it.
+        resolved_slots: Dict[str, MintSlot] = {}
         override_digests: Dict[str, str] = {}
         self._intent_transition(
             intent_id,
@@ -6735,8 +6739,8 @@ class Executor:
             snap = (snapshots or {}).get(ref)
             materialized = await self.store._materialize_local(
                 ref, snap, binding=binding)
-            paths[slot] = str(materialized.path)
             slot_identities[slot] = materialized.identity
+            comps: Dict[str, str] = {}
             for comp, comp_ref in _component_overrides(binding):
                 try:
                     comp_binding = self._hub_binding(comp_ref)
@@ -6748,9 +6752,17 @@ class Executor:
                 comp_mat = await self.store._materialize_local(
                     comp_ref, (snapshots or {}).get(comp_ref),
                     binding=comp_binding)
-                component_paths.setdefault(slot, {})[comp] = str(comp_mat.path)
+                comps[comp] = str(comp_mat.path)
                 if comp_mat.identity[0]:
                     override_digests[comp_ref] = comp_mat.identity[0]
+            resolved_slots[slot] = MintSlot(
+                ref=binding, path=str(materialized.path),
+                component_paths=comps)
+        paths: Dict[str, str] = {
+            slot: res.path for slot, res in resolved_slots.items()}
+        component_paths: Dict[str, Dict[str, str]] = {
+            slot: dict(res.component_paths)
+            for slot, res in resolved_slots.items() if res.component_paths}
         eager_only = self._eager_only_reason()
         if eager_only and spec.compile is not None:
             logger.info("%s: %s", spec.name, eager_only)
@@ -6833,7 +6845,6 @@ class Executor:
             )
             setup = getattr(instance, "setup", None)
             inj = _InjectionResult(kwargs={}, loaded={})
-            from . import aot_serve, compile_cache, trt_engine
 
             vram_before = self._vram_allocated()
             if spec.runtime:
@@ -6958,7 +6969,6 @@ class Executor:
                     _fc_undelegate.abandon_self_mint(_mint)
                     inj.pending_self_mints.pop(_pid, None)
             if eager_first:
-                from . import hot_swap
 
                 mint_selections: Dict[int, _CompileArtifactSelection] = {}
                 mint_pipes: Dict[int, Any] = {}
@@ -6991,11 +7001,7 @@ class Executor:
                     pipes=mint_pipes,
                     selections=mint_selections,
                     modules=_mint_modules(spec),
-                    snapshot_paths=dict(paths),
-                    component_paths={
-                        slot: dict(comps)
-                        for slot, comps in component_paths.items() if comps
-                    },
+                    slots=dict(resolved_slots),
                 )
                 logger.info(
                     "eager-first boot for %s (pgw#671): READY at eager tier "
@@ -7249,7 +7255,6 @@ class Executor:
                         # failure never un-serves the request (the compiled
                         # callable is already live); it only forfeits
                         # advertising/publishing this boot's capture.
-                        from . import fleet_cells as fleet_cells_mod
 
                         activity_mod.current_phase(
                             activity_mod.PHASE_SEAL_PUBLISH)
@@ -7322,7 +7327,6 @@ class Executor:
                     unproven.extend(unexercised)
                     unexercised = []
                 if unproven:
-                    from .models.loading import pipeline_weight_lane
 
                     quant_execution_lane = any(
                         pipeline_weight_lane(
@@ -7425,7 +7429,6 @@ class Executor:
                         # the activity carries the confession; never silent
                         # (gw#586).
                         if mint_by_id:
-                            from . import fleet_cells as fleet_cells_mod
 
                             for pending in mint_by_id.values():
                                 fleet_cells_mod.withhold_self_mint_publish(
@@ -7447,8 +7450,6 @@ class Executor:
                         )
                     else:
                         logger.warning("%s; serving eager", detail)
-                if unexercised:
-                    from .models.loading import pipeline_weight_lane
                 for candidate in unexercised:
                     pipe = candidate.pipeline
                     mandatory = pipeline_weight_lane(pipe).startswith(
@@ -7476,7 +7477,6 @@ class Executor:
                                 # artifact to advertise. Drop the target
                                 # loudly rather than advertise bytes
                                 # nothing proved (the gw#586 shape).
-                                from . import fleet_cells as fleet_cells_mod
 
                                 fleet_cells_mod.abandon_self_mint(
                                     pending_mint)
@@ -7525,7 +7525,6 @@ class Executor:
                     # per-object adopt proof on every later boot (the
                     # gw#611 qwen hits=1/misses=1 release-breaker). The
                     # local mint keeps serving this process either way.
-                    from . import fleet_cells as fleet_cells_mod
 
                     for pending in mint_by_id.values():
                         sharers = mint_sharers.get(id(pending), [])
@@ -7717,7 +7716,6 @@ class Executor:
         self-loading (str/Path) slot has no reproducible construction, and two
         candidate pipelines have no single SPMD unit.
         """
-        from .parallel import ContextParallelUnavailable
 
         candidates = [s for s, pipe in rec.slot_pipelines.items() if pipe is not None]
         if len(candidates) == 1:
@@ -7744,10 +7742,6 @@ class Executor:
         topo = self.topology
         if topo.degree <= 1 or topo.parallel != "sequence":
             return
-        from . import compile_cache
-        from .parallel import GroupPlan
-        from .parallel.cp import w8a8_gemm_mode
-        from .parallel.runtime import BootPlan, SequenceRuntime, arm_sequence_gate
 
         group = current_device_group()
         device_group = topo.group(group)
@@ -7780,7 +7774,6 @@ class Executor:
         installed = await asyncio.to_thread(runtime.arm, pipe, boot, plan)
         if not arm_sequence_gate(pipe, runtime):
             await asyncio.to_thread(runtime.close)
-            from .parallel import ContextParallelUnavailable
 
             raise ContextParallelUnavailable(
                 f"{spec.name}: could not route {type(pipe).__name__}.__call__ "
@@ -8400,7 +8393,6 @@ class Executor:
         are ref-specific: one large or malformed dynamic pick must never
         spill every sibling pick to CPU offload.
         """
-        from .models.serve_fit import RUN_OFFLOAD
 
         plan = self._gate_serve_plans.get(spec.name)
         mode = "model_offload" if (
@@ -8423,7 +8415,6 @@ class Executor:
 
     async def _boot_engine_server(self, spec: EndpointSpec, paths: Dict[str, str]) -> Any:
         """Boot the runtime="vllm"/"llama-server" subprocess and health-wait."""
-        from .runtimes.server import RUNTIME_FACTORIES
 
         assert spec.runtime  # validated at decoration
         factory = RUNTIME_FACTORIES[spec.runtime]
@@ -8449,7 +8440,6 @@ class Executor:
         ccell = spec.compile_cell()
         if ccell is None or not snapshots:
             return None
-        from . import compile_cache, trt_engine
         family = ccell.family
         # The effective spec is already rebound to this RunJob's selected
         # checkpoints. Snapshot maps also contain attached cells and may carry
@@ -8460,7 +8450,6 @@ class Executor:
         # th#883 pull-by-key: a key-flavored cell is selected only when its
         # key is one this runtime computed for itself (the same candidates
         # the worker advertises in cell_lookups).
-        from . import cell_key
 
         candidate_keys: set[str] = set()
         for execution_lane in (
@@ -8625,7 +8614,6 @@ class Executor:
             # composition — a Half nn.Linear meeting a bf16 activation is
             # `mat1 and mat2 must have the same dtype, but got BFloat16 and
             # Half`, with no component override anywhere on the wire.
-            from .models.loading import composition_compute_dtype
 
             effective_dtype = composition_compute_dtype(
                 paths[slot], str(getattr(binding, "dtype", "") or ""))
@@ -8723,7 +8711,6 @@ class Executor:
         module set — LRU swap moves ONLY the transformer, never the shared
         encoder. Lane slots are residency-registered inline (per slot) so
         make_room can demote lane N-1 while lane N loads."""
-        from .runtimes.server import ServerHandle
 
         try:
             hints = {
@@ -8915,7 +8902,6 @@ class Executor:
                         # a TRT engine (#390, refit with this pipeline's weights)
                         # or an inductor cache (#384). No verified artifact =>
                         # stays eager. ``compile_artifact`` is hub-attached (#569).
-                        from . import compile_cache
 
                         # pgw#677 reopen: stamp the hub-resolved execution
                         # lane on the pipe BEFORE arming, so the router's
@@ -8989,7 +8975,6 @@ class Executor:
                                 result.pending_self_mints[id(pipe)] = pipe_mint
                             elif armed and selection is not None:
                                 result.active_compile_artifacts[id(pipe)] = selection
-                                from . import trt_engine
 
                                 if trt_engine.is_engine_ref(selection.ref):
                                     result.trt_execution_before[id(pipe)] = (
@@ -9107,7 +9092,6 @@ class Executor:
         Monolithic pipelines (``spec`` given) additionally get the last-resort
         offload fallback; shared-component lanes never do (hooks on a shared
         module would poison sibling lanes)."""
-        from .models.execution_lane_gate import ExecutionLaneGate, arm_execution_lane_gate
 
         fallback = None
         if spec is not None:
@@ -9124,7 +9108,6 @@ class Executor:
         """Serve-time last resort (gw#551): promote could not fit even after
         LRU demotions — arm a coherent CPU-offload rung on the (cpu-resident)
         pipeline and rebook it honestly, instead of failing the request."""
-        from .models.memory import rearm_offload
 
         if not rearm_offload(pipe):
             return False
@@ -9143,7 +9126,6 @@ class Executor:
         """The fleet publish sink for self-minted cells (gw#587/th#910).
         Built per call: file_base_url arrives with HelloAck and the worker
         JWT rotates (#561). ``enabled()`` is false until both exist."""
-        from . import fleet_cells
 
         return fleet_cells.CellPublisher(
             base_url=self.file_base_url,
@@ -9170,7 +9152,6 @@ class Executor:
         confession, and it is countable per (release, SKU, arm) hub-side
         exactly the way pgw#680 counts dynamo guard misses.
         """
-        from . import aot_serve, shape_growth, trt_engine
 
         arm = shape_growth.ARM_DYNAMO
         if aot_serve.is_armed(pipeline):
@@ -9202,7 +9183,6 @@ class Executor:
         family = str(getattr(cfg, "family", "") or "")
 
         def republish() -> None:
-            from . import fleet_cells
 
             cache_dir = self.store._cache_dir
             live_root = (
@@ -9256,7 +9236,6 @@ class Executor:
         # record — mixing tiers inside one proof window is not worth it.
         if set(inj.active_compile_artifacts) - set(inj.pending_self_mints):
             return False
-        from . import compile_cache, hot_swap
 
         saw_candidate = False
         for candidate in inj.compile_objects:
@@ -9300,7 +9279,6 @@ class Executor:
         """
         if not obligations:
             return
-        from . import fleet_cells as fleet_cells_mod
 
         for pending in obligations:
             if fleet_cells_mod.terminus_of(pending):
@@ -9342,8 +9320,6 @@ class Executor:
         structured ``mint_skipped`` line, logged and on the wire) and
         automatic — a roomier config, or a smaller-resident flavor, mints
         the same cell later."""
-        from . import compile_cache
-        from . import fleet_cells as fleet_cells_mod
 
         pipes = [
             candidate.pipeline for candidate in inj.compile_objects
@@ -9449,8 +9425,6 @@ class Executor:
 
         ``free_targets`` (pgw#737): this process will not mint at all, so
         also give the card back — see :meth:`_free_mint_targets`."""
-        from . import fleet_cells as fleet_cells_mod
-        from . import hot_swap
 
         for pipe in bg.pipes.values():
             router = hot_swap.router_of(pipe)
@@ -9475,8 +9449,6 @@ class Executor:
         around all of it, and on wan-2.2 it did not. Unwrap to true eager
         (the same end state as the Phase-3 unproven-object branch), drop the
         branch lane, then empty the cache."""
-        from . import compile_cache
-        from . import hot_swap
 
         for pipe in bg.pipes.values():
             try:
@@ -9623,10 +9595,6 @@ class Executor:
     async def _background_mint_run(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
     ) -> None:
-        from . import compile_cache
-        from . import fleet_cells as fleet_cells_mod
-        from . import hot_swap
-        from . import warmup as warmup_mod
 
         spec = bg.spec
         if _delegated_pendings(bg.pendings):
@@ -9703,7 +9671,10 @@ class Executor:
                     wj.spec, request_id=f"bg-mint-{wj.spec.name}",
                     local_output_dir=tmp,
                     execution_lane=self._served_execution_lane(wj.spec),
-                    config=self._effective_config(wj.spec))
+                    config=self._effective_config(wj.spec),
+                    # pgw#969: the in-process mint is a mint too — a slot that
+                    # cannot resolve here must say which one it killed.
+                    origin=_mint_origin(bg, wj.spec))
                 if preemptible:
                     bg.seed_ctx = ctx
                     # Registration race: demand that arrived after the turn
@@ -9968,7 +9939,6 @@ class Executor:
         novel shapes. Shared by the in-process and delegated routes (pgw#784):
         the artifact SOURCE differs, what it means to advertise one does not.
         """
-        from . import hot_swap
 
         spec = bg.spec
         act.phase(activity_mod.PHASE_FINALIZE)
@@ -10024,9 +9994,6 @@ class Executor:
         mint). Serving continues in every branch: the worker never dies with
         its mint.
         """
-        from . import compile_cache
-        from . import fleet_cells as fleet_cells_mod
-        from . import mint_delegate
 
         spec = bg.spec
         # One child per DISTINCT pending: sibling pipes of one record whose
@@ -10049,11 +10016,7 @@ class Executor:
                     pipe=pipe,
                     function=spec.name,
                     modules=bg.modules or _mint_modules(spec),
-                    snapshots=dict(bg.snapshot_paths),
-                    component_paths={
-                        slot: dict(comps)
-                        for slot, comps in bg.component_paths.items()
-                    },
+                    slots=dict(bg.slots),
                     weight_lane=compile_cache.cell_base_execution_lane(pipe),
                     execution_lane=self._served_execution_lane(spec),
                     configs={spec.name: self._effective_config(spec)},
@@ -10165,7 +10128,6 @@ class Executor:
         into ``active_compile_artifacts`` exactly like a delivered cell so
         the warmup proof runs and the target advertises the worker's own
         key ref (th#910 self-attested dispatch fence)."""
-        from . import fleet_cells
 
         return fleet_cells.enable_compiled(
             pipe, cfg, self.store._cache_dir, artifact,
@@ -10182,7 +10144,6 @@ class Executor:
         gets the same fleet policy (delivered cell first, self-mint on miss)
         as a worker-loaded slot. ``cache_dir`` comes from the scope, which
         the executor constructed with its own store cache dir."""
-        from . import fleet_cells
 
         return fleet_cells.enable_compiled(
             pipe, cfg, cache_dir, artifact,
@@ -10501,8 +10462,6 @@ class Executor:
         (``aot-inductor``) lane joins inductor and TRT, and proves adoption by
         its own artifact invocations rather than by an FX cache hit it can
         never produce."""
-        from . import aot_serve, compile_cache, trt_engine
-        from . import hot_swap as hot_swap_mod
 
         t0 = time.monotonic()
         staged_artifact: Any = None
@@ -10673,7 +10632,6 @@ class Executor:
             with expected_target.state_lock:
                 want_key = expected_target.requested_cell_key
             if want_key and staged_artifact is not None:
-                from . import cell_key
 
                 self_requested = not cell_key.mismatch(
                     staged_artifact.metadata, want_key)
@@ -11447,7 +11405,6 @@ class Executor:
                 with self._bg_state_lock:
                     if self._bg_blocked_since is None:
                         self._bg_blocked_since = blocked_since
-                from . import hot_swap
 
                 raise hot_swap.TurnGateBusy(kind)
             if self._bg_quiet.is_set():
@@ -11508,7 +11465,6 @@ class Executor:
             if self.draining:
                 if abort is not None:
                     raise _MintAbandoned()
-                from . import hot_swap
 
                 raise hot_swap.TurnGateClosed("worker draining")
 
@@ -11548,7 +11504,6 @@ class Executor:
         shape-warm thread blocks here — loop-free by construction — until
         its turn is granted, then owns the instance's modules for exactly
         one compile."""
-        from . import hot_swap
 
         @contextmanager
         def turn(kind: str) -> typing.Iterator[None]:
@@ -11582,7 +11537,6 @@ class Executor:
         tenant work (pgw#677). Idempotent; no-op without a router."""
         if not _bg_yield_enabled():
             return
-        from . import hot_swap
 
         router = hot_swap.router_of(pipeline)
         if router is not None:
@@ -12284,7 +12238,6 @@ class Executor:
             await self._finish(job, pb.JOB_STATUS_FATAL, safe_message="deadline exceeded",
                                metrics=metrics)
         except BaseException as exc:
-            from .compile_cache import CompiledExecutionLaneUnavailableError
 
             if isinstance(exc, CompiledExecutionLaneUnavailableError):
                 # pgw#672: a compiled lane failing at call time fails THIS
@@ -12362,7 +12315,6 @@ class Executor:
             sig = typing.get_type_hints(spec.method)
         except Exception:
             sig = {}
-        import inspect as _inspect
 
         params = [
             p.name for p in _inspect.signature(spec.method).parameters.values()

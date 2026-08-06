@@ -41,8 +41,12 @@
 #   Dead or duplicated surface
 #     compile_cache.build / prepare (the JIT build path), aot_serve.flavor_label
 #     and find_artifact (compile_cache's same-named versions are the live ones),
-#     aot_mint.replace_spec, aot_package.package_entry_names,
-#     guard_closure.manifest_digest.
+#     aot_package.package_entry_names, guard_closure.manifest_digest.
+#       aot_mint.replace_spec — ✅ DELISTED 2026-08-05 by DELETION. It was a
+#       one-line wrapper over `dataclasses.replace` that existed, per its own
+#       docstring, "so the deferred-import dance does not have to repeat at
+#       every call site". Hoisting the import removed the dance and the wrapper
+#       with it: a deferred import had grown a whole public function.
 #       aot_compile_pool.free_disk_bytes — ✅ DELISTED 2026-08-02 (pgw#877) by
 #       DELETION, the other way a line leaves this file.
 #     aot_export_parallel.groups / width_for — ✅ DELISTED 2026-08-02 by
@@ -90,7 +94,6 @@ gen_worker.aot_compile_spans.dark_fraction()
 gen_worker.aot_declaration.named_dynamic_rows()
 gen_worker.aot_inputs.inputs_for()
 gen_worker.aot_inputs.latent_dims()
-gen_worker.aot_mint.replace_spec()
 gen_worker.aot_package.package_entry_names()
 gen_worker.aot_serve.EntryDispatch.refusal_counts()
 gen_worker.aot_serve.find_artifact()

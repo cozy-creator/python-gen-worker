@@ -27,6 +27,7 @@ from pathlib import Path
 from ..component_vocab import denoiser_components
 from typing import Any, Optional
 import importlib.metadata as md
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,6 @@ _ENGINE_ENV = "GEN_WORKER_SVDQ_ENGINE"
 def svdq_engine_override() -> str:
     """Operational kill-switch: pin the engine for this process. Empty (the
     default) means "choose per artifact + host"."""
-    import os
 
     raw = str(os.environ.get(_ENGINE_ENV, "") or "").strip().lower()
     if raw and raw not in SVDQ_ENGINES:
@@ -245,6 +245,7 @@ def select_svdq_engine(precision: str, *, override: str = "",
     ``reasons`` maps each rejected engine to why, so the caller can raise one
     error naming every closed door. An explicit ``override`` is honored
     strictly: if that engine cannot serve, nothing else is substituted."""
+    # Deferred: svdq_native adds +2 modules to the `import gen_worker` path.
     from .svdq_native import svdq_native_reason
 
     chosen = str(override or "").strip().lower() or svdq_engine_override()

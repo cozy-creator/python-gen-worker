@@ -54,6 +54,18 @@ from .svdq_layout import (
     split_decoded,
     to_buffers,
 )
+from pathlib import Path
+import json
+import time
+from .w4a4 import w4a4_gemm_mode
+from .w4a4 import _gemm_w4a4
+from .native_kernels import svdq_linear_execution_lane
+from .svdq_fused import build_svdq_fused_linear, fused_shape_supported
+from .svdq import _read_safetensors_metadata
+from .svdq_awq import decode_awq_linear, is_awq_linear
+from .svdq_layout import LOWRANK_QUANT_KEY, LOWRANK_QUANT_SCHEMES, decode_linear
+from .native_kernels import svdq_modulation_execution_lane
+from .svdq_awq_packed import awq_packed_supported, build_awq_packed_linear
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +126,6 @@ def svdq_native_available() -> bool:
     shares all of it with the ``#nvfp4-w4a4`` lane."""
     if svdq_native_reason() is not None:
         return False
-    from .w4a4 import w4a4_gemm_mode
 
     return w4a4_gemm_mode() == "blockwise"
 
@@ -186,7 +197,6 @@ def _build_svdq_linear_class() -> type:
                 self.bias = None
 
         def forward(self, x: Any) -> Any:
-            from .w4a4 import _gemm_w4a4
 
             shape = x.shape
             x2 = x.reshape(-1, self.in_features)
@@ -347,9 +357,6 @@ def swap_svdq_linears(
     alignment fold to dense individually rather than refusing."""
     import torch
 
-    from .native_kernels import svdq_linear_execution_lane
-    from .svdq_fused import build_svdq_fused_linear, fused_shape_supported
-
     compute = compute_dtype or torch.bfloat16
     if mode not in ("blockwise", "dense"):
         mode = "blockwise" if svdq_native_available() else "dense"
@@ -462,20 +469,10 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     CPU vs seconds as device-bandwidth permutes; nunchaku loads in ~8s only
     because its kernels consume the on-disk layout verbatim). ``"cpu"``
     reproduces the historical path byte-identically."""
-    import json
-    import time
 
     import torch
     from accelerate import init_empty_weights
     from safetensors import safe_open
-
-    from .svdq import _read_safetensors_metadata
-    from .svdq_awq import decode_awq_linear, is_awq_linear
-    from .svdq_layout import (
-        LOWRANK_QUANT_KEY,
-        LOWRANK_QUANT_SCHEMES,
-        decode_linear,
-    )
 
     compute = compute_dtype or torch.bfloat16
     meta = _read_safetensors_metadata(art.file)
@@ -510,9 +507,6 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
         device = ("cuda" if mode == "blockwise" and torch.cuda.is_available()
                   else "cpu")
     dev = torch.device(device)
-
-    from .native_kernels import svdq_modulation_execution_lane
-    from .svdq_awq_packed import awq_packed_supported, build_awq_packed_linear
 
     # Only the modulation axis is read here; `swap_svdq_linears` below owns
     # the linear one and asks for it itself.
@@ -592,8 +586,6 @@ def load_svdq_native_pipeline(cls: Any, path: Any, art: Any, *,
     Compute dtype is bf16 for the same reason the nunchaku lane pins it: the
     checkpoint's scales and low-rank branch are bf16-oriented."""
     import torch
-
-    from pathlib import Path
 
     compute = compute_dtype or torch.bfloat16
     if not art.component:

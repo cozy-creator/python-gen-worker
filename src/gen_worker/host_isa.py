@@ -36,6 +36,7 @@ from functools import lru_cache
 from typing import Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, Union
 
 from . import torch_capability
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,6 @@ def _read_in_fresh_thread(fn: object) -> object:
     A fresh thread starts with an empty ``ContextVar`` context, so this reads
     exactly what a background compile thread would read.
     """
-    import threading
 
     box: Dict[str, object] = {}
 

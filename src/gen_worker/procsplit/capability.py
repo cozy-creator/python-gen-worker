@@ -37,6 +37,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from ..request_context import _decode_unverified_jwt_claims
 
 # A per-job grant living longer than this is worth naming. Not a refusal: the
 # minter chooses the TTL (runtimestore.WorkerCapabilityTokenTTL) and only it
@@ -60,7 +61,6 @@ FORWARD = Decision(forward=True)
 
 
 def _claims(token: str) -> Dict[str, Any]:
-    from ..request_context import _decode_unverified_jwt_claims
 
     try:
         claims = _decode_unverified_jwt_claims(token)

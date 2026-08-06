@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import host_isa
+from . import aot_run_impl_split as v2
 
 logger = logging.getLogger(__name__)
 
@@ -444,7 +445,6 @@ def split_and_compile(cmd_line: str, cwd: str,
     half-written object at the target path: the partial link is the last
     step and runs only once every part has built.
     """
-    from . import aot_run_impl_split as v2
 
     argv = shlex.split(cmd_line)
     src_at, obj_at = _split_source_arg(argv), _object_arg(argv)

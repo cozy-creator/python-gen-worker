@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import re
 import threading
@@ -538,7 +537,13 @@ def _run_with_stall_watchdog(
     # what counts as an advance (a trickle never does), the window decides how
     # long an unadvanced loop may run. Same pair now guards the CAS fetch.
     floor = ProgressFloor(max(int(min_window_bytes), 1))
-    window = SilenceWindow(stall_timeout if stall_timeout > 0 else math.inf)
+    # DESIGN-RULINGS §4.24 item 4: an unset limit is a REFUSAL, never an
+    # emergent one. This used to read `stall_timeout if stall_timeout > 0 else
+    # math.inf`, which defeated SilenceWindow's own `window_s must be positive`
+    # guard — the guard exists precisely so a zero cannot silently delete the
+    # watchdog and hand a wedged download the unbounded hang gw#456 was filed
+    # for. Let it refuse.
+    window = SilenceWindow(stall_timeout)
     while not holder.get("done"):
         dl_thread.join(timeout=poll_interval)
         if holder.get("done"):
@@ -883,7 +888,7 @@ def _civitai_stream_one(
     on_bytes: Callable[[int], None],
 ) -> int:
 
-    import requests
+    import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
     headers: Dict[str, str] = {}
     if api_key and urlparse(url).hostname in _CIVITAI_AUTH_HOSTS:
@@ -955,7 +960,7 @@ def download_civitai(
             except Exception:
                 pass
 
-    import requests
+    import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
     local_paths: list[Path] = []
     for f in files:

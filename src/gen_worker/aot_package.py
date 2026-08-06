@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from .aot_serve import SOURCE_LITERAL, SOURCE_STATE_DICT
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -431,7 +432,6 @@ def literal_values_digest(program: Any) -> str:
     being skipped, because a silently-skipped constant is the hole this
     function exists to close.
     """
-    import hashlib
 
     names = program_literal_fqns(program)
     if not names:

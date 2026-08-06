@@ -45,6 +45,7 @@ from typing import Any, Callable, Iterator, Sequence
 
 from .api.errors import RetryableError, ValidationError
 from .request_context._helpers import _infer_mime_type, _url_is_blocked
+from io import BytesIO
 
 __all__ = [
     "DEFAULT_MAX_BYTES",
@@ -299,7 +300,6 @@ def fetch_image(
         raise ValidationError(
             f"url_fetch_refused: {url} is {fetched.mime!r}, not an image"
         )
-    from io import BytesIO
 
     try:
         image = Image.open(BytesIO(fetched.data))

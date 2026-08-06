@@ -95,12 +95,11 @@ class MintTask:
     pipe: Any
     function: str
     modules: Tuple[str, ...]
-    snapshots: Dict[str, str] = field(default_factory=dict)
-    # pgw#816: the parent's RESOLVED component overrides, slot -> comp ->
-    # local tree. Part of the composition, not a detail: the base snapshot is
-    # fetched with these components EXCLUDED (th#1330 B2), so a child handed
-    # only `snapshots` is handed a tree that cannot load.
-    component_paths: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # pgw#974: the parent's resolution of each setup slot — identity, bytes and
+    # pgw#617 composition in ONE value, resolved together in
+    # `_setup_locked_inner` and carried together from here to the child. See
+    # `mint_process.MintSlot`.
+    slots: Dict[str, mint_process.MintSlot] = field(default_factory=dict)
     weight_lane: str = ""
     execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -196,11 +195,7 @@ def build_request(
         # later boot — finds the same bank.
         resume=str(aot_resume.bank_root(pending.cell_key)),
         cfg=cfg_spec(pending.cfg),
-        snapshots=dict(task.snapshots),
-        component_paths={
-            slot: dict(comps)
-            for slot, comps in task.component_paths.items() if comps
-        },
+        slots=dict(task.slots),
         device=-1 if task.device is None else int(task.device),
         vram_cap_bytes=int(cap_bytes),
         execution_lane=task.execution_lane,

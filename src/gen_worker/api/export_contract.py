@@ -47,6 +47,7 @@ from typing import (
 )
 
 import msgspec
+import importlib
 
 _logger = logging.getLogger(__name__)
 
@@ -1012,7 +1013,6 @@ def import_export_declaration(
 
     Returns ``True`` when the module imported.
     """
-    import importlib
 
     try:
         importlib.import_module(module, package=package)

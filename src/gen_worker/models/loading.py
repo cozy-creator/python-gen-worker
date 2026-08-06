@@ -946,6 +946,7 @@ def component_load_dtypes(
 
     Empty for every uniform composition, which is the common case: the caller
     then keeps its single scalar ``torch_dtype`` and nothing changes."""
+    # CYCLE: api.tree reaches back into loading (FP8_STORAGE_FIT_FACTOR).
     from ..api.tree import component_dtypes
 
     cls = pipeline_cls if isinstance(pipeline_cls, type) else None

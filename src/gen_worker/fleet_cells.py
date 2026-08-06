@@ -77,6 +77,10 @@ from .procsplit import broker
 # monkeypatch models.loading.pipeline_weight_lane; stay late-bound.
 from .models import loading, provision
 from .models.memory import low_vram_mode
+from .request_context._helpers import _decode_unverified_jwt_claims
+from .convert.hub import HubPublishError
+from .api.export_contract import export_declaration
+from .models import lora_lifted
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +279,6 @@ def _credential_lapse_s(token: str, *, now: float) -> float:
     Not a timeout (gw#666): ``exp`` is an absolute instant the credential
     itself carries, not a duration this code picked.
     """
-    from .request_context._helpers import _decode_unverified_jwt_claims
 
     try:
         exp = float(_decode_unverified_jwt_claims(token).get("exp") or 0)
@@ -321,7 +324,6 @@ class CellPublisher:
     # -- wire ---------------------------------------------------------------
 
     def _post(self, path: str, payload: dict, *, timeout: float) -> dict:
-        from .convert.hub import HubPublishError
 
         # pgw#763 delta 1: parent-mediated under the split — the compute child
         # holds no worker JWT, so the parent makes the attested-intent call and
@@ -1795,8 +1797,6 @@ def mint_recipe(
                 "out-of-process minting is unavailable and an AOTI export "
                 "has no eager tier to serve from while it compiles"))
 
-    from .api.export_contract import export_declaration
-
     # pgw#853: THIS is where a declaration is allowed to refuse. A family with
     # open mint blockers (ltx/qwen/z-image) registers a THUNK, so its refusal
     # arrives here — as a typed `self_mint_skipped` carrying every word of the
@@ -1824,6 +1824,8 @@ def mint_recipe(
             f"`compile=` block carrying graph classes, pgw#739/#758) — the "
             f"class set a multi-graph cell covers is undeclared")
 
+    # CYCLE: aot_mint imports CellPublisher from this module at module scope,
+    # so this direction of the pair must stay deferred.
     from . import aot_mint
 
     spec = aot_export_spec(pipe, cfg)
@@ -1884,8 +1886,9 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
     (the class rows, coordinates, dynamic contracts and input bindings) — so
     nothing here is a per-pod guess.
     """
+    # CYCLE: aot_mint imports CellPublisher from this module at module scope,
+    # so this direction of the pair must stay deferred.
     from . import aot_mint
-    from .models import lora_lifted
 
     execution_lane = loading.pipeline_weight_lane(pipe)
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)

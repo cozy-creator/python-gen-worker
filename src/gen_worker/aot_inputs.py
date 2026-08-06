@@ -36,6 +36,8 @@ from .compile_cache import resolve_pipeline_class
 from .models import lora_lifted
 from .models.loading import load_from_pretrained
 from .models.memory import place_pipeline
+from .api.export_contract import export_declaration
+from .aot_contract import DynamicDim
 
 if TYPE_CHECKING:  # pragma: no cover — typing only, no runtime import cycle
     from .aot_contract import DynamicDim, ExportSpec
@@ -82,7 +84,6 @@ def builder_for(family: str, target: str = "") -> InputBuilder:
     with a declared denoiser but no VAE contract must FAIL for the VAE rather
     than silently feed it denoiser inputs.
     """
-    from .api.export_contract import export_declaration
 
     fam, tgt = str(family), str(target)
     decl = export_declaration(fam)
@@ -126,8 +127,6 @@ def lifted_lora_values(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
     if not int(spec.lora_bucket or 0):
         return {}
     import torch
-
-    from .models import lora_lifted
 
     plan = lora_lifted.build_plan(module, int(spec.lora_bucket))
     lora_a, lora_b = plan.alloc(module_dtype_device(module)[1])
@@ -174,7 +173,6 @@ def latent_dims(
     Families with a class declaration never call this — their bounds derive
     from the class rows (``aot_declaration.derived_dynamic``).
     """
-    from .aot_contract import DynamicDim
 
     if not spec.shapes:
         raise InputContractError(

@@ -96,6 +96,9 @@ from .api.decorators import EndpointDecl, NoWarmup
 from .api.errors import IllegalCombination
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 import inspect
+from .api.slot import resolve_slot
+from .api.binding import wire_ref
+from .request_context import RequestContext
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from .registry import EndpointSpec
@@ -811,7 +814,6 @@ def resolved_slots_kwargs(
     """
     if not spec.slots:
         return {"resolved_slots": {}, "slot_errors": {}, "root_slot": ""}
-    from .api.slot import resolve_slot
 
     run_models = list(run.models) if run is not None else []
     raw_defaults = {
@@ -863,6 +865,7 @@ def warm_context(
     local_output_dir: str,
     execution_lane: str = "",
     config: Optional[Mapping[str, Any]] = None,
+    origin: str = "",
 ) -> Any:
     """The ``RequestContext`` a WARM forward runs under — one construction.
 
@@ -883,15 +886,26 @@ def warm_context(
     It lives in ``warmup`` rather than in ``executor`` on purpose: the child
     already derives its warm plan from here, and it must never import the
     executor's whole arming brain to build a context.
-    """
-    from .api.binding import wire_ref
-    from .request_context import RequestContext
 
+    ``origin`` (pgw#969) names the warm this context belongs to and is
+    prefixed onto every deferred slot-resolution error, so a handler's
+    ``ctx.slots[...]`` failure says WHICH warm it killed. A mint child holds
+    no orchestrator session; the text it raises is its only channel, and
+    ``ValueError: slot 'pipeline': no resolved model ref`` named a symptom
+    and no mint.
+    """
+
+    slot_kwargs = resolved_slots_kwargs(spec, None)
+    if origin:
+        slot_kwargs["slot_errors"] = {
+            name: f"{origin}: {why}"
+            for name, why in slot_kwargs["slot_errors"].items()
+        }
     ctx: Any = RequestContext(
         request_id=str(request_id),
         local_output_dir=local_output_dir,
         models={slot: wire_ref(b) for slot, b in spec.models.items()},
-        **resolved_slots_kwargs(spec, None),
+        **slot_kwargs,
         boot_warmup=True,
     )
     if execution_lane:
