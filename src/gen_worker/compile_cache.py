@@ -2228,11 +2228,16 @@ def resolve_targets(
 
     ``(declared name, owner, attribute, eager callable)`` per resolvable
     target, in declaration order. :func:`has_compile_target`, :func:`apply`
-    and :func:`begin_fleet_mint` all read THIS list (§1.29, one relation):
-    two computations of one fact disagree eventually, and this one did — the
-    mint's arm gate said "no compile targets resolved" on a pipeline whose
-    ``.unet`` resolved fine, because it was reporting a different fact
-    (:func:`arming_block`) under this one's sentence.
+    and :func:`begin_fleet_mint` all read THIS list (§1.29, one relation) —
+    it used to be scanned independently by the first two, which is how a
+    reader of the third could not tell which scan had spoken.
+
+    Whether the pipeline OWNS a declared target is the only question answered
+    here. Whether this process can ARM the targets it owns is a different
+    question with a different answer, and :func:`arming_block` owns it;
+    conflating the two is what let a cardless mint pod report "no compile
+    targets resolved on TinyDiffusionPipeline" about a pipeline whose
+    ``.unet`` had resolved a frame earlier (pgw#985).
     """
     out: List[Tuple[str, Any, str, Callable[..., Any]]] = []
     for target in tuple(getattr(cfg, "targets", ()) or ()):
