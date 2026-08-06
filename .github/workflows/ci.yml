@@ -1,34 +1,37 @@
 name: CI
 
-# pgw#952 — this workflow now runs on PRs into `dev` AS WELL AS `master`, and is
-# split into two PARALLEL jobs. Both changes are corrections; the reasoning is
-# below because the premise that produced the old shape was measurably false.
+# pgw#952 — this workflow is split into two PARALLEL jobs, and runs the full
+# suite on every PR. pgw#977 (2026-08-05) narrowed the trigger back to `master`
+# alone, because `dev` was deleted when the three-tier flow retired — lanes now
+# PR straight to `master`, so `[master]` IS the every-lane trigger. Both jobs
+# are the master ruleset's required contexts (`fast gates`, `tests`).
 #
-# ─── THE GAP THIS CLOSES ───────────────────────────────────────────────────────
+# ─── THE GAP THIS CLOSES, AND WHY IT STAYS CLOSED ──────────────────────────────
 #
-# Until pgw#952, a lane -> `dev` PR in this repository ran NO CI AT ALL. Verified
-# on PR #466 (`950-legacy-hardcut`, 215+/178-, merged into `dev`):
-# `statusCheckRollup` was `[]`. Not a check that passed — no check ran.
+# Until pgw#952 a lane PR in this repository could run NO CI AT ALL. Verified on
+# PR #466 (`950-legacy-hardcut`, 215+/178-): `statusCheckRollup` was `[]`. Not a
+# check that passed — no check ran. At the time the cause was `ci.yml` naming
+# only `master` while lanes targeted `dev`; the branch names have since swapped
+# roles, and the invariant that matters is the one to preserve:
 #
-#   ci.yml             `branches: [master]`  -> silent on every dev PR
-#   proto-contract.yml `[dev, master]` BUT with a `paths:` filter #466 missed
-#   native-kernels.yml master only
-#   publish.yml        tag push only
+#   **THIS WORKFLOW MUST TRIGGER ON WHATEVER BRANCH LANES ACTUALLY PR INTO.**
 #
-# So every lane merged into `dev` having run whatever it happened to run locally,
-# and whatever it did not run was discovered by the NEXT lane rebasing onto it —
-# or by a promotion train, minutes before production. pgw#949 is that failure mode
-# already written down: `dev` has been RED on two gw#666 guard tests since PR #455
-# and nothing said so.
+# If that branch is ever renamed or a second one added, change the list here in
+# the same commit. A lane merging with an empty check rollup is the failure this
+# file exists to make impossible, and a reader cannot tell it apart from "CI is
+# broken". pgw#949 is the same failure already written down: the integration
+# branch sat RED on two gw#666 guard tests since PR #455 and nothing said so.
 #
-# ─── WHY THE OLD `branches: [master]` WAS WRONG HERE ───────────────────────────
+# ─── WHY THE FULL SUITE IS PRE-MERGE HERE, UNLIKE TENSORHUB ────────────────────
 #
-# The retired header said "CI spend is metered (WORKSPACE-GIT-POLICY.md)". That is
-# true of tensorhub, which is PRIVATE. **This repository is PUBLIC**
+# An older header said "CI spend is metered (WORKSPACE-GIT-POLICY.md)". That is
+# true of tensorhub, which is PRIVATE — and it is why tensorhub's `verify` moved
+# to a post-merge `push: [master]` trigger (th#1621/th#1114, ~24 runner-hours/day
+# at lane volume). **This repository is PUBLIC**
 # (`gh repo view --json visibility` -> PUBLIC), and GitHub Actions on standard
 # runners is free and unmetered for public repositories. `ubuntu-latest` is a
-# standard runner. The constraint the split was designed around does not exist on
-# this repo — it was inherited from a sibling with different economics.
+# standard runner. That constraint does not exist on this repo, so the suite
+# stays pre-merge where it can actually block a defect.
 #
 # What remains real is LATENCY, not spend. That is what the two jobs below are
 # for: a lane gets the cheap verdict in ~1m35s and does not wait 15m to learn
@@ -131,19 +134,23 @@ name: CI
 # What it DOES catch is the class that has actually been costing lanes time:
 # a behavioural regression in the ~3,000-test suite, and the three tree-scanning
 # guards. pgw#950's own lane found a 57-failure regression only by running a
-# baseline differential BY HAND against clean `origin/dev`; mypy, ruff and the
-# three script guards would every one of them have passed it. That is why the
-# suite is on the dev trigger and not just the cheap half.
+# baseline differential BY HAND against a clean base; mypy, ruff and the three
+# script guards would every one of them have passed it. That is why the full
+# suite is on the PR trigger and not just the cheap half.
+#
+# pgw#977 (2026-08-05): `dev` is retired and lanes PR straight to `master`, so
+# the trigger names `master` alone. Both jobs here are the master ruleset's
+# REQUIRED contexts (`fast gates`, `tests`) — they gate the merge, and unlike
+# tensorhub this repo keeps its full suite pre-merge because it is public,
+# unmetered, and ~10m rather than ~18m.
 on:
   workflow_dispatch: {}
   pull_request:
-    branches: [dev, master]
+    branches: [master]
     # `ready_for_review` is NOT a default `pull_request` type, and the jobs below
     # skip drafts. Without it listed here a lane that opens a draft, pushes, then
     # clicks "Ready for review" gets NO run for the head it actually merges —
-    # the same invisible-green this issue exists to remove. (tensorhub's
-    # fast-gates.yaml has this bug; its comment claims the gate re-fires on ready.
-    # It does not. Not inherited here.)
+    # the same invisible-green this issue exists to remove.
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
