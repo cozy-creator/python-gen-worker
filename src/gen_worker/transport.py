@@ -55,6 +55,13 @@ logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = pb.PROTOCOL_VERSION_CURRENT
 
+#: The full gRPC method path this client dials. Derived from the generated
+#: descriptor rather than written out, so it can never drift from the proto
+#: package that defines the wire-protocol major (th#1597, §1.27(b)).
+_CONNECT_METHOD = "/{}/Connect".format(
+    pb.DESCRIPTOR.services_by_name["WorkerScheduler"].full_name
+)
+
 _RESULT, _PROGRESS, _EVENT = "result", "progress", "event"
 #: pgw#869: a hub-bound FACT with no live-state replay behind it. Results have
 #: `_pending_results`; state has `LifecycleSnapshot`/`StateDelta`/the capacity
@@ -1162,6 +1169,25 @@ class Transport:
                         raise FatalTransportError(f"permanent registration rejection: {details}") from e
                     else:
                         logger.error("protocol violation: %s", details)
+                elif code == grpc.StatusCode.UNIMPLEMENTED:
+                    # th#1597 / DESIGN-RULINGS §1.27(b): the wire-protocol MAJOR
+                    # is the proto package, so it is in the service path
+                    # (/cozy.scheduler.v1.WorkerScheduler/Connect). A hub that
+                    # does not serve our major never registers that path and
+                    # gRPC answers UNIMPLEMENTED before any hub code runs.
+                    #
+                    # This is FATAL and unretryable, and that is load-bearing
+                    # HUB-side, not merely tidy here: the worker's exit is what
+                    # makes the pod die before Hello, which leaves
+                    # `everConnected` false, which is how th#874's death
+                    # taxonomy marks the release `boot_crashing` and fails its
+                    # queued requests. Retrying would reconnect-loop forever
+                    # against a hub that can never answer, producing NO durable
+                    # mark and no operator signal — strictly worse than dying.
+                    raise FatalTransportError(
+                        f"hub does not serve this wire-protocol major "
+                        f"(UNIMPLEMENTED on {_CONNECT_METHOD}): {details}"
+                    ) from e
                 else:
                     logger.warning("stream error %s: %s", code, details)
             except FatalTransportError:
