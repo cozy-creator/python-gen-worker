@@ -33,6 +33,7 @@ from . import activity as activity_mod
 from . import compile_cache
 from . import shape_growth
 from .shape_growth import Debounce, TurnGateBusy, TurnGateClosed
+from . import postmortem
 
 logger = logging.getLogger(__name__)
 
@@ -631,7 +632,6 @@ def _run_warm_gated(job: _WarmJob) -> None:
     # to whatever tenant request was in flight — the misattribution that
     # refused fn=generate and condemned (release, SKU) pairs for a software
     # race (th#1226/th#1236).
-    from . import postmortem
 
     token = postmortem.note_inflight(
         postmortem.COMPILE_KIND, postmortem.compile_marker(job.label))

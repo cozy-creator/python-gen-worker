@@ -17,6 +17,10 @@ import logging
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+import json as _json
+import requests
+from . import is_compute_child
+from . import frames
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +42,6 @@ class HubResponse:
     text: str
 
     def json(self) -> Any:
-        import json as _json
 
         return _json.loads(self.text) if self.text else {}
 
@@ -73,7 +76,6 @@ def request(
     broker = _broker
     if broker is not None:
         return broker.call(method, path, params=params, json=json, timeout=timeout)
-    from . import is_compute_child
 
     if is_compute_child():
         # The seam is down (or was never up) inside a compute child. Falling
@@ -86,7 +88,6 @@ def request(
             f"{method} {path}: the control seam is down and this compute child "
             "holds no credential — hub calls are parent-mediated"
         )
-    import requests
 
     headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
     url = base_url.rstrip("/") + path
@@ -207,7 +208,6 @@ class ChildBroker:
     # ---- transport -------------------------------------------------------
 
     def _roundtrip(self, payload: Dict[str, Any], *, timeout: float) -> Dict[str, Any]:
-        from . import frames
 
         with self._id_lock:
             self._next_id += 1

@@ -51,6 +51,7 @@ from .aot_compile_pool import (
     EntryJob,
     EntryReport,
 )
+from . import aot_device_lock
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,6 @@ def _device_lock_wait_s() -> float:
     single most misleading second in the table if it stays anonymous, because
     it looks like compile cost and is actually pool contention.
     """
-    from . import aot_device_lock
 
     lock = aot_device_lock.installed()
     return round(float(getattr(lock, "waited_s", 0.0) or 0.0), 3) if lock else 0.0
@@ -142,7 +142,7 @@ def _device_fields() -> dict:
 
 
 def run(job: EntryJob) -> int:
-    from . import aot_device_lock, aot_mint, env_seal
+    from . import aot_mint, env_seal
 
     started = time.monotonic()
     # pgw#830: the child's own wall, partitioned. `close()` at every exit,

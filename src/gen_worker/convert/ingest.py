@@ -32,15 +32,10 @@ from gen_worker.models.download import (
 from ..net import hf, install_hf_http_timeouts
 from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
+from huggingface_hub.errors import EntryNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError
 
 
 def _hf_access_error_classes() -> tuple[type[Exception], ...]:
-    from huggingface_hub.errors import (
-        EntryNotFoundError,
-        GatedRepoError,
-        RepositoryNotFoundError,
-        RevisionNotFoundError,
-    )
 
     return (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError)
 
@@ -400,12 +395,6 @@ def _snapshot_download_with_retries(
     retry (hf_hub resumes ``.incomplete`` files via Range). Exhausted retries
     raise :class:`CloneDownloadError`."""
     snapshot_download = hf().snapshot_download
-    from huggingface_hub.errors import (
-        EntryNotFoundError,
-        GatedRepoError,
-        RepositoryNotFoundError,
-        RevisionNotFoundError,
-    )
 
     attempts = _download_attempts()
     last: Exception | None = None

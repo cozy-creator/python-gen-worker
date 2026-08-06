@@ -102,6 +102,7 @@ from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
 
 from . import activity as activity_mod
 from . import torch_capability
+import argparse
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +479,7 @@ def extract(pipeline: Any, cfg: Any) -> ClosureReport:
     (whole-graph targets via the marker's originals; regional targets via
     the repeated-block forwards — same enumeration the in-memory compile
     probe trusts)."""
+    # CYCLE (see manifest_digest): compile_cache reaches back here via registry.
     from . import compile_cache as cc
 
     marker = getattr(pipeline, cc._MARKER_ATTR, None) or {}
@@ -1080,6 +1082,8 @@ def load_manifest(path: Path) -> Dict[str, Any]:
         data = json.loads(path.read_text())
         found = data.get(MANIFEST_KEY, data) if isinstance(data, dict) else None
     else:
+        # CYCLE: env_seal -> guard_closure -> compile_cache -> registry -> cell_key
+        # -> env_seal. This is the edge that must not be static.
         from . import compile_cache as cc
 
         found = None
@@ -1099,7 +1103,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """``python -m gen_worker.guard_closure <cell.tar.gz|manifest.json>...``
     — the runnable N-cold-pod closure check. Exit 0 closed+consistent,
     2 leaks, 3 divergence (or unreadable manifests)."""
-    import argparse
 
     parser = argparse.ArgumentParser(
         prog="gen_worker.guard_closure",

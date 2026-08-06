@@ -888,7 +888,7 @@ def _civitai_stream_one(
     on_bytes: Callable[[int], None],
 ) -> int:
 
-    import requests
+    import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
     headers: Dict[str, str] = {}
     if api_key and urlparse(url).hostname in _CIVITAI_AUTH_HOSTS:
@@ -960,7 +960,7 @@ def download_civitai(
             except Exception:
                 pass
 
-    import requests
+    import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
     local_paths: list[Path] = []
     for f in files:

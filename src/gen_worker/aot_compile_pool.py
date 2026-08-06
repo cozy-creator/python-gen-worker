@@ -67,6 +67,7 @@ from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
 from . import worker_goals
 from .worker_goals import WorkerGoals
 from .postmortem import cpu_quota_cores
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,6 @@ def _code_digest() -> str:
     compare the code each process is actually EXECUTING, not what its files say
     afterwards.
     """
-    import hashlib
 
     here = Path(__file__).resolve().parent
     digest = hashlib.sha256()

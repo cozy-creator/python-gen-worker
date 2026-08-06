@@ -100,6 +100,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("WorkerEntrypoint")
 
+# FILE-WIDE IMPORT RULE (the one sanctioned exception to top-of-file imports):
+# this module runs as TWO process roles. The control parent must stay a bare
+# interpreter — no torch, no credentials — for OOM-victim ordering (gw#640,
+# pgw#763), and the env `setdefault`s at the top are read once at torch import,
+# so anything that could reach torch stays inside a function body below.
+
 
 def _startup_payload(phase: str, status: str = "ok", **extra: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {

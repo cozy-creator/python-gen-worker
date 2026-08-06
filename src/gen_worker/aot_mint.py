@@ -111,6 +111,17 @@ from .compile_cache import (
     _resolve_target,
     toolchain_present,
 )
+from dataclasses import replace
+import inspect
+from .models.memory import is_cuda_oom
+from . import aot_inputs
+from . import aot_declaration as _decl
+from .api.export_contract import export_declaration
+from .models import lora_lifted
+from . import compile_cache as cc
+from . import env_seal
+from . import config, worker_credential
+from .fleet_cells import CellPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +174,6 @@ def raise_if_device_oom(exc: BaseException, where: str) -> None:
     every one of these sites was converting it to the verdict that guarantees
     it never will be.
     """
-    from .models.memory import is_cuda_oom
 
     if not is_cuda_oom(exc):
         return
@@ -888,7 +898,6 @@ def declared_fork(fork: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
 def with_adapter_arm(plan: Any, arm: bool) -> Any:
     """One mint plan pinned to an adapter arm (a fork coordinate, so it names
     the entry and lands in the class hash like every other fork)."""
-    from dataclasses import replace
 
     return replace(
         plan,
@@ -900,9 +909,6 @@ def with_adapter_arm(plan: Any, arm: bool) -> Any:
 def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     """The per-entry :class:`ExportSpec` one mint plan derives from the
     cell-level request."""
-    from dataclasses import replace
-
-    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
     specialization = dict(spec.specialization)
     specialization.setdefault(
@@ -979,8 +985,6 @@ def _export_entry(
     entry with no files: pgw#809's pool then compiles every entry K-wide out
     of process. Export must stay here and stay SERIAL — it runs against the
     one live pipeline, on the one card, inside the one branch-arm toggle."""
-    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
-    from . import aot_inputs
 
     espec = _entry_spec(spec, plan, decl)
     entry = _decl.plan_entry_name(plan)
@@ -1008,9 +1012,6 @@ def _export_entry(
     # and a branch-capable target whose lifting was not installed still fails
     # the lifted-input gate by name, never silently mints bucket-0.
     if espec.lora_bucket or espec.lifted_inputs or espec.lora_fqns:
-        from dataclasses import replace
-
-        from .models import lora_lifted
 
         branch_owners = {
             id(m) for m in lora_lifted.branch_targets(pipeline).values()}
@@ -1105,7 +1106,6 @@ def _export_entry(
     # package-side scan a false PASS. Free here, unsound there.
     if espec.lora_bucket or espec.lifted_inputs or espec.lora_fqns:
         from .api.errors import ValidationError
-        from .models import lora_lifted
 
         try:
             lora_lifted.assert_no_baked_adapter(
@@ -1162,10 +1162,6 @@ def bench_step(pipeline: Any, spec: ExportSpec) -> Callable[[], Any]:
     """
     import torch
 
-    from . import aot_declaration as _decl
-    from . import aot_inputs
-    from .api.export_contract import export_declaration
-
     decl = export_declaration(spec.family)
     if decl is None:
         raise MintRefused(
@@ -1196,14 +1192,6 @@ def bench_step(pipeline: Any, spec: ExportSpec) -> Callable[[], Any]:
     return step
 
 
-def replace_spec(spec: ExportSpec, **changes: Any) -> ExportSpec:
-    """``dataclasses.replace`` on an :class:`ExportSpec`, named so the
-    deferred-import dance does not have to repeat at every call site."""
-    from dataclasses import replace
-
-    return replace(spec, **changes)
-
-
 def adapter_arm_plans(
     plans: Sequence[Any], pipeline: Any, spec: ExportSpec,
 ) -> List[Tuple[Any, Optional[bool]]]:
@@ -1221,7 +1209,6 @@ def adapter_arm_plans(
     """
     if not int(spec.lora_bucket or 0):
         return [(plan, None) for plan in plans]
-    from .models import lora_lifted
 
     branch_owners = {
         id(m) for m in lora_lifted.branch_targets(pipeline).values()}
@@ -1269,8 +1256,6 @@ def declaration_module_gaps(
     Never raises — an unreadable declaration is itself a gap, and the caller
     is deciding whether to mint, not whether to serve.
     """
-    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
-    from .models import lora_lifted
 
     gaps: List[str] = []
     try:
@@ -1356,7 +1341,7 @@ def _disarm_branches(pipeline: Any) -> None:
     the zeroed branch containers on every leaf, and the trace would still emit
     the branch — the exact arithmetic-over-zeros this fork exists to delete.
     """
-    from .models import lora_lifted, w8a8_lora
+    from .models import w8a8_lora
 
     lora_lifted.remove_lifted_lora_execution_lanes(pipeline)
     w8a8_lora.disable_branch_execution_lanes(pipeline)
@@ -1386,7 +1371,6 @@ def _arm_branches(pipeline: Any, bucket: int) -> None:
     to serve or re-mint, and a pipeline left branchless would silently be a
     different graph family.
     """
-    from .models import lora_lifted
 
     lora_lifted.arm_lifted_lora_execution_lanes(pipeline, int(bucket or 0))
 
@@ -1741,7 +1725,6 @@ def _mint_cell(
     inspected, byte-compared (#699 double-mint), or produced on a box with no
     hub credentials.
     """
-    from .api.export_contract import export_declaration
 
     refusal = lifted_torch_gap(spec)
     if refusal:
@@ -1769,8 +1752,6 @@ def _mint_cell(
     timings = progress.timings
     t_mint = time.monotonic()
     progress.t_mint = t_mint
-
-    from . import aot_declaration as _decl  # deferred: aot_declaration imports us
 
     # pgw#846 (Paul's ruling): the exported cell is always WHOLE-GRAPH.
     # Regional (block-class) export is retired for production — a
@@ -2229,7 +2210,6 @@ def _entry_ingress_declaration(
         # The NEGATIVE half of a branchless class's contract, exactly as
         # `_gate_and_declare_entry` will pack it (pgw#790). Without it here the
         # gate would ask a question the serve path never asks.
-        from .models import lora_lifted
 
         meta["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
     contract = aot_serve.contract_from_meta(meta)
@@ -2513,7 +2493,6 @@ def _gate_and_declare_entry(
         # sees two admitting entries and refuses `entry_ambiguous` — and the
         # cell serves the whole attach lane eagerly. Declared, so the refusal
         # is the right one and it names the input.
-        from .models import lora_lifted
 
         block["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
     return block
@@ -2643,7 +2622,6 @@ def _emit_pool_event(
     pool = dict(table.get("pool") or {})
     if not pool:
         return
-    from . import activity as activity_mod
 
     workers = int(pool.get("entry_workers") or 1)
     binding = str(pool.get("binding") or "unknown")
@@ -2684,7 +2662,6 @@ def emit_phase_events(
     which entries the extra minutes are in, not just that there are more.
     """
     try:
-        from . import activity as activity_mod
 
         totals = dict(table.get("totals") or {})
         execution_lane = execution_lane or "plain"
@@ -2774,8 +2751,6 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
     and are unaffected). Per-entry graph facts live in the ``entries`` blocks
     (:func:`entry_graph_block`) and reach the key through the combined hash.
     """
-    from . import compile_cache as cc
-    from . import env_seal
 
     return {
         "weight_lane": str(spec.weight_lane or ""),
@@ -2855,7 +2830,6 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
     and the ``mode`` axis ``""`` — the whole-graph key is byte-identical to
     what it was before and after pgw#817, so nothing re-keys.
     """
-    from . import env_seal
 
     sm = str(meta.get("sm") or "")
     if not sm:
@@ -2970,7 +2944,6 @@ def _input_names(
     form can key on the same names whether a caller passed a tensor
     positionally or by keyword.
     """
-    import inspect
 
     forward = getattr(module, "forward", module)
     try:
@@ -3096,7 +3069,6 @@ class _CallableTarget:
     """
 
     def __init__(self, owner: Any, attr: str) -> None:
-        import inspect
 
         import torch.nn as nn
 
@@ -3304,7 +3276,6 @@ def compose_for_mint(
     is called (SDXL's ``added_cond_kwargs``, z-image's ragged lists, #729), and
     that knowledge must live with the family, not in the mint driver.
     """
-    from . import aot_inputs
 
     return aot_inputs.compose(model, spec, request)
 
@@ -3319,8 +3290,6 @@ def _publisher_from_settings() -> Any:
     from settings. Refuses by name when either is absent rather than attempting
     an unauthenticated publish.
     """
-    from . import config, worker_credential
-    from .fleet_cells import CellPublisher
 
     settings = config.current()
     base_url = str(

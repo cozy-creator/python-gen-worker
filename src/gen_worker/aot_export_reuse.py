@@ -59,6 +59,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from . import aot_mint, aot_wrapper_split
+from . import host_isa
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +214,6 @@ def _capture_codegen(
     measured property of one pinned toolchain, re-checked by
     `test_source_and_command_determine_the_object`.
     """
-    from . import aot_mint, aot_wrapper_split
     from torch._inductor import cpp_builder
 
     shutil.rmtree(cache_dir, ignore_errors=True)
@@ -292,8 +293,6 @@ _ARM_ENTRYPOINT = "gen_worker.aot_export_reuse"
 def _arm_child_main(job_path: str) -> int:
     """One gate arm, in its own process: codegen, stop, write digests."""
     import torch
-
-    from . import host_isa
 
     job = json.loads(Path(job_path).read_text())
     out = Path(job["out"])

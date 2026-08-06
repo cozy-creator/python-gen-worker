@@ -52,6 +52,8 @@ _PINNED_TOTAL_FRACTION = 0.5
 def _current_group() -> int:
     """Which execution group is asking. Import-local: staging is imported by
     the residency/loading core that topology itself imports."""
+    # CYCLE: topology -> residency -> staging; hoisting leaves REPLICATED
+    # unbound while residency is still initializing.
     from ..topology import current_device_group
 
     try:

@@ -57,6 +57,7 @@ from .w8a8_lora import (
     branch_targets,
     clear_branch_adapters,
 )
+import inspect
 
 logger = logging.getLogger(__name__)
 
@@ -327,7 +328,6 @@ class LiftedLoraBinding:
 
 def _positional_arity(forward: Any) -> int:
     """How many positional parameters the denoiser's OWN forward takes."""
-    import inspect
 
     try:
         params = inspect.signature(forward).parameters.values()
@@ -351,7 +351,6 @@ def _lifted_signature(forward: Any) -> Any:
     landed it in ``*args`` while the branch bound ``None`` and refused. So the
     call convention is stated in the signature instead of being implied.
     """
-    import inspect
 
     try:
         sig = inspect.signature(forward)

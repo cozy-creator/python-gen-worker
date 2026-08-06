@@ -44,6 +44,7 @@ from .loading import (
 )
 from .memory import place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
+from .. import activity as activity_mod
 
 __all__ = ["model_index_components"]  # re-export: single source in loading.py (gw#521)
 
@@ -260,6 +261,8 @@ def arm_aot(
     proven order). Rolled back on a failed arm so a dynamo fallthrough never
     traces a lifted forward it did not ask for.
     """
+    # Deferred: hoisting drags aot_serve + trt_engine onto the
+    # `import gen_worker` path (+39 modules).
     from .. import aot_serve, trt_engine
 
     if meta is None:
@@ -360,7 +363,9 @@ def gate_cell_numerics(pipe: Any, cfg: Any) -> bool:
       refused on its own `phase=unmeasurable`, because "nobody could ask" is
       not "it passed".
     """
-    from .. import activity as activity_mod, aot_serve, numerics_ladder
+    # Deferred: +38 modules on the `import gen_worker` path if hoisted.
+    from .. import aot_serve, numerics_ladder
+    # Deferred: +2 modules on the `import gen_worker` path if hoisted.
     from .. import numerics_probe
 
     family = str(getattr(cfg, "family", "") or "")
@@ -421,7 +426,6 @@ def _refuse_unmeasurable(family: str, reason: str, detail: str) -> bool:
     through a comparison that exists. An exception swallowed into a `True`
     here would rebuild the exact hole pgw#848 CP12 refused to ship.
     """
-    from .. import activity as activity_mod
 
     logger.error(
         "aot arm: REFUSING to arm %s — the numerics gate could not be run "
@@ -453,6 +457,7 @@ def enable_compiled(
     cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
     placement per request."""
     from .. import aot_serve, compile_cache, trt_engine  # lazy: keeps `import gen_worker` off the compile/pb stack
+    # Deferred: receipts pulls +151 modules onto the `import gen_worker` path.
     from .. import receipts
 
     # pgw#709: hub-delivered artifacts must carry a verifiable hub-signed
@@ -801,8 +806,10 @@ def _fetch_tensorhub_snapshot(
     covers the FULL-repo case — a components=-scoped ref must be fetched
     online at least once per component set.
     """
-    # lazy: cozy_snapshot/hub_client import requests; keeps `import gen_worker` light
+    # Deferred: cozy_snapshot pulls +305 modules onto the `import gen_worker`
+    # path — the single largest boot-cost import in the SDK.
     from .cozy_snapshot import ensure_snapshot_async, snapshot_dir_key
+    # Deferred: hub_client pulls +129 modules onto the `import gen_worker` path.
     from .hub_client import HubResolveError, resolve_repo
 
     canonical = thref.canonical()

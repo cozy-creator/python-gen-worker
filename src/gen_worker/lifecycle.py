@@ -33,6 +33,7 @@ from .transport import (
 from .api.binding import wire_ref
 # module import: tests monkeypatch worker_fatal.report_worker_error_async; stay late-bound.
 from . import worker_fatal
+from .topology import delivered_topology
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,6 @@ def _worst_group_free_vram_bytes() -> int:
     not being served, so reporting from it makes the reported and served
     topologies disagree.
     """
-    from .topology import delivered_topology
 
     groups = delivered_topology().all_groups()
     return int(min((g.free_vram_bytes() for g in groups), default=0))
@@ -181,7 +181,7 @@ def _warn_once_if_gpus_are_invisible() -> None:
     try:
         import torch
 
-        from .topology import ENV_VAR, delivered_topology
+        from .topology import ENV_VAR
 
         if os.environ.get(ENV_VAR):
             return

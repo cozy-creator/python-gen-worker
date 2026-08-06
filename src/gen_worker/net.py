@@ -81,6 +81,8 @@ def _hf_version() -> str:
 
 def _verify_httpx_floor() -> None:
     """Prove the floor on the session huggingface_hub will actually use."""
+    # 1.x-only module (see install_hf_http_timeouts): absent on 0.x, so a
+    # top-of-file import would make net.py unimportable there.
     from huggingface_hub.utils import _http as hf_http
 
     # Drop any client built before the factory was registered, so this checks
@@ -101,6 +103,8 @@ def _verify_httpx_floor() -> None:
 
 
 def _verify_requests_floor() -> None:
+    # Deferred with its 0.x sibling above: this runs only on the requests
+    # backend, and keeping the pair local keeps the 0.x path self-contained.
     from huggingface_hub.utils import get_session
 
     session = get_session()
@@ -120,6 +124,9 @@ def install_hf_http_timeouts() -> None:
         if _installed:
             return
         try:
+            # The version probe itself: `utils._http` exists only on 1.x, and its
+            # absence (ImportError) is what selects the 0.x branch below. Hoisting
+            # it would move the probe to module-import time and break 0.x outright.
             from huggingface_hub.utils import _http as hf_http
 
             default_factory = hf_http.default_client_factory
@@ -154,6 +161,9 @@ class _TimeoutSession(requests.Session):
 def _install_requests_backend() -> None:
     """huggingface_hub 0.x (requests): default a (connect, read) timeout on
     every Session request that would otherwise wait forever."""
+    # DEFERRED ON PURPOSE: `configure_http_backend` was DELETED in huggingface_hub
+    # 1.x (requests -> httpx). Top-of-file it is an ImportError that kills net.py
+    # — and with it every convert/ module — on the version the fleet actually runs.
     from huggingface_hub import configure_http_backend
 
     configure_http_backend(backend_factory=_TimeoutSession)
@@ -167,6 +177,9 @@ def hf() -> Any:
     anywhere else in src/, so the floor is structurally unskippable.
     Non-network imports (huggingface_hub.errors / .constants) stay direct."""
     install_hf_http_timeouts()
+    # Kept below the install call, not at module top: binding the module only
+    # after the floor is proven is what makes "reached through hf()" mean
+    # "reached with timeouts installed" (scripts/lint_http_timeouts.py).
     import huggingface_hub
 
     return huggingface_hub

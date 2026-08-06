@@ -27,6 +27,7 @@ Two ends, both here:
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from typing import Any, Dict
 
@@ -148,7 +149,7 @@ def test_the_declared_feed_binds_once_the_execution_lane_is_armed() -> None:
     the declaration to the module's own signature."""
     decl = _declare()
     pipe = _container_only_pipe()
-    spec = aot_mint.replace_spec(_spec(), target="unet")
+    spec = dataclasses.replace(_spec(), target="unet")
 
     with pytest.raises(aot_mint.MintRefused, match="are not parameters of"):
         aot_declaration.declared_inputs(pipe.unet, spec, decl)

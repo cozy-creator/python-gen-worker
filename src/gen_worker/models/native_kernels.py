@@ -53,6 +53,8 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 from .. import kernel_path
+from .svdq_fused import fused_self_check
+from .svdq_awq_packed import awq_packed_self_check
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +99,6 @@ def _fused_linear_self_check() -> Optional[str]:
     gap = _cuda_gap()
     if gap is not None:
         return gap
-    from .svdq_fused import fused_self_check
 
     return fused_self_check()
 
@@ -107,7 +108,6 @@ def _packed_modulation_self_check() -> Optional[str]:
     gap = _cuda_gap()
     if gap is not None:
         return gap
-    from .svdq_awq_packed import awq_packed_self_check
 
     return awq_packed_self_check()
 

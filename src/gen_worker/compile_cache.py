@@ -81,6 +81,8 @@ from .models.memory import low_vram_mode, place_pipeline, reconcile_resident_mod
 from .models.refs import parse_model_ref
 from .models.w8a8_lora import RANK_BUCKETS
 from .registry import CompileCell
+from .models import execution_lanes as lanespec
+from .models import loading as _loading
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +144,6 @@ def _cell_ref_identity(ref: str) -> str:
         return ""
     family, flavor = parse_cell_ref(ref)
     if family and flavor:
-        from . import cell_key
 
         if cell_key.is_key(flavor):
             return f"{family}#{flavor}"
@@ -2993,7 +2994,6 @@ def operator_eager_pin(pipeline: Any) -> bool:
                 pass
     if not (execution_lane_str and pinned):
         return False
-    from .models import execution_lanes as lanespec
 
     try:
         execution_lane = lanespec.parse_execution_lane(execution_lane_str)
@@ -3027,6 +3027,8 @@ def eager_tier_available(pipeline: Any) -> bool:
     an AOTI export or a TRT engine — because there the eager forward is gone
     until the artifact is unwrapped.
     """
+    # CYCLE: aot_serve and trt_engine both import AdoptError from this module;
+    # hoisting makes compile_cache import itself through them at boot.
     from . import aot_serve, trt_engine
 
     try:
@@ -3064,7 +3066,6 @@ def mandatory_serving(pipeline: Any) -> bool:
             except Exception:
                 pass
     if execution_lane_str:
-        from .models import execution_lanes as lanespec
 
         try:
             execution_lane = lanespec.parse_execution_lane(execution_lane_str)
@@ -3074,7 +3075,6 @@ def mandatory_serving(pipeline: Any) -> bool:
             return execution_lane.activation in (lanespec.ACT_W8A8, lanespec.ACT_W4A4)
     # Module-attr call (not the top-level import): tests monkeypatch
     # models.loading.pipeline_weight_lane; stay late-bound.
-    from .models import loading as _loading
 
     return _loading.pipeline_weight_lane(pipeline).startswith(
         ("w8a8", "w4a4"))
@@ -3511,7 +3511,6 @@ def enable(
                 # with the one shared brain? If so, a refusal below is by
                 # construction a selection/parity bug, never compatibility.
                 try:
-                    from . import cell_key
                     from .models.loading import (
                         pipeline_weight_lane as _pwl,
                     )
@@ -3569,7 +3568,6 @@ def enable(
                     f"self-requested cell {self_key} activated but armed "
                     "no compile target"
                 )
-            from .models.loading import pipeline_weight_lane
 
             quant_execution_lane = pipeline_weight_lane(pipeline)
             if quant_execution_lane.startswith(("w8a8", "w4a4")) and not armed:

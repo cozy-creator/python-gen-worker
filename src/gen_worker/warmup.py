@@ -96,6 +96,9 @@ from .api.decorators import EndpointDecl, NoWarmup
 from .api.errors import IllegalCombination
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 import inspect
+from .api.slot import resolve_slot
+from .api.binding import wire_ref
+from .request_context import RequestContext
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from .registry import EndpointSpec
@@ -811,7 +814,6 @@ def resolved_slots_kwargs(
     """
     if not spec.slots:
         return {"resolved_slots": {}, "slot_errors": {}, "root_slot": ""}
-    from .api.slot import resolve_slot
 
     run_models = list(run.models) if run is not None else []
     raw_defaults = {
@@ -892,8 +894,6 @@ def warm_context(
     ``ValueError: slot 'pipeline': no resolved model ref`` named a symptom
     and no mint.
     """
-    from .api.binding import wire_ref
-    from .request_context import RequestContext
 
     slot_kwargs = resolved_slots_kwargs(spec, None)
     if origin:

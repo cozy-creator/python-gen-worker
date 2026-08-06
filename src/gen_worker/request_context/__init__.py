@@ -167,6 +167,10 @@ from ._helpers import (
 from ._stream import _RequestOutputStream
 
 from typing import Generic, TypeVar
+from typing import cast as _cast
+from ..view import for_request as _view_for_request
+from ..callout import CalloutClient
+from ..callout import ChildRequest
 
 D = TypeVar("D", bound=GenerationDefaults)
 
@@ -489,7 +493,6 @@ class RequestContext(Generic[D]):
         instance mutation two concurrent requests corrupt each other
         through, and a module swap the compiled graph guards against.
         """
-        from ..view import for_request as _view_for_request
 
         objective = ""
         resolved = None
@@ -704,7 +707,6 @@ class RequestContext(Generic[D]):
     # -- th#826 call-out primitive ------------------------------------------
 
     def _callout_client(self) -> "CalloutClient":
-        from ..callout import CalloutClient
 
         if not self._file_api_base_url:
             from ..api.errors import ChildCallError
@@ -762,7 +764,6 @@ class RequestContext(Generic[D]):
         self.raise_if_cancelled()
         client = self._callout_client()
         request_id = client.submit(endpoint, function, payload, tag=tag, tier=tier)
-        from ..callout import ChildRequest
 
         handle = ChildRequest(client, request_id, wait_guard=self._child_call_wait)
         if not wait:
@@ -1000,6 +1001,8 @@ class RequestContext(Generic[D]):
         payload is not a signable media format; raises when signing is
         configured but fails (an unlabeled asset must not ship silently).
         """
+        # Deferred: content_credentials (c2pa) is +132 modules on the
+        # `import gen_worker` path.
         from .. import content_credentials
 
         with self._stages.stage("credential_stamp"):
@@ -1009,6 +1012,8 @@ class RequestContext(Generic[D]):
     def _c2pa_sign_file(self, ref: str, src: str) -> Optional[str]:
         """File variant of :meth:`_c2pa_sign_bytes` — returns a signed temp
         path (caller unlinks) or None when signing doesn't apply."""
+        # Deferred: content_credentials (c2pa) is +132 modules on the
+        # `import gen_worker` path.
         from .. import content_credentials
 
         with self._stages.stage("credential_stamp"):
@@ -1223,7 +1228,6 @@ class RequestContext(Generic[D]):
             logger.debug("save_video: metadata probe failed", exc_info=True)
         return asset
 
-
     def save_file(
         self,
         ref: str,
@@ -1318,7 +1322,6 @@ class RequestContext(Generic[D]):
     # were deleted as a hard cut. They were not used by any worker-author
     # endpoint; visibility flips belong in cozyctl / the tensorhub UI, not on
     # a per-request object.
-
 
 
 # ---------------------------------------------------------------------------
@@ -1573,7 +1576,6 @@ class _PublisherMixin:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
-        from typing import cast as _cast
 
         return _RequestOutputStream(
             ctx=_cast("RequestContext", self),
@@ -1600,7 +1602,10 @@ class _PublisherMixin:
         only thing that decides how a terminal miss classifies. See
         :data:`REF_ORIGIN_PAYLOAD`.
         """
+        # lazy: request_context is on the `import gen_worker` path, which the
+        # `python -m gen_worker.discover` build step must keep requests-free.
         import requests
+
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = self._get_worker_capability_token()
         # Normalize digest format for URL.
@@ -1718,6 +1723,7 @@ class _PublisherMixin:
         empty manifest, a silent hub, an exhausted download) is the
         platform's and still raises ``RuntimeError``.
         """
+        # Deferred: _datasets is +129 modules on the `import gen_worker` path.
         from ._datasets import (
             DatasetRefNotFound,
             download_entries,
@@ -1868,6 +1874,7 @@ class DatasetContext(_PublisherMixin, RequestContext):
         HTTP failure. The hub-API plumbing lives next to ``HubClient``
         (``gen_worker.convert.hub.publish_dataset_revision``).
         """
+        # Deferred: convert.hub is +267 modules on the `import gen_worker` path.
         from ..convert.hub import publish_dataset_revision
 
         return publish_dataset_revision(
