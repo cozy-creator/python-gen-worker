@@ -97,7 +97,7 @@ def _default_boot_record_path() -> Path:
 BOOT_RECORD_PATH = _default_boot_record_path()
 
 
-def _cgroup_nodes(
+def cgroup_nodes(
     root: Path = _CGROUP_ROOT, proc_self_cgroup: Path = _PROC_SELF_CGROUP
 ) -> list[Path]:
     """cgroup-v2 dirs from root down to this process's own cgroup."""
@@ -151,7 +151,7 @@ def _read_keyed(path: Path) -> Dict[str, int]:
 
 
 def _deepest(name: str) -> Optional[Path]:
-    for node in reversed(_cgroup_nodes()):
+    for node in reversed(cgroup_nodes()):
         p = node / name
         if p.exists():
             return p
@@ -190,6 +190,15 @@ def container_limits() -> Dict[str, Any]:
     facts["memory_swap_max_bytes"] = _read_int(swap_max) if swap_max else None
     ev = _deepest("memory.events")
     facts["memory_events"] = _read_keyed(ev) if ev else {}
+    # pgw#975: the one fact that decides whether the pgw#763 split can report at
+    # all. `memory.oom.group=1` makes the kernel kill the whole cgroup as a unit
+    # — parent included — and `mem_cgroup_get_oom_group()` is consulted on the
+    # GLOBAL oom path too, so `memory.max=unlimited` does not rule it out. We
+    # have defended against the scenario since gw#640 (see this module's header)
+    # without ever reading the value. Now every death and every boot record
+    # carries it, so a real pod settles it instead of an inference from a laptop.
+    oom_group = _deepest("memory.oom.group")
+    facts["memory_oom_group"] = _read_int(oom_group) if oom_group else None
     cpu_max = _deepest("cpu.max")
     raw_cpu = _read_text(cpu_max) if cpu_max else None
     facts["cpu_max"] = raw_cpu
@@ -318,6 +327,17 @@ def format_detail(
             _gb(limits.get("memory_current_bytes")),
             _gb(limits.get("memory_peak_bytes")),
             _gb(limits.get("memory_swap_max_bytes")),
+        )
+    )
+    # pgw#975: `1` means the kernel kills the cgroup as a unit and this very
+    # report is only reaching you because the parent happened to outlive it.
+    oom_group = limits.get("memory_oom_group")
+    head.append(
+        "memory.oom.group=%s%s"
+        % (
+            "unreadable" if oom_group is None else oom_group,
+            "  <-- GROUP KILL: the pgw#763 reporter dies with the child"
+            if oom_group == 1 else "",
         )
     )
     head.append(
