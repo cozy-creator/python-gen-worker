@@ -507,20 +507,18 @@ class InFlightJob(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
 
 class HelloAck(_message.Message):
-    __slots__ = ("protocol_version", "file_base_url", "keep", "resolutions", "desired_residency", "desired_state_command")
+    __slots__ = ("protocol_version", "file_base_url", "resolutions", "desired_residency", "desired_state_command")
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
     FILE_BASE_URL_FIELD_NUMBER: _ClassVar[int]
-    KEEP_FIELD_NUMBER: _ClassVar[int]
     RESOLUTIONS_FIELD_NUMBER: _ClassVar[int]
     DESIRED_RESIDENCY_FIELD_NUMBER: _ClassVar[int]
     DESIRED_STATE_COMMAND_FIELD_NUMBER: _ClassVar[int]
     protocol_version: ProtocolVersion
     file_base_url: str
-    keep: _containers.RepeatedScalarFieldContainer[str]
     resolutions: _containers.RepeatedCompositeFieldContainer[ModelResolution]
     desired_residency: DesiredResidency
     desired_state_command: DesiredStateCommand
-    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., file_base_url: _Optional[str] = ..., keep: _Optional[_Iterable[str]] = ..., resolutions: _Optional[_Iterable[_Union[ModelResolution, _Mapping]]] = ..., desired_residency: _Optional[_Union[DesiredResidency, _Mapping]] = ..., desired_state_command: _Optional[_Union[DesiredStateCommand, _Mapping]] = ...) -> None: ...
+    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., file_base_url: _Optional[str] = ..., resolutions: _Optional[_Iterable[_Union[ModelResolution, _Mapping]]] = ..., desired_residency: _Optional[_Union[DesiredResidency, _Mapping]] = ..., desired_state_command: _Optional[_Union[DesiredStateCommand, _Mapping]] = ...) -> None: ...
 
 class DesiredResidency(_message.Message):
     __slots__ = ("generation", "disk_refs", "hot", "snapshots", "release_id", "config_generation")

@@ -17,7 +17,7 @@
 #   that updates proto AND PROTO_DIGEST in only one of the two repos.
 #
 #   env:
-#     PROTO_PEER_REF=<branch>  peer branch to compare against (default: dev)
+#     PROTO_PEER_REF=<branch>  peer branch to compare against (default: master)
 #     PROTO_SKIP_PEER=1        run layer 1 only (offline local runs)
 set -euo pipefail
 
@@ -98,7 +98,9 @@ case "$proto_dir" in
     ;;
 esac
 
-peer_ref="${PROTO_PEER_REF:-dev}"
+# th#1621: was `dev`, which 404s since python-gen-worker deleted that branch on
+# 2026-08-05. The peer's integration branch IS `master` now.
+peer_ref="${PROTO_PEER_REF:-master}"
 peer_url="https://raw.githubusercontent.com/cozy-creator/python-gen-worker/${peer_ref}/proto/worker_scheduler.proto"
 peer_file="$(mktemp)"
 trap 'rm -f "$peer_file"' EXIT

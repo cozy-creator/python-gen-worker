@@ -35,7 +35,7 @@ class WorkerSchedulerStub:
             channel: A grpc.Channel.
         """
         self.Connect = channel.stream_stream(
-                '/cozy.scheduler.WorkerScheduler/Connect',
+                '/cozy.scheduler.v1.WorkerScheduler/Connect',
                 request_serializer=worker__scheduler__pb2.WorkerMessage.SerializeToString,
                 response_deserializer=worker__scheduler__pb2.SchedulerMessage.FromString,
                 _registered_method=True)
@@ -60,9 +60,9 @@ def add_WorkerSchedulerServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'cozy.scheduler.WorkerScheduler', rpc_method_handlers)
+            'cozy.scheduler.v1.WorkerScheduler', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('cozy.scheduler.WorkerScheduler', rpc_method_handlers)
+    server.add_registered_method_handlers('cozy.scheduler.v1.WorkerScheduler', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -83,7 +83,7 @@ class WorkerScheduler:
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/cozy.scheduler.WorkerScheduler/Connect',
+            '/cozy.scheduler.v1.WorkerScheduler/Connect',
             worker__scheduler__pb2.WorkerMessage.SerializeToString,
             worker__scheduler__pb2.SchedulerMessage.FromString,
             options,
