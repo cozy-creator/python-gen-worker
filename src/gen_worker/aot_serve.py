@@ -600,21 +600,41 @@ def artifact_metadata(
     return meta
 
 
-def verify(meta: Dict[str, Any], *, family: str = "") -> str:
-    """'' when the artifact matches this runtime, else the mismatch reason.
+#: The bounded stand-ins for the ``entries`` map in a publish DECLARE. The
+#: map itself is unbounded (per-class contracts + constant manifests, 98% of a
+#: real cell's envelope) and rides the ARTIFACT; the declare carries its digest
+#: and its size, which is what a pre-download filter can actually use.
+ENTRIES_DIGEST_KEY = "entries_digest"
+ENTRIES_COUNT_KEY = "entries_count"
 
-    An AOTI ``.pt2`` is a ``dlopen``-ed ELF built against one exact torch
-    C++ ABI on one compute capability — the FULL torch version must match,
-    not maj.min, or the load either fails obscurely or is undefined.
 
-    Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA +
-    contract hashes), each of them STRICTLY — an axis a cell is silent on is
-    refused by name, never skipped. Never on ``sku`` (pgw#765): a cell minted on an l4
-    and a cell minted on an rtx-4090 are the same sm_89 compiled code, and
-    refusing the cross-SKU adoption discards the whole point of the pgw#691
-    collapse, the FX inner-key shim, and the pgw#754 ISA clamp. The JIT lane
-    (``compile_cache.verify``) carried the identical hard sku pin and shed it
-    in the ck3 wave; this is the same defect on the exported lane.
+def entries_digest(entries: Mapping[str, Any]) -> str:
+    """16-hex canonical digest of an ``entries`` map — the bounded summary a
+    declare carries in place of the map (pgw#988)."""
+    blob = json.dumps(
+        dict(entries), sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def entries_summary(meta: Mapping[str, Any]) -> Dict[str, Any]:
+    """``{entries_digest, entries_count}`` for a full envelope, or ``{}`` when
+    it declares no entries map. The ONE place the summary is computed, so a
+    publisher and a consumer can never disagree about its shape."""
+    raw = meta.get("entries")
+    if not isinstance(raw, Mapping) or not raw:
+        return {}
+    return {ENTRIES_DIGEST_KEY: entries_digest(raw),
+            ENTRIES_COUNT_KEY: len(raw)}
+
+
+def _runtime_reason(meta: Mapping[str, Any], family: str) -> str:
+    """The half of the contract a BOUNDED declare can state: envelope format,
+    artifact kind, weights-baked refusal, the identity axes, host ISA, family.
+
+    Shared by :func:`verify_declared` (pre-download, over the hub listing) and
+    :func:`verify` (post-download, over the artifact's own metadata) so the two
+    can never drift into different answers about the same axis.
     """
     if int(meta.get("format") or 0) != ARTIFACT_FORMAT:
         return f"format {meta.get('format')!r} != {ARTIFACT_FORMAT}"
@@ -640,6 +660,67 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     want_fam = str(meta.get("family") or "")
     if family and want_fam and want_fam != family:
         return f"family {want_fam!r} != {family!r}"
+    return ""
+
+
+def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
+    """'' when a cell's DECLARE says this runtime could serve it, else the
+    reason. The pre-download filter (``aot_cells._candidates``).
+
+    pgw#988: a declare is a CONTROL-plane body and th#1645 bounds it, so the
+    ``entries`` map is not in it — only :func:`entries_summary`'s digest and
+    count are. This verifies exactly what a bounded declare can carry and no
+    more; the per-entry contract, its ``class_hash`` chain and the combined
+    graph hash are verified by :func:`verify` after the artifact is staged,
+    from the artifact's OWN metadata, where the map actually lives.
+
+    The two halves used to be one function run against the declare, so when
+    the publisher stopped carrying ``entries`` the consumer rejected every
+    published cell with ``malformed declared contract`` and the whole fleet
+    re-minted forever. One contract, two levels, named.
+
+    A cell SILENT on the summary is not refused here. This level is a
+    prefilter — its job is to avoid paying for a 200 MB download, and the
+    gate is :func:`verify`, which the arm path runs over the staged artifact
+    and which fails closed on every entry. A prefilter that refuses whatever
+    it does not recognise is exactly the failure pgw#988 was: it turns one
+    publisher-side omission into a fleet that adopts nothing. What the
+    summary IS present for is verified strictly.
+    """
+    reason = _runtime_reason(meta, family)
+    if reason:
+        return reason
+    count = meta.get(ENTRIES_COUNT_KEY)
+    if count is not None:
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            return f"declare states {ENTRIES_COUNT_KEY}={count!r}, not a positive count"
+    digest = meta.get(ENTRIES_DIGEST_KEY)
+    if digest is not None:
+        text = str(digest)
+        if len(text) != 16 or any(c not in "0123456789abcdef" for c in text):
+            return f"declare states {ENTRIES_DIGEST_KEY}={digest!r}, not a 16-hex digest"
+    return ""
+
+
+def verify(meta: Dict[str, Any], *, family: str = "") -> str:
+    """'' when the artifact matches this runtime, else the mismatch reason.
+
+    An AOTI ``.pt2`` is a ``dlopen``-ed ELF built against one exact torch
+    C++ ABI on one compute capability — the FULL torch version must match,
+    not maj.min, or the load either fails obscurely or is undefined.
+
+    Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA +
+    contract hashes), each of them STRICTLY — an axis a cell is silent on is
+    refused by name, never skipped. Never on ``sku`` (pgw#765): a cell minted on an l4
+    and a cell minted on an rtx-4090 are the same sm_89 compiled code, and
+    refusing the cross-SKU adoption discards the whole point of the pgw#691
+    collapse, the FX inner-key shim, and the pgw#754 ISA clamp. The JIT lane
+    (``compile_cache.verify``) carried the identical hard sku pin and shed it
+    in the ck3 wave; this is the same defect on the exported lane.
+    """
+    reason = _runtime_reason(meta, family)
+    if reason:
+        return reason
     try:
         entries = entries_from_meta(meta)
     except ValueError as exc:
@@ -2006,6 +2087,14 @@ def load_and_wrap(
     staged = stage_artifact(Path(artifact), family, cache_dir=cache_dir)
     try:
         meta = staged.metadata
+        # pgw#988: THE gate. `verify` runs here, over the artifact's OWN
+        # metadata, because that is the only place the entries map exists —
+        # the publish declare is bounded (th#1645) and carries a digest and a
+        # count instead. Every axis the prefilter could only sample is decided
+        # here, fail-closed, before a single package is dlopen'd.
+        reason = verify(dict(meta), family=family)
+        if reason:
+            raise AdoptError("contract_invalid", reason)
         try:
             entries = entries_from_meta(meta)
         except ValueError as exc:
@@ -2363,6 +2452,11 @@ __all__ = [
     "contract_from_meta",
     "enable",
     "entries_from_meta",
+    "entries_digest",
+    "entries_summary",
+    "verify_declared",
+    "ENTRIES_COUNT_KEY",
+    "ENTRIES_DIGEST_KEY",
     "execution_count",
     "proven_since",
     "find_artifact",

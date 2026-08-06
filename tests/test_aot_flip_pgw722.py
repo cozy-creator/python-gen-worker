@@ -1,9 +1,11 @@
-"""pgw#722 pilot flip seams (SDXL-AOT-PILOT-RUNBOOK.md §3) — F1/F2/F3.
+"""pgw#722 F1/F2/F3 seams — UNGATED since pgw#990.
 
-One flag (``Settings.compile_prefer_aot`` / ``GEN_WORKER_PREFER_AOT``),
-default OFF. The red half of every seam asserts flag-off behavior is
-IDENTICAL to today's: no discovery call, no lifted install, buffer-copy
-adapter attach. The green half asserts each seam's contract:
+There is no longer a flip switch. ``Settings.compile_prefer_aot`` /
+``GEN_WORKER_PREFER_AOT`` are DELETED: the release-scoped env plumbing that
+carried them silently un-armed adoption on every release rebuild, and three
+A1 attempts self-minted over a published cell because of it. Adoption is the
+path. The red half of every seam now asserts the gate cannot come back; the
+green half asserts each seam's contract:
 
 * **F1** — fetch-and-filter cell discovery: list the family repo's
   checkpoints, keep only receipt-shaped ``aot-inductor`` cells this
@@ -82,36 +84,32 @@ def _pilot_meta(key: str, *, execution_lane: str = "w8a8", bucket: int = 64,
 
 
 def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
-    gw_config.reload_for_test()
+    """pgw#990: there is nothing left to arm. Kept as a no-op so the green
+    seams below still read as "with adoption available" instead of being
+    rewritten into silence."""
 
 
 # ---------------------------------------------------------------------------
-# The flag
+# pgw#990 — the gate is gone, and must not come back
 # ---------------------------------------------------------------------------
 
 
-def test_flag_defaults_off() -> None:
-    assert gw_config.current().compile_prefer_aot is False
-    assert aot_cells.prefer_aot() is False
+def test_no_prefer_aot_gate_survives_anywhere() -> None:
+    """The whole hardcut, asserted at every surface it lived on.
 
-
-def test_flag_rides_typed_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    _flag_on(monkeypatch)
-    assert gw_config.current().compile_prefer_aot is True
-    assert aot_cells.prefer_aot() is True
-
-
-def test_flag_never_joins_the_env_seal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The flip switch selects an artifact; it must not change cell identity.
-    Flipping it must leave the env_seal digest byte-identical, or every
-    published JIT cell strands fleet-wide (the runbook's rollback contract)."""
+    It was not one flag: it was a Settings field, an env name, a loader
+    mapping, a module-level predicate and two call sites — and the release
+    that had to DECLARE the env name stopped declaring it, so adoption was
+    off fleet-wide from 2026-08-05 with nothing reporting it.
+    """
     from gen_worker import env_seal
+    from gen_worker.config import loader
 
+    assert not hasattr(gw_config.Settings(), "compile_prefer_aot")
+    assert not hasattr(aot_cells, "prefer_aot")
+    assert "prefer_aot" not in aot_cells.__all__
+    assert "GEN_WORKER_PREFER_AOT" not in loader._ENV_TO_FIELD
     assert "compile_prefer_aot" not in env_seal.CANONICAL_CONFIG
-    before = env_seal.seal_digest(env_seal.effective_seal())
-    _flag_on(monkeypatch)
-    assert env_seal.seal_digest(env_seal.effective_seal()) == before
 
 
 # ---------------------------------------------------------------------------
@@ -543,20 +541,32 @@ def _armable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cc, "has_compile_target", lambda pipe, cfg: True)
 
 
-def test_flag_off_never_discovers(
+def test_discovery_runs_with_no_flag_set(
     monkeypatch: pytest.MonkeyPatch, _armable: None,
 ) -> None:
-    """RED: flag off => byte-identical arming — discovery must not run."""
-    def _forbidden(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("discovery ran with the flag off")
+    """pgw#990 RED: a pod with NO adoption env at all must still ask.
 
-    monkeypatch.setattr(aot_cells, "discover", _forbidden)
+    The inverse of the test this replaces. Every serving pod between
+    2026-08-05 and attempt twenty-four passed the old assertion and was
+    thereby broken: it never called discover, self-minted for 75 minutes, and
+    published nothing anyone could see was wrong.
+    """
+    monkeypatch.delenv("GEN_WORKER_PREFER_AOT", raising=False)
+    gw_config.reload_for_test()
+    asked: List[str] = []
+
+    def _discover(pipe: Any, cfg: Any, **kwargs: Any) -> None:
+        asked.append(str(getattr(cfg, "family", "")))
+        return None
+
+    monkeypatch.setattr(aot_cells, "discover", _discover)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.hit())
     outcome = fleet_cells.enable_compiled(
         _FakePipe(), _Cfg(), publisher=_StubPublisher())  # type: ignore[arg-type]
-    assert outcome.armed and outcome.self_mint is None
+    assert asked == [FAMILY]
+    assert outcome.armed
 
 
 def test_flag_on_arms_discovered_cell_and_advertises_it(
@@ -697,15 +707,18 @@ def _arm_aot(
     return observed
 
 
-def test_f2_flag_off_never_installs_lifting(
+def test_f2_installs_lifting_with_no_flag_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RED: flag off => the module reaches aot_serve.enable UNLIFTED,
-    exactly as 0.76.x ships (a lifted artifact then refuses by name)."""
+    """pgw#990: the lifted install is decided by the artifact's own bucket,
+    never by a pod env. It used to be `bucket and compile_prefer_aot`, so an
+    adopted bucket-bearing cell reached aot_serve.enable UNLIFTED and refused
+    by name on exactly the pods the flag had not reached."""
+    monkeypatch.delenv("GEN_WORKER_PREFER_AOT", raising=False)
+    gw_config.reload_for_test()
     pipe = _Pipe()
     observed = _arm_aot(monkeypatch, pipe, enable_result=False)
-    assert observed == [False]
-    assert lora_lifted.lifted_binding(pipe.unet) is None
+    assert observed == [True]
 
 
 def test_f2_flag_on_installs_before_enable_in_proven_order(

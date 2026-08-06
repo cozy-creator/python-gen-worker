@@ -34,13 +34,13 @@ class _ContractCfg:
 _FACTS = cc.declared_contract_facts(_ContractCfg())
 _CONTRACT = ck.contract_digest(_FACTS)
 
-# ck5 recipe axes: version strings and image identity live in METADATA
-# only (observability); content digests carry the identity.
+# ck6 recipe axes: version strings and image identity live in METADATA only
+# (observability); content digests carry the identity. pgw#990 dropped
+# `code_closure` — a source-file content hash is a MEMO, never identity.
 _AXES = {
     "format": "2", "kind": "inductor", "family": "ltx-2.3", "lane": "w8a8",
     "sm": "sm_100", "contract": _CONTRACT,
     "env_seal": "aa00bb11cc22dd33", "toolchain": "bb11cc22dd33ee44",
-    "code_closure": "cc22dd33ee44ff55",
 }
 
 _RT = {
@@ -66,7 +66,7 @@ def test_key_deterministic_and_axis_sensitive():
     assert a.digest == ck.from_axes(dict(_AXES)).digest
     assert ck.is_key(a.digest)
     for axis in ("family", "lane", "sm", "contract", "env_seal",
-                 "toolchain", "code_closure"):
+                 "toolchain"):
         bumped = dict(_AXES, **{axis: _AXES[axis] + "x"})
         assert ck.from_axes(bumped).digest != a.digest, axis
 
@@ -112,15 +112,29 @@ def test_sku_is_not_identity(fixed_runtime):
     assert _meta("a40", sm="sm_89")["cell_key"] != a40["cell_key"]
 
 
-def test_key_scheme_ck5_old_keys_never_half_match():
+def test_key_scheme_ck6_old_keys_never_half_match():
     """Each axis-set change bumps the scheme (sku collapse -> ck3, env_seal
-    -> ck4, recipe identity -> ck5): an older digest is no longer a key at
-    all — a clean MISS, never a half-match."""
+    -> ck4, recipe identity -> ck5, code_closure OUT -> ck6): an older digest
+    can never collide with a current one — a clean MISS, never a half-match.
+
+    pgw#990: shape is scheme-AGNOSTIC, byte-identical to tensorhub's
+    `compilecache.IsCellKey`, for the reason th#1183 gives — pinning the
+    current scheme in the shape check turns every other-scheme cell into
+    `unreadable_cell_key`, which is a lie and a filter no axis justifies. An
+    old-scheme token IS key-shaped; it simply names no artifact this runtime
+    computes, and `mismatch` says so on the axes.
+    """
     key = ck.from_axes(_AXES).digest
-    assert key.startswith("ck5-")
-    for dead in ("ck2-", "ck3-", "ck4-"):
-        assert not ck.is_key(dead + "a" * 56)
-        assert "not a cell key" in ck.mismatch({}, dead + "a" * 56)
+    assert key.startswith("ck6-")
+    for dead in ("ck2-", "ck3-", "ck4-", "ck5-"):
+        token = dead + "a" * 56
+        assert ck.is_key(token), "an old-scheme token is still key-SHAPED"
+        assert token != key
+        # No artifact metadata => no computable key => a named miss, never ''.
+        assert ck.mismatch({}, token) != ""
+    assert not ck.is_key("ck-" + "a" * 56)      # no scheme digits
+    assert not ck.is_key("ck6-" + "a" * 55)     # wrong digest width
+    assert not ck.is_key("ck6-" + "A" * 56)     # uppercase hex
 
 
 def test_compute_matches_artifact_metadata_stamp(fixed_runtime):

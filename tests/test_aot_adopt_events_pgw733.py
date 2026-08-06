@@ -291,7 +291,6 @@ def _f1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     from gen_worker import compile_cache as cc
     from gen_worker import config as gw_config
 
-    monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
     gw_config.reload_for_test()
     monkeypatch.setattr(cc, "has_compile_target", lambda pipe, cfg: True)
     art = tmp_path / "cell.tar.gz"

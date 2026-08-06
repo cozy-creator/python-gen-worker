@@ -2878,8 +2878,6 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
         "contract": contract,
         "env_seal": env_seal.seal_digest(dict(meta.get(env_seal.SEAL_KEY) or {})),
         "toolchain": cell_key.facts_digest(dict(meta.get("toolchain") or {})),
-        "code_closure": cell_key.facts_digest(
-            dict(meta.get("code_closure") or {})),
     })
 
 

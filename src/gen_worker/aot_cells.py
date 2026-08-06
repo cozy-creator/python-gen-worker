@@ -1,4 +1,4 @@
-"""AOT cell discovery — the pgw#722 pilot's F1 seam (flag-gated, default OFF).
+"""AOT cell discovery — the F1 seam every serving pod runs (pgw#722, pgw#990).
 
 A serving pod cannot COMPUTE an exported cell's key: an ``aot-inductor``
 cell is STAMPED at mint with axes only the mint holds (its traced-graph
@@ -6,9 +6,9 @@ contract), so the runtime's ``cell_key.compute`` (kind="inductor") can
 never name it and the hub's worker-owned pull-by-key delivery (th#883)
 never lights it up. Published AOT cells are therefore provably dark.
 
-This module is the minimal pilot delivery: **fetch-and-filter**. At arm
-time (``fleet_cells.enable_compiled``, behind ``Settings.
-compile_prefer_aot``) the worker lists the family cell repo's checkpoints
+This module is **fetch-and-filter**. At arm time
+(``fleet_cells.enable_compiled``, unconditionally since pgw#990) the worker
+lists the family cell repo's checkpoints
 through the hub's existing catalog read API, filters for a cell THIS
 runtime can serve, downloads the artifact, and feeds it into the existing
 ``provision.enable_compiled`` HIT path — where the pgw#709 receipt gate
@@ -54,8 +54,6 @@ from . import aot_serve, cell_key
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .procsplit import broker
-from . import config
-from .config import Settings
 from .models.chunk_cas import sha256_file
 from .models.chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
@@ -79,15 +77,6 @@ EVENT = "aot_cell_discovery"
 # read grant on a platform cell repo; 401 covers a credential the hub could not
 # verify at all.
 _NOT_AUTHORIZED = (401, 403)
-
-
-def prefer_aot(settings: Optional[Settings] = None) -> bool:
-    """The pilot flip switch (typed pod-launch knob, default OFF).
-
-    Takes the `Settings` when the caller has them; otherwise reads the ones the
-    process entry installed (§1.18 — never the environment).
-    """
-    return bool((settings or config.current()).compile_prefer_aot)
 
 
 @dataclass(frozen=True)
@@ -191,7 +180,13 @@ def _candidates(
             logger.debug("aot-cells: %s filtered: no host_isa stamp", key)
             _reject(aot_serve.NO_HOST_ISA_STAMP)
             continue
-        reason = aot_serve.verify(meta, family=family)
+        # pgw#988: the DECLARE-level half. The hub listing body is a bounded
+        # control-plane declare — it does not carry the entries map — so this
+        # rules on what a declare can state and the artifact-level `verify`
+        # (aot_serve.arm, over the staged package's own metadata) rules on the
+        # rest. Verifying the full contract here rejected every cell published
+        # from c2e52f5f on.
+        reason = aot_serve.verify_declared(meta, family=family)
         if reason:
             logger.debug("aot-cells: %s filtered: %s", key, reason)
             # The verify reason is already a classified token — keep it, so a
@@ -481,5 +476,4 @@ __all__ = [
     "AdoptedAotCell",
     "EVENT",
     "discover",
-    "prefer_aot",
 ]

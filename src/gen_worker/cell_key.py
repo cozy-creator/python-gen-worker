@@ -35,14 +35,16 @@ exist for this runtime.
                   + the bundled ptxas/nvdisasm binaries. Replaces the old
                   torch/triton/cuda/diffusers/transformers VERSION axes —
                   content, never version strings
-    code_closure  CONTENT digest of the STATIC import-graph closure of the
-                  compile/composition code (compile_cache.
-                  static_code_closure): the source files that shape the
-                  traced graphs, found by pure static analysis from the
-                  compile entrypoints. Sound because of the root-imports
-                  convention (no runtime imports); the mint-time
-                  completeness gate makes that convention a hard check.
-                  Replaces the old gen_worker version axis
+
+ck6 (pgw#990) DROPS ``code_closure`` from the key. It is still RECORDED on
+every artifact and still drives ``compile_cache``'s local re-trace memo, but
+it is not identity: Paul's final ruling is that identity is the COMPUTATION
+(traced graph x sm x toolchain x env_seal) and "code hashes are a memo, never
+identity". A 147-file content hash made every wheel release re-key every cell
+in the fleet for edits that could not change a traced graph — 0.93.0 -> 0.93.1
+moved the sdxl key on three plumbing files, and 0.93.2's own gate deletion
+would have moved it again. Cells are stranded by SCHEME here, by name, once,
+instead of silently on every release.
 
 Axes deliberately NOT in the key, recorded in metadata for observability
 and runtime compat checks (``compile_cache.verify``) only: ``sku`` (pgw#691
@@ -72,7 +74,7 @@ from . import env_seal
 # digest — toolchain + code_closure content joined; every version axis
 # left. ck5 is FINAL: new identity facts ride the content digests (seal_v /
 # closure/toolchain values), never new axes.
-KEY_SCHEME = "ck5"
+KEY_SCHEME = "ck6"
 _PREFIX = KEY_SCHEME + "-"
 # The key digest doubles as the store flavor token, whose shared grammar
 # (th#597 C5: [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64
@@ -82,7 +84,7 @@ _DIGEST_HEX = 56
 # Axes that must be non-empty for a computable key: a runtime that cannot
 # state them has no cell identity (CPU-only build, failed CUDA probe).
 _REQUIRED = ("format", "kind", "family", "sm", "contract", "env_seal",
-             "toolchain", "code_closure")
+             "toolchain")
 # Axes that may be legitimately absent ("" => omitted from canonical form):
 # lane "" is the plain-resident graph family; mode "" is whole-graph
 # compilation ("regional" per-block cells are different artifacts, ie#381).
@@ -115,12 +117,31 @@ class CellKey:
 
 
 def is_key(value: str) -> bool:
-    """True when ``value`` is a cell-key digest string."""
+    """True when ``value`` has cell-key SHAPE: ``ck`` + 1-2 scheme digits +
+    ``-`` + 56 lowercase hex.
+
+    Scheme-AGNOSTIC, byte-for-byte the grammar tensorhub's
+    ``compilecache.IsCellKey`` enforces, and for the same reason it gives
+    (th#1183): pinning the current scheme here turns every other-scheme cell
+    into ``unreadable_cell_key``, which is both a lie and a filter no axis
+    justifies. A cell of an older scheme is admitted to the candidate list and
+    then ruled on by the axes that actually decide whether this runtime can
+    execute it — the artifact contract, the identity axes and the numerics
+    gate — not by the label on it.
+    """
     v = str(value or "")
+    rest = v[2:] if v.startswith("ck") else ""
+    if not rest:
+        return False
+    digits = 0
+    while digits < len(rest) and rest[digits].isdigit():
+        digits += 1
+    if not 1 <= digits <= 2 or digits >= len(rest) or rest[digits] != "-":
+        return False
+    hexpart = rest[digits + 1:]
     return (
-        v.startswith(_PREFIX)
-        and len(v) == len(_PREFIX) + _DIGEST_HEX
-        and all(c in "0123456789abcdef" for c in v[len(_PREFIX):])
+        len(hexpart) == _DIGEST_HEX
+        and all(c in "0123456789abcdef" for c in hexpart)
     )
 
 
@@ -209,8 +230,6 @@ def compute(
         "contract": str(contract or ""),
         "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
         "toolchain": facts_digest(dict(cc.toolchain_digest())),
-        "code_closure": facts_digest(
-            dict(cc.static_code_closure(tuple(closure_roots)))),
     })
 
 
@@ -254,13 +273,9 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
             "execution environment is unproven"
         )
     toolchain = meta.get("toolchain")
-    closure = meta.get("code_closure")
-    if not isinstance(toolchain, dict) or not toolchain \
-            or not isinstance(closure, dict) or not closure:
+    if not isinstance(toolchain, dict) or not toolchain:
         raise CellKeyError(
-            "artifact records no toolchain/code_closure blocks (pre-ck5 "
-            "cell); no recipe identity"
-        )
+            "artifact records no toolchain block; no recipe identity")
     return from_axes({
         "format": str(meta.get("format") or ""),
         "kind": "inductor",
@@ -274,7 +289,6 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         "contract": contract_digest(contract_facts),
         "env_seal": env_seal.seal_digest(seal),
         "toolchain": facts_digest(toolchain),
-        "code_closure": facts_digest(closure),
     })
 
 
