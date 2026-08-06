@@ -43,7 +43,7 @@ import pytest
 
 from gen_worker import fleet_cells, mint_child, mint_delegate
 from gen_worker import mint_process as mp
-from gen_worker.api.binding import wire_ref
+from gen_worker.api.binding import ModelRef, wire_ref
 from gen_worker.cli import run as cli_run
 from gen_worker.executor import _BackgroundMint
 from gen_worker.models import provision
@@ -248,27 +248,27 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
                         text_lens=()),
         capture_dir=tmp_path / "capture", target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path, recipe="aot")
-    overrides = {"pipeline": {"vae": "/cas/snapshots/sha256:beef"}}
+    resolved = mp.MintSlot(
+        ref=ModelRef(source="tensorhub", path="harness/composed", tag="prod"),
+        path="/cas/snapshots/sha256:cafe__xdeadbeef",
+        component_paths={"vae": "/cas/snapshots/sha256:beef"})
 
     bg = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=object(), snapshots=None,
         pendings={}, pipes={}, selections={},
         modules=("app",),
-        snapshot_paths={"pipeline": "/cas/snapshots/sha256:cafe__xdeadbeef"},
-        component_paths=overrides,
+        slots={"pipeline": resolved},
     )
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="gen",
-        modules=bg.modules, snapshots=dict(bg.snapshot_paths),
-        component_paths={k: dict(v) for k, v in bg.component_paths.items()},
+        modules=bg.modules, slots=dict(bg.slots),
         execution_lane="fp8-w8a16", device=0)
     request = mint_delegate.build_request(
         task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
 
     wire = msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
-    assert wire.component_paths == overrides, (
+    assert wire.slots == {"pipeline": resolved}, (
         "the child cannot rediscover an override it was never told about")
-    assert wire.snapshots == dict(bg.snapshot_paths)
 
 
 def test_the_executor_records_what_it_resolved() -> None:
@@ -277,7 +277,7 @@ def test_the_executor_records_what_it_resolved() -> None:
     bg = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=object(), snapshots=None,
         pendings={}, pipes={}, selections={})
-    assert bg.component_paths == {}
+    assert bg.slots == {}
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +293,10 @@ def test_a_narrowed_tree_with_no_override_refuses_by_name(
     single weight is read."""
     base, _vae = trees
     with pytest.raises(mint_child.MintChildRefused) as exc:
-        mint_child.assert_composable({"pipeline": str(base)}, {})
+        mint_child.assert_composable({"pipeline": mp.MintSlot(
+            ref=ModelRef(source="tensorhub", path="harness/composed",
+                         tag="prod"),
+            path=str(base))})
     assert "pipeline" in str(exc.value)
     assert "override-narrowed" in str(exc.value)
     assert base.name in str(exc.value)
@@ -308,7 +311,10 @@ def test_a_narrowed_tree_with_no_override_refuses_by_name(
         report=str(tmp_path / mp.REPORT_NAME),
         cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),
-        snapshots={"pipeline": str(base)},
+        slots={"pipeline": mp.MintSlot(
+            ref=ModelRef(source="tensorhub", path="harness/composed",
+                         tag="prod"),
+            path=str(base))},
     )
     with pytest.raises(mint_child.MintChildRefused):
         mint_child.mint(request)
@@ -319,18 +325,23 @@ def test_a_narrowed_tree_with_no_override_refuses_by_name(
 def test_a_complete_tree_never_demands_overrides(tmp_path: Path) -> None:
     """The guard keys on the narrowing marker our own materializer writes —
     a bare-digest (complete) tree is loadable alone and must stay that way."""
+    ref = ModelRef(source="tensorhub", path="harness/composed", tag="prod")
+
+    def _one(key: str, **comps: str) -> Dict[str, mp.MintSlot]:
+        return {"pipeline": mp.MintSlot(
+            ref=ref, path=f"/cas/{key}", component_paths=dict(comps))}
+
     complete = snapshot_dir_key("sha256:cafe")
     subset = snapshot_dir_key("sha256:cafe", components=("vae",))
     narrowed = snapshot_dir_key("sha256:cafe", exclude=("vae",))
     assert complete == "sha256:cafe"
-    mint_child.assert_composable({"pipeline": f"/cas/{complete}"}, {})
+    mint_child.assert_composable(_one(complete))
     # A component-SCOPED subset is what the caller asked to fetch; loadable.
-    mint_child.assert_composable({"pipeline": f"/cas/{subset}"}, {})
+    mint_child.assert_composable(_one(subset))
     with pytest.raises(mint_child.MintChildRefused):
-        mint_child.assert_composable({"pipeline": f"/cas/{narrowed}"}, {})
+        mint_child.assert_composable(_one(narrowed))
     # With the override in hand, the same tree is composable.
-    mint_child.assert_composable(
-        {"pipeline": f"/cas/{narrowed}"}, {"pipeline": {"vae": "/cas/x"}})
+    mint_child.assert_composable(_one(narrowed, vae="/cas/x"))
 
 
 # ---------------------------------------------------------------------------

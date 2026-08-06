@@ -130,7 +130,12 @@ def _request(
     tree: Path, binding: Any, tmp_path: Path, *, function: str = "catalog-generate",
 ) -> mp.MintRequest:
     """The child's request, built through the REAL parent chain and
-    round-tripped through msgspec — the boundary IS a file."""
+    round-tripped through msgspec — the boundary IS a file.
+
+    ``binding=None`` no longer means "a path with no ref" — pgw#974 made that
+    unrepresentable. It now means the parent resolved this slot not at all, so
+    the slot is ABSENT, which is the only shape a wiring gap can still take.
+    """
     pending = SimpleNamespace(
         family="pgw969", cell_key="ck5-catalog", recipe="dynamo",
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
@@ -143,14 +148,13 @@ def _request(
         spec=SimpleNamespace(name=function), instance=object(), snapshots=None,
         pendings={}, pipes={}, selections={},
         modules=(CATALOG_MODULE,),
-        snapshot_paths={"pipeline": str(tree)},
-        slot_bindings=({"pipeline": binding} if binding is not None else {}),
+        slots=({"pipeline": mp.MintSlot(ref=binding, path=str(tree))}
+               if binding is not None else {}),
     )
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function=function,
-        modules=bg.modules, snapshots=dict(bg.snapshot_paths),
-        slot_bindings=dict(bg.slot_bindings),
-        component_paths={}, execution_lane="w8a8-lora64", device=-1)
+        modules=bg.modules, slots=dict(bg.slots),
+        execution_lane="w8a8-lora64", device=-1)
     request = mint_delegate.build_request(
         task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
@@ -162,7 +166,7 @@ def _child_specs(request: mp.MintRequest) -> Tuple[Any, List[Any]]:
     bindings, and refuse if they cannot resolve."""
     specs = registry.collect_endpoints(list(request.modules))
     chosen, siblings = mint_child.select_specs(specs, request.function)
-    mint_child.bind_slots(siblings, request.slot_bindings)
+    mint_child.bind_slots(siblings, request.slots)
     mint_child.assert_slots_resolvable(siblings, request)
     return chosen, siblings
 
@@ -223,7 +227,8 @@ def test_the_child_warms_the_checkpoint_THE_PARENT_SERVED(
 
     instance = chosen.cls()
     loaded = cli_run.run_setup(
-        instance, dict(request.snapshots), arm_compile=False,
+        instance, {s: r.path for s, r in request.slots.items()},
+        arm_compile=False,
         return_loaded=True) or {}
     assert loaded["pipeline"] == str(tree)
 
@@ -267,7 +272,7 @@ def test_the_binding_crosses_the_wire_whole(
         binding, flavor="fp8", storage_dtype="fp8",
         component_overrides=(("vae", "harness/override-vae:prod"),))
     request = _request(tree, binding, tmp_path)
-    assert request.slot_bindings["pipeline"] == binding
+    assert request.slots["pipeline"].ref == binding
     _chosen, siblings = _child_specs(request)
     assert siblings[0].models["pipeline"].storage_dtype == "fp8"
     assert siblings[0].models["pipeline"].component_overrides == (
@@ -344,8 +349,9 @@ def test_a_bound_slot_that_still_fails_names_the_divergence(
         tmp_path, ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
         tmp_path)
     request = msgspec.structs.replace(
-        request, slot_bindings={"nonexistent-slot": ModelRef(
-            source="tensorhub", path="harness/pick", tag="prod")})
+        request, slots={"nonexistent-slot": mp.MintSlot(
+            ref=ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
+            path=str(tmp_path))})
     with pytest.raises(mint_child.MintChildRefused) as exc:
         _child_specs(request)
     assert "sent no resolved binding" in str(exc.value)
@@ -374,7 +380,8 @@ def test_a_code_default_never_stands_in_for_the_parents_pick(
     chosen, siblings = mint_child.select_specs(specs, "juggle-echo")
     assert wire_ref(chosen.models["pipeline"]) == declared
 
-    mint_child.bind_slots(siblings, {"pipeline": picked})
+    mint_child.bind_slots(siblings, {"pipeline": mp.MintSlot(
+        ref=picked, path=str(tmp_path))})
     with __import__("tempfile").TemporaryDirectory() as tmp:
         ctx = warmup.warm_context(
             chosen, request_id="mint-child-x", local_output_dir=tmp)
@@ -392,7 +399,7 @@ def test_the_default_is_empty_not_absent() -> None:
     bg = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=object(), snapshots=None,
         pendings={}, pipes={}, selections={})
-    assert bg.slot_bindings == {}
+    assert bg.slots == {}
 
 
 def test_the_paths_and_the_bindings_travel_together(
@@ -403,5 +410,58 @@ def test_the_paths_and_the_bindings_travel_together(
     without the other is the shape this issue exists to make impossible."""
     tree, binding = served
     request = _request(tree, binding, tmp_path)
-    assert set(request.snapshots) == set(request.slot_bindings)
-    assert wire_ref(request.slot_bindings["pipeline"]) == PICK_REF
+    assert wire_ref(request.slots["pipeline"].ref) == PICK_REF
+    assert request.slots["pipeline"].path == str(tree)
+
+
+# ---------------------------------------------------------------------------
+# 6. pgw#974: the assertion above is now a TYPE, and the pod's request cannot
+#    be written down at all
+# ---------------------------------------------------------------------------
+
+
+def test_a_slot_with_bytes_and_no_identity_cannot_be_constructed() -> None:
+    """The pod's request, at the constructor.
+
+    pgw#969 made the binding travel; it could not stop a producer from
+    forgetting it, because ``snapshots`` and ``slot_bindings`` were two fields
+    with two defaults. ``ref`` and ``path`` now have none.
+    """
+    with pytest.raises(TypeError):
+        mp.MintSlot(path="/cas/snapshots/sha256:cafe")   # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        mp.MintSlot(ref=ModelRef(                        # type: ignore[call-arg]
+            source="tensorhub", path="harness/pick", tag="prod"))
+    # ...and the degenerate spelling of the same lie.
+    with pytest.raises(ValueError):
+        mp.MintSlot(
+            ref=ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
+            path="")
+
+
+def test_the_pods_wire_no_longer_decodes(
+    served: Tuple[Path, ModelRef], tmp_path: Path,
+) -> None:
+    """The decisive negative, on a REAL request off the real producer chain.
+
+    The boundary is a JSON file the child decodes, so the constructor above is
+    only half the guard: strip the identity out of a request the parent
+    actually built and the file must be REFUSED, not accepted as a complete
+    resolution the way the two L40S pods' was.
+    """
+    tree, binding = served
+    doc = msgspec.json.decode(msgspec.json.encode(_request(tree, binding, tmp_path)))
+    assert doc["slots"]["pipeline"]["path"] == str(tree)
+
+    del doc["slots"]["pipeline"]["ref"]
+    with pytest.raises(msgspec.ValidationError) as exc:
+        msgspec.json.decode(msgspec.json.encode(doc), type=mp.MintRequest)
+    assert "ref" in str(exc.value)
+
+    # The whole slot may still be absent — that is a resolution the parent did
+    # not make, and `assert_slots_resolvable` is what refuses it, by name.
+    doc["slots"] = {}
+    empty = msgspec.json.decode(msgspec.json.encode(doc), type=mp.MintRequest)
+    assert empty.slots == {}
+    with pytest.raises(mint_child.MintChildRefused):
+        _child_specs(empty)

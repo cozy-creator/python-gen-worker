@@ -43,6 +43,7 @@ from . import worker_credential
 from . import mint_goal as mint_goal_mod
 from . import worker_goals
 from .api.binding import ModelRef, wire_ref
+from .mint_process import MintSlot
 from .api.errors import (
     ArtifactTransferError,
     CanceledError,
@@ -2812,25 +2813,15 @@ class _BackgroundMint:
     seed_ctx: Optional[Any] = None
     # pgw#784: the two facts a DELEGATED mint's child process needs and cannot
     # rediscover for itself — the endpoint module(s) to walk (the child re-runs
-    # discovery in a fresh interpreter) and the ALREADY-materialized local
-    # snapshot path per setup slot. The paths matter: a mint is compute, and a
-    # mint process that could download is a mint process that can stall on a
-    # lemon host (pgw#786).
+    # discovery in a fresh interpreter) and the parent's own RESOLUTION of each
+    # setup slot: identity, already-materialized local tree, and pgw#617
+    # composition, in ONE value per slot (pgw#974, `mint_process.MintSlot`).
+    # The paths matter because a mint is compute, and a mint process that could
+    # download is one that can stall on a lemon host (pgw#786); the refs matter
+    # because `ctx.slots` is built from bindings and the child rediscovers none
+    # for a hub-catalog slot (pgw#969).
     modules: Tuple[str, ...] = ()
-    snapshot_paths: Dict[str, str] = dc_field(default_factory=dict)
-    # pgw#816: and the THIRD fact, which the first delegated mint in
-    # production died without — the resolved component overrides (pgw#617),
-    # slot -> comp -> local tree. th#1330 B2 excludes an overridden
-    # component's files from the base fetch, so `snapshot_paths` alone names
-    # a narrowed tree (`<digest>__x<fp>`) that no loader can open.
-    component_paths: Dict[str, Dict[str, str]] = dc_field(default_factory=dict)
-    # pgw#969: and the FOURTH — slot -> the RESOLVED ModelRef behind that
-    # path. `snapshot_paths` says which bytes to load; `ctx.slots` is built
-    # from bindings, and the child re-runs discovery, so a hub-catalog slot
-    # (no code `default_checkpoint=`) rediscovers NOTHING. Its warm request
-    # reached the endpoint's own handler unbound and died at
-    # `ctx.slots["pipeline"]` 0.0s into `warmup_forward`.
-    slot_bindings: Dict[str, ModelRef] = dc_field(default_factory=dict)
+    slots: Dict[str, MintSlot] = dc_field(default_factory=dict)
     # th#1299: WHY this mint was asked to stop. The abort event used to report
     # "(adopt-on-arm / vacate / shutdown)" — three unrelated causes in one
     # string — so a mint that died could not be told from a mint that was
@@ -6737,14 +6728,13 @@ class Executor:
             slot: wire_ref(spec.models[slot]) for slot in setup_slots
         }
         slot_identities: Dict[str, _ResidencyIdentity] = {}
-        paths: Dict[str, str] = {}
-        # pgw#969: the BINDING behind each of those paths, kept in step with
-        # `paths` by construction — the two are one resolution, and a mint
-        # child handed only the paths cannot say which checkpoint they are.
-        slot_bindings: Dict[str, ModelRef] = {}
-        # pgw#617: component-override materializations, slot -> comp -> local
-        # path, plus per-override-ref snapshot digests (identity facts).
-        component_paths: Dict[str, Dict[str, str]] = {}
+        # pgw#974: ONE resolution per slot — the binding, the tree its bytes
+        # were materialized into, and the pgw#617 component overrides that
+        # complete the composition. Written by a single statement per slot, so
+        # the three cannot drift apart or arrive without one another; the
+        # plain-path and plain-override views the local loaders take are
+        # DERIVED from it below, never maintained beside it.
+        resolved_slots: Dict[str, MintSlot] = {}
         override_digests: Dict[str, str] = {}
         self._intent_transition(
             intent_id,
@@ -6757,9 +6747,8 @@ class Executor:
             snap = (snapshots or {}).get(ref)
             materialized = await self.store._materialize_local(
                 ref, snap, binding=binding)
-            paths[slot] = str(materialized.path)
-            slot_bindings[slot] = binding
             slot_identities[slot] = materialized.identity
+            comps: Dict[str, str] = {}
             for comp, comp_ref in _component_overrides(binding):
                 try:
                     comp_binding = self._hub_binding(comp_ref)
@@ -6771,9 +6760,17 @@ class Executor:
                 comp_mat = await self.store._materialize_local(
                     comp_ref, (snapshots or {}).get(comp_ref),
                     binding=comp_binding)
-                component_paths.setdefault(slot, {})[comp] = str(comp_mat.path)
+                comps[comp] = str(comp_mat.path)
                 if comp_mat.identity[0]:
                     override_digests[comp_ref] = comp_mat.identity[0]
+            resolved_slots[slot] = MintSlot(
+                ref=binding, path=str(materialized.path),
+                component_paths=comps)
+        paths: Dict[str, str] = {
+            slot: res.path for slot, res in resolved_slots.items()}
+        component_paths: Dict[str, Dict[str, str]] = {
+            slot: dict(res.component_paths)
+            for slot, res in resolved_slots.items() if res.component_paths}
         eager_only = self._eager_only_reason()
         if eager_only and spec.compile is not None:
             logger.info("%s: %s", spec.name, eager_only)
@@ -7014,12 +7011,7 @@ class Executor:
                     pipes=mint_pipes,
                     selections=mint_selections,
                     modules=_mint_modules(spec),
-                    snapshot_paths=dict(paths),
-                    slot_bindings=dict(slot_bindings),
-                    component_paths={
-                        slot: dict(comps)
-                        for slot, comps in component_paths.items() if comps
-                    },
+                    slots=dict(resolved_slots),
                 )
                 logger.info(
                     "eager-first boot for %s (pgw#671): READY at eager tier "
@@ -10076,12 +10068,7 @@ class Executor:
                     pipe=pipe,
                     function=spec.name,
                     modules=bg.modules or _mint_modules(spec),
-                    snapshots=dict(bg.snapshot_paths),
-                    slot_bindings=dict(bg.slot_bindings),
-                    component_paths={
-                        slot: dict(comps)
-                        for slot, comps in bg.component_paths.items()
-                    },
+                    slots=dict(bg.slots),
                     weight_lane=compile_cache.cell_base_execution_lane(pipe),
                     execution_lane=self._served_execution_lane(spec),
                     configs={spec.name: self._effective_config(spec)},

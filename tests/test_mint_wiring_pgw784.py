@@ -34,6 +34,7 @@ import pytest
 
 import gen_worker.executor as executor_mod
 from gen_worker import fleet_cells, mint_budget, mint_delegate
+from gen_worker.api.binding import ModelRef
 from gen_worker import mint_process as mp
 from gen_worker.executor import (
     Executor,
@@ -51,6 +52,13 @@ from gen_worker.cell_adopt import AdoptOutcome
 
 GIB = 1 << 30
 STUB_MODULE = "harness.mint_child_stub"
+SDXL_REF = ModelRef(source="tensorhub", path="harness/sdxl", tag="prod")
+
+
+def _slot(path: str) -> mp.MintSlot:
+    """One resolved slot. ``ref`` has no default (pgw#974), so a test cannot
+    describe bytes without saying whose they are either."""
+    return mp.MintSlot(ref=SDXL_REF, path=path)
 
 
 class _Pipe:
@@ -156,20 +164,21 @@ def test_mint_modules_derives_from_the_declaring_module() -> None:
     assert _mint_modules(SimpleNamespace(module="")) == ()
 
 
-def test_background_mint_carries_the_modules_and_snapshot_paths(
+def test_background_mint_carries_the_modules_and_the_resolution(
     tmp_path: Path,
 ) -> None:
     bg = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=None, snapshots=None,
         pendings={}, pipes={}, selections={},
-        modules=("app",), snapshot_paths={"pipeline": "/cas/sdxl"})
+        modules=("app",), slots={"pipeline": _slot("/cas/sdxl")})
     assert bg.modules == ("app",)
-    assert bg.snapshot_paths == {"pipeline": "/cas/sdxl"}
+    assert bg.slots["pipeline"].path == "/cas/sdxl"
+    assert bg.slots["pipeline"].ref == SDXL_REF
     # Defaulted, so the in-process route is untouched by their existence.
     plain = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=None, snapshots=None,
         pendings={}, pipes={}, selections={})
-    assert plain.modules == () and plain.snapshot_paths == {}
+    assert plain.modules == () and plain.slots == {}
 
 
 # ------------------------------------- 3 + 4. the route and its outcomes
@@ -214,7 +223,7 @@ def _wired(
         pendings={id(p): pending for p in objs},
         pipes={id(p): p for p in objs}, selections={},
         modules=("harness.toy_endpoints",),
-        snapshot_paths={"pipeline": str(tmp_path / "snap")})
+        slots={"pipeline": _slot(str(tmp_path / "snap"))})
     monkeypatch.setattr(ex, "_served_execution_lane", lambda s, instructed="": "fp8-w8a16")
     monkeypatch.setattr(ex, "_effective_config", lambda s, run=None: {"steps": 28})
     monkeypatch.setattr(

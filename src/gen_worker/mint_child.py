@@ -69,6 +69,7 @@ from .mint_process import (
     EXIT_RESOURCE,
     MintReport,
     MintRequest,
+    MintSlot,
     frame_line,
 )
 
@@ -264,7 +265,7 @@ def mint_identity(request: MintRequest) -> str:
         f"fn={request.function!r} recipe={request.recipe!r}")
 
 
-def bind_slots(specs: Sequence[Any], bindings: Mapping[str, Any]) -> None:
+def bind_slots(specs: Sequence[Any], resolved: Mapping[str, MintSlot]) -> None:
     """Install the PARENT's resolved slot bindings onto rediscovered specs.
 
     The child re-runs discovery in a fresh interpreter, so ``spec.models``
@@ -279,12 +280,10 @@ def bind_slots(specs: Sequence[Any], bindings: Mapping[str, Any]) -> None:
     would move its key out from under its siblings and silently narrow the
     class-scoped warm plan (pgw#654) to one lane.
     """
-    if not bindings:
-        return
     for spec in specs:
-        for slot, binding in bindings.items():
+        for slot, res in resolved.items():
             if slot in spec.slots or slot in spec.models:
-                spec.models[slot] = binding
+                spec.models[slot] = res.ref
 
 
 def assert_slots_resolvable(
@@ -307,7 +306,7 @@ def assert_slots_resolvable(
     """
     from . import warmup as warmup_mod
 
-    bound = set(request.slot_bindings)
+    bound = set(request.slots)
     problems: List[str] = []
     for spec in specs:
         missing = sorted(
@@ -321,14 +320,15 @@ def assert_slots_resolvable(
                 f"slot {name!r} of {spec.name!r}: the parent sent no resolved "
                 f"binding for it and the endpoint declares no "
                 f"default_checkpoint, so this child has no checkpoint to "
-                f"trace (MintRequest.slot_bindings carries "
+                f"trace (MintRequest.slots carries "
                 f"{sorted(bound) or '(nothing)'})")
         errors = warmup_mod.resolved_slots_kwargs(spec, None)["slot_errors"]
         for name, why in sorted(errors.items()):
-            if name in bound:
+            resolved = request.slots.get(name)
+            if resolved is not None:
                 problems.append(
                     f"slot {name!r} of {spec.name!r}: the parent's binding "
-                    f"{getattr(request.slot_bindings.get(name), 'path', '')!r} "
+                    f"{resolved.ref.path!r} "
                     f"crossed but does not resolve in this process — {why}")
     if not problems:
         return
@@ -339,9 +339,7 @@ def assert_slots_resolvable(
           "to load.")
 
 
-def assert_composable(
-    snapshots: Dict[str, str], overrides: Dict[str, Dict[str, str]],
-) -> None:
+def assert_composable(resolved: Mapping[str, MintSlot]) -> None:
     """pgw#816: refuse a request that describes a tree this child cannot load.
 
     A materialized snapshot path is not self-describing except in one
@@ -359,8 +357,8 @@ def assert_composable(
     from .models.cozy_snapshot import dir_key_excludes_components
 
     bad = sorted(
-        slot for slot, path in snapshots.items()
-        if dir_key_excludes_components(path) and not overrides.get(slot)
+        slot for slot, res in resolved.items()
+        if dir_key_excludes_components(res.path) and not res.component_paths
     )
     if not bad:
         return
@@ -369,7 +367,7 @@ def assert_composable(
         f"(the overridden component's files were excluded from the fetch) "
         f"but this request carries no component override for them, so the "
         f"composition cannot be rebuilt: "
-        + "; ".join(f"{slot}={snapshots[slot]}" for slot in bad))
+        + "; ".join(f"{slot}={resolved[slot].path}" for slot in bad))
 
 
 def _pick_compile_target(loaded: Dict[str, Any], cfg: Any) -> Tuple[str, Any]:
@@ -689,14 +687,17 @@ def _mint_aot(
 
 def mint(request: MintRequest) -> MintReport:
     """Build the cell. Raises ``MintChildRefused`` for a named refusal."""
+    # The two views ``cli.run.run_setup`` takes, both DERIVED from the one
+    # resolution (pgw#974) rather than carried beside it.
+    paths = {slot: res.path for slot, res in request.slots.items()}
     overrides = {
-        slot: dict(comps)
-        for slot, comps in request.component_paths.items() if comps
+        slot: dict(res.component_paths)
+        for slot, res in request.slots.items() if res.component_paths
     }
     # pgw#816: the request's SHAPE is checked before anything heavy is
     # imported or a single weight is read — a composition this child cannot
     # rebuild is a wiring refusal, not a load crash eight seconds in.
-    assert_composable(dict(request.snapshots), overrides)
+    assert_composable(request.slots)
 
     from . import compile_cache as cc
     from . import env_seal
@@ -733,7 +734,7 @@ def mint(request: MintRequest) -> MintReport:
     spec, siblings = select_specs(specs, request.function)
     # pgw#969: the parent's resolution, installed on the rediscovered specs
     # BEFORE anything is loaded — and the refusal, if it cannot be.
-    bind_slots(siblings, request.slot_bindings)
+    bind_slots(siblings, request.slots)
     assert_slots_resolvable(siblings, request)
     cfg = compile_cfg(request.cfg)
 
@@ -749,7 +750,7 @@ def mint(request: MintRequest) -> MintReport:
 
         obj = spec.cls()
         got = run_setup(
-            obj, dict(request.snapshots), arm_compile=False,
+            obj, dict(paths), arm_compile=False,
             return_loaded=True, component_paths=overrides) or {}
         _slot, loaded_pipe = _pick_compile_target(got, cfg)
         frame(phase="load", note=f"compile target on slot {_slot!r}")
@@ -775,7 +776,7 @@ def mint(request: MintRequest) -> MintReport:
 
     instance = spec.cls()
     loaded = run_setup(
-        instance, dict(request.snapshots), arm_compile=False,
+        instance, dict(paths), arm_compile=False,
         return_loaded=True, component_paths=overrides) or {}
     slot, pipe = _pick_compile_target(loaded, cfg)
     frame(phase="load", note=f"compile target on slot {slot!r}")
