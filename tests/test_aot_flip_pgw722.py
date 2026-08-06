@@ -827,3 +827,49 @@ def test_f3_lifted_attach_writes_through_the_binding_views(
     residency.deactivate("ref", pipe, request_id="off")
     a, b = binding.tensors
     assert torch.count_nonzero(b) == 0
+
+
+def test_every_dynamo_fallback_in_mint_recipe_emits_a_decline() -> None:
+    """pgw#990, generalized: a gate that returns a DIFFERENT recipe is a
+    decline, and a decline must be on the wire.
+
+    The deleted `prefer_aot` gate was the only one of `mint_recipe`'s paths
+    that returned RECIPE_DYNAMO without calling `_decline`, so it emitted
+    nothing at all — the sole tell that a fleet was minting the wrong KIND was
+    the word "dynamo" inside a SUCCESS event's detail string. The z-image lane
+    reproduced exactly that on sm_80 while the sdxl lane reproduced it on
+    sm_89, neither with an event to find.
+
+    Asserted structurally rather than by exercising nine branches: inside
+    `mint_recipe`, the ONLY `return RECIPE_DYNAMO` may be the one inside
+    `_decline`, which emits before it returns. A new silent gate then fails
+    here instead of on a rented pod.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fleet_cells.mint_recipe)))
+    fn = tree.body[0]
+    assert isinstance(fn, ast.FunctionDef)
+
+    emitting: set[int] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.FunctionDef) and node.name == "_decline":
+            emitting = {id(n) for n in ast.walk(node)}
+            break
+    assert emitting, "mint_recipe no longer has the _decline helper"
+
+    silent = [
+        node.lineno
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "RECIPE_DYNAMO"
+        and id(node) not in emitting
+    ]
+    assert not silent, (
+        "mint_recipe returns RECIPE_DYNAMO without emitting a decline at "
+        f"line(s) {silent} — a gate that changes the recipe must say so on "
+        "the wire (pgw#990)"
+    )
