@@ -46,7 +46,7 @@ from harness.tiny_diffusion import (
     install_synthetic_runtime_if_asked,
 )
 
-# pgw#981: the mint child is a fresh interpreter, so import time is the only
+# pgw#983: the mint child is a fresh interpreter, so import time is the only
 # hook the rig has to supply the one runtime fact a cardless box cannot state.
 # No-op unless PGW978_SYNTHETIC_RUNTIME asks; see the function's docstring for
 # what it does and does not buy.

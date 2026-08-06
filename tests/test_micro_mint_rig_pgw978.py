@@ -82,7 +82,7 @@ def test_the_rig_refuses_to_run_with_the_host_move_guard_off(
 
 
 def test_the_device_is_resolved_and_reported_never_assumed() -> None:
-    """pgw#981: this box's driver is CUDA 12.8 and the pinned torch is cu130, so
+    """pgw#983: this box's driver is CUDA 12.8 and the pinned torch is cu130, so
     the rig falls back to CPU — and must SAY which coverage it lost. A report
     whose green line implies device coverage it never had is the failure this
     field exists to prevent."""
@@ -205,7 +205,7 @@ def test_the_full_machinery_cycle_runs_on_this_box(tmp_path: Path) -> None:
     phases = mint.facts["phase_seconds"]
     # The child really loaded the endpoint through `run_setup` — not a stub.
     assert float(phases.get("load", 0.0)) > 0.0
-    # ...and really traced + compiled. pgw#982: the AOT recipe emits
+    # ...and really traced + compiled. pgw#984: the AOT recipe emits
     # `trace_graph`/`seal_publish`/`finalize` and NO `warmup_forward`, because
     # it exports rather than capturing a warm run. Asserting `warmup_forward`
     # here would be asserting a phase this recipe does not have.

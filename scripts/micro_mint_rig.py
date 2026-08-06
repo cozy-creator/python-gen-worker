@@ -107,7 +107,7 @@ def assert_load_gate(limit: float = MAX_START_LOAD_1MIN) -> float:
 def resolve_device(want: str = "auto") -> Dict[str, Any]:
     """Which device this cycle runs on, and — when it is not the card — WHY.
 
-    pgw#981, found by this rig's first run: the repo pins `torch==2.13.0+cu130`
+    pgw#983, found by this rig's first run: the repo pins `torch==2.13.0+cu130`
     and this box's NVIDIA driver is 570.211.01 (CUDA 12.8). A cu130 build needs
     a 580-series driver, so `torch.cuda.is_available()` is False here and the
     box cannot execute the fleet's own pinned torch at all.
@@ -129,7 +129,7 @@ def resolve_device(want: str = "auto") -> Dict[str, Any]:
     if want == "cuda" and not available:
         raise RigRefused(
             f"--device cuda requested but torch {torch.__version__} reports no "
-            f"CUDA device on this box (see pgw#981: driver is CUDA 12.8, the "
+            f"CUDA device on this box (see pgw#983: driver is CUDA 12.8, the "
             f"pinned torch is cu130 and needs a 580-series driver)")
     if available and want in ("auto", "cuda"):
         major, minor = torch.cuda.get_device_capability(0)
@@ -153,7 +153,7 @@ def resolve_device(want: str = "auto") -> Dict[str, Any]:
         "covers": "plumbing only — NO VRAM cap, NO placement, NO measured lane",
         "why_not_cuda": (
             f"torch {torch.__version__} reports no CUDA device "
-            f"(pgw#981: cu130 build vs a CUDA 12.8 driver)"),
+            f"(pgw#983: cu130 build vs a CUDA 12.8 driver)"),
     }
 
 
@@ -343,7 +343,7 @@ def run_cycle(
         [str(REPO / "tests"), str(REPO / "src"), env.get("PYTHONPATH", "")])
     env["PGW978_CHECKPOINT"] = str(tree)
     if dev["device_kind"] != "cuda":
-        # pgw#981: a cell key needs an `sm` and this box can state none. The
+        # pgw#983: a cell key needs an `sm` and this box can state none. The
         # probes are supplied, LOUDLY — see `install_synthetic_runtime_if_asked`
         # and the `synthetic_runtime` fact this leg reports.
         env[SYNTHETIC_RUNTIME_ENV] = "1"

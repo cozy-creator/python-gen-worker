@@ -223,7 +223,7 @@ def example_inputs(
     }
 
 
-#: pgw#978/pgw#981: the env that installs a SYNTHETIC runtime key so a cardless
+#: pgw#978/pgw#983: the env that installs a SYNTHETIC runtime key so a cardless
 #: box can complete the seal, publish and adopt legs.
 SYNTHETIC_RUNTIME_ENV = "PGW978_SYNTHETIC_RUNTIME"
 
@@ -231,7 +231,7 @@ SYNTHETIC_RUNTIME_ENV = "PGW978_SYNTHETIC_RUNTIME"
 #: sm_89, cuda 13.0) — nothing about how they are COMBINED into a cell key is
 #: faked, which is the same seam `test_aot_mint_pgw723._gpu_runtime` has used
 #: since pgw#723. sm_89 specifically because it is this box's own compute
-#: capability; the box simply cannot execute cu130 today (pgw#981).
+#: capability; the box simply cannot execute cu130 today (pgw#983).
 SYNTHETIC_RUNTIME = {
     "sku": "l4", "sm": "sm_89", "triton": "3.6.0", "cuda": "13.0",
     "cuda_driver": "13000", "image_digest": "sha256:" + "ab" * 32,
