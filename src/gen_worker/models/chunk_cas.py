@@ -433,7 +433,7 @@ def _fetch_chunk_to_offset(
             delay = 0.0 if (alive or out_of_budget) else _retry_delay(strikes)
             _log.warning(
                 "chunk_refetch sha256=%s attempt=%d/%d delivered=%d "
-                "route_alive=%s retry_in=%.1fs: %s",
+                "route_alive=%s retry_in=%.3fs: %s",
                 spec.sha256[:12], attempt, _CHUNK_MAX_ATTEMPTS,
                 delivered, alive, delay, exc,
             )

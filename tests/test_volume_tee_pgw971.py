@@ -27,7 +27,6 @@ import hashlib
 import http.server
 import socketserver
 import threading
-import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -337,42 +336,71 @@ def test_fused_hash_accepts_honest_bytes(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. pgw#972: backoff, and the two failure shapes told apart
+# 3. pgw#972: which retry branch each failure shape takes
+#
+# These assert the DECISION, never the runner's speed (pgw#795): the loop logs
+# the classification it made and the delay it scheduled, so the branch taken is
+# the work's product and is observable without a clock. Timing the download and
+# comparing to a constant would measure the CI runner, and would go red on a
+# loaded box while the policy was perfectly correct.
 # ---------------------------------------------------------------------------
 
-def test_zero_byte_failures_back_off(tmp_path: Path, server, monkeypatch) -> None:
+def _decisions(caplog, sha256: str):
+    """(route_alive, retry_in) for each retry decision about one chunk."""
+    out = []
+    for line in caplog.text.splitlines():
+        if "chunk_refetch" not in line or sha256[:12] not in line:
+            continue
+        alive = line.split("route_alive=")[1].split()[0] == "True"
+        delay = float(line.split("retry_in=")[1].split("s")[0])
+        out.append((alive, delay))
+    return out
+
+
+def test_a_route_that_delivers_nothing_is_made_to_wait(
+    tmp_path: Path, server, monkeypatch, caplog,
+) -> None:
     """The defect: a chunk source that delivers NOTHING was retried with no
-    delay at all, so the whole budget burned inside a couple of seconds and a
-    transient TLS/connect blip failed the fetch."""
+    delay at all, so a transient TLS/connect blip burned the whole budget in
+    well under a second. Each such failure must now schedule a real delay, and
+    the delays must ESCALATE."""
     monkeypatch.setattr(cc, "_CHUNK_BACKOFF_CAP_S", 0.5)
+    caplog.set_level("WARNING", logger="gen_worker.models.chunk_cas")
     payload = _body(CS * 2)
     specs = _publish(server, payload)
     with server.lock:
         server.fail_first[specs[0].sha256] = 3  # three connect-shaped failures
 
     local = tmp_path / "local" / "blob"
-    started = time.monotonic()
     download_chunked_file(
         specs, local, whole_digest="sha256:" + _sha(payload),
         total_size=len(payload), chunk_size_bytes=CS, window=2,
     )
-    elapsed = time.monotonic() - started
 
-    assert local.read_bytes() == payload
-    # Three failures at strikes 1..3, each sleeping uniform(0.5, 1.0) * cap.
-    assert elapsed >= 3 * 0.5 * 0.5, f"no backoff observed ({elapsed:.3f}s)"
+    assert local.read_bytes() == payload  # it still succeeds
+    decisions = _decisions(caplog, specs[0].sha256)
+    assert len(decisions) == 3
+    assert all(not alive for alive, _ in decisions), decisions
+    assert all(delay > 0 for _, delay in decisions), decisions
+    # Each scheduled delay lies in the window its own strike defines. The bound
+    # is DERIVED from the schedule, not a guess about how fast the box is.
+    cap = cc._CHUNK_BACKOFF_CAP_S
+    for strike, (_, delay) in enumerate(decisions, start=1):
+        window = min(cap, 2.0 ** strike)
+        assert 0.5 * window <= delay <= window, (strike, delay, decisions)
 
 
-def test_a_live_route_reconnects_without_sleeping(
-    tmp_path: Path, server, monkeypatch,
+def test_a_live_route_reconnects_at_once(
+    tmp_path: Path, server, monkeypatch, caplog,
 ) -> None:
     """pgw#786's rule survives: an attempt that DELIVERED ITS FLOOR and then
     died is a lemon CONNECTION, and the answer is a fresh socket NOW, not a
-    sleep. The read block and the floor are shrunk so the property is testable
+    sleep. The read block and the floor are shrunk so the property is reachable
     in kilobytes; the arithmetic under test is unchanged."""
     monkeypatch.setattr(cc, "_CHUNK_BACKOFF_CAP_S", 30.0)
     monkeypatch.setattr(cc, "_READ_CHUNK_BYTES", 64)
     monkeypatch.setattr(cc, "_CHUNK_PROGRESS_FLOOR_BYTES", 128)
+    caplog.set_level("WARNING", logger="gen_worker.models.chunk_cas")
     payload = _body(CS * 2)
     specs = _publish(server, payload)
     with server.lock:
@@ -380,22 +408,52 @@ def test_a_live_route_reconnects_without_sleeping(
         server.trickle_bytes[specs[0].sha256] = 4096  # >> the shrunken floor
 
     local = tmp_path / "local" / "blob"
-    started = time.monotonic()
     download_chunked_file(
         specs, local, whole_digest="sha256:" + _sha(payload),
         total_size=len(payload), chunk_size_bytes=CS, window=2,
     )
-    elapsed = time.monotonic() - started
 
     assert local.read_bytes() == payload
-    assert elapsed < 5.0, f"a live route slept instead of reconnecting ({elapsed:.1f}s)"
+    decisions = _decisions(caplog, specs[0].sha256)
+    assert decisions, "no retry was recorded"
+    assert all(alive for alive, _ in decisions), decisions
+    assert all(delay == 0.0 for _, delay in decisions), decisions
+
+
+def test_a_digest_mismatch_refetches_at_once(
+    tmp_path: Path, server, monkeypatch, caplog,
+) -> None:
+    """A complete, wrong-hashing body proves the ROUTE is healthy and only the
+    bytes are not. Backing off there is pure loss — and it made an existing
+    permanently-bad-chunk test walk the whole ladder instead of failing fast."""
+    monkeypatch.setattr(cc, "_CHUNK_BACKOFF_CAP_S", 30.0)
+    caplog.set_level("WARNING", logger="gen_worker.models.chunk_cas")
+    payload = _body(CS * 2)
+    specs = _publish(server, payload)
+    # Serve chunk 0 under a digest it does not hash to: every fetch is complete
+    # and every fetch mismatches.
+    with server.lock:
+        server.blobs[specs[0].sha256] = _body(CS, seed=99)
+
+    local = tmp_path / "local" / "blob"
+    with pytest.raises(Exception):
+        download_chunked_file(
+            specs, local, whole_digest="sha256:" + _sha(payload),
+            total_size=len(payload), chunk_size_bytes=CS, window=2,
+        )
+
+    decisions = _decisions(caplog, specs[0].sha256)
+    assert decisions, "no retry was recorded"
+    assert all(alive for alive, _ in decisions), decisions
+    assert all(delay == 0.0 for _, delay in decisions), decisions
 
 
 def test_a_dead_route_gives_up_on_a_COUNT_not_a_clock(
     tmp_path: Path, server, monkeypatch,
 ) -> None:
     """The give-up is `_CHUNK_MAX_ATTEMPTS` attempts, per `stall.py`'s standing
-    rule that nothing which ends real work may key on a wall clock."""
+    rule that nothing which ends real work may key on a wall clock. The
+    evidence is the SERVER's hit count, which no amount of box load can move."""
     monkeypatch.setattr(cc, "_CHUNK_BACKOFF_CAP_S", 0.05)
     payload = _body(CS * 2)
     specs = _publish(server, payload)
