@@ -41,7 +41,26 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["response_is_from_hub", "is_proxy_outage", "is_definite_hub_answer"]
+__all__ = [
+    "response_is_from_hub",
+    "is_proxy_outage",
+    "is_definite_hub_answer",
+    "REQUEST_DETERMINED_STATUSES",
+]
+
+# pgw#987: statuses whose cause is a property of the REQUEST WE SENT, not of
+# who answered. The same bytes earn the same refusal from the hub, from a
+# proxy, and from anything else in the path, forever — so "did the hub itself
+# answer?" is not the question, and the retry-biased default below (which
+# rests on retrying being the cheap direction) does not hold: retrying is
+# pure cost with a guaranteed identical outcome.
+#
+# 413 only, deliberately. A 404 can be a proxy with no healthy backend
+# (pgw#743, two 58-minute clones), a 403 can be a token that will be rotated,
+# a 409 can be a race — none of those are determined by our own bytes. A
+# Content-Length refusal is: `Content-Length` is byte-identical on every
+# retry.
+REQUEST_DETERMINED_STATUSES = frozenset({413})
 
 
 def _content_type(resp: Any) -> str:
@@ -122,5 +141,15 @@ def is_definite_hub_answer(resp: Any) -> bool:
     except Exception:  # noqa: BLE001 - an unreadable status is not a verdict
         return False
     if 200 <= code < 400:
+        return True
+    if code in REQUEST_DETERMINED_STATUSES:
+        # pgw#987. The measured failure: the hub refused 32 cell publishes with
+        # `413 request_body_too_large` in 25 microseconds each, and this
+        # function answered False every time — because gin's
+        # `AbortWithStatusJSON` envelope carries a STRING `error` with no
+        # `message`, matching neither shape below. Ten minutes of a paid pod
+        # re-sending a body that could never be accepted, and the typed event
+        # that reached the hub said "network" while the hub's own log said
+        # `413`. That mislabelled error produced a wrong P0 (th#1644).
         return True
     return response_is_from_hub(resp)
