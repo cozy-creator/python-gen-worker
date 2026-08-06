@@ -64,7 +64,7 @@ from typing import (
 import msgspec
 
 from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
-from . import worker_goals
+from . import mint_budget, worker_goals
 from .worker_goals import WorkerGoals
 from .postmortem import cpu_quota_cores
 import hashlib
@@ -224,6 +224,18 @@ _POLL_S = 0.25
 DEVICE_FREE_SAMPLES = 3
 DEVICE_FREE_SAMPLE_GAP_S = 0.05
 
+#: Entry children whose DEVICE high-water must be in hand before the pool
+#: re-derives its own K from them (:meth:`EntryCompilePool._rewiden`).
+#:
+#: One is an anecdote. The first round's children start together, so they are
+#: also the ones that miss the shared PCH and the autotune cache, and a width
+#: re-derived from a single unrepresentative child is exactly the "5-vs-3 with
+#: nothing recorded to say why" defect pgw#842 closed. Two is the smallest
+#: number that is a measurement rather than a sample, and on a 36-entry sdxl
+#: cell it arrives after ~6 % of the work — early enough that the other 94 %
+#: is compiled at the measured width.
+REWIDEN_MIN_SAMPLES = 2
+
 
 @dataclass(frozen=True)
 class CpuFacts:
@@ -311,6 +323,12 @@ class PoolWidth:
     #: rather than inferred by diffing two pods that no longer exist.
     binding: str = ""
     ceiling: int = MAX_ENTRY_WORKERS
+    #: The caller's own cap (``entry_workers(limit=)``), 0 when uncapped. It is
+    #: an INPUT that chose K and was the one input this record did not carry —
+    #: which mattered the moment :meth:`EntryCompilePool._rewiden` began
+    #: re-deriving K mid-mint: an operator who forced the serial path must not
+    #: have it widened back out from under them by a later measurement.
+    limit: int = 0
     cpu: Optional[CpuFacts] = None
     memory: Optional[MemoryFacts] = None
     device: Optional[DeviceFacts] = None
@@ -359,6 +377,7 @@ class PoolWidth:
             "device_lock": bool(self.device_lock),
             "binding": self.binding,
             "ceiling": int(self.ceiling),
+            "limit": int(self.limit),
             "underwidth": int(self.underwidth),
             "per_entry_device_basis": self.per_entry_device_basis,
             "per_entry_rss_basis": self.per_entry_rss_basis,
@@ -615,6 +634,7 @@ def entry_workers(
             per_entry_rss_bytes=0, per_entry_device_bytes=0,
             per_entry_rss_basis="not-read", per_entry_device_basis="not-read",
             device_lock=locked, binding="entries", ceiling=1,
+            limit=max(0, int(limit)),
             serve_goal=goals.serve, mint_goal=goals.mint,
             reason=(
                 f"{entries} entr{'y' if entries == 1 else 'ies'}: serial "
@@ -706,6 +726,7 @@ def entry_workers(
             memory=memory, device=device,
             per_entry_device_basis=device_basis,
             per_entry_rss_basis=rss_basis,
+            limit=max(0, int(limit)),
             serve_goal=goals.serve, mint_goal=goals.mint)
 
     workers = max(
@@ -758,9 +779,10 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     elapsed_s: float = 0.0
     peak_rss_bytes: int = 0
     #: pgw#868 A4: the child's DEVICE high-water, allocated and reserved.
-    #: Defaulted so an older child's report still decodes. Telemetry only —
-    #: `entry_workers` still sizes off `mint_budget.co_residency`, and
-    #: replacing an estimate with this measurement is a SEPARATE change.
+    #: Defaulted so an older child's report still decodes. No longer telemetry
+    #: only: `EntryCompilePool._rewiden` divides the pool's own free-VRAM
+    #: reading by THIS, once two children have reported one, in place of the
+    #: `mint_budget.co_residency` estimate the pool was constructed with.
     peak_device_bytes: int = 0
     peak_device_reserved_bytes: int = 0
     #: Inductor's own phase split (lowering / codegen / host C++ compile+link)
@@ -870,6 +892,12 @@ class PoolLedger:
     """
 
     workers: int = 1
+    #: pgw#868 A4: the width the pool was CONSTRUCTED at, kept beside the one
+    #: it finished at. When ``_rewiden`` replaces an estimated per-entry device
+    #: ask with a measured one, ``workers`` moves and this does not — so the
+    #: prize is readable as a delta from one row, without a second mint to
+    #: compare against.
+    workers_initial: int = 1
     wall_s: float = 0.0
     #: Sum of the per-entry Popen-to-reap walls (== the mint's ``compile_s``).
     busy_s: float = 0.0
@@ -930,6 +958,7 @@ class PoolLedger:
             "seal_seed_s": round(self.seal_seed_s, 3),
             "pool_entries": int(self.entries),
             "pool_workers": int(self.workers),
+            "pool_workers_initial": int(self.workers_initial),
             **dict(self.resume),
         }
 
@@ -1190,6 +1219,14 @@ class EntryCompilePool:
         #: it, so the per-entry device ask stayed the mint child's whole
         #: co-residency estimate. This is the number that ends that.
         self.peak_device_bytes = 0
+        #: How many entry children have contributed one. `_rewiden` refuses to
+        #: act on fewer than :data:`REWIDEN_MIN_SAMPLES`.
+        self.device_samples = 0
+        #: The width the pool was CONSTRUCTED with, kept whole. `_rewiden`
+        #: re-derives against this record's own free-VRAM and host-RAM
+        #: readings — the same question, a measured divisor — so the initial
+        #: row has to survive being superseded.
+        self.width_initial = width
         self.peak_concurrency = 0
         # pgw#848: the kernel's OOM-kill counter as it stood before this pool
         # ran. A DELTA over the pool's own wall is evidence; the absolute
@@ -1210,7 +1247,8 @@ class EntryCompilePool:
         self.entry_spawn_seconds: Dict[str, float] = {}
         self.entry_overlays: Dict[str, Dict[str, float]] = {}
         self.entry_metrics_raw: Dict[str, Dict[str, float]] = {}
-        self.ledger = PoolLedger(workers=int(width.workers))
+        self.ledger = PoolLedger(
+            workers=int(width.workers), workers_initial=int(width.workers))
 
     # -- staging ----------------------------------------------------------
 
@@ -1292,7 +1330,6 @@ class EntryCompilePool:
         # a multi-GB write (~16 s at 2.5 GB) and a freed slot that had to wait
         # for one would idle a core through every round; one spare removes
         # that without turning an 18-entry sdxl cell into ~46 GB on disk.
-        staged_cap = max(1, self.width.workers + INFLIGHT_PROGRAM_SLACK)
         failure: Optional[EntryCompileFailed] = None
         # pgw#830: exact idle accounting. Every wall second is multiplied by
         # the number of FREE worker slots at that moment and charged to
@@ -1314,10 +1351,22 @@ class EntryCompilePool:
             if free > 0:
                 setattr(self.ledger, bucket,
                         getattr(self.ledger, bucket) + (now - mark) * free)
+            # pgw#868 A4: capacity is ACCUMULATED at the width that was live
+            # for each interval, not multiplied out at the end. `_rewiden` can
+            # move K mid-pool, and `wall_s * final_workers` would then price
+            # the whole run at a width the first entries never had — turning
+            # the efficiency identity (busy + idle == capacity) into a
+            # residual nobody can trust, which is the one thing this ledger
+            # exists not to be.
+            self.ledger.capacity_s += (now - mark) * self.width.workers
             mark = now
 
         try:
             while pending or staged or running:
+                # Re-read every round: `_rewiden` can widen K after an entry
+                # lands, and a staging cap frozen at the construction width
+                # would starve the slots it just opened.
+                staged_cap = max(1, self.width.workers + INFLIGHT_PROGRAM_SLACK)
                 while (pending and not failure
                        and len(staged) + len(running) < staged_cap):
                     index, name, program = pending.pop(0)
@@ -1355,6 +1404,10 @@ class EntryCompilePool:
                 except EntryCompileFailed as exc:
                     failure = exc
                     break
+                # pgw#868 A4: this entry's own DEVICE high-water is now banked
+                # (`_collect` -> `observe_entry_device`). Ask K again with the
+                # measurement in place of the estimate the pool was built on.
+                self._rewiden()
                 if on_entry is not None:
                     try:
                         on_entry(finished.entry, len(done), len(entries))
@@ -1372,8 +1425,10 @@ class EntryCompilePool:
         finally:
             self.ledger.wall_s = round(time.monotonic() - pool_t0, 3)
             self.ledger.busy_s = round(sum(self.entry_seconds.values()), 3)
-            self.ledger.capacity_s = round(
-                self.ledger.wall_s * self.width.workers, 3)
+            # Closed at the LIVE width for the final interval, then rounded —
+            # `charge` has been accumulating it all along (see there).
+            charge("idle_other_s", 0)
+            self.ledger.capacity_s = round(self.ledger.capacity_s, 3)
             for row in running:
                 _terminate_group(row.proc)
             self._sweep()
@@ -1567,6 +1622,95 @@ class EntryCompilePool:
             or int(report.peak_device_bytes or 0)
         if peak > 0:
             self.peak_device_bytes = max(self.peak_device_bytes, peak)
+            self.device_samples += 1
+
+    def _rewiden(self) -> None:
+        """Re-derive K from what the entry children MEASURED (pgw#868 A4).
+
+        pgw#809 sizes the pool before a single entry has run, and the only
+        per-entry device figure available then is
+        ``mint_budget.co_residency().need_bytes`` — the MINT CHILD's whole
+        co-residency estimate (a full weight copy, an activation set the
+        estimate never observed, and two flat constants), used as ONE entry
+        child's ask. pgw#877 measured that ~56 % of it was never observed and
+        renamed its basis from ``"measured"`` to ``"estimated"`` for exactly
+        that reason. Every entry child since has reported what it actually
+        peaked at, :meth:`observe_entry_device` has banked it, and nothing
+        read it: an sdxl cell spent 34 more entries at a width chosen by an
+        estimate its own first two entries had already disproved.
+
+        This asks the SAME question against the SAME readings — only the
+        divisor changes, from an estimate to an observation. That is the
+        pgw#847 shape (delete a guess, keep the computation), not a new
+        policy: no reserve moves, no ceiling moves, no bound is invented.
+
+        Fail-closed, in five directions:
+
+        * it never NARROWS. Children are already running against the wider
+          number, and a mid-flight dip is the reading ``device_facts`` takes a
+          max over precisely so it cannot be acted on;
+        * it never exceeds the caller's own ``limit`` — an operator who forced
+          the serial path keeps it;
+        * it refuses on fewer than :data:`REWIDEN_MIN_SAMPLES` reports, on a
+          zero peak, and on a pool whose device lock is absent (``K=1`` there
+          is a safety width, not a resource one);
+        * it re-derives against ``width_initial``'s OWN free-VRAM and host-RAM
+          figures rather than re-probing a card that K running children are
+          sitting on — re-probing would read their footprints as absent
+          capacity and narrow, which is the opposite of the truth;
+        * anything raising leaves the width exactly as it was.
+
+        It changes no artifact. K is not an input to codegen, kernel selection
+        or the traced graph — the device lock already serializes the one thing
+        that is shared (``benchmark_all_configs``) — so this is a PROCESS
+        change under pgw#846's rule, and the emitted files are untouched.
+        """
+        if self.device_samples < REWIDEN_MIN_SAMPLES:
+            return
+        if self.peak_device_bytes <= 0 or not self.width.device_lock:
+            return
+        base = self.width_initial
+        if base.free_device_bytes <= 0:
+            # The initial width never read the card (`entries <= 1`, or an
+            # absent probe). There is nothing to re-divide, and inventing a
+            # free figure here is the guess this method exists to delete.
+            return
+        try:
+            ask = mint_budget.entry_device_ask(int(self.peak_device_bytes))
+            if ask <= 0:
+                return
+            wider = entry_workers(
+                base.entries,
+                limit=base.limit,
+                device_bytes=ask,
+                device_basis="measured",
+                free_vram_bytes=int(base.free_device_bytes),
+                available_bytes=int(base.available_bytes),
+                vcpus=int(base.vcpus),
+                peak_rss_bytes=int(self.peak_rss_bytes or 0),
+                device_lock=base.device_lock,
+                # Reconstructed from the record rather than re-read: the
+                # re-derivation must run the policy the pool was BUILT under,
+                # not whatever a later `install()` published.
+                goals=WorkerGoals(
+                    serve=base.serve_goal, mint=base.mint_goal),
+            )
+        except Exception:  # noqa: BLE001 — a re-derivation never fails a mint
+            logger.debug("aot-pool: width re-derivation failed", exc_info=True)
+            return
+        if wider.workers <= self.width.workers:
+            return
+        logger.info(
+            "aot-pool: pgw#868 A4 K %d -> %d — per-entry device ask measured "
+            "at %.2f GiB over %d entr%s against the %.2f GiB (%s) the pool "
+            "was sized with",
+            self.width.workers, wider.workers, ask / 1024**3,
+            self.device_samples, "y" if self.device_samples == 1 else "ies",
+            base.per_entry_device_bytes / 1024**3,
+            base.per_entry_device_basis)
+        self.width = wider
+        self.ledger.workers = wider.workers
+        self._emit_width("re-derived from measured entry peaks")
 
     def _collect(self, row: _Running) -> List[str]:
         elapsed = time.monotonic() - row.started
