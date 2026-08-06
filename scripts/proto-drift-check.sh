@@ -98,10 +98,8 @@ case "$proto_dir" in
     ;;
 esac
 
-# th#1597: `dev` was deleted in both repos on 2026-08-05 (th#1621 / pgw#977), so
-# the old default resolved to a 404 and layer 2 failed the fetch — which this
-# script correctly treats as FAIL, not as a pass. Every proto-touching PR in
-# either repo was therefore blocked until this default followed the branch.
+# th#1621: was `dev`, which 404s since python-gen-worker deleted that branch on
+# 2026-08-05. The peer's integration branch IS `master` now.
 peer_ref="${PROTO_PEER_REF:-master}"
 peer_url="https://raw.githubusercontent.com/cozy-creator/python-gen-worker/${peer_ref}/proto/worker_scheduler.proto"
 peer_file="$(mktemp)"
