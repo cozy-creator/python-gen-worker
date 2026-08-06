@@ -140,9 +140,15 @@ def _error_code_of(resp: requests.Response) -> str:
     if not isinstance(body, dict):
         return ""
     err = body.get("error")
-    if not isinstance(err, dict):
-        return ""
-    return str(err.get("code") or "")
+    if isinstance(err, dict):
+        return str(err.get("code") or "")
+    # pgw#987: the publish envelope (`publishError.body()`) and gin's
+    # `AbortWithStatusJSON` both emit the code as a STRING. Dropping it left
+    # `_publish_failure_phase` with only `http_413` to group 32 identical
+    # refusals by, when the hub had named the fault exactly.
+    if isinstance(err, str) and err.strip():
+        return err.strip()
+    return ""
 
 
 # pgw#738/#743: how long _send_with_retries tolerates hearing nothing

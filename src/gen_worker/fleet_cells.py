@@ -61,7 +61,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 
 from . import activity as activity_mod
@@ -270,7 +270,12 @@ def _hub_error_code(body: Any) -> str:
     err = body.get("error")
     if isinstance(err, dict):
         return str(err.get("code") or "")
-    return str(body.get("code") or "")
+    flat = str(body.get("code") or "")
+    # pgw#987: gin's `AbortWithStatusJSON` (the body-cap middleware) emits the
+    # code as a bare string under `error` and carries no `code` at all, so a
+    # `request_body_too_large` refusal named itself and the client dropped the
+    # name.
+    return flat or (err.strip() if isinstance(err, str) else "")
 
 
 def _credential_lapse_s(token: str, *, now: float) -> float:
@@ -285,6 +290,85 @@ def _credential_lapse_s(token: str, *, now: float) -> float:
     except (TypeError, ValueError):
         return 0.0
     return max(0.0, now - exp) if exp > 0 else 0.0
+
+
+# th#1645/pgw#987: the blocks a cell's envelope carries that are UNBOUNDED in
+# the size of the model, and that the publish declare must therefore not
+# forward.
+#
+# Every one of them already ships INSIDE the artifact (`metadata.json` in the
+# .tar.gz) and is read from there — `guard_closure.load_manifest` opens the
+# tarball, `aot_serve` reads `entries` off the unpacked package. The copy in
+# the declare body had exactly one hub-side reader,
+# `api/cell_receipts.go:242-248`, which hashes it into two `omitempty` audit
+# claims that nothing verifies against anything (the worker parses
+# `manifest_digest`/`fingerprint_digest` into a dataclass field and never
+# reads them) — and the content is already bound by `snapshot_digest`, as
+# that file's own header says.
+#
+# THE MEASUREMENT that makes this a bound and not a preference: on a REAL
+# published sdxl cell (checkpoint sha256:926bc9f5…, artifact 69,045,459 B),
+# `guard_manifest` alone is 13,092,487 bytes of the 13,377,167-byte metadata
+# — 98%. Everything else together is 285 KB. The declare body therefore grew
+# with the ARTIFACT, and at ~200 MB (a real AOT cell) it crossed the 32 MiB
+# route cap and the hub answered 413 thirty-two times.
+_UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
+    "guard_manifest",   # JIT lane: per-graph guard closures
+    "entries",          # AOT lane: per-class contracts + constant manifests
+    "composition",      # pgw#697 composition fingerprint rows
+    "weight_contract",  # per-tensor weight rows
+})
+
+# The stated ceiling on a cell's CONTROL-plane declare (§4.24). Measured
+# basis: the same real cell's metadata minus the blocks above is 285 KB, and
+# the AOT lane's phase table adds tens of KB — so 4 MiB is roughly an order
+# of magnitude of headroom over anything observed, while staying far below
+# the route's 32 MiB.
+#
+# THREAT: without it, the next unbounded block someone adds to the envelope
+# re-creates th#1645 exactly — a publish that cannot succeed, discovered as a
+# 413 that names no key, ten minutes into a paid pod. This bound fails on the
+# POD, before the wire, and NAMES the block that broke it.
+CELL_DECLARE_MAX_BYTES = 4 << 20
+
+#: The groupable phase a declare-bound refusal reports. Its own token, not the
+#: generic `refused`: this refusal means "someone added an unbounded block to
+#: the envelope", which is a code defect with a named owner, and it must not
+#: land in the same bucket as the hub's trust-tier and quota decisions.
+CELL_DECLARE_OVERSIZE_CODE = "cell_declare_oversize"
+
+
+def control_plane_metadata(meta: Mapping[str, Any]) -> Dict[str, Any]:
+    """The bounded subset of a cell envelope the publish declare may carry.
+
+    The seam carries CONTROL, not DATA (pgw#763/#783). A cell's bulk envelope
+    is data: it rides the artifact, over presigned PUTs, digest-bound. What
+    the hub actually selects a cell on — family, key, sm, sku, image digest,
+    gen_worker version, lane — reaches it on the publish-INTENT call and is
+    stored in `cell_store`'s own columns; none of it is read back out of this
+    dict.
+
+    Raises :class:`CellPublishRefused` when what survives still exceeds
+    :data:`CELL_DECLARE_MAX_BYTES`, naming the largest surviving key — a new
+    unbounded block must be a named refusal here, not a 413 later.
+    """
+    kept = {
+        k: v for k, v in dict(meta).items()
+        if v is not None and k not in _UNBOUNDED_ENVELOPE_BLOCKS
+    }
+    encoded = len(json.dumps(kept, sort_keys=True, default=str).encode())
+    if encoded > CELL_DECLARE_MAX_BYTES:
+        widest = max(
+            kept,
+            key=lambda k: len(json.dumps(kept[k], sort_keys=True, default=str)),
+            default="")
+        raise CellPublishRefused(
+            f"cell declare is {encoded} bytes, over the "
+            f"{CELL_DECLARE_MAX_BYTES}-byte control-plane bound (th#1645); "
+            f"the largest block is {widest!r} — it belongs in the artifact, "
+            "not in the declare",
+            code=CELL_DECLARE_OVERSIZE_CODE)
+    return kept
 
 
 class CellPublisher:
@@ -460,7 +544,8 @@ class CellPublisher:
                 files=[CommitFile(path=artifact.name, local_path=artifact)],
                 mode="replace",
                 flavor=key,
-                metadata={k: v for k, v in dict(meta).items() if v is not None},
+                # th#1645: CONTROL only. The bulk envelope is in the artifact.
+                metadata=control_plane_metadata(meta),
                 on_stage=lambda stage, facts: _publish_leg(
                     family, key, stage, facts),
             )
@@ -681,7 +766,11 @@ def _publish_async(
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: hub refused the publish: {exc}",
-                phase="refused",
+                # th#1645: the hub's own code when it named one (and the
+                # declare-bound's own token when the refusal never reached the
+                # hub at all) — `refused` alone puts a code defect, a trust
+                # tier and a quota in one bucket.
+                phase=_publish_failure_phase(exc) or "refused",
             )
         except Exception as exc:  # noqa: BLE001 — reported, never fatal
             logger.warning("fleet-cells: publish failed; the next worker on this key re-mints", exc_info=True)
