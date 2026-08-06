@@ -35,7 +35,7 @@ from .args import ArgError, build_payload
 from ..api.slot import resolve_slot
 from ..models import execution_lanes as lanespec
 from ..api.binding import rebind_pick
-from .serve import DEFAULT_SOCKET_PATH
+from .transport import DEFAULT_SOCKET_PATH
 from . import invoke as invoke_mod
 from .local_context import _stderr_emitter
 

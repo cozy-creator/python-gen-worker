@@ -17,6 +17,15 @@ import socket
 from pathlib import Path
 from typing import NamedTuple
 
+# The default listen/connect address, and the reason this module exists at the
+# bottom of the cli package: `serve` legitimately depends on `run` (it reuses
+# its dispatch, its exit codes and its errors), so `run` and `invoke` may not
+# reach back into `serve` for a constant. It lived there until pgw#981, and the
+# cycle that made cost `import gen_worker.cli.serve` an ImportError whenever it
+# was the first cli module imported.
+DEFAULT_SOCKET_PATH = "./.gen-worker.sock"
+
+
 class Address(NamedTuple):
     """("unix", path, 0) | ("tcp", host, port)."""
 
