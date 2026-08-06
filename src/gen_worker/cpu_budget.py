@@ -47,6 +47,7 @@ import math
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+from .procsplit import host_siblings
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,6 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
     192-threads-on-32-cores oversubscription pgw#782 removed. ``host_siblings()``
     is 1 for every pod that is not running the split, so this is unchanged for
     them (byte-identical at G=1)."""
-    from .procsplit import host_siblings
 
     siblings = host_siblings()
     effective = max(1, int(groups)) * siblings

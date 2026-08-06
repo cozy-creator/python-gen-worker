@@ -147,7 +147,7 @@ class CalloutClient:
         return request_id
 
     def get(self, request_id: str) -> Dict[str, Any]:
-        import requests
+        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
 
         resp = requests.get(
             f"{self._base_url}/v1/requests/{quote(request_id, safe='')}",
@@ -163,7 +163,7 @@ class CalloutClient:
 
     def cancel(self, request_id: str) -> None:
         """Cancel a child (idempotent: an already-terminal child is a no-op)."""
-        import requests
+        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
 
         resp = requests.post(
             f"{self._base_url}/v1/requests/{quote(request_id, safe='')}/cancel",
@@ -216,7 +216,7 @@ class CalloutClient:
     # -- checkpoints ---------------------------------------------------------
 
     def checkpoint_get(self, key: str) -> tuple[Any, bool]:
-        import requests
+        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
 
         resp = requests.get(
             self._checkpoint_url(key), headers=self._headers(), timeout=_HTTP_TIMEOUT_S
@@ -238,7 +238,7 @@ class CalloutClient:
         return resp.json(), True
 
     def checkpoint_put(self, key: str, value: Any) -> None:
-        import requests
+        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
 
         body = json.dumps(value).encode("utf-8")
         resp = requests.put(

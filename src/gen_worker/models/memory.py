@@ -29,6 +29,7 @@ from typing import Any, Dict, Iterable, List, Optional, TypeVar
 import msgspec
 
 from ..component_vocab import component_vocabulary
+import asyncio
 
 _LOG = logging.getLogger(__name__)
 
@@ -671,7 +672,6 @@ async def aflush_memory(*, collect: bool = True, reset_peak: bool = False) -> No
     teardown that quietly reset the peak would zero the measurement the
     admission ladder is built on.
     """
-    import asyncio
 
     if collect:
         await asyncio.to_thread(gc.collect)

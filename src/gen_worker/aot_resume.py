@@ -59,6 +59,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from . import local_cells
+from . import graph_hash as graph_hash_mod
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +121,6 @@ def bank_root(scope: str) -> Path:
     that runs inside it. A colliding scope cannot admit anything wrong; it can
     only produce a graph-hash refusal.
     """
-    from . import local_cells
 
     safe = "".join(
         c if (c.isalnum() or c in "._-") else "_" for c in str(scope))[:48]
@@ -351,8 +352,6 @@ class EntryBank:
         re-derivation the whole design rests on.
         """
         import time
-
-        from . import graph_hash as graph_hash_mod
 
         t0 = time.monotonic()
         try:

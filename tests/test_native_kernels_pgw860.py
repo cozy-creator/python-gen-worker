@@ -263,7 +263,9 @@ def test_swap_picks_fused_execution_lane_when_armed(
     dec = _tiny_decoded()
     model = _Model(dec.out_features, dec.in_features)
     monkeypatch.setattr(nk, "svdq_linear_execution_lane", lambda: "fused")
+    monkeypatch.setattr(native, "svdq_linear_execution_lane", lambda: "fused")
     monkeypatch.setattr(nk, "svdq_modulation_execution_lane", lambda: "packed")
+    monkeypatch.setattr(native, "svdq_modulation_execution_lane", lambda: "packed")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts == {"blockwise": 0, "dense": 0, "fused": 1, "prefixes": 1,
                       "linears": 1}
@@ -274,7 +276,9 @@ def test_swap_baseline_when_execution_lane_off(monkeypatch: pytest.MonkeyPatch) 
     dec = _tiny_decoded()
     model = _Model(dec.out_features, dec.in_features)
     monkeypatch.setattr(nk, "svdq_linear_execution_lane", lambda: "baseline")
+    monkeypatch.setattr(native, "svdq_linear_execution_lane", lambda: "baseline")
     monkeypatch.setattr(nk, "svdq_modulation_execution_lane", lambda: "dense")
+    monkeypatch.setattr(native, "svdq_modulation_execution_lane", lambda: "dense")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts["fused"] == 0
     assert counts["blockwise"] == 1
@@ -294,7 +298,9 @@ def test_swap_unsupported_shape_degrades_to_blockwise(
         smooth_factor=dec.smooth_factor, bias=dec.bias)
     model = _Model(dec.out_features, dec.in_features)
     monkeypatch.setattr(nk, "svdq_linear_execution_lane", lambda: "fused")
+    monkeypatch.setattr(native, "svdq_linear_execution_lane", lambda: "fused")
     monkeypatch.setattr(nk, "svdq_modulation_execution_lane", lambda: "packed")
+    monkeypatch.setattr(native, "svdq_modulation_execution_lane", lambda: "packed")
     counts = native.swap_svdq_linears(model, {"proj": dec}, mode="blockwise")
     assert counts["fused"] == 0
     assert counts["blockwise"] == 1

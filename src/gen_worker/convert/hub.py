@@ -37,6 +37,10 @@ from ..api.errors import AuthError
 from ..request_context._helpers import _parse_owner_repo
 from ..stall import SilenceWindow
 from gen_worker.models.refs import flavor_token as _token
+from .. import activity as _activity
+from ..http_origin import is_definite_hub_answer
+from ..models import chunk_upload as _cu
+from ..models.chunk_upload import UploadGrant
 
 logger = logging.getLogger(__name__)
 
@@ -168,8 +172,6 @@ def _send_with_retries(
     Returns the last response for non-retryable statuses — callers keep their
     own status handling.
     """
-    from .. import activity as _activity
-    from ..http_origin import is_definite_hub_answer
 
     if silence_window_s is None:
         silence_window_s = _SEND_SILENCE_WINDOW_S
@@ -431,8 +433,6 @@ class HubClient:
         its terminus. Never load-bearing: a raising callback is the caller's
         bug and must not fail a publish that is transferring correctly.
         """
-        from ..models import chunk_upload as _cu
-        from ..models.chunk_upload import UploadGrant
 
         # Read the constant off the module at CALL time rather than binding a
         # default: it must equal the hub's `storage.CASChunkSizeBytes`, and a

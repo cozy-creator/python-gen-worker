@@ -117,7 +117,10 @@ def test_the_parent_declines_the_AOT_recipe_by_name(
         classes=(GraphClass(dims={"B": 2}),),
         inputs=(Input("sample", shape=("B", 4)),),
         shape_strategy="static-rows", warm_changes_key=False)
+    # Patch the caller's binding too: fleet_cells imports the name at module
+    # scope (pgw#976), so patching only export_contract leaves the real one bound.
     monkeypatch.setattr(ec, "export_declaration", lambda _f: decl)
+    monkeypatch.setattr(fleet_cells, "export_declaration", lambda _f: decl)
 
     events: list = []
     monkeypatch.setattr(

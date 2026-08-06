@@ -38,6 +38,7 @@ from gen_worker.discovery.walk import EndpointImportError, find_endpoints
 from gen_worker.models.refs import DEFAULT_REF_TAG
 from gen_worker.registry import extract_specs
 from .validation import validate_endpoint_lock
+import importlib.machinery
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -586,7 +587,6 @@ def _audit_source_only_imports(*, root: Path, top_level: str) -> None:
     ``cwd`` is deliberately not honoured (the worker's import set must not
     depend on the directory it happens to start in).
     """
-    import importlib.machinery
 
     root_str = str(root)
     src_str = str(root / "src")

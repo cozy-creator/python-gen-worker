@@ -61,6 +61,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 import os
 import tempfile
+from .procsplit import broker
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +410,6 @@ def _hub_sign_claim(remote: _RemoteSigner, alg: str, claim: bytes) -> bytes:
     # back; the credential that authorizes the oracle, like the key behind it,
     # is somewhere this process cannot reach. `broker.request` is the same POST
     # off the split, so there is one code path either way.
-    from .procsplit import broker
 
     try:
         resp = broker.request(

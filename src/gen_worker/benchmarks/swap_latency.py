@@ -66,6 +66,9 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from ..models.loading import load_component
+from ..models.pinned_swap import prestage_module
+from ..models.staging import copy_stream
 
 _GiB = float(1 << 30)
 
@@ -198,7 +201,6 @@ def _load_component(tree: Path, name: str) -> Any:
     ``cls.from_pretrained`` directly, which on any modelopt-produced flavor
     — i.e. every tree the fleet actually serves — died reconstructing
     ``NVIDIAModelOptConfig`` (pgw#689)."""
-    from ..models.loading import load_component
 
     return load_component(tree, name)
 
@@ -315,9 +317,6 @@ def bench_stage(tree: Path, emit: EmitFn) -> None:
     row is the whole visible swap when the next model was RAM-staged."""
     import torch
 
-    from ..models.pinned_swap import prestage_module
-    from ..models.staging import copy_stream
-
     total_pin = 0
     total_h2d_s = 0.0
     for name in _component_names(tree):
@@ -358,8 +357,6 @@ def bench_stage(tree: Path, emit: EmitFn) -> None:
 def bench_overlap(gb: float, emit: EmitFn) -> None:
     """H2D on the copy stream with pinned staging, concurrent with compute."""
     import torch
-
-    from ..models.staging import copy_stream
 
     n = int(gb * _GiB / 2)  # fp16 elements
     staging_buf = torch.empty(n, dtype=torch.float16, pin_memory=True)

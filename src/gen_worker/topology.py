@@ -89,6 +89,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Tuple
 
 from .models.residency import REPLICATED, SHARDED, DeviceGroup
+from .host_canary import is_fabric_wedge, sp_admits
 
 logger = logging.getLogger(__name__)
 
@@ -619,7 +620,6 @@ def delivered_topology(
     possibly fabric-demoted — packing can do that. An explicit ``env`` is a
     caller asking a question about some other pod, so it publishes nothing.
     """
-    from .host_canary import is_fabric_wedge, sp_admits
 
     topo = ExecutionTopology.from_env(env)
     # An explicit ``interconnect`` is a caller asking about SOME pod — the

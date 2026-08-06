@@ -989,6 +989,7 @@ def _finalize(
             f"whole-file label is wrong or the chunk ORDER is)"
         )
     # Durable atomic finalize (gw#408): rename is atomic in the NAMESPACE only.
+    # CYCLE: cozy_cas imports DigestMismatch from this module.
     from .cozy_cas import fsync_dir
 
     os.fsync(fd)

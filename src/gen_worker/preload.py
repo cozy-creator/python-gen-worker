@@ -57,6 +57,9 @@ from . import activity as activity_mod
 from .api.binding import wire_ref
 from .models import residency as residency_mod
 from .models.pinned_swap import prestage_module
+from pathlib import Path
+import functools
+from .pb import worker_scheduler_pb2 as pb
 
 if typing.TYPE_CHECKING:  # pragma: no cover - typing only
     from .executor import Executor
@@ -221,7 +224,6 @@ class Preloader:
         """The derived per-pick spec this instance resolves to (same remap
         the validated warm path applies), or None when it cannot resolve —
         resolution problems are the reconcile's to report, not ours."""
-        from .pb import worker_scheduler_pb2 as pb
 
         ex = self._ex
         spec = ex.specs.get(instance.function_name)
@@ -248,6 +250,8 @@ class Preloader:
 
     def _instance_refs(self, effective: Any) -> Dict[str, Any]:
         """ref -> binding for every setup slot and component override."""
+        # CYCLE: executor imports preload; hoisting makes `gen_worker.entrypoint`
+        # fail at boot.
         from .executor import _binding_wire_refs, _component_overrides
 
         ex = self._ex
@@ -345,9 +349,10 @@ class Preloader:
         them (promote = H2D on the copy stream, from_pretrained skips their
         disk reads). Shared components already resident stay untouched —
         the component-first ruling by construction."""
-        from pathlib import Path
 
+        # CYCLE (see _stage_components_): executor imports preload.
         from .executor import _component_overrides
+        # CYCLE: models.loading is reached through executor, which imports preload.
         from .models.loading import load_component_override
 
         ex = self._ex
@@ -430,7 +435,6 @@ class Preloader:
                 initializer=_nice_thread_init,
             )
         loop = asyncio.get_running_loop()
-        import functools
 
         return await loop.run_in_executor(
             self._pool, functools.partial(fn, *args, **kwargs))

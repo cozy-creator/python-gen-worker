@@ -31,6 +31,8 @@ from __future__ import annotations
 import functools
 import logging
 from typing import Any, Optional
+from .svdq_awq import _scales_and_zeros, unpack_w4x16
+from .svdq_awq import decode_awq_linear, encode_awq_linear
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +229,6 @@ def build_awq_packed_linear(tensors: dict[str, Any], out_features: int,
     import torch
     import torch.nn as nn
 
-    from .svdq_awq import _scales_and_zeros, unpack_w4x16
-
     if awq_op() is None:
         raise AwqPackedError("awq packed op unavailable (no triton)")
     compute = compute_dtype or torch.bfloat16
@@ -274,8 +274,6 @@ def awq_packed_self_check() -> Optional[str]:
     """Arm gate: packed module output vs the decoded bf16 Linear on random
     layers (plain + adanorm-6). Returns None when armed."""
     import torch
-
-    from .svdq_awq import decode_awq_linear, encode_awq_linear
 
     if awq_op() is None:
         return "triton unavailable"

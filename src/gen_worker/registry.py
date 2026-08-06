@@ -32,6 +32,7 @@ from .warmup import validate_class_warmup
 import dataclasses
 from .api.compile_axis import warm_guidance_values
 from .cell_key import contract_digest
+from .api.export_contract import register_export_declaration, registered_entry
 
 logger = logging.getLogger(__name__)
 
@@ -713,9 +714,6 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
     AOT lane's defect and must not take down endpoint collection (which every
     boot, every CLI walk and every discovery pass runs).
     """
-    from .api.export_contract import (
-        register_export_declaration, registered_entry,
-    )
 
     registered: List[str] = []
     seen: set[int] = set()

@@ -30,6 +30,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+import faulthandler
+from .procsplit import group_ordinal, host_siblings
 
 logger = logging.getLogger(__name__)
 
@@ -520,7 +522,6 @@ def group_fault_dump_path(
 def _local_marker_path(name: str) -> Path:
     # Importing procsplit's tiny environment helpers here keeps the reserved
     # names canonical without pulling in the parent or any compute dependency.
-    from .procsplit import group_ordinal, host_siblings
 
     if host_siblings() > 1:
         return _group_marker_path(name, group_ordinal())
@@ -541,7 +542,6 @@ def enable_fault_dump(path: Optional[Path] = None) -> None:
     the signal handler (SIGSEGV/SIGFPE/SIGABRT/SIGBUS) without allocating,
     then the default action re-raises — so the file has content by the time
     ``waitpid`` returns to the parent."""
-    import faulthandler
 
     global _fault_dump_file
     path = path or FAULT_DUMP_PATH

@@ -19,6 +19,8 @@ from .pb import worker_scheduler_pb2 as pb
 from .registry import collect_endpoints
 from .topology import ExecutionTopology, delivered_topology
 from .transport import FatalTransportError, Transport
+from .host_move_guard import install as _install_host_move_guard
+from .procsplit import is_compute_child
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +104,6 @@ class Worker:
         self.settings = settings
         # pgw#763: an endpoint-authored oversized `.to("cpu")` becomes a typed
         # job error instead of a cgroup OOM SIGKILL of the whole worker.
-        from .host_move_guard import install as _install_host_move_guard
 
         _install_host_move_guard()
         # pgw#748 / th#1285: the delivered `G×D` packing. Absent env == one
@@ -142,7 +143,6 @@ class Worker:
         # pgw#763: in the split's COMPUTE CHILD, the "transport" speaks frames
         # to the control parent (which owns the real gRPC stream + SendQueue).
         # Lifecycle/Executor wiring is identical either way.
-        from .procsplit import is_compute_child
 
         if is_compute_child():
             from .procsplit.child import ChildTransport

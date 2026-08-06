@@ -49,6 +49,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Callable, List, Optional, Sequence, Tuple, cast
+import multiprocessing as mp
 
 logger = logging.getLogger(__name__)
 
@@ -338,8 +339,6 @@ class RankGroup:
         if self.degree == 1:
             self._formed = True
             return RankSpec(0, 1, self.devices[0], "127.0.0.1", 0, self.backend)
-
-        import multiprocessing as mp
 
         import torch.distributed as dist
 

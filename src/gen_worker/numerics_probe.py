@@ -53,6 +53,9 @@ from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 
 from . import numerics_ladder
 from .numerics_ladder import Comparison, Thresholds
+from . import aot_serve
+from . import aot_inputs
+from .aot_contract import ExportSpec
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +147,6 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     artifacts sharing a file (pgw#758), and a verdict that averaged them could
     not name the class that parted from eager.
     """
-    from . import aot_serve
 
     entries = aot_serve.entries_from_meta(dict(meta))
     execution_lane = str(meta.get("precision") or "")
@@ -225,9 +227,6 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
     to check a cell.
     """
     import torch
-
-    from . import aot_inputs
-    from .aot_contract import ExportSpec
 
     try:
         builder = aot_inputs.builder_for(family, axis.target)
@@ -427,7 +426,6 @@ def probe_cell(
     Raises :class:`ProbeUnavailable` when the cell cannot be probed at all —
     never returns a report that could be mistaken for a pass.
     """
-    from . import aot_serve
 
     family = str(getattr(cfg, "family", "") or meta.get("family") or "")
     thresholds = numerics_ladder.declared_thresholds(cfg)

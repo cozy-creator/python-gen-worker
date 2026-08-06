@@ -49,6 +49,7 @@ import grpc.aio
 from .config import Settings
 from .pb import worker_scheduler_pb2 as pb
 from .pb import worker_scheduler_pb2_grpc as pb_grpc
+from . import worker_credential
 
 logger = logging.getLogger(__name__)
 
@@ -846,7 +847,6 @@ class Transport:
         """Newest worker credential: hub-rotated token, else the boot token."""
         # pgw#848: ONE source. `_worker_jwt` is this stream's rotation cache;
         # `worker_credential` is the process-wide truth every hub dial reads.
-        from . import worker_credential
 
         return (self._worker_jwt or worker_credential.current() or "").strip()
 
@@ -897,7 +897,6 @@ class Transport:
         return grpc.aio.insecure_channel(target, options=self._channel_options())
 
     def _metadata(self) -> Optional[List[Tuple[str, str]]]:
-        from . import worker_credential
 
         token = (self._worker_jwt or worker_credential.current() or "").strip()
         if not token:
@@ -908,7 +907,6 @@ class Transport:
     # ---- pgw#869: which auth rejections are a verdict about US ------------
 
     def _presented_credential(self) -> str:
-        from . import worker_credential
 
         return (self._worker_jwt or worker_credential.current() or "").strip()
 
@@ -1410,7 +1408,6 @@ class Transport:
                     # Connect and used to authenticate with the frozen boot
                     # token — which is what wedged attempts 16 and 17.
                     try:
-                        from . import worker_credential
 
                         worker_credential.install(
                             token, float(msg.token_refresh.expires_at_unix or 0))

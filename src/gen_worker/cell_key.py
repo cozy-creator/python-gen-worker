@@ -65,6 +65,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Tuple
+from . import env_seal
 
 # ck2 -> ck3 (pgw#691): sku left. ck3 -> ck4 (pgw#696): env_seal joined.
 # ck4 -> ck5 (Paul's exact-identity ruling): the key became the RECIPE
@@ -196,7 +197,6 @@ def compute(
     function's module. Raises :class:`CellKeyError` when a required axis is
     unavailable — callers on non-CUDA runtimes simply have no key."""
     from . import compile_cache as cc  # cycle: compile_cache imports cell_key
-    from . import env_seal
 
     rt = cc.runtime_key()
     return from_axes({
@@ -239,7 +239,6 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
             f"axes (stamped={str(meta.get('cell_key') or '') or 'MISSING'})")
     if kind != "torch-inductor-cache":
         raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
-    from . import env_seal
 
     mode = str(meta.get("compile_mode") or "whole")
     contract_facts = meta.get("shape_contract")
