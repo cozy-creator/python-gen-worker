@@ -18,8 +18,8 @@
 - **pgw#973: two verbatim-duplicated bounds given single owners.**
   `_READ_CHUNK_BYTES` (4 MiB) was defined identically in `models/chunk_cas.py`
   and `models/chunk_upload.py`, which already imports the rest of the chunk
-  vocabulary from `chunk_cas`; and `input_assets._DEFAULT_MAX_BYTES` /
-  `_CHUNK` restated `url_fetch.DEFAULT_MAX_BYTES` / `_CHUNK`. **Correcting the
+  vocabulary from `chunk_cas`; and `input_assets._DEFAULT_MAX_BYTES`
+  restated `url_fetch.DEFAULT_MAX_BYTES`. **Correcting the
   census on the second one:** these are *not* two caps on one fetch path.
   `url_fetch.open_guarded_stream` deliberately caps nothing ("the caller owns
   the read and its byte cap"), and `url_fetch.fetch_bytes` and

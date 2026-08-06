@@ -33,7 +33,7 @@ import msgspec
 from .api.errors import CanceledError, RetryableError, ValidationError
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 from .request_context._helpers import _infer_mime_type, _url_is_blocked
-from .url_fetch import DEFAULT_MAX_BYTES, _CHUNK, open_guarded_stream
+from .url_fetch import DEFAULT_MAX_BYTES, open_guarded_stream
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,8 @@ _DOWNLOAD_TIMEOUT_S = 120
 _RESOLVE_TIMEOUT_S = 30
 _MAX_RESOLVE_BODY = 8 << 20
 _MAX_WALK_DEPTH = 32
+# Streaming read buffer, not a bound — it refuses nothing.
+_CHUNK = 1 << 20
 _INPUT_DIR_PREFIX = "gen-worker-inputs-"
 _RESOLVE_PATH = "/api/v1/worker/input-assets/resolve"
 _MANIFEST_KINDS = ("media", "image", "video", "audio")
