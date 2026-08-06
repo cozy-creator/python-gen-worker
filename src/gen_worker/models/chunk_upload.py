@@ -41,7 +41,12 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 import requests
 
-from .chunk_cas import CAS_CHUNK_SIZE_BYTES, chunk_count_for, chunk_len_at
+from .chunk_cas import (
+    CAS_CHUNK_SIZE_BYTES,
+    _READ_CHUNK_BYTES,
+    chunk_count_for,
+    chunk_len_at,
+)
 
 __all__ = [
     "ChunkPlan",
@@ -54,7 +59,6 @@ __all__ = [
 
 _log = logging.getLogger(__name__)
 
-_READ_CHUNK_BYTES = 4 * 1024 * 1024
 _MAX_ATTEMPTS = 5
 
 # Shared with the legacy presigned path's intent: total concurrent PUTs across

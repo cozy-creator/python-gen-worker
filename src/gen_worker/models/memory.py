@@ -41,7 +41,6 @@ _VALID_MODES: tuple[str, ...] = (
     "auto", "off", "vae_only", "model_offload", "group_offload", "sequential",
 )
 
-_DEFAULT_VAE_SLICE_THRESHOLD_GB = 10.0
 _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB = 8.0
 _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB = 6.0
 # Safety margin below free VRAM reserved for activations.

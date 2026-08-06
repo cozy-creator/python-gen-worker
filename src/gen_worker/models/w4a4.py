@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
+from .safetensors_header import header_len_ok
 from typing import Any, Dict, List, Optional
 import shutil
 
@@ -72,7 +73,6 @@ W4A4_MIN_SM = 100
 # dims % 16 == 0 => in_features % 32 == 0, out_features % 16 == 0.
 _K_ALIGN = 32
 _N_ALIGN = 16
-_MAX_HEADER_BYTES = 100 << 20
 _AUX_SUFFIXES = (".weight_scale", ".weight_scale_2", ".input_scale",
                  ".pre_quant_scale")
 
@@ -102,7 +102,7 @@ def _read_header(path: Path) -> dict:
             if len(raw) < 8:
                 return {}
             (n,) = struct.unpack("<Q", raw)
-            if n <= 0 or n > _MAX_HEADER_BYTES:
+            if not header_len_ok(n):
                 return {}
             header = json.loads(f.read(n))
     except (OSError, ValueError):

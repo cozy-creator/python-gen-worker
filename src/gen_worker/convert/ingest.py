@@ -30,6 +30,7 @@ from gen_worker.models.download import (
 )
 
 from ..net import hf, install_hf_http_timeouts
+from ..models.safetensors_header import header_len_ok
 from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
 from huggingface_hub.errors import EntryNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError
@@ -78,7 +79,6 @@ _SAFETENSORS_DTYPE_NAMES = {
     "F32": "fp32", "F16": "fp16", "BF16": "bf16",
     "F8_E4M3": "fp8", "F8_E5M2": "fp8:e5m2",
 }
-_MAX_SAFETENSORS_HEADER_BYTES = 100 * 1024 * 1024
 
 
 def _detect_snapshot_dtype(root: Path) -> str:
@@ -95,7 +95,7 @@ def _detect_snapshot_dtype(root: Path) -> str:
                 if len(raw) < 8:
                     continue
                 (n,) = struct.unpack("<Q", raw)
-                if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
+                if not header_len_ok(n):
                     continue
                 header = json.loads(f.read(n))
             for value in header.values():

@@ -34,6 +34,7 @@ from gen_worker.models.loading import (_fp8_block_windows, _fp8_block_windows_wh
 from fnmatch import fnmatch
 import random
 from gen_worker.models.w8a8 import detect_w8a8_artifact
+from gen_worker.models.safetensors_header import header_len_ok
 
 if TYPE_CHECKING:
     import torch
@@ -1391,7 +1392,6 @@ def verify_w8a8_snapshot(
 # ---------------------------------------------------------------------------
 
 _HEADER_LEN_PREFIX = 8
-_MAX_HEADER_BYTES = 512 * 1024 * 1024
 _RAW_COPY_CHUNK = 8 * 1024 * 1024
 
 
@@ -1402,7 +1402,7 @@ def _read_safetensors_header(fd: int) -> tuple[dict, int]:
     if len(prefix) != _HEADER_LEN_PREFIX:
         raise ValueError("safetensors: short read on header length prefix")
     header_len = int.from_bytes(prefix, "little")
-    if header_len <= 0 or header_len > _MAX_HEADER_BYTES:
+    if not header_len_ok(header_len):
         raise ValueError(f"safetensors: implausible header_length={header_len}")
     body = os.read(fd, header_len)
     if len(body) != header_len:
