@@ -35,7 +35,7 @@ from typing import Any, List, Optional
 
 from . import run as run_mod
 from . import transport
-from .serve import DEFAULT_SOCKET_PATH
+from .transport import DEFAULT_SOCKET_PATH
 from .args import ArgError, build_payload, looks_like_field_token
 
 

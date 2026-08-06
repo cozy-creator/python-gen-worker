@@ -57,11 +57,10 @@ from . import run as run_mod
 from . import transport
 from .local_context import _stderr_emitter, build_local_context
 from .protocol import PROTOCOL_VERSION, gen_worker_version
+from .transport import DEFAULT_SOCKET_PATH
 from ..api.binding import BINDING_TYPES
 from ..models import provision
 
-
-DEFAULT_SOCKET_PATH = "./.gen-worker.sock"
 
 
 # --------------------------------------------------------------------------
