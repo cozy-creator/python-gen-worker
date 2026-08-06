@@ -42,6 +42,7 @@ from typing import Awaitable, Callable, Optional
 import psutil
 
 from . import progress as progress_mod
+from . import warm_spans
 from .pb import worker_scheduler_pb2 as pb
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,11 @@ PHASE_MINTED = "minted"
 PHASE_LOAD = "load"
 PHASE_TRACE_GRAPH = "trace_graph"
 PHASE_INDUCTOR_COMPILE = "inductor_compile"
+# pgw#989: the dynamo mint used to report its router drain under
+# PHASE_INDUCTOR_COMPILE, next to a `warmup_forward` row holding every compile
+# it ever ran. Re-exported (defined in `warm_spans`, which the mint child can
+# import without protobuf) so the vocabulary is enumerable from one module.
+PHASE_ROUTER_DRAIN = warm_spans.PHASE_ROUTER_DRAIN
 PHASE_WARMUP_FORWARD = "warmup_forward"
 PHASE_SEAL_PUBLISH = "seal_publish"
 # gw#612: post-proof tail — sibling-lane resolution, publish decision,

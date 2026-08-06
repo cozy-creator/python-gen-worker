@@ -62,7 +62,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import worker_goals
+from . import warm_spans, worker_goals
 from .config import load_settings
 from .mint_process import (
     EXIT_BAD_REQUEST,
@@ -470,7 +470,7 @@ def _drain_router(pipe: Any, *, poll_s: float = 0.5) -> None:
         _warm, pending, _failed = router.stats()
         if pending == 0:
             return
-        frame(phase="inductor_compile", note=f"{pending} compile(s) queued")
+        frame(phase=warm_spans.PHASE_ROUTER_DRAIN, note=f"{pending} compile(s) queued")
         time.sleep(poll_s)
 
 
@@ -792,15 +792,20 @@ def mint(request: MintRequest) -> MintReport:
     cc.begin_fleet_mint(pipe, cfg, capture)
     miss_before = cc.cache_miss_count(pipe)
 
+    # pgw#989: the warm forwards ARE the compile on this recipe, so the ledger
+    # goes around them. Without it `warmup_forward` is 97.6 % of the mint under
+    # one name, next to an `inductor_compile` row reading 0.0 s.
+    ledger = warm_spans.WarmLedger()
     frame(phase="warmup_forward", step=0, total=len(jobs))
     for index, job in enumerate(jobs, start=1):
         frame(
             phase="warmup_forward", step=index, total=len(jobs),
             note=job.spec.name)
-        _run_warm_job(
-            instance, job, dict(request.configs.get(job.spec.name) or {}),
-            request.execution_lane, origin=mint_identity(request))
-    frame(phase="inductor_compile", note="draining any queued compiles")
+        with ledger.job(job.spec.name):
+            _run_warm_job(
+                instance, job, dict(request.configs.get(job.spec.name) or {}),
+                request.execution_lane, origin=mint_identity(request))
+    frame(phase=warm_spans.PHASE_ROUTER_DRAIN, note="draining any queued compiles")
     _drain_router(pipe)
 
     if cc.execution_count(pipe) <= 0:
@@ -832,6 +837,10 @@ def mint(request: MintRequest) -> MintReport:
         peak_vram_bytes=peak,
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
+        # pgw#989: the dynamo recipe's `mint_phases` was documented as "empty —
+        # no per-graph-class breakdown". It has one; it was just never
+        # measured. The parent re-emits this exactly as it does the AOT table.
+        mint_phases=ledger.table(),
     )
 
 

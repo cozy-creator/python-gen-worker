@@ -34,14 +34,14 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from . import activity as activity_mod
 from . import aot_resume
 from . import mint_budget
 from . import mint_process
 from . import progress as progress_mod
-from .mint_process import MintOutcome, MintRequest
+from .mint_process import MintOutcome, MintReport, MintRequest
 
 logger = logging.getLogger(__name__)
 
@@ -492,10 +492,16 @@ def _emit_jit_compile(
     """th#1322: one delegated JIT mint's duration, as typed NUMERIC events.
 
     This is the fleet's real JIT compile path — the child arms COLD and drives
-    the endpoint's own warm plan (gw#587), so its `warmup_forward` +
-    `inductor_compile` spans ARE "how long does JIT take". Before this the
-    number lived only in the child's stdout, and a serve pod exposes no logs
-    (pgw#760), so it was unrecoverable the moment the pod went away.
+    the endpoint's own warm plan (gw#587), so its `warmup_forward` span IS
+    "how long does JIT take". Before this the number lived only in the child's
+    stdout, and a serve pod exposes no logs (pgw#760), so it was unrecoverable
+    the moment the pod went away.
+
+    pgw#989: that span is also 97.6 % of the mint, so "how long" was as far as
+    it went. ``report.mint_phases`` now carries the warm plan's own ledger
+    (:class:`gen_worker.warm_spans.WarmLedger`) and it is emitted here under
+    `phase=warm:<name>` / `phase=warm_job:<name>` — compile vs forward, and the
+    inductor partition inside the compile half.
 
     Shape matches ``aot_mint_phases`` exactly: `phase=minted` carries the total,
     `phase=child:<phase>` the spans inside it. A mint that did NOT produce a
@@ -520,6 +526,7 @@ def _emit_jit_compile(
                 phase=f"child:{name}",
                 duration_ms=int(round(value * 1000)),
             )
+        _emit_warm_ledger(report, head=head)
         # The child's own elapsed is authoritative when it wrote a report; the
         # parent's wall clock covers a child that died before writing one (spawn
         # + run, which is the honest cost of that attempt).
@@ -539,6 +546,61 @@ def _emit_jit_compile(
     except Exception:  # pragma: no cover — telemetry never fails a mint
         logger.debug("mint-delegate: jit_compile event emission failed",
                      exc_info=True)
+
+
+def _emit_warm_ledger(report: Optional[MintReport], *, head: str) -> None:
+    """pgw#989: the warm plan's compile-vs-forward split, as numeric events.
+
+    Three row shapes, all under ``jit_compile`` so one grouped query still
+    covers a JIT mint:
+
+    * ``warm:totals`` — the roll-up, carrying ``warm_compile_s`` in
+      ``duration_ms``. The one number that says whether a slow mint is a slow
+      COMPILE.
+    * ``warm:<member>`` — the inductor partition inside the compile half.
+    * ``warm_job:<name>`` — one warm forward. A plan whose jobs mostly compile
+      nothing is paying full forward cost for coverage it already has; that is
+      a different defect from a slow compile, and only the per-job rows can
+      tell them apart.
+
+    Silent when the recipe produced no ledger (the AOT path, or a child that
+    died before the warm loop) — an absent measurement is reported as absence.
+    """
+    table = dict(getattr(report, "mint_phases", None) or {}) \
+        if report is not None else {}
+    totals = dict(table.get("totals") or {})
+    if not totals.get("warm_wall_s"):
+        return
+    overlays = dict(table.get("overlays") or {})
+    activity_mod.emit_event(
+        activity_mod.KIND_JIT_COMPILE,
+        f"{head} warm_totals={totals} overlays={overlays}",
+        phase="warm:totals",
+        duration_ms=int(round(float(totals.get("warm_compile_s") or 0.0) * 1000)),
+    )
+    for name, seconds in sorted(dict(table.get("phases") or {}).items()):
+        value = float(seconds or 0.0)
+        if value <= 0:
+            continue
+        activity_mod.emit_event(
+            activity_mod.KIND_JIT_COMPILE,
+            f"{head} warm_phase={name} seconds={round(value, 2)}",
+            phase=f"warm:{name}",
+            duration_ms=int(round(value * 1000)),
+        )
+    for row in table.get("jobs") or ():
+        if not isinstance(row, Mapping):
+            continue
+        wall = float(row.get("wall_s") or 0.0)
+        if wall <= 0:
+            continue
+        activity_mod.emit_event(
+            activity_mod.KIND_JIT_COMPILE,
+            f"{head} warm_job={row.get('job')} wall_s={round(wall, 2)} "
+            f"compile_s={row.get('compile_s')} execute_s={row.get('execute_s')}",
+            phase=f"warm_job:{row.get('job')}",
+            duration_ms=int(round(wall * 1000)),
+        )
 
 
 def _emit_abort(
