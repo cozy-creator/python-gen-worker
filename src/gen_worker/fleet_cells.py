@@ -319,6 +319,36 @@ _UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
     "weight_contract",  # per-tensor weight rows
 })
 
+# pgw#988 — the OTHER half of this decision, asserted rather than assumed.
+#
+# What the declare carries and what the consumer verifies off it are two halves
+# of ONE contract, and until now they were two independent computations of it in
+# two modules. th#1645 dropped `entries` here — right about SIZE — while
+# `aot_cells._candidates` still refused any cell whose declare had no entries
+# map, so 100% of AOT cells published from that commit on were undiscoverable on
+# every pod. A pod that finds no cell mints its own, so the fleet paid a full
+# compile per cold boot and the failure presented as COST, never as an error.
+#
+# Checked at import, over two frozensets, so the next block that moves fails
+# every test run rather than a fleet.
+def assert_declare_contract(
+    dropped: "frozenset[str]" = _UNBOUNDED_ENVELOPE_BLOCKS,
+    read: "frozenset[str]" = aot_cells.DECLARE_CONTRACT_KEYS,
+) -> None:
+    """Raise when the declare strips a key its consumer still verifies."""
+    breach = sorted(dropped & read)
+    if breach:
+        raise RuntimeError(
+            f"cell declare contract broken (pgw#988): {breach!r} is stripped "
+            "from the publish declare but is still read off it by "
+            "aot_cells._candidates — every cell published this way would be "
+            "undiscoverable, and every pod would re-mint. Either keep the "
+            "block in the declare or stop verifying against it before the "
+            "download.")
+
+
+assert_declare_contract()
+
 # The stated ceiling on a cell's CONTROL-plane declare (§4.24). Measured
 # basis: the same real cell's metadata minus the blocks above is 285 KB, and
 # the AOT lane's phase table adds tens of KB — so 4 MiB is roughly an order
