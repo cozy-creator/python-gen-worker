@@ -32,6 +32,7 @@ event, not a 404.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -182,6 +183,43 @@ _MAX_JSON_BYTES = 256 * 1024
 CONTROL_BODY_CEILING_BYTES = _MAX_JSON_BYTES
 
 
+#: pgw#980: the two actions that WRITE a cell into a shared family namespace.
+#: Every other action in the table reads, renews or reports.
+PUBLISH_ACTIONS = frozenset({"cells.publish_intent", "cells.publish_complete"})
+
+#: pgw#980: the env that marks a pod a LIVE-EDIT PROBE. A probe runs code that
+#: was rsync'd onto it — code that is, by construction, not any released
+#: version and not any built image. Its mints are therefore stamped with a
+#: `gen_worker` version that lies (the dist-info does not move with the source)
+#: and a `code_closure` axis no other pod can reproduce. A probe publishing into
+#: the shared family namespace poisons every pod that later adopts from it.
+_PROBE_ENV = "GEN_WORKER_PROBE"
+
+#: And the deliberate, explicit arming. Two names rather than one truthy flag:
+#: "this is a probe" and "this probe may write to the store" are different
+#: decisions, and the second must never be reachable by forgetting the first.
+_PROBE_PUBLISH_ARM_ENV = "GEN_WORKER_PROBE_PUBLISH_ARMED"
+
+
+def probe_pod() -> bool:
+    """Whether this pod is a live-edit probe (pgw#980)."""
+    return str(os.environ.get(_PROBE_ENV, "")).strip().lower() in ("1", "true", "yes")
+
+
+def publish_disarmed() -> bool:
+    """Whether cell publish is disarmed for this pod.
+
+    Read in the PARENT, which is the point. The compute child is where the
+    swapped code runs and where a tenant endpoint executes; the parent holds
+    the credential and owns this table, and nothing rsync'd into the child's
+    site-packages can reach either. Disarming here is structural — a probe
+    cannot publish by editing the code it is running.
+    """
+    return probe_pod() and (
+        str(os.environ.get(_PROBE_PUBLISH_ARM_ENV, "")).strip().lower()
+        not in ("1", "true", "yes"))
+
+
 def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[Dict[str, Any]]]:
     """Validate one child action request against the table.
 
@@ -206,6 +244,17 @@ def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[
             f"{method} {path[:200]} is not an allowlisted parent-mediated action "
             "(the compute child holds no credential and may not name arbitrary "
             "hub calls)"
+        )
+    if match.name in PUBLISH_ACTIONS and publish_disarmed():
+        # Refused, not dropped: the parent counts, logs and dials every
+        # ActionRefused, so a probe whose operator MEANT to publish learns it
+        # from a named refusal rather than from a cell that never appeared.
+        raise ActionRefused(
+            f"{match.name} is disarmed on this pod: {_PROBE_ENV} marks it a "
+            f"live-edit probe running rsync'd code, whose cells carry a "
+            f"`gen_worker` version that does not describe them and a "
+            f"`code_closure` no other pod can reproduce. Set "
+            f"{_PROBE_PUBLISH_ARM_ENV}=1 to arm it deliberately (pgw#980)."
         )
 
     raw_query = req.get("query") or {}

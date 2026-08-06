@@ -156,7 +156,14 @@ ignore = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: network tests against real tiny HF models"]
+markers = [
+  "integration: network tests against real tiny HF models",
+  # pgw#978. LOCAL-ONLY by classification, not by accident: CI has no GPU and
+  # no card-side anything, and scripts/skip_census.txt carries these rows as
+  # LOCAL-ONLY so a green CI never reads as coverage of them.
+  "localrig: the local micro-mint rig (pgw#978) — run by hand, never in CI",
+  "slow: a full machinery cycle; minutes, not seconds",
+]
 # Prefer the working-tree source so a bare `pytest` never tests a stale wheel.
 # The supported command is still `uv run --extra dev pytest` (pytest is a dev
 # extra); tests/conftest.py hard-fails if gen_worker resolves outside src/.

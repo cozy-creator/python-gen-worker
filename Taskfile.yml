@@ -9,10 +9,49 @@ tasks:
       - uv build
 
   publish:
-    desc: Publish to PyPI (uses UV_PUBLISH_TOKEN from .env)
+    desc: |
+      Publish to PyPI (uses UV_PUBLISH_TOKEN from .env).
+
+      pgw#978 — the ORDER matters. Paul, 2026-08-06: "we want to release new
+      versions of python-gen-worker to pypi only after we've proven they work."
+      Run `task rig:mint` first; a version that has never completed a local
+      machinery cycle has not been proven by anything.
     deps: [build]
     cmds:
       - sh -c 'unset UV_PUBLISH_USERNAME; uv publish'
+
+  rig:mint:
+    desc: |
+      pgw#978 — run the whole mint machinery locally against a toy model:
+      resolve -> MintSlot handoff -> child spawn -> load -> warmup_forward ->
+      torch.export + AOTInductor -> seal -> publish to a local hub -> a SECOND
+      process adopting the cell.
+
+      Seconds per iteration instead of the publish->build->buy loop. Bounded by
+      the workspace policy's local-inference carve-out (generated weights under
+      500 MB, a 4 GiB budget split across processes, nice, a load gate at 24,
+      and GEN_WORKER_HOST_MOVE_GUARD untouched) — the driver enforces all five.
+    cmds:
+      - nice -n 10 uv run python scripts/micro_mint_rig.py {{.CLI_ARGS}}
+
+  rig:test:
+    desc: |
+      pgw#978 — the rig as a pytest row, including the full cycle (opt-in via
+      PGW978_RIG so CI's cardless runner never reads it as coverage; classified
+      LOCAL-ONLY in scripts/skip_census.txt).
+    env:
+      PGW978_RIG: '1'
+    cmds:
+      - nice -n 10 uv run --extra dev pytest tests/test_micro_mint_rig_pgw978.py -p no:randomly -rs
+
+  probe:sync:
+    desc: |
+      pgw#980 — rsync src/gen_worker onto a held probe pod and respawn its
+      compute child. Code only; weights stay pod-side.
+      Usage: task probe-sync -- <ssh-target>
+      See docs/probe-worker.md — buy ONE pod, hold it, iterate, terminate.
+    cmds:
+      - scripts/probe_sync.sh {{.CLI_ARGS}}
 
   proto-vendor:
     desc: |
