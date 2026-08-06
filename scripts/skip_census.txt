@@ -130,6 +130,15 @@ LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (pac
 LOCAL-ONLY tests/test_chunk_cas_parallel_th1362.py|multi-gb throughput measurement; set chunk_cas_bench=#
 LOCAL-ONLY tests/test_aot_run_impl_split_pgw811.py|banked pgw#793 wrapper not present
 LOCAL-ONLY tests/test_topology_fuzz_pgw867.py|tensorhub checkout not present
+# pgw#978. The full local mint cycle: a real child spawn, a real torch.export +
+# AOTInductor compile, a real publish over the wire and a real second-process
+# adopt. It is opt-in EVERYWHERE, CI included — not because CI could run it and
+# we chose not to, but because it is the developer's inner loop and a CI runner
+# has no card. The rest of that file (the gates, the carve-out bounds, the
+# handoff round-trip, the pgw#980 probe disarm) is pure Python and RUNS in CI;
+# only this row is opt-in, which is the point of classifying it rather than
+# marking the whole module.
+LOCAL-ONLY tests/test_micro_mint_rig_pgw978.py|the pgw#978 micro-mint rig is opt-in: it runs a full local mint cycle (set pgw#_rig=#)
 
 # ─── STAGED ───────────────────────────────────────────────────────────────────
 STAGED tests/test_p1_stream_lifecycle.py|pgw#605 open: hello.idle_heartbeat_interval_ms / workermessage.heartbeat proto fields are not generated in this tree yet
