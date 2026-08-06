@@ -1003,8 +1003,12 @@ def test_discovery_rejects_non_string_key_asset_maps() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_protocol_version_is_5() -> None:
-    assert pb.PROTOCOL_VERSION_CURRENT == 5
+def test_protocol_version_is_1() -> None:
+    # th#1597 / §1.27(g): the first package is v1 and the enum restarts at 1.
+    # Versions 1-4 never existed as packages, so 5 was a label with no history
+    # behind it. The major itself now lives in the proto package, not here —
+    # see tests/test_wire_major_th1597.py.
+    assert pb.PROTOCOL_VERSION_CURRENT == 1
 
 
 def test_run_job_org_field_hard_cut() -> None:

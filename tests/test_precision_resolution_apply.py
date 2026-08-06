@@ -76,8 +76,10 @@ def test_apply_model_resolutions_rejects_non_roundtrip() -> None:
 
 def test_hello_ack_shape_applies() -> None:
     ex = _executor()
+    # th#1597: HelloAck.keep was a dead "legacy v2 field; ignored by current
+    # workers" and the v1 cut reclaimed its slot. It was never read here — the
+    # assertion below is entirely about `resolutions`.
     ack = pb.HelloAck(
-        keep=["acme/z-image#svdq-int4-r128"],
         resolutions=[pb.ModelResolution(
             ref="acme/z-image", resolved_ref="acme/z-image#svdq-int4-r128", cast="",
         )],
