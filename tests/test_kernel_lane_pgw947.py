@@ -574,7 +574,10 @@ def test_mint_probes_every_candidate_and_mints_the_winner_fresh(
     def _load(execution_lane: str):
         loads.append(execution_lane)
         assert kl.pinned()[0] == execution_lane, "the lane must be pinned BEFORE loading"
-        return f"pipe:{execution_lane}", f"spec:{execution_lane}"
+        # pgw#984: the endpoint INSTANCE rides out with the pipeline — the AOT
+        # recipe proves the handler runs before it exports, and the handler is
+        # a method on it.
+        return f"obj:{execution_lane}", f"pipe:{execution_lane}", f"spec:{execution_lane}"
 
     monkeypatch.setattr(
         kl, "candidates_here", lambda: ("baseline+dense", "fused+packed"))
@@ -592,11 +595,12 @@ def test_mint_probes_every_candidate_and_mints_the_winner_fresh(
 
     monkeypatch.setattr(kl, "measure", _measure)
 
-    verdict, pipe, spec = mint_child.execution_lane_verdict_for(_load)
+    verdict, obj, pipe, spec = mint_child.execution_lane_verdict_for(_load)
     assert verdict.winner == "baseline+dense"
     assert verdict.binding == kl.BIND_SPEED
     assert loads == ["baseline+dense", "fused+packed", "baseline+dense"]
-    assert (pipe, spec) == ("pipe:baseline+dense", "spec:baseline+dense")
+    assert (obj, pipe, spec) == (
+        "obj:baseline+dense", "pipe:baseline+dense", "spec:baseline+dense")
     assert kl.pinned()[0] == "baseline+dense"
     # Both lanes' numbers are in the record, not just the winner's.
     assert verdict.measurement("fused+packed").ms_per_step == 350.0
@@ -621,8 +625,10 @@ def test_mint_records_a_typed_verdict_when_only_one_execution_lane_can_be_built(
         kl, "measure",
         lambda *a: pytest.fail("no benchmark for a sole candidate"))
 
-    verdict, pipe, _spec = mint_child.execution_lane_verdict_for(
-        lambda execution_lane: (f"pipe:{execution_lane}", f"spec:{execution_lane}"))
+    verdict, _obj, pipe, _spec = mint_child.execution_lane_verdict_for(
+        lambda execution_lane: (
+            f"obj:{execution_lane}", f"pipe:{execution_lane}",
+            f"spec:{execution_lane}"))
     assert verdict.winner == "baseline+dense"
     assert verdict.binding == kl.BIND_SOLE_CANDIDATE
     assert "sm_89 is not Blackwell" in verdict.detail
@@ -638,7 +644,7 @@ def test_a_execution_lane_that_cannot_be_built_never_fails_the_mint(
     def _load(execution_lane: str):
         if execution_lane == "fused+packed":
             raise RuntimeError("triton kernels will not compile here")
-        return f"pipe:{execution_lane}", f"spec:{execution_lane}"
+        return f"obj:{execution_lane}", f"pipe:{execution_lane}", f"spec:{execution_lane}"
 
     monkeypatch.setattr(
         kl, "candidates_here", lambda: ("baseline+dense", "fused+packed"))
@@ -651,7 +657,7 @@ def test_a_execution_lane_that_cannot_be_built_never_fails_the_mint(
         lambda execution_lane, step: kl.Measurement(
             execution_lane=execution_lane, ms_per_step=228.0, peak_bytes=int(44.1 * GB)))
 
-    verdict, pipe, _spec = mint_child.execution_lane_verdict_for(_load)
+    verdict, _obj, pipe, _spec = mint_child.execution_lane_verdict_for(_load)
     assert verdict.winner == "baseline+dense"
     assert ("will not compile here"
             in verdict.measurement("fused+packed").unavailable)

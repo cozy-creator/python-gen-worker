@@ -36,6 +36,13 @@ What it does, and why in this order
    So the child runs ``warmup.plan`` over the same sibling spec set the parent
    would have, through the endpoint's own handler. Same code, same shapes,
    same seal — a different PROCESS, not a different execution.
+
+   The AOT recipe traces with ``torch.export`` instead, so its cell is not
+   derived from these forwards — but it runs ONE of them anyway (pgw#984),
+   before exporting. A recipe that never enters the handler cannot tell a
+   working endpoint from one whose forward dies on its first request, and a
+   green mint that sealed a cell for the latter is the shape pgw#969 cost
+   four hours to find on a pod.
 6. **Pack** with ``finish_fleet_mint`` and write a typed report.
 
 The parity claim is checked, not asserted
@@ -450,6 +457,43 @@ def _run_warm_job(
                     pass
 
 
+def _drive_warm_plan(
+    instance: Any, jobs: Sequence[Any], request: MintRequest, *,
+    proof_only: bool = False,
+) -> None:
+    """Run the endpoint's OWN warm plan, framed as ``warmup_forward``.
+
+    ``proof_only`` runs ONE job (pgw#984, the AOT recipe); otherwise the whole
+    plan runs (the dynamo recipe, where these forwards ARE the compile).
+
+    Failure classification is the same on both recipes (pgw#985). A resource
+    shortfall re-raises untouched so ``main`` can exit ``EXIT_RESOURCE`` and
+    the parent can re-budget; everything else is a REFUSAL. The endpoint's
+    handler, its declared warm plan and the parent's slot bindings are all
+    fixed for the life of this request file, so a forward that raised once
+    raises identically on attempt two — the hub already books this event as
+    ``(phase=warmup_forward, deterministic)`` while the worker was still
+    calling it ``crashed`` and buying the second pod.
+    """
+    total = 1 if proof_only else len(jobs)
+    frame(phase="warmup_forward", step=0, total=total)
+    for index, job in enumerate(jobs[:total], start=1):
+        frame(phase="warmup_forward", step=index, total=total,
+              note=job.spec.name)
+        try:
+            _run_warm_job(
+                instance, job, dict(request.configs.get(job.spec.name) or {}),
+                request.execution_lane, origin=mint_identity(request))
+        except BaseException as exc:
+            if _is_resource_error(exc) or not isinstance(exc, Exception):
+                raise
+            raise MintChildRefused(
+                f"{mint_identity(request)}: the endpoint's own warm plan does "
+                f"not run — warm job {job.spec.name!r} raised "
+                f"{type(exc).__name__}: {exc}. A cell must not seal for a "
+                f"handler that cannot serve.") from exc
+
+
 def _drain_router(pipe: Any, *, poll_s: float = 0.5) -> None:
     """Wait out any hot-swap router queue before packing.
 
@@ -502,7 +546,7 @@ def _measure_execution_lane(execution_lane: str, load: Any) -> Any:
 
     kernel_path.pin(execution_lane, "mint-time A/B probe (pgw#947)")
     try:
-        pipe, spec = load(execution_lane)
+        _instance, pipe, spec = load(execution_lane)
         return kernel_path.measure(execution_lane, aot_mint.bench_step(pipe, spec))
     except Exception as exc:  # noqa: BLE001 — a candidate that cannot be
         # built or measured drops out of the ranking; it never fails the
@@ -513,12 +557,14 @@ def _measure_execution_lane(execution_lane: str, load: Any) -> Any:
             execution_lane=execution_lane, unavailable=f"build: {type(exc).__name__}: {exc}")
 
 
-def execution_lane_verdict_for(load: Any) -> Tuple[Any, Any, Any]:
+def execution_lane_verdict_for(load: Any) -> Tuple[Any, Any, Any, Any]:
     """MEASURE which serving-kernel lane wins on THIS card (pgw#947).
 
-    Returns ``(verdict, pipeline, spec)`` — the winning lane's loaded
-    pipeline and its export spec, ready to mint, so the artifact and the
-    verdict inside it can never describe different code.
+    Returns ``(verdict, endpoint instance, pipeline, spec)`` — the winning
+    lane's loaded pipeline and its export spec, ready to mint, so the artifact
+    and the verdict inside it can never describe different code. The INSTANCE
+    rides along because the AOT recipe now proves the endpoint's own warm plan
+    runs before it exports (pgw#984), and the handler is a method on it.
 
     A "lane" is the pgw#863 COMBINATION of both axes (``fused+packed``,
     ``baseline+packed``, ...), so the ranking prices the modulation lane's
@@ -556,8 +602,8 @@ def execution_lane_verdict_for(load: Any) -> Tuple[Any, Any, Any]:
             f"{detail or 'no rival'}")
         kernel_path.pin(verdict.winner, f"sole candidate: {verdict.detail}")
         frame(phase="load", note=f"kernel lane {verdict.winner} (sole)")
-        pipe, spec = load(verdict.winner)
-        return verdict, pipe, spec
+        instance, pipe, spec = load(verdict.winner)
+        return verdict, instance, pipe, spec
 
     measurements = []
     for index, execution_lane in enumerate(candidates, start=1):
@@ -580,8 +626,8 @@ def execution_lane_verdict_for(load: Any) -> Tuple[Any, Any, Any]:
     # The winner is loaded FRESH rather than kept from its probe pass: the
     # probe ran `torch.compile` over the denoiser, and the graph that gets
     # exported must come from a pipeline nothing has warmed or specialized.
-    pipe, spec = load(verdict.winner)
-    return verdict, pipe, spec
+    instance, pipe, spec = load(verdict.winner)
+    return verdict, instance, pipe, spec
 
 
 def _mint_aot(
@@ -745,9 +791,10 @@ def mint(request: MintRequest) -> MintReport:
         + (f" (+{sum(len(c) for c in overrides.values())} component "
            f"override(s))" if overrides else "")))
 
-    def _load(_execution_lane: str) -> Tuple[Any, Any]:
-        """One full endpoint load on the currently pinned kernel lane, plus
-        the export spec of the pipeline it produced."""
+    def _load(_execution_lane: str) -> Tuple[Any, Any, Any]:
+        """One full endpoint load on the currently pinned kernel lane: the
+        endpoint instance, its compile-target pipeline, and that pipeline's
+        export spec."""
         from . import fleet_cells
 
         obj = spec.cls()
@@ -758,14 +805,30 @@ def mint(request: MintRequest) -> MintReport:
         frame(phase="load", note=f"compile target on slot {_slot!r}")
         if cfg.lora_bucket:
             cc.apply_lora_execution_lane(loaded_pipe, cfg.lora_bucket)
-        return loaded_pipe, fleet_cells.aot_export_spec(loaded_pipe, cfg)
+        return obj, loaded_pipe, fleet_cells.aot_export_spec(loaded_pipe, cfg)
 
     if request.recipe == RECIPE_AOT:
         # pgw#947: MEASURE the serving-kernel lane on this card before the
         # cell is exported, so the cell can carry the verdict instead of the
         # fleet re-deriving it from a hand-maintained SM tuple. The probe
         # loads once per candidate; the winner's pipeline is what gets minted.
-        verdict, pipe, aot_spec = execution_lane_verdict_for(_load)
+        verdict, instance, pipe, aot_spec = execution_lane_verdict_for(_load)
+        # pgw#984: PROVE the endpoint's own forward runs, before a byte is
+        # exported. `torch.export` traces the declared graph classes off the
+        # modules directly and never enters the handler, so an AOT mint's
+        # phase table read `load / trace_graph / seal_publish / finalize` —
+        # green, with no `warmup_forward` row, for an endpoint whose handler
+        # could not run at all. That is precisely pgw#969's crash class
+        # (`ctx.slots["pipeline"]`, 0.0 s into `warmup_forward`), and it was
+        # unreachable on this recipe.
+        #
+        # ONE forward, not the whole plan: the export derives its own class
+        # set, so a full eager pass would buy minutes and prove nothing more
+        # than the first job does. Eager — nothing is armed here, unlike the
+        # dynamo recipe where the identical call IS the compile — so it
+        # specializes no graph the export then has to trace around.
+        _drive_warm_plan(
+            instance, _warm_jobs(siblings), request, proof_only=True)
         # pgw#805: the SAME loaded pipeline, a different recipe. Deliberately
         # NOT `aot_mint.compose_for_mint` (which builds a pipeline from a
         # model ref for an operator's mint pod): the graphs this cell must
@@ -789,17 +852,20 @@ def mint(request: MintRequest) -> MintReport:
     jobs = _warm_jobs(siblings)
     # Arm COLD, pointed at our own capture dir: the warm forwards below are
     # the ONLY compile this cell will ever see (gw#587).
-    cc.begin_fleet_mint(pipe, cfg, capture)
+    #
+    # pgw#985: an arm decline is DETERMINISTIC — no target on the pipeline, no
+    # CUDA, no toolchain, an operator eager pin — and none of them can differ
+    # on a second attempt. This used to escape as a bare `RuntimeError`, exit
+    # 1, `CRASHED`, and bought a second billed pod for a sentence the first
+    # one had already settled. The AOT recipe has always typed the identical
+    # condition as a refusal; both recipes now say it the same way.
+    try:
+        cc.begin_fleet_mint(pipe, cfg, capture)
+    except cc.CompileArmRefused as exc:
+        raise MintChildRefused(f"{mint_identity(request)}: {exc}") from exc
     miss_before = cc.cache_miss_count(pipe)
 
-    frame(phase="warmup_forward", step=0, total=len(jobs))
-    for index, job in enumerate(jobs, start=1):
-        frame(
-            phase="warmup_forward", step=index, total=len(jobs),
-            note=job.spec.name)
-        _run_warm_job(
-            instance, job, dict(request.configs.get(job.spec.name) or {}),
-            request.execution_lane, origin=mint_identity(request))
+    _drive_warm_plan(instance, jobs, request)
     frame(phase="inductor_compile", note="draining any queued compiles")
     _drain_router(pipe)
 
@@ -941,21 +1007,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         report = mint(request)
     except MintChildRefused as exc:
         # th#1322: a refused mint's phase table is where it spent the time
-        # BEFORE refusing — the most useful half of a failed mint.
+        # BEFORE refusing — the most useful half of a failed mint. The OPEN
+        # phase is read first on purpose: `_close_phases` closes it, and
+        # reading after would report every failure as phase "".
+        died_in = _PHASE_OPEN[0]
         _write_report(report_path, MintReport(
             status="refused", detail=str(exc)[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0], peak_vram_bytes=_peak_vram(),
+            phase=died_in, peak_vram_bytes=_peak_vram(),
             mint_phases=dict(getattr(exc, "mint_phases", None) or {})))
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     except BaseException as exc:  # noqa: BLE001 — every death is classified
         resource_shortfall = _is_resource_error(exc)
+        died_in = _PHASE_OPEN[0]
         _write_report(report_path, MintReport(
             status="resource" if resource_shortfall else "failed",
             detail=f"{type(exc).__name__}: {exc}"[:2000],
             elapsed_s=time.monotonic() - started, phases=_close_phases(),
-            phase=_PHASE_OPEN[0], peak_vram_bytes=_peak_vram(),
+            phase=died_in, peak_vram_bytes=_peak_vram(),
             # pgw#825: a CRASH's paid compiles are measurable too — the mint
             # attaches its partial table to whatever it died with.
             mint_phases=dict(getattr(exc, "mint_phases", None) or {})))
