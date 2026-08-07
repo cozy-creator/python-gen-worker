@@ -238,6 +238,35 @@ def lifted_torch_gap(spec: ExportSpec) -> str:
 # ---------------------------------------------------------------------------
 
 
+def exported_input_names(
+    name: str, containers: Optional[Mapping[str, int]] = None,
+) -> Tuple[str, ...]:
+    """The exported program's user-input name(s) a DECLARED input name means.
+
+    THE ONE FLATTENING RULE (pgw#993). ``torch.export`` flattens a container
+    argument into one positional user input per element, suffixed ``_0``,
+    ``_1``, … — measured for every arity, ``N=1`` included, so a one-element
+    container is ``x_0`` and never ``x``. A declared name therefore survives
+    into the exported program only when it is NOT a container.
+
+    Every consumer that maps declared names onto exported ones goes through
+    here: :func:`dynamic_shapes_spec` (which mirrors the structure),
+    :func:`declared_range_gaps` and :func:`lifted_input_gaps` (which resolve
+    names against the program). Two independent spellings of one mapping is
+    the defect class this replaces — z-image's ``Dim(carried_by=(("x", 2),))``
+    was unsatisfiable by construction, refusing every mint with "declared
+    dynamic dim names input 'x', which is not a user input of the exported
+    program (inputs: [… 'x_0', 'x_1'])" while the export it gated succeeded.
+
+    The arity comes from the SAME class row the example feed was built from
+    (``aot_declaration.container_arities``), never re-guessed.
+    """
+    arity = (containers or {}).get(name)
+    if arity is None:
+        return (str(name),)
+    return tuple(f"{name}_{index}" for index in range(int(arity)))
+
+
 def dynamic_shapes_spec(
     dims: Sequence[DynamicDim], input_names: Sequence[str],
     containers: Optional[Mapping[str, int]] = None,
@@ -311,18 +340,16 @@ def dynamic_shapes_spec(
     # fine, so this was an SDK gap, not a torch limitation. The arity comes
     # from the SAME class row the feed was built from
     # (`aot_declaration.container_arities`), never re-guessed here.
-    arities = dict(containers or {})
     out: Dict[str, Any] = {}
     for name in input_names:
         spec = by_input.get(name)
-        arity = arities.get(name)
-        if arity is None:
-            out[name] = spec
-        else:
-            # One entry per element; every element of a declared container
-            # shares the container's declared axes, which is what makes the
-            # elements one graph class rather than N.
-            out[name] = [spec for _ in range(int(arity))]
+        # One entry per EXPORTED element; every element of a declared
+        # container shares the container's declared axes, which is what makes
+        # the elements one graph class rather than N. The element count comes
+        # from `exported_input_names` — the same rule the declared-range and
+        # lifted-input gates resolve names with (pgw#993).
+        exported = exported_input_names(name, containers)
+        out[name] = spec if exported == (name,) else [spec for _ in exported]
     return out
 
 
@@ -441,6 +468,7 @@ def _shape_env(program: Any) -> Any:
 
 def declared_range_gaps(
     program: Any, dims: Sequence[DynamicDim],
+    containers: Optional[Mapping[str, int]] = None,
 ) -> List[str]:
     """Named reasons the export did not honour the declared dynamic contract.
 
@@ -466,6 +494,11 @@ def declared_range_gaps(
        shares a factor records nothing. This is the check the presence-only gate
        lacked, and it is evidence-based rather than arithmetic — see
        :func:`_pinning_guards` for why the arithmetic version was wrong.
+
+    A dim carried by a ``repeat=`` container is checked on EVERY exported
+    element (pgw#993): the declared name is resolved through
+    :func:`exported_input_names`, the same flattening rule
+    :func:`dynamic_shapes_spec` mirrors the structure with.
     """
     gaps: List[str] = []
     shapes = _placeholder_shapes(program)
@@ -474,90 +507,97 @@ def declared_range_gaps(
     for d in dims:
         if d.min == d.max:
             continue
-        shape = shapes.get(d.input_name)
-        if shape is None:
-            gaps.append(
-                f"declared dynamic dim names input {d.input_name!r}, which is "
-                f"not a user input of the exported program "
-                f"(inputs: {sorted(shapes)!r})")
-            continue
-        if d.axis >= len(shape):
-            gaps.append(
-                f"{d.input_name}[{d.axis}] is out of range for the exported "
-                f"shape {tuple(str(x) for x in shape)!r}")
-            continue
-        dim = shape[d.axis]
-        text = str(dim)
-        if text.lstrip("-").isdigit():
-            gaps.append(
-                f"{d.input_name}[{d.axis}] exported as the STATIC value {text} "
-                f"but is declared dynamic [{d.min}, {d.max}] — export "
-                f"specialized a dim the declaration advertises as dynamic")
-            continue
-        syms = _free_symbols(dim)
-        declared_symbols.extend(syms)
-        covered = False
-        # The SOLVED range of the axis's full expression, when the program
-        # records one. This is what makes a UNIFIED relational axis (#739 /
-        # ie#566 §5) gate-able: wan ti2v's per-token dim solves to
-        # ``31*s25*s56`` with its own composite range entry, while the
-        # per-symbol path below would compare a governing symbol's [20, 40]
-        # against the declared [12400, 49600] and refuse a sound artifact.
-        # Composite entries are in the axis's OWN units, so the declared
-        # bounds compare directly, with no multiple-of scaling.
-        expr = getattr(getattr(dim, "node", None), "expr", None)
-        interval = ranges.get(expr) if expr is not None else None
-        if interval is not None:
-            try:
-                lo, hi = int(interval.lower), int(interval.upper)
-            except (TypeError, ValueError, OverflowError):
-                lo = hi = -1
-            if lo >= 0:
+        for input_name in exported_input_names(d.input_name, containers):
+            shape = shapes.get(input_name)
+            if shape is None:
+                declared = (
+                    repr(d.input_name) if input_name == d.input_name
+                    else f"{d.input_name!r} (flattened element "
+                         f"{input_name!r})")
+                gaps.append(
+                    f"declared dynamic dim names input {declared}, which is "
+                    f"not a user input of the exported program "
+                    f"(inputs: {sorted(shapes)!r})")
+                continue
+            if d.axis >= len(shape):
+                gaps.append(
+                    f"{input_name}[{d.axis}] is out of range for the exported "
+                    f"shape {tuple(str(x) for x in shape)!r}")
+                continue
+            dim = shape[d.axis]
+            text = str(dim)
+            if text.lstrip("-").isdigit():
+                gaps.append(
+                    f"{input_name}[{d.axis}] exported as the STATIC value "
+                    f"{text} but is declared dynamic [{d.min}, {d.max}] — "
+                    f"export specialized a dim the declaration advertises as "
+                    f"dynamic")
+                continue
+            syms = _free_symbols(dim)
+            declared_symbols.extend(syms)
+            covered = False
+            # The SOLVED range of the axis's full expression, when the program
+            # records one. This is what makes a UNIFIED relational axis (#739 /
+            # ie#566 §5) gate-able: wan ti2v's per-token dim solves to
+            # ``31*s25*s56`` with its own composite range entry, while the
+            # per-symbol path below would compare a governing symbol's [20, 40]
+            # against the declared [12400, 49600] and refuse a sound artifact.
+            # Composite entries are in the axis's OWN units, so the declared
+            # bounds compare directly, with no multiple-of scaling.
+            expr = getattr(getattr(dim, "node", None), "expr", None)
+            interval = ranges.get(expr) if expr is not None else None
+            if interval is not None:
+                try:
+                    lo, hi = int(interval.lower), int(interval.upper)
+                except (TypeError, ValueError, OverflowError):
+                    lo = hi = -1
+                if lo >= 0:
+                    if lo == hi:
+                        gaps.append(
+                            f"{input_name}[{d.axis}] ({expr}) solved to the "
+                            f"single value {lo} — the declared range "
+                            f"[{d.min}, {d.max}] is advertised but the "
+                            f"artifact admits ONE shape")
+                    elif lo > d.min or hi < d.max:
+                        gaps.append(
+                            f"{input_name}[{d.axis}] ({expr}) solved to "
+                            f"[{lo}, {hi}] which does not cover the declared "
+                            f"[{d.min}, {d.max}] — the artifact admits less "
+                            f"traffic than it advertises")
+                    continue
+            for sym in syms:
+                interval = ranges.get(sym)
+                if interval is None:
+                    continue
+                try:
+                    lo, hi = int(interval.lower), int(interval.upper)
+                except (TypeError, ValueError, OverflowError):
+                    continue
                 if lo == hi:
                     gaps.append(
-                        f"{d.input_name}[{d.axis}] ({expr}) solved to the "
+                        f"{input_name}[{d.axis}] symbol {sym} solved to the "
                         f"single value {lo} — the declared range "
                         f"[{d.min}, {d.max}] is advertised but the artifact "
                         f"admits ONE shape")
-                elif lo > d.min or hi < d.max:
+                    covered = True
+                    break
+                # The symbol may carry a multiple-of factor (8*s95), so compare
+                # the DECLARED bounds against the symbol's own solved bounds
+                # scaled by the factor the declaration states.
+                factor = max(1, int(d.multiple_of or 1))
+                want_lo, want_hi = d.min // factor, d.max // factor
+                if lo > want_lo or hi < want_hi:
                     gaps.append(
-                        f"{d.input_name}[{d.axis}] ({expr}) solved to "
-                        f"[{lo}, {hi}] which does not cover the declared "
-                        f"[{d.min}, {d.max}] — the artifact admits less "
-                        f"traffic than it advertises")
-                continue
-        for sym in syms:
-            interval = ranges.get(sym)
-            if interval is None:
-                continue
-            try:
-                lo, hi = int(interval.lower), int(interval.upper)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if lo == hi:
-                gaps.append(
-                    f"{d.input_name}[{d.axis}] symbol {sym} solved to the "
-                    f"single value {lo} — the declared range [{d.min}, {d.max}] "
-                    f"is advertised but the artifact admits ONE shape")
+                        f"{input_name}[{d.axis}] symbol {sym} solved to "
+                        f"[{lo * factor}, {hi * factor}] which does not cover "
+                        f"the declared [{d.min}, {d.max}] — the artifact "
+                        f"admits less traffic than it advertises")
                 covered = True
                 break
-            # The symbol may carry a multiple-of factor (8*s95), so compare the
-            # DECLARED bounds against the symbol's own solved bounds scaled by
-            # the factor the declaration states.
-            factor = max(1, int(d.multiple_of or 1))
-            want_lo, want_hi = d.min // factor, d.max // factor
-            if lo > want_lo or hi < want_hi:
+            if not covered and not syms:
                 gaps.append(
-                    f"{d.input_name}[{d.axis}] symbol {sym} solved to "
-                    f"[{lo * factor}, {hi * factor}] which does not cover the "
-                    f"declared [{d.min}, {d.max}] — the artifact admits less "
-                    f"traffic than it advertises")
-            covered = True
-            break
-        if not covered and not syms:
-            gaps.append(
-                f"{d.input_name}[{d.axis}] is symbolic ({text}) but carries no "
-                f"resolvable symbol; its admissible range is unprovable")
+                    f"{input_name}[{d.axis}] is symbolic ({text}) but carries "
+                    f"no resolvable symbol; its admissible range is unprovable")
 
     gaps.extend(_pinning_guards(program, declared_symbols))
     return gaps
@@ -1060,10 +1100,12 @@ def _export_entry(
 
     input_names = _input_names(module, args, kwargs)
     flat_names = flat_input_names(module, args, kwargs)
+    # ONE arity map for this arm: the spec builder mirrors the container
+    # structure with it and the gates below resolve declared names against
+    # the exported ones with it (pgw#993).
+    arities = _decl.container_arities(decl, espec, module)
     dynamic = dynamic_shapes_spec(
-        espec.dynamic, input_names,
-        _decl.container_arities(decl, espec, module),
-    ) if espec.dynamic else None
+        espec.dynamic, input_names, arities) if espec.dynamic else None
 
     def _full_export() -> Any:
         try:
@@ -1089,11 +1131,11 @@ def _export_entry(
     if prop_probe is not None:
         timings["prop_probe_s"] = prop_probe
 
-    gaps = declared_range_gaps(program, espec.dynamic)
+    gaps = declared_range_gaps(program, espec.dynamic, arities)
     if gaps:
         raise MintRefused(
             f"entry {entry!r}: declared-range gate: " + "; ".join(gaps))
-    lifted_gaps = lifted_input_gaps(program, espec)
+    lifted_gaps = lifted_input_gaps(program, espec, arities)
     if lifted_gaps:
         raise MintRefused(
             f"entry {entry!r}: lifted-input gate: " + "; ".join(lifted_gaps))
@@ -3024,7 +3066,10 @@ def _specialization_facts(spec: ExportSpec) -> Dict[str, Any]:
     return facts
 
 
-def lifted_input_gaps(program: Any, spec: ExportSpec) -> List[str]:
+def lifted_input_gaps(
+    program: Any, spec: ExportSpec,
+    containers: Optional[Mapping[str, int]] = None,
+) -> List[str]:
     """Named reasons the declared lifted inputs are not actually graph inputs.
 
     #725 option 2's guarantee is structural: the adapter cannot be baked
@@ -3033,19 +3078,24 @@ def lifted_input_gaps(program: Any, spec: ExportSpec) -> List[str]:
     means the branch was constant-folded, the same bug in a different hat"
     case. So the presence of every declared lifted input is proven here, on
     the program, before a single second of AOTI compile is spent.
+
+    Names resolve through :func:`exported_input_names` (pgw#993), so a lifted
+    input declared as a ``repeat=`` container is looked up under the flattened
+    names export actually emits rather than refusing a sound program.
     """
     if not spec.lifted_inputs:
         return []
     signature = getattr(program, "graph_signature", None)
     user_inputs = {str(n) for n in getattr(signature, "user_inputs", ()) or ()}
     gaps: List[str] = []
-    for name in spec.lifted_inputs:
-        if str(name) not in user_inputs:
-            gaps.append(
-                f"declared lifted input {name!r} is not a user input of the "
-                f"exported program (inputs: {sorted(user_inputs)!r}) — the "
-                f"adapter would not be swappable (#725 option 2)"
-            )
+    for declared in spec.lifted_inputs:
+        for name in exported_input_names(str(declared), containers):
+            if name not in user_inputs:
+                gaps.append(
+                    f"declared lifted input {name!r} is not a user input of "
+                    f"the exported program (inputs: {sorted(user_inputs)!r}) "
+                    f"— the adapter would not be swappable (#725 option 2)"
+                )
     return gaps
 
 
@@ -3348,6 +3398,7 @@ __all__ = [
     "emit_phase_events",
     "entry_graph_block",
     "export_program",
+    "exported_input_names",
     "shared_identity_blocks",
     "LIFTED_LORA_TORCH_FLOOR",
     "lifted_input_gaps",
