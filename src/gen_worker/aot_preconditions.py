@@ -61,7 +61,15 @@ LIFTED_LORA_TORCH_FLOOR: Tuple[int, int] = (2, 13)
 CHECK_DECLARATION_IMPORT = "declaration_import"
 CHECK_DECLARATION_EVALUATES = "declaration_evaluates"
 CHECK_CXX_TOOLCHAIN = "cxx_toolchain"
+CHECK_CUDA_ROOT = "cuda_root"
+CHECK_TORCH_SINGLETON = "torch_singleton"
 CHECK_LIFTED_LORA_TORCH_FLOOR = "lifted_lora_torch_floor"
+
+#: Distributions that must appear at most once. A second copy of any of them
+#: silently doubles the image by ~7 GB and desyncs the CUDA runtime — the
+#: synthesized Dockerfile asserts this in-image (`torchInvariantLine`), and
+#: until pgw#1017 nothing asked it of a custom Dockerfile.
+TORCH_FAMILY: Tuple[str, ...] = ("torch", "torchvision", "torchaudio", "triton")
 
 OK = "ok"
 REFUSED = "refused"
@@ -210,6 +218,8 @@ def static_mint_preconditions(
         return tuple(rows)
 
     rows.append(_cxx_row(aot_declaring))
+    rows.append(_cuda_root_row(aot_declaring))
+    rows.append(_torch_singleton_row())
 
     version = torch_version if torch_version is not None else _torch_version()
     for family in aot_declaring:
@@ -244,6 +254,89 @@ def _cxx_row(aot_declaring: list[str]) -> Precondition:
             f"drop the export declaration and serve the dynamo/JIT lane"))
 
 
+def _torch_is_cuda_build() -> bool:
+    import torch
+
+    return bool(getattr(getattr(torch, "version", None), "cuda", None))
+
+
+def _cuda_root_row(aot_declaring: list[str]) -> Precondition:
+    """pgw#1017 GAP A: `g++` is necessary and NOT sufficient on a CUDA image.
+
+    The third instance of this issue's own defect class, and the most expensive
+    of the three: the cxx gap refused at build for $0.00, while this one refused
+    NOWHERE. The pod booted, loaded and EXPORTED — the expensive part — before
+    `cpp_extension` said "CUDA_HOME environment variable is not set". Free
+    refusal, paid failure; that asymmetry is the whole reason this row exists.
+    """
+    from . import cuda_root as cr
+
+    if not _torch_is_cuda_build():
+        return Precondition(
+            check=CHECK_CUDA_ROOT, verdict=OK,
+            detail=("torch is a CPU build, so AOTInductor's host compile needs "
+                    "no CUDA root"))
+    home = cr.torch_cuda_home()
+    gaps = cr.missing_parts(cr.Path(home)) if home else ["the root itself"]
+    if home and not gaps:
+        return Precondition(
+            check=CHECK_CUDA_ROOT, verdict=OK,
+            detail=f"AOTInductor host-compiles against {home}")
+    return Precondition(
+        check=CHECK_CUDA_ROOT, verdict=REFUSED, detail=(
+            f"torch's cpp_extension cannot host-compile on this image and "
+            f"{aot_declaring!r} declare an AOT export. Missing: "
+            f"{'; '.join(gaps)}. The pytorch runtime bases ship CUDA as pip "
+            f"wheels and never create /usr/local/cuda, so a C++ compiler alone "
+            f"gets you to the LINK step and no further (pgw#823, pgw#1017). "
+            f"Fix: add `RUN python -m gen_worker.cuda_root` to your Dockerfile "
+            f"after your dependency install — it composes the root out of parts "
+            f"the image already ships, writes nothing into site-packages, and "
+            f"is a no-op on an image that already has one. Or drop the export "
+            f"declaration and serve the dynamo/JIT lane"))
+
+
+def _torch_singleton_row() -> Precondition:
+    """pgw#1017 GAP B: one torch-family install, not two.
+
+    `torchInvariantLine` fails the SYNTHESIZED build when a second copy of a
+    torch-family distribution lands — *"silently doubles the image by ~7GB and
+    desyncs the CUDA runtime"*. A custom Dockerfile installing its deps its own
+    way (no `--no-emit-package` list, no base-image constraints file)
+    reproduces exactly that, and the hub reads no distribution's version out of
+    the image but `gen-worker`'s.
+
+    Scope, stated rather than implied: this verifies the DUPLICATE half only.
+    The synthesized file's other half — "torch has not drifted from the base
+    image's pin" — reads `/tmp/torch-constraints.txt`, which is written and
+    deleted inside the generated Dockerfile and does not exist here. That half
+    is decidable only where the base image is known, so it belongs to the hub
+    (th#1686) and is not faked here.
+    """
+    import importlib.metadata as md
+
+    counts: Dict[str, int] = {}
+    for dist in md.distributions():
+        name = str((dist.metadata["Name"] or "")).lower().replace("_", "-")
+        if name in TORCH_FAMILY:
+            counts[name] = counts.get(name, 0) + 1
+    dups = sorted(n for n, c in counts.items() if c > 1)
+    if not dups:
+        return Precondition(
+            check=CHECK_TORCH_SINGLETON, verdict=OK,
+            detail=(f"one install each of "
+                    f"{sorted(n for n in counts) or list(TORCH_FAMILY)}"))
+    return Precondition(
+        check=CHECK_TORCH_SINGLETON, verdict=REFUSED, detail=(
+            f"duplicate torch-family install: {dups}. A second copy shadows the "
+            f"base image's, adds ~7 GB to every pod's image pull and desyncs "
+            f"the CUDA runtime the compiled kernels were built against. Pin "
+            f"your dependencies against the versions the base image already "
+            f"provides, or exclude them from your install (the synthesized "
+            f"Dockerfile passes --no-emit-package for the whole torch/CUDA "
+            f"wheel set)"))
+
+
 def declared_compile_families(functions: Any) -> Dict[str, int]:
     """family -> largest declared ``lora_bucket``, over manifest functions.
 
@@ -265,13 +358,16 @@ def declared_compile_families(functions: Any) -> Dict[str, int]:
 __all__ = [
     "ABSTAINED",
     "BLOCKED",
+    "CHECK_CUDA_ROOT",
     "CHECK_CXX_TOOLCHAIN",
     "CHECK_DECLARATION_EVALUATES",
     "CHECK_DECLARATION_IMPORT",
     "CHECK_LIFTED_LORA_TORCH_FLOOR",
+    "CHECK_TORCH_SINGLETON",
     "LIFTED_LORA_TORCH_FLOOR",
     "OK",
     "REFUSED",
+    "TORCH_FAMILY",
     "Precondition",
     "declared_compile_families",
     "static_mint_preconditions",

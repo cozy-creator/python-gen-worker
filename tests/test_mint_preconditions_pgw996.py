@@ -129,6 +129,29 @@ def toolchain(monkeypatch: pytest.MonkeyPatch):
     return _set
 
 
+@pytest.fixture(autouse=True)
+def cuda_root(monkeypatch: pytest.MonkeyPatch):
+    """The image's CUDA root, under test control (pgw#1017 GAP A).
+
+    Autouse and healthy by default, for the same reason `toolchain` stubs g++:
+    these rows are about a hypothetical endpoint IMAGE, and the box running the
+    suite is not one. Without it every row here would answer about the CI
+    runner — which carries a CUDA torch wheel and no `/usr/local/cuda`, so the
+    honest verdict is `refused` and it has nothing to do with the toy endpoint
+    under test.
+
+    Returns a setter so a row that wants the refusal can ask for it.
+    """
+    from gen_worker import cuda_root as cr
+
+    def _set(home: str, gaps: tuple[str, ...] = ()) -> None:
+        monkeypatch.setattr(cr, "torch_cuda_home", lambda: home)
+        monkeypatch.setattr(cr, "missing_parts", lambda _root: list(gaps))
+
+    _set("/usr/local/cuda")
+    return _set
+
+
 def _build(root: Path, pkg: str, declaration: str, *, bucket: int = 0,
            external: bool = False):
     _tree(root, pkg, declaration, bucket=bucket, external=external)
@@ -225,6 +248,11 @@ def test_a_healthy_declaring_image_builds_and_records_its_proof(
     assert verdicts == {
         pre.CHECK_DECLARATION_EVALUATES: pre.OK,
         pre.CHECK_CXX_TOOLCHAIN: pre.OK,
+        # pgw#1017: the two the custom-Dockerfile audit added. An exhaustive
+        # equality, deliberately — a row that stops being stamped is the exact
+        # defect this whole issue is about, and `in` would not notice.
+        pre.CHECK_CUDA_ROOT: pre.OK,
+        pre.CHECK_TORCH_SINGLETON: pre.OK,
         pre.CHECK_LIFTED_LORA_TORCH_FLOOR: pre.OK,
     }
 
