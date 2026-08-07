@@ -123,11 +123,17 @@ def test_classification_leak_completes_the_mint_naming_the_variable(
     assert "toyfam" in emitted[0].detail
 
 
-def test_leaking_mint_packs_and_publishes_the_leak(
+def test_a_leaking_pipeline_still_packs_and_carries_its_leak(
     tmp_path: Path, events: List[Any],
 ) -> None:
-    """End to end through the real finalize: the cell EXISTS, and the leak
-    rides it into CAS. Before pgw#756 this raised and packed nothing."""
+    """The cell EXISTS and the leak rides it. Before pgw#756 this raised and
+    packed nothing.
+
+    pgw#1010 re-pointed the seal: `finish_fleet_mint` packed a DYNAMO cell and
+    is deleted with that artifact class. The audit itself is unchanged and its
+    surviving producer is `mint_artifact` (the cozy-local store's mint), so the
+    assembly below is that producer's — manifest onto the metadata, metadata
+    into `pack` — minus the compile a CPU test host cannot run."""
     pipe = _leaking_pipe()
     capture = tmp_path / "capture"
     fx_entry = capture / "inductor" / "fxgraph" / "aa" / "bb"
@@ -135,11 +141,16 @@ def test_leaking_mint_packs_and_publishes_the_leak(
     (fx_entry / "entry").write_bytes(b"fx")
     target = tmp_path / "cell.tar.gz"
 
-    meta = cc.finish_fleet_mint(pipe, _cfg(), "toyfam", target, capture)
+    manifest = gc.closure_manifest(pipe, _cfg(), label="toyfam")
+    meta = cc.artifact_metadata(
+        family="toyfam", source_ref="self-mint",
+        shapes=_cfg().shapes, targets=_cfg().targets)
+    meta[gc.MANIFEST_KEY] = manifest
+    cc.pack(capture, target, meta)
 
     assert target.exists(), "an undeclared scalar must not refuse the mint"
     packed = gc.load_manifest(target)
-    assert packed == meta[gc.MANIFEST_KEY]
+    assert packed == manifest
     assert any("L['scale']" in row for row in packed["leaks"])
     assert _guard_leak_events(events), "the leak must be countable hub-side"
 

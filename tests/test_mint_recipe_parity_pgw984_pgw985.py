@@ -241,7 +241,10 @@ def test_the_child_refuses_a_deterministic_environment_decline(
     # th#1322: and the phase it died in survives into the report. This was
     # ALWAYS "" — `_close_phases()` closes the open phase, and the field was
     # read after it in the same call.
-    assert report.phase in ("load", "trace_graph"), report.phase
+    # The phase it died in survives into the report (th#1322). WHICH phase is
+    # the child's business — a cardless box refuses inside the export's
+    # packaging step — so the assertion is that a phase is NAMED, not which.
+    assert report.phase, report.phase
 
 
 def test_a_missing_target_is_refused_terminally_not_crashed(
@@ -338,7 +341,9 @@ def test_an_aot_mint_cannot_seal_for_a_handler_that_cannot_run(
 
     text = str(exc.value)
     assert "warm plan does not run" in text, text
-    assert "microrig" in text and FUNCTION in text and "aot" in text, text
+    # pgw#1010: the recipe left the identity line with the recipe axis — the
+    # child mints one kind, so a name for it on every refusal is noise.
+    assert "microrig" in text and FUNCTION in text, text
     assert "no resolved model ref" in text, text
     assert not aot_without_the_export, (
         "nothing may be exported once the endpoint's forward has failed")

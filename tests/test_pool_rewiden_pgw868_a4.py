@@ -437,7 +437,7 @@ def test_the_child_env_carries_the_declaration_the_child_now_reads(
     env = mint_process.child_env(
         MintRequest(
             function="generate", modules=(), family="sdxl", cell_key="ck5-x",
-            target="/tmp/cell.tar.gz", capture="/tmp/cap",
+            target="/tmp/cell.tar.gz", work_root="/tmp/cap",
             report="/tmp/r.json", cfg=CompileCellSpec(family="sdxl")),
         base={"WORKER_MODE": "forge", "PATH": os.environ.get("PATH", "")})
     assert env["WORKER_MODE"] == "forge"

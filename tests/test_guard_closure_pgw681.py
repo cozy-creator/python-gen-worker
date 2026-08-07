@@ -224,12 +224,15 @@ def test_gate_refuses_when_nothing_is_extractable() -> None:
         gc.closure_manifest(pipe, _cfg())
 
 
-def test_finish_fleet_mint_records_the_manifest_leaking_or_clean(
+def test_the_packed_cell_records_the_manifest_leaking_or_clean(
     tmp_path: Path,
 ) -> None:
-    """The audit rides the real mint finalize: a leaking capture PACKS
-    anyway (pgw#756) carrying its leak, and a clean capture packs with an
-    empty leak list — both with the manifest riding metadata.json."""
+    """The audit rides the packed cell: a leaking capture PACKS anyway
+    (pgw#756) carrying its leak, and a clean capture packs with an empty leak
+    list — both with the manifest riding metadata.json.
+
+    pgw#1010: assembled the way the surviving producer (`mint_artifact`) does,
+    because `finish_fleet_mint` sealed a dynamo cell and is deleted with it."""
 
     def forward(self: Any, x: Any, scale: float) -> Any:
         return self.lin(x) * scale
@@ -244,14 +247,22 @@ def test_finish_fleet_mint_records_the_manifest_leaking_or_clean(
     (fx_entry / "entry").write_bytes(b"fx")
     target = tmp_path / "cell.tar.gz"
 
+    def _packed(cfg: Any, out: Path) -> dict:
+        meta = cc.artifact_metadata(
+            family="toyfam", source_ref="self-mint",
+            shapes=cfg.shapes, targets=cfg.targets,
+            guidance_scales=getattr(cfg, "guidance_scales", ()))
+        meta[gc.MANIFEST_KEY] = gc.closure_manifest(pipe, cfg, label="toyfam")
+        cc.pack(capture, out, meta)
+        return meta
+
     leaky = tmp_path / "leaky.tar.gz"
-    meta = cc.finish_fleet_mint(pipe, _cfg(), "toyfam", leaky, capture)
+    meta = _packed(_cfg(), leaky)
     assert leaky.exists(), "an undeclared scalar must no longer refuse the mint"
     assert any("L['scale']" in row for row in meta[gc.MANIFEST_KEY]["leaks"])
     assert gc.load_manifest(leaky)["leaks"] == meta[gc.MANIFEST_KEY]["leaks"]
 
-    meta = cc.finish_fleet_mint(
-        pipe, _cfg(guidance_scales=(3.25,)), "toyfam", target, capture)
+    meta = _packed(_cfg(guidance_scales=(3.25,)), target)
     assert meta[gc.MANIFEST_KEY]["leaks"] == []
     assert target.exists()
     loaded = gc.load_manifest(target)

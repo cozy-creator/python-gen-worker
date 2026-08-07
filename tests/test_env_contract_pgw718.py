@@ -204,13 +204,18 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
     fx_entry.mkdir(parents=True)
     (fx_entry / "entry").write_bytes(b"fx")
 
+    # pgw#1010: the seal this drove was `finish_fleet_mint`'s, which packed a
+    # DYNAMO cell and is deleted with that artifact class. The RULE is
+    # unchanged and lives where every surviving mint reads it —
+    # `env_seal.assert_seal_unchanged("mint")`, called by `mint_artifact` (the
+    # local store's mint) and by `aot_mint` — so the drift is driven directly
+    # against the one authority rather than through a deleted caller.
     env_seal.establish()
     before = torch.backends.cudnn.benchmark
     try:
         torch.backends.cudnn.benchmark = True
         with pytest.raises(env_seal.EnvSealError, match="cudnn_benchmark"):
-            cc.finish_fleet_mint(
-                pipe, _cfg(), "toyfam", tmp_path / "cell.tar.gz", capture)
+            env_seal.assert_seal_unchanged("mint")
         assert not (tmp_path / "cell.tar.gz").exists()
     finally:
         torch.backends.cudnn.benchmark = before

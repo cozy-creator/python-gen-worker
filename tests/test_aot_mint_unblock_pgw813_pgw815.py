@@ -270,8 +270,13 @@ def test_delegation_declines_name_their_TRUE_cause(
     # deleted (in-process minting existed only to pack a dynamo cell), so the
     # caller-forced seam that replaces it is the one asserted here — the same
     # phase, reached the way a caller can still reach it.
-    fleet_cells.enable_compiled(
-        _Pipe(), _Cfg(), publisher=_Publisher(), delegate=False)  # type: ignore[arg-type]
+    with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
+        # pgw#1010: this rig's lane is w8a8, which serves only from a cell — so
+        # the decline is followed by the typed fail-closed rather than by a JIT
+        # intake arm. The decline still NAMES ITS CAUSE first, which is the
+        # pgw#813 claim under test.
+        fleet_cells.enable_compiled(
+            _Pipe(), _Cfg(), publisher=_Publisher(), delegate=False)  # type: ignore[arg-type]
     assert "aot_mint_forced_in_process" in _phases(_events, "self_mint_skipped")
 
     # pgw#995: the second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and

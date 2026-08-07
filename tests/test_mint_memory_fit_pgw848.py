@@ -277,7 +277,7 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
     assert banked == 6 * _GIB
     request = mint_process.MintRequest(
         function="f", modules=(), family=fam, cell_key="k", target="t",
-        capture="c", report="r",
+        work_root="c", report="r",
         cfg=mint_delegate.mint_process.CompileCellSpec(),
         entry_peak_rss_bytes=banked)
     assert request.entry_peak_rss_bytes == 6 * _GIB, (
