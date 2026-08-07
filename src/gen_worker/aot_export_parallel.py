@@ -1,59 +1,75 @@
-"""pgw#868 A4: export the rows of one adapter arm CONCURRENTLY, in processes.
+"""pgw#868 A4 / pgw#1000: how wide the export phase may run, decided in code.
 
-**The measurement this exists for.** `trace_graph` is ~74 minutes for sdxl's 36
-rows (2.06 and 2.07 min/row, two pods, agreeing to two decimals), it runs
-SERIALLY in the mint parent, and pgw#809's compile pool divides none of it. The
-profile says why parallelism is the lever and not a local fix: >80 % of a row is
-single-threaded Python proxy-tensor tracing and fake-tensor dispatch, with flat
-self-time (largest frame 5.5 %) — there is no hot path to optimise. And a
-controlled four-size series says width buys what it appears to buy: export is
-**sub-linear** in node count (exponent 0.71-0.93) with per-call cost flat or
-falling, so parallelism divides a real wall rather than fighting a curve.
+The phase this is about
+-----------------------
+``aot_mint._mint_cell`` exports one declared class row at a time, serially, in
+the mint parent. MEASURED on the only complete 36-entry sdxl AOT mint that has
+ever finished (attempt 26, L40S)::
 
-**The seam, and why "serial" was broader than the constraint.**
-``aot_mint._export_entry`` says export *"must stay SERIAL — one live pipeline,
-one card, one branch-arm toggle"*. All three hold AT THE BOUNDARY:
+    export_s 3891.82   compile_s 9153.12   total_s 9546.65
+
+**65 minutes of a 2 h 43 m mint, and pgw#809's K-wide compile pool divides
+none of it.** Per row that is 108 s, which agrees with the 125-134 s the
+z-image lane measured on an A100. It is the single largest serial term left.
+
+Why this module shipped dark for three releases, and what actually fixed it
+--------------------------------------------------------------------------
+It was gated on ``GEN_WORKER_AOT_EXPORT_PARALLEL``, default OFF, with the
+stated reason: *"width is bounded by the EXPORT-phase footprint, which nobody
+has measured... until then this refuses to guess and stays OFF."*
+
+The footprint was not unmeasured. It was measured WRONG, and nothing said so.
+``timings["export_peak_device_bytes"]`` is ``max_memory_allocated`` over the
+ENTIRE serial loop against a resident pipeline — 15.4 GiB on attempt 26 — so
+:func:`width_for` was asked "how many 15.4 GiB workers fit beside a resident
+mint child" and correctly answered **1**, on every card, forever. A flag
+guarding a computation that cannot return anything but 1 is not a safety
+mechanism; it is a feature that never ran.
+
+pgw#1000 measures the right quantity — :class:`aot_mint._ExportFootprint`, one
+row's DELTA over the resident baseline, which is what a worker adds to a card
+that already holds the module it traces — and the gate is gone. **The width
+decision lives here, in code.** Width 1 is the natural floor when the budget
+says so, and it says so through named terms, not a flag.
+
+The budget is pgw#992's, unchanged
+----------------------------------
+An export worker is priced exactly as an entry-compile child is priced, by the
+same :class:`~gen_worker.aot_compile_pool.CardCensus`::
+
+    budget = total - resident co-tenant - own device high-water - tenant reserve
+
+That bound exists because dividing a momentary free-VRAM SAMPLE killed the
+first AOT mint ever to reach the compile phase (pgw#992). Export has no claim
+to a weaker rule than compile: it runs on the same card, beside the same
+residents, in the same mint.
+
+The partition, and why it is the only safe one
+----------------------------------------------
 ``_disarm_branches`` mutates the module in place, exactly ONCE, between the
 adapter-bearing rows and the branchless ones. Rows *within* an arm mutate
-nothing. So sdxl's 36 rows are **two internally order-independent groups of
-18**, and the serialisation across those 18 was inherited from where the model
-lives, not required by correctness.
+nothing, so sdxl's 36 rows are two internally order-independent groups of 18
+and the serialisation across those 18 was inherited from where the model
+lives, not required by correctness. :func:`groups` is that partition and
+nothing may reorder across it.
 
-**Processes, not threads:** the bottleneck is the GIL, so a thread pool buys
-nothing. Not `fork` either — banned after CUDA init (pgw#784). Each worker is a
-fresh interpreter that builds its OWN module copy, which is what makes the
-width VRAM-bounded.
-
-**Width is bounded by the EXPORT-phase footprint, which nobody has measured.**
-It is NOT the compile pool's `weights x 1.25 + 5 GiB` — that estimate's
-activation and workspace terms are *inductor's*, and ~56 % of it was never
-observed. Export traces with fake tensors and executes no kernel, so its
-footprint should be close to the resident weights alone. `peak_device_bytes`
-(pgw#868) measures it per phase on the next mint; **until then this refuses to
-guess and stays OFF.**
-
-**The rule, and the gate.** pgw#846 governs: the traced graph may not move. So
-this ships behind ``GEN_WORKER_AOT_EXPORT_PARALLEL`` (OFF), and a worker's
-artifact must be **byte-identical** to the parent's for the same row — proven,
-not asserted, by comparing generated C++ in the SAME cleared build directory
-(the build dir and expanded ``-march`` are embedded; different dirs can never be
-byte-equal, a trap this program has hit twice).
+Processes, not threads: the bottleneck is the GIL, and ``fork`` is banned
+after CUDA init (pgw#784). Each worker is a fresh interpreter holding its own
+module copy — which is exactly why the width is VRAM-bounded and why the
+divisor above had to be real before an executor could be built against it.
 """
 from __future__ import annotations
 
-import os
-from typing import Any, Dict, List, Sequence, Tuple
-
-#: OFF by default. Turning it on needs the export-phase VRAM measurement first.
-ENV_FLAG = "GEN_WORKER_AOT_EXPORT_PARALLEL"
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 #: Below this a group cannot repay a worker's own module load.
 MIN_GROUP = 3
 
-
-def enabled() -> bool:
-    return os.environ.get(ENV_FLAG, "").strip().lower() in (
-        "1", "true", "yes", "on")
+#: Hard ceiling regardless of budget, matching the compile pool's
+#: (:data:`~gen_worker.aot_compile_pool.MAX_ENTRY_WORKERS`). Past it the shared
+#: inductor cache and the disk holding N saved programs stop behaving, and the
+#: remaining serial terms dominate anyway.
+CEILING = 8
 
 
 def groups(rows: Sequence[Tuple[Any, Any]]) -> List[List[int]]:
@@ -76,77 +92,93 @@ def groups(rows: Sequence[Tuple[Any, Any]]) -> List[List[int]]:
 
 
 def width_for(
-    group_size: int, *, free_device_bytes: int, per_export_device_bytes: int,
-    cpu_workers: int, ceiling: int = 8,
+    group_size: int, *, budget_bytes: int, per_export_device_bytes: int,
+    cpu_workers: int, ceiling: int = CEILING,
 ) -> Dict[str, Any]:
-    """K for ONE arm's export, from the EXPORT footprint — never the compile one.
+    """K for ONE arm's export, from the EXPORT footprint and pgw#992's budget.
 
-    Refuses to license concurrency it cannot justify: an unmeasured or absent
-    per-export footprint yields 1, because the failure mode of guessing here is
-    an OOM that kills a 74-minute phase.
+    ``budget_bytes`` is what the CARD can hold at once beside its residents —
+    never a free-VRAM sample. Refuses to license concurrency it cannot justify:
+    an unmeasured footprint or an unreadable budget yields 1, because the
+    failure mode of guessing here is an OOM that kills a 65-minute phase.
     """
     if group_size < MIN_GROUP:
         return {"workers": 1, "binding": "group-too-small"}
     if per_export_device_bytes <= 0:
         return {"workers": 1, "binding": "export-footprint-unmeasured"}
-    if free_device_bytes <= 0:
-        return {"workers": 1, "binding": "no-device-reading"}
-    device_workers = max(1, int(free_device_bytes // per_export_device_bytes))
+    if budget_bytes <= 0:
+        return {"workers": 1, "binding": "no-card-budget"}
+    device_workers = max(1, int(budget_bytes // per_export_device_bytes))
     workers = max(1, min(device_workers, max(1, cpu_workers), ceiling,
                          group_size))
     binding = min((device_workers, "vram"), (cpu_workers, "cpu"),
                   (ceiling, "ceiling"), (group_size, "group"))[1]
     return {"workers": workers, "binding": binding,
             "device_workers": device_workers, "cpu_workers": cpu_workers,
+            "budget_bytes": int(budget_bytes),
             "per_export_device_bytes": int(per_export_device_bytes)}
-
-
-__all__ = ["ENV_FLAG", "MIN_GROUP", "decide", "enabled", "groups",
-           "width_for"]
 
 
 def decide(
     rows: Sequence[Any], timings: Dict[str, Any], *,
-    free_device_bytes: int = -1, cpu_workers: int = 0,
+    budget_bytes: int = -1, cpu_workers: int = 0,
+    census: Optional[Any] = None,
 ) -> Dict[str, float]:
-    """The CALL SITE's decision, as flat telemetry. Emitted on EVERY mint.
+    """The width the export phase runs at, as flat telemetry.
 
-    pgw#868 A4: `timings["export_peak_device_bytes"]` (shipped 0.90.6) is
-    exactly :func:`width_for`'s ``per_export_device_bytes``. Producer and
-    consumer were both built and never joined — so the flag was inert and
-    "shipped OFF behind a flag" described a seam that had never been cut.
-    This is the join, and it records the decision **whether or not the flag is
-    on**, because the decision is the OBSERVABLE: a reader sees the width the
-    export phase would have run at and which fact bound it, on a mint that
-    changed nothing. That is what makes turning it on a measurement rather than
-    a leap.
+    Emitted on EVERY mint. When ``budget_bytes`` is not supplied it is derived
+    from pgw#992's census exactly as the compile pool derives it — same terms,
+    same card, same residents — so the two phases can never disagree about how
+    much room exists.
     """
-    if cpu_workers <= 0 or free_device_bytes < 0:
-        from . import aot_compile_pool
+    from . import aot_compile_pool
 
+    if cpu_workers <= 0:
         try:
-            if cpu_workers <= 0:
-                cpu_workers = max(1, aot_compile_pool.cpu_facts().vcpus // 2)
-            if free_device_bytes < 0:
-                free_device_bytes = aot_compile_pool.device_facts().free_bytes
+            cpu_workers = max(1, aot_compile_pool.cpu_facts().vcpus // 2)
         except Exception:  # noqa: BLE001 — telemetry never fails a mint
-            cpu_workers = max(1, cpu_workers)
-            free_device_bytes = max(0, free_device_bytes)
+            cpu_workers = 1
+    if budget_bytes < 0:
+        budget_bytes = _card_budget(
+            census if census is not None else aot_compile_pool.card_census())
 
-    per_export = int(float(timings.get("export_peak_device_bytes") or 0))
+    per_export = int(float(timings.get("per_export_device_bytes") or 0))
     runs = groups(rows)
     largest = max((len(g) for g in runs), default=0)
     width = width_for(
-        largest, free_device_bytes=int(free_device_bytes),
+        largest, budget_bytes=int(budget_bytes),
         per_export_device_bytes=per_export, cpu_workers=int(cpu_workers))
     return {
-        "export_parallel_enabled": 1.0 if enabled() else 0.0,
         "export_parallel_groups": float(len(runs)),
         "export_parallel_largest_group": float(largest),
         "export_parallel_width": float(width["workers"]),
         "export_parallel_binding": float(
             {"vram": 1, "cpu": 2, "ceiling": 3, "group": 4,
-             "export-footprint-unmeasured": 5, "no-device-reading": 6,
+             "export-footprint-unmeasured": 5, "no-card-budget": 6,
              "group-too-small": 7}.get(str(width["binding"]), 0)),
         "export_parallel_per_export_bytes": float(per_export),
+        "export_parallel_budget_bytes": float(max(0, budget_bytes)),
     }
+
+
+def _card_budget(census: Any) -> int:
+    """pgw#992's budget, for export workers instead of entry children.
+
+    ``total - resident co-tenant - own device high-water``. The tenant reserve
+    is the compile pool's to apply against a serve goal; export runs inside the
+    same mint child, so the two must not each subtract it — the pool re-derives
+    the whole budget for itself when it builds.
+    """
+    from . import aot_compile_pool
+
+    try:
+        if not census.readable:
+            return -1
+        own = max(aot_compile_pool.own_device_high_water(),
+                  int(census.own_reserved_bytes))
+        return int(census.total_bytes) - int(census.resident_other_bytes) - own
+    except Exception:  # noqa: BLE001 — telemetry never fails a mint
+        return -1
+
+
+__all__ = ["CEILING", "MIN_GROUP", "decide", "groups", "width_for"]

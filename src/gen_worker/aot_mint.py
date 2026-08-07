@@ -88,6 +88,7 @@ later step could upload.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -95,11 +96,12 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple)
 
 from . import activity as activity_mod
 from . import (
-    aot_compile_pool, aot_export_parallel, aot_export_reuse, aot_package,
+    aot_compile_pool, aot_export_parallel, aot_package,
     aot_serve, aot_wrapper_split, cell_key, graph_hash, kernel_path)
 from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
@@ -993,22 +995,12 @@ def _export_entry(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     compile_now: bool = True,
-    reuse: Optional[aot_export_reuse.ReuseState] = None,
-    reuse_key: Any = None,
     rows: int = 0,
 ) -> _MintedEntry:
     """Resolve, feed, (warm,) export, gate, and compile ONE declared graph
     class. Every refusal is prefixed with the entry name — a multi-graph
     mint that cannot say WHICH class failed is the silent-failure path in
     a new hat (pgw#758).
-
-    ``reuse`` (pgw#847, OFF unless `GEN_WORKER_AOT_EXPORT_REUSE` is set) may
-    hand back a program re-specialized from an earlier row's graph instead of
-    a fresh `torch.export.export`, but only after its own gate has PROVEN, by
-    byte-comparing every emitted file including the linked `.so`, that the two
-    routes agree for this family. It falls back to a full export on anything
-    it cannot prove, so this parameter can only change how long the export
-    takes, never what comes out.
 
     ``compile_now=False`` stops after the export-side gates and returns the
     entry with no files: pgw#809's pool then compiles every entry K-wide out
@@ -1105,17 +1097,12 @@ def _export_entry(
             raise MintRefused(f"entry {entry!r}: {exc}") from exc
 
     t0 = time.monotonic()
-    if reuse is None:
-        program, how = _full_export(), "full"
-    else:
-        program, how = reuse.program(
-            (espec.target, reuse_key), entry=entry, rows=rows,
-            args=args, kwargs=kwargs, full_export=_full_export)
+    program = _full_export()
     timings["export_s"] = round(time.monotonic() - t0, 2)
-    if how != "full":
-        timings["export_how"] = how
-    # pgw#847, telemetry only: the one number that sizes "export once,
-    # re-propagate per row". Once per process, so a 36-entry mint pays it once.
+    # pgw#1000, telemetry only: the one number that sized "export once,
+    # re-propagate per row". Kept after pgw#847 was deleted because it prices
+    # the SAME question the export pool now answers with processes, and it is
+    # free. Once per process, so a 36-entry mint pays it once.
     prop_probe = _probe_prop_s(program)
     if prop_probe is not None:
         timings["prop_probe_s"] = prop_probe
@@ -1713,6 +1700,107 @@ def _attach_partial_phases(exc: BaseException, progress: MintProgress) -> None:
         logger.debug("aot-mint: partial phase table unavailable", exc_info=True)
 
 
+class _ExportFootprint:
+    """What ONE export costs a card, as distinct from what the whole export
+    PHASE costs one.
+
+    pgw#1000 — the measurement that kept export parallelism dark. The width
+    rule needs "how much device memory does one export worker hold"; the only
+    figure ever recorded was ``max_memory_allocated`` over the ENTIRE serial
+    loop, taken against a resident pipeline:
+
+        export_peak_device_bytes  16,558,897,664   (15.4 GiB, sdxl, attempt 26)
+
+    That is a cumulative high-water across 36 rows *including* the resident
+    module — so dividing free VRAM by it answers "how many whole mint children
+    fit", which is 1, forever. ``aot_export_parallel.width_for`` then returned
+    1 with ``binding='export-footprint-unmeasured'`` and the feature could
+    never turn on. The number was not missing; it was the wrong number, and
+    nothing said so.
+
+    A row's DELTA over the resident baseline is the right one: it is what a
+    worker adds to a card that already holds the module it traces. Export runs
+    on fake tensors and launches no kernel, so it should be small — but
+    "should be" is the claim this class exists to replace, and the fallback
+    when it cannot be read is still a refusal to widen.
+
+    Reported both ways, because they answer different questions and conflating
+    them is the defect: ``per_export_device_bytes`` (the MAX row delta — sizes
+    a pool) and ``export_peak_device_bytes`` (the phase high-water — sizes the
+    mint child itself, and is what pgw#992's CardCensus already prices).
+    """
+
+    __slots__ = ("baseline", "rows", "readable", "census")
+
+    def __init__(self, baseline: int, readable: bool,
+                 census: Optional[Any] = None) -> None:
+        self.baseline = baseline
+        self.rows: List[int] = []
+        self.readable = readable
+        #: pgw#992's card census, taken HERE — before the first row traces.
+        #: The budget it feeds is `total - co-tenant - own high-water`, and
+        #: that only bounds anything if the census predates the growth it is
+        #: meant to price. Taken at `decide()` time instead it would read the
+        #: mint child's own grown footprint as the baseline and hand the
+        #: export pool back everything the phase had already consumed.
+        self.census = census
+
+    @classmethod
+    def open(cls) -> "_ExportFootprint":
+        from . import aot_compile_pool
+
+        census = aot_compile_pool.card_census()
+        try:
+            import torch as _t
+
+            if not _t.cuda.is_available():
+                return cls(0, False, census)
+            return cls(int(_t.cuda.memory_reserved()), True, census)
+        except Exception:  # noqa: BLE001 — a probe never changes an outcome
+            return cls(0, False, census)
+
+    @contextlib.contextmanager
+    def row(self) -> Iterator[None]:
+        """Measure ONE row's export. Never raises: the row's own exception
+        propagates untouched and its measurement is simply absent."""
+        if not self.readable:
+            yield
+            return
+        try:
+            import torch as _t
+
+            _t.cuda.reset_peak_memory_stats()
+            before = int(_t.cuda.memory_reserved())
+        except Exception:  # noqa: BLE001
+            yield
+            return
+        try:
+            yield
+        finally:
+            try:
+                import torch as _t2
+
+                peak = int(_t2.cuda.max_memory_reserved())
+                # Against the row's OWN entry level, not the phase baseline:
+                # rows that leave allocations behind (a cached graph, a lifted
+                # constant) would otherwise charge every later row for them.
+                self.rows.append(max(0, peak - before))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def facts(self) -> Dict[str, float]:
+        """Flat scalars for ``timings``. Absent keys where nothing was read —
+        a measured zero and an unread card are different facts, and the width
+        rule must be able to tell them apart."""
+        if not self.readable or not self.rows:
+            return {}
+        return {
+            "per_export_device_bytes": float(max(self.rows)),
+            "per_export_device_rows": float(len(self.rows)),
+            "export_resident_baseline_bytes": float(self.baseline),
+        }
+
+
 def _mint_cell(
     pipeline: Any,
     spec: ExportSpec,
@@ -1830,12 +1918,6 @@ def _mint_cell(
     # forward. Arming it is this function's job, not the caller's — see
     # `_arm_branches`.
     _arm_branches(pipeline, int(spec.lora_bucket or 0))
-    # pgw#847, OFF unless opted in: one export per (target, adapter arm) and a
-    # re-specialization per row, admitted only by a gate that byte-compares
-    # every emitted file. Built HERE, per mint, so a verdict can never outlive
-    # the family it was reached for.
-    reuse_state = aot_export_reuse.ReuseState(
-        work, inductor_configs=inductor_configs)
     t_export = time.monotonic()
     # pgw#868 A4: the EXPORT phase's own device high-water, which nothing has
     # ever measured. `aot_compile_child` resets and samples around the INDUCTOR
@@ -1855,6 +1937,11 @@ def _mint_cell(
             _t.cuda.reset_peak_memory_stats()
     except Exception:  # noqa: BLE001 — a probe never changes an outcome
         pass
+    # pgw#1000: the RESIDENT baseline, read before the first row traces. Every
+    # per-row figure below is a DELTA over this, because what a hypothetical
+    # export worker adds to a card is what it allocates on top of the module
+    # it holds — not the module plus everything the parent already had.
+    export_footprint = _ExportFootprint.open()
     progress.beat(
         PHASE_TRACE_GRAPH, 0, len(rows),
         f"{len(rows)} declared class row(s)")
@@ -1873,36 +1960,14 @@ def _mint_cell(
             progress.beat(
                 PHASE_TRACE_GRAPH, index, len(rows),
                 _decl.plan_entry_name(plan))
-            minted.append(_export_entry(
-                pipeline, spec, plan, decl,
-                inductor_configs=inductor_configs,
-                compile_now=not parallel,
-                reuse=reuse_state, reuse_key=bool(arm), rows=len(rows)))
+            with export_footprint.row():
+                minted.append(_export_entry(
+                    pipeline, spec, plan, decl,
+                    inductor_configs=inductor_configs,
+                    compile_now=not parallel, rows=len(rows)))
     finally:
         if disarmed:
             _arm_branches(pipeline, int(spec.lora_bucket or 0))
-    # pgw#868 A4: ALWAYS recorded, flag or no flag, because it is free — the
-    # mint already exported these rows. 1.0 = one export could serve this
-    # family's rows; 0.0 = its graph text moves with the row (measured true of
-    # sdxl, whose Transformer2DModel bakes the sequence length and the spatial
-    # extents), so reuse can never fire and no lane should spend a mint
-    # proving it. -1.0 = not determinable (fewer than two rows for any key).
-    if reuse_state.eligible:
-        timings["export_reuse_eligible"] = (
-            1.0 if all(reuse_state.eligible.values()) else 0.0)
-    else:
-        timings["export_reuse_eligible"] = -1.0
-    if reuse_state.active:
-        # FLAT scalars: `timings` is a float table and a nested dict there
-        # would be a shape nothing downstream parses. The gate's REASONS are
-        # logged at INFO by ReuseState, where a reader needs prose anyway.
-        timings["export_reuse_rows_full"] = float(reuse_state.exported)
-        timings["export_reuse_rows_reused"] = float(reuse_state.reused)
-        timings["export_reuse_respecialize_s"] = round(
-            reuse_state.respecialize_s, 2)
-        timings["export_reuse_gate_s"] = round(sum(
-            float(e.get("gate_s") or 0.0) for e in reuse_state.events), 2)
-
     # Asked of the EXPORTED programs: a cell whose entries cannot be told
     # apart at dispatch must cost seconds to refuse, not a full compile bill
     # (the pgw#825 discipline, one gate over). Exact on the parallel path,
@@ -1934,6 +1999,11 @@ def _mint_cell(
                     _t.cuda.max_memory_reserved())
         except Exception:  # noqa: BLE001 — a probe never changes an outcome
             pass
+        # pgw#1000: and the PER-ROW figure beside it. The two are different
+        # questions — phase high-water sizes the mint child, one row's delta
+        # sizes a pool — and the width rule spent its whole life dividing by
+        # the first one, which is why it always answered 1.
+        timings.update(export_footprint.facts())
         # pgw#868 A4: THE CONNECTION. The probe above is exactly
         # `aot_export_parallel.width_for(per_export_device_bytes=)`. Both were
         # built and neither ever called the other, so the flag was inert.
@@ -1942,7 +2012,8 @@ def _mint_cell(
         # have run at — and which fact bound it — from a mint that changed
         # nothing.
         try:
-            timings.update(aot_export_parallel.decide(rows, timings))
+            timings.update(aot_export_parallel.decide(
+                rows, timings, census=export_footprint.census))
         except Exception:  # noqa: BLE001 — telemetry never fails a mint
             logger.debug("aot-mint: export-parallel decision failed",
                          exc_info=True)
