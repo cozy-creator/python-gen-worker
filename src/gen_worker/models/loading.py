@@ -28,7 +28,7 @@ import sys
 from .artifact_contract import CONTRACT_PLAIN_BF16, implements_contract
 from .fp8_storage import restructure_fp8_storage
 from .memory import get_available_vram_gb, meta_tensors
-from .safetensors_header import MAX_HEADER_BYTES, header_len_ok
+from .safetensors_header import header_len_ok
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
 from .w4a4 import (
     detect_w4a4_artifact,
@@ -751,6 +751,9 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
         shard_path = snapshot_dir / shard
         with open(shard_path, "rb") as f:
             (n,) = struct.unpack("<Q", f.read(8))
+            if not header_len_ok(n):
+                raise ValueError(
+                    f"safetensors: implausible header_length={n} in {shard}")
             header = json.loads(f.read(n))
         data_start = 8 + n
         header.pop("__metadata__", None)

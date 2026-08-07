@@ -856,6 +856,9 @@ def component_stored_tensor_names(component_dir: Path) -> frozenset[str]:
     for f in sorted(component_dir.glob("*.safetensors")):
         with open(f, "rb") as fh:
             header_len = struct.unpack("<Q", fh.read(8))[0]
+            if not header_len_ok(header_len):
+                raise ValueError(
+                    f"safetensors: implausible header_length={header_len} in {f.name}")
             header = json.loads(fh.read(header_len))
         names.update(k for k in header if k != "__metadata__")
     return frozenset(names)

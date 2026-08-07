@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker.convert.ingest import _detect_snapshot_dtype
-from gen_worker.convert.writer import _read_safetensors_header
+from gen_worker.convert.writer import _read_safetensors_header, component_stored_tensor_names
 from gen_worker.models.loading import safetensors_file_valid
 from gen_worker.models.safetensors_header import MAX_HEADER_BYTES, header_len_ok
 from gen_worker.models.svdq import _read_safetensors_metadata
@@ -153,3 +153,32 @@ def test_writer_and_loader_agree_on_the_same_file(tmp_path: Path):
             _read_safetensors_header(fd)
     finally:
         os.close(fd)
+
+
+# --------------------------------------------------------------------------
+# The two readers the CENSUS MISSED — they had no cap at all
+# --------------------------------------------------------------------------
+# pgw#973 wave 2 follow-up. The census enumerated *bounds* and adjudicated each
+# one, so a reader carrying NO bound was invisible to it. Two such readers
+# existed since 2026-07-24 (`6714ad8b`), both doing
+# `json.loads(f.read(header_len))` straight off an unvalidated 8-byte prefix:
+# `convert/writer.component_stored_tensor_names` and
+# `models/loading` in the deshard path. Same threat, zero guard.
+#
+# Recorded as a METHOD defect, not just two fixes: "census every bound" does
+# not find "the place a bound should be and isn't". Absence is invisible to an
+# inventory of what is present.
+
+def test_writer_component_scan_refuses_unbounded_header(tmp_path: Path):
+    comp = tmp_path / "component"
+    comp.mkdir()
+    _write_safetensors(comp / "m.safetensors", declared_len=2**63 - 1)
+    with pytest.raises(ValueError, match="implausible header_length"):
+        component_stored_tensor_names(comp)
+
+
+def test_writer_component_scan_still_reads_a_good_file(tmp_path: Path):
+    comp = tmp_path / "component"
+    comp.mkdir()
+    _write_safetensors(comp / "m.safetensors")
+    assert component_stored_tensor_names(comp) == frozenset({"t"})
