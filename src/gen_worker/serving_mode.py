@@ -94,7 +94,7 @@ def classify_mode(active_compile_ref: str, pipeline: Any = None) -> str:
     """``eager`` | ``jit_cell`` | ``aot_cell``.
 
     The discriminator is the ARMED artifact, never the lane string: both cell
-    kinds set ``active_compile_ref``, and stamped ck5 keys are string-shape
+    kinds set ``active_compile_ref``, and stamped cell keys are string-shape
     identical, so the ref alone cannot be pattern-matched. ``aot_serve`` owns
     the answer (``is_aot_ref`` for the recorded kind, the ``_cozy_aot`` marker
     for what is live on the pipeline right now).

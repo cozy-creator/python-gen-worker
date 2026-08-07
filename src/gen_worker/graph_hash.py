@@ -1,4 +1,4 @@
-"""Canonical GRAPH identity — the ck6 key input (pgw#716).
+"""Canonical GRAPH identity — the cell-key input (pgw#716).
 
 Paul's ruling: "I'd rather key on the graph that is changed, not hash on code
 changes... look at some code and be like 'oh this is graph-ABC' and that is the

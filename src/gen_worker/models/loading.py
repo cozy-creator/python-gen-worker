@@ -797,7 +797,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # `bf16_resident_fits` / BF16_RESIDENT_MARGIN_GB) is REMOVED, ruled by Paul on
 # pgw#772. The serving lane is deterministic per (release x declared config)
 # — never a function of the individual card's free VRAM. The probe made
-# `lane` the only GPU-dependent axis of the ck5 cell key: a 4090's ~1.5 GiB
+# `lane` the only GPU-dependent axis of the cell key: a 4090's ~1.5 GiB
 # VRAM surplus over an L4 (same release/image/sm_89) flipped it to base lane
 # "", a lane NOTHING mints for, so the better card missed all 144 published
 # checkpoints INCLUDING its own same-SKU cell and served eager for life

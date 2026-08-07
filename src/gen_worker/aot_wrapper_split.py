@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import host_isa
-from . import aot_run_impl_split as v2
+from . import aot_run_impl_split as runimpl
 
 logger = logging.getLogger(__name__)
 
@@ -298,11 +298,11 @@ def _reinline(source: str) -> str:
 
 #: Env kill-switch. Not a sealed config knob and not an inductor config —
 #: see :func:`install` for why that distinction is what keeps cell identity
-#: untouched. Kills v1 and v2 together.
+#: untouched. Kills the ctor and run_impl levers together.
 DISABLE_ENV = "GEN_WORKER_AOT_WRAPPER_SPLIT_OFF"
 
 #: Kill switch for the pgw#811 ``run_impl`` split alone, so the (much older,
-#: much better travelled) v1 ctor split can stay on if v2 ever has to go off.
+#: much better travelled) ctor split can stay on if run_impl ever goes off.
 DISABLE_V2_ENV = "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"
 
 #: How many of the K+1 part compiles may run at once. pgw#809's pool owns
@@ -340,11 +340,16 @@ def host_compile_jobs(tus: int) -> int:
     return max(1, min(tus, budget))
 
 
-def _emit(outcome: SplitOutcome, version: str = "") -> None:
-    """One typed row per wrapper compile. ``version`` distinguishes the
-    pgw#811 ``run_impl`` split (``v2_applied`` / ``v2_declined``) from v1's
-    original ``applied`` / ``declined``, so a fleet can tell which of the two
-    levers fired on any given mint."""
+#: Phase-label prefix for the pgw#811 run_impl lever (pgw#958: a name,
+#: never a version number).
+_RUNIMPL = "runimpl"
+
+
+def _emit(outcome: SplitOutcome, lever: str = "") -> None:
+    """One typed row per wrapper compile. ``lever`` names WHICH split fired:
+    the pgw#811 ``run_impl`` split (``runimpl_applied`` / ``runimpl_declined``)
+    versus the original ctor split (bare ``applied`` / ``declined``). A phase
+    label, deliberately non-numeric — it is not a version counter."""
     try:
         from . import activity as activity_mod
 
@@ -352,7 +357,7 @@ def _emit(outcome: SplitOutcome, version: str = "") -> None:
         activity_mod.emit_event(
             EVENT,
             outcome.detail(),
-            phase=f"{version}_{state}" if version else state,
+            phase=f"{lever}_{state}" if lever else state,
         )
     except Exception:  # pragma: no cover - telemetry must never break a mint
         logger.debug("aot-wrapper-split: activity emit failed", exc_info=True)
@@ -408,7 +413,7 @@ def transform_command(cmd_line: str) -> Tuple[str, Optional[SplitOutcome]]:
 
 
 # ---------------------------------------------------------------------------
-# v2: the run_impl K-way split, driven over K+1 real compiles
+# run_impl: the K-way split, driven over K+1 real compiles
 # ---------------------------------------------------------------------------
 
 def _object_arg(argv: Sequence[str]) -> Optional[int]:
@@ -455,9 +460,9 @@ def split_and_compile(cmd_line: str, cwd: str,
         text = source.read_text()
     except OSError as exc:
         _emit(SplitOutcome(False, f"unreadable source: {exc}",
-                           source=str(source)), version="v2")
+                           source=str(source)), lever=_RUNIMPL)
         return None
-    split = v2.split_run_impl(text)
+    split = runimpl.split_run_impl(text)
     if not split.applied:
         _emit(SplitOutcome(False, split.reason, source=str(source)))
         return None
@@ -562,13 +567,13 @@ def install() -> bool:
             return
         _emit(outcome)
 
-        # v2 (pgw#811) splits run_impl out of whatever source v1 left behind
+        # pgw#811 splits run_impl out of whatever source the ctor split left
         # — inductor's own when v1 declined, v1's regrouped one when it did
         # not. It subsumes the single compile: when it fires it drives every
         # compile itself and there is no monolith left to run.
         if not os.environ.get(DISABLE_V2_ENV, "").strip():
             try:
-                v2_outcome = split_and_compile(new_cmd, cwd, original)
+                runimpl_outcome = split_and_compile(new_cmd, cwd, original)
             except Exception as exc:
                 _emit(
                     SplitOutcome(
@@ -577,14 +582,14 @@ def install() -> bool:
                         f"{type(exc).__name__}: {exc}",
                         source=outcome.source,
                     ),
-                    version="v2",
+                    lever=_RUNIMPL,
                 )
                 logger.warning(
                     "aot-wrapper-split: pgw#811 split failed (%s); recompiling "
                     "the whole wrapper", type(exc).__name__, exc_info=True)
             else:
-                if v2_outcome is not None:
-                    _emit(v2_outcome, version="v2")
+                if runimpl_outcome is not None:
+                    _emit(runimpl_outcome, lever=_RUNIMPL)
                     return
 
         if not outcome.applied:

@@ -67,9 +67,9 @@ _BURST_META: Dict[str, Any] = {
     "image_digest": _IMAGE_DIGEST,
     "libs": {"diffusers": "0.39.0", "transformers": "5.13.1"},
     "shape_contract": _SHAPE_CONTRACT,
-    # Reconstruction: the ck2-era burst pre-dates env sealing and recipe
+    # Reconstruction: the recorded burst pre-dates env sealing and recipe
     # identity; fixed representative blocks keep the lane-only-divergence
-    # relations provable under ck5 (burst_runtime pins effective_seal /
+    # relations provable under exact identity (burst_runtime pins effective_seal /
     # toolchain_digest / static_code_closure to THESE dicts, exactly as it
     # pins every other runtime probe).
     "env_seal": {

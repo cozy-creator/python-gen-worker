@@ -110,7 +110,7 @@ def test_a_guard_missed_request_reports_the_fallback_not_the_tier() -> None:
     class: `volatile` means permanently eager for this shape, and downgrading
     it to `guard_miss` loses that."""
     served = serving_mode.resolve(
-        active_compile_ref="root/family-sdxl#ck5",
+        active_compile_ref="root/family-sdxl#ck1",
         guard_missed=True,
         verdict=serving_mode.FALLBACK_VOLATILE,
         sm="sm_89",

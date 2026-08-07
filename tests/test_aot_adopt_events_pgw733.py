@@ -42,7 +42,7 @@ _MEASURED_ARM_FLOOR_MS = int(_INDUCED_ARM_S * 1000 * 0.75)
 FAMILY = "sdxl"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
            "cuda": "13.0"}
-KEY = "ck5-" + "a" * 56
+KEY = "ck1-" + "a" * 56
 
 INPUTS = [
     {"name": "sample", "position": 0, "dtype": "bfloat16",
@@ -339,7 +339,7 @@ def test_fleet_did_not_arm_is_a_measured_refusal_naming_the_candidate(
     outcome = fleet_cells.enable_compiled(
         _FleetPipe(), _FleetCfg(), artifact=delivered,
         publisher=_StubPublisher(),  # type: ignore[arg-type]
-        delivered_ref="root/family-sdxl#ck5-delivered",
+        delivered_ref="root/family-sdxl#ck1-delivered",
         delivered_digest="blake3:" + "7" * 64)
     assert outcome.armed and outcome.self_mint is None
     # BOTH attempts are on the ledger, in order: the discovered cell that
@@ -349,7 +349,7 @@ def test_fleet_did_not_arm_is_a_measured_refusal_naming_the_candidate(
     assert outcome.adoptions[0].ref == _f1.ref
     assert not outcome.adoptions[0].armed
     assert outcome.adoptions[1].armed
-    assert outcome.adoptions[1].ref == "root/family-sdxl#ck5-delivered"
+    assert outcome.adoptions[1].ref == "root/family-sdxl#ck1-delivered"
 
 
 def test_fleet_armed_other_path_never_advertises_aot(

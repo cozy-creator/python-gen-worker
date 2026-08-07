@@ -137,7 +137,7 @@ def _request(
     the slot is ABSENT, which is the only shape a wiring gap can still take.
     """
     pending = SimpleNamespace(
-        family="pgw969", cell_key="ck5-catalog", recipe="dynamo",
+        family="pgw969", cell_key="ck1-catalog", recipe="dynamo",
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
                         family="pgw969", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
@@ -297,7 +297,7 @@ def test_an_unbound_required_slot_refuses_by_name_before_the_load(
     with pytest.raises(mint_child.MintChildRefused) as exc:
         _child_specs(request)
     text = str(exc.value)
-    for fact in ("pgw969", "ck5-catalog", "w8a8-lora64", "catalog-generate",
+    for fact in ("pgw969", "ck1-catalog", "w8a8-lora64", "catalog-generate",
                  "'pipeline'", "sent no resolved binding"):
         assert fact in text, f"{fact!r} missing from: {text}"
 
@@ -328,7 +328,7 @@ def test_the_refusal_is_the_childs_terminal_word_on_a_real_subprocess(
     assert outcome.exit_code == mp.EXIT_REFUSED
     report = outcome.report
     assert report is not None and report.status == "refused"
-    for fact in ("pgw969", "ck5-catalog", "'pipeline'", "catalog-generate"):
+    for fact in ("pgw969", "ck1-catalog", "'pipeline'", "catalog-generate"):
         assert fact in report.detail, f"{fact!r} missing from: {report.detail}"
     # The refusal precedes every side effect the CHILD could have: it wrote no
     # artifact, and it never reached the toolchain probe or a weight.

@@ -163,11 +163,11 @@ def test_a_typed_refusal_is_recorded_as_refused_not_failed() -> None:
     with boot_phases.span(
         boot_phases.PHASE_CELL_ARM,
         artifact_kind=aot_serve.ARTIFACT_KIND,
-        artifact_key="ck5_deadbeef",
+        artifact_key="ck1_deadbeef",
     ) as arm:
         # The shape aot_serve.enable uses: classified reason token + the
         # identifiers and the exception in detail (pgw#760 doctrine).
-        arm.refused(str(exc.reason), f"key=ck5_deadbeef: {type(exc).__name__}: {exc}")
+        arm.refused(str(exc.reason), f"key=ck1_deadbeef: {type(exc).__name__}: {exc}")
 
     row = [r for r in boot_phases.recorded_rows()
            if r.terminal and r.phase == boot_phases.PHASE_CELL_ARM][0]
@@ -176,7 +176,7 @@ def test_a_typed_refusal_is_recorded_as_refused_not_failed() -> None:
     assert row.reason == "key_mismatch"
     assert "sm_90" in row.detail
     assert row.artifact_kind == aot_serve.ARTIFACT_KIND
-    assert row.artifact_key == "ck5_deadbeef"
+    assert row.artifact_key == "ck1_deadbeef"
 
 
 def test_a_cumulative_milestone_is_not_summed_as_a_phase() -> None:
@@ -237,9 +237,9 @@ def test_serving_mode_distinguishes_aot_from_jit_from_eager(
     # Both cell kinds set active_compile_ref, so the ref alone cannot be
     # pattern-matched — aot_serve owns the discrimination.
     monkeypatch.setattr(aot_serve, "is_aot_ref", lambda ref: ref.endswith("aot"))
-    assert serving_mode.classify_mode("root/family-sdxl#ck5aot") == \
+    assert serving_mode.classify_mode("root/family-sdxl#ck1aot") == \
         serving_mode.MODE_AOT_CELL
-    assert serving_mode.classify_mode("root/family-sdxl#ck5jit") == \
+    assert serving_mode.classify_mode("root/family-sdxl#ck1jit") == \
         serving_mode.MODE_JIT_CELL
 
 
@@ -247,13 +247,13 @@ def test_a_guard_miss_request_is_not_counted_as_compiled() -> None:
     """The defect this closes: a compiled lane that served ONE request eager
     still reported lane=...+compiled, contaminating every comparison."""
     served = serving_mode.resolve(
-        active_compile_ref="root/family-sdxl#ck5", guard_missed=True, sm="sm_89")
+        active_compile_ref="root/family-sdxl#ck1", guard_missed=True, sm="sm_89")
     assert served.served_eager_fallback is True
     assert served.fallback_reason == serving_mode.FALLBACK_GUARD_MISS
     assert served.sm == "89"  # matches WorkerResources.gpu_sm spelling
 
     clean = serving_mode.resolve(
-        active_compile_ref="root/family-sdxl#ck5", sm="89")
+        active_compile_ref="root/family-sdxl#ck1", sm="89")
     assert clean.served_eager_fallback is False
     assert clean.fallback_reason == ""
 

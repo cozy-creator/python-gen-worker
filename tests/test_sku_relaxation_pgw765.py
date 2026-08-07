@@ -58,7 +58,7 @@ def on_4090(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _key(seed: str) -> str:
-    return "ck5-" + (seed * 56)[:56]
+    return "ck1-" + (seed * 56)[:56]
 
 
 def _meta(key: str, **over: Any) -> Dict[str, Any]:

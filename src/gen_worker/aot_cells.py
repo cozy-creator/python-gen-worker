@@ -22,7 +22,7 @@ needs a hub tie-break first; the runbook records the hazard.
 
 Filter (SDXL-AOT-PILOT-RUNBOOK.md §3 F1):
 
-* ``kind == aot-inductor`` with a stamped ck5 ``cell_key``;
+* ``kind == aot-inductor`` with a stamped ``cell_key``;
 * runtime-key check via ``aot_serve.verify_declared`` (sm, torch, cuda,
   family, host ISA, code-only flag) — the DECLARE half only. The ``entries``
   contract is unbounded in the model, does not ride the control-plane declare
@@ -88,7 +88,7 @@ _NOT_AUTHORIZED = (401, 403)
 #: that nothing it strips from the declare appears here — the check pgw#988
 #: cost a day of unadoptable cells for not existing.
 DECLARE_CONTRACT_KEYS = frozenset(aot_serve.DECLARED_AXES) | frozenset({
-    "cell_key",       # ck5 identity + the artifact cache name
+    "cell_key",       # cell identity + the artifact cache name
     "weight_lane",    # \_ the canonical execution lane this pipeline needs
     "lora_bucket",    # /
     "sku",            # selection PREFERENCE, never a filter (pgw#765)
@@ -108,7 +108,7 @@ class AdoptedAotCell:
 
     family: str
     cell_key: str
-    ref: str  # "root/family-<f>#<stamped ck5 key>"
+    ref: str  # "root/family-<f>#<stamped cell key>"
     snapshot_digest: str  # "sha256:<hex>" of the artifact tarball
     artifact: Path
 
@@ -465,7 +465,7 @@ def _discover_inner(
         if artifact is None:
             return None
         # From this moment the executor's kind dispatch (#734/#735) must
-        # recognize the ck5-flavored ref as an exported cell.
+        # recognize the key-flavored ref as an exported cell.
         aot_serve.note_aot_key(key)
         adopted = AdoptedAotCell(
             family=family,

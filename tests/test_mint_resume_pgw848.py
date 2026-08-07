@@ -463,7 +463,7 @@ def test_the_bank_outlives_an_abandoned_mint(
     monkeypatch.setenv(local_cells.ENV_STORE_DIR, str(tmp_path / "store"))
     mint_root = tmp_path / "selfmint-abc"
     (mint_root / "capture").mkdir(parents=True)
-    key = "ck5:sdxl:deadbeef"
+    key = "ck1:sdxl:deadbeef"
 
     # 1. The request the parent actually builds points OUTSIDE the mint tree.
     request = mint_delegate.build_request(

@@ -106,9 +106,11 @@ import argparse
 
 logger = logging.getLogger(__name__)
 
-# v2 (pgw#695): + "posture" process-seal block
-# v3 (pgw#756): advisory gate — + "unproven" rows, + "gate" disposition
-MANIFEST_VERSION = 3
+# pgw#958 (§1.27(g)): restarted at 1 alongside KEY_SCHEME / SEAL_VERSION,
+# with the pre-existing cell corpus purged in the same cut. The manifest
+# shape is the one the old v3 reached (posture process-seal block, advisory
+# gate, "unproven" rows).
+MANIFEST_VERSION = 1
 MANIFEST_KEY = "guard_manifest"
 POSTURE_KEY = "posture"
 GATE_KEY = "gate"

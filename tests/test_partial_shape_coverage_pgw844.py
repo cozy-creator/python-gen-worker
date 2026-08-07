@@ -324,7 +324,7 @@ def _boot(
             (kind, phase, detail)))
     if exported:
         # The exported lane is identified by the ref the hub delivers; a
-        # stamped ck5 key is only computable on CUDA, so this process is TOLD
+        # stamped cell key is only computable on CUDA, so this process is TOLD
         # the flavor is an AOT cell exactly as `aot_cells.discover` tells a
         # pod. Everything downstream of that classification is production code.
         aot_serve.note_aot_key(FLAVOR)

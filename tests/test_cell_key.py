@@ -34,7 +34,7 @@ class _ContractCfg:
 _FACTS = cc.declared_contract_facts(_ContractCfg())
 _CONTRACT = ck.contract_digest(_FACTS)
 
-# ck6 recipe axes: version strings and image identity live in METADATA only
+# Recipe axes: version strings and image identity live in METADATA only
 # (observability); content digests carry the identity. pgw#990 dropped
 # `code_closure` — a source-file content hash is a MEMO, never identity.
 _AXES = {
@@ -83,7 +83,7 @@ def test_unknown_and_missing_axes_refuse():
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(_AXES, sku="b200"))  # demoted to metadata (pgw#691)
     with pytest.raises(ck.CellKeyError):
-        ck.from_axes(dict(_AXES, torch="2.13.0"))  # version axes left in ck5
+        ck.from_axes(dict(_AXES, torch="2.13.0"))  # version axes are gone
     with pytest.raises(ck.CellKeyError):
         ck.from_axes({k: v for k, v in _AXES.items() if k != "toolchain"})
 
@@ -112,29 +112,31 @@ def test_sku_is_not_identity(fixed_runtime):
     assert _meta("a40", sm="sm_89")["cell_key"] != a40["cell_key"]
 
 
-def test_key_scheme_ck6_old_keys_never_half_match():
-    """Each axis-set change bumps the scheme (sku collapse -> ck3, env_seal
-    -> ck4, recipe identity -> ck5, code_closure OUT -> ck6): an older digest
-    can never collide with a current one — a clean MISS, never a half-match.
+def test_key_scheme_ck1_foreign_keys_never_half_match():
+    """pgw#958 (§1.27(g), Paul 2026-08-07 over pgw#990's ck6): ck1 is the only
+    scheme this runtime mints, and the pre-existing ck1..ck6 corpus was purged
+    (th#1636) so the token cannot mean two things. A digest under any other
+    scheme token can never collide with a current one — a clean MISS, never a
+    half-match.
 
-    pgw#990: shape is scheme-AGNOSTIC, byte-identical to tensorhub's
+    pgw#990: shape stays scheme-AGNOSTIC, byte-identical to tensorhub's
     `compilecache.IsCellKey`, for the reason th#1183 gives — pinning the
     current scheme in the shape check turns every other-scheme cell into
-    `unreadable_cell_key`, which is a lie and a filter no axis justifies. An
-    old-scheme token IS key-shaped; it simply names no artifact this runtime
-    computes, and `mismatch` says so on the axes.
+    `unreadable_cell_key`, which is a lie and a filter no axis justifies. A
+    foreign-scheme token IS key-shaped; it simply names no artifact this
+    runtime computes, and `mismatch` says so on the axes.
     """
     key = ck.from_axes(_AXES).digest
-    assert key.startswith("ck6-")
-    for dead in ("ck2-", "ck3-", "ck4-", "ck5-"):
+    assert key.startswith("ck1-")
+    for dead in ("ck2-", "ck3-", "ck4-", "ck5-", "ck6-"):
         token = dead + "a" * 56
-        assert ck.is_key(token), "an old-scheme token is still key-SHAPED"
+        assert ck.is_key(token), "a foreign-scheme token is still key-SHAPED"
         assert token != key
         # No artifact metadata => no computable key => a named miss, never ''.
         assert ck.mismatch({}, token) != ""
     assert not ck.is_key("ck-" + "a" * 56)      # no scheme digits
-    assert not ck.is_key("ck6-" + "a" * 55)     # wrong digest width
-    assert not ck.is_key("ck6-" + "A" * 56)     # uppercase hex
+    assert not ck.is_key("ck1-" + "a" * 55)     # wrong digest width
+    assert not ck.is_key("ck1-" + "A" * 56)     # uppercase hex
 
 
 def test_compute_matches_artifact_metadata_stamp(fixed_runtime):
@@ -199,7 +201,7 @@ def test_contract_axis_fences_newer_contract(fixed_runtime):
     reason = ck.mismatch(meta_b, want_a)
     assert reason.startswith("contract:")  # the named-axis refusal
 
-    # Pre-ck2 cells record no shape_contract: deliberately NO ck2 identity —
+    # Cells recording no shape_contract have deliberately NO identity —
     # never a stamped key, never a self-requested match.
     legacy = cc.artifact_metadata(
         family="ltx-2.3", shapes=((768, 768),), targets=("transformer",))

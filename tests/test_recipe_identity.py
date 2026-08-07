@@ -1,4 +1,4 @@
-"""ck5 recipe identity (Paul's exact-identity ruling) + kept trust pieces.
+"""Recipe identity (Paul's exact-identity ruling) + kept trust pieces.
 
 The key IS the recipe: family + contract + sm + lane/mode + env_seal +
 toolchain CONTENT + static code-closure CONTENT. No version axes, no
@@ -117,15 +117,15 @@ def test_completeness_diagnostic_names_dynamic_imports() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ck5: the recipe digest
+# ck1: the recipe digest
 # ---------------------------------------------------------------------------
 
 
-def test_ck5_axes_are_the_recipe(pinned_runtime: None,
+def test_ck1_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
     facts = cc.declared_contract_facts(_cfg())
     key = ck.compute(FAMILY, contract=ck.contract_digest(facts))
-    assert key.digest.startswith("ck6-")
+    assert key.digest.startswith("ck1-")
     axes = key.axes_dict()
     assert set(axes) == {"format", "kind", "family", "sm", "contract",
                          "env_seal", "toolchain"}
@@ -135,10 +135,10 @@ def test_ck5_axes_are_the_recipe(pinned_runtime: None,
     monkeypatch.setenv("WORKER_IMAGE_DIGEST", "sha256:other")
     assert ck.compute(
         FAMILY, contract=ck.contract_digest(facts)).digest == key.digest
-    # Older schemes can never collide with a current key; they stay
+    # Foreign schemes can never collide with a current key; they stay
     # key-SHAPED (pgw#990 — is_key mirrors tensorhub's scheme-agnostic
     # IsCellKey) and are ruled on by axes, not by their label.
-    for dead in ("ck2-", "ck3-", "ck4-", "ck5-"):
+    for dead in ("ck2-", "ck3-", "ck4-", "ck5-", "ck6-"):
         assert ck.is_key(dead + "a" * 56)
         assert key.digest != dead + "a" * 56
     # Version-string axes are rejected outright.
@@ -225,7 +225,7 @@ def test_marked_cell_never_republishes(monkeypatch: pytest.MonkeyPatch,
     artifact.write_bytes(b"bytes")
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
-    meta = {"cell_key": "ck5-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
+    meta = {"cell_key": "ck1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
     with pytest.raises(fc.CellPublishRefused, match="pgw#712"):
         pub.publish(FAMILY, artifact, meta)
 
@@ -234,7 +234,7 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     posts: list = []
-    key = "ck5-" + "c" * 56
+    key = "ck1-" + "c" * 56
 
     class _FakeResp:
         def __init__(self, code: int, body: Dict[str, Any]) -> None:

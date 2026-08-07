@@ -45,7 +45,7 @@ def _request(tmp_path: Path, **over: Any) -> mp.MintRequest:
         function="gen",
         modules=("harness.toy_endpoints",),
         family="sdxl",
-        cell_key="ck5-deadbeef",
+        cell_key="ck1-deadbeef",
         target=str(tmp_path / "cell.tar.gz"),
         capture=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
@@ -129,7 +129,7 @@ def test_a_minted_cell_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> None
     assert out.artifact == tmp_path / "cell.tar.gz"
     assert out.artifact.read_bytes() == b"stub-cell-bytes"
     assert out.report is not None and out.report.digest == "blake3:stub"
-    assert out.report.cell_key == "ck5-deadbeef"
+    assert out.report.cell_key == "ck1-deadbeef"
     assert not out.retryable
     assert "status=minted" in out.line()
 

@@ -34,9 +34,9 @@ def _reset() -> None:
 def test_a_new_key_starting_its_upload_is_durable_progress() -> None:
     _reset()
     before = fleet_cells.publish_durable_progress()
-    fleet_cells._note_durable("ck5-a", "started")
+    fleet_cells._note_durable("ck1-a", "started")
     assert fleet_cells.publish_durable_progress() == before + 1
-    fleet_cells._note_durable("ck5-a", "published")
+    fleet_cells._note_durable("ck1-a", "published")
     assert fleet_cells.publish_durable_progress() == before + 2
 
 
@@ -45,10 +45,10 @@ def test_a_retry_of_the_SAME_key_is_not_progress() -> None:
     never advance the counter, or the activity never goes stale and the pod is
     never reaped."""
     _reset()
-    fleet_cells._note_durable("ck5-a", "started")
+    fleet_cells._note_durable("ck1-a", "started")
     baseline = fleet_cells.publish_durable_progress()
     for _ in range(50):  # fifty failed attempts at the same key
-        fleet_cells._note_durable("ck5-a", "started")
+        fleet_cells._note_durable("ck1-a", "started")
     assert fleet_cells.publish_durable_progress() == baseline, (
         "a failing publish retry loop advanced durable progress — the activity "
         "would read as progressing forever on a paid card"
@@ -57,10 +57,10 @@ def test_a_retry_of_the_SAME_key_is_not_progress() -> None:
 
 def test_failure_is_not_durable_progress() -> None:
     _reset()
-    fleet_cells._note_durable("ck5-a", "started")
+    fleet_cells._note_durable("ck1-a", "started")
     baseline = fleet_cells.publish_durable_progress()
     with fleet_cells._IN_FLIGHT_LOCK:
-        fleet_cells._REFUSED["ck5-a"] = "cell_publish_untrusted_compute"
+        fleet_cells._REFUSED["ck1-a"] = "cell_publish_untrusted_compute"
     assert fleet_cells.publish_durable_progress() == baseline
 
 
@@ -78,7 +78,7 @@ def test_the_wait_beats_the_activity_ONLY_on_durable_movement(monkeypatch) -> No
     def _in_flight():
         ticks["n"] += 1
         if ticks["n"] <= 6:
-            return {"ck5-a": ("sdxl", 0.0)}
+            return {"ck1-a": ("sdxl", 0.0)}
         return {}
 
     monkeypatch.setattr(fleet_cells, "publishes_in_flight", _in_flight)
@@ -106,7 +106,7 @@ def test_a_stuck_publish_never_beats_the_activity(monkeypatch) -> None:
 
     def _in_flight():
         polls["n"] += 1
-        return {} if polls["n"] > 20 else {"ck5-a": ("sdxl", 0.0)}
+        return {} if polls["n"] > 20 else {"ck1-a": ("sdxl", 0.0)}
 
     monkeypatch.setattr(fleet_cells, "publishes_in_flight", _in_flight)
     monkeypatch.setattr(fleet_cells, "publish_durable_progress", lambda: 7)

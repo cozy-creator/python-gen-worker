@@ -108,7 +108,7 @@ def _fresh_process_settings():
 def _fresh_learned_aot_keys():
     """`aot_serve.note_aot_key` learns into a process-global set. A key one
     test teaches must never reclassify another test's dynamo refs as AOT —
-    the pgw#722 discovery suite's `ck5-999…` collided with the adopt suite's
+    the pgw#722 discovery suite's `ck1-999…` collided with the adopt suite's
     stubbed mint digest and silently flipped its whole proof lane."""
     from gen_worker import aot_serve
 

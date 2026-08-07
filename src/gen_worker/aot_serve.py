@@ -123,7 +123,7 @@ REALIGN_EVENT = "aot_input_realigned"
 AOTI_ALIGNMENT = 16
 #: Format 2 = multi-graph cells (pgw#758): the envelope carries an
 #: ``entries`` map instead of one flat contract. Format-1 cells are RETIRED
-#: (ck5 exact identity: a recipe change strands old cells, which is fine).
+#: (exact identity: a recipe change strands old cells, which is fine).
 ARTIFACT_FORMAT = 2
 #: Separator between the entry name and the constant FQN in
 #: ``constants.safetensors`` keys. Entry names never contain it (targets are
@@ -240,8 +240,8 @@ def flavor_label(sku: str, version: str, precision: str) -> str:
     return f"aot-{sku}-torch{mm}-{precision}"
 
 
-# Stamped ck5 cell keys this process LEARNED name aot-inductor artifacts
-# (pgw#722 F1 discovery). Published AOT cells ride the ck5 key space as
+# Stamped cell keys this process LEARNED name aot-inductor artifacts
+# (pgw#722 F1 discovery). Published AOT cells ride the same key space as
 # their store flavor — indistinguishable from a dynamo cell's flavor by
 # string shape alone — so discovery registers each learned key here and
 # :func:`is_aot_ref` consults the set. Without this the executor's kind
@@ -252,7 +252,7 @@ _KNOWN_AOT_KEYS_LOCK = threading.Lock()
 
 
 def note_aot_key(cell_key: str) -> None:
-    """Record that ``cell_key`` (a stamped ck5 digest) is an AOT cell."""
+    """Record that ``cell_key`` (a stamped cell-key digest) is an AOT cell."""
     key = str(cell_key or "").strip()
     if not key:
         return
@@ -264,7 +264,7 @@ def is_aot_ref(ref: str, family: str = "") -> bool:
     """True when ``ref`` names an AOTI cell (optionally of one family).
 
     Recognizes both the label form (``#aot-<sku>-...``) and any stamped
-    ck5 key this process learned via :func:`note_aot_key`.
+    cell key this process learned via :func:`note_aot_key`.
     """
     fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
@@ -488,7 +488,7 @@ def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
 def range_digest(meta: Mapping[str, Any]) -> str:
     """Canonical digest of the DECLARED admissible traffic of one artifact.
 
-    Owed to the ck6 identity lane (pgw#716/#717): declared dim ranges live
+    Owed to the exact-identity lane (pgw#716/#717): declared dim ranges live
     in ``ep.range_constraints``, NOT in the graph nodes — three exports
     differing only in declared range produced the identical node-only
     digest. A node-only ``graph_hashes`` therefore collides artifacts that
@@ -527,7 +527,7 @@ def range_digest(meta: Mapping[str, Any]) -> str:
     }
     # pgw#790: the NEGATIVE half of the declared admissible traffic. Two
     # classes that differ only in what they REFUSE admit different traffic,
-    # so the digest must see it or the ck6 collision this function exists to
+    # so the digest must see it or the collision this function exists to
     # close reopens for adapter forks. Keyed only when non-empty: a contract
     # that excludes nothing is the contract every already-published cell
     # declares, and re-keying the fleet's 144 live checkpoints to add a field
@@ -566,7 +566,7 @@ def class_hash(
 
 
 def combined_graph_hash(hashes: Iterable[str]) -> str:
-    """The ck6 combined hash, VERBATIM per pgw#716: the first 16 hex chars
+    """The combined hash, VERBATIM per pgw#716: the first 16 hex chars
     of the sha256 over the newline-joined SORTED per-class hash values
     (sorted by the hash string itself, single ``\\n`` joins, no trailing
     newline, UTF-8 bytes)."""
@@ -624,7 +624,7 @@ def artifact_metadata(
     into two interpretations of the same bytes. Each entry block carries
     ``target``/``fork``/``class_dims``/``inputs``/``symbols``/``constants``
     (+ ``graph``); this function validates every one, stamps its
-    ``range_digest`` and ``class_hash``, and stamps the ck6
+    ``range_digest`` and ``class_hash``, and stamps the
     ``combined_graph_hash`` over the sorted per-class hashes. A malformed
     contract must fail at MINT, on the pod, not at serve time on a paying
     request.

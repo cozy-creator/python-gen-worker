@@ -696,7 +696,7 @@ def input_contract(
             # a serve-side bind reading `position` would fetch the wrong one
             # (measured — it is how pgw#994's `t` went missing). Every cell
             # published before pgw#994 has no containers at all, so every row
-            # is derivable and no live artifact's metadata (or ck6 key) moves
+            # is derivable and no live artifact's metadata (or cell key) moves
             # — see `aot_serve.range_digest`.
             row["param"] = leaf.param
             row["param_position"] = leaf.param_position

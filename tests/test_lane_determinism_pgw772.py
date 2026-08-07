@@ -2,7 +2,7 @@
 
 The gw#534 voluntary bf16-resident upgrade probed LIVE free VRAM
 (`bf16_resident_fits` / BF16_RESIDENT_MARGIN_GB) and made `lane` — the only
-GPU-dependent axis of the ten in the ck5 cell key — a function of the
+GPU-dependent axis of the ten in the cell key — a function of the
 individual card's headroom: an RTX 4090's ~1.5 GiB surplus over an L4 (same
 release, same image, both sm_89) flipped its base lane to "", a lane nothing
 mints for, so the better card missed all 144 published checkpoints INCLUDING

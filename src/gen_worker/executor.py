@@ -676,7 +676,7 @@ def _cell_execution_lane_matches(
     lora_bucket endpoint needs exactly a ``-lora<bucket>`` cell of its base
     lane, and a branchless endpoint must never fetch one (either mismatch is
     a guaranteed lane_drift that would shadow the right cell and serve
-    eager). Key-flavored cells (th#883 pull-by-key, ``#ck2-…``) match only
+    eager). Key-flavored cells (th#883 pull-by-key, ``#ck1-…``) match only
     when their key is one this runtime computed for itself."""
 
     if not compile_cache.is_cache_ref(ref, family):

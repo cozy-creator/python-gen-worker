@@ -185,7 +185,7 @@ def _fake_key_compute(family: str, weight_lane: str = "", lora_bucket: int = 0,
     digest = hashlib.blake2s(
         f"{family}|{weight_lane}|{lora_bucket}|{contract}|{regional}".encode()
     ).hexdigest()[:56]
-    return SimpleNamespace(digest="ck5-" + digest, axes={})
+    return SimpleNamespace(digest="ck1-" + digest, axes={})
 
 
 def _endpoint_cls(shapes: tuple) -> type:
@@ -329,7 +329,7 @@ def test_second_same_family_arm_mints_its_own_graphs_and_finalizes(
     }
     assert len(refs) == 2, "two distinct cells, each proven by its own boot"
     for ref in refs:
-        assert ref.startswith(f"root/family-{FAMILY}#ck5-")
+        assert ref.startswith(f"root/family-{FAMILY}#ck1-")
         assert cc.cell_proven_in_process(ref)
     with fleet_cells._PENDING_LOCK:
         assert fleet_cells._PENDING == {}

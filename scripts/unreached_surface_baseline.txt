@@ -21,7 +21,7 @@
 #       (`c47dc46`) gave all three their first production callers, the guard went
 #       red on STALE, and the lines came out. A symbol ceasing to be dead code is
 #       this guard's nicest failure mode, and the ratchet turned the right way.
-#     compile_cache.assert_closure_complete — the ck5 code-closure completeness
+#     compile_cache.assert_closure_complete — the code-closure completeness
 #       gate ("a dynamic import is hiding trace-relevant code from the recipe
 #       key"). Its only caller is a test.
 #     aot_serve.is_aot_artifact — its own docstring says "kind sniff for the

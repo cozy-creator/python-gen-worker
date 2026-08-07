@@ -2771,7 +2771,7 @@ def entry_graph_block(
 
 
 def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
-    """The cell-level ck5 identity facts an exported cell must record.
+    """The cell-level identity facts an exported cell must record.
 
     ``aot_serve.artifact_metadata`` takes ``cell_key`` as a STRING, so the
     envelope on its own would carry a stamp WITHOUT the axes the stamp
@@ -2853,7 +2853,7 @@ def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey
 
     CONTRACT-FACTS SHAPE CHANGE (v1 -> v2, pgw#758): this re-keys every
     published ``aot-inductor`` cell; single-graph format-1 cells are RETIRED —
-    correct and expected under ck5 exact identity.
+    correct and expected under exact identity.
 
     CONTRACT-FACTS SHAPE CHANGE (v2 -> v3, pgw#817): ``shell_digest`` joined
     the facts for the (since-retired) regional kind. pgw#846 retires regional

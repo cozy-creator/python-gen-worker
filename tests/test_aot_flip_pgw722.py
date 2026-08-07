@@ -58,7 +58,7 @@ CONSTANTS = [
 
 
 def _key(seed: str) -> str:
-    return "ck5-" + (seed * 56)[:56]
+    return "ck1-" + (seed * 56)[:56]
 
 
 @pytest.fixture()
@@ -306,7 +306,7 @@ def test_discover_downloads_newest_and_registers_key(
         assert adopted.snapshot_digest == (
             "sha256:" + hashlib.sha256(blob).hexdigest())
         # The executor's kind dispatch (#734/#735) must now classify the
-        # ck5-flavored ref as an exported cell.
+        # ck1-flavored ref as an exported cell.
         assert aot_serve.is_aot_ref(adopted.ref)
         # Re-discovery serves from the local cache (no second download).
         blob_requests = [p for p, _ in hub.requests if p.startswith("/blob/")]
