@@ -1262,6 +1262,16 @@ class EntryCompilePool:
         #: pgw#842/th#1359: the width facts as last EMITTED, so a re-emit
         #: happens only when they actually moved.
         self._emitted_width_facts: Optional[Dict[str, Any]] = None
+        #: pgw#992: who else is on the card, read before the first child exists.
+        #: `_rewiden` cannot compute a simultaneity bound without it, and a
+        #: census it cannot read refuses the widen rather than assuming an
+        #: empty card.
+        self.census = card_census()
+        #: The terms of the last simultaneity decision, merged into the width
+        #: row so a future OOM names WHICH term was wrong instead of leaving a
+        #: reader to diff two pods that no longer exist.
+        self.simultaneity: Dict[str, Any] = {}
+        self._apply_simultaneity_bound()
         self._emit_width("construction")
         self.inductor_configs = dict(inductor_configs or {})
         # pgw#848 item 5: the crash-only half. `bank` is None on every path
@@ -1301,20 +1311,12 @@ class EntryCompilePool:
         #: How many entry children have contributed one. `_rewiden` refuses to
         #: act on fewer than :data:`REWIDEN_MIN_SAMPLES`.
         self.device_samples = 0
-        #: The width the pool was CONSTRUCTED with, kept whole. `_rewiden`
-        #: re-derives against this record's own free-VRAM and host-RAM
-        #: readings — the same question, a measured divisor — so the initial
-        #: row has to survive being superseded.
-        self.width_initial = width
-        #: pgw#992: who else is on the card, read before the first child exists.
-        #: `_rewiden` cannot compute a simultaneity bound without it, and a
-        #: census it cannot read refuses the widen rather than assuming an
-        #: empty card.
-        self.census = card_census()
-        #: The terms of the last simultaneity decision, merged into the width
-        #: row so a future OOM names WHICH term was wrong instead of leaving a
-        #: reader to diff two pods that no longer exist.
-        self.simultaneity: Dict[str, Any] = {}
+        #: The width the pool was CONSTRUCTED with — AFTER the pgw#992
+        #: simultaneity bound, so the record `_rewiden` re-derives against is
+        #: the one the pool actually ran. `_rewiden` re-uses this record's own
+        #: free-VRAM and host-RAM readings — the same question, a measured
+        #: divisor — so the initial row has to survive being superseded.
+        self.width_initial = self.width
         self.peak_concurrency = 0
         # pgw#848: the kernel's OOM-kill counter as it stood before this pool
         # ran. A DELTA over the pool's own wall is evidence; the absolute
@@ -1713,10 +1715,16 @@ class EntryCompilePool:
             self.peak_device_bytes = max(self.peak_device_bytes, peak)
             self.device_samples += 1
 
-    def entry_budget_bytes(self, ask: int) -> Tuple[int, Dict[str, Any]]:
+    def entry_budget_bytes(
+        self, ask: int,
+    ) -> Tuple[Optional[int], Dict[str, Any]]:
         """Bytes K entry children may hold AT THEIR SIMULTANEOUS PEAKS, with
-        every term named. ``(budget, terms)``; a budget of ``-1`` means a term
-        was unreadable and no widen may be granted.
+        every term named. ``(budget, terms)``, where ``None`` means a term was
+        unreadable — distinct from a budget that is readable and NEGATIVE,
+        which is a card already oversubscribed by its residents and a perfectly
+        computable answer of "one child, and only because one is the floor".
+        Conflating the two would let an oversubscribed card take the
+        unreadable branch and keep whatever width it had.
 
         pgw#992 — the defect this replaces. A4 divided the pool's
         free-VRAM SAMPLE by the measured per-entry peak: ``29.5 GiB / 6.02 GiB
@@ -1745,9 +1753,21 @@ class EntryCompilePool:
                    - this process's own device high-water
                    - the tenant's forward reserve, when a serve goal exists
 
-        Every term is an observation. Deliberately NOT a larger
-        :data:`DEVICE_RESERVE_BYTES` (§4.24): padding a constant moves the same
-        unpriced simultaneity somewhere else and re-fires on the next card.
+        Every term is an observation, and every term is read from the DEVICE.
+        Summing what the pool believes is loaded would not do: on the z-image
+        pod, 16.2 GiB was free on an 80 GB card whose static slot sum is
+        53.3 GiB — ~9 GiB of CUDA context, allocator fragmentation and child
+        overhead that no catalog arithmetic can see.
+
+        Indifferent to ``ask``'s BASIS, deliberately. The estimate is not safer
+        than the measurement (it only happened to be larger on one pod) and the
+        measurement is not more dangerous than the estimate; a bound that
+        preferred either would be a statement about the divisor, and the
+        divisor is not what was wrong.
+
+        Deliberately NOT a larger :data:`DEVICE_RESERVE_BYTES` (§4.24): padding
+        a constant moves the same unpriced simultaneity somewhere else and
+        re-fires on the next card.
         """
         terms: Dict[str, Any] = {
             "simultaneity_ask_bytes": int(ask),
@@ -1755,7 +1775,7 @@ class EntryCompilePool:
         }
         if not self.census.readable or ask <= 0:
             terms["simultaneity_verdict"] = "unreadable — no widen"
-            return -1, terms
+            return None, terms
         own_peak = max(
             own_device_high_water(), int(self.census.own_reserved_bytes))
         reserve = DEVICE_RESERVE_BYTES \
@@ -1771,6 +1791,57 @@ class EntryCompilePool:
             "simultaneity_k_cap": int(max(0, budget) // ask),
         })
         return budget, terms
+
+    def _apply_simultaneity_bound(self) -> None:
+        """Narrow the CONSTRUCTED width to what the card can hold at once.
+
+        pgw#992, second reading. The first version of this fix capped only
+        ``_rewiden``, which would have held the L40S at K=2 — and the z-image
+        contrast specimen shows why that is not the invariant. Same
+        ``_rewiden`` code, a different pod:
+
+            free_device 16.2 GiB / per_entry 25.0 GiB (**estimated**) -> K=1,
+            underwidth=3
+
+        The ESTIMATE accidentally protected that pod; the L40S died because the
+        MEASURED peak shrank the denominator. So the bound cannot be "prefer
+        the measured peak" or "distrust the measured peak" — either one is a
+        statement about the DIVISOR, and the divisor is not what was wrong.
+        **The threat is K children's simultaneous peak against the residents'
+        future peaks, and it has to be read from the DEVICE regardless of which
+        basis supplies the per-entry figure.** That makes it a bound on every
+        width this pool ever runs, not a patch on the one path that widens.
+
+        Measured on the same z-image pod, and the reason this reads the card
+        rather than adding up what the pool thinks is loaded: 16.2 GiB free on
+        an 80 GB card whose static slot sum is 53.3 GiB — **~9 GiB of CUDA
+        context, allocator fragmentation and child overhead that no catalog
+        arithmetic can see**.
+
+        Never below 1: K=1 is the in-process serial path, it is what the pool
+        degrades TO, and a bound that could forbid it would forbid minting at
+        all. Never above what the caller already chose — this only narrows.
+        """
+        ask = int(self.width.per_entry_device_bytes or 0)
+        budget, terms = self.entry_budget_bytes(ask)
+        self.simultaneity = terms
+        if budget is None or ask <= 0:
+            return
+        capped = max(1, int(terms["simultaneity_k_cap"]))
+        if capped >= self.width.workers:
+            return
+        logger.warning(
+            "aot-pool: pgw#992 narrowing the CONSTRUCTED K %d -> %d — the "
+            "card holds %.2f GiB, a %.2f GiB co-tenant and a %.2f GiB "
+            "resident set, leaving %.2f GiB for entries at %.2f GiB each",
+            self.width.workers, capped, self.census.total_bytes / 1024**3,
+            self.census.resident_other_bytes / 1024**3,
+            terms["simultaneity_own_peak_bytes"] / 1024**3,
+            budget / 1024**3, ask / 1024**3)
+        self.width = replace(
+            self.width, workers=capped, binding="simultaneity",
+            reason=(f"K={capped} (simultaneity-bound): {self.width.reason} — "
+                    f"narrowed to what the card holds at once"))
 
     def _rewiden(self) -> None:
         """Re-derive K from what the entry children MEASURED (pgw#868 A4),
@@ -1837,7 +1908,7 @@ class EntryCompilePool:
             # widen happens — a refused widen is the interesting row.
             budget, terms = self.entry_budget_bytes(ask)
             self.simultaneity = terms
-            if budget < 0:
+            if budget is None:
                 logger.info(
                     "aot-pool: pgw#992 declining to widen from K=%d — the "
                     "card census is %s, so K children's simultaneous peak "
