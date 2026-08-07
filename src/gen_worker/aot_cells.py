@@ -1,4 +1,4 @@
-"""AOT cell discovery — the pgw#722 pilot's F1 seam (flag-gated, default OFF).
+"""AOT cell discovery — the F1 seam every serving pod runs (pgw#722, pgw#990).
 
 A serving pod cannot COMPUTE an exported cell's key: an ``aot-inductor``
 cell is STAMPED at mint with axes only the mint holds (its traced-graph
@@ -6,9 +6,9 @@ contract), so the runtime's ``cell_key.compute`` (kind="inductor") can
 never name it and the hub's worker-owned pull-by-key delivery (th#883)
 never lights it up. Published AOT cells are therefore provably dark.
 
-This module is the minimal pilot delivery: **fetch-and-filter**. At arm
-time (``fleet_cells.enable_compiled``, behind ``Settings.
-compile_prefer_aot``) the worker lists the family cell repo's checkpoints
+This module is **fetch-and-filter**. At arm time
+(``fleet_cells.enable_compiled``, unconditionally since pgw#990) the worker
+lists the family cell repo's checkpoints
 through the hub's existing catalog read API, filters for a cell THIS
 runtime can serve, downloads the artifact, and feeds it into the existing
 ``provision.enable_compiled`` HIT path — where the pgw#709 receipt gate
@@ -57,8 +57,6 @@ from . import aot_serve, cell_key
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .procsplit import broker
-from . import config
-from .config import Settings
 from .models.chunk_cas import sha256_file
 from .models.chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
@@ -95,15 +93,6 @@ DECLARE_CONTRACT_KEYS = frozenset(aot_serve.DECLARED_AXES) | frozenset({
     "lora_bucket",    # /
     "sku",            # selection PREFERENCE, never a filter (pgw#765)
 })
-
-
-def prefer_aot(settings: Optional[Settings] = None) -> bool:
-    """The pilot flip switch (typed pod-launch knob, default OFF).
-
-    Takes the `Settings` when the caller has them; otherwise reads the ones the
-    process entry installed (§1.18 — never the environment).
-    """
-    return bool((settings or config.current()).compile_prefer_aot)
 
 
 @dataclass(frozen=True)
@@ -505,5 +494,4 @@ __all__ = [
     "AdoptedAotCell",
     "EVENT",
     "discover",
-    "prefer_aot",
 ]

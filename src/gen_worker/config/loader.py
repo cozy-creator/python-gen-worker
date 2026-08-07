@@ -50,7 +50,6 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "TENSORHUB_CAS_DIR": "tensorhub_cas_dir",
     "TENSORHUB_FILL_SOURCE_DIR": "tensorhub_fill_source_dir",
     "CIVITAI_API_KEY": "civitai_api_key",
-    "GEN_WORKER_PREFER_AOT": "compile_prefer_aot",
     "GEN_WORKER_C2PA_CERT_PEM": "c2pa_cert_pem",
     "GEN_WORKER_C2PA_CERT_PATH": "c2pa_cert_path",
     # th#1307: GEN_WORKER_C2PA_KEY_PEM / _KEY_PATH are deliberately NOT

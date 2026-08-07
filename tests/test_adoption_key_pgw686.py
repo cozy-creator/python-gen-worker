@@ -161,10 +161,15 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
     assert _requested("") != published
     assert _requested("fp8-hooks") != published
     assert _requested("") != _requested("fp8-hooks")
-    # pgw#691: the recorded ck2 burst keys are dead post-bump — is_key
-    # refuses them outright, so an old cell can only MISS, never half-match.
+    # pgw#691: the recorded ck2 burst keys are dead post-bump — they can
+    # never collide with a current key, so an old cell can only MISS, never
+    # half-match. pgw#990: they stay key-SHAPED (is_key mirrors tensorhub's
+    # scheme-agnostic IsCellKey, th#1183), and it is the AXES that refuse
+    # them, not the label.
     for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
-        assert not ck.is_key(old)
+        assert ck.is_key(old)
+        assert old != published
+        assert ck.mismatch(_BURST_META, old) != ""
 
 
 # --- the fix: one base-lane resolution for every cell-identity surface -----

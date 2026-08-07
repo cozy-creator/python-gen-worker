@@ -143,7 +143,7 @@ def _phases(events: List[Tuple[str, str, str]], kind: str) -> List[str]:
 
 @pytest.fixture()
 def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """The measured pod, reduced: prefer_aot armed, a real w8a8 lane, a
+    """The measured pod, reduced: a real w8a8 lane, a
     resolvable compile target, CUDA + toolchain present, and no cell.
 
     `mandatory_serving` is deliberately NOT stubbed — the w8a8 weight-lane
@@ -152,7 +152,6 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     """
     from gen_worker import aot_cells
 
-    monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
     monkeypatch.delenv("GEN_WORKER_MINT_IN_PROCESS", raising=False)
     monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT", raising=False)
     gw_config.reload_for_test()
@@ -253,7 +252,7 @@ def test_a_w8a8_miss_mints_AOT_and_not_dynamo(
     pending = outcome.self_mint
     assert pending is not None, "the miss produced no mint at all"
     assert pending.recipe == fleet_cells.RECIPE_AOT, (
-        "a w8a8 miss with prefer_aot armed and a declaration registered must "
+        "a w8a8 miss with a declaration registered must "
         "mint an AOT cell; a dynamo artifact will never satisfy AOT discovery")
     assert pending.delegated is True
     assert "aot_requires_delegation" not in _phases(_events, "self_mint_skipped")

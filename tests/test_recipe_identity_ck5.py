@@ -125,19 +125,22 @@ def test_ck5_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
     facts = cc.declared_contract_facts(_cfg())
     key = ck.compute(FAMILY, contract=ck.contract_digest(facts))
-    assert key.digest.startswith("ck5-")
+    assert key.digest.startswith("ck6-")
     axes = key.axes_dict()
     assert set(axes) == {"format", "kind", "family", "sm", "contract",
-                         "env_seal", "toolchain", "code_closure"}
+                         "env_seal", "toolchain"}
     # Version axes are GONE from the key: a version-string bump alone can
     # never re-key a cell (content digests decide).
     monkeypatch.setattr(cc, "gen_worker_version", lambda: "99.0.0")
     monkeypatch.setenv("WORKER_IMAGE_DIGEST", "sha256:other")
     assert ck.compute(
         FAMILY, contract=ck.contract_digest(facts)).digest == key.digest
-    # Older schemes are dead.
-    for dead in ("ck2-", "ck3-", "ck4-"):
-        assert not ck.is_key(dead + "a" * 56)
+    # Older schemes can never collide with a current key; they stay
+    # key-SHAPED (pgw#990 — is_key mirrors tensorhub's scheme-agnostic
+    # IsCellKey) and are ruled on by axes, not by their label.
+    for dead in ("ck2-", "ck3-", "ck4-", "ck5-"):
+        assert ck.is_key(dead + "a" * 56)
+        assert key.digest != dead + "a" * 56
     # Version-string axes are rejected outright.
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(axes, torch="2.13.0"))
@@ -167,17 +170,24 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     assert ck.mismatch(meta, want) == ""
     # The version strings ride metadata for observability only.
     assert meta["torch"] and meta["gen_worker"]
-    # A pre-ck5 cell (no recipe blocks) has no identity.
-    legacy = {k: v for k, v in meta.items()
-              if k not in ("toolchain", "code_closure")}
+    # A cell with no toolchain block has no recipe identity.
+    legacy = {k: v for k, v in meta.items() if k != "toolchain"}
     with pytest.raises(ck.CellKeyError, match="recipe"):
         ck.from_artifact_metadata(legacy)
-    # A recorded-closure drift names a different key, and mismatch names
-    # the axis.
+    # pgw#990: `code_closure` is still RECORDED and still drives the local
+    # re-trace memo, but it is NOT identity — drifting it must leave the key
+    # alone. It used to re-key every cell in the fleet whenever an unrelated
+    # plumbing file moved, which is what a 147-file content hash does.
     drifted = json.loads(json.dumps(meta))
+    assert drifted["code_closure"], "the closure is still recorded"
     drifted["code_closure"]["gen_worker/compile_cache.py"] = "0" * 16
-    assert ck.from_artifact_metadata(drifted).digest != want.digest
-    assert ck.mismatch(drifted, want).startswith("code_closure:")
+    assert ck.from_artifact_metadata(drifted).digest == want.digest
+    assert ck.mismatch(drifted, want) == ""
+    # A TOOLCHAIN drift is identity, and mismatch names the axis.
+    retooled = json.loads(json.dumps(meta))
+    retooled["toolchain"]["torch"] = "0" * 16
+    assert ck.from_artifact_metadata(retooled).digest != want.digest
+    assert ck.mismatch(retooled, want).startswith("toolchain:")
 
 
 def test_toolchain_covers_the_model_libraries() -> None:

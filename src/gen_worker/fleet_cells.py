@@ -1025,15 +1025,21 @@ def _arming_policy(
     elif not delegate:
         delegate_refusal = "caller_forced_in_process"
 
-    # pgw#722 F1 (flag-gated, default OFF): PREFER a published aot-inductor
-    # cell over the delivered dynamo artifact. Discovery is fetch-and-filter
-    # (the worker cannot compute a stamped AOT key); the downloaded artifact
-    # rides the SAME choke point below, so the pgw#709 receipt gate and the
-    # aot_serve arm gates run unchanged. Any miss/failure falls through to
-    # today's policy with the originally delivered artifact.
+    # PREFER a published aot-inductor cell over the delivered dynamo artifact.
+    # Discovery is fetch-and-filter (the worker cannot compute a stamped AOT
+    # key); the downloaded artifact rides the SAME choke point below, so the
+    # pgw#709 receipt gate and the aot_serve arm gates run unchanged. Any
+    # miss/failure falls through to today's policy with the originally
+    # delivered artifact.
+    #
+    # pgw#990: UNCONDITIONAL. This was `aot_cells.prefer_aot()` — a default-OFF
+    # pilot switch carried by a release-scoped env entry — and the release
+    # stopped declaring the name on 2026-08-05, so every serving pod between
+    # then and attempt twenty-four skipped discovery entirely and self-minted
+    # over a published cell. Adoption is the path; a gate that un-arms it on a
+    # rebuild protects nothing.
     if (
-        aot_cells.prefer_aot()
-        and family
+        family
         and publisher is not None
         and publisher.enabled()
         and cc.has_compile_target(pipe, cfg)
@@ -1875,16 +1881,14 @@ def mint_recipe(
 
     The AOT lane was a pure CONSUMER: ``aot_cells.discover`` filtered for
     ``kind == "aot-inductor"`` artifacts and a miss fell through to the dynamo
-    self-mint, whose cell can never satisfy that filter. So a fleet with
-    ``prefer_aot`` armed missed, re-minted the wrong kind (or nothing), and
-    missed identically on every subsequent pod, forever.
+    self-mint, whose cell can never satisfy that filter. So a fleet missed,
+    re-minted the wrong kind (or nothing), and missed identically on every
+    subsequent pod, forever.
 
     Every decline here is NAMED on the wire. A silent decline is the defect
     class this issue exists to kill: five real L4 pods produced no mint and no
     refusal, which is indistinguishable from a crash.
     """
-    if not aot_cells.prefer_aot():
-        return RECIPE_DYNAMO
     family = str(getattr(cfg, "family", "") or "")
 
     def _decline(reason: str, detail: str) -> str:
@@ -1892,7 +1896,7 @@ def mint_recipe(
         if emit:
             activity_mod.emit_event(
                 "self_mint_skipped",
-                f"family={family}: prefer_aot is armed but this miss cannot "
+                f"family={family}: this miss cannot "
                 f"mint an aot-inductor cell — {detail}; falling back to the "
                 f"dynamo self-mint (its artifact will NOT satisfy AOT "
                 f"discovery, so a later pod misses again)",

@@ -150,11 +150,11 @@ def test_an_unknown_owned_env_is_reported(monkeypatch) -> None:
 
 
 def test_a_known_env_is_not_reported_as_unknown(monkeypatch) -> None:
-    monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
+    monkeypatch.setenv("GEN_WORKER_C2PA_CERT_PATH", "/tmp/cert.pem")
     monkeypatch.setenv("GEN_WORKER_COMPUTE_CHILD", "1")   # IPC, deliberately unbound
     monkeypatch.setenv("GEN_WORKER_LOG_LEVEL", "DEBUG")   # library knob, ditto
     reported = config.unrecognised_owned_env()
-    assert "GEN_WORKER_PREFER_AOT" not in reported
+    assert "GEN_WORKER_C2PA_CERT_PATH" not in reported
     assert "GEN_WORKER_COMPUTE_CHILD" not in reported
     assert "GEN_WORKER_LOG_LEVEL" not in reported
 
@@ -198,3 +198,12 @@ def test_parent_control_installs_the_boot_credential(monkeypatch) -> None:
     assert worker_credential.current() == "boot-jwt-xyz", (
         "building a control parent must install its boot credential — the "
         "child cannot sign through a parent that has none")
+
+
+def test_the_retired_prefer_aot_env_is_reported_as_unknown(monkeypatch) -> None:
+    """pgw#990: the gate is deleted, so a pod still being handed the env name
+    must SAY SO. A stale endpoint_env row is the exact trap that hid the
+    un-armed adoption path for three A1 attempts; silence about it is how it
+    would hide again."""
+    monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
+    assert "GEN_WORKER_PREFER_AOT" in config.unrecognised_owned_env()

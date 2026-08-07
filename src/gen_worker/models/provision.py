@@ -286,7 +286,7 @@ def arm_aot(
         return AdoptOutcome.miss(
             "no_arm_for_mode",
             f"artifact declares mode={mode!r}, which this runtime has no arm for")
-    if bucket and current_or(_STANDALONE).compile_prefer_aot:
+    if bucket:
         from . import lora_lifted
 
         # The target module comes from the ARTIFACT's own recorded facts

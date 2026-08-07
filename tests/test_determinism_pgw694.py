@@ -240,8 +240,11 @@ def test_ck5_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
 
     facts = cc.declared_contract_facts(_cfg())
     want = ck.compute("toyfam", contract=ck.contract_digest(facts))
-    assert want.digest.startswith("ck5-")
-    assert not ck.is_key("ck3-" + "a" * 56)  # older schemes are dead
+    assert want.digest.startswith("ck6-")
+    # pgw#990: an older scheme is key-SHAPED and simply names nothing this
+    # runtime computes — refused on axes, not on its label.
+    assert ck.is_key("ck3-" + "a" * 56)
+    assert want.digest != "ck3-" + "a" * 56
 
     meta = cc.artifact_metadata(
         family="toyfam", shapes=((64, 64),), targets=("transformer",),
