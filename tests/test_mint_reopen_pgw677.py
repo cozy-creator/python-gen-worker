@@ -54,7 +54,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, guard_closure, hot_swap
+from gen_worker import fleet_cells, guard_closure, hot_swap, mint_delegate
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -193,6 +193,14 @@ class _Harness:
         monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
+        # pgw#1010: every mint is a CHILD mint now (the in-process capture only
+        # ever built a dynamo cell). This harness has no child process, so the
+        # child's OUTCOME is stubbed — what it is testing is the serving side
+        # around it: eager-first, the tenant never starving, the router, and
+        # the wire. The compile the harness performs is the one its own
+        # `compiled` wrapper does, on the boot/warm thread, exactly as before.
+        monkeypatch.setattr(
+            mint_delegate, "build_cell", self._fake_build_cell)
         monkeypatch.setattr(
             guard_closure, "closure_manifest",
             lambda pipe, cfg, label="": {
@@ -204,12 +212,28 @@ class _Harness:
             ref = wire_ref(self.spec.models["model"])
             self.ex._model_resolutions = {ref: (ref, "", hub_execution_lane)}
 
+    async def _fake_build_cell(self, task: Any, **kwargs: Any) -> Any:
+        """The child, minus the process: it adopts the pending it was given."""
+        pending = task.pending
+        minted = fleet_cells.SelfMint(
+            family=pending.family, cell_key=pending.cell_key,
+            ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
+            artifact=pending.target)
+        pending._state["minted"] = minted
+        pending.target.parent.mkdir(parents=True, exist_ok=True)
+        pending.target.write_bytes(b"stub-cell")
+        return mint_delegate.DelegatedResult(
+            status=mint_delegate.ADOPTED, minted=minted, attempts=1)
+
     def _fake_enable_compiled(
         self, pipe: Any, cfg: Any, cache_dir: Any = None,
         artifact: Any = None, publisher: Any = None,
     ) -> fleet_cells.ArmOutcome:
         mint_root = self.tmp_path / f"mint-{id(pipe)}"
-        capture = mint_root / "capture"
+        # pgw#1010: OUTSIDE mint_root. The publish gate rmtree's mint_root when
+        # a mint resolves with no sink, and this rig's simulated compile writes
+        # its "graphs" long after that.
+        capture = self.tmp_path / f"capture-{id(pipe)}"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
         pending = fleet_cells.PendingSelfMint(
             family=FAMILY, cell_key="ck1-" + "a" * 56,
@@ -357,12 +381,20 @@ def test_w8a8_stamp_with_hub_execution_lane_boots_eager_first(
     asyncio.run(_run())
 
 
-def test_true_mandatory_execution_lane_still_refuses_eager_first(
+def test_a_true_mandatory_lane_mints_in_a_child_and_is_fenced_meanwhile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The qwen shape: hub lane says real w8a8 activations — eager is not
-    a production tier there; the boot keeps the sequential foreground
-    proof. Guards the fix from over-rotating."""
+    """The qwen shape: hub lane says real w8a8 activations — eager is not a
+    production tier there.
+
+    This used to assert the boot kept the SEQUENTIAL FOREGROUND proof, because
+    the in-process capture needed a router the mandatory lane could not have.
+    pgw#813 already dissolved that (a delegated pending arms NOTHING, so its
+    eager tier is the untouched pipeline), and pgw#1010 removed the in-process
+    shape entirely — so a mandatory lane mints in a child like every other
+    lane. What protects the tenant is not a foreground proof any more, it is
+    the dispatch fence: no cell, no active compile incarnation, no dispatch.
+    """
     h = _Harness(
         tmp_path, monkeypatch,
         compile_delay_s=0.0, seed_forward_s=0.0, tenant_forward_s=0.01,
@@ -370,8 +402,11 @@ def test_true_mandatory_execution_lane_still_refuses_eager_first(
 
     async def _run() -> None:
         await h.boot()
-        assert h.rec.background_mint is None, (
-            "a REAL w8a8-activation lane must keep the foreground proof")
+        assert h.rec.background_mint is not None, (
+            "a mandatory lane mints out of process like every other lane "
+            "(pgw#813/pgw#1010) — the eager tier it serves from meanwhile is "
+            "the untouched pipeline")
+        await h.wait_mint()
 
     asyncio.run(_run())
 
@@ -380,14 +415,17 @@ def test_w8a8_stamp_without_execution_lane_evidence_stays_foreground(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No hub lane evidence: the weight-lane stamp remains the fail-closed
-    fallback — unchanged pre-reopen behavior."""
+    fallback for SERVING — but, since pgw#813/pgw#1010, not for the mint shape:
+    the cell is built in a child either way, because that is the only shape
+    there is."""
     h = _Harness(
         tmp_path, monkeypatch,
         weight_lane="w8a8", hub_execution_lane="")
 
     async def _run() -> None:
         await h.boot()
-        assert h.rec.background_mint is None
+        assert h.rec.background_mint is not None
+        await h.wait_mint()
 
     asyncio.run(_run())
 
@@ -398,54 +436,13 @@ def test_w8a8_stamp_without_execution_lane_evidence_stays_foreground(
 # ---------------------------------------------------------------------------
 
 
-def test_multi_minute_compile_never_steals_against_live_demand(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The reopen's missing tape: background compile units are MINUTES of
-    unabortable wall (here scaled to 1.2s vs a 20ms tenant forward), and a
-    tenant stream is live the whole time. Post-fix, compile turns steal
-    only after `_BG_COMPILE_STEAL_FLOOR_S` of continuous demand, so every
-    tenant completes at serving latency. RED on 0.70.0: the single 30s
-    floor (patched to 0.1s, as tape 3 always did) lets the compile steal
-    almost immediately and a tenant waits out the whole unabortable unit."""
-    monkeypatch.setattr(executor_mod, "_BG_STEAL_FLOOR_S", 0.1)
-    # raising=False: on the pre-fix tree this attribute does not exist and
-    # the single floor governs — that IS the red run.
-    monkeypatch.setattr(
-        executor_mod, "_BG_COMPILE_STEAL_FLOOR_S", 30.0, raising=False)
-    h = _Harness(
-        tmp_path, monkeypatch,
-        compile_delay_s=1.2, seed_forward_s=0.02, tenant_forward_s=0.02)
-
-    async def _run() -> None:
-        # A sustained, never-idle stream FROM THE FIRST ADMISSION: the next
-        # dispatch is always admitted before the previous completes, so
-        # `_bg_quiet` never sets and no compile turn can be idle-granted —
-        # any multi-second tenant wall in this window is a STEAL. (The
-        # arrive-mid-idle-compile residual is a separate, documented bound
-        # and deliberately not provoked here.) The first request performs
-        # setup and starts the mint; its wall is excluded.
-        walls: List[float] = []
-        pending_task: Any = None
-        for i in range(12):
-            nxt = asyncio.create_task(h.dispatch(f"r-{i}", aspect="16:9"))
-            if pending_task is not None:
-                res, wall = await pending_task
-                assert res.status == pb.JOB_STATUS_OK, res.safe_message
-                walls.append(wall)
-            pending_task = nxt
-            await asyncio.sleep(0)
-        res, wall = await pending_task
-        walls.append(wall)
-        assert h.rec.background_mint is not None
-        # Post-fix: no tenant ever waits out the 1.2s unabortable compile.
-        steady = walls[1:]
-        assert max(steady) < 1.0, (
-            f"a tenant waited out a stolen multi-minute compile: {steady}")
-        # Drain: with the stream gone, idle grants finish the mint.
-        await h.wait_mint()
-
-    asyncio.run(_run())
+# pgw#1010: `test_multi_minute_compile_never_steals_against_live_demand` stood
+# here. Its mechanism was the IN-PROCESS mint's background compile turns
+# competing with tenant demand — the mint compiles in a child process now, so
+# there are no in-process mint turns to steal with. The steal floors
+# (`_BG_STEAL_FLOOR_S` / `_BG_COMPILE_STEAL_FLOOR_S`) are untouched and still
+# govern the pgw#622 router's background shape warms; the wire half of the
+# doctrine is the test immediately below, which is unchanged.
 
 
 def test_compile_steal_is_announced_on_the_wire(
@@ -490,35 +487,13 @@ def test_compile_steal_is_announced_on_the_wire(
 # ---------------------------------------------------------------------------
 
 
-def test_pack_or_closure_refusal_reaches_the_wire(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The ie#546 cycle lost its root cause because a finalize refusal
-    (closure gate / pack) died in pod logs. Post-fix the verbatim reason
-    rides the wire as a typed ``self_mint_abort`` event. RED on 0.70.0:
-    no such event exists anywhere."""
-
-    def _refuse(*args: Any, **kwargs: Any) -> None:
-        raise ValueError("closure refused: guard leak L['scale']")
-
-    monkeypatch.setattr(cc, "finish_fleet_mint", _refuse)
-    h = _Harness(tmp_path, monkeypatch, compile_delay_s=0.02)
-
-    async def _run() -> None:
-        await h.boot()
-        bg = h.rec.background_mint
-        assert bg is not None and bg.task is not None
-        # The driver contains the failure (serving stays eager and alive);
-        # the typed abort must still name the refusal verbatim.
-        await asyncio.wait_for(bg.task, timeout=30.0)
-        assert h.ex.serving_tiers() == {"generate": "eager"}
-        aborts = h.events("self_mint_abort")
-        assert aborts, "finalize refusal never reached the wire"
-        assert any("L['scale']" in a.detail for a in aborts), (
-            [a.detail for a in aborts])
-        assert any(a.phase == "pack_failed" for a in aborts)
-
-    asyncio.run(_run())
+# pgw#1010: `test_pack_or_closure_refusal_reaches_the_wire` and
+# `test_oom_truncated_plan_never_finalizes_partial_capture` stood here. Both
+# assert a PACK — of an in-process inductor capture, into a dynamo cell — and
+# both go with it. The surviving half of "a refusal reaches the wire" is the
+# child's typed abort (`test_mint_abort_classification_th1299.py`) and the
+# publish/withhold gate (`test_fleet_cells.py`), which the test between them
+# still exercises here.
 
 
 def test_withhold_and_no_sink_reach_the_wire(tmp_path: Path) -> None:
@@ -579,40 +554,6 @@ def test_withhold_and_no_sink_reach_the_wire(tmp_path: Path) -> None:
     finally:
         activity_mod.bind_sink(None, None)
         loop.close()
-
-
-def test_oom_truncated_plan_never_finalizes_partial_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The finalize@8/18 shape: seeds OOM persistently mid-plan. Post-fix
-    the driver retries bounded, then aborts LOUDLY with typed
-    ``self_mint_abort`` events — it never converges into a finalize of a
-    partial capture, and serving stays eager and alive. RED on 0.70.0:
-    the OOM'd pass satisfied the stats-stable convergence and the mint
-    finalized (phase=finalize) with nothing publishable and no event."""
-    h = _Harness(
-        tmp_path, monkeypatch,
-        compile_delay_s=0.02, seed_forward_s=0.01, tenant_forward_s=0.01,
-        seed_oom_after=1)
-
-    async def _run() -> None:
-        await h.boot()
-        bg = h.rec.background_mint
-        assert bg is not None and bg.task is not None
-        await asyncio.wait(
-            {bg.task}, timeout=60.0, return_when=asyncio.ALL_COMPLETED)
-        assert bg.task.done(), "mint driver hung on the OOM'd plan"
-        # The mint must NOT have armed a partial capture.
-        assert h.ex.serving_tiers() == {"generate": "eager"}, (
-            "an OOM-truncated plan finalized a partial capture")
-        aborts = h.events("self_mint_abort")
-        assert aborts, "the OOM truncation never reached the wire"
-        assert any(a.phase == "warmup_oom" for a in aborts)
-        # Serving is alive: a tenant request still completes eager.
-        res, _wall = await h.dispatch("r-after-oom", aspect="1:1")
-        assert res.status == pb.JOB_STATUS_OK, res.safe_message
-
-    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
