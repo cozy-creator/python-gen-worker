@@ -36,13 +36,22 @@ growing rather than as time silently vanishing::
 
 Overlays vs partition members
 -----------------------------
-``triton_s`` and ``device_lock_wait_s`` are OVERLAYS, not partition members:
-they are known to nest inside the members above them (the triton keys sit
-inside codegen / host compile on a CUDA entry; a device-benchmark flock wait
-happens inside ``aot_compile``). Summing them with the partition was the
-second attribution bug — it inflates "attributed" while leaving the residual
-unexplained. They are reported under their own names so a reader can attribute
-WITHIN a member without double-counting the total.
+``triton_s``, ``autotune_s`` and ``device_lock_wait_s`` are OVERLAYS, not
+partition members: they are known to nest inside the members above them (the
+triton keys sit inside codegen / host compile on a CUDA entry; a
+device-benchmark flock wait happens inside ``aot_compile``). Summing them with
+the partition was the second attribution bug — it inflates "attributed" while
+leaving the residual unexplained. They are reported under their own names so a
+reader can attribute WITHIN a member without double-counting the total.
+
+``autotune_s`` (pgw#1006) is the compile-time Triton autotune benchmark —
+``autotune_at_compile_time`` resolves True for AOTI, so the autotune block runs
+INSIDE ``GraphLowering.codegen``. It is named because it decides two separate
+questions and both were being answered from a residual: how much of a mint a
+shared autotune cache could ever return (measured 3.1 % of a 390 s w8a8 SDXL
+UNet entry — 12.1 s over 96 calls), and whether the selected config, which is
+baked into the generated wrapper's grid expression and ``num_warps``, moved
+between two mints of the same key.
 
 The partition members are the four dynamo keys that are provably disjoint on
 the pin (verified by the containment arithmetic on torch 2.13.0:
@@ -74,8 +83,15 @@ PARTITION_KEYS: Dict[str, Tuple[str, ...]] = {
 }
 
 #: Reported, never summed into the partition — see the module docstring.
+#: None of the autotune keys contain "triton"/"async_compile", so ``autotune_s``
+#: and the ``triton_s`` overlay below do not double-count each other.
 OVERLAY_KEYS: Dict[str, Tuple[str, ...]] = {
     "inductor_total_s": ("compile_fx.<locals>.fw_compiler_base",),
+    "autotune_s": (
+        "CachingAutotuner.benchmark_all_configs",
+        "CachingAutotuner.coordinate_descent_tuning",
+        "CachingAutotuner.combo_sequential_autotune",
+    ),
 }
 
 #: The three-level partition, as {total: members}. ``check`` walks this, so
@@ -102,7 +118,7 @@ RESIDUALS = ("child_other_s", "compile_other_s")
 #: would delete; ``triton_s`` / ``device_lock_wait_s`` nest inside
 #: ``compile_wall_s``. Anything listed here must be excluded by a reader
 #: summing the table.
-SUBSPANS = ("child_interp_s", "triton_s", "device_lock_wait_s",
+SUBSPANS = ("child_interp_s", "triton_s", "autotune_s", "device_lock_wait_s",
             "inductor_total_s", "parent_stage_s", "parent_spawn_s")
 
 

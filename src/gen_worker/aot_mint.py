@@ -820,6 +820,19 @@ _PHASE_KEYS: Dict[str, Tuple[str, ...]] = {
     ),
 }
 
+#: pgw#1006. NOT a member of ``_PHASE_KEYS`` — these nest INSIDE ``codegen_s``
+#: (``autotune_at_compile_time`` resolves True for AOTI, so the autotune block
+#: runs during codegen), exactly as ``triton_s`` does. Named because it answers
+#: two questions that were being read out of a residual: the whole ceiling of a
+#: shared autotune cache, and whether the selected config moved between two
+#: mints of one key — it is baked into the generated wrapper's grid expression
+#: and ``num_warps``. Same keys as ``aot_compile_spans.OVERLAY_KEYS``.
+_AUTOTUNE_KEYS: Tuple[str, ...] = (
+    "CachingAutotuner.benchmark_all_configs",
+    "CachingAutotuner.coordinate_descent_tuning",
+    "CachingAutotuner.combo_sequential_autotune",
+)
+
 
 def _phase_snapshot() -> Dict[str, float]:
     try:
@@ -837,8 +850,11 @@ def _phase_delta(
 ) -> Dict[str, float]:
     """Named phase seconds spent between two snapshots. ``triton_s`` sums
     every async-compile/triton key so GPU kernel compilation is one
-    labeled number; the remainder of inductor time is NOT invented — the
-    coarse wall clocks around export/compile hold the totals."""
+    labeled number; ``autotune_s`` (pgw#1006) does the same for the
+    compile-time autotune benchmark. Both NEST inside the named phases above
+    them and must not be summed with them. The remainder of inductor time is
+    NOT invented — the coarse wall clocks around export/compile hold the
+    totals."""
     raw = {
         k: round(float(after.get(k, 0.0)) - float(before.get(k, 0.0)), 3)
         for k in set(after) | set(before)
@@ -853,6 +869,9 @@ def _phase_delta(
         if ("async_compile" in k or "triton" in k.lower()) and v > 0), 3)
     if triton:
         out["triton_s"] = triton
+    autotune = round(sum(raw.get(k, 0.0) for k in _AUTOTUNE_KEYS), 3)
+    if autotune > 0:
+        out["autotune_s"] = autotune
     return out
 
 
