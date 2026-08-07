@@ -197,4 +197,36 @@ class MicroDecoder(nn.Module):
         return torch.tanh(self.proj_out(self.norm(h)))
 
 
-__all__ = ["MicroConfig", "MicroDecoder", "MicroDenoiser"]
+__all__ = ["MicroConfig", "MicroDecoder", "MicroDenoiser",
+           "MicroGridDenoiser"]
+
+
+class MicroGridDenoiser(MicroDenoiser):
+    """The pgw#998 shape: a 4-D latent GRID whose H and W are BOTH dynamic.
+
+    Same weights and same blocks as :class:`MicroDenoiser` — only the
+    interface differs. Each ``x`` element is ``(C, H, W)`` and is flattened to
+    tokens INSIDE the forward, so every matmul's M extent becomes the PRODUCT
+    ``H*W``: an extent that is NONLINEAR in the traced symbols.
+
+    That is z-image's declared shape (``H_lat`` and ``W_lat`` on a 4-D latent
+    under ``dynamic-collapse``), and it is what pgw#998 found unlowerable
+    across the mint's own `torch.export.save`/`load` hand-off to its compile
+    child. This class exists so the gauntlet keeps testing that seam on every
+    run rather than trusting a changelog.
+    """
+
+    def forward(  # type: ignore[override]
+        self,
+        x: List[torch.Tensor],
+        t: torch.Tensor,
+        cond: List[torch.Tensor],
+    ) -> torch.Tensor:
+        tokens = []
+        for grid in x:
+            channels, height, width = grid.shape
+            tokens.append(
+                grid.reshape(channels, height * width).transpose(0, 1))
+        out = super().forward(tokens, t, cond)
+        channels, height, width = x[0].shape
+        return out.transpose(1, 2).reshape(len(x), channels, height, width)

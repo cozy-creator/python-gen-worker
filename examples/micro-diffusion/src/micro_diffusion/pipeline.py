@@ -13,7 +13,12 @@ from typing import Any, List, Optional
 
 import torch
 
-from .model import MicroConfig, MicroDecoder, MicroDenoiser
+from .model import (
+    MicroConfig,
+    MicroDecoder,
+    MicroDenoiser,
+    MicroGridDenoiser,
+)
 from .weights import SEED, load_config, load_state, materialize
 
 
@@ -128,4 +133,20 @@ class MicroPipeline:
         return self.unpatchify(cells, grid)
 
 
-__all__ = ["MicroConfig", "MicroPipeline"]
+__all__ = ["MicroConfig", "MicroGridPipeline", "MicroPipeline"]
+
+
+class MicroGridPipeline(MicroPipeline):
+    """The pgw#998 vehicle's pipeline: same weights, GRID-shaped transformer.
+
+    Only `.transformer` differs — it is a :class:`MicroGridDenoiser`, so the
+    traced call takes 4-D latents and every matmul's M extent is the product
+    of two dynamic symbols. See `aot_declaration_4d`.
+    """
+
+    @classmethod
+    def from_pretrained(cls, path: str, **_kw: Any) -> "MicroGridPipeline":
+        base = MicroPipeline.from_pretrained(path)
+        grid = MicroGridDenoiser(base.config)
+        grid.load_state_dict(base.transformer.state_dict(), strict=True)
+        return cls(grid.eval(), base.decoder, source=base.source)

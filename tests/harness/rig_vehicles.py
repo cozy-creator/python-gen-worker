@@ -59,6 +59,13 @@ class Vehicle:
     #: What this vehicle proves that the other does not — printed, so a
     #: reported cycle time is never read against the wrong vehicle.
     covers: str
+    #: The outcome this vehicle is EXPECTED to produce. A variant that exists
+    #: to demonstrate a refusal is not a failing test — but a variant whose
+    #: outcome flips IS news, in either direction, so the gauntlet compares
+    #: against this rather than against "green".
+    expect: str = "green"
+    #: Why, when `expect` is not "green".
+    expect_note: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +194,13 @@ cfg = CompileCell(
 # The adopting process rebuilds the pipeline from the SAME generated tree,
 # which is the whole point of deterministic weights: a second machine with the
 # seed has the bytes, and the snapshot digest agrees without a download.
-pipe = MicroPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"])
+# The cell is minted for the device the mint ran on, and a code-only cell
+# binds its constants from RESIDENT weights — so the adopting pipeline must
+# live on that device or the bind fails inside AOTI itself
+# (`update_constant_buffer_func_ ... API call failed`). Measured the first
+# time this rig ran on a real card; a CPU-only cycle cannot reach it.
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+pipe = MicroPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
 config = pipe.config
 
 # pgw#999: a BUCKET-bearing cell is keyed on the branch-bearing lane, and
@@ -207,12 +220,12 @@ def _feed(arity, tokens):
     """One legal call of each declared arm, built from a FIXED generator so
     the eager pass and the served pass see identical bytes."""
     gen = torch.Generator().manual_seed(997)
-    x = [torch.randn(tokens, config.in_channels, generator=gen)
+    x = [torch.randn(tokens, config.in_channels, generator=gen).to(DEVICE)
          for _ in range(arity)]
-    t = torch.full((arity,), 100.0)
-    cond = [torch.randn(COND_LEN, config.cond_dim, generator=gen)
+    t = torch.full((arity,), 100.0, device=DEVICE)
+    cond = [torch.randn(COND_LEN, config.cond_dim, generator=gen).to(DEVICE)
             for _ in range(arity)]
-    lat = torch.randn(1, tokens, config.in_channels, generator=gen)
+    lat = torch.randn(1, tokens, config.in_channels, generator=gen).to(DEVICE)
     return x, t, cond, lat
 
 
@@ -229,7 +242,7 @@ ARMS = [("transformer/cfg=true", CFG_ARITY, TOKEN_ROWS[0]),
 # reference captured from the object that is about to be armed is a reference
 # the arm can contaminate — and a parity number computed against a
 # contaminated reference is worse than no parity number.
-ref = MicroPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"])
+ref = MicroPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
 if int(getattr(cfg, "lora_bucket", 0) or 0):
     from gen_worker import compile_cache as _cc0
     _cc0.apply_lora_execution_lane(ref, int(cfg.lora_bucket))
@@ -373,7 +386,160 @@ MICRO_LORA = Vehicle(
 )
 
 
-VEHICLES: Dict[str, Vehicle] = {v.name: v for v in (TINY, MICRO, MICRO_LORA)}
+# ---------------------------------------------------------------------------
+# micro-lora-plain-parent — pgw#999's design question, as a standing leg
+# ---------------------------------------------------------------------------
+
+#: A `lora64` cell offered to a parent that boots on the PLAIN lane. This is
+#: A1 step 8's "boot a SECOND pod cold and adopt", and it is EXPECTED to be
+#: refused: `aot_cells.discover` filters candidates by the adopting pipeline's
+#: own lane, so a bucket-less parent computes `lane=plain` and rejects the cell
+#: with `lane_mismatch` BEFORE any arm runs — no `arm_aot` gate, no adopt
+#: reason. Standing here so the day it silently starts passing is visible.
+MICRO_LORA_PLAIN_PARENT = Vehicle(
+    name="micro-lora-plain-parent",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main"),
+    function="generate",
+    family="micro-diffusion",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=lambda: _micro_cell(MICRO_LORA_BUCKET),
+    # The MINT is bucket 64; the ADOPTER is bucket 0. That mismatch is the
+    # whole point of the leg.
+    adopt_source=_micro_adopt_source_for(0),
+    covers=("the pgw#999 design question: a bucket-bearing cell offered to a "
+            "parent on the plain lane"),
+    expect="red",
+    expect_note=("discovery rejects on `lane_mismatch` before arming — the "
+                 "adopting pod must carry the cell's own lora bucket "
+                 "(required line in attempt 27's choreography)"),
+)
+
+
+
+
+# ---------------------------------------------------------------------------
+# micro-4d — pgw#998's shape: a NONLINEAR traced extent (z-image's declaration)
+# ---------------------------------------------------------------------------
+
+
+def _micro_4d_cell() -> Any:
+    from gen_worker.registry import CompileCell
+
+    from micro_diffusion.aot_declaration_4d import COND_LEN, PIXEL_ROWS
+
+    return CompileCell(
+        shapes=PIXEL_ROWS, targets=("transformer",), family="micro-4d",
+        regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+        guidance_scales=(), text_lens=())
+
+
+_MICRO_4D_ADOPT = '''
+import json, logging, os, sys
+for p in %(paths)r:
+    sys.path.insert(0, p)
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+import harness.rig_runtime  # noqa: F401
+import torch
+from pathlib import Path
+from gen_worker import aot_cells, aot_serve
+from gen_worker.models import provision
+from gen_worker.registry import CompileCell
+from micro_diffusion.aot_declaration_4d import ARITY, COND_LEN, LATENT_ROWS, PIXEL_ROWS
+from micro_diffusion.pipeline import MicroGridPipeline
+
+torch.set_num_threads(2)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+cfg = CompileCell(
+    shapes=PIXEL_ROWS, targets=("transformer",), family="micro-4d",
+    regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+    guidance_scales=(), text_lens=())
+pipe = MicroGridPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+ref = MicroGridPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+config = pipe.config
+
+
+def _feed(grid):
+    gen = torch.Generator().manual_seed(998)
+    x = [torch.randn(config.in_channels, grid, grid, generator=gen).to(DEVICE)
+         for _ in range(ARITY)]
+    t = torch.full((ARITY,), 100.0, device=DEVICE)
+    cond = [torch.randn(COND_LEN, config.cond_dim, generator=gen).to(DEVICE)
+            for _ in range(ARITY)]
+    return x, t, cond
+
+
+# The row the artifact was NOT seeded on, so the derived range is exercised.
+ARMS = [("transformer", LATENT_ROWS[0])]
+eager = {}
+with torch.no_grad():
+    for name, grid in ARMS:
+        x, t, cond = _feed(grid)
+        eager[name] = pipe.transformer(x, t, cond).clone()
+
+cell = aot_cells.discover(
+    pipe, cfg, base_url=%(base)r,
+    worker_jwt=lambda: "local-rig-worker-jwt",
+    cache_dir=Path(%(cache)r))
+out = {"pid": os.getpid(), "ok": cell is not None}
+if cell is not None:
+    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+    out.update({
+        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "snapshot_digest": cell.snapshot_digest,
+        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "entries": sorted((meta.get("entries") or {})),
+    })
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), 0)
+    out["armed"] = bool(outcome)
+    out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
+    out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
+    if outcome:
+        deltas = {}
+        with torch.no_grad():
+            for name, grid in ARMS:
+                x, t, cond = _feed(grid)
+                deltas[name] = float(
+                    (pipe.transformer(x, t, cond) - eager[name]).abs().max())
+        out["parity_max_abs"] = deltas
+        out["execution_count"] = int(aot_serve.execution_count(pipe))
+        out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
+        out["ok"] = bool(out["parity_ok"]) and out["execution_count"] > 0
+    else:
+        out["ok"] = False
+print("RIG_ADOPT " + json.dumps(out))
+'''
+
+
+def _micro_4d_adopt_source(base: str, cache: Path) -> str:
+    return _MICRO_4D_ADOPT % {
+        "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
+        "base": base, "cache": str(cache)}
+
+
+MICRO_4D = Vehicle(
+    name="micro-4d",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main_4d"),
+    function="generate-4d",
+    family="micro-4d",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=_micro_4d_cell,
+    adopt_source=_micro_4d_adopt_source,
+    covers=("pgw#998's shape — a 4-D latent with BOTH spatial axes dynamic, so "
+            "every matmul's M extent is NONLINEAR in the traced symbols. This "
+            "is z-image's declaration, and the seam that was unlowerable "
+            "across the mint's export save/load hand-off"),
+)
+
+
+VEHICLES: Dict[str, Vehicle] = {
+    v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA_PLAIN_PARENT,
+                        MICRO_4D)}
 DEFAULT_VEHICLE = TINY.name
 
 
@@ -386,4 +552,4 @@ def vehicle(name: str) -> Vehicle:
 
 
 __all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_LORA", "MICRO_LORA_BUCKET",
-           "TINY", "VEHICLES", "Vehicle", "vehicle"]
+           "MICRO_4D", "MICRO_LORA_PLAIN_PARENT", "TINY", "VEHICLES", "Vehicle", "vehicle"]
