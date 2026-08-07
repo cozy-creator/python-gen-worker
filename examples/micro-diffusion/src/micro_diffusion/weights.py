@@ -31,6 +31,10 @@ from .model import MicroConfig, MicroDecoder, MicroDenoiser
 CONFIG_NAME = "config.json"
 WEIGHTS_NAME = "micro_diffusion.safetensors"
 
+#: The state-dict LAYOUT. Part of the cached tree's identity, so a component
+#: rename invalidates the cache instead of leaving bytes no loader can read.
+LAYOUT_VERSION = 2
+
 #: The one seed the fleet's micro family is defined by. Changing it is a new
 #: checkpoint, not a new build of the same one.
 SEED = 997
@@ -52,10 +56,10 @@ def state_dict(config: MicroConfig, *, seed: int = SEED) -> Dict[str, torch.Tens
     order — so the mapping (seed, config) -> bytes is total and stable.
     """
     torch.manual_seed(int(seed))
-    denoiser = MicroDenoiser(config)
+    transformer = MicroDenoiser(config)
     decoder = MicroDecoder(config)
     out: Dict[str, torch.Tensor] = {}
-    for prefix, module in (("denoiser", denoiser), ("decoder", decoder)):
+    for prefix, module in (("transformer", transformer), ("decoder", decoder)):
         for name, tensor in module.state_dict().items():
             out[f"{prefix}.{name}"] = tensor.contiguous()
     return out
@@ -72,8 +76,13 @@ def materialize(
     """
     root = Path(root)
     cfg = config or MicroConfig(seed=seed)
+    # pgw#999: LAYOUT is part of the cache identity. `materialize` is
+    # idempotent by config, and the config does not mention the state-dict
+    # prefixes — so renaming a component left a stale tree on disk that the
+    # new loader could not read. Bump this whenever a key changes name.
     payload = dict(cfg.as_dict(), _class_name="MicroPipeline",
-                   _format="safetensors", seed=int(seed))
+                   _format="safetensors", _layout=LAYOUT_VERSION,
+                   seed=int(seed))
     cfg_path = root / CONFIG_NAME
     if cfg_path.is_file() and (root / WEIGHTS_NAME).is_file():
         try:

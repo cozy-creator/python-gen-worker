@@ -24,7 +24,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
@@ -298,8 +298,26 @@ def arm_aot(
         # code; a guessed name on a non-UNet family would silently skip the
         # install and waste the arm).
         targets = [str(t) for t in ((meta or {}).get("targets") or ())]
-        module_name = str(
-            (meta or {}).get("module") or (targets[0] if targets else ""))
+        if not targets:
+            # pgw#1001: a packed multi-entry cell records its targets PER
+            # ENTRY and carries no top-level `targets`/`module` (measured:
+            # both None on a real 5-entry lora64 cell). Without this the name
+            # resolved to "" and the lifted install was silently skipped.
+            seen: List[str] = []
+            for entry in ((meta or {}).get("entries") or {}).values():
+                name = str((entry or {}).get("target") or "").strip()
+                if name and name not in seen:
+                    seen.append(name)
+            targets = seen
+        # ...and among them the BRANCH-CAPABLE one: `decoder` sorts first
+        # among entry names, and a lifted forward on a module with no branch
+        # container fails by name. `branch_targets` is the authority.
+        branch_capable = lora_lifted.branch_targets(pipe)
+        module_name = str((meta or {}).get("module") or "")
+        if not module_name:
+            module_name = next(
+                (t for t in targets if t in branch_capable),
+                targets[0] if targets else "")
         lifted_target = (
             getattr(pipe, module_name, None) if module_name else None)
         if (lifted_target is not None

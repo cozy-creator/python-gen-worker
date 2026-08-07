@@ -1,6 +1,6 @@
 """The diffusers-SHAPED holder the slot resolves to.
 
-``.denoiser`` and ``.decoder`` are the two compile targets; ``from_pretrained``
+``.transformer`` and ``.decoder`` are the two compile targets; ``from_pretrained``
 is the contract the SDK's slot loader calls and it reads only from the local
 tree it is handed. If that tree does not exist yet it is GENERATED, never
 fetched — see :mod:`micro_diffusion.weights`.
@@ -17,14 +17,34 @@ from .model import MicroConfig, MicroDecoder, MicroDenoiser
 from .weights import SEED, load_config, load_state, materialize
 
 
+def _load_prefixed(module: Any, state: dict, prefix: str) -> None:
+    """Load ``prefix.*`` out of ``state`` into ``module``, STRICTLY.
+
+    Refuses by name when the prefix selects nothing — the failure mode that
+    `strict=True` alone does NOT catch, because an empty dict against a
+    module with parameters is just "missing keys", and the message would not
+    say the interesting part: that the checkpoint uses a different layout.
+    """
+    sub = {k[len(prefix) + 1:]: v for k, v in state.items()
+           if k.startswith(prefix + ".")}
+    if not sub:
+        raise ValueError(
+            f"checkpoint carries no {prefix!r} tensors — its prefixes are "
+            f"{sorted({k.split('.')[0] for k in state})!r}. This tree was "
+            f"written by a different layout version; regenerate it "
+            f"(`python -m micro_diffusion.weights --out <dir>`) rather than "
+            f"loading a randomly-initialized module.")
+    module.load_state_dict(sub, strict=True)
+
+
 class MicroPipeline:
     def __init__(
-        self, denoiser: MicroDenoiser, decoder: MicroDecoder, source: str = "",
+        self, transformer: MicroDenoiser, decoder: MicroDecoder, source: str = "",
     ) -> None:
-        self.denoiser = denoiser
+        self.transformer = transformer
         self.decoder = decoder
         self.source = source
-        self.config = denoiser.config
+        self.config = transformer.config
 
     @classmethod
     def from_pretrained(cls, path: str, **_kw: Any) -> "MicroPipeline":
@@ -36,24 +56,30 @@ class MicroPipeline:
             materialize(root, seed=SEED)
         config = load_config(root)
         state = load_state(root)
-        denoiser = MicroDenoiser(config)
+        transformer = MicroDenoiser(config)
         decoder = MicroDecoder(config)
-        denoiser.load_state_dict(
-            {k[len("denoiser."):]: v for k, v in state.items()
-             if k.startswith("denoiser.")}, strict=False)
-        decoder.load_state_dict(
-            {k[len("decoder."):]: v for k, v in state.items()
-             if k.startswith("decoder.")}, strict=False)
-        return cls(denoiser.eval(), decoder.eval(), source=str(root))
+        # STRICT, and it is load-bearing (pgw#999). With `strict=False` a
+        # checkpoint written under a different prefix loads ZERO tensors and
+        # leaves the module randomly initialized — silently. That is exactly
+        # what renaming this family's denoiser `denoiser` -> `transformer` did:
+        # the cached tree still said `denoiser.*`, every lookup missed, and two
+        # processes then held two DIFFERENT random transformers. The rig read
+        # that as a 0.151 numerics divergence and spent a session accusing the
+        # numerics gate, which was right all along.
+        #
+        # A loader that cannot find its weights must fail, not shrug.
+        _load_prefixed(transformer, state, "transformer")
+        _load_prefixed(decoder, state, "decoder")
+        return cls(transformer.eval(), decoder.eval(), source=str(root))
 
     def to(self, device: Any) -> "MicroPipeline":
-        self.denoiser.to(device)
+        self.transformer.to(device)
         self.decoder.to(device)
         return self
 
     @property
     def device(self) -> torch.device:
-        return next(self.denoiser.parameters()).device
+        return next(self.transformer.parameters()).device
 
     def unpatchify(self, cells: torch.Tensor, grid: int) -> torch.Tensor:
         """``(N, T, 3*s*s) -> (N, 3, grid*s, grid*s)``.
@@ -89,7 +115,7 @@ class MicroPipeline:
         for i in reversed(range(max(1, steps))):
             t = torch.full((len(x),), float(i * 100), device=x[0].device)
             with torch.no_grad():
-                eps = self.denoiser(x, t, cond)
+                eps = self.transformer(x, t, cond)
             if len(x) == 2:
                 uncond, text = eps[0], eps[1]
                 guided = uncond + guidance * (text - uncond)

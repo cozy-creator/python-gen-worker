@@ -146,15 +146,15 @@ TINY = Vehicle(
 # ---------------------------------------------------------------------------
 
 
-def _micro_cell() -> Any:
+def _micro_cell(bucket: int = 0) -> Any:
     from gen_worker.registry import CompileCell
 
     from micro_diffusion.aot_declaration import COND_LEN, PIXEL_ROWS
 
     return CompileCell(
-        shapes=PIXEL_ROWS, targets=("denoiser", "decoder"),
+        shapes=PIXEL_ROWS, targets=("transformer", "decoder"),
         family="micro-diffusion", regional=False, text_len=COND_LEN,
-        dynamic=(), lora_bucket=0, guidance_scales=(), text_lens=())
+        dynamic=(), lora_bucket=int(bucket), guidance_scales=(), text_lens=())
 
 
 _MICRO_ADOPT = '''
@@ -181,14 +181,26 @@ from micro_diffusion.pipeline import MicroPipeline
 
 torch.set_num_threads(2)
 cfg = CompileCell(
-    shapes=PIXEL_ROWS, targets=("denoiser", "decoder"),
+    shapes=PIXEL_ROWS, targets=("transformer", "decoder"),
     family="micro-diffusion", regional=False, text_len=COND_LEN,
-    dynamic=(), lora_bucket=0, guidance_scales=(), text_lens=())
+    dynamic=(), lora_bucket=%(bucket)d, guidance_scales=(), text_lens=())
 # The adopting process rebuilds the pipeline from the SAME generated tree,
 # which is the whole point of deterministic weights: a second machine with the
 # seed has the bytes, and the snapshot digest agrees without a download.
 pipe = MicroPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"])
 config = pipe.config
+
+# pgw#999: a BUCKET-bearing cell is keyed on the branch-bearing lane, and
+# `aot_cells.discover` filters candidates by the ADOPTING pipeline's own lane.
+# A pod that boots without the LoRA lane computes `lane=plain` and rejects the
+# cell it asked for with `lane_mismatch` — BEFORE arming is ever attempted, so
+# no `arm_aot` gate ever runs and no adopt reason is produced. Measured here
+# the first time this vehicle ran. So the adopting side puts itself on the same
+# lane the mint was on, which is what a serving pod with this endpoint's
+# declared bucket does at boot.
+if int(getattr(cfg, "lora_bucket", 0) or 0):
+    from gen_worker import compile_cache as _cc
+    _cc.apply_lora_execution_lane(pipe, int(cfg.lora_bucket))
 
 
 def _feed(arity, tokens):
@@ -207,16 +219,26 @@ def _feed(arity, tokens):
 # ARMS: every declared entry. The rows deliberately differ from the seed row
 # the mint traced, so the artifact is exercised through its DERIVED range
 # rather than at the one coordinate it was built at.
-ARMS = [("denoiser/cfg=true", CFG_ARITY, TOKEN_ROWS[0]),
-        ("denoiser/cfg=false", 1, TOKEN_ROWS[0]),
+ARMS = [("transformer/cfg=true", CFG_ARITY, TOKEN_ROWS[0]),
+        ("transformer/cfg=false", 1, TOKEN_ROWS[0]),
         ("decoder", 1, TOKEN_ROWS[-1])]
 
+# pgw#999: the eager reference comes from a SEPARATE, PRISTINE instance, not
+# from `pipe` before arming. Arming binds constants from resident weights and
+# the numerics gate runs its own forwards through the served module, so a
+# reference captured from the object that is about to be armed is a reference
+# the arm can contaminate — and a parity number computed against a
+# contaminated reference is worse than no parity number.
+ref = MicroPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"])
+if int(getattr(cfg, "lora_bucket", 0) or 0):
+    from gen_worker import compile_cache as _cc0
+    _cc0.apply_lora_execution_lane(ref, int(cfg.lora_bucket))
 eager = {}
 with torch.no_grad():
     for name, arity, latent in ARMS:
         x, t, cond, lat = _feed(arity, latent)
-        eager[name] = (pipe.decoder(lat) if name == "decoder"
-                       else pipe.denoiser(x, t, cond)).clone()
+        eager[name] = (ref.decoder(lat) if name == "decoder"
+                       else ref.transformer(x, t, cond)).clone()
 
 cell = aot_cells.discover(
     pipe, cfg, base_url=%(base)r,
@@ -254,7 +276,7 @@ if cell is not None:
             for name, arity, latent in ARMS:
                 x, t, cond, lat = _feed(arity, latent)
                 got = (pipe.decoder(lat) if name == "decoder"
-                       else pipe.denoiser(x, t, cond))
+                       else pipe.transformer(x, t, cond))
                 deltas[name] = float((got - eager[name]).abs().max())
         out["parity_max_abs"] = deltas
         out["served_entry_calls"] = dict(aot_serve.served_entry_calls(pipe))
@@ -264,14 +286,30 @@ if cell is not None:
         # identity is not the claim. 1e-4 on float32 activations is.
         out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
         out["ok"] = bool(out["parity_ok"]) and out["execution_count"] > 0
+    else:
+        # pgw#999, in the rig's own code: a leg that reports OK while the arm
+        # REFUSED is the same defect this issue is about, one layer out. An
+        # unarmed cell has served nothing and proved nothing.
+        out["ok"] = False
 print("RIG_ADOPT " + json.dumps(out))
 '''
 
 
-def _micro_adopt_source(base: str, cache: Path) -> str:
-    return _MICRO_ADOPT % {
-        "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
-        "base": base, "cache": str(cache)}
+def _micro_adopt_source_for(bucket: int) -> Any:
+    """The adopt child's source for ONE bucket.
+
+    A factory rather than a constant: the adopting process must construct the
+    SAME `CompileCell` the mint was keyed on, and a hardcoded `lora_bucket=0`
+    made a bucket-bearing vehicle's adopter compute `lane=plain` and reject
+    its own cell with `lane_mismatch` before arming (measured, pgw#999).
+    """
+
+    def _source(base: str, cache: Path) -> str:
+        return _MICRO_ADOPT % {
+            "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
+            "base": base, "cache": str(cache), "bucket": int(bucket)}
+
+    return _source
 
 
 def _micro_checkpoint(root: Path) -> Path:
@@ -296,14 +334,46 @@ MICRO = Vehicle(
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
     compile_cell=_micro_cell,
-    adopt_source=_micro_adopt_source,
+    adopt_source=_micro_adopt_source_for(0),
     covers=("org-worker packaging: 3 export entries (2 fork arms + a second "
             "target), CONTAINER inputs with a plain input after them "
             "(pgw#993/pgw#994), a derived dynamic range, generated weights"),
 )
 
 
-VEHICLES: Dict[str, Vehicle] = {v.name: v for v in (TINY, MICRO)}
+# ---------------------------------------------------------------------------
+# micro-lora — pgw#999's diagnosis vehicle. The SAME family on the
+# BRANCH-BEARING graph, which is the axis sdxl's refused cell differs on.
+# ---------------------------------------------------------------------------
+
+#: sdxl's stamp at the refused mint was `w8a8-lora64`. The w8a8 half cannot be
+#: armed on this box (pgw#983: no CUDA, so `w8a8_gemm_mode()` is "" and the
+#: module class refuses), but the LORA half is lane-agnostic — gw#558's branch
+#: capability covers "plain resident" Linears — so the bucket axis IS
+#: reproducible here, on CPU, and it is the axis `arm_aot` grows a whole extra
+#: gate for (`install_lifted_lora_forward` -> `assert_lifted_contract`).
+MICRO_LORA_BUCKET = 64
+
+MICRO_LORA = Vehicle(
+    name="micro-lora",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main"),
+    function="generate",
+    family="micro-diffusion",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=lambda: _micro_cell(MICRO_LORA_BUCKET),
+    adopt_source=_micro_adopt_source_for(MICRO_LORA_BUCKET),
+    covers=(f"everything `micro` covers, on the BRANCH-BEARING graph "
+            f"(lora_bucket={MICRO_LORA_BUCKET}): the mint child applies the "
+            f"LoRA execution lane before tracing and the parent's arm runs "
+            f"`install_lifted_lora_forward` + `assert_lifted_contract` — the "
+            f"gate pair a plain-lane cycle never reaches (pgw#999)"),
+)
+
+
+VEHICLES: Dict[str, Vehicle] = {v.name: v for v in (TINY, MICRO, MICRO_LORA)}
 DEFAULT_VEHICLE = TINY.name
 
 
@@ -315,4 +385,5 @@ def vehicle(name: str) -> Vehicle:
             f"unknown rig vehicle {name!r} (known: {sorted(VEHICLES)!r})")
 
 
-__all__ = ["DEFAULT_VEHICLE", "MICRO", "TINY", "VEHICLES", "Vehicle", "vehicle"]
+__all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_LORA", "MICRO_LORA_BUCKET",
+           "TINY", "VEHICLES", "Vehicle", "vehicle"]

@@ -92,7 +92,7 @@ class MicroOut(msgspec.Struct):
 @endpoint(
     models={"pipeline": Slot(MicroPipeline, selected_by="model")},
     compile=Compile(
-        family=FAMILY, targets=("denoiser", "decoder"), shapes=PIXEL_ROWS,
+        family=FAMILY, targets=("transformer", "decoder"), shapes=PIXEL_ROWS,
         text_len=COND_LEN),
     resources=Resources(gpu=True),
 )
