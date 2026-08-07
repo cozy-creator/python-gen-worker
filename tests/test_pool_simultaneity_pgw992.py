@@ -100,14 +100,22 @@ def test_the_simultaneity_bound_holds_K_at_two_on_the_incident_card(
     pool does not widen, because the CARD cannot hold the widened set."""
     box = _pool(tmp_path, monkeypatch,
                 census=_incident_census(), own_peak=OWN_PEAK)
-    assert box.width.workers == 2, box.width.reason
+    # The pool OPENS at K=1, not the K=2 the free sample licensed: 18.65 GiB of
+    # card room cannot hold two children at the 9.9 GiB the pod was still
+    # ASKING for. That the real pod survived at K=2 is a fact about the
+    # estimate being wrong, not about two 9.9 GiB children fitting.
+    assert box.width.workers == 1, box.width.reason
+    assert box.width.binding == "simultaneity"
 
     _observe(box, MEASURED_ENTRY_PEAK)
 
+    # ...and the measurement then buys the width back, to the largest K the
+    # card can actually hold. This is the convergence the bound is for: A4's
+    # observation still moves K, it just cannot move it past the card.
     assert box.width.workers == 2, (
         "A4 asked for K=4 on a 29.49 GiB free SAMPLE; the card holds 44.39 "
-        "GiB, of which 25.74 GiB is two resident consumers. Widening here is "
-        "the OOM.")
+        "GiB, of which 25.74 GiB is two resident consumers. Widening past 2 "
+        "here is the OOM.")
     ask = mint_budget.entry_device_ask(MEASURED_ENTRY_PEAK)
     terms = box.simultaneity
     assert terms["simultaneity_budget_bytes"] == (
@@ -224,3 +232,110 @@ def test_a_driver_reading_that_does_not_add_up_yields_no_free_capacity() -> None
     """`free + own > total` is nonsense, and nonsense must not become room."""
     bad = pool.CardCensus(10 * _GIB, 9 * _GIB, 8 * _GIB, "sampled")
     assert bad.resident_other_bytes == 0
+
+
+# ---------------------------------------------------------------------------
+# the z-image contrast specimen: the bound is not about the DIVISOR
+# ---------------------------------------------------------------------------
+
+# The same `_rewiden` code on a different pod, from the pgw#992 filing:
+#   free_device 16.2 GiB / per_entry 25.0 GiB (ESTIMATED) -> K=1, underwidth=3
+# and 16.2 GiB free on an 80 GB card whose static slot sum is 53.3 GiB — ~9 GiB
+# of CUDA context, allocator fragmentation and child overhead that no catalog
+# arithmetic can see.
+ZI_CARD_TOTAL = 85899345920           # 80 GB
+ZI_FREE = int(16.2 * _GIB)
+ZI_PER_ENTRY_ESTIMATE = 25 * _GIB
+ZI_STATIC_SLOT_SUM = int(53.3 * _GIB)
+
+
+def test_the_estimate_only_LOOKED_safe_and_the_bound_does_not_rely_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The invariant, stated as the thing it must NOT be.
+
+    z-image survived because its per-entry ESTIMATE (25.0 GiB) happened to be
+    larger than the truth; the L40S died because its MEASURED peak (6.02 GiB)
+    was smaller. A fix that said "prefer the estimate" or "distrust the
+    measurement" would be a statement about the DIVISOR — and the divisor is
+    not what was wrong. The bound must bite on the card, whichever basis
+    supplies the ask.
+    """
+    census = pool.CardCensus(
+        ZI_CARD_TOTAL, ZI_FREE, ZI_STATIC_SLOT_SUM, "sampled")
+    monkeypatch.setattr(pool, "card_census", lambda device=-1: census)
+    monkeypatch.setattr(
+        pool, "own_device_high_water", lambda device=-1: ZI_STATIC_SLOT_SUM)
+
+    # The card's own reading is 16.2 GiB free where the slot sum says 26.7 GiB
+    # should be: ~9 GiB is context/fragmentation/child overhead. A bound that
+    # summed checkpoints instead of reading the device would over-grant by it.
+    invisible = (ZI_CARD_TOTAL - ZI_STATIC_SLOT_SUM) - ZI_FREE
+    assert invisible > 9 * _GIB * 0.9
+
+    room = ZI_CARD_TOTAL - census.resident_other_bytes - ZI_STATIC_SLOT_SUM
+    for basis, ask in (("estimated", ZI_PER_ENTRY_ESTIMATE),
+                       ("measured", MEASURED_ENTRY_PEAK)):
+        width = pool.entry_workers(
+            4, vcpus=128, available_bytes=256 * _GIB, peak_rss_bytes=3 * _GIB,
+            free_vram_bytes=ZI_FREE, device_bytes=ask, device_basis=basis,
+            device_lock=True, goals=worker_goals.MINT_ONLY)
+        box = pool.EntryCompilePool(tmp_path / f"pool-{basis}", width=width)
+        granted = box.width.workers
+        run_ask = int(box.width.per_entry_device_bytes or ask)
+        # The property, stated so it holds for BOTH bases: the pool never
+        # grants a second child the card cannot hold. K=1 is exempt because it
+        # is the floor — and on this pod at the ESTIMATE even one child does
+        # not fit (25.0 GiB into 15.4 GiB of room), which is the whole point:
+        # that pod was not protected by a safe policy, it was at the floor.
+        assert granted >= 1
+        if granted > 1:
+            assert granted * run_ask <= room, (
+                f"basis={basis}: granted {granted} children of "
+                f"{run_ask / _GIB:.2f} GiB into {room / _GIB:.2f} GiB")
+    assert ZI_PER_ENTRY_ESTIMATE > room, (
+        "the z-image estimate does not fit even ONCE — 'the estimate kept it "
+        "safe' is the floor doing the work, not the policy")
+
+
+def test_the_constructed_width_is_bounded_too_not_only_the_widen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_rewiden` is not the only way a pool gets a K it cannot hold.
+
+    `entry_workers` divides a free SAMPLE at construction with exactly the same
+    blind spot, so the bound belongs on every width the pool runs — not on the
+    one path that happens to widen.
+    """
+    census = pool.CardCensus(CARD_TOTAL, FREE_AT_OPEN, OWN_AT_OPEN, "sampled")
+    monkeypatch.setattr(pool, "card_census", lambda device=-1: census)
+    monkeypatch.setattr(pool, "own_device_high_water", lambda device=-1: OWN_PEAK)
+
+    # A width the free sample licenses (29.49 / 4 GiB -> 7) but the card cannot
+    # hold beside 25.74 GiB of residents.
+    optimistic = pool.entry_workers(
+        36, vcpus=256, available_bytes=116 * _GIB, peak_rss_bytes=3 * _GIB,
+        free_vram_bytes=FREE_AT_OPEN, device_bytes=4 * _GIB,
+        device_basis="measured", device_lock=True,
+        goals=worker_goals.MINT_ONLY)
+    assert optimistic.workers >= 5, optimistic.reason
+
+    box = pool.EntryCompilePool(tmp_path / "pool", width=optimistic)
+    assert box.width.workers == (CARD_TOTAL - SERVING_PARENT - OWN_PEAK) // (4 * _GIB)
+    assert box.width.binding == "simultaneity"
+    # `_rewiden` re-derives against the width the pool ACTUALLY ran.
+    assert box.width_initial.workers == box.width.workers
+
+
+def test_the_bound_never_narrows_below_the_serial_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K=1 is what the pool degrades TO. A bound that could forbid it would
+    forbid minting, which is not a safety property."""
+    starved = pool.CardCensus(CARD_TOTAL, 1 * _GIB, CARD_TOTAL - 2 * _GIB,
+                              "sampled")
+    monkeypatch.setattr(pool, "card_census", lambda device=-1: starved)
+    monkeypatch.setattr(
+        pool, "own_device_high_water", lambda device=-1: CARD_TOTAL)
+    box = pool.EntryCompilePool(tmp_path / "pool", width=_incident_width())
+    assert box.width.workers == 1
