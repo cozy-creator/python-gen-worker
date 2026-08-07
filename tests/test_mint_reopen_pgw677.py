@@ -333,7 +333,6 @@ def test_w8a8_stamp_with_hub_execution_lane_boots_eager_first(
     setup ran the FOREGROUND compile-then-serve mint (rec.background_mint
     is None), and the first tenant request sat behind the whole inline
     plan — the measured 26-minute cold-L4 starvation."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h = _Harness(
         tmp_path, monkeypatch,
         compile_delay_s=0.4, seed_forward_s=0.05, tenant_forward_s=0.02,
@@ -365,7 +364,6 @@ def test_true_mandatory_execution_lane_still_refuses_eager_first(
     """The qwen shape: hub lane says real w8a8 activations — eager is not
     a production tier there; the boot keeps the sequential foreground
     proof. Guards the fix from over-rotating."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h = _Harness(
         tmp_path, monkeypatch,
         compile_delay_s=0.0, seed_forward_s=0.0, tenant_forward_s=0.01,
@@ -384,7 +382,6 @@ def test_w8a8_stamp_without_execution_lane_evidence_stays_foreground(
 ) -> None:
     """No hub lane evidence: the weight-lane stamp remains the fail-closed
     fallback — unchanged pre-reopen behavior."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h = _Harness(
         tmp_path, monkeypatch,
         weight_lane="w8a8", hub_execution_lane="")
@@ -412,7 +409,6 @@ def test_multi_minute_compile_never_steals_against_live_demand(
     tenant completes at serving latency. RED on 0.70.0: the single 30s
     floor (patched to 0.1s, as tape 3 always did) lets the compile steal
     almost immediately and a tenant waits out the whole unabortable unit."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     monkeypatch.setattr(executor_mod, "_BG_STEAL_FLOOR_S", 0.1)
     # raising=False: on the pre-fix tree this attribute does not exist and
     # the single floor governs — that IS the red run.
@@ -459,7 +455,6 @@ def test_compile_steal_is_announced_on_the_wire(
     """When the compile floor DOES elapse under truly continuous demand,
     the steal happens (minimum progress) and announces itself as a typed
     ``bg_turn_steal`` event."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     monkeypatch.setattr(executor_mod, "_BG_STEAL_FLOOR_S", 0.05)
     monkeypatch.setattr(
         executor_mod, "_BG_COMPILE_STEAL_FLOOR_S", 0.3, raising=False)
@@ -503,7 +498,6 @@ def test_pack_or_closure_refusal_reaches_the_wire(
     (closure gate / pack) died in pod logs. Post-fix the verbatim reason
     rides the wire as a typed ``self_mint_abort`` event. RED on 0.70.0:
     no such event exists anywhere."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
 
     def _refuse(*args: Any, **kwargs: Any) -> None:
         raise ValueError("closure refused: guard leak L['scale']")
@@ -599,7 +593,6 @@ def test_oom_truncated_plan_never_finalizes_partial_capture(
     partial capture, and serving stays eager and alive. RED on 0.70.0:
     the OOM'd pass satisfied the stats-stable convergence and the mint
     finalized (phase=finalize) with nothing publishable and no event."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h = _Harness(
         tmp_path, monkeypatch,
         compile_delay_s=0.02, seed_forward_s=0.01, tenant_forward_s=0.01,

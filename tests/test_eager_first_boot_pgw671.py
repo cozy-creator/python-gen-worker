@@ -311,40 +311,79 @@ def test_eager_first_boot_ready_before_compile_then_hot_swaps(
     asyncio.run(_run())
 
 
-def test_kill_switch_restores_the_sequential_gate_and_measures_the_split(
+def test_eager_first_is_unconditional_and_no_env_restores_the_sequential_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RED-VERIFICATION of the gate removal: with the env kill switch the
-    old ladder is back — every compile lands BEFORE READY — and the
-    elapsed-boot split is the eager-vs-compiled latency evidence."""
+    """pgw#995 RED-VERIFICATION, inverted: the surviving path is the ONLY path.
+
+    This test used to drive `GEN_WORKER_EAGER_FIRST_BOOT=0` to restore the
+    pre-pgw#671 sequential ladder, and the elapsed-boot split between the two
+    arms was the eager-vs-compiled latency evidence. That switch is deleted:
+    it defaulted ON, no release ever declared it and no endpoint ever set it,
+    so deleting it made the shape every pod already ran unconditional.
+
+    An env used as a red-verification seam is the same defect as an env used as
+    a feature gate — it is a behaviour switch that a rebuild can flip, and
+    `GEN_WORKER_PREFER_AOT` is what that costs. So the assertion inverts: rather
+    than proving the OFF arm still works, prove the OFF arm is UNREACHABLE.
+    Setting the old name (or any plausible spelling of it) must change nothing.
+
+    The latency evidence the old second arm carried is not lost — it is the
+    absolute bound below, which is the half that actually stated the claim:
+    time-to-READY does not pay the compile wall. The old test asserted BOTH
+    `ready_at < 3 * delay` and `ready_at < h_off.ready_at`; the second is
+    implied by the first whenever the sequential arm is honest, so the arm was
+    paying for a comparison the bound already made.
+    """
     delay = 0.3
-    monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "0")
-    h_off = _Harness(tmp_path / "off", monkeypatch, compile_delay_s=delay)
+    for name in (
+        "GEN_WORKER_EAGER_FIRST_BOOT",
+        "GEN_WORKER_EAGER_FIRST",
+        "GEN_WORKER_EAGER_FIRST_BOOT_OFF",
+    ):
+        monkeypatch.setenv(name, "0")
 
-    async def _off() -> None:
-        await h_off.boot()
-        assert h_off.rec.ready is True
-        assert h_off.rec.background_mint is None
-        # Sequential: the full plan compiled foreground, gating READY.
-        assert len(h_off.compile_log) == 3
-        assert h_off.ex.serving_tiers() == {"generate": "compiled"}
+    h = _Harness(tmp_path / "on", monkeypatch, compile_delay_s=delay)
 
-    asyncio.run(_off())
-    assert h_off.ready_at is not None and h_off.ready_at >= 3 * delay
+    async def _run() -> None:
+        await h.boot()
+        # The pre-pgw#671 ladder would have compiled the full plan in the
+        # foreground and left no background mint at all.
+        assert h.rec.background_mint is not None, (
+            "an env turned eager-first off — the pgw#995 deletion did not take, "
+            "or a new switch was added on top of it")
+        assert h.rec.ready is True
+        await h.wait_mint()
 
-    monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "1")
-    h_on = _Harness(tmp_path / "on", monkeypatch, compile_delay_s=delay)
+    asyncio.run(_run())
+    assert h.ready_at is not None
+    # The whole point, stated as an absolute bound rather than a comparison
+    # against an arm that no longer exists: READY does not wait for the wall.
+    assert h.ready_at < 3 * delay
 
-    async def _on() -> None:
-        await h_on.boot()
-        assert h_on.rec.background_mint is not None
-        await h_on.wait_mint()
 
-    asyncio.run(_on())
-    assert h_on.ready_at is not None
-    # The whole point: time-to-READY no longer pays the compile wall.
-    assert h_on.ready_at < 3 * delay
-    assert h_on.ready_at < h_off.ready_at
+def test_no_env_read_survives_in_the_eager_first_and_bg_yield_paths() -> None:
+    """pgw#995 structural guard: the deleted names are gone from the SOURCE.
+
+    A behavioural assertion can pass while a second, unreached reader survives
+    somewhere else in the module — which is exactly how `GEN_WORKER_PREFER_AOT`
+    kept two live gates after one was believed removed. So read the source.
+    """
+    import gen_worker.executor as _ex
+    import gen_worker.mint_delegate as _md
+    import gen_worker.aot_wrapper_split as _ws
+
+    src = "".join(
+        Path(m.__file__).read_text() for m in (_ex, _md, _ws) if m.__file__)
+    for gone in (
+        "GEN_WORKER_EAGER_FIRST_BOOT",
+        "GEN_WORKER_BG_YIELD",
+        "GEN_WORKER_AOT_WRAPPER_SPLIT_OFF",
+    ):
+        # Prose that NAMES the deleted switch is fine and wanted; a read is not.
+        assert f'environ.get("{gone}"' not in src, (
+            f"{gone} is read again — pgw#995 deleted it because env must carry "
+            f"config and secrets, never a branch selection")
 
 
 def test_mid_build_abandonment_is_clean_and_keeps_serving_eager(
