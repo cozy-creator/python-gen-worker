@@ -105,6 +105,13 @@ Preconditions (all verified before step 1, none assumed):
 **ESTIMATE: < 1 min.** No commit to `inference-endpoints` is wanted — this is a
 proof artifact, not a fleet pin.
 
+> ⚠️ **The pin must carry pgw#994 (`2165c2d5`) — 0.93.4 or a master build.**
+> This family declares a container input with a plain input after it, which is
+> exactly the shape whose contract positions pgw#994 fixed. On 0.93.3 the cell
+> mints and seals and then **refuses at ingress on its first served call**, so
+> the run would burn a pod to rediscover a fixed defect. The local rig runs
+> against master and its parity leg is a green proof of that fix.
+
 ### 2. Create the endpoint (first time only)
 
 ```
