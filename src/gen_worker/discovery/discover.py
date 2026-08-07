@@ -956,6 +956,26 @@ def _strip_none(obj: Any) -> Any:
     return obj
 
 
+#: pgw#1017 GAP D. Tensorhub classifies a build failure carrying this marker as
+#: ``ErrBuildInput`` → ``river.JobCancel``: the same source bytes are never
+#: retried. It used to be emitted by a shell wrapper the hub wrote into the
+#: SYNTHESIZED Dockerfile, so a family shipping its OWN Dockerfile got the
+#: opposite classification for an identical failure — and that included
+#: pgw#996's precondition refusals, whose entire value is deciding once, at
+#: build. The whole image build re-ran on every River attempt to reach the same
+#: verdict. The knowledge lives here: discovery is what knows the failure is
+#: about immutable endpoint source, so discovery says so, on both paths.
+BUILD_INPUT_FAILURE_MARKER = "TENSORHUB_BUILD_INPUT_FAILURE:discovery"
+
+
+def _fail_build_input(*messages: str) -> None:
+    """Print the refusal, mark it non-retryable, and exit nonzero."""
+    for message in messages:
+        print(message, file=sys.stderr)
+    print(BUILD_INPUT_FAILURE_MARKER, file=sys.stderr)
+    sys.exit(1)
+
+
 def main() -> None:
     """Write the build-time endpoint manifest to stdout.
 
@@ -964,6 +984,11 @@ def main() -> None:
     is a class-shape declaration (post-#322). An old function-shape entry
     that slipped past the discovery refactor hard-fails the build with a
     pointer to the migration guide.
+
+    Every refusal below is about the endpoint SOURCE, which no retry can
+    change, so each one carries ``BUILD_INPUT_FAILURE_MARKER``. A death that
+    is NOT about the source — the process OOM-killed, the build host cut off —
+    prints nothing and stays retryable, which is the correct answer for it.
     """
     try:
         manifest = discover_manifest()
@@ -976,8 +1001,7 @@ def main() -> None:
             cause = cause.__cause__
         if cause is not None:
             traceback.print_exc(file=sys.stderr)
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
+        _fail_build_input(f"error: {e}")
 
     # #328 bake-time validation gate. Old function-shape entries trip the
     # missing-class_name check; same-class slug collisions trip the route
@@ -989,9 +1013,7 @@ def main() -> None:
     for w in val.warnings:
         print(f"warning: {w}", file=sys.stderr)
     if not val.ok:
-        for err in val.errors:
-            print(f"error: {err}", file=sys.stderr)
-        sys.exit(1)
+        _fail_build_input(*(f"error: {err}" for err in val.errors))
 
     if not manifest.get("functions"):
         print("warning: no @endpoint objects found", file=sys.stderr)

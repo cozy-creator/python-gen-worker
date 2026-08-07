@@ -239,15 +239,36 @@ existed the same defect cost 336 s of rented L4 time and surfaced as
 `InvalidCxxCompiler` at the link step. A guarantee you can observe beats a
 quieter one: the refusal IS the guarantee.
 
-> **On a CUDA image `g++` is necessary, not sufficient.** torch's
-> `cpp_extension` also needs a CUDA root it can discover, and the pytorch
-> runtime bases ship CUDA as pip wheels without ever creating `/usr/local/cuda`
-> — so an image with `g++` and no composed CUDA root still dies with
-> `CUDA_HOME environment variable is not set`, on a pod, after paying for the
-> export. Tensorhub's synthesized Dockerfile composes that root; a custom
-> Dockerfile has no equivalent and **no precondition covers it yet**. pgw#1017
-> owns closing that gap. Until it does, do not pod-run a custom-Dockerfile
-> family that declares an AOT export.
+### On a CUDA image, `g++` is necessary and not sufficient
+
+torch's `cpp_extension` also needs a CUDA root it can discover, and the pytorch
+runtime bases ship CUDA as pip wheels without ever creating `/usr/local/cuda`.
+An image with `g++` and no CUDA root reaches the link step and dies with
+`CUDA_HOME environment variable is not set` — three separate facts are missing,
+and none of them is a compiler.
+
+One line, after your dependency install:
+
+```dockerfile
+RUN python -m gen_worker.cuda_root
+```
+
+It composes `/usr/local/cuda` out of parts the image already ships (the
+`nvidia/*` wheels' headers and libs, the real `crt/` headers, and `nv/target`
+from `cuda-cccl` fetched into a throwaway directory). It writes nothing inside
+a pip package, is a no-op when the image already has a CUDA install, and never
+fails a build — a CPU image simply has nothing to compose.
+
+You invoke it; the SDK owns whether the recipe is right. That is deliberate:
+the alternative is twenty lines of shell transcribed into every Dockerfile that
+needs it, drifting apart the moment a base image changes.
+
+The same build-time gate covers it:
+
+```
+error: aot precondition cuda_root: torch's cpp_extension cannot host-compile on
+       this image and ['micro-diffusion'] declare an AOT export. Missing: …
+```
 
 ---
 
@@ -259,9 +280,9 @@ FROM ${BASE_IMAGE}
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# The AOT host toolchain. Drop this layer only if no endpoint in the image
-# declares a compile export — Tensorhub's own generated Dockerfile installs it
-# in every image it synthesizes.
+# The AOT host toolchain. Drop this layer and the cuda_root line below only if
+# no endpoint in the image declares a compile export — Tensorhub's own
+# generated Dockerfile does both in every image it synthesizes.
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl g++ \
@@ -281,6 +302,7 @@ COPY . /app
 
 RUN uv pip install --no-cache --link-mode copy \
       --system --break-system-packages --no-deps --no-sources /app \
+    && python -m gen_worker.cuda_root \
     && mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
