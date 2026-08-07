@@ -383,6 +383,10 @@ def _build_module_class() -> type:
                      static_input_scale: bool,
                      pre_quant_scale: bool = False) -> None:
             super().__init__()
+            # pgw#1019: a quantized leaf is the ONLY thing that knows its
+            # compute dtype — the weight is uint8 and the bias is optional,
+            # so bias-free instances leave no trace of it. Record it.
+            self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
             if in_features % _K_ALIGN or out_features % _N_ALIGN:

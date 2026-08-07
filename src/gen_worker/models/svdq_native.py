@@ -159,6 +159,10 @@ def _build_svdq_linear_class() -> type:
                      rank: int, bias: bool, compute_dtype: Any,
                      per_channel_scale: bool, smooth: bool) -> None:
             super().__init__()
+            # pgw#1019: record it — the packed weight is uint8 and every
+            # compute-dtype tensor here (smooth_factor, proj_*, bias) is
+            # optional, so a rank-0 bias-free instance states it nowhere else.
+            self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
             self.rank = int(rank)
