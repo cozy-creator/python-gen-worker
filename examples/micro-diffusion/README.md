@@ -97,6 +97,12 @@ Preconditions (all verified before step 1, none assumed):
   platform-paid work).
 - The wheel is a version that has completed a local `task rig:micro` cycle.
   A wheel nothing has proven locally is what this whole family exists to stop.
+- **pgw#1017's `cuda_root` gap is closed.** ⛔ It is not, today. This family
+  ships its own Dockerfile, so it gets no composed `/usr/local/cuda`, and
+  torch's `cpp_extension` finds no CUDA on the pytorch runtime base. The mint
+  would boot, load, export and then die at `CUDA_HOME environment variable is
+  not set` — a paid failure where the missing-`g++` sibling was a free one.
+  **The pod runbook is blocked on that, independently of Paul's go.**
 
 ### 1. Wheel — pin the endpoint at the version under test
 
@@ -112,21 +118,19 @@ proof artifact, not a fleet pin.
 > the run would burn a pod to rediscover a fixed defect. The local rig runs
 > against master and its parity leg is a green proof of that fix.
 
-### 2. Create the endpoint (first time only)
+### 2. Publish the release
 
-```
-POST /api/v1/endpoints  {"owner":"tensorhub","name":"micro-diffusion"}
-```
-
-Auth: `POST /api/v1/password/login` → **`access_token`** (not `access`),
-15-minute expiry — refresh it around the build.
-
-### 3. Publish the release
+There is no endpoint-creation call to make first. `POST /api/v1/endpoints` does
+not exist; publishing a release auto-creates the endpoint. A runbook step that
+posts it has nothing to hit.
 
 ```
 POST /api/v1/endpoints/tensorhub/micro-diffusion/releases?dev=true&skip_profiling=true
 Content-Type: application/gzip     (raw tarball body)
 ```
+
+Auth: `POST /api/v1/password/login` → **`access_token`** (not `access`),
+15-minute expiry — refresh it around the build.
 
 202 → `{build_id, proposed_release_id}`; `200 {"status":"noop"}` is also
 success. Poll `GET /api/v1/endpoint-builds/{id}` to `succeeded`.
@@ -134,7 +138,7 @@ success. Poll `GET /api/v1/endpoint-builds/{id}` to `succeeded`.
 diffusers/transformers/accelerate and its weight-generation layer is ~1 s, so
 the delta is the dependency install).
 
-### 4. Tag `prod` — BEFORE the buy
+### 3. Tag `prod` — BEFORE the buy
 
 ```
 PUT /api/v1/endpoints/tensorhub/micro-diffusion/tags/prod  {"release_id": …}
@@ -145,7 +149,7 @@ answers `409 no_compile_declaration` for a release the runtime has not loaded.
 That 409 has twice been misread as a missing declaration; it is a cold cache.
 **ESTIMATE: seconds.**
 
-### 5. Arm mint boots
+### 4. Arm mint boots
 
 `TENSORHUB_COMPILE_OBLIGATION_MINT_BOOTS=true`, restart the hub **process
 alone**. Confirm from the LOG, not the API:
@@ -153,7 +157,7 @@ alone**. Confirm from the LOG, not the API:
 `compile-cells` 202 reads current config, not the running loop's snapshot, and
 will lie to you. **ESTIMATE: < 1 min.**
 
-### 6. Buy
+### 5. Buy
 
 ```
 POST /v1/admin/compile-cells  {"release_id":…, "gpu_model":"L40S", "coverage":"warmup"}
@@ -165,7 +169,7 @@ un-parks (its `ON CONFLICT (release_id, sku) DO UPDATE` resets `status`,
 `attempts`, `discharged_at`, `not_before`). **Buy it as FORGE** — 12 h worker
 JWT instead of 30 min, plus the activity-backstop and idle-turnover exemptions.
 
-### 7. Watch
+### 6. Watch
 
 ```
 GET /v1/admin/mints?release=…
@@ -183,12 +187,12 @@ GET /v1/admin/fleet-status | .compile_cells
 | export + AOTI compile | ~90 min / 36 entries | ~2-3 min / 3 entries | 12x fewer entries, tiny graphs |
 | seal + publish | ~1 min | seconds | the cell is small |
 
-### 8. Adopt
+### 7. Adopt
 
 Drive demand so a SECOND pod boots cold and adopts the published cell from the
 hub. Bank the eager arm on a pod that is NOT concurrently minting.
 
-### 9. Safety half
+### 8. Safety half
 
 The mint is sm_89 (L40S). Boot an `a100-sxm4-80gb` (sm_80) and record the TYPED
 refusal — an untested refusal is not a guarantee.
