@@ -17,6 +17,26 @@ from .model import MicroConfig, MicroDecoder, MicroDenoiser
 from .weights import SEED, load_config, load_state, materialize
 
 
+def _load_prefixed(module: Any, state: dict, prefix: str) -> None:
+    """Load ``prefix.*`` out of ``state`` into ``module``, STRICTLY.
+
+    Refuses by name when the prefix selects nothing — the failure mode that
+    `strict=True` alone does NOT catch, because an empty dict against a
+    module with parameters is just "missing keys", and the message would not
+    say the interesting part: that the checkpoint uses a different layout.
+    """
+    sub = {k[len(prefix) + 1:]: v for k, v in state.items()
+           if k.startswith(prefix + ".")}
+    if not sub:
+        raise ValueError(
+            f"checkpoint carries no {prefix!r} tensors — its prefixes are "
+            f"{sorted({k.split('.')[0] for k in state})!r}. This tree was "
+            f"written by a different layout version; regenerate it "
+            f"(`python -m micro_diffusion.weights --out <dir>`) rather than "
+            f"loading a randomly-initialized module.")
+    module.load_state_dict(sub, strict=True)
+
+
 class MicroPipeline:
     def __init__(
         self, transformer: MicroDenoiser, decoder: MicroDecoder, source: str = "",
@@ -38,12 +58,18 @@ class MicroPipeline:
         state = load_state(root)
         transformer = MicroDenoiser(config)
         decoder = MicroDecoder(config)
-        transformer.load_state_dict(
-            {k[len("transformer."):]: v for k, v in state.items()
-             if k.startswith("transformer.")}, strict=False)
-        decoder.load_state_dict(
-            {k[len("decoder."):]: v for k, v in state.items()
-             if k.startswith("decoder.")}, strict=False)
+        # STRICT, and it is load-bearing (pgw#999). With `strict=False` a
+        # checkpoint written under a different prefix loads ZERO tensors and
+        # leaves the module randomly initialized — silently. That is exactly
+        # what renaming this family's denoiser `denoiser` -> `transformer` did:
+        # the cached tree still said `denoiser.*`, every lookup missed, and two
+        # processes then held two DIFFERENT random transformers. The rig read
+        # that as a 0.151 numerics divergence and spent a session accusing the
+        # numerics gate, which was right all along.
+        #
+        # A loader that cannot find its weights must fail, not shrug.
+        _load_prefixed(transformer, state, "transformer")
+        _load_prefixed(decoder, state, "decoder")
         return cls(transformer.eval(), decoder.eval(), source=str(root))
 
     def to(self, device: Any) -> "MicroPipeline":
