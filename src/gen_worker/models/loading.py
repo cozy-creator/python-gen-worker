@@ -28,6 +28,7 @@ import sys
 from .artifact_contract import CONTRACT_PLAIN_BF16, implements_contract
 from .fp8_storage import restructure_fp8_storage
 from .memory import get_available_vram_gb, meta_tensors
+from .safetensors_header import header_len_ok
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
 from .w4a4 import (
     detect_w4a4_artifact,
@@ -94,7 +95,6 @@ def detect_diffusers_variant(model_path: Path) -> Optional[str]:
 _SAFETENSORS_DTYPE_NAMES = {
     "BF16": "bf16", "F16": "fp16", "F32": "fp32", "F8_E4M3": "fp8",
 }
-_MAX_SAFETENSORS_HEADER_BYTES = 100 << 20
 
 
 def safetensors_file_valid(path: Path) -> bool:
@@ -111,7 +111,7 @@ def safetensors_file_valid(path: Path) -> bool:
             if len(raw) < 8:
                 return False
             (n,) = struct.unpack("<Q", raw)
-            if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES or 8 + n > size:
+            if not header_len_ok(n) or 8 + n > size:
                 return False
             header = json.loads(f.read(n))
         if not isinstance(header, dict):
@@ -144,7 +144,7 @@ def detect_on_disk_dtype(model_path: Path) -> str:
                 if len(raw) < 8:
                     continue
                 (n,) = struct.unpack("<Q", raw)
-                if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
+                if not header_len_ok(n):
                     continue
                 header = json.loads(f.read(n))
             for value in header.values():
@@ -751,6 +751,9 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
         shard_path = snapshot_dir / shard
         with open(shard_path, "rb") as f:
             (n,) = struct.unpack("<Q", f.read(8))
+            if not header_len_ok(n):
+                raise ValueError(
+                    f"safetensors: implausible header_length={n} in {shard}")
             header = json.loads(f.read(n))
         data_start = 8 + n
         header.pop("__metadata__", None)
@@ -1342,7 +1345,7 @@ def _safetensors_data_bytes(p: Path) -> int:
         if len(raw) < 8:
             return 0
         (n,) = struct.unpack("<Q", raw)
-        if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
+        if not header_len_ok(n):
             return 0
         header = json.loads(f.read(n))
     total = 0

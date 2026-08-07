@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
+from .safetensors_header import header_len_ok
 from .artifact_contract import CONTRACT_COZY_FP8_ROWWISE, implements_contract
 from typing import Any, Dict, List, Optional
 import shutil
@@ -53,7 +54,6 @@ W8A8_MIN_SM = 89
 W8A8_ROWWISE_MIN_SM = 90
 _FP8_MAX = 448.0
 _DIM_ALIGN = 16
-_MAX_HEADER_BYTES = 100 << 20
 
 
 class W8a8Error(RuntimeError):
@@ -82,7 +82,7 @@ def _read_header(path: Path) -> dict:
             if len(raw) < 8:
                 return {}
             (n,) = struct.unpack("<Q", raw)
-            if n <= 0 or n > _MAX_HEADER_BYTES:
+            if not header_len_ok(n):
                 return {}
             header = json.loads(f.read(n))
     except (OSError, ValueError):

@@ -33,15 +33,20 @@ import msgspec
 from .api.errors import CanceledError, RetryableError, ValidationError
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 from .request_context._helpers import _infer_mime_type, _url_is_blocked
-from .url_fetch import open_guarded_stream
+from .url_fetch import DEFAULT_MAX_BYTES, open_guarded_stream
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_BYTES = 50 << 20  # matches tensorhub's default media cap
+# pgw#973 (§4.24): one number for tensorhub's media cap, owned by url_fetch.
+# open_guarded_stream deliberately caps nothing ("the caller owns the read
+# and its byte cap"), so this path really does need its own enforcement —
+# it just must not re-decide the value.
+_DEFAULT_MAX_BYTES = DEFAULT_MAX_BYTES
 _DOWNLOAD_TIMEOUT_S = 120
 _RESOLVE_TIMEOUT_S = 30
 _MAX_RESOLVE_BODY = 8 << 20
 _MAX_WALK_DEPTH = 32
+# Streaming read buffer, not a bound — it refuses nothing.
 _CHUNK = 1 << 20
 _INPUT_DIR_PREFIX = "gen-worker-inputs-"
 _RESOLVE_PATH = "/api/v1/worker/input-assets/resolve"

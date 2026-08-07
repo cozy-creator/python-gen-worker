@@ -104,11 +104,26 @@ _COMPLETE_SILENCE_WINDOW_S = 2.0 * _FINALIZE_TIMEOUT_S
 # Default part size sent by server, but we read it from the response.
 _FALLBACK_PART_SIZE = 64 * 1024 * 1024  # 64 MiB
 
-# Hard-coded internal safety budget for the current Tensorhub presigned
-# upload path. File-level fan-out is fixed at 4 and per-file part fan-out is
-# fixed at 4, so this semaphore is the authoritative cap that keeps the two
-# axes from multiplying. Eight concurrent PUTs preserves useful parallelism
-# while avoiding the 100+ PUT retry storm that broke R2 mirrors.
+# pgw#973 (§4.24) — KEEP, but the old justification was false and is replaced.
+#
+# It read: "File-level fan-out is fixed at 4 and per-file part fan-out is fixed
+# at 4, so this semaphore is the authoritative cap that keeps the two axes from
+# multiplying." Both halves were wrong. The module that owned file-level
+# fan-out (``_concurrent_upload.py``) NO LONGER EXISTS; the only in-repo caller
+# of this path (``request_context/_stream.py:_finalize_presigned_upload``) is
+# sequential, with no pool and no gather. So the file axis is 1, in-flight PUTs
+# are capped at 4 by ``optimal_part_concurrency``, and this semaphore of 8 is
+# never the binding constraint on any in-repo path.
+#
+# THE THREAT IT ACTUALLY COVERS, which nothing else does: an endpoint author
+# calling ``ctx.save()`` from their own threads. That is the one axis
+# ``optimal_part_concurrency`` cannot see, because it bounds ONE file's parts
+# and knows nothing about how many files are in flight beside it. Without this,
+# N author threads x 4 parts is unbounded and rebuilds the 100+ PUT retry storm
+# that broke R2 mirrors.
+#
+# NOT DERIVED. 8 is round. What would change it: one measured author workload
+# whose concurrent saves exceed 2 files.
 _PRESIGNED_PUT_BUDGET = 8
 _presigned_put_slots = threading.BoundedSemaphore(_PRESIGNED_PUT_BUDGET)
 

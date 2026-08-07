@@ -25,6 +25,7 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 from ..component_vocab import denoiser_components
+from .safetensors_header import header_len_ok
 from typing import Any, Optional
 import importlib.metadata as md
 import os
@@ -37,7 +38,6 @@ SVDQ_METHOD = "svdquant"
 SVDQ_FP4_SMS = (120, 121)
 SVDQ_INT4_SMS = (75, 80, 86, 89)
 
-_MAX_HEADER_BYTES = 100 << 20
 
 
 class SvdqError(RuntimeError):
@@ -291,7 +291,7 @@ def _read_safetensors_metadata(path: Path) -> dict:
             if len(raw) < 8:
                 return {}
             (n,) = struct.unpack("<Q", raw)
-            if n <= 0 or n > _MAX_HEADER_BYTES:
+            if not header_len_ok(n):
                 return {}
             header = json.loads(f.read(n))
     except (OSError, ValueError):
