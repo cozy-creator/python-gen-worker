@@ -29,6 +29,13 @@ KID = "test-kid-1"
 FAMILY = "sdxl"
 CELL_KEY = "ck1-0123456789abcdef0123456789abcdef0123456789abcdef01234567"
 SNAPSHOT = "snapdigest-abc123"
+# th#1657: the endpoint the test pod serves, and the one every fixture receipt
+# is minted FOR unless a test deliberately mints it for someone else. Keeping
+# the default a matching ORG-tier pair means the publisher gate is live in every
+# case below, not just the ones that name it.
+SELF_ENDPOINT = "3e0f8f7a-1111-2222-3333-444455556666"
+OTHER_ENDPOINT = "9c1d2e3f-9999-8888-7777-666655554444"
+SELF_ORG = "11111111-2222-3333-4444-555555555555"
 B3_HEX = "ab12cd34" * 8
 SHA_HEX = "12ab34cd" * 8
 
@@ -74,12 +81,15 @@ def make_claims(
     else:
         artifact["digest"] = artifact_digest
     claims: Dict[str, Any] = {
-        "crv": "cell-receipt-v1",
+        "crv": "cell-receipt-v2",
         "family": FAMILY,
         "cell_key": CELL_KEY,
         "axes": {"sku": "rtx-4090", "image_digest": "sha256:feed", "gen_worker": "0.75.1"},
-        "owning_endpoint_id": "3e0f8f7a-1111-2222-3333-444455556666",
+        "owning_endpoint_id": SELF_ENDPOINT,
         "publisher": "selfmint:worker=w1:pod=p1:release=r1",
+        # th#1657 publisher trust, inside the signature.
+        "publisher_tier": "org",
+        "publisher_org_id": SELF_ORG,
         "snapshot_digest": SNAPSHOT,
         "artifact": artifact,
         "manifest_digest": "sha256:aa",
@@ -162,7 +172,7 @@ class TestVerifyReceiptJWS:
         assert exc.value.reason == "receipt_signature_invalid"
 
     def test_wrong_version_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
-        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096, crv="cell-receipt-v0"))
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096, crv="cell-receipt-v1"))
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(jws, pub_map)
         assert exc.value.reason == "receipt_version_unsupported"
@@ -269,8 +279,24 @@ def hub(rsa_key: rsa.RSAPrivateKey) -> Iterator[HubStub]:
     receipts.reset()
 
 
-def _configure(stub: HubStub) -> None:
-    receipts.configure(base_url=stub.base_url, worker_jwt=lambda: "test-worker-jwt")
+def worker_jwt_for(endpoint_id: str) -> str:
+    """A hub-shaped worker credential naming the endpoint this pod serves.
+
+    th#1657: the pod's own identity comes from the `cell_read_endpoint_id` the
+    hub stamps on the cell-read grant (th#1335), so the test builds the same
+    thing. The signature is never checked — this is our OWN bearer token, not an
+    input — so an unsigned third segment is faithful to what the gate reads.
+    """
+    header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+    payload = _b64url(json.dumps({
+        "sub": "worker-1", "cell_read_endpoint_id": endpoint_id,
+    }).encode())
+    return header + "." + payload + ".not-checked-here"
+
+
+def _configure(stub: HubStub, *, endpoint_id: str = SELF_ENDPOINT) -> None:
+    receipts.configure(
+        base_url=stub.base_url, worker_jwt=lambda: worker_jwt_for(endpoint_id))
 
 
 class TestGateDeliveredArtifact:
@@ -515,3 +541,156 @@ class TestAlgorithmAgnosticReceipts:
         assert set(got) == set(receipts.ARTIFACT_DIGEST_ALGORITHMS) == {"sha256"}
         raw = artifact.read_bytes()
         assert got["sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# th#1657 — the publisher trust boundary at the arm gate (pgw#1008)
+# ---------------------------------------------------------------------------
+
+
+class TestPublisherTrustTh1657:
+    """A cell must have come from THIS endpoint, or from a publisher the
+    platform vouches for.
+
+    THREAT: cross-tenant native-code execution. The artifact is a `.so` this
+    process is about to dlopen. Every other link in the chain proves the bytes
+    are the ones the hub signed; none of them asks whether the hub signed them
+    FOR THIS POD. `owning_endpoint_id` has ridden the signed receipt since
+    pgw#709 and was decoded into `Receipt` and compared against nothing.
+
+    The first test is the RED one: before pgw#1008 it ARMS.
+    """
+
+    def test_another_endpoints_org_cell_is_refused(
+        self, tmp_path: Path, hub: HubStub
+    ) -> None:
+        """A genuine, correctly-signed, un-revoked receipt — for someone else.
+
+        Nothing about this artifact is malformed. The signature verifies, the
+        digest matches, the size matches, the packed key matches, the family
+        matches, the pair is not revoked. It is simply not ours, and before
+        pgw#1008 that made no difference at all.
+        """
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=OTHER_ENDPOINT, publisher_tier="org")
+        _configure(hub, endpoint_id=SELF_ENDPOINT)
+
+        with pytest.raises(receipts.ReceiptError) as excinfo:
+            receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert excinfo.value.reason == "publisher_untrusted"
+        assert OTHER_ENDPOINT in str(excinfo.value)
+        # And the arm hook refuses rather than raising into the boot.
+        assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
+
+    def test_our_own_org_cell_arms(self, tmp_path: Path, hub: HubStub) -> None:
+        """THE CONTROL. Without it, a gate that refused everything would pass
+        every other assertion in this class."""
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=SELF_ENDPOINT, publisher_tier="org")
+        _configure(hub, endpoint_id=SELF_ENDPOINT)
+
+        receipt = receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert receipt.owning_endpoint_id == SELF_ENDPOINT
+        assert receipt.publisher_tier == "org"
+        assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
+
+    def test_platform_tier_arms_anywhere(self, tmp_path: Path, hub: HubStub) -> None:
+        """Platform-tier is the escape hatch the fleet actually runs on: the
+        platform authored that code and already runs it everywhere."""
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=OTHER_ENDPOINT, publisher_tier="platform")
+        _configure(hub, endpoint_id=SELF_ENDPOINT)
+
+        receipt = receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert receipt.publisher_tier == "platform"
+        assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
+
+    @pytest.mark.parametrize("tier", [None, "", "platform-ish", "PLATFORM", "org"])
+    def test_only_exactly_platform_widens(
+        self, tmp_path: Path, hub: HubStub, tier: object
+    ) -> None:
+        """§4.24 point 4: absence must be explicit. An unset, mis-cased or
+        invented tier must land on the NARROWER rule, never the wider one — a
+        receipt is a permanent statement, so there is no reader-side leniency
+        to lean on."""
+        artifact = make_artifact(tmp_path)
+        overrides: Dict[str, Any] = {"owning_endpoint_id": OTHER_ENDPOINT}
+        if tier is not None:
+            overrides["publisher_tier"] = tier
+        else:
+            overrides["publisher_tier"] = None
+        hub.serve_receipt_for(artifact, **overrides)
+        _configure(hub, endpoint_id=SELF_ENDPOINT)
+
+        with pytest.raises(receipts.ReceiptError) as excinfo:
+            receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert excinfo.value.reason == "publisher_untrusted"
+
+    def test_pod_that_cannot_name_itself_gets_platform_only(
+        self, tmp_path: Path, hub: HubStub
+    ) -> None:
+        """A worker credential with no `cell_read_endpoint_id` (a hub too old
+        for th#1657, or a grant that could not resolve one) narrows this pod to
+        platform-tier cells. It does NOT widen it — an identity we cannot
+        establish is not an identity that matches everyone."""
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=SELF_ENDPOINT, publisher_tier="org")
+        receipts.configure(base_url=hub.base_url, worker_jwt=lambda: "not-a-jwt")
+
+        with pytest.raises(receipts.ReceiptError) as excinfo:
+            receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert excinfo.value.reason == "publisher_untrusted"
+        assert "cannot name its own endpoint" in str(excinfo.value)
+
+    def test_org_receipt_naming_no_endpoint_is_adoptable_by_nobody(
+        self, tmp_path: Path, hub: HubStub
+    ) -> None:
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id="", publisher_tier="org")
+        _configure(hub, endpoint_id=SELF_ENDPOINT)
+
+        with pytest.raises(receipts.ReceiptError) as excinfo:
+            receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert excinfo.value.reason == "publisher_untrusted"
+
+    def test_v1_receipt_is_refused_not_defaulted(
+        self, tmp_path: Path, hub: HubStub
+    ) -> None:
+        """The trust fields are load-bearing, so a receipt minted before they
+        existed must not be read as a v2 one with them missing. That is the
+        `omitempty` collapse §4.24 point 4 names, and here it would silently
+        delete the boundary."""
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(artifact, crv="cell-receipt-v1")
+        _configure(hub, endpoint_id=SELF_ENDPOINT)
+
+        with pytest.raises(receipts.ReceiptError) as excinfo:
+            receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert excinfo.value.reason == "receipt_version_unsupported"
+
+    def test_the_refusal_reaches_the_wire(
+        self, tmp_path: Path, hub: HubStub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """pgw#824/pgw#999: a refusal nobody can count is a refusal nobody can
+        act on. The class must reach the activity event, not just the log."""
+        events: List[Tuple[str, str, str]] = []
+        monkeypatch.setattr(
+            receipts.activity_mod, "emit_event",
+            lambda kind, detail, phase="", **_: events.append((kind, detail, phase)))
+
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=OTHER_ENDPOINT, publisher_tier="org")
+        _configure(hub, endpoint_id=SELF_ENDPOINT)
+
+        assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
+        assert events, "the refusal never reached the wire"
+        kind, detail, phase = events[-1]
+        assert kind == "cell_receipt_refused"
+        assert phase == "publisher_untrusted"
+        assert FAMILY in detail
