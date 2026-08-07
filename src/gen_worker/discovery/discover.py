@@ -14,6 +14,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import msgspec
 
+from gen_worker.aot_preconditions import (
+    declared_compile_families,
+    static_mint_preconditions,
+)
 from gen_worker.api.binding import Binding
 from gen_worker.api.slot import Slot
 from gen_worker.api.types import (
@@ -912,8 +916,15 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     # decoders this image actually carries — never a hand-maintained list.
     # Runs inside the same heavy-dep stubbing the endpoint walk used, so a
     # torch-less manifest build derives the same set an in-image build does.
-    with stub_missing_heavy_deps(cfg.discovery_heavy_deps):
+    with stub_missing_heavy_deps(cfg.discovery_heavy_deps) as stubbed:
         derived = derive_execution_lanes()
+        # pgw#996: the AOT lane's STATIC preconditions, decided in the image
+        # that will run them. `validate_endpoint_lock` turns a refusal into a
+        # build error, so an endpoint that declares an export it cannot
+        # compile never reaches a pod to downgrade there.
+        preconditions = static_mint_preconditions(
+            declared_compile_families(functions),
+            torch_available="torch" not in stubbed)
     for fn in functions:
         bucket = int((fn.get("compile") or {}).get("lora_bucket") or 0)
         lanes, exclusions = execution_lanes_for_function(
@@ -930,6 +941,9 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         "functions": functions,
         "execution_lanes": manifest_block(derived),
     }
+    if preconditions:
+        manifest["aot_preconditions"] = [
+            row.manifest_row() for row in preconditions]
     return manifest
 
 

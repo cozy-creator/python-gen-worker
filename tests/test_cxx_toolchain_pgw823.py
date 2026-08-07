@@ -92,17 +92,30 @@ def test_the_predicate_does_not_contradict_torch(
 
 
 # ---------------------------------------------------------------------------
-# The decline — before the child, before the 336 s
+# The refusal — pgw#996 moved it to the BUILD
+#
+# pgw#823 asked this question on the pod, where the only available answer was
+# a silent downgrade: decline the AOT recipe, serve eager forever, bill the
+# fleet. The toolchain is a property of the IMAGE, so the question now belongs
+# to the image build (`aot_preconditions` / `validate_endpoint_lock`, proven in
+# test_mint_preconditions_pgw996.py) and a g++-less image that declares an
+# export cannot be published at all. What survives on the mint path is the
+# CHILD's typed refusal, below: loud and terminal, never a downgrade.
 # ---------------------------------------------------------------------------
 
 
-def test_the_parent_declines_the_AOT_recipe_by_name(
+def test_the_parent_no_longer_second_guesses_the_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The 336 s is bought back by the build gate, not by a pod-side branch.
+    A pod that reaches this code is running an image whose build PROVED the
+    toolchain, so the parent asks nothing and mints AOT."""
     monkeypatch.setattr(fleet_cells.cc, "cxx_toolchain_present", lambda: False)
     from gen_worker import aot_mint
 
     monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda *a, **k: "")
+    monkeypatch.setattr(
+        aot_mint, "declaration_module_gaps", lambda *a, **k: [])
     monkeypatch.setattr(
         fleet_cells, "aot_export_spec", lambda *a, **k: object())
 
@@ -131,9 +144,8 @@ def test_the_parent_declines_the_AOT_recipe_by_name(
         guidance_scales=(), targets=("unet",), regional=False)
     recipe = fleet_cells.mint_recipe(object(), cfg, delegate=True)
 
-    assert recipe == fleet_cells.RECIPE_DYNAMO
-    assert events and events[-1][2]["phase"] == "no_cxx_toolchain"
-    assert "InvalidCxxCompiler" in events[-1][1]
+    assert recipe == fleet_cells.RECIPE_AOT
+    assert [e for e in events if e[2].get("phase") == "no_cxx_toolchain"] == []
 
 
 def test_the_child_refuses_the_AOT_recipe_before_reading_weights(

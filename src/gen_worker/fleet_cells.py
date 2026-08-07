@@ -1888,6 +1888,14 @@ def mint_recipe(
     Every decline here is NAMED on the wire. A silent decline is the defect
     class this issue exists to kill: five real L4 pods produced no mint and no
     refusal, which is indistinguishable from a crash.
+
+    pgw#996 split the branches by WHEN they are knowable. What is left asks
+    only questions a pod can answer and a build cannot: whether delegation is
+    available right now, whether this family declares an export at all, and
+    whether the declaration fits the pipeline this pod actually COMPOSED. The
+    image's own properties — C++ toolchain, torch floor, whether the
+    declaration module even imports — are refused at build time by
+    ``aot_preconditions``; reaching a pod is proof they hold.
     """
     family = str(getattr(cfg, "family", "") or "")
 
@@ -1925,6 +1933,12 @@ def mint_recipe(
     # arrives here — as a typed `self_mint_skipped` carrying every word of the
     # blocker text — instead of as an ImportError that takes the endpoint
     # down at boot. A refusal to MINT is not a refusal to IMPORT.
+    #
+    # pgw#996: the STATIC half of this refusal (unresolved MINT_BLOCKERS) is
+    # already recorded by the build gate, so no pod discovers it for the first
+    # time. The branch survives because the other half is genuinely a pod
+    # fact: ltx-2.3's thunk reads `LTX_SERVING_TIER` off the environment, and
+    # an unknown tier there is a MintRefused the image could not have known.
     try:
         decl = export_declaration(family)
     except Exception as exc:  # noqa: BLE001 — serving outranks compiling
@@ -1959,24 +1973,14 @@ def mint_recipe(
     # the one lane the mint admitted was the one lane no AUTO pod could be on.
     # Every check below answers "can this compile physically run", never
     # "should this lane exist".
-    refusal = aot_mint.lifted_torch_gap(spec)
-    if refusal:
-        return _decline("aot_lifted_torch_gap", refusal)
-
-    # pgw#823: AOTI links a real `.so`, so it needs a C++ compiler — and the
-    # endpoint images do not have one. The parent runs the SAME image as the
-    # child, so this is answerable here, for free, instead of after the child
-    # has loaded the pipeline and exported every graph class: measured, that
-    # cost 336 s of L4 time to arrive at `InvalidCxxCompiler`. Deliberately
-    # NOT `toolchain_present()` — that one passes on the image's C compiler,
-    # and tightening it would refuse the dynamo lane, which needs no C++.
-    if not cc.cxx_toolchain_present():
-        return _decline(
-            "no_cxx_toolchain",
-            "no C++ compiler on this image (torch._inductor would raise "
-            "InvalidCxxCompiler): AOTInductor forces the C++ wrapper and "
-            "links a shared object, unlike the dynamo lane's Triton + Python "
-            "wrapper — install g++/build-essential in the endpoint image")
+    # pgw#996: the C++ toolchain (pgw#823) and the lifted-LoRA torch floor
+    # (pgw#723) USED to be asked here. Both are properties of the IMAGE — apt
+    # installed g++, the pinned torch wheel — decided long before this pod was
+    # rented, and answering them here could only ever downgrade the recipe and
+    # bill the fleet for eager serving. They are now `aot_preconditions` rows
+    # that the image build refuses on (`discovery.validate_endpoint_lock`), so
+    # an image that reaches a pod has already proven them. What survives below
+    # is the residue that a build genuinely cannot know: the COMPOSED pipeline.
 
     # pgw#822: the LAST thing checkable without renting anything. Every
     # declared graph class's input names against its target module's own
