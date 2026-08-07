@@ -47,6 +47,39 @@ tasks:
     cmds:
       - nice -n 10 uv run python scripts/micro_mint_rig.py --vehicle micro {{.CLI_ARGS}}
 
+  rig:gauntlet:
+    desc: |
+      pgw#1014 — EVERY mint shape the fleet runs, in one command, with a table.
+      Each variant is a full production cycle (spawn, export+AOTI, seal,
+      publish, second-process adopt + parity) on a model that compiles in
+      under a minute.
+
+      Variants declare the outcome they EXPECT, because some exist to
+      demonstrate a REFUSAL — so the gauntlet reports agreement, and a flip in
+      either direction is news. Exit 0 = every variant matched.
+
+      Cardless by default. For the GPU lane (real sm_89, no synthetic probe):
+        eval "$(./scripts/rig_gpu_env.sh --export-only)"
+        task rig:gauntlet -- --device cuda --python "$GEN_WORKER_RIG_GPU_PYTHON"
+    cmds:
+      - nice -n 10 uv run python scripts/rig_gauntlet.py {{.CLI_ARGS}}
+
+  rig:gpu:
+    desc: |
+      pgw#983 — one rig cycle on the REAL card. Builds/refreshes the isolated
+      cu126 interpreter (see scripts/rig_gpu_env.sh: cu128 has no torch
+      2.13.0, cu126 does) and runs with --device cuda, so the cell carries a
+      MEASURED sm_89 instead of a supplied one.
+
+      The repo's own .venv and the cu130 pin are untouched; this is a second
+      interpreter, selected explicitly, never a default.
+    cmds:
+      - ./scripts/rig_gpu_env.sh > /dev/null
+      - |
+        eval "$(./scripts/rig_gpu_env.sh --export-only)"
+        nice -n 10 "$GEN_WORKER_RIG_GPU_PYTHON" scripts/micro_mint_rig.py \
+          --device cuda {{.CLI_ARGS}}
+
   rig:test:
     desc: |
       pgw#978 — the rig as a pytest row, including the full cycle (opt-in via
