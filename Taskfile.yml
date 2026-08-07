@@ -144,6 +144,10 @@ tasks:
       # Ratcheted against scripts/unreached_surface_baseline.txt: new entries
       # fail, and so does a baseline line that is now wired up.
       - cmd: uv run python scripts/lint_unreached_surface.py
+      # Hard gate (matches CI): pgw#1013 / th#1662 — an external length prefix
+      # may not size a read unless a validator bounds it or a
+      # `# bound-justified:` comment says why none is needed.
+      - cmd: uv run python scripts/lint_unbounded_reads.py
 
   test:
     desc: Run tests (both suites, as CI does)
