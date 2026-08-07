@@ -279,7 +279,7 @@ def hub(rsa_key: rsa.RSAPrivateKey) -> Iterator[HubStub]:
     receipts.reset()
 
 
-def worker_jwt_for(endpoint_id: str) -> str:
+def worker_jwt_for(endpoint_id: str, org_id: str = "") -> str:
     """A hub-shaped worker credential naming the endpoint this pod serves.
 
     th#1657: the pod's own identity comes from the `cell_read_endpoint_id` the
@@ -288,9 +288,12 @@ def worker_jwt_for(endpoint_id: str) -> str:
     input — so an unsigned third segment is faithful to what the gate reads.
     """
     header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
-    payload = _b64url(json.dumps({
-        "sub": "worker-1", "cell_read_endpoint_id": endpoint_id,
-    }).encode())
+    claims = {"sub": "worker-1", "cell_read_endpoint_id": endpoint_id}
+    # th#1680: the org rides the same grant. Omitted when empty, exactly as a
+    # pre-th#1680 hub (or one that could not resolve the org) leaves it out.
+    if org_id:
+        claims["cell_read_org_id"] = org_id
+    payload = _b64url(json.dumps(claims).encode())
     return header + "." + payload + ".not-checked-here"
 
 
@@ -694,3 +697,158 @@ class TestPublisherTrustTh1657:
         assert kind == "cell_receipt_refused"
         assert phase == "publisher_untrusted"
         assert FAMILY in detail
+
+
+# ---------------------------------------------------------------------------
+# th#1680 / pgw#1021 — the two layers apply ONE rule
+# ---------------------------------------------------------------------------
+
+# THE SHARED ADOPTION TABLE. Twin of tensorhub's
+# `internal/authz/cell_adoption_table_th1680_test.go` (`TH1680AdoptionTable`).
+# Same rows, same order, same verdicts — a change made to one layer and not the
+# other fails a test here instead of producing a quiet disagreement that costs a
+# cold mint per boot. Tuple order matches the Go struct's field order so the two
+# can be diffed by eye.
+#
+#   (name, tier, publisher_org, viewer_org, want_adoptable, why)
+TH1680_ADOPTION_TABLE = [
+    ("platform tier, foreign org", "platform", "org-a", "org-b", True,
+     "the platform authored that code and already runs it everywhere"),
+    ("platform tier, no publisher org", "platform", "", "org-b", True,
+     "platform tier needs no publisher identity — the tier IS the identity"),
+    ("platform tier, no viewer", "platform", "org-a", "", True,
+     "a caller we cannot name still may adopt platform cells"),
+    ("org tier, same org", "org", "org-a", "org-a", True,
+     "th#1680: same org adopts across its OWN endpoints — the case th#1657 refused"),
+    ("org tier, foreign org", "org", "org-a", "org-b", False,
+     "THE THREAT: cross-tenant native-code execution"),
+    ("org tier, no publisher org", "org", "", "org-a", False,
+     "a cell whose publisher is unresolvable is adoptable by nobody"),
+    ("org tier, no viewer org", "org", "org-a", "", False,
+     "an identity we cannot establish is not an identity that matches everyone"),
+    ("org tier, both unresolvable", "org", "", "", False,
+     "empty-equals-empty must NOT match — the vacuous-guard shape"),
+    ("empty tier is org, foreign", "", "org-a", "org-b", False,
+     "§4.24 point 4: an unset tier lands on the NARROWER rule"),
+    ("empty tier is org, same org", "", "org-a", "org-a", True,
+     "…and still adopts within its own org"),
+    ("invented tier is org", "platform-ish", "org-a", "org-b", False,
+     "only exactly `platform` widens"),
+    ("mis-cased tier is org", "PLATFORM", "org-a", "org-b", False,
+     "no case folding — the receipt is a permanent statement, normalized before signing"),
+]
+
+
+def _receipt_for(tier: str, publisher_org: str, owning_endpoint: str = "") -> receipts.Receipt:
+    """A Receipt carrying only the fields the publisher gate reads."""
+    return receipts.Receipt(
+        version=receipts.RECEIPT_VERSION, family=FAMILY, cell_key=CELL_KEY, axes={},
+        owning_endpoint_id=owning_endpoint, publisher="",
+        publisher_tier=receipts._normalize_publisher_tier(tier),
+        publisher_org_id=publisher_org,
+        snapshot_digest=SNAPSHOT, artifact_path="cell.tar.gz",
+        artifact_digest="sha256:" + SHA_HEX, artifact_size_bytes=1,
+        manifest_digest="", fingerprint_digest="", issued_at_unix=0)
+
+
+class TestSharedAdoptionTableTh1680:
+    @pytest.mark.parametrize(
+        "name,tier,publisher_org,viewer_org,want,why", TH1680_ADOPTION_TABLE)
+    def test_row(self, name: str, tier: str, publisher_org: str,
+                 viewer_org: str, want: bool, why: str) -> None:
+        # Endpoints are deliberately DIFFERENT on every row, so each row tests
+        # the ORG axis alone — the endpoint rule must not mask an org verdict.
+        receipt = _receipt_for(tier, publisher_org, owning_endpoint="ep-publisher")
+        try:
+            receipts.refuse_untrusted_publisher(receipt, "ep-viewer", viewer_org)
+            got = True
+        except receipts.ReceiptError as exc:
+            assert exc.reason == "publisher_untrusted"
+            got = False
+        assert got is want, (
+            f"{name}: adoptable={got}, want {want} — {why}. "
+            "If you changed this rule, change tensorhub's "
+            "internal/authz/cell_adoption_table_th1680_test.go too.")
+
+    def test_table_covers_both_verdicts(self) -> None:
+        """A guard on the TABLE, not the code: an all-true or all-false table
+        would pass every row above while proving nothing."""
+        adoptable = sum(1 for row in TH1680_ADOPTION_TABLE if row[4])
+        refused = len(TH1680_ADOPTION_TABLE) - adoptable
+        assert adoptable and refused, (
+            f"table must exercise both verdicts; got {adoptable}/{refused}")
+        assert len(TH1680_ADOPTION_TABLE) == 12, (
+            "tensorhub's TH1680AdoptionTable has 12 rows — add the row THERE "
+            "too, then update both counts")
+
+
+class TestOrgWideningTh1680:
+    """RED both directions, through the real receipt path."""
+
+    def test_same_org_different_endpoint_adopts(
+        self, tmp_path: Path, hub: HubStub
+    ) -> None:
+        """THE RED CASE. The hub's listing shows this cell (it is the same org);
+        before pgw#1021 the arm gate refused it, costing a wasted download and a
+        full cold mint."""
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=OTHER_ENDPOINT,
+            publisher_tier="org", publisher_org_id=SELF_ORG)
+        receipts.configure(
+            base_url=hub.base_url,
+            worker_jwt=lambda: worker_jwt_for(SELF_ENDPOINT, org_id=SELF_ORG))
+
+        receipt = receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert receipt.publisher_org_id == SELF_ORG
+        assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
+
+    def test_different_org_still_refused(self, tmp_path: Path, hub: HubStub) -> None:
+        """The threat is unchanged: another ORG's native code never arms."""
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=OTHER_ENDPOINT,
+            publisher_tier="org", publisher_org_id="99999999-0000-0000-0000-000000000000")
+        receipts.configure(
+            base_url=hub.base_url,
+            worker_jwt=lambda: worker_jwt_for(SELF_ENDPOINT, org_id=SELF_ORG))
+
+        with pytest.raises(receipts.ReceiptError) as excinfo:
+            receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert excinfo.value.reason == "publisher_untrusted"
+
+    def test_hub_without_th1680_degrades_to_endpoint_only(
+        self, tmp_path: Path, hub: HubStub
+    ) -> None:
+        """THE SAFE DEGRADATION, and the reason this needs no coupled deploy:
+        a grant with no `cell_read_org_id` (a hub older than th#1680) leaves
+        this pod on pgw#1008's endpoint-only rule. Narrower, never wider."""
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=OTHER_ENDPOINT,
+            publisher_tier="org", publisher_org_id=SELF_ORG)
+        _configure(hub, endpoint_id=SELF_ENDPOINT)  # no org stamped
+
+        with pytest.raises(receipts.ReceiptError) as excinfo:
+            receipts.verify_delivered_artifact(artifact, FAMILY)
+        assert excinfo.value.reason == "publisher_untrusted"
+
+    def test_same_endpoint_still_adopts_without_org(
+        self, tmp_path: Path, hub: HubStub
+    ) -> None:
+        """The endpoint rule survives untouched — an old hub's pods keep
+        adopting their own cells."""
+        artifact = make_artifact(tmp_path)
+        hub.serve_receipt_for(
+            artifact, owning_endpoint_id=SELF_ENDPOINT,
+            publisher_tier="org", publisher_org_id="")
+        _configure(hub, endpoint_id=SELF_ENDPOINT)
+
+        assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
+
+    def test_receipt_version_did_not_move(self) -> None:
+        """th#1678's lesson: `publisher_org_id` already shipped in v2, so this
+        change is additive on the GRANT and touches no wire constant. If this
+        assertion ever needs updating, the change is a COUPLED hub+fleet cut and
+        must say so in its own body."""
+        assert receipts.RECEIPT_VERSION == "cell-receipt-v2"
