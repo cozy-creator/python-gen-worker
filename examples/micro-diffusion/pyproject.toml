@@ -1,0 +1,51 @@
+[project]
+name = "micro-diffusion"
+version = "0.1.0"
+description = "The fleet's smallest REAL endpoint family — three export entries over a deterministically generated toy checkpoint, so a full AOT mint cycle costs minutes"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Hard-pinned per th#1098 fleet policy: compile cells verify() EXACT on
+    # the gen-worker version, so a range would make an adopted cell's identity
+    # depend on what the build happened to resolve.
+    #
+    # ⚠️ THIS FAMILY'S SERVE PATH REQUIRES pgw#994. It declares a `repeat=`
+    # container input with a plain input after it, which is precisely the
+    # shape whose contract positions pgw#994 fixed. On 0.93.3 the cell MINTS
+    # and SEALS and then refuses at ingress on its first served call — the
+    # same failure z-image's tracker entry describes. Bump this to the first
+    # release carrying `2165c2d5` (0.93.4, or a master build) before any pod
+    # run; the local rig already runs against master and its parity leg is
+    # currently a green proof of that fix.
+    "gen-worker==0.93.3",
+    "msgspec>=0.18",
+    "safetensors>=0.4",
+    "pillow",
+]
+
+# NO diffusers, NO transformers, NO accelerate. The whole point of this family
+# is that its image is small and its boot is short; a dependency it does not
+# use would cost both on every cycle.
+
+[dependency-groups]
+local = [
+    "torch>=2.11.0",
+]
+dev = [
+    "mypy>=1.10.0",
+    "pytest>=9.0.3",
+]
+
+[tool.gen_worker]
+main = "micro_diffusion.main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/micro_diffusion"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = true

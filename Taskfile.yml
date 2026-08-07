@@ -34,6 +34,19 @@ tasks:
     cmds:
       - nice -n 10 uv run python scripts/micro_mint_rig.py {{.CLI_ARGS}}
 
+  rig:micro:
+    desc: |
+      pgw#997 — the same full cycle against `examples/micro-diffusion`, the
+      org-worker-shaped endpoint: 3 export entries (two fork arms + a second
+      target), CONTAINER inputs with a plain input after them so every cycle
+      re-proves pgw#993/pgw#994, deterministically GENERATED weights, and a
+      parity check that arms the adopted cell and compares every arm to eager.
+
+      This is the vehicle a mint-path change should be proven against;
+      `task rig:mint` is the cheaper one-entry plumbing toy.
+    cmds:
+      - nice -n 10 uv run python scripts/micro_mint_rig.py --vehicle micro {{.CLI_ARGS}}
+
   rig:test:
     desc: |
       pgw#978 — the rig as a pytest row, including the full cycle (opt-in via
