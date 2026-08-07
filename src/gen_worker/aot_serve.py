@@ -600,16 +600,39 @@ def artifact_metadata(
     return meta
 
 
-def verify(meta: Dict[str, Any], *, family: str = "") -> str:
-    """'' when the artifact matches this runtime, else the mismatch reason.
+#: The metadata keys :func:`verify_declared` rules on — every axis a cell's
+#: publish DECLARE carries, and therefore everything discovery may refuse a
+#: cell for before it has downloaded a byte.
+#:
+#: pgw#988: this set and ``fleet_cells.control_plane_metadata`` are two halves
+#: of ONE contract, and they used to be two independent computations of it.
+#: th#1645 moved ``entries`` out of the declare (correctly — it is unbounded in
+#: the model and the declare is control-plane) while the pre-download filter
+#: still demanded it, so every AOT cell published for the next day was rejected
+#: as ``malformed declared contract`` by every pod, and a pod that finds no cell
+#: mints its own — the fleet paid a full compile per cold boot and the symptom
+#: presented as cost, not as an error. ``fleet_cells`` now asserts at import
+#: that nothing it strips appears here.
+DECLARED_AXES: Tuple[str, ...] = (
+    "format", "kind", "package_constants_in_so", *IDENTITY_AXES,
+    "host_isa", "family",
+)
+
+
+def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
+    """'' when a cell's DECLARE matches this runtime, else the reason.
+
+    The pre-download half of :func:`verify`: exactly the axes a bounded
+    control-plane declare carries (:data:`DECLARED_AXES`). Discovery rules on
+    this against the hub listing row, so an unloadable cell costs no bytes.
 
     An AOTI ``.pt2`` is a ``dlopen``-ed ELF built against one exact torch
     C++ ABI on one compute capability — the FULL torch version must match,
     not maj.min, or the load either fails obscurely or is undefined.
 
-    Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA +
-    contract hashes), each of them STRICTLY — an axis a cell is silent on is
-    refused by name, never skipped. Never on ``sku`` (pgw#765): a cell minted on an l4
+    Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA), each of
+    them STRICTLY — an axis a cell is silent on is refused by name, never
+    skipped. Never on ``sku`` (pgw#765): a cell minted on an l4
     and a cell minted on an rtx-4090 are the same sm_89 compiled code, and
     refusing the cross-SKU adoption discards the whole point of the pgw#691
     collapse, the FX inner-key shim, and the pgw#754 ISA clamp. The JIT lane
@@ -640,6 +663,19 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     want_fam = str(meta.get("family") or "")
     if family and want_fam and want_fam != family:
         return f"family {want_fam!r} != {family!r}"
+    return ""
+
+
+def verify_contract(meta: Dict[str, Any]) -> str:
+    """'' when the artifact's ``entries`` contract is self-consistent, else
+    the reason.
+
+    The post-download half of :func:`verify`. ``entries`` is unbounded in the
+    size of the model and rides INSIDE the artifact — :func:`unpack` reads it
+    off ``metadata.json``, which is where ``aot_serve`` has always served it
+    from. It is verified HERE, on the staged bytes, and never against a
+    control-plane declare that is not required to carry it (pgw#988).
+    """
     try:
         entries = entries_from_meta(meta)
     except ValueError as exc:
@@ -662,6 +698,16 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     if stamped_combined and stamped_combined != combined_graph_hash(hashes):
         return "combined_graph_hash does not match the per-entry class hashes"
     return ""
+
+
+def verify(meta: Dict[str, Any], *, family: str = "") -> str:
+    """'' when a cell's FULL metadata matches this runtime, else the reason.
+
+    Both halves, for callers holding an artifact's own ``metadata.json``
+    (:func:`stage_artifact`). Discovery, which holds only a declare, calls
+    :func:`verify_declared` and reaches this one after the fetch.
+    """
+    return verify_declared(meta, family=family) or verify_contract(meta)
 
 
 #: :func:`host_isa_reason`'s refusal for a cell that stamped no requirement.
@@ -2340,6 +2386,7 @@ __all__ = [
     "ArtifactRunner",
     "ConstantSpec",
     "ConstantsUnboundError",
+    "DECLARED_AXES",
     "EntryDispatch",
     "IDENTITY_AXES",
     "IngressContractError",
@@ -2393,6 +2440,8 @@ __all__ = [
     "unpack_metadata",
     "unwrap",
     "verify",
+    "verify_contract",
+    "verify_declared",
     "verify_package_compute_capability",
     "wrap_module",
 ]
