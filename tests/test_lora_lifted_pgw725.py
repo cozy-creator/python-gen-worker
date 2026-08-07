@@ -19,7 +19,7 @@ device — no GPU and no fp8 kernel needed to prove where a bound view lands.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -27,6 +27,7 @@ torch = pytest.importorskip("torch")
 
 import torch.nn as nn
 
+from gen_worker.models import lora_lifted
 from gen_worker.api.errors import ValidationError
 from gen_worker.models.lora_lifted import (
     LIFTED_INPUT_NAMES,
@@ -113,8 +114,10 @@ def _eager_reference(x: torch.Tensor, *adapters: Dict[str, Any]) -> List[torch.T
     return outs
 
 
-def _lifted(x: torch.Tensor) -> Tuple[nn.Module, Any]:
-    model = _Stack().eval()
+def _lifted(
+    x: torch.Tensor, model: Optional[nn.Module] = None,
+) -> Tuple[nn.Module, Any]:
+    model = model if model is not None else _Stack().eval()
     enable_lora_branches(model, BUCKET)
     return model, install_lifted_lora_forward(model)
 
@@ -393,7 +396,8 @@ def test_bucket_zero_is_its_own_class_and_refuses_lifting() -> None:
     assert lifted_binding(model) is None
 
 
-def test_missing_adapter_argument_refuses_by_name() -> None:
+def test_a_HALF_supplied_adapter_pair_refuses_by_name() -> None:
+    """One operand without the other is a caller error and stays one."""
     x = torch.randn(TOK, DIM, dtype=DT)
     model, binding = _lifted(x)
     a, b = binding.tensors
@@ -401,8 +405,41 @@ def test_missing_adapter_argument_refuses_by_name() -> None:
         model(x, lora_a=a)
     with pytest.raises(ValidationError, match="'lora_a' is missing"):
         model(x, lora_b=b)
-    with pytest.raises(ValidationError, match="'lora_a' is missing"):
-        model(x)
+
+
+def test_a_plain_call_TAKES_THE_PLAIN_BRANCH_at_serving_time() -> None:
+    """CHANGED BY pgw#1001, deliberately, and this docstring is the record.
+
+    This case used to assert `model(x)` REFUSES with "'lora_a' is missing".
+    That assertion was written when the only caller was the mint/trace path,
+    and it encodes a SERVING BREAK: `install_lifted_lora_forward` replaces
+    `model.forward` wholesale, so a plain call that worked the instant before
+    the install raised the instant after it, and a branchless request falling
+    back to eager on an ARMED pod hit it in production. Measured on the
+    pgw#997 rig; it is what refused a whole 5-entry lora cell as
+    `numerics_refused`.
+
+    The invariant: **arming a bucket must not alter the semantics of calls
+    that do not use the bucket.**
+
+    The old assertion also doubled as a belt-and-braces against CAPTURING an
+    adapter class without its operands. That is retired deliberately: tracing
+    the BRANCHLESS arm with no operands is correct (it is what an
+    `adapter=false` entry is), and a compiling-guard to separate the two reads
+    False under STRICT export — the mint's own mode — so it would ship unable
+    to fire. The real protection belongs at the mint, on the adapter arm's
+    feed. See pgw#1001.
+    """
+    x = torch.randn(TOK, DIM, dtype=DT)
+    plain = _Stack().eval()
+    with torch.no_grad():
+        before = plain(x).clone()
+
+    model, _binding = _lifted(x, model=plain)
+    with torch.no_grad():
+        after = model(x)
+
+    assert torch.equal(before, after)
 
 
 def test_wrong_operand_layout_refuses() -> None:

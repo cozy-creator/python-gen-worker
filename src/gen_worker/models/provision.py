@@ -299,33 +299,19 @@ def arm_aot(
         # install and waste the arm).
         targets = [str(t) for t in ((meta or {}).get("targets") or ())]
         if not targets:
-            # pgw#999 ROOT CAUSE. A packed multi-entry cell records its
-            # targets PER ENTRY (`entries[*].target`) and carries NO top-level
-            # `targets`/`module` at all — measured on a real 5-entry
-            # lora64 cell: `meta["targets"] is None`, `meta["module"] is
-            # None`, every entry `target='transformer'`.
-            #
-            # So this lookup produced module_name="", `lifted_target` stayed
-            # None, the install was SILENTLY SKIPPED, and `aot_serve.enable`
-            # then refused the artifact it had just been handed with
-            # `lifted_inputs_unbindable: the module has no lifted binding to
-            # supply them`. A bucket-bearing cell could therefore never adopt
-            # on the runtime that minted it — which is the shape attempt 26
-            # spent 2 h 45 m and $2.72 discovering as "could not adopt".
+            # pgw#1001: a packed multi-entry cell records its targets PER
+            # ENTRY and carries no top-level `targets`/`module` (measured:
+            # both None on a real 5-entry lora64 cell). Without this the name
+            # resolved to "" and the lifted install was silently skipped.
             seen: List[str] = []
             for entry in ((meta or {}).get("entries") or {}).values():
                 name = str((entry or {}).get("target") or "").strip()
                 if name and name not in seen:
                     seen.append(name)
             targets = seen
-        # ...and among the candidates, the BRANCH-CAPABLE one. A multi-target
-        # cell lists every target it packed (`decoder` sorts first in a dict
-        # keyed by entry name), and installing a lifted forward on a module
-        # that carries no branch container fails by name — measured:
-        # "branch-capable module 'proj_in' carries no branch container at
-        # bucket 64" on the decoder of a transformer+decoder cell. The lifted
-        # adapter belongs to the denoiser, and `branch_targets` is the one
-        # authority on which module that is.
+        # ...and among them the BRANCH-CAPABLE one: `decoder` sorts first
+        # among entry names, and a lifted forward on a module with no branch
+        # container fails by name. `branch_targets` is the authority.
         branch_capable = lora_lifted.branch_targets(pipe)
         module_name = str((meta or {}).get("module") or "")
         if not module_name:

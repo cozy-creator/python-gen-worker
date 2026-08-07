@@ -403,6 +403,20 @@ def install_lifted_lora_forward(model: Any, bucket: int = 0) -> LiftedLoraBindin
             # signature, and `_positionalize` fills every slot before them —
             # so the arity is exact, never a guess about a trailing tensor.
             args, lora_a, lora_b = args[:-2], args[-2], args[-1]
+        if lora_a is None and lora_b is None:
+            # pgw#1001: arming a bucket must not alter the semantics of calls
+            # that do not use it. This wrapper replaces `forward` wholesale, so
+            # without this branch a plain call RAISES on an armed pod — a
+            # serving break, not just a probe one. After the positional-feed
+            # extraction, so it sees the pair however it arrived; a HALF-
+            # supplied pair is still a caller error and refuses below.
+            #
+            # Tracing the branchless arm with no operands is CORRECT (that arm
+            # is what an `adapter=false` entry is), so this is not gated on a
+            # compiling-check — and one would not work anyway:
+            # `is_compiling()` reads False under strict export. The adapter
+            # arm's feed is asserted at the mint instead.
+            return orig(*args, **kwargs)
         prior = bind_views(resolved, plan, lora_a, lora_b)
         try:
             return orig(*args, **kwargs)
