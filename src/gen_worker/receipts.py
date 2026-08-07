@@ -181,8 +181,8 @@ def _normalize_publisher_tier(raw: object) -> str:
     return CELL_PUBLISHER_TIER_ORG
 
 
-def _self_endpoint_id(cfg: "_Config") -> str:
-    """The endpoint THIS pod serves, read out of the hub-issued worker JWT.
+def _self_grant_claim(cfg: "_Config", name: str) -> str:
+    """One hub-stamped cell-read grant claim, read out of our OWN worker JWT.
 
     The hub stamps ``cell_read_endpoint_id`` on the cell-read grant (th#1335 +
     th#1657) precisely so both ends of the exchange can name the viewer. Reading
@@ -209,14 +209,42 @@ def _self_endpoint_id(cfg: "_Config") -> str:
         return ""
     if not isinstance(payload, dict):
         return ""
-    return str(payload.get("cell_read_endpoint_id") or "").strip()
+    return str(payload.get(name) or "").strip()
 
 
-def refuse_untrusted_publisher(receipt: Receipt, self_endpoint_id: str) -> None:
+def _self_endpoint_id(cfg: "_Config") -> str:
+    """The endpoint this pod serves (th#1657)."""
+    return _self_grant_claim(cfg, "cell_read_endpoint_id")
+
+
+def _self_org_id(cfg: "_Config") -> str:
+    """The ORG that owns this pod's endpoint (th#1680).
+
+    Absent on a hub older than th#1680, and absent when the hub could not
+    resolve the org — both of which fall back to endpoint-only matching, i.e.
+    exactly pgw#1008's behaviour. Never wider.
+    """
+    return _self_grant_claim(cfg, "cell_read_org_id")
+
+
+def refuse_untrusted_publisher(
+    receipt: Receipt, self_endpoint_id: str, self_org_id: str = "",
+) -> None:
     """Raise unless this pod may adopt ``receipt``'s cell (th#1657).
 
-    THE RULE, and it is Paul's ruling verbatim: a cell must have come from THIS
-    endpoint, or from a publisher the platform vouches for.
+    THE RULE: a cell must have come from THIS endpoint, from THIS pod's OWN ORG,
+    or from a publisher the platform vouches for.
+
+    Paul's ruling is literally endpoint-scoped (*"must have come from endpoint-A
+    itself, or from a publisher that is us or a trusted party"*) and pgw#1008
+    implemented exactly that — because the worker had no way to name its own
+    org. th#1680 stamps ``cell_read_org_id`` on the grant, and the ORG is the
+    rule the hub's listing has applied all along
+    (``authz.CellAdoptable``). Until now the two layers disagreed: the listing
+    showed an org its own cell from a sibling endpoint, and this function
+    refused it, costing a wasted download plus a full cold mint and emitting a
+    ``publisher_untrusted`` that reads like an attack when it is the platform
+    disagreeing with itself.
 
     THREAT: cross-tenant native-code execution. The artifact is a ``.so`` this
     process is about to ``dlopen``. Nothing else prevents it — the digest proves
@@ -237,19 +265,34 @@ def refuse_untrusted_publisher(receipt: Receipt, self_endpoint_id: str) -> None:
         return
     owner = str(receipt.owning_endpoint_id or "").strip()
     mine = str(self_endpoint_id or "").strip()
-    if not owner:
+    owner_org = str(receipt.publisher_org_id or "").strip()
+    my_org = str(self_org_id or "").strip()
+
+    # Same endpoint: the narrowest match, and the only one a pre-th#1680 hub can
+    # support.
+    if owner and mine and owner == mine:
+        return
+    # Same org (th#1680). BOTH sides must be non-empty: an empty-equals-empty
+    # match is the vacuous-guard shape this module already refuses elsewhere —
+    # two cells neither of which can be attributed must not match each other.
+    if owner_org and my_org and owner_org == my_org:
+        return
+
+    if not owner and not owner_org:
         raise ReceiptError(
             "publisher_untrusted",
-            "org-tier receipt names no owning endpoint, so no pod may adopt it")
-    if not mine:
+            "org-tier receipt names neither an owning endpoint nor a publisher "
+            "org, so no pod may adopt it")
+    if not mine and not my_org:
         raise ReceiptError(
             "publisher_untrusted",
-            "this pod cannot name its own endpoint (no cell_read_endpoint_id on "
-            "the worker credential), so it may adopt platform-tier cells only")
-    if owner != mine:
-        raise ReceiptError(
-            "publisher_untrusted",
-            f"cell was minted for endpoint {owner} and this pod serves {mine}")
+            "this pod cannot name its own endpoint or org (no cell_read_* claim "
+            "on the worker credential), so it may adopt platform-tier cells only")
+    raise ReceiptError(
+        "publisher_untrusted",
+        f"cell was minted for endpoint {owner or '<unnamed>'} "
+        f"(org {owner_org or '<unnamed>'}) and this pod serves "
+        f"{mine or '<unnamed>'} (org {my_org or '<unnamed>'})")
 
 
 def _rsa_key_from_jwk(jwk: Mapping[str, object]) -> Optional[rsa.RSAPublicKey]:
@@ -601,7 +644,7 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     # the signature — the tier is only meaningful once the claims are proven —
     # and deliberately before the return, because the caller's next act is to
     # arm the cell and dlopen it.
-    refuse_untrusted_publisher(receipt, _self_endpoint_id(cfg))
+    refuse_untrusted_publisher(receipt, _self_endpoint_id(cfg), _self_org_id(cfg))
 
     return receipt
 
