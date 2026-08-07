@@ -129,6 +129,10 @@ class DelegatedResult:
     minted: Optional[Any] = None      # fleet_cells.SelfMint
     attempts: int = 0
     budget: Optional[mint_budget.MintBudget] = None
+    #: pgw#999: the CLASSIFIED reason the child's cell did not adopt, carried
+    #: up so the executor's decline names the same token the abort event did.
+    #: Empty for every outcome that is not an adopt refusal.
+    reason: str = ""
 
     @property
     def declined(self) -> bool:
@@ -403,11 +407,20 @@ async def build_cell(
                     status=ADOPTED, minted=minted, attempts=attempts,
                     budget=budget)
             # The child produced bytes this runtime could not adopt.
-            # adopt_delegated_mint already emitted the typed abort and
-            # cleaned up; retrying cannot change a verify()/drift verdict.
+            # `adopt_delegated_mint` emitted the typed abort and cleaned up;
+            # retrying cannot change a verify()/drift verdict.
+            #
+            # pgw#999: it also RECORDED why, and this is where that used to
+            # die. The sentence below was the whole of what the wire got.
+            reason, why = fleet_cells.adopt_refusal(pending)
             return DelegatedResult(
                 status=FAILED, attempts=attempts, budget=budget,
-                detail="the child's cell did not adopt on this runtime")
+                reason=reason,
+                detail=(
+                    f"the child's cell did not adopt on this runtime "
+                    f"({reason}{': ' + why if why else ''})"
+                    if reason else
+                    "the child's cell did not adopt on this runtime"))
 
         _emit_abort(outcome, family, pending.cell_key, attempts)
         if not (outcome.retryable and attempts < max(1, max_attempts)):

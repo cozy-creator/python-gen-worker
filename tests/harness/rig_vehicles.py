@@ -173,6 +173,7 @@ import harness.rig_runtime  # noqa: F401
 import torch
 from pathlib import Path
 from gen_worker import aot_cells, aot_serve
+from gen_worker.models import provision
 from gen_worker.registry import CompileCell
 from micro_diffusion.aot_declaration import (
     CFG_ARITY, COND_LEN, PIXEL_ROWS, TOKEN_ROWS)
@@ -233,10 +234,20 @@ if cell is not None:
     # PARITY. Adoption that is never CALLED proves the filter, not the cell —
     # and the serve-side call is exactly where pgw#994 lives: a container
     # input expands to N leaves and every contract position after it shifts.
-    outcome = aot_serve.enable(pipe, cfg, Path(%(cache)r), Path(cell.artifact))
+    #
+    # pgw#999: through `provision.arm_aot`, NOT `aot_serve.enable`. They are
+    # different gates and the delegated mint uses this one: it adds the mode
+    # route, the lifted-LoRA install for a bucket-bearing cfg, and the
+    # numerics gate. Arming via `enable` left every one of those uncovered —
+    # which is why a cycle could be green while the path that refused sdxl's
+    # 36/36 cell had never run locally at all.
+    outcome = provision.arm_aot(
+        pipe, cfg, Path(%(cache)r), Path(cell.artifact),
+        int(getattr(cfg, "lora_bucket", 0) or 0))
     out["armed"] = bool(outcome)
+    out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
     out["arm_detail"] = str(getattr(outcome, "detail", "") or
-                            getattr(outcome, "reason", ""))[:400]
+                            getattr(outcome, "identity", ""))[:400]
     if outcome:
         deltas = {}
         with torch.no_grad():
