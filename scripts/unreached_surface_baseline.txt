@@ -70,10 +70,12 @@
 #     MEASURED, 2026-08-02 (pgw#877): `aot_compile_pool.available_memory_bytes`
 #     and `.free_device_bytes` had zero references anywhere in src/, tests/ or
 #     scripts/ and were invisible to this guard for its entire life. Both are
-#     now deleted. `--explain` still shows the same clearance for
+#     now deleted. The same clearance used to cover
 #     `aot_export_parallel.enabled`, whose "wrappee production already calls"
-#     is `str.strip` / `dict.get` — stdlib methods, which every module reaches
-#     and which therefore clear ANY one-line wrapper over them.
+#     was `str.strip` / `dict.get` — stdlib methods, which every module reaches
+#     and which therefore clear ANY one-line wrapper over them. That function
+#     is gone too (pgw#1000 deleted the env gate), so the example is historical;
+#     the exemption's shape is the point and it is unchanged.
 #
 #     KEPT, deliberately, and recorded rather than silently worked around: the
 #     exemption is right far more often than it is wrong, and a rule tight

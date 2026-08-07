@@ -108,7 +108,6 @@ src/gen_worker/compile_cache.py::$env LIBRARY reads the inductor/triton env bloc
 src/gen_worker/compile_cache.py::TORCHINDUCTOR_AUTOGRAD_CACHE LIBRARY TORCHINDUCTOR_AUTOGRAD_CACHE=0; torch offers no other API.
 src/gen_worker/compile_cache.py::CXX LIBRARY CXX host-compiler discovery, the toolchain's own convention.
 src/gen_worker/compile_cache.py::TORCHINDUCTOR_CACHE_DIR LIBRARY reads back the inductor cache dir torch was steered to.
-src/gen_worker/aot_export_reuse.py::TORCHINDUCTOR_CACHE_DIR LIBRARY scopes TORCHINDUCTOR_CACHE_DIR around the reuse gate.
 src/gen_worker/host_canary.py::NCCL_P2P_DISABLE LIBRARY reads NCCL_P2P_DISABLE for the canary's recorded facts.
 src/gen_worker/host_canary.py::MASTER_ADDR LIBRARY MASTER_ADDR, torch.distributed reads it at init.
 src/gen_worker/host_canary.py::MASTER_PORT LIBRARY MASTER_PORT, torch.distributed reads it at init.
@@ -117,8 +116,6 @@ src/gen_worker/env_seal.py::$name LIBRARY scrub_env() ERASES the behaviour names
 src/gen_worker/env_seal.py::PYTHONHASHSEED LIBRARY PYTHONHASHSEED is a CPython interpreter fact the seal must record.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS_LIB LIBRARY GEN_WORKER_NATIVE_KERNELS_LIB, explicit .so path override for the loader.
 src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_HOST_COMPILE_JOBS LIBRARY GEN_WORKER_AOT_HOST_COMPILE_JOBS, per-entry host-compile fan-out; derived from the pod budget when unset.
-src/gen_worker/aot_export_parallel.py::GEN_WORKER_AOT_EXPORT_PARALLEL LIBRARY DARK FEATURE, off by default. See the note at the end of this file - it must NOT be made unconditional.
-src/gen_worker/aot_export_reuse.py::GEN_WORKER_AOT_EXPORT_REUSE LIBRARY DARK FEATURE, off by default. Same note.
 src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIBRARY GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF. LIVE: five SDXL releases (0.2.111/112/113/116/117) declare it in `release_env_declarations` and one endpoint has a non-deleted `endpoint_env_entries` row. Verified on the standing hub 2026-08-03. NOT a deletion candidate.
 
 # ---------------------------------------------------------------------------
@@ -198,11 +195,6 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIVE: 5 SDXL releases declare it, 1
 #             endpoint carries a non-deleted entry. Deleting it changes a
 #             running endpoint.
-#     GEN_WORKER_AOT_EXPORT_PARALLEL    default-OFF and dark by its own
-#     GEN_WORKER_AOT_EXPORT_REUSE       docstring. Deleting the gate LAUNCHES an
-#             unproven path. If they encode a decision nobody makes, the §2.2
-#             answer is to delete the ~500 lines of FEATURE — a call for Paul,
-#             not a side effect of an env census.
 #     GEN_WORKER_HOST_MOVE_GUARD        ruled exception: safety guard, on by
 #             default, named threat, documented. Do not touch.
 #     GEN_WORKER_PROBE / _PUBLISH_ARMED security boundary; deliberately NOT a

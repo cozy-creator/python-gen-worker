@@ -147,9 +147,8 @@ compile evidence.
 - `TORCHINDUCTOR_CACHE_DIR` / `TRITON_CACHE_DIR` — both READ and WRITTEN, and
   by more than one module: written by `compile_cache.py`, `entrypoint.py`
   (deliberately re-set after the env seal scrubs `TORCH*`),
-  `aot_export_reuse.py`, and `aot_compile_pool.py`; read back by
-  `compile_cache.py` and `aot_export_reuse.py` to latch inductor/triton onto
-  verified seeded dirs (children inherit).
+  and `aot_compile_pool.py`; read back by `compile_cache.py` to latch
+  inductor/triton onto verified seeded dirs (children inherit).
 - `GEN_WORKER_HOST_MOVE_GUARD` — the actual CPU-placement guard
   (`host_move_guard.py`). Patches `torch.nn.Module.to`/`.cpu` and raises
   `HostRamMoveRefusedError` for moves ≥ 1 GiB that exceed the cgroup RAM

@@ -284,18 +284,6 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "better parameter seam that already exists. Blocked ONLY on ten test "
         "sites across seven files that force the shape via this env and drive "
         "the executor. Owner and scope on pgw#995. Do not add a second reader.",
-    ("src/gen_worker/aot_export_parallel.py", "GEN_WORKER_AOT_EXPORT_PARALLEL"):
-        "DARK FEATURE, default OFF. NOT deletable: deleting the gate would make "
-        "an unproven path unconditional, which is a LAUNCH, not a deletion. "
-        "Threat: an unmeasured export-phase VRAM footprint OOMs a 74-minute "
-        "phase. `decide()` emits the decision on EVERY mint whether or not the "
-        "flag is on, so the gate's state is observable rather than silent — "
-        "which is the property PREFER_AOT lacked.",
-    ("src/gen_worker/aot_export_reuse.py", "GEN_WORKER_AOT_EXPORT_REUSE"):
-        "DARK FEATURE, default OFF. Same launch-not-deletion reasoning. Threat: "
-        "a reused export whose artifact is not byte-identical silently changes "
-        "a compiled program. The gate byte-compares every emitted file and "
-        "falls back on any doubt (ReuseUnproven).",
     ("src/gen_worker/aot_wrapper_split.py", "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"):
         "LIVE ON THE FLEET, and that is why it survives its deleted sibling: 5 "
         "SDXL releases declare it and 1 endpoint carries a non-deleted entry "
