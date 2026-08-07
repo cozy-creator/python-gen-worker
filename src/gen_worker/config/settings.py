@@ -151,18 +151,6 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Civitai provider credential (CIVITAI_API_KEY, alias CIVITAI_TOKEN).
     civitai_api_key: str = ""
 
-    # pgw#722 pilot flip switch (SDXL-AOT-PILOT-RUNBOOK.md §3): serving pods
-    # ALSO discover published aot-inductor cells (fetch-and-filter at arm),
-    # install the lifted-LoRA binding at adoption, and route adapter attach
-    # through the binding views. Default OFF = published AOT cells stay dark
-    # and behavior is byte-identical to 0.76.x. This is a typed pod-launch
-    # knob (release env -> Settings), NOT an env_seal knob: it selects which
-    # ARTIFACT to arm and changes no traced graph, so it must never join the
-    # sealed config table — a seal change would re-digest the env_seal axis
-    # and strand every published JIT cell fleet-wide, breaking the runbook's
-    # "flag off = boot back onto the dynamo cell" rollback.
-    compile_prefer_aot: bool = False  # GEN_WORKER_PREFER_AOT
-
     # C2PA Content Credentials signing (th#714, EU AI Act Art. 50).
     # Signing is ON iff cert material is set (inline PEM or path): every
     # generated media asset gets a signed provenance manifest at save time

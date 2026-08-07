@@ -1,7 +1,7 @@
 """pgw#805 — an AOT cell-discovery MISS must start a mint, or refuse BY NAME.
 
 The defect this pins, measured on five real 0.78.0 L4 pods (hub-dispatched,
-`GEN_WORKER_PREFER_AOT` armed release-scoped, `Compile(family="sdxl",
+`Compile(family="sdxl",
 targets=("unet",))` declared, compile target advertised, discovery working
 through a 200 listing, `cell_mint_hold_granted` on every pod, trickle traffic
 earning pgw#677 background turns):
@@ -120,7 +120,6 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     Everything the five measured pods had: the flag armed, a publisher, a
     resolvable compile target, CUDA and a toolchain — and no cell.
     """
-    monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
     gw_config.reload_for_test()
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
@@ -167,7 +166,7 @@ def test_aot_discovery_miss_enqueues_an_aot_mint(
     _miss: None, _events: List[Tuple[str, str, str]],
 ) -> None:
     """RED at HEAD: the pending's recipe was always the dynamo capture, whose
-    artifact kind AOT discovery rejects — so a fleet with prefer_aot armed
+    artifact kind AOT discovery rejects — so a fleet
     could never produce the cell it was looking for."""
     register_export_declaration(_declaration())
 

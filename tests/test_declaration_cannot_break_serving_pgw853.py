@@ -242,7 +242,6 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 @pytest.fixture()
 def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """A real AOT discovery miss on an otherwise mint-capable pod."""
-    monkeypatch.setenv("GEN_WORKER_PREFER_AOT", "1")
     gw_config.reload_for_test()
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(

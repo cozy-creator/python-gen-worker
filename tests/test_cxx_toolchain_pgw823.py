@@ -99,7 +99,6 @@ def test_the_predicate_does_not_contradict_torch(
 def test_the_parent_declines_the_AOT_recipe_by_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(fleet_cells.aot_cells, "prefer_aot", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "cxx_toolchain_present", lambda: False)
     from gen_worker import aot_mint
 
