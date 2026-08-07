@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import aot_mint, aot_wrapper_split
+from . import aot_shape_hints
 from . import host_isa
 
 logger = logging.getLogger(__name__)
@@ -299,6 +300,11 @@ def _arm_child_main(job_path: str) -> int:
     try:
         host_isa.impose()
         program = torch.export.load(job["program"])
+        # pgw#998: the same round trip, so the same restore. One authority
+        # for the handoff contract (`aot_shape_hints`), not a second one for
+        # the gate's arms.
+        aot_shape_hints.restore_symbol_values(
+            program, job.get("symbol_values") or {})
         digests = _capture_codegen(
             program, job["entry"], Path(job["cache_dir"]),
             job.get("inductor_configs") or None)
@@ -329,6 +335,8 @@ def _run_arms(
             "program": str(program_path), "entry": name,
             "cache_dir": str(slot / "cache"), "out": str(out),
             "inductor_configs": dict(inductor_configs or {}),
+            "symbol_values": aot_shape_hints.symbol_values(program),
+            "symbol_labels": aot_shape_hints.symbol_labels(program),
         }))
         procs.append((name, subprocess.Popen(
             [sys.executable, "-m", _ARM_ENTRYPOINT, str(job)],
