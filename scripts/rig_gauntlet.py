@@ -51,6 +51,13 @@ def run_one(
     name: str, *, device: str, root: Path, python: str, timeout_s: float,
 ) -> Dict[str, Any]:
     out = root / f"{name}.json"
+    # pgw#1014: DELETE it first. A variant the rig REFUSED (the load gate, a
+    # cardless `--device cuda`) exits before writing any json, and a stale file
+    # from a previous run then gets read as THIS run's result — which is how a
+    # CPU row was very nearly reported as a GPU one, complete with the previous
+    # cycle's timing and peak. A variant that did not run must look like it did
+    # not run.
+    out.unlink(missing_ok=True)
     cmd = [
         python, str(RIG), "--vehicle", name, "--device", device,
         "--clean", "--root", str(root / name), "--json", str(out),
@@ -68,7 +75,17 @@ def run_one(
     row: Dict[str, Any] = {
         "vehicle": name, "rc": rc, "wall_s": round(elapsed, 1),
         "green": rc == 0, "tail": tail,
+        # rc 2 is the rig's REFUSED exit (a precondition, never a verdict on
+        # the variant). It must not be scored as a red, because a red is a
+        # claim about the mint path and a refusal is a claim about the box.
+        "refused": rc == 2,
     }
+    if not out.is_file():
+        row["failed_leg"] = "did-not-run"
+        row["failed_why"] = (
+            "REFUSED before any leg (load gate / device precondition) — "
+            "no result written" if row["refused"] else
+            "the rig wrote no result")
     if out.is_file():
         try:
             data = json.loads(out.read_text())
@@ -115,6 +132,8 @@ def _why(facts: Dict[str, Any], leg: Dict[str, Any]) -> str:
 
 
 def _verdict(row: Dict[str, Any], expect: str) -> str:
+    if row.get("refused"):
+        return "NOT-RUN"
     actual = "green" if row["green"] else "red"
     return "OK" if actual == expect else ("REGRESSED" if expect == "green"
                                           else "NOW-GREEN")
@@ -126,7 +145,8 @@ def table(rows: List[Dict[str, Any]], vehicles: Dict[str, Any]) -> str:
     lines = [head, "-" * len(head)]
     for row in rows:
         veh = vehicles[row["vehicle"]]
-        got = "green" if row["green"] else "red"
+        got = ("n/a" if row.get("refused")
+               else ("green" if row["green"] else "red"))
         verdict = _verdict(row, veh.expect)
         parity = row.get("parity")
         note = ""
