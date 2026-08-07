@@ -177,6 +177,30 @@ def _dtype_name(dtype: Any) -> str:
     return str(dtype).replace("torch.", "")
 
 
+class UnknownComputeDtypeError(RuntimeError):
+    """A branch-capable module cannot state the dtype its arithmetic lands in.
+
+    pgw#1019's ruling on pgw#1015. The branch-capable universe is CLOSED —
+    ``w8a8_lora.branch_modules`` admits exactly ``_Fp8ScaledLinear`` and
+    modules whose ``fp8_storage.structural_base`` is ``nn.Linear``/
+    ``nn.Conv2d`` — and every member of it can state a compute dtype:
+
+    * a plain ``nn.Linear``/``nn.Conv2d`` computes in its weight's dtype, by
+      definition;
+    * a pgw#727 fp8-storage leaf records ``compute_dtype`` at restructure
+      (``fp8_storage.restructure_fp8_storage``), because its own ``forward``
+      upcasts to it;
+    * ``_Fp8ScaledLinear`` records it in ``__init__`` (pgw#1015).
+
+    So there is no dtype-less caller left, and a default here can only be a
+    module that FORGOT to record the fact — which is exactly what pgw#1015
+    was: a bias-free fp8 layer silently taking bf16 while its bias-bearing
+    siblings in the same module set took float32, and the first
+    branch-bearing forward dying on ``expected mat1 and mat2 to have the same
+    dtype``. "Nobody could tell" is not "bf16".
+    """
+
+
 def branch_compute_dtype(mod: Any) -> Any:
     """The dtype a branch buffer is allocated in for this module.
 
@@ -185,6 +209,10 @@ def branch_compute_dtype(mod: Any) -> Any:
     tensors compute in the module's COMPUTE dtype, never its storage dtype: on
     the fp8-storage lane weight AND bias rest in fp8, and a pgw#727 leaf
     declares ``compute_dtype`` for exactly this question.
+
+    REFUSES rather than defaulting (pgw#1019) — see
+    :class:`UnknownComputeDtypeError` for why every legitimate caller can
+    answer.
     """
     import torch
 
@@ -198,7 +226,19 @@ def branch_compute_dtype(mod: Any) -> Any:
         # weight is skipped here by the membership test itself.
         if cand in compute:
             return cand
-    return torch.bfloat16
+    raise UnknownComputeDtypeError(
+        f"{type(mod).__name__} states no compute dtype: `compute_dtype` is "
+        f"{getattr(mod, 'compute_dtype', None)!r}, weight is "
+        f"{_dtype_name(getattr(weight, 'dtype', None))}, bias is "
+        f"{_dtype_name(getattr(bias, 'dtype', None))} — none of them a "
+        "compute dtype (float16/bfloat16/float32). A LoRA branch allocated "
+        "on a guess is the pgw#1015 defect: bias-bearing and bias-free "
+        "layers of one module set land in DIFFERENT dtypes and the first "
+        "branch-bearing forward dies inside torch. FIX: record it — "
+        f"`self.compute_dtype = compute_dtype` in {type(mod).__name__}"
+        ".__init__ (every quantized leaf in gen_worker.models already takes "
+        "the parameter), or set it on the instance where the lane is armed, "
+        "the way `fp8_storage.restructure_fp8_storage` does.")
 
 
 def branch_grid_dtype(mod: Any) -> Any:
@@ -619,6 +659,7 @@ __all__ = [
     "PHASE_DEGRADED", "PHASE_REFUSED", "PATH_BRANCH", "PATH_FUSE",
     "VERDICT_DEGRADED", "VERDICT_DESTROYED", "VERDICT_HEALTHY",
     "AdapterSurvival", "ModuleSurvival", "TargetGrid",
+    "UnknownComputeDtypeError",
     "branch_compute_dtype", "branch_grid_dtype", "evaluate_branch",
     "evaluate_fuse", "gate",
     "gate_branch", "gate_fuse", "grid_of_module", "quantizer_for",

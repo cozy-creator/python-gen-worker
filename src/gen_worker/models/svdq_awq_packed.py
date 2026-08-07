@@ -166,6 +166,8 @@ def _build_awq_linear_class() -> type:
         def __init__(self, in_features: int, out_features: int, *,
                      bias: bool, compute_dtype: Any) -> None:
             super().__init__()
+            # pgw#1019: record it (twin of _SvdqLinear).
+            self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
             if not awq_packed_supported(out_features, in_features):

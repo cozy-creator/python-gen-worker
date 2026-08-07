@@ -578,6 +578,8 @@ def _build_fused_linear_class() -> type:
                      rank: int, bias: bool, compute_dtype: Any,
                      per_channel_scale: bool, smooth: bool) -> None:
             super().__init__()
+            # pgw#1019: record it (twin of _SvdqLinear).
+            self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
             self.rank = int(rank)
