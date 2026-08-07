@@ -159,39 +159,17 @@ def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
     monkeypatch.setattr(cc, "cxx_toolchain_present", lambda: False)
 
     req = types.SimpleNamespace(
-        slots={}, recipe=mint_child.RECIPE_AOT,
-        target="/tmp/x", capture="/tmp/y", device=0, vram_cap_bytes=0,
+        slots={},
+        target="/tmp/x", work_root="/tmp/y", device=0, vram_cap_bytes=0,
         modules=[], function="generate", cfg=None, configs={}, execution_lane="",
         report="/tmp/r", cell_key="")
     with pytest.raises(mint_child.MintChildRefused, match="no C\\+\\+ compiler"):
         mint_child.mint(req)
 
 
-def test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The whole reason this is a separate predicate: leg 2's dynamo mints
-    ran 24-47 minutes on an image with no C++ compiler."""
-    from gen_worker import mint_child
-
-    monkeypatch.setattr(mint_child, "assert_composable", lambda *a, **k: None)
-    monkeypatch.setattr(cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(cc, "cxx_toolchain_present", lambda: False)
-    from gen_worker import registry
-
-    seen: list = []
-
-    def _reached(mods):
-        seen.append(mods)
-        raise RuntimeError("reached discovery — the cxx gate did not fire")
-
-    monkeypatch.setattr(registry, "collect_endpoints", _reached)
-
-    req = types.SimpleNamespace(
-        slots={}, recipe=mint_child.RECIPE_DYNAMO,
-        target="/tmp/x", capture="/tmp/y", device=0, vram_cap_bytes=0,
-        modules=[], function="generate", cfg=None, configs={}, execution_lane="",
-        report="/tmp/r", cell_key="")
-    with pytest.raises(RuntimeError, match="reached discovery"):
-        mint_child.mint(req)
-    assert seen == [[]]
+# pgw#1010: `test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate` stood here.
+# The child mints ONE artifact kind now, and AOTInductor links a shared object,
+# so the C++ compiler is an unconditional precondition rather than a per-recipe
+# one. The finding it recorded (leg 2's dynamo mints ran 24-47 minutes on an
+# image with no C++ compiler) is exactly why the gate fires before a weight is
+# read, which the test above still asserts.

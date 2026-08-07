@@ -211,8 +211,7 @@ class _Harness:
         pending = fleet_cells.PendingSelfMint(
             family=FAMILY, cell_key="ck1-" + "a" * 56,
             ref=f"{cc.system_repo(FAMILY)}#ck1-{'a' * 56}",
-            cfg=cfg, target=mint_root / "cell.tar.gz",
-            capture_dir=capture, mint_root=mint_root,
+            cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,
         )
         original = pipe.transformer.forward
@@ -318,81 +317,15 @@ def _stage_ms(res: pb.JobResult, name: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def test_tenant_serves_at_serving_latency_during_mint_and_red_verifies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Post-fix: tenant requests dispatched DURING the background mint
-    complete at serving latency (preempting the in-flight seed), no seed
-    ever inline-compiles, and every real compile lands on the shape-warm
-    thread. RED: the kill switch restores the pre-fix tree and the same
-    tenant request queues behind a minutes-scale (here: seconds-scale)
-    inline-compiling mint unit — the live 19s-for-2s collapse shape."""
-    # Degraded router everywhere: pre-fix this forces COMPILED (inline)
-    # verdicts; post-fix seeds force EAGER and the warm thread ensures
-    # headroom inside its exclusive turn instead.
-    monkeypatch.setattr(hot_swap, "_headroom_ok", lambda device: False)
-
-    # pgw#995: the RED arm here drove `GEN_WORKER_BG_YIELD=0` to restore the
-    # pre-pgw#677 tree (idle-gate between units, bare run gate around the
-    # forward, inline compiles on handler workers) and asserted the starvation
-    # shape it produced. The switch is deleted — it defaulted ON, no release
-    # ever declared it and no endpoint ever set it — so the legacy tree it
-    # selected is deleted with it and there is nothing left to red-verify
-    # against. An env kept alive to be a test seam is still an env that selects
-    # behaviour, and a release rebuild cannot tell the two purposes apart.
-    #
-    # What survives is the arm that states the property in absolute terms, and
-    # `test_no_env_restores_the_pre_pgw677_tree` below proves the deleted arm is
-    # unreachable rather than merely unused.
-
-    h_on = _Harness(
-        tmp_path / "on", monkeypatch,
-        compile_delay_s=0.15, seed_forward_s=0.6, tenant_forward_s=0.02)
-
-    async def _on() -> None:
-        await h_on.boot()
-        bg = h_on.rec.background_mint
-        assert bg is not None
-        # Wait until a PREEMPTIBLE background seed unit holds the gate.
-        deadline = time.monotonic() + 10.0
-        while bg.seed_ctx is None and time.monotonic() < deadline:
-            await asyncio.sleep(0.005)
-        assert bg.seed_ctx is not None, "no preemptible seed in flight"
-        # A stream of tenant requests lands mid-mint; each must complete
-        # at serving latency — a fraction of one pre-fix unit — by
-        # preempting idle-granted seed units cooperatively (the only
-        # bounded residual is one short warm-thread compile).
-        walls: List[float] = []
-        for i in range(4):
-            res, wall = await h_on.dispatch(f"r-{i}", aspect="16:9")
-            assert res.status == pb.JOB_STATUS_OK, res.safe_message
-            walls.append(wall)
-        # pgw#795: anchored to the harness's OWN configured quantities rather
-        # than a 0.45s guess. If the tenant were serialized behind the mint it
-        # would wait out a seed unit; beating one is the property, and both
-        # numbers are induced sleeps, so neither moves with the runner.
-        assert max(walls) < h_on.seed_forward_s, (
-            f"tenant latencies not at serving levels during mint: {walls} "
-            f"(a seed unit is {h_on.seed_forward_s}s)")
-        # runtime_ms never absorbs gate contention: the handler runs
-        # ~tenant_forward_s, so reported runtime stays near it.
-        results = [m.job_result for m in h_on.sent
-                   if m.WhichOneof("msg") == "job_result"]
-        assert results
-        assert all(
-            r.metrics.runtime_ms < h_on.seed_forward_s * 1000 for r in results), (
-            [r.metrics.runtime_ms for r in results], h_on.seed_forward_s)
-        # The mint still finishes once the stream drains.
-        await h_on.wait_mint()
-        assert h_on.ex.serving_tiers() == {"generate": "compiled"}
-        # pgw#677 seed contract: every real compile ran on the shape-warm
-        # thread inside a granted turn — no seed unit compiled inline.
-        assert h_on.compiles
-        assert all(
-            "shape-warm" in thread for _, thread, _, _ in h_on.compiles), (
-            h_on.compiles)
-
-    asyncio.run(_on())
+# pgw#1010: `test_tenant_serves_at_serving_latency_during_mint_and_red_verifies`
+# stood here. Its mechanism is the mint SEED WINDOW — preemptible in-process
+# seed units holding the instance gate while a tenant request arrives — and the
+# in-process mint is deleted (it only ever built a dynamo cell). A delegated
+# mint compiles in a CHILD PROCESS, so there is no seed unit in the serving
+# interpreter for a tenant to preempt; what bounds the child against the tenant
+# is the pgw#737 co-residency budget, which has its own coverage. The doctrine
+# rows that do NOT depend on the seed window — no compile/tenant overlap, and
+# no inline compile on a degraded router — are below and unchanged.
 
 
 # ---------------------------------------------------------------------------
@@ -455,46 +388,13 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
 # ---------------------------------------------------------------------------
 
 
-def test_mint_completes_under_sustained_tenant_load(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A tenant stream that never drains would starve a purely idle-gated
-    mint forever. The steal rule grants one bounded background unit per
-    debt window: the mint completes while the stream keeps serving."""
-    monkeypatch.setattr(executor_mod, "_BG_STEAL_FLOOR_S", 0.1)
-    monkeypatch.setattr(executor_mod, "_BG_STEAL_DEBT_FACTOR", 1.0)
-    monkeypatch.setattr(executor_mod, "_BG_COMPILE_QUIESCENCE_S", 0.0)
-    h = _Harness(
-        tmp_path, monkeypatch,
-        compile_delay_s=0.05, seed_forward_s=0.05, tenant_forward_s=0.02)
-
-    async def _run() -> None:
-        await h.boot()
-        bg = h.rec.background_mint
-        assert bg is not None and bg.task is not None
-        stop = asyncio.Event()
-        served = 0
-
-        async def _stream() -> None:
-            nonlocal served
-            i = 0
-            while not stop.is_set():
-                res, _wall = await h.dispatch(f"r-load-{i}", aspect="16:9")
-                assert res.status == pb.JOB_STATUS_OK, res.safe_message
-                served += 1
-                i += 1
-
-        stream = asyncio.create_task(_stream())
-        try:
-            await asyncio.wait_for(asyncio.shield(bg.task), timeout=60.0)
-        finally:
-            stop.set()
-            await stream
-        assert h.ex.serving_tiers() == {"generate": "compiled"}
-        # The stream really was sustained while the mint progressed.
-        assert served >= 5
-
-    asyncio.run(_run())
+# pgw#1010: `test_mint_completes_under_sustained_tenant_load` stood here — the
+# minimum-progress half of the same seed-window doctrine (a sustained tenant
+# stream must not starve the mint of background turns). With the compile in a
+# child process the mint's progress no longer competes for in-process turns at
+# all, so the property it asserted is not merely untested but gone. The child's
+# own progress is covered by mint_process's liveness rule
+# (`test_mint_liveness_pgw784.py`).
 
 
 # ---------------------------------------------------------------------------

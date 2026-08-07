@@ -47,7 +47,7 @@ def _request(tmp_path: Path, **over: Any) -> mp.MintRequest:
         family="sdxl",
         cell_key="ck1-deadbeef",
         target=str(tmp_path / "cell.tar.gz"),
-        capture=str(tmp_path / "capture"),
+        work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
         cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),

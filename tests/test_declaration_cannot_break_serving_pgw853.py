@@ -249,7 +249,6 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
     monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
     monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
@@ -259,7 +258,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
         lambda *a, **k: type("_K", (), {"digest": "ck1-" + "a" * 56})())
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
     monkeypatch.setattr(
-        fleet_cells.cc, "begin_fleet_mint", lambda p, c, capture: None)
+        fleet_cells.cc, "arm_jit_intake", lambda p, c: None)
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     reset_export_declarations()
@@ -278,11 +277,10 @@ def test_the_mint_gate_declines_typed_and_keeps_the_blocker_text(
     outcome = fleet_cells.enable_compiled(
         _Pipe(), _Cfg(), publisher=_Publisher(), delegate=True)  # type: ignore[arg-type]
 
-    pending = outcome.self_mint
-    assert pending is not None
-    assert pending.recipe == fleet_cells.RECIPE_DYNAMO, (
-        "an AOT cell cannot be minted for a blocked family — it must fall "
-        "back, not proceed")
+    # pgw#1010: an AOT cell cannot be minted for a blocked family, and there
+    # is no second artifact to fall back to — the pod serves JIT intake and
+    # owes nothing. The refusal is still SAID, which is this test's subject.
+    assert outcome.self_mint is None
     skipped = [(p, d) for k, p, d in _events if k == "self_mint_skipped"]
     assert skipped, _events
     phases = [p for p, _ in skipped]
@@ -300,8 +298,12 @@ def test_the_pod_serves_eager_rather_than_failing_the_arm(
     outcome = fleet_cells.enable_compiled(
         _Pipe(), _Cfg(), publisher=_Publisher(), delegate=True)  # type: ignore[arg-type]
 
-    assert outcome.armed is False
-    assert outcome.self_mint is not None
+    # pgw#1010: "serves eager rather than failing the arm" is now "serves JIT
+    # INTAKE rather than failing the arm" — the pod compiles its own graphs
+    # and keeps serving; what it does not do is mint or publish anything.
+    assert outcome.armed is True
+    assert outcome.self_mint is None
+    assert not [k for k, _p, _d in _events if k == "self_mint_started"]
 
 
 # ---------------------------------------------------------------------------

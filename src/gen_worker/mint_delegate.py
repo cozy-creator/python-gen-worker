@@ -30,59 +30,38 @@ What the caller still owns
 from __future__ import annotations
 
 import logging
-import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from . import activity as activity_mod
 from . import aot_resume
 from . import mint_budget
 from . import mint_process
 from . import progress as progress_mod
-from .mint_process import MintOutcome, MintReport, MintRequest
+from .mint_process import MintOutcome, MintRequest
 
 logger = logging.getLogger(__name__)
 
-#: Kill switch, for red-verifying the in-process shape only. Delegation is the
-#: default because the in-process shape VIOLATES the liveness contract
-#: (WORKER-CONTRACTS §1/§2) — it is kept reachable to prove that, not to run.
-#:
-#: pgw#995: this is the LAST surviving env behaviour switch in this repo whose
-#: default is ON and whose fleet declaration count is zero — i.e. the last one
-#: that is safe to delete — and it is not deleted here. The reason is specific,
-#: not a shrug: ``fleet_cells.enable_compiled`` ALREADY takes ``delegate=False``
-#: and reports it as ``caller_forced_in_process``, so a strictly better
-#: parameter seam exists and this env is redundant with it. What blocks the
-#: deletion is that ten test sites across seven files force the shape by setting
-#: this env and then driving the EXECUTOR, which reaches the policy with
-#: ``delegate=None``; threading the parameter through those call sites is a real
-#: refactor of a 4k-line test file and does not belong in a sweep. Owner and
-#: scope are recorded on pgw#995. Do not add a second reader in the meantime.
-ENV_IN_PROCESS = "GEN_WORKER_MINT_IN_PROCESS"
-
-
-#: Typed refusals :func:`delegation_refusal` can return. They are the OPERATOR
-#: half of the decision; the PIPELINE half lives in
-#: ``fleet_cells.delegation_refusal``. pgw#813: the two were collapsed into one
-#: either/or sentence on the wire, so a real refusal named two causes that were
-#: both false and never named the one that was true.
-#:
-#: pgw#995 deleted ``REFUSAL_EAGER_FIRST_DISABLED`` with its switch. Delegation
-#: IS eager-first, so the two moved together — and once eager-first is
-#: unconditional, "eager-first is off" is not a state this worker can be in.
-#: A refusal reason that can never be returned is a cause a reader will hunt for
-#: and never find, which is the same defect as a cause that goes unnamed.
-REFUSAL_IN_PROCESS_FORCED = "mint_in_process_forced"
+#: pgw#1010: ``GEN_WORKER_MINT_IN_PROCESS`` is GONE, with the shape it
+#: selected. In-process minting existed only to capture and pack a dynamo
+#: cell; a dynamo miss now serves JIT intake and packs nothing, so "mint in
+#: this process" is not a state this worker can be in. pgw#995 recorded the
+#: env as the last deletable behaviour switch and named its blocker (ten test
+#: sites forcing the shape through the executor) — the shape's removal
+#: discharges that debt rather than deferring it again.
 
 
 def delegation_refusal() -> str:
-    """"" when this WORKER may mint out of process, else the typed reason."""
-    if os.environ.get(ENV_IN_PROCESS, "").strip().lower() in (
-        "1", "true", "yes", "on"
-    ):
-        return REFUSAL_IN_PROCESS_FORCED
+    """"" when this WORKER may mint out of process, else the typed reason.
+
+    Always "" today: nothing worker-wide can refuse delegation any more. The
+    seam survives because the PIPELINE half (``fleet_cells.delegation_refusal``
+    — an armed non-eager backend with no eager tier to serve from) is a real
+    per-pipe refusal, and both halves must reach ``mint_recipe`` as one typed
+    reason rather than as an either/or sentence (pgw#813).
+    """
     return ""
 
 
@@ -189,7 +168,7 @@ def build_request(
         family=str(pending.family),
         cell_key=str(pending.cell_key),
         target=str(Path(workdir) / "cell.tar.gz"),
-        capture=str(pending.capture_dir),
+        work_root=str(workdir),
         report=str(Path(workdir) / mint_process.REPORT_NAME),
         # pgw#848: where the child writes its LIVE table. `report` is written
         # once, at a terminus the child reaches under its own power; this is
@@ -213,11 +192,6 @@ def build_request(
         vram_cap_bytes=int(cap_bytes),
         execution_lane=task.execution_lane,
         configs={k: dict(v) for k, v in task.configs.items()},
-        # pgw#805: the recipe rides the pending the arming brain built. The
-        # child never decides it — the recipe determines the artifact KIND,
-        # and a pod that mints the kind its own discovery does not accept is
-        # the permanent-miss loop this issue exists to close.
-        recipe=str(getattr(pending, "recipe", "dynamo") or "dynamo"),
     )
 
 
@@ -381,12 +355,11 @@ async def build_cell(
         mint_budget.record_entry_device_peak(
             family, task.weight_lane,
             _pool_stat(outcome.partial_phases, "peak_child_device_bytes"))
-        if str(getattr(pending, "recipe", "")) == fleet_cells.RECIPE_AOT:
-            _emit_aot_phases(outcome, family=family, execution_lane=task.weight_lane)
-        else:
-            _emit_jit_compile(
-                outcome, family=family, execution_lane=task.weight_lane,
-                key=str(pending.cell_key), attempt=attempts)
+        # pgw#1010: every delegated mint is an AOT mint, so there is one
+        # phase emitter. The JIT twin measured a child recipe that no longer
+        # exists.
+        _emit_aot_phases(
+            outcome, family=family, execution_lane=task.weight_lane)
 
         if outcome.status == mint_process.ABANDONED:
             return DelegatedResult(
@@ -508,123 +481,6 @@ def _emit_aot_phases(
                      exc_info=True)
 
 
-def _emit_jit_compile(
-    outcome: MintOutcome, *, family: str, execution_lane: str, key: str, attempt: int,
-) -> None:
-    """th#1322: one delegated JIT mint's duration, as typed NUMERIC events.
-
-    This is the fleet's real JIT compile path — the child arms COLD and drives
-    the endpoint's own warm plan (gw#587), so its `warmup_forward` span IS
-    "how long does JIT take". Before this the number lived only in the child's
-    stdout, and a serve pod exposes no logs (pgw#760), so it was unrecoverable
-    the moment the pod went away.
-
-    pgw#989: that span is also 97.6 % of the mint, so "how long" was as far as
-    it went. ``report.mint_phases`` now carries the warm plan's own ledger
-    (:class:`gen_worker.warm_spans.WarmLedger`) and it is emitted here under
-    `phase=warm:<name>` / `phase=warm_job:<name>` — compile vs forward, and the
-    inductor partition inside the compile half.
-
-    Shape matches ``aot_mint_phases`` exactly: `phase=minted` carries the total,
-    `phase=child:<phase>` the spans inside it. A mint that did NOT produce a
-    cell reports its total under `phase=aborted` instead — the seconds are real
-    and worth recording, but they must not enter an AOT-vs-JIT comparison as if
-    a cell came out.
-
-    Telemetry never changes the mint's outcome.
-    """
-    report = outcome.report
-    try:
-        head = f"family={family} lane={execution_lane or 'plain'} key={key} attempt={attempt}"
-        phases: Dict[str, float] = dict(
-            report.phases) if report is not None else {}
-        for name, seconds in sorted(phases.items()):
-            value = float(seconds or 0.0)
-            if value <= 0:
-                continue
-            activity_mod.emit_event(
-                activity_mod.KIND_JIT_COMPILE,
-                f"{head} child_phase={name} seconds={round(value, 2)}",
-                phase=f"child:{name}",
-                duration_ms=int(round(value * 1000)),
-            )
-        _emit_warm_ledger(report, head=head)
-        # The child's own elapsed is authoritative when it wrote a report; the
-        # parent's wall clock covers a child that died before writing one (spawn
-        # + run, which is the honest cost of that attempt).
-        total_s = float(
-            report.elapsed_s if report is not None and report.elapsed_s > 0
-            else outcome.elapsed_s)
-        if total_s <= 0:
-            return
-        activity_mod.emit_event(
-            activity_mod.KIND_JIT_COMPILE,
-            f"{head} status={outcome.status} total_s={round(total_s, 2)} "
-            f"phases={phases}",
-            phase=(
-                activity_mod.PHASE_MINTED if outcome.minted else "aborted"),
-            duration_ms=int(round(total_s * 1000)),
-        )
-    except Exception:  # pragma: no cover — telemetry never fails a mint
-        logger.debug("mint-delegate: jit_compile event emission failed",
-                     exc_info=True)
-
-
-def _emit_warm_ledger(report: Optional[MintReport], *, head: str) -> None:
-    """pgw#989: the warm plan's compile-vs-forward split, as numeric events.
-
-    Three row shapes, all under ``jit_compile`` so one grouped query still
-    covers a JIT mint:
-
-    * ``warm:totals`` — the roll-up, carrying ``warm_compile_s`` in
-      ``duration_ms``. The one number that says whether a slow mint is a slow
-      COMPILE.
-    * ``warm:<member>`` — the inductor partition inside the compile half.
-    * ``warm_job:<name>`` — one warm forward. A plan whose jobs mostly compile
-      nothing is paying full forward cost for coverage it already has; that is
-      a different defect from a slow compile, and only the per-job rows can
-      tell them apart.
-
-    Silent when the recipe produced no ledger (the AOT path, or a child that
-    died before the warm loop) — an absent measurement is reported as absence.
-    """
-    table = dict(getattr(report, "mint_phases", None) or {}) \
-        if report is not None else {}
-    totals = dict(table.get("totals") or {})
-    if not totals.get("warm_wall_s"):
-        return
-    overlays = dict(table.get("overlays") or {})
-    activity_mod.emit_event(
-        activity_mod.KIND_JIT_COMPILE,
-        f"{head} warm_totals={totals} overlays={overlays}",
-        phase="warm:totals",
-        duration_ms=int(round(float(totals.get("warm_compile_s") or 0.0) * 1000)),
-    )
-    for name, seconds in sorted(dict(table.get("phases") or {}).items()):
-        value = float(seconds or 0.0)
-        if value <= 0:
-            continue
-        activity_mod.emit_event(
-            activity_mod.KIND_JIT_COMPILE,
-            f"{head} warm_phase={name} seconds={round(value, 2)}",
-            phase=f"warm:{name}",
-            duration_ms=int(round(value * 1000)),
-        )
-    for row in table.get("jobs") or ():
-        if not isinstance(row, Mapping):
-            continue
-        wall = float(row.get("wall_s") or 0.0)
-        if wall <= 0:
-            continue
-        activity_mod.emit_event(
-            activity_mod.KIND_JIT_COMPILE,
-            f"{head} warm_job={row.get('job')} wall_s={round(wall, 2)} "
-            f"compile_s={row.get('compile_s')} execute_s={row.get('execute_s')}",
-            phase=f"warm_job:{row.get('job')}",
-            duration_ms=int(round(wall * 1000)),
-        )
-
-
 def _emit_abort(
     outcome: MintOutcome, family: str, key: str, attempt: int,
 ) -> None:
@@ -656,7 +512,6 @@ __all__ = [
     "ABANDONED",
     "ADOPTED",
     "DECLINED",
-    "ENV_IN_PROCESS",
     "FAILED",
     "DelegatedResult",
     "MintTask",

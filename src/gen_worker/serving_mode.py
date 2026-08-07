@@ -98,9 +98,18 @@ def classify_mode(active_compile_ref: str, pipeline: Any = None) -> str:
     identical, so the ref alone cannot be pattern-matched. ``aot_serve`` owns
     the answer (``is_aot_ref`` for the recorded kind, the ``_cozy_aot`` marker
     for what is live on the pipeline right now).
+
+    pgw#1010: a ref is no longer NECESSARY for ``jit_cell``. JIT intake arms a
+    pipeline that compiles its own graphs and names no artifact — a cell ref is
+    exactly what it does not have — and reporting those requests as ``eager``
+    would delete the whole JIT arm of the AOT-vs-JIT latency comparison this
+    module exists to make answerable. The armed pipeline itself is the
+    evidence.
     """
     ref = str(active_compile_ref or "").strip()
     if not ref:
+        if pipeline is not None and compile_cache.is_compile_armed(pipeline):
+            return MODE_JIT_CELL
         return MODE_EAGER
     try:
         if aot_serve.is_aot_ref(ref):

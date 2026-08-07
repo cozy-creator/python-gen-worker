@@ -17,7 +17,7 @@ Behaviour is chosen with ``MINT_STUB_MODE``:
 ``sigkill``     SIGKILL itself
 ``busy``        burn CPU for MINT_STUB_SECONDS, then mint
 ``silent``      sleep for MINT_STUB_SECONDS doing nothing at all
-``grow``        write capture bytes slowly (CPU-quiet but progressing)
+``grow``        write work-root bytes slowly (CPU-quiet but progressing)
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ def main() -> int:
         _mint(request)
         return 0
     if mode == "grow":
-        capture = Path(request.capture)
+        capture = Path(request.work_root)
         capture.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + _seconds()
         n = 0

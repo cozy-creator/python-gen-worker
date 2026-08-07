@@ -222,6 +222,16 @@ jobs:
       - name: pgw#1013 guard - an external length sizes a read with no bound
         run: uv run python scripts/lint_unbounded_reads.py
 
+      # GATING (pgw#1010 rider): a changelog fragment whose name does not
+      # parse as <prefix><number>.md refuses the RELEASE CUT, which is weeks
+      # after the PR that added it and belongs to whoever is cutting rather
+      # than whoever wrote it. Three fragments have now landed misnamed
+      # (pgw868-a4, pgw984-pgw985, pgw1002-pgw1005) — the failure was always
+      # loud, just at the wrong time. Same check, same script, moved to the PR
+      # that introduces the name.
+      - name: pgw#968 guard - changelog fragment names parse
+        run: uv run python scripts/assemble_changelog.py --check
+
       # Cheap (2s) and it belongs with the gates, not behind the suite: a
       # broken sdist/wheel build is a publish-time failure, and publish.yml
       # gates on a green run of THIS workflow.

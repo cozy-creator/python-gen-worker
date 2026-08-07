@@ -277,13 +277,6 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
     ("src/gen_worker/benchmarks/swap_latency.py", "GEN_WORKER_FORBID_CPU_OFFLOAD"):
         "TRIPWIRE, the original single reader. Refusing the benchmark is still "
         "correct. Same threat, same box-wide-export reasoning.",
-    ("src/gen_worker/mint_delegate.py", "GEN_WORKER_MINT_IN_PROCESS"):
-        "DEFECT, NOT AN EXCEPTION — listed so the gate is green while it is "
-        "burned down, exactly as VIOLATION lines are. Default-ON, zero fleet "
-        "declarations, and `enable_compiled(delegate=False)` is a strictly "
-        "better parameter seam that already exists. Blocked ONLY on ten test "
-        "sites across seven files that force the shape via this env and drive "
-        "the executor. Owner and scope on pgw#995. Do not add a second reader.",
     ("src/gen_worker/aot_wrapper_split.py", "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"):
         "LIVE ON THE FLEET, and that is why it survives its deleted sibling: 5 "
         "SDXL releases declare it and 1 endpoint carries a non-deleted entry "

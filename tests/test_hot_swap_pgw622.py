@@ -348,55 +348,15 @@ def _pin_identity(monkeypatch):
             "verdicts": {}, "leaks": []})
 
 
-def test_republish_packs_live_root_under_same_key(monkeypatch, tmp_path):
-    _pin_identity(monkeypatch)
-    live_root = tmp_path / "compile-cache"
-    (live_root / "inductor" / "fxgraph" / "aa" / "bb").mkdir(parents=True)
-    (live_root / "inductor" / "fxgraph" / "aa" / "bb" / "entry").write_bytes(b"g1")
-    (live_root / "triton").mkdir()
-
-    class Pipe:
-        pass
-
-    publisher = _Publisher()
-    assert fleet_cells.republish_after_shape_warm(
-        Pipe(), _Cfg(), "toyfam", publisher, live_root)
-    family, names, meta = publisher.published[0]
-    assert family == "toyfam"
-    assert "inductor/fxgraph/aa/bb/entry" in names
-    assert meta["family"] == "toyfam"
-    from gen_worker import cell_key
-
-    assert meta["cell_key"] == cell_key.from_artifact_metadata(meta).digest
-
-
-def test_republish_without_sink_is_a_loud_noop(tmp_path, caplog):
-    live_root = tmp_path / "compile-cache"
-    (live_root / "inductor").mkdir(parents=True)
-
-    class Pipe:
-        pass
-
-    assert not fleet_cells.republish_after_shape_warm(
-        Pipe(), _Cfg(), "toyfam", _Publisher(enabled=False), live_root)
-    assert any(
-        "SHAPE_WARM_WITHOUT_PUBLISH_SINK" in r.message for r in caplog.records)
-
-
-def test_republish_failure_never_raises(monkeypatch, tmp_path):
-    _pin_identity(monkeypatch)
-    live_root = tmp_path / "compile-cache"
-    (live_root / "inductor").mkdir(parents=True)
-
-    class Boom(_Publisher):
-        def publish(self, family, artifact, meta, mint_duration_ms=0):
-            raise RuntimeError("wire down")
-
-    class Pipe:
-        pass
-
-    assert not fleet_cells.republish_after_shape_warm(
-        Pipe(), _Cfg(), "toyfam", Boom(), live_root)
+def test_the_shape_warm_has_no_republish_backend_since_pgw1010() -> None:
+    """A background novel-shape warm still GROWS this pod's live cache — the
+    three tests that used to stand here proved it then republished the grown
+    cell for the fleet. That cell was a dynamo artifact with no consumer
+    (`aot_cells` adopts `aot-inductor` only), so pgw#1010 deleted the
+    republish outright rather than leaving it to ship bytes nothing adopts.
+    The growth itself is unchanged; what is gone is the shipping.
+    """
+    assert not hasattr(fleet_cells, "republish_after_shape_warm")
 
 
 # ---------------------------------------------------------------------------

@@ -245,8 +245,7 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
                         family="sdxl", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
-                        text_lens=()),
-        capture_dir=tmp_path / "capture", target=tmp_path / "cell.tar.gz",
+                        text_lens=()), target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path, recipe="aot")
     resolved = mp.MintSlot(
         ref=ModelRef(source="tensorhub", path="harness/composed", tag="prod"),
@@ -307,7 +306,7 @@ def test_a_narrowed_tree_with_no_override_refuses_by_name(
         function="composed-echo", modules=("harness.toy_endpoints",),
         family="sdxl", cell_key="ck1-abc",
         target=str(tmp_path / "cell.tar.gz"),
-        capture=str(tmp_path / "capture"),
+        work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
         cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),
@@ -427,8 +426,7 @@ def _task(tmp_path: Path) -> mint_delegate.MintTask:
                         family="sdxl", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
                         text_lens=()),
-        target=tmp_path / "cell.tar.gz", capture_dir=tmp_path / "capture",
-        mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path,
+        target=tmp_path / "cell.tar.gz", mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path,
         delegated=True)
     return mint_delegate.MintTask(
         pending=pending, pipe=SimpleNamespace(), function="gen",

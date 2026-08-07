@@ -50,7 +50,7 @@ Observe the machine, never a wall clock
 There is no total-runtime bound. A mint that keeps making progress is never
 killed; a mint that stops making progress is killed quickly. Progress is
 MEASURED — the child's process-tree CPU seconds plus the bytes it has written
-into its capture dir — not asserted by a frame the child could emit while
+into its work root — not asserted by a frame the child could emit while
 wedged. That is the same rule ``stall.SilenceWindow`` / pgw#655 already apply
 to downloads, and the same rule §1 states for supervisors.
 """
@@ -111,7 +111,7 @@ ABANDONED = "abandoned"
 #: How often the parent re-reads the child's measured evidence.
 _OBSERVE_INTERVAL_S = 5.0
 
-#: How long the child's MEASURED evidence (process-tree CPU + capture bytes)
+#: How long the child's MEASURED evidence (process-tree CPU + work-root bytes)
 #: may fail to advance before the parent calls it wedged. Generous because it
 #: bounds nothing that is working: an inductor phase that burns CPU advances
 #: this every poll. It is not a mint budget — there is no mint budget.
@@ -213,7 +213,11 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     family: str
     cell_key: str
     target: str          # artifact the child writes (.tar.gz), atomically
-    capture: str         # TORCHINDUCTOR_CACHE_DIR / TRITON_CACHE_DIR root
+    #: The child's work root (target, export tree, snapshots). The parent
+    #: watches its BYTE GROWTH as one of the two progress signals — pgw#1010
+    #: re-aimed it from the retired inductor capture dir, which an AOT mint
+    #: never wrote a byte into, so that signal read 0 for every real mint.
+    work_root: str
     report: str          # typed terminal report the child writes
     cfg: CompileCellSpec
     #: The parent's resolution, whole — slot -> identity + bytes + composition.
@@ -254,11 +258,6 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: different config traces different graphs and the parent's proof misses.
     execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = {}
-    #: pgw#805: ``"dynamo"`` (inductor FX capture, the original recipe) or
-    #: ``"aot"`` (torch.export + AOTInductor). The parent decides; the child
-    #: never guesses, because the recipe determines the artifact KIND and a
-    #: pod that adopts the wrong kind is a silent permanent miss.
-    recipe: str = "dynamo"
 
 
 class MintFrame(msgspec.Struct, frozen=True, kw_only=True):
@@ -306,11 +305,7 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     #: (``aot_mint._mint_phase_table``). The child emits it too, but a mint
     #: child holds no orchestrator session, so the child's events go nowhere —
     #: the parent re-emits from this, exactly as it does for `jit_compile`.
-    #: Empty for the dynamo recipe, which has no per-graph-class breakdown.
     mint_phases: Dict[str, Any] = msgspec.field(default_factory=dict)
-    #: Which recipe actually produced this report, echoed back so the parent
-    #: never has to infer the artifact kind from the request it sent.
-    recipe: str = "dynamo"
 
 
 @dataclass(frozen=True)
@@ -444,18 +439,18 @@ def _tree_cpu_seconds(pid: int) -> Optional[float]:
     return total
 
 
-def _capture_mib(capture: Path) -> Optional[float]:
-    """MiB the child has written into its capture dir.
+def _work_root_mib(work_root: Path) -> Optional[float]:
+    """MiB the child has written into its work root.
 
-    The inductor/triton cache root, not a stdio buffer. It grows in BURSTS —
-    generated sources land, then a single-threaded ``g++`` chews on them for
-    minutes writing nothing. So its growth proves work and its silence proves
-    nothing, which is why ``_observe`` treats it as an independent positive
-    signal that can never, on its own, vote to kill.
+    Generated sources, compiled objects and the packed cell — not a stdio
+    buffer. It grows in BURSTS: sources land, then a single-threaded ``g++``
+    chews on them for minutes writing nothing. So its growth proves work and
+    its silence proves nothing, which is why ``_observe`` treats it as an
+    independent positive signal that can never, on its own, vote to kill.
     """
     total = 0
     try:
-        for path in capture.rglob("*"):
+        for path in work_root.rglob("*"):
             try:
                 if path.is_file():
                     total += path.stat().st_size
@@ -469,10 +464,10 @@ def _capture_mib(capture: Path) -> Optional[float]:
 #: The measured signals, sampled together. Deliberately a PAIR and never a
 #: sum: they have different failure modes and different units, and adding them
 #: lets a fall in one cancel a rise in the other. That is precisely how a
-#: healthy mint died — a reaped entry's CPU drop swallowed the capture bytes
+#: healthy mint died — a reaped entry's CPU drop swallowed the work-root bytes
 #: its successor was writing.
-def _evidence(pid: int, capture: Path) -> Tuple[Optional[float], Optional[float]]:
-    return _tree_cpu_seconds(pid), _capture_mib(capture)
+def _evidence(pid: int, work_root: Path) -> Tuple[Optional[float], Optional[float]]:
+    return _tree_cpu_seconds(pid), _work_root_mib(work_root)
 
 
 def child_argv(request_path: Path, *, python: str = "") -> Sequence[str]:
@@ -572,7 +567,7 @@ async def _pump_stderr(
 
 async def _observe(
     pid: int,
-    capture: Path,
+    work_root: Path,
     window: SilenceWindow,
     on_evidence: Optional[Callable[[float], None]],
     interval_s: float,
@@ -585,15 +580,15 @@ async def _observe(
 
     * a signal that cannot be sampled this poll contributes nothing rather
       than a cliff, and
-    * a signal that is merely quiet — capture bytes during a long ``g++`` —
+    * a signal that is merely quiet — work-root bytes during a long ``g++`` —
       cannot cancel one that is moving. Only the absence of BOTH advances is
       silence, which is the only thing this window is entitled to judge.
     """
-    cpu, mib = _evidence(pid, capture)
+    cpu, mib = _evidence(pid, work_root)
     window.touch()
     while True:
         await asyncio.sleep(interval_s)
-        now_cpu, now_mib = _evidence(pid, capture)
+        now_cpu, now_mib = _evidence(pid, work_root)
         advanced = False
         if now_cpu is not None and (cpu is None or now_cpu - cpu >= _EVIDENCE_EPS):
             cpu, advanced = now_cpu, True
@@ -611,7 +606,7 @@ async def _observe(
                 f"the mint process made no measured progress for "
                 f"{window.silent_for():.0f}s (window {window.window_s:.0f}s): "
                 f"process-tree CPU {'unreadable' if now_cpu is None else f'{now_cpu:.1f}s'} "
-                f"and capture "
+                f"and work-root "
                 f"{'unreadable' if now_mib is None else f'{now_mib:.1f}MiB'} "
                 f"both flat")
 
@@ -663,8 +658,8 @@ async def run_mint(
     """
     request_path = write_request(workdir, request)
     report_path = Path(request.report)
-    capture = Path(request.capture)
-    capture.mkdir(parents=True, exist_ok=True)
+    work_root = Path(request.work_root)
+    work_root.mkdir(parents=True, exist_ok=True)
     state: Dict[str, Any] = {"phase": "", "stderr": ""}
     started = time.monotonic()
 
@@ -683,7 +678,7 @@ async def run_mint(
     frames = asyncio.ensure_future(_pump_frames(proc.stdout, on_frame, state))
     errs = asyncio.ensure_future(_pump_stderr(proc.stderr, state))
     watch = asyncio.ensure_future(_observe(
-        proc.pid, capture,
+        proc.pid, work_root,
         SilenceWindow(evidence_window_s), on_evidence, observe_interval_s))
     reap = asyncio.ensure_future(proc.wait())
     stop = (

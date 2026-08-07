@@ -4669,7 +4669,14 @@ class Executor:
                 target.active_self_mint = bool(getattr(
                     active_selection, "self_mint", False))
             rec.compile_targets[incarnation_id] = target
-            if active_ref and not self._bind_compile_guard(rec, target):
+            # pgw#1010: bind the guards for anything ARMED, not only for a
+            # target that names a cell. A JIT INTAKE arm is compiled code with
+            # no artifact, and it is now the only dynamo lane there is — gating
+            # the pgw#680 guard-miss confession on `active_ref` would take
+            # every guard miss on the platform off the wire.
+            armed_here = bool(
+                active_ref or compile_cache.is_compile_armed(pipeline))
+            if armed_here and not self._bind_compile_guard(rec, target):
                 # Production wrappers always expose one of the two guard
                 # signals. A hand-built/custom wrapper without revocation
                 # cannot be advertised as compiled (pgw#672: eager, loudly).
@@ -4681,16 +4688,14 @@ class Executor:
                     "advertising eager", incarnation_id,
                 )
             self._warn_cell_key_divergence(spec.name, target)
-            if target.active_compile_ref:
+            if target.active_compile_ref or armed_here:
                 # pgw#622: post-proof, novel request shapes serve eager while
-                # the compiled path warms in the background; each completed
-                # warm republishes the grown cell for the fleet.
-
-                if hot_swap.enable(
-                    pipeline,
-                    on_warmed=hot_swap.Debounce(
-                        self._shape_warm_republisher(spec, pipeline)),
-                ):
+                # the compiled path warms in the background.
+                #
+                # pgw#1010: no republish callback. A grown JIT cache belongs
+                # to this pod alone now — the cell it used to republish was a
+                # dynamo artifact nothing could adopt.
+                if hot_swap.enable(pipeline):
                     logger.info(
                         "hot-swap: eager-while-compiling enabled for %s",
                         spec.name)
@@ -6911,12 +6916,6 @@ class Executor:
                         if trt_engine.is_engine_ref(selection.ref):
                             inj.trt_execution_before[id(pipe)] = (
                                 trt_engine.execution_count(pipe))
-                        # gw#587 CORRECT FIX: a PendingSelfMint is not proven
-                        # or packed yet — the warmup proof below finalizes it
-                        # (pack + publish) only after confirming a real
-                        # compiled call, never before.
-                        if hasattr(mint, "capture_dir"):
-                            inj.pending_self_mints[id(pipe)] = mint
             # pgw#671 eager-first boot (worker half of th#1187): a fresh
             # self-mint on an eager-compatible lane no longer gates READY.
             # Stash the arm-time placeholder selections (their digest is
@@ -7132,8 +7131,12 @@ class Executor:
                 pb.LIFECYCLE_INTENT_STATUS_RUNNING,
                 warmup_stage,
             )
-            compile_seconds_before = (
-                compile_cache.compile_wall_seconds() if proves_inductor else 0.0)
+            # pgw#1010: measured UNCONDITIONALLY. It used to be gated on
+            # `proves_inductor`, which needs an active artifact — and the JIT
+            # lane that survives (INTAKE) has none by construction, so the only
+            # remaining dynamo compile on the platform would have been the one
+            # nobody timed. A counter read costs nothing.
+            compile_seconds_before = compile_cache.compile_wall_seconds()
             # pgw#797: THE warmup split. `pipeline_load` used to be
             # load+warmup as one number, so "what does a cell save on warmup"
             # was only ever an estimate (`pipeline_load` minus a guessed
@@ -7175,15 +7178,31 @@ class Executor:
                         warmed, function_proofs, warm_aborted = await run_warmup()
                 else:
                     warmed, function_proofs, warm_aborted = await run_warmup()
-            compile_seconds = (
-                compile_cache.compile_wall_seconds() - compile_seconds_before
-                if proves_inductor else 0.0)
+            compile_seconds = max(
+                0.0,
+                compile_cache.compile_wall_seconds() - compile_seconds_before)
             # id(pipeline) -> (calls, cache_hits, cache_misses) observed across
             # this setup's warmup. Declared out here because pgw#923's adoption
             # report reads it whether or not this boot proved anything: a cell
             # that armed and then warmed to zero hits is exactly the adoption
             # the measurement lane exists to price.
             proof_by_obj: Dict[int, Tuple[int, int, int]] = {}
+            if compile_seconds > 0 and not inj.active_compile_artifacts:
+                # pgw#1010 / th#1322: the JIT compile this pod paid for itself.
+                # The `jit_compile` numeric event used to be emitted by the
+                # parent OF A MINT CHILD, which no longer runs the JIT recipe —
+                # so without this the INTAKE lane (the only JIT left) would
+                # compile silently and "AOT vs JIT compile cost" would have one
+                # arm. Sited OUTSIDE the proof block on purpose: an intake arm
+                # names no artifact, so `proves_inductor` is false for it and
+                # anything inside that block is unreachable from the lane this
+                # measures.
+                compile_cache.emit_jit_compile_event(
+                    {"boot": compile_seconds},
+                    family=str(getattr(spec.compile, "family", "") or ""),
+                    execution_lane=self._served_execution_lane(spec),
+                    route="intake",
+                )
             if proves_inductor or proves_exported:
                 # gw#595 per-object provability: the proof scopes to objects
                 # the warmup actually EXERCISED (calls>0). An exercised object
@@ -7197,15 +7216,6 @@ class Executor:
                 proven = 0
                 hits = 0
                 misses = 0
-                # gw#612: snapshot capture-sharing BEFORE the loop pops
-                # pending entries. The publish decision needs to know, per
-                # shared capture, whether EVERY sharer's graphs made it in.
-                mint_by_id: Dict[int, Any] = {}
-                mint_sharers: Dict[int, List[int]] = {}
-                for _obj_id, _pending in inj.pending_self_mints.items():
-                    mint_by_id[id(_pending)] = _pending
-                    mint_sharers.setdefault(id(_pending), []).append(_obj_id)
-                proven_mint_objs: set[int] = set()
                 calls_by_obj: Dict[int, int] = {}
                 for candidate in inj.compile_objects:
                     pipe = candidate.pipeline
@@ -7241,46 +7251,8 @@ class Executor:
                     proof_by_obj[id(pipe)] = (calls, pipe_hits, pipe_misses)
                     hits += max(0, pipe_hits)
                     misses += max(0, pipe_misses)
-                    pending_mint = inj.pending_self_mints.get(id(pipe))
                     if not warmed or calls <= 0:
                         unexercised.append(candidate)
-                    elif pending_mint is not None:
-                        # gw#587 CORRECT FIX: a fresh self-mint capture has
-                        # nothing pre-existing on disk to HIT against — its
-                        # own real, successful compiled call (calls>0, no
-                        # guard failure) IS the entire proof; requiring a
-                        # disk hit here would fail every honest self-mint by
-                        # construction. Pack the capture dir that call just
-                        # populated and advertise the real digest — this is
-                        # "prove-produces-the-mint": the published artifact
-                        # is byte-derived from exactly this execution, never
-                        # a second, separately-shaped compile. A pack
-                        # failure never un-serves the request (the compiled
-                        # callable is already live); it only forfeits
-                        # advertising/publishing this boot's capture.
-
-                        activity_mod.current_phase(
-                            activity_mod.PHASE_SEAL_PUBLISH)
-                        finalized = fleet_cells_mod.finalize_self_mint(
-                            pipe, pending_mint,
-                            expected_graphs=max(0, pipe_misses))
-                        inj.pending_self_mints.pop(id(pipe), None)
-                        if finalized is not None:
-                            proven += 1
-                            proven_mint_objs.add(id(pipe))
-                            if callable(warmup):
-                                function_proofs[id(pipe)] = {spec.name}
-                            compile_cache.record_cell_proven(
-                                str(finalized.ref))
-                            inj.active_compile_artifacts[id(pipe)] = (
-                                _CompileArtifactSelection(
-                                    path=Path(finalized.artifact),
-                                    ref=str(finalized.ref),
-                                    snapshot_digest=str(
-                                        finalized.snapshot_digest),
-                                    self_mint=True))
-                        else:
-                            disproven.append(candidate)
                     elif pipe_hits > 0:
                         proven += 1
                         if callable(warmup):
@@ -7431,13 +7403,6 @@ class Executor:
                         # explicit eager — serving_tier flips on the wire and
                         # the activity carries the confession; never silent
                         # (gw#586).
-                        if mint_by_id:
-
-                            for pending in mint_by_id.values():
-                                fleet_cells_mod.withhold_self_mint_publish(
-                                    pending,
-                                    f"proof failed; degraded to eager "
-                                    f"({detail})")
                         logger.error(
                             "%s; mandatory lane DEGRADED to explicit eager "
                             "serving (pgw#672)", detail)
@@ -7458,42 +7423,6 @@ class Executor:
                     mandatory = pipeline_weight_lane(pipe).startswith(
                         _MANDATORY_EXECUTION_LANES)
                     if mandatory:
-                        pending_mint = inj.pending_self_mints.pop(
-                            id(pipe), None)
-                        if pending_mint is not None:
-                            finalized = pending_mint._state.get("minted")
-                            if finalized is not None:
-                                # A proven sibling finalized the SHARED
-                                # capture (same key, one family cell) —
-                                # advertise the finalized identity, not the
-                                # arm-time placeholder.
-                                inj.active_compile_artifacts[id(pipe)] = (
-                                    _CompileArtifactSelection(
-                                        path=Path(finalized.artifact),
-                                        ref=str(finalized.ref),
-                                        snapshot_digest=str(
-                                            finalized.snapshot_digest),
-                                        self_mint=True))
-                            else:
-                                # Its capture was never exercised and no
-                                # sibling finalized it: there is no proven
-                                # artifact to advertise. Drop the target
-                                # loudly rather than advertise bytes
-                                # nothing proved (the gw#586 shape).
-
-                                fleet_cells_mod.abandon_self_mint(
-                                    pending_mint)
-                                logger.warning(
-                                    "compile object (slots=%s) self-mint "
-                                    "capture unexercised (calls=0) with no "
-                                    "finalized sibling; dropping its "
-                                    "compile target",
-                                    sorted(candidate.slots))
-                                function_proofs[id(pipe)] = set()
-                                compile_cache.unwrap(pipe)
-                                inj.active_compile_artifacts.pop(
-                                    id(pipe), None)
-                                continue
                         # Eager is not a lane for it and a proven sibling
                         # vouches for the cell: stays armed unproven. Its
                         # own graphs, absent from the cell by design, fail
@@ -7520,40 +7449,6 @@ class Executor:
                         compile_cache.drop_lora_execution_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
                     self._abandon_pending_mint(inj, pipe)
-                if mint_by_id:
-                    # gw#612 publish gate: a shared capture packs only the
-                    # graphs the warmup compiled. Publish the family cell
-                    # only when EVERY sharer proved into it; otherwise the
-                    # store would gain a partial cell that fails gw#607's
-                    # per-object adopt proof on every later boot (the
-                    # gw#611 qwen hits=1/misses=1 release-breaker). The
-                    # local mint keeps serving this process either way.
-
-                    for pending in mint_by_id.values():
-                        sharers = mint_sharers.get(id(pending), [])
-                        gap = [
-                            oid for oid in sharers
-                            if oid not in proven_mint_objs
-                        ]
-                        if warm_aborted:
-                            # pgw#677 reopen: a plan cut short (OOM backoff)
-                            # can leave every OBJECT looking proven while
-                            # whole graph CLASSES are missing — publishing
-                            # that partial pack bricks every adopting boot.
-                            fleet_cells_mod.withhold_self_mint_publish(
-                                pending,
-                                f"warm plan cut short ({warm_aborted}); "
-                                "planned graphs are absent from the packed "
-                                "cell")
-                        elif gap:
-                            fleet_cells_mod.withhold_self_mint_publish(
-                                pending,
-                                f"{len(gap)}/{len(sharers)} capture-sharing "
-                                "compile object(s) were never exercised by "
-                                "the warmup, so their graphs are absent "
-                                "from the packed cell")
-                        else:
-                            fleet_cells_mod.publish_self_mint(pending)
                 if (
                     proven
                     and compile_selection is not None
@@ -8982,12 +8877,6 @@ class Executor:
                                 if trt_engine.is_engine_ref(selection.ref):
                                     result.trt_execution_before[id(pipe)] = (
                                         trt_engine.execution_count(pipe))
-                                # gw#587 CORRECT FIX: a PendingSelfMint is not
-                                # proven or packed yet — the warmup proof
-                                # finalizes it (pack + publish) only after
-                                # confirming a real compiled call, never before.
-                                if hasattr(pipe_mint, "capture_dir"):
-                                    result.pending_self_mints[id(pipe)] = pipe_mint
                     delta = max(0, self._vram_allocated() - before)
                     if slot_share:
                         execution_lane_obj, execution_lane_bytes = self._register_execution_lane(
@@ -9176,26 +9065,6 @@ class Executor:
             f"pod or any other",
             phase="no_growth_path",
         )
-
-    def _shape_warm_republisher(
-        self, spec: EndpointSpec, pipeline: Any,
-    ) -> Callable[[], None]:
-        """Republish the grown cell after a background novel-shape warm
-        (pgw#622). Runs on the Debounce thread, never the serving path."""
-        cfg = spec.compile_cell()
-        family = str(getattr(cfg, "family", "") or "")
-
-        def republish() -> None:
-
-            cache_dir = self.store._cache_dir
-            live_root = (
-                Path(cache_dir) if cache_dir
-                else Path.home() / ".cache" / "gen-worker"
-            ) / "compile-cache"
-            fleet_cells.republish_after_shape_warm(
-                pipeline, cfg, family, self._cell_publisher(), live_root)
-
-        return republish
 
     # ---- pgw#671 eager-first boot (worker half of th#1187) -----------------
 
@@ -9596,322 +9465,17 @@ class Executor:
     async def _background_mint_run(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
     ) -> None:
+        """Drive the owed mint(s) for this record, off the serving path.
 
-        spec = bg.spec
-        if _delegated_pendings(bg.pendings):
-            # pgw#784: the compile leaves this interpreter. Everything below
-            # runs the mint INSIDE the serving process, which is th#1299's
-            # contract violation — long-running GIL-holding inductor Python on
-            # the one asyncio task that carries both the 10s beat and eager
-            # serving. It stays reachable only to red-verify that
-            # (GEN_WORKER_MINT_IN_PROCESS=1).
-            await self._delegated_mint_run(rec, bg, act)
-            return
-        # pgw#737: the capture's VRAM pre-budget, BEFORE any seed touches
-        # the card. The boot warm has already run one real eager forward on
-        # these shapes, so the peak high-water is a measured anchor, not a
-        # guess. Not fitting is not an error — decline, serve eager, leave
-        # the cell absent (never attempt-and-OOM: that is what took the
-        # wan-2.2 tenant request down with 26 banked denoise steps).
-        mint_device = next(
-            (dev for pipe in bg.pipes.values()
-             if (dev := mint_budget.device_of(pipe)) is not None),
-            None,
-        )
-        budget = mint_budget.probe(mint_device)
-        if not budget.fits:
-            raise _MintDeclined("insufficient_vram", budget)
-        jobs, _skips = self._warmup_plan(spec, rec)
-        jobs, _mode = warmup_mod.select_runs(jobs, tracing=True)
-        if not jobs:
-            raise RuntimeError(
-                "eager-first mint has no derived warm jobs to seed")
-        routers: Dict[int, Any] = {}
-        for pid, pipe in bg.pipes.items():
-            router = hot_swap.router_of(pipe)
-            if router is None:
-                raise RuntimeError(
-                    "pipeline lost its hot-swap router mid-mint")
-            routers[pid] = router
-
-        def _stats() -> Tuple[int, int, int]:
-            warm = pending = failed = 0
-            for router in routers.values():
-                w, p, f = router.stats()
-                warm, pending, failed = warm + w, pending + p, failed + f
-            return warm, pending, failed
-
-        def _checkpoint() -> None:
-            if bg.abandon.is_set():
-                raise _MintAbandoned()
-
-        # pgw#672 honesty: a warm process may hold resident compiled code
-        # for these class-shared targets from an earlier same-family arm —
-        # the router's warm compiles would then capture NOTHING and the
-        # finalize below would pack an empty cell. Reset so the background
-        # compiles really trace into the pending capture.
-        for pipe in bg.pipes.values():
-            compile_cache.reset_target_code(pipe)
-        exec_before = {
-            pid: compile_cache.execution_count(pipe)
-            for pid, pipe in bg.pipes.items()
-        }
-        miss_before = {
-            pid: compile_cache.cache_miss_count(pipe)
-            for pid, pipe in bg.pipes.items()
-        }
-
-        async def _forward(wj: Any, *, preemptible: bool = False) -> None:
-            handler_kwargs = await self._handler_kwargs(
-                wj.spec, bg.snapshots or {})
-            with tempfile.TemporaryDirectory(prefix="gw-bgmint-") as tmp:
-                payload = wj.build(tmp)
-                if payload is None:
-                    return
-                ctx: RequestContext[Any] = warmup.warm_context(
-                    wj.spec, request_id=f"bg-mint-{wj.spec.name}",
-                    local_output_dir=tmp,
-                    execution_lane=self._served_execution_lane(wj.spec),
-                    config=self._effective_config(wj.spec),
-                    # pgw#969: the in-process mint is a mint too — a slot that
-                    # cannot resolve here must say which one it killed.
-                    origin=_mint_origin(bg, wj.spec))
-                if preemptible:
-                    bg.seed_ctx = ctx
-                    # Registration race: demand that arrived after the turn
-                    # was granted but before this ctx existed must still
-                    # preempt — check it here, not only at admission.
-                    if not self._bg_quiet.is_set():
-                        ctx._cancel()
-                try:
-                    # pgw#677: the seed window forces EAGER routing — a seed
-                    # must never pay an inline Dynamo+Inductor compile while
-                    # it holds the run gate (the measured 3.5-7 min units).
-                    with hot_swap.mint_seed_window():
-                        await self._invoke_warmup(
-                            wj.spec, bg.instance, ctx, payload,
-                            handler_kwargs)
-                except CanceledError:
-                    if preemptible and ctx.cancelled:
-                        raise _SeedPreempted()
-                    raise
-                finally:
-                    bg.seed_ctx = None
-
-        async def _unit(wj: Any) -> bool:
-            """One warm forward inside a background GPU turn (pgw#677):
-            tenant work always wins the gate — the turn is granted when the
-            worker is tenant-idle (or stolen under the minimum-progress
-            rule), the forward routes EAGER by construction (seed window),
-            and the actual graph compiles run on the router's warm thread
-            in their own turns. False = preempted by a tenant arrival; the
-            caller re-queues the unit."""
-            _checkpoint()
-            async with self._bg_turn(rec, "seed", abort=bg.abandon) as stole:
-                _checkpoint()
-                try:
-                    # A stolen turn runs to completion (the steal already
-                    # paid its debt); an idle-granted turn yields to any
-                    # tenant arrival at the handler's next cancel poll.
-                    await _forward(wj, preemptible=not stole)
-                except _SeedPreempted:
-                    return False
-            return True
-
-        async def _seed_pass(jobs_now: List[Any]) -> bool:
-            """One full-plan seed pass; preempted units re-queue within the
-            pass (a preemption is not plan progress — the pass semantics
-            stay 'every unit ran to completion once'). False = the pass was
-            CUT SHORT by an OOM backoff — the caller must never treat such
-            a pass as converged (pgw#677 reopen: an OOM-truncated plan that
-            converged silently is how a partial capture reached finalize at
-            unit 8/18 with nothing publishable)."""
-            pending_units = list(jobs_now)
-            completed = 0
-            while pending_units:
-                wj = pending_units.pop(0)
-                act.phase(
-                    activity_mod.PHASE_WARMUP_FORWARD,
-                    min(completed + 1, len(jobs_now)), len(jobs_now))
-                try:
-                    done = await _unit(wj)
-                except _MintAbandoned:
-                    raise
-                except Exception as exc:
-                    if not is_cuda_oom(exc):
-                        raise
-                    logger.warning(
-                        "background mint seed %s OOMed (%s); backing off "
-                        "this pass", wj.spec.name, exc)
-                    activity_mod.emit_event(
-                        "self_mint_abort",
-                        f"seed pass cut short by CUDA OOM at unit "
-                        f"{completed + 1}/{len(jobs_now)} "
-                        f"({wj.spec.name}): {exc}; backing off and "
-                        "retrying the pass",
-                        phase="warmup_oom",
-                    )
-                    if torch is not None and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    return False
-                if done:
-                    completed += 1
-                else:
-                    pending_units.append(wj)
-            return True
-
-        # Phase 1 — SEED: run the full derived plan through the enabled
-        # routers. Every novel signature serves EAGER here and enqueues its
-        # background compile into the pending capture; passes repeat until
-        # the signature vocabulary is stable (a full queue drops seeds — a
-        # later pass re-enqueues them) and no compile is pending.
-        seeding_pass = 0
-        oom_passes = 0
-        while True:
-            seeding_pass += 1
-            if seeding_pass > _MINT_SEED_MAX_PASSES:
-                raise RuntimeError(
-                    f"mint seeding did not converge after "
-                    f"{_MINT_SEED_MAX_PASSES} passes")
-            before = _stats()
-            pass_ok = await _seed_pass(jobs)
-            act.phase(activity_mod.PHASE_INDUCTOR_COMPILE)
-            while True:
-                _checkpoint()
-                _warm, pending, _failed = _stats()
-                if pending == 0:
-                    break
-                await asyncio.sleep(_MINT_POLL_INTERVAL_S)
-            if not pass_ok:
-                # pgw#677 reopen: an OOM-truncated pass is NEVER
-                # convergence — stats can be stable precisely because the
-                # remaining units never ran. Retry (bounded by the pass
-                # cap); a persistent OOM ends the mint instead of
-                # finalizing a partial capture.
-                oom_passes += 1
-                # pgw#737: re-budget on the allocator state the OOM just
-                # measured (the pass emptied the cache on its way out). A
-                # card that no longer has capture headroom must DECLINE
-                # here — retrying the pass is how three more OOMs landed on
-                # a live tenant request.
-                budget = mint_budget.probe(mint_device)
-                if not budget.fits:
-                    raise _MintDeclined("insufficient_vram_after_oom", budget)
-                if oom_passes >= _MINT_OOM_MAX_PASSES:
-                    raise _MintDeclined(
-                        f"oom_x{oom_passes}", budget,
-                        "the warm plan OOMed on consecutive passes; "
-                        "refusing to finalize a partial capture — this "
-                        "process serves eager")
-                continue
-            oom_passes = 0
-            after = _stats()
-            if after == before:
-                break
-        _warm, _pending, failed_sigs = _stats()
-        if failed_sigs:
-            raise RuntimeError(
-                f"{failed_sigs} signature(s) failed their background "
-                "compile; the capture is incomplete")
-        dropped = sum(r.seed_dropped for r in routers.values())
-        if dropped:
-            raise RuntimeError(
-                f"{dropped} mint seed signature(s) could not enqueue their "
-                "background compile (vocabulary overflow or dummy-batch "
-                "failure); the capture would be incomplete")
-
-        # Phase 2 — VERIFY: every signature is warm, so these forwards
-        # route COMPILED through the guarded wrappers — the successful
-        # compiled call IS the self-mint proof (gw#587: a fresh capture has
-        # nothing on disk to HIT against). Real tenant traffic since the
-        # swap counts as the same honest evidence.
-        act.phase(activity_mod.PHASE_WARMUP_FORWARD, 0, len(jobs))
-        def _unproven_pids() -> List[int]:
-            return [
-                pid for pid, pipe in bg.pipes.items()
-                if compile_cache.execution_count(pipe) <= exec_before[pid]
-            ]
-        for wj in jobs:
-            if not _unproven_pids():
-                break
-            while not await _unit(wj):
-                _checkpoint()
-        proven_pids = [
-            pid for pid in bg.pipes if pid not in set(_unproven_pids())
-        ]
-        if not proven_pids:
-            raise RuntimeError(
-                "no compile object served a compiled call after the "
-                "background warm; nothing to finalize")
-
-        # Phase 3 — FINALIZE the proven captures (pack; digest computed from
-        # the packed bytes), then decide publish per shared capture: a
-        # family cell ships only when EVERY sharer proved into it (gw#612).
-        act.phase(activity_mod.PHASE_SEAL_PUBLISH)
-        finalized: Dict[int, Any] = {}
-        for pid in proven_pids:
-            pipe = bg.pipes[pid]
-            pending_mint = bg.pendings.get(pid)
-            if pending_mint is None:
-                continue
-            miss_delta = max(
-                0, compile_cache.cache_miss_count(pipe) - miss_before[pid])
-            outcome = fleet_cells_mod.finalize_self_mint(
-                pipe, pending_mint, expected_graphs=miss_delta)
-            if outcome is None:
-                logger.warning(
-                    "background mint pack failed for %s; that object stays "
-                    "eager", spec.name)
-                continue
-            finalized[pid] = outcome
-            compile_cache.record_cell_proven(str(outcome.ref))
-        for pid in list(bg.pipes):
-            if pid in finalized:
-                continue
-            # Unexercised or unpacked on a non-mandatory lane: today's miss
-            # policy — unwrap and serve eager, never advertise unproven
-            # bytes (gw#586).
-            pipe = bg.pipes[pid]
-            pending_mint = bg.pendings.get(pid)
-            if pending_mint is not None:
-                fleet_cells_mod.abandon_self_mint(pending_mint)
-            compile_cache.unwrap(pipe)
-            if spec.lora_bucket:
-                compile_cache.drop_lora_execution_lane(pipe)
-        sharers: Dict[int, List[int]] = {}
-        mints: Dict[int, Any] = {}
-        for pid, pending_mint in bg.pendings.items():
-            mints[id(pending_mint)] = pending_mint
-            sharers.setdefault(id(pending_mint), []).append(pid)
-        for mint_id, pending_mint in mints.items():
-            gap = [pid for pid in sharers[mint_id] if pid not in finalized]
-            if gap:
-                fleet_cells_mod.withhold_self_mint_publish(
-                    pending_mint,
-                    f"{len(gap)}/{len(sharers[mint_id])} capture-sharing "
-                    "compile object(s) never proved into the background "
-                    "capture")
-            else:
-                fleet_cells_mod.publish_self_mint(pending_mint)
-        if not finalized:
-            raise RuntimeError(
-                "background mint finalization produced no advertisable "
-                "cell; serving stays eager")
-
-        # Phase 4 — HOT-SWAP the advertisement (shared with the delegated
-        # route, pgw#784: an adopted cell is advertised the same way whichever
-        # process built it).
-        self._advertise_minted_cells(rec, bg, act, finalized)
-        # Contract-keyed warm memory (pgw#654): the full plan executed in
-        # this process — compiled — so later checkpoint instances of this
-        # contract may inherit down to one verification run.
-        memory = self._warm_contract_runs.setdefault(
-            self._warm_contract_key(spec), set())
-        memory.update(wj.graph_key for wj in jobs)
-        logger.info(
-            "background mint for %s armed: %d compile object(s) hot-swapped "
-            "to compiled (tier flips in the next capability projection)",
-            spec.name, len(finalized))
+        pgw#1010: one route. What used to stand here — seed a capture in THIS
+        interpreter, drive the warm plan, prove, pack, publish — built a dynamo
+        cell, and a dynamo cell has no consumer. It also violated the liveness
+        contract by construction (long-running GIL-holding inductor Python on
+        the one task that carries the beat and eager serving, th#1299), and it
+        was reachable only behind an env switch kept "to red-verify that".
+        Both are gone; every mint is a child process.
+        """
+        await self._delegated_mint_run(rec, bg, act)
 
     def _advertise_minted_cells(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
@@ -9955,10 +9519,7 @@ class Executor:
                         "compile target %s has no runtime guard revocation "
                         "signal; advertising eager", target.incarnation_id)
                     continue
-            hot_swap.enable(
-                pipe,
-                on_warmed=hot_swap.Debounce(
-                    self._shape_warm_republisher(spec, pipe)))
+            hot_swap.enable(pipe)
 
     async def _delegated_mint_run(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,

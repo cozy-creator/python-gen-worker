@@ -53,16 +53,25 @@ class EagerPhase(StrEnum):
     member-to-value mapping rather than reading it back out of this file.
     """
 
-    #: The nine mint-impossibility exits, each a distinct `_fail_closed` cause.
+    #: The mint-impossibility exits, each a distinct `_fail_closed` cause.
+    #: pgw#1010 retired three of the original nine with the in-process
+    #: capture that produced them — ``delivered_cell_seeded``,
+    #: ``capture_conflict`` and ``multi_group_in_process`` all named hazards
+    #: of moving the process-global inductor cache dir, and nothing moves it
+    #: any more; ``capture_arm_failed`` became ``jit_arm_failed``, which is
+    #: what it always measured (this process cannot arm its declared
+    #: targets), minus a capture that no longer exists.
     NO_FAMILY = "no_family"
     NO_CUDA = "no_cuda"
     NO_TOOLCHAIN = "no_toolchain"
     NO_COMPILE_TARGET = "no_compile_target"
-    DELIVERED_CELL_SEEDED = "delivered_cell_seeded"
     KEY_COMPUTATION_FAILED = "key_computation_failed"
-    CAPTURE_CONFLICT = "capture_conflict"
-    MULTI_GROUP_IN_PROCESS = "multi_group_in_process"
-    CAPTURE_ARM_FAILED = "capture_arm_failed"
+    JIT_ARM_FAILED = "jit_arm_failed"
+    #: pgw#1010: a mandatory (w8a8/w4a4) lane on a family that declares no
+    #: export. The lane serves only from a cell, the only cell is an AOT cell,
+    #: and nothing can mint one here — so the pod fails closed instead of
+    #: compiling a JIT intake arm no request may be dispatched to.
+    MANDATORY_LANE_NEEDS_A_CELL = "mandatory_lane_needs_a_cell"
 
     #: The tenth eager exit: it declines BEFORE `_fail_closed` (a quarantined
     #: identity must not be re-minted) and was the one that only logged.

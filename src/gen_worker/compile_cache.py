@@ -257,7 +257,7 @@ def reset_target_code(pipeline: Any) -> int:
     Dynamo keys its code cache on the target's class-shared ``__code__``, so
     in a WARM process a later arm's proof warmup is served straight from a
     sibling's resident compiled code with ZERO FX/AOT counter movement —
-    a pending self-mint then captures nothing (``finish_fleet_mint:
+    a pending intake arm then compiles nothing (``arm_jit_intake:
     captured nothing``) and a seeded adoption proves nothing (hits=0,
     misses=0), the exact ``warmups=N, calls=N, cache_hits=0,
     cache_misses=0`` live loop. Calling this immediately before a proof
@@ -1195,66 +1195,6 @@ def _inductor_cache_config() -> Dict[str, Any]:
     return facts
 
 
-def _capture_forensics(capture: Path, pipe: Any = None) -> str:
-    """Why a pack refusal happened, IN the refusal itself.
-
-    First-real-pod audit: the first real-GPU mint ran its whole plan and was
-    refused at pack for both functions, and the verbatim reason was LOST (the
-    hub persists no typed worker events) — one pod run per refusal. Every pack
-    refusal now carries the facts that discriminate its candidate causes, so
-    ONE run settles which gate fired and why:
-
-    * ``latched`` — did the compile write HERE, or is inductor pointed
-      somewhere else (gw#608's class);
-    * ``tree`` — what DID land, per subdir, with counts;
-    * ``inductor`` — was caching disabled, bypassed or bundled;
-    * ``proof``/``process`` — did this process compile at all, or reuse
-      in-process compiled code and write nothing (pgw#604's class).
-
-    Never raises: a diagnostic that can fail is a second lost refusal.
-    """
-    parts: List[str] = [f"capture={capture}"]
-    try:
-        want = {str(Path(capture) / sub) for sub in ("inductor", "triton")}
-        live = {
-            env: os.environ.get(env, "")
-            for env in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR")
-        }
-        parts.append(
-            "latched=" + ("yes" if set(live.values()) == want else "NO")
-            + " " + " ".join(f"{k}={v or '-'}" for k, v in sorted(live.items()))
-        )
-        tree: List[str] = []
-        for sub in ("inductor", "triton"):
-            base = Path(capture) / sub
-            if not base.is_dir():
-                tree.append(f"{sub}:absent")
-                continue
-            children = sorted(p for p in base.iterdir())
-            if not children:
-                tree.append(f"{sub}:empty")
-            for child in children:
-                count = sum(1 for p in child.rglob("*") if p.is_file()) \
-                    if child.is_dir() else 1
-                tree.append(f"{sub}/{child.name}:{count}")
-        parts.append("tree=[" + ", ".join(tree) + "]")
-        config_facts = _inductor_cache_config()
-        if config_facts:
-            parts.append("inductor=" + " ".join(
-                f"{k}={v}" for k, v in sorted(config_facts.items())))
-        if pipe is not None:
-            parts.append(
-                f"proof=hits:{cache_hit_count(pipe)} "
-                f"misses:{cache_miss_count(pipe)}")
-        counters = inductor_counters()
-        if counters:
-            parts.append("process=" + " ".join(
-                f"{k}:{v}" for k, v in sorted(counters.items())))
-    except Exception:  # noqa: BLE001 — see the docstring
-        logger.debug("compile-cache: capture forensics failed", exc_info=True)
-    return " | ".join(parts)
-
-
 def pack(cache_root: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
     """Deterministic artifact from a capture root holding ``inductor/`` and
     ``triton/``: sorted entries, zeroed times/owners, gzip mtime 0 — identical
@@ -1511,17 +1451,6 @@ def _reset_inductor_latch() -> None:
 
 # seeding reuses the same env contract
 seed_env = capture_env
-
-# gw#608: True once this process seeded a verified DELIVERED cell into the
-# live cache root. The inductor/triton cache dirs are process-global, so a
-# self-mint capture in the same process would re-point them away from the
-# seeded entries; fleet arming declines the mint instead.
-_DELIVERED_SEEDED = False
-
-
-def delivered_cell_seeded() -> bool:
-    return _DELIVERED_SEEDED
-
 
 def inductor_counters() -> Dict[str, int]:
     """This process's compiled-artifact cache counters (monotonic). The delta
@@ -2051,15 +1980,10 @@ def stage_artifact(
 
 def _activate_staged(staged: _StagedArtifact) -> Dict[str, Any]:
     """Publish a verified staging tree while holding ``_SEED_ARM_LOCK``."""
-    global _DELIVERED_SEEDED
     if not staged.activated:
         _merge_staged_cache(staged.staged_root, staged.live_root)
         staged.activated = True
     seed_env(staged.live_root)
-    # gw#608: the process now serves from a seeded delivered cell; any later
-    # self-mint capture would re-point the ONE process-global cache dir away
-    # from it and every seeded lookup would miss (the LTX consumer shape).
-    _DELIVERED_SEEDED = True
     return staged.metadata
 
 
@@ -2212,7 +2136,7 @@ class CompileArmRefused(RuntimeError):
     """A NAMED, deterministic reason this process cannot arm this pipeline.
 
     pgw#985: what decides whether a second pod gets bought is the
-    CLASSIFICATION, not the message. ``begin_fleet_mint`` used to raise a bare
+    CLASSIFICATION, not the message. ``arm_jit_intake`` used to raise a bare
     ``RuntimeError`` for every decline — which the mint child let out as exit
     1 (``CRASHED``, retryable) while the AOT recipe typed the identical
     condition as a refusal (``EXIT_REFUSED``, terminal). Same fact, two
@@ -2228,7 +2152,7 @@ def resolve_targets(
 
     ``(declared name, owner, attribute, eager callable)`` per resolvable
     target, in declaration order. :func:`has_compile_target`, :func:`apply`
-    and :func:`begin_fleet_mint` all read THIS list (§1.29, one relation) —
+    and :func:`arm_jit_intake` all read THIS list (§1.29, one relation) —
     it used to be scanned independently by the first two, which is how a
     reader of the third could not tell which scan had spoken.
 
@@ -2849,6 +2773,14 @@ def _guarded(
                 f"compiled {'W8A8 ' if fail_closed else ''}target {label} failed: "
                 f"{type(exc).__name__}: {exc}"
             )
+            # pgw#1010: the degrade is recorded on the SHARED signal, not only
+            # in this closure. An INTAKE arm names no artifact, so "is this
+            # pipeline serving compiled" cannot be answered by an active cell
+            # ref — `is_compile_armed` reads this, and without it a permanently
+            # degraded intake pod would keep reporting `serving_mode=jit_cell`
+            # while every request ran eager (the gw#586 class, one lane over).
+            if isinstance(failure_signal, dict):
+                failure_signal["degraded"] = True
             # Revoke scheduler-visible compiled proof synchronously before the
             # eager fallback: the tier flips to explicit eager on the wire.
             revoke(state["detail"])
@@ -3174,7 +3106,7 @@ def apply(
     """
     if getattr(pipeline, _MARKER_ATTR, None) is not None:
         return True
-    # pgw#985: ONE reading of the preconditions, named. `begin_fleet_mint`
+    # pgw#985: ONE reading of the preconditions, named. `arm_jit_intake`
     # reads the same function to say WHY it refused, so the two can never
     # again describe the same decline in two different sentences.
     block = arming_block(
@@ -3368,6 +3300,28 @@ def cache_hit_count(pipeline: Any) -> int:
 def cache_miss_count(pipeline: Any) -> int:
     """FX-graph cache misses observed inside this exact pipeline's guard."""
     return _proof_count(pipeline, "cache_misses")
+
+
+def is_compile_armed(pipeline: Any) -> bool:
+    """True when this pipeline is serving COMPILED code right now.
+
+    pgw#1010: the JIT INTAKE arm names no artifact, so ``active_compile_ref``
+    is empty for a pipeline that is nonetheless serving compiled code. This is
+    the fact that separates it from true eager, and ``serving_mode`` reads it
+    per request — hence the cheap attribute probe rather than a target walk.
+
+    A guard that permanently degraded this target to eager (``_guarded``'s
+    fallback) clears the answer even though the wrapper is still installed:
+    reporting a degraded pipeline as compiled is the same lie as reporting an
+    unproven cell as adopted.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    if marker is None:
+        return False
+    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
+    if isinstance(signal, dict) and signal.get("degraded"):
+        return False
+    return True
 
 
 def unwrap(pipeline: Any) -> bool:
@@ -4152,48 +4106,34 @@ def mint_artifact(
     return meta
 
 
-def begin_fleet_mint(pipe: Any, cfg: Any, capture: Path) -> None:
-    """Arm ``pipe`` for a fleet self-mint capture (gw#587 CORRECT FIX).
+def arm_jit_intake(pipe: Any, cfg: Any) -> None:
+    """Arm ``pipe`` for JIT INTAKE serving (pgw#1010).
 
-    Points inductor/triton at a fresh ``capture`` dir and enables the
-    declared compile targets in cold-allowed, GUARDED mode — WITHOUT
-    running any synthetic warm call (the old ``mint_artifact``/
-    ``_warm_call`` producer-style recipe, gw#586's defect class
-    resurfacing inside self-mint, gw#587's root cause).
+    Intake is the serving posture for a family with no export declaration:
+    the declared targets are enabled cold-allowed and GUARDED, this pod's own
+    warmup performs the compile, and the pod serves compiled for its own life.
+    Nothing is captured, packed, keyed or published — a JIT cell is an artifact
+    class with no consumer (``aot_cells`` adopts ``aot-inductor`` only), so
+    every honest cold boot re-compiles and that is the contract, not a gap.
 
-    The caller's real serving warmup — the executor's own warmup-proof
-    window, running the endpoint's own code (the two-stage/conditioned
-    call LTX and its siblings actually make) — performs the ONLY compile
-    this mint will ever see. Capturing that exact execution instead of a
-    second, separately-shaped call is what makes the published artifact
-    byte-derived from the same execution the proof observed: there is no
-    other code path that could re-create serving's call shape, so the
-    mint can never diverge from what it actually serves.
+    This used to be ``begin_fleet_mint``, which additionally re-pointed the
+    PROCESS-GLOBAL ``TORCHINDUCTOR_CACHE_DIR``/``TRITON_CACHE_DIR`` at a fresh
+    capture dir so the compile could be packed afterwards. With no artifact to
+    pack, that move has no purpose — and its removal deletes gw#608's whole
+    root-cause class (a capture dir stealing the process cache dir from a
+    sibling's seeded cell), pgw#777's multi-execution-group refusal, and the
+    one-capture-per-process conflict, along with the env-restore transaction
+    they needed.
 
-    Raises :class:`CompileArmRefused` — typed and deterministic — when there
-    is nothing to prove or publish; the caller's miss policy applies exactly
-    as it did for a failed :func:`mint_artifact` call. pgw#985: the two facts
-    that can refuse here are DIFFERENT and are now named as such. A pipeline
-    that owns no declared target is a WIRING fact; a process that cannot arm
-    the targets it does own (no CUDA, no toolchain, an operator eager pin) is
-    an ENVIRONMENT fact. Both used to raise the wiring sentence, so a cardless
-    mint pod reported "no compile targets resolved on TinyDiffusionPipeline"
-    about a pipeline whose ``.unet`` had resolved a frame earlier.
+    Raises :class:`CompileArmRefused` — typed and deterministic. pgw#985: the
+    two facts that can refuse here are DIFFERENT and are named as such. A
+    pipeline that owns no declared target is a WIRING fact; a process that
+    cannot arm the targets it does own (no CUDA, no toolchain, an operator
+    eager pin) is an ENVIRONMENT fact.
 
     The DECISION still has one evaluator — :func:`apply` — and this only names
     what it declined on, through the same :func:`arming_block` ``apply``
     itself consulted.
-
-    gw#608 ROOT CAUSE lived here: the cache-dir env is PROCESS-GLOBAL, and
-    this function re-pointed it BEFORE knowing the arm could succeed. On a
-    store-served LTX boot the no-compile-target upsampler sibling reached
-    this path after the distilled lane had seeded its delivered cell: the
-    env moved to a throwaway capture dir, the arm failed, the dir was
-    deleted — and the real warmup then looked up FX graphs in an empty
-    resurrected tmp dir (8/8 misses, live-proven; mint boots were immune
-    because their own capture registers first and the sibling is declined
-    BEFORE this call). The arm is therefore transactional now: nothing to
-    arm never touches the env, and an arm failure restores it exactly.
     """
     family = str(getattr(cfg, "family", "") or "(unset)")
     owned = [name for name, *_ in resolve_targets(pipe, cfg)]
@@ -4202,123 +4142,17 @@ def begin_fleet_mint(pipe: Any, cfg: Any, capture: Path) -> None:
             f"no compile target resolves on {type(pipe).__name__} for family "
             f"{family!r}: declared "
             f"targets={[str(t) for t in (getattr(cfg, 'targets', ()) or ())]}")
-    prior = {
-        env: os.environ.get(env)
-        for env in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR")
-    }
-    capture_env(capture)
-    try:
-        # `apply` DECIDES — one call, and it reads `arming_block` for the same
-        # preconditions this refusal then names. Asking `arming_block` here
-        # first would be a second gate `apply` does not answer to, and the
-        # decision must have exactly one evaluator.
-        if not apply(pipe, cfg, cache_ready=False, guard=True, allow_cold=True):
-            raise CompileArmRefused(
-                f"{type(pipe).__name__} owns the declared compile target(s) "
-                f"{owned} for family {family!r}, but this process cannot arm "
-                f"them: "
-                + (arming_block(pipe, cfg, cache_ready=False, allow_cold=True)
-                   or "apply() declined without naming a precondition"))
-    except BaseException:
-        for env, value in prior.items():
-            if value is None:
-                os.environ.pop(env, None)
-            else:
-                os.environ[env] = value
-        _reset_inductor_latch()
-        raise
-
-
-def finish_fleet_mint(
-    pipe: Any, cfg: Any, family: str, target: Path, capture: Path,
-    *, expected_graphs: int = 0,
-) -> Dict[str, Any]:
-    """Pack the capture dir a PASSED warmup proof just populated.
-
-    Callers must invoke this ONLY after the executor's warmup proof has
-    confirmed the real serving call exercised ``pipe``'s attached compile
-    targets (a successful compiled call recorded — never before: packing
-    ahead of the proof would reopen the publish-before-proof window
-    gw#587 closes, and packing an unexercised/failed capture would
-    publish bytes nothing ever proved served).
-
-    Unlike :func:`mint_artifact`, this never compiles anything itself —
-    the compile already happened, inside the proof window, driven by the
-    endpoint's own warmup. This function only packages what that warmup
-    produced.
-    """
-    captured = [p for p in (capture / "inductor").rglob("*") if p.is_file()]
-    if not captured:
-        raise RuntimeError(
-            "self-mint proof passed but captured nothing under "
-            "TORCHINDUCTOR_CACHE_DIR — the compile did not write here. "
-            + _capture_forensics(capture, pipe)
-        )
-    # gw#608 hardening: a minting boot proves its EXECUTION; this asserts
-    # its ARTIFACT. The pack must contain the FX-graph entries the proof's
-    # compiled set implies — an empty/partial fxgraph store (e.g. inductor
-    # latched elsewhere mid-process, or a cache-layer redirect miss) would
-    # publish a cell that can never serve any consumer, and the fleet would
-    # only find out one fail-closed boot at a time.
-    fx_entries = 0
-    fx_root = capture / "inductor" / "fxgraph"
-    if fx_root.is_dir():
-        fx_entries = sum(1 for p in fx_root.rglob("*") if p.is_file())
-    if fx_entries <= 0:
-        raise RuntimeError(
-            "self-mint capture contains NO FX-graph cache entries — the "
-            f"compile wrote {len(captured)} other file(s) here but no fx "
-            "entry, so either the fx cache was bypassed/disabled or nothing "
-            "re-compiled in this process; refusing to publish an unservable "
-            "cell. " + _capture_forensics(capture, pipe)
-        )
-    if expected_graphs > 0 and fx_entries < expected_graphs:
-        raise RuntimeError(
-            f"self-mint capture holds {fx_entries} FX-graph entrie(s) but "
-            f"the warmup proof compiled {expected_graphs} graph(s) — "
-            "partial capture, refusing to publish. "
-            + _capture_forensics(capture, pipe)
-        )
-
-    # pgw#681/#756: the guard-closure audit. The proof confirmed the graphs
-    # SERVE; this DOCUMENTS what they depend on. Guards the contract does
-    # not pin are named and emitted as a `guard_leak` event but do NOT
-    # refuse the mint — dynamo re-checks them at the consumer, where a real
-    # leak fails its guards and degrades to explicit eager (pgw#680). The
-    # returned manifest rides the cell as its dependency dump.
-    # pgw#719: the environment this capture traced under must still be the
-    # BOOT environment — drift (endpoint code mutating config/env behind
-    # our back) fails the mint red, naming the fact.
-    env_seal.assert_seal_unchanged("mint")
-    guard_manifest = guard_closure.closure_manifest(pipe, cfg, label=family)
-
-    # gw#564: record the execution contract exactly like the production
-    # build — w8a8 cells are contract_drift-gated on the graph signature and
-    # weight-lane manifest, so a mint without them can never re-adopt. Both
-    # are STATIC (module structure + declared shapes/targets), computed the
-    # same way whether sampled before or after the real compile.
-    graph_signature, weight_contract = execution_contract(pipe, cfg)
-    meta = artifact_metadata(
-        family=family,
-        source_ref="self-mint",
-        shapes=cfg.shapes,
-        targets=cfg.targets,
-        guidance_scales=getattr(cfg, "guidance_scales", ()),
-        low_vram_mode=low_vram_mode(pipe),
-        compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
-        weight_lane=pipeline_weight_lane(pipe),
-        lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
-        graph_signature=graph_signature,
-        weight_contract=weight_contract,
-        shape_contract=declared_contract_facts(cfg),
-        composition=composition_fingerprint(pipe, cfg),
-    )
-    meta[guard_closure.MANIFEST_KEY] = guard_manifest
-    tmp = target.with_suffix(".part")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    pack(capture, tmp, meta)
-    os.replace(tmp, target)
-    return meta
+    # `apply` DECIDES — one call, and it reads `arming_block` for the same
+    # preconditions this refusal then names. Asking `arming_block` here
+    # first would be a second gate `apply` does not answer to, and the
+    # decision must have exactly one evaluator.
+    if not apply(pipe, cfg, cache_ready=False, guard=True, allow_cold=True):
+        raise CompileArmRefused(
+            f"{type(pipe).__name__} owns the declared compile target(s) "
+            f"{owned} for family {family!r}, but this process cannot arm "
+            f"them: "
+            + (arming_block(pipe, cfg, cache_ready=False, allow_cold=True)
+               or "apply() declined without naming a precondition"))
 
 
 __all__ = [
@@ -4334,14 +4168,13 @@ __all__ = [
     "resolve_targets",
     "artifact_fx_lines",
     "artifact_metadata",
-    "begin_fleet_mint",
+    "arm_jit_intake",
     "capture_env",
     "cell_base_execution_lane",
     "drop_lora_execution_lane",
     "cell_execution_lane",
     "contract_drift",
     "counters_delta",
-    "delivered_cell_seeded",
     "cache_hit_count",
     "cache_miss_count",
     "enable",
@@ -4350,7 +4183,6 @@ __all__ = [
     "execution_contract",
     "execution_contract_digest",
     "family_from_ref",
-    "finish_fleet_mint",
     "parse_cell_ref",
     "find_artifact",
     "flavor_label",
@@ -4366,6 +4198,7 @@ __all__ = [
     "tenant_serve_window",
     "inductor_counters",
     "is_cache_ref",
+    "is_compile_armed",
     "execution_lane_bucket",
     "execution_lane_token",
     "execution_lane_drift",

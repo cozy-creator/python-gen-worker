@@ -135,7 +135,6 @@ src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS STANDALONE GE
 src/gen_worker/models/svdq.py::GEN_WORKER_SVDQ_ENGINE STANDALONE GEN_WORKER_SVDQ_ENGINE, same measured-then-requested ruling.
 src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_MAX_BYTES STANDALONE GEN_WORKER_MINT_RESUME_MAX_BYTES, resume-area capacity bound.
 src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_DIR STANDALONE GEN_WORKER_MINT_RESUME_DIR. pgw#929: the ENABLE used to be hidden inside an empty string; `resume_enabled()` now states it.
-src/gen_worker/mint_delegate.py::GEN_WORKER_MINT_IN_PROCESS STANDALONE GEN_WORKER_MINT_IN_PROCESS forces the in-process mint shape, which VIOLATES the liveness contract and is kept reachable to prove that, not to run.
 
 # ---------------------------------------------------------------------------
 # TRIPWIRE — guards whose entire purpose is to fire on a misconfiguration.
@@ -181,17 +180,18 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #
 # VERDICTS (declaration counts measured on the standing hub 2026-08-03):
 #
+#   DELETED by pgw#1010 — with the SHAPE it selected, not merely the switch:
+#     GEN_WORKER_MINT_IN_PROCESS        in-process minting existed only to pack
+#             a dynamo cell; a dynamo miss now serves JIT intake and packs
+#             nothing, so "mint in this process" is not a reachable state. The
+#             ten test sites pgw#995 was blocked on went with the shape.
+#
 #   DELETED by pgw#995 — default-ON, zero declarations:
 #     GEN_WORKER_BG_YIELD               pgw#677 bg-yield is now unconditional
 #     GEN_WORKER_EAGER_FIRST_BOOT       pgw#671 eager-first is now unconditional
 #     GEN_WORKER_AOT_WRAPPER_SPLIT_OFF  v1 ctor-split is now unconditional
 #
 #   NOT DELETED, and each for a stated reason:
-#     GEN_WORKER_MINT_IN_PROCESS        default-ON, zero declarations, SAFE to
-#             delete — blocked only on ten test sites across seven files that
-#             force the shape via this env and drive the executor. A strictly
-#             better parameter seam already exists (`enable_compiled(delegate=
-#             False)` -> `caller_forced_in_process`). Owner on pgw#995.
 #     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIVE: 5 SDXL releases declare it, 1
 #             endpoint carries a non-deleted entry. Deleting it changes a
 #             running endpoint.

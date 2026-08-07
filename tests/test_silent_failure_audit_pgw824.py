@@ -127,6 +127,12 @@ def test_fail_closed_names_the_cause_instead_of_one_shared_constant(
 
 #: The eager exits pgw#824 gave a classified cause, named as MEMBERS.
 #:
+#: pgw#1010 retired three (``delivered_cell_seeded``, ``capture_conflict``,
+#: ``multi_group_in_process``) with the in-process capture whose process-global
+#: cache-dir move was the only reason they existed, and renamed
+#: ``capture_arm_failed`` to ``jit_arm_failed`` — the arm it measures is the
+#: JIT INTAKE arm now, and there is no capture behind it.
+#:
 #: This list is the audit's own specification of which causes must exist, and
 #: it stays here rather than being read back out of ``EagerPhase``: an audit
 #: that enumerates the enum agrees with the code by construction, which is the
@@ -143,11 +149,9 @@ _DECLINE_PHASES = (
     EagerPhase.NO_CUDA,
     EagerPhase.NO_TOOLCHAIN,
     EagerPhase.NO_COMPILE_TARGET,
-    EagerPhase.DELIVERED_CELL_SEEDED,
     EagerPhase.KEY_COMPUTATION_FAILED,
-    EagerPhase.CAPTURE_CONFLICT,
-    EagerPhase.MULTI_GROUP_IN_PROCESS,
-    EagerPhase.CAPTURE_ARM_FAILED,
+    EagerPhase.JIT_ARM_FAILED,
+    EagerPhase.MANDATORY_LANE_NEEDS_A_CELL,
 )
 
 
@@ -164,7 +168,7 @@ def _phase_uses(member: EagerPhase) -> int:
 
 
 def test_every_fail_closed_exit_carries_a_distinct_token() -> None:
-    """The nine exits must not collapse back onto one token by accident: a
+    """The exits must not collapse back onto one token by accident: a
     reader groups on this string, so a duplicate silently merges two causes."""
     uses = {member: _phase_uses(member) for member in _DECLINE_PHASES}
     missing = sorted(m.name for m, n in uses.items() if n == 0)
@@ -186,11 +190,9 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "NO_CUDA": "no_cuda",
         "NO_TOOLCHAIN": "no_toolchain",
         "NO_COMPILE_TARGET": "no_compile_target",
-        "DELIVERED_CELL_SEEDED": "delivered_cell_seeded",
         "KEY_COMPUTATION_FAILED": "key_computation_failed",
-        "CAPTURE_CONFLICT": "capture_conflict",
-        "MULTI_GROUP_IN_PROCESS": "multi_group_in_process",
-        "CAPTURE_ARM_FAILED": "capture_arm_failed",
+        "JIT_ARM_FAILED": "jit_arm_failed",
+        "MANDATORY_LANE_NEEDS_A_CELL": "mandatory_lane_needs_a_cell",
         "CELL_QUARANTINED": "cell_quarantined",
         "MINT_IN_PROGRESS": "mint_in_progress",
         "MINT_UNAVAILABLE": "mint_unavailable",

@@ -477,7 +477,7 @@ def _spec(name: str, cls: type) -> EndpointSpec:
     return EndpointSpec(
         name=name, method=cls.run, kind="inference",
         payload_type=_In, output_mode="single", cls=cls, attr_name="run",
-        models={"pipeline": Hub("acme/sdxl-base", flavor="fp8-w8a8")},
+        models={"pipeline": Hub("acme/sdxl-base")},
         compile=Compile(shapes=(SHAPE,), family=FAMILY, text_len=0),
     )
 
@@ -485,11 +485,18 @@ def _spec(name: str, cls: type) -> EndpointSpec:
 class _Rig:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
-        # pgw#813: `mandatory_serving` no longer blocks delegation, so a w8a8
-        # miss delegates by default. This rig has no child process, and the
-        # doctrine under test (mint window OFF, serve window ON) is the
-        # IN-PROCESS mint's — which is what this switch selects.
-        monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
+        # pgw#1010: no export declaration is registered, so the miss takes the
+        # JIT INTAKE arm — the in-process compile the guard-miss doctrine
+        # (mint window OFF while compiling, serve window ON while serving) is
+        # about. It mints and publishes nothing, which is orthogonal to this
+        # file's subject and asserted below where it shows.
+        #
+        # The sim keys its entries under TORCHINDUCTOR_CACHE_DIR. The retired
+        # capture used to point that at a mint dir; an intake arm moves no env
+        # (that was gw#608's whole root cause), so the rig states the cache
+        # root itself — production leaves it wherever the image/worker set it.
+        monkeypatch.setenv(
+            "TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "inductor"))
         self.sim = _Sim()
         self.sent: List[pb.WorkerMessage] = []
         self.pipes: Dict[str, _Pipe] = {}
@@ -507,7 +514,12 @@ class _Rig:
 
         def _load_slot(*args: Any, **kwargs: Any) -> Any:
             pipe = _Pipe()
-            setattr(pipe, "_cozy_weight_lane", "w8a8")
+            # pgw#1010: a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
+            # from a cell — the dispatch fence pins every request to an active
+            # compile incarnation — so a family with no export declaration
+            # fails closed there instead of arming JIT intake. The doctrine
+            # this rig exercises is the intake compile itself, which is a plain
+            # lane's shape.
             self.pipes[f"pipe-{len(self.pipes)}"] = pipe
             return provision.SlotLoad(obj=pipe, is_pipeline=True)
 
@@ -524,6 +536,14 @@ class _Rig:
             cc, "inductor_counters", lambda: dict(self.sim.counters))
         monkeypatch.setattr(cell_key_mod, "compute", _fake_key_compute)
         monkeypatch.setattr(cc, "reset_target_code", lambda pipeline: 0)
+        # The sim never enters dynamo, so dynamo's cumulative compile clock
+        # never moves. Stub it: what is under test is that the executor READS
+        # it across the warm window and puts the number on the wire (pgw#1010 /
+        # th#1322), not what torch would have measured.
+        self.compile_wall = [0.0, 12.5]
+        monkeypatch.setattr(
+            cc, "compile_wall_seconds",
+            lambda: self.compile_wall.pop(0) if self.compile_wall else 12.5)
         # pgw#681 coexistence: when the guard-closure mint gate is present,
         # neutralize it — it audits REAL dynamo graphs, which this rig's
         # simulated torch boundary never creates. Orthogonal to the
@@ -564,18 +584,25 @@ async def _dispatch(rig: _Rig, run: pb.RunJob) -> pb.JobResult:
 def _run_job(rig: _Rig, spec: EndpointSpec, request_id: str) -> pb.RunJob:
     (target,) = rig.ex.compile_targets()
     model_ref = wire_ref(spec.models["pipeline"])
-    return pb.RunJob(
+    job = pb.RunJob(
         request_id=request_id, attempt=1, function_name=spec.name,
         input_payload=msgspec.msgpack.encode(_In(prompt="a cat")),
         models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
         snapshots={model_ref: pb.Snapshot(digest=MODEL_DIGEST)},
-        required_compile=pb.RequiredCompileExecution(
+    )
+    if target.active_compile_ref:
+        # The th#910 dispatch fence pins a request to the CELL the worker
+        # advertised. pgw#1010: an intake target advertises none — there is no
+        # artifact to fence on — so a hub that sent one would be naming a cell
+        # this pod never claimed, and the worker's own
+        # `required_compile_invalid` refusal is the correct answer to that.
+        job.required_compile.CopyFrom(pb.RequiredCompileExecution(
             target_incarnation_id=target.incarnation_id,
             cell_ref=target.active_compile_ref,
             cell_snapshot_digest=target.active_compile_snapshot_digest,
             contract_digest=target.contract_digest,
-        ),
-    )
+        ))
+    return job
 
 
 def test_tenant_guard_miss_end_to_end(
@@ -594,14 +621,28 @@ def test_tenant_guard_miss_end_to_end(
     rig = _Rig(tmp_path, monkeypatch, [spec])
 
     rig.boot(spec)
-    assert rig.ex.serving_tiers()["generate"] == "compiled"
+    # pgw#1010: JIT intake serves COMPILED CODE and names no artifact, so the
+    # platform tier — which means "serving from a cell" — is eager, and the
+    # target advertises active-less. The per-request axis is where the
+    # compiled-ness of an intake pod is stated (`serving_mode=jit_cell`).
+    assert rig.ex.serving_tiers()["generate"] == "eager"
     # Mint-window contract: every boot compile ran with the window OFF.
     assert rig.sim.compiles, "boot must have compiled"
     assert rig.sim.window_seen and not any(rig.sim.window_seen), (
         "the serve window leaked into a mint/warm window")
     (target,) = rig.ex.compile_targets()
     cell_ref = target.active_compile_ref
-    assert cell_ref
+    assert cell_ref == "", "an intake arm has no cell to advertise"
+    # pgw#1010 / th#1322: and the compile it just paid for is a NUMBER on the
+    # wire. The emitter used to be the mint parent's, and the mint no longer
+    # runs JIT — so this boot is the only place an AOT-vs-JIT cost comparison
+    # can get its JIT arm from.
+    jit = [m.activity_update for m in rig.sent
+           if m.WhichOneof("msg") == "activity_update"
+           and m.activity_update.kind == activity_mod.KIND_JIT_COMPILE]
+    assert jit and any(u.duration_ms > 0 for u in jit), (
+        "an intake boot compiled and reported no duration")
+    assert any("route=intake" in u.detail for u in jit)
 
     # The variable-we-don't-understand flips between mint and serve
     # (stride/autotune divergence between minting and serving workers).
@@ -634,9 +675,8 @@ def test_tenant_guard_miss_end_to_end(
 
     # Nothing was revoked, degraded, or disabled — the lane is healthy.
     assert target.active_compile_ref == cell_ref
-    assert rig.ex.serving_tiers()["generate"] == "compiled"
+    assert rig.ex.serving_tiers()["generate"] == "eager"
     assert rig.ex.unavailable == {}
-    assert not cc.cell_quarantined_in_process(cell_ref)
 
     # SECOND request of the shape: compiled, no new miss, no new event.
     served_before = len(rig.sim.served_compiled)

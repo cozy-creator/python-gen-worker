@@ -1,5 +1,18 @@
 # torch.compile cache artifacts (#384)
 
+> **pgw#1010 — "cell" means AOT cell.** The only artifact class the platform
+> publishes, delivers or adopts is `kind="aot-inductor"` (an exported `.pt2`,
+> `aot_mint` -> `aot_cells.discover` -> `aot_serve`). The
+> `kind="torch-inductor-cache"` artifact this document was written about is
+> RETIRED: `aot_cells` rejects it by name, so it had no consumer, and nothing
+> mints, seals or publishes one any more. JIT/dynamo compilation survives as
+> **intake** — a family with no export declaration arms
+> `compile_cache.arm_jit_intake`, compiles on the pod that needs it, serves
+> compiled for that pod's life, and produces no artifact. Honest cold boots are
+> the contract there, not a gap. Sections below that describe capturing,
+> packing or publishing an inductor cache are history; the keying, verification
+> and lane material still applies to the cell that survived.
+
 Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
 (model, shape) and needs a C toolchain prod worker images don't ship. The
 split:

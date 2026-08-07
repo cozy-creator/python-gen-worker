@@ -469,8 +469,7 @@ def test_the_bank_outlives_an_abandoned_mint(
     request = mint_delegate.build_request(
         mint_delegate.MintTask(
             pending=SimpleNamespace(
-                family="sdxl", cell_key=key, capture_dir=mint_root / "capture",
-                mint_root=mint_root, recipe="aot",
+                family="sdxl", cell_key=key, mint_root=mint_root,
                 cfg=SimpleNamespace(shapes=(), targets=(), family="sdxl")),
             pipe=None, function="generate", modules=("m",)),
         workdir=mint_root / "child-1", cap_bytes=0)
@@ -491,9 +490,8 @@ def test_the_bank_outlives_an_abandoned_mint(
 
     pending = fleet_cells.PendingSelfMint(
         family="sdxl", cell_key=key, ref=f"repo#{key}",
-        cfg=SimpleNamespace(family="sdxl"), target=mint_root / "cell.tar.gz",
-        capture_dir=mint_root / "capture", mint_root=mint_root,
-        publisher=None, delegated=True, recipe=fleet_cells.RECIPE_AOT)
+        cfg=SimpleNamespace(family="sdxl"), target=mint_root / "cell.tar.gz", mint_root=mint_root,
+        publisher=None)
     fleet_cells.abandon_self_mint(pending)
 
     assert not mint_root.exists(), (

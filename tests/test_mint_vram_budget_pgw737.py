@@ -47,7 +47,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, guard_closure, hot_swap
+from gen_worker import fleet_cells, guard_closure, hot_swap, mint_delegate
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -209,6 +209,11 @@ class _Harness:
         monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
+        # pgw#1010: every mint is a CHILD mint. This rig has no child process,
+        # so its outcome is stubbed — the budget decisions under test are the
+        # PROBE's (`mint_budget`), not the child's.
+        monkeypatch.setattr(
+            mint_delegate, "build_cell", self._fake_build_cell)
         monkeypatch.setattr(
             guard_closure, "closure_manifest",
             lambda pipe, cfg, label="": {
@@ -216,6 +221,34 @@ class _Harness:
                                     "entry": 0, "guards": []}],
                 "verdicts": {}, "leaks": []})
         self.ex = Executor(self.specs, _send, store=store)
+
+    async def _fake_build_cell(self, task: Any, **kwargs: Any) -> Any:
+        pending = task.pending
+        # The child takes `compile_delay_s` to produce its cell, and honours the
+        # parent's abandon signal — which is what a tenant OOM pulls.
+        abandon = kwargs.get("abandon")
+        if self.compile_delay_s:
+            if abandon is not None:
+                try:
+                    await asyncio.wait_for(
+                        abandon.wait(), timeout=self.compile_delay_s)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    return mint_delegate.DelegatedResult(
+                        status=mint_delegate.ABANDONED, attempts=1,
+                        detail="abandoned by the parent")
+            else:
+                await asyncio.sleep(self.compile_delay_s)
+        minted = fleet_cells.SelfMint(
+            family=pending.family, cell_key=pending.cell_key,
+            ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
+            artifact=pending.target)
+        pending._state["minted"] = minted
+        pending.target.parent.mkdir(parents=True, exist_ok=True)
+        pending.target.write_bytes(b"stub-cell")
+        return mint_delegate.DelegatedResult(
+            status=mint_delegate.ADOPTED, minted=minted, attempts=1)
 
     def _fake_enable_compiled(
         self, pipe: Any, cfg: Any, cache_dir: Any = None,
@@ -227,8 +260,7 @@ class _Harness:
         pending = fleet_cells.PendingSelfMint(
             family=FAMILY, cell_key="ck1-" + "a" * 56,
             ref=f"{cc.system_repo(FAMILY)}#ck1-{'a' * 56}",
-            cfg=cfg, target=mint_root / "cell.tar.gz",
-            capture_dir=capture, mint_root=mint_root,
+            cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,
         )
         original = pipe.transformer.forward
@@ -358,44 +390,16 @@ def test_wan22_card_declines_and_sdxl_card_fits(
 # ---------------------------------------------------------------------------
 
 
-def test_mint_declines_on_a_card_that_cannot_hold_the_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RED on 0.75.1: nothing checked, the plan ran, and the OOM took the
-    tenant with it. Post-fix: no seed runs at all, one structured
-    ``self_mint_skipped`` line on the wire, the tier stays eager, the cell
-    stays absent, and the request SUCCEEDS."""
-    h = _Harness(tmp_path, monkeypatch, compile_delay_s=0.05)
-    _card(monkeypatch, total_gib=79.19, resident_gib=54.2, peak_gib=65.4)
-
-    async def _run() -> None:
-        await h.boot()
-        await h.wait_mint()
-        assert h.rec.background_mint is None, (
-            "a mint was armed on a card that cannot hold its capture")
-        assert not h.compiles, "a capture was attempted despite the budget"
-        assert len(h.seed_runs) <= 1, (
-            "the mint seeded its plan anyway (only the plain-eager boot "
-            f"warm may run): {h.seed_runs}")
-        skipped = h.events("self_mint_skipped")
-        assert skipped, "the decline never reached the wire"
-        assert skipped[-1].phase == "insufficient_vram"
-        assert "mint_skipped reason=insufficient_vram" in skipped[-1].detail
-        assert "headroom=" in skipped[-1].detail
-        assert "needed~=" in skipped[-1].detail
-        # Eager, cell absent, and no FAILED mint activity: a declined mint
-        # is an outcome, not a worker failure (th#1228 — nothing here may
-        # read as "re-dispatch me").
-        assert h.ex.serving_tiers() == {"generate": "eager"}
-        mints = [
-            a for a in h.events("self_mint_compile")
-            if a.state == pb.ActivityState.ACTIVITY_STATE_FAILED
-        ]
-        assert not mints, "a declined mint reported itself FAILED"
-        res = await h.dispatch("r-declined")
-        assert res.status == pb.JOB_STATUS_OK, res.safe_message
-
-    asyncio.run(_run())
+# pgw#1010: `test_mint_declines_on_a_card_that_cannot_hold_the_capture` stood
+# here. Its subject is the BOOT-TIME capture budget — the gate that refused to
+# arm an in-process capture on a card without headroom. pgw#784 already exempted
+# delegated mints from it (nothing is armed on the serving pipe, and the child's
+# own co-residency ask is budgeted per ATTEMPT by `mint_delegate`), and
+# pgw#1010 made every mint delegated, so the gate has no reachable subject left.
+# The property it defended — a card with no room declines WITHOUT spending
+# anything — is asserted on the live path in
+# `test_mint_delegate_pgw784.py::test_no_room_for_a_co_resident_child_declines_without_spawning`,
+# and the probe itself is still covered by the row above.
 
 
 def test_small_resident_still_mints_on_the_same_rig(

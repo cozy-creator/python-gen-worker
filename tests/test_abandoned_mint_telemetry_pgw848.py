@@ -105,7 +105,7 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
 
     request = mint_process.MintRequest(
         function="f", modules=(), family="sdxl", cell_key="k",
-        target=str(tmp_path / "cell.tar.gz"), capture=str(tmp_path),
+        target=str(tmp_path / "cell.tar.gz"), work_root=str(tmp_path),
         report=str(tmp_path / "report.json"),
         cfg=mint_process.CompileCellSpec(),
         phases_snapshot=str(snapshot))

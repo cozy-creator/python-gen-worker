@@ -9,29 +9,23 @@ replicate was discovered as a live production failure, one at a time.
 
 Under self-mint the arming policy for a compile-declared function becomes:
 
-  1. HIT (hub attached the cell for this runtime's self-computed key):
-     arm through the delivered-cell path — today's behavior, unchanged.
-  2. MISS — prove-produces-the-mint (gw#587 CORRECT FIX): arm the
-     pipeline COLD into a fresh capture dir with NO synthetic warm call
-     (``compile_cache.begin_fleet_mint``). The executor's real warmup
-     proof — the endpoint's own serving code, the exact call shapes
-     production requests make — performs the only compile the mint ever
-     sees. The old design ran the producer-style ``_warm_call`` loop
-     first and proved afterwards; its synthetic call traced different FX
-     graphs than a conditioned/two-stage endpoint warmup (the gw#586
-     defect class resurfacing inside self-mint), so the proof correctly
-     refused its own artifact. Now the artifact is byte-derived from the
-     same execution the proof observed — there is no second code path
-     that re-creates serving's execution to drift from.
-  3. FINALIZE + PUBLISH, only after the proof PASSES
-     (``finalize_self_mint``): pack the proven capture, advertise its
-     real digest, then ship it through the hub's attested publish gate
-     (th#910) in the background so the next worker on this key is
-     store-served. A failed proof abandons the capture — nothing
-     unproven is ever packed or published (this also closes the old
-     publish-before-proof window). Publish failure NEVER affects serving;
-     a refusal (untrusted tier, attestation, quota) is the hub's call and
-     is fully recorded hub-side.
+  1. HIT (a published ``aot-inductor`` cell this runtime's axes select, or
+     the hub-attached artifact): arm through the delivered-cell path.
+  2. MISS on a family that DECLARES an export: delegate an AOT mint to a
+     child process (pgw#784/#805) while this pipeline serves eager, then
+     adopt the child's cell through the same gates a hub-delivered ``.pt2``
+     passes. Publish only what adopted — the hub's attested gate (th#910)
+     decides accept/refuse, and publish failure never affects serving.
+  3. MISS on a family with NO export declaration: **JIT intake** — arm the
+     declared targets cold-allowed and guarded, let this pod's own warmup
+     compile them, and produce NOTHING. This is pgw#1010's cut, and it is
+     the ratified reuse ruling made structural: reuse is AOT-only, JIT is
+     intake with honest cold boots. A JIT cell had no possible consumer
+     (``aot_cells`` adopts ``aot-inductor`` only, by name), so every one
+     minted was pod time and platform storage spent on an artifact nothing
+     could ever adopt. There is no seal, no key, no publish and no
+     ``cell_store`` row on this path; the ONLY artifact class this module
+     produces is ``aot-inductor``.
 
 The publish transport reuses the existing repo-commit machinery
 (``convert.hub.HubClient``) with a capability token minted by
@@ -68,15 +62,12 @@ from . import activity as activity_mod
 from . import aot_cells, cell_key
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
-from . import guard_closure
-from . import topology as topology_mod
 from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
 from .models.chunk_cas import sha256_file
 from .procsplit import broker
 # module import (not `from .loading import pipeline_weight_lane`): tests
 # monkeypatch models.loading.pipeline_weight_lane; stay late-bound.
 from .models import loading, provision
-from .models.memory import low_vram_mode
 from .request_context._helpers import _decode_unverified_jwt_claims
 from .convert.hub import HubPublishError
 from .api.export_contract import export_declaration
@@ -84,10 +75,13 @@ from .models import lora_lifted
 
 logger = logging.getLogger(__name__)
 
-#: pgw#805 mint recipes. ``dynamo`` is the inductor FX capture this module has
-#: run since gw#587; ``aot`` is torch.export + AOTInductor (``aot_mint``) —
-#: the ONLY kind ``aot_cells.discover`` will ever adopt, and the kind no
-#: serving pod has ever produced because nothing on this path called it.
+#: pgw#805 mint recipes, as re-cut by pgw#1010. ``aot`` (torch.export +
+#: AOTInductor) is the ONLY recipe that produces an artifact — the only kind
+#: ``aot_cells.discover`` will ever adopt. ``dynamo`` is no longer a mint at
+#: all: it names the JIT INTAKE posture a family without an export declaration
+#: serves under (compile in this process, serve compiled for this pod's life,
+#: publish nothing). Kept as a distinct token because every decline that
+#: chooses it is on the wire, and the hub counts them.
 RECIPE_DYNAMO = "dynamo"
 RECIPE_AOT = "aot"
 
@@ -96,9 +90,9 @@ RECIPE_AOT = "aot"
 class SelfMint:
     """Identity of one successfully adopted, FINALIZED self-minted cell.
 
-    Produced only by :func:`finalize_self_mint`, after the executor's
-    warmup proof confirms the real serving call exercised the compiled
-    targets it identifies. The serving-bootstrap half of gw#587/th#910:
+    Produced only by :func:`adopt_delegated_mint`, after the child's cell
+    passes the same arm gates a hub-delivered one does. The serving-bootstrap
+    half of gw#587/th#910:
     the minting worker ADVERTISES this identity under its own key so the
     hub's self-attested dispatch fence
     (``ActiveCompileRef == KeyRef(family, requested_cell_key)``) and
@@ -116,25 +110,22 @@ class SelfMint:
 
 @dataclass(frozen=True)
 class PendingSelfMint:
-    """A self-mint ARMED for capture, not yet proven or packed (gw#587
-    CORRECT FIX).
+    """An AOT mint this worker OWES, handed to a child process (pgw#784).
 
-    ``enable_compiled`` returns this on a miss instead of an already-
-    packed :class:`SelfMint`: the pipeline is armed cold, pointed at
-    ``capture_dir``, with NO synthetic warm call run against it. Only the
-    executor's real warmup proof — the endpoint's own serving code —
-    performs the compile this mint will ever see. ``ref`` is computable
-    immediately (STATIC axes: sku/torch/image/weight-lane/shapes/graph
-    structure — never the traced FX graph bytes), so the worker can
-    advertise its claimed key ref at arm time; ``finalize_self_mint``
-    packs the artifact and computes the real digest only after the proof
-    passes, and publishes only from that proven capture.
+    ``enable_compiled`` returns this on a miss instead of an already-packed
+    :class:`SelfMint`: the live pipeline keeps serving eager while the child
+    exports, and ``adopt_delegated_mint`` swaps it through the ordinary
+    delivered-cell path once the child's cell earns adoption.
 
-    One instance may be SHARED by several pipelines of one record whose
-    axes compute the same key (the qwen edit shape: two lanes, one family
-    cell) — they cold-compile into the one capture during the one warmup
-    window, and the packed cell is their union. ``_state`` memoizes the
-    finalize outcome so sibling candidates converge on one pack/publish.
+    One instance may be SHARED by several pipelines of one record whose axes
+    compute the same key (the qwen edit shape: two lanes, one family cell).
+    ``_state`` memoizes the adopt outcome so sibling candidates converge on
+    one publish.
+
+    pgw#1010: a DYNAMO miss no longer builds one of these. The JIT recipe
+    keeps its serving role (intake, ``compile_cache.arm_jit_intake``) and
+    produces no artifact at all, so every pending in this module is an AOT
+    mint and every pending is delegated.
     """
 
     family: str
@@ -142,22 +133,15 @@ class PendingSelfMint:
     ref: str
     cfg: Any
     target: Path
-    capture_dir: Path
     mint_root: Path
     publisher: Optional["CellPublisher"]
     cache_dir: Optional[Path] = None
     #: pgw#784: this mint is built by a CHILD PROCESS, so the live pipeline
     #: was never armed and this process holds no capture. The live pipe stays
     #: plain eager until ``adopt_delegated_mint`` swaps it through the
-    #: ordinary delivered-cell path.
-    delegated: bool = False
-    #: pgw#805: WHICH mint produces this cell. ``"dynamo"`` is the inductor FX
-    #: capture this module has always run; ``"aot"`` is torch.export +
-    #: AOTInductor (``aot_mint``), the artifact kind ``aot_cells.discover``
-    #: actually looks for. An ``"aot"`` pending's ``cell_key``/``ref`` are a
-    #: CAPTURE HANDLE only — a real AOT key folds the combined graph hash and
-    #: is unknowable until the export finishes, so it is never advertised.
-    recipe: str = RECIPE_DYNAMO
+    #: ordinary delivered-cell path. Always true since pgw#1010 — the
+    #: in-process capture existed only to pack a dynamo cell.
+    delegated: bool = True
     #: th#1355: when this mint was ARMED. arm -> finalize is the window the
     #: compile happens in, so the elapsed time is this cell's mint cost. It is
     #: reported to the hub at publish-intent and lands on the cell's own
@@ -1147,39 +1131,73 @@ def _arming_policy(
         return _fail_closed(
             pipe, "no C compiler for the self-mint", selection_bug,
             phase=EagerPhase.NO_TOOLCHAIN)
-    # gw#608 ROOT CAUSE gates (order matters — BEFORE any process-global
-    # cache-dir mutation):
-    # (a) a slot object with no resolvable compile target (the LTX upsampler
-    #     shape) must never open a capture — begin_fleet_mint's env re-point
-    #     used to happen before its no-target raise, leaving the process
-    #     cache dir on a deleted tmp path and every seeded lookup missing;
-    # (b) once this process serves from a SEEDED delivered cell, any sibling
-    #     self-mint capture would re-point the one global cache dir away
-    #     from it — decline via the ordinary miss policy instead (plain
-    #     lanes eager, mandatory lanes typed refusal).
+    # A slot object with no resolvable compile target (the LTX upsampler
+    # shape) has nothing to arm and nothing to mint.
     if not cc.has_compile_target(pipe, cfg):
         return _fail_closed(
             pipe, "no compile target resolves on this pipeline", selection_bug,
             phase=EagerPhase.NO_COMPILE_TARGET)
-    if cc.delivered_cell_seeded() and not delegate:
-        # pgw#784: this gate exists ONLY because an in-process capture moves
-        # the process-global inductor cache dir. A DELEGATED mint's capture
-        # lives in the child, so the hazard does not exist — and a sibling
-        # whose own cell is missing can now mint it instead of being eager
-        # for life because an unrelated slot got a delivered cell first.
-        return _fail_closed(
-            pipe,
-            "a delivered cell is seeded in this process; a self-mint "
-            "capture would re-point the process-global inductor cache dir "
-            "away from it (gw#608)", selection_bug,
-            phase=EagerPhase.DELIVERED_CELL_SEEDED)
-
     # gw#561: the eager-miss rollback in provision.enable_compiled dropped
     # the branch lane; the mint must key + trace the DECLARED graph family.
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if bucket:
         cc.apply_lora_execution_lane(pipe, bucket)
 
+    if delegate:
+        pipe_refusal = delegation_refusal(pipe, cfg)
+        if pipe_refusal:
+            logger.info(
+                "fleet-cells: %s cannot mint out of process (%s) — no AOT "
+                "mint is possible on this pipe (pgw#784)", family, pipe_refusal)
+            delegate = False
+            delegate_refusal = pipe_refusal
+
+    # pgw#805/#1010: WHICH recipe this miss runs, decided ONCE, after
+    # `delegate` is final and on the branch-bearing lane the export would
+    # trace. `aot` is the only recipe that produces an artifact; every other
+    # answer is JIT INTAKE, and every one of them is named on the wire by
+    # `mint_recipe` itself.
+    recipe = mint_recipe(
+        pipe, cfg, delegate=delegate, delegate_refusal=delegate_refusal)
+    if recipe != RECIPE_AOT:
+        # pgw#1010: a MANDATORY (w8a8/w4a4) lane is compiled-from-a-CELL by
+        # contract — the dispatch fence pins every request to an active
+        # compile incarnation (th#910), and an intake arm has no identity to
+        # pin. Arming it would compile a whole boot's worth of graphs for a
+        # pod that then refuses every request `required_compile_missing`. So
+        # it fails closed here, typed, exactly as a mandatory lane did before
+        # self-mint existed: to serve a mandatory lane a family must declare
+        # an export, because an AOT cell is the only cell there is.
+        if cc.mandatory_serving(pipe):
+            if bucket:
+                cc.drop_lora_execution_lane(pipe)
+            return _fail_closed(
+                pipe,
+                "this lane serves only from a cell and this family declares "
+                "no export, so no cell can be minted for it (pgw#1010)",
+                selection_bug, phase=EagerPhase.MANDATORY_LANE_NEEDS_A_CELL)
+        # INTAKE. Arm the declared targets and let this pod's own warmup
+        # compile them — nothing is captured, keyed, packed, published or
+        # owed. There is no capture dir, so gw#608's process-global cache
+        # move, pgw#777's multi-group refusal and the one-capture-per-process
+        # conflict are all gone with it: an intake arm is just an arm.
+        try:
+            cc.arm_jit_intake(pipe, cfg)
+        except Exception as exc:  # noqa: BLE001 — arm failure => miss policy
+            logger.warning("fleet-cells: JIT intake arm failed (%s)", exc)
+            if bucket:
+                cc.drop_lora_execution_lane(pipe)
+            return _fail_closed(
+                pipe, f"jit intake arm failed: {exc}", selection_bug,
+                phase=EagerPhase.JIT_ARM_FAILED)
+        logger.info(
+            "fleet-cells: JIT intake armed for %s (lane=%s) — this pod "
+            "compiles its own graphs and serves them for its own life; no "
+            "cell is minted, keyed or published (pgw#1010)",
+            family, loading.pipeline_weight_lane(pipe) or "plain")
+        return ArmOutcome(armed=True, selection_bug=selection_bug)
+
+    # --- AOT, and only AOT, from here down --------------------------------
     # ``cell_key`` is computable from STATIC axes (sku/torch/image/weight
     # lane/declared shapes+targets/module structure) — never the traced FX
     # graph bytes — so the ref the hub's self-attested dispatch fence needs
@@ -1231,12 +1249,12 @@ def _arming_policy(
             eager_reason=EagerPhase.CELL_QUARANTINED)
     finalized_prior = finalized_in_process(key)
     if finalized_prior is not None:
-        # This process already minted, proved, and FOLDED this exact cell
-        # into the live cache root — re-arm cache_ready from those entries
-        # (the proof warmup then serves a real FX hit) instead of opening a
-        # doomed second capture the resident compiled code would starve.
+        # This process already minted and ADOPTED this exact cell — re-arm
+        # the same artifact through the same AOT gates instead of paying a
+        # second export for bytes that are already on this disk.
         try:
-            armed_ready = cc.apply(pipe, cfg, cache_ready=True)
+            armed_ready = bool(provision.arm_aot(
+                pipe, cfg, cache_dir, Path(finalized_prior.artifact), bucket))
         except Exception as exc:  # noqa: BLE001 — fall back to a fresh mint
             logger.warning(
                 "fleet-cells: re-arm from the in-process finalized cell "
@@ -1245,272 +1263,58 @@ def _arming_policy(
         if armed_ready:
             logger.info(
                 "fleet-cells: re-armed %s from this process's finalized "
-                "cell (key=%s) — no second capture (pgw#672)", family, key)
+                "cell (key=%s) — no second mint (pgw#672)", family, key)
             return ArmOutcome(
                 armed=True, self_mint=finalized_prior,
                 selection_bug=selection_bug)
 
-    # gw#587 CORRECT FIX (the defect this replaces: the old design minted
-    # via a separate producer-style ``mint_artifact``/``_warm_call`` BEFORE
-    # the real serving warmup ran — a synthetic single-stage call that can
-    # trace DIFFERENT FX graphs than a conditioned/two-stage endpoint's own
-    # warmup (the gw#586 defect class, live-found resurfacing inside self-
-    # mint). Arm cold instead: the caller's real warmup — run by the
-    # executor immediately after this returns — is the ONLY compile this
-    # mint will ever see, so the eventual capture is byte-derived from
-    # exactly the execution the proof observes. Nothing is packed or
-    # published here; ``finalize_self_mint`` does that, and only after the
-    # proof passes.
-    #
-    # The inductor capture dir is process-global (one TORCHINDUCTOR_CACHE_DIR)
-    # so at most ONE capture key can be live at a time: sibling pipes of the
-    # same record computing the SAME key share the one capture (their union
-    # is the family cell — the qwen edit shape); a DIFFERENT key while a
-    # capture is pending declines loudly into the ordinary miss policy (a
-    # second dir would corrupt the first capture's byte-derivation).
+    # Sibling pipes of one record whose axes compute the SAME key share one
+    # child mint (the qwen edit shape: two lanes, one family cell) — the
+    # first arm registers the pending and every sharer adopts its cell.
     with _PENDING_LOCK:
         existing = _PENDING.get(key)
-        conflict = next((k for k in _PENDING if k != key), None)
-    if conflict is not None and existing is None and not delegate:
-        logger.warning(
-            "fleet-cells: self-mint declined for %s key=%s — capture already "
-            "pending for key=%s (one inductor capture dir per process)",
-            family, key, conflict)
-        if bucket:
-            cc.drop_lora_execution_lane(pipe)
-        return _fail_closed(
-            pipe, f"another self-mint capture is pending (key {conflict})",
-            selection_bug, phase=EagerPhase.CAPTURE_CONFLICT)
-
     if existing is not None:
-        mint_root, capture_dir = existing.mint_root, existing.capture_dir
+        mint_root = existing.mint_root
         target = existing.target
     else:
         mint_root = Path(tempfile.mkdtemp(prefix="selfmint-"))
-        capture_dir = mint_root / "capture"
         label = cc.flavor_label(
             cc.runtime_key()["sku"], cc.runtime_key()["torch"],
             loading.pipeline_weight_lane(pipe))
         target = mint_root / f"{label}.tar.gz"
 
-    if delegate:
-        pipe_refusal = delegation_refusal(pipe, cfg)
-        if pipe_refusal:
-            logger.info(
-                "fleet-cells: %s cannot mint out of process (%s) — minting "
-                "in-process instead (pgw#784)", family, pipe_refusal)
-            delegate = False
-            delegate_refusal = pipe_refusal
-    # pgw#805: WHICH recipe this miss mints, decided once, after `delegate` is
-    # final. Called on both branches so an AOT decline is named even when the
-    # in-process shape is the one that runs.
-    recipe = mint_recipe(
-        pipe, cfg, delegate=delegate, delegate_refusal=delegate_refusal)
-    if delegate:
-        # pgw#784: NOTHING is armed on the live pipeline. It keeps serving
-        # plain eager — no guarded wrappers, no branch containers, no
-        # inductor state, and (unlike the in-process capture) no
-        # process-global TORCHINDUCTOR_CACHE_DIR move, which is why the
-        # one-live-capture-per-process restriction above does not apply.
-        # ``armed=False`` is the honest answer: this pipe serves eager right
-        # now. The mint obligation rides the returned pending.
-        pending = PendingSelfMint(
-            family=family, cell_key=key,
-            ref=f"{cc.system_repo(family)}#{key}",
-            cfg=cfg, target=target, capture_dir=capture_dir,
-            mint_root=mint_root, publisher=publisher, cache_dir=cache_dir,
-            delegated=True, recipe=recipe,
-        )
-        with _PENDING_LOCK:
-            _PENDING.setdefault(key, pending)
-        logger.info(
-            "fleet-cells: DELEGATED %s self-mint for %s (key=%s) — a child "
-            "process builds the cell while this process serves eager "
-            "(pgw#784/#805)", recipe, family, key)
-        activity_mod.emit_event(
-            "self_mint_started",
-            f"family={family} recipe={recipe} key={key} "
-            f"lane={loading.pipeline_weight_lane(pipe) or 'plain'}: a "
-            f"compile-cell miss opened a delegated mint; this worker serves "
-            f"eager throughout",
-            phase=recipe,
-        )
-        return ArmOutcome(
-            armed=False, self_mint=pending, selection_bug=selection_bug,
-            # pgw#824: eager RIGHT NOW, but for a reason with an end — the
-            # child is building the cell. A request row carrying
-            # `mint_in_progress` is a fleet that is warming up; one carrying
-            # `no_toolchain` is a fleet that never will. Reading them as the
-            # same "" was the whole gap.
-            eager_reason=EagerPhase.MINT_IN_PROGRESS)
-
-    # pgw#777 / DPA-8: the IN-PROCESS capture moves the process-global
-    # TORCHINDUCTOR_CACHE_DIR and clears inductor's latch for the whole
-    # interpreter — under G in-process execution groups that lands mid-compile
-    # or mid-serve on G-1 sibling cards (a mint published from bytes another
-    # group produced, or a sibling's seeded FX entries going invisible). The
-    # delegated route dissolves this (its capture lives in the mint child's
-    # own process); when delegation was refused, a multi-group worker REFUSES
-    # the in-process capture rather than arbitrating a control plane that was
-    # never per-group. Typed, and scoped by the miss policy like every other
-    # decline here.
-    topo = topology_mod.installed_topology()
-    if topo is not None and int(getattr(topo, "execution_groups", 1) or 1) > 1:
-        logger.warning(
-            "fleet-cells: in-process self-mint refused for %s key=%s — this "
-            "worker runs %d execution groups in one process and the inductor "
-            "capture env is process-global (pgw#777)", family, key, topo.execution_groups)
-        if bucket:
-            cc.drop_lora_execution_lane(pipe)
-        return _fail_closed(
-            pipe,
-            f"in-process mint refused at groups={topo.execution_groups}: the inductor "
-            "capture env is process-global (pgw#777/DPA-8)",
-            selection_bug, phase=EagerPhase.MULTI_GROUP_IN_PROCESS)
-
-    try:
-        cc.begin_fleet_mint(pipe, cfg, capture_dir)
-    except Exception as exc:  # noqa: BLE001 — arm failure => miss policy
-        logger.warning("fleet-cells: self-mint arm failed (%s)", exc)
-        if existing is None:
-            shutil.rmtree(mint_root, ignore_errors=True)
-        if bucket:
-            cc.drop_lora_execution_lane(pipe)
-        return _fail_closed(
-            pipe, f"self-mint arm failed: {exc}", selection_bug,
-            phase=EagerPhase.CAPTURE_ARM_FAILED)
-
-    if existing is not None:
-        logger.info(
-            "fleet-cells: joined pending self-mint capture for %s (key=%s)",
-            family, key)
-        return ArmOutcome(
-            armed=True, self_mint=existing, selection_bug=selection_bug)
-
+    # pgw#784: NOTHING is armed on the live pipeline. It keeps serving plain
+    # eager — no guarded wrappers, no branch containers, no inductor state.
+    # ``armed=False`` is the honest answer: this pipe serves eager right now.
+    # The mint obligation rides the returned pending.
     pending = PendingSelfMint(
-        family=family, cell_key=key, ref=f"{cc.system_repo(family)}#{key}",
-        cfg=cfg, target=target, capture_dir=capture_dir, mint_root=mint_root,
-        publisher=publisher, cache_dir=cache_dir, recipe=recipe,
+        family=family, cell_key=key,
+        ref=f"{cc.system_repo(family)}#{key}",
+        cfg=cfg, target=target,
+        mint_root=mint_root, publisher=publisher, cache_dir=cache_dir,
     )
     with _PENDING_LOCK:
-        _PENDING[key] = pending
+        _PENDING.setdefault(key, pending)
     logger.info(
-        "fleet-cells: armed self-mint capture for %s (key=%s) — the real "
-        "warmup proof performs the only compile this mint will see",
-        family, key)
+        "fleet-cells: DELEGATED %s self-mint for %s (key=%s) — a child "
+        "process builds the cell while this process serves eager "
+        "(pgw#784/#805)", recipe, family, key)
     activity_mod.emit_event(
         "self_mint_started",
-        f"family={family} recipe={recipe} key={key}: a compile-cell miss "
-        f"armed an in-process capture",
+        f"family={family} recipe={recipe} key={key} "
+        f"lane={loading.pipeline_weight_lane(pipe) or 'plain'}: a "
+        f"compile-cell miss opened a delegated mint; this worker serves "
+        f"eager throughout",
         phase=recipe,
     )
     return ArmOutcome(
-        armed=True, self_mint=pending, selection_bug=selection_bug)
-
-
-def finalize_self_mint(
-    pipe: Any, pending: "PendingSelfMint", *, expected_graphs: int = 0,
-) -> Optional[SelfMint]:
-    """Pack a self-mint AFTER the executor's warmup proof passes.
-
-    Called from the executor's warmup-proof loop, per proven candidate —
-    never before the proof confirms a real, successful compiled call on
-    ``pipe``. Memoized on the pending object: when several sibling pipes
-    share one capture (same key), the first proven candidate packs; later
-    siblings receive the same finalized identity without re-packing. The
-    capture holds ONLY graphs the warmup actually compiled, so the executor
-    decides publish/withhold separately (:func:`publish_self_mint` /
-    :func:`withhold_self_mint_publish`) once sibling coverage is known
-    (gw#612: an unexercised mandatory sibling means an incomplete cell).
-
-    Packing failure never un-serves the request (``pipe``'s compiled
-    callables are already live in-process); it only means this boot cannot
-    advertise/publish a cell, so the caller must treat a ``None`` return
-    the same as a disproven candidate (unwrap, and fail closed for
-    mandatory lanes — never advertise or publish an artifact nothing
-    proved).
-    """
-    state = pending._state
-    if "minted" in state:
-        return state["minted"]  # sibling already finalized (or failed: None)
-
-    try:
-        meta = cc.finish_fleet_mint(
-            pipe, pending.cfg, pending.family, pending.target,
-            pending.capture_dir, expected_graphs=expected_graphs)
-    except Exception as exc:  # noqa: BLE001 — pack failure => caller disproves
-        logger.warning(
-            "fleet-cells: self-mint pack failed after a passed proof (%s) — "
-            "the compiled callables stay live for this process, but this "
-            "boot cannot advertise or publish a cell", exc)
-        # pgw#677 reopen: this exit swallowed the pgw#681 closure-gate
-        # refusal (and every other pack failure) into unreachable pod logs
-        # — the ie#546 final cycle lost its root cause to exactly that.
-        # The reason now rides the wire as a typed, countable event.
-        activity_mod.emit_event(
-            "self_mint_abort",
-            f"pack/finalize failed for family={pending.family} "
-            f"key={pending.cell_key}: {type(exc).__name__}: {exc}",
-            phase="pack_failed",
-        )
-        mark_terminus(pending, TERMINUS_ABORTED)
-        state["minted"] = None
-        _unregister(pending)
-        shutil.rmtree(pending.mint_root, ignore_errors=True)
-        return None
-
-    key = str(meta.get("cell_key") or "").strip() or pending.cell_key
-    minted = SelfMint(
-        family=pending.family, cell_key=key,
-        ref=f"{cc.system_repo(pending.family)}#{key}",
-        snapshot_digest="sha256:" + sha256_file(pending.target),
-        artifact=pending.target,
-    )
-    state["minted"] = minted
-    state["meta"] = dict(meta)
-    # th#1355: the mint cost, banked at the moment the cell becomes real.
-    state["mint_duration_ms"] = max(
-        0, int((time.monotonic() - pending.armed_at) * 1000))
-    _unregister(pending)
-    with _PENDING_LOCK:
-        # pgw#672: remember the finalized identity so a later same-key arm
-        # in this process reuses the folded cell instead of re-minting.
-        _FINALIZED[key] = minted
-    packed_mb = pending.target.stat().st_size / 1e6
-    logger.info(
-        "fleet-cells: self-mint proof passed for %s (key=%s, %.1f MB) — "
-        "serving compiled; publish decided after sibling coverage is known",
-        pending.family, key, packed_mb)
-    # pgw#815: the SEAL is a terminus and must be countable. A pack that
-    # "succeeded" against an almost-empty capture and a real one used to be
-    # the same silence; the byte count and the key are the two facts that
-    # tell them apart without pod logs.
-    activity_mod.emit_event(
-        "self_mint_publish",
-        f"family={pending.family} key={key}: packed {packed_mb:.1f} MB from "
-        f"the proven capture; publish decided after sibling coverage",
-        phase="sealed",
-    )
-    mark_terminus(pending, TERMINUS_SEALED)
-
-    # Hygiene: fold the proven capture into the live compile-cache root and
-    # re-point inductor there (the same end state the delivered-cell adoption
-    # path leaves), so later boots/adoptions in this process are not aimed at
-    # the soon-to-be-deleted temp capture dir. Best-effort — the in-process
-    # compiled callables never depend on it.
-    try:
-        live_root = (
-            Path(pending.cache_dir) if pending.cache_dir
-            else Path.home() / ".cache" / "gen-worker") / "compile-cache"
-        with cc._SEED_ARM_LOCK:
-            cc._merge_staged_cache(pending.capture_dir, live_root)
-            cc.seed_env(live_root)
-    except Exception:
-        logger.debug(
-            "fleet-cells: live-cache fold of the proven capture failed",
-            exc_info=True)
-
-    return minted
+        armed=False, self_mint=pending, selection_bug=selection_bug,
+        # pgw#824: eager RIGHT NOW, but for a reason with an end — the
+        # child is building the cell. A request row carrying
+        # `mint_in_progress` is a fleet that is warming up; one carrying
+        # `no_toolchain` is a fleet that never will. Reading them as the
+        # same "" was the whole gap.
+        eager_reason=EagerPhase.MINT_IN_PROGRESS)
 
 
 def _packed_metadata(artifact: Path) -> Dict[str, Any]:
@@ -1527,20 +1331,11 @@ def adopt_delegated_mint(
 ) -> Optional[SelfMint]:
     """pgw#784: adopt a cell a CHILD PROCESS just built, then publish it.
 
-    The delegated twin of :func:`finalize_self_mint`, and deliberately a
-    thinner one: there is nothing to pack here — the child already packed —
-    so this is exactly the DELIVERED-cell adoption the cache-HIT path runs
-    (``compile_cache.enable`` with an explicit artifact: stage, ``verify()``,
-    key match, drift, seed, arm). ``verify()`` semantics are untouched
-    (th#1098 exact identity): the child's cell either describes this runtime
-    on every axis or it does not exist for it.
-
-    That is the whole point of the split. In-process capture made the proof
-    tautological — the artifact was byte-derived from the very execution the
-    proof observed, so it could not fail to match. A child-built cell has to
-    EARN adoption through the same gates a hub-delivered cell does, and when
-    it cannot, the honest outcome is the one every miss already has: unwrap,
-    serve eager, leave the cell absent, publish nothing. A parity gap
+    There is nothing to pack here — the child already packed — so this is
+    exactly the DELIVERED-cell adoption the cache-HIT path runs. A child-built
+    cell EARNS adoption through the same gates a hub-delivered cell does, and
+    when it cannot, the honest outcome is the one every miss already has:
+    unwrap, serve eager, leave the cell absent, publish nothing. A parity gap
     degrades; it never poisons the store.
 
     ``None`` = not adoptable. The caller treats that exactly like a disproven
@@ -1563,36 +1358,28 @@ def adopt_delegated_mint(
     # instead of as an empty string that reads like "no reason exists".
     refusal: Tuple[str, str] = ("unclassified_arm_refusal", "")
     try:
-        if pending.recipe == RECIPE_AOT:
-            # pgw#805: an exported cell arms through the AOT gates
-            # (lifted-binding install -> aot_serve.enable -> rollback), not
-            # the inductor seed path. Same gates a hub-delivered `.pt2`
-            # passes; `provision.enable_compiled` itself is not reusable here
-            # because its pgw#709 receipts gate would drop a cell this pod
-            # minted seconds ago and the hub has not countersigned yet.
-            # pgw#999: the outcome is KEPT. `arm_aot` returns a classified
-            # `AdoptOutcome` (`contract_invalid`, `constants_unbound`,
-            # `no_arm_for_mode`, `numerics_refused`, …) and this call site
-            # used to spend it on `bool(...)`. That discard cost attempt 26
-            # 2 h 45 m and $2.72: a 36/36 mint sealed, finalized, and was then
-            # refused by three events that all said "could not adopt".
-            outcome = provision.arm_aot(
-                pipe, pending.cfg, pending.cache_dir, pending.target,
-                int(getattr(pending.cfg, "lora_bucket", 0) or 0))
-            armed = bool(outcome)
-            if not armed:
-                refusal = (outcome.reason or "unclassified_arm_refusal",
-                           outcome.detail or outcome.identity)
-        else:
-            armed = bool(cc.enable(pipe, pending.cfg, pending.cache_dir,
-                                   artifact=pending.target))
-            if not armed:
-                # `cc.enable` returns a bare bool and RAISES for the refusals
-                # it can name, so a falsy return genuinely carries no reason.
-                # Saying so by name beats inventing one.
-                refusal = ("jit_enable_declined",
-                           "compile_cache.enable declined without raising; it "
-                           "reports no classified reason on this path")
+        # pgw#805: an exported cell arms through the AOT gates (lifted-binding
+        # install -> aot_serve.enable -> rollback), not the inductor seed path.
+        # Same gates a hub-delivered `.pt2` passes; `provision.enable_compiled`
+        # itself is not reusable here because its pgw#709 receipts gate would
+        # drop a cell this pod minted seconds ago and the hub has not
+        # countersigned yet.
+        # pgw#999: the outcome is KEPT. `arm_aot` returns a classified
+        # `AdoptOutcome` (`contract_invalid`, `constants_unbound`,
+        # `no_arm_for_mode`, `numerics_refused`, …) and this call site
+        # used to spend it on `bool(...)`. That discard cost attempt 26
+        # 2 h 45 m and $2.72: a 36/36 mint sealed, finalized, and was then
+        # refused by three events that all said "could not adopt".
+        # pgw#1010: there is no second branch — a delegated mint is an AOT
+        # mint, and the inductor-seed adopt it used to fall back to armed an
+        # artifact class nothing publishes any more.
+        outcome = provision.arm_aot(
+            pipe, pending.cfg, pending.cache_dir, pending.target,
+            int(getattr(pending.cfg, "lora_bucket", 0) or 0))
+        armed = bool(outcome)
+        if not armed:
+            refusal = (outcome.reason or "unclassified_arm_refusal",
+                       outcome.detail or outcome.identity)
     except cc.CellSelectionBugError as exc:
         # th#883, delegated edition: the child's own cell, whose axes describe
         # exactly this runtime, refused to arm. Loud — it is a bug in the one
@@ -1773,76 +1560,6 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
     shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
-def republish_after_shape_warm(
-    pipe: Any,
-    cfg: Any,
-    family: str,
-    publisher: Optional["CellPublisher"],
-    live_root: Path,
-) -> bool:
-    """Replace the fleet cell with the live cache root's grown contents
-    (pgw#622): after a background novel-shape warm, the root holds the
-    adopted/minted graphs PLUS the fresh signature's, so republishing under
-    the same key means no other worker ever compiles that (shape, GPU,
-    lane) again. Synchronous (callers run it off the serving path); every
-    failure is non-fatal to serving."""
-    if publisher is None or not publisher.enabled():
-        logger.warning(
-            "hot-swap: SHAPE_WARM_WITHOUT_PUBLISH_SINK family=%s — the "
-            "novel-shape graphs stay local to this pod", family)
-        return False
-    if not (Path(live_root) / "inductor").is_dir():
-        logger.warning(
-            "hot-swap: live cache root %s has no inductor tree; nothing to "
-            "republish", live_root)
-        return False
-
-    tmp_root = Path(tempfile.mkdtemp(prefix="cellrepub-"))
-    try:
-        # pgw#681/#756: the grown cell's guard set is classified and rides
-        # the republished cell as its manifest. ADVISORY — a background
-        # novel-signature warm that baked an out-of-contract guard is named
-        # and emitted as a `guard_leak` event; it does not block republish.
-        guard_manifest = guard_closure.closure_manifest(
-            pipe, cfg, label=family)
-        graph_signature, weight_contract = cc.execution_contract(pipe, cfg)
-        meta = cc.artifact_metadata(
-            family=family,
-            source_ref="shape-warm",
-            shapes=cfg.shapes,
-            targets=cfg.targets,
-            guidance_scales=getattr(cfg, "guidance_scales", ()),
-            low_vram_mode=low_vram_mode(pipe),
-            compile_mode=(
-                "regional" if getattr(cfg, "regional", False) else "whole"),
-            weight_lane=loading.pipeline_weight_lane(pipe),
-            lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
-            graph_signature=graph_signature,
-            weight_contract=weight_contract,
-            shape_contract=cc.declared_contract_facts(cfg),
-        )
-        meta[guard_closure.MANIFEST_KEY] = guard_manifest
-        label = cc.flavor_label(
-            meta["sku"], meta["torch"], meta.get("weight_lane", ""))
-        artifact = cc.pack(Path(live_root), tmp_root / f"{label}.tar.gz", meta)
-        # th#1355: no mint duration — this is a REPACK of an already-captured
-        # cell after a shape warm, not a compile. 0 reads as "unreported",
-        # which is the truth; inventing a number here would poison the cost
-        # aggregate with a tar time.
-        publisher.publish(family, artifact, meta, 0)
-        return True
-    except CellPublishRefused as exc:
-        logger.warning("hot-swap: cell republish refused (hub decision): %s", exc)
-        return False
-    except Exception:
-        logger.warning(
-            "hot-swap: cell republish failed; the fleet keeps the previous "
-            "cell", exc_info=True)
-        return False
-    finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
-
-
 #: pgw#815: every way a self-mint obligation can END. A pending that carries
 #: none of these when its boot finishes was neither published, nor withheld,
 #: nor aborted, nor abandoned — it VANISHED, which is exactly what a 24-minute
@@ -1900,21 +1617,19 @@ def _unregister(pending: "PendingSelfMint") -> None:
 #: not named at all. A refusal that cannot name its own cause is the defect.
 #: pgw#995 dropped `eager_first_disabled`: eager-first is unconditional, so
 #: that cause can no longer arise and a reason nobody can reach is dead prose.
+#: pgw#1010 dropped `mint_in_process_forced` with the env that produced it —
+#: there is no in-process mint shape to force.
 _DELEGATION_DECLINE_PHASE = {
-    "mint_in_process_forced": "aot_mint_forced_in_process",
     "no_eager_tier": "aot_no_eager_tier",
     "caller_forced_in_process": "aot_mint_forced_in_process",
 }
 _DELEGATION_DECLINE_DETAIL = {
-    "mint_in_process_forced":
-        "GEN_WORKER_MINT_IN_PROCESS is set, which forces the in-process "
-        "capture; an AOTI export has no eager tier to serve from while it "
-        "compiles, so it cannot ride that shape",
     "no_eager_tier":
         "an armed non-eager backend (AOTI cell or TRT engine) has replaced "
         "this pipeline's forward, so there is no eager tier to serve from",
     "caller_forced_in_process":
-        "the caller forced the in-process shape",
+        "the caller passed delegate=False, and an AOTI export has no eager "
+        "tier to serve from while it compiles",
 }
 
 
@@ -1928,7 +1643,9 @@ def mint_recipe(
     ``kind == "aot-inductor"`` artifacts and a miss fell through to the dynamo
     self-mint, whose cell can never satisfy that filter. So a fleet missed,
     re-minted the wrong kind (or nothing), and missed identically on every
-    subsequent pod, forever.
+    subsequent pod, forever. pgw#1010 finished that: the dynamo answer no
+    longer mints anything at all — it is the JIT INTAKE posture, and every
+    return of it here is a decline that says so.
 
     Every decline here is NAMED on the wire. A silent decline is the defect
     class this issue exists to kill: five real L4 pods produced no mint and no
@@ -1950,9 +1667,10 @@ def mint_recipe(
             activity_mod.emit_event(
                 "self_mint_skipped",
                 f"family={family}: this miss cannot "
-                f"mint an aot-inductor cell — {detail}; falling back to the "
-                f"dynamo self-mint (its artifact will NOT satisfy AOT "
-                f"discovery, so a later pod misses again)",
+                f"mint an aot-inductor cell — {detail}; this pod serves JIT "
+                f"INTAKE instead (it compiles its own graphs and serves them "
+                f"for its own life) and MINTS NOTHING — no cell, no key, no "
+                f"publish, no obligation (pgw#1010)",
                 phase=reason,
             )
         return RECIPE_DYNAMO
@@ -2149,13 +1867,11 @@ __all__ = [
     "delegatable",
     "delegation_refusal",
     "enable_compiled",
-    "finalize_self_mint",
     "finalized_in_process",
     "mark_terminus",
     "mint_recipe",
     "publish_self_mint",
     "publishes_in_flight",
-    "republish_after_shape_warm",
     "terminus_of",
     "withhold_self_mint_publish",
 ]

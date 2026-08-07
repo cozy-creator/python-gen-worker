@@ -127,7 +127,6 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
     monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
     monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
@@ -141,7 +140,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # serving refusal is a separate policy, exercised in its own test.
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
     monkeypatch.setattr(
-        fleet_cells.cc, "begin_fleet_mint", lambda p, c, capture: None)
+        fleet_cells.cc, "arm_jit_intake", lambda p, c: None)
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     yield
@@ -174,7 +173,8 @@ def test_aot_discovery_miss_enqueues_an_aot_mint(
 
     pending = outcome.self_mint
     assert pending is not None, "a discovery miss produced no mint at all"
-    assert pending.recipe == fleet_cells.RECIPE_AOT
+    # pgw#1010: a pending IS an AOT mint — the dynamo recipe opens none at all,
+    # so the recipe axis this used to assert cannot disagree any more.
     assert pending.delegated is True, (
         "an AOTI export holds the GPU with no router to yield through; it "
         "must never run in the serving process")
@@ -182,11 +182,12 @@ def test_aot_discovery_miss_enqueues_an_aot_mint(
     assert ("self_mint_started", "aot") in [(k, p) for k, p, _ in _events]
 
 
-def test_the_mint_recipe_reaches_the_child_process(
+def test_the_child_is_handed_one_artifact_kind_and_cannot_choose(
     _miss: None, _events: List[Tuple[str, str, str]], tmp_path: Path,
 ) -> None:
-    """The recipe must survive the process boundary: the child never guesses
-    the artifact kind."""
+    """pgw#1010: the recipe stopped travelling because there is nothing to
+    choose. The child exports; that is the only artifact it can produce, so a
+    `recipe` field on the wire could only ever disagree with the truth."""
     register_export_declaration(_declaration())
     pending = _arm(delegate=True).self_mint
     assert pending is not None
@@ -196,7 +197,8 @@ def test_the_mint_recipe_reaches_the_child_process(
         modules=("sdxl.main",), weight_lane="w8a8")
     request = mint_delegate.build_request(
         task, workdir=tmp_path, cap_bytes=1 << 30)
-    assert request.recipe == "aot"
+    assert not hasattr(request, "recipe")
+    assert request.work_root == str(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -207,11 +209,13 @@ def test_the_mint_recipe_reaches_the_child_process(
 def test_a_family_with_no_export_declaration_refuses_by_name(
     _miss: None, _events: List[Tuple[str, str, str]],
 ) -> None:
+    """...and, since pgw#1010, mints NOTHING: the JIT intake arm serves this
+    pod and opens no obligation, because a dynamo cell has no consumer."""
     outcome = _arm(delegate=True)
 
     assert export_declaration(FAMILY) is None
-    pending = outcome.self_mint
-    assert pending is not None and pending.recipe == fleet_cells.RECIPE_DYNAMO
+    assert outcome.self_mint is None, "a JIT intake arm owes no cell"
+    assert outcome.armed, "intake still SERVES — it compiles in this process"
     assert "no_export_declaration" in _phases(_events, "self_mint_skipped")
 
 
@@ -279,9 +283,9 @@ def test_every_execution_lane_a_pod_can_serve_reaches_the_aot_recipe(
 
     pending = _arm(delegate=True).self_mint
 
-    assert pending is not None and pending.recipe == fleet_cells.RECIPE_AOT, (
-        f"lane {base_execution_lane!r} did not reach the AOT recipe — a mint-side lane "
-        f"judgement has grown back")
+    assert pending is not None, (
+        f"lane {base_execution_lane!r} did not reach the AOT recipe — a "
+        f"mint-side lane judgement has grown back")
     assert not _phases(_events, "self_mint_skipped"), (
         f"lane {base_execution_lane!r} was declined: "
         f"{[d for k, _p, d in _events if k == 'self_mint_skipped']}")
@@ -301,7 +305,7 @@ def test_the_bucketed_lora_form_of_a_execution_lane_mints_too(
 
     pending = _arm(delegate=True).self_mint
 
-    assert pending is not None and pending.recipe == fleet_cells.RECIPE_AOT
+    assert pending is not None
     assert not _phases(_events, "self_mint_skipped")
 
 
@@ -323,8 +327,9 @@ def test_an_in_process_only_pod_declines_the_aot_recipe_by_name(
 
     outcome = _arm(delegate=False)
 
-    pending = outcome.self_mint
-    assert pending is not None and pending.recipe == fleet_cells.RECIPE_DYNAMO
+    assert outcome.self_mint is None, (
+        "a pod that cannot delegate cannot mint an AOT cell — and pgw#1010 "
+        "leaves it nothing else to mint, so it serves JIT intake")
     # pgw#813 sharpened the vocabulary: the generic `aot_requires_delegation`
     # carried a hand-written either/or sentence and could not distinguish an
     # operator kill switch from a pipeline classification. Each cause now
@@ -417,7 +422,7 @@ def test_a_mint_that_produced_no_cell_still_reports_its_seconds(
 
     outcome = MintOutcome(
         status=mint_process.CRASHED, detail="boom", elapsed_s=120.0,
-        report=MintReport(status="failed", elapsed_s=120.0, recipe="aot"))
+        report=MintReport(status="failed", elapsed_s=120.0))
     assert not outcome.minted
     mint_delegate._emit_aot_phases(outcome, family=FAMILY, execution_lane="w8a8")
 
@@ -460,14 +465,13 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     request = MintRequest(
         function="generate", modules=("sdxl.main",), family=FAMILY,
         cell_key="ck1-parent", target=str(target),
-        capture=str(tmp_path / "cap"), report=str(tmp_path / "report.json"),
-        cfg=cfg_spec(_Cfg()), recipe="aot")
+        work_root=str(tmp_path), report=str(tmp_path / "report.json"),
+        cfg=cfg_spec(_Cfg()))
     report = mint_child._mint_aot(
         request, _Pipe(), _Cfg(), target,
         started=0.0, sha256_file=lambda p: "deadbeef")
 
     assert report.status == "minted"
-    assert report.recipe == "aot"
     assert report.cell_key == "ck1-abc"
     assert report.mint_phases == {"totals": {"total_s": 1.0}}
     assert target.read_bytes() == b"packed-cell"
@@ -496,8 +500,8 @@ def test_a_named_export_refusal_is_a_refusal_not_a_crash(
     request = MintRequest(
         function="generate", modules=("sdxl.main",), family=FAMILY,
         cell_key="k", target=str(tmp_path / "cell.tar.gz"),
-        capture=str(tmp_path / "cap"), report=str(tmp_path / "r.json"),
-        cfg=cfg_spec(_Cfg()), recipe="aot")
+        work_root=str(tmp_path), report=str(tmp_path / "r.json"),
+        cfg=cfg_spec(_Cfg()))
     with pytest.raises(mint_child.MintChildRefused, match="lane held on dynamo"):
         mint_child._mint_aot(
             request, _Pipe(), _Cfg(), tmp_path / "cell.tar.gz",
@@ -524,6 +528,9 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     monkeypatch.setattr(
         fleet_cells.cc, "enable",
         lambda *a, **k: (calls.append("dynamo"), True)[1])
+    # pgw#1010: `cc.enable` is not merely unused on this path — the branch that
+    # called it is deleted, so a "dynamo" entry below would mean an inductor
+    # seed adopt has grown back for an exported cell.
     monkeypatch.setattr(
         fleet_cells, "_packed_metadata",
         lambda artifact: {"cell_key": "ck1-real", "kind": "aot-inductor"})
@@ -534,9 +541,8 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     artifact.write_bytes(b"cell")
     pending = fleet_cells.PendingSelfMint(
         family=FAMILY, cell_key="ck1-handle", ref="root/family-sdxl#ck1-handle",
-        cfg=_Cfg(), target=artifact, capture_dir=tmp_path / "cap",
-        mint_root=tmp_path, publisher=None, delegated=True,
-        recipe=fleet_cells.RECIPE_AOT)
+        cfg=_Cfg(), target=artifact,
+        mint_root=tmp_path, publisher=None)
 
     minted = fleet_cells.adopt_delegated_mint(_Pipe(), pending, artifact)
 

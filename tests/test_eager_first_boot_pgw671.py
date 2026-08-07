@@ -52,7 +52,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, guard_closure, hot_swap
+from gen_worker import fleet_cells, guard_closure, hot_swap, mint_delegate
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.intent_registry import IntentRegistry
@@ -162,6 +162,13 @@ class _Harness:
         monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
+        # pgw#1010: every mint is a CHILD mint now. This rig has no child
+        # process — without a stub it spawns a REAL one per attempt and the
+        # test spends minutes importing torch to watch it fail. The serving
+        # side is what pgw#671 is about: READY at eager tier first, the tier
+        # flipping only when the mint lands.
+        monkeypatch.setattr(
+            mint_delegate, "build_cell", self._fake_build_cell)
         # pgw#681 gate at its torch boundary, simmed: this rig's compiles
         # never touch dynamo, so extraction would honestly report closure
         # unprovable and refuse every finalize.
@@ -172,6 +179,45 @@ class _Harness:
                                     "entry": 0, "guards": []}],
                 "verdicts": {}, "leaks": []})
         self.ex = Executor(self.specs, _send, store=store)
+
+    # -- the child, minus the process ---------------------------------------
+
+    async def _fake_build_cell(self, task: Any, **kwargs: Any) -> Any:
+        pending = task.pending
+        # The harness's own controls steer the CHILD now, exactly as they used
+        # to steer the in-process compile: `compile_delay_s` is how long the
+        # cell takes to appear (so a mid-build abandonment has something to
+        # abandon), `compile_raises` is a child that produced nothing.
+        abandon = kwargs.get("abandon")
+        if self.compile_delay_s:
+            if abandon is not None:
+                try:
+                    await asyncio.wait_for(
+                        abandon.wait(), timeout=self.compile_delay_s)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    # The parent pulled the plug mid-build: a real child is
+                    # reaped and nothing is adopted.
+                    return mint_delegate.DelegatedResult(
+                        status=mint_delegate.ABANDONED, attempts=1,
+                        detail="abandoned mid-build")
+            else:
+                await asyncio.sleep(self.compile_delay_s)
+        if self.compile_raises:
+            return mint_delegate.DelegatedResult(
+                status=mint_delegate.FAILED, attempts=1,
+                reason="synthetic_child_failure",
+                detail="synthetic inductor failure")
+        minted = fleet_cells.SelfMint(
+            family=pending.family, cell_key=pending.cell_key,
+            ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
+            artifact=pending.target)
+        pending._state["minted"] = minted
+        pending.target.parent.mkdir(parents=True, exist_ok=True)
+        pending.target.write_bytes(b"stub-cell")
+        return mint_delegate.DelegatedResult(
+            status=mint_delegate.ADOPTED, minted=minted, attempts=1)
 
     # -- the compile-arm leaf ------------------------------------------------
 
@@ -185,8 +231,7 @@ class _Harness:
         pending = fleet_cells.PendingSelfMint(
             family=FAMILY, cell_key="ck1-" + "a" * 56,
             ref=f"{cc.system_repo(FAMILY)}#ck1-{'a' * 56}",
-            cfg=cfg, target=mint_root / "cell.tar.gz",
-            capture_dir=capture, mint_root=mint_root,
+            cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,
         )
         original = pipe.transformer.forward
@@ -266,9 +311,16 @@ class _Harness:
 def test_eager_first_boot_ready_before_compile_then_hot_swaps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The headline: READY at eager tier BEFORE any graph finished
-    compiling; the background driver seeds the full plan (3 aspect
-    classes), proves, packs, and flips the tier — state never flaps."""
+    """The headline: READY at eager tier BEFORE any graph finished compiling;
+    the background driver builds the cell and flips the tier — state never
+    flaps.
+
+    pgw#1010: the driver's compile is a CHILD PROCESS's now (the in-process
+    seed/prove/pack phases only ever built a dynamo cell), so the assertions
+    that counted this rig's own simulated compiles and its inherited warm
+    memory are gone with them. What pgw#671 actually claims — READY does not
+    wait for compiled serving, and the tier flips exactly once when the mint
+    lands — is unchanged and is what stands below."""
     h = _Harness(tmp_path, monkeypatch, compile_delay_s=0.3)
 
     async def _run() -> None:
@@ -291,17 +343,12 @@ def test_eager_first_boot_ready_before_compile_then_hot_swaps(
 
         await h.wait_mint()
         assert rec.background_mint is None
-        # The full plan compiled in the background (one per aspect class).
-        assert len(h.compile_log) == 3
         (target,) = h.ex.compile_targets()
         assert target.active_compile_ref.startswith(
             cc.system_repo(FAMILY))
         assert target.active_compile_snapshot_digest.startswith("sha256:")
         assert h.ex.serving_tiers() == {"generate": "compiled"}
         assert cc.cell_proven_in_process(target.active_compile_ref)
-        # pgw#654 memory: the full plan is inheritable by the next instance.
-        (memory,) = h.ex._warm_contract_runs.values()
-        assert len(memory) == 3
         # The self_mint_compile activity outlived READY and COMPLETED from
         # the driver — never FAILED.
         states = h.activity_states("self_mint_compile")
@@ -446,22 +493,15 @@ def test_failed_background_compile_stays_eager_and_reports_typed_failure(
     asyncio.run(_run())
 
 
-def test_mandatory_quantized_execution_lane_keeps_the_sequential_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """gw#586: eager is not a production lane for w8a8 — the boot must keep
-    today's foreground proof (and its fail-closed policy)."""
-    h = _Harness(tmp_path, monkeypatch, compile_delay_s=0.05,
-                 weight_lane="w8a8")
-
-    async def _run() -> None:
-        await h.boot()
-        rec = h.rec
-        assert rec.ready is True
-        assert rec.background_mint is None  # never deferred
-        assert len(h.compile_log) == 3     # compiled foreground, pre-READY
-
-    asyncio.run(_run())
+# pgw#1010: `test_mandatory_quantized_execution_lane_keeps_the_sequential_gate`
+# stood here — "eager is not a production lane for w8a8, so the boot keeps the
+# foreground proof". Two rulings retired it: pgw#813 (a delegated pending arms
+# NOTHING, so its eager tier is the untouched pipeline and a mandatory lane may
+# defer) and pgw#1010 (there is no in-process foreground mint left to keep). The
+# mandatory lane's protection is now stated where it belongs — it fails closed
+# when the family declares no export, because the only cell is an AOT cell:
+# `test_serve_finalize_pgw672.py::test_a_mandatory_lane_without_a_declaration_
+# fails_closed_before_it_compiles`.
 
 
 def test_capability_projection_carries_serving_tier_on_ready_only() -> None:

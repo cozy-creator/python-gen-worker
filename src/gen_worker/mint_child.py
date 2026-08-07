@@ -43,7 +43,7 @@ What it does, and why in this order
    working endpoint from one whose forward dies on its first request, and a
    green mint that sealed a cell for the latter is the shape pgw#969 cost
    four hours to find on a pod.
-6. **Pack** with ``finish_fleet_mint`` and write a typed report.
+6. **Pack** the exported cell and write a typed report.
 
 The parity claim is checked, not asserted
 -----------------------------------------
@@ -84,9 +84,9 @@ from .mint_process import (
 
 logger = logging.getLogger(__name__)
 
-#: pgw#805 recipes (mirrors ``fleet_cells.RECIPE_*``; duplicated as literals
-#: rather than imported so the child never pulls the whole arming brain in).
-RECIPE_DYNAMO = "dynamo"
+#: pgw#1010: the child builds ONE artifact kind. The dynamo recipe it used to
+#: also run produced a cell with no consumer, and it is deleted rather than
+#: kept behind a request field nobody may set.
 RECIPE_AOT = "aot"
 
 
@@ -271,7 +271,7 @@ def mint_identity(request: MintRequest) -> str:
     return (
         f"mint family={request.family!r} key={request.cell_key!r} "
         f"lane={request.execution_lane or '(unset)'!r} "
-        f"fn={request.function!r} recipe={request.recipe!r}")
+        f"fn={request.function!r}")
 
 
 def bind_slots(specs: Sequence[Any], resolved: Mapping[str, MintSlot]) -> None:
@@ -505,30 +505,6 @@ def _drive_warm_plan(
     return ledger
 
 
-def _drain_router(pipe: Any, *, poll_s: float = 0.5) -> None:
-    """Wait out any hot-swap router queue before packing.
-
-    ``begin_fleet_mint`` arms cold and GUARDED with no router, so the warm
-    forwards above compile INLINE on this thread — which is exactly what a
-    dedicated mint process is for. But endpoint code is allowed to install a
-    router of its own, and a capture packed while a compile is still queued is
-    the partial-capture class gw#612 bricks adopting boots with. Failed
-    signatures are the caller's problem (``finish_fleet_mint`` gates on the
-    expected graph count).
-    """
-    from . import hot_swap
-
-    router = hot_swap.router_of(pipe)
-    if router is None:
-        return
-    while True:
-        _warm, pending, _failed = router.stats()
-        if pending == 0:
-            return
-        frame(phase=warm_spans.PHASE_ROUTER_DRAIN, note=f"{pending} compile(s) queued")
-        time.sleep(poll_s)
-
-
 def _release() -> None:
     """Reclaim a probe pipeline's device memory. The caller has already
     dropped its references; this collects the cycles and returns the cached
@@ -740,7 +716,6 @@ def _mint_aot(
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
         mint_phases=dict(result.metadata.get("mint_phases") or {}),
-        recipe=request.recipe or RECIPE_AOT,
     )
 
 
@@ -766,8 +741,6 @@ def mint(request: MintRequest) -> MintReport:
 
     started = time.monotonic()
     target = Path(request.target)
-    capture = Path(request.capture)
-    capture.mkdir(parents=True, exist_ok=True)
 
     frame(phase="load", note="env seal")
     env_seal.establish()
@@ -778,15 +751,14 @@ def mint(request: MintRequest) -> MintReport:
     if not cc.toolchain_present():
         raise MintChildRefused(
             "no C toolchain (cc/gcc/clang) — inductor cannot link a kernel")
-    if request.recipe == RECIPE_AOT and not cc.cxx_toolchain_present():
-        # pgw#823: the AOT recipe's stricter requirement, asserted BEFORE the
+    if not cc.cxx_toolchain_present():
+        # pgw#823: AOTInductor's stricter requirement, asserted BEFORE the
         # weights are read. The guard above passes on a C compiler; AOTI needs
         # a C++ one, and without this the miss surfaces 336 s later as an
         # InductorError from inside the linker.
         raise MintChildRefused(
             "no C++ compiler (g++/clang++) — AOTInductor links a shared "
-            "object and cannot build one; the dynamo recipe does not need "
-            "this, the AOT recipe does")
+            "object and cannot build one")
 
     frame(phase="load", note=f"discover {list(request.modules)}")
     specs = collect_endpoints(list(request.modules))
@@ -818,103 +790,33 @@ def mint(request: MintRequest) -> MintReport:
             cc.apply_lora_execution_lane(loaded_pipe, cfg.lora_bucket)
         return obj, loaded_pipe, fleet_cells.aot_export_spec(loaded_pipe, cfg)
 
-    if request.recipe == RECIPE_AOT:
-        # pgw#947: MEASURE the serving-kernel lane on this card before the
-        # cell is exported, so the cell can carry the verdict instead of the
-        # fleet re-deriving it from a hand-maintained SM tuple. The probe
-        # loads once per candidate; the winner's pipeline is what gets minted.
-        verdict, instance, pipe, aot_spec = execution_lane_verdict_for(_load)
-        # pgw#984: PROVE the endpoint's own forward runs, before a byte is
-        # exported. `torch.export` traces the declared graph classes off the
-        # modules directly and never enters the handler, so an AOT mint's
-        # phase table read `load / trace_graph / seal_publish / finalize` —
-        # green, with no `warmup_forward` row, for an endpoint whose handler
-        # could not run at all. That is precisely pgw#969's crash class
-        # (`ctx.slots["pipeline"]`, 0.0 s into `warmup_forward`), and it was
-        # unreachable on this recipe.
-        #
-        # ONE forward, not the whole plan: the export derives its own class
-        # set, so a full eager pass would buy minutes and prove nothing more
-        # than the first job does. Eager — nothing is armed here, unlike the
-        # dynamo recipe where the identical call IS the compile — so it
-        # specializes no graph the export then has to trace around.
-        _drive_warm_plan(
-            instance, _warm_jobs(siblings), request, proof_only=True)
-        # pgw#805: the SAME loaded pipeline, a different recipe. Deliberately
-        # NOT `aot_mint.compose_for_mint` (which builds a pipeline from a
-        # model ref for an operator's mint pod): the graphs this cell must
-        # serve are the graphs the ENDPOINT's own composed pipeline runs, and
-        # composing a second time is how a mint exports something the serving
-        # pod cannot adopt.
-        return _mint_aot(
-            request, pipe, cfg, target, started=started,
-            sha256_file=sha256_file, execution_lane_verdict=verdict, spec=aot_spec)
-
-    instance = spec.cls()
-    loaded = run_setup(
-        instance, dict(paths), arm_compile=False,
-        return_loaded=True, component_paths=overrides) or {}
-    slot, pipe = _pick_compile_target(loaded, cfg)
-    frame(phase="load", note=f"compile target on slot {slot!r}")
-
-    if cfg.lora_bucket:
-        cc.apply_lora_execution_lane(pipe, cfg.lora_bucket)
-
-    jobs = _warm_jobs(siblings)
-    # Arm COLD, pointed at our own capture dir: the warm forwards below are
-    # the ONLY compile this cell will ever see (gw#587).
+    # pgw#947: MEASURE the serving-kernel lane on this card before the cell is
+    # exported, so the cell can carry the verdict instead of the fleet
+    # re-deriving it from a hand-maintained SM tuple. The probe loads once per
+    # candidate; the winner's pipeline is what gets minted.
+    verdict, instance, pipe, aot_spec = execution_lane_verdict_for(_load)
+    # pgw#984: PROVE the endpoint's own forward runs, before a byte is
+    # exported. `torch.export` traces the declared graph classes off the
+    # modules directly and never enters the handler, so an AOT mint's
+    # phase table read `load / trace_graph / seal_publish / finalize` —
+    # green, with no `warmup_forward` row, for an endpoint whose handler
+    # could not run at all. That is precisely pgw#969's crash class
+    # (`ctx.slots["pipeline"]`, 0.0 s into `warmup_forward`), and it was
+    # unreachable on this recipe.
     #
-    # pgw#985: an arm decline is DETERMINISTIC — no target on the pipeline, no
-    # CUDA, no toolchain, an operator eager pin — and none of them can differ
-    # on a second attempt. This used to escape as a bare `RuntimeError`, exit
-    # 1, `CRASHED`, and bought a second billed pod for a sentence the first
-    # one had already settled. The AOT recipe has always typed the identical
-    # condition as a refusal; both recipes now say it the same way.
-    try:
-        cc.begin_fleet_mint(pipe, cfg, capture)
-    except cc.CompileArmRefused as exc:
-        raise MintChildRefused(f"{mint_identity(request)}: {exc}") from exc
-    miss_before = cc.cache_miss_count(pipe)
-
-    ledger = _drive_warm_plan(instance, jobs, request)
-    frame(phase=warm_spans.PHASE_ROUTER_DRAIN,
-          note="draining any queued compiles")
-    _drain_router(pipe)
-
-    if cc.execution_count(pipe) <= 0:
-        raise MintChildRefused(
-            "the warm plan ran but no compile object served a compiled "
-            "call — there is nothing to pack")
-
-    frame(phase="seal_publish", note="packing")
-    meta = cc.finish_fleet_mint(
-        pipe, cfg, cfg.family, target, capture,
-        expected_graphs=max(0, cc.cache_miss_count(pipe) - miss_before))
-    frame(phase="finalize", note=f"packed {target.name}")
-
-    peak = _peak_vram()
-    from . import cell_key
-
-    try:
-        minted_key = cell_key.from_artifact_metadata(meta).digest
-    except Exception:
-        minted_key = request.cell_key
-
-    return MintReport(
-        status="minted",
-        artifact=str(target),
-        digest=sha256_file(target),
-        cell_key=str(minted_key or request.cell_key),
-        detail=f"packed {target.name} for family {cfg.family!r}",
-        phase="finalize",
-        peak_vram_bytes=peak,
-        elapsed_s=time.monotonic() - started,
-        phases=_close_phases(),
-        # pgw#989: the dynamo recipe's `mint_phases` was documented as "empty —
-        # no per-graph-class breakdown". It has one; it was just never
-        # measured. The parent re-emits this exactly as it does the AOT table.
-        mint_phases=ledger.table(),
-    )
+    # ONE forward, not the whole plan: the export derives its own class set, so
+    # a full eager pass would buy minutes and prove nothing more than the first
+    # job does. Eager — nothing is armed here — so it specializes no graph the
+    # export then has to trace around.
+    _drive_warm_plan(instance, _warm_jobs(siblings), request, proof_only=True)
+    # Deliberately NOT `aot_mint.compose_for_mint` (which builds a pipeline
+    # from a model ref for an operator's mint pod): the graphs this cell must
+    # serve are the graphs the ENDPOINT's own composed pipeline runs, and
+    # composing a second time is how a mint exports something the serving pod
+    # cannot adopt.
+    return _mint_aot(
+        request, pipe, cfg, target, started=started,
+        sha256_file=sha256_file, execution_lane_verdict=verdict, spec=aot_spec)
 
 
 def _peak_vram() -> int:
