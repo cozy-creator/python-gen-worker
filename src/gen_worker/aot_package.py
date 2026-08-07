@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
+from . import aot_flatten
 from .aot_serve import SOURCE_LITERAL, SOURCE_STATE_DICT
 import hashlib
 
@@ -629,7 +630,7 @@ def unbindable_constants(
 
 
 def input_contract(
-    program: Any, input_names: Sequence[str],
+    program: Any, leaves: Sequence[aot_flatten.Leaf],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, List[int]]]:
     """``(inputs, symbols)`` rows for ``aot_serve.artifact_metadata``.
 
@@ -648,13 +649,20 @@ def input_contract(
     Dtypes and shapes come off the exported program's placeholders rather than
     off the example inputs, so what is recorded is what export actually
     committed to — which is what the consumer will be checked against.
+
+    ``leaves`` are ``aot_flatten`` leaves, not names (pgw#994): each row
+    records WHERE IN THE CALL its input lives — parameter, that parameter's
+    position, and the path into it — because a name cannot tell the serve side
+    that ``x.0`` is element 0 of the single argument ``x`` rather than the
+    argument in slot 0. ``aot_serve.bind_call_inputs`` replays exactly this.
     """
     ranges = _symbol_ranges(program)
     rows: List[Dict[str, Any]] = []
     symbols: Dict[str, List[int]] = {}
-    for position, (name, val) in enumerate(
-        zip(input_names, _user_input_vals(program))
+    for position, (leaf, val) in enumerate(
+        zip(leaves, _user_input_vals(program))
     ):
+        name = leaf.name
         if val is None:
             continue
         shape: List[Any] = []
@@ -671,13 +679,32 @@ def input_contract(
                     f"have nothing to assert (pgw#704 B2)")
             symbols[text] = [bounds[0], bounds[1]]
             shape.append(text)
-        rows.append({
+        row: Dict[str, Any] = {
             "name": str(name),
             "position": position,
             "dtype": _dtype_name(getattr(val, "dtype", None)),
             "shape": shape,
             "optional": False,
-        })
+        }
+        if not leaf.trivial or leaf.param_position != position:
+            # Written only when the identity is NOT derivable from the row
+            # itself. An absent field means `param=name, param_position=
+            # position, path=()` — true exactly when the leaf IS its argument
+            # AND no earlier argument flattened into more than one leaf. The
+            # second half is the half that bites: a plain tensor sitting after
+            # a container has a flat position its ARGUMENT does not have, and
+            # a serve-side bind reading `position` would fetch the wrong one
+            # (measured — it is how pgw#994's `t` went missing). Every cell
+            # published before pgw#994 has no containers at all, so every row
+            # is derivable and no live artifact's metadata (or ck6 key) moves
+            # — see `aot_serve.range_digest`.
+            row["param"] = leaf.param
+            row["param_position"] = leaf.param_position
+            row["path"] = [
+                step if isinstance(step, str) else int(step)
+                for step in leaf.path
+            ]
+        rows.append(row)
     if not rows:
         raise PackageIntrospectionError(
             "exported program declares no user inputs; an artifact with no "

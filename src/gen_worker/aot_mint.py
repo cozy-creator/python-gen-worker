@@ -114,6 +114,7 @@ from .compile_cache import (
 from dataclasses import replace
 import inspect
 from .models.memory import is_cuda_oom
+from . import aot_flatten
 from . import aot_inputs
 from . import aot_declaration as _decl
 from .api.export_contract import export_declaration
@@ -259,12 +260,17 @@ def exported_input_names(
     program (inputs: [… 'x_0', 'x_1'])" while the export it gated succeeded.
 
     The arity comes from the SAME class row the example feed was built from
-    (``aot_declaration.container_arities``), never re-guessed.
+    (``aot_declaration.container_arities``), never re-guessed, and the spelling
+    comes from ``aot_flatten.exported_name`` — the ONE naming rule the ingress
+    contract and the serve-side bind also read (pgw#994). A declared container
+    is the leaf path ``(0,), (1,), …`` of its parameter, so this function is a
+    special case of that rule rather than a second copy of it.
     """
     arity = (containers or {}).get(name)
     if arity is None:
-        return (str(name),)
-    return tuple(f"{name}_{index}" for index in range(int(arity)))
+        return (aot_flatten.exported_name(name),)
+    return tuple(aot_flatten.exported_name(name, (index,))
+                 for index in range(int(arity)))
 
 
 def dynamic_shapes_spec(
@@ -915,7 +921,7 @@ class _MintedEntry:
     owner: Any
     program: Any
     input_names: Tuple[str, ...]
-    flat_names: Tuple[str, ...]
+    flat_leaves: Tuple[aot_flatten.Leaf, ...]
     files: List[Any]
     timings: Dict[str, Any]
 
@@ -1099,7 +1105,7 @@ def _export_entry(
         timings["warm_s"] = _run_declared_warm(module, args, entry)
 
     input_names = _input_names(module, args, kwargs)
-    flat_names = flat_input_names(module, args, kwargs)
+    flat_leaves = flat_input_leaves(module, args, kwargs)
     # ONE arity map for this arm: the spec builder mirrors the container
     # structure with it and the gates below resolve declared names against
     # the exported ones with it (pgw#993).
@@ -1181,7 +1187,7 @@ def _export_entry(
 
     return _MintedEntry(
         name=entry, spec=espec, module=module, owner=owner, program=program,
-        input_names=input_names, flat_names=flat_names, files=files,
+        input_names=input_names, flat_leaves=flat_leaves, files=files,
         timings=timings)
 
 
@@ -2246,7 +2252,7 @@ def _entry_ingress_declaration(
     the midpoint), deduplicated. A fully specialized entry — the sdxl case —
     yields exactly one call, which is the call its class row exists to serve.
     """
-    inputs, symbols = aot_package.input_contract(row.program, row.flat_names)
+    inputs, symbols = aot_package.input_contract(row.program, row.flat_leaves)
     meta: Dict[str, Any] = {"inputs": inputs, "symbols": symbols}
     if adapter_arm(row.spec.fork) is False:
         # The NEGATIVE half of a branchless class's contract, exactly as
@@ -2514,7 +2520,7 @@ def _gate_and_declare_entry(
             "(e.g. %s)", entry, len(fused), fused[:3])
     try:
         inputs, symbols = aot_package.input_contract(
-            row.program, row.flat_names)
+            row.program, row.flat_leaves)
         constants = aot_package.constants_manifest(package, entry)
     except aot_package.PackageIntrospectionError as exc:
         raise MintRefused(f"entry {entry!r}: declaration: {exc}") from exc
@@ -3001,11 +3007,11 @@ def _input_names(
     return tuple(positional) + tuple(keyword)
 
 
-def flat_input_names(
+def flat_input_leaves(
     module: Any, args: Tuple[Any, ...], kwargs: Mapping[str, Any],
-) -> Tuple[str, ...]:
-    """ONE name per EXPORTED user input — containers FLATTENED the way export
-    flattens them.
+) -> Tuple[aot_flatten.Leaf, ...]:
+    """ONE leaf per EXPORTED user input — containers FLATTENED the way export
+    flattens them, each carrying WHERE IN THE CALL it came from.
 
     MEASURED (pgw#790 lane, real sdxl UNet, torch 2.13): `aot_package.
     input_contract` zips the caller-side parameter names against the exported
@@ -3027,29 +3033,20 @@ def flat_input_names(
     treated the symptom, but a nested lookup cannot help when the NAMES it
     searches for are the wrong ones.
 
-    Mapping leaves take their BARE KEY, which is exactly what the serve-side
-    nested resolution looks for, and dicts flatten in SORTED key order because
-    that is what torch's pytree does. Sequence leaves take `<param>.<index>`.
+    THE NAMES ARE NOT ENOUGH (pgw#994). A name says which leaf this is; it
+    does not say where the leaf LIVES in a call, and the serve side has only
+    the call. So each leaf carries its identity — parameter, that parameter's
+    position, and the path into it — and ``aot_serve.bind_call_inputs``
+    replays that identity instead of guessing. The walk itself lives in
+    ``aot_flatten``, which every consumer of the flat view reads, mint and
+    serve alike: three separate spellings of this one mapping is exactly what
+    pgw#790, pgw#993 and pgw#994 each were.
+
     ``_input_names`` is deliberately left alone: `dynamic_shapes_spec` keys on
     top-level PARAMETER names and mirrors containers structurally.
     """
-    names = _input_names(module, args, kwargs)
-    values = list(args) + [kwargs[n] for n in names[len(args):] if n in kwargs]
-    out: List[str] = []
-
-    def walk(name: str, value: Any) -> None:
-        if isinstance(value, Mapping):
-            for key in sorted(value):
-                walk(str(key), value[key])
-        elif isinstance(value, (list, tuple)):
-            for index, item in enumerate(value):
-                walk(f"{name}.{index}", item)
-        else:
-            out.append(str(name))
-
-    for name, value in zip(names, values):
-        walk(str(name), value)
-    return tuple(out)
+    return aot_flatten.flatten_call(
+        _input_names(module, args, kwargs), args, kwargs)
 
 
 def _specialization_facts(spec: ExportSpec) -> Dict[str, Any]:

@@ -242,7 +242,7 @@ def test_the_pool_ledger_is_live_not_end_of_run(tmp_path: Path) -> None:
         _MintedEntry(
             name=f"unet/row={i}", spec=None, module=None, owner=None,
             program=torch.export.export(Tiny(i), (torch.randn(4, 64),)),
-            input_names=(), flat_names=(), files=[], timings={})
+            input_names=(), flat_leaves=(), files=[], timings={})
         for i in range(2)
     ]
     width = pool.entry_workers(

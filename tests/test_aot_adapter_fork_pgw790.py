@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
+from gen_worker import aot_flatten
+
 torch = pytest.importorskip("torch")
 
 import torch.nn as nn  # noqa: E402
@@ -492,8 +494,9 @@ def test_a_flattened_container_does_not_shift_the_declared_names() -> None:
     module = NestedUNet().eval()
     args = (torch.randn(2, BUCKET), torch.tensor(1.0), None,
             {"text_embeds": torch.randn(2, 4), "time_ids": torch.randn(2, 6)})
-    flat = aot_mint.flat_input_names(module, args, {})
-    # One name per EXPORTED user input, in export's own (sorted-key) order —
+    flat = tuple(leaf.name for leaf in
+                 aot_mint.flat_input_leaves(module, args, {}))
+    # One name per EXPORTED user input, in export's own (insertion-order) order —
     # not one name per PARAMETER, which is what shifted `text_embeds` onto
     # `added_cond_kwargs` and `time_ids` onto the parameter after it.
     assert flat == ("sample", "timestep", "class_labels",
@@ -511,15 +514,17 @@ def test_the_recorded_contract_names_the_flattened_leaves(tmp_path) -> None:
     with torch.no_grad():
         program = torch.export.export(module, args, {}, strict=False)
     rows, _symbols = aot_package.input_contract(
-        program, aot_mint.flat_input_names(module, args, {}))
+        program, aot_mint.flat_input_leaves(module, args, {}))
     by_name = {r["name"]: r for r in rows}
     assert by_name["text_embeds"]["shape"] == [2, 4]
     assert by_name["time_ids"]["shape"] == [2, 6]
     assert "added_cond_kwargs" not in by_name
 
     # RED: the pre-fix derivation (parameter names) mislabels both.
-    stale, _ = aot_package.input_contract(
-        program, aot_mint._input_names(module, args, {}))
+    stale, _ = aot_package.input_contract(program, [
+        aot_flatten.Leaf(param=name, param_position=index, path=())
+        for index, name in enumerate(aot_mint._input_names(module, args, {}))
+    ])
     stale_names = {r["name"] for r in stale}
     assert "time_ids" not in stale_names
     assert "added_cond_kwargs" in stale_names
@@ -527,16 +532,24 @@ def test_the_recorded_contract_names_the_flattened_leaves(tmp_path) -> None:
 
 def test_the_serve_path_binds_the_flattened_names_from_a_nested_call() -> None:
     """The names the mint records must be the ones a diffusers-shaped call can
-    actually be resolved against — `bind_call_inputs` looks INSIDE a mapping
-    kwarg for the bare leaf key."""
+    actually be resolved against.
+
+    REWRITTEN by pgw#994. This used to pass because `bind_call_inputs`
+    SEARCHED every mapping-valued kwarg for the bare leaf key — which worked
+    only while no other kwarg carried the same key, and could not help the
+    list case at all. The contract now records where each leaf lives and the
+    serve side replays it; the search is deleted.
+    """
     contract = aot_serve.contract_from_meta({
         "inputs": [
             {"name": "sample", "position": 0, "dtype": "float32",
              "shape": [2, BUCKET]},
             {"name": "text_embeds", "position": 3, "dtype": "float32",
-             "shape": [2, 4]},
+             "shape": [2, 4], "param": "added_cond_kwargs",
+             "param_position": 3, "path": ["text_embeds"]},
             {"name": "time_ids", "position": 4, "dtype": "float32",
-             "shape": [2, 6]},
+             "shape": [2, 6], "param": "added_cond_kwargs",
+             "param_position": 3, "path": ["time_ids"]},
         ],
         "symbols": {}, "constants": [],
     })

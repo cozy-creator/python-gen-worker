@@ -81,9 +81,13 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple,
+    Union,
+)
 
 from . import activity as activity_mod
+from . import aot_flatten
 from . import host_isa
 from .cell_adopt import AdoptOutcome
 from . import shape_growth
@@ -285,6 +289,14 @@ class InputContract:
     in :attr:`ArtifactContract.symbols`. ``position`` is the positional
     index in the exported call convention; ``name`` is the keyword the
     pipeline's own forward uses, so a call can be matched either way.
+
+    :attr:`param` / :attr:`param_position` / :attr:`path` are the input's
+    IDENTITY IN THE CALL (pgw#994): which argument it lives in, where that
+    argument sits, and the path into it. ``position`` counts FLATTENED graph
+    inputs and a container argument occupies one caller slot while producing
+    N of them, so position alone binds the wrong value the moment any input is
+    a list or a dict. Defaults are the trivial identity — an input that IS its
+    argument — which is what every row published before pgw#994 declares.
     """
 
     name: str
@@ -292,6 +304,31 @@ class InputContract:
     dtype: str
     shape: Tuple[Any, ...]
     optional: bool = False
+    param: str = ""
+    param_position: int = -1
+    path: Tuple[Union[int, str], ...] = ()
+
+    @property
+    def call_param(self) -> str:
+        """The argument this input lives in (itself, when trivial)."""
+        return self.param or self.name
+
+    @property
+    def call_position(self) -> int:
+        """The argument's own position (this input's, when trivial)."""
+        return self.position if self.param_position < 0 else self.param_position
+
+    @property
+    def trivial_identity(self) -> bool:
+        """True when the identity says exactly what its absence would say.
+
+        Defined on the RESOLVED identity, not on which fields were written, so
+        a row that spells its trivial identity out and one that omits it are
+        the same contract — which is what ``range_digest`` needs in order to
+        key the field without re-keying anything already published.
+        """
+        return (not self.path and self.call_param == self.name
+                and self.call_position == self.position)
 
 
 @dataclass(frozen=True)
@@ -353,12 +390,24 @@ def contract_from_meta(meta: Mapping[str, Any]) -> ArtifactContract:
                 shape.append(dim.strip())
             else:
                 raise ValueError(f"input {name!r} has a malformed dim {dim!r}")
+        raw_path = row.get("path", [])
+        if not isinstance(raw_path, list):
+            raise ValueError(f"input {name!r} has a malformed path {raw_path!r}")
+        path: List[Union[int, str]] = []
+        for step in raw_path:
+            if isinstance(step, bool) or not isinstance(step, (int, str)):
+                raise ValueError(
+                    f"input {name!r} has a malformed path step {step!r}")
+            path.append(int(step) if isinstance(step, int) else str(step))
         inputs.append(InputContract(
             name=name,
             position=int(row.get("position", idx)),
             dtype=dtype,
             shape=tuple(shape),
             optional=bool(row.get("optional", False)),
+            param=str(row.get("param") or ""),
+            param_position=int(row.get("param_position", -1)),
+            path=tuple(path),
         ))
 
     symbols: Dict[str, Tuple[int, int]] = {}
@@ -448,15 +497,30 @@ def range_digest(meta: Mapping[str, Any]) -> str:
     the contract's canonical form.
     """
     contract = contract_from_meta(meta)
+
+    def _row(s: InputContract) -> Dict[str, Any]:
+        row: Dict[str, Any] = {
+            "name": s.name,
+            "position": s.position,
+            "dtype": s.dtype,
+            "shape": list(s.shape),
+            "optional": s.optional,
+        }
+        if not s.trivial_identity:
+            # pgw#994, on the `excluded` precedent below: the call identity is
+            # part of the declared traffic (two classes that take the same
+            # tensors in different argument structures are different graphs),
+            # but it is keyed only when it is not the trivial identity. Every
+            # row published before pgw#994 is trivial, so no live cell is
+            # re-keyed by this field existing.
+            row["param"] = s.call_param
+            row["param_position"] = s.call_position
+            row["path"] = list(s.path)
+        return row
+
     canon = {
         "inputs": [
-            {
-                "name": s.name,
-                "position": s.position,
-                "dtype": s.dtype,
-                "shape": list(s.shape),
-                "optional": s.optional,
-            }
+            _row(s)
             for s in sorted(contract.inputs, key=lambda s: (s.position, s.name))
         ],
         "symbols": {k: list(v) for k, v in sorted(contract.symbols.items())},
@@ -962,38 +1026,49 @@ def _dtype_name(value: Any) -> str:
 def bind_call_inputs(
     contract: ArtifactContract, args: Sequence[Any], kwargs: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    """Match one call's actual arguments to the declared inputs by keyword
-    first, then by position, then INSIDE any mapping-valued kwarg. Missing
-    non-optional input => named refusal.
+    """Match one call's actual arguments to the declared inputs by REPLAYING
+    each input's recorded identity in the call. Missing non-optional input =>
+    named refusal.
 
-    The nested lookup is the serve-side half of the mint's flat calling
-    convention (live-proven missing on the 0.76.x line, pod ae2uc81yub0gyq
-    2026-07-29): the export flattens ``added_cond_kwargs`` entries
-    (``text_embeds``, ``time_ids``) into declared inputs, but a diffusers
-    pipeline calls the denoiser with them NESTED in one dict kwarg —
-    without this resolution an armed artifact refuses every real call by
-    name (``input_missing: text_embeds``) and the cell serves nothing."""
+    THE RULE (pgw#994): an input is found at ``kwargs[param]`` — or at
+    ``args[param_position]`` — followed by its ``path`` into that argument.
+    The mint recorded that identity with ``aot_flatten.flatten_call``; this
+    replays it with ``aot_flatten.resolve_leaf``, so the two sides of the
+    flattening are one rule and not two spellings that agree by luck.
+
+    WHAT THIS REPLACES, because both halves were luck. The old resolution
+    tried ``kwargs[name]``, then ``args[position]``, then a SEARCH inside any
+    mapping-valued kwarg for ``name``.
+
+    * ``position`` counts FLATTENED graph inputs, but ``args`` is the call
+      BEFORE flattening. sdxl escaped because diffusers passes its dict by
+      keyword and the positional branch never fired. z-image, whose ``x`` is
+      a ``list[Tensor]``, could not escape: ``x.0`` bound the whole list,
+      ``x.1`` bound the NEXT argument, and the last input then refused
+      ``input_missing`` — measured off-GPU, and it is what pgw#994 filed.
+    * the nested search found ``text_embeds`` in ``added_cond_kwargs``
+      because no other kwarg happened to carry that key. It is deleted here:
+      the contract now SAYS where the value is, so nothing needs to hunt for
+      it, and a dict that carries a colliding key can no longer decide a bind.
+    """
     out: Dict[str, Any] = {}
     for spec in contract.inputs:
-        if spec.name in kwargs:
-            out[spec.name] = kwargs[spec.name]
-        elif 0 <= spec.position < len(args):
-            out[spec.name] = args[spec.position]
+        found, value = aot_flatten.resolve_leaf(
+            spec.call_param, spec.call_position, spec.path, args, kwargs)
+        if found:
+            out[spec.name] = value
+        elif spec.optional:
+            continue
         else:
-            nested = next(
-                (v[spec.name] for v in kwargs.values()
-                 if isinstance(v, Mapping) and spec.name in v),
-                None)
-            if nested is not None:
-                out[spec.name] = nested
-            elif spec.optional:
-                continue
-            else:
-                raise IngressContractError(
-                    "input_missing",
-                    f"declared input {spec.name!r} (position {spec.position}) "
-                    f"is absent from the call ({len(args)} positional, "
-                    f"kwargs {sorted(kwargs)[:8]!r})")
+            where = f"argument {spec.call_param!r}"
+            if spec.path:
+                where += " path " + "".join(
+                    f"[{step!r}]" for step in spec.path)
+            raise IngressContractError(
+                "input_missing",
+                f"declared input {spec.name!r} ({where}, position "
+                f"{spec.call_position}) is absent from the call "
+                f"({len(args)} positional, kwargs {sorted(kwargs)[:8]!r})")
     return out
 
 
@@ -1048,11 +1123,19 @@ def excluded_inputs_present(
 ) -> Tuple[str, ...]:
     """The contract's EXCLUDED inputs this call actually carries (pgw#790).
 
-    Keyword and nested-mapping only, mirroring :func:`bind_call_inputs`'
-    resolution order minus the positional leg: an excluded input has no
-    position in this graph's signature, so a positional index would name a
-    different argument entirely. A ``None`` value does not count as carrying
-    it — that is how a diffusers pipeline says "absent".
+    Keyword and nested-mapping only: an excluded input has no position in this
+    graph's signature, so a positional index would name a different argument
+    entirely. A ``None`` value does not count as carrying it — that is how a
+    diffusers pipeline says "absent".
+
+    This still SEARCHES, and deliberately (pgw#994, which deleted the search
+    in :func:`bind_call_inputs`). The two questions are not the same one: a
+    declared input has a contract row, so its location is recorded and can be
+    replayed; an EXCLUDED input has no row by definition, and the question
+    asked of it is "does this call carry such a value anywhere" — for which
+    there is nothing to replay. A diffusers pipeline can hand an adapter down
+    nested (``cross_attention_kwargs``), and a branchless class that missed it
+    would silently serve the base model.
     """
     if not contract.excluded:
         return ()
