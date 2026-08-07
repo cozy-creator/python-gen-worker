@@ -69,7 +69,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import worker_goals
+from . import warm_spans, worker_goals
 from .config import load_settings
 from .mint_process import (
     EXIT_BAD_REQUEST,
@@ -460,8 +460,15 @@ def _run_warm_job(
 def _drive_warm_plan(
     instance: Any, jobs: Sequence[Any], request: MintRequest, *,
     proof_only: bool = False,
-) -> None:
+) -> warm_spans.WarmLedger:
     """Run the endpoint's OWN warm plan, framed as ``warmup_forward``.
+
+    Returns the plan's own cost ledger (pgw#989). On the dynamo recipe these
+    forwards ARE the compile, so ``warmup_forward`` is 97.6 % of the mint under
+    a single name — measured beside an ``inductor_compile`` row reading 0.0 s.
+    The ledger splits it into compile and forward per job. It is measured on
+    the AOT recipe's proof forward too: that job costs real seconds and an
+    unmeasured cost is how this one hid.
 
     ``proof_only`` runs ONE job (pgw#984, the AOT recipe); otherwise the whole
     plan runs (the dynamo recipe, where these forwards ARE the compile).
@@ -475,15 +482,18 @@ def _drive_warm_plan(
     ``(phase=warmup_forward, deterministic)`` while the worker was still
     calling it ``crashed`` and buying the second pod.
     """
+    ledger = warm_spans.WarmLedger()
     total = 1 if proof_only else len(jobs)
     frame(phase="warmup_forward", step=0, total=total)
     for index, job in enumerate(jobs[:total], start=1):
         frame(phase="warmup_forward", step=index, total=total,
               note=job.spec.name)
         try:
-            _run_warm_job(
-                instance, job, dict(request.configs.get(job.spec.name) or {}),
-                request.execution_lane, origin=mint_identity(request))
+            with ledger.job(job.spec.name):
+                _run_warm_job(
+                    instance, job,
+                    dict(request.configs.get(job.spec.name) or {}),
+                    request.execution_lane, origin=mint_identity(request))
         except BaseException as exc:
             if _is_resource_error(exc) or not isinstance(exc, Exception):
                 raise
@@ -492,6 +502,7 @@ def _drive_warm_plan(
                 f"not run — warm job {job.spec.name!r} raised "
                 f"{type(exc).__name__}: {exc}. A cell must not seal for a "
                 f"handler that cannot serve.") from exc
+    return ledger
 
 
 def _drain_router(pipe: Any, *, poll_s: float = 0.5) -> None:
@@ -514,7 +525,7 @@ def _drain_router(pipe: Any, *, poll_s: float = 0.5) -> None:
         _warm, pending, _failed = router.stats()
         if pending == 0:
             return
-        frame(phase="inductor_compile", note=f"{pending} compile(s) queued")
+        frame(phase=warm_spans.PHASE_ROUTER_DRAIN, note=f"{pending} compile(s) queued")
         time.sleep(poll_s)
 
 
@@ -865,8 +876,9 @@ def mint(request: MintRequest) -> MintReport:
         raise MintChildRefused(f"{mint_identity(request)}: {exc}") from exc
     miss_before = cc.cache_miss_count(pipe)
 
-    _drive_warm_plan(instance, jobs, request)
-    frame(phase="inductor_compile", note="draining any queued compiles")
+    ledger = _drive_warm_plan(instance, jobs, request)
+    frame(phase=warm_spans.PHASE_ROUTER_DRAIN,
+          note="draining any queued compiles")
     _drain_router(pipe)
 
     if cc.execution_count(pipe) <= 0:
@@ -898,6 +910,10 @@ def mint(request: MintRequest) -> MintReport:
         peak_vram_bytes=peak,
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
+        # pgw#989: the dynamo recipe's `mint_phases` was documented as "empty —
+        # no per-graph-class breakdown". It has one; it was just never
+        # measured. The parent re-emits this exactly as it does the AOT table.
+        mint_phases=ledger.table(),
     )
 
 
