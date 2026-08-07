@@ -153,11 +153,11 @@ presence as your signal in the build script that drives `docker build`.
 
 ---
 
-## Caching: tenant-controlled
+## Caching: tenant-controlled, with one platform ban
 
 `BUILD_NONCE`, `DEPS_NONCE`, endpoint-specific commit pins — these are your
-cache-bust knobs, unrelated to versioning. Tensorhub does not impose any
-caching strategy.
+cache-bust knobs, unrelated to versioning. Layer caching is yours; Tensorhub
+imposes no caching strategy.
 
 ```dockerfile
 ARG BUILD_NONCE=2026-04-23-default
@@ -165,6 +165,89 @@ RUN echo "build-nonce=${BUILD_NONCE}" \
     && mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 ```
+
+### BuildKit cache mounts are refused
+
+A Dockerfile that asks BuildKit for a persistent cache directory is rejected at
+publish:
+
+```
+400 invalid_tarball
+     buildkit cache mounts are not allowed in org Dockerfiles
+```
+
+**Why.** The builder is multi-tenant, and such a cache is addressed by an id.
+The obvious id is a constant — every org copies the same one off a page like
+this one — and a constant id is one mutable directory shared across tenant
+builds. Org A seeds a poisoned wheel into it; org B's build mounts the same id
+and installs it. That is build-time code injection across a tenant boundary:
+the same shape of trust failure as adopting a foreign compile cell, one layer
+down.
+
+Install uncached instead — `uv pip install --no-cache`. The ordinary layer
+cache still covers the common case, and a cold dependency install is a
+build-time cost paid once per release, not a per-pod one.
+
+If build speed later justifies a real cache, the answer is a per-org
+**namespaced** id the validator enforces (the id must embed the org; the
+validator rewrites or refuses). Never a shared one — speed does not reopen a
+cross-tenant channel.
+
+> The validator matches the raw bytes of the whole Dockerfile, **comments
+> included**. Do not paste the banned directive into your file even to explain
+> why it is banned: an explanatory comment is refused exactly like a live
+> instruction. Fail-closed is deliberate here.
+
+---
+
+## The AOT host toolchain — yours to install, the platform's to verify
+
+AOTInductor is the only lane that host-compiles: it emits a C++ wrapper and
+links a real `.so`, on the machine running the mint. The dynamo/JIT lane does
+not — it emits Triton kernels behind a Python wrapper — so an endpoint that
+declares no `compile=` export never needs any of this.
+
+If any of your endpoints DOES declare an AOT export, the image must carry a C++
+compiler. The pytorch runtime bases ship a C compiler and no C++ one. Install
+it yourself: your Dockerfile is author-owned content and the platform never
+injects layers into it.
+
+```dockerfile
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl g++ \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+`g++`, recommends-off, and **not** `build-essential` — the latter drags ~250 MB
+of make/dpkg-dev the wrapper compile never invokes. Measured cost of this layer
+on a ~9.2 GB endpoint image: **+80 MB**.
+
+**The platform verifies it rather than establishing it.** `python -m
+gen_worker.discovery` already runs inside your final image, so it can ask the
+question about the image that will actually serve. An image whose endpoints
+declare an AOT export and whose PATH holds no C++ compiler fails the build, by
+name:
+
+```
+error: aot precondition cxx_toolchain: no C++ compiler on this image, but
+       ['micro-4d', 'micro-diffusion'] declare an AOT export
+```
+
+That refusal costs $0.00, at the build, naming the families. Before the check
+existed the same defect cost 336 s of rented L4 time and surfaced as
+`InvalidCxxCompiler` at the link step. A guarantee you can observe beats a
+quieter one: the refusal IS the guarantee.
+
+> **On a CUDA image `g++` is necessary, not sufficient.** torch's
+> `cpp_extension` also needs a CUDA root it can discover, and the pytorch
+> runtime bases ship CUDA as pip wheels without ever creating `/usr/local/cuda`
+> — so an image with `g++` and no composed CUDA root still dies with
+> `CUDA_HOME environment variable is not set`, on a pod, after paying for the
+> export. Tensorhub's synthesized Dockerfile composes that root; a custom
+> Dockerfile has no equivalent and **no precondition covers it yet**. pgw#1017
+> owns closing that gap. Until it does, do not pod-run a custom-Dockerfile
+> family that declares an AOT export.
 
 ---
 
@@ -176,21 +259,27 @@ FROM ${BASE_IMAGE}
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# The AOT host toolchain. Drop this layer only if no endpoint in the image
+# declares a compile export — Tensorhub's own generated Dockerfile installs it
+# in every image it synthesizes.
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl g++ \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock /app/
 
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv export --cache-dir /var/cache/uv --link-mode copy \
+RUN uv export --no-cache --link-mode copy \
       --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
       -o /tmp/requirements.txt \
-    && uv pip install --cache-dir /var/cache/uv --link-mode copy \
+    && uv pip install --no-cache --link-mode copy \
       --system --break-system-packages --no-deps -r /tmp/requirements.txt
 
 COPY . /app
 
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --cache-dir /var/cache/uv --link-mode copy \
+RUN uv pip install --no-cache --link-mode copy \
       --system --break-system-packages --no-deps --no-sources /app \
     && mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock

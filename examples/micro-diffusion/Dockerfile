@@ -11,21 +11,37 @@ FROM ${BASE_IMAGE}
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# The AOT host toolchain. This family declares a compile export, so its image
+# must be able to link the C++ wrapper AOTInductor emits — the pytorch runtime
+# bases carry a C compiler and no C++ one. Recommends-off and no
+# build-essential: +80 MB measured, against ~250 MB of make/dpkg-dev the
+# wrapper compile never invokes. `gen_worker.discovery` below verifies this at
+# build time and refuses the image if it is missing (pgw#996, pgw#1017).
+#
+# NOT SUFFICIENT ON ITS OWN, and this family is not pod-ready until pgw#1017
+# closes it: torch's cpp_extension also needs a discoverable CUDA root, which
+# this base does not have (CUDA arrives as pip wheels and /usr/local/cuda is
+# never created). Tensorhub's synthesized Dockerfile composes that root; a
+# custom Dockerfile has no equivalent and no precondition covers it yet, so a
+# mint on this image would die at CUDA_HOME after paying for the export.
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl g++ \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock /app/
 
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv export --cache-dir /var/cache/uv --link-mode copy \
+RUN uv export --no-cache --link-mode copy \
       --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
       -o /tmp/requirements.txt \
-    && uv pip install --cache-dir /var/cache/uv --link-mode copy \
+    && uv pip install --no-cache --link-mode copy \
       --system --break-system-packages --no-deps -r /tmp/requirements.txt
 
 COPY . /app
 
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --cache-dir /var/cache/uv --link-mode copy \
+RUN uv pip install --no-cache --link-mode copy \
       --system --break-system-packages --no-deps --no-sources /app
 
 # The checkpoint, generated and VERIFIED in the same layer. `--verify`
