@@ -158,6 +158,24 @@ class BlobNotFoundError(PayloadRefError):
         )
 
 
+class BlobDigestMalformedError(PayloadRefError):
+    """A caller-supplied blob address is not an algorithm-tagged digest.
+
+    The hub's `storage.ParseDigest` refuses bare hex outright, so guessing an
+    algorithm here would only turn a local contract error into a remote 400 —
+    or, worse, silently address the wrong one of the two live CAS namespaces
+    (repo-CAS is sha256 since th#1303; dataset-CAS is blake3).
+    """
+
+    def __init__(self, digest: str, detail: str) -> None:
+        super().__init__(
+            f"blob address {digest!r} supplied by the request payload is not a "
+            f"valid content digest ({detail}) — write it algorithm-tagged, as "
+            '"sha256:<64 hex>" or "blake3:<64 hex>"',
+            code="blob_digest_malformed", ref=digest,
+        )
+
+
 class BlobForbiddenError(PayloadRefError):
     """A caller-supplied digest is not readable under this request's grant."""
 
