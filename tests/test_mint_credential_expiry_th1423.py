@@ -37,7 +37,7 @@ from gen_worker import fleet_cells as fc
 from gen_worker.convert.hub import HubPublishError
 
 LAPSE_S = 150  # how far past `exp` the presented credential is, in the JWT
-CELL_KEY = "ck5-" + "e" * 56
+CELL_KEY = "ck1-" + "e" * 56
 FAMILY = "sdxl"
 
 META = {

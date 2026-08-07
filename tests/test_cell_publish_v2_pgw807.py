@@ -37,7 +37,7 @@ from gen_worker.convert.hub import HubPublishError
 from gen_worker.models import chunk_upload as cu
 from gen_worker.procsplit import actions
 
-CELL_KEY = "ck5-" + "b" * 56
+CELL_KEY = "ck1-" + "b" * 56
 FAMILY = "sdxl"
 
 # Small enough to keep the test in kilobytes, large enough that the artifact

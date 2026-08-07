@@ -235,7 +235,7 @@ def finalized_in_process(key: str) -> Optional["SelfMint"]:
 
 
 # pgw#712 fence marker (see publish()): presence in metadata refuses
-# republication. Nothing in-tree stamps it post-ck5.
+# republication. Nothing in-tree stamps it under exact identity.
 ADOPTION_MARK = "equivalence_adopted"
 
 
@@ -498,11 +498,11 @@ class CellPublisher:
         treats every raise as non-fatal to serving.
         """
 
-        # pgw#712 (kept under the ck5 exact-identity ruling as
+        # pgw#712 (kept under the exact-identity ruling as
         # defense-in-depth): a cell whose metadata carries a foreign
         # adoption provenance must never republish under this worker's
         # key. Nothing in-tree stamps the mark anymore (equivalence
-        # adoption was deleted with ck5); a marked cell can only be a
+        # adoption was deleted with exact identity); a marked cell can only be a
         # foreign/hand-copied artifact — refuse it.
         mark = meta.get(ADOPTION_MARK)
         if mark:

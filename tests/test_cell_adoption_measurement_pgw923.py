@@ -31,7 +31,7 @@ from gen_worker.cell_adopt import AdoptOutcome, CellAdoption
 from gen_worker.executor import Executor, _InjectionResult
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
-REF = "root/family-sdxl#ck5-" + "b" * 56
+REF = "root/family-sdxl#ck1-" + "b" * 56
 DIGEST = "blake3:" + "c" * 64
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
@@ -163,7 +163,7 @@ def test_the_arm_is_measured_and_recorded_as_the_cell_arm_boot_phase(
 
     def _slow_arm(pipe: Any, cfg: Any, cache_dir: Any, art: Any) -> AdoptOutcome:
         time.sleep(_INDUCED_ARM_S)
-        return AdoptOutcome.hit("family=sdxl key=ck5-abc")
+        return AdoptOutcome.hit("family=sdxl key=ck1-abc")
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _slow_arm)
     outcome = fleet_cells.enable_compiled(

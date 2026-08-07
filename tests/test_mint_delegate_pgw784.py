@@ -108,7 +108,7 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
     # is not what this test is about.
     monkeypatch.setattr(
         fleet_cells.cell_key, "compute",
-        lambda *a, **k: SimpleNamespace(digest="ck5-test"))
+        lambda *a, **k: SimpleNamespace(digest="ck1-test"))
 
     prior = dict(os.environ)
     outcome = fleet_cells.enable_compiled(
@@ -152,7 +152,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
     a child warming at different config traces different graphs and the
     parent's own proof then misses."""
     pending = SimpleNamespace(
-        family="sdxl", cell_key="ck5-abc", cfg=_cfg(),
+        family="sdxl", cell_key="ck1-abc", cfg=_cfg(),
         capture_dir=tmp_path / "capture", target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path)
     task = mint_delegate.MintTask(
@@ -174,8 +174,8 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
 
 def _task(tmp_path: Path, **over: Any) -> mint_delegate.MintTask:
     pending = fleet_cells.PendingSelfMint(
-        family="sdxl", cell_key="ck5-abc",
-        ref="root/family-sdxl#ck5-abc", cfg=_cfg(),
+        family="sdxl", cell_key="ck1-abc",
+        ref="root/family-sdxl#ck1-abc", cfg=_cfg(),
         target=tmp_path / "cell.tar.gz", capture_dir=tmp_path / "capture",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path,
         delegated=True)
@@ -221,7 +221,7 @@ def test_a_minted_child_is_adopted_through_the_delivered_cell_path(
     def _adopt(pipe: Any, pending: Any, artifact: Path) -> Any:
         adopted.append(Path(artifact))
         return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ck5-abc", ref="r#k",
+            family="sdxl", cell_key="ck1-abc", ref="r#k",
             snapshot_digest="blake3:x", artifact=Path(artifact))
 
     monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)

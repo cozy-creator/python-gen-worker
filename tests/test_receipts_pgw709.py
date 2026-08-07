@@ -27,7 +27,7 @@ from gen_worker import receipts
 
 KID = "test-kid-1"
 FAMILY = "sdxl"
-CELL_KEY = "ck5-0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+CELL_KEY = "ck1-0123456789abcdef0123456789abcdef0123456789abcdef01234567"
 SNAPSHOT = "snapdigest-abc123"
 B3_HEX = "ab12cd34" * 8
 SHA_HEX = "12ab34cd" * 8
@@ -136,7 +136,7 @@ class TestVerifyReceiptJWS:
         # poisoning move receipts exist to prevent.
         jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096))
         head, _, sig = jws.split(".")
-        forged_claims = make_claims("sha256:" + SHA_HEX, 4096, cell_key="ck5-" + "f" * 56)
+        forged_claims = make_claims("sha256:" + SHA_HEX, 4096, cell_key="ck1-" + "f" * 56)
         forged = head + "." + _b64url(json.dumps(forged_claims).encode()) + "." + sig
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(forged, pub_map)
@@ -313,7 +313,7 @@ class TestGateDeliveredArtifact:
         # Nix Deriver lesson — key binding must be inside the signature.
         artifact = make_artifact(tmp_path)
         ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
-        claims = make_claims(ref, artifact.stat().st_size, cell_key="ck5-" + "e" * 56)
+        claims = make_claims(ref, artifact.stat().st_size, cell_key="ck1-" + "e" * 56)
         hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
         _configure(hub)
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
@@ -335,7 +335,7 @@ class TestGateDeliveredArtifact:
     def test_other_revocation_does_not_block(self, tmp_path: Path, hub: HubStub) -> None:
         artifact = make_artifact(tmp_path)
         hub.serve_receipt_for(artifact)
-        hub.revoked.append({"cell_key": "ck5-" + "d" * 56, "snapshot_digest": "other", "reason": "x"})
+        hub.revoked.append({"cell_key": "ck1-" + "d" * 56, "snapshot_digest": "other", "reason": "x"})
         _configure(hub)
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
 

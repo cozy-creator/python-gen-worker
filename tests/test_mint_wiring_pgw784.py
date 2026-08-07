@@ -83,7 +83,7 @@ def _stub_child(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _pending(tmp_path: Path, *, delegated: bool = True) -> Any:
     return fleet_cells.PendingSelfMint(
-        family="sdxl", cell_key="ck5-abc", ref="root/family-sdxl#ck5-abc",
+        family="sdxl", cell_key="ck1-abc", ref="root/family-sdxl#ck1-abc",
         cfg=_cfg(), target=tmp_path / "cell.tar.gz",
         capture_dir=tmp_path / "capture", mint_root=tmp_path / "root",
         publisher=None, cache_dir=tmp_path, delegated=delegated)
@@ -126,7 +126,7 @@ def test_the_arm_returns_armed_false_with_a_delegated_pending(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
     monkeypatch.setattr(
         fleet_cells.cell_key, "compute",
-        lambda *a, **k: SimpleNamespace(digest="ck5-wired"))
+        lambda *a, **k: SimpleNamespace(digest="ck1-wired"))
     monkeypatch.delenv(mint_delegate.ENV_IN_PROCESS, raising=False)
 
     outcome = fleet_cells.enable_compiled(_Pipe(), _cfg(), tmp_path)
@@ -244,8 +244,8 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     def _adopt(pipe: Any, pending: Any, artifact: Path) -> Any:
         adopted.append(Path(artifact))
         return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ck5-abc",
-            ref="root/family-sdxl#ck5-abc", snapshot_digest="blake3:aa",
+            family="sdxl", cell_key="ck1-abc",
+            ref="root/family-sdxl#ck1-abc", snapshot_digest="blake3:aa",
             artifact=Path(artifact))
 
     monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
@@ -269,7 +269,7 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     # Phase 4, shared with the in-process route: the target now advertises the
     # worker's OWN key (th#910's self-attested fence).
     target = rec.compile_targets["t0"]
-    assert target.active_compile_ref == "root/family-sdxl#ck5-abc"
+    assert target.active_compile_ref == "root/family-sdxl#ck1-abc"
     assert target.active_compile_snapshot_digest == "blake3:aa"
     assert target.active_self_mint is True
     assert "finalize" in act.phases

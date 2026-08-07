@@ -1,4 +1,4 @@
-"""pgw#694 determinism hardening: posture seal (#695), env seal + ck4
+"""pgw#694 determinism hardening: posture seal (#695), env seal
 (#696), composition fingerprint (#697), cubin gate (#698).
 
 Red-verified against real torch state and real file trees — no mocks of
@@ -125,7 +125,8 @@ def test_mint_manifest_carries_the_posture_seal() -> None:
 
     manifest = gc.closure_manifest(pipe, _cfg(), label="toyfam")
     assert manifest[gc.POSTURE_KEY] == gc.CANONICAL_POSTURE
-    assert gc.MANIFEST_VERSION == 3 and manifest["v"] == 3
+    # pgw#958 §1.27(g): one live manifest version, and it is 1.
+    assert gc.MANIFEST_VERSION == 1 and manifest["v"] == 1
 
     # A mint attempted in a non-canonical posture fails red, named.
     with torch.no_grad():
@@ -181,7 +182,7 @@ def test_consolidate_flags_posture_divergence() -> None:
 
 
 # ---------------------------------------------------------------------------
-# #696: env seal + ck4
+# #696: env seal joins the key
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +219,7 @@ def test_establish_config_imposes_the_serving_posture() -> None:
 
 def test_seal_digest_tracks_config_flags() -> None:
     """Flipping one sealed flag changes the seal digest — and therefore the
-    ck4 key (red pre-fix: no env_seal axis, keys blind to config)."""
+    key (red pre-fix: no env_seal axis, keys blind to config)."""
     baseline = _env_seal().seal_digest(_env_seal().effective_seal())
     before = torch.backends.cudnn.benchmark
     try:
@@ -229,7 +230,7 @@ def test_seal_digest_tracks_config_flags() -> None:
     assert _env_seal().seal_digest(_env_seal().effective_seal()) == baseline
 
 
-def test_ck5_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
+def test_ck1_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
     monkeypatch.setattr(cc, "runtime_key", lambda: {
         "sku": "l4", "sm": "sm_89", "cuda": "13.0", "cuda_driver": "13000",
         "torch": "2.13.0+cu130", "triton": "3.7.1", "image_digest": "",
@@ -240,8 +241,8 @@ def test_ck5_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
 
     facts = cc.declared_contract_facts(_cfg())
     want = ck.compute("toyfam", contract=ck.contract_digest(facts))
-    assert want.digest.startswith("ck6-")
-    # pgw#990: an older scheme is key-SHAPED and simply names nothing this
+    assert want.digest.startswith("ck1-")
+    # pgw#990: a foreign scheme is key-SHAPED and simply names nothing this
     # runtime computes — refused on axes, not on its label.
     assert ck.is_key("ck3-" + "a" * 56)
     assert want.digest != "ck3-" + "a" * 56
@@ -263,14 +264,14 @@ def test_ck5_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
     assert ck.from_artifact_metadata(drifted).digest != want.digest
     assert ck.mismatch(drifted, want).startswith("env_seal:")
 
-    # No env_seal block = pre-ck4 cell = no identity.
+    # No env_seal block = no sealed environment = no identity.
     unsealed = {k: v for k, v in meta.items() if k != _env_seal().SEAL_KEY}
     with pytest.raises(ck.CellKeyError, match="env_seal"):
         ck.from_artifact_metadata(unsealed)
 
 
 def test_verify_no_longer_pins_sku(monkeypatch: Any) -> None:
-    """ck3 completion (pgw#691): sku left the identity axes, but verify()
+    """pgw#691: sku left the identity axes, but verify()
     still hard-required it — a same-sm cell minted on a different SKU
     refused to arm, structurally undoing the collapse."""
     monkeypatch.setattr(cc, "runtime_key", lambda: {

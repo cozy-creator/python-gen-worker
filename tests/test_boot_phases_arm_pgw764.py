@@ -58,7 +58,7 @@ def test_a_refused_arm_rides_a_boot_row_with_its_reason(
         raise AdoptError("key_mismatch", "cell was minted for sm_90, host is sm_89")
 
     monkeypatch.setattr(aot_serve, "load_and_wrap", refuse)
-    artifact = tmp_path / "ck5_deadbeef.tar.gz"
+    artifact = tmp_path / "ck1_deadbeef.tar.gz"
     artifact.write_bytes(b"not-a-real-artifact")
 
     # Behaviour is unchanged: a refused arm stays eager and returns False.
@@ -73,16 +73,16 @@ def test_a_refused_arm_rides_a_boot_row_with_its_reason(
     assert row.reason == "key_mismatch"
     assert "sm_90" in row.detail
     assert row.artifact_kind == aot_serve.ARTIFACT_KIND
-    assert row.artifact_key == "ck5_deadbeef"
+    assert row.artifact_key == "ck1_deadbeef"
 
 
 def test_an_armed_cell_rides_an_ok_boot_row(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    meta = {"family": "sdxl", "cell_key": "ck5_feed", "entries": {"unet": {}},
+    meta = {"family": "sdxl", "cell_key": "ck1_feed", "entries": {"unet": {}},
             "sku": "rtx-4090", "torch": "2.13", "precision": "w8a8"}
     monkeypatch.setattr(aot_serve, "load_and_wrap", lambda *a, **k: meta)
-    artifact = tmp_path / "ck5_feed.tar.gz"
+    artifact = tmp_path / "ck1_feed.tar.gz"
     artifact.write_bytes(b"x")
 
     assert aot_serve.enable(object(), object(), artifact=artifact).armed is True
@@ -90,6 +90,6 @@ def test_an_armed_cell_rides_an_ok_boot_row(
             if r.terminal and r.phase == boot_phases.PHASE_CELL_ARM]
     assert len(arms) == 1
     assert arms[0].outcome == boot_phases.OUTCOME_OK
-    assert "key=ck5_feed" in arms[0].detail
+    assert "key=ck1_feed" in arms[0].detail
 
 

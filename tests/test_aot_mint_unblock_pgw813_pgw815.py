@@ -168,7 +168,7 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
     monkeypatch.setattr(
         fleet_cells.cell_key, "compute",
-        lambda *a, **k: type("_K", (), {"digest": "ck5-" + "a" * 56})())
+        lambda *a, **k: type("_K", (), {"digest": "ck1-" + "a" * 56})())
     monkeypatch.setattr(
         fleet_cells.cc, "begin_fleet_mint", lambda p, c, capture: None)
     # THE lane: sdxl's mixed fp8 checkpoint stamps `w8a8-lora64` (pgw#686 cell
@@ -354,7 +354,7 @@ def test_eager_first_admits_a_DELEGATED_pending_with_no_router(
         "name": "generate",
     })()
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck5-" + "a" * 56, ref="r", cfg=cfg,
+        family=FAMILY, cell_key="ck1-" + "a" * 56, ref="r", cfg=cfg,
         target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
         mint_root=tmp_path, publisher=None, delegated=True,
         recipe=fleet_cells.RECIPE_AOT)
@@ -382,7 +382,7 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
         "name": "generate",
     })()
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck5-" + "b" * 56, ref="r", cfg=cfg,
+        family=FAMILY, cell_key="ck1-" + "b" * 56, ref="r", cfg=cfg,
         target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
         mint_root=tmp_path, publisher=None, delegated=False)
     inj = _Inj(compile_objects=[_Candidate(pipe)],
@@ -398,7 +398,7 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
 
 def _finalized_pending(tmp_path: Path, publisher: Any) -> Any:
     """A pending that has been packed — a real file, a real key, real bytes."""
-    key = "ck5-" + "c" * 56
+    key = "ck1-" + "c" * 56
     target = tmp_path / "cell.tar.gz"
     target.write_bytes(b"x" * 4096)
     pending = fleet_cells.PendingSelfMint(
@@ -458,7 +458,7 @@ def test_a_publish_gate_with_nothing_packed_is_NAMED(
     pendings it believes it packed, so reaching it with nothing packed is a
     real defect and must not be a no-op."""
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck5-" + "d" * 56, ref="r", cfg=_Cfg(),
+        family=FAMILY, cell_key="ck1-" + "d" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
         mint_root=tmp_path / "root2", publisher=_Publisher())
 
@@ -472,7 +472,7 @@ def test_a_withhold_with_nothing_packed_is_NAMED(
     tmp_path: Path, _events: List[Tuple[str, str, str]],
 ) -> None:
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck5-" + "e" * 56, ref="r", cfg=_Cfg(),
+        family=FAMILY, cell_key="ck1-" + "e" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
         mint_root=tmp_path / "root3", publisher=_Publisher())
 
@@ -520,7 +520,7 @@ def test_a_boot_that_resolves_NOTHING_confesses(
     ex = _executor(tmp_path)
     spec = type("_S", (), {"name": "generate"})()
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck5-" + "f" * 56, ref="r", cfg=_Cfg(),
+        family=FAMILY, cell_key="ck1-" + "f" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
         mint_root=tmp_path / "root4", publisher=_Publisher())
     pending.mint_root.mkdir(parents=True, exist_ok=True)

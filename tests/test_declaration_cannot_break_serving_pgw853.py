@@ -256,7 +256,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
     monkeypatch.setattr(
         fleet_cells.cell_key, "compute",
-        lambda *a, **k: type("_K", (), {"digest": "ck5-" + "a" * 56})())
+        lambda *a, **k: type("_K", (), {"digest": "ck1-" + "a" * 56})())
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
     monkeypatch.setattr(
         fleet_cells.cc, "begin_fleet_mint", lambda p, c, capture: None)

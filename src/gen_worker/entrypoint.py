@@ -288,7 +288,7 @@ def _establish_env_seal() -> Dict[str, Any]:
     ``TORCH*`` env vars, pin the canonical config surface, and record the
     effective seal — BEFORE the CUDA probe or any model/compile work, so
     every graph this process ever mints or serves runs under the sealed
-    posture and the ck4 ``env_seal`` axis describes reality. A process that
+    posture and the ``env_seal`` axis describes reality. A process that
     cannot be sealed must not advertise: the caller exits typed."""
     from . import env_seal
 
@@ -312,7 +312,7 @@ def _isolate_group_inductor_cache() -> None:
     Set AFTER the seal — env_seal scrubs the whole ``TORCH*``/``TRITON*``
     namespace at boot, and the sanctioned window to point the SDK's own capture
     redirects is after that scrub (same as cell ``capture_env``). A per-group
-    PATH is plumbing, not a behaviour flag, so it does not touch the ck4 seal
+    PATH is plumbing, not a behaviour flag, so it does not touch the seal
     digest or minted kernels (inductor keys are content-addressed).
 
     Gated on ``host_siblings() > 1``: a single child (or no split) keeps torch's

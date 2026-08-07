@@ -58,7 +58,7 @@ def test_no_shared_components_never_forces():
 # th#1043 second layer (found live, pod 4xh4m999n26u5f): the gw#534
 # bf16-resident upcast made a SINGLE-lane fit call against current free VRAM
 # and silently un-forced the group's fp8 decision. pgw#772 removed that
-# voluntary upcast entirely (it also forked the ck5 `lane` axis per-card);
+# voluntary upcast entirely (it also forked the `lane` axis per-card);
 # both the unforced and the forced load now stay on the fp8 storage lane.
 # ---------------------------------------------------------------------------
 

@@ -59,17 +59,14 @@ import importlib.util
 
 logger = logging.getLogger(__name__)
 
-# v3 (pgw#718/#719 erase-and-impose): recorded-env facts left (scrubbed
-# vars are constants by construction); + hash-seed facts + loaded-library
-# digest. v2 added the operator `epoch` salt. v4 (pgw#745): host driver
-# libs excluded from the loaded-lib manifest (gw#577: driver is never
-# identity). v5 (pgw#749): the identity manifest is the python env's
-# toolchain libs ON DISK — phase-independent — never the mapped set.
-# Adding/changing sealed facts bumps THIS version only — never the
-# key-axis set. v6 (pgw#754): host-ISA codegen clamp facts (cpp_march /
-# cpp_simdlen) — deliberately retires every pre-clamp cell: they were
-# compiled -march=native for their mint host's CPU and are not portable.
-SEAL_VERSION = 6
+# pgw#958 (§1.27(g)): restarted at 1 alongside KEY_SCHEME, with the
+# pre-existing cell corpus purged in the same cut — v1..v6 minted real cells
+# and re-issuing 1 is only honest once none of them survive. The seal dict
+# carries every sealed fact accumulated through the old v6 (epoch salt,
+# hash-seed + loaded-library digests, driver libs excluded, on-disk toolchain
+# manifest, host-ISA codegen clamp). Adding/changing sealed facts bumps THIS
+# version only — never the key-axis set.
+SEAL_VERSION = 1
 SEAL_KEY = "env_seal"
 
 # R2: the operator-settable generation salt. Bumping it disowns every cell

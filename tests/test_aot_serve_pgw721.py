@@ -521,7 +521,7 @@ def test_labels_and_refs():
     # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
     # it would then be scored by FX hits).
     assert aot.is_aot_ref(
-        f"root/family-{FAMILY}#ck5-0123456789abcdef") is False
+        f"root/family-{FAMILY}#ck1-0123456789abcdef") is False
 
 
 def test_verify_refuses_baked_weights(stub_runtime):

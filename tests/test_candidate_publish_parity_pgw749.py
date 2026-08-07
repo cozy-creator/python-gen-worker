@@ -1,8 +1,8 @@
 """pgw#749: a cold-boot CANDIDATE key must equal the key a mint on the same
 runtime PUBLISHES — otherwise boot-attach adoption can never fire and every
 cold pod starts a mint it did not need (live: every sdxl 0.2.14 pod
-demanded ck5-4c7e494b/ck5-ad5fdb4b while every mint published
-ck5-41b367ab/ck5-e6e3be89; ADOPT-WITHOUT-MINT = 0 across a 13-worker
+demanded ck1-4c7e494b/ck1-ad5fdb4b while every mint published
+ck1-41b367ab/ck1-e6e3be89; ADOPT-WITHOUT-MINT = 0 across a 13-worker
 burst).
 
 Mechanism (verified against the banked artifacts): the seal's loaded-lib

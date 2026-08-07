@@ -730,7 +730,7 @@ def is_cache_ref(ref: str, family: str = "") -> bool:
     """True when ``ref`` names an inductor compile-cache cell (optionally of
     one specific family). Cells are flavored either with the legacy human
     label (``inductor-<sku>-torch<mm>[-lane]``) or, post-th#883, with the
-    worker-computed cell key itself (``ck2-<sha256>`` — pull-by-key)."""
+    worker-computed cell key itself (``ck1-<sha256>`` — pull-by-key)."""
 
     fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
@@ -767,7 +767,7 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
     }
 
 
-# --- static code closure (ck5 recipe identity, Paul's exact-identity
+# --- static code closure (recipe identity, Paul's exact-identity
 # ruling) -------------------------------------------------------------------
 #
 # "Look at our code and say 'this is the graph we need', ideally with pure
@@ -775,7 +775,7 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
 # import graph reachable from the compile/composition entrypoints, resolved
 # by AST inspection only (no execution): every reached source file is
 # content-digested, and the sorted (module-path, digest) list digests into
-# the ck5 ``code_closure`` axis. Paul's root-imports convention (top-of-file
+# the ``code_closure`` axis. Paul's root-imports convention (top-of-file
 # imports, no runtime imports) is exactly what makes this static graph
 # SOUND — and the mint-time completeness gate below turns that convention
 # into a hard check where the key's honesty depends on it.
@@ -875,7 +875,7 @@ def static_code_closure(roots: Tuple[str, ...] = ()) -> Tuple[Tuple[str, str], .
 
 def closure_completeness_gap(roots: Tuple[str, ...] = ()) -> List[str]:
     """Loaded modules inside the composition namespaces that the static
-    import walk cannot see. NOT a mint gate (Paul's ck6 ruling demoted the
+    import walk cannot see. NOT a mint gate (Paul's pgw#990 ruling demoted the
     closure to a possible future memo — this check's only job was memo
     honesty, so it rides the deferred memo issue): kept as diagnostics for
     that issue. Note the live finding it produced: executor-side models/*
@@ -906,7 +906,7 @@ def assert_closure_complete(roots: Tuple[str, ...] = ()) -> None:
     gaps = closure_completeness_gap(roots)
     if gaps:
         raise RuntimeError(
-            f"code-closure completeness gate (ck5): {len(gaps)} loaded "
+            f"code-closure completeness gate: {len(gaps)} loaded "
             f"module(s) outside the static import closure — a dynamic "
             f"import is hiding trace-relevant code from the recipe key: "
             f"{gaps[:10]!r}")
@@ -931,7 +931,7 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     try:
         import importlib.metadata
 
-        # ck5: diffusers/transformers/peft ride here at package granularity
+        # diffusers/transformers/peft ride here at package granularity
         # (their VERSION axes left the key; content replaces them).
         wanted = ("torch", "triton", "diffusers", "transformers", "peft")
         for dist in importlib.metadata.distributions():
@@ -960,7 +960,7 @@ def content_keys() -> Tuple[Tuple[str, str], ...]:
     """torch/triton CONTENT identity as upstream computes it (cache-design
     review §6.5: ``torch_key`` hashes the whole torch package's bytes;
     ``triton_key`` per-file shas + the libtriton binary). Recorded in
-    metadata for observability/forensics — the ck5 key's content identity
+    metadata for observability/forensics — the key's content identity
     for the same stack rides the ``toolchain`` axis (dist-info RECORDs +
     tool binaries), which is cheaper and covers the cuda runtime too."""
     out: Dict[str, str] = {"torch": "", "triton": ""}
@@ -1034,10 +1034,10 @@ def artifact_metadata(
         # pgw#697: per-module fingerprint rows so an adoption refusal can
         # name the exact drifted module, not just a digest mismatch.
         "composition": [[str(p), str(d)] for p, d in composition],
-        # pgw#696: the execution-environment seal rides verbatim — the ck4
+        # pgw#696: the execution-environment seal rides verbatim — the
         # env_seal axis is recomputed FROM it, never trusted as a stamp.
         env_seal.SEAL_KEY: env_seal.effective_seal(),
-        # ck5 recipe facts: toolchain + static code closure feed the key
+        # recipe facts: toolchain + static code closure feed the key
         # axes (recomputed from these blocks, never trusted as stamps);
         # content_keys stay observability (review §6.5). Endpoint closure
         # roots ride in when the executor passes them (train-lane wiring).
@@ -1410,7 +1410,7 @@ def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
     ``cache_key_tag`` (review §6.3), so a delivered cell's entries are
     mechanically unconsumable by a process whose declared semantic identity
     differs. Environment facts are deliberately excluded: the inner FX key
-    already hashes them natively (system info, config, dtypes) and the ck5
+    already hashes them natively (system info, config, dtypes) and the
     outer key pins them via env_seal/toolchain/code_closure — the tag's job
     is semantics only."""
     execution_lane = cell_key._canonical_execution_lane(

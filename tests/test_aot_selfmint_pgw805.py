@@ -132,11 +132,11 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
-    # No GPU on a dev box: the ck5 `sm` axis is a real-runtime fact, and this
+    # No GPU on a dev box: the `sm` axis is a real-runtime fact, and this
     # test is about the RECIPE decision, not key computation.
     monkeypatch.setattr(
         fleet_cells.cell_key, "compute",
-        lambda *a, **k: type("_K", (), {"digest": "ck5-" + "a" * 56})())
+        lambda *a, **k: type("_K", (), {"digest": "ck1-" + "a" * 56})())
     # w8a8 is the migration's first lane (pgw#704 parity); its mandatory
     # serving refusal is a separate policy, exercised in its own test.
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
@@ -435,7 +435,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     from gen_worker import mint_child
 
     target = tmp_path / "cell.tar.gz"
-    packed = tmp_path / "aot" / "ck5-abc.tar.gz"
+    packed = tmp_path / "aot" / "ck1-abc.tar.gz"
     seen: Dict[str, Any] = {}
 
     def _fake_mint(pipe: Any, spec: Any, out_dir: Path, **kw: Any) -> Any:
@@ -446,7 +446,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         packed.write_bytes(b"packed-cell")
         return aot_mint.MintResult(
             artifact=packed,
-            metadata={"cell_key": "ck5-abc", "entries": {"unet/cfg": {}},
+            metadata={"cell_key": "ck1-abc", "entries": {"unet/cfg": {}},
                       "mint_phases": {"totals": {"total_s": 1.0}}},
             timings={"total_s": 1.0})
 
@@ -459,7 +459,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
 
     request = MintRequest(
         function="generate", modules=("sdxl.main",), family=FAMILY,
-        cell_key="ck5-parent", target=str(target),
+        cell_key="ck1-parent", target=str(target),
         capture=str(tmp_path / "cap"), report=str(tmp_path / "report.json"),
         cfg=cfg_spec(_Cfg()), recipe="aot")
     report = mint_child._mint_aot(
@@ -468,7 +468,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
 
     assert report.status == "minted"
     assert report.recipe == "aot"
-    assert report.cell_key == "ck5-abc"
+    assert report.cell_key == "ck1-abc"
     assert report.mint_phases == {"totals": {"total_s": 1.0}}
     assert target.read_bytes() == b"packed-cell"
     # The spec the exporter got describes the LIVE pipeline, not a re-compose.
@@ -526,14 +526,14 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
         lambda *a, **k: (calls.append("dynamo"), True)[1])
     monkeypatch.setattr(
         fleet_cells, "_packed_metadata",
-        lambda artifact: {"cell_key": "ck5-real", "kind": "aot-inductor"})
+        lambda artifact: {"cell_key": "ck1-real", "kind": "aot-inductor"})
     monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
     monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
 
     artifact = tmp_path / "cell.tar.gz"
     artifact.write_bytes(b"cell")
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck5-handle", ref="root/family-sdxl#ck5-handle",
+        family=FAMILY, cell_key="ck1-handle", ref="root/family-sdxl#ck1-handle",
         cfg=_Cfg(), target=artifact, capture_dir=tmp_path / "cap",
         mint_root=tmp_path, publisher=None, delegated=True,
         recipe=fleet_cells.RECIPE_AOT)
@@ -544,4 +544,4 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     assert minted is not None
     # The REAL key comes off the packed envelope — an AOT key folds the
     # combined graph hash and cannot be known before the export runs.
-    assert minted.cell_key == "ck5-real"
+    assert minted.cell_key == "ck1-real"

@@ -717,7 +717,7 @@ def test_action_table_admits_exactly_the_named_actions():
         {"method": "GET", "path": "/api/v1/repos/root/system-sdxl/checkpoints",
          "query": {"limit": "50"}},
         {"method": "GET", "path": "/api/v1/repos/root/system-sdxl/resolve",
-         "query": {"digest": "ck5-abc"}},
+         "query": {"digest": "ck1-abc"}},
     ):
         actions.authorize(req)
 

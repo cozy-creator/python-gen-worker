@@ -50,15 +50,15 @@ def test_proven_since_requires_new_successful_calls_and_no_revocation():
 
 def test_exported_kind_cell_key_refusals_are_named():
     """cell_key.from_artifact_metadata recomputes INDUCTOR-cache axes. An
-    exported cell rides the same ck5 key space but its key is STAMPED at mint,
+    exported cell rides the same key space but its key is STAMPED at mint,
     so the refusal must say so by name instead of failing opaquely."""
     with pytest.raises(cell_key.CellKeyError) as exc:
         cell_key.from_artifact_metadata(
-            {"kind": "aot-inductor", "cell_key": "ck5-" + "a" * 56})
+            {"kind": "aot-inductor", "cell_key": "ck1-" + "a" * 56})
     message = str(exc.value)
     assert "aot-inductor" in message
     assert "cell_key" in message and "STAMPED" in message
-    assert "ck5-" + "a" * 56 in message
+    assert "ck1-" + "a" * 56 in message
 
     with pytest.raises(cell_key.CellKeyError) as missing:
         cell_key.from_artifact_metadata({"kind": "aot-inductor"})

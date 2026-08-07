@@ -235,7 +235,7 @@ def test_serving_worker_never_runs_the_driver(
 def test_published_cell_is_a_typed_terminal_then_retire(
         monkeypatch: pytest.MonkeyPatch, events: List[Tuple[str, str, str]]) -> None:
     _declare(monkeypatch, "forge")
-    _ledger(monkeypatch, {"ck5-abc": "sha256:deadbeef"}, {})
+    _ledger(monkeypatch, {"ck1-abc": "sha256:deadbeef"}, {})
     lc = _FakeLifecycle()
     _run(lc)
     kinds = [(k, p) for k, _, p in events]
@@ -248,7 +248,7 @@ def test_refused_publish_is_distinguished_from_no_cell(
     """"minted but the hub said no" and "never produced a cell" are different
     operational facts and must not share a terminal."""
     _declare(monkeypatch, "forge")
-    _ledger(monkeypatch, {}, {"ck5-abc": "cell_publish_untrusted_compute"})
+    _ledger(monkeypatch, {}, {"ck1-abc": "cell_publish_untrusted_compute"})
     lc = _FakeLifecycle()
     _run(lc)
     assert (mint_goal.KIND_MINT_GOAL, mint_goal.TERMINAL_REFUSED) in [
@@ -289,11 +289,11 @@ def test_driver_waits_for_the_publish_to_land(
     def _in_flight() -> Dict[str, Any]:
         if state["n"] > 0:
             state["n"] -= 1
-            return {"ck5-abc": ("sdxl", 0.0)}
+            return {"ck1-abc": ("sdxl", 0.0)}
         return {}
 
     monkeypatch.setattr(fleet_cells, "publishes_in_flight", _in_flight)
-    monkeypatch.setattr(fleet_cells, "published_cells", lambda: {"ck5-abc": "cp"})
+    monkeypatch.setattr(fleet_cells, "published_cells", lambda: {"ck1-abc": "cp"})
     monkeypatch.setattr(fleet_cells, "refused_publishes", lambda: {})
     lc = _FakeLifecycle()
     _run(lc)
@@ -334,7 +334,7 @@ def test_dual_goal_pod_states_its_terminal_but_does_NOT_retire(
     moment its mint finished.
     """
     _goals(serve=True, mint=True, declared="serve")
-    _ledger(monkeypatch, {"ck5-abc": "sha256:deadbeef"}, {})
+    _ledger(monkeypatch, {"ck1-abc": "sha256:deadbeef"}, {})
     lc = _FakeLifecycle()
     _run(lc)
     assert (mint_goal.KIND_MINT_GOAL, mint_goal.TERMINAL_PUBLISHED) in [

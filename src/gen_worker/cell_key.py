@@ -11,7 +11,7 @@ and every consumer of cell identity uses the same code:
 * cozy-local's self-mint (gw#555) looks up / saves its store by the same
   key.
 
-The key is the RECIPE DIGEST (ck5, Paul's exact-identity ruling): "look at
+The key is the RECIPE DIGEST (Paul's exact-identity ruling): "look at
 our code and say 'this is the graph we need' — that is our unique
 identifier. If the recipe changes it gets a new identifier, stranding the
 old ones, which is fine." No version comparison, no relaxable axes, no
@@ -36,7 +36,7 @@ exist for this runtime.
                   torch/triton/cuda/diffusers/transformers VERSION axes —
                   content, never version strings
 
-ck6 (pgw#990) DROPS ``code_closure`` from the key. It is still RECORDED on
+pgw#990 DROPS ``code_closure`` from the key. It is still RECORDED on
 every artifact and still drives ``compile_cache``'s local re-trace memo, but
 it is not identity: Paul's final ruling is that identity is the COMPUTATION
 (traced graph x sm x toolchain x env_seal) and "code hashes are a memo, never
@@ -49,7 +49,7 @@ Axes deliberately NOT in the key, recorded in metadata for observability
 and runtime compat checks (``compile_cache.verify``) only: ``sku`` (pgw#691
 — no guard or artifact fact observes it), ``cuda_driver`` (gw#577),
 ``torch``/``triton``/``cuda``/``gen_worker``/``diffusers``/``transformers``
-version strings and ``image_digest`` (ck5 — their CONTENT rides the
+version strings and ``image_digest`` (exact identity — their CONTENT rides the
 toolchain and code_closure axes; version strings and image identity are
 observability, not identity).
 
@@ -68,12 +68,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Tuple
 from . import env_seal
 
-# ck2 -> ck3 (pgw#691): sku left. ck3 -> ck4 (pgw#696): env_seal joined.
-# ck4 -> ck5 (Paul's exact-identity ruling): the key became the RECIPE
-# digest — toolchain + code_closure content joined; every version axis
-# left. ck5 is FINAL: new identity facts ride the content digests (seal_v /
-# closure/toolchain values), never new axes.
-KEY_SCHEME = "ck6"
+# pgw#958 (DESIGN-RULINGS §1.27(g); Paul 2026-08-04, reaffirmed 2026-08-07
+# over pgw#990's ck6 — "the ck6 is wrong and can be removed, the v1 is the
+# correct one"): the counter restarts at 1, and the pre-existing ck1..ck6
+# corpus is PURGED in the same cut (th#1636), so no two cells ever share a
+# scheme token with different meanings. ck1 is the only live scheme; new
+# identity facts ride the content digests (seal_v / closure / toolchain
+# values), never new axes and never a new scheme number.
+KEY_SCHEME = "ck1"
 _PREFIX = KEY_SCHEME + "-"
 # The key digest doubles as the store flavor token, whose shared grammar
 # (th#597 C5: [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64
@@ -243,7 +245,7 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     store. A cell with no computable key is refused and re-minted.
 
     EXPORTED (``aot-inductor``) cells are refused here BY NAME (pgw#735): they
-    ride the same ck5 key space — the axis names are what :func:`from_axes`
+    ride the same key space — the axis names are what :func:`from_axes`
     validates, and the kind is an envelope value, so no scheme bump was needed —
     but their axes are not an inductor cache's, and their key is STAMPED at mint.
     Read ``meta["cell_key"]``; do not recompute an exported cell's identity from
