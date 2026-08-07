@@ -84,6 +84,19 @@ def _wait_boot_fatal_ack(sock: socket.socket) -> None:
     while True:
         header = _recv_exact(sock, 5)
         ftype, length = header[0], int.from_bytes(header[1:5], "big")
+        # pgw#1013 (§4.24, ABSENCE sweep): `length` is 4 attacker-supplied bytes
+        # off the control socket, so it may declare up to 4 GiB. The bound
+        # already exists — frames.MAX_FRAME_BYTES, enforced by BOTH ends of the
+        # normal path (frames.read_frame and FrameWriter.frame). This reader is
+        # hand-rolled for the boot-fatal ack and skipped it, so one route into
+        # the child had no ceiling while its siblings did.
+        #
+        # The docstring's claim that this is "bounded by the socket timeout"
+        # was wrong in a way worth naming: settimeout bounds each recv, not the
+        # accumulation, so a peer that dribbles bytes resets the clock forever.
+        if length > frames.MAX_FRAME_BYTES:
+            raise ValueError(
+                f"frame of {length} bytes exceeds {frames.MAX_FRAME_BYTES}")
         if length:
             _recv_exact(sock, length)
         if ftype == frames.T_BOOT_FATAL_ACK:
@@ -91,13 +104,17 @@ def _wait_boot_fatal_ack(sock: socket.socket) -> None:
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    buf = b""
+    # pgw#1013: accumulate into a bytearray, not `buf += chunk`. The old form
+    # reallocated and copied the whole buffer per chunk, so a large frame cost
+    # O(n^2) — the length bound above caps n, but quadratic copying at 128 MiB
+    # is still a stall, and there is no reason to pay it.
+    buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
         if not chunk:
             raise OSError("socket closed before the boot-fatal ack arrived")
-        buf += chunk
-    return buf
+        buf.extend(chunk)
+    return bytes(buf)
 
 
 def _ping_interval() -> float:

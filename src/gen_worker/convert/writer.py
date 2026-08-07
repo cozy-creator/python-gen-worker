@@ -1642,6 +1642,11 @@ def deshard_indexed_safetensors(index_path: Path) -> Path:
     # here, at ingest, instead of at load time on a GPU pod.
     with open(merged, "rb") as f:
         header_len = int.from_bytes(f.read(8), "little")
+        # bound-justified: `merged` was written by merge_safetensors_by_offset in
+        # this same call, from shard headers each already refused by
+        # header_len_ok. This length is our own output, not external input, so a
+        # second check here would bound us rather than an attacker (§4.24: a
+        # limit must name a runaway nothing else prevents).
         header = json.loads(f.read(header_len).decode("utf-8"))
     got = {k for k in header if k != "__metadata__"}
     want = {str(k) for k in weight_map}
