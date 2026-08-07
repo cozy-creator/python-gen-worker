@@ -63,6 +63,8 @@ from typing import (
 
 import msgspec
 
+from . import aot_shape_hints
+
 from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
 from . import mint_budget, worker_goals
 from .worker_goals import WorkerGoals
@@ -848,6 +850,18 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     inductor_configs: Dict[str, Any] = {}
     cache_dir: str = ""
     device_lock: str = ""
+    #: pgw#998: the tracing process's ShapeEnv symbol values. `torch.export`'s
+    #: round trip rebuilds `var_to_val` keyed by size EXPRESSIONS, so a
+    #: derived symbol (`multiple_of` -> `2*s18`) leaves every extent that is
+    #: not literally one of those keys — a matmul M that multiplies two of
+    #: them — unrealizable, and inductor dies with `('unexpected None!',
+    #: 512*s18*s57)`. The parent is the only process that knows these, so it
+    #: sends them rather than letting the child infer them.
+    symbol_values: Dict[str, int] = {}
+    #: pgw#998: `{symbol: the dim name the AUTHOR wrote}`. Debug surfaces do
+    #: not survive serialization, so a child that has to refuse can only say
+    #: `512*s18*s57` unless the parent tells it these.
+    symbol_labels: Dict[str, str] = {}
 
 
 class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
@@ -1363,6 +1377,8 @@ class EntryCompilePool:
             inductor_configs=dict(self.inductor_configs),
             cache_dir=self.cache_dir,
             device_lock=str(self.device_lock_path),
+            symbol_values=aot_shape_hints.symbol_values(program),
+            symbol_labels=aot_shape_hints.symbol_labels(program),
         )
         job_path = slot / "job.json"
         job_path.write_bytes(msgspec.json.encode(job))
