@@ -18,10 +18,12 @@ from .chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
     ChunkSpec,
     download_chunked_file,
+    drop_volume_chunks,
     hash_file,
     hasher_for,
     parse_cas_ref,
     verify_file_digest,
+    volume_chunk_dir,
 )
 from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
@@ -447,6 +449,10 @@ class CozySnapshotDownloader:
         blobs_root.mkdir(parents=True, exist_ok=True)
         snaps_root.mkdir(parents=True, exist_ok=True)
         fill_blobs_root = fill_source_dir / "blobs" if fill_source_dir is not None else None
+        # pgw#972: the volume's chunk-object tree, a SIBLING of `blobs/` — an
+        # incomplete file's verified chunks, so a replacement pod resumes it
+        # instead of refetching it whole.
+        fill_chunks_root = fill_source_dir / "chunks" if fill_source_dir is not None else None
 
         if resolved is None:
             # Workers don't resolve via HTTP — the orchestrator pre-resolves
@@ -522,6 +528,7 @@ class CozySnapshotDownloader:
                 res.files,
                 progress=progress,
                 fill_blobs_root=fill_blobs_root,
+                fill_chunks_root=fill_chunks_root,
                 publishes=publishes,
             )
             # Materialization copies/concatenates multi-GB trees — strictly
@@ -602,6 +609,7 @@ class CozySnapshotDownloader:
         *,
         progress: Optional[ProgressFn] = None,
         fill_blobs_root: Optional[Path] = None,
+        fill_chunks_root: Optional[Path] = None,
         publishes: Optional[List["asyncio.Task"]] = None,
     ) -> None:
         # pgw#971: background volume write-throughs land here; the caller joins
@@ -695,6 +703,18 @@ class CozySnapshotDownloader:
         sem = asyncio.Semaphore(max_conc)
         blobs_root_id = str(blobs_root.resolve())
 
+        def _drop_chunks(digest: str) -> None:
+            """pgw#972 cleanup, and the whole of it: the volume holds the
+            COMPLETE blob under its digest name, so that file's chunk objects
+            are garbage. Every site that ESTABLISHES that fact calls this — the
+            copy publisher below, the pod that finds it already published, and
+            the tee publisher inside `download_chunked_file` — so the only
+            chunk sets that survive belong to files no pod has ever completed
+            here, and the first pod that completes one collects it. No sweep,
+            no owner registry, no age clock."""
+            if fill_chunks_root is not None:
+                drop_volume_chunks(volume_chunk_dir(fill_chunks_root, digest))
+
         async def _blob_trusted(dst: Path, f: WorkerResolvedRepoFile, digest: str) -> bool:
             """Reusable AND digest-trusted (gw#598): size gate as before, plus
             a full content-hash check once per (root, digest) per process —
@@ -741,6 +761,9 @@ class CozySnapshotDownloader:
                     digest[:16], int(f.size_bytes or 0),
                     int((time.monotonic() - started) * 1000),
                 )
+                # Another pod completed this file; any chunk objects a third
+                # left behind for it are now dead.
+                await asyncio.to_thread(_drop_chunks, digest)
                 return True
             _log.info("blob_cache_miss source=volume digest=%s", digest[:16])
             return False
@@ -774,6 +797,8 @@ class CozySnapshotDownloader:
                 "digest=%s bytes=%d published=%s",
                 digest[:16], int(f.size_bytes or 0), published,
             )
+            if published:
+                await asyncio.to_thread(_drop_chunks, digest)
 
         async def _dl(f: WorkerResolvedRepoFile) -> None:
             digest = f.cas_ref()
@@ -826,6 +851,14 @@ class CozySnapshotDownloader:
                         mirror_dst=(
                             _blob_path(fill_blobs_root, digest)
                             if fill_blobs_root is not None else None
+                        ),
+                        # pgw#972: verified chunks land here as they arrive and
+                        # are adopted from here by the next pod, so a pod that
+                        # dies 90% in costs its successor 10% of the bytes, not
+                        # 100%.
+                        mirror_chunk_dir=(
+                            volume_chunk_dir(fill_chunks_root, digest)
+                            if fill_chunks_root is not None else None
                         ),
                     )
                 else:

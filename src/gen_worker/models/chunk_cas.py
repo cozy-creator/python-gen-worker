@@ -45,6 +45,17 @@ to actually live.
     is published only after the LOCAL file passes its whole-file digest, so a
     half-written volume blob is never readable under the digest name, and any
     mirror failure disables the mirror rather than failing the fetch.
+*   **Resume crosses PODS, at chunk granularity** (pgw#972). Each chunk is
+    copied onto the volume the moment its own sha256 verifies, under the
+    content-addressed name ``chunks/<algo>/aa/bb/<file>/<index>-<chunk>``. So
+    the volume never holds unverified bytes under a name anyone reads: it holds
+    individually-VERIFIED chunks of an incomplete file. A successor pod builds
+    those names straight from the manifest, RE-HASHES every chunk it adopts
+    before trusting it, and fetches only what is missing — in any order, since
+    a CAS file's chunks have none. The names are content-addressed, so two pods
+    writing one chunk write identical bytes to one name and a duplicate write
+    is a no-op. Cleanup is targeted and clock-free: whoever establishes that the
+    volume holds the COMPLETE blob drops that file's chunk objects.
 *   Disk is proven UP FRONT with ``posix_fallocate``, so a 2 TB file that will
     not fit fails in milliseconds instead of 90% of the way through.
 """
@@ -78,11 +89,13 @@ __all__ = [
     "chunk_count_for",
     "chunk_len_at",
     "download_chunked_file",
+    "drop_volume_chunks",
     "hash_file",
     "hasher_for",
     "parse_cas_ref",
     "sha256_file",
     "verify_file_digest",
+    "volume_chunk_dir",
 ]
 
 _log = logging.getLogger(__name__)
@@ -339,6 +352,219 @@ class _Mirror:
             self.tmp.unlink(missing_ok=True)
 
 
+def volume_chunk_dir(chunks_root: Path, ref: str) -> Path:
+    """Where one file's verified chunk objects live on the endpoint volume.
+
+    ``chunks/<algo>/aa/bb/<filehex>/`` — the same fanout as ``blobs/``, and a
+    SIBLING of it rather than a tenant inside it, so nothing that walks the blob
+    tree can mistake a chunk for a blob. Scoping the directory by the FILE
+    digest is what makes cleanup a single unambiguous act by a single owner: the
+    set of objects belonging to a completed file is exactly one directory, not a
+    query over a shared pool.
+    """
+    algo, hexpart = parse_cas_ref(ref)
+    return chunks_root / algo / hexpart[:2] / hexpart[2:4] / hexpart
+
+
+def _chunk_object_name(index: int, sha256: str) -> str:
+    """``<index>-<chunk digest>``, zero-padded so the directory sorts numerically.
+
+    All three coordinates a chunk has are in the name: the file (the directory),
+    its position (the index) and its content (the digest). The digest is what
+    makes a write IDEMPOTENT — two pods that reach this name wrote the same
+    bytes — and the index is what lets an adopter build the name straight from
+    the manifest instead of inventorying the directory. A file re-chunked at a
+    different size therefore addresses different names and cannot be adopted by
+    accident.
+    """
+    return f"{index:08d}-{sha256}"
+
+
+def drop_volume_chunks(directory: Path) -> int:
+    """Remove one file's chunk objects; the volume now holds the whole blob.
+
+    **Who and when:** whoever ESTABLISHES that the volume holds the complete
+    blob under its digest name — the pod that publishes it (tee or copy), or a
+    pod that finds it already published. Every such site calls this, so the only
+    chunk sets that survive are those of a file no pod has ever completed on
+    this volume, and the moment one does they go. That needs no sweep, no owner
+    registry and no age clock.
+
+    **Under concurrency:** ``unlink`` is a NAMESPACE operation, so an adopter
+    that already opened an object keeps reading its inode to the end, and one
+    that opens after the unlink simply misses and refetches that chunk. Neither
+    can read WRONG bytes — every adopted chunk is re-hashed regardless. In-flight
+    writers' staged files are left alone (they are dot-prefixed and
+    writer-unique); the ``rmdir`` then fails and is ignored, and the next
+    completion collects the directory.
+    """
+    removed = 0
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue  # another writer's staged chunk, still being written
+        try:
+            entry.unlink()
+            removed += 1
+        except OSError:
+            pass
+    with contextlib.suppress(OSError):
+        directory.rmdir()
+    if removed:
+        _log.info("volume_chunks_dropped path=%s objects=%d", directory.name[:16], removed)
+    return removed
+
+
+class _VolumeChunks:
+    """The endpoint volume's verified-chunk store for ONE incomplete file.
+
+    pgw#972's cross-pod half. Best effort in exactly ``_Mirror``'s sense: the
+    first error of any kind disables the store for this file and is never
+    propagated, because a volume that is full, slow, read-only or absent must
+    cost the request nothing.
+
+    The volume is mounted by ONE endpoint, so a bad chunk here is self-inflicted
+    rather than hostile — which is why a rejected object is simply unlinked and
+    refetched. It is NOT single-writer, though: two pods of that endpoint are
+    concurrent, so every write stages writer-unique and renames atomically, and
+    every read re-hashes.
+    """
+
+    __slots__ = ("dir", "_ok", "_lock")
+
+    def __init__(self, directory: Path) -> None:
+        self.dir = directory
+        self._ok = True
+        self._lock = threading.Lock()
+
+    @property
+    def ok(self) -> bool:
+        return self._ok
+
+    def disable(self, why: BaseException) -> None:
+        with self._lock:
+            if not self._ok:
+                return
+            self._ok = False
+        _log.warning("volume_chunks_disabled path=%s: %s", self.dir.name[:16], why)
+
+    def path_for(self, index: int, sha256: str) -> Path:
+        return self.dir / _chunk_object_name(index, sha256)
+
+    def publish(self, index: int, spec: ChunkSpec, fd: int, offset: int) -> bool:
+        """Copy one VERIFIED chunk from the local part file onto the volume.
+
+        The read is of bytes this process wrote moments ago, so it comes off the
+        page cache; the cost is one volume write, taken while the pool is still
+        waiting on the network. Staged writer-unique and renamed, so the final
+        name only ever appears with complete bytes — the volume holds verified
+        chunks, never a partial one.
+        """
+        if not self._ok:
+            return False
+        final = self.path_for(index, spec.sha256)
+        tmp = self.dir / f".{final.name}.part-{os.getpid()}-{uuid.uuid4().hex}"
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "xb") as out:
+                pos, remaining = offset, spec.length
+                while remaining > 0:
+                    b = os.pread(fd, min(_READ_CHUNK_BYTES, remaining), pos)
+                    if not b:
+                        raise OSError(f"short read publishing chunk {index}")
+                    out.write(b)
+                    pos += len(b)
+                    remaining -= len(b)
+            # Idempotent by construction: the name fixes the content, so a
+            # racing pod's replace puts the SAME bytes there. Atomic, so a
+            # concurrent reader sees one complete version or the other.
+            os.replace(tmp, final)
+            return True
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            self.disable(exc)
+            return False
+
+    def adopt(
+        self,
+        chunks: Sequence[ChunkSpec],
+        offsets: Sequence[int],
+        wanted: Sequence[int],
+        fd: int,
+        mirror: Optional["_Mirror"],
+        window: int,
+    ) -> set[int]:
+        """Take the chunks a PREVIOUS POD verified and left on the volume.
+
+        Every adopted chunk is RE-HASHED here before it is trusted: the name is
+        a claim, not a proof, so a corrupt or truncated object costs a wasted
+        hash pass and can never inject bytes. Rejected objects are unlinked, so
+        the next pod does not pay the same pass again.
+
+        Bytes go into the local part file (and the mirror) as they are hashed.
+        Writing before the verdict is safe for the same reason a failed fetch
+        attempt is: the range belongs to this chunk alone and nothing reads it
+        until the chunk is marked done, so a rejected adoption is simply
+        overwritten by the refetch.
+        """
+        if not self._ok or not wanted:
+            return set()
+
+        def _take(i: int) -> Optional[int]:
+            spec = chunks[i]
+            src = self.path_for(i, spec.sha256)
+            h = hashlib.sha256()
+            pos, remaining = offsets[i], spec.length
+            try:
+                with open(src, "rb") as f:
+                    while remaining > 0:
+                        b = f.read(min(_READ_CHUNK_BYTES, remaining))
+                        if not b:
+                            return None
+                        h.update(b)
+                        _pwrite_all(fd, b, pos)
+                        if mirror is not None:
+                            mirror.write(b, pos)
+                        pos += len(b)
+                        remaining -= len(b)
+                    if f.read(1):
+                        return None  # longer than the manifest says it is
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                self.disable(exc)
+                return None
+            if h.hexdigest() != spec.sha256:
+                _log.warning(
+                    "volume_chunk_corrupt path=%s index=%d: re-hash rejected it; refetching",
+                    self.dir.name[:16], i,
+                )
+                with contextlib.suppress(OSError):
+                    src.unlink()
+                return None
+            return i
+
+        with ThreadPoolExecutor(max_workers=max(1, min(window, len(wanted)))) as pool:
+            kept = {i for i in pool.map(_take, wanted) if i is not None}
+        adopted_bytes = sum(chunks[i].length for i in kept)
+        _log.info(
+            "chunk_resume source=volume path=%s adopted=%d/%d chunks bytes=%d",
+            self.dir.name[:16], len(kept), len(wanted), adopted_bytes,
+        )
+        return kept
+
+    def drop(self) -> int:
+        return drop_volume_chunks(self.dir)
+
+
+def _open_volume_chunks(directory: Optional[Path]) -> Optional["_VolumeChunks"]:
+    return None if directory is None else _VolumeChunks(directory)
+
+
 def _retry_delay(strikes: int) -> float:
     """Full-jitter exponential backoff, capped. Same shape as the whole-file
     loop in ``cozy_cas`` — the chunked path was the only transfer in the SDK
@@ -501,6 +727,7 @@ def download_chunked_file(
     on_bytes: Optional[Callable[[int], None]] = None,
     session_factory: Callable[[], requests.Session] = requests.Session,
     mirror_dst: Optional[Path] = None,
+    mirror_chunk_dir: Optional[Path] = None,
 ) -> bool:
     """Reassemble a chunked file, verifying every chunk AND the whole-file hash.
 
@@ -513,6 +740,12 @@ def download_chunked_file(
     every byte. Returns whether that mirror was published; ``False`` (including
     always when ``mirror_dst`` is ``None``) means the caller still owes the
     volume a copy.
+
+    ``mirror_chunk_dir`` (pgw#972) is that file's chunk-object directory on the
+    same volume — see :func:`volume_chunk_dir`. Verified chunks are published
+    there as they land and adopted from there on the next pod, so a pod that
+    dies 90% into a 35 GB component leaves its successor 3.5 GB to fetch instead
+    of 35 GB.
     """
     if not chunks:
         raise ValueError("download_chunked_file: no chunks")
@@ -558,7 +791,7 @@ def download_chunked_file(
         return _download_chunked_locked(
             chunks, dst, want_whole=want_whole, total_size=total_size,
             window=window, on_bytes=on_bytes, session_factory=session_factory,
-            mirror_dst=mirror_dst,
+            mirror_dst=mirror_dst, mirror_chunk_dir=mirror_chunk_dir,
         )
 
 
@@ -786,6 +1019,7 @@ def _download_chunked_locked(
     on_bytes: Optional[Callable[[int], None]],
     session_factory: Callable[[], requests.Session],
     mirror_dst: Optional[Path] = None,
+    mirror_chunk_dir: Optional[Path] = None,
 ) -> bool:
     """The reassembly itself, run while holding the cross-process CAS fetch lock
     (``download_chunked_file`` does the shape checks and the dedup)."""
@@ -820,6 +1054,18 @@ def _download_chunked_locked(
             # would publish a file with holes.
             _seed_mirror(fd, mirror, chunks, offsets, already)
 
+        # pgw#972: whatever THIS pod's local journal could not supply, a
+        # PREVIOUS pod may have left verified on the volume. Local disk wins
+        # (no volume read is owed for a chunk we already hold); everything else
+        # is adopted here, re-hashed, and never fetched again.
+        vol_chunks = _open_volume_chunks(mirror_chunk_dir)
+        if vol_chunks is not None:
+            already = already | vol_chunks.adopt(
+                chunks, offsets,
+                [i for i in range(len(chunks)) if i not in already],
+                fd, mirror, max_inflight,
+            )
+
         prefix = _Prefix(len(chunks))
         for i in sorted(already):
             prefix.mark(i)
@@ -844,7 +1090,7 @@ def _download_chunked_locked(
                 chunks, offsets, prefix, jfd, fd, dst,
                 already=already, max_inflight=max_inflight,
                 on_bytes=on_bytes, session_factory=session_factory,
-                mirror=mirror,
+                mirror=mirror, vol_chunks=vol_chunks,
             )
         except BaseException:
             prefix.abort()
@@ -864,6 +1110,12 @@ def _download_chunked_locked(
             _log.info("blob_fill_publish source=r2 destination=volume mode=tee "
                       "digest=%s bytes=%d published=%s",
                       want_whole[:16], total_size, published)
+        # pgw#972 cleanup: the volume now holds the COMPLETE blob under its
+        # digest name, so this file's chunk objects are garbage. `exists()`
+        # rather than `published` — a concurrent pod may have published it
+        # first, and the chunks are just as dead either way.
+        if vol_chunks is not None and mirror_dst is not None and mirror_dst.exists():
+            vol_chunks.drop()
         return published
     finally:
         if mirror is not None:
@@ -886,6 +1138,7 @@ def _fetch_pending(
     on_bytes: Optional[Callable[[int], None]],
     session_factory: Callable[[], requests.Session],
     mirror: Optional["_Mirror"] = None,
+    vol_chunks: Optional["_VolumeChunks"] = None,
 ) -> None:
     pending = [i for i in range(len(chunks)) if i not in already]
     if not pending:
@@ -918,6 +1171,11 @@ def _fetch_pending(
         # needs no lock of its own.
         os.write(jfd, f"{i}\n".encode())
         prefix.mark(i)
+        # pgw#972: the chunk has proved its own digest, so it is publishable
+        # on its own — AFTER the mark, which keeps the whole-file hasher
+        # moving while this worker pays the volume write.
+        if vol_chunks is not None:
+            vol_chunks.publish(i, chunks[i], fd, offsets[i])
 
     try:
         with ThreadPoolExecutor(max_workers=max_inflight) as pool:
