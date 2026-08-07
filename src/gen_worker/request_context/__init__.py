@@ -23,6 +23,7 @@ from typing import (
     List,
     Literal,
     Mapping,
+    NoReturn,
     Optional,
     Sequence,
     Tuple,
@@ -50,6 +51,7 @@ LogLevel = Literal["debug", "info", "warning", "error"]
 
 from ..api.errors import (
     AuthError,
+    BlobDigestMalformedError,
     BlobForbiddenError,
     BlobNotFoundError,
     DatasetNotFoundError,
@@ -130,6 +132,48 @@ def _copy_context_metadata(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_copy_context_metadata(v) for v in value)
     return value
+
+
+_CAS_DIGEST_WIDTHS = {"blake3": 64, "sha256": 64}
+"""The algorithms the hub's CAS keys on, and their hex widths — the exact
+content of tensorhub `storage.casSupportedAlgos`. Two live namespaces with
+different algorithms is why a bare hex string cannot be promoted to a digest
+by guessing."""
+
+
+def _parse_cas_digest(digest: str, *, origin: str) -> str:
+    """Return the canonical ``<algo>:<hex>`` form, or refuse.
+
+    Byte-for-byte the same contract as the hub's `storage.ParseDigest`
+    (`internal/storage/cas_paths.go`), which `validateDigestParam` fronts on
+    every by-digest route: algorithm-tagged, a supported algorithm, hex of
+    that algorithm's width, lowercased. Bare hex is refused rather than
+    tagged, because the two CAS namespaces disagree on the algorithm and
+    guessing addresses the wrong one silently.
+    """
+    raw = (digest or "").strip()
+    caller_supplied = origin == REF_ORIGIN_PAYLOAD
+
+    def _refuse(detail: str) -> NoReturn:
+        if caller_supplied:
+            raise BlobDigestMalformedError(raw, detail)
+        raise RuntimeError(f"malformed platform blob digest {raw!r}: {detail}")
+
+    if not raw:
+        _refuse("empty")
+    algo, sep, hexpart = raw.partition(":")
+    if not sep:
+        _refuse("not algorithm-tagged")
+    algo = algo.strip().lower()
+    hexpart = hexpart.strip()
+    width = _CAS_DIGEST_WIDTHS.get(algo)
+    if width is None:
+        _refuse(f"unsupported algorithm {algo!r}")
+    if not re.fullmatch(r"[0-9a-fA-F]*", hexpart):
+        _refuse("non-hex character")
+    if len(hexpart) != width:
+        _refuse(f"{algo} hex must be {width} chars")
+    return f"{algo}:{hexpart.lower()}"
 
 
 def _as_asset(asset: Asset, cls: type) -> Any:
@@ -1592,11 +1636,12 @@ class _PublisherMixin:
     ) -> None:
         """Fetch a blob by ``<algo>:<hex>`` digest to ``dest``.
 
-        Uses the repo-CAS by-digest read endpoint — works for any blob
-        uploaded via ``save_checkpoint`` regardless of whether it's a
-        checkpoint file or a dataset file. The server indexes all CAS
-        content by blake3 digest; callers that know the digest can fetch
-        without needing to know which subsystem the blob belongs to.
+        Uses the by-digest CAS read endpoint — works for any blob uploaded
+        via ``save_checkpoint`` regardless of whether it is a checkpoint file
+        or a dataset file. The digest must be ALGORITHM-TAGGED: the hub keys
+        two CAS namespaces on different algorithms (repo-CAS is sha256 since
+        th#1303; dataset-CAS is blake3), so a bare hex string does not name a
+        blob and is refused here for the same reason the hub refuses it.
 
         ``origin`` is the th#1259 provenance of the ADDRESS, and it is the
         only thing that decides how a terminal miss classifies. See
@@ -1608,8 +1653,7 @@ class _PublisherMixin:
 
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = self._get_worker_capability_token()
-        # Normalize digest format for URL.
-        digest_norm = digest if ":" in digest else f"blake3:{digest}"
+        digest_norm = _parse_cas_digest(digest, origin=origin)
         url = f"{base}/api/v1/blobs/{urllib.parse.quote(digest_norm, safe=':')}/content"
         headers = {"Authorization": f"Bearer {token}"}
         caller_supplied = origin == REF_ORIGIN_PAYLOAD
