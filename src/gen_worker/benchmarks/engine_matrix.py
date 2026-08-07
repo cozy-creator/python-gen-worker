@@ -295,7 +295,7 @@ def run_matrix(
     for arm in arms:
         payload = {**plan.payload, **arm.payload}
         baseline = arm.baseline or (default_base if arm.name != default_base else "")
-        stub = dict(
+        stub: Dict[str, Any] = dict(
             arm=arm.name, tier=arm.tier, baseline=baseline, expect=arm.expect,
             approximate=arm.approximate)
         if arm.skip:

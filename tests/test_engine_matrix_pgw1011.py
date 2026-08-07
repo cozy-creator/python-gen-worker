@@ -50,7 +50,7 @@ class _Lane:
 
 
 def _factory(log: List[str]):
-    def open_lane(arm: em.Arm, payload: Dict[str, Any]) -> em._Lane:  # type: ignore[name-defined]
+    def open_lane(arm: em.Arm, payload: Dict[str, Any]) -> _Lane:
         if arm.settings.get("unbuildable"):
             raise ImportError("cache-dit 1.3.0 is not installed")
         return _Lane(arm, payload, log)
