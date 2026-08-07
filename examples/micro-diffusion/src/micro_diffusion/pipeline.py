@@ -19,6 +19,8 @@ from .model import (
     MicroDenoiser,
     MicroGridDenoiser,
 )
+from safetensors.torch import load_file
+
 from .weights import SEED, load_config, load_state, materialize
 
 
@@ -133,7 +135,8 @@ class MicroPipeline:
         return self.unpatchify(cells, grid)
 
 
-__all__ = ["MicroConfig", "MicroGridPipeline", "MicroPipeline"]
+__all__ = ["MicroConfig", "MicroGridPipeline", "MicroPipeline",
+           "MicroW8a8Pipeline"]
 
 
 class MicroGridPipeline(MicroPipeline):
@@ -150,3 +153,39 @@ class MicroGridPipeline(MicroPipeline):
         grid = MicroGridDenoiser(base.config)
         grid.load_state_dict(base.transformer.state_dict(), strict=True)
         return cls(grid.eval(), base.decoder, source=base.source)
+
+
+class MicroW8a8Pipeline(MicroPipeline):
+    """attempt 26's lane, on a model that mints in a minute.
+
+    The denoiser is materialized by the SDK's own `load_w8a8_denoiser` from a
+    real fp8 artifact — `_Fp8ScaledLinear` modules, `float8_e4m3fn` weights,
+    per-out-channel scales — so this is the w8a8 lane, not an imitation of it.
+
+    GPU-ONLY by construction: `scaled_mm` is the whole point, and
+    `w8a8_gemm_mode()` answers "" without a card, which the module class
+    refuses. The gemm mode is chosen by a LIVE per-card benchmark — `pertensor`
+    on this box's RTX 4070; an L40S (also sm_89) may measure `rowwise`. The
+    mode is a per-card fact and must not be assumed to transfer.
+    """
+
+    @classmethod
+    def from_pretrained(cls, path: str, **_kw: Any) -> "MicroW8a8Pipeline":
+        from gen_worker.models.w8a8 import (
+            detect_w8a8_artifact,
+            load_w8a8_denoiser,
+        )
+
+        root = Path(path)
+        art = detect_w8a8_artifact(root)
+        if art is None:
+            raise ValueError(
+                f"{root} carries no quantized denoiser — build it with "
+                f"`micro_diffusion.weights.materialize_w8a8`")
+        transformer = load_w8a8_denoiser(root, art, compute_dtype=torch.float32)
+        config = load_config(root / "decoder")
+        decoder = MicroDecoder(config)
+        decoder.load_state_dict(load_file(
+            str(root / "decoder" / "diffusion_pytorch_model.safetensors")),
+            strict=True)
+        return cls(transformer.eval(), decoder.eval(), source=str(root))

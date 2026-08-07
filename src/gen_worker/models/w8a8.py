@@ -396,6 +396,16 @@ def _build_module_class() -> type:
             if gemm_mode not in ("rowwise", "pertensor"):
                 raise ValueError(f"invalid gemm_mode {gemm_mode!r}")
             self.gemm_mode = gemm_mode
+            # pgw#1015: RECORD it. `adapter_fidelity.branch_compute_dtype`
+            # probes `mod.compute_dtype` FIRST, then the weight (fp8 here, so
+            # correctly skipped), then the bias — so on a BIAS-FREE layer it
+            # had nothing left and silently fell back to bf16. Measured: in
+            # one denoiser, `mlp_in` (bias) got float32 branches and
+            # `attn.to_q` (no bias) got bfloat16, and the first branch-bearing
+            # forward died with "expected mat1 and mat2 to have the same
+            # dtype". Invisible on sdxl only because its compute dtype IS
+            # bf16; every bias-free projection on any other lane was wrong.
+            self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
             meta = torch.device("meta")

@@ -23,8 +23,10 @@ Deliberate structural choices, each with a reason the mint can read:
 
 from __future__ import annotations
 
+import json
 import math
-from typing import List
+from pathlib import Path
+from typing import Any, Dict, List
 
 import torch
 from torch import nn
@@ -43,7 +45,7 @@ class MicroConfig:
 
     def __init__(
         self,
-        in_channels: int = 4,
+        in_channels: int = 16,
         cond_dim: int = 32,
         cond_len: int = 16,
         hidden: int = 128,
@@ -122,7 +124,7 @@ class _Block(nn.Module):
 
 
 class MicroDenoiser(nn.Module):
-    """The compile target ``denoiser``.
+    """The compile target ``transformer``.
 
     ``forward(x, t, cond)`` where ``x`` and ``cond`` are python LISTS of
     length N and ``t`` is a plain ``(N,)`` tensor sitting between them.
@@ -151,6 +153,30 @@ class MicroDenoiser(nn.Module):
             [_Block(hidden, config.cond_dim) for _ in range(config.depth)])
         self.norm_out = nn.LayerNorm(hidden)
         self.proj_out = nn.Linear(hidden, config.in_channels)
+
+    # ------------------------------------------------------------------
+    # The diffusers CONFIG surface, implemented deliberately (pgw#1014).
+    #
+    # `w8a8.load_w8a8_denoiser` builds its skeleton with
+    # `cls.load_config(dir)` + `cls.from_config(cfg)` under
+    # `accelerate.init_empty_weights()`. That is diffusers' `ConfigMixin`
+    # API, so a denoiser that is a plain `nn.Module` — as most non-diffusers
+    # runtimes are — CANNOT take the w8a8 load path at all until it exposes
+    # it. Recorded as a real requirement on sdxl-class families rather than
+    # worked around: this family implements the surface, it does not bypass
+    # the loader.
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def load_config(cls, directory: str, **_kw: Any) -> Dict[str, Any]:
+        return json.loads(
+            (Path(directory) / "config.json").read_text("utf-8"))
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], **_kw: Any) -> "MicroDenoiser":
+        fields = set(MicroConfig().as_dict())
+        return cls(MicroConfig(
+            **{k: v for k, v in dict(config).items() if k in fields}))
 
     def forward(
         self,

@@ -146,3 +146,76 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+#: The denoiser component name. From `gen_worker.component_vocab`'s denoiser
+#: vocabulary — `quantize_tree_w8a8` and `detect_w8a8_artifacts` both scan for
+#: a directory named from it, so a family whose denoiser is called anything
+#: else is invisible to the whole w8a8 producer/consumer path (pgw#1014).
+DENOISER_COMPONENT = "transformer"
+
+
+def materialize_diffusers(
+    root: Path, *, seed: int = SEED, config: MicroConfig | None = None,
+) -> Path:
+    """Write the checkpoint as a DIFFUSERS TREE, not a flat file.
+
+    The flat single-file layout is what `MicroPipeline` normally reads, and it
+    is enough for every lane except one: `w8a8.quantize_tree_w8a8` refuses
+    anything that is not a diffusers tree (`model_index.json` plus a
+    denoiser component directory named from the SDK's own vocabulary), and
+    `detect_w8a8_artifacts` scans component dirs to find what was quantized.
+
+    So the w8a8 leg needs this layout to run the REAL producer path rather
+    than a hand-rolled quantizer. Same weights, same seed, different shape on
+    disk.
+    """
+    root = Path(root)
+    cfg = config or MicroConfig(seed=seed)
+    state = state_dict(cfg, seed=seed)
+    comp = root / DENOISER_COMPONENT
+    dec = root / "decoder"
+    comp.mkdir(parents=True, exist_ok=True)
+    dec.mkdir(parents=True, exist_ok=True)
+
+    payload = dict(cfg.as_dict(), _class_name="MicroDenoiser",
+                   _layout=LAYOUT_VERSION, seed=int(seed))
+    save_file({k[len("transformer."):]: v for k, v in state.items()
+               if k.startswith("transformer.")},
+              str(comp / "diffusion_pytorch_model.safetensors"))
+    (comp / "config.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
+    save_file({k[len("decoder."):]: v for k, v in state.items()
+               if k.startswith("decoder.")},
+              str(dec / "diffusion_pytorch_model.safetensors"))
+    (dec / "config.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+    # `_denoiser_class` imports the [library, class] pair named here and only
+    # falls back to `diffusers` on ImportError — so a first-party module is a
+    # legal denoiser library, which is what lets a non-diffusers family use
+    # this path at all.
+    (root / "model_index.json").write_text(json.dumps({
+        "_class_name": "MicroPipeline",
+        DENOISER_COMPONENT: ["micro_diffusion.model", "MicroDenoiser"],
+        "decoder": ["micro_diffusion.model", "MicroDecoder"],
+    }, indent=2, sort_keys=True))
+    return root
+
+
+def materialize_w8a8(
+    root: Path, *, seed: int = SEED, config: MicroConfig | None = None,
+) -> Path:
+    """The fp8 tree, through the SDK's OWN producer (`quantize_tree_w8a8`).
+
+    Two steps and neither is hand-rolled: write the diffusers tree, then let
+    the platform's quantizer rewrite the eligible denoiser weights to
+    fp8 + per-out-channel `weight_scale` per the gw#534 contract. Eligibility
+    is `2D, both dims 16-aligned, name not matching ("embed", "norm")` — this
+    family's channel widths are 16-aligned FOR THAT REASON, so the leg tests
+    real quantized layers instead of silently getting a dequantized tree.
+    """
+    from gen_worker.models.w8a8 import quantize_tree_w8a8
+
+    root = Path(root)
+    bf16 = root.parent / (root.name + "-bf16")
+    materialize_diffusers(bf16, seed=seed, config=config)
+    return quantize_tree_w8a8(bf16, root)
