@@ -56,7 +56,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
     Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple)
@@ -298,6 +298,85 @@ class DeviceFacts:
             "device_basis": self.basis,
             "free_device_samples": [int(x) for x in self.samples],
         }
+
+
+@dataclass(frozen=True)
+class CardCensus:
+    """Who holds the card, taken BEFORE the pool spawns its first child.
+
+    pgw#992: the one reading that makes a simultaneity bound computable. At
+    pool construction no entry child exists, so everything on the device that
+    is not this process is, by elimination, the RESIDENT co-tenant — the
+    eager-serving parent the pgw#784 contract keeps alive through the mint.
+    Taken later the same subtraction would be meaningless, because the pool's
+    own children would be inside it.
+    """
+
+    total_bytes: int
+    free_bytes: int
+    own_reserved_bytes: int
+    basis: str
+
+    @property
+    def resident_other_bytes(self) -> int:
+        """The co-tenant's occupancy. Never negative: a driver that reports
+        `free + own > total` is reporting something this bound must not turn
+        into free capacity."""
+        return max(0, self.total_bytes - self.free_bytes - self.own_reserved_bytes)
+
+    @property
+    def readable(self) -> bool:
+        return self.basis == "sampled" and self.total_bytes > 0
+
+    def facts(self) -> Dict[str, Any]:
+        return {
+            "card_total_bytes": int(self.total_bytes),
+            "card_free_at_open_bytes": int(self.free_bytes),
+            "card_own_at_open_bytes": int(self.own_reserved_bytes),
+            "card_resident_other_bytes": int(self.resident_other_bytes),
+            "card_census_basis": self.basis,
+        }
+
+
+def card_census(device: int = -1) -> CardCensus:
+    """One (total, free, own-reserved) reading of the mint's card.
+
+    All three at the same moment on purpose: the subtraction that names the
+    co-tenant is only sound if its terms describe one instant.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return CardCensus(0, 0, 0, "absent")
+        dev = torch.cuda.current_device() if device < 0 else int(device)
+        free, total = torch.cuda.mem_get_info(dev)
+        return CardCensus(
+            int(total), int(free), int(torch.cuda.memory_reserved(dev)),
+            "sampled")
+    except Exception:  # noqa: BLE001 — an unreadable card licenses nothing
+        return CardCensus(0, 0, 0, "unreadable")
+
+
+def own_device_high_water(device: int = -1) -> int:
+    """This process's own device high-water (0 = unreadable).
+
+    RESERVED, not allocated — the caching allocator's held blocks are exactly
+    what a co-resident child cannot have, which is the question a simultaneity
+    bound asks. The mint child's resident pipeline is the largest single
+    consumer on the card (16.20 GiB of 44.39 on the pgw#992 pod), and it is the
+    one consumer this process can measure exactly.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0
+        dev = torch.cuda.current_device() if device < 0 else int(device)
+        return max(int(torch.cuda.max_memory_reserved(dev)),
+                   int(torch.cuda.memory_reserved(dev)))
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 @dataclass(frozen=True)
@@ -1227,6 +1306,15 @@ class EntryCompilePool:
         #: readings — the same question, a measured divisor — so the initial
         #: row has to survive being superseded.
         self.width_initial = width
+        #: pgw#992: who else is on the card, read before the first child exists.
+        #: `_rewiden` cannot compute a simultaneity bound without it, and a
+        #: census it cannot read refuses the widen rather than assuming an
+        #: empty card.
+        self.census = card_census()
+        #: The terms of the last simultaneity decision, merged into the width
+        #: row so a future OOM names WHICH term was wrong instead of leaving a
+        #: reader to diff two pods that no longer exist.
+        self.simultaneity: Dict[str, Any] = {}
         self.peak_concurrency = 0
         # pgw#848: the kernel's OOM-kill counter as it stood before this pool
         # ran. A DELTA over the pool's own wall is evidence; the absolute
@@ -1556,7 +1644,8 @@ class EntryCompilePool:
         try:
             from . import activity as activity_mod
 
-            facts = self.width.facts()
+            facts = {**self.width.facts(), **self.census.facts(),
+                     **self.simultaneity}
             if facts == self._emitted_width_facts:
                 return
             first = self._emitted_width_facts is None
@@ -1624,8 +1713,68 @@ class EntryCompilePool:
             self.peak_device_bytes = max(self.peak_device_bytes, peak)
             self.device_samples += 1
 
+    def entry_budget_bytes(self, ask: int) -> Tuple[int, Dict[str, Any]]:
+        """Bytes K entry children may hold AT THEIR SIMULTANEOUS PEAKS, with
+        every term named. ``(budget, terms)``; a budget of ``-1`` means a term
+        was unreadable and no widen may be granted.
+
+        pgw#992 — the defect this replaces. A4 divided the pool's
+        free-VRAM SAMPLE by the measured per-entry peak: ``29.5 GiB / 6.02 GiB
+        -> K=4``. On the real path that killed the first AOT mint ever to reach
+        the compile phase, deterministically, on entry 2 of 36::
+
+            44.39 GiB card, 2.69 MiB free, OOM on a 14 MiB alloc
+              9.54 GiB  eager-serving parent   (resident, by pgw#784's contract)
+             16.20 GiB  mint child's pipeline  (resident, this process)
+             18.61 GiB  four entry children    (4 x ~6 GiB, as measured)
+
+        Two facts make the division wrong, and neither is a shortage of card:
+
+        * **"free right now" is not a simultaneous budget.** The sample is
+          taken before the widened children exist and prices none of their
+          growth. Its own comment already says it is read *between tenant
+          forwards*.
+        * **The residents keep growing against the same card.** They were
+          14.9 GiB at the sample and 25.7 GiB at the OOM. A momentary reading
+          cannot bound a future peak.
+
+        So the budget is taken against the CARD, not against a moment:
+
+            budget = total
+                   - resident co-tenant (census, measured before child one)
+                   - this process's own device high-water
+                   - the tenant's forward reserve, when a serve goal exists
+
+        Every term is an observation. Deliberately NOT a larger
+        :data:`DEVICE_RESERVE_BYTES` (§4.24): padding a constant moves the same
+        unpriced simultaneity somewhere else and re-fires on the next card.
+        """
+        terms: Dict[str, Any] = {
+            "simultaneity_ask_bytes": int(ask),
+            "simultaneity_basis": self.census.basis,
+        }
+        if not self.census.readable or ask <= 0:
+            terms["simultaneity_verdict"] = "unreadable — no widen"
+            return -1, terms
+        own_peak = max(
+            own_device_high_water(), int(self.census.own_reserved_bytes))
+        reserve = DEVICE_RESERVE_BYTES \
+            if WorkerGoals(serve=self.width.serve_goal,
+                           mint=self.width.mint_goal).tenant_reserve_applies() \
+            else 0
+        budget = (self.census.total_bytes - self.census.resident_other_bytes
+                  - own_peak - reserve)
+        terms.update({
+            "simultaneity_own_peak_bytes": int(own_peak),
+            "simultaneity_tenant_reserve_bytes": int(reserve),
+            "simultaneity_budget_bytes": int(budget),
+            "simultaneity_k_cap": int(max(0, budget) // ask),
+        })
+        return budget, terms
+
     def _rewiden(self) -> None:
-        """Re-derive K from what the entry children MEASURED (pgw#868 A4).
+        """Re-derive K from what the entry children MEASURED (pgw#868 A4),
+        bounded by what the CARD can hold at once (pgw#992).
 
         pgw#809 sizes the pool before a single entry has run, and the only
         per-entry device figure available then is
@@ -1644,8 +1793,11 @@ class EntryCompilePool:
         pgw#847 shape (delete a guess, keep the computation), not a new
         policy: no reserve moves, no ceiling moves, no bound is invented.
 
-        Fail-closed, in five directions:
+        Fail-closed, in six directions:
 
+        * **the grant is capped by the card's simultaneous budget**
+          (:meth:`entry_budget_bytes`) — the one that was missing, and the one
+          that killed pgw#868 A1's first real AOT compile;
         * it never NARROWS. Children are already running against the wider
           number, and a mid-flight dip is the reading ``device_facts`` takes a
           max over precisely so it cannot be acted on;
@@ -1657,7 +1809,9 @@ class EntryCompilePool:
         * it re-derives against ``width_initial``'s OWN free-VRAM and host-RAM
           figures rather than re-probing a card that K running children are
           sitting on — re-probing would read their footprints as absent
-          capacity and narrow, which is the opposite of the truth;
+          capacity and narrow, which is the opposite of the truth. That
+          argument is right about the FREE figure and was never a licence to
+          skip the card-wide bound above;
         * anything raising leaves the width exactly as it was.
 
         It changes no artifact. K is not an input to codegen, kernel selection
@@ -1679,6 +1833,18 @@ class EntryCompilePool:
             ask = mint_budget.entry_device_ask(int(self.peak_device_bytes))
             if ask <= 0:
                 return
+            # pgw#992: the cap comes FIRST and is recorded whether or not the
+            # widen happens — a refused widen is the interesting row.
+            budget, terms = self.entry_budget_bytes(ask)
+            self.simultaneity = terms
+            if budget < 0:
+                logger.info(
+                    "aot-pool: pgw#992 declining to widen from K=%d — the "
+                    "card census is %s, so K children's simultaneous peak "
+                    "cannot be priced", self.width.workers, self.census.basis)
+                self._emit_width("simultaneity bound unreadable")
+                return
+            k_cap = int(terms["simultaneity_k_cap"])
             wider = entry_workers(
                 base.entries,
                 limit=base.limit,
@@ -1698,16 +1864,34 @@ class EntryCompilePool:
         except Exception:  # noqa: BLE001 — a re-derivation never fails a mint
             logger.debug("aot-pool: width re-derivation failed", exc_info=True)
             return
-        if wider.workers <= self.width.workers:
+        granted = min(wider.workers, k_cap)
+        if granted < wider.workers:
+            # The row pgw#992 exists to produce: A4's own arithmetic said one
+            # thing, the card said another, and the card wins BY NAME.
+            logger.warning(
+                "aot-pool: pgw#992 capping K %d -> %d (A4 asked for %d) — the "
+                "card holds %.2f GiB, a %.2f GiB co-tenant and a %.2f GiB "
+                "resident pipeline, leaving %.2f GiB for entries at %.2f "
+                "GiB each",
+                self.width.workers, granted, wider.workers,
+                self.census.total_bytes / 1024**3,
+                self.census.resident_other_bytes / 1024**3,
+                terms["simultaneity_own_peak_bytes"] / 1024**3,
+                budget / 1024**3, ask / 1024**3)
+        if granted <= self.width.workers:
+            # Nothing to grant. Emit anyway: "the pool did NOT widen, and here
+            # is the bound that stopped it" is the row a later OOM needs.
+            self._emit_width("simultaneity bound held K")
             return
+        wider = replace(wider, workers=granted)
         logger.info(
             "aot-pool: pgw#868 A4 K %d -> %d — per-entry device ask measured "
             "at %.2f GiB over %d entr%s against the %.2f GiB (%s) the pool "
-            "was sized with",
+            "was sized with, within a %.2f GiB simultaneous budget (pgw#992)",
             self.width.workers, wider.workers, ask / 1024**3,
             self.device_samples, "y" if self.device_samples == 1 else "ies",
             base.per_entry_device_bytes / 1024**3,
-            base.per_entry_device_basis)
+            base.per_entry_device_basis, budget / 1024**3)
         self.width = wider
         self.ledger.workers = wider.workers
         self._emit_width("re-derived from measured entry peaks")

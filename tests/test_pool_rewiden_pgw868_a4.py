@@ -67,6 +67,23 @@ def _sized(
         goals=worker_goals.MINT_ONLY)
 
 
+@pytest.fixture(autouse=True)
+def _roomy_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold the CARD constant and generous for this whole file.
+
+    pgw#992 added a second, independent bound to `_rewiden`: the widened set's
+    SIMULTANEOUS peak against the card, which on a box with no CUDA is
+    unreadable and therefore refuses every widen (fail-closed, by design). The
+    rows in this file are about A4's DIVISOR — an estimate replaced by an
+    observation — so the card is stated once here and never varies. The
+    simultaneity bound has its own file
+    (``test_pool_simultaneity_pgw992.py``), where the card is the variable.
+    """
+    monkeypatch.setattr(
+        pool, "card_census",
+        lambda device=-1: pool.CardCensus(512 * _GIB, 512 * _GIB, 0, "sampled"))
+
+
 def _report(entry: str, reserved: int) -> pool.EntryReport:
     return pool.EntryReport(
         entry=entry, status=pool.COMPILED,
