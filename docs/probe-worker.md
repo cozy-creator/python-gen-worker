@@ -11,7 +11,8 @@ Tier by tier, cheapest first:
 
 | Tier | Cost per iteration | Covers |
 |---|---|---|
-| `task rig:mint` (pgw#978) | seconds, free | resolve, handoff, spawn, load, warm, export, compile, seal, publish, adopt — on a toy model |
+| `task rig:mint` (pgw#978) | seconds, free | resolve, handoff, spawn, load, warm, export, compile, seal, publish, adopt — on a toy model, ONE export entry |
+| `task rig:micro` (pgw#997) | ~15 s, free | all of the above on a REAL org-worker package — 3 entries, two fork arms, a second target, container inputs, a derived dynamic range, plus a PARITY check that arms the adopted cell and compares every arm to eager |
 | experimental image (pgw#979) | one image build | the real image, the real deps, a real pod, a real family |
 | **probe pod (this doc)** | seconds, on a pod you already hold | everything above, on real weights and a real card, iterating |
 

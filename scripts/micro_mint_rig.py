@@ -82,8 +82,11 @@ MAX_START_LOAD_1MIN = 24.0
 #: The size ceiling the policy carve-out states. Enforced, not documented.
 MAX_WEIGHTS_BYTES = 500 * 1000 * 1000
 
-ENDPOINT_MODULE = "harness.tiny_diffusion_endpoint"
-FUNCTION = "rig-generate"
+#: pgw#997: WHAT the rig mints is now a choice. `tiny` is pgw#978's original
+#: one-entry plumbing toy; `micro` is the org-worker-shaped
+#: `examples/micro-diffusion` package — three export entries, container inputs,
+#: generated weights, a Dockerfile. See `tests/harness/rig_vehicles.py`.
+DEFAULT_VEHICLE = "tiny"
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +228,7 @@ class RigResult:
             f"(the number that replaces 4 hours)")
 
 
-def _mint_slot(tree: Path) -> Any:
+def _mint_slot(tree: Path, ref_path: str) -> Any:
     """The parent's resolution: WHICH checkpoint, and WHERE its bytes are.
 
     Built through the real `ModelRef`/`MintSlot` types, because pgw#974's whole
@@ -237,13 +240,13 @@ def _mint_slot(tree: Path) -> Any:
     from gen_worker.mint_process import MintSlot
 
     return MintSlot(
-        ref=ModelRef(source="tensorhub", path="rig/tiny-diffusion", tag="prod"),
+        ref=ModelRef(source="tensorhub", path=ref_path, tag="prod"),
         path=str(tree),
     )
 
 
 def _mint_request(
-    workdir: Path, tree: Path, capture: Path, *,
+    workdir: Path, tree: Path, capture: Path, veh: Any, *,
     ordinal: int = 0, cap_bytes: int = MINT_VRAM_BYTES,
 ) -> Any:
     """Built through `mint_delegate.build_request` — the REAL parent chain.
@@ -253,23 +256,17 @@ def _mint_request(
     """
     from gen_worker import mint_delegate
     from gen_worker.mint_delegate import MintTask
-    from gen_worker.registry import CompileCell
 
-    from harness import tiny_diffusion_endpoint as ep
-
-    cfg = CompileCell(
-        shapes=(ep.PIXEL_SHAPE,), targets=("unet",), family=ep.FAMILY,
-        regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
-        guidance_scales=(), text_lens=())
+    cfg = veh.compile_cell()
     pending = SimpleNamespace(
-        family=ep.FAMILY, cell_key="", recipe=os.environ.get("PGW978_RECIPE", "aot"), cfg=cfg,
+        family=veh.family, cell_key="", recipe=os.environ.get("PGW978_RECIPE", "aot"), cfg=cfg,
         capture_dir=capture, target=workdir / "cell.tar.gz", mint_root=workdir)
     # The key is the REAL one, derived the way the arming brain derives it, so
     # the child's own recomputation has something to agree with.
     task = MintTask(
         pending=pending, pipe=None,
-        function=FUNCTION, modules=(ENDPOINT_MODULE,),
-        slots={"pipeline": _mint_slot(tree)}, device=ordinal,
+        function=veh.function, modules=tuple(veh.modules),
+        slots={"pipeline": _mint_slot(tree, veh.ref_path)}, device=ordinal,
         execution_lane="", configs={})
     return mint_delegate.build_request(
         task, workdir=workdir, cap_bytes=cap_bytes)
@@ -277,8 +274,14 @@ def _mint_request(
 
 def run_cycle(
     root: Path, *, stage: str = "all", force_load: bool = False,
-    device: str = "auto",
+    device: str = "auto", vehicle: str = DEFAULT_VEHICLE,
 ) -> RigResult:
+    from harness import rig_vehicles
+
+    veh = rig_vehicles.vehicle(vehicle)
+    for entry in veh.syspath:
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
     result = RigResult()
     t0 = time.monotonic()
 
@@ -292,19 +295,20 @@ def run_cycle(
     leg.facts = {"load1": load1, "host_move_guard": guard, **dev,
                  "mint_vram_bytes": MINT_VRAM_BYTES,
                  "adopt_vram_bytes": ADOPT_VRAM_BYTES}
-    leg.detail = (f"{dev['device']} {dev['sm']} torch={dev['torch']} "
-                  f"load={load1:.1f} covers={dev['covers']}")
+    leg.facts["vehicle"] = veh.name
+    leg.facts["vehicle_covers"] = veh.covers
+    leg.detail = (f"vehicle={veh.name} {dev['device']} {dev['sm']} "
+                  f"torch={dev['torch']} load={load1:.1f} "
+                  f"covers={dev['covers']}")
     result.env = leg.facts
 
     # -- weights -------------------------------------------------------------
-    from harness.tiny_diffusion import (
-        SYNTHETIC_RUNTIME_ENV, build_checkpoint, checkpoint_bytes,
-    )
+    from harness.tiny_diffusion import SYNTHETIC_RUNTIME_ENV
 
     leg = result.add(Leg("weights"))
     g0 = time.monotonic()
-    tree = build_checkpoint(root / "checkpoint")
-    size = checkpoint_bytes(tree)
+    tree = veh.build_checkpoint(root / "checkpoint" / veh.name)
+    size = veh.checkpoint_bytes(tree)
     if size > MAX_WEIGHTS_BYTES:
         raise RigRefused(
             f"generated checkpoint is {size / 1e6:.1f} MB, over the "
@@ -320,17 +324,20 @@ def run_cycle(
 
     leg = result.add(Leg("handoff"))
     g0 = time.monotonic()
-    request = _mint_request(workdir, tree, capture,
+    request = _mint_request(workdir, tree, capture, veh,
                             ordinal=int(dev["device_ordinal"]),
                             cap_bytes=(MINT_VRAM_BYTES
                                        if dev["device_kind"] == "cuda" else 0))
     leg.ok, leg.seconds = True, time.monotonic() - g0
+    entries = _declared_entries(veh)
     leg.facts = {"family": request.family, "recipe": request.recipe,
                  "slots": sorted(request.slots),
                  "cell_key": request.cell_key,
-                 "vram_cap_bytes": request.vram_cap_bytes}
+                 "vram_cap_bytes": request.vram_cap_bytes,
+                 "declared_entries": entries}
     leg.detail = (f"family={request.family} recipe={request.recipe} "
-                  f"slots={sorted(request.slots)}")
+                  f"slots={sorted(request.slots)} "
+                  f"entries={len(entries)}")
 
     # -- the child -----------------------------------------------------------
     from gen_worker import mint_process as mp
@@ -340,7 +347,8 @@ def run_cycle(
     phases: List[str] = []
     env = dict(mp.child_env(request))
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(REPO / "tests"), str(REPO / "src"), env.get("PYTHONPATH", "")])
+        [str(REPO / "tests"), str(REPO / "src"), *veh.syspath,
+         env.get("PYTHONPATH", "")])
     env["PGW978_CHECKPOINT"] = str(tree)
     if dev["device_kind"] != "cuda":
         # pgw#983: a cell key needs an `sm` and this box can state none. The
@@ -372,10 +380,25 @@ def run_cycle(
         result.total_s = time.monotonic() - t0
         return result
     warm = float((report.phases if report else {}).get("warmup_forward", 0.0))
+    from gen_worker import aot_serve as _serve
+
+    packed = sorted(
+        (_serve.unpack_metadata(Path(outcome.artifact or "")).get("entries") or {}))
+    leg.facts["packed_entries"] = packed
+    if entries and sorted(entries) != packed:
+        # The declaration said N entries; the tarball carries M. A cycle that
+        # reported green on a cell missing an arm would be the exact silent
+        # loss the entry vocabulary exists to prevent.
+        leg.ok = False
+        leg.detail = (f"declared entries {sorted(entries)!r} but the packed "
+                      f"cell carries {packed!r}")
+        result.total_s = time.monotonic() - t0
+        return result
     leg.detail = (
         f"minted {Path(outcome.artifact or '').name} "
         f"key={(report.cell_key if report else '')[:20]} "
-        f"warm={warm:.2f}s peak={leg.facts['peak_vram_bytes'] / 1e9:.2f}GB")
+        f"warm={warm:.2f}s peak={leg.facts['peak_vram_bytes'] / 1e9:.2f}GB "
+        f"entries={len(packed)}")
 
     if stage == "mint":
         result.total_s = time.monotonic() - t0
@@ -404,16 +427,23 @@ def run_cycle(
         leg = result.add(Leg("adopt"))
         g0 = time.monotonic()
         adopted = _adopt_in_subprocess(
-            hub.base, root,
+            hub.base, root, veh, tree,
             synthetic_runtime=bool(
                 next(lg for lg in result.legs
                      if lg.name == "mint-child").facts.get("synthetic_runtime")))
         leg.seconds = time.monotonic() - g0
         leg.ok = bool(adopted.get("ok"))
         leg.facts = adopted
+        parity = adopted.get("parity_max_abs")
         leg.detail = (
-            f"pid={adopted.get('pid')} adopted {str(adopted.get('cell_key'))[:20]} "
-            f"({adopted.get('artifact_bytes', 0) / 1e6:.1f} MB)"
+            f"pid={adopted.get('pid')} adopted "
+            f"{str(adopted.get('cell_key'))[:20]} "
+            f"({adopted.get('artifact_bytes', 0) / 1e6:.1f} MB"
+            + (f", {len(adopted['entries'])} entries"
+               if adopted.get("entries") else "") + ")"
+            + (f" parity max|delta|="
+               f"{max(parity.values()):.2e} over {len(parity)} arms"
+               if parity else "")
             if leg.ok else
             (str(adopted.get("error") or adopted.get("miss_log") or "")[-400:]))
     finally:
@@ -442,39 +472,26 @@ def _publish(hub: Any, request: Any, artifact: Path) -> str:
     return publisher.publish(request.family, artifact, meta)
 
 
-ADOPT_CHILD = """
-import json, os, sys
-sys.path.insert(0, %(tests)r)
-sys.path.insert(0, %(src)r)
-from pathlib import Path
-from types import SimpleNamespace
-from gen_worker import aot_cells
-from gen_worker.registry import CompileCell
-from harness import tiny_diffusion_endpoint as ep
-from harness.tiny_diffusion import TinyUNet
+def _declared_entries(veh: Any) -> List[str]:
+    """The entry names this vehicle's declaration says to mint.
 
-cfg = CompileCell(
-    shapes=(ep.PIXEL_SHAPE,), targets=("unet",), family=ep.FAMILY,
-    regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
-    guidance_scales=(), text_lens=())
-pipe = SimpleNamespace(unet=TinyUNet().eval())
-cell = aot_cells.discover(
-    pipe, cfg, base_url=%(base)r,
-    worker_jwt=lambda: "local-rig-worker-jwt",
-    cache_dir=Path(%(cache)r))
-out = {"pid": os.getpid(), "ok": cell is not None}
-if cell is not None:
-    out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
-        "snapshot_digest": cell.snapshot_digest,
-        "artifact_bytes": Path(cell.artifact).stat().st_size,
-    })
-print("RIG_ADOPT " + json.dumps(out))
-"""
+    Reported by the handoff leg so a cycle states its own SIZE: the whole
+    point of the micro vehicle is that this list has three rows and sdxl's
+    has thirty-six. A vehicle whose family carries no declaration (the
+    dynamo-recipe toy) reports none rather than failing.
+    """
+    from gen_worker import aot_declaration as ad
+    from gen_worker.api.export_contract import export_declaration
+
+    decl = export_declaration(veh.family)
+    if decl is None:
+        return []
+    return [ad.plan_entry_name(p) for p in ad.cell_plans(decl)]
 
 
 def _adopt_in_subprocess(
-    base: str, root: Path, *, synthetic_runtime: bool = False,
+    base: str, root: Path, veh: Any, tree: Path, *,
+    synthetic_runtime: bool = False,
 ) -> Dict[str, Any]:
     """A SECOND OS process doing the discovery.
 
@@ -483,16 +500,19 @@ def _adopt_in_subprocess(
     nothing but the hub and the card. A fresh interpreter is the cheapest
     honest stand-in for the second pod.
     """
-    cache = root / "adopt-cache"
+    cache = root / "adopt-cache" / veh.name
     cache.mkdir(parents=True, exist_ok=True)
-    src = ADOPT_CHILD % {
-        "tests": str(REPO / "tests"), "src": str(REPO / "src"),
-        "base": base, "cache": str(cache)}
+    src = veh.adopt_source(base, cache)
     from harness.tiny_diffusion import SYNTHETIC_RUNTIME_ENV
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(REPO / "tests"), str(REPO / "src"), env.get("PYTHONPATH", "")])
+        [str(REPO / "tests"), str(REPO / "src"), *veh.syspath,
+         env.get("PYTHONPATH", "")])
+    # The SAME generated tree the mint traced. Deterministic weights are what
+    # make that a re-derivation rather than a copy: a second pod with the seed
+    # has the bytes, and the snapshot digest agrees without a download.
+    env["PGW978_CHECKPOINT"] = str(tree)
     if synthetic_runtime:
         # The adopting side runs `aot_serve.verify`, which compares the cell's
         # stamped sm/torch/cuda against THIS runtime's. A second process that
@@ -547,6 +567,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="auto falls back to CPU and SAYS SO; cuda refuses instead")
     parser.add_argument("--clean", action="store_true",
                         help="discard the scratch root first")
+    parser.add_argument(
+        "--vehicle", default=os.environ.get("PGW997_VEHICLE", DEFAULT_VEHICLE),
+        help="WHAT to mint: 'tiny' (pgw#978's one-entry plumbing toy) or "
+             "'micro' (pgw#997's org-worker-shaped examples/micro-diffusion — "
+             "3 entries, container inputs, generated weights)")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     root = Path(args.root)
@@ -556,7 +581,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         result = run_cycle(root, stage=args.stage, force_load=args.force_load,
-                           device=args.device)
+                           device=args.device, vehicle=args.vehicle)
     except RigRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2

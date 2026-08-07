@@ -157,12 +157,16 @@ def test_the_request_the_rig_hands_the_child_carries_a_resolved_slot(
     import msgspec
 
     from gen_worker.mint_process import MintRequest
+    from harness.rig_vehicles import TINY
     from harness.tiny_diffusion import build_checkpoint
 
     rig = _rig()
     tree = build_checkpoint(tmp_path / "ckpt")
+    # pgw#997: the vehicle is now an explicit argument — WHAT the rig mints is
+    # a choice, so the handoff cannot read it off a module global.
     request = rig._mint_request(
-        tmp_path / "mint", tree, tmp_path / "capture", ordinal=-1, cap_bytes=0)
+        tmp_path / "mint", tree, tmp_path / "capture", TINY,
+        ordinal=-1, cap_bytes=0)
     # The boundary IS a JSON file, so round-trip it the way the child will.
     raw = msgspec.json.encode(request)
     decoded = msgspec.json.decode(raw, type=MintRequest)
