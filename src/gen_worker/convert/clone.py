@@ -26,6 +26,7 @@ from typing import Any, Iterable, Optional
 from gen_worker.api.errors import ValidationError
 
 from .hub import HubClient, files_from_tree
+from .publish_journal import JOURNAL_NAME, PublishJournal
 from .keepalive import HubKeepalive
 from .ingest import (
     IngestedSource,
@@ -543,6 +544,51 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             f"{_DISK_MARGIN_BYTES / gib:.0f} GiB margin), have {free / gib:.1f} GiB "
             f"at {workdir}")
 
+def _reusable_flavor_tree(
+    workdir: Path, spec_label: str, flavor_dir: Path,
+) -> Optional[dict[str, str]]:
+    """The flavor attrs of a retained tree this run may re-publish as-is, or None.
+
+    pgw#1003. A publish that failed on a retryable error leaves its session
+    live and its journal entry behind, and ``run_clone``'s ``finally`` then
+    RETAINS the workdir instead of deleting it. This is the other half: on the
+    retry, a tree the predecessor already finished casting is re-published
+    rather than re-cast — which is the whole point, since the cast is the $10
+    and the two hours.
+
+    Three conditions, all cheap and all necessary:
+      * a journal entry exists for this spec label (so the predecessor got as
+        far as DECLARING, which happens only after the tree was complete and
+        every file hashed — a run that died mid-cast leaves no entry);
+      * the tree on disk still yields exactly the file set that entry declared;
+      * the entry carries the flavor attrs, so nothing has to be re-derived.
+
+    Bytes are re-proven for free downstream: ``publish_v2`` re-hashes every
+    file and adopts the journalled session only if the artifact key matches,
+    so a same-shape-but-corrupted tree publishes fresh instead of resuming
+    wrong.
+    """
+    if not flavor_dir.is_dir():
+        return None
+    journal = PublishJournal.open(workdir / JOURNAL_NAME)
+    entry = journal.for_producer(spec_label=str(spec_label), tree=str(flavor_dir))
+    if entry is None:
+        return None
+    attrs = entry.producer_state.get("attrs")
+    if not isinstance(attrs, dict):
+        return None
+    if not entry.declares([f.path for f in files_from_tree(flavor_dir)]):
+        logger.info(
+            "flavor-%s: retained tree no longer matches publish %s's declaration; "
+            "rebuilding", spec_label, entry.publish_id)
+        return None
+    logger.warning(
+        "flavor-%s: REUSING the retained cast output for publish %s — "
+        "re-uploading rather than re-casting (pgw#1003)",
+        spec_label, entry.publish_id)
+    return {str(k): str(v) for k, v in attrs.items()}
+
+
 def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
     """Remove clone scratch left by crashed predecessors: dirs whose flock is
     free and that have been idle past COZY_CONVERT_SCRATCH_TTL_S (default 1h).
@@ -854,18 +900,24 @@ def run_clone(
                             target_dtype=spec.dtype,
                         )
                 else:
-                    # Wipe any partial flavor tree from a prior failed run —
-                    # only the downloaded source is resumable.
                     flavor_dir = workdir / f"flavor-{spec.label}"
-                    shutil.rmtree(flavor_dir, ignore_errors=True)
-                    shutil.rmtree(workdir / f"flavor-{spec.label}.__repack__",
-                                  ignore_errors=True)
-                    tree, attrs = build_flavor_tree(
-                        source, spec, flavor_dir,
-                        quantize_components=quantize_components,
-                        objective=objective_fact,
-                        distilled=distilled_fact,
-                    )
+                    # pgw#1003: a tree a predecessor already CAST and DECLARED
+                    # is re-published, not re-cast. Anything else is wiped —
+                    # a partial tree from a run that died mid-cast is not
+                    # resumable, and never was.
+                    reused = _reusable_flavor_tree(workdir, spec.label, flavor_dir)
+                    if reused is not None:
+                        tree, attrs = flavor_dir, reused
+                    else:
+                        shutil.rmtree(flavor_dir, ignore_errors=True)
+                        shutil.rmtree(workdir / f"flavor-{spec.label}.__repack__",
+                                      ignore_errors=True)
+                        tree, attrs = build_flavor_tree(
+                            source, spec, flavor_dir,
+                            quantize_components=quantize_components,
+                            objective=objective_fact,
+                            distilled=distilled_fact,
+                        )
                     # dtype="source" resolves to the detected on-disk dtype.
                     flavor_label = str(attrs.get("dtype") or spec.dtype)
                 # Hub flavor tokens are [a-z0-9][a-z0-9._-]{0,63}: the gguf
@@ -956,6 +1008,18 @@ def run_clone(
                 metadata=metadata,
                 provenance=provenance,
                 repo_spec=source.repo_spec,
+                # pgw#1003: the session id lands beside the produced bytes
+                # before the first PUT, so a retry re-uploads instead of
+                # re-cloning. Kept at the workdir root, out of every flavor
+                # tree `files_from_tree` walks.
+                journal_path=workdir / JOURNAL_NAME,
+                # What `_reusable_flavor_tree` reads back on the retry so the
+                # cast does not have to run again.
+                journal_state={
+                    "spec_label": str(spec.label),
+                    "tree": str(tree),
+                    "attrs": {str(k): str(v) for k, v in attrs.items()},
+                },
             )
             result.published.append({
                 "flavor": flavor_label,
@@ -996,16 +1060,34 @@ def run_clone(
                     keepalive.probes, keepalive.longest_outage_s,
                     keepalive.reachable)
         # gw#462: a long-running worker must not leak scratch — the workdir
-        # goes after EVERY job. Cross-run resume lives in the publish bank
-        # (th#592) + CAS dedup, not in retained local bytes.
+        # goes after every job that has nothing left to resume.
         # pgw#929: COZY_CONVERT_RETAIN_WORKDIR deleted. Retaining a failed
         # job's scratch is a DEBUGGING ACTION taken against one run, not a
         # deployment mode a pod is booted in — and as an env it could only ever
         # be set fleet-wide and forgotten, which is how a long-running worker
         # leaks scratch (the gw#462 defect this cleanup exists for).
-        shutil.rmtree(workdir, ignore_errors=True)
-        if not succeeded:
-            logger.warning("clone failed; workdir %s removed", workdir)
+        #
+        # pgw#1003 makes ONE exception, and it is not a debugging one: a
+        # publish that failed with its session still live has a journal entry
+        # naming it, and the produced tree is the only copy of bytes that cost
+        # hours of GPU. Deleting it means the retry re-runs the cast to redo an
+        # upload. So the tree survives exactly as long as there is a session to
+        # resume it into — a real, machine-checkable condition, not a mode.
+        # The disk budget is the one that already exists: `_sweep_stale_workdirs`
+        # reaps any unlocked workdir past COZY_CONVERT_SCRATCH_TTL_S (1 h) at
+        # the start of the next clone, and the hub's own staging lifecycle
+        # (th#1319) bounds how long resuming is possible anyway.
+        resumable = 0 if succeeded else len(
+            PublishJournal.open(workdir / JOURNAL_NAME).entries)
+        if resumable:
+            logger.warning(
+                "clone failed with %d publish session(s) still resumable; "
+                "RETAINING %s so a retry re-uploads instead of re-cloning "
+                "(swept after COZY_CONVERT_SCRATCH_TTL_S)", resumable, workdir)
+        else:
+            shutil.rmtree(workdir, ignore_errors=True)
+            if not succeeded:
+                logger.warning("clone failed; workdir %s removed", workdir)
         os.close(lock_fd)  # releases the flock
 
 

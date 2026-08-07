@@ -319,9 +319,14 @@ def test_corrupt_local_bytes_are_refused_BEFORE_the_transfer(hub, tmp_path, monk
 
     with pytest.raises(HubPublishError, match="failed to upload"):
         hub_c.publish_v2(destination_repo="org/model", files=[f], tags=["prod"])
-    # Nothing corrupt was stored, and the session was aborted.
+    # Nothing corrupt was stored.
     assert all(sha(v) == k for k, v in hub.store.items())
-    assert hub.aborts
+    # pgw#1002 B: and the session is LEFT ALONE. `DELETE /publishes/:id`
+    # deletes every staged chunk hub-side, so it is answered only for a refusal
+    # the HUB classified terminal — never for a client-side fault, where the
+    # objects that did land are exactly what a retry wants. Sessions nobody
+    # comes back to are the staging lifecycle's problem (th#1319).
+    assert hub.aborts == []
 
 
 def test_by_reference_adds_are_REFUSED(hub, tmp_path):

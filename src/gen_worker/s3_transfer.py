@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -19,7 +20,12 @@ import boto3
 
 _MULTIPART_CHUNK_BYTES = 64 * 1024 * 1024
 _MULTIPART_MAX_WORKERS = 10
-_SDK_TRANSFER_ATTEMPTS = 4
+# pgw#1005 A: each OUTER attempt re-uploads every part from zero, on top of
+# botocore's own per-part `max_attempts: 10` below — 4 × 10 was up to forty
+# attempts per part and four full re-transfers of the object. Two outer
+# attempts still cover the case botocore cannot (a client whose credentials or
+# connection pool are the problem) without multiplying the transfer budget.
+_SDK_TRANSFER_ATTEMPTS = 2
 _SDK_UPLOAD_FILE_BUDGET = 2
 _sdk_upload_slots = threading.BoundedSemaphore(_SDK_UPLOAD_FILE_BUDGET)
 
@@ -90,6 +96,22 @@ class S3TransferResult:
     etag: str = ""
 
 
+def _grant_expired(grant: S3TransferGrant, *, margin_s: float = 60.0) -> bool:
+    """pgw#1005 A: ``S3TransferGrant.expires_at`` was parsed and never read
+    again. A scoped credential that is already dead turns a multi-GB upload
+    into forty authentication failures; ask the caller to re-mint instead."""
+    raw = str(grant.expires_at or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc).timestamp() + margin_s >= parsed.timestamp()
+
+
 def upload_file_with_grant(
     *,
     file_path: str | Path,
@@ -98,11 +120,58 @@ def upload_file_with_grant(
     size_bytes: int,
     on_progress: Optional[Any] = None,
 ) -> S3TransferResult:
+    """Upload one object through a scoped S3 credential, returning a digest
+    this function PROVED (pgw#1005 A).
+
+    It used to return ``blake3=blake3_hex`` — the value the caller passed in,
+    having verified nothing — and that claim was forwarded verbatim into the
+    ``/complete`` body. Its download twin was fixed and documented long ago
+    (``download_file_with_grant`` calls ``verify_file_digest``); the upload
+    side never got the same treatment, so the only real check was the hub
+    re-hashing at ``/complete``.
+
+    Now the local bytes are hashed and compared BEFORE the transfer, and the
+    digest reported is the computed one. That is deliberately a check of what
+    we SENT, not of what landed: this path is boto3 multipart, where R2 does
+    not enforce ``x-amz-checksum-sha256`` on ``UploadPart``, so no write-time
+    store enforcement is available (measured — it IS available on
+    ``PutObject``, which is why the chunk-CAS path keeps per-chunk presigns
+    and gets the strongest guarantee in the platform). What the hub's
+    ``/complete`` re-hash then catches is corruption in flight; what this
+    catches is the thing the re-hash cannot distinguish from it — a caller
+    whose claim never described these bytes in the first place.
+
+    ``etag`` stays "": s3transfer owns the multipart completion and does not
+    hand one back. Reading it would cost a HEAD per object for a value nothing
+    consumes.
+    """
     path = Path(file_path)
     actual_size = int(path.stat().st_size)
     if actual_size != int(size_bytes):
         raise ArtifactTransferError(
             f"local file size changed before upload: expected {size_bytes}, got {actual_size}",
+            provider="tensorhub",
+            phase="sdk_upload",
+            retryable=False,
+        )
+    if _grant_expired(grant):
+        raise ArtifactTransferError(
+            f"transfer grant for {grant.key} expires at {grant.expires_at}; "
+            "refusing to start an upload that cannot finish — re-mint the grant",
+            provider="tensorhub",
+            phase="grant",
+            retryable=True,
+        )
+    # Lazy: `presigned_upload` imports this module (inside a function) for the
+    # grant path, and the hash helper is not worth a fourth implementation.
+    from .presigned_upload import blake3_hash_file
+
+    verified = blake3_hash_file(path)
+    claimed = str(blake3_hex or "").strip().lower()
+    if claimed and claimed != verified:
+        raise ArtifactTransferError(
+            f"local bytes for {path.name} hash to {verified[:16]}…, caller claimed "
+            f"{claimed[:16]}… — refusing to upload under a digest they do not have",
             provider="tensorhub",
             phase="sdk_upload",
             retryable=False,
@@ -140,7 +209,8 @@ def upload_file_with_grant(
             cause_type=type(last_exc).__name__,
         ) from last_exc
 
-    return S3TransferResult(bucket=grant.bucket, key=grant.key, size_bytes=actual_size, blake3=blake3_hex)
+    return S3TransferResult(
+        bucket=grant.bucket, key=grant.key, size_bytes=actual_size, blake3=verified)
 
 
 def download_file_with_grant(

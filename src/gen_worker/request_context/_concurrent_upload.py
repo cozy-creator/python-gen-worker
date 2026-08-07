@@ -1,24 +1,17 @@
-"""Concurrent multi-file upload coordinator (issue #269, refactored #13).
+"""Capability byte-budget back-pressure for worker-side uploads (issue #269).
 
-Single source of truth for the worker-side file-level upload fan-out.
-Loops that previously did ``for f in files: ctx.save_checkpoint(f)``
-should swap in ``parallel_map_uploads(items, upload_fn)`` to pipeline
-disk read + BLAKE3 hash + multipart PUT across files instead of
-serializing them.
+pgw#1004 E: this module used to advertise ``parallel_map_uploads`` as "the
+single source of truth for the worker-side file-level upload fan-out". No
+such function has ever existed — the claim matched only its own docstrings.
+There is NO file-level upload parallelism: files are uploaded serially and
+the fan-out lives *inside* one file (S3 parts in ``presigned_upload.py``,
+CAS chunks in ``models/chunk_upload.py``), each with its own bounded,
+process-wide PUT budget. The claim is deleted rather than reasserted.
 
-Library-internal. ``_``-prefixed module name. Don't import from tenant
-code.
-
-# Fixed upload concurrency (issue #19)
-
-``parallel_map_uploads`` owns worker-side FILE-level fan-out. Keep this
-small and boring: S3/R2 part uploads inside each file already run their
-own bounded part-level pool, so this outer pool must not ramp
-independently.
-
-``BudgetGate`` (below) is the capability byte-budget back-pressure. The
-network PUT budget lives in ``presigned_upload.py`` for the current
-Tensorhub presigned path.
+What is real here is ``BudgetGate``: the ``max_total_bytes`` /
+``max_bytes_per_file`` back-pressure derived from the worker capability
+token. Library-internal, ``_``-prefixed module name — don't import from
+tenant code.
 """
 
 from __future__ import annotations
