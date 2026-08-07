@@ -266,3 +266,64 @@ def test_the_delegated_result_carries_the_reason_field(monkeypatch: pytest.Monke
     assert result.reason == "contract_invalid"
     assert not result.ok
     assert "contract_invalid" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# 4. The SAME discard, one frame deeper — `arm_aot`'s lifted-binding install
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_lifted_install_reaches_the_refusal_it_causes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RED at HEAD. `arm_aot`'s bucket branch caught the install failure,
+    PREDICTED its own downstream symptom in a log line ("a lifted artifact
+    will refuse at assert_lifted_contract"), and discarded the cause — so the
+    refusal named the gate that noticed instead of the install that failed.
+
+    This is the bucket-bearing path a `w8a8-lora64` family takes, which is
+    exactly the lane attempt 26 was minting.
+    """
+    from gen_worker.models import provision
+
+    class _Target:
+        pass
+
+    class _PipeWithUnet:
+        def __init__(self) -> None:
+            self.unet = _Target()
+
+    # `arm_aot` imports these INSIDE the function body (they drag 39 modules
+    # onto the `import gen_worker` path), so they are patched on their own
+    # modules rather than as attributes of `provision`.
+    from gen_worker import aot_serve, trt_engine
+
+    monkeypatch.setattr(
+        trt_engine, "unpack_metadata",
+        lambda p: {"targets": ["unet"], "module": "unet", "mode": ""})
+    monkeypatch.setattr(provision, "arm_route", lambda mode: object())
+
+    from gen_worker.models import lora_lifted
+
+    monkeypatch.setattr(lora_lifted, "lifted_binding", lambda m: None)
+
+    def _boom(target: Any, bucket: int) -> None:
+        raise RuntimeError("branch containers not allocated for bucket 64")
+
+    monkeypatch.setattr(lora_lifted, "install_lifted_lora_forward", _boom)
+    monkeypatch.setattr(
+        aot_serve, "enable",
+        lambda *a, **k: AdoptOutcome.miss(
+            "lifted_inputs_unbindable", "module exposes no lifted binding"))
+
+    artifact = tmp_path / "cell.tar.gz"
+    artifact.write_bytes(b"cell")
+    outcome = provision.arm_aot(
+        _PipeWithUnet(), _Cfg(), None, artifact, 64)
+
+    assert not outcome.armed
+    # The gate that refused is still named...
+    assert outcome.reason == "lifted_inputs_unbindable"
+    # ...and so is the ROOT, which is what HEAD threw away.
+    assert "branch containers not allocated for bucket 64" in outcome.detail
+    assert "root:" in outcome.detail
