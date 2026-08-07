@@ -2773,6 +2773,14 @@ def _guarded(
                 f"compiled {'W8A8 ' if fail_closed else ''}target {label} failed: "
                 f"{type(exc).__name__}: {exc}"
             )
+            # pgw#1010: the degrade is recorded on the SHARED signal, not only
+            # in this closure. An INTAKE arm names no artifact, so "is this
+            # pipeline serving compiled" cannot be answered by an active cell
+            # ref — `is_compile_armed` reads this, and without it a permanently
+            # degraded intake pod would keep reporting `serving_mode=jit_cell`
+            # while every request ran eager (the gw#586 class, one lane over).
+            if isinstance(failure_signal, dict):
+                failure_signal["degraded"] = True
             # Revoke scheduler-visible compiled proof synchronously before the
             # eager fallback: the tier flips to explicit eager on the wire.
             revoke(state["detail"])
@@ -3295,14 +3303,25 @@ def cache_miss_count(pipeline: Any) -> int:
 
 
 def is_compile_armed(pipeline: Any) -> bool:
-    """True when :func:`apply` has this pipeline's targets wrapped right now.
+    """True when this pipeline is serving COMPILED code right now.
 
     pgw#1010: the JIT INTAKE arm names no artifact, so ``active_compile_ref``
     is empty for a pipeline that is nonetheless serving compiled code. This is
     the fact that separates it from true eager, and ``serving_mode`` reads it
     per request — hence the cheap attribute probe rather than a target walk.
+
+    A guard that permanently degraded this target to eager (``_guarded``'s
+    fallback) clears the answer even though the wrapper is still installed:
+    reporting a degraded pipeline as compiled is the same lie as reporting an
+    unproven cell as adopted.
     """
-    return getattr(pipeline, _MARKER_ATTR, None) is not None
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    if marker is None:
+        return False
+    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
+    if isinstance(signal, dict) and signal.get("degraded"):
+        return False
+    return True
 
 
 def unwrap(pipeline: Any) -> bool:

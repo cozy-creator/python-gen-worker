@@ -265,8 +265,15 @@ def test_an_intake_armed_pipeline_reports_jit_not_eager() -> None:
     """The measurement half. An intake pod serves COMPILED and names no
     artifact, so classifying it by the (absent) cell ref would report every
     JIT request as eager and delete the JIT arm of the AOT-vs-JIT comparison.
+
+    ...and a pipeline whose guard permanently degraded it back to eager must
+    say EAGER again, wrapper or no wrapper — reporting a degraded lane as
+    compiled is the same lie as reporting an unproven cell as adopted.
     """
     pipe = _Pipe()
     assert serving_mode.classify_mode("", pipe) == serving_mode.MODE_EAGER
-    setattr(pipe, cc._MARKER_ATTR, {"originals": ()})
+    signal: Dict[str, Any] = {}
+    setattr(pipe, cc._MARKER_ATTR, {"originals": (), "failure_signal": signal})
     assert serving_mode.classify_mode("", pipe) == serving_mode.MODE_JIT_CELL
+    signal["degraded"] = True
+    assert serving_mode.classify_mode("", pipe) == serving_mode.MODE_EAGER
