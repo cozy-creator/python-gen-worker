@@ -43,6 +43,7 @@ from . import worker_credential
 from . import mint_goal as mint_goal_mod
 from . import worker_goals
 from .api.binding import ModelRef, wire_ref
+from .convert.hub import HubPublishError
 from .mint_process import MintSlot
 from .api.errors import (
     ArtifactTransferError,
@@ -482,6 +483,21 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "retryable error")
     if isinstance(exc, ArtifactTransferError) and getattr(exc, "retryable", False):
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "artifact transfer failed")
+    if isinstance(exc, HubPublishError):
+        # pgw#1002. The hub's th#1301 refusal carries its OWN `retryable` bit;
+        # PROVENANCE decides the class (th#1259), not our reading of the
+        # message. `True` -> RETRYABLE, so the orchestrator's MaxJobAttempts
+        # budget is actually spent on a publish the hub asked us to retry.
+        # `False` is a repudiation (audit findings, contract failure,
+        # possession refusal) and `None` honestly means the hub named nothing
+        # — neither invents a retry. The hub's `code` LEADS the detail so the
+        # refusal groups by a stable token instead of by prose.
+        detail = _sanitize(str(exc) or "publish failed")
+        if exc.code:
+            detail = f"{exc.code}: {detail}"
+        status = (pb.JOB_STATUS_RETRYABLE if exc.retryable is True
+                  else pb.JOB_STATUS_FATAL)
+        return status, detail[:512]
     if isinstance(exc, HardwareUnmetError):
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "hardware unmet")
     if isinstance(exc, UrlExpiredError):

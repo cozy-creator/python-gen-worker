@@ -41,6 +41,7 @@ from .. import activity as _activity
 from ..http_origin import is_definite_hub_answer
 from ..models import chunk_upload as _cu
 from ..models.chunk_upload import UploadGrant
+from .publish_journal import JOURNAL_NAME, JournalEntry, PublishJournal, artifact_key
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,13 @@ _CONNECT_TIMEOUT_S = 15.0
 # Resume needs no client state: the need set comes back smaller because what
 # landed is now resident, so a pass costs only the objects still missing.
 _REUPLOAD_ATTEMPTS = 2
+
+# pgw#1004 C: re-plans spent purely on RE-MINTING expired presigns, charged to
+# their own budget. An expired grant is not a failed transfer — nothing about
+# the bytes is in question — so consuming a re-upload pass for one is how a
+# 2 h TTL crossed mid-publish turns into a fatal job. Small, because the CAS
+# grant TTL is 2 h and a publish that crosses it twice has a different problem.
+_EXPIRY_REPLAN_ATTEMPTS = 3
 
 # tensorhub's /complete verifies the publish synchronously before answering.
 # For a large tree that can outlast whatever timeout sits in front of the hub,
@@ -119,6 +127,26 @@ class HubPublishError(RuntimeError):
         self.status = int(status or 0)
         self.code = str(code or "")
         self.retryable = retryable
+
+
+def _is_terminal_repudiation(exc: BaseException) -> bool:
+    """Should this failure destroy the session's staged bytes? (pgw#1002 B)
+
+    ONLY a refusal the hub itself classified terminal. `DELETE /publishes/:id`
+    is not a tidy-up — hub-side it runs `cleanupCASPublishV2Staging` and
+    deletes every staged chunk, so answering it is answering "these bytes can
+    never be useful to anyone". That is true of a repudiation (audit findings,
+    contract failure, possession refusal): the declaration itself is refused,
+    so re-uploading against it cannot help. It is false of everything else — a
+    transport blip, a timeout, a proxy outage, a KeyboardInterrupt, a local
+    bug — where the staged objects are exactly what a retry wants.
+
+    The default is therefore KEEP. An exception we cannot classify is not
+    evidence that 37 GB is worthless.
+    """
+    if isinstance(exc, HubPublishError):
+        return exc.retryable is False
+    return False
 
 
 def _retry_after_s(resp: requests.Response) -> Optional[float]:
@@ -339,6 +367,20 @@ class HubClient:
             return None
         return failure
 
+    def _abort_publish(self, repo_path: str, publish_id: str) -> None:
+        """Land a REPUDIATED session in a terminal state. Destroys staging —
+        call only from :func:`_is_terminal_repudiation`'s branch."""
+        if not publish_id:
+            return
+        try:
+            _http_session().delete(
+                f"{self.base_url}{repo_path}/publishes/"
+                f"{urllib.parse.quote(publish_id, safe='')}",
+                headers=self._headers(), timeout=(_CONNECT_TIMEOUT_S, 30),
+            )
+        except Exception:  # noqa: BLE001 — best effort; the session TTL backstops it
+            logger.debug("publish %s abort failed", publish_id, exc_info=True)
+
     def _post_v2_complete(self, path: str) -> requests.Response:
         """POST /complete WITHOUT the envelope-guessing retry loop.
 
@@ -402,6 +444,8 @@ class HubClient:
         progress: Any = None,
         part_progress: Optional[Callable[[int, int, int], None]] = None,
         on_stage: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        journal_path: Optional[Path] = None,
+        journal_state: Optional[Mapping[str, Any]] = None,
     ) -> CommitResult:
         """Publish one checkpoint over the CHUNKED SHA-256 CAS (th#1303).
 
@@ -433,11 +477,20 @@ class HubClient:
 
         ``on_stage(stage, facts)`` reports the protocol's own legs —
         ``declared`` (publish_id + the have/need split, i.e. what dedup
-        actually saved), ``uploading`` (objects and bytes this pass will
-        move), ``committing`` — so a caller whose publish is otherwise a
-        silent background thread can put the LEG on the wire instead of only
-        its terminus. Never load-bearing: a raising callback is the caller's
-        bug and must not fail a publish that is transferring correctly.
+        actually saved), ``resumed`` (a journalled session re-adopted),
+        ``uploading`` (objects and bytes this pass will move), ``committing``
+        — so a caller whose publish is otherwise a silent background thread can
+        put the LEG on the wire instead of only its terminus. Never
+        load-bearing: a raising callback is the caller's bug and must not fail
+        a publish that is transferring correctly.
+
+        ``journal_path`` (pgw#1003) turns "the upload died" into "re-upload"
+        rather than "re-run the cast". The session id is recorded beside the
+        produced bytes BEFORE the first PUT, so a retry on this pod re-adopts
+        the same session (same staging prefix) and re-plans it instead of
+        declaring a fresh one. See ``publish_journal`` for what this does and
+        does not cover, and for the th#1654 hub dependency it is built to
+        exploit.
         """
 
         # Read the constant off the module at CALL time rather than binding a
@@ -524,21 +577,9 @@ class HubClient:
             if val:
                 body[key] = val
 
-        resp = self._post(f"{repo_path}/publishes", body)
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise HubPublishError(
-                f"publish declare failed ({resp.status_code}): {resp.text[:800]}",
-                status=resp.status_code, code=_error_code_of(resp))
-        session = self._json(resp)
-        publish_id = str(session.get("publish_id") or "").strip()
-        if not publish_id:
-            raise HubPublishError("publish response missing publish_id",
-                                  code="publish_id_missing")
-
-        distinct = int(session.get("distinct_objects") or 0)
-        resident = int(session.get("resident_objects") or 0)
-        uploaded_objects = 0
         total_bytes = sum(d.size_bytes for d in decls)
+        art_key = artifact_key(sorted(sources))
+        journal = PublishJournal.open(journal_path) if journal_path else None
 
         def _stage(stage: str, **facts: Any) -> None:
             if on_stage is None:
@@ -559,6 +600,10 @@ class HubClient:
                     put_url=str(g.get("put_url") or ""),
                     headers={str(k): str(v) for k, v in (g.get("headers") or {}).items()},
                     staging_key=str(g.get("staging_key") or ""),
+                    # pgw#1004 C: the hub has always sent this
+                    # (`chunkcas/plan.go` ObjectGrant.ExpiresAt); we used to
+                    # decode the grant and drop it.
+                    expires_at=str(g.get("expires_at") or ""),
                 ))
             return out
 
@@ -570,13 +615,86 @@ class HubClient:
                 )
             return span
 
+        def _replan(pid: str) -> Mapping[str, Any]:
+            """Re-plan an EXISTING session. This is also the CAS path's presign
+            re-mint: the hub answers with fresh grants for whatever the need
+            set still names."""
+            again = self._post(f"{repo_path}/publishes/"
+                               f"{urllib.parse.quote(pid, safe='')}/grants")
+            if again.status_code < 200 or again.status_code >= 300:
+                raise HubPublishError(
+                    f"publish re-plan failed ({again.status_code}): {again.text[:500]}",
+                    status=again.status_code, code=_error_code_of(again))
+            return self._json(again)
+
+        # pgw#1003: adopt a journalled session before declaring a new one. Its
+        # staging prefix is session-scoped, so reusing the id is the ONLY way
+        # to reach bytes a predecessor already moved. A session the hub no
+        # longer accepts simply falls through to a fresh declare — resuming is
+        # an optimization and must never be a way to fail.
+        #
+        # The DECLARATION is not re-sent: the session already carries it, and
+        # the journal key is the declared object set, so an adopted session is
+        # about exactly these bytes. A re-run that wants a different
+        # declaration (other tags, other metadata) produces the same objects
+        # and therefore adopts the same session — if that is ever wrong, the
+        # answer is a distinct journal key, never a second declare onto a live
+        # session.
+        session: Optional[Mapping[str, Any]] = None
+        publish_id = ""
+        prior = (journal.find(destination_repo=destination_repo, mode=mode, key=art_key)
+                 if journal is not None else None)
+        if prior is not None:
+            try:
+                session = _replan(prior.publish_id)
+                publish_id = prior.publish_id
+                logger.info(
+                    "publish_v2 resuming journalled session %s for %s (%d objects)",
+                    publish_id, destination_repo, prior.objects)
+                _stage("resumed", publish_id=publish_id,
+                       need=len(session.get("need") or []), bytes=total_bytes)
+            except HubPublishError as exc:
+                logger.info(
+                    "publish_v2 could not resume journalled session %s (%s); "
+                    "declaring a fresh publish", prior.publish_id, exc)
+                journal.clear(prior.publish_id)  # type: ignore[union-attr]
+                session = None
+
+        if session is None:
+            resp = self._post(f"{repo_path}/publishes", body)
+            if resp.status_code < 200 or resp.status_code >= 300:
+                raise HubPublishError(
+                    f"publish declare failed ({resp.status_code}): {resp.text[:800]}",
+                    status=resp.status_code, code=_error_code_of(resp))
+            session = self._json(resp)
+            publish_id = str(session.get("publish_id") or "").strip()
+            if not publish_id:
+                raise HubPublishError("publish response missing publish_id",
+                                      code="publish_id_missing")
+
+        distinct = int(session.get("distinct_objects") or 0)
+        resident = int(session.get("resident_objects") or 0)
+        uploaded_objects = 0
+
+        # Recorded BEFORE the first PUT: a journal written after the transfer
+        # is a journal that never survives the transfer failing.
+        if journal is not None:
+            journal.record(JournalEntry(
+                publish_id=publish_id, destination_repo=destination_repo, mode=mode,
+                artifact_key=art_key, objects=distinct or len(sources),
+                bytes_declared=total_bytes,
+                source_root=str(Path(files[0].local_path or ".").parent),
+                paths=tuple(d.path for d in decls),
+                producer_state=dict(journal_state or {}),
+            ))
+
         try:
             grants = _grants_of(session)
             _stage("declared", publish_id=publish_id, objects=distinct,
                    resident=resident, need=len(grants), bytes=total_bytes)
-            for attempt in range(_REUPLOAD_ATTEMPTS + 1):
-                if not grants:
-                    break
+            attempt = 0
+            expiry_replans = 0
+            while grants:
                 _stage("uploading", publish_id=publish_id, objects=len(grants),
                        bytes=sum(g.size_bytes for g in grants), attempt=attempt)
                 report = _cu.upload_grants(
@@ -589,73 +707,99 @@ class HubClient:
                     progress(resident + uploaded_objects, distinct or len(grants))
                 if report.ok:
                     break
-                if attempt == _REUPLOAD_ATTEMPTS:
+                if report.needs_replan:
+                    # pgw#1004 C: nothing failed — presigns went stale. Re-mint
+                    # them without charging the re-upload budget, which exists
+                    # for objects that would not land.
+                    expiry_replans += 1
+                    if expiry_replans > _EXPIRY_REPLAN_ATTEMPTS:
+                        raise HubPublishError(
+                            f"publish {publish_id}: grants kept expiring after "
+                            f"{_EXPIRY_REPLAN_ATTEMPTS} re-mints "
+                            f"({len(report.expired)} object(s) still stale)",
+                            code="grant_expiry_loop")
+                    logger.info(
+                        "publish %s re-minting %d expired grant(s) (re-mint %d/%d)",
+                        publish_id, len(report.expired), expiry_replans,
+                        _EXPIRY_REPLAN_ATTEMPTS)
+                    grants = _grants_of(_replan(publish_id))
+                    continue
+                attempt += 1
+                if attempt > _REUPLOAD_ATTEMPTS:
                     raise HubPublishError(
                         f"publish {publish_id}: {len(report.failures)} object(s) failed to "
                         f"upload after {_REUPLOAD_ATTEMPTS + 1} passes: "
                         + "; ".join(report.failures[:5])
                     )
-                # RESUME NEEDS NO CLIENT STATE: re-plan and the need set comes
-                # back smaller, because what landed is now resident. A kill
-                # mid-upload costs the in-flight objects and nothing else.
-                again = self._post(f"{repo_path}/publishes/"
-                                   f"{urllib.parse.quote(publish_id, safe='')}/grants")
-                if again.status_code < 200 or again.status_code >= 300:
-                    raise HubPublishError(
-                        f"publish re-plan failed ({again.status_code}): {again.text[:500]}",
-                        status=again.status_code, code=_error_code_of(again))
-                grants = _grants_of(self._json(again))
+                # RESUME NEEDS NO CLIENT STATE FOR THIS PROCESS: re-plan and
+                # the need set names what still has to move. th#1654 is what
+                # makes it come back SMALLER (staged-but-unpromoted objects are
+                # invisible to the hub's planner until it lands); the journal
+                # above is what lets a LATER process re-enter this same loop.
+                grants = _grants_of(_replan(publish_id))
 
             _stage("committing", publish_id=publish_id, objects=distinct,
                    resident=resident, uploaded=uploaded_objects)
             done = self._post_v2_complete(
                 f"{repo_path}/publishes/{urllib.parse.quote(publish_id, safe='')}/complete")
-        except Exception:
-            # Abort so the staging prefix is reclaimed and the session lands in
-            # a TERMINAL state rather than looking forever in-flight.
-            try:
-                _http_session().delete(
-                    f"{self.base_url}{repo_path}/publishes/"
-                    f"{urllib.parse.quote(publish_id, safe='')}",
-                    headers=self._headers(), timeout=30,
-                )
-            except Exception:
-                pass
+
+            if done.status_code < 200 or done.status_code >= 300:
+                # Lead with the hub's OWN typed classification when it gave one.
+                # A refusal that reports its `code`, its `retryable` bit and the
+                # stage that produced it is actionable; a bare status code plus
+                # 800 bytes of truncated projection is what sent this lane
+                # looking in the wrong place twice.
+                failure = self._v2_failure(done)
+                if failure:
+                    stage = ""
+                    try:
+                        for s in (done.json().get("status") or {}).get("stages") or []:
+                            if s.get("status") == "failed":
+                                stage = str(s.get("stage") or "")
+                    except Exception:  # noqa: BLE001 - the stage is a nicety
+                        pass
+                    raise HubPublishError(
+                        f"publish {publish_id} "
+                        f"{'repudiated' if not failure.get('retryable') else 'failed'}"
+                        f"{f' at {stage}' if stage else ''}: "
+                        f"{failure.get('code')}: {failure.get('message')} "
+                        f"(retryable={bool(failure.get('retryable'))})",
+                        status=done.status_code, code=str(failure.get("code") or ""),
+                        retryable=bool(failure.get("retryable")),
+                    )
+                raise HubPublishError(
+                    f"publish complete failed ({done.status_code}): {done.text[:800]}",
+                    status=done.status_code, code=_error_code_of(done))
+            final = self._json(done)
+            ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
+            checkpoint_id = str((ckpt or {}).get("checkpoint_id") or "").strip()
+            if not checkpoint_id:
+                raise HubPublishError(
+                    f"publish {publish_id} completed without a checkpoint id: "
+                    f"{json.dumps(final)[:500]}", code="checkpoint_id_missing")
+        except BaseException as exc:
+            # pgw#1002 B: ABORT ONLY ON A TERMINAL REFUSAL. `DELETE /publishes/:id`
+            # runs `cleanupCASPublishV2Staging` hub-side, which deletes every
+            # staged chunk — so aborting on a transport blip threw away 37 GB of
+            # transferred bytes to keep a session row tidy. A transport failure,
+            # a timeout or a KeyboardInterrupt now leaves the session intact so
+            # a retry (this pod, via the journal) can resume it. Sessions that
+            # genuinely leak are the staging lifecycle's problem (th#1319).
+            if _is_terminal_repudiation(exc):
+                self._abort_publish(repo_path, publish_id)
+                if journal is not None:
+                    journal.clear(publish_id)
+            else:
+                logger.warning(
+                    "publish %s failed with a non-terminal error (%s); leaving the "
+                    "session and its staged objects intact for a retry",
+                    publish_id, type(exc).__name__)
             raise
 
-        if done.status_code < 200 or done.status_code >= 300:
-            # Lead with the hub's OWN typed classification when it gave one. A
-            # refusal that reports its `code`, its `retryable` bit and the stage
-            # that produced it is actionable; a bare status code plus 800 bytes
-            # of truncated projection is what sent this lane looking in the
-            # wrong place twice.
-            failure = self._v2_failure(done)
-            if failure:
-                stage = ""
-                try:
-                    for s in (done.json().get("status") or {}).get("stages") or []:
-                        if s.get("status") == "failed":
-                            stage = str(s.get("stage") or "")
-                except Exception:  # noqa: BLE001 - the stage is a nicety
-                    pass
-                raise HubPublishError(
-                    f"publish {publish_id} {'repudiated' if not failure.get('retryable') else 'failed'}"
-                    f"{f' at {stage}' if stage else ''}: "
-                    f"{failure.get('code')}: {failure.get('message')} "
-                    f"(retryable={bool(failure.get('retryable'))})",
-                    status=done.status_code, code=str(failure.get("code") or ""),
-                    retryable=bool(failure.get("retryable")),
-                )
-            raise HubPublishError(
-                f"publish complete failed ({done.status_code}): {done.text[:800]}",
-                status=done.status_code, code=_error_code_of(done))
-        final = self._json(done)
-        ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
-        checkpoint_id = str((ckpt or {}).get("checkpoint_id") or "").strip()
-        if not checkpoint_id:
-            raise HubPublishError(
-                f"publish {publish_id} completed without a checkpoint id: "
-                f"{json.dumps(final)[:500]}", code="checkpoint_id_missing")
+        # Promoted. The produced tree and this journal entry have no further
+        # job: the bytes are in the CAS.
+        if journal is not None:
+            journal.clear(publish_id)
         # Surfaced, not swallowed: the hub names which canonical th#1301 checks
         # it did NOT run. A list that promises 19 and silently runs 14 is worse
         # than one promising 14.
@@ -867,7 +1011,8 @@ def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
     """Build CommitFile entries for every regular file under ``tree``.
 
     ``.cache/huggingface/**`` is skipped: huggingface_hub's local-dir download
-    metadata is cache-layout junk, never repo content."""
+    metadata is cache-layout junk, never repo content. So is a publish journal
+    (pgw#1003) — it is recovery bookkeeping about the tree, not part of it."""
     tree = Path(tree)
     out: list[CommitFile] = []
     for f in sorted(tree.rglob("*")):
@@ -875,6 +1020,8 @@ def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
             continue
         rel_parts = f.relative_to(tree).parts
         if rel_parts[:2] == (".cache", "huggingface"):
+            continue
+        if f.name == JOURNAL_NAME:
             continue
         rel = f.relative_to(tree).as_posix()
         if prefix:

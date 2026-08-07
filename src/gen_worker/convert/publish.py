@@ -11,9 +11,11 @@ Publishes over the chunked sha256 CAS (th#1303 ``HubClient.publish_v2``).
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .. import activity as _activity
 from ..models.ladder import (
     CLASS_BASE,
     Placement,
@@ -22,6 +24,7 @@ from ..models.ladder import (
     placement_to_metadata,
 )
 from .hub import CommitFile, CommitResult, HubClient, files_from_tree
+from .publish_journal import JOURNAL_NAME
 from .produced import ProducedFlavor
 from .writer import assert_one_file_per_component
 
@@ -108,6 +111,34 @@ def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None
         return None, None
 
 
+def _journal_beside(flavor: ProducedFlavor) -> Path:
+    """The publish journal for one produced flavor (pgw#1003).
+
+    NEXT TO the tree, never inside it: ``files_from_tree`` walks a flavor
+    directory wholesale, and a journal written into it would publish itself as
+    repo content on the next flavor. One journal per produced-output directory
+    also means one file holding every flavor's in-flight session, which is
+    exactly the set a successor should try to resume.
+    """
+    return Path(flavor.path).parent / JOURNAL_NAME
+
+
+def _publish_leg(dest: str, label: str, stage: str, facts: Mapping[str, Any]) -> None:
+    """One typed `convert_publish` event per LEG of the publish protocol.
+
+    pgw#1004 B: `publish_flavors` is what every quantize / fuse / cast job
+    calls — the 2h16m casts — and it used to pass no ``on_stage``, no
+    ``progress`` and no ``part_progress``, so the highest-volume producer on
+    the platform emitted ZERO `worker_activity_events` legs for its whole
+    publish. "Declared 590 objects and is moving 37 GB" and "was refused
+    before a byte left" were the same observation. Modelled on
+    ``fleet_cells._publish_leg``, which already does this correctly.
+    """
+    detail = " ".join(f"{k}={v}" for k, v in sorted(dict(facts).items()))
+    _activity.emit_event(
+        "convert_publish", f"repo={dest} flavor={label}: {detail}", phase=stage)
+
+
 def publish_flavors(
     ctx: Any,
     flavors: Iterable[ProducedFlavor],
@@ -118,6 +149,7 @@ def publish_flavors(
     metadata: Mapping[str, Any] | None = None,
     objective: str | None = None,
     distilled: bool | None = None,
+    journal_path: Path | None = None,
 ) -> list[CommitResult]:
     """Publish each ProducedFlavor as one commit. ``destination_repo`` falls
     back to the reserved-name ``ctx.destination`` payload field.
@@ -126,7 +158,12 @@ def publish_flavors(
     export is a complete tree by definition — merging with the repo's prior
     :latest is how te#44 shipped an #fp8 checkpoint carrying 5.2GB of fp16
     base weights. Pass ``mode="merge"`` explicitly only for deliberate
-    overlay publishes (e.g. a vae swap on top of an existing tree)."""
+    overlay publishes (e.g. a vae swap on top of an existing tree).
+
+    ``journal_path`` (pgw#1003) is where the in-flight ``publish_id`` is
+    recorded so a retry on this pod re-uploads instead of re-casting. Pass the
+    produced tree's own directory; omit it and the publish is exactly as
+    unrecoverable as it was before."""
     dest = str(destination_repo or "").strip()
     if not dest:
         info = getattr(ctx, "destination", None) or {}
@@ -196,6 +233,13 @@ def publish_flavors(
             files=_flavor_files(flavor),
             tags=list(tags or []),
             mode=mode,
+            # pgw#1004 B: the conversion producer now puts its own legs on the
+            # wire. (The per-object liveness beat lives in the data plane
+            # itself — `chunk_upload._beat` — so it cannot be lost by a caller
+            # who forgets to pass a callback, which is exactly how it was
+            # lost here.)
+            on_stage=functools.partial(_publish_leg, dest, label),
+            journal_path=journal_path or _journal_beside(flavor),
             flavor=label,
             flavors=list(flavor.flavors or []),
             dtype=attrs.get("dtype", ""),

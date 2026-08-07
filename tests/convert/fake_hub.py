@@ -10,6 +10,7 @@ from gen_worker.convert.hub import HubClient
 
 
 import base64 as _base64
+import datetime as _dt
 import hashlib as _hashlib
 
 
@@ -139,6 +140,11 @@ class _FakeHub(BaseHTTPRequestHandler):
             return
         if "/publishes/" in self.path and self.path.endswith("/grants"):
             pid = self.path.split("/publishes/")[1].split("/")[0]
+            st.setdefault("replans", []).append(pid)
+            if pid not in st.get("publishes", {}):
+                self._send(404, {"error": {"code": "publish_not_found",
+                                           "message": "no such publish session"}})
+                return
             self._send(200, self._v2_plan(st["publishes"][pid]))
             return
         if "/publishes/" in self.path and self.path.endswith("/complete"):
@@ -148,6 +154,17 @@ class _FakeHub(BaseHTTPRequestHandler):
             if plan["need"]:
                 self._send(409, {"error": {"code": "upload_incomplete",
                                            "message": "objects still awaiting upload"}})
+                return
+            # th#1301 typed refusals, projection-shaped: `retryable` is the
+            # hub's OWN classification and the client must honour it
+            # (pgw#1002 A) rather than re-derive one from the message.
+            verdict = st.get("complete_failure")
+            if verdict is not None:
+                self._send(409, {"status": {
+                    "publish_id": pid, "stage": "repudiated", "terminal": True,
+                    "stages": [{"stage": "verify", "status": "failed"}],
+                    "failure": dict(verdict),
+                }})
                 return
             st.setdefault("v2_manifests", {})[pid] = req.get("files") or []
             self._send(200, {
@@ -320,14 +337,37 @@ class _FakeHub(BaseHTTPRequestHandler):
                 if d in cas:
                     have.append("sha256:" + d)
                     continue
-                need.append({
+                grant = {
                     "digest": "sha256:" + d, "size_bytes": n,
                     "staging_key": f"staging/sha256/{d}",
                     "put_url": f"{base}/v2put/{d}",
                     "headers": {"x-amz-checksum-sha256": _b64_sha(d)},
-                })
+                }
+                # th#1303 ObjectGrant.ExpiresAt (2 h TTL in production). Tests
+                # override `grant_ttl_s` — negative mints an already-dead
+                # grant, which is what pgw#1004 C is about.
+                ttl = st.get("grant_ttl_s")
+                if ttl is not None:
+                    grant["expires_at"] = (
+                        _dt.datetime.now(_dt.timezone.utc)
+                        + _dt.timedelta(seconds=float(ttl))
+                    ).isoformat().replace("+00:00", "Z")
+                need.append(grant)
         return {"have": have, "need": need, "distinct_objects": len(seen),
                 "resident_objects": len(have)}
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        """`DELETE /publishes/:id` — hub-side this repudiates the session AND
+        reclaims (deletes) every staged chunk. Recorded so a test can prove the
+        client only ever sends it for a terminal refusal (pgw#1002 B)."""
+        st = _FakeHub.state
+        st.setdefault("aborts", []).append(self.path)
+        if "/publishes/" in self.path:
+            pid = self.path.rstrip("/").rsplit("/", 1)[-1]
+            st.setdefault("aborted_publishes", []).append(pid)
+            # The staged bytes go with it — that is the whole cost.
+            st["v2_cas"] = set()
+        self._send(200, {"status": {"stage": "repudiated", "terminal": True}})
 
     def do_PUT(self) -> None:  # noqa: N802
         st = _FakeHub.state
@@ -342,25 +382,12 @@ class _FakeHub(BaseHTTPRequestHandler):
             return
         n = int(self.headers.get("Content-Length") or 0)
         data = self.rfile.read(n) if n else b""
-        if self.path.startswith("/v2put/"):
-            key = self.path.rsplit("/", 1)[-1]
-            st.setdefault("put_counts", {})[self.path] = (
-                st.setdefault("put_counts", {}).get(self.path, 0) + 1)
-            if self.headers.get("x-amz-checksum-sha256") != _b64_sha(key):
-                self._send(403, {"error": {"code": "SignatureDoesNotMatch",
-                                           "message": "claim substituted"}})
-                return
-            if _hashlib.sha256(data).hexdigest() != key:
-                self._send(400, {"error": {"code": "BadDigest",
-                                           "message": "bytes do not hash to the key"}})
-                return
-            st.setdefault("v2_cas", set()).add(key)
-            self.send_response(200)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
         counts = st.setdefault("put_counts", {})
         counts[self.path] = counts.get(self.path, 0) + 1
+        # pgw#1005 C: the 5xx and expired-presign injectors apply to EVERY PUT
+        # surface, v1 part URLs and v2 chunk grants alike. They used to sit
+        # below the v2 branch, so the chunk-CAS data plane — the one every
+        # producer now rides — could not be made to fail at all.
         fail_paths = st.get("fail_put_paths") or {}
         if st.get("fail_puts", 0) > 0 or fail_paths.get(self.path, 0) > 0:
             if fail_paths.get(self.path, 0) > 0:
@@ -376,6 +403,21 @@ class _FakeHub(BaseHTTPRequestHandler):
             # gw#570: S3 answers 403 for an expired presigned URL.
             expired_puts[self.path] -= 1
             self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path.startswith("/v2put/"):
+            key = self.path.rsplit("/", 1)[-1]
+            if self.headers.get("x-amz-checksum-sha256") != _b64_sha(key):
+                self._send(403, {"error": {"code": "SignatureDoesNotMatch",
+                                           "message": "claim substituted"}})
+                return
+            if _hashlib.sha256(data).hexdigest() != key:
+                self._send(400, {"error": {"code": "BadDigest",
+                                           "message": "bytes do not hash to the key"}})
+                return
+            st.setdefault("v2_cas", set()).add(key)
+            self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return

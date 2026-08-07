@@ -22,18 +22,30 @@ The publisher's side of the v2 flow. Shape, and why each part is the way it is:
     stored checksum at all, which means wrong bytes would also have been
     accepted. So: send exactly the headers the hub gave, add nothing, drop
     nothing, and never reconstruct a URL locally.
-*   **Resume by RE-DECLARING.** There is no session state to reconstruct: the
-    need-set simply comes back smaller, because the chunks that landed are now
-    resident. A kill mid-upload loses at most the in-flight chunks.
+*   **Resume by RE-PLANNING.** There is no session state to reconstruct: the
+    need-set comes back smaller from ``POST .../grants``, because what landed
+    is now accounted for. A kill mid-upload loses at most the in-flight
+    objects. That re-plan is also the CAS path's presign re-mint: a grant that
+    outlived ``expires_at`` is not fatal, it is re-planned (pgw#1004 C — the
+    media/dataset domains needed a whole new hub route for this, th#1655; this
+    one always had it and simply never read the expiry).
 *   **Parallel across chunks**, bounded, sharing the process-wide PUT budget so
-    file-level and chunk-level fan-out cannot multiply into a retry storm.
+    file-level and chunk-level fan-out cannot multiply into a retry storm. The
+    budget is taken BEFORE the span is read, so it bounds buffer residency and
+    not merely socket count.
+*   **Retry hygiene identical to the presigned path** (pgw#1004 A/B):
+    decorrelated-jitter backoff from the one shared helper, classify before
+    charging an attempt, and a liveness beat per completed object so a healthy
+    multi-hour transfer is not silence to the watchdogs.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +53,9 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 import requests
 
+from .. import activity as _activity
+from .. import progress as _progress
+from .._upload_transport import backoff_sleep_s
 from .chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
     _READ_CHUNK_BYTES,
@@ -51,6 +66,7 @@ from .chunk_cas import (
 __all__ = [
     "ChunkPlan",
     "FileDeclaration",
+    "GrantExpired",
     "UploadGrant",
     "UploadReport",
     "hash_file_and_chunks",
@@ -61,11 +77,28 @@ _log = logging.getLogger(__name__)
 
 _MAX_ATTEMPTS = 5
 
-# Shared with the legacy presigned path's intent: total concurrent PUTs across
-# every file and chunk. Two fan-out axes that each look modest multiply into a
-# retry storm otherwise.
-_PUT_BUDGET = 8
+# Total concurrent PUTs across every file and chunk. Two fan-out axes that each
+# look modest multiply into a retry storm otherwise.
+#
+# pgw#1004 D raised these from 4/8. The reference points, all in-repo and all
+# measured rather than guessed: the hub's ranged reader needs SIXTEEN windows in
+# flight to move 3.5 MB/s where one stream moves 0.10 MB/s on the same class of
+# link (`internal/s3/resumable_reader.go:45`), and the SDK transfer path next
+# door has run at 10 workers for as long as it has existed
+# (`s3_transfer.py:_MULTIPART_MAX_WORKERS`). 8 in flight per publish under a
+# 16-PUT process ceiling sits between the two: it can no longer leave a pod
+# uplink idle, and it still cannot multiply with a second publish into
+# something the store reads as a flood. Chunks are 64 MiB, so the slot is also
+# the buffer bound — 8 × 64 MiB = 512 MiB per publish, unchanged from before,
+# because the OLD code bought its buffer outside the semaphore.
+_DEFAULT_PARALLEL = 8
+_PUT_BUDGET = 16
 _put_slots = threading.BoundedSemaphore(_PUT_BUDGET)
+
+# Don't START a PUT on a grant with less than this left: a 64 MiB body over a
+# slow link outlives a few seconds of TTL, and a presign that dies mid-flight
+# costs a whole classification pass to discover.
+_GRANT_EXPIRY_MARGIN_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -103,15 +136,61 @@ class FileDeclaration:
         return out
 
 
+class GrantExpired(Exception):
+    """This grant's presign is (or has just proven to be) expired.
+
+    NOT a failure of the bytes and NOT terminal: an expired presign is fixed
+    by re-planning, which mints a fresh grant for the same object. Kept apart
+    from ``failures`` so it cannot consume a re-upload pass — pgw#1004 C, where
+    a 403 from an expired URL was indistinguishable from a substituted claim
+    and both were classified terminal.
+    """
+
+
+def _parse_expires_at(raw: str) -> float:
+    """RFC3339 -> unix seconds. 0.0 means "the hub named no expiry"."""
+    text = str(raw or "").strip()
+    if not text:
+        return 0.0
+    try:
+        # `fromisoformat` handles the offset forms; Go's RFC3339 "Z" needs the
+        # swap on Python < 3.11 and is harmless on newer ones.
+        parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed.timestamp()
+
+
 @dataclass(frozen=True)
 class UploadGrant:
-    """One `need` entry from the hub: where to PUT, and with which headers."""
+    """One `need` entry from the hub: where to PUT, and with which headers.
+
+    ``expires_at`` is the hub's ``ObjectGrant.ExpiresAt`` (RFC3339). It was on
+    the wire and dropped on the floor before pgw#1004; reading it is what makes
+    a 403 attributable — an expired presign re-plans, a substituted claim does
+    not. "" means the hub named none, and then no expiry check is made.
+    """
 
     digest: str  # "sha256:<hex>" — also the CAS key
     size_bytes: int
     put_url: str
     headers: Dict[str, str]
     staging_key: str = ""
+    expires_at: str = ""
+
+    def expires_at_unix(self) -> float:
+        return _parse_expires_at(self.expires_at)
+
+    def expired(
+        self, *, margin_s: float = _GRANT_EXPIRY_MARGIN_S, now: Optional[float] = None
+    ) -> bool:
+        """Is this grant past its expiry, or too close to it to start a PUT?"""
+        deadline = self.expires_at_unix()
+        if deadline <= 0.0:
+            return False
+        return (now if now is not None else time.time()) + margin_s >= deadline
 
 
 @dataclass
@@ -124,10 +203,17 @@ class UploadReport:
     bytes_uploaded: int = 0
     skipped_resident: int = 0
     failures: List[str] = field(default_factory=list)
+    #: Digests whose GRANT expired. Re-plannable, never a failure of the bytes.
+    expired: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.failures and self.uploaded == self.granted
+        return not self.failures and not self.expired and self.uploaded == self.granted
+
+    @property
+    def needs_replan(self) -> bool:
+        """Nothing is wrong except stale presigns — a re-plan alone fixes it."""
+        return bool(self.expired) and not self.failures
 
 
 def hash_file_and_chunks(
@@ -220,44 +306,89 @@ def _read_span(path: Path, offset: int, length: int) -> bytes:
     return buf
 
 
+def _classify_put(grant: UploadGrant, code: int, body_sample: str) -> Optional[Exception]:
+    """None = success. Otherwise the typed outcome for this HTTP status.
+
+    With the checksum inside the signature, 400 means our bytes disagree with
+    the digest we computed (a local bug, or a file that changed under us) and
+    403 normally means the grant does not authorize what we sent. Neither is
+    fixed by retrying — EXCEPT that S3 also answers 403 for a presign that has
+    simply expired, and pgw#1004 C is that we could not tell the two apart.
+    Now we can: a 403 on a grant already past its stated ``expires_at`` is a
+    re-plan, not a repudiation.
+    """
+    if 200 <= code < 300:
+        return None
+    if code == 403 and grant.expired(margin_s=0.0):
+        return GrantExpired(
+            f"grant for {grant.digest[:20]}… expired at {grant.expires_at} "
+            f"(HTTP 403) — re-planning"
+        )
+    if 400 <= code < 500 and code not in (408, 429):
+        return ValueError(
+            f"chunk {grant.digest[:20]}… refused with HTTP {code}: {body_sample}"
+        )
+    return _Transient(f"HTTP {code}: {body_sample}")
+
+
+class _Transient(Exception):
+    """Retryable in place: 429, 5xx, or a transport-level failure."""
+
+
 def _put_one(
     session: requests.Session,
     grant: UploadGrant,
     body: bytes,
+    *,
+    max_attempts: int = _MAX_ATTEMPTS,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """One single PUT, headers VERBATIM.
+    """One object, headers VERBATIM, with the repo's one backoff policy.
 
-    A 4xx that is not 408/429 is terminal: with the checksum inside the
-    signature, 400 means our bytes disagree with the digest we computed (a
-    local bug or a file that changed under us) and 403 means the grant does not
-    authorize what we sent. Neither is fixed by retrying.
+    CLASSIFY BEFORE CHARGING: a terminal status raises on the spot and never
+    spends an attempt; only a transient one does, and it pays a
+    decorrelated-jitter sleep first (``_upload_transport.backoff_sleep_s`` —
+    the same helper the presigned path uses). Before pgw#1004 this loop
+    retried five times with NO sleep at all: four threads hammering a store
+    that had just answered 429.
     """
-    last = ""
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
+    last: Exception = _Transient("no attempt made")
+    for attempt in range(1, max_attempts + 1):
+        if grant.expired():
+            raise GrantExpired(
+                f"grant for {grant.digest[:20]}… expires at {grant.expires_at}; "
+                f"refusing to start a PUT inside the margin — re-planning"
+            )
         try:
-            with _put_slot():
-                resp = session.put(
-                    grant.put_url,
-                    data=body,
-                    headers=dict(grant.headers),
-                    timeout=(60, 300),
-                )
-            code = int(resp.status_code)
-            if 200 <= code < 300:
-                return
-            body_sample = (resp.text or "")[:300]
-            if 400 <= code < 500 and code not in (408, 429):
-                raise ValueError(
-                    f"chunk {grant.digest[:20]}… refused with HTTP {code}: {body_sample}"
-                )
-            last = f"HTTP {code}: {body_sample}"
+            resp = session.put(
+                grant.put_url,
+                data=body,
+                headers=dict(grant.headers),
+                timeout=(60, 300),
+            )
         except requests.RequestException as exc:
-            last = f"{type(exc).__name__}: {exc}"
+            last = _Transient(f"{type(exc).__name__}: {exc}")
+        else:
+            outcome = _classify_put(
+                grant, int(resp.status_code), (resp.text or "")[:300])
+            if outcome is None:
+                return
+            if not isinstance(outcome, _Transient):
+                raise outcome
+            last = outcome
+        if attempt >= max_attempts:
+            break
+        delay = backoff_sleep_s(attempt)
         _log.warning(
-            "chunk_put_retry digest=%s attempt=%d/%d: %s",
-            grant.digest[:20], attempt, _MAX_ATTEMPTS, last,
+            "chunk_put_retry digest=%s attempt=%d/%d sleep_s=%.2f: %s",
+            grant.digest[:20], attempt, max_attempts, delay, last,
         )
-    raise ValueError(f"chunk {grant.digest[:20]}… failed after {_MAX_ATTEMPTS} attempts: {last}")
+        # Backing off IS work in progress, and the pod must say so: the hub's
+        # activity stall window does not care why we are quiet (pgw#1004 B).
+        _activity.note_progress()
+        sleep(delay)
+    raise ValueError(
+        f"chunk {grant.digest[:20]}… failed after {max_attempts} attempts: {last}")
 
 
 class _put_slot:
@@ -269,11 +400,29 @@ class _put_slot:
         _put_slots.release()
 
 
+def _beat(n: int) -> None:
+    """Feed the data plane's liveness the way the presigned path does
+    (``presigned_upload.py``'s ``_feed``): bytes onto the open activity's
+    counter so the 10 s beat carries a moving number, plus proof-of-life.
+
+    Before pgw#1004 the entire multi-GB data plane emitted nothing, so a
+    healthy 37 GB publish and a wedged one were the same silence to the
+    orchestrator's activity stall window.
+    """
+    act = _activity.current()
+    if act is not None:
+        try:
+            act.counter("upload:bytes", _progress.UNIT_BYTES).add(n)
+        except Exception:  # noqa: BLE001 — reporting never fails a transfer
+            _log.debug("chunk upload beat dropped", exc_info=True)
+    _activity.note_progress()
+
+
 def upload_grants(
     grants: Sequence[UploadGrant],
     source_for: Callable[[str], "tuple[Path, int, int]"],
     *,
-    parallel: int = 4,
+    parallel: int = _DEFAULT_PARALLEL,
     session_factory: Callable[[], requests.Session] = requests.Session,
     on_bytes: Optional[Callable[[int], None]] = None,
 ) -> UploadReport:
@@ -283,6 +432,10 @@ def upload_grants(
     for that CAS object live locally. A whole file is ``(path, 0, size)``; a
     chunk is its span. Only GRANTED objects are uploaded: anything the hub
     reported as `have` was never granted and is silently, correctly, skipped.
+
+    A grant that has expired (or expires within the margin) lands in
+    ``report.expired`` rather than ``report.failures``: the caller re-plans,
+    which re-mints it. See :class:`GrantExpired`.
     """
     rep = UploadReport(granted=len(grants))
     if not grants:
@@ -297,22 +450,34 @@ def upload_grants(
                 raise ValueError(
                     f"grant for {g.digest[:20]}… is {g.size_bytes} bytes, local span is {length}"
                 )
-            body = _read_span(path, offset, length)
-            # Verify our own bytes before spending the transfer. The store
-            # would refuse them anyway, but a local mismatch is a local bug and
-            # the error should say so rather than arriving as an opaque 400.
-            got = hashlib.sha256(body).hexdigest()
-            want = g.digest.split(":", 1)[-1]
-            if got != want:
-                raise ValueError(
-                    f"local bytes for {g.digest[:20]}… hash to {got[:12]}… — refusing to upload"
-                )
-            _put_one(session, g, body)
+            # pgw#1004 D: the slot is taken BEFORE the span is read, so the
+            # PUT budget bounds bytes resident in this process and not merely
+            # sockets open from it. It used to be taken inside _put_one, one
+            # 64 MiB buffer too late.
+            with _put_slot():
+                body = _read_span(path, offset, length)
+                # Verify our own bytes before spending the transfer. The store
+                # would refuse them anyway, but a local mismatch is a local bug
+                # and the error should say so rather than arriving as an opaque
+                # 400.
+                got = hashlib.sha256(body).hexdigest()
+                want = g.digest.split(":", 1)[-1]
+                if got != want:
+                    raise ValueError(
+                        f"local bytes for {g.digest[:20]}… hash to {got[:12]}… "
+                        f"— refusing to upload"
+                    )
+                _put_one(session, g, body)
             with lock:
                 rep.uploaded += 1
                 rep.bytes_uploaded += length
+            _beat(length)
             if on_bytes is not None:
                 on_bytes(length)
+        except GrantExpired as exc:
+            _log.info("chunk_grant_expired digest=%s: %s", g.digest[:20], exc)
+            with lock:
+                rep.expired.append(g.digest)
         except (ValueError, OSError) as exc:
             with lock:
                 rep.failures.append(f"{g.digest}: {exc}")
@@ -324,8 +489,9 @@ def upload_grants(
     finally:
         session.close()
     _log.info(
-        "chunk_upload granted=%d uploaded=%d bytes=%d failed=%d",
-        rep.granted, rep.uploaded, rep.bytes_uploaded, len(rep.failures),
+        "chunk_upload granted=%d uploaded=%d bytes=%d failed=%d expired=%d",
+        rep.granted, rep.uploaded, rep.bytes_uploaded,
+        len(rep.failures), len(rep.expired),
     )
     return rep
 
