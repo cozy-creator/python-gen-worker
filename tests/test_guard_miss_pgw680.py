@@ -536,6 +536,14 @@ class _Rig:
             cc, "inductor_counters", lambda: dict(self.sim.counters))
         monkeypatch.setattr(cell_key_mod, "compute", _fake_key_compute)
         monkeypatch.setattr(cc, "reset_target_code", lambda pipeline: 0)
+        # The sim never enters dynamo, so dynamo's cumulative compile clock
+        # never moves. Stub it: what is under test is that the executor READS
+        # it across the warm window and puts the number on the wire (pgw#1010 /
+        # th#1322), not what torch would have measured.
+        self.compile_wall = [0.0, 12.5]
+        monkeypatch.setattr(
+            cc, "compile_wall_seconds",
+            lambda: self.compile_wall.pop(0) if self.compile_wall else 12.5)
         # pgw#681 coexistence: when the guard-closure mint gate is present,
         # neutralize it — it audits REAL dynamo graphs, which this rig's
         # simulated torch boundary never creates. Orthogonal to the
@@ -625,6 +633,16 @@ def test_tenant_guard_miss_end_to_end(
     (target,) = rig.ex.compile_targets()
     cell_ref = target.active_compile_ref
     assert cell_ref == "", "an intake arm has no cell to advertise"
+    # pgw#1010 / th#1322: and the compile it just paid for is a NUMBER on the
+    # wire. The emitter used to be the mint parent's, and the mint no longer
+    # runs JIT — so this boot is the only place an AOT-vs-JIT cost comparison
+    # can get its JIT arm from.
+    jit = [m.activity_update for m in rig.sent
+           if m.WhichOneof("msg") == "activity_update"
+           and m.activity_update.kind == activity_mod.KIND_JIT_COMPILE]
+    assert jit and any(u.duration_ms > 0 for u in jit), (
+        "an intake boot compiled and reported no duration")
+    assert any("route=intake" in u.detail for u in jit)
 
     # The variable-we-don't-understand flips between mint and serve
     # (stride/autotune divergence between minting and serving workers).

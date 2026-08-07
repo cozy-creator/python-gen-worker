@@ -7131,8 +7131,12 @@ class Executor:
                 pb.LIFECYCLE_INTENT_STATUS_RUNNING,
                 warmup_stage,
             )
-            compile_seconds_before = (
-                compile_cache.compile_wall_seconds() if proves_inductor else 0.0)
+            # pgw#1010: measured UNCONDITIONALLY. It used to be gated on
+            # `proves_inductor`, which needs an active artifact — and the JIT
+            # lane that survives (INTAKE) has none by construction, so the only
+            # remaining dynamo compile on the platform would have been the one
+            # nobody timed. A counter read costs nothing.
+            compile_seconds_before = compile_cache.compile_wall_seconds()
             # pgw#797: THE warmup split. `pipeline_load` used to be
             # load+warmup as one number, so "what does a cell save on warmup"
             # was only ever an estimate (`pipeline_load` minus a guessed
@@ -7174,15 +7178,31 @@ class Executor:
                         warmed, function_proofs, warm_aborted = await run_warmup()
                 else:
                     warmed, function_proofs, warm_aborted = await run_warmup()
-            compile_seconds = (
-                compile_cache.compile_wall_seconds() - compile_seconds_before
-                if proves_inductor else 0.0)
+            compile_seconds = max(
+                0.0,
+                compile_cache.compile_wall_seconds() - compile_seconds_before)
             # id(pipeline) -> (calls, cache_hits, cache_misses) observed across
             # this setup's warmup. Declared out here because pgw#923's adoption
             # report reads it whether or not this boot proved anything: a cell
             # that armed and then warmed to zero hits is exactly the adoption
             # the measurement lane exists to price.
             proof_by_obj: Dict[int, Tuple[int, int, int]] = {}
+            if compile_seconds > 0 and not inj.active_compile_artifacts:
+                # pgw#1010 / th#1322: the JIT compile this pod paid for itself.
+                # The `jit_compile` numeric event used to be emitted by the
+                # parent OF A MINT CHILD, which no longer runs the JIT recipe —
+                # so without this the INTAKE lane (the only JIT left) would
+                # compile silently and "AOT vs JIT compile cost" would have one
+                # arm. Sited OUTSIDE the proof block on purpose: an intake arm
+                # names no artifact, so `proves_inductor` is false for it and
+                # anything inside that block is unreachable from the lane this
+                # measures.
+                compile_cache.emit_jit_compile_event(
+                    {"boot": compile_seconds},
+                    family=str(getattr(spec.compile, "family", "") or ""),
+                    execution_lane=self._served_execution_lane(spec),
+                    route="intake",
+                )
             if proves_inductor or proves_exported:
                 # gw#595 per-object provability: the proof scopes to objects
                 # the warmup actually EXERCISED (calls>0). An exercised object
@@ -7429,22 +7449,6 @@ class Executor:
                         compile_cache.drop_lora_execution_lane(pipe)
                     inj.active_compile_artifacts.pop(id(pipe), None)
                     self._abandon_pending_mint(inj, pipe)
-                if proven and compile_selection is None and compile_seconds > 0:
-                    # pgw#1010 / th#1322: the JIT compile this pod paid for
-                    # itself. The `jit_compile` numeric event used to be
-                    # emitted by the parent OF A MINT CHILD, which no longer
-                    # runs the JIT recipe — so without this the INTAKE lane
-                    # (the only JIT left) would compile silently and "AOT vs
-                    # JIT compile cost" would have one arm. Measured by
-                    # `compile_wall_seconds` across the proof window, which is
-                    # the same clock the store-served alarm below reads.
-                    compile_cache.emit_jit_compile_event(
-                        {"boot": compile_seconds},
-                        family=str(getattr(spec.compile, "family", "") or ""),
-                        execution_lane=self._served_execution_lane(spec),
-                        route="intake",
-                        n_graphs=max(0, misses),
-                    )
                 if (
                     proven
                     and compile_selection is not None
