@@ -420,11 +420,20 @@ def test_install_moves_no_seal_digest(monkeypatch) -> None:  # type: ignore[no-u
         ws._installed = False
 
 
-def test_install_is_idempotent_and_killable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_install_is_idempotent_and_no_env_can_kill_it(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """pgw#995: the `GEN_WORKER_AOT_WRAPPER_SPLIT_OFF` arm is DELETED.
+
+    It defaulted ON, no release ever declared it and no endpoint ever set it, so
+    deleting it made the shape every pod already ran unconditional. Setting the
+    retired name must now be inert — asserted rather than assumed, because a
+    deletion that leaves a live reader elsewhere looks exactly like this test
+    passing for the wrong reason.
+    """
     monkeypatch.setattr(ws, "_installed", False)
-    monkeypatch.setenv(ws.DISABLE_ENV, "1")
-    assert ws.install() is False
-    monkeypatch.delenv(ws.DISABLE_ENV)
+    monkeypatch.setenv("GEN_WORKER_AOT_WRAPPER_SPLIT_OFF", "1")
+    assert not hasattr(ws, "DISABLE_ENV"), (
+        "the v1 kill switch is back; env carries config and secrets, never a "
+        "branch selection")
     torch_inductor = pytest.importorskip("torch._inductor.cpp_builder")
     original = torch_inductor.run_compile_cmd
     try:

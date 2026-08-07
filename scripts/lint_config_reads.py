@@ -221,6 +221,207 @@ def load_allowlist() -> Tuple[Dict[Tuple[str, str], str], List[str]]:
     return allowed, errors
 
 
+# ---------------------------------------------------------------------------
+# pgw#995 — the BEHAVIOUR axis
+# ---------------------------------------------------------------------------
+#
+# The six classifications above answer WHERE a read happens relative to the
+# config pipeline. None of them answers whether the read SELECTS BEHAVIOUR, and
+# those are orthogonal questions. `GEN_WORKER_PREFER_AOT` was a behaviour switch
+# that silently disarmed on a release rebuild and took the entire AOT path dark
+# for three pod attempts; nothing WHERE-shaped could have flagged it. The
+# allowlist proves the axis was missing rather than implicit: it classified
+# `GEN_WORKER_AOT_EXPORT_PARALLEL`/`_REUSE` as LIBRARY (torch has never heard of
+# either name) and three serving-hot-path switches as STANDALONE ("a CLI that
+# loads no app config").
+#
+# Paul's rule: env carries CONFIG, SECRETS and TUNING VALUES. A branch selector
+# needs typed config, a loud typed observable, and a named threat. This gate
+# makes a NEW one fail the build instead of being noticed three pods later.
+
+#: (path, ENV_NAME) -> the named threat this gate defends against.
+#: A gate lives here ONLY with a threat a reader can evaluate. "It is useful"
+#: and "it is off by default" are not threats.
+BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
+    ("src/gen_worker/host_move_guard.py", "GEN_WORKER_HOST_MOVE_GUARD"):
+        "RULED EXCEPTION. Safety guard, ON by default, disabled only with =0. "
+        "Threat: a silent host-RAM offload turns a serving pod into a "
+        "swap-thrashing one that still answers health checks. Documented in "
+        "CLAUDE.md; explicitly out of scope for every env sweep.",
+    ("src/gen_worker/procsplit/actions.py", "GEN_WORKER_PROBE"):
+        "SECURITY BOUNDARY (pgw#980). Marks the pod a live-edit probe and "
+        "DISARMS cell publish in the parent's action allowlist. Threat: a probe "
+        "pod publishing a cell minted from hand-edited source into the fleet "
+        "store. Deliberately NOT a Settings field: `authorize` is the boundary, "
+        "and a guard that depends on a config load having succeeded has an "
+        "unarmed window.",
+    ("src/gen_worker/procsplit/actions.py", "GEN_WORKER_PROBE_PUBLISH_ARMED"):
+        "SECURITY BOUNDARY (pgw#980). The separate second decision that re-arms "
+        "publish on a marked probe. Two names so 'this is a probe' and 'this "
+        "probe may write' can never be satisfied by one value.",
+    ("src/gen_worker/procsplit/__init__.py", "GEN_WORKER_COMPUTE_CHILD"):
+        "BOOTSTRAP. Decides WHICH OF TWO PROGRAMS this process is, before "
+        "_run_main and before any config can exist. Threat: none — it is not a "
+        "policy, it is the process's own identity, and there is no earlier "
+        "carrier than the environment it was exec'd with.",
+    ("src/gen_worker/supervisor.py", "GEN_WORKER_SUPERVISOR"):
+        "BOOTSTRAP. Pre-fork supervisor predicate, runs before the process "
+        "entry. Same identity-not-policy reasoning.",
+    ("src/gen_worker/supervisor.py", "GEN_WORKER_SUPERVISED"):
+        "BOOTSTRAP. Pre-fork re-entry guard; without it the supervisor forks "
+        "itself forever.",
+    ("src/gen_worker/models/memory.py", "GEN_WORKER_FORBID_CPU_OFFLOAD"):
+        "TRIPWIRE at the real placement boundary. Read as env rather than "
+        "Settings because a control-plane box exports it box-wide with no worker "
+        "config in sight. Threat: a CPU-offloading run on the shared dev box.",
+    ("src/gen_worker/benchmarks/swap_latency.py", "GEN_WORKER_FORBID_CPU_OFFLOAD"):
+        "TRIPWIRE, the original single reader. Refusing the benchmark is still "
+        "correct. Same threat, same box-wide-export reasoning.",
+    ("src/gen_worker/mint_delegate.py", "GEN_WORKER_MINT_IN_PROCESS"):
+        "DEFECT, NOT AN EXCEPTION — listed so the gate is green while it is "
+        "burned down, exactly as VIOLATION lines are. Default-ON, zero fleet "
+        "declarations, and `enable_compiled(delegate=False)` is a strictly "
+        "better parameter seam that already exists. Blocked ONLY on ten test "
+        "sites across seven files that force the shape via this env and drive "
+        "the executor. Owner and scope on pgw#995. Do not add a second reader.",
+    ("src/gen_worker/aot_export_parallel.py", "GEN_WORKER_AOT_EXPORT_PARALLEL"):
+        "DARK FEATURE, default OFF. NOT deletable: deleting the gate would make "
+        "an unproven path unconditional, which is a LAUNCH, not a deletion. "
+        "Threat: an unmeasured export-phase VRAM footprint OOMs a 74-minute "
+        "phase. `decide()` emits the decision on EVERY mint whether or not the "
+        "flag is on, so the gate's state is observable rather than silent — "
+        "which is the property PREFER_AOT lacked.",
+    ("src/gen_worker/aot_export_reuse.py", "GEN_WORKER_AOT_EXPORT_REUSE"):
+        "DARK FEATURE, default OFF. Same launch-not-deletion reasoning. Threat: "
+        "a reused export whose artifact is not byte-identical silently changes "
+        "a compiled program. The gate byte-compares every emitted file and "
+        "falls back on any doubt (ReuseUnproven).",
+    ("src/gen_worker/aot_wrapper_split.py", "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"):
+        "LIVE ON THE FLEET, and that is why it survives its deleted sibling: 5 "
+        "SDXL releases declare it and 1 endpoint carries a non-deleted entry "
+        "(standing hub, 2026-08-03). Deleting a live switch changes a running "
+        "endpoint. Threat: the pgw#811 run_impl split regressing a family, with "
+        "no way to unstick it short of a release.",
+    ("src/gen_worker/lifecycle.py", "$ENV_VAR"):
+        "READ-ONLY WARNING PREDICATE. Re-reads the hub-delivered topology only "
+        "to decide whether the 'GPUs are invisible' warning applies. Selects a "
+        "log line, never a code path.",
+    ("src/gen_worker/executor.py", "RUNPOD_POD_ID"):
+        "DEFECT, listed to keep the gate green while it burns down. A vendor env "
+        "used as a proxy for 'managed runtime'. Blocked on pgw#921/th#1488 "
+        "RuntimeIdentity.managed; pgw#929 AMBIGUOUS #5 forbids papering over it "
+        "with a vendor Settings field.",
+    ("src/gen_worker/executor.py", "RUNPOD_PROVIDER"):
+        "DEFECT, same site and same blocker as RUNPOD_POD_ID above.",
+    ("src/gen_worker/content_credentials.py", "$env_name"):
+        "TRIPWIRE that REFUSES THE BOOT (th#1307). Threat: a C2PA private key "
+        "reaching a pod. Carries no behaviour of its own — its only outcome is "
+        "a loud refusal.",
+
+}
+
+#: Predicate-shaped function names: a `return <env read>` inside one of these is
+#: a behaviour selection even without a syntactic `if`.
+_PREDICATE_SUFFIXES = ("enabled", "disabled", "_on", "_off", "armed", "forced")
+
+
+class BehaviourVisitor(ast.NodeVisitor):
+    """Env reads whose value reaches a CONDITIONAL rather than a value slot.
+
+    Deliberately syntactic and conservative. It cannot follow a read through a
+    variable into an `if` three functions away, and it does not try — a gate
+    that pretends to completeness it does not have is worse than one whose
+    reach is stated. What it DOES catch is every shape the four switches
+    deleted by pgw#995 were written in, which is the shape this defect keeps
+    being written in.
+    """
+
+    def __init__(self) -> None:
+        self.hits: List[Tuple[int, str]] = []
+
+    def _collect(self, node: ast.AST) -> None:
+        sub = EnvVisitor()
+        sub.visit(node)
+        self.hits.extend(sub.hits)
+
+    def _scan_conditions(self, tree: ast.AST, consts: Dict[str, str]) -> None:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.If, ast.While, ast.IfExp, ast.Assert)):
+                self._collect_with(node.test, consts)
+            elif isinstance(node, ast.comprehension):
+                for cond in node.ifs:
+                    self._collect_with(cond, consts)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                returns_bool = (
+                    isinstance(node.returns, ast.Name)
+                    and node.returns.id == "bool")
+                predicate_name = node.name.lower().endswith(_PREDICATE_SUFFIXES)
+                if not (returns_bool or predicate_name):
+                    continue
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Return) and inner.value is not None:
+                        self._collect_with(inner.value, consts)
+
+    def _collect_with(self, node: ast.AST, consts: Dict[str, str]) -> None:
+        sub = EnvVisitor()
+        sub.consts = dict(consts)
+        sub.visit(node)
+        self.hits.extend(sub.hits)
+
+
+def scan_behaviour() -> Dict[Tuple[str, str], int]:
+    """Every env read outside `config/` that feeds a conditional."""
+    sites: Dict[Tuple[str, str], int] = {}
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        if CONFIG_PKG in path.parents or path == CONFIG_PKG:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - the other pass reports it
+            continue
+        consts = EnvVisitor()
+        consts.load_consts(tree)
+        visitor = BehaviourVisitor()
+        visitor._scan_conditions(tree, consts.consts)
+        rel = str(path.relative_to(REPO))
+        for lineno, name in visitor.hits:
+            sites.setdefault((rel, name or UNRESOLVED), lineno)
+    return sites
+
+
+def check_behaviour_gates() -> List[str]:
+    """Paul's rule, enforced: env carries values, never a branch selection."""
+    found = scan_behaviour()
+    errors: List[str] = []
+    for key in sorted(set(found) - set(BEHAVIOUR_GATES)):
+        path, name = key
+        errors.append(
+            f"{path}:{found[key]} reads {name} from the environment and feeds it "
+            f"to a CONDITIONAL. Env vars are for CONFIG and SECRETS, never logic "
+            f"or behaviour switches (Paul, standing rule). GEN_WORKER_PREFER_AOT "
+            f"was exactly this: it gated the mint recipe and cell discovery, "
+            f"silently disarmed on a release rebuild, and cost three pod attempts "
+            f"before anyone noticed the AOT path was dark.\n"
+            f"    Fix it: make the branch unconditional (if its default is ON and "
+            f"nothing declares it, deleting the gate changes NO pod's behaviour), "
+            f"or move the decision to typed config with a loud typed observable.\n"
+            f"    If it genuinely must stay, add ('{path}', '{name}') to "
+            f"BEHAVIOUR_GATES in {Path(__file__).name} with the THREAT it defends "
+            f"against — not 'it is useful' and not 'it is off by default'.")
+    for key in sorted(set(BEHAVIOUR_GATES) - set(found)):
+        path, name = key
+        errors.append(
+            f"BEHAVIOUR_GATES lists ('{path}', '{name}') but no such conditional "
+            f"env read exists any more. Delete the entry — a stale exemption is "
+            f"the second carrier this whole gate exists to prevent (§4.22).")
+    for key, threat in BEHAVIOUR_GATES.items():
+        if len(threat.strip()) < 40:
+            errors.append(
+                f"BEHAVIOUR_GATES{key}: the threat must be specific enough for a "
+                f"reader to evaluate, got {threat!r}")
+    return errors
+
+
 def check_owned_names_known(names: Set[str]) -> List[str]:
     """Every owned-namespace name read in src/ must be known to the loader."""
     sys.path.insert(0, str(REPO / "src"))
@@ -246,6 +447,7 @@ def check_owned_names_known(names: Set[str]) -> List[str]:
 def main() -> int:
     sites, names = scan()
     allowed, errors = load_allowlist()
+    errors.extend(check_behaviour_gates())
 
     for key in sorted(set(sites) - set(allowed)):
         path, name = key

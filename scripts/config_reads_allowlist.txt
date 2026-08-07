@@ -139,10 +139,7 @@ src/gen_worker/models/svdq.py::GEN_WORKER_SVDQ_ENGINE STANDALONE GEN_WORKER_SVDQ
 src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_MAX_BYTES STANDALONE GEN_WORKER_MINT_RESUME_MAX_BYTES, resume-area capacity bound.
 src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_DIR STANDALONE GEN_WORKER_MINT_RESUME_DIR. pgw#929: the ENABLE used to be hidden inside an empty string; `resume_enabled()` now states it.
 src/gen_worker/mint_delegate.py::GEN_WORKER_MINT_IN_PROCESS STANDALONE GEN_WORKER_MINT_IN_PROCESS forces the in-process mint shape, which VIOLATES the liveness contract and is kept reachable to prove that, not to run.
-src/gen_worker/mint_delegate.py::GEN_WORKER_EAGER_FIRST_BOOT STANDALONE GEN_WORKER_EAGER_FIRST_BOOT, second reader; the two switches move together.
 
-src/gen_worker/executor.py::GEN_WORKER_BG_YIELD STANDALONE GEN_WORKER_BG_YIELD=0 restores the pre-pgw#677 shape. See the kill-switch note below.
-src/gen_worker/executor.py::GEN_WORKER_EAGER_FIRST_BOOT STANDALONE GEN_WORKER_EAGER_FIRST_BOOT=0. See the kill-switch note below.
 # ---------------------------------------------------------------------------
 # TRIPWIRE — guards whose entire purpose is to fire on a misconfiguration.
 # ---------------------------------------------------------------------------
@@ -150,42 +147,65 @@ src/gen_worker/content_credentials.py::$env_name TRIPWIRE GEN_WORKER_C2PA_KEY_PE
 src/gen_worker/models/memory.py::GEN_WORKER_FORBID_CPU_OFFLOAD TRIPWIRE GEN_WORKER_FORBID_CPU_OFFLOAD, now enforced at the REAL placement boundary (pgw#929 AMBIGUOUS #1). Read as env rather than Settings because a control-plane box exports it box-wide with no worker config in sight.
 src/gen_worker/benchmarks/swap_latency.py::GEN_WORKER_FORBID_CPU_OFFLOAD TRIPWIRE GEN_WORKER_FORBID_CPU_OFFLOAD, the original single reader. Retained: refusing the benchmark is still correct.
 src/gen_worker/host_move_guard.py::GEN_WORKER_HOST_MOVE_GUARD TRIPWIRE GEN_WORKER_HOST_MOVE_GUARD, the pgw#763 host-move guard's disable escape hatch. See the kill-switch note below.
-src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_WRAPPER_SPLIT_OFF TRIPWIRE GEN_WORKER_AOT_WRAPPER_SPLIT_OFF, v1 ctor-split disable. See the kill-switch note below.
 
 src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter with a producer OUTSIDE this process (`podguard.arm()` on rented pods), so there is no argv to move it to and no Settings that could own it. Gated on podguard_status()==armed; pgw#929 owns its validation and observability permanently and deletion is explicitly out of scope.
 # ---------------------------------------------------------------------------
-# NOTE — the seven "kill switches" pgw#929 lists for deletion. FIVE can go once
-# their unconditional path has a named observable; TWO CANNOT, and saying so is
-# part of the finding.
+# NOTE — the BEHAVIOUR axis (pgw#995), and the kill-switch verdicts.
 #
-# Measured on the standing hub 2026-08-03: `release_env_declarations` and
-# `endpoint_env_entries` carry exactly two GEN_WORKER_* names fleet-wide,
-# GEN_WORKER_PREFER_AOT (19 declarations, 2 live entries) and
-# GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF (5 declarations, 1 live entry). None of the
-# seven kill switches is declared anywhere.
+# The six classifications above answer WHERE a read happens relative to the
+# config pipeline. They do NOT answer whether the read SELECTS BEHAVIOUR, and
+# those are orthogonal. `GEN_WORKER_PREFER_AOT` was a behaviour switch that
+# silently disarmed on a release rebuild and took the whole AOT path dark for
+# three pod attempts; nothing in a WHERE-shaped classification could have
+# flagged it. Evidence the axis was missing rather than implicit: this file used
+# to classify `GEN_WORKER_AOT_EXPORT_PARALLEL` and `_REUSE` as LIBRARY (torch has
+# never heard of either name — they are first-party feature gates) and
+# `GEN_WORKER_BG_YIELD` / `_EAGER_FIRST_BOOT` / `_MINT_IN_PROCESS` as STANDALONE
+# ("a CLI that loads no app config") while all three were read from executor.py
+# on the serving hot path of every production pod.
 #
-# Zero declarations is NOT the same fact as safe-to-delete, and the direction of
-# the default decides which:
+# So: `scripts/lint_config_reads.py` now also asserts the behaviour axis, and
+# Paul's rule is enforced rather than restated — env carries CONFIG, SECRETS and
+# TUNING VALUES. A branch selector needs typed config, a loud typed observable,
+# and a named threat.
 #
-#   DEFAULT-ON  (HOST_MOVE_GUARD, MINT_IN_PROCESS, EAGER_FIRST_BOOT, BG_YIELD,
-#               AOT_WRAPPER_SPLIT_OFF) — deleting the env makes the CURRENT
-#               PRODUCTION BEHAVIOUR unconditional. Safe. Blocked only on the
-#               replacement observable pgw#929 requires, plus the fact that the
-#               tests set BG_YIELD=0 / EAGER_FIRST_BOOT=0 as red-verification
-#               seams: those need a real parameter, not an env, before the
-#               switch goes.
+# THE DIRECTION OF THE DEFAULT DECIDES WHETHER A GATE CAN BE DELETED:
 #
-#   DEFAULT-OFF (AOT_EXPORT_PARALLEL, AOT_EXPORT_REUSE) — deleting the env would
-#               make an UNPROVEN path unconditional. Both ship dark by their own
-#               docstrings ("turning it on needs the export-phase VRAM
-#               measurement first"; "ships dark until a real family's mint has
-#               run the gate on a pod"), and neither enable path has ever run in
-#               production. Making them unconditional is not a deletion, it is a
-#               launch. pgw#929's "delete seven kill switches" is WRONG for
-#               these two.
+#   DEFAULT-ON  — deleting the env makes the CURRENT PRODUCTION BEHAVIOUR
+#               unconditional, so no pod changes behaviour. Safe.
+#   DEFAULT-OFF — deleting the env makes an UNPROVEN path unconditional. That
+#               is not a deletion, it is a LAUNCH. pgw#929's "delete seven kill
+#               switches" is WRONG for these, and saying so is the finding.
 #
-#               If they encode a decision nobody makes — which the measurement
-#               supports — the §2.2 answer is to delete the FEATURES, ~500 lines
-#               of dark code. That is a call for Paul, not a side effect of an
-#               env census, so it is recorded here rather than taken.
+# ...but only together with a MEASURED declaration count. Zero fleet
+# declarations is what licenses a deletion, and it is a fact you query, not one
+# you infer from the code — `GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF` looks identical
+# to its deleted sibling in this file and is LIVE on the standing hub.
+#
+# VERDICTS (declaration counts measured on the standing hub 2026-08-03):
+#
+#   DELETED by pgw#995 — default-ON, zero declarations:
+#     GEN_WORKER_BG_YIELD               pgw#677 bg-yield is now unconditional
+#     GEN_WORKER_EAGER_FIRST_BOOT       pgw#671 eager-first is now unconditional
+#     GEN_WORKER_AOT_WRAPPER_SPLIT_OFF  v1 ctor-split is now unconditional
+#
+#   NOT DELETED, and each for a stated reason:
+#     GEN_WORKER_MINT_IN_PROCESS        default-ON, zero declarations, SAFE to
+#             delete — blocked only on ten test sites across seven files that
+#             force the shape via this env and drive the executor. A strictly
+#             better parameter seam already exists (`enable_compiled(delegate=
+#             False)` -> `caller_forced_in_process`). Owner on pgw#995.
+#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIVE: 5 SDXL releases declare it, 1
+#             endpoint carries a non-deleted entry. Deleting it changes a
+#             running endpoint.
+#     GEN_WORKER_AOT_EXPORT_PARALLEL    default-OFF and dark by its own
+#     GEN_WORKER_AOT_EXPORT_REUSE       docstring. Deleting the gate LAUNCHES an
+#             unproven path. If they encode a decision nobody makes, the §2.2
+#             answer is to delete the ~500 lines of FEATURE — a call for Paul,
+#             not a side effect of an env census.
+#     GEN_WORKER_HOST_MOVE_GUARD        ruled exception: safety guard, on by
+#             default, named threat, documented. Do not touch.
+#     GEN_WORKER_PROBE / _PUBLISH_ARMED security boundary; deliberately NOT a
+#             Settings field so tenant-adjacent code cannot reach it.
+#     PODGUARD_STATE                    producer is outside this process.
 # ---------------------------------------------------------------------------

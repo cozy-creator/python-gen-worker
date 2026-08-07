@@ -1851,9 +1851,10 @@ def _unregister(pending: "PendingSelfMint") -> None:
 #: off") that named two causes which were BOTH false on the measured pod while
 #: the true cause — the pipeline-side mandatory-lane misclassification — was
 #: not named at all. A refusal that cannot name its own cause is the defect.
+#: pgw#995 dropped `eager_first_disabled`: eager-first is unconditional, so
+#: that cause can no longer arise and a reason nobody can reach is dead prose.
 _DELEGATION_DECLINE_PHASE = {
     "mint_in_process_forced": "aot_mint_forced_in_process",
-    "eager_first_disabled": "aot_eager_first_disabled",
     "no_eager_tier": "aot_no_eager_tier",
     "caller_forced_in_process": "aot_mint_forced_in_process",
 }
@@ -1862,9 +1863,6 @@ _DELEGATION_DECLINE_DETAIL = {
         "GEN_WORKER_MINT_IN_PROCESS is set, which forces the in-process "
         "capture; an AOTI export has no eager tier to serve from while it "
         "compiles, so it cannot ride that shape",
-    "eager_first_disabled":
-        "GEN_WORKER_EAGER_FIRST_BOOT=0 turned eager-first off, and delegation "
-        "IS eager-first — there is no route to serve while a child compiles",
     "no_eager_tier":
         "an armed non-eager backend (AOTI cell or TRT engine) has replaced "
         "this pipeline's forward, so there is no eager tier to serve from",

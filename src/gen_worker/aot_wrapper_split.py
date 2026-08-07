@@ -296,13 +296,22 @@ def _reinline(source: str) -> str:
 # Mint-path installation
 # ---------------------------------------------------------------------------
 
-#: Env kill-switch. Not a sealed config knob and not an inductor config —
-#: see :func:`install` for why that distinction is what keeps cell identity
-#: untouched. Kills the ctor and run_impl levers together.
-DISABLE_ENV = "GEN_WORKER_AOT_WRAPPER_SPLIT_OFF"
+#: pgw#995: ``GEN_WORKER_AOT_WRAPPER_SPLIT_OFF`` is GONE. It defaulted ON, no
+#: release ever declared it and no endpoint ever set it, so deleting it makes
+#: the shape every pod already ran unconditional. An env that selects which
+#: program runs is the class that took `GEN_WORKER_PREFER_AOT` dark for three
+#: pod attempts; a switch nobody has ever thrown carries none of the safety it
+#: appears to and all of the silent-disarm risk.
 
 #: Kill switch for the pgw#811 ``run_impl`` split alone, so the (much older,
 #: much better travelled) ctor split can stay on if run_impl ever goes off.
+#: pgw#995 KEEPS this one, and the asymmetry with its deleted sibling above is
+#: the finding rather than an oversight: this name is LIVE — five SDXL releases
+#: (0.2.111/112/113/116/117) declare it and one endpoint carries a non-deleted
+#: `endpoint_env_entries` row (verified on the standing hub 2026-08-03). Deleting
+#: a live switch changes a running endpoint's behaviour; deleting a never-thrown
+#: one cannot. "Zero declarations" is the fact that licenses a deletion, and it
+#: is a fact you MEASURE, not one you assume from the code.
 DISABLE_V2_ENV = "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"
 
 #: How many of the K+1 part compiles may run at once. pgw#809's pool owns
@@ -526,13 +535,10 @@ def install() -> bool:
     ``code_closure`` axis is untouched too. No cell is re-keyed. (Both
     facts are asserted by tests/test_aot_wrapper_split_pgw793.py.)
 
-    Returns True when installed, False when already installed or disabled.
+    Returns True when installed, False when already installed.
     """
     global _installed
     if _installed:
-        return False
-    if os.environ.get(DISABLE_ENV, "").strip():
-        logger.info("aot-wrapper-split: disabled by %s", DISABLE_ENV)
         return False
     try:
         from torch._inductor import cpp_builder
@@ -632,7 +638,6 @@ __all__ = [
     "CHUNK",
     "EVENT",
     "MIN_STATEMENTS",
-    "DISABLE_ENV",
     "DISABLE_V2_ENV",
     "JOBS_ENV",
     "SERVING_HEADROOM_CPUS",

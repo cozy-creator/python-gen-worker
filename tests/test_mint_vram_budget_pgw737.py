@@ -365,7 +365,6 @@ def test_mint_declines_on_a_card_that_cannot_hold_the_capture(
     tenant with it. Post-fix: no seed runs at all, one structured
     ``self_mint_skipped`` line on the wire, the tier stays eager, the cell
     stays absent, and the request SUCCEEDS."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h = _Harness(tmp_path, monkeypatch, compile_delay_s=0.05)
     _card(monkeypatch, total_gib=79.19, resident_gib=54.2, peak_gib=65.4)
 
@@ -404,7 +403,6 @@ def test_small_resident_still_mints_on_the_same_rig(
 ) -> None:
     """The fence: an sdxl-class residency has the headroom, so the budget
     must stay out of the way — the mint runs and the tier flips compiled."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h = _Harness(tmp_path, monkeypatch, compile_delay_s=0.02)
     _card(monkeypatch, total_gib=23.6, resident_gib=7.0, peak_gib=9.5)
 
@@ -432,7 +430,6 @@ def test_tenant_oom_evicts_the_mint_and_the_request_completes(
     five times and bought a second H100 for a deterministic failure. Post
     fix the MINT loses: it is abandoned, its targets unwrapped, the card
     freed, and the same request re-runs eager to OK on this same worker."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h = _Harness(
         tmp_path, monkeypatch,
         compile_delay_s=1.5, seed_forward_s=0.05, tenant_oom_once=True)
