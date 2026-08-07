@@ -113,11 +113,46 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
             )
         slugs[slug] = py_name
 
+    _check_aot_preconditions(lock_dict, errors, warnings)
+
     return EndpointLockValidationResult(
         ok=not errors,
         errors=tuple(errors),
         warnings=tuple(warnings),
     )
+
+
+def _check_aot_preconditions(
+    lock_dict: Dict[str, Any], errors: List[str], warnings: List[str],
+) -> None:
+    """pgw#996: an image that cannot AOT-compile what it DECLARES is broken.
+
+    ``discover_manifest`` stamps ``aot_preconditions`` — the static verdicts
+    read off this very image (its C++ toolchain, its torch wheel, its
+    declaration modules). A ``refused`` row means no pod can fix it, so the
+    build stops here rather than shipping an endpoint that declares an export
+    and silently downgrades its recipe on rented hardware forever.
+
+    ``blocked`` (the family's own typed ``MintRefused``) and ``abstained`` (a
+    torch-less manifest build) are WARNINGS: both are legitimate, and both are
+    said out loud so nobody has to infer them from a pod's absence of events.
+    """
+    rows = lock_dict.get("aot_preconditions") if isinstance(lock_dict, dict) else None
+    for row in rows or ():
+        if not isinstance(row, dict):
+            errors.append(f"aot_preconditions: expected dict rows, got {row!r}")
+            continue
+        verdict = str(row.get("verdict") or "").strip()
+        family = str(row.get("family") or "").strip()
+        label = f"{row.get('check')}{f' [{family}]' if family else ''}"
+        detail = str(row.get("detail") or "")
+        if verdict == "refused":
+            errors.append(f"aot precondition {label}: {detail}")
+        elif verdict in ("blocked", "abstained"):
+            warnings.append(f"aot precondition {label} ({verdict}): {detail}")
+        elif verdict != "ok":
+            errors.append(
+                f"aot precondition {label}: unknown verdict {verdict!r}")
 
 
 _NON_SLUG_CHARS = re.compile(r"[^a-z0-9.]+")

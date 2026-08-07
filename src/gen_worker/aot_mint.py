@@ -107,6 +107,7 @@ from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ExportSpec,
     MintRefused,
 )
+from .aot_preconditions import LIFTED_LORA_TORCH_FLOOR, torch_version_gap
 from .compile_cache import (
     _resolve_target,
     toolchain_present,
@@ -199,39 +200,21 @@ def raise_if_device_oom(exc: BaseException, where: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-#: The lifted-LoRA mint's torch floor (pgw#723 residuals, pod 8): torch 2.9
-#: strict export refuses ``bind_views``' in-trace ``mod.lora_a = ...`` setattr
-#: ("AssertionError: Mutating module attribute lora_a during export") that
-#: 2.13 traces fine. 2.9 is NOT a valid fallback for this lane.
-LIFTED_LORA_TORCH_FLOOR = (2, 13)
-
-
 def lifted_torch_gap(spec: ExportSpec) -> str:
     """'' when torch meets the lifted-LoRA floor (or the spec has no lifted
-    fork declared), else the named refusal reason."""
+    fork declared), else the named refusal reason.
+
+    pgw#996: the floor arithmetic lives in ``aot_preconditions`` because the
+    BUILD gate asks the same question of the same image — a second spelling
+    here is how a build proves one thing and a pod discovers another. This
+    wrapper survives for the mint-request CLI, which can be handed a spec the
+    build gate never saw.
+    """
     if not (spec.lora_bucket or spec.lifted_inputs or spec.lora_fqns):
         return ""
     import torch
 
-    version = str(getattr(torch, "__version__", "") or "")
-    parts = version.split("+")[0].split(".")
-    try:
-        found = (int(parts[0]), int(parts[1]))
-    except (IndexError, ValueError):
-        return (
-            f"cannot parse torch version {version!r} to check the "
-            f"lifted-LoRA mint floor (torch >= "
-            f"{'.'.join(map(str, LIFTED_LORA_TORCH_FLOOR))})")
-    if found < LIFTED_LORA_TORCH_FLOOR:
-        floor = ".".join(map(str, LIFTED_LORA_TORCH_FLOOR))
-        return (
-            f"lifted-LoRA mint requires torch >= {floor}, got {version}: "
-            f"torch 2.9 strict export refuses bind_views' in-trace setattr "
-            f"('Mutating module attribute lora_a during export') that 2.13 "
-            f"traces fine — measured on pod 8 (pgw#723 residuals), so the "
-            f"2.13 prod floor is a mint PRECONDITION for this lane, not a "
-            f"preference")
-    return ""
+    return torch_version_gap(str(getattr(torch, "__version__", "") or ""))
 
 
 # ---------------------------------------------------------------------------

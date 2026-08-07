@@ -39,6 +39,7 @@ from threading import RLock
 from typing import (
     Any,
     Dict,
+    List,
     Mapping,
     Optional,
     Sequence,
@@ -804,6 +805,12 @@ def validate_contract(compile_decl: Any) -> None:
 
 _lock = RLock()
 _declared: Dict[str, Any] = {}
+#: (module, "ExcType: message") for every declaration import that FAILED.
+#: pgw#996: the swallow is correct at boot and a lie at build time — a pod
+#: cannot tell "this endpoint declares no AOT" (intake, legitimate) from "the
+#: declaration module blew up" (broken image), because both present as
+#: `export_declaration(family) is None`. The build gate reads this and refuses.
+_import_failures: List[Tuple[str, str]] = []
 
 
 class _Thunk:
@@ -996,6 +1003,20 @@ def reset_export_declarations() -> None:
     """Drop every registration. Tests only."""
     with _lock:
         _declared.clear()
+        _import_failures.clear()
+
+
+def declaration_import_failures() -> Tuple[Tuple[str, str], ...]:
+    """Every declaration module whose import raised, as (module, exception).
+
+    :func:`import_export_declaration` deliberately swallows — an endpoint must
+    come up. The build gate (pgw#996) is where that swallow stops being
+    correct: an image whose declaration module cannot import ships an endpoint
+    that declares AOT and mints nothing, and on a pod that is indistinguishable
+    from an endpoint that never declared one.
+    """
+    with _lock:
+        return tuple(_import_failures)
 
 
 def import_export_declaration(
@@ -1018,6 +1039,9 @@ def import_export_declaration(
         importlib.import_module(module, package=package)
         return True
     except BaseException as exc:  # noqa: BLE001 — serving outranks compiling
+        with _lock:
+            _import_failures.append(
+                (str(module), f"{type(exc).__name__}: {exc}"))
         detail = (
             f"export declaration module {module!r} raised at import "
             f"({type(exc).__name__}: {exc}) — this endpoint serves EAGER and "
@@ -1050,6 +1074,7 @@ __all__ = [
     "STATIC_ROWS",
     "FORK_REASONS",
     "WEAK_FORK_REASONS",
+    "declaration_import_failures",
     "export_declaration",
     "has_export_declaration",
     "registered_entry",
