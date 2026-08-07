@@ -28,7 +28,7 @@ torch = pytest.importorskip("torch")
 
 import torch.nn as nn  # noqa: E402
 
-from gen_worker import aot_mint, aot_serve  # noqa: E402
+from gen_worker import aot_flatten, aot_mint, aot_serve  # noqa: E402
 
 FAMILY = "sdxl"
 IN_CH = 4
@@ -97,7 +97,9 @@ def _entry(name: str, program: Any, *, arm: bool | None = None,
         owner=None,
         program=program,
         input_names=names,
-        flat_names=names,
+        flat_leaves=tuple(
+            aot_flatten.Leaf(param=n, param_position=i, path=())
+            for i, n in enumerate(names)),
         files=[],
         timings={},
     )

@@ -36,7 +36,7 @@ torch = pytest.importorskip("torch")
 
 import torch.nn as nn  # noqa: E402
 
-from gen_worker import aot_mint  # noqa: E402
+from gen_worker import aot_flatten, aot_mint  # noqa: E402
 
 FAMILY = "sdxl"
 DIM = 640
@@ -92,7 +92,9 @@ def _entry(name: str, program: Any, *, h: int, w: int, b: int = 2,
         owner=None,
         program=program,
         input_names=("hidden_states", "encoder_hidden_states"),
-        flat_names=("hidden_states", "encoder_hidden_states"),
+        flat_leaves=tuple(
+            aot_flatten.Leaf(param=n, param_position=i, path=())
+            for i, n in enumerate(("hidden_states", "encoder_hidden_states"))),
         files=[],
         timings={},
     )

@@ -31,7 +31,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import aot_mint, aot_package, aot_serve, cell_key  # noqa: E402
+from gen_worker import (  # noqa: E402
+    aot_flatten, aot_mint, aot_package, aot_serve, cell_key,
+)
 from gen_worker.api.decorators import Compile  # noqa: E402
 from gen_worker.api.errors import ValidationError  # noqa: E402
 from gen_worker.api.export_contract import (  # noqa: E402
@@ -555,12 +557,20 @@ def test_lifted_input_gate_names_an_unlifted_declaration() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _leaves(*names: str) -> tuple:
+    """Trivial `aot_flatten` leaves: these programs take plain tensors, so each
+    input IS its own argument (pgw#994's identity, in its degenerate case)."""
+    return tuple(
+        aot_flatten.Leaf(param=name, param_position=index, path=())
+        for index, name in enumerate(names))
+
+
 def test_input_contract_binds_each_symbol_to_an_input_dim() -> None:
     """Without this the consumer has nothing to assert, which is exactly the B2
     hole pgw#704 measured (2048x2048 accepted by a max=160 artifact)."""
     program = _export_lifted(lo=4, hi=24)
     inputs, symbols = aot_package.input_contract(
-        program, ("x", "lora_a", "lora_b"))
+        program, _leaves("x", "lora_a", "lora_b"))
     row = inputs[0]
     assert row["name"] == "x"
     assert row["dtype"] == "float32"
@@ -575,7 +585,7 @@ def test_input_contract_is_accepted_by_the_envelope_parser() -> None:
     """The producer and the consumer must agree on the contract's shape, so the
     rows are round-tripped through the parser that will actually read them."""
     inputs, symbols = aot_package.input_contract(
-        _export_lifted(lo=4, hi=24), ("x", "lora_a", "lora_b"))
+        _export_lifted(lo=4, hi=24), _leaves("x", "lora_a", "lora_b"))
     contract = aot_serve.contract_from_meta(
         {"inputs": inputs, "symbols": symbols})
     assert [s.name for s in contract.inputs] == ["x", "lora_a", "lora_b"]
@@ -599,7 +609,7 @@ def test_input_contract_refuses_an_unbounded_symbol(
     with pytest.raises(
         aot_package.PackageIntrospectionError, match="unbounded range",
     ):
-        aot_package.input_contract(program, ("x", "lora_a", "lora_b"))
+        aot_package.input_contract(program, _leaves("x", "lora_a", "lora_b"))
 
 
 def test_declared_range_gate_catches_a_specialized_dim() -> None:
@@ -872,7 +882,7 @@ def _meta_for(program: Any, package: Path, spec: aot_mint.ExportSpec) -> Dict[st
     """A format-2 envelope around ONE compiled program — the session
     packages are single-model archives, read with ``entry=""``."""
     inputs, symbols = aot_package.input_contract(
-        program, ("x", "lora_a", "lora_b"))
+        program, _leaves("x", "lora_a", "lora_b"))
     entries = {ENTRY: {
         "target": "forward",
         "fork": [[str(n), v] for n, v in sorted(spec.fork)],
