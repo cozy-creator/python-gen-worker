@@ -4,7 +4,7 @@
 
     aot_cell_discovery  miss                     family=sdxl lane=w8a8-lora64
     self_mint_skipped   aot_requires_delegation  "out-of-process minting is
-                        disabled (GEN_WORKER_MINT_IN_PROCESS or eager-first
+                        disabled (GEN_WORKER_MINT_IN_PROCESS
                         off) and an AOTI export has no eager tier..."
     self_mint_started   dynamo                   ... armed an in-process capture
 
@@ -272,19 +272,22 @@ def test_delegation_declines_name_their_TRUE_cause(
     _arm()
     assert "aot_mint_forced_in_process" in _phases(_events, "self_mint_skipped")
 
+    # pgw#995: the second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and
+    # asserted the `aot_eager_first_disabled` phase. Both the switch and the
+    # phase are deleted — eager-first is unconditional, so that decline cannot
+    # arise, and a reason nobody can reach is a cause a reader hunts for and
+    # never finds. The pgw#813 claim under test is unharmed: it is that a
+    # refusal names its TRUE cause, which the operator arm above and the
+    # pipeline arm below still exercise.
     _events.clear()
     monkeypatch.delenv("GEN_WORKER_MINT_IN_PROCESS")
-    monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "0")
     fleet_cells._PENDING.clear()
-    _arm()
-    assert "aot_eager_first_disabled" in _phases(_events, "self_mint_skipped")
 
     # pgw#846: `Compile.regional` is the dynamo/JIT per-block knob (ie#381)
     # and the AOT mint ignores it — regional EXPORT is retired, the recipe is
     # always whole-graph. A family that declares it must neither decline
     # delegation nor change the mint shape.
     _events.clear()
-    monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT")
     fleet_cells._PENDING.clear()
     fleet_cells.enable_compiled(
         _Pipe(), _Cfg(regional=True), publisher=_Publisher())  # type: ignore[arg-type]
@@ -296,11 +299,14 @@ def test_mint_delegate_names_its_own_refusals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("GEN_WORKER_MINT_IN_PROCESS", raising=False)
-    monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT", raising=False)
     assert mint_delegate.delegation_refusal() == ""
+    # pgw#995: eager-first is unconditional, so setting the deleted name is a
+    # no-op rather than a second refusal. Asserted, not assumed — a deletion
+    # that leaves a live reader somewhere else looks exactly like this test
+    # passing for the wrong reason.
     monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "0")
-    assert (mint_delegate.delegation_refusal()
-            == mint_delegate.REFUSAL_EAGER_FIRST_DISABLED)
+    assert mint_delegate.delegation_refusal() == ""
+    assert not hasattr(mint_delegate, "REFUSAL_EAGER_FIRST_DISABLED")
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     assert (mint_delegate.delegation_refusal()
             == mint_delegate.REFUSAL_IN_PROCESS_FORCED)
@@ -342,7 +348,6 @@ def test_eager_first_admits_a_DELEGATED_pending_with_no_router(
     lines later — pgw#784 could not run on any lane."""
     from gen_worker.models import loading as loading_mod
 
-    monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT", raising=False)
     monkeypatch.setattr(
         loading_mod, "pipeline_weight_lane", lambda p: "w8a8-lora64")
 
@@ -371,7 +376,6 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
     router, so no router means no eager tier."""
     from gen_worker.models import loading as loading_mod
 
-    monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT", raising=False)
     monkeypatch.setattr(loading_mod, "pipeline_weight_lane", lambda p: "")
 
     ex = _executor(tmp_path)

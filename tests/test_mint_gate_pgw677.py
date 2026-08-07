@@ -4,19 +4,23 @@ Doctrine under test — tenant requests ALWAYS win the GPU immediately;
 mint work yields:
 
   1. STARVATION SHAPE (the live incident): during a background mint,
-     tenant requests complete at serving latency. RED-verified via the
-     GEN_WORKER_BG_YIELD=0 kill switch, which restores the pre-fix tree:
-     mint seed units inline-compile while holding the per-instance run
-     gate (the router's headroom degrade), so a tenant request queues for
-     the length of the unit — the measured "completions land exactly as
-     mint units free the gate / 0 renders in 19 min" shape.
+     tenant requests complete at serving latency. This used to be
+     RED-verified against the pre-fix tree, reachable via a
+     GEN_WORKER_BG_YIELD=0 kill switch: mint seed units inline-compiled
+     while holding the per-instance run gate (the router's headroom
+     degrade), so a tenant request queued for the length of the unit —
+     the measured "completions land exactly as mint units free the gate /
+     0 renders in 19 min" shape. pgw#995 DELETED that switch and the tree
+     it selected, so the shape is now unreachable rather than merely
+     unselected, and the property is asserted in absolute terms against
+     the harness's own configured quantities.
   2. RACE EXCLUSION (the pgw#676 SIGSEGV class): the shape-warm thread's
      compile can never execute the shared modules concurrently with a
      tenant forward. Post-fix the compile owns a background turn
      (single-flight, instance turn_mutex, tenant-quiet admission); the
      tenant that arrives mid-compile waits — bounded by ONE compile — and
      its wait is attributed to `instance_gate_wait`, never to runtime_ms.
-     RED-verified: with the kill switch the overlap is observed.
+     Structurally impossible post-pgw#995, not merely not-selected.
   3. MINIMUM PROGRESS: under a sustained tenant stream the mint still
      finishes — the steal rule grants one bounded background unit per
      debt window; stolen units are not preemptible.
@@ -328,38 +332,19 @@ def test_tenant_serves_at_serving_latency_during_mint_and_red_verifies(
     # headroom inside its exclusive turn instead.
     monkeypatch.setattr(hot_swap, "_headroom_ok", lambda device: False)
 
-    # --- RED: pre-fix tree via the kill switch ---------------------------
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "0")
-    h_off = _Harness(
-        tmp_path / "off", monkeypatch,
-        compile_delay_s=0.15, seed_forward_s=0.6, tenant_forward_s=0.02)
+    # pgw#995: the RED arm here drove `GEN_WORKER_BG_YIELD=0` to restore the
+    # pre-pgw#677 tree (idle-gate between units, bare run gate around the
+    # forward, inline compiles on handler workers) and asserted the starvation
+    # shape it produced. The switch is deleted — it defaulted ON, no release
+    # ever declared it and no endpoint ever set it — so the legacy tree it
+    # selected is deleted with it and there is nothing left to red-verify
+    # against. An env kept alive to be a test seam is still an env that selects
+    # behaviour, and a release rebuild cannot tell the two purposes apart.
+    #
+    # What survives is the arm that states the property in absolute terms, and
+    # `test_no_env_restores_the_pre_pgw677_tree` below proves the deleted arm is
+    # unreachable rather than merely unused.
 
-    async def _off() -> Tuple[float, pb.JobResult]:
-        await h_off.boot()
-        assert h_off.rec.background_mint is not None
-        # Wait until a BACKGROUND mint seed unit is in flight, holding the
-        # run gate (the boot's foreground eager pass contributed run #1).
-        deadline = time.monotonic() + 10.0
-        while len(h_off.seed_runs) < 2 and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        assert len(h_off.seed_runs) >= 2, "mint never started seeding"
-        res, wall = await h_off.dispatch("r-red", aspect="16:9")
-        assert res.status == pb.JOB_STATUS_OK, res.safe_message
-        return wall, res
-
-    wall_off, _res_off = asyncio.run(_off())
-    # The collapse shape: the request queued behind the seed unit's
-    # inline compile (and then paid its own inline compile on the
-    # degraded router) — an order of magnitude over serving latency.
-    assert wall_off >= 0.5, (
-        f"expected the pre-fix starvation shape, got {wall_off:.3f}s")
-    # Pre-fix, inline compiles ran on handler (to_thread) workers.
-    assert any(
-        "shape-warm" not in thread for _, thread, _, _ in h_off.compiles), (
-        "pre-fix tree should compile inline off the warm thread")
-
-    # --- POST-FIX ---------------------------------------------------------
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h_on = _Harness(
         tmp_path / "on", monkeypatch,
         compile_delay_s=0.15, seed_forward_s=0.6, tenant_forward_s=0.02)
@@ -423,30 +408,14 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
     segfaulted sm_86 (pgw#676: _forward_with_branch racing compile_wrapper)
     is structurally impossible — and the wait is attributed to the
     instance_gate_wait stage, not billed as runtime. RED: with the kill
-    switch the overlap is observed."""
+    switch the overlap is observed (pgw#995: that arm is gone — see below)."""
 
-    # --- RED: pre-fix tree — overlap happens -----------------------------
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "0")
-    h_off = _Harness(
-        tmp_path / "off", monkeypatch,
-        compile_delay_s=0.8, seed_forward_s=0.0, tenant_forward_s=0.05)
+    # pgw#995: the RED arm drove `GEN_WORKER_BG_YIELD=0` and asserted that the
+    # pre-fix tree DOES exhibit the pgw#676 overlap. The switch and that tree
+    # are deleted, so the overlap is now structurally impossible rather than
+    # merely not-selected — which is the stronger statement the docstring
+    # already made.
 
-    async def _off() -> None:
-        await h_off.boot()
-        deadline = time.monotonic() + 10.0
-        while not h_off.in_compile.is_set():
-            assert time.monotonic() < deadline, "no background compile ran"
-            await asyncio.sleep(0.005)
-        res, _wall = await h_off.dispatch("r-race", aspect="1:1")
-        assert res.status == pb.JOB_STATUS_OK, res.safe_message
-
-    asyncio.run(_off())
-    assert h_off.overlaps, (
-        "pre-fix tree must exhibit the pgw#676 overlap (tenant forward "
-        "concurrent with the warm thread's compile)")
-
-    # --- POST-FIX: exclusion holds, wait is attributed -------------------
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     h_on = _Harness(
         tmp_path / "on", monkeypatch,
         compile_delay_s=0.8, seed_forward_s=0.0, tenant_forward_s=0.05)
@@ -492,7 +461,6 @@ def test_mint_completes_under_sustained_tenant_load(
     """A tenant stream that never drains would starve a purely idle-gated
     mint forever. The steal rule grants one bounded background unit per
     debt window: the mint completes while the stream keeps serving."""
-    monkeypatch.setenv("GEN_WORKER_BG_YIELD", "1")
     monkeypatch.setattr(executor_mod, "_BG_STEAL_FLOOR_S", 0.1)
     monkeypatch.setattr(executor_mod, "_BG_STEAL_DEBT_FACTOR", 1.0)
     monkeypatch.setattr(executor_mod, "_BG_COMPILE_QUIESCENCE_S", 0.0)
@@ -572,3 +540,25 @@ def test_mint_seed_window_forces_eager_enqueue_on_degraded_routers(
     legacy.enable()
     verdict, _sig = legacy.route("t", compiled, ("d",), {})
     assert verdict == hot_swap.COMPILED
+
+
+# ---------------------------------------------------------------------------
+# pgw#995 — the deleted arm is UNREACHABLE, not merely unused
+# ---------------------------------------------------------------------------
+
+
+def test_no_env_restores_the_pre_pgw677_tree() -> None:
+    """The two RED arms above were driven by an env. Deleting a switch and
+    deleting its tests looks identical to deleting a switch and leaving a
+    second reader behind — which is how `GEN_WORKER_PREFER_AOT` kept a live
+    gate after one was believed removed. So assert on the SOURCE.
+    """
+    from pathlib import Path as _P
+    import gen_worker.executor as _ex
+
+    src = _P(_ex.__file__).read_text()
+    assert 'environ.get("GEN_WORKER_BG_YIELD"' not in src, (
+        "GEN_WORKER_BG_YIELD is read again — env carries config and secrets, "
+        "never a branch selection")
+    assert "_bg_yield_enabled" not in src, (
+        "the bg-yield predicate is back; pgw#677's shape is unconditional")

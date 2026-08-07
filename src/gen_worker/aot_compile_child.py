@@ -52,6 +52,7 @@ from .aot_compile_pool import (
     EntryReport,
 )
 from . import aot_device_lock
+from . import aot_shape_hints
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,12 @@ def run(job: EntryJob) -> int:
         # process boundary" was a prime suspect for the dark 44 %.
         with ledger.span("child_program_load_s"):
             program = torch.export.load(job.program)
+            # pgw#998: the round trip drops the ShapeEnv's symbol VALUES (it
+            # rebuilds the map keyed by size expressions), which makes any
+            # extent that is not literally one of those keys unlowerable.
+            # Restored from the parent's own env — the one authority for them
+            # — before anything reads a shape.
+            aot_shape_hints.restore_symbol_values(program, job.symbol_values)
     except Exception as exc:  # noqa: BLE001
         _write(report_path, EntryReport(
             entry=job.entry, status=REFUSED,
@@ -210,6 +217,27 @@ def run(job: EntryJob) -> int:
             torch.cuda.reset_peak_memory_stats()
     except Exception:  # noqa: BLE001 — a probe never changes an outcome
         pass
+    # pgw#998's safety net, before a minute of compile is spent: an extent
+    # inductor cannot turn into a number dies deep in lowering as
+    # `('unexpected None!', 512*s18*s57)`, which names nothing an author
+    # wrote. Refuse here instead, naming the input, the axis and the declared
+    # dim.
+    unhinted = aot_shape_hints.unhinted_extents(
+        program, job.symbol_labels)
+    if unhinted:
+        _write(report_path, EntryReport(
+            entry=job.entry, status=REFUSED,
+            detail=(
+                f"entry {job.entry!r}: the export handoff did not carry a "
+                f"value for every symbol: " + "; ".join(unhinted) +
+                " — inductor cannot lower a size it cannot evaluate "
+                "(pgw#998)"),
+            elapsed_s=round(time.monotonic() - started, 2),
+            peak_rss_bytes=_peak_rss(),
+            **_device_fields(),
+            **_span_fields(ledger, {}, {}, seal_detail)))
+        return EXIT_REFUSED
+
     before = aot_compile_spans.phase_snapshot()
     try:
         with ledger.span("compile_wall_s"):

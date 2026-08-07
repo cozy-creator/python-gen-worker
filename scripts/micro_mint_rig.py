@@ -38,6 +38,24 @@ them rather than trusting the operator:
   * `nice`, so a compile cannot starve the box's other agents;
   * a load gate: refuse to start above 1-min load 24;
   * `GEN_WORKER_HOST_MOVE_GUARD` untouched — the rig never disables it.
+
+THE ENV-DELIVERY MODE (pgw#995, `--hub-env`). The rig above builds the child's
+environment itself — `mint_process.child_env` plus a few rig keys — which is a
+shape no production pod ever has. So the chain that actually delivers env to a
+pod was invisible to it, and to every other test in this repo:
+
+    worker function declares env -> release_env_declarations
+    operator sets a value        -> endpoint_env_entries
+    pod launch                   -> EndpointEnvService.Resolve -> pod env -> Settings
+
+That chain is what took `GEN_WORKER_PREFER_AOT` dark: a release rebuild stopped
+declaring the name, the hub withheld the live entry SILENTLY, and three pod
+attempts went by. `--hub-env` boots the mint child through it instead — the
+child's environment is what the hub's rule would have delivered, ambient values
+are STRIPPED so a developer's shell cannot stand in for a delivered one, and any
+withholding is reported as a rig fact rather than a missing variable nobody
+looks for. The model lives in `tests/harness/hub_env.py`; the first regression
+tests are `tests/test_hub_env_delivery_pgw995.py`.
 """
 
 from __future__ import annotations
@@ -272,9 +290,39 @@ def _mint_request(
         task, workdir=workdir, cap_bytes=cap_bytes)
 
 
+#: What the rig's endpoint function DECLARES, the way a real build reads it off
+#: the function schema. Deliberately tiny: the point is the delivery mechanism,
+#: not the breadth of the catalogue.
+RIG_DECLARED_ENV = ("HF_TOKEN",)
+
+#: Ambient names the rig REFUSES to let through in `--hub-env` mode. Without
+#: this the developer's own shell satisfies the assertion and the mode proves
+#: nothing — which is the exact substitution the blind spot was made of.
+RIG_STRIPPED_ENV = ("HF_TOKEN",)
+
+
+def hub_delivered_env(
+    base: Dict[str, str], entries: Optional[Dict[str, str]] = None,
+) -> tuple:
+    """(env, withheld) as the hub would resolve them for this rig's release."""
+    sys.path.insert(0, str(REPO / "tests"))
+    from harness import hub_env as _hub
+
+    delivery = _hub.resolve(
+        _hub.declared_by(list(RIG_DECLARED_ENV)),
+        _hub.EndpointEnvEntries(dict(entries or {})))
+    env = _hub.pod_environ(base, delivery, strip=RIG_STRIPPED_ENV)
+    return env, [
+        {"name": w.name, "reason": w.reason, "detail": w.detail}
+        for w in delivery.withheld
+    ]
+
+
 def run_cycle(
     root: Path, *, stage: str = "all", force_load: bool = False,
     device: str = "auto", vehicle: str = DEFAULT_VEHICLE,
+    hub_env_mode: bool = False,
+    hub_env_entries: Optional[Dict[str, str]] = None,
 ) -> RigResult:
     from harness import rig_vehicles
 
@@ -346,6 +394,13 @@ def run_cycle(
     g0 = time.monotonic()
     phases: List[str] = []
     env = dict(mp.child_env(request))
+    hub_withheld: List[Dict[str, str]] = []
+    if hub_env_mode:
+        # pgw#995: the child no longer inherits whatever this process carries.
+        # It boots with what the HUB would have delivered for this release —
+        # so a name the release stops declaring disappears here, locally, the
+        # way it disappeared on the pod nobody was watching.
+        env, hub_withheld = hub_delivered_env(env, hub_env_entries)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(REPO / "tests"), str(REPO / "src"), *veh.syspath,
          env.get("PYTHONPATH", "")])
@@ -364,6 +419,8 @@ def run_cycle(
     leg.facts = {
         "status": outcome.status,
         "exit_code": outcome.exit_code,
+        "hub_env_mode": hub_env_mode,
+        "hub_env_withheld": hub_withheld,
         "phases_seen": sorted(set(phases)),
         "phase_seconds": dict(report.phases) if report else {},
         "peak_vram_bytes": int(report.peak_vram_bytes) if report else 0,
@@ -599,6 +656,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="WHAT to mint: 'tiny' (pgw#978's one-entry plumbing toy) or "
              "'micro' (pgw#997's org-worker-shaped examples/micro-diffusion — "
              "3 entries, container inputs, generated weights)")
+    parser.add_argument(
+        "--hub-env", action="store_true",
+        help="boot the mint child through the hub's env-delivery rule "
+             "(declarations x entries) instead of this process's environment; "
+             "ambient values are stripped and withholdings are reported")
+    parser.add_argument(
+        "--hub-env-entry", action="append", default=[], metavar="NAME=VALUE",
+        help="an endpoint_env_entries row the operator has set; repeatable. "
+             "Only names the release DECLARES are delivered.")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     root = Path(args.root)
@@ -607,8 +673,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     root.mkdir(parents=True, exist_ok=True)
 
     try:
+        entries: Dict[str, str] = {}
+        for raw in args.hub_env_entry:
+            name, sep, value = str(raw).partition("=")
+            if not sep:
+                parser.error(f"--hub-env-entry expects NAME=VALUE, got {raw!r}")
+            entries[name.strip()] = value
         result = run_cycle(root, stage=args.stage, force_load=args.force_load,
-                           device=args.device, vehicle=args.vehicle)
+                           device=args.device, vehicle=args.vehicle,
+                           hub_env_mode=args.hub_env,
+                           hub_env_entries=entries)
     except RigRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2

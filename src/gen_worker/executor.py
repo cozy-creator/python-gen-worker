@@ -655,14 +655,6 @@ _BG_COMPILE_QUIESCENCE_S = 5.0
 _BG_THREAD_ADMIT_WAIT_S = 0.5
 
 
-def _bg_yield_enabled() -> bool:
-    """pgw#677: default ON; env kill switch for red-verification and
-    emergencies only. OFF restores the pre-fix shape: mint seeds idle-gate
-    + hold the bare run gate (inline compiles included) and shape-warm
-    compiles run ungated against tenant forwards."""
-    return os.environ.get("GEN_WORKER_BG_YIELD", "1").strip() != "0"
-
-
 def _cell_execution_lane_matches(
     ref: str,
     family: str,
@@ -2882,11 +2874,6 @@ def _mint_modules(spec: EndpointSpec) -> Tuple[str, ...]:
 
 def _delegated_pendings(pendings: typing.Mapping[int, Any]) -> bool:
     return any(getattr(p, "delegated", False) for p in pendings.values())
-
-
-def _eager_first_boot_enabled() -> bool:
-    """pgw#671: default ON; env kill switch for emergencies only."""
-    return os.environ.get("GEN_WORKER_EAGER_FIRST_BOOT", "1").strip() != "0"
 
 
 @dataclass
@@ -9222,8 +9209,6 @@ class Executor:
           lane. A delegated pending's eager tier is the untouched pipeline
           itself; the router question belongs only to an in-process capture,
           whose eager-while-compiling routing is what a router performs."""
-        if not _eager_first_boot_enabled():
-            return False
         if not inj.pending_self_mints:
             return False
         if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
@@ -9706,22 +9691,6 @@ class Executor:
             in their own turns. False = preempted by a tenant arrival; the
             caller re-queues the unit."""
             _checkpoint()
-            if not _bg_yield_enabled():
-                # Legacy shape (kill switch / red-verification): idle-gate
-                # between units, bare run gate around the forward.
-                idle = asyncio.ensure_future(self.wait_idle())
-                stop = asyncio.ensure_future(bg.abandon.wait())
-                try:
-                    await asyncio.wait(
-                        {idle, stop}, return_when=asyncio.FIRST_COMPLETED)
-                finally:
-                    for fut in (idle, stop):
-                        if not fut.done():
-                            fut.cancel()
-                _checkpoint()
-                async with rec.run_lock:
-                    await _forward(wj)
-                return True
             async with self._bg_turn(rec, "seed", abort=bg.abandon) as stole:
                 _checkpoint()
                 try:
@@ -11544,10 +11513,11 @@ class Executor:
     def _wire_turn_gate(self, rec: _ClassRecord, pipeline: Any) -> None:
         """Hand this pipeline's hot-swap router the background-turn gate so
         every shape-warm/heal compile serializes with — and yields to —
-        tenant work (pgw#677). Idempotent; no-op without a router."""
-        if not _bg_yield_enabled():
-            return
+        tenant work (pgw#677). Idempotent; no-op without a router.
 
+        pgw#995: unconditional. ``GEN_WORKER_BG_YIELD`` used to be able to skip
+        this, restoring the pre-pgw#677 shape where shape-warm compiles ran
+        ungated against tenant forwards. Nothing ever set it."""
         router = hot_swap.router_of(pipeline)
         if router is not None:
             router.set_turn_gate(self._bg_turn_threaded(rec))
