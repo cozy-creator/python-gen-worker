@@ -1005,6 +1005,16 @@ def run_clone(
                 dtype=str(attrs.get("dtype") or spec.dtype),
                 file_layout=str(attrs.get("file_layout") or spec.file_layout),
                 file_type=str(attrs.get("file_type") or spec.file_type),
+                # pgw#1009: the caller's checkpoint facts have to reach the
+                # DECLARE, not just `apply_objective_scheduler_config`. th#1411
+                # refuses a publish into a repo whose live rows carry
+                # classification unless the request restates it, so without
+                # these two a clone can never re-publish into a classified repo
+                # — which is every mirror the catalog already serves.
+                # `publish_flavors` has passed them since pgw#654; this call
+                # site was the one that did not.
+                objective=objective_fact,
+                distilled=distilled_fact,
                 metadata=metadata,
                 provenance=provenance,
                 repo_spec=source.repo_spec,
