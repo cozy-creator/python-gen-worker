@@ -444,6 +444,8 @@ def run_cycle(
             + (f" parity max|delta|="
                f"{max(parity.values()):.2e} over {len(parity)} arms"
                if parity else "")
+            + (f" arm={adopted['arm_reason']}"
+               if adopted.get("arm_reason") else "")
             if leg.ok else
             (str(adopted.get("error") or adopted.get("miss_log") or "")[-400:]))
     finally:

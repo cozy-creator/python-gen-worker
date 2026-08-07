@@ -10007,6 +10007,9 @@ class Executor:
 
         finalized: Dict[int, Any] = {}
         declined: Optional[_MintDeclined] = None
+        # pgw#999: every classified refusal this run saw, so the terminal
+        # RuntimeError names them instead of restating "no advertisable cell".
+        declined_reasons: List[str] = []
         for pids in sharers.values():
             pending = bg.pendings[pids[0]]
             pipe = bg.pipes[pids[0]]
@@ -10042,14 +10045,19 @@ class Executor:
                 # wire trace whenever a SIBLING pending succeeded (the
                 # `if not finalized: raise` below never fires then).
                 fleet_cells_mod.abandon_self_mint(pending)
+                # pgw#999: `phase` carries the CLASSIFIED reason when the
+                # child's cell was built and then refused arming; it falls
+                # back to the call-site token only when there is genuinely no
+                # classification (no cell was produced at all).
                 activity_mod.emit_event(
                     "self_mint_abort",
                     f"family={pending.family} key={pending.cell_key}: the "
                     f"delegated child produced no adoptable cell "
                     f"({result.detail or result.status}); this object stays "
                     f"eager and nothing is published",
-                    phase="delegated_no_cell",
+                    phase=result.reason or "delegated_no_cell",
                 )
+                declined_reasons.append(result.reason or result.status)
                 continue
             for pid in pids:
                 finalized[pid] = minted
@@ -10060,7 +10068,9 @@ class Executor:
                 raise declined
             raise RuntimeError(
                 "delegated mint produced no advertisable cell; serving stays "
-                "eager")
+                "eager"
+                + (f" (refused: {', '.join(sorted(set(declined_reasons)))})"
+                   if declined_reasons else ""))
 
         # Publish per shared cell on gw#612's rule: a family cell ships only
         # when EVERY sharer is covered by it — a partial pack bricks every

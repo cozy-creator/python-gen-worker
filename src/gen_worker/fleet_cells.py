@@ -1557,6 +1557,11 @@ def adopt_delegated_mint(
             os.replace(artifact, pending.target)
         except OSError:
             shutil.copy2(artifact, pending.target)
+    # pgw#999: (reason, detail) of the arm refusal, set by whichever branch
+    # refuses. Initialized to a NAMED unset rather than "" so a branch that
+    # forgets to classify is visible on the wire as a gap in this function
+    # instead of as an empty string that reads like "no reason exists".
+    refusal: Tuple[str, str] = ("unclassified_arm_refusal", "")
     try:
         if pending.recipe == RECIPE_AOT:
             # pgw#805: an exported cell arms through the AOT gates
@@ -1565,12 +1570,29 @@ def adopt_delegated_mint(
             # passes; `provision.enable_compiled` itself is not reusable here
             # because its pgw#709 receipts gate would drop a cell this pod
             # minted seconds ago and the hub has not countersigned yet.
-            armed = bool(provision.arm_aot(
+            # pgw#999: the outcome is KEPT. `arm_aot` returns a classified
+            # `AdoptOutcome` (`contract_invalid`, `constants_unbound`,
+            # `no_arm_for_mode`, `numerics_refused`, …) and this call site
+            # used to spend it on `bool(...)`. That discard cost attempt 26
+            # 2 h 45 m and $2.72: a 36/36 mint sealed, finalized, and was then
+            # refused by three events that all said "could not adopt".
+            outcome = provision.arm_aot(
                 pipe, pending.cfg, pending.cache_dir, pending.target,
-                int(getattr(pending.cfg, "lora_bucket", 0) or 0)))
+                int(getattr(pending.cfg, "lora_bucket", 0) or 0))
+            armed = bool(outcome)
+            if not armed:
+                refusal = (outcome.reason or "unclassified_arm_refusal",
+                           outcome.detail or outcome.identity)
         else:
             armed = bool(cc.enable(pipe, pending.cfg, pending.cache_dir,
                                    artifact=pending.target))
+            if not armed:
+                # `cc.enable` returns a bare bool and RAISES for the refusals
+                # it can name, so a falsy return genuinely carries no reason.
+                # Saying so by name beats inventing one.
+                refusal = ("jit_enable_declined",
+                           "compile_cache.enable declined without raising; it "
+                           "reports no classified reason on this path")
     except cc.CellSelectionBugError as exc:
         # th#883, delegated edition: the child's own cell, whose axes describe
         # exactly this runtime, refused to arm. Loud — it is a bug in the one
@@ -1580,18 +1602,30 @@ def adopt_delegated_mint(
             "mint (family=%s key=%s): %s",
             pending.family, pending.cell_key, exc)
         armed = False
+        refusal = ("cell_selection_bug", str(exc))
     except Exception as exc:  # noqa: BLE001 — adoption failure => eager
         logger.warning(
             "fleet-cells: delegated mint for %s did not adopt (%s)",
             pending.family, exc)
         armed = False
+        # An `AdoptError` already carries the token; anything else is named by
+        # its type rather than flattened into one word nobody can count.
+        refusal = (str(getattr(exc, "reason", "") or "") or type(exc).__name__,
+                   str(exc))
     if not armed:
+        reason, detail = refusal
+        # pgw#999: `phase` is the countable column, so it carries the CLASS —
+        # the same convention `self_mint_skipped` already uses. The old
+        # constant `delegated_adopt_failed` said only which call site fired,
+        # which every reader already knew from the event kind.
+        state["adopt_refusal"] = (reason, detail)
         activity_mod.emit_event(
             "self_mint_abort",
             f"family={pending.family} key={pending.cell_key}: the child "
-            "process produced a cell this runtime could not adopt; serving "
-            "stays eager and nothing is published",
-            phase="delegated_adopt_failed",
+            f"process produced a cell this runtime could not adopt "
+            f"({reason}{': ' + detail if detail else ''}); serving stays "
+            f"eager and nothing is published",
+            phase=reason,
         )
         mark_terminus(pending, TERMINUS_ABORTED)
         state["minted"] = None
@@ -1620,6 +1654,19 @@ def adopt_delegated_mint(
         "worker served eager throughout and now serves compiled",
         pending.family, key, pending.target.stat().st_size / 1e6)
     return minted
+
+
+def adopt_refusal(pending: "PendingSelfMint") -> Tuple[str, str]:
+    """Why :func:`adopt_delegated_mint` refused this pending's cell (pgw#999).
+
+    ``("", "")`` when it did not refuse — the mint adopted, or never got as
+    far as arming. The classification lives on the pending's own state rather
+    than being re-derived by the caller, so the abort event, the delegated
+    result and the executor's decline all quote ONE string that was produced
+    at the one place that knows it.
+    """
+    reason, detail = pending._state.get("adopt_refusal") or ("", "")
+    return str(reason), str(detail)
 
 
 def publish_self_mint(pending: "PendingSelfMint") -> None:
