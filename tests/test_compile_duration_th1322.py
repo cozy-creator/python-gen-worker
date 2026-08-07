@@ -22,10 +22,17 @@ What is real here
   REAL `activity.bind_sink` the real `Worker` transport installed — the same leg
   the pgw#789 dimension assertion uses. Read back off the wire, never from a
   spy.
-* The emitters are the PRODUCTION functions: `aot_mint._emit_phase_event`,
-  `compile_cache.emit_jit_compile_event`, `mint_delegate._emit_jit_compile`.
-  Nothing is re-implemented for the test — the pgw#789 lesson was a module that
-  was correct, unit-tested, and imported by nothing but its own test.
+* The emitters are the PRODUCTION functions: `aot_mint._emit_phase_event` and
+  `compile_cache.emit_jit_compile_event`. Nothing is re-implemented for the
+  test — the pgw#789 lesson was a module that was correct, unit-tested, and
+  imported by nothing but its own test.
+
+pgw#1010 moved the JIT half of this contract without weakening it. The mint
+child no longer runs a JIT recipe (a dynamo cell had no consumer), so
+`mint_delegate._emit_jit_compile` is deleted; the JIT compile that still
+happens — and still has to be comparable against an AOT mint — is the INTAKE
+compile on a serving pod, emitted by the executor's proof window through the
+same `emit_jit_compile_event`.
 * The `mint_child` phase clock is driven through the real `frame()` funnel, in a
   real subprocess-free path, and the resulting `MintReport` is what the parent
   emitter consumes.
@@ -40,13 +47,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from gen_worker import activity as activity_mod  # noqa: E402
 from gen_worker import compile_cache as cc  # noqa: E402
-from gen_worker import mint_delegate  # noqa: E402
 from gen_worker import mint_process  # noqa: E402
 from gen_worker.pb import worker_scheduler_pb2 as pb  # noqa: E402
 from harness.hub_double import hub_double  # noqa: E402
@@ -222,27 +227,18 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
 
         aot_mint._emit_phase_event(_Spec(), table)
 
-        # ---- JIT route (fleet half — the one a hub-spawned pod runs): the REAL
-        # mint_delegate emitter, fed a real MintOutcome carrying a real child
-        # MintReport.
-        outcome = mint_process.MintOutcome(
-            status=mint_process.MINTED,
-            report=mint_process.MintReport(
-                status="minted", elapsed_s=612.5,
-                phases={"load": 33.1, "warmup_forward": 540.2,
-                        "seal_publish": 39.2}),
-            elapsed_s=615.0)
-        mint_delegate._emit_jit_compile(
-            outcome, family="sdxl", execution_lane="w8a8", key="ck1-" + "a" * 64,
-            attempt=1)
+        # ---- JIT route (pgw#1010: the INTAKE compile a serving pod pays for
+        # itself — the only JIT left, and the executor emits it through the
+        # REAL production emitter).
+        cc.emit_jit_compile_event(
+            {"boot": 612.5}, family="sdxl", execution_lane="w8a8",
+            route="intake", n_graphs=8)
 
         aot = _wait_for_phases(
             conn, aot_mint.MINT_PHASES_KIND,
             {"minted", "entry:unet_cfg", "entry:vae_decode"})
         jit = _wait_for_phases(
-            conn, activity_mod.KIND_JIT_COMPILE,
-            {"minted", "child:load", "child:warmup_forward",
-             "child:seal_publish"})
+            conn, activity_mod.KIND_JIT_COMPILE, {"minted", "shape:boot"})
 
     # The roll-ups: the numbers a comparison groups on, in a column. ONE query
     # over (kind, phase='minted') now yields both, in the same unit.
@@ -259,8 +255,8 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
     assert (aot["entry:unet_cfg"].duration_ms
             + aot["entry:vae_decode"].duration_ms) < aot["minted"].duration_ms
 
-    assert jit["child:warmup_forward"].duration_ms == 540_200
-    assert jit["child:load"].duration_ms == 33_100
+    assert jit["shape:boot"].duration_ms == 612_500
+    assert "route=intake" in jit["minted"].detail
 
     # Every timed event is COMPLETED, which is what makes it durable hub-side
     # (th#1250 records terminal updates unconditionally).
@@ -294,44 +290,21 @@ def test_the_producer_warm_loop_reports_its_per_shape_compile_time() -> None:
 
 
 
-def test_a_failed_jit_mint_reports_its_cost_but_not_as_minted() -> None:
-    """A mint that burned 10 minutes and produced nothing spent real seconds —
-    they are recorded. But they must NOT enter an AOT-vs-JIT comparison as if a
-    cell came out, so the roll-up phase is `aborted`, never `minted`."""
+def test_an_intake_compile_that_produced_nothing_is_not_reported_at_all(
+) -> None:
+    """pgw#1010 replaces the two "a failed JIT MINT still reports its seconds"
+    rows: there is no JIT mint to fail. What remains is the emitter's own rule —
+    a zero/absent measurement is reported as ABSENCE, never as a zero row that
+    would enter an AOT-vs-JIT comparison as a free compile."""
     with hub_double(modules=("harness.toy_endpoints",)) as (sched, _harness):
         conn = sched.wait_connection(0)
-        outcome = mint_process.MintOutcome(
-            status=mint_process.CRASHED,
-            detail="child exited 1",
-            report=mint_process.MintReport(
-                status="failed", detail="CUDA out of memory",
-                elapsed_s=602.0, phases={"load": 30.0, "warmup_forward": 572.0}),
-            exit_code=1, elapsed_s=605.0)
-        mint_delegate._emit_jit_compile(
-            outcome, family="sdxl", execution_lane="w8a8", key="ck1-" + "b" * 64,
-            attempt=2)
+        cc.emit_jit_compile_event({}, family="sdxl", route="intake")
+        cc.emit_jit_compile_event({"boot": 0.0}, family="sdxl", route="intake")
+        cc.emit_jit_compile_event(
+            {"boot": 3.5}, family="sdxl", route="intake")
         jit = _wait_for_phases(
-            conn, activity_mod.KIND_JIT_COMPILE,
-            {"aborted", "child:load", "child:warmup_forward"})
-
-    assert "minted" not in jit
-    assert jit["aborted"].duration_ms == 602_000
-    assert "status=crashed" in jit["aborted"].detail
-
-
-
-def test_a_child_that_died_before_reporting_still_costs_measured_time() -> None:
-    """No report at all: the parent's own wall clock is the honest cost of that
-    attempt, and it is still a number on the wire rather than a lost minute."""
-    with hub_double(modules=("harness.toy_endpoints",)) as (sched, _harness):
-        conn = sched.wait_connection(0)
-        mint_delegate._emit_jit_compile(
-            mint_process.MintOutcome(
-                status=mint_process.CRASHED, report=None, elapsed_s=7.5),
-            family="sdxl", execution_lane="", key="ck1-" + "c" * 64, attempt=1)
-        jit = _wait_for_phases(conn, activity_mod.KIND_JIT_COMPILE, {"aborted"})
-
-    assert jit["aborted"].duration_ms == 7_500
+            conn, activity_mod.KIND_JIT_COMPILE, {"minted", "shape:boot"})
+    assert jit["minted"].duration_ms == 3_500
 
 
 def test_telemetry_never_fails_the_compile_it_measures() -> None:
@@ -349,6 +322,3 @@ def test_telemetry_never_fails_the_compile_it_measures() -> None:
 
     aot_mint._emit_phase_event(_Exploding(), {"totals": {"total_s": 1.0}})
     cc.emit_jit_compile_event({"a": "not-a-number"}, family="sdxl")  # type: ignore[dict-item]
-    mint_delegate._emit_jit_compile(
-        mint_process.MintOutcome(status=mint_process.MINTED, report=None),
-        family="sdxl", execution_lane="", key="k", attempt=1)

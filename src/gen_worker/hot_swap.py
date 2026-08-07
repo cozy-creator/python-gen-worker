@@ -294,12 +294,6 @@ class Router:
             self.concurrent = False
             self.on_warmed = None
 
-    def stats(self) -> Tuple[int, int, int]:
-        """(warm, pending, failed) signature counts — the eager-first boot
-        mint driver's completion evidence (pgw#671)."""
-        with self.lock:
-            return len(self.warm), len(self.pending), len(self.bg_failed)
-
     def route(
         self, label: str, compiled: Callable[..., Any],
         args: tuple, kwargs: dict,

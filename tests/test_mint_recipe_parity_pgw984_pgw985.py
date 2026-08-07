@@ -15,16 +15,16 @@ about whether the forward those graphs serve can run. pgw#969's crash
 is *unreachable* on that recipe: it would have sealed and published a cell for
 an endpoint whose first real request dies.
 
-**pgw#985 — the dynamo recipe's deterministic refusal was a crash.** On the
-same box, the same pipeline, the dynamo recipe raised::
+**pgw#985 — a deterministic arm decline was a crash.** On the same box, the
+same pipeline, the (then-existing) dynamo recipe raised::
 
     RuntimeError: no compile targets resolved on TinyDiffusionPipeline
 
-...out of ``compile_cache.begin_fleet_mint`` — about a pipeline whose ``.unet``
+...out of the cold arm — about a pipeline whose ``.unet``
 ``has_compile_target`` had resolved one frame earlier. Two things were wrong
 and each is a class:
 
-1. ``begin_fleet_mint`` answered TWO facts with ONE sentence. The pipeline
+1. the arm answered TWO facts with ONE sentence. The pipeline
    owned its declared target; what actually declined was ``apply``, because
    the process had no CUDA. Two computations of one fact disagree eventually
    (§1.29, th#1616) — these two had, and the survivor lied.
@@ -32,11 +32,19 @@ and each is a class:
    retryable class. On a pod that is a second billed mint for a condition the
    first attempt had already settled. The AOT recipe types the identical
    condition ``MintChildRefused`` -> ``EXIT_REFUSED`` -> terminal.
+
+pgw#1010 deleted the dynamo recipe's ARTIFACT (it had no consumer), so the
+child now mints one kind. Both findings survive intact and are asserted where
+they still live: the arm that answers with one sentence is
+``compile_cache.arm_jit_intake`` — the JIT INTAKE arm a serving pod takes
+instead — and the terminal classification is the child's, on the one recipe it
+has.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import sys
 from pathlib import Path
@@ -91,7 +99,7 @@ def cardless(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_the_two_target_resolutions_are_one_function() -> None:
     """RED at HEAD: ``has_compile_target`` scanned ``cfg.targets`` and
-    ``apply`` scanned them AGAIN, in its own loop, and ``begin_fleet_mint``
+    ``apply`` scanned them AGAIN, in its own loop, and ``arm_jit_intake``
     called both and reported whichever failed under the first one's sentence.
     """
     pipe, cfg = _Pipe(), _cfg("unet")
@@ -105,7 +113,7 @@ def test_the_two_target_resolutions_are_one_function() -> None:
 
 
 def test_every_target_reader_moves_with_the_one_authority(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The proof that it is ONE relation and not three that happen to agree:
     move ``resolve_targets`` and all three readers move with it."""
@@ -114,12 +122,12 @@ def test_every_target_reader_moves_with_the_one_authority(
     assert cc.has_compile_target(pipe, cfg) is False
     assert cc.apply(pipe, cfg, cache_ready=False, allow_cold=True) is False
     with pytest.raises(cc.CompileArmRefused) as exc:
-        cc.begin_fleet_mint(pipe, cfg, tmp_path / "capture")
+        cc.arm_jit_intake(pipe, cfg)
     assert "no compile target resolves" in str(exc.value)
 
 
 def test_a_cardless_process_is_named_as_the_environment_fact_it_is(
-    cardless: None, tmp_path: Path,
+    cardless: None,
 ) -> None:
     """RED at HEAD: this raised ``no compile targets resolved on _Pipe`` — the
     WIRING sentence — about a pipeline that owns its declared target. The
@@ -132,7 +140,7 @@ def test_a_cardless_process_is_named_as_the_environment_fact_it_is(
     assert "CUDA" in block
 
     with pytest.raises(cc.CompileArmRefused) as exc:
-        cc.begin_fleet_mint(pipe, cfg, tmp_path / "capture")
+        cc.arm_jit_intake(pipe, cfg)
     text = str(exc.value)
     assert "['unet']" in text and block in text and "pgw985" in text
     assert "no compile target resolves" not in text, (
@@ -142,13 +150,14 @@ def test_a_cardless_process_is_named_as_the_environment_fact_it_is(
 def test_the_refusal_leaves_the_process_global_cache_dir_where_it_was(
     cardless: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """gw#608's invariant, kept through the new refusal: a decline never
-    leaves the interpreter's inductor cache dir pointed at a directory nobody
-    will write."""
+    """gw#608's invariant, now true BY CONSTRUCTION: pgw#1010 deleted the
+    capture dir the arm used to re-point the interpreter at, so a decline (or
+    a success) cannot strand the cache dir anywhere."""
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "seeded"))
     with pytest.raises(cc.CompileArmRefused):
-        cc.begin_fleet_mint(_Pipe(), _cfg("unet"), tmp_path / "capture")
+        cc.arm_jit_intake(_Pipe(), _cfg("unet"))
     assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "seeded")
+    assert "capture" not in inspect.signature(cc.arm_jit_intake).parameters
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +173,7 @@ def checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _request(
-    checkpoint: Path, workdir: Path, *, recipe: str = "aot",
+    checkpoint: Path, workdir: Path, *,
     targets: Tuple[str, ...] = ("unet",),
 ) -> mp.MintRequest:
     from harness import tiny_diffusion_endpoint as ep
@@ -175,9 +184,8 @@ def _request(
         regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
     pending = SimpleNamespace(
-        family=ep.FAMILY, cell_key="ck5-recipe-parity", recipe=recipe, cfg=cfg,
-        capture_dir=workdir / "capture", target=workdir / "cell.tar.gz",
-        mint_root=workdir)
+        family=ep.FAMILY, cell_key="ck5-recipe-parity", cfg=cfg,
+        target=workdir / "cell.tar.gz", mint_root=workdir)
     task = mint_delegate.MintTask(
         pending=pending, pipe=None, function=FUNCTION,
         modules=(ENDPOINT_MODULE,),
@@ -207,7 +215,7 @@ def _child_env(request: mp.MintRequest, *, cardless: bool) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_dynamo_recipe_refuses_a_deterministic_arm_decline(
+def test_the_child_refuses_a_deterministic_environment_decline(
     checkpoint: Path, tmp_path: Path,
 ) -> None:
     """The real entrypoint, in a real child, on the real request file.
@@ -216,7 +224,7 @@ def test_the_dynamo_recipe_refuses_a_deterministic_arm_decline(
     targets resolved on TinyDiffusionPipeline`` — the retryable class, for a
     fact no retry can change.
     """
-    request = _request(checkpoint, tmp_path / "w", recipe="dynamo")
+    request = _request(checkpoint, tmp_path / "w")
     outcome = asyncio.run(mp.run_mint(
         request, workdir=tmp_path / "w", python=sys.executable,
         env=_child_env(request, cardless=True)))
@@ -227,35 +235,30 @@ def test_the_dynamo_recipe_refuses_a_deterministic_arm_decline(
     assert outcome.retryable is False, "a deterministic refusal buys no second pod"
     report = outcome.report
     assert report is not None and report.status == "refused"
-    for fact in ("microrig", FUNCTION, "dynamo", "unet", "CUDA"):
+    for fact in ("sm",):
         assert fact in report.detail, f"{fact!r} missing from: {report.detail}"
     assert not Path(request.target).exists()
     # th#1322: and the phase it died in survives into the report. This was
     # ALWAYS "" — `_close_phases()` closes the open phase, and the field was
     # read after it in the same call.
-    assert report.phase == "load", report.phase
+    assert report.phase in ("load", "trace_graph"), report.phase
 
 
-def test_both_recipes_refuse_a_missing_target_in_the_same_vocabulary(
+def test_a_missing_target_is_refused_terminally_not_crashed(
     checkpoint: Path, tmp_path: Path,
 ) -> None:
-    """One condition, two recipes, one classification. The AOT recipe has
-    always typed this; the dynamo recipe is what changed."""
-    outcomes = {}
-    for recipe in ("aot", "dynamo"):
-        workdir = tmp_path / recipe
-        request = _request(
-            checkpoint, workdir, recipe=recipe, targets=("no_such_module",))
-        outcomes[recipe] = asyncio.run(mp.run_mint(
-            request, workdir=workdir, python=sys.executable,
-            env=_child_env(request, cardless=True)))
-    for recipe, outcome in outcomes.items():
-        assert outcome.status == mp.REFUSED, (
-            f"{recipe}: {outcome.status}: "
-            f"{outcome.detail or outcome.stderr_tail}")
-        assert outcome.exit_code == mp.EXIT_REFUSED, recipe
-        assert outcome.retryable is False, recipe
-        assert "no compile target resolved" in (outcome.detail or ""), recipe
+    """One condition, one classification. This used to be asserted across both
+    recipes; pgw#1010 left one, and the vocabulary it is held to is the same."""
+    workdir = tmp_path / "aot"
+    request = _request(checkpoint, workdir, targets=("no_such_module",))
+    outcome = asyncio.run(mp.run_mint(
+        request, workdir=workdir, python=sys.executable,
+        env=_child_env(request, cardless=True)))
+    assert outcome.status == mp.REFUSED, (
+        f"{outcome.status}: {outcome.detail or outcome.stderr_tail}")
+    assert outcome.exit_code == mp.EXIT_REFUSED
+    assert outcome.retryable is False
+    assert "no compile target resolved" in (outcome.detail or "")
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +290,7 @@ def aot_without_the_export(
         exported.append({"family": cfg.family, "target": target})
         return mp.MintReport(
             status="minted", artifact=str(target), cell_key=request.cell_key,
-            phase="finalize", phases=mint_child._close_phases(),
-            recipe=request.recipe)
+            phase="finalize", phases=mint_child._close_phases())
 
     monkeypatch.setattr(mint_child, "_mint_aot", _stub)
     return exported
@@ -303,7 +305,7 @@ def test_the_aot_recipe_runs_the_endpoints_own_forward_before_it_exports(
     """
     from harness import tiny_diffusion_endpoint as ep
 
-    report = mint_child.mint(_request(checkpoint, tmp_path / "w", recipe="aot"))
+    report = mint_child.mint(_request(checkpoint, tmp_path / "w"))
 
     assert ep.RESOLVED_REFS == ["rig/tiny-diffusion"], (
         "the endpoint's own handler must have run, through ctx.slots — "
@@ -332,7 +334,7 @@ def test_an_aot_mint_cannot_seal_for_a_handler_that_cannot_run(
     monkeypatch.setattr(ep.MicroRigEndpoint, "rig_generate", _broken)
 
     with pytest.raises(mint_child.MintChildRefused) as exc:
-        mint_child.mint(_request(checkpoint, tmp_path / "w", recipe="aot"))
+        mint_child.mint(_request(checkpoint, tmp_path / "w"))
 
     text = str(exc.value)
     assert "warm plan does not run" in text, text
@@ -357,5 +359,5 @@ def test_a_resource_shortfall_in_the_warm_plan_is_still_retryable(
     monkeypatch.setattr(ep.MicroRigEndpoint, "rig_generate", _oom)
 
     with pytest.raises(MemoryError):
-        mint_child.mint(_request(checkpoint, tmp_path / "w", recipe="aot"))
+        mint_child.mint(_request(checkpoint, tmp_path / "w"))
     assert not aot_without_the_export

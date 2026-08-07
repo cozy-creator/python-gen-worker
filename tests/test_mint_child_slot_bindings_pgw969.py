@@ -141,8 +141,7 @@ def _request(
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
                         family="pgw969", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
-                        text_lens=()),
-        capture_dir=tmp_path / "capture", target=tmp_path / "cell.tar.gz",
+                        text_lens=()), target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path)
     bg = _BackgroundMint(
         spec=SimpleNamespace(name=function), instance=object(), snapshots=None,

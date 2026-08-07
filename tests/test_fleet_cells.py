@@ -1,13 +1,23 @@
 """gw#587 fleet self-mint: arming policy outcomes + the publish protocol.
 
-The torch.compile capture itself needs a GPU + toolchain and is proven live
-(the gw#587 live proof); these tests pin the POLICY around it: delivered
-cell first, PROVE-PRODUCES-THE-MINT on miss (arm cold for capture; only
-the executor's passed warmup proof packs + publishes — the gw#586-class
-fix: no synthetic producer warm loop exists in the fleet path anymore),
-publish best-effort and never load-bearing for serving, the
-cell_selection_bug receipt invariant untouched, and the typed quantized
-refusal only at genuine mint impossibilities.
+The mint itself needs a GPU + toolchain and is proven live (the gw#587 live
+proof, and the micro rig since pgw#978); these tests pin the POLICY around it:
+delivered cell first, a DELEGATED AOT mint on a miss (the live pipe untouched,
+serving eager, the obligation on the pending), publish best-effort and never
+load-bearing for serving, the cell_selection_bug receipt invariant untouched,
+and the typed quantized refusal only at genuine mint impossibilities.
+
+pgw#1010 re-aimed this module. What it used to cover — arm cold into a capture
+dir, pack the proven capture, publish the packed bytes — was the DYNAMO cell
+path, and a dynamo cell has no consumer (`aot_cells` adopts `aot-inductor`
+only, by name), so it is deleted rather than kept. A miss on a family with no
+export declaration now serves JIT INTAKE and produces nothing; that half is
+covered by `test_dynamo_no_publish_pgw1010.py`.
+
+`mint_recipe` is stubbed to `RECIPE_AOT` where a delegated pending is the
+subject: WHICH recipe a miss runs has its own coverage
+(`test_aot_flip_pgw722.py`, `test_mint_recipe_parity_pgw984_pgw985.py`), and a
+test box registers no export declarations at all.
 """
 
 from __future__ import annotations
@@ -65,7 +75,7 @@ def _clear_pending():
 
 
 def _mintable(monkeypatch, *, key=FAKE_KEY):
-    """Route a MISS into the cold-capture arm with no CUDA/toolchain."""
+    """Route a MISS into the delegated AOT mint with no CUDA/toolchain."""
     monkeypatch.setattr(
         provision, "enable_compiled",
         lambda *a, **k: AdoptOutcome.miss("no_cell"))
@@ -84,19 +94,16 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
         digest = key
 
     monkeypatch.setattr(cell_key, "compute", lambda *a, **k: _Key())
-
-    def _begin(pipe, cfg, capture):
-        # the real begin_fleet_mint latches env + arms cold; the capture
-        # content itself arrives during the (real, GPU) warmup — simulate
-        # the layout the proof window would produce (incl. the fxgraph
-        # store the gw#608 artifact assertion requires).
-        (capture / "inductor" / "g").mkdir(parents=True, exist_ok=True)
-        (capture / "inductor" / "g" / "kernel.py").write_text("compiled")
-        (capture / "inductor" / "fxgraph" / "aa").mkdir(parents=True, exist_ok=True)
-        (capture / "inductor" / "fxgraph" / "aa" / "entry").write_text("fx")
-        (capture / "triton").mkdir(exist_ok=True)
-
-    monkeypatch.setattr(cc, "begin_fleet_mint", _begin)
+    # A test box registers no export declarations, so the real `mint_recipe`
+    # would decline every miss to JIT intake. The recipe DECISION is covered
+    # elsewhere; what is under test here is what the policy does once the
+    # answer is "AOT".
+    monkeypatch.setattr(
+        fc, "mint_recipe", lambda *a, **k: fc.RECIPE_AOT)
+    monkeypatch.setattr(
+        cc, "arm_jit_intake",
+        lambda *a, **k: pytest.fail(
+            "an AOT miss must not arm JIT intake on the live pipe"))
 
 
 def _publisher(calls):
@@ -113,19 +120,20 @@ def _publisher(calls):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _in_process_mint_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    """pgw#784: this module covers the IN-PROCESS capture shape, pinned.
-
-    Out-of-process minting is the production DEFAULT now (a mint that compiles
-    inside the serving process starves the 10s beat — th#1299), but the
-    in-process capture is still the shape that runs whenever a pipeline cannot
-    serve eager meanwhile: a mandatory quantized lane or regional targets, per
-    ``fleet_cells.delegatable``. So this coverage stays load-bearing rather
-    than legacy — it just has to say which shape it is testing. The delegated
-    shape has its own tests in ``test_mint_delegate_pgw784.py``.
-    """
-    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
+def _adopted(monkeypatch, pending, *, artifact_bytes=b"cell-bytes"):
+    """Drive the pending to ADOPTED the way the delegated driver does: the
+    child wrote a cell, `arm_aot` accepted it, `adopt_delegated_mint` records
+    the identity. The arm itself is `provision`'s to prove (pgw#805)."""
+    child = pending.mint_root / "child-cell.tar.gz"
+    child.parent.mkdir(parents=True, exist_ok=True)
+    child.write_bytes(artifact_bytes)
+    monkeypatch.setattr(
+        provision, "arm_aot", lambda *a, **k: AdoptOutcome.hit())
+    monkeypatch.setattr(
+        fc, "_packed_metadata",
+        lambda artifact: {"cell_key": "ck1-" + "d" * 56, "family": "fam",
+                          "kind": "aot-inductor"})
+    return fc.adopt_delegated_mint(_Pipe(), pending, child)
 
 
 def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
@@ -133,8 +141,8 @@ def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
     monkeypatch.setattr(
         provision, "enable_compiled", lambda *a, **k: AdoptOutcome.hit())
     monkeypatch.setattr(
-        cc, "begin_fleet_mint",
-        lambda *a, **k: pytest.fail("HIT must never open a mint capture"))
+        cc, "arm_jit_intake",
+        lambda *a, **k: pytest.fail("HIT must never arm anything else"))
     outcome = fc.enable_compiled(
         _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher(calls))
     assert outcome and outcome.self_mint is None
@@ -159,7 +167,7 @@ def test_cell_selection_bug_reports_and_self_mints(monkeypatch, tmp_path):
 
     outcome = fc.enable_compiled(
         _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))
-    assert outcome.armed
+    assert not outcome.armed, "the pipe serves eager while the child mints"
     assert isinstance(outcome.self_mint, fc.PendingSelfMint)
     assert outcome.selection_bug is bug
 
@@ -188,14 +196,12 @@ def test_cell_selection_bug_still_fail_closed_when_mint_impossible(
     assert isinstance(exc.value.__cause__, cc.CellSelectionBugError)
 
 
-def test_miss_arms_pending_capture_without_packing_or_publishing(
+def test_miss_opens_a_delegated_mint_without_packing_or_publishing(
     monkeypatch, tmp_path,
 ):
-    """gw#587 CORRECT FIX direction (b): a MISS opens a cold capture and
-    returns a PENDING mint — nothing is packed, nothing is published, and
-    no synthetic warm call runs (that separate producer-shaped execution
-    was the gw#586-class defect the live proof caught). Publish before the
-    proof reverts this test red."""
+    """A MISS hands the mint to a child and returns a PENDING — the live pipe
+    is untouched, nothing is packed, nothing is published. Publishing before
+    the child's cell adopts reverts this test red."""
     calls: list = []
     _mintable(monkeypatch)
     monkeypatch.setattr(
@@ -205,22 +211,19 @@ def test_miss_arms_pending_capture_without_packing_or_publishing(
 
     outcome = fc.enable_compiled(
         _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher(calls))
-    assert outcome.armed
+    assert not outcome.armed
     pending = outcome.self_mint
     assert isinstance(pending, fc.PendingSelfMint)
+    assert pending.delegated is True
     assert pending.cell_key == FAKE_KEY
     assert pending.ref == f"root/family-fam#{FAKE_KEY}"
-    assert not pending.target.exists(), "nothing packed before the proof"
-    assert calls == [], "nothing published before the proof"
+    assert not pending.target.exists(), "nothing packed before the child runs"
+    assert calls == [], "nothing published before the cell adopts"
 
 
-def test_finalize_packs_the_proven_capture_and_publishes_it(
-    monkeypatch, tmp_path,
-):
-    """gw#587 CORRECT FIX direction (a): after the proof passes, finalize
-    packs EXACTLY the capture the proof window populated and publishes
-    those bytes; the advertised digest is the digest of that packed
-    artifact."""
+def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
+    """The cell that ADOPTED is the cell that ships, and the advertised digest
+    is the digest of exactly those bytes (gw#587's direction (a), delegated)."""
     calls: list = []
     published = threading.Event()
 
@@ -234,69 +237,41 @@ def test_finalize_packs_the_proven_capture_and_publishes_it(
     pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
                image_digest="sha256:img")
     _mintable(monkeypatch)
-    pipe = _Pipe()
-    outcome = fc.enable_compiled(pipe, _Cfg(), tmp_path, None, publisher=pub)
+    outcome = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=pub)
     pending = outcome.self_mint
     assert isinstance(pending, fc.PendingSelfMint)
 
-    minted = fc.finalize_self_mint(pipe, pending)
+    minted = _adopted(monkeypatch, pending)
     assert minted is not None
-    assert calls == [], "finalize packs; only the coverage gate publishes"
+    assert calls == [], "adoption arms; only the coverage gate publishes"
     fc.publish_self_mint(pending)
-    # The packed metadata's stamped key wins when the box's axes are
-    # key-complete (identical to the arm-time key in production; they only
-    # diverge here because compute is faked). Identity self-consistency is
-    # the pin, not the fake value.
-    assert minted.cell_key.startswith("ck1-")
     assert minted.ref == f"root/family-fam#{minted.cell_key}"
     assert minted.snapshot_digest.startswith("sha256:")
     assert len(minted.snapshot_digest) == len("sha256:") + 64
-    assert published.wait(5), "a finalized mint must attempt publish"
+    assert published.wait(5), "an adopted mint must attempt publish"
     (family, tar_bytes, meta, mint_duration_ms) = calls[0]
     assert family == "fam"
-    # th#1355: the mint cost travels with the publish. Before this, "what did
-    # this cell cost to build" lived only in an activity event that carried no
-    # cell key, so it could never be joined back to the cell it described.
+    # th#1355: the mint cost travels with the publish, so "what did this cell
+    # cost to build" can be joined to the cell it describes.
     assert mint_duration_ms >= 0
-    # And the ck axes the key is a digest OF ride the intent, so the hub's
-    # cell_store row can say which lane and which card this cell is for
-    # instead of holding an opaque hash.
-    axes = fc._identity_axes(family, meta)
-    assert axes.get("family") == "fam", axes
-    assert axes.get("kind") == "torch-inductor-cache", axes
-    # sm/lane are present in production and empty on a torch-less test box —
-    # the pin is that the helper always produces the axes the metadata CAN
-    # state and never raises, because an inventory detail must not fail a
-    # publish.
-    # The published bytes ARE the packed proven capture, and the advertised
-    # digest is the digest of exactly those bytes.
     from gen_worker.models.chunk_cas import sha256_file
 
     copy = tmp_path / "published-copy.tar.gz"
     copy.write_bytes(tar_bytes)
     assert minted.snapshot_digest == "sha256:" + sha256_file(copy)
-    import io
-    import tarfile
-
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:*") as tar:
-        names = tar.getnames()
-    assert any("kernel.py" in n for n in names), (
-        "published cell must contain the capture the proof produced")
-    # Finalize is memoized for same-key siblings: no double pack; publish
-    # resolves exactly once.
-    assert fc.finalize_self_mint(pipe, pending) is minted
+    # Adoption is memoized for same-key siblings: publish resolves once.
+    assert _adopted(monkeypatch, pending) is minted
     fc.publish_self_mint(pending)
     assert len(calls) == 1
 
 
 def test_abandon_never_publishes(monkeypatch, tmp_path):
-    """A capture whose proof did not certify it is abandoned: nothing
-    packed, nothing published, temp dir removed."""
+    """A mint whose child produced nothing adoptable is abandoned: nothing
+    published, temp dir removed."""
     calls: list = []
     _mintable(monkeypatch)
-    pipe = _Pipe()
     outcome = fc.enable_compiled(
-        pipe, _Cfg(), tmp_path, None, publisher=_publisher(calls))
+        _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher(calls))
     pending = outcome.self_mint
     fc.abandon_self_mint(pending)
     assert calls == []
@@ -305,20 +280,19 @@ def test_abandon_never_publishes(monkeypatch, tmp_path):
         assert fc._PENDING == {}
 
 
-def test_same_key_sibling_joins_the_pending_capture(monkeypatch, tmp_path):
-    """Two pipes of one record computing the same key share ONE capture
-    (the union family cell); a second mint_root is never created."""
+def test_same_key_sibling_shares_the_pending_mint_root(monkeypatch, tmp_path):
+    """Two pipes of one record computing the same key share ONE mint (the
+    union family cell); a second mint_root is never created."""
     _mintable(monkeypatch)
-    a, b = _Pipe(), _Pipe()
-    first = fc.enable_compiled(a, _Cfg(), tmp_path, None).self_mint
-    second = fc.enable_compiled(b, _Cfg(), tmp_path, None).self_mint
-    assert second is first
+    first = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None).self_mint
+    second = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None).self_mint
+    assert second.mint_root == first.mint_root
+    assert second.target == first.target
 
 
 def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
-    """The request that triggered the miss is served from the proven local
-    capture even when the hub refuses the publish (untrusted tier / forged
-    axis / quota)."""
+    """The pipe that triggered the miss serves from its adopted cell even
+    when the hub refuses the publish (untrusted tier / forged axis / quota)."""
     refused = threading.Event()
 
     class _Pub(fc.CellPublisher):
@@ -328,25 +302,23 @@ def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
 
     pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="d")
     _mintable(monkeypatch)
-    pipe = _Pipe()
-    outcome = fc.enable_compiled(pipe, _Cfg(), tmp_path, None, publisher=pub)
-    minted = fc.finalize_self_mint(pipe, outcome.self_mint)
-    assert minted is not None, "hub refusal must never fail the finalize"
+    outcome = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None, publisher=pub)
+    minted = _adopted(monkeypatch, outcome.self_mint)
+    assert minted is not None, "hub refusal must never fail the adoption"
     fc.publish_self_mint(outcome.self_mint)
     assert refused.wait(5)
 
 
 def test_withheld_publish_never_ships_and_is_final(monkeypatch, tmp_path):
-    """gw#612: an incomplete family cell (a mandatory sibling's graphs
-    absent from the shared capture) is never published — and once the
-    publish is resolved (withheld), a later publish call is a no-op."""
+    """gw#612: an incomplete family cell (a mandatory sibling not covered by
+    the mint) is never published — and once the publish is resolved
+    (withheld), a later publish call is a no-op."""
     calls: list = []
     _mintable(monkeypatch)
-    pipe = _Pipe()
     outcome = fc.enable_compiled(
-        pipe, _Cfg(), tmp_path, None, publisher=_publisher(calls))
+        _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher(calls))
     pending = outcome.self_mint
-    minted = fc.finalize_self_mint(pipe, pending)
+    minted = _adopted(monkeypatch, pending)
     assert minted is not None
     fc.withhold_self_mint_publish(pending, "sibling lane unexercised")
     assert calls == []
@@ -540,40 +512,19 @@ def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
     assert complete_body["ok"] is False and "upload exploded" in complete_body["error"]
 
 
-def test_finalize_refuses_capture_without_fx_entries(monkeypatch, tmp_path):
-    """gw#608 hardening (revert-turns-red): a minting boot proves its
-    EXECUTION; the pack must also prove its ARTIFACT. A capture whose
-    fxgraph store is empty (inductor latched elsewhere / cache-layer
-    redirect miss) must never publish — it can never serve any consumer."""
-    calls: list = []
-    _mintable(monkeypatch)
-    pipe = _Pipe()
-    outcome = fc.enable_compiled(pipe, _Cfg(), tmp_path, None, publisher=_publisher(calls))
-    pending = outcome.self_mint
-    # the _mintable fixture creates inductor files but NO fxgraph entries
-    import shutil as _sh
-    _sh.rmtree(pending.capture_dir / "inductor" / "fxgraph", ignore_errors=True)
-    assert fc.finalize_self_mint(pipe, pending) is None, (
-        "an artifact without FX entries must be refused")
-    assert calls == [], "nothing may publish from a refused capture"
-
-
-# ---------------------------------------------------------------------------
-# gw#608 root cause: the self-mint arm must never strand the process-global
-# cache dir away from a seeded delivered cell.
-# ---------------------------------------------------------------------------
-
-
-def test_no_target_pipe_never_touches_cache_env(tmp_path, monkeypatch):
+def test_no_target_pipe_is_declined_before_anything_is_armed(tmp_path, monkeypatch):
     """A slot object with no resolvable compile target (the LTX upsampler
-    shape) must be declined BEFORE any cache-dir mutation. Pre-fix,
-    begin_fleet_mint re-pointed TORCHINDUCTOR_CACHE_DIR to a throwaway
-    capture dir before discovering there was nothing to arm — every seeded
-    lookup of the SIBLING lane then missed (the live 8/8 shape)."""
+    shape) is declined by name — no intake arm, no mint, no pending.
+
+    pgw#1010 note: this used to also assert that the process-global inductor
+    cache dir was untouched, because `arm_jit_intake` re-pointed it before
+    discovering there was nothing to arm (gw#608's live 8/8-miss shape).
+    Nothing moves that env any more — the capture it existed for is gone — so
+    what survives is the decline itself.
+    """
     _mintable(monkeypatch)
-    seeded = tmp_path / "seeded-live"
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(seeded))
-    monkeypatch.setenv("TRITON_CACHE_DIR", str(seeded / "triton"))
+    armed: list = []
+    monkeypatch.setattr(cc, "arm_jit_intake", lambda *a, **k: armed.append(a))
 
     class _NoTargetPipe:
         _cozy_low_vram_mode = "off"
@@ -581,49 +532,30 @@ def test_no_target_pipe_never_touches_cache_env(tmp_path, monkeypatch):
     outcome = fc.enable_compiled(
         _NoTargetPipe(), _Cfg(), tmp_path, None, publisher=None)
     assert not outcome.armed and outcome.self_mint is None
-    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(seeded)
-    assert os.environ["TRITON_CACHE_DIR"] == str(seeded / "triton")
+    assert outcome.eager_reason == "no_compile_target"
+    assert armed == []
     with fc._PENDING_LOCK:
         assert fc._PENDING == {}
 
 
-def test_begin_fleet_mint_arm_failure_restores_cache_env(tmp_path, monkeypatch):
-    """An arm failure AFTER capture_env must restore the prior env exactly
-    (transactional): a dangling env on a deleted capture dir is the gw#608
-    consumer signature."""
-    seeded = tmp_path / "seeded-live"
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(seeded))
-    monkeypatch.setenv("TRITON_CACHE_DIR", str(seeded / "triton"))
-    # A real pipe with a real target; apply() fails on this box (no CUDA),
-    # driving the genuine post-capture_env failure path.
-    with pytest.raises(RuntimeError):
-        cc.begin_fleet_mint(_Pipe(), _Cfg(), tmp_path / "capture")
-    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(seeded)
-    assert os.environ["TRITON_CACHE_DIR"] == str(seeded / "triton")
+def test_a_seeded_delivered_cell_no_longer_blocks_a_later_mint(
+    tmp_path, monkeypatch,
+):
+    """gw#608's seeded-cell gate is DELETED (pgw#1010), and this is the test
+    that says so deliberately rather than by silence.
 
-
-def test_delivered_seed_declines_later_self_mint(tmp_path, monkeypatch):
-    """Once a delivered cell is seeded in this process, a sibling self-mint
-    must be declined (plain lane -> eager): its capture would re-point the
-    ONE global cache dir away from the seeded entries mid-boot."""
+    The gate existed only because an in-process capture moved the ONE global
+    inductor cache dir away from the seeded entries. No capture, no move, no
+    hazard — so a sibling whose own cell is missing mints it instead of being
+    eager for the rest of the pod's life because an unrelated slot got a
+    delivered cell first.
+    """
     _mintable(monkeypatch)
-    monkeypatch.setattr(cc, "_DELIVERED_SEEDED", True)
     seeded = tmp_path / "seeded-live"
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(seeded))
 
-    began: list = []
-    monkeypatch.setattr(
-        cc, "begin_fleet_mint", lambda *a, **k: began.append(a))
     outcome = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None)
-    assert not outcome.armed and outcome.self_mint is None
-    assert began == [], "a seeded process must never open a mint capture"
+
+    assert isinstance(outcome.self_mint, fc.PendingSelfMint)
+    assert outcome.eager_reason == "mint_in_progress"
     assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(seeded)
-
-
-def test_delivered_seed_mandatory_execution_lane_keeps_typed_refusal(tmp_path, monkeypatch):
-    _mintable(monkeypatch)
-    monkeypatch.setattr(cc, "_DELIVERED_SEEDED", True)
-    pipe = _Pipe()
-    pipe._cozy_weight_lane = "w8a8"
-    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="delivered cell"):
-        fc.enable_compiled(pipe, _Cfg(), tmp_path, None)

@@ -4,8 +4,7 @@
 
     aot_cell_discovery  miss                     family=sdxl lane=w8a8-lora64
     self_mint_skipped   aot_requires_delegation  "out-of-process minting is
-                        disabled (GEN_WORKER_MINT_IN_PROCESS
-                        off) and an AOTI export has no eager tier..."
+                        disabled and an AOTI export has no eager tier..."
     self_mint_started   dynamo                   ... armed an in-process capture
 
 Neither named cause was true on that pod — no env was set. The operative
@@ -152,7 +151,6 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     """
     from gen_worker import aot_cells
 
-    monkeypatch.delenv("GEN_WORKER_MINT_IN_PROCESS", raising=False)
     monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT", raising=False)
     gw_config.reload_for_test()
     monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
@@ -161,7 +159,6 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
     monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
     monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
@@ -170,7 +167,7 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
         fleet_cells.cell_key, "compute",
         lambda *a, **k: type("_K", (), {"digest": "ck1-" + "a" * 56})())
     monkeypatch.setattr(
-        fleet_cells.cc, "begin_fleet_mint", lambda p, c, capture: None)
+        fleet_cells.cc, "arm_jit_intake", lambda p, c: None)
     # THE lane: sdxl's mixed fp8 checkpoint stamps `w8a8-lora64` (pgw#686 cell
     # identity), which is what `mandatory_serving` falls back to without hub
     # lane evidence — exactly the measured pod's state.
@@ -251,9 +248,9 @@ def test_a_w8a8_miss_mints_AOT_and_not_dynamo(
 
     pending = outcome.self_mint
     assert pending is not None, "the miss produced no mint at all"
-    assert pending.recipe == fleet_cells.RECIPE_AOT, (
-        "a w8a8 miss with a declaration registered must "
-        "mint an AOT cell; a dynamo artifact will never satisfy AOT discovery")
+    # pgw#1010: a pending IS the AOT mint — the JIT recipe opens none — so the
+    # recipe axis that used to be asserted here cannot disagree any more. The
+    # `self_mint_started` phase below is the wire half of the same claim.
     assert pending.delegated is True
     assert "aot_requires_delegation" not in _phases(_events, "self_mint_skipped")
     assert ("self_mint_started", "aot") in [(k, p) for k, p, _ in _events]
@@ -268,8 +265,13 @@ def test_delegation_declines_name_their_TRUE_cause(
     kill switch from a pipeline classification."""
     register_export_declaration(_declaration())
 
-    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
-    _arm()
+    # pgw#1010: the OPERATOR arm of this test drove
+    # `GEN_WORKER_MINT_IN_PROCESS=1`. The env and the shape it selected are
+    # deleted (in-process minting existed only to pack a dynamo cell), so the
+    # caller-forced seam that replaces it is the one asserted here — the same
+    # phase, reached the way a caller can still reach it.
+    fleet_cells.enable_compiled(
+        _Pipe(), _Cfg(), publisher=_Publisher(), delegate=False)  # type: ignore[arg-type]
     assert "aot_mint_forced_in_process" in _phases(_events, "self_mint_skipped")
 
     # pgw#995: the second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and
@@ -280,7 +282,6 @@ def test_delegation_declines_name_their_TRUE_cause(
     # refusal names its TRUE cause, which the operator arm above and the
     # pipeline arm below still exercise.
     _events.clear()
-    monkeypatch.delenv("GEN_WORKER_MINT_IN_PROCESS")
     fleet_cells._PENDING.clear()
 
     # pgw#846: `Compile.regional` is the dynamo/JIT per-block knob (ie#381)
@@ -298,7 +299,6 @@ def test_delegation_declines_name_their_TRUE_cause(
 def test_mint_delegate_names_its_own_refusals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("GEN_WORKER_MINT_IN_PROCESS", raising=False)
     assert mint_delegate.delegation_refusal() == ""
     # pgw#995: eager-first is unconditional, so setting the deleted name is a
     # no-op rather than a second refusal. Asserted, not assumed — a deletion
@@ -307,9 +307,12 @@ def test_mint_delegate_names_its_own_refusals(
     monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "0")
     assert mint_delegate.delegation_refusal() == ""
     assert not hasattr(mint_delegate, "REFUSAL_EAGER_FIRST_DISABLED")
+    # pgw#1010: and the same is now true of the in-process switch — the WORKER
+    # half of the decision can no longer refuse anything, because there is no
+    # in-process mint shape to select.
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
-    assert (mint_delegate.delegation_refusal()
-            == mint_delegate.REFUSAL_IN_PROCESS_FORCED)
+    assert mint_delegate.delegation_refusal() == ""
+    assert not hasattr(mint_delegate, "REFUSAL_IN_PROCESS_FORCED")
 
 
 # ---------------------------------------------------------------------------
@@ -360,9 +363,7 @@ def test_eager_first_admits_a_DELEGATED_pending_with_no_router(
     })()
     pending = fleet_cells.PendingSelfMint(
         family=FAMILY, cell_key="ck1-" + "a" * 56, ref="r", cfg=cfg,
-        target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
-        mint_root=tmp_path, publisher=None, delegated=True,
-        recipe=fleet_cells.RECIPE_AOT)
+        target=tmp_path / "c.tar.gz", mint_root=tmp_path, publisher=None, delegated=True,)
     inj = _Inj(compile_objects=[_Candidate(pipe)],
                pending_self_mints={id(pipe): pending})
 
@@ -387,8 +388,7 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
     })()
     pending = fleet_cells.PendingSelfMint(
         family=FAMILY, cell_key="ck1-" + "b" * 56, ref="r", cfg=cfg,
-        target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
-        mint_root=tmp_path, publisher=None, delegated=False)
+        target=tmp_path / "c.tar.gz", mint_root=tmp_path, publisher=None, delegated=False)
     inj = _Inj(compile_objects=[_Candidate(pipe)],
                pending_self_mints={id(pipe): pending})
 
@@ -407,8 +407,7 @@ def _finalized_pending(tmp_path: Path, publisher: Any) -> Any:
     target.write_bytes(b"x" * 4096)
     pending = fleet_cells.PendingSelfMint(
         family=FAMILY, cell_key=key, ref=f"root/family-{FAMILY}#{key}",
-        cfg=_Cfg(), target=target, capture_dir=tmp_path / "cap",
-        mint_root=tmp_path / "root", publisher=publisher)
+        cfg=_Cfg(), target=target, mint_root=tmp_path / "root", publisher=publisher)
     pending.mint_root.mkdir(parents=True, exist_ok=True)
     pending._state["minted"] = fleet_cells.SelfMint(
         family=FAMILY, cell_key=key, ref=pending.ref,
@@ -463,8 +462,7 @@ def test_a_publish_gate_with_nothing_packed_is_NAMED(
     real defect and must not be a no-op."""
     pending = fleet_cells.PendingSelfMint(
         family=FAMILY, cell_key="ck1-" + "d" * 56, ref="r", cfg=_Cfg(),
-        target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
-        mint_root=tmp_path / "root2", publisher=_Publisher())
+        target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root2", publisher=_Publisher())
 
     fleet_cells.publish_self_mint(pending)
 
@@ -477,8 +475,7 @@ def test_a_withhold_with_nothing_packed_is_NAMED(
 ) -> None:
     pending = fleet_cells.PendingSelfMint(
         family=FAMILY, cell_key="ck1-" + "e" * 56, ref="r", cfg=_Cfg(),
-        target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
-        mint_root=tmp_path / "root3", publisher=_Publisher())
+        target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root3", publisher=_Publisher())
 
     fleet_cells.withhold_self_mint_publish(pending, "sibling never exercised")
 
@@ -525,11 +522,19 @@ def test_a_boot_that_resolves_NOTHING_confesses(
     spec = type("_S", (), {"name": "generate"})()
     pending = fleet_cells.PendingSelfMint(
         family=FAMILY, cell_key="ck1-" + "f" * 56, ref="r", cfg=_Cfg(),
-        target=tmp_path / "c.tar.gz", capture_dir=tmp_path / "cap",
-        mint_root=tmp_path / "root4", publisher=_Publisher())
+        target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root4", publisher=_Publisher())
     pending.mint_root.mkdir(parents=True, exist_ok=True)
 
+    # pgw#1010: every pending is a DELEGATED mint now, so the BOOT sweep
+    # defers to the driver that owns it — asserted, so a reader cannot mistake
+    # the silence for the defect this test exists about...
     ex._assert_mint_termini(spec, [pending])  # type: ignore[arg-type]
+    assert seen == []
+    assert fleet_cells.terminus_of(pending) == ""
+
+    # ...and the DRIVER's own sweep, which owns it, still confesses.
+    ex._assert_mint_termini(
+        spec, [pending], driver_owns_delegated=False)  # type: ignore[arg-type]
 
     assert ("self_mint_abort", "no_terminus") in [(k, p) for k, p, _ in seen]
     assert fleet_cells.terminus_of(pending) == fleet_cells.TERMINUS_ABANDONED

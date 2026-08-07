@@ -185,8 +185,7 @@ class _Harness:
         pending = fleet_cells.PendingSelfMint(
             family=FAMILY, cell_key="ck1-" + "a" * 56,
             ref=f"{cc.system_repo(FAMILY)}#ck1-{'a' * 56}",
-            cfg=cfg, target=mint_root / "cell.tar.gz",
-            capture_dir=capture, mint_root=mint_root,
+            cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,
         )
         original = pipe.transformer.forward

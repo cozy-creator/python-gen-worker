@@ -76,9 +76,7 @@ def pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     artifact.write_bytes(b"a sealed, finalized cell")
     return fleet_cells.PendingSelfMint(
         family=FAMILY, cell_key="ck1-sealed", ref=f"root/family-{FAMILY}#ck1-sealed",
-        cfg=_Cfg(), target=artifact, capture_dir=tmp_path / "cap",
-        mint_root=tmp_path / "root", publisher=None, delegated=True,
-        recipe=fleet_cells.RECIPE_AOT)
+        cfg=_Cfg(), target=artifact, mint_root=tmp_path / "root", publisher=None, delegated=True,)
 
 
 def _abort(events: List[Tuple[str, str, str]]) -> Tuple[str, str]:
@@ -146,9 +144,7 @@ def test_every_classified_reason_survives_verbatim(
         artifact.write_bytes(b"cell")
         p = fleet_cells.PendingSelfMint(
             family=FAMILY, cell_key=f"ck1-{i}", ref=f"root/family-{FAMILY}#ck1-{i}",
-            cfg=_Cfg(), target=artifact, capture_dir=tmp_path / f"cap{i}",
-            mint_root=tmp_path / f"root{i}", publisher=None, delegated=True,
-            recipe=fleet_cells.RECIPE_AOT)
+            cfg=_Cfg(), target=artifact, mint_root=tmp_path / f"root{i}", publisher=None, delegated=True,)
         assert fleet_cells.adopt_delegated_mint(_Pipe(), p, artifact) is None
         phase, _detail = _abort(seen)
         assert phase == reason

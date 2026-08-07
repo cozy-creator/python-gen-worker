@@ -264,7 +264,7 @@ def _mint_slot(tree: Path, ref_path: str) -> Any:
 
 
 def _mint_request(
-    workdir: Path, tree: Path, capture: Path, veh: Any, *,
+    workdir: Path, tree: Path, veh: Any, *,
     ordinal: int = 0, cap_bytes: int = MINT_VRAM_BYTES,
 ) -> Any:
     """Built through `mint_delegate.build_request` — the REAL parent chain.
@@ -277,8 +277,8 @@ def _mint_request(
 
     cfg = veh.compile_cell()
     pending = SimpleNamespace(
-        family=veh.family, cell_key="", recipe=os.environ.get("PGW978_RECIPE", "aot"), cfg=cfg,
-        capture_dir=capture, target=workdir / "cell.tar.gz", mint_root=workdir)
+        family=veh.family, cell_key="", cfg=cfg,
+        target=workdir / "cell.tar.gz", mint_root=workdir)
     # The key is the REAL one, derived the way the arming brain derives it, so
     # the child's own recomputation has something to agree with.
     task = MintTask(
@@ -368,22 +368,21 @@ def run_cycle(
     # -- the handoff ---------------------------------------------------------
     workdir = root / "mint"
     workdir.mkdir(parents=True, exist_ok=True)
-    capture = root / "capture"
 
     leg = result.add(Leg("handoff"))
     g0 = time.monotonic()
-    request = _mint_request(workdir, tree, capture, veh,
+    request = _mint_request(workdir, tree, veh,
                             ordinal=int(dev["device_ordinal"]),
                             cap_bytes=(MINT_VRAM_BYTES
                                        if dev["device_kind"] == "cuda" else 0))
     leg.ok, leg.seconds = True, time.monotonic() - g0
     entries = _declared_entries(veh)
-    leg.facts = {"family": request.family, "recipe": request.recipe,
+    leg.facts = {"family": request.family,
                  "slots": sorted(request.slots),
                  "cell_key": request.cell_key,
                  "vram_cap_bytes": request.vram_cap_bytes,
                  "declared_entries": entries}
-    leg.detail = (f"family={request.family} recipe={request.recipe} "
+    leg.detail = (f"family={request.family} "
                   f"slots={sorted(request.slots)} "
                   f"entries={len(entries)}")
 
@@ -539,8 +538,9 @@ def _declared_entries(veh: Any) -> List[str]:
 
     Reported by the handoff leg so a cycle states its own SIZE: the whole
     point of the micro vehicle is that this list has three rows and sdxl's
-    has thirty-six. A vehicle whose family carries no declaration (the
-    dynamo-recipe toy) reports none rather than failing.
+    has thirty-six. A vehicle whose family carries no declaration reports none
+    rather than failing (pgw#1010: such a family serves JIT intake and mints
+    nothing at all).
     """
     from gen_worker import aot_declaration as ad
     from gen_worker.api.export_contract import export_declaration

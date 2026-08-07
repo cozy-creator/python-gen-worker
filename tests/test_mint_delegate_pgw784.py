@@ -6,8 +6,8 @@ Three claims, each with the fact that would break it:
    in-process shape the serving pipe carries guarded wrappers, LoRA branch
    containers and a process-global ``TORCHINDUCTOR_CACHE_DIR`` move for the
    whole mint; delegated, it carries none of that and keeps serving plain
-   eager. That is also why the "one live capture per process" restriction
-   lifts — the capture is the child's.
+   eager. (pgw#1010 deleted the in-process shape outright, so this is now the
+   only shape a mint has — and the restriction it carried is gone with it.)
 2. **The child computes the SAME key the parent will demand.** The parent
    states the compile contract on the wire because the parent owns the key
    (the ck2 ``contract`` axis digests ``CompileCell.contract_facts()``, and
@@ -87,8 +87,11 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
 ) -> None:
     armed: List[str] = []
     monkeypatch.setattr(
-        cc, "begin_fleet_mint",
-        lambda *a, **k: armed.append("begin_fleet_mint"))
+        cc, "arm_jit_intake", lambda *a, **k: armed.append("arm_jit_intake"))
+    # pgw#1010: WHICH recipe a miss runs has its own coverage; a test box
+    # registers no export declarations, so state the answer this test is about.
+    monkeypatch.setattr(
+        fleet_cells, "mint_recipe", lambda *a, **k: fleet_cells.RECIPE_AOT)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda *a, **k: AdoptOutcome.miss("no_cell"))
@@ -100,10 +103,6 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
-    # gw#608's seeded-cell gate exists only because an IN-PROCESS capture
-    # moves the process-global inductor dir. Assert it does not block a
-    # delegated mint, whose capture lives in the child.
-    monkeypatch.setattr(cc, "delivered_cell_seeded", lambda: True)
     # No CUDA on this box, so the real sm axis is unavailable; the key itself
     # is not what this test is about.
     monkeypatch.setattr(
@@ -153,8 +152,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
     parent's own proof then misses."""
     pending = SimpleNamespace(
         family="sdxl", cell_key="ck1-abc", cfg=_cfg(),
-        capture_dir=tmp_path / "capture", target=tmp_path / "cell.tar.gz",
-        mint_root=tmp_path)
+        target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="gen",
         modules=("app",), slots={"pipeline": mp.MintSlot(
@@ -167,7 +165,10 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
     assert req.configs == {"gen": {"steps": 28}}
     assert req.slots["pipeline"].path == "/cas/sdxl"
     assert req.device == 3 and req.vram_cap_bytes == 7 * GIB
-    assert req.capture == str(tmp_path / "capture")
+    # pgw#1010: the child's WORK ROOT — the tree it actually writes into, and
+    # the byte-growth half of the parent's progress evidence. It used to be
+    # the inductor capture dir, which an AOT mint never touched.
+    assert req.work_root == str(tmp_path / "w")
 
 
 # --------------------------------------------------- 3. failure inversion
@@ -176,9 +177,8 @@ def _task(tmp_path: Path, **over: Any) -> mint_delegate.MintTask:
     pending = fleet_cells.PendingSelfMint(
         family="sdxl", cell_key="ck1-abc",
         ref="root/family-sdxl#ck1-abc", cfg=_cfg(),
-        target=tmp_path / "cell.tar.gz", capture_dir=tmp_path / "capture",
-        mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path,
-        delegated=True)
+        target=tmp_path / "cell.tar.gz",
+        mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
     fields: Dict[str, Any] = dict(
         pending=pending, pipe=SimpleNamespace(), function="gen",
         modules=("harness.toy_endpoints",), weight_lane="fp8", device=0)
@@ -345,12 +345,17 @@ def test_a_child_peak_is_banked_for_the_next_ask(
     assert mint_budget.child_peak("sdxl", "w8a8") == 11 * GIB
 
 
-def test_delegation_is_the_default_and_the_in_process_shape_is_a_kill_switch(
+def test_delegation_is_unconditional_and_has_no_kill_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The in-process shape stays reachable only to RED-VERIFY that it
-    violates the liveness contract — never as a supported mode."""
-    monkeypatch.delenv(mint_delegate.ENV_IN_PROCESS, raising=False)
+    """pgw#1010: the in-process shape is DELETED, not disabled.
+
+    It existed only to capture and pack a dynamo cell, so
+    ``GEN_WORKER_MINT_IN_PROCESS`` selected a state this worker can no longer
+    be in — and pgw#995 named that env the last deletable behaviour switch,
+    blocked only on the ten test sites that forced the shape. Setting it must
+    now do nothing at all; the env must not be read by anybody."""
+    monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     assert mint_delegate.delegated()
-    monkeypatch.setenv(mint_delegate.ENV_IN_PROCESS, "1")
-    assert not mint_delegate.delegated()
+    assert mint_delegate.delegation_refusal() == ""
+    assert not hasattr(mint_delegate, "ENV_IN_PROCESS")

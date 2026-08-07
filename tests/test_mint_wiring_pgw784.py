@@ -81,12 +81,11 @@ def _stub_child(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MINT_STUB_MODE", "minted")
 
 
-def _pending(tmp_path: Path, *, delegated: bool = True) -> Any:
+def _pending(tmp_path: Path) -> Any:
     return fleet_cells.PendingSelfMint(
         family="sdxl", cell_key="ck1-abc", ref="root/family-sdxl#ck1-abc",
         cfg=_cfg(), target=tmp_path / "cell.tar.gz",
-        capture_dir=tmp_path / "capture", mint_root=tmp_path / "root",
-        publisher=None, cache_dir=tmp_path, delegated=delegated)
+        mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
 
 
 # ------------------------------------------------- 1. the recording gate
@@ -100,11 +99,9 @@ def test_a_delegated_pending_is_recorded_even_though_nothing_is_armed() -> None:
     obligation and the cell is never minted at all.
     """
     delegated = SimpleNamespace(delegated=True)
-    in_process = SimpleNamespace(delegated=False)
     plain = SimpleNamespace()          # a finalized SelfMint has no such field
     assert _delegated_pendings({1: delegated})
-    assert _delegated_pendings({1: in_process, 2: delegated})
-    assert not _delegated_pendings({1: in_process})
+    assert _delegated_pendings({1: plain, 2: delegated})
     assert not _delegated_pendings({1: plain})
     assert not _delegated_pendings({})
 
@@ -120,14 +117,14 @@ def test_the_arm_returns_armed_false_with_a_delegated_pending(
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda *a, **k: True)
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda pipe: False)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "delivered_cell_seeded", lambda: False)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
     monkeypatch.setattr(
         fleet_cells.cell_key, "compute",
         lambda *a, **k: SimpleNamespace(digest="ck1-wired"))
-    monkeypatch.delenv(mint_delegate.ENV_IN_PROCESS, raising=False)
+    monkeypatch.setattr(
+        fleet_cells, "mint_recipe", lambda *a, **k: fleet_cells.RECIPE_AOT)
 
     outcome = fleet_cells.enable_compiled(_Pipe(), _cfg(), tmp_path)
     assert not outcome.armed
@@ -255,8 +252,6 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
     monkeypatch.setattr(ex, "_warn_cell_key_divergence", lambda n, t: None)
     monkeypatch.setattr(ex, "_bind_compile_guard", lambda r, t: True)
-    monkeypatch.setattr(
-        ex, "_shape_warm_republisher", lambda s, p: (lambda *a, **k: None))
 
     act = _Act()
     asyncio.run(ex._delegated_mint_run(rec, bg, act))
@@ -298,8 +293,6 @@ def test_shared_sharers_mint_one_cell_between_them(
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
     monkeypatch.setattr(ex, "_warn_cell_key_divergence", lambda n, t: None)
     monkeypatch.setattr(ex, "_bind_compile_guard", lambda r, t: True)
-    monkeypatch.setattr(
-        ex, "_shape_warm_republisher", lambda s, p: (lambda *a, **k: None))
 
     asyncio.run(ex._delegated_mint_run(rec, bg, _Act()))
     assert len(spawns) == 1, "one shared cell must mean one child process"
@@ -355,15 +348,17 @@ def test_a_dead_child_raises_a_plain_exception_and_never_advertises(
     assert rec.compile_targets["t0"].active_self_mint is False
 
 
-def test_background_mint_run_routes_delegated_pendings_to_the_child(
+def test_the_mint_driver_has_exactly_one_route_and_it_is_the_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The branch itself. Without it every seed/drain/prove/pack phase below it
-    runs IN the serving process — which is precisely th#1299.
+    """pgw#1010: there is no in-process route left to fall through to.
 
-    Asserted by routing, not by mocking the check: the driver is handed a
-    delegated `_BackgroundMint` and must reach `_delegated_mint_run` without
-    touching `_warmup_plan` (the first thing the in-process route does).
+    The branch this test used to police (`_background_mint_run` -> delegated vs
+    seed/drain/prove/pack in the serving process, th#1299) is gone because the
+    in-process half is deleted — it only ever built a dynamo cell. The
+    invariant survives as a stronger one: the driver reaches the child, and
+    `_warmup_plan` — the first thing the in-process route did — is not
+    reachable from it at all.
     """
     ex, rec, bg, _pending, _objs = _wired(tmp_path, monkeypatch)
     took: List[str] = []
@@ -379,5 +374,5 @@ def test_background_mint_run_routes_delegated_pendings_to_the_child(
     monkeypatch.setattr(ex, "_warmup_plan", _plan_must_not_run)
     asyncio.run(ex._background_mint_run(rec, bg, _Act()))
     assert took == ["delegated"], (
-        "a delegated mint fell through to the in-process capture — the compile "
-        "would run on the loop that carries the beat")
+        "the mint driver ran a compile in the serving process — the loop that "
+        "carries the beat (th#1299)")

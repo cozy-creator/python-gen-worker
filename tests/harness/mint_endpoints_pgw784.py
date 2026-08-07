@@ -57,7 +57,7 @@ def _request(workdir: Path) -> mp.MintRequest:
         function="gen", modules=("harness.toy_endpoints",),
         family="pgw784", cell_key="ck1-liveness",
         target=str(workdir / "cell.tar.gz"),
-        capture=str(workdir / "capture"),
+        work_root=str(workdir / "capture"),
         report=str(workdir / mp.REPORT_NAME),
         cfg=mp.CompileCellSpec(family="pgw784"),
     )

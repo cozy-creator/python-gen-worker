@@ -9,7 +9,8 @@ pipeline never has one — ``models.provision.enable_compiled`` returns as soon
 as ``arm_aot`` succeeds and stamps ``aot_serve._MARKER_ATTR`` instead.  So on
 every AOT (and TRT) arm the executor's three growth call sites are no-ops, the
 ``_shape_warm_republisher`` closure is constructed and discarded, and
-``fleet_cells.republish_after_shape_warm`` has no reachable caller.
+and pgw#1010 deleted the republish backend outright (a grown JIT cache is
+this pod's, and its cell had no consumer).
 
 What that costs, measured on the standing stack: one
 ``compiled_shape_coverage`` row reporting **2 of 18 declared graph classes

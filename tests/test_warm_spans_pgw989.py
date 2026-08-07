@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import pytest
 
@@ -174,10 +174,12 @@ def test_a_failing_warm_job_still_lands_in_the_ledger(
 # ---------------------------------------------------------------------------
 
 def test_the_drain_phase_no_longer_calls_itself_a_compile() -> None:
-    """RED on master: ``mint_child`` framed ``_drain_router`` — which waits out
-    a queue the fleet mint arms EMPTY — as ``inductor_compile``, so every
+    """RED on master: ``mint_child`` framed ``_drain_router`` — which waited out
+    a queue the fleet mint armed EMPTY — as ``inductor_compile``, so every
     dynamo mint's phase table carried ``'inductor_compile': 0.0`` beside a
-    ``warmup_forward`` row holding the entire compile."""
+    ``warmup_forward`` row holding the entire compile. (pgw#1010 deleted
+    ``_drain_router`` with the dynamo recipe; the phase vocabulary it forced
+    apart is what this asserts, and that survives.)"""
     from gen_worker import activity, mint_child
 
     source = __import__("inspect").getsource(mint_child)
@@ -188,54 +190,10 @@ def test_the_drain_phase_no_longer_calls_itself_a_compile() -> None:
     assert activity.PHASE_INDUCTOR_COMPILE != activity.PHASE_ROUTER_DRAIN
 
 
-def test_parent_emits_the_warm_ledger_as_numeric_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from gen_worker import mint_delegate
-    from gen_worker.mint_process import MintReport
-
-    emitted: List[Dict[str, Any]] = []
-
-    def _emit(kind: str, detail: str, **kw: Any) -> None:
-        emitted.append({"kind": kind, "detail": detail, **kw})
-
-    monkeypatch.setattr(mint_delegate.activity_mod, "emit_event", _emit)
-
-    ledger = warm_spans.WarmLedger()
-    ledger.jobs = [
-        {"job": "generate", "wall_s": 300.0, "compile_s": 280.0,
-         "execute_s": 20.0}]
-    ledger._raw = dict(REAL_DELTA)
-    ledger._wall = 300.0
-
-    mint_delegate._emit_warm_ledger(
-        MintReport(status="minted", mint_phases=ledger.table()), head="h=1")
-
-    phases = [row["phase"] for row in emitted]
-    assert "warm:totals" in phases
-    assert "warm:kernel_compile_s" in phases
-    assert "warm_job:generate" in phases
-    totals = next(r for r in emitted if r["phase"] == "warm:totals")
-    # A real wall means the ratio IS computable, and it rides the row.
-    assert "compile_fraction" in totals["detail"]
-    # The roll-up's NUMERIC column is the compile half — the number a
-    # regression hunt groups on, not one buried in prose.
-    assert totals["duration_ms"] == 5054
-    assert all(r["kind"] == "jit_compile" for r in emitted)
-
-
-def test_parent_is_silent_when_the_recipe_produced_no_ledger(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An AOT mint, or a child that died before the warm loop. Absence is
-    reported as absence — never as a zero-cost warm plan."""
-    from gen_worker import mint_delegate
-    from gen_worker.mint_process import MintReport
-
-    emitted: List[Any] = []
-    monkeypatch.setattr(
-        mint_delegate.activity_mod, "emit_event",
-        lambda *a, **k: emitted.append(a))
-    mint_delegate._emit_warm_ledger(MintReport(status="minted"), head="h=1")
-    mint_delegate._emit_warm_ledger(None, head="h=1")
-    assert emitted == []
+# pgw#1010: the parent's warm-ledger emission (`mint_delegate._emit_warm_ledger`
+# and its `_emit_jit_compile` caller) is deleted with the recipe it measured —
+# the mint child no longer runs a JIT warm plan, so a ledger from one can never
+# reach the parent. `WarmLedger` itself stays: the child still drives the
+# endpoint's warm plan for the pgw#984 proof forward, and the ledger is how that
+# span is measured honestly. What the wire carries for a JIT compile now is the
+# INTAKE event, covered in `test_compile_duration_th1322.py`.
