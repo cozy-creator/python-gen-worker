@@ -385,13 +385,16 @@ def run_cycle(
     packed = sorted(
         (_serve.unpack_metadata(Path(outcome.artifact or "")).get("entries") or {}))
     leg.facts["packed_entries"] = packed
-    if entries and sorted(entries) != packed:
-        # The declaration said N entries; the tarball carries M. A cycle that
-        # reported green on a cell missing an arm would be the exact silent
-        # loss the entry vocabulary exists to prevent.
+    # pgw#999: the guard is a SUBSET check, not equality. A bucket-bearing
+    # mint adds adapter arms whose exact set depends on composed
+    # branch-capability; what must never happen is a packed cell MISSING a
+    # declared class, which is the silent loss the entry vocabulary exists to
+    # prevent. An extra packed arm is the adapter fork doing its job.
+    missing = [n for n in _branchless(packed) if n not in set(entries)]
+    if entries and missing:
         leg.ok = False
         leg.detail = (f"declared entries {sorted(entries)!r} but the packed "
-                      f"cell carries {packed!r}")
+                      f"cell is MISSING {missing!r} (packed: {packed!r})")
         result.total_s = time.monotonic() - t0
         return result
     leg.detail = (
@@ -488,7 +491,29 @@ def _declared_entries(veh: Any) -> List[str]:
     decl = export_declaration(veh.family)
     if decl is None:
         return []
+    # The DECLARED class set, always branchless: a bucket-bearing cfg forks
+    # each branch-capable target into an adapter-bearing and a branchless
+    # graph class at MINT time (pgw#790), and which targets are branch-capable
+    # is composed truth this function has no pipeline for. So the declaration
+    # stays the branchless authority and the guard compares against it after
+    # stripping the adapter coordinate — see `_branchless`.
     return [ad.plan_entry_name(p) for p in ad.cell_plans(decl)]
+
+
+def _branchless(names: List[str]) -> List[str]:
+    """Packed entry names with any ``adapter=…`` coordinate dropped, so a
+    bucket-bearing cell's arms compare against the declared class set."""
+    out = []
+    for name in names:
+        segs = []
+        for seg in name.split("/"):
+            kept = ",".join(
+                pair for pair in seg.split(",")
+                if not pair.startswith("adapter="))
+            if kept:
+                segs.append(kept)
+        out.append("/".join(segs))
+    return sorted(set(out))
 
 
 def _adopt_in_subprocess(

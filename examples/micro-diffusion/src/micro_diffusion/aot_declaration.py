@@ -10,8 +10,8 @@ still exercises every one of them.
 The three entries
 -----------------
 
-    denoiser/cfg=true     the guided arm; the container arity is 2
-    denoiser/cfg=false    the turbo arm; the container arity is 1
+    transformer/cfg=true     the guided arm; the container arity is 2
+    transformer/cfg=false    the turbo arm; the container arity is 1
     decoder               one arm, no fork, its own dims
 
 Why each declared fact is what it is
@@ -99,7 +99,7 @@ def _classes() -> tuple:
         for cfg, arity in ((True, CFG_ARITY), (False, 1)):
             rows.append(GraphClass(
                 dims={"N": arity, "T": tokens},
-                fork={"cfg": cfg}, targets=("denoiser",)))
+                fork={"cfg": cfg}, targets=("transformer",)))
         rows.append(GraphClass(
             dims={"N": 1, "T": tokens}, targets=("decoder",)))
     return tuple(dict.fromkeys(rows))
@@ -109,7 +109,7 @@ def build_declaration() -> Compile:
     """Construct and validate the declaration without registering it."""
     return Compile(
         family=FAMILY,
-        targets=("denoiser", "decoder"),
+        targets=("transformer", "decoder"),
         shapes=PIXEL_ROWS,
         text_len=COND_LEN,
         dims=(
@@ -123,7 +123,7 @@ def build_declaration() -> Compile:
             Dim("T", carried_by=(("x", 0), ("latent", 1))),
         ),
         forks=(
-            Fork("cfg", served=(True, False), targets=("denoiser",),
+            Fork("cfg", served=(True, False), targets=("transformer",),
                  why="the pipeline batches classifier-free guidance into ONE "
                      "forward by building a two-element latent list, so the "
                      "pytree ARITY doubles: N=1 and N=2 are two graphs, not "
@@ -136,10 +136,10 @@ def build_declaration() -> Compile:
             # ordering that makes flattened leaf positions diverge from
             # argument positions (pgw#993/pgw#994).
             Input("x", shape=("T", ("config", "in_channels")),
-                  repeat="N", dtype="float32", targets=("denoiser",)),
-            Input("t", shape=("N",), dtype="float32", targets=("denoiser",)),
+                  repeat="N", dtype="float32", targets=("transformer",)),
+            Input("t", shape=("N",), dtype="float32", targets=("transformer",)),
             Input("cond", shape=(COND_LEN, ("config", "cond_dim")),
-                  repeat="N", dtype="float32", targets=("denoiser",)),
+                  repeat="N", dtype="float32", targets=("transformer",)),
             Input("latent", shape=("N", "T", ("config", "in_channels")),
                   dtype="float32", targets=("decoder",)),
         ),

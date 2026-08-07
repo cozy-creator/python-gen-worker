@@ -55,7 +55,7 @@ def state_dict(config: MicroConfig, *, seed: int = SEED) -> Dict[str, torch.Tens
     denoiser = MicroDenoiser(config)
     decoder = MicroDecoder(config)
     out: Dict[str, torch.Tensor] = {}
-    for prefix, module in (("denoiser", denoiser), ("decoder", decoder)):
+    for prefix, module in (("transformer", denoiser), ("decoder", decoder)):
         for name, tensor in module.state_dict().items():
             out[f"{prefix}.{name}"] = tensor.contiguous()
     return out

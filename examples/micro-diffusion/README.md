@@ -15,7 +15,7 @@ is the model.
 src/micro_diffusion/
   model.py            MicroDenoiser (tiny DiT) + MicroDecoder — conv-free, register_buffer table
   weights.py          deterministic seed -> checkpoint; `python -m micro_diffusion.weights`
-  pipeline.py         MicroPipeline: .denoiser / .decoder, from_pretrained
+  pipeline.py         MicroPipeline: .transformer / .decoder, from_pretrained
   aot_declaration.py  the Compile declaration — 3 entries, container inputs
   main.py             @endpoint Generate: generate (cfg on) / generate_turbo (cfg off)
 ```
@@ -23,8 +23,8 @@ src/micro_diffusion/
 ## The three entries, and why exactly three
 
 ```
-denoiser/cfg=true     the guided arm; container arity 2
-denoiser/cfg=false    the turbo arm; container arity 1
+transformer/cfg=true     the guided arm; container arity 2
+transformer/cfg=false    the turbo arm; container arity 1
 decoder               a SECOND target, its own dims, no fork
 ```
 

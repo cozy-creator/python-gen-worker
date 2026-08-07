@@ -45,7 +45,7 @@ from gen_worker import aot_declaration as ad  # noqa: E402
 from gen_worker import aot_flatten  # noqa: E402
 from gen_worker.aot_mint import ExportSpec  # noqa: E402
 
-EXPECTED_ENTRIES = ["decoder", "denoiser/cfg=false", "denoiser/cfg=true"]
+EXPECTED_ENTRIES = ["decoder", "transformer/cfg=false", "transformer/cfg=true"]
 
 
 @pytest.fixture(scope="module")
@@ -107,12 +107,12 @@ def test_every_traced_extent_is_linear_in_one_symbol(declaration) -> None:
 def test_the_decoder_is_a_second_target_with_its_own_dims(declaration) -> None:
     """A dim carried through a CONTAINER for one target and a PLAIN tensor for
     the other — pgw#993's seam, declared."""
-    assert declaration.targets == ("denoiser", "decoder")
+    assert declaration.targets == ("transformer", "decoder")
     by_name = {d.name: d for d in declaration.dims}
     assert ("x", 0) in by_name["T"].carried_by
     assert ("latent", 1) in by_name["T"].carried_by
     denoiser = [d for d in ad.cell_plans(declaration)
-                if d.target == "denoiser"]
+                if d.target == "transformer"]
     decoder = [d for d in ad.cell_plans(declaration) if d.target == "decoder"]
     assert len(denoiser) == 2 and len(decoder) == 1
 
@@ -131,7 +131,7 @@ def _spec(target: str, cfg=None) -> ExportSpec:
 @pytest.mark.parametrize("cfg,arity", [(True, 2), (False, 1)])
 def test_container_arity_follows_the_fork(declaration, cfg, arity) -> None:
     module = MicroDenoiser(MicroConfig())
-    got = ad.container_arities(declaration, _spec("denoiser", cfg), module)
+    got = ad.container_arities(declaration, _spec("transformer", cfg), module)
     assert got == {"x": arity, "cond": arity}
 
 
@@ -147,7 +147,7 @@ def test_a_plain_input_sits_after_a_container_and_its_leaf_shifts(
     day the declaration stops reproducing that divergence.
     """
     module = MicroDenoiser(MicroConfig())
-    args, kwargs = ad.declared_inputs(module, _spec("denoiser", True),
+    args, kwargs = ad.declared_inputs(module, _spec("transformer", True),
                                       declaration)
     assert kwargs == {}
     assert isinstance(args[0], list) and len(args[0]) == 2, "x is a container"
@@ -166,7 +166,7 @@ def test_the_turbo_arm_is_a_one_element_container_not_a_bare_tensor(
     """A one-element container is ``x_0``, never ``x`` — the arity-1 case is
     where a "container support" implementation usually quietly degrades."""
     module = MicroDenoiser(MicroConfig())
-    args, _ = ad.declared_inputs(module, _spec("denoiser", False), declaration)
+    args, _ = ad.declared_inputs(module, _spec("transformer", False), declaration)
     assert isinstance(args[0], list) and len(args[0]) == 1
     leaves = aot_flatten.flatten_call(("x", "t", "cond"), args, {})
     assert leaves[0].exported_name == "x_0"
@@ -176,7 +176,7 @@ def test_every_declared_arm_runs_eagerly(declaration, tree) -> None:
     """The declared example feed is a LEGAL call of the real module — the
     cheapest possible catch for a declaration that drifted from its model."""
     pipe = MicroPipeline.from_pretrained(str(tree))
-    for target, cfg in (("denoiser", True), ("denoiser", False),
+    for target, cfg in (("transformer", True), ("transformer", False),
                         ("decoder", None)):
         module = getattr(pipe, target)
         args, _ = ad.declared_inputs(module, _spec(target, cfg), declaration)

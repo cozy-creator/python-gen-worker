@@ -1,6 +1,6 @@
 """The diffusers-SHAPED holder the slot resolves to.
 
-``.denoiser`` and ``.decoder`` are the two compile targets; ``from_pretrained``
+``.transformer`` and ``.decoder`` are the two compile targets; ``from_pretrained``
 is the contract the SDK's slot loader calls and it reads only from the local
 tree it is handed. If that tree does not exist yet it is GENERATED, never
 fetched — see :mod:`micro_diffusion.weights`.
@@ -19,12 +19,12 @@ from .weights import SEED, load_config, load_state, materialize
 
 class MicroPipeline:
     def __init__(
-        self, denoiser: MicroDenoiser, decoder: MicroDecoder, source: str = "",
+        self, transformer: MicroDenoiser, decoder: MicroDecoder, source: str = "",
     ) -> None:
-        self.denoiser = denoiser
+        self.transformer = transformer
         self.decoder = decoder
         self.source = source
-        self.config = denoiser.config
+        self.config = transformer.config
 
     @classmethod
     def from_pretrained(cls, path: str, **_kw: Any) -> "MicroPipeline":
@@ -36,24 +36,24 @@ class MicroPipeline:
             materialize(root, seed=SEED)
         config = load_config(root)
         state = load_state(root)
-        denoiser = MicroDenoiser(config)
+        transformer = MicroDenoiser(config)
         decoder = MicroDecoder(config)
-        denoiser.load_state_dict(
-            {k[len("denoiser."):]: v for k, v in state.items()
-             if k.startswith("denoiser.")}, strict=False)
+        transformer.load_state_dict(
+            {k[len("transformer."):]: v for k, v in state.items()
+             if k.startswith("transformer.")}, strict=False)
         decoder.load_state_dict(
             {k[len("decoder."):]: v for k, v in state.items()
              if k.startswith("decoder.")}, strict=False)
-        return cls(denoiser.eval(), decoder.eval(), source=str(root))
+        return cls(transformer.eval(), decoder.eval(), source=str(root))
 
     def to(self, device: Any) -> "MicroPipeline":
-        self.denoiser.to(device)
+        self.transformer.to(device)
         self.decoder.to(device)
         return self
 
     @property
     def device(self) -> torch.device:
-        return next(self.denoiser.parameters()).device
+        return next(self.transformer.parameters()).device
 
     def unpatchify(self, cells: torch.Tensor, grid: int) -> torch.Tensor:
         """``(N, T, 3*s*s) -> (N, 3, grid*s, grid*s)``.
@@ -89,7 +89,7 @@ class MicroPipeline:
         for i in reversed(range(max(1, steps))):
             t = torch.full((len(x),), float(i * 100), device=x[0].device)
             with torch.no_grad():
-                eps = self.denoiser(x, t, cond)
+                eps = self.transformer(x, t, cond)
             if len(x) == 2:
                 uncond, text = eps[0], eps[1]
                 guided = uncond + guidance * (text - uncond)
