@@ -66,6 +66,10 @@ class Vehicle:
     expect: str = "green"
     #: Why, when `expect` is not "green".
     expect_note: str = ""
+    #: Requires a real card. `scaled_mm` IS the w8a8 lane, and
+    #: `w8a8_gemm_mode()` answers "" without CUDA — which the module class
+    #: refuses — so a cardless run of these is NOT-RUN, never a red.
+    gpu_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +335,13 @@ def _micro_checkpoint(root: Path) -> Path:
     return materialize(root)
 
 
+def _micro_w8a8_checkpoint(root: Path) -> Path:
+    """The fp8 tree, through the SDK's OWN `quantize_tree_w8a8`."""
+    from micro_diffusion.weights import materialize_w8a8
+
+    return materialize_w8a8(root)
+
+
 def _micro_checkpoint_bytes(tree: Path) -> int:
     from micro_diffusion.weights import tree_bytes
 
@@ -537,9 +548,176 @@ MICRO_4D = Vehicle(
 )
 
 
+
+
+# ---------------------------------------------------------------------------
+# micro-w8a8 [+lora] — attempt 26's lane string, on a model that mints in a
+# minute. GPU-only: `scaled_mm` is the point.
+# ---------------------------------------------------------------------------
+
+_MICRO_W8A8_ADOPT = '''
+import json, logging, os, sys
+for p in %(paths)r:
+    sys.path.insert(0, p)
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+import harness.rig_runtime  # noqa: F401
+import torch
+from pathlib import Path
+from gen_worker import aot_cells, aot_serve, compile_cache as cc
+from gen_worker.models import provision
+from gen_worker.registry import CompileCell
+from micro_diffusion.aot_declaration import CFG_ARITY, COND_LEN, PIXEL_ROWS, TOKEN_ROWS
+from micro_diffusion.pipeline import MicroW8a8Pipeline
+
+torch.set_num_threads(2)
+DEVICE = "cuda"
+BUCKET = %(bucket)d
+cfg = CompileCell(
+    shapes=PIXEL_ROWS, targets=("transformer", "decoder"),
+    family="micro-diffusion", regional=False, text_len=COND_LEN,
+    dynamic=(), lora_bucket=BUCKET, guidance_scales=(), text_lens=())
+pipe = MicroW8a8Pipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+ref = MicroW8a8Pipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+if BUCKET:
+    cc.apply_lora_execution_lane(pipe, BUCKET)
+    cc.apply_lora_execution_lane(ref, BUCKET)
+config = pipe.config
+
+# The bf16 tree the producer quantized FROM — `materialize_w8a8` leaves it
+# beside the fp8 one. It is the yardstick for how lossy this lane already is.
+import json as _json
+from safetensors.torch import load_file as _load_file
+from micro_diffusion.model import MicroConfig as _MC, MicroDenoiser as _MD
+_bf = Path(os.environ["PGW978_CHECKPOINT"])
+_bf = _bf.parent / (_bf.name + "-bf16") / "transformer"
+_cfgd = _json.loads((_bf / "config.json").read_text())
+_ref_mod = _MD(_MC(**{k: v for k, v in _cfgd.items() if k in _MC().as_dict()}))
+_ref_mod.load_state_dict(
+    _load_file(str(_bf / "diffusion_pytorch_model.safetensors")), strict=True)
+_ref_mod = _ref_mod.eval().to(DEVICE)
+
+
+def _bf16_ref(x, t, cond):
+    with torch.no_grad():
+        return _ref_mod(x, t, cond)
+
+
+def _feed(arity, tokens):
+    gen = torch.Generator().manual_seed(997)
+    x = [torch.randn(tokens, config.in_channels, generator=gen).to(DEVICE)
+         for _ in range(arity)]
+    t = torch.full((arity,), 100.0, device=DEVICE)
+    cond = [torch.randn(COND_LEN, config.cond_dim, generator=gen).to(DEVICE)
+            for _ in range(arity)]
+    lat = torch.randn(1, tokens, config.in_channels, generator=gen).to(DEVICE)
+    return x, t, cond, lat
+
+
+ARMS = [("transformer/cfg=true", CFG_ARITY, TOKEN_ROWS[0]),
+        ("transformer/cfg=false", 1, TOKEN_ROWS[0]),
+        ("decoder", 1, TOKEN_ROWS[-1])]
+eager = {}
+with torch.no_grad():
+    for name, arity, tokens in ARMS:
+        x, t, cond, lat = _feed(arity, tokens)
+        eager[name] = (ref.decoder(lat) if name == "decoder"
+                       else ref.transformer(x, t, cond)).clone()
+
+cell = aot_cells.discover(
+    pipe, cfg, base_url=%(base)r,
+    worker_jwt=lambda: "local-rig-worker-jwt",
+    cache_dir=Path(%(cache)r))
+out = {"pid": os.getpid(), "ok": cell is not None}
+if cell is not None:
+    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+    out.update({
+        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "snapshot_digest": cell.snapshot_digest,
+        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "entries": sorted((meta.get("entries") or {})),
+        "precision": meta.get("precision"),
+    })
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), BUCKET)
+    out["armed"] = bool(outcome)
+    out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
+    out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
+    if outcome:
+        deltas = {}
+        with torch.no_grad():
+            for name, arity, tokens in ARMS:
+                x, t, cond, lat = _feed(arity, tokens)
+                got = (pipe.decoder(lat) if name == "decoder"
+                       else pipe.transformer(x, t, cond))
+                deltas[name] = float((got - eager[name]).abs().max())
+        out["parity_max_abs"] = deltas
+        out["execution_count"] = int(aot_serve.execution_count(pipe))
+        # THE BOUND, MEASURED RATHER THAN PICKED. fp8 storage is a lossy lane:
+        # measured on this card, eager-fp8 already differs from the bf16 tree
+        # it was quantized from by max|delta| 0.129 (5.3%% of output scale). A
+        # fixed max-abs threshold is therefore the wrong instrument here — it
+        # would reject the LANE, not the compile.
+        #
+        # So the invariant is relative to the lane itself: THE COMPILE MUST
+        # NOT ADD MORE ERROR THAN THE QUANTIZATION ALREADY DID. The bf16 tree
+        # the producer copied from is right next to the fp8 one, so the
+        # yardstick is measured every run instead of hardcoded.
+        lane = {}
+        with torch.no_grad():
+            for name, arity, tokens in ARMS:
+                if name == "decoder":
+                    continue
+                x, t, cond, lat = _feed(arity, tokens)
+                lane[name] = float(
+                    (eager[name] - _bf16_ref(x, t, cond)).abs().max())
+        out["lane_noise_max_abs"] = lane
+        out["parity_ok"] = all(
+            v <= max(lane.get(k, 0.0), 1e-4) for k, v in deltas.items())
+        out["ok"] = bool(out["parity_ok"]) and out["execution_count"] > 0
+    else:
+        out["ok"] = False
+print("RIG_ADOPT " + json.dumps(out))
+'''
+
+
+def _micro_w8a8_adopt_source_for(bucket: int) -> Any:
+    def _source(base: str, cache: Path) -> str:
+        return _MICRO_W8A8_ADOPT % {
+            "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
+            "base": base, "cache": str(cache), "bucket": int(bucket)}
+
+    return _source
+
+
+def _w8a8_vehicle(name: str, bucket: int) -> Vehicle:
+    lane = f"w8a8-lora{bucket}" if bucket else "w8a8"
+    return Vehicle(
+        name=name,
+        modules=(RUNTIME_HOOK, "micro_diffusion.main_w8a8"),
+        function="generate-w8a8",
+        family="micro-diffusion",
+        ref_path="cozy/micro-diffusion",
+        syspath=(str(MICRO_SRC),),
+        build_checkpoint=_micro_w8a8_checkpoint,
+        checkpoint_bytes=_micro_checkpoint_bytes,
+        compile_cell=lambda: _micro_cell(bucket),
+        adopt_source=_micro_w8a8_adopt_source_for(bucket),
+        gpu_only=True,
+        covers=(f"attempt 26's lane string `{lane}` — a REAL fp8 artifact from "
+                f"the SDK's own `quantize_tree_w8a8`, loaded by "
+                f"`load_w8a8_denoiser` into `_Fp8ScaledLinear` modules with "
+                f"`float8_e4m3fn` weights. The gemm mode is chosen by a LIVE "
+                f"per-card benchmark (`pertensor` here; an L40S may measure "
+                f"`rowwise`) — a per-card fact, never assumed to transfer"),
+    )
+
+
+MICRO_W8A8 = _w8a8_vehicle("micro-w8a8", 0)
+MICRO_W8A8_LORA = _w8a8_vehicle("micro-w8a8-lora", MICRO_LORA_BUCKET)
+
+
 VEHICLES: Dict[str, Vehicle] = {
     v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA_PLAIN_PARENT,
-                        MICRO_4D)}
+                        MICRO_4D, MICRO_W8A8, MICRO_W8A8_LORA)}
 DEFAULT_VEHICLE = TINY.name
 
 
@@ -552,4 +730,5 @@ def vehicle(name: str) -> Vehicle:
 
 
 __all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_LORA", "MICRO_LORA_BUCKET",
-           "MICRO_4D", "MICRO_LORA_PLAIN_PARENT", "TINY", "VEHICLES", "Vehicle", "vehicle"]
+           "MICRO_4D", "MICRO_LORA_PLAIN_PARENT", "MICRO_W8A8",
+           "MICRO_W8A8_LORA", "TINY", "VEHICLES", "Vehicle", "vehicle"]

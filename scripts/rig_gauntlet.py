@@ -43,13 +43,23 @@ ORDER = (
     "micro",
     "micro-lora",
     "micro-4d",
+    "micro-w8a8",
+    "micro-w8a8-lora",
     "micro-lora-plain-parent",
 )
 
 
 def run_one(
     name: str, *, device: str, root: Path, python: str, timeout_s: float,
+    gpu_only: bool = False, have_cuda: bool = False,
 ) -> Dict[str, Any]:
+    if gpu_only and not have_cuda:
+        # `scaled_mm` IS the w8a8 lane. Running it cardless would not be a
+        # weaker test, it would be a DIFFERENT one, so it is NOT-RUN.
+        return {"vehicle": name, "rc": 2, "wall_s": 0.0, "green": False,
+                "refused": True, "tail": "",
+                "failed_leg": "did-not-run",
+                "failed_why": "gpu-only lane; this run is cardless"}
     out = root / f"{name}.json"
     # pgw#1014: DELETE it first. A variant the rig REFUSED (the load gate, a
     # cardless `--device cuda`) exits before writing any json, and a stale file
@@ -191,12 +201,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"GAUNTLET — {len(names)} variant(s), device={args.device}, "
           f"python={Path(args.python).parent.parent.name}\n")
 
+    have_cuda = args.device == "cuda" or (
+        args.device == "auto" and "cu126" in str(args.python))
     rows: List[Dict[str, Any]] = []
     for name in names:
         veh = rig_vehicles.VEHICLES[name]
         print(f"  ... {name} ({veh.covers[:70]})", flush=True)
         rows.append(run_one(name, device=args.device, root=args.root,
-                            python=args.python, timeout_s=args.timeout))
+                            python=args.python, timeout_s=args.timeout,
+                            gpu_only=veh.gpu_only, have_cuda=have_cuda))
 
     print("\n" + table(rows, rig_vehicles.VEHICLES))
 
