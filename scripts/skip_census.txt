@@ -125,6 +125,16 @@ CI-SKIPPED tests/test_mint_oom_classification_pgw848.py|the memory cap did not o
 # it is counted here rather than left to look like a passing row.
 CI-SKIPPED tests/test_topology_fuzz_pgw867.py|got empty parameter set for (vector)
 
+# pgw#1013 wave 2. `test_rule_2_fires_on_all_four_filed_sites_as_they_were`
+# re-reads all four defective downloaders from `d7881b40` and asserts the guard
+# fires on each — `actions/checkout@v4` is shallow, so the commit is not in the
+# CI clone. WHERE THE PROPERTY IS MEASURED IN CI:
+# `test_rule_2_fires_on_each_filed_shape`, four parametrized rows carrying the
+# same four loops transcribed verbatim, which run everywhere. The git-backed row
+# is what keeps those transcriptions honest against the real files, and it runs
+# on every developer box.
+CI-SKIPPED tests/test_unbounded_read_guard_pgw1013.py|<hex> not in this checkout (shallow clone)
+
 # ─── LOCAL-ONLY ───────────────────────────────────────────────────────────────
 LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (packs a real .pt#; needs g++)
 LOCAL-ONLY tests/test_chunk_cas_parallel_th1362.py|multi-gb throughput measurement; set chunk_cas_bench=#

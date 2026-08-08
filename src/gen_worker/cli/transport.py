@@ -25,6 +25,22 @@ from typing import NamedTuple
 # was the first cli module imported.
 DEFAULT_SOCKET_PATH = "./.gen-worker.sock"
 
+#: pgw#1013 — the largest NDJSON line either end will buffer before refusing.
+#:
+#: Both ends read bytes into a `bytearray` until a newline arrives, and neither
+#: end counted them: a peer that never sends `\n` grows that buffer until the
+#: process dies. The socket timeout does not bound it — `settimeout` bounds one
+#: `recv`, and a peer dribbling one byte per second resets it forever.
+#:
+#: This bound is NOT downgraded by "it is only the local dev socket": the same
+#: reader serves `--listen tcp://0.0.0.0:PORT`, where the peer is whoever
+#: reached the port.
+#:
+#: 256 MiB sits above the largest envelope this protocol legitimately carries
+#: (a multi-image result inlined as base64) and far below the memory of a host
+#: that can run the models behind it.
+MAX_NDJSON_LINE_BYTES = 256 << 20
+
 
 class Address(NamedTuple):
     """("unix", path, 0) | ("tcp", host, port)."""

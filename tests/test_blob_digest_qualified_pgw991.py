@@ -14,6 +14,7 @@ worker-side assertion about it.
 """
 from __future__ import annotations
 
+import hashlib
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Iterator
 from urllib.parse import unquote
 
 import pytest
+from blake3 import blake3
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.api.errors import (
@@ -34,10 +36,15 @@ from gen_worker.request_context import (
     ConversionContext,
 )
 
-BARE_HEX = "6f3306ab3b849905dd21c6e3073a2f88a4ae34ac4ee5f3af4bda597f559e9d17"
-SHA256_DIGEST = f"sha256:{BARE_HEX}"
-BLAKE3_DIGEST = "blake3:" + "aa" * 32
 BLOB_BYTES = b"real blob bytes"
+# pgw#1013: both addresses are derived from the bytes the rig serves, because
+# `_download_blob_by_digest` now verifies that the bytes hash to the digest
+# that named them. The subject of this file is unchanged — which ADDRESSES are
+# well-formed — but a rig serving one blob under an unrelated digest describes
+# a content-addressed store that does not content-address.
+BARE_HEX = hashlib.sha256(BLOB_BYTES).hexdigest()
+SHA256_DIGEST = f"sha256:{BARE_HEX}"
+BLAKE3_DIGEST = "blake3:" + blake3(BLOB_BYTES).hexdigest()
 
 # Every algorithm tensorhub `storage.casSupportedAlgos` keys on, and its width.
 _SUPPORTED = {"blake3": 64, "sha256": 64}

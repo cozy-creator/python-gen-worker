@@ -339,6 +339,14 @@ def _send_request(
                 continue
             if not chunk:
                 break
+            if len(buf) + len(chunk) > transport.MAX_NDJSON_LINE_BYTES:
+                # pgw#1013: the same bound the server applies to the request
+                # line, applied to the response — a serve process that never
+                # sends `\n` must not grow this buffer without end.
+                raise run_mod._UsageError(
+                    f"serve sent more than {transport.MAX_NDJSON_LINE_BYTES} bytes "
+                    "without completing a response line"
+                )
             buf.extend(chunk)
     finally:
         if canceler is not None:

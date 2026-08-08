@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Iterator
 
 import pytest
+from blake3 import blake3
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.api.errors import (
@@ -36,10 +37,14 @@ from gen_worker.request_context import (
     ConversionContext,
 )
 
-GOOD_DIGEST = "blake3:" + "aa" * 32
+BLOB_BYTES = b"real blob bytes"
+# pgw#1013: the digest ADDRESSES the bytes, and `_download_blob_by_digest`
+# now verifies that. A rig that serves one blob under an arbitrary digest is
+# describing a hub that cannot exist, so the "good" address is derived from the
+# bytes it names.
+GOOD_DIGEST = "blake3:" + blake3(BLOB_BYTES).hexdigest()
 MISSING_DIGEST = "sha256:6f3306ab3b849905dd21c6e3073a2f88a4ae34ac4ee5f3af4bda597f559e9d17"
 FORBIDDEN_DIGEST = "blake3:" + "bb" * 32
-BLOB_BYTES = b"real blob bytes"
 
 
 class _Hub(BaseHTTPRequestHandler):
