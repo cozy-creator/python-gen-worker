@@ -26,8 +26,9 @@
 #       key"). Its only caller is a test.
 #     aot_serve.is_aot_artifact — its own docstring says "kind sniff for the
 #       provision.enable_compiled dispatch". That dispatch does not call it.
-#     aot_declaration.named_dynamic_rows — bridges declaration rows that NAME a
-#       Dim into per-binding DynamicDim rows. Nothing runs it.
+#     aot_declaration.named_dynamic_rows — ✅ DELISTED 2026-08-08 (pgw#1030) by
+#       DELETION. It bridged declaration rows that NAME a Dim into per-binding
+#       DynamicDim rows; nothing ever ran it.
 #
 #   Measured and then dropped (the pgw#848 CP1 shape)
 #     boot_phases.servable_ms — "THE cold-boot number", computed, never read.
@@ -92,7 +93,6 @@
 #     clear them would also clear real hits.
 #
 gen_worker.aot_compile_spans.dark_fraction()
-gen_worker.aot_declaration.named_dynamic_rows()
 gen_worker.aot_inputs.inputs_for()
 gen_worker.aot_inputs.latent_dims()
 gen_worker.aot_package.package_entry_names()
