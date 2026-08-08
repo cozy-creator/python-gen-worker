@@ -477,16 +477,7 @@ class Lifecycle:
         # re-flushes after a reconnect, and the hub upserts on
         # (boot_id, ordinal), so a duplicate delivery is harmless.
         try:
-            loop = asyncio.get_running_loop()
-            boot_mod.bind_sink(self.executor._send, loop)
-            # pgw#803: bind ACTIVITY here too, for the reason the paragraph
-            # above already gives — `Executor.ensure_setup` is after weights
-            # are on disk, so every typed event before that (the transport's
-            # own disconnect/reconnect episode among them) reached only pod
-            # stdout, which on RunPod nobody can read. Binding is idempotent
-            # and survives reconnects; ensure_setup's later call re-binds the
-            # same sink.
-            activity_mod.bind_sink(self.executor._send, loop)
+            boot_mod.bind_sink(self.executor._send, asyncio.get_running_loop())
             # process start -> hello: the first boot number, and the one the
             # hub could previously only infer from pod create -> connect.
             # ONCE per process: this handler runs again on every reconnect, and

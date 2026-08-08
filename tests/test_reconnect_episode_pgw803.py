@@ -43,8 +43,6 @@ from gen_worker.transport import RECONNECT_EVENT, _ReconnectEpisode
 
 from harness.hub_double import hub_double
 
-_TIMEOUT = 30.0
-
 
 def _reconnect_events(msgs: List[pb.WorkerMessage], phase: str) -> List[pb.ActivityUpdate]:
     return [
@@ -115,7 +113,9 @@ def test_a_healthy_episode_accounts_for_all_of_its_gap() -> None:
     ep.teardown_s = 0.01
 
     assert ep.unaccounted_s(0.51) == pytest.approx(0.0, abs=1e-6)
-    assert ep.overshoot_s() < 0.05
+    # The exact difference between what was scheduled and what was slept —
+    # a property of the two recorded numbers, not of the runner's speed.
+    assert ep.overshoot_s() == pytest.approx(0.01, abs=1e-6)
 
 
 def test_attempt_outcomes_coalesce_by_count_never_by_dropping() -> None:
@@ -145,16 +145,20 @@ def test_an_involuntary_drop_and_its_reconnect_both_reach_the_hub() -> None:
     evidence lane, which `reset_for_reconnect` preserves.
 
     (This row does NOT cover the earliest window — a drop before the first
-    `Executor.ensure_setup`, i.e. during the 72-199 s weights fetch. Nothing
-    observes that from here; the activity sink is bound at HelloAck for it, on
-    the same argument `boot_phases` already makes at that call site.)
+    `Executor.ensure_setup`, which is where `activity.bind_sink` runs, i.e.
+    during the 72-199 s weights fetch. Such an episode is logger-only and
+    therefore invisible. Binding the sink at HelloAck instead — the argument
+    `boot_phases` already makes at that call site — fixes it and is NOT done
+    here: it is a process-global rebind that clobbers the `_sink` patch
+    `test_superseded_disk_ref_th1330` installs, so it belongs to whoever owns
+    that surface, not to a transport change.)
     """
     with hub_double(worker_id="pgw803-worker") as (scheduler, _harness):
-        first = scheduler.wait_connection(0, timeout=_TIMEOUT)
+        first = scheduler.wait_connection(0)
         assert first.hello is not None
         first.kill()
 
-        second = scheduler.wait_connection(1, timeout=_TIMEOUT)
+        second = scheduler.wait_connection(1)
 
         def _has_both(_m: pb.WorkerMessage) -> bool:
             return bool(
@@ -162,7 +166,7 @@ def test_an_involuntary_drop_and_its_reconnect_both_reach_the_hub() -> None:
                 and _reconnect_events(second.received, "reconnected")
             )
 
-        second.wait_for(_has_both, timeout=_TIMEOUT)
+        second.wait_for(_has_both)
 
         dropped = _reconnect_events(second.received, "dropped")
         reconnected = _reconnect_events(second.received, "reconnected")
