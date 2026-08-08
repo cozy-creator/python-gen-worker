@@ -31,6 +31,19 @@ In-memory only, deliberately (pgw#869 §1): the worker process did not restart i
 the motivating incident, and a mint is a child of the worker, so a worker restart
 ends the mint anyway. Disk persistence is out of scope and must be argued on its
 own merits, not borrowed from this one.
+
+pgw#803 — THE RECONNECT EPISODE IS A HUB ROW. Every duration in this module is
+retry PACING or an RPC deadline, never a kill decision, and none of them can
+produce th#1333's 15m36s reconnect gap: the backoff is `uniform(0, min(30 s,
+2**attempt))` with `attempt` reset after `_BACKOFF_RESET_AFTER_S` of
+connectedness, a dead peer is called by h2 keepalive within 20 s +
+`KEEPALIVE_TIMEOUT_S`, and a hung dial is cut at `_HELLO_ACK_TIMEOUT_S`. So the
+gap was time the reconnect loop was NOT RUNNING — and nothing recorded that,
+because the loop's narration was `logger.info` on RunPod stdout, which is
+unreadable (gw#640). Each episode now emits two evidence rows (`dropped`, then
+`reconnected`) partitioning the gap into scheduled backoff, slept wall time,
+dial+Hello, teardown, and the remainder. No new bound is introduced anywhere:
+this measures, it never decides.
 """
 
 from __future__ import annotations
@@ -46,6 +59,7 @@ from typing import Any, List, Optional, Tuple
 import grpc
 import grpc.aio
 
+from . import activity as activity_mod
 from .config import Settings
 from .pb import worker_scheduler_pb2 as pb
 from .pb import worker_scheduler_pb2_grpc as pb_grpc
@@ -189,6 +203,93 @@ KEEPALIVE_TIMEOUT_S = 10.0
 #: How long to wait for the peer to end a half-closed call before giving up on
 #: a graceful close. Unchanged value, named so both close paths share it.
 _PEER_CLOSE_WAIT_S = 5.0
+
+#: pgw#803: the typed disconnect/reconnect record. th#1333's tape has a worker
+#: whose stream ended at 17:51:43Z and whose next connect attempt reached the
+#: hub at 18:07:19Z — 15m36s — and NOTHING on either side can say what the pod
+#: did in between. The reconnect loop's own narration is `logger.info` on RunPod
+#: stdout, which is unreadable (gw#640's whole premise), so every investigation
+#: of that gap has been speculation.
+#:
+#: The loop's own constants cannot produce it, and that is the point: the delay
+#: is `uniform(0, min(30s, 2**attempt))` (full jitter, ceiling
+#: :attr:`Transport._backoff_cap` = 30 s), `attempt` resets to 0 after
+#: :data:`_BACKOFF_RESET_AFTER_S` of connectedness, a dead peer is called by
+#: h2 keepalive within `keepalive_time_ms` (20 s) + :data:`KEEPALIVE_TIMEOUT_S`,
+#: and a dial that hangs is cut at :data:`_HELLO_ACK_TIMEOUT_S`. A 936 s gap is
+#: therefore time the reconnect loop WAS NOT RUNNING — a starved event loop, a
+#: frozen process, a drop the socket never surfaced — and the fix for that class
+#: is to make it nameable, not to add another duration.
+#:
+#: So an episode ACCOUNTS for itself: the gap from drop to reconnect is
+#: partitioned into what the loop can prove it spent (backoff sleep, dial+Hello
+#: attempts, teardown) and the remainder. `unaccounted_s` is the diagnostic —
+#: ~0 on a healthy reconnect, ~890 s on the incident — and it introduces no
+#: bound of any kind.
+RECONNECT_EVENT = "worker_reconnect"
+
+
+class _ReconnectEpisode:
+    """One disconnect -> reconnect episode, measured (pgw#803).
+
+    Coalescing is by COUNT, never by dropping: an hour-long hub outage is two
+    hub rows (`dropped`, then `reconnected` carrying the attempt histogram),
+    not one row per attempt — the queue is bounded and a replay storm would
+    cost the very evidence it is made of.
+    """
+
+    __slots__ = (
+        "dropped_at", "cause", "uptime_s", "loop_silent_s",
+        "attempts", "sched_s", "slept_s", "dialed_s", "teardown_s", "outcomes",
+    )
+
+    def __init__(
+        self, *, dropped_at: float, cause: str, uptime_s: float,
+        loop_silent_s: float,
+    ) -> None:
+        self.dropped_at = dropped_at
+        self.cause = cause
+        self.uptime_s = uptime_s
+        #: How stale this process's last PROVEN scheduling instant already was
+        #: when the drop was detected. The heartbeat forces a StateDelta every
+        #: beat in every state, so on a live worker this is ~one beat; a large
+        #: value says the drop was detected late because the process was not
+        #: running, not because the loop was slow to react.
+        self.loop_silent_s = loop_silent_s
+        self.attempts = 0
+        self.sched_s = 0.0
+        self.slept_s = 0.0
+        self.dialed_s = 0.0
+        self.teardown_s = 0.0
+        self.outcomes: "collections.OrderedDict[str, int]" = collections.OrderedDict()
+
+    def note_outcome(self, token: str) -> None:
+        self.outcomes[token] = self.outcomes.get(token, 0) + 1
+
+    def histogram(self) -> str:
+        return ", ".join(f"{k}={v}" for k, v in self.outcomes.items()) or "none"
+
+    def gap_s(self, now: float) -> float:
+        return max(0.0, now - self.dropped_at)
+
+    def overshoot_s(self) -> float:
+        """Slept wall time minus what was actually scheduled.
+
+        An asyncio sleep on a healthy loop overshoots by milliseconds. Minutes
+        of overshoot is a starved loop, and it is the one term that cannot be
+        confused with a slow network or a slow hub.
+        """
+        return max(0.0, self.slept_s - self.sched_s)
+
+    def unaccounted_s(self, now: float) -> float:
+        """Gap time in no measured phase at all — neither sleeping, dialing,
+        nor tearing down. Should be ~0; anything else is a phase this ledger
+        cannot see, and is worth more than a guess about the backoff."""
+        return max(
+            0.0,
+            self.gap_s(now)
+            - self.slept_s - self.dialed_s - self.teardown_s,
+        )
 
 
 class SenderQuiesced(Exception):
@@ -824,6 +925,11 @@ class Transport:
         #: reconnect storm does not emit one event per attempt.
         self._last_credential_left: Optional[float] = None
         self._connected_at: Optional[float] = None  # set on each HelloAck
+        #: pgw#803: last proven scheduling instant (see `_send_loop`).
+        self._last_send_at: Optional[float] = None
+        #: pgw#803: the open disconnect->reconnect episode, if any.
+        self._episode: Optional["_ReconnectEpisode"] = None
+        self._dial_started: float = 0.0
         # gw#640: (message kind, exception class) already dialed to the hub.
         self._reported_handler_failures: set = set()
         # Latest hub-pushed worker JWT (TokenRefresh, contract §1 rotation).
@@ -1128,6 +1234,110 @@ class Transport:
         except Exception:
             logger.warning("handler-failure report raised unexpectedly", exc_info=True)
 
+    # ---- pgw#803: the disconnect/reconnect episode ledger ------------------
+
+    def _open_episode(
+        self, *, dropped_at: float, cause: str, uptime_s: float,
+    ) -> "_ReconnectEpisode":
+        """A stream that HAD reached HelloAck ended: the episode starts here.
+
+        Emitted immediately rather than only at reconnect: the evidence lane
+        survives the disconnect (pgw#869), so the drop is a durable fact even
+        for a pod that dies before it ever gets back — which is the shape
+        th#1333's tape had, and the shape that produced no worker-side row.
+        """
+        last_send = self._last_send_at
+        loop_silent_s = (
+            max(0.0, dropped_at - last_send) if last_send is not None else 0.0)
+        ep = _ReconnectEpisode(
+            dropped_at=dropped_at, cause=cause, uptime_s=uptime_s,
+            loop_silent_s=loop_silent_s)
+        detail = (
+            f"stream dropped after {uptime_s:.1f}s connected — cause={cause} "
+            f"loop_silent={loop_silent_s:.1f}s; reconnecting with full-jitter "
+            f"backoff (ceiling {self._backoff_cap:.3g}s)")
+        logger.warning("[reconnect] %s", detail)
+        activity_mod.emit_event(RECONNECT_EVENT, detail, phase="dropped")
+        return ep
+
+    def _close_episode(
+        self, ep: "_ReconnectEpisode", *, at: float, dial_s: float,
+    ) -> None:
+        """Reconnected. Report the gap AND the partition that explains it."""
+        ep.attempts += 1
+        ep.dialed_s += max(0.0, dial_s)
+        gap = ep.gap_s(at)
+        unaccounted = ep.unaccounted_s(at)
+        overshoot = ep.overshoot_s()
+        detail = (
+            f"reconnected after {gap:.1f}s — cause={ep.cause} "
+            f"attempts={ep.attempts} "
+            f"sched={ep.sched_s:.1f}s slept={ep.slept_s:.1f}s "
+            f"dialed={ep.dialed_s:.1f}s teardown={ep.teardown_s:.1f}s "
+            f"overshoot={overshoot:.1f}s unaccounted={unaccounted:.1f}s "
+            f"loop_silent_at_drop={ep.loop_silent_s:.1f}s; "
+            f"attempt outcomes: {ep.histogram()}"
+        )
+        # `overshoot` and `unaccounted` are the whole reason this row exists:
+        # together they are the part of the gap the reconnect loop cannot
+        # account for, i.e. time it was not running at all. Named on the row so
+        # the next 15-minute gap is read as "the process was not scheduling"
+        # rather than re-litigated as "the backoff must be wrong".
+        starved = overshoot + unaccounted
+        if starved > 0:
+            detail += (
+                f" — {starved:.1f}s of the gap is NOT the reconnect loop's "
+                f"pacing (it was not scheduled: starved event loop, frozen "
+                f"process, or a drop the socket never surfaced)")
+        logger.warning("[reconnect] %s", detail)
+        activity_mod.emit_event(
+            RECONNECT_EVENT, detail, phase="reconnected",
+            duration_ms=int(gap * 1000))
+
+    def _note_connected(self, connected_at: float) -> None:
+        """HelloAck landed. Close any open episode HERE — not when this new
+        stream later ends: a reconnect is news the instant it happens, and a
+        row that waits for the next drop to be emitted arrives after the pod it
+        describes may already be dead."""
+        ep, self._episode = self._episode, None
+        if ep is not None:
+            self._close_episode(
+                ep, at=connected_at,
+                dial_s=connected_at - self._dial_started)
+
+    def _account_connection(
+        self, *, outcome: str, ended_at: float, teardown_s: float,
+    ) -> None:
+        """Fold one ended connection attempt into the ledger.
+
+        ``ended_at`` is when the connection ENDED, i.e. before this iteration's
+        teardown — not "now". The distinction is the accounting: an episode's
+        clock starts at the drop, so charging it a teardown that ran BEFORE its
+        own start would leave that time in `unaccounted` forever, and reading a
+        constant offset there as loop starvation is exactly the wrong answer.
+
+        The episode stays None while this worker has never been connected — a
+        boot dial that has not landed yet is gw#618's subject, not this one.
+        """
+        connected_at = self._connected_at
+        if connected_at is not None:
+            # This attempt reached HelloAck (and `_note_connected` already
+            # closed the previous episode), so the stream that was UP has now
+            # ended: a new episode opens here, AT the end of the stream. Its
+            # teardown is the first thing inside it.
+            self._episode = self._open_episode(
+                dropped_at=ended_at, cause=outcome,
+                uptime_s=max(0.0, ended_at - connected_at))
+            self._episode.teardown_s += teardown_s
+            return
+        ep = self._episode
+        if ep is None:
+            return
+        ep.attempts += 1
+        ep.dialed_s += max(0.0, ended_at - self._dial_started)
+        ep.teardown_s += teardown_s
+        ep.note_outcome(outcome)
+
     async def run(self) -> None:
         """Reconnect until stopped; fatal protocol/auth failures still exit."""
         attempt = 0
@@ -1143,10 +1353,16 @@ class Transport:
             else:
                 target, use_tls = normalize_grpc_addr(self._settings.orchestrator_public_addr)
             self._connected_at = None
+            self._dial_started = time.monotonic()
+            # pgw#803: the classified outcome of THIS attempt. Default names
+            # the clean case — `_connect_once` returning is a stream that ended
+            # without raising.
+            outcome = "stream_ended"
             try:
                 await self._connect_once(target, use_tls)
             except grpc.aio.AioRpcError as e:
                 code, details = e.code(), str(e.details() or "")
+                outcome = f"grpc_{(code.name if code is not None else 'unknown').lower()}"
                 if code == grpc.StatusCode.UNAUTHENTICATED:
                     if self._auth_rejection_is_fatal(details):
                         raise FatalTransportError(
@@ -1194,16 +1410,27 @@ class Transport:
                 raise
             except HandlerError as e:
                 # gw#640: NEVER let this look like a dropped socket again.
+                outcome = f"handler_{e.kind}_{type(e.cause).__name__}"
                 self._report_handler_failure(e)
             except Exception as e:
+                outcome = f"exc_{type(e).__name__}"
                 logger.warning("connection to %s failed: %s: %s", target, type(e).__name__, e)
             finally:
+                teardown_started = time.monotonic()
                 self._connected.clear()
                 await self.queue.reset_for_reconnect()
                 try:
                     await self._handlers.on_disconnect()
                 except Exception:
                     logger.exception("on_disconnect handler failed")
+                # After the reset: the evidence lane this emits into is the one
+                # `reset_for_reconnect` just rebuilt, so the drop row rides the
+                # NEXT stream instead of being cleared by this one's teardown.
+                self._account_connection(
+                    outcome=outcome,
+                    ended_at=teardown_started,
+                    teardown_s=time.monotonic() - teardown_started,
+                )
 
             if self._stopping.is_set():
                 return
@@ -1221,11 +1448,20 @@ class Transport:
             attempt += 1
             self.reconnect_delays.append(delay)
             logger.info("reconnecting in %.2fs (attempt %d)", delay, attempt)
+            slept_from = time.monotonic()
             try:
                 await asyncio.wait_for(self._stopping.wait(), delay)
                 return
             except asyncio.TimeoutError:
                 pass
+            finally:
+                # BOTH the scheduled delay and the slept wall time: on a healthy
+                # loop they agree to milliseconds, and their difference is the
+                # loop starvation this issue exists to name.
+                if self._episode is not None:
+                    self._episode.sched_s += delay
+                    self._episode.slept_s += max(
+                        0.0, time.monotonic() - slept_from)
 
     async def _connect_once(self, target: str, use_tls: bool) -> None:
         """One connection lifetime; sets self._connected_at once HelloAck lands."""
@@ -1276,6 +1512,8 @@ class Transport:
                     "(stale orchestrator build)"
                 )
             self._connected_at = time.monotonic()
+            self._last_send_at = self._connected_at
+            self._note_connected(self._connected_at)
             self._consecutive_auth_failures = 0
             self._first_auth_failure_at = None
             self._auth_credential_id = ""
@@ -1398,6 +1636,13 @@ class Transport:
             if not await self.queue.should_ship_capacity(msg):
                 continue
             await stream.write(msg)
+            # pgw#803: the last instant this process is PROVEN to have been
+            # scheduling. A write into a dead socket still succeeds, so this is
+            # not peer liveness — it is OUR liveness, and that is exactly the
+            # axis th#1333's 15m36s gap turns on. The heartbeat loop forces a
+            # StateDelta every beat in every state, so on a healthy worker this
+            # is never more than one beat stale.
+            self._last_send_at = time.monotonic()
             if kind == _RESULT:
                 await self.queue.mark_result_shipped(msg)
             else:
