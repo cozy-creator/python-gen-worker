@@ -329,6 +329,17 @@ def test_blob_truncated_stream_leaves_nothing_behind(rig: _Rig, tmp_path: Path) 
     assert not (tmp_path / "short.bin.part").exists()
 
 
+def test_blob_empty_blob_is_a_legal_object(rig: _Rig, tmp_path: Path) -> None:
+    """Zero bytes is a real object with a real digest, and zero is not a bound
+    `copy_bounded` accepts. The declared-length refusal must not swallow it —
+    a cap that refuses the empty file is a cap that broke a legal read."""
+    digest = "sha256:" + hashlib.sha256(b"").hexdigest()
+    path = _blob_path(digest)
+    _serve(rig, path, b"")
+    out = _ctx(rig).materialize_blob(digest, tmp_path / "empty.bin")
+    assert out.read_bytes() == b""
+
+
 def test_blob_verification_covers_the_blake3_namespace(rig: _Rig, tmp_path: Path) -> None:
     """Both CAS algorithms the address parser accepts must be hashable here —
     a digest this repo can address but not verify would be a download taken on

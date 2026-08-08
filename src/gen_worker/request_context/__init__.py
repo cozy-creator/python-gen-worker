@@ -1736,7 +1736,7 @@ class _PublisherMixin:
             if resp.status_code < 200 or resp.status_code >= 300:
                 raise RuntimeError(f"blob fetch failed ({resp.status_code}) digest={digest}: {resp.text[:256]}")
             raw_length = str(resp.headers.get("Content-Length") or "").strip()
-            if not raw_length.isdigit() or int(raw_length) <= 0:
+            if not raw_length.isdigit():
                 raise RuntimeError(
                     f"blob fetch refused: digest={digest_norm} came back with no "
                     f"declared length ({raw_length!r}) — nothing bounds the transfer"
@@ -1745,7 +1745,11 @@ class _PublisherMixin:
             _refuse_without_disk_room(tmp.parent, declared, digest_norm)
             try:
                 with open(tmp, "wb") as f:
-                    total = copy_bounded(
+                    # An empty blob is a legal object with a real digest, and
+                    # zero is not a bound `copy_bounded` will accept — writing
+                    # the file and letting the digest check speak is the whole
+                    # of the work here.
+                    total = 0 if declared == 0 else copy_bounded(
                         resp.iter_content(chunk_size=1024 * 1024),
                         f.write,
                         limit_bytes=declared,
