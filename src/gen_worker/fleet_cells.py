@@ -59,7 +59,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 
 from . import activity as activity_mod
-from . import aot_cells, cell_key
+from . import aot_cells, aot_serve, cell_key
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
@@ -210,10 +210,26 @@ _PENDING: Dict[str, "PendingSelfMint"] = {}
 # entries instead of opening a SECOND capture — which, with the first mint's
 # compiled code resident in dynamo's in-memory cache, would capture nothing
 # and disprove itself at finalize (the L4 churn loop).
+#
+# pgw#1033: keyed on the ARM key — the COMPUTED `cell_key.compute` digest the
+# miss path names its pending with — and NOT on the cell's own stamped key.
+# The two are different digest spaces by construction (`kind="inductor"` vs
+# the exported cell's `kind="aot-inductor"`, whose contract axis folds a
+# combined graph hash that does not exist until the export finishes), so a
+# ledger written under the stamped key could never be read by the only caller
+# there is: an arm that has computed its key and not yet minted anything. The
+# VALUE carries the stamped identity (`SelfMint.cell_key`/`.ref`) — this map
+# IS the process's arm-key -> stamped-cell index, and the quarantine gate
+# below reads it for exactly that.
 _FINALIZED: Dict[str, "SelfMint"] = {}
 
 
 def finalized_in_process(key: str) -> Optional["SelfMint"]:
+    """The cell this process already minted and adopted for ARM key ``key``.
+
+    ``key`` is a computed :func:`cell_key.compute` digest (pgw#1033); the
+    returned :class:`SelfMint` carries the artifact's own STAMPED key.
+    """
     with _PENDING_LOCK:
         return _FINALIZED.get(str(key or "").strip())
 
@@ -1030,8 +1046,6 @@ def _arming_policy(
             cache_dir=cache_dir,
         )
         if adopted is not None:
-            from . import aot_serve
-
             try:
                 aot_out, aot_row = _arm_candidate(
                     pipe, cfg, cache_dir, adopted.artifact,
@@ -1214,16 +1228,37 @@ def _arming_policy(
             phase=EagerPhase.KEY_COMPUTATION_FAILED)
 
     # pgw#672: consult the process ledgers BEFORE opening a capture.
+    #
+    # pgw#1033: TWO identities can be quarantined for one arm, and the gate
+    # has to ask about both, because the ledger holds whatever ref actually
+    # failed:
+    #   * the ARM identity — an owed mint that died before it produced
+    #     anything has no cell of its own, so the pending's computed ref is
+    #     what `executor._abandon_pending_mint`'s quarantine writes;
+    #   * the CELL identity — a serve/finalize proof fails on an ARMED
+    #     artifact, whose ref is the exported cell's STAMPED key. That is the
+    #     ref the runtime-guard and boot-proof writers record, and the arm can
+    #     only reach it through `_FINALIZED`, this process's arm-key -> cell
+    #     index. A mint is deterministic in its axes, so re-minting an arm
+    #     whose own cell was just disproven rebuilds the same disproven cell.
     key_ref = f"{cc.system_repo(family)}#{key}"
+    finalized_prior = finalized_in_process(key)
+    quarantined_ref = ""
     if cc.cell_quarantined_in_process(key_ref):
+        quarantined_ref = key_ref
+    elif (finalized_prior is not None
+            and cc.cell_quarantined_in_process(finalized_prior.ref)):
+        quarantined_ref = finalized_prior.ref
+    if quarantined_ref:
         # This exact identity already failed its serve/finalize proof in
         # this process — re-minting it is the churn loop, not recovery.
         # DEGRADE (explicit eager, mandatory lanes included): a broken
         # optimization must never kill a serving worker.
         logger.error(
-            "fleet-cells: declining self-mint for %s key=%s — this identity "
-            "was quarantined by a failed proof in this process; serving "
-            "eager (pgw#672)", family, key)
+            "fleet-cells: declining self-mint for %s key=%s (quarantined "
+            "ref=%s) — this identity was quarantined by a failed proof in "
+            "this process; serving eager (pgw#672)",
+            family, key, quarantined_ref)
         if bucket:
             cc.drop_lora_execution_lane(pipe)
         # pgw#824: the ONE eager exit in this function that never rode a typed
@@ -1232,17 +1267,17 @@ def _arming_policy(
         # is precisely the state the hub most needs named.
         activity_mod.emit_event(
             "self_mint_skipped",
-            f"family={family} key={key} lane="
-            f"{loading.pipeline_weight_lane(pipe) or 'plain'}: this identity "
-            f"was quarantined by a failed serve/finalize proof earlier in this "
-            f"process; re-minting it is the churn loop, so this worker serves "
-            f"eager for the rest of its life and publishes nothing",
+            f"family={family} key={key} quarantined_ref={quarantined_ref} "
+            f"lane={loading.pipeline_weight_lane(pipe) or 'plain'}: this "
+            f"identity was quarantined by a failed serve/finalize proof "
+            f"earlier in this process; re-minting it is the churn loop, so "
+            f"this worker serves eager for the rest of its life and "
+            f"publishes nothing",
             phase=EagerPhase.CELL_QUARANTINED,
         )
         return ArmOutcome(
             armed=False, selection_bug=selection_bug,
             eager_reason=EagerPhase.CELL_QUARANTINED)
-    finalized_prior = finalized_in_process(key)
     if finalized_prior is not None:
         # This process already minted and ADOPTED this exact cell — re-arm
         # the same artifact through the same AOT gates instead of paying a
@@ -1425,12 +1460,23 @@ def adopt_delegated_mint(
     )
     state["minted"] = minted
     state["meta"] = dict(meta)
+    # pgw#1033: this process has now READ a stamped `aot-inductor` key off a
+    # packed envelope, which is the one event that teaches a runtime that a
+    # key-flavored ref names an EXPORTED cell. `aot_cells.discover` registers
+    # the keys it learns for the same reason; a SELF-MINTED cell was the
+    # unregistered half, so the executor's #734/#735 kind dispatch scored this
+    # pod's own `.pt2` by FX cache hits it can never produce.
+    aot_serve.note_aot_key(minted.cell_key)
     # th#1355: the mint cost, banked at the moment the cell becomes real.
     state["mint_duration_ms"] = max(
         0, int((time.monotonic() - pending.armed_at) * 1000))
     _unregister(pending)
     with _PENDING_LOCK:
-        _FINALIZED[key] = minted
+        # pgw#1033: under the ARM key (see `_FINALIZED`). The stamped key is
+        # the VALUE's identity; keying the ledger by it made the memo
+        # unreadable by the only lookup there is, so every same-key re-arm in
+        # this process paid a second full export.
+        _FINALIZED[pending.cell_key] = minted
     logger.info(
         "fleet-cells: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
         "worker served eager throughout and now serves compiled",
