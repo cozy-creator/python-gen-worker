@@ -331,12 +331,76 @@ def test_rule_2_no_false_positive(src: str):
     assert _scan(src) == []
 
 
-def test_rule_2_fires_on_all_four_filed_sites_as_they_were():
-    """The ratchet, proved against history rather than against a fixture.
+# The four loops as they stood at d7881b40, transcribed verbatim from the
+# shipping files (imports and surrounding logic dropped; the loop and the check
+# around it are byte-for-byte). This is the CI-runnable half of the proof — the
+# git-backed test below reads the real files and can only run on a full clone.
+PRE_FIX_SHAPES = {
+    "request_context._download_blob_by_digest": (
+        "def fetch(resp, dest):\n"
+        "    with open(dest, 'wb') as f:\n"
+        "        for chunk in resp.iter_content(chunk_size=1024 * 1024):\n"
+        "            if chunk:\n"
+        "                f.write(chunk)\n"
+    ),
+    "aot_cells whole-file branch": (
+        "def fetch(dl, tmp, want_ref):\n"
+        "    with open(tmp, 'wb') as f:\n"
+        "        for chunk in dl.iter_content(1 << 20):\n"
+        "            f.write(chunk)\n"
+        "    verify_file_digest(tmp, want_ref)\n"
+    ),
+    "models/download._civitai_stream_one": (
+        "def fetch(resp, tmp, h, on_bytes, expected_size, dst):\n"
+        "    written = 0\n"
+        "    with open(tmp, 'wb') as f:\n"
+        "        for chunk in resp.iter_content(chunk_size=4 * 1024 * 1024):\n"
+        "            if not chunk:\n"
+        "                continue\n"
+        "            f.write(chunk)\n"
+        "            h.update(chunk)\n"
+        "            written += len(chunk)\n"
+        "            on_bytes(len(chunk))\n"
+        "    if expected_size and abs(written - expected_size) > 1024:\n"
+        "        raise ValueError('size mismatch')\n"
+    ),
+    "_datasets._download_url_streamed": (
+        "def fetch(resp, tmp, hasher, expected_size):\n"
+        "    total = 0\n"
+        "    with open(tmp, 'wb') as f:\n"
+        "        for chunk in resp.iter_content(chunk_size=1 << 20):\n"
+        "            if not chunk:\n"
+        "                continue\n"
+        "            f.write(chunk)\n"
+        "            total += len(chunk)\n"
+        "            hasher.update(chunk)\n"
+        "    if expected_size is not None and total != int(expected_size):\n"
+        "        raise RuntimeError('shard size mismatch')\n"
+    ),
+}
 
-    Every one of the four sites this issue names is re-read from `origin/master`
-    and run through the guard. A rule that only passes on the fixed tree proves
-    nothing about whether it would have caught the defect.
+
+@pytest.mark.parametrize("site", sorted(PRE_FIX_SHAPES))
+def test_rule_2_fires_on_each_filed_shape(site: str):
+    """The ratchet, on every shape this issue closed.
+
+    A rule that only passes on the fixed tree proves nothing about whether it
+    would have caught the defect. Each of these is the loop the defect actually
+    had, including the post-loop comparison that made it LOOK checked.
+    """
+    findings = _scan(PRE_FIX_SHAPES[site])
+    assert len(findings) == 1, f"{site}: {findings}"
+    assert "streams external bytes" in findings[0]
+
+
+def test_rule_2_fires_on_all_four_filed_sites_as_they_were():
+    """The same proof against the REAL files, which is what keeps the
+    transcriptions above honest — a fixture that drifted from the code it
+    quotes would assert about a shape that never existed.
+
+    Needs the pre-fix commit, so it cannot run on CI's shallow checkout; the
+    parametrized test above is where this property is measured there. That
+    disposition is recorded in `scripts/skip_census.txt`.
     """
     # Pinned rather than derived: `merge-base HEAD origin/master` moves to the
     # fix itself the moment this lands, and the test would then assert the
