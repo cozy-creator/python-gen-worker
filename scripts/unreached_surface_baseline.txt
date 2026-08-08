@@ -26,8 +26,9 @@
 #       key"). Its only caller is a test.
 #     aot_serve.is_aot_artifact — its own docstring says "kind sniff for the
 #       provision.enable_compiled dispatch". That dispatch does not call it.
-#     aot_declaration.named_dynamic_rows — bridges declaration rows that NAME a
-#       Dim into per-binding DynamicDim rows. Nothing runs it.
+#     aot_declaration.named_dynamic_rows — ✅ DELISTED 2026-08-08 (pgw#1030) by
+#       DELETION. It bridged declaration rows that NAME a Dim into per-binding
+#       DynamicDim rows; nothing ever ran it.
 #
 #   Measured and then dropped (the pgw#848 CP1 shape)
 #     boot_phases.servable_ms — "THE cold-boot number", computed, never read.
@@ -50,13 +51,12 @@
 #       aot_compile_pool.free_disk_bytes — ✅ DELISTED 2026-08-02 (pgw#877) by
 #       DELETION, the other way a line leaves this file.
 #     aot_export_parallel.groups / width_for — ✅ DELISTED 2026-08-02 by
-#       WIRING (`5923622`, pgw#868 A4). The audit that filed them found the
-#       producer too: `aot_mint` had been recording `export_peak_device_bytes`
-#       since 0.90.6, which IS `width_for(per_export_device_bytes=)`. Both
-#       halves built, never joined — and `GEN_WORKER_AOT_EXPORT_PARALLEL` was
-#       therefore an inert flag, which is a shape this guard should be taught
-#       to see (a module with NO importer at all, as against a symbol with no
-#       caller).
+#       WIRING (`5923622`, pgw#868 A4), then the MODULE DELETED 2026-08-08
+#       (pgw#1030): the "wiring" fed a report, not a decision — export stayed
+#       unconditionally serial and nothing consumed `decide()`'s six floats.
+#       The 2026-08-02 note asked for the guard to be taught to see "a module
+#       with NO importer at all"; this deletion is that lesson applied by
+#       hand.
 #
 #   ⚠️ KNOWN BLIND SPOT — the wrapper exemption clears the WRONG function
 #
@@ -93,7 +93,6 @@
 #     clear them would also clear real hits.
 #
 gen_worker.aot_compile_spans.dark_fraction()
-gen_worker.aot_declaration.named_dynamic_rows()
 gen_worker.aot_inputs.inputs_for()
 gen_worker.aot_inputs.latent_dims()
 gen_worker.aot_package.package_entry_names()

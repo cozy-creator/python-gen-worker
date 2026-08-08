@@ -121,12 +121,8 @@ class ExportSpec:
     precision: str = "bf16"
     lora_bucket: int = 0
     shapes: Tuple[Tuple[int, ...], ...] = ()
-    #: Traced batch. 0 = the family's input builder decides. Declared rather
-    #: than inferred from ``guidance_scales`` because CFG batching is a FAMILY
-    #: fact: sdxl runs CFG as one batch-2 forward, wan as two sequential batch-1
-    #: forwards, so guidance changes wan's call COUNT and not its shape
-    #: (ie#566 G2).
-    batch: int = 0
+    # (pgw#1030: `batch` deleted — zero readers. The traced batch is a
+    # declared GraphClass coordinate since pgw#739, not a spec field.)
     text_lens: Tuple[int, ...] = ()
     guidance_scales: Tuple[float, ...] = ()
     dynamic: Tuple[DynamicDim, ...] = ()

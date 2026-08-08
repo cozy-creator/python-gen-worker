@@ -857,11 +857,6 @@ def delegation_refusal(pipe: Any, cfg: Any) -> str:
     return ""
 
 
-def delegatable(pipe: Any, cfg: Any) -> bool:
-    """Bool form of :func:`delegation_refusal` (pgw#784 call sites)."""
-    return not delegation_refusal(pipe, cfg)
-
-
 def _arm_candidate(
     pipe: Any,
     cfg: Any,
@@ -1864,7 +1859,6 @@ __all__ = [
     "PendingSelfMint",
     "SelfMint",
     "abandon_self_mint",
-    "delegatable",
     "delegation_refusal",
     "enable_compiled",
     "finalized_in_process",

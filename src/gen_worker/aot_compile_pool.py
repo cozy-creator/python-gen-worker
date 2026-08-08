@@ -200,9 +200,8 @@ DEVICE_RESERVE_BYTES = 2 * 1024**3
 #: conditions, so ``free_vram <= 0`` short-circuited before the fallback could
 #: be consulted. A constant nothing can reach still reads as a policy, and
 #: this one read as "8 GiB is a reasonable entry". Deleted; a readable card
-#: with no footprint now refuses to widen instead — the rule
-#: ``aot_export_parallel.width_for`` already states for the export footprint,
-#: because the failure mode of guessing here is an OOM on paid work.
+#: with no footprint now refuses to widen instead, because the failure mode
+#: of guessing here is an OOM on paid work.
 
 #: Programs staged AHEAD of the running set. The export loop hands the pool
 #: every entry at once; staging them all would put ~46 GB of exported programs
@@ -1077,8 +1076,6 @@ def child_env(
       from any process). Sharing it is what lets children recover the
       cross-entry kernel dedup a serial loop got from one warm process, and
       it is how the parent reads the loose files the children produced.
-    * ``GEN_WORKER_AOT_ENTRY_CHILD=1`` so anything that must not run twice on
-      a pod can tell.
     * ``GEN_WORKER_SEAL_LIB_MEMO`` (pgw#832), when the pool seeded one: the
       parent's toolchain digests, so the child's ``env_seal.establish()``
       stats instead of re-hashing 4 GB. A LOCATION of digests, never a
@@ -1095,7 +1092,8 @@ def child_env(
       backstop that proves it rather than assuming it.
     """
     env = dict(os.environ if base is None else base)
-    env["GEN_WORKER_AOT_ENTRY_CHILD"] = "1"
+    # (pgw#1030: the GEN_WORKER_AOT_ENTRY_CHILD marker is deleted — written
+    # for four months, read by nothing.)
     if cache_dir:
         env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_dir)
     if seal_memo:
@@ -1268,7 +1266,6 @@ class EntryCompilePool:
         inductor_configs: Optional[Mapping[str, Any]] = None,
         cache_dir: str = "",
         python: str = "",
-        resume_dir: str = "",
     ) -> None:
         self.workdir = Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -1288,11 +1285,13 @@ class EntryCompilePool:
         self._apply_simultaneity_bound()
         self._emit_width("construction")
         self.inductor_configs = dict(inductor_configs or {})
-        # pgw#848 item 5: the crash-only half. `bank` is None on every path
-        # that was not told a stable root, and then this class behaves exactly
-        # as it did before — no admission pass, no hashing, no copies.
+        # pgw#848 item 5: the crash-only half. `bank` is None whenever the
+        # process was not given a stable root (`aot_resume.set_root`, the one
+        # production wiring — pgw#1030 deleted the redundant `resume_dir`
+        # param), and then this class behaves exactly as it did before — no
+        # admission pass, no hashing, no copies.
         self.bank = aot_resume.open_bank(
-            resume_dir, inductor_configs=self.inductor_configs)
+            inductor_configs=self.inductor_configs)
         #: entry -> the graph hash re-derived at admission, so `_collect` can
         #: bank the finished files under an identity the parent computed from
         #: the program it exported (never one read back from an artifact).

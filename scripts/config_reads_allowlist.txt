@@ -59,7 +59,7 @@ src/gen_worker/env_seal.py::COZY_CELL_EPOCH VIOLATION COZY_CELL_EPOCH is an axis
 src/gen_worker/entrypoint.py::$var VIOLATION writes TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR from a computed path. Legitimate library steering, but belongs in the one Settings-derived torch_env() builder rather than here.
 
 src/gen_worker/topology.py::<unresolved> VIOLATION binds the WHOLE environment as the default source and reads WORKER_EXECUTION_TOPOLOGY out of it. The hub-delivered topology has no Settings field; absent is legal and means one slot, so a misspelling silently serves one card on a multi-GPU pod.
-src/gen_worker/aot_compile_pool.py::<unresolved> IPC seeds the AOT entry child's env from this process's, then sets GEN_WORKER_AOT_ENTRY_CHILD. Parent-to-child handoff; the inherited base is the denylist shape above.
+src/gen_worker/aot_compile_pool.py::<unresolved> IPC seeds the AOT entry child's env from this process's (TORCHINDUCTOR_CACHE_DIR, seal memo). Parent-to-child handoff; the inherited base is the denylist shape above.
 src/gen_worker/mint_process.py::<unresolved> IPC seeds the mint child's env, then sets GEN_WORKER_MINT_CHILD. Same handoff shape.
 src/gen_worker/runtimes/server.py::<unresolved> IPC seeds an engine-server subprocess's env. The engine is a third-party binary configured by environment; there is no other API.
 src/gen_worker/subproc.py::<unresolved> IPC seeds a per-invoke subprocess's env in order to set GEN_WORKER_CONFIG_SNAPSHOT_PATH. §1.18 ownership test FAILS with its sibling at :144 - the snapshot path originates in Settings.
@@ -134,7 +134,7 @@ src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODE_CONCURRENCY STANDALONE G
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS STANDALONE GEN_WORKER_NATIVE_KERNELS, same measured-then-requested ruling as the video encoder.
 src/gen_worker/models/svdq.py::GEN_WORKER_SVDQ_ENGINE STANDALONE GEN_WORKER_SVDQ_ENGINE, same measured-then-requested ruling.
 src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_MAX_BYTES STANDALONE GEN_WORKER_MINT_RESUME_MAX_BYTES, resume-area capacity bound.
-src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_DIR STANDALONE GEN_WORKER_MINT_RESUME_DIR. pgw#929: the ENABLE used to be hidden inside an empty string; `resume_enabled()` now states it.
+src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_DIR STANDALONE GEN_WORKER_MINT_RESUME_DIR. Operator override for the resume root; production wiring is `aot_resume.set_root` (pgw#1030 deleted the zero-caller `resume_enabled()` wrapper — `open_bank` states the decision).
 
 # ---------------------------------------------------------------------------
 # TRIPWIRE — guards whose entire purpose is to fire on a misconfiguration.

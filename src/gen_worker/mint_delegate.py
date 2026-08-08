@@ -65,11 +65,6 @@ def delegation_refusal() -> str:
     return ""
 
 
-def delegated() -> bool:
-    """Whether a compile-cell miss should be minted out of process."""
-    return not delegation_refusal()
-
-
 @dataclass(frozen=True)
 class MintTask:
     """Everything the serving process knows that the child needs.
@@ -518,6 +513,5 @@ __all__ = [
     "build_cell",
     "build_request",
     "cfg_spec",
-    "delegated",
     "scratch_root",
 ]

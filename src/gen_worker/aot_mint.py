@@ -101,7 +101,7 @@ from typing import (
 
 from . import activity as activity_mod
 from . import (
-    aot_compile_pool, aot_export_parallel, aot_package,
+    aot_compile_pool, aot_package,
     aot_serve, aot_wrapper_split, cell_key, graph_hash, kernel_path)
 from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
@@ -1014,7 +1014,6 @@ def _export_entry(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     compile_now: bool = True,
-    rows: int = 0,
 ) -> _MintedEntry:
     """Resolve, feed, (warm,) export, gate, and compile ONE declared graph
     class. Every refusal is prefixed with the entry name — a multi-graph
@@ -1732,10 +1731,10 @@ class _ExportFootprint:
 
     That is a cumulative high-water across 36 rows *including* the resident
     module — so dividing free VRAM by it answers "how many whole mint children
-    fit", which is 1, forever. ``aot_export_parallel.width_for`` then returned
-    1 with ``binding='export-footprint-unmeasured'`` and the feature could
-    never turn on. The number was not missing; it was the wrong number, and
-    nothing said so.
+    fit", which is 1, forever. The width rule (``aot_export_parallel``,
+    deleted by pgw#1030 — export stayed serial and nothing consumed its
+    decision) then returned 1 with ``binding='export-footprint-unmeasured'``.
+    The number was not missing; it was the wrong number, and nothing said so.
 
     A row's DELTA over the resident baseline is the right one: it is what a
     worker adds to a card that already holds the module it traces. Export runs
@@ -1946,9 +1945,7 @@ def _mint_cell(
     # figure: export traces with FAKE tensors and executes no kernel, so the
     # compile pool's `weights * 1.25 + 5 GiB` — whose activation and workspace
     # terms are INDUCTOR'S, and ~56 % of which was never observed — does not
-    # describe it. That is exactly why `aot_export_parallel.width_for()`
-    # returns 1 while this is unknown rather than guessing and OOMing a
-    # 74-minute phase. A probe: it reads and clears a counter and decides
+    # describe it. A probe: it reads and clears a counter and decides
     # nothing (pgw#830 — instrument first, optimise never in the same change).
     try:
         import torch as _t
@@ -1983,7 +1980,7 @@ def _mint_cell(
                 minted.append(_export_entry(
                     pipeline, spec, plan, decl,
                     inductor_configs=inductor_configs,
-                    compile_now=not parallel, rows=len(rows)))
+                    compile_now=not parallel))
     finally:
         if disarmed:
             _arm_branches(pipeline, int(spec.lora_bucket or 0))
@@ -2023,19 +2020,11 @@ def _mint_cell(
         # sizes a pool — and the width rule spent its whole life dividing by
         # the first one, which is why it always answered 1.
         timings.update(export_footprint.facts())
-        # pgw#868 A4: THE CONNECTION. The probe above is exactly
-        # `aot_export_parallel.width_for(per_export_device_bytes=)`. Both were
-        # built and neither ever called the other, so the flag was inert.
-        # Recorded on EVERY mint, flag or no flag: the DECISION is the
-        # observable, and a reader must be able to see what width export would
-        # have run at — and which fact bound it — from a mint that changed
-        # nothing.
-        try:
-            timings.update(aot_export_parallel.decide(
-                rows, timings, census=export_footprint.census))
-        except Exception:  # noqa: BLE001 — telemetry never fails a mint
-            logger.debug("aot-mint: export-parallel decision failed",
-                         exc_info=True)
+        # pgw#1030: `aot_export_parallel.decide(...)` was recorded here —
+        # six floats describing the width a PARALLEL export would have run
+        # at. Export is unconditionally serial (the loop above), nothing
+        # ever consumed the decision, and the module duplicated the compile
+        # pool's card-budget logic. Deleted with the module.
         progress.beat(
             PHASE_INDUCTOR_COMPILE, 0, len(minted),
             f"{len(minted)} entries, {width.workers} wide")
@@ -3290,7 +3279,6 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
         precision=str(body.get("precision") or "bf16"),
         lora_bucket=int(body.get("lora_bucket") or 0),
         shapes=tuple(tuple(int(v) for v in row) for row in body.get("shapes") or ()),
-        batch=int(body.get("batch") or 0),
         text_lens=tuple(int(v) for v in body.get("text_lens") or ()),
         guidance_scales=tuple(float(v) for v in body.get("guidance_scales") or ()),
         specialization=dict(body.get("specialization") or {}),
