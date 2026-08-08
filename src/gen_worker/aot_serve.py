@@ -88,6 +88,7 @@ from typing import (
 
 from . import activity as activity_mod
 from . import aot_flatten
+from . import aot_identity
 from . import host_isa
 from .cell_adopt import AdoptOutcome
 from . import shape_growth
@@ -972,12 +973,20 @@ class _StagedAotArtifact:
 
 def stage_artifact(
     artifact: Path, family: str, cache_dir: Optional[Path] = None,
+    *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
 ) -> _StagedAotArtifact:
     """Extract and runtime-verify a complete artifact in an isolated tree.
 
     The live/shared cache and pipeline remain untouched on every rejection.
     Concurrent attempts use distinct trees; a process crash can leave only
     an unreferenced staging directory, never a partially published ``.pt2``.
+
+    ``expected`` (pgw#903) is the identity the current ``ExecutionSpec`` named.
+    When supplied, this artifact must BE that one — a declared-identity
+    comparison, never a byte comparison (§4.25/§4.26: two mints of one key
+    legitimately differ, pgw#1006 measured it). ``None`` is the pre-cutover
+    RunJob path, where no immutable spec exists to compare against; it leaves
+    behaviour byte-identical rather than inventing an expectation.
     """
     base = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
     base.mkdir(parents=True, exist_ok=True)
@@ -993,6 +1002,15 @@ def stage_artifact(
         reason = verify(meta, family=family)
         if reason:
             raise AdoptError("key_mismatch", reason)
+        # pgw#903: "can this runtime execute it" is answered above; this
+        # answers "is it the artifact the spec named", which nothing asked
+        # before there was an immutable spec to ask against. Its own reason
+        # class: a runnable cell that is the WRONG cell is a different bug,
+        # a different owner and a different fix from an unrunnable one.
+        if expected is not None:
+            mismatch = aot_identity.verify_declared_identity(meta, expected)
+            if mismatch:
+                raise AdoptError("expected_identity_mismatch", mismatch)
         # pgw#765: the GPU-architecture axis as the BYTES declare it, ruled
         # on by name before dlopen — the tier that keeps cross-SKU adoption
         # honest now that ``sku`` no longer stands in for the arch. Runs
@@ -2127,6 +2145,7 @@ def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
 
 def load_and_wrap(
     pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None,
+    *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
 ) -> Dict[str, Any]:
     """Stage + verify + load EVERY named entry + BIND all constants, then
     perform the live wraps (pgw#758: one resident artifact serves every
@@ -2137,9 +2156,14 @@ def load_and_wrap(
     bind before ANY wrap: a cell that cannot arm one of its graph classes
     arms none of them — a partially served contract would be a silent
     subset of what the cell key advertises.
+
+    ``expected`` (pgw#903) is checked inside :func:`stage_artifact`, i.e.
+    strictly before the first ``_load_package`` — the identity question must be
+    settled while the artifact is still inert bytes.
     """
     family = str(getattr(cfg, "family", "") or "")
-    staged = stage_artifact(Path(artifact), family, cache_dir=cache_dir)
+    staged = stage_artifact(
+        Path(artifact), family, cache_dir=cache_dir, expected=expected)
     try:
         meta = staged.metadata
         try:
