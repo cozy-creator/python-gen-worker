@@ -404,24 +404,85 @@ def test_the_dropped_child_can_still_write_the_config_snapshot(dropped):
     )
 
 
-def _reap_state(proc: Any, pid: int) -> str:
-    """``running`` -> ``exited`` -> ``reaped``, read from the process table.
+def _reap_state(proc: Any, pid: int, *, parent_alive: bool) -> str:
+    """``running`` -> ``reaped``, with THIS process doing the collecting once
+    nothing else can.
 
     pgw#956: ``proc.returncode`` is asyncio bookkeeping delivered to the parent's
-    loop by the child-watcher thread, and ``ThreadedChildWatcher._do_waitpid``
-    DROPS that delivery when the loop has already closed. So it can confirm a
-    reap and never deny one — under load it stays None permanently on a child
-    the kernel did reap, which no amount of re-reading recovers.
+    loop by the child watcher, and the watcher DROPS that delivery once the loop
+    has closed. So it can confirm a reap and never deny one, and this helper must
+    read the process table instead.
+
+    pgw#1024 measured where that lands under CPU starvation: the parent thread
+    exits, its loop closes with the child's exit still undelivered, and from then
+    on there is no reaper left in this process at all — the child sits as a
+    zombie for the rest of the run and a poll on the process table reports
+    ``exited`` forever. Waiting longer cannot fix a delivery that can never
+    arrive, and a longer window would only be tolerance for it.
+
+    So: while the parent lives, its loop owns the child and we LOOK (``WNOWAIT``
+    leaves the status for it). Once the parent is gone this process is the only
+    reaper there is, so it reaps. That keeps the property this row measures — the
+    child, running at another uid, really died when root signalled it, and a
+    child that ignored the signal still reads ``running`` and still fails — and
+    drops only the bookkeeping question of which thread called wait().
     """
     if proc.returncode is not None:
         return "reaped"
+    if parent_alive:
+        try:
+            info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return "reaped"      # no longer our child: somebody here reaped it
+        return "running" if info is None else "exited"
     try:
-        # WNOWAIT leaves the status for the watcher thread; ChildProcessError
-        # means it is no longer our child, i.e. somebody in this process reaped.
-        info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        collected, _status = os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
-        return "reaped"
-    return "running" if info is None else "exited"
+        return "reaped"          # the watcher won the race; equally collected
+    return "reaped" if collected == pid else "running"
+
+
+class _UndeliveredExit:
+    """An asyncio Process whose exit was never delivered — pgw#956's drop."""
+
+    returncode = None
+
+
+def test_a_zombie_no_loop_can_report_is_collected_here_rather_than_waited_on():
+    """pgw#1024's mechanism and its fix, without having to lose the coin flip.
+
+    The row below could only be measured on a runner that happened to starve, so
+    build the end state directly: a child NO child-watcher is tracking, i.e. what
+    a parent loop that closed before the exit arrived leaves behind. Nothing in
+    this process will ever call ``wait()`` on it, so ``exited`` is not a stage it
+    passes through — it is where it stops, and the previous helper's wait could
+    only end in its staleness window. The fix is that once the parent can no
+    longer deliver, this process collects.
+    """
+    proc = _UndeliveredExit()
+    pid = os.posix_spawn("/bin/sleep", ["sleep", "600"], {})
+    try:
+        # While a parent could still deliver, the helper LOOKS and does not take.
+        assert _reap_state(proc, pid, parent_alive=True) == "running"
+        os.kill(pid, 9)
+        await_progress(
+            lambda: _reap_state(proc, pid, parent_alive=True),
+            lambda seen: seen == "exited",
+            what="the unwatched child to become a zombie nobody collects",
+            cadence=Cadence(),
+        )
+        # ...and it STAYS there: no watcher, no loop, no later reader recovers it.
+        assert _reap_state(proc, pid, parent_alive=True) == "exited"
+
+        # The parent is gone. This process is the only reaper there is.
+        assert _reap_state(proc, pid, parent_alive=False) == "reaped"
+        assert _reap_state(proc, pid, parent_alive=False) == "reaped"
+        assert _reap_state(proc, pid, parent_alive=True) == "reaped"
+        pid = 0
+    finally:
+        if pid:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
 
 
 @root_only
@@ -439,8 +500,15 @@ def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
     # and the child was reaped, so wait on THAT advancing; a hang fails by never
     # reaping, which is the actual defect.
     dropped.close()
+
+    def observe() -> tuple:
+        # One read of the parent's liveness for both halves: the answer to
+        # "may the loop still deliver?" decides whether we look or collect.
+        alive = dropped.alive
+        return alive, _reap_state(proc, pid, parent_alive=alive)
+
     await_progress(
-        lambda: (dropped.alive, _reap_state(proc, pid)),
+        observe,
         lambda seen: seen == (False, "reaped"),
         what="the parent to exit after SIGTERM and the dropped child to be reaped",
         cadence=Cadence(),
