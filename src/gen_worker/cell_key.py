@@ -6,7 +6,7 @@ and every consumer of cell identity uses the same code:
 
 * the fleet executor advertises the key it wants (pull-by-key: the hub
   serves bytes by key or records demand for the forge; it never matches);
-* the production mint (``compile_cache.build``) stamps the key it actually
+* the production mint (``aot_mint.mint``) stamps the key it actually
   produced, derived from the artifact's own recorded axes;
 * cozy-local's self-mint (gw#555) looks up / saves its store by the same
   key.

@@ -74,12 +74,10 @@ import sys
 from . import cell_key, env_seal, guard_closure, hot_swap
 from .api.errors import RetryableError
 from .models import w8a8_lora
-from .models.loading import load_from_pretrained, pipeline_weight_lane
-from .models.loading import pipeline_weight_lane as _traced_execution_lane
-from .models.memory import low_vram_mode, place_pipeline, reconcile_resident_mode
+from .models.loading import pipeline_weight_lane
+from .models.memory import low_vram_mode, reconcile_resident_mode
 from .models.refs import parse_model_ref
 from .models.w8a8_lora import RANK_BUCKETS
-from .registry import CompileCell
 from .models import execution_lanes as lanespec
 from .models import loading as _loading
 
@@ -95,8 +93,8 @@ _MARKER_ATTR = "_cozy_compile"
 _JUNK_SUFFIXES = (".lock", ".tmp", ".pid")
 # Cache directories and torch's in-process cache latches are process-global.
 # Serialize the complete seed+arm transaction so another setup can never arm
-# against a half-merged artifact. RLock keeps prepare -> seed_artifact and
-# seed_artifact -> capture_env composable without another configuration layer.
+# against a half-merged artifact. RLock keeps seed_artifact -> capture_env
+# composable without another configuration layer.
 _SEED_ARM_LOCK = threading.RLock()
 _LOCK_TYPE = type(threading.Lock())
 
@@ -374,10 +372,6 @@ def tenant_serve_window() -> Iterator[None]:
         _SERVE_WINDOW.reset(token)
 
 
-def in_tenant_serve_window() -> bool:
-    return _SERVE_WINDOW.get()
-
-
 @contextlib.contextmanager
 def _fail_on_recompile() -> Iterator[bool]:
     """Arm the serve-window recompile stance for the calling thread.
@@ -458,11 +452,6 @@ def set_guard_miss_callback(
         return False
     signal["on_guard_miss"] = callback
     return True
-
-
-def guard_miss_count(pipeline: Any) -> int:
-    """Serve-time guard misses observed on this exact pipeline's guards."""
-    return _proof_count(pipeline, "guard_misses")
 
 
 def _record_guard_miss(
@@ -763,11 +752,13 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
 # static analysis, and that is our unique identifier." The closure is the
 # import graph reachable from the compile/composition entrypoints, resolved
 # by AST inspection only (no execution): every reached source file is
-# content-digested, and the sorted (module-path, digest) list digests into
-# the ``code_closure`` axis. Paul's root-imports convention (top-of-file
-# imports, no runtime imports) is exactly what makes this static graph
-# SOUND — and the mint-time completeness gate below turns that convention
-# into a hard check where the key's honesty depends on it.
+# content-digested, and the sorted (module-path, digest) list is recorded as
+# the ``code_closure`` metadata block. pgw#990 demoted it from a key axis to a
+# MEMO — a source-file content hash is not identity — so what follows is
+# observability, and the completeness gate that guarded the memo's honesty went
+# with the honesty requirement (pgw#1035). Paul's root-imports convention
+# (top-of-file imports, no runtime imports) is what makes the static graph
+# sound in the first place.
 
 _CLOSURE_ENTRYPOINTS = (
     "gen_worker.compile_cache",
@@ -826,18 +817,22 @@ def _static_imports(path: Path, module_name: str) -> set[str]:
     return out
 
 
-@functools.lru_cache(maxsize=32)
-def static_code_closure(roots: Tuple[str, ...] = ()) -> Tuple[Tuple[str, str], ...]:
+@functools.lru_cache(maxsize=1)
+def static_code_closure() -> Tuple[Tuple[str, str], ...]:
     """The recipe's code identity: sorted (module path, content digest) of
-    every source file statically reachable from the compile entrypoints
-    (plus ``roots`` — the ENDPOINT modules, whose source shapes the traced
-    graphs too). Restricted to the gen_worker package and the root
-    packages; torch/diffusers/transformers content rides the ``toolchain``
-    axis at package granularity instead. Deterministic: module-derived
-    relative paths, sorted, content digests — never absolute paths, never
-    bytecode."""
-    packages = {"gen_worker"} | {r.split(".", 1)[0] for r in roots if r}
-    queue: List[str] = list(_CLOSURE_ENTRYPOINTS) + [r for r in roots if r]
+    every source file statically reachable from the compile entrypoints.
+    Restricted to the gen_worker package; torch/diffusers/transformers content
+    rides the ``toolchain`` axis at package granularity instead. Deterministic:
+    module-derived relative paths, sorted, content digests — never absolute
+    paths, never bytecode.
+
+    A MEMO, not identity (pgw#990) — recorded in metadata, in no key. pgw#1035
+    dropped the ``roots`` parameter with the last caller that passed one: the
+    endpoint-closure widening only ever fed the ``code_closure`` envelope block
+    pgw#1034 deleted, and the completeness gate that read it.
+    """
+    packages = {"gen_worker"}
+    queue: List[str] = list(_CLOSURE_ENTRYPOINTS)
     seen: set[str] = set()
     out: Dict[str, str] = {}
     while queue:
@@ -860,45 +855,6 @@ def static_code_closure(roots: Tuple[str, ...] = ()) -> Tuple[Tuple[str, str], .
         out[rel] = _closure_file_digest(str(path), st.st_mtime_ns, st.st_size)
         queue.extend(_static_imports(path, name))
     return tuple(sorted(out.items()))
-
-
-def closure_completeness_gap(roots: Tuple[str, ...] = ()) -> List[str]:
-    """Loaded modules inside the composition namespaces that the static
-    import walk cannot see. NOT a mint gate (Paul's pgw#990 ruling demoted the
-    closure to a possible future memo — this check's only job was memo
-    honesty, so it rides the deferred memo issue): kept as diagnostics for
-    that issue. Note the live finding it produced: executor-side models/*
-    modules (disk_gc, lane_gate, ...) load outside the composition walk,
-    so any future memo scope must be the walk's namespaces, not the
-    package prefix."""
-    static = {rel for rel, _digest in static_code_closure(tuple(roots))}
-    scope_prefixes = ("gen_worker.models",) + _CLOSURE_ENTRYPOINTS + tuple(
-        r for r in roots if r)
-    gaps: List[str] = []
-    for name, module in sorted(sys.modules.items()):
-        if module is None:
-            continue
-        if not any(name == p or name.startswith(p + ".")
-                   for p in scope_prefixes):
-            continue
-        file = getattr(module, "__file__", None)
-        if not file or not str(file).endswith(".py"):
-            continue
-        rel = name.replace(".", "/") + (
-            "/__init__.py" if Path(str(file)).name == "__init__.py" else ".py")
-        if rel not in static:
-            gaps.append(name)
-    return gaps
-
-
-def assert_closure_complete(roots: Tuple[str, ...] = ()) -> None:
-    gaps = closure_completeness_gap(roots)
-    if gaps:
-        raise RuntimeError(
-            f"code-closure completeness gate: {len(gaps)} loaded "
-            f"module(s) outside the static import closure — a dynamic "
-            f"import is hiding trace-relevant code from the recipe key: "
-            f"{gaps[:10]!r}")
 
 
 @functools.lru_cache(None)
@@ -1041,7 +997,7 @@ def artifact_metadata(
     # gw#581/th#883: stamp the worker-owned cell key the recorded axes
     # describe. Derived FROM the metadata (never probed separately), so the
     # stamp can never disagree with the axes it summarizes. Callers that
-    # later override a key axis (build()'s serving image digest) re-stamp.
+    # later override a key axis re-stamp.
 
     return cell_key.stamp(meta)
 
@@ -1582,54 +1538,6 @@ def _fx_entry_lines(data: bytes) -> Tuple[str, list]:
     return key, lines
 
 
-def artifact_fx_lines(artifact: Path) -> Dict[str, list]:
-    """key -> FxGraphHashDetails lines for every fxgraph entry in a cell."""
-    out: Dict[str, list] = {}
-    try:
-        with tarfile.open(Path(artifact), mode="r:*") as tar:
-            for member in tar:
-                parts = PurePosixPath(member.name).parts
-                if (
-                    len(parts) < 4
-                    or parts[:2] != ("inductor", "fxgraph")
-                    or not member.isfile()
-                ):
-                    continue
-                f = tar.extractfile(member)
-                if f is None:
-                    continue
-                try:
-                    key, lines = _fx_entry_lines(f.read())
-                except Exception:
-                    continue
-                if key and lines:
-                    out.setdefault(key, lines)
-    except Exception:
-        logger.debug("fx forensics: artifact unreadable", exc_info=True)
-    return out
-
-
-def live_fx_lines(inductor_dir: Optional[Path] = None) -> Dict[str, list]:
-    """key -> FxGraphHashDetails lines from the live inductor cache dir
-    (defaults to the seeded ``TORCHINDUCTOR_CACHE_DIR``)."""
-    out: Dict[str, list] = {}
-    base = Path(inductor_dir) if inductor_dir else Path(
-        os.environ.get("TORCHINDUCTOR_CACHE_DIR", ""))
-    fx_root = base / "fxgraph"
-    if not str(base) or not fx_root.is_dir():
-        return out
-    for entry in sorted(fx_root.glob("*/*/*")):
-        if not entry.is_file() or entry.name.startswith("."):
-            continue
-        try:
-            key, lines = _fx_entry_lines(entry.read_bytes())
-        except Exception:
-            continue
-        if key and lines:
-            out.setdefault(key, lines)
-    return out
-
-
 _FX_COMPONENT_RE = re.compile(r"\A\[(\S+)\]\s+([^:]+):\s?(.*)\Z", re.DOTALL)
 
 
@@ -2063,37 +1971,6 @@ def execution_lane_drift(meta: Dict[str, Any], pipeline: Any) -> str:
     if want != have:
         return f"weight_lane {want!r} != pipeline {have!r}"
     return ""
-
-
-def prepare(
-    family: str,
-    cache_dir: Optional[Path] = None,
-    artifact: Optional[Path] = None,
-) -> Optional[Dict[str, Any]]:
-    """Verify and seed one explicitly delivered artifact for this runtime.
-
-    Production obtains ``artifact`` from Tensorhub's immutable RunJob/
-    DesiredInstance snapshot attachment. Local tooling passes an explicit path
-    or uses the explicit local-cell store; environment fallbacks deliberately
-    do not participate in serving placement.
-    """
-    try:
-        if artifact is None:
-            logger.info("compile-cache: no delivered artifact; staying eager")
-            return None
-        artifact = Path(artifact)
-        if not artifact.exists():
-            logger.warning("compile-cache: attached artifact %s does not exist", artifact)
-            return None
-        meta = seed_artifact(artifact, family, cache_dir=cache_dir)
-        logger.info(
-            "compile-cache: seeded verified artifact (sku=%s torch=%s shapes=%s)",
-            meta.get("sku"), meta.get("torch"), meta.get("shapes"),
-        )
-        return meta
-    except Exception as exc:
-        logger.warning("compile-cache: artifact unusable (%s); staying eager", exc)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -2966,10 +2843,6 @@ def disable_process_compiles(reason: str) -> None:
             _PROCESS_COMPILES_DISABLED)
 
 
-def process_compiles_disabled() -> str:
-    return _PROCESS_COMPILES_DISABLED
-
-
 def operator_eager_pin(pipeline: Any) -> bool:
     """True when the hub-resolved execution lane stamped on ``pipeline`` was
     OPERATOR-PINNED to the eager execution axis (pgw#714 kill switch)."""
@@ -3663,224 +3536,6 @@ def _warm_call(
         pipe(**kwargs, guidance_scale=scale)
 
 
-def build(
-    model_path: str | Path,
-    out_dir: str | Path,
-    *,
-    shapes: Iterable[Tuple[int, ...]],
-    targets: Iterable[str] = ("transformer", "vae.decode"),
-    guidance_scales: Iterable[float] = (),
-    text_len: Optional[int] = None,
-    text_lens: Iterable[int] = (),
-    dynamic: Iterable[Any] = (),
-    family: str = "",
-    source_ref: str = "",
-    source_digest: str = "",
-    dtype: str = "bf16",
-    storage_dtype: str = "",
-    regional: bool = False,
-    steps: int = 2,
-    prompt: str = "cache warm-up: a lighthouse on a cliff at dawn, detailed",
-    declared_vram_gb: float = 0.0,
-    serving_image_digest: str = "",
-    lora_bucket: int = 0,
-    pipeline_class: str = "",
-) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
-    """Compile a diffusers pipeline over ``shapes`` and package the resulting
-    inductor+triton caches as a per-SKU artifact.
-
-    ``storage_dtype`` mirrors the serving binding's weight-storage lane
-    (gw#389 fp8 storage): the per-layer upcast is traced INTO the FX graphs
-    (as module types since pgw#727), so a cell for an fp8-served model must be
-    built from an fp8-loaded pipeline or every request misses the cache
-    (ie#381).
-
-    ``pipeline_class`` (gw#586) names the diffusers pipeline class the
-    SERVING endpoint declares (e.g. ``"LTX2ConditionPipeline"``). The traced
-    FX graphs depend on the pipeline's CALL path, not just the module tree:
-    LTX2ConditionPipeline drives the DiT with PER-TOKEN timestep/modulation
-    tensors even for a plain unconditioned call, while the generic
-    model_index class broadcasts them — structurally different graphs, so a
-    cell minted through the generic load can never serve the serving path's
-    lookups (found live: warmups=1, cache_hits=0). The gw#577
-    ``graph_signature`` remains class-agnostic (same module tree) — this is
-    call-path parity, not module identity. Unknown class names refuse
-    loudly: a silent generic fallback would re-open the exact parity gap.
-
-    Runs on the TARGET GPU SKU with a C toolchain present (cold compile).
-    Returns ``(artifact_path, metadata, per-shape warm-up seconds)`` — the
-    first call per shape is the compile cost. Raises on any compile failure
-    or an empty capture; a silently-eager build must never publish.
-    """
-
-    _W8A8_MINT_NEEDS_DIGEST = (
-        "W8A8 cell mint requires serving_image_digest (the endpoint "
-        "serving image's immutable OCI digest); a cell stamped with the "
-        "producer image identity can never be adopted by the fleet"
-    )
-    if (("w8a8" in str(storage_dtype) or "w4a4" in str(storage_dtype))
-            and not str(serving_image_digest).strip()):
-        # gw#577 finding (b): contract_drift requires image_digest identity on
-        # W8A8 cells and verify() pins it exactly. Without the SERVING digest
-        # the artifact stamps the PRODUCER pod's WORKER_IMAGE_DIGEST — every
-        # serving worker then rejects it and W8A8 serves NOTHING
-        # (fail-closed). Refuse loudly before any load or compile.
-        raise RuntimeError(_W8A8_MINT_NEEDS_DIGEST)
-    if not toolchain_present():
-        raise RuntimeError(
-            "compile-cache build needs a C toolchain (cc/gcc); run in the "
-            "compile-job image, not a prod worker image"
-        )
-    out_dir = Path(out_dir)
-    capture_root = out_dir / "capture"
-    capture_env(capture_root)
-
-    import torch
-    from diffusers import DiffusionPipeline
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("compile-cache build requires CUDA")
-
-    cfg = CompileCell(
-        shapes=tuple(tuple(int(v) for v in row) for row in shapes),
-        targets=tuple(targets), family=str(family or ""),
-        regional=bool(regional),
-        text_len=(int(text_len) if text_len is not None else None),
-        dynamic=tuple(dynamic),
-        lora_bucket=int(lora_bucket or 0),
-        guidance_scales=tuple(float(v) for v in guidance_scales),
-        text_lens=tuple(int(v) for v in text_lens),
-    )
-    load_cls: Any = DiffusionPipeline
-    if str(pipeline_class or "").strip():
-        # gw#586 call-path parity: trace through the SERVING pipeline class.
-        load_cls = resolve_pipeline_class(str(pipeline_class))
-    pipe = load_from_pretrained(
-        load_cls, str(model_path), dtype=dtype,
-        storage_dtype=storage_dtype,
-        # Producer/consumer LANE parity is now structural (pgw#772): the
-        # voluntary free-VRAM bf16-resident upgrade is removed, so both
-        # sides land the lane the declared config names. declared_vram_gb
-        # is dead plumbing pending the coordinated wire sweep (pgw#772
-        # follow-up in the tracker).
-        declared_vram_gb=declared_vram_gb)
-    # Producer/consumer graph parity (gw#391): the worker prepares pipelines
-    # with place_pipeline (placement + vae/attention low-VRAM flags), and
-    # those flags are traced INTO the graphs — the FX-graph cache key. A cell
-    # built from a differently-prepared pipeline misses at request time, so
-    # the producer must come through the exact same prep, and the mode it
-    # traced under travels in the metadata for adopt-time parity checks. Run
-    # on a pod with the same free-VRAM class as the target workers.
-    placed = place_pipeline(pipe)
-
-    if _traced_execution_lane(pipe).startswith(("w8a8", "w4a4")) and not str(
-        serving_image_digest
-    ).strip():
-        # The lane can materialize as w8a8/w4a4 from the SOURCE flavor alone
-        # (e.g. storage_dtype="fp8+te" over an fp8-w8a8 checkpoint), so the
-        # authoritative check is on the traced lane, before the compile.
-        raise RuntimeError(_W8A8_MINT_NEEDS_DIGEST)
-    # gw#561: branch-bearing cells trace WITH canonical zeroed rank-bucket
-    # branches installed — zeroed slots are bit-exact with branchless output
-    # (gw#547), so the warm calls render normally while the traced graphs
-    # carry the branch GEMMs.
-    apply_lora_execution_lane(pipe, int(lora_bucket))
-    if callable(getattr(pipe, "set_progress_bar_config", None)):
-        pipe.set_progress_bar_config(disable=True)
-    # Cold compilation is an explicit producer-library operation; serving
-    # workers have no environment switch that can enter this path.
-    if not apply(pipe, cfg, cache_ready=False, guard=False, allow_cold=True):
-        # pgw#985: name the fact that actually declined — "no compile targets"
-        # was this line's answer to every one of them, including "no CUDA".
-        raise CompileArmRefused(
-            f"cannot arm {type(pipe).__name__} for a cold compile: "
-            + (arming_block(pipe, cfg, cache_ready=False, allow_cold=True)
-               or f"no compile target resolves for targets="
-                  f"{[str(t) for t in (getattr(cfg, 'targets', ()) or ())]}"))
-
-    timings: Dict[str, float] = {}
-    decode = any(t.startswith("vae") for t in cfg.targets)
-    for shape in cfg.shapes:
-        torch.cuda.synchronize()
-        t = time.monotonic()
-        for pin in _warm_text_lens(cfg):
-            _warm_call(
-                pipe, shape, steps=int(steps), prompt=prompt, decode=decode,
-                guidance_scales=cfg.guidance_scales,
-                text_len=pin,
-            )
-        torch.cuda.synchronize()
-        key = "x".join(str(v) for v in shape)
-        timings[key] = round(time.monotonic() - t, 2)
-        logger.info("compile-cache build: warmed %s in %.1fs", key, timings[key])
-
-    # th#1322: the same numbers, on the wire. The log line above is for whoever
-    # is watching the producer run; the event is for whoever asks the hub next
-    # week how long a JIT mint takes.
-    emit_jit_compile_event(
-        timings, family=family, execution_lane=pipeline_weight_lane(pipe), route="build")
-
-    captured = [p for p in (capture_root / "inductor").rglob("*") if p.is_file()]
-    if not captured:
-        raise RuntimeError(
-            "compile warm-up captured nothing under TORCHINDUCTOR_CACHE_DIR — "
-            "was inductor already latched to another dir in this process?"
-        )
-
-    # pgw#681/#756: the guard-closure audit is ADVISORY — suspected
-    # out-of-contract guards are named in the log, emitted as a countable
-    # `guard_leak` event, and recorded in the manifest that rides the cell;
-    # the mint continues (the consumer re-evaluates these guards on every
-    # call, so a real leak degrades to explicit eager there).
-    # pgw#719: the environment this capture traced under must still be the
-    # BOOT environment — drift (endpoint code mutating config/env behind
-    # our back) fails the mint red, naming the fact.
-    env_seal.assert_seal_unchanged("mint")
-    guard_manifest = guard_closure.closure_manifest(pipe, cfg, label=family)
-
-    graph_signature, weight_contract = execution_contract(pipe, cfg)
-    meta = artifact_metadata(
-        family=family, source_ref=source_ref, source_digest=source_digest,
-        shapes=cfg.shapes, targets=cfg.targets,
-        guidance_scales=cfg.guidance_scales,
-        low_vram_mode=str(placed.get("mode") or ""),
-        storage_dtype=storage_dtype,
-        compile_mode="regional" if regional else "whole",
-        # gw#534: the lane the pipeline ACTUALLY traced under — the loader may
-        # have upgraded a requested fp8 cast to bf16-resident on this pod.
-        weight_lane=pipeline_weight_lane(pipe),
-        lora_bucket=int(lora_bucket or 0),
-        graph_signature=graph_signature,
-        weight_contract=weight_contract,
-        shape_contract=declared_contract_facts(cfg),
-        composition=composition_fingerprint(pipe, cfg),
-    )
-    meta[guard_closure.MANIFEST_KEY] = guard_manifest
-    if serving_image_digest:
-        # The producer image contains a compiler; the graph is consumed by
-        # the endpoint's serving image. Tensorhub supplies that immutable OCI
-        # digest from the release, so it—not the producer container—is the
-        # identity the worker must match.
-        meta["image_digest"] = str(serving_image_digest).strip()
-    if str(pipeline_class or "").strip():
-        # gw#586 observability only — NOT a key axis (graph_signature and the
-        # ck1 key stay class-agnostic; the class shapes the traced CALL, and
-        # a wrong class shows up as serving cache misses, which the warmup
-        # proof refuses loudly).
-        meta["pipeline_class"] = str(pipeline_class).strip()
-    # gw#581/th#883: stamp the key over the final axes.
-    #
-    # pgw#1032: the `requested_cell_key` ECHO is gone. It let a demand-driven
-    # mint name the exact worker-computed key it had to satisfy — but the
-    # forge that issued demand-driven mints was deleted (th#1127), no caller
-    # has passed the parameter since, and a COMPUTED key is a space nothing
-    # publishes into any more (pgw#1010). The stamp below is the sole key.
-    cell_key.stamp(meta)
-    label = flavor_label(meta["sku"], meta["torch"], meta.get("weight_lane", ""))
-    artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)
-    return artifact, meta, timings
-
-
 def emit_jit_compile_event(
     timings: Mapping[str, float],
     *,
@@ -4101,12 +3756,10 @@ __all__ = [
     "CellSelectionBugError",
     "CompileArmRefused",
     "CompiledExecutionLaneUnavailableError",
-    "build",
     "apply",
     "apply_lora_execution_lane",
     "arming_block",
     "resolve_targets",
-    "artifact_fx_lines",
     "artifact_metadata",
     "arm_jit_intake",
     "capture_env",
@@ -4130,10 +3783,8 @@ __all__ = [
     "fx_key_forensics",
     "gen_worker_version",
     "GuardMiss",
-    "guard_miss_count",
     "guard_miss_reason_class",
     "has_compile_target",
-    "in_tenant_serve_window",
     "set_guard_miss_callback",
     "tenant_serve_window",
     "inductor_counters",
@@ -4142,11 +3793,9 @@ __all__ = [
     "execution_lane_bucket",
     "execution_lane_token",
     "execution_lane_drift",
-    "live_fx_lines",
     "mint_artifact",
     "mode_drift",
     "pack",
-    "prepare",
     "resolve_pipeline_class",
     "runtime_key",
     "record_cell_proven",

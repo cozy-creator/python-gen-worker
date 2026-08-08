@@ -92,11 +92,30 @@ class EagerPhase(StrEnum):
     #: identity must not be re-minted) and was the one that only logged.
     CELL_QUARANTINED = "cell_quarantined"
 
-    #: Eager with an END — a delegated mint child is building the cell. Equal
-    #: to ``serving_mode.POSTURE_MINT_IN_PROGRESS`` by contract; the audit
-    #: asserts the two, because a fleet that is warming up must never read as
-    #: a fleet that never will.
+    #: Eager with an END — a delegated mint child is building the cell.
     MINT_IN_PROGRESS = "mint_in_progress"
+
+    #: pgw#1035: the four tokens below rode the SAME wire columns as the ones
+    #: above — `phase` on `self_mint_skipped`/`self_mint_started`, and the
+    #: request row's `fallback_reason` — while living as bare literals in
+    #: `serving_mode` and `executor`. That is exactly the two-lists-of-literals
+    #: drift channel this enum was created to close, and only
+    #: `MINT_IN_PROGRESS` had ever been pinned to it. `serving_mode`'s
+    #: `POSTURE_*` names are now ALIASES of these members, so there is one
+    #: vocabulary and the values are unchanged (the hub's grouped history is
+    #: untouched).
+
+    #: The arming brain has not answered yet (boot in flight, setup unfinished).
+    ARM_PENDING = "arm_pending"
+    #: The release declared no compile target at all — eager is the contract,
+    #: not a degradation. Distinct so it never pollutes the defect classes.
+    NO_COMPILE_DECLARED = "no_compile_declared"
+    #: Terminal fallback when a decline reached the request path unclassified.
+    UNCOMPILED = "uncompiled"
+    #: Setup finished with a declared compile target, nothing armed and no mint
+    #: in flight: this worker serves eager for the rest of its life. Terminal,
+    #: and it must mean "nothing is dispatchable" (pgw#844), never "partial".
+    BOOT_ENDED_UNCOMPILED = "boot_ended_uncompiled"
 
     #: `_fail_closed`'s default, for a caller that has not classified its exit.
     #: A new decline landing here rather than on its own member is the

@@ -12,9 +12,11 @@ lifted-LoRA kwargs, dtype/device introspection, and a registration hook for
 callers that need a hand-written builder while a family's declaration is
 still being written.
 
-Composition itself is NOT family-specific and mirrors the dynamo mint
-(``compile_cache.build``): ``load_from_pretrained`` -> ``place_pipeline``. That
-is a parity requirement, not tidiness — the placement/low-VRAM flags are traced
+Composition itself is NOT family-specific and mirrors the SERVING path's own
+composition: ``load_from_pretrained`` -> ``place_pipeline``. (It used to say
+"mirrors ``compile_cache.build``"; that whole-pipeline dynamo mint had no caller
+and pgw#1035 deleted it — the requirement it named is unchanged.) That is a
+parity requirement, not tidiness — the placement/low-VRAM flags are traced
 INTO the graph, so a cell composed differently from the serving path is a cell
 the serving path can never use (gw#391, ie#381 are both that bug).
 
@@ -200,8 +202,8 @@ def compose(
 ) -> Tuple[Any, Callable[[Any], Tuple[Tuple[Any, ...], Dict[str, Any]]]]:
     """Compose the pipeline for a mint; return it with its input builder.
 
-    The sequence mirrors ``compile_cache.build`` exactly (see the module
-    docstring for why that is a requirement rather than a convention). The
+    The sequence mirrors the serving path's composition exactly (see the
+    module docstring for why that is a requirement rather than a convention). The
     returned builder takes the RESOLVED target module — not the pipeline — so
     widths and dtypes come off the thing actually being exported.
     """

@@ -141,7 +141,6 @@ def test_serve_window_guard_miss_serves_eager_records_and_heals() -> None:
     # (a)+(b): served, eager, correct — and the object is NOT degraded.
     assert torch.equal(out, x * 3)
     assert not signal.get("failed", False)
-    assert cc.guard_miss_count is not None  # api exists
     assert signal["guard_misses"] == 1
     # (c): the confession carries torch's verbatim reason + identity.
     assert len(misses) == 1
@@ -401,14 +400,14 @@ class _Sim:
             self.counters["fxgraph_cache_hit"] += 1
             self.served_compiled.append(graph)
             return original(*args, **kwargs)
-        if epoch is not None and cc.in_tenant_serve_window():
+        if epoch is not None and cc._SERVE_WINDOW.get():
             raise dexc.RecompileError(
                 f"Recompiling function forward in sim.py:1\n"
                 f"    triggered by the following guard failure(s):\n"
                 f"    - 0/0: tensor 'sample' stride mismatch at index 1. "
                 f"expected 4096, actual 1 (epoch {epoch} != "
                 f"{self.guard_epoch})")
-        self.window_seen.append(cc.in_tenant_serve_window())
+        self.window_seen.append(cc._SERVE_WINDOW.get())
         entry.write_text(str(self.guard_epoch))
         self.counters["fxgraph_cache_miss"] += 1
         self.compiles.append((graph, self.guard_epoch))
@@ -654,7 +653,7 @@ def test_tenant_guard_miss_end_to_end(
     assert res1.status == pb.JOB_STATUS_OK, res1.safe_message
     # Served EAGER: no inline compile happened inside the request window.
     (pipe,) = rig.pipes.values()
-    assert cc.guard_miss_count(pipe) == 1
+    assert cc._proof_count(pipe, "guard_misses") == 1
     # The heal ran on the background warm thread (window OFF there).
     _wait(lambda: len(rig.sim.compiles) > boot_compiles)
     assert not any(rig.sim.window_seen), (
@@ -682,7 +681,7 @@ def test_tenant_guard_miss_end_to_end(
     served_before = len(rig.sim.served_compiled)
     res2 = asyncio.run(_dispatch(rig, _run_job(rig, spec, "r-healed")))
     assert res2.status == pb.JOB_STATUS_OK, res2.safe_message
-    assert cc.guard_miss_count(pipe) == 1
+    assert cc._proof_count(pipe, "guard_misses") == 1
     assert len(rig.sim.served_compiled) > served_before, (
         "the healed entry must serve the second request compiled")
     events_after = [m.activity_update for m in rig.sent

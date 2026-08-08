@@ -73,49 +73,6 @@ def test_static_closure_reaches_the_composition_code() -> None:
     assert cc.static_code_closure() == cc.static_code_closure()  # stable
 
 
-def test_endpoint_roots_join_the_closure(tmp_path: Path,
-                                         monkeypatch: pytest.MonkeyPatch) -> None:
-    """The endpoint's own module shapes the graphs: passing it as a closure
-    root pulls its source (and its intra-package imports) into the recipe."""
-    pkg = tmp_path / "fakeendpoint"
-    pkg.mkdir()
-    (pkg / "__init__.py").write_text("")
-    (pkg / "helper.py").write_text("X = 1\n")
-    (pkg / "main.py").write_text("from fakeendpoint import helper\n")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    closure = dict(cc.static_code_closure(("fakeendpoint.main",)))
-    assert "fakeendpoint/main.py" in closure
-    assert "fakeendpoint/helper.py" in closure  # via the static import graph
-    assert "fakeendpoint/__init__.py" in closure  # parents execute too
-    # A content change changes the recipe digest (strands old cells).
-    before = ck.facts_digest(closure)
-    (pkg / "helper.py").write_text("X = 2\n")
-    cc.static_code_closure.cache_clear()
-    after = ck.facts_digest(dict(cc.static_code_closure(("fakeendpoint.main",))))
-    assert before != after
-    cc.static_code_closure.cache_clear()
-
-
-def test_completeness_diagnostic_names_dynamic_imports() -> None:
-    """Diagnostics for the deferred memo issue (NOT a mint gate — Paul's
-    ck6 ruling): a module loaded in the composition namespaces but
-    invisible to the static walk is named. Order-independent: other suite
-    tests may load executor-side models/* modules (the documented
-    scope-vs-walk finding), so only the ghost's presence is asserted."""
-    ghost = types.ModuleType("gen_worker.models.ghost_dynamic")
-    ghost.__file__ = str(
-        Path(cc.__file__).parent / "models" / "ghost_dynamic.py")
-    sys.modules["gen_worker.models.ghost_dynamic"] = ghost
-    try:
-        gaps = cc.closure_completeness_gap()
-        assert "gen_worker.models.ghost_dynamic" in gaps
-        with pytest.raises(RuntimeError, match="ghost_dynamic"):
-            cc.assert_closure_complete()
-    finally:
-        del sys.modules["gen_worker.models.ghost_dynamic"]
-    assert "gen_worker.models.ghost_dynamic" not in cc.closure_completeness_gap()
-
-
 # ---------------------------------------------------------------------------
 # ck1: the recipe digest
 # ---------------------------------------------------------------------------

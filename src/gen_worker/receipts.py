@@ -51,7 +51,7 @@ import tarfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple
 
 import requests
 from cryptography.exceptions import InvalidSignature
