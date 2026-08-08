@@ -232,8 +232,7 @@ def test_a_readable_card_with_no_footprint_refuses_to_widen() -> None:
     the fallback was never consulted. Deleted rather than left as a constant
     nothing can reach — and the branch now does what the other branch's
     comment always CLAIMED: a card we can see but cannot size against does not
-    license concurrency on itself. Same rule ``aot_export_parallel.width_for``
-    already states for the export footprint."""
+    license concurrency on itself."""
     assert not hasattr(pool, "DEFAULT_ENTRY_DEVICE_BYTES")
     w = pool.entry_workers(
         36, vcpus=127, available_bytes=116 * _GIB,

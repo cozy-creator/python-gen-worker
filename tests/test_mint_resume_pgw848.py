@@ -76,6 +76,20 @@ def _width(entries: int, workers: int) -> pool.PoolWidth:
         free_vram_bytes=0, device_lock=True)
 
 
+def _pool_with_root(workdir: Path, count: int, root: str) -> pool.EntryCompilePool:
+    """Construct a pool with the resume root installed the production way
+    (`aot_resume.set_root`, the process global — pgw#1030 deleted the
+    redundant `resume_dir` constructor param). The root only needs to span
+    construction: `open_bank` runs in `__init__`."""
+    aot_resume.set_root(root)
+    try:
+        return pool.EntryCompilePool(
+            workdir, width=_width(count, 1),
+            inductor_configs={"compile_threads": 2})
+    finally:
+        aot_resume.set_root("")
+
+
 # ---------------------------------------------------------------------------
 # The crash, for real: a child process running a real pool, SIGKILLed mid-run
 # ---------------------------------------------------------------------------
@@ -94,7 +108,7 @@ _DRIVER = textwrap.dedent(
     from pathlib import Path
     sys.path.insert(0, {tests!r})
     from test_mint_resume_pgw848 import _entries, _width
-    from gen_worker import aot_compile_pool as pool, env_seal
+    from gen_worker import aot_compile_pool as pool, aot_resume, env_seal
 
     cfg = json.loads(Path(sys.argv[1]).read_text())
     landed = Path(cfg["landed"])
@@ -103,10 +117,12 @@ _DRIVER = textwrap.dedent(
     # at the same point in the same code path, in every attempt.
     env_seal.establish()
 
+    # The production wiring (mint_child._mint_aot): the bank root is a
+    # process global, not a constructor argument (pgw#1030).
+    aot_resume.set_root(cfg["resume"])
     box = pool.EntryCompilePool(
         Path(cfg["workdir"]), width=_width(count, 1),
-        inductor_configs={{"compile_threads": 2}},
-        resume_dir=cfg["resume"])
+        inductor_configs={{"compile_threads": 2}})
 
     def tick(name, done, total):
         with landed.open("a") as fh:
@@ -299,9 +315,7 @@ def _bank_one(tmp_path: Path, index: int = 0) -> Tuple[Path, str, Any]:
     """Compile one entry for real and bank it. Returns (root, entry, program)."""
     resume = tmp_path / "resume"
     entry, program = _name(index), _program(index)
-    box = pool.EntryCompilePool(
-        tmp_path / "first" / "entry-pool", width=_width(1, 1),
-        inductor_configs={"compile_threads": 2}, resume_dir=str(resume))
+    box = _pool_with_root(tmp_path / "first" / "entry-pool", 1, str(resume))
     box.compile([(entry, program)])
     assert box.bank is not None and box.bank.banked_bytes > 0
     return resume, entry, program
@@ -331,9 +345,7 @@ def test_a_tampered_banked_artifact_is_refused_and_recompiled(
         "the tamper must not change the SIZE — otherwise this test proves "
         "only that a size check works, and the sha256 is never exercised")
 
-    second = pool.EntryCompilePool(
-        tmp_path / "second" / "entry-pool", width=_width(1, 1),
-        inductor_configs={"compile_threads": 2}, resume_dir=str(resume))
+    second = _pool_with_root(tmp_path / "second" / "entry-pool", 1, str(resume))
     out = second.compile([(entry, program)])
 
     assert second.bank is not None
@@ -368,9 +380,7 @@ def test_a_stale_entry_is_refused_by_a_re_derived_graph_hash(
         original), (
         "the two programs must genuinely differ, or this test cannot fail")
 
-    second = pool.EntryCompilePool(
-        tmp_path / "second" / "entry-pool", width=_width(1, 1),
-        inductor_configs={"compile_threads": 2}, resume_dir=str(resume))
+    second = _pool_with_root(tmp_path / "second" / "entry-pool", 1, str(resume))
     out = second.compile([(entry, other)])
 
     assert second.bank is not None

@@ -164,29 +164,9 @@ def derived_dynamic(
     return tuple(out)
 
 
-def named_dynamic_rows(decl: Compile, target: str) -> Tuple[DynamicDim, ...]:
-    """Bridge ``Compile.dynamic`` rows that NAME a declared Dim (legal only
-    for class-less declarations — with classes the range is derived, never
-    hand-written) into per-binding :class:`aot_mint.DynamicDim` rows."""
-    by_name = {d.name: d for d in decl.dims}
-    names = _target_input_names(decl, target)
-    by_arg = arg_carriers(decl, target)
-    out: List[DynamicDim] = []
-    for dd in decl.dynamic:
-        dim = by_name.get(dd.dim)
-        if dim is None:
-            continue  # "batch"/"sequence" are the dynamo lane's business
-        for bound, axis in dim.carried_by:
-            if bound in by_arg or bound.split(".", 1)[0] in by_arg:
-                continue  # pgw#853: a python int is never a torch symbol
-            if names is not None and bound.split(".", 1)[0] not in names \
-                    and bound not in names:
-                continue
-            out.append(DynamicDim(
-                input_name=bound, axis=int(axis), min=int(dd.min),
-                max=int(dd.max), multiple_of=dim.multiple_of,
-                dim=str(dim.name)))
-    return tuple(out)
+# (pgw#1030: `named_dynamic_rows` deleted — zero callers anywhere; the
+# class-bearing path derives ranges via `dynamic_rows_for_plan` and the
+# class-less path never grew a consumer.)
 
 
 def effective_shape_strategy(decl: Compile) -> str:
@@ -805,7 +785,6 @@ __all__ = [
     "fork_gaps",
     "load_declaration",
     "mint_plans",
-    "named_dynamic_rows",
     "plan_entry_name",
     "select_plan",
     "target_args",

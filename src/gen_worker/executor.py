@@ -6955,9 +6955,10 @@ class Executor:
                 # compile-then-serve path below cannot drive them. Discard the
                 # obligation and serve eager with the cell absent — the honest
                 # miss policy — rather than run a warmup proof against an
-                # unarmed pipeline. (fleet_cells.delegatable already refused to
-                # delegate anything that MUST serve compiled, so this is the
-                # custom-warmup / mixed-delivered-artifact remainder.)
+                # unarmed pipeline. (fleet_cells.delegation_refusal already
+                # refused to delegate anything that MUST serve compiled, so
+                # this is the custom-warmup / mixed-delivered-artifact
+                # remainder.)
                 from . import fleet_cells as _fc_undelegate
 
                 for _pid, _mint in list(inj.pending_self_mints.items()):

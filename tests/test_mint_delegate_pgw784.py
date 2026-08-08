@@ -356,6 +356,8 @@ def test_delegation_is_unconditional_and_has_no_kill_switch(
     blocked only on the ten test sites that forced the shape. Setting it must
     now do nothing at all; the env must not be read by anybody."""
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
-    assert mint_delegate.delegated()
     assert mint_delegate.delegation_refusal() == ""
     assert not hasattr(mint_delegate, "ENV_IN_PROCESS")
+    # pgw#1030: the `delegated()` bool wrapper is deleted with the switch it
+    # once negated; `delegation_refusal` is the predicate.
+    assert not hasattr(mint_delegate, "delegated")

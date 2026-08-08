@@ -10,7 +10,6 @@ different graph never shares.
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 
 import pytest
@@ -211,26 +210,9 @@ def test_non_graph_is_refused_by_name():
 
 
 # --------------------------------------------------------------------------
-# The combined-hash formula, verbatim.
+# (pgw#1030: the combined-hash tests moved out with the symbol — the live
+# formula and its coverage are `aot_serve.combined_graph_hash`.)
 # --------------------------------------------------------------------------
-
-def test_combined_graph_hash_is_the_verbatim_formula():
-    per_class = ["beef00000000000a", "0123456789abcdef", "ffffffffffffffff"]
-    expected = hashlib.sha256(
-        "\n".join(sorted(per_class)).encode()).hexdigest()[:16]
-    assert gh.combined_graph_hash(per_class) == expected
-    assert len(gh.combined_graph_hash(per_class)) == 16
-
-
-def test_combined_graph_hash_is_order_independent():
-    per_class = ["aaaa000000000000", "bbbb000000000000", "cccc000000000000"]
-    assert gh.combined_graph_hash(per_class) == gh.combined_graph_hash(
-        reversed(per_class))
-
-
-def test_combined_graph_hash_needs_a_class():
-    with pytest.raises(ValueError):
-        gh.combined_graph_hash([])
 
 
 # --------------------------------------------------------------------------

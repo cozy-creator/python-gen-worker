@@ -344,27 +344,14 @@ def graph_hash(obj: Any) -> str:
 
 
 def digest_lines(lines: Iterable[str]) -> str:
-    """Digest an already-canonical line sequence (the debug CLI hashes the
-    lines it prints, so what you read is what was keyed)."""
+    """Digest an already-canonical line sequence."""
     payload = "\n".join(lines).encode()
     return hashlib.sha256(payload).hexdigest()[:_DIGEST_HEX]
 
 
-def combined_graph_hash(hashes: Iterable[str]) -> str:
-    """The cell's graph_hashes axis, VERBATIM per pgw#716:
-
-    the first 16 hex chars of the sha256 over the newline-joined SORTED
-    per-class ``graph_hash`` values.
-
-    Order-independent by construction (a cell covering N graph classes cannot
-    depend on which order they happened to be traced in); per-class hashes ride
-    the cell metadata so a mismatch NAMES the class.
-    """
-    values = sorted(str(h) for h in hashes)
-    if not values:
-        raise ValueError("combined_graph_hash needs at least one graph hash")
-    payload = "\n".join(values).encode()
-    return hashlib.sha256(payload).hexdigest()[:_DIGEST_HEX]
+# pgw#1030: `combined_graph_hash` was deleted — it was a byte-identical,
+# zero-caller duplicate of `aot_serve.combined_graph_hash`, which is the live
+# formula the stamped cell identity actually folds.
 
 
 __all__ = [
@@ -375,7 +362,6 @@ __all__ = [
     "SPEC_PREFIX",
     "SYM_PREFIX",
     "canonical_lines",
-    "combined_graph_hash",
     "digest_lines",
     "graph_hash",
 ]

@@ -213,15 +213,15 @@ def test_a_w8a8_pipeline_has_an_eager_tier(
 
 
 def test_the_w8a8_execution_lane_is_delegatable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RED at HEAD: `delegatable` refused `mandatory_serving(pipe)`, so the
-    lane Paul ruled AOT-first was the one lane that could never get a
-    delegated minter."""
+    """RED at pgw#813 HEAD: the delegation gate refused `mandatory_serving
+    (pipe)`, so the lane Paul ruled AOT-first was the one lane that could
+    never get a delegated minter. (pgw#1030 deleted the zero-caller
+    `delegatable` bool wrapper; `delegation_refusal` is the predicate.)"""
     from gen_worker.models import loading as loading_mod
 
     monkeypatch.setattr(
         loading_mod, "pipeline_weight_lane", lambda p: "w8a8-lora64")
     assert fleet_cells.delegation_refusal(_Pipe(), _Cfg()) == ""
-    assert fleet_cells.delegatable(_Pipe(), _Cfg()) is True
 
 
 def test_an_armed_non_eager_backend_still_refuses(

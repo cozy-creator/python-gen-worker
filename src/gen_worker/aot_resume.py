@@ -197,19 +197,6 @@ def set_root(path: Any) -> None:
     _ROOT = str(path or "") or None
 
 
-def resume_enabled() -> bool:
-    """Whether this process may resume a banked mint at all.
-
-    pgw#929: the enable used to be HIDDEN INSIDE AN EMPTY STRING — `root()`
-    returned `""` and every caller re-derived "so do not resume" from the
-    falsiness of a path. That is a decision carried by the absence of a value,
-    which is the least visible carrier there is: nothing logs it, nothing
-    reports it, and a typo'd directory is indistinguishable from a deliberate
-    refusal. The path is the VALUE; this is the DECISION, and it is stated.
-    """
-    return bool(root())
-
-
 def root() -> str:
     """The resume root, or "" when this process has none configured."""
     if _ROOT:

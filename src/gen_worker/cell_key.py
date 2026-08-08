@@ -65,7 +65,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping
 from . import env_seal
 
 # pgw#958 (DESIGN-RULINGS §1.27(g); Paul 2026-08-04, reaffirmed 2026-08-07
@@ -208,16 +208,14 @@ def compute(
     *,
     contract: str,
     regional: bool = False,
-    closure_roots: Tuple[str, ...] = (),
 ) -> CellKey:
     """The key THIS runtime wants for ``family`` on ``weight_lane`` —
     computed purely statically (no trace, no execution): live probes for
-    sm/posture/config, dist-info + binary content for the toolchain, and
-    the static import-graph closure for the code identity.
-    ``closure_roots`` names the ENDPOINT modules whose source also shapes
-    the graphs (e.g. ``("sdxl.main",)``) — the executor passes its worker
-    function's module. Raises :class:`CellKeyError` when a required axis is
-    unavailable — callers on non-CUDA runtimes simply have no key."""
+    sm/posture/config, dist-info + binary content for the toolchain.
+    (pgw#1030: the ``closure_roots`` parameter is deleted — pgw#990 removed
+    code identity from the key and the body never read it.) Raises
+    :class:`CellKeyError` when a required axis is unavailable — callers on
+    non-CUDA runtimes simply have no key."""
     from . import compile_cache as cc  # cycle: compile_cache imports cell_key
 
     rt = cc.runtime_key()
