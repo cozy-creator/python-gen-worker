@@ -92,6 +92,10 @@ KIND_LORA_FIDELITY = "lora_fidelity"
 # eager) that nothing in the worker would have noticed, which is why the
 # verdict has to reach the hub whether or not it refuses.
 KIND_CELL_NUMERICS = "cell_numerics"
+# pgw#1036: modular-pipeline hydration provenance — one event per slot load,
+# detail lists component<-local_source pairs (the hydration guard's proof that
+# every weight came from OUR tree, bankable hub-side; phase=hydrated).
+KIND_MODULAR_HYDRATION = "modular_hydration"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"

@@ -1338,6 +1338,227 @@ def load_component_override(
         base_path, component, dtype=dtype, weights_tree=override_path)
 
 
+class ModularHydrationError(RuntimeError):
+    """A ModularPipeline slot could not be hydrated from the LOCAL tree
+    (pgw#1036). Typed so the failure is a refusal at load — never a silent
+    shell handed to ``setup()``, and never a fetch from the repo id the
+    snapshot's index happens to name."""
+
+
+def is_modular_pipeline_class(cls: Any) -> bool:
+    """Duck-typed: a modular pipeline class exposes ``load_components``
+    (weights hydrate AFTER construction) — ``DiffusionPipeline`` does not."""
+    return (
+        isinstance(cls, type)
+        and callable(getattr(cls, "from_pretrained", None))
+        and callable(getattr(cls, "load_components", None))
+    )
+
+
+def _is_modular_pipeline(obj: Any) -> bool:
+    return (
+        hasattr(obj, "_component_specs")
+        and callable(getattr(obj, "load_components", None))
+    )
+
+
+def _resolve_override_tree(root: Path, component: str) -> Path:
+    """Override-tree layout convention (same as :func:`load_component`): the
+    tree's ``<component>/`` subtree when present, else its root."""
+    sub = root / component
+    return sub if sub.is_dir() else root
+
+
+def _local_component_dir(base: Path, spec: Any, name: str) -> Optional[Path]:
+    """The LOCAL snapshot dir for a component spec: the spec's subfolder
+    under the snapshot root (falling back to the component name). None when
+    the snapshot has no such dir at all."""
+    for sub in (str(getattr(spec, "subfolder", "") or ""), name):
+        if not sub:
+            continue
+        cand = base / sub
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _weightless_model_dir(src: Path) -> bool:
+    """True for a config-only weight-bearing dir — the deliberate-partition
+    shape (ie#613 pins by FILE SET and keeps ``config.json`` for the
+    unselected partition, e.g. H3's ``transformer_ref/``): the component is
+    EXCLUDED from this slot, not missing."""
+    if not (src / "config.json").is_file():
+        return False  # tokenizer/processor/scheduler dirs: no model config
+    return next(src.rglob("*.safetensors"), None) is None
+
+
+def hydrate_modular_pipeline(
+    pipe: Any,
+    path: str | Path,
+    *,
+    torch_dtype: Any = None,
+    component_trees: Optional[Dict[str, str]] = None,
+    preloaded: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    """Hydrate a freshly constructed ``ModularPipeline`` from the LOCAL
+    snapshot tree (pgw#1036).
+
+    ``ModularPipeline.__init__`` registers every ``from_pretrained``
+    component as ``None`` and copies each spec's
+    ``pretrained_model_name_or_path`` verbatim out of the snapshot's index —
+    which on a mirrored repo names the UPSTREAM repo id. This function is the
+    hydration guard: every spec is re-pointed at the local tree BEFORE
+    ``load_components`` runs, so neither this load nor any later endpoint-side
+    ``pipe.load_components()`` can reach huggingface.co.
+
+    - base components load from ``<snapshot>/<subfolder>``;
+    - ``component_trees`` (th#980/pgw#617 overrides) re-route a component to
+      its OWN materialized tree (``<tree>/<component>/`` or the tree root);
+    - a config-only weight-bearing dir is the unselected partition: SKIPPED,
+      its spec neutralized so nothing can ever fetch it;
+    - a component the index names but the snapshot does not carry refuses
+      typed (:class:`ModularHydrationError`) — never a fetch;
+    - ``preloaded`` modules (gw#479 shared components) are registered via
+      ``update_components`` instead of the ``from_pretrained`` kwarg
+      ``ModularPipeline.__init__`` silently discards.
+
+    Returns ``{component: source_path}`` for everything hydrated. The result
+    is verified: ``load_components`` swallows load errors into a logger
+    warning, so every requested component is re-checked non-``None`` and a
+    miss raises typed with the captured diffusers log text."""
+    base = Path(path)
+    specs = dict(getattr(pipe, "_component_specs", None) or {})
+    trees = dict(component_trees or {})
+    pre = dict(preloaded or {})
+
+    unknown = sorted(set(trees) - set(specs))
+    if unknown:
+        raise ModularHydrationError(
+            f"component override {unknown[0]!r} is not a component of "
+            f"{type(pipe).__name__} (specs: {sorted(specs)})")
+    both = sorted(set(trees) & set(pre))
+    if both:
+        raise ModularHydrationError(
+            f"component {both[0]!r} arrived as BOTH an override tree and a "
+            f"preloaded module; one delivery mechanism per component")
+
+    sources: Dict[str, str] = {}
+    skipped: List[str] = []
+    for name, spec in specs.items():
+        if getattr(spec, "default_creation_method", "") != "from_pretrained":
+            continue
+        if name in pre:
+            continue
+        if name in trees:
+            root = Path(trees[name])
+            if not root.is_dir():
+                raise ModularHydrationError(
+                    f"override tree for component {name!r} does not exist: "
+                    f"{root}")
+            sources[name] = str(_resolve_override_tree(root, name))
+            continue
+        src = _local_component_dir(base, spec, name)
+        if src is None:
+            raise ModularHydrationError(
+                f"component {name!r} is named by the snapshot's index "
+                f"(pretrained_model_name_or_path="
+                f"{getattr(spec, 'pretrained_model_name_or_path', None)!r}) "
+                f"but the local tree {base} has no {name!r} dir — refusing "
+                f"rather than fetching from the index's repo id")
+        if _weightless_model_dir(src):
+            skipped.append(name)
+            continue
+        sources[name] = str(src)
+
+    # Re-point the SPECS first: a later bare `pipe.load_components()` (e.g.
+    # endpoint-side) must be equally incapable of reaching the index's repo
+    # id. Skipped partitions get None — load_components ignores a spec with
+    # no path, and spec.load() refuses one outright.
+    for name in sources:
+        spec = specs[name]
+        spec.pretrained_model_name_or_path = sources[name]
+        spec.subfolder = ""
+    for name in skipped:
+        specs[name].pretrained_model_name_or_path = None
+    for name in pre:
+        # A preloaded (gw#479 shared) module loads from no path at all;
+        # update_components below replaces its spec, but neutralize first so
+        # the guard can never read its stale upstream id as a fetch source.
+        if name in specs:
+            specs[name].pretrained_model_name_or_path = None
+
+    for name, spec in specs.items():
+        if getattr(spec, "default_creation_method", "") != "from_pretrained":
+            continue
+        p = getattr(spec, "pretrained_model_name_or_path", None)
+        if p is not None and not Path(str(p)).exists():
+            try:
+                listing = sorted(q.name for q in base.iterdir())
+            except OSError:
+                listing = ["<unreadable>"]
+            raise ModularHydrationError(
+                f"component {name!r} spec still names a non-local source "
+                f"{p!r} after re-pointing — refusing rather than fetching "
+                f"(base tree {base} holds: {listing})")
+
+    names = sorted(sources)
+    if names:
+        kwargs: Dict[str, Any] = {
+            "pretrained_model_name_or_path": {n: sources[n] for n in names},
+            "subfolder": {n: "" for n in names},
+        }
+        if torch_dtype is not None:
+            kwargs["torch_dtype"] = torch_dtype
+        # load_components swallows per-component load failures into a
+        # diffusers logger warning and registers nothing — capture that text
+        # so the typed refusal below can carry the actual cause.
+        records: List[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record.getMessage())
+
+        dlog = logging.getLogger("diffusers")
+        handler = _Capture(level=logging.WARNING)
+        dlog.addHandler(handler)
+        try:
+            pipe.load_components(names=names, **kwargs)
+        finally:
+            dlog.removeHandler(handler)
+        missing = [n for n in names if getattr(pipe, n, None) is None]
+        if missing:
+            detail = "\n".join(r for r in records if missing[0] in r) or \
+                "\n".join(records[-3:])
+            raise ModularHydrationError(
+                f"modular hydration failed for component(s) {missing} of "
+                f"{type(pipe).__name__} from local source(s) "
+                f"{ {n: sources[n] for n in missing} }: {detail}")
+
+    if pre:
+        pipe.update_components(**pre)
+        for name in pre:
+            if getattr(pipe, name, None) is None:
+                raise ModularHydrationError(
+                    f"preloaded component {name!r} did not register on "
+                    f"{type(pipe).__name__}")
+            sources[name] = "<preloaded shared module>"
+
+    try:
+        pipe._cozy_modular_hydration = dict(sources)
+    except Exception:  # noqa: BLE001
+        pass
+    detail = " ".join(f"{n}<-{sources[n]}" for n in sorted(sources))
+    logger.info("modular hydration (%s): %s; skipped partitions: %s",
+                type(pipe).__name__, detail, skipped or "none")
+    activity_mod.emit_event(
+        activity_mod.KIND_MODULAR_HYDRATION,
+        f"pipeline={type(pipe).__name__} base={base} {detail}"
+        + (f" skipped={','.join(skipped)}" if skipped else ""),
+        phase="hydrated",
+    )
+    return sources
+
+
 def _safetensors_data_bytes(p: Path) -> int:
 
     with open(p, "rb") as f:
@@ -1554,6 +1775,62 @@ def _adaptive_fit_rung(
     return "nf4", qc
 
 
+def _load_modular_pipeline(
+    cls: Any,
+    path: str,
+    *,
+    dtype: str = "",
+    storage_dtype: str = "",
+    components: Optional[Dict[str, Any]] = None,
+    component_trees: Optional[Dict[str, str]] = None,
+) -> Any:
+    """The modular lane of :func:`load_from_pretrained` (pgw#1036):
+    ``cls.from_pretrained(path)`` builds a SHELL (every weight-bearing
+    component ``None``, specs naming the index's repo id verbatim), then
+    :func:`hydrate_modular_pipeline` re-points every spec at the local tree
+    and loads the weights. The quant/storage rungs (svdq/w8a8/w4a4/gguf,
+    fp8 storage, the adaptive fit ladder) are pipeline-lane mechanisms and do
+    not apply here v1 — a quantized modular component arrives as its own
+    self-describing component tree (e.g. a transformers FineGrainedFP8
+    artifact) and loads natively through its spec."""
+    if storage_dtype:
+        logger.warning(
+            "storage_dtype=%s ignored on the modular lane (component "
+            "precision is a per-component artifact fact)", storage_dtype)
+    scalar_dtype: Any = None
+    wanted = dtype or {
+        "bf16": "bf16", "fp16": "fp16", "fp8": "bf16",
+    }.get(detect_on_disk_dtype(Path(path)), "")
+    if wanted:
+        try:
+            scalar_dtype = get_torch_dtype(wanted)
+        except ImportError:
+            pass  # torch-less environment: loaders fail on their own terms
+    torch_dtype: Any = scalar_dtype
+    per_component = _component_dtype_map(cls, path, scalar_dtype)
+    if per_component:
+        # Same {"default": ..., part: ...} shape load_components' dict
+        # routing understands (pgw#667 widened parts included).
+        torch_dtype = per_component
+    pipe = cls.from_pretrained(path)
+    if not _is_modular_pipeline(pipe):
+        raise ModularHydrationError(
+            f"{getattr(cls, '__name__', cls)}.from_pretrained returned "
+            f"{type(pipe).__name__} without _component_specs/load_components;"
+            f" cannot hydrate")
+    hydrate_modular_pipeline(
+        pipe, Path(path), torch_dtype=torch_dtype,
+        component_trees=component_trees, preloaded=components,
+    )
+    unmaterialized = meta_tensors(pipe)
+    if unmaterialized:
+        raise RuntimeError(
+            f"{type(pipe).__name__} load left {len(unmaterialized)} "
+            f"unmaterialized meta tensors (e.g. {unmaterialized[:3]})"
+        )
+    return pipe
+
+
 @implements_contract(
     contract=CONTRACT_PLAIN_BF16,
     serves=("bf16-w16a16", "fp8-w8a16"),
@@ -1571,6 +1848,7 @@ def load_from_pretrained(
     attrs: Optional[Dict[str, str]] = None,
     storage_dtype: str = "",
     components: Optional[Dict[str, Any]] = None,
+    component_trees: Optional[Dict[str, str]] = None,
     declared_vram_gb: float = 0.0,
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
@@ -1586,8 +1864,23 @@ def load_from_pretrained(
     components, gw#479) forwarded to ``from_pretrained`` — diffusers skips
     loading those from disk and wires the given objects in. Used by the
     executor to satisfy pipeline-typed ``setup()`` annotations; endpoints may
-    also call it."""
+    also call it. A modular pipeline class (pgw#1036: exposes
+    ``load_components``) takes its own lane — construct, re-point every
+    component spec at the LOCAL tree, hydrate; ``component_trees`` routes
+    th#980/pgw#617 component overrides to their own materialized trees on
+    that lane (the ``components=`` kwarg is what ``ModularPipeline.__init__``
+    silently discards)."""
     path = str(path)
+    if is_modular_pipeline_class(cls):
+        return _load_modular_pipeline(
+            cls, path, dtype=dtype, storage_dtype=storage_dtype,
+            components=components, component_trees=component_trees,
+        )
+    if component_trees:
+        raise ModularHydrationError(
+            f"component_trees is the MODULAR delivery mechanism and "
+            f"{getattr(cls, '__name__', cls)} is not a modular pipeline "
+            f"class; non-modular overrides ride components= (pgw#617)")
     # SVDQuant/nunchaku 4-bit flavors (gw#415): self-describing snapshots take
     # the svdq lane — a nunchaku transformer swapped into the standard
     # pipeline. Detection precedes every other rung; failures are typed
@@ -1855,5 +2148,8 @@ __all__ = [
     "model_index_component_classes",
     "snapshot_component_weight_bytes",
     "load_from_pretrained",
+    "is_modular_pipeline_class",
+    "hydrate_modular_pipeline",
+    "ModularHydrationError",
     "load_gguf_pipeline",
 ]

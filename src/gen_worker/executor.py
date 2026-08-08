@@ -8666,11 +8666,16 @@ class Executor:
                         slot_share = {}
                     res = self.store.residency
                     injected: Dict[str, Any] = {}
+                    override_trees: Dict[str, str] = {}
                     if overrides:
                         # pgw#617 load-then-substitute: each override component
                         # loads from its OWN materialized tree and rides the
                         # same from_pretrained components= injection as gw#479
                         # shared modules. Unknown names refuse typed at setup.
+                        # pgw#1036: a MODULAR slot's overrides ride the
+                        # hydration guard's spec routing instead — the
+                        # components= kwarg is what ModularPipeline.__init__
+                        # silently discards.
                         valid = self._model_index_components(path)
                         unknown = sorted(set(overrides) - valid)
                         if unknown:
@@ -8682,12 +8687,21 @@ class Executor:
                             # An overridden component never rides the shared
                             # cache: its bytes differ from the base's.
                             slot_share.pop(comp, None)
-                        from .models.loading import load_component_override
+                        from .models.loading import (
+                            is_modular_pipeline_class,
+                            load_component_override,
+                        )
 
-                        for comp, comp_path in sorted(overrides.items()):
-                            injected[comp] = await _to_thread_complete(
-                                load_component_override, path, comp, comp_path,
-                                dtype=str(getattr(binding, "dtype", "") or ""))
+                        if is_modular_pipeline_class(ann):
+                            override_trees = {
+                                comp: str(p) for comp, p in overrides.items()}
+                        else:
+                            for comp, comp_path in sorted(overrides.items()):
+                                injected[comp] = await _to_thread_complete(
+                                    load_component_override, path, comp,
+                                    comp_path,
+                                    dtype=str(
+                                        getattr(binding, "dtype", "") or ""))
                     if slot_share:
                         valid = self._model_index_components(path)
                         for comp, key in list(slot_share.items()):
@@ -8713,6 +8727,7 @@ class Executor:
                         sl = await _to_thread_complete(
                             provision.load_slot, ann, path, binding=binding,
                             slot=slot, ref=ref, mode=mode, components=injected,
+                            component_trees=override_trees or None,
                             declared_vram_gb=float(
                                 spec.resources.vram_gb_hint or 0),
                             force_storage_dtype=(
@@ -8740,6 +8755,7 @@ class Executor:
                         sl = await _to_thread_complete(
                             provision.load_slot, ann, path, binding=binding,
                             slot=slot, ref=ref, mode=mode, components=injected,
+                            component_trees=override_trees or None,
                             declared_vram_gb=float(
                                 spec.resources.vram_gb_hint or 0),
                             force_storage_dtype=(
