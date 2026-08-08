@@ -12333,12 +12333,17 @@ class Executor:
         if len(data) <= INLINE_RESULT_MAX_BYTES:
             return data, None
         try:
+            # pgw#767: the ENVELOPE, never ctx.save_bytes — the client's
+            # `Prefer: bytes=inline` media hint must not decide whether the
+            # transport blob this ref names actually exists.
             asset = await asyncio.to_thread(
-                ctx.save_bytes, f"results/{run.request_id}.msgpack", data
+                ctx._save_result_envelope, f"results/{run.request_id}.msgpack", data
             )
             ref = getattr(asset, "ref", "") or ""
             if not ref:
                 raise RuntimeError("upload returned no ref")
+            if getattr(asset, "inline_bytes", None):
+                raise RuntimeError("result envelope was not uploaded")
             return None, ref
         except Exception as exc:
             logger.warning("result blob upload failed for %s: %s", run.request_id, exc)

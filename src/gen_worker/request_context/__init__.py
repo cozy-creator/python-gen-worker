@@ -1115,6 +1115,22 @@ class RequestContext(Generic[D]):
     _SAVE_BYTES_INLINE_THRESHOLD = 4 * 1024 * 1024
 
     def save_bytes(self, ref: str, data: bytes) -> Asset:
+        return self._save_bytes(ref, data, allow_inline=True)
+
+    def _save_result_envelope(self, ref: str, data: bytes) -> Asset:
+        """Store the RESULT ENVELOPE blob, always as a real upload.
+
+        The envelope is worker->orchestrator transport, not a client-visible
+        media output: `JobResult` owns its own inline-vs-blob_ref choice at
+        its own ceiling (`executor.INLINE_RESULT_MAX_BYTES`). The client's
+        `Prefer: bytes=inline` hint is about MEDIA and must not reach here —
+        pgw#767: it did, so every result in
+        (INLINE_RESULT_MAX_BYTES, _SAVE_BYTES_INLINE_THRESHOLD] returned a
+        `blob_ref` naming a blob that was never uploaded.
+        """
+        return self._save_bytes(ref, data, allow_inline=False)
+
+    def _save_bytes(self, ref: str, data: bytes, *, allow_inline: bool) -> Asset:
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_bytes expects bytes")
         data = bytes(data)
@@ -1146,7 +1162,11 @@ class RequestContext(Generic[D]):
         output_format = str(
             (self._execution_hints or {}).get("output_format", "")
         ).strip().lower()
-        if output_format == "inline" and len(data) <= self._SAVE_BYTES_INLINE_THRESHOLD:
+        if (
+            allow_inline
+            and output_format == "inline"
+            and len(data) <= self._SAVE_BYTES_INLINE_THRESHOLD
+        ):
             return Asset(
                 ref=ref,
                 owner=self._owner,
