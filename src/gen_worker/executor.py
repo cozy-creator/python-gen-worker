@@ -168,7 +168,6 @@ from . import aot_serve, shape_growth, trt_engine
 from . import fleet_cells as fleet_cells_mod
 from . import hot_swap
 from . import mint_delegate
-from . import hot_swap as hot_swap_mod
 
 _CONTEXT_BY_KIND: Dict[str, type] = {
     "inference": RequestContext,
@@ -2547,11 +2546,6 @@ class _CompileTargetRecord:
     pipeline_weight_lane: str
     lora_bucket: int
     contract_digest: str
-    # th#883/gw#581 pull-by-key: the exact cell key this live object's
-    # runtime computed for itself (gen_worker.cell_key), plus its axes for
-    # the wire. "" when a required axis is unavailable (no cell identity).
-    requested_cell_key: str = ""
-    requested_cell_axes: Tuple[Tuple[str, str], ...] = ()
     active_compile_ref: str = ""
     active_compile_snapshot_digest: str = ""
     # gw#604: True when the active artifact is this worker's OWN mint (the
@@ -2565,15 +2559,6 @@ class _CompileTargetRecord:
     # cell identity.
     state_lock: threading.Lock = dc_field(
         default_factory=threading.Lock, repr=False, compare=False)
-    # The operation that most recently certified the active cell. Boot-
-    # attached cells have no ModelOp and therefore leave this empty rather
-    # than fabricating causal failure evidence later.
-    active_adoption_operation_id: str = ""
-    # Runtime guard failures quarantine immutable cells on this exact
-    # incarnation. Successful adoption of B must not clear an earlier failure
-    # of A; only a newly minted target gets a fresh quarantine set.
-    failed_compile_identities: set[Tuple[str, str]] = dc_field(
-        default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -3317,12 +3302,6 @@ class Executor:
         # gw#624: set by a rolled-back setup; the next attempt gc-purges the
         # cancelled load's cycle-held modules before allocating.
         self._pending_alloc_purge = False
-        # Compile-cache adoption mutates already-resident modules in place.
-        # Serialize the whole operation (download through terminal evidence),
-        # not only its GPU warmup, so two commands can never cross wraps or
-        # let an older rollback mutate a newer adoption.
-        self._compile_cache_adoption_lock = asyncio.Lock()
-        self._compile_cache_adoption_active = ""
         # pgw#678: wire refs whose content-keyed share plan proved impossible
         # on THIS host — the lane's placement fell to an offload rung, which
         # the shared-component invariant refuses (hooks on a shared module
@@ -3477,19 +3456,6 @@ class Executor:
             repr(spec.instance_key),
             function_name=spec.name,
             detail=f"prepare function {spec.name}",
-        )
-
-    def _adoption_intent(self, op: pb.ModelOp) -> str:
-        registry = self.intent_registry
-        if registry is None:
-            return ""
-        return registry.intent_id(
-            pb.DESIRED_INTENT_KIND_COMPILE_ADOPT,
-            ref=op.ref,
-        ) or registry.ensure_local_intent(
-            "compile-adopt",
-            op.operation_id or op.ref,
-            detail=f"adopt compile artifact {op.ref}",
         )
 
     def _job_intent(self, run: pb.RunJob) -> str:
@@ -4074,68 +4040,10 @@ class Executor:
             target.pipeline, cfg)
         execution_lane = pipeline_weight_lane(target.pipeline)
         bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-        requested_key = ""
-        requested_axes: Tuple[Tuple[str, str], ...] = ()
-        try:
-
-            # pgw#686: the KEY lane resolves through the one shared brain
-            # (compile_cache.cell_base_execution_lane — probe, then denoiser markers),
-            # never the raw probe alone: the raw probe is blind to the w8a8
-            # GEMM mode, so its key names a cell no mint ever publishes and
-            # the fleet's armed cells are never adopted. The raw probe stays
-            # authoritative for the wire lane descriptor below.
-            key = cell_key.compute(
-                str(getattr(cfg, "family", "") or ""),
-                compile_cache.cell_base_execution_lane(target.pipeline), bucket,
-                contract=cfg.contract_digest(),
-                regional=bool(getattr(cfg, "regional", False)))
-            requested_key, requested_axes = key.digest, key.axes
-        except Exception:
-            pass  # no computable identity on this runtime => no key
         with target.state_lock:
             target.pipeline_weight_lane = execution_lane
             target.lora_bucket = bucket
             target.contract_digest = contract_digest
-            target.requested_cell_key = requested_key
-            target.requested_cell_axes = requested_axes
-
-    @staticmethod
-    def _warn_cell_key_divergence(spec_name: str, target: "_CompileTargetRecord") -> None:
-        """pgw#686 invariant: a SELF-MINTED active cell must carry exactly
-        the key an identical worker would REQUEST (requested_cell_key) —
-        anything else is fleet-wide silent zero-adoption: the published
-        cell sits armed in the store while every cold pod re-mints (the
-        ie#546 burst: 10 pods, 9 simultaneous mints, 0 adoptions). Loud
-        and greppable; never fatal to serving.
-
-        pgw#1033 (INTERIM — pgw#1032 deletes this warning together with
-        `requested_cell_key` itself): an EXPORTED cell's key is STAMPED on
-        its envelope and folds the combined graph hash of the traced class
-        set, so it can never equal the `kind="inductor"` key this runtime
-        COMPUTES — different spaces, by construction and on purpose. Since
-        pgw#1010 an AOT cell is the only cell a worker mints, so this
-        invariant was false for every self-mint there is and the ERROR fired
-        on every healthy AOT boot. It is scoped to the space it can actually
-        judge; the pgw#686 concern itself is now carried by the mint's own
-        determinism, not by comparing two key spaces. (The skip is only
-        precise because `is_aot_ref` learned this pod's own mint — the same
-        registration this issue restored.)
-        """
-        with target.state_lock:
-            active = str(target.active_compile_ref or "")
-            self_mint = bool(target.active_self_mint)
-            requested = str(target.requested_cell_key or "")
-        if not (self_mint and active and requested):
-            return
-        if aot_serve.is_aot_ref(active):
-            return
-        if active.rpartition("#")[2] == requested:
-            return
-        logger.error(
-            "cell_key_divergence: self-minted active cell %s is not this "
-            "runtime's requested key %s for %s — the published cell can "
-            "never be adopted by an identical worker; the lane/axis probes "
-            "disagree (pgw#686)", active, requested, spec_name)
 
     def _compile_guard_failed(
         self,
@@ -4150,8 +4058,15 @@ class Executor:
         pgw#672: mandatory (w8a8/w4a4) lanes no longer disable their aliases
         or force a reload here — the guard wrapper degrades the object to
         explicit eager serving and this revocation flips the wire tier; the
-        failed identity is quarantined (per-target AND process-wide) so it is
-        never re-adopted or re-minted this boot.
+        failed identity is quarantined process-wide so it is never re-adopted
+        or re-minted this boot (`fleet_cells` reads that quarantine on the arm
+        path).
+
+        pgw#1032: the per-target `failed_compile_identities` set and the causal
+        `adopt_failed:runtime_guard` ModelEvent are gone with the hub-commanded
+        adoption they answered — both were fed only by the ADOPT_COMPILE_CACHE
+        handler, which no stack has ever dispatched. The revocation itself is
+        unchanged and still rides the StateDelta tier flip.
         """
         if rec.compile_targets.get(target.incarnation_id) is not target:
             raise RuntimeError("compiled target is no longer live")
@@ -4162,12 +4077,8 @@ class Executor:
             ):
                 return
             failed_ref = target.active_compile_ref
-            failed_digest = target.active_compile_snapshot_digest
-            operation_id = target.active_adoption_operation_id
-            target.failed_compile_identities.add((failed_ref, failed_digest))
             target.active_compile_ref = ""
             target.active_compile_snapshot_digest = ""
-            target.active_adoption_operation_id = ""
 
         compile_cache.record_cell_quarantined(failed_ref)
         logger.warning(
@@ -4177,47 +4088,6 @@ class Executor:
             detail,
         )
         self._signal_state_change_threadsafe()
-        if operation_id:
-            # State revocation above is synchronous and wins every local
-            # dispatch race. The causal terminal event is delivered on the
-            # executor loop and may arrive before or after the StateDelta.
-            loop = self._loop
-            if loop is None or loop.is_closed():
-                raise RuntimeError(
-                    "cannot deliver causal compile-runtime failure: "
-                    "executor loop is unavailable"
-                )
-            event = pb.WorkerMessage(model_event=self._adoption_event(
-                failed_ref,
-                pb.MODEL_STATE_FAILED,
-                failed_digest,
-                operation_id,
-                target.incarnation_id,
-                error="adopt_failed:runtime_guard",
-            ))
-
-            def send_failure() -> None:
-                async def deliver() -> None:
-                    await self._send(event)
-
-                task: asyncio.Task[None] = asyncio.create_task(
-                    deliver(),
-                    name=f"compile-runtime-failed-{target.incarnation_id}",
-                )
-
-                def log_delivery(done: asyncio.Task[None]) -> None:
-                    if done.cancelled():
-                        return
-                    error = done.exception()
-                    if error is not None:
-                        logger.error(
-                            "causal compile-runtime failure delivery failed",
-                            exc_info=error,
-                        )
-
-                task.add_done_callback(log_delivery)
-
-            loop.call_soon_threadsafe(send_failure)
 
     def _mark_compile_target_unavailable(
         self,
@@ -4699,7 +4569,6 @@ class Executor:
                     "compile target %s has no runtime guard revocation signal; "
                     "advertising eager", incarnation_id,
                 )
-            self._warn_cell_key_divergence(spec.name, target)
             if target.active_compile_ref or armed_here:
                 # pgw#622: post-proof, novel request shapes serve eager while
                 # the compiled path warms in the background.
@@ -4727,7 +4596,16 @@ class Executor:
                 "compile target survived the proof")
 
     def compile_targets(self) -> List[pb.CompileTarget]:
-        """Full-replace READY compile-target snapshot for StateDelta."""
+        """Full-replace READY compile-target snapshot for StateDelta.
+
+        pgw#1032: a target states the identity it IS SERVING (the ACTIVE ref,
+        whose key was STAMPED on the artifact at mint) and nothing else. The
+        `requested_cell_key`/`requested_cell_axes` fields it used to fill are
+        a COMPUTED (`kind="inductor"`) key, a space with no producer since
+        pgw#1010 — so the hub's exact-key delivery and demand machinery on
+        them could never fire. The wire fields retire with the RunJob cut
+        (th#1457/pgw#891); this side simply stops filling them.
+        """
         out: List[pb.CompileTarget] = []
         for rec in self._classes.values():
             if not rec.ready:
@@ -4751,59 +4629,8 @@ class Executor:
                         model_bindings=[pb.CompileTargetBinding(
                             slot=slot, ref=ref, snapshot_digest=digest,
                         ) for slot, ref, digest in target.model_bindings],
-                        requested_cell_key=target.requested_cell_key,
-                        requested_cell_axes=dict(target.requested_cell_axes),
                     ))
         return sorted(out, key=lambda target: target.incarnation_id)
-
-    def cell_lookups(self) -> List[pb.CellLookup]:
-        """Full-replace pull-by-key lookup hints (th#883/gw#581).
-
-        Live targets contribute their exact requested keys; compile-declared
-        specs not yet live contribute pre-load CANDIDATE keys (the loader's
-        resident-upgrade decision is unknown before load, so both plain
-        lanes are candidates). Lookup hints only: the hub may attach store
-        hits at boot; forge demand comes exclusively from live targets."""
-
-        seen: set[Tuple[str, str]] = set()
-        for rec in self._classes.values():
-            live = [
-                target for target in rec.compile_targets.values()
-                if target.requested_cell_key
-            ] if rec.ready else []
-            for target in live:
-                family = str(getattr(
-                    target.spec.compile_cell(), "family", "") or "").strip()
-                if family:
-                    seen.add((family, target.requested_cell_key))
-            if live:
-                continue
-            for spec in rec.specs:
-                cfg = spec.compile_cell()
-                family = str(getattr(cfg, "family", "") or "").strip()
-                if cfg is None or not family:
-                    continue
-                bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-                want_execution_lane = self._mandatory_execution_lane_of_bound(
-                    wire_ref(binding) for binding in spec.models.values()
-                )
-                execution_lanes = (
-                    (want_execution_lane,) if want_execution_lane
-                    else _SPECULATIVE_CELL_BASE_EXECUTION_LANES)
-                for execution_lane in execution_lanes:
-                    try:
-                        digest = cell_key.compute(
-                            family, execution_lane, bucket,
-                            contract=cfg.contract_digest(),
-                            regional=bool(getattr(cfg, "regional", False)),
-                        ).digest
-                    except Exception:
-                        continue
-                    seen.add((family, digest))
-        return [
-            pb.CellLookup(family=family, cell_key=key)
-            for family, key in sorted(seen)
-        ]
 
     def _compile_target(
         self, incarnation_id: str,
@@ -8356,8 +8183,14 @@ class Executor:
         want_execution_lane = self._mandatory_execution_lane_of_bound(model_refs)
         want_bucket = int(ccell.lora_bucket or 0)
         # th#883 pull-by-key: a key-flavored cell is selected only when its
-        # key is one this runtime computed for itself (the same candidates
-        # the worker advertises in cell_lookups).
+        # key is one this runtime computed for itself.
+        #
+        # pgw#1032/th#1702: this whole consumer is DARK. The hub no longer
+        # attaches a cell to anything — both snapshot attach sites are deleted
+        # hub-side — so no `snapshots` map reaching here carries one. A cell is
+        # ACQUIRED by `aot_cells` fetch-and-filter at arm time instead. Left
+        # standing (not deleted) because pgw#904 replaces it with a
+        # hub-RESOLVED `Arm.artifact`, and that lane owns the cut.
 
         candidate_keys: set[str] = set()
         for execution_lane in (
@@ -9260,7 +9093,18 @@ class Executor:
         covering the function has a proven active artifact, ``"eager"``
         otherwise (including functions without a compile declaration —
         eager by construction). Never returns ``""``: the empty tier is
-        reserved for pre-0.65 workers on the wire."""
+        reserved for pre-0.65 workers on the wire.
+
+        The tier is NOT ``serving_mode`` at a coarser grain, and pgw#1032
+        deliberately did not merge them. The tier answers *"is this worker
+        serving from a CELL"* — the hub reads it as adoption evidence
+        (``WorkerServingCompiledTier`` -> ``WorkerAdoptedDeliveredCell``,
+        th#1216), so a JIT-intake pod reporting ``compiled`` would testify that
+        the cell exchange worked on a pod that adopted nothing. ``serving_mode``
+        answers *"what code ran this request"*, where an intake arm is honestly
+        ``jit_cell`` (pgw#1010). Two questions, two answers; the apparent
+        divergence is the design.
+        """
         compiled: set[str] = set()
         for rec in self._classes.values():
             if not rec.ready:
@@ -9515,7 +9359,6 @@ class Executor:
         the artifact SOURCE differs, what it means to advertise one does not.
         """
 
-        spec = bg.spec
         act.phase(activity_mod.PHASE_FINALIZE)
         # pgw#824: the eager posture is DISCHARGED — this record now serves
         # from a cell. Left behind, a stale token would misattribute a later,
@@ -9532,11 +9375,9 @@ class Executor:
                         outcome.snapshot_digest)
                     target.active_self_mint = True
                 # pgw#686: the mint stamped the pipe's lane; re-advertise so
-                # the requested key names the key just published (the fleet
-                # adopts by requested key — a stale advertisement leaves the
-                # published cell unreachable), then assert the invariant.
+                # the target's lane/bucket/contract descriptors match what it
+                # now serves.
                 self._refresh_compile_target(target)
-                self._warn_cell_key_divergence(spec.name, target)
                 if not self._bind_compile_guard(rec, target):
                     with target.state_lock:
                         target.active_compile_ref = ""
@@ -9707,9 +9548,15 @@ class Executor:
         quantized=typed refusal).
 
         Returns the fleet ``ArmOutcome``; a ``self_mint`` result is recorded
-        into ``active_compile_artifacts`` exactly like a delivered cell so
-        the warmup proof runs and the target advertises the worker's own
-        key ref (th#910 self-attested dispatch fence)."""
+        into ``active_compile_artifacts`` exactly like a cell this pod
+        DISCOVERED and pulled, so the warmup proof runs and the target
+        advertises the key STAMPED on the bytes it serves.
+
+        pgw#1032/th#1702: that advertised key is what the hub's dispatch fence
+        verifies against its own store. The older "self-attested" spelling —
+        ``ActiveCompileRef == KeyRef(family, requested_cell_key)`` — compared a
+        stamped key against a COMPUTED one, disjoint spaces since pgw#1010, so
+        it could never match; it is retired with the requested key itself."""
 
         return fleet_cells.enable_compiled(
             pipe, cfg, self.store._cache_dir, artifact,
@@ -9791,44 +9638,6 @@ class Executor:
 
     # ---- Compile-cache adoption -------------------------------------------
 
-    async def handle_model_op(self, op: pb.ModelOp) -> None:
-        """Handle the sole v3 ModelOp: hot adoption of a compile cache."""
-        if op.op != pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE:
-            return
-        blocker_intent_id = self._compile_cache_adoption_active
-        if self.intent_registry is not None and blocker_intent_id:
-            intent_id = self.intent_registry.ensure_local_intent(
-                "compile-adopt-waiter",
-                op.operation_id or f"{op.ref}\0{id(asyncio.current_task())}",
-                detail=f"waiting to adopt compile artifact {op.ref}",
-            )
-        else:
-            intent_id = self._adoption_intent(op)
-            self._compile_cache_adoption_active = intent_id
-        self._intent_transition(
-            intent_id,
-            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-        )
-        try:
-            async with self._intent_lock(
-                intent_id,
-                self._compile_cache_adoption_lock,
-                operation=f"compile adoption single-flight for {op.ref}",
-                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
-                reason=pb.LIFECYCLE_WAIT_REASON_SINGLE_FLIGHT_OWNER,
-                resume_stage=pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-                blocker_intent_id=blocker_intent_id,
-            ):
-                self._compile_cache_adoption_active = intent_id
-                await self._handle_compile_cache_adoption(
-                    op,
-                    intent_id=intent_id,
-                )
-        finally:
-            if self._compile_cache_adoption_active == intent_id:
-                self._compile_cache_adoption_active = ""
-
     async def _report_adoptions(
         self,
         inj: "_InjectionResult",
@@ -9842,9 +9651,11 @@ class Executor:
         at warm time" — and both live stacks held ZERO rows in it, because the
         only worker-side sender was the hub-commanded `ADOPT_COMPILE_CACHE`
         handler and no stack has ever issued that operation. Every adoption
-        that actually happens is a boot attach, and a boot attach reported
-        itself in prose (`aot_adopt`, `duration_ms=0`) on a lane with no
-        numbers in it. Two builders, one fact, and only the unmeasured builder
+        that actually happens is armed at boot — "boot attach" names WHEN, not
+        a hub push; since th#1702 nothing is pushed to a pod at all and the
+        cell is ACQUIRED by `aot_cells` fetch-and-filter — and that arm
+        reported itself in prose (`aot_adopt`, `duration_ms=0`) on a lane with
+        no numbers in it. Two builders, one fact, and only the unmeasured builder
         reached the consumer.
 
         `operation_id` is empty by construction here: the wire contract already
@@ -9901,606 +9712,6 @@ class Executor:
                 "" if adoption.armed else f" reason={adoption.reason}")
             await self._send(pb.WorkerMessage(model_event=event))
         inj.adoptions.clear()
-
-    def _adoption_event(
-        self,
-        ref: str,
-        state: "pb.ModelState",
-        snapshot_digest: str,
-        operation_id: str,
-        target_incarnation_id: str,
-        **kw: Any,
-    ) -> pb.ModelEvent:
-        """Build terminal evidence for one orchestrator-minted adoption op."""
-        identity = (snapshot_digest, 0) if snapshot_digest else None
-        return self.store.model_event(
-            ref,
-            state,
-            identity=identity,
-            operation_id=operation_id,
-            target_incarnation_id=target_incarnation_id,
-            **kw,
-        )
-
-    async def _handle_compile_cache_adoption(
-        self,
-        op: pb.ModelOp,
-        *,
-        intent_id: str = "",
-    ) -> None:
-        self.store.bind_loop()
-        ref = op.ref
-        snap = op.snapshot if op.HasField("snapshot") else None
-        snapshot_digest = snap.digest if snap is not None else ""
-        operation_id = op.operation_id
-        target_incarnation_id = op.target_incarnation_id
-        if not operation_id.strip():
-            await self._send(pb.WorkerMessage(
-                model_event=self._adoption_event(
-                    ref,
-                    pb.MODEL_STATE_FAILED,
-                    snapshot_digest,
-                    operation_id,
-                    target_incarnation_id,
-                    error="adopt_failed:missing_operation_id",
-                )
-            ))
-            self._intent_transition(
-                intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_FAILED,
-                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-                detail="missing operation_id",
-            )
-            return
-        if not snapshot_digest.strip():
-            # Adoption is one-shot evidence for one immutable artifact.  A
-            # mutable ref (or the resident identity for that ref) cannot
-            # identify which bytes this operation actually used.
-            await self._send(pb.WorkerMessage(
-                model_event=self._adoption_event(
-                    ref,
-                    pb.MODEL_STATE_FAILED,
-                    snapshot_digest,
-                    operation_id,
-                    target_incarnation_id,
-                    error="adopt_failed:missing_snapshot_digest",
-                )
-            ))
-            self._intent_transition(
-                intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_FAILED,
-                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-                detail="missing snapshot digest",
-            )
-            return
-        if not target_incarnation_id.strip():
-            await self._send(pb.WorkerMessage(
-                model_event=self._adoption_event(
-                    ref,
-                    pb.MODEL_STATE_FAILED,
-                    snapshot_digest,
-                    operation_id,
-                    target_incarnation_id,
-                    error="adopt_failed:missing_target_incarnation_id",
-                )
-            ))
-            self._intent_transition(
-                intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_FAILED,
-                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-                detail="missing target incarnation id",
-            )
-            return
-        try:
-            await self._adopt_compile_cache(
-                ref,
-                snap,
-                snapshot_digest,
-                operation_id,
-                target_incarnation_id,
-                intent_id=intent_id,
-            )
-        except Exception as exc:
-            self._intent_transition(
-                intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_FAILED,
-                pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
-                detail=_sanitize(str(exc))[:512],
-            )
-            logger.warning("compile-cache adoption on %s failed: %s", ref, exc)
-            await self._send(pb.WorkerMessage(
-                model_event=self._adoption_event(
-                    ref,
-                    pb.MODEL_STATE_FAILED,
-                    snapshot_digest,
-                    operation_id,
-                    target_incarnation_id,
-                    error=(
-                        f"adopt_failed:{type(exc).__name__.lower()}: "
-                        f"{str(exc)[:300]}"
-                    ),
-                )
-            ))
-
-    async def _adopt_compile_cache(
-        self,
-        ref: str,
-        snap: Optional[pb.Snapshot],
-        snapshot_digest: str,
-        operation_id: str,
-        target_incarnation_id: str,
-        *,
-        intent_id: str = "",
-    ) -> None:
-        """Hot adoption (th#567): download+verify a compiled artifact and
-        re-wrap the already-resident modules in place — weights untouched, no
-        reload, one warmup. Handles BOTH cell kinds on the same rails: an
-        inductor cache (#384: seed dirs + torch.compile) and a TRT engine
-        (#390: deserialize + refit with the resident weights + module swap).
-        ANY failure => stay eager and report ``adopt_failed:<reason>``;
-        adoption must never degrade service.
-
-        pgw#735: THREE cell kinds ride these rails now — the exported
-        (``aot-inductor``) lane joins inductor and TRT, and proves adoption by
-        its own artifact invocations rather than by an FX cache hit it can
-        never produce."""
-
-        t0 = time.monotonic()
-        staged_artifact: Any = None
-        # th#883: once the staged artifact's axes are proven to describe
-        # exactly the key this target computed for itself, arm failures in
-        # the selection/parity vocabulary are BY CONSTRUCTION bugs in the
-        # one worker-owned brain and surface as their own loud event class.
-        self_requested = False
-        _SELECTION_BUG_REASONS = ("key_mismatch", "no_target", "lane_apply")
-
-        async def fail(reason: str, detail: str = "") -> None:
-            nonlocal staged_artifact
-            if staged_artifact is not None:
-                await asyncio.to_thread(staged_artifact.close)
-                staged_artifact = None
-            logger.warning("compile-cache adopt %s failed: %s %s", ref, reason, detail)
-            # gw#577: terminal refusals carry the exact mismatch (axis +
-            # cell-vs-runtime values) on the wire — pods expose no logs. The
-            # th#875 transient vocabulary stays bare: the hub re-arm matcher
-            # compares those four statuses EXACTLY.
-            error = f"adopt_failed:{reason}"
-            if (
-                self_requested
-                and reason in _SELECTION_BUG_REASONS
-                # low_vram prep mode is dynamic placement, outside the key:
-                # its drift is a legitimate miss, never the bug class.
-                and "low_vram_mode" not in detail
-            ):
-                logger.error(
-                    "cell_selection_bug on %s: %s %s", ref, reason, detail)
-                error = f"cell_selection_bug:{reason}"
-            if detail and reason not in (
-                "model_in_use", "target_not_ready", "target_replaced", "download",
-            ):
-                error = f"{error}: {detail[:300]}"
-            self._intent_transition(
-                intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_FAILED,
-                pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
-                detail=_sanitize(error)[:512],
-            )
-            await self._send(
-                pb.WorkerMessage(
-                    model_event=self._adoption_event(
-                        ref,
-                        pb.MODEL_STATE_FAILED,
-                        snapshot_digest,
-                        operation_id,
-                        target_incarnation_id,
-                        error=error,
-                    )
-                )
-            )
-
-        family = compile_cache.family_from_ref(ref)
-        is_trt = trt_engine.is_engine_ref(ref)
-        # pgw#735: an EXPORTED cell is a third artifact kind, proven its own
-        # way below. Without this it fails `bad_ref` before it is ever armed.
-        is_aot = aot_serve.is_aot_ref(ref)
-        if not family or not (
-            is_trt or is_aot or compile_cache.is_cache_ref(ref)
-        ):
-            return await fail("bad_ref")
-        found = self._compile_target(target_incarnation_id)
-        if found is None:
-            return await fail("target_not_ready")
-        expected_rec, expected_target = found
-        target_family = str(
-            getattr(expected_target.spec.compile, "family", "") or ""
-        ).strip()
-        if target_family != family:
-            return await fail("target_family_mismatch")
-        with expected_target.state_lock:
-            previous_ref = expected_target.active_compile_ref
-            previous_digest = expected_target.active_compile_snapshot_digest
-            cell_quarantined = (
-                (ref, snapshot_digest)
-                in expected_target.failed_compile_identities
-            )
-        if cell_quarantined:
-            return await fail(
-                "cell_quarantined",
-                "this immutable cell already failed its runtime guard on "
-                "the exact live target",
-            )
-        if previous_ref == ref and previous_digest == snapshot_digest:
-            # Replayed/reconnected operation for the exact already-proven
-            # artifact: acknowledge without another wrap or warmup, and retain
-            # the latest causal operation identity for a later guard failure.
-            with expected_target.state_lock:
-                expected_target.active_adoption_operation_id = operation_id
-            await self._send(
-                pb.WorkerMessage(
-                    model_event=self._adoption_event(
-                        ref,
-                        pb.MODEL_STATE_ADOPTED,
-                        snapshot_digest,
-                        operation_id,
-                        target_incarnation_id,
-                        duration_ms=0,
-                    )
-                )
-            )
-            self._intent_transition(
-                intent_id,
-                pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
-                pb.LIFECYCLE_INTENT_STAGE_READY,
-                actual_digest=snapshot_digest.encode(),
-            )
-            return
-        if previous_ref:
-            # Replacing any already-active wrapper is not transactional:
-            # applying the new graph first unwraps the old one, and a failed
-            # warmup cannot promise a lossless restore. Never report the old
-            # artifact as active after removing it. Tensorhub vacates/reloads
-            # this incarnation for same-ref republish or kind/ref changes.
-            return await fail("active_replace_requires_reload")
-        if self.in_flight_keys():
-            # The hub schedules adoption idle-only; defensive — never touch
-            # a module while any job is in flight.
-            return await fail("model_in_use")
-        # pgw#671 adopt-on-arm: a peer's upload armed this cell while our own
-        # background mint was building — adopt, abandoning our build cleanly
-        # (opportunistic adoption, never wait-for-peer). The router is also
-        # suspended so the adoption's proof warmup keeps its sequential
-        # semantics (an eager route would falsify the proof).
-        await self.abandon_background_mint(
-            expected_rec, reason=f"adopting peer cell {ref}",
-            code="adopt_on_arm")
-        adopt_router = hot_swap_mod.router_of(expected_target.pipeline)
-        if adopt_router is not None:
-            adopt_router.suspend()
-        materialize_intent = self.store._materialize_intent(ref)
-        self._intent_transition(
-            intent_id,
-            pb.LIFECYCLE_INTENT_STATUS_WAITING,
-            pb.LIFECYCLE_INTENT_STAGE_WAIT_SNAPSHOT,
-            reason=pb.LIFECYCLE_WAIT_REASON_SNAPSHOT,
-            blocker_intent_id=materialize_intent,
-        )
-        try:
-            local = await self.store.ensure_local(ref, snap)
-        except Exception as exc:
-            return await fail("download", str(exc))
-        self._intent_transition(
-            intent_id,
-            pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-            pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-        )
-        artifact = compile_cache.find_artifact(local)
-        if artifact is None:
-            return await fail("artifact_missing")
-        if not is_trt and not is_aot:
-            try:
-                # Expensive extraction and runtime-key verification happen in
-                # an isolated tree before taking model/GPU locks. Activation
-                # and wrapper installation remain one serialized transaction.
-                staged_artifact = await asyncio.to_thread(
-                    compile_cache.stage_artifact,
-                    artifact,
-                    family,
-                    self.store._cache_dir,
-                )
-            except compile_cache.AdoptError as exc:
-                return await fail(exc.reason, str(exc))
-            except Exception as exc:
-                return await fail("artifact_invalid", str(exc))
-            with expected_target.state_lock:
-                want_key = expected_target.requested_cell_key
-            if want_key and staged_artifact is not None:
-
-                self_requested = not cell_key.mismatch(
-                    staged_artifact.metadata, want_key)
-
-        # Artifact work may take long enough for model juggling to replace the
-        # object. Serialize the final check + mutation with setup/vacate, and
-        # address only the exact incarnation observed before the download.
-        async with self._intent_lock(
-            intent_id,
-            self._load_lock,
-            operation=f"compile adoption load lock for {ref}",
-            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_LOAD_LOCK,
-            reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
-            resume_stage=pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
-        ):
-            current = self._compile_target(target_incarnation_id)
-            if (
-                current is None
-                or current[0] is not expected_rec
-                or current[1] is not expected_target
-            ):
-                return await fail("target_replaced")
-            if self.in_flight_keys():
-                return await fail("model_in_use")
-
-            # A job landing mid-adoption queues behind every GPU permit;
-            # process-global Inductor counters cannot tolerate another slot
-            # compiling inside this exact target's proof window.
-            async with self._exclusive_gpu(
-                intent_id,
-                resume_stage=pb.LIFECYCLE_INTENT_STAGE_ADOPTING,
-            ):
-                current = self._compile_target(target_incarnation_id)
-                if (
-                    current is None
-                    or current[0] is not expected_rec
-                    or current[1] is not expected_target
-                ):
-                    return await fail("target_replaced")
-
-                rec, target = current
-                spec = target.spec
-                cfg = spec.compile_cell()
-                assert cfg is not None
-                obj = target.pipeline
-                wrapped = False
-                execution_lane_applied = False
-                trt_before = trt_engine.execution_count(obj) if is_trt else 0
-                aot_before = aot_serve.execution_count(obj) if is_aot else 0
-                inductor_before = (0, 0, 0)
-
-                async def rollback() -> None:
-                    """Return a first-time failed adoption to honest eager."""
-                    if is_trt and wrapped:
-                        trt_engine.unwrap(obj)
-                    if is_aot and wrapped:
-                        aot_serve.unwrap(obj)
-                    if wrapped:
-                        if not is_trt and not is_aot:
-                            compile_cache.unwrap(obj)
-                    if execution_lane_applied:
-                        compile_cache.drop_lora_execution_lane(obj)
-                    live = self._compile_target(target_incarnation_id)
-                    if live is not None and live[0] is rec and live[1] is target:
-                        self._refresh_compile_target(target)
-                        self._on_state_change()
-
-                bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-                if bucket and not is_trt and not is_aot:
-                    try:
-                        compile_cache.apply_lora_execution_lane(obj, bucket)
-                        execution_lane_applied = True
-                    except Exception as exc:
-                        await rollback()
-                        return await fail("lane_apply", str(exc))
-
-                if is_trt:
-                    try:
-                        await asyncio.to_thread(
-                            trt_engine.load_and_wrap, obj, cfg,
-                            artifact, self.store._cache_dir,
-                        )
-                        wrapped = True
-                    except compile_cache.AdoptError as exc:
-                        await rollback()
-                        return await fail(exc.reason, str(exc))
-                    except Exception as exc:
-                        await rollback()
-                        return await fail("artifact_invalid", str(exc))
-                elif is_aot:
-                    # pgw#734: HOT adoption of an exported cell. Boot arming
-                    # already dispatches by kind in provision.enable_compiled;
-                    # this path did not, so a .pt2 delivered to a RUNNING
-                    # worker was handed to the dynamo stager and unpacked as an
-                    # inductor cache tree. Same rails, same fail-closed
-                    # classification — its own backend.
-                    try:
-                        await asyncio.to_thread(
-                            aot_serve.load_and_wrap, obj, cfg,
-                            artifact, self.store._cache_dir,
-                        )
-                        wrapped = True
-                    except compile_cache.AdoptError as exc:
-                        await rollback()
-                        return await fail(exc.reason, str(exc))
-                    except Exception as exc:
-                        await rollback()
-                        return await fail("artifact_invalid", str(exc))
-                else:
-                    assert staged_artifact is not None
-                    try:
-                        # Exact graph/lane parity is checked against this one
-                        # live object, never every resident family member.
-                        await asyncio.to_thread(
-                            compile_cache.arm_staged_artifact,
-                            obj,
-                            cfg,
-                            staged_artifact,
-                        )
-                        staged_artifact = None
-                    except compile_cache.AdoptError as exc:
-                        await rollback()
-                        return await fail(exc.reason, str(exc))
-                    except Exception as exc:
-                        await rollback()
-                        return await fail("artifact_invalid", str(exc))
-                    wrapped = True
-
-                if not is_trt and not is_aot:
-                    inductor_before = (
-                        compile_cache.execution_count(obj),
-                        compile_cache.cache_hit_count(obj),
-                        compile_cache.cache_miss_count(obj),
-                    )
-                warm_t0 = time.monotonic()
-                warmup = getattr(rec.instance, "warmup", None)
-                proven_function_names: set[str] = set()
-                try:
-                    if callable(warmup):
-                        if asyncio.iscoroutinefunction(warmup):
-                            await warmup()
-                        else:
-                            await asyncio.to_thread(warmup)
-                        warmed = 1
-                    else:
-                        # Real FLUX/Z/SDXL endpoints use the decorator warmup
-                        # contract rather than a custom instance method. Reuse
-                        # the same production planner/invocation path as setup.
-                        warmup_evidence = await self._run_synthesized_warmup(
-                            spec,
-                            rec,
-                            rec.instance,
-                            None,
-                            proof_objects=(obj,),
-                        )
-                        warmed = warmup_evidence.count
-                        proven_function_names.update(
-                            warmup_evidence.functions_by_object.get(id(obj), set()))
-                except Exception as exc:
-                    await rollback()
-                    return await fail("warmup", f"{type(exc).__name__}: {exc}")
-                warmup_s = round(time.monotonic() - warm_t0, 3)
-                # pgw#797 / th#1329: warmup AFTER arming a cell. Same quantity
-                # the hub stores as `worker_activity_events.warmup_ms` on the
-                # adopt event, recorded here as a boot row too so the ladder
-                # and the adopt event answer "what does an armed cell still pay
-                # on warmup" identically instead of by two derivations. Always
-                # armed=1 by construction — this runs after the wrap.
-                if boot_mod.in_boot() and warmed:
-                    # pgw#924: `and warmed`. A warmup that ran no forward has
-                    # no cost to report, and a zero-duration row here reads
-                    # identically to "an armed cell warms instantly" — the
-                    # exact reading 240 live rows of `duration_ms=0` invited.
-                    boot_mod.mark(
-                        boot_mod.PHASE_WARMUP,
-                        duration_ms=int(round(warmup_s * 1000)),
-                        function=spec.name,
-                        ref=ref,
-                        klass=boot_mod.CLASS_LOAD,
-                        detail=f"armed=1 minting=0 forwards={warmed} adopt=1",
-                    )
-                hits = 0
-                misses = 0
-
-                if not is_trt and not is_aot:
-                    calls = compile_cache.execution_count(obj) - inductor_before[0]
-                    hits = compile_cache.cache_hit_count(obj) - inductor_before[1]
-                    misses = compile_cache.cache_miss_count(obj) - inductor_before[2]
-                    if not warmed:
-                        await rollback()
-                        return await fail(
-                            "no_warmup",
-                            "target defines no runnable warmup; cache hits unprovable")
-                    if calls <= 0:
-                        # gw#595: distinct from a genuine miss — the warmup
-                        # has no modality that exercises this object at all,
-                        # so the cell is unprovable on this target rather
-                        # than disproven.
-                        await rollback()
-                        return await fail("no_warmup_modality", (
-                            "no warmup modality exercises this object "
-                            f"(calls=0, warmup={warmup_s}s); cell unprovable "
-                            "on this target"))
-                    if hits <= 0:
-                        await rollback()
-                        return await fail("cache_miss", (
-                            "exact target warmup did not execute a cache-hit "
-                            f"compiled graph (calls={calls}, hits={hits}, "
-                            f"misses={misses}, warmup={warmup_s}s) — cell useless "
-                            f"on this runtime, serving eager"))
-                elif is_trt and trt_engine.execution_count(obj) <= trt_before:
-                    await rollback()
-                    return await fail(
-                        "engine_not_executed",
-                        "warmup did not execute the attached TRT engine",
-                    )
-                elif is_aot and not aot_serve.proven_since(obj, aot_before):
-                    # pgw#735: the exported lane's own proof. An artifact that
-                    # never ran, or that ran and then revoked (B1/B2 refusal),
-                    # is NOT adopted — same fail-closed posture as a dynamo
-                    # cell with zero cache hits, never a synthesized hit.
-                    await rollback()
-                    return await fail(
-                        "artifact_not_executed", (
-                            "warmup did not execute the attached exported "
-                            f"artifact (calls={aot_serve.execution_count(obj) - aot_before}, "
-                            f"armed={aot_serve.is_armed(obj)}, "
-                            f"ingress_refusals={aot_serve.ingress_refusals(obj)})"
-                        ),
-                    )
-                if callable(warmup):
-                    # A custom object warmup has no sibling-handler identity.
-                    proven_function_names.add(spec.name)
-                advertised_function_names = set(target.function_names)
-                if proven_function_names != advertised_function_names:
-                    await rollback()
-                    return await fail(
-                        "function_alias_unproven",
-                        "warmup proof does not equal the immutable advertised "
-                        f"handler aliases (advertised={sorted(advertised_function_names)!r} "
-                        f"proven={sorted(proven_function_names)!r})",
-                    )
-
-                current = self._compile_target(target_incarnation_id)
-                if current is None or current[0] is not rec or current[1] is not target:
-                    await rollback()
-                    return await fail("target_replaced")
-                self._refresh_compile_target(target)
-                if not self._bind_compile_guard(rec, target):
-                    await rollback()
-                    return await fail(
-                        "guard_unbound",
-                        "compiled wrapper has no runtime revocation signal",
-                    )
-                with target.state_lock:
-                    target.active_compile_ref = ref
-                    target.active_compile_snapshot_digest = snapshot_digest
-                    target.active_adoption_operation_id = operation_id
-                self._on_state_change()
-
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        logger.info(
-            "compile-cache adopt %s: adopted in %dms (fxgraph hits=%d misses=%d, "
-            "warmup %.1fs)", ref, duration_ms, hits, misses, warmup_s)
-        if misses:
-            logger.warning(
-                "compile-cache adopt %s: %d fxgraph misses during warmup — "
-                "cell covers the declared shapes only partially", ref, misses)
-        await self._send(pb.WorkerMessage(
-            model_event=self._adoption_event(
-                ref,
-                pb.MODEL_STATE_ADOPTED,
-                snapshot_digest,
-                operation_id,
-                target_incarnation_id,
-                duration_ms=duration_ms,
-                cache_hits=hits,
-                cache_misses=misses,
-                warmup_s=warmup_s,
-            )
-        ))
-        self._intent_transition(
-            intent_id,
-            pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
-            pb.LIFECYCLE_INTENT_STAGE_READY,
-            actual_digest=snapshot_digest.encode(),
-        )
 
     def _record_refs(self, rec: _ClassRecord) -> List[str]:
         """The wire refs a record's instance holds: the load-time booking

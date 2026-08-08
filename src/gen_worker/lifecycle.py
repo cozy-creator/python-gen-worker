@@ -338,10 +338,12 @@ class Lifecycle:
             # must not drain/retire this worker on GPU-idleness alone.
             finalizing_jobs=self.executor.finalizing_jobs(),
             observed_residency_generation=self._observed_residency_generation,
+            # pgw#1032: `cell_lookups` is NOT filled. It advertised COMPUTED
+            # (kind="inductor") keys, a space with no producer since pgw#1010,
+            # so the store lookups it fed could never resolve. A target now
+            # states only the identity it IS serving. The wire field retires
+            # with the RunJob cut (th#1457/pgw#891).
             compile_targets=self.executor.compile_targets(),
-            # th#883 pull-by-key: worker-computed cell keys the hub may look
-            # up in its store (boot attach) — never hub-side selection input.
-            cell_lookups=self.executor.cell_lookups(),
             # pgw#610/th#962: measured per-tier disk telemetry. Rides every
             # StateDelta (and thus Hello.state). boothang fix: this ONLY
             # reads ModelStore's cache (never blocks) — the actual statvfs
@@ -994,20 +996,23 @@ class Lifecycle:
         elif which == "cancel_job":
             self.executor.handle_cancel(msg.cancel_job)
         elif which == "model_op":
-            # Compile-cache adoption must never block the receive path.
-            asyncio.create_task(self._adopt_compile_cache_then_delta(msg.model_op))
+            # pgw#1032: the sole ModelOp kind (ADOPT_COMPILE_CACHE) is retired.
+            # Its hub-side push was keyed off the COMPUTED cell key, a space
+            # with no producer since pgw#1010, so no stack has ever dispatched
+            # one. Ignore rather than refuse: a hub that has not yet deployed
+            # th#1702 must not lose its stream over a message we simply no
+            # longer act on.
+            logger.warning(
+                "ignoring retired ModelOp (pgw#1032): hot compile-cache "
+                "adoption is gone; this worker ACQUIRES cells itself "
+                "(aot_cells fetch-and-filter at arm time) — the hub never "
+                "pushes one")
         elif which == "drain":
             self.start_drain(int(msg.drain.deadline_ms or 0))
         elif which is None:
             raise FatalTransportError("scheduler sent an unknown mandatory command")
         else:
             raise FatalTransportError(f"scheduler sent unsupported command {which!r}")
-
-    async def _adopt_compile_cache_then_delta(self, op: pb.ModelOp) -> None:
-        try:
-            await self.executor.handle_model_op(op)
-        finally:
-            await self.maybe_send_state_delta()
 
     async def on_disconnect(self) -> None:
         self._last_delta = None

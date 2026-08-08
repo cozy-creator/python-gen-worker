@@ -117,7 +117,9 @@ def test_cold_candidate_key_equals_warm_published_key(
     parity boot-attach adoption requires."""
     cfg = _cfg()
 
-    # Cold phase — the executor's cell_lookups() candidate computation.
+    # Cold phase — the arm-key computation the fetch-and-filter adoption
+    # path runs (fleet_cells/local_cells; pgw#1032 retired the executor's
+    # `cell_lookups()` advertisement of the same digest, not the digest).
     _phase(monkeypatch, tmp_path, "cold", _COLD_LIBS)
     candidate = ck.compute(
         "sdxl", "w8a8", 64,

@@ -9,11 +9,26 @@ free-text ``aot_adopt`` activity event that put ``family=… key=… sku=…`` i
 prose and no numbers anywhere.
 
 Only the free-text one was ever reachable from the path adoptions actually take
-(boot attach through ``fleet_cells``); the typed one was reachable only from the
+(arming at boot, through ``fleet_cells`` — historically called "boot attach",
+which names WHEN the cell is armed, never a hub push); the typed one was
+reachable only from the
 hub-commanded ``ADOPT_COMPILE_CACHE`` operation, which no stack has ever
 dispatched. So the measured lane had zero rows on both live stacks while every
 real adoption landed at ``duration_ms=0``, and the percentile endpoint
 aggregated a population with no members.
+
+pgw#1032 finished the argument: ``ADOPT_COMPILE_CACHE`` is GONE on both sides.
+Its hub-side push was keyed off the COMPUTED (``kind="inductor"``) cell key,
+and since pgw#1010 nothing mints into that key space — every publishable cell
+is STAMPED ``aot-inductor`` — so the push could never have selected a cell.
+
+**Nothing is DELIVERED to a pod any more.** th#1702 also deletes the hub's
+snapshot attach (HelloAck and RunJob both), so the worker ACQUIRES its own
+cell: ``aot_cells`` fetch-and-filter lists the family repo through the hub's
+catalog read API at arm time, downloads what this runtime can serve, and feeds
+it through the same gates. That is the only adoption there is. (pgw#904
+replaces the listing with a hub-RESOLVED ``Arm.artifact`` — still a pull, not
+a push.)
 
 The free-text lane is DELETED. This module is what replaced it: the arm returns
 a typed outcome instead of a bare bool, the arming policy times it and names the
@@ -128,10 +143,10 @@ class CellAdoption:
 
     ``arm_ms`` is the wall time of the arm itself — load, bind, wrap, gate —
     and is the same quantity the hub stores as the adoption's ``duration_ms``.
-    The warmup half is deliberately absent: a boot-attached cell is armed during
-    injection and warmed later, by the setup warmup, so the two numbers are
-    known at two different instants and the executor joins them. A hot
-    (hub-commanded) adoption arms and warms in one frame and fills both there.
+    The warmup half is deliberately absent: a cell is armed during injection
+    and warmed later, by the setup warmup, so the two numbers are known at two
+    different instants and the executor joins them (pgw#1032: an arm-time
+    acquisition is the only adoption there is, so this is the only shape).
     """
 
     ref: str

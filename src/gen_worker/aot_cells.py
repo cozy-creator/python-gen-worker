@@ -20,6 +20,12 @@ function make the hub's ``requestedKeyCellLocked`` ambiguous and
 fail-close mandatory-lane dispatch. That route is #724's design work and
 needs a hub tie-break first; the runbook records the hazard.
 
+pgw#1032/th#1702 settled it by DELETION rather than tie-break: the
+advertised-key route and the hub lookup it fed are both gone, because the
+computed (``inductor``) key space has had no producer since pgw#1010.
+Fetch-and-filter is the only discovery there is; pgw#904 replaces it with a
+hub-resolved ``Arm.artifact``.
+
 Filter (SDXL-AOT-PILOT-RUNBOOK.md §3 F1):
 
 * ``kind == aot-inductor`` with a stamped ``cell_key``;

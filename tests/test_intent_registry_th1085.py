@@ -153,7 +153,11 @@ def test_setup_and_gpu_waits_are_typed_before_blocking() -> None:
     asyncio.run(run())
 
 
-def test_legacy_adoption_and_job_have_bounded_local_intents() -> None:
+def test_legacy_job_has_a_bounded_local_intent() -> None:
+    """pgw#1032: the ADOPTION half of this test is deleted with the handler it
+    drove. ``ModelOp{ADOPT_COMPILE_CACHE}`` was pushed off the COMPUTED cell
+    key, a space with no producer since pgw#1010, so no stack ever dispatched
+    one — there is no adoption intent to bound. The job half is unchanged."""
     class Input(msgspec.Struct):
         value: int
 
@@ -181,16 +185,6 @@ def test_legacy_adoption_and_job_have_bounded_local_intents() -> None:
         executor = Executor([spec], send)
         registry = IntentRegistry("release-1", ["echo"])
         executor.bind_intent_registry(registry)
-
-        adoption = pb.ModelOp(
-            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
-            ref="compile-cache/family/cell",
-        )
-        adoption_intent = executor._adoption_intent(adoption)
-        await executor.handle_model_op(adoption)
-        adoption_state = _state(registry, adoption_intent)
-        assert adoption_state.status == pb.LIFECYCLE_INTENT_STATUS_FAILED
-        assert adoption_state.stage == pb.LIFECYCLE_INTENT_STAGE_VALIDATING
 
         request = pb.RunJob(
             request_id="request-1",

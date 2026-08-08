@@ -117,7 +117,7 @@ def test_same_declared_config_same_key_across_free_vram(
         _, execution_lane_rich, key_rich = _load_and_key(root, monkeypatch, free_gb=999.0)
 
     assert execution_lane_tight == execution_lane_rich == "fp8-hooks"
-    # The issue's acceptance surface: the two requested_cell_axes dicts.
+    # The issue's acceptance surface: the two computed axis dicts.
     assert key_tight.axes_dict() == key_rich.axes_dict()
     assert key_tight.digest == key_rich.digest
     # And it is the MINTED lane token (w8a16 = fp8-hooks on the wire), not
