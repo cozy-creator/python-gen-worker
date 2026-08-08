@@ -100,6 +100,7 @@ def load_slot(
     ref: str = "",
     mode: str = "auto",
     components: Optional[Dict[str, Any]] = None,
+    component_trees: Optional[Dict[str, str]] = None,
     device: str = "",
     declared_vram_gb: float = 0.0,
     force_storage_dtype: str = "",
@@ -151,7 +152,9 @@ def load_slot(
 
     pipe = load_from_pretrained(
         annotation, path, dtype=dtype, storage_dtype=storage_dtype,
-        components=components or None, declared_vram_gb=declared_vram_gb,
+        components=components or None,
+        component_trees=component_trees or None,
+        declared_vram_gb=declared_vram_gb,
     )
     out.obj = pipe
 
