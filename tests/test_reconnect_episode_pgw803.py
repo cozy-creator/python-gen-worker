@@ -38,10 +38,23 @@ from typing import List
 
 import pytest
 
+from gen_worker import activity as activity_mod
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.transport import RECONNECT_EVENT, _ReconnectEpisode
 
 from harness.hub_double import hub_double
+
+
+@pytest.fixture(autouse=True)
+def _restore_activity_sink():
+    """`activity.bind_sink` is a process global with no autouse reset, and any
+    hub-double row binds it to a `Worker._send` that stops draining at teardown.
+    Under `--dist loadfile` the next FILE runs in the same process, so leaving it
+    bound hands that file a queue nothing empties. Pre-existing for every
+    hub-double row in the suite; this file at least does not add to it."""
+    before = activity_mod._sink
+    yield
+    activity_mod._sink = before
 
 
 def _reconnect_events(msgs: List[pb.WorkerMessage], phase: str) -> List[pb.ActivityUpdate]:
