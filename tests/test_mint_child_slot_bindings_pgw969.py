@@ -145,7 +145,7 @@ def _request(
         mint_root=tmp_path)
     bg = _BackgroundMint(
         spec=SimpleNamespace(name=function), instance=object(), snapshots=None,
-        pendings={}, pipes={}, selections={},
+        pendings={}, pipes={},
         modules=(CATALOG_MODULE,),
         slots=({"pipeline": mp.MintSlot(ref=binding, path=str(tree))}
                if binding is not None else {}),
@@ -397,7 +397,7 @@ def test_the_default_is_empty_not_absent() -> None:
     """A hub-less or slotless boot must still produce a well-formed request."""
     bg = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=object(), snapshots=None,
-        pendings={}, pipes={}, selections={})
+        pendings={}, pipes={})
     assert bg.slots == {}
 
 

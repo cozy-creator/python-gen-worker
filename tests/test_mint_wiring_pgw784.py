@@ -166,7 +166,7 @@ def test_background_mint_carries_the_modules_and_the_resolution(
 ) -> None:
     bg = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=None, snapshots=None,
-        pendings={}, pipes={}, selections={},
+        pendings={}, pipes={},
         modules=("app",), slots={"pipeline": _slot("/cas/sdxl")})
     assert bg.modules == ("app",)
     assert bg.slots["pipeline"].path == "/cas/sdxl"
@@ -174,7 +174,7 @@ def test_background_mint_carries_the_modules_and_the_resolution(
     # Defaulted, so the in-process route is untouched by their existence.
     plain = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=None, snapshots=None,
-        pendings={}, pipes={}, selections={})
+        pendings={}, pipes={})
     assert plain.modules == () and plain.slots == {}
 
 
@@ -218,7 +218,7 @@ def _wired(
     bg = _BackgroundMint(
         spec=spec, instance=None, snapshots=None,
         pendings={id(p): pending for p in objs},
-        pipes={id(p): p for p in objs}, selections={},
+        pipes={id(p): p for p in objs},
         modules=("harness.toy_endpoints",),
         slots={"pipeline": _slot(str(tmp_path / "snap"))})
     monkeypatch.setattr(ex, "_served_execution_lane", lambda s, instructed="": "fp8-w8a16")

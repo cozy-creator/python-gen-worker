@@ -254,7 +254,7 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
 
     bg = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=object(), snapshots=None,
-        pendings={}, pipes={}, selections={},
+        pendings={}, pipes={},
         modules=("app",),
         slots={"pipeline": resolved},
     )
@@ -275,7 +275,7 @@ def test_the_executor_records_what_it_resolved() -> None:
     and must still produce a well-formed request."""
     bg = _BackgroundMint(
         spec=SimpleNamespace(name="gen"), instance=object(), snapshots=None,
-        pendings={}, pipes={}, selections={})
+        pendings={}, pipes={})
     assert bg.slots == {}
 
 

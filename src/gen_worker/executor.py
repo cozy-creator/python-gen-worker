@@ -2604,31 +2604,30 @@ def _selection_for(
     minted instead, recording the delivered identity would advertise bytes
     this object does not serve (the gw#586 defect shape).
 
-    ``mint`` is either a finalized ``fleet_cells.SelfMint`` (artifact
-    already packed, digest known) or a ``fleet_cells.PendingSelfMint``
-    (gw#587 CORRECT FIX: armed for capture, not yet proven or packed — its
-    ``target`` path exists on disk only once the warmup proof finalizes
-    it, and its ``snapshot_digest`` is empty until then). Either way the
-    ``ref`` is known immediately (computed from static axes, never the
-    traced FX graph bytes), which is what the hub's self-attested dispatch
-    fence needs at advertise time; the proof loop replaces this selection
-    with the fully finalized one once it packs the proven capture.
+    ``mint`` is a finalized ``fleet_cells.SelfMint`` — an adopted cell, whose
+    ``artifact`` is packed on this disk and whose ``ref`` carries the key
+    STAMPED on that envelope. That is the only identity this function will
+    hand back for a mint.
+
+    A ``fleet_cells.PendingSelfMint`` yields the ``delivered`` selection (or
+    nothing): pgw#805 — an exported cell's key folds the COMBINED GRAPH HASH
+    of its class set, so it does not exist until the export finishes, and the
+    pending's own ``ref`` is a COMPUTED ``kind="inductor"`` key that no
+    artifact will ever carry. Advertising it would publish a self-attested ref
+    against bytes that will be stamped with a different one. Nothing is
+    advertised for an owed mint until ``adopt_delegated_mint`` reads the real
+    key off the packed envelope.
+
+    pgw#1033: that guard used to test ``mint.recipe == "aot"``, an attribute
+    pgw#1010 deleted from every mint object — so it could not fire, and only
+    the caller's ``delegated`` branch (which drops the selection it just asked
+    for) kept the computed ref off the wire. The predicate is the mint's own
+    state: a pending has no packed artifact.
     """
     if mint is not None:
-        if (getattr(mint, "recipe", "") == "aot"
-                and getattr(mint, "artifact", None) is None):
-            # pgw#805: an AOT cell's key folds the COMBINED GRAPH HASH of the
-            # exported class set, so it does not exist until the export
-            # finishes. The dynamo pending's key is computable from static
-            # axes and is therefore honest to advertise at arm time; an AOT
-            # pending's is not, and advertising the dynamo-shaped handle would
-            # publish a self-attested ref no artifact will ever carry. Nothing
-            # is advertised until `adopt_delegated_mint` reads the real key
-            # off the packed envelope.
-            return delivered
         path = getattr(mint, "artifact", None)
         if path is None:
-            path = mint.target
+            return delivered
         return _CompileArtifactSelection(
             path=Path(path), ref=str(mint.ref),
             snapshot_digest=str(getattr(mint, "snapshot_digest", "") or ""),
@@ -2833,9 +2832,6 @@ class _BackgroundMint:
     # id(pipeline) -> the actual pipeline object (id() keys alone cannot
     # keep the object alive or recover it).
     pipes: Dict[int, Any]
-    # id(pipeline) -> arm-time placeholder selection (claimed key ref,
-    # digest empty until finalize) stashed out of the foreground install.
-    selections: Dict[int, "_CompileArtifactSelection"]
     abandon: asyncio.Event = dc_field(default_factory=asyncio.Event)
     task: Optional["asyncio.Task[None]"] = None
     act: Optional[Any] = None  # the handed-over self_mint_compile Activity
@@ -4110,12 +4106,28 @@ class Executor:
         anything else is fleet-wide silent zero-adoption: the published
         cell sits armed in the store while every cold pod re-mints (the
         ie#546 burst: 10 pods, 9 simultaneous mints, 0 adoptions). Loud
-        and greppable; never fatal to serving."""
+        and greppable; never fatal to serving.
+
+        pgw#1033 (INTERIM — pgw#1032 deletes this warning together with
+        `requested_cell_key` itself): an EXPORTED cell's key is STAMPED on
+        its envelope and folds the combined graph hash of the traced class
+        set, so it can never equal the `kind="inductor"` key this runtime
+        COMPUTES — different spaces, by construction and on purpose. Since
+        pgw#1010 an AOT cell is the only cell a worker mints, so this
+        invariant was false for every self-mint there is and the ERROR fired
+        on every healthy AOT boot. It is scoped to the space it can actually
+        judge; the pgw#686 concern itself is now carried by the mint's own
+        determinism, not by comparing two key spaces. (The skip is only
+        precise because `is_aot_ref` learned this pod's own mint — the same
+        registration this issue restored.)
+        """
         with target.state_lock:
             active = str(target.active_compile_ref or "")
             self_mint = bool(target.active_self_mint)
             requested = str(target.requested_cell_key or "")
         if not (self_mint and active and requested):
+            return
+        if aot_serve.is_aot_ref(active):
             return
         if active.rpartition("#")[2] == requested:
             return
@@ -6973,23 +6985,21 @@ class Executor:
                     inj.pending_self_mints.pop(_pid, None)
             if eager_first:
 
-                mint_selections: Dict[int, _CompileArtifactSelection] = {}
                 mint_pipes: Dict[int, Any] = {}
                 for candidate in inj.compile_objects:
                     pid = id(candidate.pipeline)
                     if pid not in inj.pending_self_mints:
                         continue
-                    sel = inj.active_compile_artifacts.pop(pid, None)
-                    if sel is None:
-                        # pgw#784: a DELEGATED pending never entered
-                        # active_compile_artifacts (nothing is armed on its
-                        # pipe), but its claimed key ref is computable now from
-                        # static axes, and th#910's self-attested dispatch
-                        # fence wants it advertised while the child compiles.
-                        sel = _selection_for(
-                            None, inj.pending_self_mints.get(pid))
-                    if sel is not None:
-                        mint_selections[pid] = sel
+                    # pgw#1033: an OWED mint advertises no artifact. Every
+                    # pending is delegated (pgw#1010), so nothing is armed on
+                    # this pipe and it never entered
+                    # `active_compile_artifacts`; the arm-time placeholder
+                    # selection this loop used to stash was the pending's
+                    # COMPUTED `kind="inductor"` ref, which the cell the child
+                    # is exporting will never carry — and the only consumer of
+                    # the stash was a `_BackgroundMint` field nothing read.
+                    # The pipe serves eager until `adopt_delegated_mint` reads
+                    # the STAMPED key off the packed envelope.
                     mint_pipes[pid] = candidate.pipeline
                     hot_swap.enable(candidate.pipeline)
                     # pgw#677: the mint's own background compiles are the
@@ -7002,7 +7012,6 @@ class Executor:
                     snapshots=dict(snapshots) if snapshots else None,
                     pendings=dict(inj.pending_self_mints),
                     pipes=mint_pipes,
-                    selections=mint_selections,
                     modules=_mint_modules(spec),
                     slots=dict(resolved_slots),
                 )

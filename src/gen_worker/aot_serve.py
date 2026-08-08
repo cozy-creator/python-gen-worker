@@ -243,10 +243,17 @@ def flavor_label(sku: str, version: str, precision: str) -> str:
 # Stamped cell keys this process LEARNED name aot-inductor artifacts
 # (pgw#722 F1 discovery). Published AOT cells ride the same key space as
 # their store flavor — indistinguishable from a dynamo cell's flavor by
-# string shape alone — so discovery registers each learned key here and
-# :func:`is_aot_ref` consults the set. Without this the executor's kind
-# dispatch (#734/#735) would score an armed ``.pt2`` by FX cache hits and
-# disprove every honest adoption.
+# string shape alone — so every reader of a stamped envelope registers the
+# key it learned here and :func:`is_aot_ref` consults the set. Without this
+# the executor's kind dispatch (#734/#735) would score an armed ``.pt2`` by
+# FX cache hits and disprove every honest adoption.
+#
+# THE RULE (pgw#1033): whoever reads a ``cell_key`` off an ``aot-inductor``
+# envelope registers it. There are two such readers on the serving path —
+# ``aot_cells.discover`` (a delivered cell) and
+# ``fleet_cells.adopt_delegated_mint`` (this pod's OWN mint). Only the first
+# registered, so a self-minted cell — the one artifact this process is
+# certain is exported — was the one ref ``is_aot_ref`` did not recognize.
 _KNOWN_AOT_KEYS: set[str] = set()
 _KNOWN_AOT_KEYS_LOCK = threading.Lock()
 
