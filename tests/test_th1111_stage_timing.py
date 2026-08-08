@@ -20,6 +20,7 @@ from gen_worker.stage_timing import StageTimer, reconciliation, stage_ms_for_met
 
 from harness.hub_double import hub_double, is_ready, is_result_for
 from harness.stage_endpoints import DECODE_S, STEP_S, STEPS, TEXT_ENCODE_S
+from harness.upload_sink import DedupUploadSink, serve_upload_sink
 
 import msgspec
 
@@ -29,13 +30,27 @@ def _payload() -> bytes:
 
 
 def test_stage_map_reconciles_with_runtime_ms_on_the_real_serve_path() -> None:
-    with hub_double(modules=("harness.stage_endpoints",)) as (scheduler, _h):
-        conn = scheduler.wait_connection(0)
-        conn.wait_for(is_ready)
-        conn.send(run_job=pb.RunJob(
-            request_id="r-stage", attempt=1, function_name="staged-generate",
-            input_payload=_payload(), output_mode=pb.OUTPUT_MODE_INLINE))
-        res = conn.wait_for(is_result_for("r-stage")).job_result
+    # pgw#767: this test used to need no file API at all. Under
+    # OUTPUT_MODE_INLINE the image AND the (~200 KiB) result envelope both took
+    # the inline shortcut, and the envelope's shortcut was the defect — it
+    # returned a ref for bytes that were never uploaded. With the envelope now
+    # always really stored, the stage-timing path needs a real upload sink like
+    # any other large-result dispatch. The test was green because of the bug.
+    httpd, base_url = serve_upload_sink()
+    try:
+        with hub_double(modules=("harness.stage_endpoints",),
+                        file_base_url=base_url) as (scheduler, _h):
+            conn = scheduler.wait_connection(0)
+            conn.wait_for(is_ready)
+            conn.send(run_job=pb.RunJob(
+                request_id="r-stage", attempt=1, function_name="staged-generate",
+                input_payload=_payload(), output_mode=pb.OUTPUT_MODE_INLINE,
+                org="00000000-0000-0000-0000-000000000001",
+                capability_token="cap-token"))
+            res = conn.wait_for(is_result_for("r-stage")).job_result
+    finally:
+        httpd.shutdown()
+        DedupUploadSink.requests_seen = []
 
     assert res.status == pb.JOB_STATUS_OK, res.safe_message
     stages = dict(res.metrics.stage_ms)
