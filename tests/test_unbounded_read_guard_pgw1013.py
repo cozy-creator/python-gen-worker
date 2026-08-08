@@ -177,3 +177,185 @@ def test_a_distant_justification_does_NOT_carry():
 ])
 def test_no_false_positive(src: str):
     assert _scan(src) == []
+
+
+# --------------------------------------------------------------------------
+# Rule 2 — the streaming-copy loop ("check AFTER the loop")
+#
+# The dominant residual class the wave-1 sweep tabled: four downloaders wrote
+# a whole remote body to disk and compared sizes only once it had ended. The
+# rule is calibrated against the four siblings that already checked in-loop —
+# it must pass every one of them and fail every one of the four that were
+# fixed, which the "real tree" and "against the pre-fix sources" tests below
+# assert with the shipping code rather than with fixtures.
+# --------------------------------------------------------------------------
+
+def test_catches_the_check_after_the_loop_shape():
+    """The exact shape of `_download_url_streamed` and `_civitai_stream_one`:
+    a counter that exists, and is compared one line too late."""
+    findings = _scan(
+        "def fetch(resp, dest, expected):\n"
+        "    total = 0\n"
+        "    with open(dest, 'wb') as f:\n"
+        "        for chunk in resp.iter_content(chunk_size=1 << 20):\n"
+        "            f.write(chunk)\n"
+        "            total += len(chunk)\n"
+        "    if total != expected:\n"
+        "        raise ValueError('too big')\n"
+    )
+    assert len(findings) == 1, findings
+    assert "`total` counts the bytes" in findings[0]
+
+
+def test_catches_a_stream_loop_with_no_count_at_all():
+    """`_download_blob_by_digest` — the worst of the four. Nothing to compare,
+    because nothing was counted."""
+    findings = _scan(
+        "def fetch(resp, dest):\n"
+        "    with open(dest, 'wb') as f:\n"
+        "        for chunk in resp.iter_content(chunk_size=1 << 20):\n"
+        "            if chunk:\n"
+        "                f.write(chunk)\n"
+    )
+    assert len(findings) == 1, findings
+    assert "no running byte count" in findings[0]
+
+
+def test_the_in_loop_check_satisfies_rule_2():
+    """The siblings' shape, which is the authority the fix copied."""
+    findings = _scan(
+        "def fetch(resp, dest, cap):\n"
+        "    total = 0\n"
+        "    with open(dest, 'wb') as f:\n"
+        "        for chunk in resp.iter_content(chunk_size=1 << 20):\n"
+        "            total += len(chunk)\n"
+        "            if total > cap:\n"
+        "                raise ValueError('too big')\n"
+        "            f.write(chunk)\n"
+    )
+    assert findings == []
+
+
+def test_a_len_reading_of_a_drained_buffer_counts_as_the_bound():
+    """The CLI's NDJSON readers drain the buffer as lines complete, so an
+    accumulator would overcount across drains and `len(buf)` is the only honest
+    measurement. Rule 2 accepts it — a rule that demanded one spelling would
+    have pushed those two sites into a wrong fix."""
+    findings = _scan(
+        "def read_line(conn, cap):\n"
+        "    buf = bytearray()\n"
+        "    while b'\\n' not in buf:\n"
+        "        chunk = conn.recv(65536)\n"
+        "        if not chunk:\n"
+        "            break\n"
+        "        if len(buf) + len(chunk) > cap:\n"
+        "            return None\n"
+        "        buf.extend(chunk)\n"
+        "    return buf\n"
+    )
+    assert findings == []
+
+
+def test_a_progress_log_is_not_mistaken_for_a_bound():
+    """`cozy_cas` compares `downloaded - last_log >= log_every` to decide when
+    to log. A rule that accepted a counter anywhere inside a comparison would
+    have read that as the bound and passed an unbounded loop."""
+    findings = _scan(
+        "def fetch(resp, dest, log_every):\n"
+        "    total = 0\n"
+        "    last = 0\n"
+        "    with open(dest, 'wb') as f:\n"
+        "        for chunk in resp.iter_content(chunk_size=1 << 20):\n"
+        "            f.write(chunk)\n"
+        "            total += len(chunk)\n"
+        "            if total - last >= log_every:\n"
+        "                last = total\n"
+    )
+    assert len(findings) == 1, findings
+
+
+def test_an_emptiness_test_is_not_a_bound():
+    findings = _scan(
+        "def fetch(resp, dest):\n"
+        "    total = 0\n"
+        "    with open(dest, 'wb') as f:\n"
+        "        for chunk in resp.iter_content(chunk_size=1 << 20):\n"
+        "            total += len(chunk)\n"
+        "            if total > 0:\n"
+        "                f.write(chunk)\n"
+    )
+    assert len(findings) == 1, findings
+
+
+def test_rule_2_takes_the_justification_comment_too():
+    findings = _scan(
+        "def fetch(resp, dest):\n"
+        "    with open(dest, 'wb') as f:\n"
+        "        # bound-justified: the body is this process's own output,\n"
+        "        # read back over loopback from a server it started.\n"
+        "        for chunk in resp.iter_content(chunk_size=1 << 20):\n"
+        "            f.write(chunk)\n"
+    )
+    assert findings == []
+
+
+@pytest.mark.parametrize("src", [
+    # A budget loop: the loop's own test is the bound (`chunk_cas._take`,
+    # `procsplit.child._recv_exact`).
+    "def take(src, fd, remaining):\n"
+    "    buf = bytearray()\n"
+    "    while len(buf) < remaining:\n"
+    "        b = src.recv(4096)\n"
+    "        if not b:\n"
+    "            break\n"
+    "        buf.extend(b)\n"
+    "    return buf\n",
+    # A handle THIS function opened is local IO, not an external stream —
+    # every upload path in the repo reads its own artifact back in blocks.
+    "def upload(path, stream):\n"
+    "    with open(path, 'rb') as fin:\n"
+    "        while True:\n"
+    "            chunk = fin.read(8 << 20)\n"
+    "            if not chunk:\n"
+    "                break\n"
+    "            stream.write(chunk)\n",
+    # The loop derives facts and drops the bytes; nothing accumulates.
+    "def plan(resp, out):\n"
+    "    import hashlib\n"
+    "    h = hashlib.sha256()\n"
+    "    for chunk in resp.iter_content(chunk_size=1 << 20):\n"
+    "        h.update(chunk)\n"
+    "        out.append(len(chunk))\n",
+])
+def test_rule_2_no_false_positive(src: str):
+    assert _scan(src) == []
+
+
+def test_rule_2_fires_on_all_four_filed_sites_as_they_were():
+    """The ratchet, proved against history rather than against a fixture.
+
+    Every one of the four sites this issue names is re-read from `origin/master`
+    and run through the guard. A rule that only passes on the fixed tree proves
+    nothing about whether it would have caught the defect.
+    """
+    # Pinned rather than derived: `merge-base HEAD origin/master` moves to the
+    # fix itself the moment this lands, and the test would then assert the
+    # guard fires on code that no longer has the defect. This sha is the commit
+    # the fix branched from and is immutable. CI checks out shallow, so a miss
+    # is a skip, not a failure — the local run is where this earns its keep.
+    PRE_FIX = "d7881b40"
+    sites = [
+        "src/gen_worker/request_context/__init__.py",
+        "src/gen_worker/aot_cells.py",
+        "src/gen_worker/models/download.py",
+        "src/gen_worker/request_context/_datasets.py",
+    ]
+    for site in sites:
+        proc = subprocess.run(
+            ["git", "show", f"{PRE_FIX}:{site}"],
+            capture_output=True, text=True, cwd=REPO)
+        if proc.returncode != 0 or not proc.stdout:
+            pytest.skip(f"{PRE_FIX} not in this checkout (shallow clone)")
+        findings = scan_file(REPO / site, proc.stdout)
+        loop_findings = [f for f in findings if "streams external bytes" in f]
+        assert loop_findings, f"the guard would have walked past {site}"

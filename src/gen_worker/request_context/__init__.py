@@ -176,6 +176,49 @@ def _parse_cas_digest(digest: str, *, origin: str) -> str:
     return f"{algo}:{hexpart.lower()}"
 
 
+def _cas_hasher(algo: str) -> Any:
+    """A hasher for a CAS algorithm ``_parse_cas_digest`` already accepted.
+
+    Every entry in :data:`_CAS_DIGEST_WIDTHS` must be constructible here: a
+    digest this repo can address but not hash is a download it would have to
+    take on trust, which is the shape pgw#882 and th#1303 S1 both refused.
+    """
+    if algo == "sha256":
+        return hashlib.sha256()
+    if algo == "blake3":
+        import blake3 as _blake3
+
+        return _blake3.blake3()
+    raise RuntimeError(f"no hasher for CAS algorithm {algo!r} — cannot verify the bytes")
+
+
+def _refuse_without_disk_room(root: Path, declared_bytes: int, what: str) -> None:
+    """Refuse a transfer the destination filesystem cannot hold.
+
+    A cap equal to the declared size stops a source that LIES; it does nothing
+    about a source that truthfully declares more bytes than the pod has. That
+    is the same runaway with a slower fuse — the write ENOSPCs, and it takes
+    every other writer on the pod with it. Deciding before the first byte turns
+    it into a typed refusal.
+    """
+    from ..bounded_stream import DISK_RESERVE_BYTES
+    from ..capability import InsufficientDiskError
+
+    try:
+        free = int(shutil.disk_usage(root).free)
+    except OSError:
+        return  # unmeasurable: the in-loop cap is still enforced
+    required = declared_bytes + DISK_RESERVE_BYTES
+    if required > free:
+        raise InsufficientDiskError(
+            f"insufficient disk for {what}: needs {declared_bytes} bytes "
+            f"(+{DISK_RESERVE_BYTES} reserve), {free} free at {root}",
+            available_bytes=free,
+            required_bytes=required,
+            path=str(root),
+        )
+
+
 def _as_asset(asset: Asset, cls: type) -> Any:
     """Re-type a plain Asset as a media Asset subclass (same fields)."""
     kw = {f: getattr(asset, f) for f in asset.__struct_fields__}
@@ -1646,17 +1689,41 @@ class _PublisherMixin:
         ``origin`` is the th#1259 provenance of the ADDRESS, and it is the
         only thing that decides how a terminal miss classifies. See
         :data:`REF_ORIGIN_PAYLOAD`.
+
+        pgw#1013 — this reader used to have NO cap and NO verification at all,
+        on the path its own public wrapper's docstring calls "the untrusted
+        case": a tenant handing a digest to ``materialize_blob`` got whatever
+        bytes arrived, in whatever quantity, written straight over ``dest``.
+        Both halves are fixed here and both are enforced DURING the stream:
+
+        * the response's declared length is the cap, checked per chunk. A
+          source with no ``Content-Length`` is refused — both arms of the hub's
+          by-digest route declare one (a 302 to a presigned object, or
+          ``DataFromReader`` with the object's size), so its absence means the
+          responder is not the one this contract describes. ``identity``
+          encoding is demanded so the declared length and the delivered length
+          are the same quantity, which also makes a gzip-bomb body impossible
+          rather than merely detectable.
+        * the digest ADDRESSES the bytes, so hashing them costs one pass and
+          refusing a mismatch costs nothing. It lands via a ``.part`` rename,
+          so a refused fetch cannot leave a partial file that a resume check
+          would read as complete.
         """
         # lazy: request_context is on the `import gen_worker` path, which the
         # `python -m gen_worker.discover` build step must keep requests-free.
         import requests
 
+        from ..bounded_stream import copy_bounded
+
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = self._get_worker_capability_token()
         digest_norm = _parse_cas_digest(digest, origin=origin)
         url = f"{base}/api/v1/blobs/{urllib.parse.quote(digest_norm, safe=':')}/content"
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = {"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"}
         caller_supplied = origin == REF_ORIGIN_PAYLOAD
+        algo, _, want_hex = digest_norm.partition(":")
+        hasher = _cas_hasher(algo)
+        tmp = dest.with_name(dest.name + ".part")
         with requests.get(url, headers=headers, stream=True, timeout=300) as resp:
             if resp.status_code in (401, 403):
                 if caller_supplied:
@@ -1668,10 +1735,40 @@ class _PublisherMixin:
                 raise RuntimeError(f"blob fetch 404 for digest={digest}")
             if resp.status_code < 200 or resp.status_code >= 300:
                 raise RuntimeError(f"blob fetch failed ({resp.status_code}) digest={digest}: {resp.text[:256]}")
-            with open(dest, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
+            raw_length = str(resp.headers.get("Content-Length") or "").strip()
+            if not raw_length.isdigit() or int(raw_length) <= 0:
+                raise RuntimeError(
+                    f"blob fetch refused: digest={digest_norm} came back with no "
+                    f"declared length ({raw_length!r}) — nothing bounds the transfer"
+                )
+            declared = int(raw_length)
+            _refuse_without_disk_room(tmp.parent, declared, digest_norm)
+            try:
+                with open(tmp, "wb") as f:
+                    total = copy_bounded(
+                        resp.iter_content(chunk_size=1024 * 1024),
+                        f.write,
+                        limit_bytes=declared,
+                        what=f"blob {digest_norm}",
+                        hasher=hasher,
+                    )
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+        if total != declared:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"blob fetch truncated: digest={digest_norm} declared {declared} "
+                f"bytes, delivered {total}"
+            )
+        got = hasher.hexdigest()
+        if got != want_hex:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"blob digest mismatch: {digest_norm} addresses bytes that hash "
+                f"to {algo}:{got[:16]}…"
+            )
+        tmp.replace(dest)
 
     def _fetch_platform_blob(self, digest: str, dest: Path) -> None:
         """`_download_blob_by_digest` bound to PLATFORM provenance — for
@@ -1694,6 +1791,10 @@ class _PublisherMixin:
         the untrusted case and the safe default (th#1259): a bad address
         fails the REQUEST typed rather than indicting the release. Pass
         :data:`REF_ORIGIN_PLATFORM` for a digest the platform produced.
+
+        The bytes are capped at the response's declared length and verified
+        against the digest before ``dest`` exists (pgw#1013) — "the untrusted
+        case" is now a claim the code enforces rather than one it documents.
         """
         dest_path = Path(os.fspath(dest))
         dest_path.parent.mkdir(parents=True, exist_ok=True)

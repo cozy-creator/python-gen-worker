@@ -845,6 +845,10 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
             chunk = conn.recv(65536)
             if not chunk:
                 break
+            if len(buf) + len(chunk) > transport.MAX_NDJSON_LINE_BYTES:
+                # pgw#1013: refuse at the byte that passes the bound, not after
+                # the peer has finished deciding how much to send.
+                return
             buf.extend(chunk)
     except (socket.timeout, OSError):
         return

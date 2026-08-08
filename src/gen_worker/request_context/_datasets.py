@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..api.errors import AuthError, SnapshotBuildFailedError
+from ..bounded_stream import copy_bounded, free_space_bound
 from ..stall import SilenceWindow
 import requests
 
@@ -285,6 +286,12 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
 
     Writes to ``dest.tmp`` then renames, so a partial download can never be
     mistaken for a complete shard.
+
+    pgw#1013: the size comparison used to sit after the loop, where the bytes
+    are already on disk and the only thing it can report is how far past the
+    declaration the shard went. The declared size is known before the first
+    byte, so it caps the stream; an entry that declares none falls back to the
+    destination filesystem, which is what an unbounded shard exhausts.
     """
 
     tmp = dest.with_name(dest.name + ".tmp")
@@ -292,17 +299,21 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     # Not `.get(...) or None`: an unverifiable download must be unreachable,
     # and the way that guarantee dies is a hasher that is allowed to be absent.
     hasher = _DIGEST_HASHERS[algo]()
-    total = 0
+    declared = int(expected_size) if expected_size is not None else 0
+    cap = declared if declared > 0 else free_space_bound(tmp.parent)
     with requests.get(url, stream=True, timeout=300) as resp:
         if resp.status_code < 200 or resp.status_code >= 300:
             raise RuntimeError(f"shard download failed ({resp.status_code}) url={url[:128]}")
-        with open(tmp, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=_CHUNK_BYTES):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                total += len(chunk)
-                hasher.update(chunk)
+        try:
+            with open(tmp, "wb") as f:
+                total = copy_bounded(
+                    resp.iter_content(chunk_size=_CHUNK_BYTES), f.write,
+                    limit_bytes=cap, what=f"dataset shard {dest.name}",
+                    hasher=hasher,
+                )
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
     if expected_size is not None and total != int(expected_size):
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"shard size mismatch: got {total}, want {expected_size}")

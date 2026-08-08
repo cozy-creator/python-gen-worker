@@ -56,6 +56,7 @@ from . import activity as activity_mod
 from . import aot_serve, cell_key
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
+from .bounded_stream import copy_bounded
 from .procsplit import broker
 from .models.chunk_cas import sha256_file
 from .models.chunk_cas import (
@@ -340,6 +341,18 @@ def _download_artifact_inner(
         _emit("resolve_failed",
               f"family={family} key={key}: manifest entry has no URL")
         return None
+    # pgw#1013: the whole-file branch below had the SAME `size_bytes` field its
+    # chunked sibling passes to `download_chunked_file` as `total_size`, and
+    # ignored it — one manifest entry, two verdicts on the same declaration. A
+    # cell artifact is compiled code fetched before the pod serves anything;
+    # an entry that cannot say how big it is cannot be sized against the pod's
+    # disk, so it is a typed MISS here rather than an unbounded write.
+    declared_size = int(entry.get("size_bytes") or 0)
+    if not chunks and declared_size <= 0:
+        _emit("resolve_failed",
+              f"family={family} key={key}: manifest entry declares no size_bytes "
+              "— refusing an unbounded artifact fetch")
+        return None
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".part")
     try:
@@ -351,7 +364,7 @@ def _download_artifact_inner(
                  for c in chunks],
                 tmp,
                 whole_digest=want_ref,
-                total_size=int(entry.get("size_bytes") or 0),
+                total_size=declared_size,
                 chunk_size_bytes=(
                     int(entry.get("chunk_size_bytes") or 0)
                     or CAS_CHUNK_SIZE_BYTES),
@@ -360,8 +373,13 @@ def _download_artifact_inner(
             with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
                 dl.raise_for_status()
                 with open(tmp, "wb") as f:
-                    for chunk in dl.iter_content(1 << 20):
-                        f.write(chunk)
+                    got = copy_bounded(
+                        dl.iter_content(1 << 20), f.write,
+                        limit_bytes=declared_size,
+                        what=f"cell artifact family={family} key={key}")
+            if got != declared_size:
+                raise ValueError(
+                    f"truncated: manifest declares {declared_size} bytes, got {got}")
             verify_file_digest(tmp, want_ref)
     except (ValueError, RuntimeError) as exc:
         tmp.unlink(missing_ok=True)

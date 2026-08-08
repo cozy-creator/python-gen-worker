@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequen
 from urllib.parse import parse_qs, urlparse
 
 from ..api.errors import ValidationError
+from ..bounded_stream import copy_bounded, free_space_bound
 from ..config import Settings, current_or
 
 _STANDALONE = Settings()
@@ -732,6 +733,13 @@ _CIVITAI_AUTH_HOSTS = {"civitai.com", "www.civitai.com", "api.civitai.com"}
 _CIVITAI_CHUNK = 4 * 1024 * 1024
 _CIVITAI_JSON_TIMEOUT = (30.0, 120.0)    # (connect, read) seconds
 _CIVITAI_STREAM_TIMEOUT = (60.0, 180.0)  # read timeout doubles as stall bound
+#: How far a civitai stream may exceed its declared `sizeBytes` before it is
+#: refused. Not slack for its own sake: the declaration is derived from
+#: `sizeKB`, a rounded float, so the true byte count is legitimately off by up
+#: to a kilobyte. The in-loop cap and the post-transfer size check use this one
+#: number, because a cap tighter than the acceptance rule refuses files the
+#: acceptance rule would accept.
+_CIVITAI_SIZE_SLACK = 1024
 
 
 def _civitai_attempts() -> int:
@@ -898,26 +906,42 @@ def _civitai_stream_one(
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".part")
     h = hashlib.sha256()
-    written = 0
+    # pgw#1013. This is the THIRD-PARTY origin in the set — civitai chooses
+    # both the byte stream and the `sizeBytes` we would check it against — and
+    # its size check ran only after the whole body was on disk, where it is a
+    # report rather than a bound. Two bounds, because the declaration is
+    # optional here in a way it is not on our own surfaces:
+    #   * declared: the cap is the declaration plus the SAME 1 KiB tolerance
+    #     the post-check has always applied (sizeKB is a rounded float, live:
+    #     wan i2v 19224728441 vs actual ...442, e2e #112). One tolerance, used
+    #     twice — a cap tighter than the acceptance check would refuse files
+    #     the very next line accepts.
+    #   * undeclared: civitai omits `sizeBytes` on real files, so refusing is
+    #     not available. The bound is the destination filesystem, which is the
+    #     resource an unbounded weights download actually exhausts.
+    if expected_size:
+        cap = int(expected_size) + _CIVITAI_SIZE_SLACK
+    else:
+        cap = free_space_bound(tmp.parent)
     with requests.get(url, headers=headers, stream=True, timeout=_CIVITAI_STREAM_TIMEOUT) as resp:
         if resp.status_code in (401, 403):
             raise ValueError("civitai_access_denied")
         if resp.status_code == 404:
             raise ValueError("civitai_not_found")
         resp.raise_for_status()
-        with open(tmp, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=_CIVITAI_CHUNK):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                h.update(chunk)
-                written += len(chunk)
-                on_bytes(len(chunk))
-    # civitai's file size often comes from `sizeKB`, a ROUNDED float — the
-    # derived byte count can be off by ±1KB (live: wan i2v 19224728441 vs
-    # actual ...442, e2e #112). Integrity is the sha256 check below; the size
-    # check only catches truncated streams.
-    if expected_size and abs(written - expected_size) > 1024:
+        try:
+            with open(tmp, "wb") as f:
+                written = copy_bounded(
+                    resp.iter_content(chunk_size=_CIVITAI_CHUNK), f.write,
+                    limit_bytes=cap, what=f"civitai file {dst.name}",
+                    hasher=h, on_bytes=on_bytes,
+                )
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    # Integrity is the sha256 check below; the size check only catches
+    # truncated streams (an overlong one never reaches here any more).
+    if expected_size and abs(written - expected_size) > _CIVITAI_SIZE_SLACK:
         tmp.unlink(missing_ok=True)
         raise ValueError(f"civitai size mismatch for {dst.name}: expected {expected_size}, got {written}")
     if expected_sha256 and h.hexdigest().lower() != expected_sha256:
