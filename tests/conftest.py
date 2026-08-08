@@ -151,6 +151,31 @@ def _fresh_cell_ledgers():
     _clear()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_report_sinks():
+    """pgw#1024: `activity._sink` and `boot_phases._sink` are process globals
+    that production binds ONCE (`Executor.ensure_setup`, `lifecycle`) and never
+    unbinds — correct there, a leak here.
+
+    A hub-double row binds the sink to a `Worker._send` whose queue stops being
+    drained at teardown. Nothing resets it, so under `--dist loadfile` the NEXT
+    FILE runs in the same worker process holding a sink nobody empties: every
+    activity it reports is handed to a dead SendQueue, and `boot_phases`
+    additionally REPLAYS the previous file's buffered rows into it on the next
+    bind. That is cross-file state whose effect depends on which files a worker
+    happened to get — i.e. it reshuffles greens whenever suite composition
+    changes. One authority here, so no file has to remember; the private copies
+    that predate it (`test_reconnect_episode_pgw803`, the `reset_for_tests()`
+    fixtures in the boot-phase files) are redundant, not wrong.
+    """
+    from gen_worker import activity as _activity
+    from gen_worker import boot_phases as _boot
+
+    _activity.reset_for_tests()
+    _boot.reset_for_tests()
+    yield
+    _activity.reset_for_tests()
+    _boot.reset_for_tests()
 
 
 @pytest.fixture(autouse=True)

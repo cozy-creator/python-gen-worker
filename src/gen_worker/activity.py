@@ -168,6 +168,20 @@ def bind_sink(
         _sink = sink
 
 
+def reset_for_tests() -> None:
+    """Drop the bound sink and any in-flight activity. Test-only.
+
+    The sink is process-lifetime in production (one worker, one transport), so
+    nothing unbinds it. In a suite that is a leak: a bound sink outlives the
+    ``Worker`` whose queue it feeds, and under ``--dist loadfile`` the next FILE
+    in the same process reports into a queue nothing drains (pgw#1024).
+    """
+    global _sink, _current
+    with _lock:
+        _sink = None
+        _current = None
+
+
 def _next_seq() -> int:
     global _seq
     with _lock:
