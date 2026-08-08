@@ -1,0 +1,42 @@
+# pgw#891 / pgw#904 — the post-connect resolution census, classified.
+# Enforced by scripts/lint_post_connect_resolution.py.
+#
+# A connected worker may not reconstruct or substitute a Hub decision. This file
+# is the enumerated set of places that today CAN. It exists so pgw#904's
+# deletion stays a bounded list while pgw#891's exact ExecutionSpec is built,
+# not so the sites below become acceptable.
+#
+# FORMAT:  <path>::<callee>  <CLASSIFICATION>  <reason>
+#
+# Keyed on the CALLEE, never on a line number — see the header of
+# scripts/lint_config_reads.py for what a line-keyed allowlist cost us.
+#
+#   CONNECTED    reachable from the connected dispatcher: a real second
+#                resolver. Replacement-gated on pgw#891/pgw#904. Every line
+#                must say what blocks its deletion. THIS IS THE DEFECT CLASS.
+#   STANDALONE   CLI / hub-less only, unreachable from the connected
+#                dispatcher. pgw#904's box 5, and legitimate.
+#   PUBLISH      publish/declaration-time validation vocabulary, which pgw#891
+#                explicitly retains.
+#   VOCABULARY   parsing/definition with no resolution effect.
+
+# --- CONNECTED: the two real second resolvers, both deletion-gated ------------
+
+src/gen_worker/executor.py::parse_execution_lane_spec  CONNECTED  _execution_lane_effective_spec expands a COARSE FAMILY ("bf16"|"fp8"|"4bit") into a concrete binding, and falls back to the local cast lane when no stored fp8 pick exists. That is layer-1/layer-2 lane authority (§1.31) executing in the worker. Blocked on: ExecutionSpec.numerical_lane carrying the RESOLVED lane only, so the family form has nowhere to arrive from.
+src/gen_worker/fleet_cells.py::discover  CONNECTED  enable_compiled calls aot_cells.discover on the connected serving path: it lists /api/v1/repos/{repo}/checkpoints and ranks siblings (aot_cells._candidates), i.e. it re-chooses an artifact after the Hub already chose one. This is pgw#904's headline. Blocked on: ExecutionSpec naming one exact artifact identity or explicitly naming none.
+
+# --- STANDALONE: hub-less / CLI only ------------------------------------------
+# All four reach resolution only through models/provision.py::resolve_bindings,
+# whose docstring states it: "Standalone (hub-less) resolution — the CLI's half.
+# The executor's bytes come from orchestrator-resolved snapshots via
+# ModelStore.ensure_local." Verified 2026-08-07: no connected path reaches them.
+
+src/gen_worker/cli/listing.py::resolve_repo  STANDALONE  `cozy` CLI listing surface; no dispatcher path reaches it.
+src/gen_worker/cli/run.py::parse_execution_lane_spec  STANDALONE  `cozy run --lane` is an operator naming a lane locally, which is §1.31 layer 3 (per-invoke override) exercised by hand, not the worker authoring one.
+src/gen_worker/models/gguf_local.py::resolve_repo  STANDALONE  maybe_rebind_gguf, reached only from provision._local_flavor_fold.
+src/gen_worker/models/provision.py::maybe_rebind_family_fp8  STANDALONE  _local_flavor_fold; the th#964 AUTO fold's own docstring says "Production resolution remains hub-owned".
+src/gen_worker/models/provision.py::resolve_repo  STANDALONE  _local_flavor_fold's own resolve, same containment.
+
+# --- PUBLISH ------------------------------------------------------------------
+
+src/gen_worker/convert/publish.py::resolve_repo  PUBLISH  reads the SOURCE repo's classification to stamp the published artifact; best-effort, and the hub's classification gate stays the enforcement. Publish-time metadata, not execution resolution.
