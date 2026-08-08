@@ -164,6 +164,27 @@ class OutputMode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     OUTPUT_MODE_URL: _ClassVar[OutputMode]
     OUTPUT_MODE_INLINE: _ClassVar[OutputMode]
 
+class WeightLane(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    WEIGHT_LANE_UNSPECIFIED: _ClassVar[WeightLane]
+    WEIGHT_LANE_BF16: _ClassVar[WeightLane]
+    WEIGHT_LANE_W8A16: _ClassVar[WeightLane]
+    WEIGHT_LANE_W8A8: _ClassVar[WeightLane]
+    WEIGHT_LANE_W4A4: _ClassVar[WeightLane]
+
+class ArmShape(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ARM_SHAPE_UNSPECIFIED: _ClassVar[ArmShape]
+    ARM_SHAPE_BRANCHLESS: _ClassVar[ArmShape]
+    ARM_SHAPE_ADAPTER: _ClassVar[ArmShape]
+
+class SteadyBackend(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    STEADY_BACKEND_UNSPECIFIED: _ClassVar[SteadyBackend]
+    STEADY_BACKEND_AOT_CELL: _ClassVar[SteadyBackend]
+    STEADY_BACKEND_DYNAMO: _ClassVar[SteadyBackend]
+    STEADY_BACKEND_EAGER_ONLY: _ClassVar[SteadyBackend]
+
 class JobStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     JOB_STATUS_UNSPECIFIED: _ClassVar[JobStatus]
@@ -308,6 +329,18 @@ WORKER_PHASE_ERROR: WorkerPhase
 OUTPUT_MODE_UNSPECIFIED: OutputMode
 OUTPUT_MODE_URL: OutputMode
 OUTPUT_MODE_INLINE: OutputMode
+WEIGHT_LANE_UNSPECIFIED: WeightLane
+WEIGHT_LANE_BF16: WeightLane
+WEIGHT_LANE_W8A16: WeightLane
+WEIGHT_LANE_W8A8: WeightLane
+WEIGHT_LANE_W4A4: WeightLane
+ARM_SHAPE_UNSPECIFIED: ArmShape
+ARM_SHAPE_BRANCHLESS: ArmShape
+ARM_SHAPE_ADAPTER: ArmShape
+STEADY_BACKEND_UNSPECIFIED: SteadyBackend
+STEADY_BACKEND_AOT_CELL: SteadyBackend
+STEADY_BACKEND_DYNAMO: SteadyBackend
+STEADY_BACKEND_EAGER_ONLY: SteadyBackend
 JOB_STATUS_UNSPECIFIED: JobStatus
 JOB_STATUS_OK: JobStatus
 JOB_STATUS_INVALID: JobStatus
@@ -361,20 +394,22 @@ class WorkerMessage(_message.Message):
     def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ..., hardware_unsuitable: _Optional[_Union[HardwareUnsuitable, _Mapping]] = ..., goal_receipt: _Optional[_Union[GoalReceipt, _Mapping]] = ..., lifecycle_snapshot: _Optional[_Union[LifecycleSnapshot, _Mapping]] = ..., boot_phase: _Optional[_Union[BootPhase, _Mapping]] = ...) -> None: ...
 
 class SchedulerMessage(_message.Message):
-    __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh")
+    __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh", "run_attempt")
     HELLO_ACK_FIELD_NUMBER: _ClassVar[int]
     RUN_JOB_FIELD_NUMBER: _ClassVar[int]
     CANCEL_JOB_FIELD_NUMBER: _ClassVar[int]
     MODEL_OP_FIELD_NUMBER: _ClassVar[int]
     DRAIN_FIELD_NUMBER: _ClassVar[int]
     TOKEN_REFRESH_FIELD_NUMBER: _ClassVar[int]
+    RUN_ATTEMPT_FIELD_NUMBER: _ClassVar[int]
     hello_ack: HelloAck
     run_job: RunJob
     cancel_job: CancelJob
     model_op: ModelOp
     drain: Drain
     token_refresh: TokenRefresh
-    def __init__(self, hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., run_job: _Optional[_Union[RunJob, _Mapping]] = ..., cancel_job: _Optional[_Union[CancelJob, _Mapping]] = ..., model_op: _Optional[_Union[ModelOp, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., token_refresh: _Optional[_Union[TokenRefresh, _Mapping]] = ...) -> None: ...
+    run_attempt: RunAttempt
+    def __init__(self, hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., run_job: _Optional[_Union[RunJob, _Mapping]] = ..., cancel_job: _Optional[_Union[CancelJob, _Mapping]] = ..., model_op: _Optional[_Union[ModelOp, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., token_refresh: _Optional[_Union[TokenRefresh, _Mapping]] = ..., run_attempt: _Optional[_Union[RunAttempt, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("protocol_version", "worker_id", "release_id", "resources", "state", "models", "in_flight", "heartbeat_interval_ms", "worker_session_id", "lifecycle_snapshot")
@@ -1079,6 +1114,273 @@ class ChunkRef(_message.Message):
     url: str
     len: int
     def __init__(self, sha256: _Optional[str] = ..., url: _Optional[str] = ..., len: _Optional[int] = ...) -> None: ...
+
+class RunAttempt(_message.Message):
+    __slots__ = ("attempt", "spec", "grant", "input_payload")
+    ATTEMPT_FIELD_NUMBER: _ClassVar[int]
+    SPEC_FIELD_NUMBER: _ClassVar[int]
+    GRANT_FIELD_NUMBER: _ClassVar[int]
+    INPUT_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    attempt: AttemptId
+    spec: ExecutionSpec
+    grant: DeliveryGrant
+    input_payload: bytes
+    def __init__(self, attempt: _Optional[_Union[AttemptId, _Mapping]] = ..., spec: _Optional[_Union[ExecutionSpec, _Mapping]] = ..., grant: _Optional[_Union[DeliveryGrant, _Mapping]] = ..., input_payload: _Optional[bytes] = ...) -> None: ...
+
+class AttemptId(_message.Message):
+    __slots__ = ("request_id", "attempt")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    ATTEMPT_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    attempt: int
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
+
+class ExecutionSpec(_message.Message):
+    __slots__ = ("digest", "spec_version", "release", "function_name", "numerical_lane", "arm", "topology", "components", "adapters", "config", "contracts", "exploration", "attribution", "output_mode", "input_assets")
+    DIGEST_FIELD_NUMBER: _ClassVar[int]
+    SPEC_VERSION_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
+    NUMERICAL_LANE_FIELD_NUMBER: _ClassVar[int]
+    ARM_FIELD_NUMBER: _ClassVar[int]
+    TOPOLOGY_FIELD_NUMBER: _ClassVar[int]
+    COMPONENTS_FIELD_NUMBER: _ClassVar[int]
+    ADAPTERS_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_FIELD_NUMBER: _ClassVar[int]
+    CONTRACTS_FIELD_NUMBER: _ClassVar[int]
+    EXPLORATION_FIELD_NUMBER: _ClassVar[int]
+    ATTRIBUTION_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_MODE_FIELD_NUMBER: _ClassVar[int]
+    INPUT_ASSETS_FIELD_NUMBER: _ClassVar[int]
+    digest: str
+    spec_version: int
+    release: EndpointRelease
+    function_name: str
+    numerical_lane: ExecutionLane
+    arm: Arm
+    topology: Topology
+    components: ComponentManifest
+    adapters: _containers.RepeatedCompositeFieldContainer[AdapterBinding]
+    config: ConfigSnapshot
+    contracts: ContractIdentities
+    exploration: ExplorationRef
+    attribution: Attribution
+    output_mode: OutputMode
+    input_assets: _containers.RepeatedCompositeFieldContainer[InputAssetRef]
+    def __init__(self, digest: _Optional[str] = ..., spec_version: _Optional[int] = ..., release: _Optional[_Union[EndpointRelease, _Mapping]] = ..., function_name: _Optional[str] = ..., numerical_lane: _Optional[_Union[ExecutionLane, _Mapping]] = ..., arm: _Optional[_Union[Arm, _Mapping]] = ..., topology: _Optional[_Union[Topology, _Mapping]] = ..., components: _Optional[_Union[ComponentManifest, _Mapping]] = ..., adapters: _Optional[_Iterable[_Union[AdapterBinding, _Mapping]]] = ..., config: _Optional[_Union[ConfigSnapshot, _Mapping]] = ..., contracts: _Optional[_Union[ContractIdentities, _Mapping]] = ..., exploration: _Optional[_Union[ExplorationRef, _Mapping]] = ..., attribution: _Optional[_Union[Attribution, _Mapping]] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., input_assets: _Optional[_Iterable[_Union[InputAssetRef, _Mapping]]] = ...) -> None: ...
+
+class EndpointRelease(_message.Message):
+    __slots__ = ("org", "endpoint", "release_id", "image_digest", "code_closure_id")
+    ORG_FIELD_NUMBER: _ClassVar[int]
+    ENDPOINT_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    IMAGE_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    CODE_CLOSURE_ID_FIELD_NUMBER: _ClassVar[int]
+    org: str
+    endpoint: str
+    release_id: str
+    image_digest: str
+    code_closure_id: str
+    def __init__(self, org: _Optional[str] = ..., endpoint: _Optional[str] = ..., release_id: _Optional[str] = ..., image_digest: _Optional[str] = ..., code_closure_id: _Optional[str] = ...) -> None: ...
+
+class Attribution(_message.Message):
+    __slots__ = ("org", "invoker_id")
+    ORG_FIELD_NUMBER: _ClassVar[int]
+    INVOKER_ID_FIELD_NUMBER: _ClassVar[int]
+    org: str
+    invoker_id: str
+    def __init__(self, org: _Optional[str] = ..., invoker_id: _Optional[str] = ...) -> None: ...
+
+class ExecutionLane(_message.Message):
+    __slots__ = ("weights", "mandatory")
+    WEIGHTS_FIELD_NUMBER: _ClassVar[int]
+    MANDATORY_FIELD_NUMBER: _ClassVar[int]
+    weights: WeightLane
+    mandatory: bool
+    def __init__(self, weights: _Optional[_Union[WeightLane, str]] = ..., mandatory: _Optional[bool] = ...) -> None: ...
+
+class Arm(_message.Message):
+    __slots__ = ("graph_contract_digest", "shape", "adapter_rank_bucket", "backend", "artifact")
+    GRAPH_CONTRACT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    SHAPE_FIELD_NUMBER: _ClassVar[int]
+    ADAPTER_RANK_BUCKET_FIELD_NUMBER: _ClassVar[int]
+    BACKEND_FIELD_NUMBER: _ClassVar[int]
+    ARTIFACT_FIELD_NUMBER: _ClassVar[int]
+    graph_contract_digest: str
+    shape: ArmShape
+    adapter_rank_bucket: int
+    backend: SteadyBackend
+    artifact: ArtifactIdentity
+    def __init__(self, graph_contract_digest: _Optional[str] = ..., shape: _Optional[_Union[ArmShape, str]] = ..., adapter_rank_bucket: _Optional[int] = ..., backend: _Optional[_Union[SteadyBackend, str]] = ..., artifact: _Optional[_Union[ArtifactIdentity, _Mapping]] = ...) -> None: ...
+
+class ArtifactIdentity(_message.Message):
+    __slots__ = ("cell_ref", "content_digest", "cell_key", "publisher_org", "toolchain_digest", "env_seal_digest")
+    CELL_REF_FIELD_NUMBER: _ClassVar[int]
+    CONTENT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    CELL_KEY_FIELD_NUMBER: _ClassVar[int]
+    PUBLISHER_ORG_FIELD_NUMBER: _ClassVar[int]
+    TOOLCHAIN_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    ENV_SEAL_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    cell_ref: str
+    content_digest: str
+    cell_key: str
+    publisher_org: str
+    toolchain_digest: str
+    env_seal_digest: str
+    def __init__(self, cell_ref: _Optional[str] = ..., content_digest: _Optional[str] = ..., cell_key: _Optional[str] = ..., publisher_org: _Optional[str] = ..., toolchain_digest: _Optional[str] = ..., env_seal_digest: _Optional[str] = ...) -> None: ...
+
+class Topology(_message.Message):
+    __slots__ = ("accelerator", "gpu_count", "execution_groups", "device_ordinals")
+    ACCELERATOR_FIELD_NUMBER: _ClassVar[int]
+    GPU_COUNT_FIELD_NUMBER: _ClassVar[int]
+    EXECUTION_GROUPS_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_ORDINALS_FIELD_NUMBER: _ClassVar[int]
+    accelerator: str
+    gpu_count: int
+    execution_groups: int
+    device_ordinals: _containers.RepeatedScalarFieldContainer[int]
+    def __init__(self, accelerator: _Optional[str] = ..., gpu_count: _Optional[int] = ..., execution_groups: _Optional[int] = ..., device_ordinals: _Optional[_Iterable[int]] = ...) -> None: ...
+
+class ComponentManifest(_message.Message):
+    __slots__ = ("slots",)
+    SLOTS_FIELD_NUMBER: _ClassVar[int]
+    slots: _containers.RepeatedCompositeFieldContainer[SlotBinding]
+    def __init__(self, slots: _Optional[_Iterable[_Union[SlotBinding, _Mapping]]] = ...) -> None: ...
+
+class SlotBinding(_message.Message):
+    __slots__ = ("slot", "ref", "snapshot_digest", "components", "objective", "distilled", "distilled_status", "inference_defaults")
+    SLOT_FIELD_NUMBER: _ClassVar[int]
+    REF_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    COMPONENTS_FIELD_NUMBER: _ClassVar[int]
+    OBJECTIVE_FIELD_NUMBER: _ClassVar[int]
+    DISTILLED_FIELD_NUMBER: _ClassVar[int]
+    DISTILLED_STATUS_FIELD_NUMBER: _ClassVar[int]
+    INFERENCE_DEFAULTS_FIELD_NUMBER: _ClassVar[int]
+    slot: str
+    ref: str
+    snapshot_digest: str
+    components: _containers.RepeatedCompositeFieldContainer[ComponentRef]
+    objective: str
+    distilled: bool
+    distilled_status: str
+    inference_defaults: str
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[str] = ..., components: _Optional[_Iterable[_Union[ComponentRef, _Mapping]]] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ..., distilled_status: _Optional[str] = ..., inference_defaults: _Optional[str] = ...) -> None: ...
+
+class ComponentRef(_message.Message):
+    __slots__ = ("component", "ref", "snapshot_digest")
+    COMPONENT_FIELD_NUMBER: _ClassVar[int]
+    REF_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    component: str
+    ref: str
+    snapshot_digest: str
+    def __init__(self, component: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[str] = ...) -> None: ...
+
+class AdapterBinding(_message.Message):
+    __slots__ = ("slot", "ref", "snapshot_digest", "weight", "inference_defaults")
+    SLOT_FIELD_NUMBER: _ClassVar[int]
+    REF_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    INFERENCE_DEFAULTS_FIELD_NUMBER: _ClassVar[int]
+    slot: str
+    ref: str
+    snapshot_digest: str
+    weight: float
+    inference_defaults: str
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[str] = ..., weight: _Optional[float] = ..., inference_defaults: _Optional[str] = ...) -> None: ...
+
+class ConfigSnapshot(_message.Message):
+    __slots__ = ("values", "digest")
+    VALUES_FIELD_NUMBER: _ClassVar[int]
+    DIGEST_FIELD_NUMBER: _ClassVar[int]
+    values: bytes
+    digest: str
+    def __init__(self, values: _Optional[bytes] = ..., digest: _Optional[str] = ...) -> None: ...
+
+class ContractIdentities(_message.Message):
+    __slots__ = ("quality_contract_digest", "runtime_formula_digest")
+    QUALITY_CONTRACT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    RUNTIME_FORMULA_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    quality_contract_digest: str
+    runtime_formula_digest: str
+    def __init__(self, quality_contract_digest: _Optional[str] = ..., runtime_formula_digest: _Optional[str] = ...) -> None: ...
+
+class ExplorationRef(_message.Message):
+    __slots__ = ("exploration_id", "operator_intent_id")
+    EXPLORATION_ID_FIELD_NUMBER: _ClassVar[int]
+    OPERATOR_INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    exploration_id: str
+    operator_intent_id: str
+    def __init__(self, exploration_id: _Optional[str] = ..., operator_intent_id: _Optional[str] = ...) -> None: ...
+
+class InputAssetRef(_message.Message):
+    __slots__ = ("asset_id", "source_ref", "digest", "size_bytes", "kind", "mime_type")
+    ASSET_ID_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_REF_FIELD_NUMBER: _ClassVar[int]
+    DIGEST_FIELD_NUMBER: _ClassVar[int]
+    SIZE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    MIME_TYPE_FIELD_NUMBER: _ClassVar[int]
+    asset_id: str
+    source_ref: str
+    digest: str
+    size_bytes: int
+    kind: str
+    mime_type: str
+    def __init__(self, asset_id: _Optional[str] = ..., source_ref: _Optional[str] = ..., digest: _Optional[str] = ..., size_bytes: _Optional[int] = ..., kind: _Optional[str] = ..., mime_type: _Optional[str] = ...) -> None: ...
+
+class DeliveryGrant(_message.Message):
+    __slots__ = ("capability_token", "expires_unix_ms", "epoch", "snapshots", "input_assets")
+    class SnapshotsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: PresignedSnapshot
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[PresignedSnapshot, _Mapping]] = ...) -> None: ...
+    CAPABILITY_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    EPOCH_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOTS_FIELD_NUMBER: _ClassVar[int]
+    INPUT_ASSETS_FIELD_NUMBER: _ClassVar[int]
+    capability_token: str
+    expires_unix_ms: int
+    epoch: int
+    snapshots: _containers.MessageMap[str, PresignedSnapshot]
+    input_assets: _containers.RepeatedCompositeFieldContainer[PresignedAsset]
+    def __init__(self, capability_token: _Optional[str] = ..., expires_unix_ms: _Optional[int] = ..., epoch: _Optional[int] = ..., snapshots: _Optional[_Mapping[str, PresignedSnapshot]] = ..., input_assets: _Optional[_Iterable[_Union[PresignedAsset, _Mapping]]] = ...) -> None: ...
+
+class PresignedSnapshot(_message.Message):
+    __slots__ = ("files",)
+    FILES_FIELD_NUMBER: _ClassVar[int]
+    files: _containers.RepeatedCompositeFieldContainer[PresignedFile]
+    def __init__(self, files: _Optional[_Iterable[_Union[PresignedFile, _Mapping]]] = ...) -> None: ...
+
+class PresignedFile(_message.Message):
+    __slots__ = ("path", "size_bytes", "digest", "url", "chunk_size_bytes", "chunks")
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    SIZE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    DIGEST_FIELD_NUMBER: _ClassVar[int]
+    URL_FIELD_NUMBER: _ClassVar[int]
+    CHUNK_SIZE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    CHUNKS_FIELD_NUMBER: _ClassVar[int]
+    path: str
+    size_bytes: int
+    digest: str
+    url: str
+    chunk_size_bytes: int
+    chunks: _containers.RepeatedCompositeFieldContainer[ChunkRef]
+    def __init__(self, path: _Optional[str] = ..., size_bytes: _Optional[int] = ..., digest: _Optional[str] = ..., url: _Optional[str] = ..., chunk_size_bytes: _Optional[int] = ..., chunks: _Optional[_Iterable[_Union[ChunkRef, _Mapping]]] = ...) -> None: ...
+
+class PresignedAsset(_message.Message):
+    __slots__ = ("asset_id", "url")
+    ASSET_ID_FIELD_NUMBER: _ClassVar[int]
+    URL_FIELD_NUMBER: _ClassVar[int]
+    asset_id: str
+    url: str
+    def __init__(self, asset_id: _Optional[str] = ..., url: _Optional[str] = ...) -> None: ...
 
 class JobAccepted(_message.Message):
     __slots__ = ("request_id", "attempt")
