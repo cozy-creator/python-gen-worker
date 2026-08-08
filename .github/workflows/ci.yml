@@ -213,6 +213,14 @@ jobs:
       - name: pgw#931 guard - config reads outside the pipeline
         run: uv run python scripts/lint_config_reads.py
 
+      # GATING (pgw#891/pgw#904): a connected worker may not reconstruct or
+      # substitute a Hub decision. The real repair is pgw#891's exact
+      # ExecutionSpec and its schema half is th#1457's, so the deletion cannot
+      # land yet — this freezes the SIZE of the job so pgw#904 stays a bounded
+      # list instead of an open-ended hunt. Fails on ADDITION only.
+      - name: pgw#891 guard - the post-connect resolution surface may not grow
+        run: uv run python scripts/lint_post_connect_resolution.py
+
       # GATING (pgw#1013 / th#1662): a length read off external bytes may not
       # size a read until something bounds it. The §4.24 census enumerated the
       # bounds that EXIST, so it could not see a site that needs one and has
