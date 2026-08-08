@@ -138,7 +138,6 @@ class ExportSpec:
     strict: bool = True
     source_ref: str = ""
     source_digest: str = ""
-    closure_roots: Tuple[str, ...] = ()
 
     def execution_lane_label(self) -> str:
         base, observed = execution_lane_bucket(self.weight_lane)

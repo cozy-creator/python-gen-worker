@@ -466,27 +466,26 @@ def test_mint_records_fused_constants_without_refusing(
     assert "definitely.fused.away" in entry["graph"]["fused_constants"]
 
 
-def test_strict_mode_drift_is_refused_by_name() -> None:
-    """Drift the env seal cannot see: both trace modes run identically sealed,
-    with the identical toolchain, so nothing else in the key would notice."""
-    assert aot_package.strict_mode_drift({"strict_export": True}, True) == []
-    reasons = aot_package.strict_mode_drift({"strict_export": False}, True)
-    assert reasons
-    assert "strict=False" in reasons[0] and "strict=True" in reasons[0]
-    assert "pgw#728" in reasons[0]
-    # Silence is not "probably strict" — an artifact silent on its trace mode
-    # is refused too.
-    silent = aot_package.strict_mode_drift({}, True)
-    assert silent and "unprovable" in silent[0]
-
-
 def test_minted_metadata_pins_the_trace_mode(cell: Dict[str, Any]) -> None:
-    """Recorded on the artifact so a consumer can refuse a mode mismatch rather
-    than discover it as a constant-set surprise."""
+    """Recorded on the artifact, and BINDING: the mode is an input to every
+    entry's ``class_hash``, so drift the env seal cannot see (both modes run
+    identically sealed, identical toolchain) is still refused on staged bytes.
+
+    pgw#1034 replaced ``aot_package.strict_mode_drift`` with this. That gate
+    compared the mint's own ``meta["strict_export"]`` against the value it had
+    been assigned from thirteen lines earlier — it could not fail. THIS is the
+    same question asked where the answer can be no: on FOREIGN bytes, after the
+    download, by the consumer that has to run them.
+    """
     meta = aot_serve.unpack_metadata(cell["result"].artifact)
     assert meta["strict_export"] is True
-    assert aot_package.strict_mode_drift(meta, True) == []
-    assert aot_package.strict_mode_drift(meta, False)
+    assert aot_serve.verify_contract(meta) == ""
+
+    drifted = json.loads(json.dumps(meta))
+    drifted["strict_export"] = False
+    reason = aot_serve.verify_contract(drifted)
+    assert "class_hash does not match its recorded facts" in reason
+    assert CELL_ENTRY in reason  # the refusal NAMES the class (pgw#716)
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +750,9 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     assert entry["class_hash"] and entry["range_digest"]
     assert entry["graph"]["specialization"]["gemm_mode"] == "pertensor"
     assert entry["graph"]["specialization"]["shape_strategy"] == "static-rows"
-    assert meta["toolchain"] and meta["code_closure"] and meta["sm"] == "sm_89"
+    assert meta["toolchain"] and meta["sm"] == "sm_89"
+    # pgw#1034: the envelope records NO `code_closure` — nothing ever read it.
+    assert "code_closure" not in meta
     assert aot_mint.cell_identity(meta, _cell_spec()).digest == result.cell_key
 
     # The mint-phase table (#757): the class count and the phases are data —
@@ -818,7 +819,7 @@ def test_mint_metadata_is_byte_deterministic(
     # differ; the recorded contract and identity must not.
     for field_name in (
         "entries", "combined_graph_hash", "toolchain",
-        "code_closure", "cell_key", "package_constants_in_so",
+        "cell_key", "package_constants_in_so",
     ):
         assert meta_a[field_name] == meta_b[field_name], field_name
 

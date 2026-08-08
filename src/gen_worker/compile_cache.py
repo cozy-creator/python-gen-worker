@@ -44,7 +44,6 @@ from __future__ import annotations
 import ast
 import contextlib
 import contextvars
-import ctypes
 import filecmp
 import functools
 import importlib.util
@@ -535,24 +534,17 @@ def sku_slug(gpu_name: str) -> str:
     return out
 
 
-def _cuda_driver_version() -> str:
-    """CUDA driver API version without shelling out to provider tooling."""
-    try:
-        lib = ctypes.CDLL("libcuda.so.1")
-        value = ctypes.c_int()
-        if lib.cuInit(0) != 0 or lib.cuDriverGetVersion(ctypes.byref(value)) != 0:
-            return ""
-        return str(int(value.value))
-    except Exception:
-        return ""
-
-
 def runtime_key() -> Dict[str, str]:
-    """The consumer-side half of the cache key, probed from this process."""
+    """The consumer-side half of the cache key, probed from this process.
+
+    pgw#1034: no ``cuda_driver``. gw#577 ruled it a host-lottery axis and took
+    it out of every key and every gate; what was left was a fact nothing read,
+    bought with a ``libcuda.so.1`` dlopen and a ``cuInit(0)`` on each call —
+    and this function is called per ``verify()``, not once.
+    """
     key = {
         "sku": "", "sm": "", "torch": "", "triton": "", "cuda": "",
-        "cuda_driver": "", "image_digest": os.environ.get(
-            "WORKER_IMAGE_DIGEST", "").strip(),
+        "image_digest": os.environ.get("WORKER_IMAGE_DIGEST", "").strip(),
     }
     try:
         import torch
@@ -563,9 +555,6 @@ def runtime_key() -> Dict[str, str]:
             key["sku"] = sku_slug(torch.cuda.get_device_name(0))
             major, minor = torch.cuda.get_device_capability(0)
             key["sm"] = f"sm_{major}{minor}"
-            # CUDA's integer encoding (e.g. 13000), obtained from libcuda
-            # rather than provider-specific nvidia-smi output.
-            key["cuda_driver"] = _cuda_driver_version()
     except Exception:
         # pgw#657: silently leaving these EMPTY manufactures a different cell
         # key than every healthy pod computes — i.e. a guaranteed cache miss
@@ -1076,9 +1065,9 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     # torch + triton pin every hardware fact the compiled artifacts carry,
     # and a same-sm cell minted on a different SKU must arm, not refuse.
     # It stays recorded in metadata for observability and selection only.
-    # cuda_driver is deliberately NOT here either (gw#577): triton's disk
-    # cache keys on the wheel's ptxas + SM arch; the host libcuda build
-    # never enters any compiled-artifact key. Recorded for observability.
+    # There is no cuda_driver axis at all (gw#577 excluded it, pgw#1034 stopped
+    # probing it): triton's disk cache keys on the wheel's ptxas + SM arch, and
+    # the host libcuda build never enters any compiled-artifact key.
     for field in IDENTITY_AXES:
         want, have = str(meta.get(field) or ""), here[field]
         if want != have:
@@ -2656,7 +2645,6 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
             return (f"{cell_execution_lane_base[:4].upper()} graph contains no "
                     "torch._scaled_mm modules")
         here_digest = runtime_key()["image_digest"]
-        # cuda_driver excluded (gw#577): host-lottery axis, see verify().
         for field in ("sm", "cuda", "image_digest"):
             if not str(meta.get(field) or ""):
                 if field == "image_digest" and not here_digest:

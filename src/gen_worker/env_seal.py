@@ -62,18 +62,24 @@ logger = logging.getLogger(__name__)
 # pgw#958 (§1.27(g)): restarted at 1 alongside KEY_SCHEME, with the
 # pre-existing cell corpus purged in the same cut — v1..v6 minted real cells
 # and re-issuing 1 is only honest once none of them survive. The seal dict
-# carries every sealed fact accumulated through the old v6 (epoch salt,
+# carries every sealed fact accumulated through the old v6 (
 # hash-seed + loaded-library digests, driver libs excluded, on-disk toolchain
 # manifest, host-ISA codegen clamp). Adding/changing sealed facts bumps THIS
 # version only — never the key-axis set.
-SEAL_VERSION = 1
+#
+# pgw#1034 bumped 1 -> 2 by DELETING the `epoch` fact. RE-KEY COST, stated per
+# §1.27(g): every cell minted under seal v1 stops matching and is re-minted
+# once, per (family, lane, sm). That is the whole cost — `epoch` had no
+# producer anywhere in the fleet, so it read "0" on every pod that ever
+# existed and the fact it removed discriminated nothing.
+#
+# It was `COZY_CELL_EPOCH`, an operator-settable recall salt.
+# `scripts/config_reads_allowlist.txt` already ruled it a VIOLATION: bumping it
+# is a fleet-wide recall, and a recall is a recorded operator intent with an
+# actor and a reason, which an env var on a pod is not. The hub's
+# `cell_revocations` (th#1499) is where a recall lives.
+SEAL_VERSION = 2
 SEAL_KEY = "env_seal"
-
-# R2: the operator-settable generation salt. Bumping it disowns every cell
-# minted under the previous epoch (their env_seal digests stop matching) —
-# the recall lever for "a subtly broken image published cells" without a
-# KEY_SCHEME bump. Set in the fleet env; default generation is "0".
-EPOCH_ENV = "COZY_CELL_EPOCH"
 
 # Behavior-affecting global flags: ONE canonical value each, set explicitly
 # by establish_config() and read back effective. String-valued for JSON
@@ -144,9 +150,13 @@ def effective_config() -> Dict[str, str]:
     """The live values of every sealed config flag (read back, never
     assumed). Post-scrub these are a pure function of (SDK build x
     declared knobs) — no env var can reach them. The hash-seed facts
-    record interpreter-level ordering entropy (pgw#719): canonical
-    enforcement (PYTHONHASHSEED=0 pre-exec) is the entrypoint's wiring;
-    until then the facts make a divergent seed VISIBLE in the key.
+    record interpreter-level ordering entropy (pgw#719). They are RECORDED,
+    not imposed, and that is deliberate rather than unfinished: ``PYTHONHASHSEED``
+    is read by CPython at interpreter startup, so imposing it means re-exec'ing
+    the entrypoint — a boot-path change with its own proof owed (pgw#1034 left
+    it as a named decision). ``SCRUB_PREFIXES`` does not cover ``PYTHON``, so an
+    operator CAN set a seed here; recording it is what makes that divergence
+    visible in the key instead of silently forking the traced graph.
 
     pgw#788: a torchless worker has no matmul/cudnn surface to read back, so it
     seals the ABSENCE as a fact instead of crashing on the import."""
@@ -505,7 +515,6 @@ def effective_seal() -> Dict[str, Any]:
     ).encode()
     return {
         "seal_v": SEAL_VERSION,
-        "epoch": os.environ.get(EPOCH_ENV, "0"),
         "posture": guard_closure.posture_snapshot(),
         "config": effective_config(),
         "inductor": inductor_config_digest(),
@@ -624,7 +633,6 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
 
 __all__ = [
     "CANONICAL_CONFIG",
-    "EPOCH_ENV",
     "LAST_ESTABLISH_SPANS",
     "EnvSealError",
     "SCRUB_PREFIXES",

@@ -55,7 +55,6 @@ src/gen_worker/runtime_config.py::GEN_WORKER_CONFIG_SNAPSHOT_PATH VIOLATION GEN_
 src/gen_worker/parallel/runtime.py::TENSORHUB_CACHE_DIR VIOLATION config->env write-back of boot.cache_dir, used as an intra-process bus. Same sequencing rule.
 src/gen_worker/url_fetch.py::GEN_WORKER_URL_FETCH_ALLOWED_HOSTS VIOLATION GEN_WORKER_URL_FETCH_ALLOWED_HOSTS is an SSRF allow-list: security policy the hub owns and may need to change on a RUNNING worker. Ruled a Directive field (th#1488). As an env, a policy change needs a pod replacement.
 src/gen_worker/input_assets.py::GEN_WORKER_INTERNAL_OBJECT_HOSTS VIOLATION GEN_WORKER_INTERNAL_OBJECT_HOSTS, same SSRF ruling, same blocker.
-src/gen_worker/env_seal.py::COZY_CELL_EPOCH VIOLATION COZY_CELL_EPOCH is an axis of the cell key, so it looks like a value - but bumping it DISOWNS EVERY PREVIOUSLY MINTED CELL. That is a fleet-wide recall, and a recall must be a recorded operator intent with an actor and a reason. `cell_revocations` already exists on the hub and is the right home (th#1499).
 src/gen_worker/entrypoint.py::$var VIOLATION writes TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR from a computed path. Legitimate library steering, but belongs in the one Settings-derived torch_env() builder rather than here.
 
 src/gen_worker/topology.py::<unresolved> VIOLATION binds the WHOLE environment as the default source and reads WORKER_EXECUTION_TOPOLOGY out of it. The hub-delivered topology has no Settings field; absent is legal and means one slot, so a misspelling silently serves one card on a multi-GPU pod.

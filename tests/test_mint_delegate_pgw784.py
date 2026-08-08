@@ -8,12 +8,14 @@ Three claims, each with the fact that would break it:
    whole mint; delegated, it carries none of that and keeps serving plain
    eager. (pgw#1010 deleted the in-process shape outright, so this is now the
    only shape a mint has — and the restriction it carried is gone with it.)
-2. **The child computes the SAME key the parent will demand.** The parent
-   states the compile contract on the wire because the parent owns the key
-   (the ck2 ``contract`` axis digests ``CompileCell.contract_facts()``, and
-   the class-scoped unions live on the spec, not the decorator). If the child
-   re-derived it, the parent would refuse its own artifact on an axis nobody
-   changed.
+2. **The child exports the declaration the PARENT stated.** The parent states
+   the compile contract on the wire because the class-scoped unions live on
+   the spec, not the decorator: a child re-deriving from ``@endpoint`` alone
+   would export a different declaration than the parent asked for. (pgw#1034:
+   this used to be phrased as key parity — "the child computes the same key" —
+   which stopped being true at pgw#758. The child computes no key; the parent
+   stamps one from the returned envelope. What the wire owes is the DECLARED
+   EXPORT, and that is what is checked below.)
 3. **Failure inversion.** A dead mint process is a FAILED MINT reported by a
    LIVE worker. Every branch returns a typed result, the retry is bounded and
    class-driven, and a card with no room for a co-resident child DECLINES
@@ -128,20 +130,28 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
 
 # --------------------------------------------- 2. one key, stated by one side
 
-def test_the_wire_form_preserves_the_contract_facts_exactly(
-    tmp_path: Path,
-) -> None:
-    """The load-bearing key-parity check: flatten -> ship -> rebuild must be a
-    round trip on ``contract_facts()``, because that dict IS the ck2 contract
-    axis. A dropped union or a lost dynamic row silently forks the key."""
-    from gen_worker import mint_child
+def test_the_wire_form_preserves_the_declared_export_exactly() -> None:
+    """The load-bearing check: the ``ExportSpec`` the CHILD derives from the
+    wire form must equal the one the parent's own ``CompileCell`` derives.
 
+    That — not ``contract_facts()`` — is what the wire owes. The child's single
+    consumer of the cfg is ``fleet_cells.aot_export_spec`` (plus
+    ``resolve_targets``, which reads ``targets``), and a dropped union or a
+    lost shape row silently exports a different declaration than the parent
+    asked for. pgw#1034 also asserts the converse: a field with no child reader
+    does not cross the wire.
+    """
     parent = _cfg()
-    rebuilt = mint_child.compile_cfg(mint_delegate.cfg_spec(parent))
-    assert rebuilt.contract_facts() == parent.contract_facts()
-    assert rebuilt.contract_text_lens() == parent.contract_text_lens()
-    assert rebuilt.guidance_scales == parent.guidance_scales
-    assert rebuilt.lora_bucket == parent.lora_bucket == 64
+    wire = mint_delegate.cfg_spec(parent)
+    pipe = SimpleNamespace()
+
+    assert (fleet_cells.aot_export_spec(pipe, wire)
+            == fleet_cells.aot_export_spec(pipe, parent))
+    assert cc.resolve_targets(pipe, wire) == cc.resolve_targets(pipe, parent)
+
+    # No child reads these, so they do not ride (pgw#1034).
+    for dead in ("regional", "text_len", "dynamic"):
+        assert not hasattr(wire, dead), dead
 
 
 def test_the_request_carries_the_execution_lane_and_the_effective_config(

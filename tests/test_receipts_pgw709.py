@@ -139,7 +139,14 @@ class TestVerifyReceiptJWS:
         assert receipt.snapshot_digest == SNAPSHOT
         assert receipt.artifact_digest == "sha256:" + SHA_HEX
         assert receipt.artifact_size_bytes == 4096
-        assert receipt.axes["sku"] == "rtx-4090"
+        # pgw#1034: claims nothing checks are not decoded. `make_claims` still
+        # signs `axes`/`publisher`/`manifest_digest`/`fingerprint_digest`/`iat`
+        # — the hub emits them — and an undecoded claim must be inert, never a
+        # parse failure.
+        for dropped in ("axes", "publisher", "artifact_path",
+                        "manifest_digest", "fingerprint_digest",
+                        "issued_at_unix"):
+            assert not hasattr(receipt, dropped), dropped
 
     def test_tampered_payload_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
         # RED: re-point the signed payload at a different cell key — the
@@ -264,7 +271,8 @@ class HubStub:
         self, artifact: Path, *, algo: str = "sha256", **claim_overrides: Any
     ) -> str:
         """Publish a receipt for ``artifact`` bound with ``algo``; returns the ref."""
-        ref = algo + ":" + receipts.artifact_digests(artifact)[algo]
+        assert algo == "sha256"
+        ref = receipts.artifact_digest(artifact)
         size = artifact.stat().st_size
         claims = make_claims(ref, size, **claim_overrides)
         self.receipts[(ref, str(claims["cell_key"]))] = sign_receipt(self.key, claims)
@@ -326,13 +334,13 @@ class TestGateDeliveredArtifact:
         # (the delivery-substitution attack).
         artifact = make_artifact(tmp_path)
         hub.serve_receipt_for(artifact)
-        original_ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
+        original_ref = receipts.artifact_digest(artifact)
         with artifact.open("ab") as f:
             f.write(b"\x00poison")
         # Serve the original receipt under the NEW digest too, so the fetch
         # succeeds and the refusal is the digest binding, not a 404.
         jws = hub.receipts[(original_ref, CELL_KEY)]
-        new_ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
+        new_ref = receipts.artifact_digest(artifact)
         hub.receipts[(new_ref, CELL_KEY)] = jws
         _configure(hub)
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
@@ -341,7 +349,7 @@ class TestGateDeliveredArtifact:
         # Receipt signed for a DIFFERENT key than the artifact claims: the
         # Nix Deriver lesson — key binding must be inside the signature.
         artifact = make_artifact(tmp_path)
-        ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
+        ref = receipts.artifact_digest(artifact)
         claims = make_claims(ref, artifact.stat().st_size, cell_key="ck1-" + "e" * 56)
         hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
         _configure(hub)
@@ -464,13 +472,11 @@ class TestAlgorithmAgnosticReceipts:
         _configure(hub)
         receipt = receipts.verify_delivered_artifact(artifact, FAMILY)
         assert receipt.artifact_digest == ref
-        # The worker cannot know the algorithm in advance, so it offers every
-        # digest it computed — one request, no per-algorithm 404 retry chain.
+        # One request carrying the ALGORITHM-TAGGED digest — no per-algorithm
+        # 404 retry chain, and never bare hex (pgw#1034).
         offered, asked_key = hub.last_query
-        local = receipts.artifact_digests(artifact)
         assert asked_key == CELL_KEY
-        for algo, hex_digest in local.items():
-            assert f"{algo}:{hex_digest}" in offered
+        assert receipts.artifact_digest(artifact) in offered
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
 
     def test_legacy_blake3_receipt_is_refused_not_dual_read(
@@ -498,7 +504,7 @@ class TestAlgorithmAgnosticReceipts:
         # A receipt whose sha256 claim names OTHER bytes: the index row is
         # keyed so the fetch succeeds, and only the digest COMPARE catches it.
         artifact = make_artifact(tmp_path)
-        ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
+        ref = receipts.artifact_digest(artifact)
         claims = make_claims("sha256:" + SHA_HEX, artifact.stat().st_size)
         hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
         _configure(hub)
@@ -511,7 +517,7 @@ class TestAlgorithmAgnosticReceipts:
         # THE trap this migration keeps setting: a receipt binding no digest
         # must REFUSE, not compare an empty string to an empty string.
         artifact = make_artifact(tmp_path)
-        ref = "sha256:" + receipts.artifact_digests(artifact)["sha256"]
+        ref = receipts.artifact_digest(artifact)
         claims = make_claims(ref, artifact.stat().st_size)
         claims["artifact"] = {"path": "cell.tar.gz", "size_bytes": artifact.stat().st_size}
         hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
@@ -538,12 +544,14 @@ class TestAlgorithmAgnosticReceipts:
                 receipts.verify_receipt_jws(jws, pub_map)
             assert exc.value.reason == reason, f"{raw!r} -> {exc.value.reason}"
 
-    def test_digests_are_computed_in_one_pass(self, tmp_path: Path) -> None:
+    def test_the_local_digest_is_tagged_and_single_algorithm(
+        self, tmp_path: Path
+    ) -> None:
         artifact = make_artifact(tmp_path)
-        got = receipts.artifact_digests(artifact)
-        assert set(got) == set(receipts.ARTIFACT_DIGEST_ALGORITHMS) == {"sha256"}
+        got = receipts.artifact_digest(artifact)
         raw = artifact.read_bytes()
-        assert got["sha256"] == hashlib.sha256(raw).hexdigest()
+        assert got == "sha256:" + hashlib.sha256(raw).hexdigest()
+        assert receipts.ARTIFACT_DIGEST_ALGORITHM == "sha256"
 
 
 # ---------------------------------------------------------------------------
@@ -742,13 +750,12 @@ TH1680_ADOPTION_TABLE = [
 def _receipt_for(tier: str, publisher_org: str, owning_endpoint: str = "") -> receipts.Receipt:
     """A Receipt carrying only the fields the publisher gate reads."""
     return receipts.Receipt(
-        version=receipts.RECEIPT_VERSION, family=FAMILY, cell_key=CELL_KEY, axes={},
-        owning_endpoint_id=owning_endpoint, publisher="",
+        version=receipts.RECEIPT_VERSION, family=FAMILY, cell_key=CELL_KEY,
+        owning_endpoint_id=owning_endpoint,
         publisher_tier=receipts._normalize_publisher_tier(tier),
         publisher_org_id=publisher_org,
-        snapshot_digest=SNAPSHOT, artifact_path="cell.tar.gz",
-        artifact_digest="sha256:" + SHA_HEX, artifact_size_bytes=1,
-        manifest_digest="", fingerprint_digest="", issued_at_unix=0)
+        snapshot_digest=SNAPSHOT,
+        artifact_digest="sha256:" + SHA_HEX, artifact_size_bytes=1)
 
 
 class TestSharedAdoptionTableTh1680:

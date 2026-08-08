@@ -204,33 +204,6 @@ def cap_vram(device: int, cap_bytes: int) -> str:
         return ""
 
 
-def compile_cfg(spec_cfg: Any) -> Any:
-    """Rebuild the parent's ``registry.CompileCell`` from the wire form.
-
-    The PARENT owns this: the cell key digests
-    ``CompileCell.contract_facts()``, and the class-scoped guidance/text-len
-    unions live on the spec rather than the decorator, so a child that
-    re-derived the cfg from ``@endpoint`` alone would compute a different key
-    and the parent would then refuse its own artifact on a contract axis.
-    """
-    from .api.decorators import DynamicDim
-    from .registry import CompileCell
-
-    return CompileCell(
-        shapes=tuple(tuple(int(v) for v in row) for row in spec_cfg.shapes),
-        targets=tuple(str(t) for t in spec_cfg.targets),
-        family=str(spec_cfg.family or ""),
-        regional=bool(spec_cfg.regional),
-        text_len=spec_cfg.text_len,
-        dynamic=tuple(
-            DynamicDim(dim=d.dim, min=d.min, max=d.max)
-            for d in spec_cfg.dynamic),
-        lora_bucket=int(spec_cfg.lora_bucket or 0),
-        guidance_scales=tuple(float(v) for v in spec_cfg.guidance_scales),
-        text_lens=tuple(int(v) for v in spec_cfg.text_lens),
-    )
-
-
 def select_specs(
     specs: Sequence[Any], function: str,
 ) -> Tuple[Any, List[Any]]:
@@ -767,7 +740,14 @@ def mint(request: MintRequest) -> MintReport:
     # BEFORE anything is loaded — and the refusal, if it cannot be.
     bind_slots(siblings, request.slots)
     assert_slots_resolvable(siblings, request)
-    cfg = compile_cfg(request.cfg)
+    # pgw#1034: the wire struct IS the cfg. It used to be re-inflated into a
+    # `registry.CompileCell` to keep `contract_facts()` byte-identical for a
+    # key the child computed — the child has computed no key since pgw#758, so
+    # the rebuild only manufactured a CompileCell whose contract axes were
+    # whatever the wire happened to carry. Every consumer here reads the
+    # declared facts by name (family, targets, shapes, text_lens, guidance,
+    # lora_bucket) and the spec carries exactly those.
+    cfg = request.cfg
 
     frame(phase="load", note=(
         f"setup {spec.cls.__name__}"
@@ -963,5 +943,5 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 __all__ = ["MintChildRefused", "assert_composable", "assert_slots_resolvable",
-           "bind_slots", "cap_vram", "compile_cfg", "frame", "main",
+           "bind_slots", "cap_vram", "frame", "main",
            "mint_identity", "mint", "select_specs"]

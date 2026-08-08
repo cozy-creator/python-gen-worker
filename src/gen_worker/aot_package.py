@@ -574,31 +574,6 @@ def eliminated_constants(
     return sorted(want - have)
 
 
-def strict_mode_drift(meta: Any, strict: bool) -> List[str]:
-    """Named reasons a recorded artifact's trace mode is not ``strict``.
-
-    Pins the doctrine at the artifact boundary. A silent mode difference is
-    exactly the drift the seal cannot observe, and its consequence — a constant
-    set that does not match the manifest — is not something a consumer can
-    diagnose from the bytes.
-    """
-    recorded = meta.get("strict_export")
-    if recorded is None:
-        return [
-            "artifact records no strict_export flag; its trace mode is "
-            "unprovable and the declared constant set cannot be trusted "
-            "(pgw#728)"
-        ]
-    if bool(recorded) != bool(strict):
-        return [
-            f"artifact was traced with strict={bool(recorded)} but this mint "
-            f"declares strict={bool(strict)}; the two modes lift different "
-            f"constant sets, so the manifest and the package would disagree "
-            f"(pgw#728)"
-        ]
-    return []
-
-
 def unbindable_constants(
     package: Path, state_dict_keys: Iterable[str], entry: str = "",
 ) -> List[str]:
@@ -768,7 +743,6 @@ __all__ = [
     "package_entry_names",
     "program_constant_fqns",
     "program_package_drift",
-    "strict_mode_drift",
     "packaged_so",
     "literal_values_digest",
     "program_literal_fqns",

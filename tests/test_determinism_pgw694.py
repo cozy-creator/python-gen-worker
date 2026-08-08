@@ -551,17 +551,27 @@ def test_pytorch_and_triton_namespaces_are_scrubbed(monkeypatch: Any) -> None:
         assert name in erased and name not in os.environ
 
 
-def test_epoch_salt_disowns_a_generation(monkeypatch: Any) -> None:
-    """R2 (Bazel Action.salt / ccache HASH_PREFIX): bumping COZY_CELL_EPOCH
-    changes every env_seal digest — one config change disowns a poisoned
-    mint generation, no scheme bump."""
+def test_the_seal_carries_no_operator_settable_recall_salt(
+    monkeypatch: Any,
+) -> None:
+    """pgw#1034 deleted the ``epoch`` fact (``COZY_CELL_EPOCH``).
+
+    A recall is a recorded operator intent with an actor and a reason; an env
+    var on a pod is neither, which is why the config-reads allowlist ruled the
+    read a VIOLATION and named the hub's ``cell_revocations`` (th#1499) as the
+    real home. The seal is now unmovable from the process environment: the
+    ONLY way to disown a cell generation is a ``SEAL_VERSION`` bump in this
+    file, which is a diff someone signs.
+    """
     seal = _env_seal()
-    monkeypatch.delenv(seal.EPOCH_ENV, raising=False)
     base = seal.effective_seal()
-    assert base["seal_v"] == seal.SEAL_VERSION and base["epoch"] == "0"
+    assert base["seal_v"] == seal.SEAL_VERSION
+    assert "epoch" not in base
+    assert not hasattr(seal, "EPOCH_ENV")
+
     baseline = seal.seal_digest(base)
-    monkeypatch.setenv(seal.EPOCH_ENV, "1")
-    assert seal.seal_digest(seal.effective_seal()) != baseline
+    monkeypatch.setenv("COZY_CELL_EPOCH", "1")
+    assert seal.seal_digest(seal.effective_seal()) == baseline
 
 
 def test_content_keys_recorded_in_metadata() -> None:

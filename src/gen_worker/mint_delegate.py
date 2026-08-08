@@ -126,23 +126,16 @@ ABANDONED = mint_process.ABANDONED
 def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
     """Flatten the parent's ``CompileCell`` for the wire.
 
-    The parent states the contract because the parent owns the KEY: the ck2
-    ``contract`` axis digests ``CompileCell.contract_facts()``, and the
-    class-scoped guidance/text-len unions live on the spec rather than the
-    decorator. A child re-deriving this from ``@endpoint`` alone would compute
-    a different key, and the parent would then refuse its own artifact on an
-    axis nobody changed.
+    The parent states the contract because the class-scoped guidance/text-len
+    unions live on the spec rather than the decorator: a child re-deriving this
+    from ``@endpoint`` alone would export a different declaration than the
+    parent asked for. It carries what the child READS and nothing else
+    (pgw#1034) — the child computes no key, so this is not a key-parity wire.
     """
     return mint_process.CompileCellSpec(
         shapes=tuple(tuple(int(v) for v in row) for row in (cfg.shapes or ())),
         targets=tuple(str(t) for t in (cfg.targets or ())),
         family=str(getattr(cfg, "family", "") or ""),
-        regional=bool(getattr(cfg, "regional", False)),
-        text_len=getattr(cfg, "text_len", None),
-        dynamic=tuple(
-            mint_process.DynamicDimSpec(
-                dim=str(d.dim), min=int(d.min), max=int(d.max))
-            for d in (getattr(cfg, "dynamic", ()) or ())),
         lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
         guidance_scales=tuple(
             float(v) for v in (getattr(cfg, "guidance_scales", ()) or ())),
