@@ -1305,28 +1305,36 @@ class Transport:
                 ep, at=connected_at,
                 dial_s=connected_at - self._dial_started)
 
-    def _account_connection(self, *, outcome: str, teardown_s: float) -> None:
+    def _account_connection(
+        self, *, outcome: str, ended_at: float, teardown_s: float,
+    ) -> None:
         """Fold one ended connection attempt into the ledger.
+
+        ``ended_at`` is when the connection ENDED, i.e. before this iteration's
+        teardown — not "now". The distinction is the accounting: an episode's
+        clock starts at the drop, so charging it a teardown that ran BEFORE its
+        own start would leave that time in `unaccounted` forever, and reading a
+        constant offset there as loop starvation is exactly the wrong answer.
 
         The episode stays None while this worker has never been connected — a
         boot dial that has not landed yet is gw#618's subject, not this one.
         """
-        now = time.monotonic()
         connected_at = self._connected_at
         if connected_at is not None:
             # This attempt reached HelloAck (and `_note_connected` already
             # closed the previous episode), so the stream that was UP has now
-            # ended: a new episode opens here.
+            # ended: a new episode opens here, AT the end of the stream. Its
+            # teardown is the first thing inside it.
             self._episode = self._open_episode(
-                dropped_at=now, cause=outcome,
-                uptime_s=max(0.0, now - connected_at))
+                dropped_at=ended_at, cause=outcome,
+                uptime_s=max(0.0, ended_at - connected_at))
             self._episode.teardown_s += teardown_s
             return
         ep = self._episode
         if ep is None:
             return
         ep.attempts += 1
-        ep.dialed_s += max(0.0, now - self._dial_started)
+        ep.dialed_s += max(0.0, ended_at - self._dial_started)
         ep.teardown_s += teardown_s
         ep.note_outcome(outcome)
 
@@ -1420,6 +1428,7 @@ class Transport:
                 # NEXT stream instead of being cleared by this one's teardown.
                 self._account_connection(
                     outcome=outcome,
+                    ended_at=teardown_started,
                     teardown_s=time.monotonic() - teardown_started,
                 )
 

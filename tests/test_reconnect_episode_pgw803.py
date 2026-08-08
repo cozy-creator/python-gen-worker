@@ -145,6 +145,38 @@ def test_attempt_outcomes_coalesce_by_count_never_by_dropping() -> None:
     assert ep.histogram() == "grpc_unavailable=200, exc_ConnectionError=1"
 
 
+def test_an_episode_starts_when_the_STREAM_ended_not_when_teardown_finished() -> None:
+    """The frame the whole partition hangs on.
+
+    `_account_connection` runs at the END of the reconnect loop's `finally`,
+    after `reset_for_reconnect` and `on_disconnect`. Opening the episode at
+    "now" would date the drop AFTER a teardown it then also charges the episode
+    for — so the stream's measured uptime would swallow the teardown, and every
+    later term would be read against a window that started too late. Both facts
+    are asserted against an injected clock, which is why this row is exact.
+    """
+    from gen_worker.config import load_settings
+    from gen_worker.transport import Transport
+
+    t = Transport(load_settings(worker_id="pgw803-frame"), object())
+    t._connected_at = 100.0          # HelloAck landed
+    t._last_send_at = 109.0          # last proven scheduling instant
+    t._dial_started = 99.0
+
+    # The stream ended at 110.0; teardown then took 0.5 s.
+    t._account_connection(
+        outcome="stream_ended", ended_at=110.0, teardown_s=0.5)
+
+    ep = t._episode
+    assert ep is not None
+    assert ep.dropped_at == 110.0, "the episode is dated after its own teardown"
+    assert ep.uptime_s == 10.0, "the stream's uptime swallowed the teardown"
+    assert ep.loop_silent_s == 1.0
+    assert ep.teardown_s == 0.5
+    # ...and the teardown is fully inside the episode's own window.
+    assert ep.unaccounted_s(110.5) == pytest.approx(0.0, abs=1e-6)
+
+
 # ---------------------------------------------------------------------------
 # the real path: a real Worker, a real gRPC socket, a real involuntary drop
 # ---------------------------------------------------------------------------
