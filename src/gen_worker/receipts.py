@@ -316,14 +316,35 @@ def refuse_untrusted_publisher(
         f"{mine or '<unnamed>'} (org {my_org or '<unnamed>'})")
 
 
+#: THREAT (pgw#1013 §4.24): the JWKS `n` is base64url off the network with no
+#: declared length, so a multi-MB modulus makes EVERY later receipt
+#: verification super-linear for the life of the cached key — and nothing
+#: downstream refuses it, because the signatures still check out. Real keys are
+#: 2048-4096 bits. Bounded here because this is the only place the bytes become
+#: a key.
+MAX_RSA_MODULUS_BITS = 8192
+
+
 def _rsa_key_from_jwk(jwk: Mapping[str, object]) -> Optional[rsa.RSAPublicKey]:
     if str(jwk.get("kty") or "") != "RSA":
         return None
     n_raw, e_raw = str(jwk.get("n") or ""), str(jwk.get("e") or "")
     if not n_raw or not e_raw:
         return None
-    n = int.from_bytes(_b64url_decode(n_raw), "big")
-    e = int.from_bytes(_b64url_decode(e_raw), "big")
+    n_bytes, e_bytes = _b64url_decode(n_raw), _b64url_decode(e_raw)
+    # RSA requires 1 < e < n, so ONE bound covers both operands of the modexp
+    # whose cost is the threat. A key this big is refused, not skipped: the hub
+    # publishing one is a fact about the hub, and quietly dropping it would
+    # leave a pod verifying against whichever key happened to parse.
+    oversized = max(len(n_bytes), len(e_bytes)) * 8
+    if oversized > MAX_RSA_MODULUS_BITS:
+        raise ReceiptError(
+            "jwks_modulus_oversized",
+            f"hub JWKS key {str(jwk.get('kid') or '<unnamed>')!r} carries a "
+            f"{oversized}-bit modulus/exponent, over the "
+            f"{MAX_RSA_MODULUS_BITS}-bit bound")
+    n = int.from_bytes(n_bytes, "big")
+    e = int.from_bytes(e_bytes, "big")
     return rsa.RSAPublicNumbers(e=e, n=n).public_key()
 
 

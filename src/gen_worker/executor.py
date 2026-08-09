@@ -55,7 +55,12 @@ from . import warmup
 from . import worker_credential
 from . import mint_goal as mint_goal_mod
 from . import worker_goals
-from .api.binding import ModelRef, wire_ref
+from .api.binding import (
+    ModelRef,
+    binding_wire_refs,
+    component_overrides,
+    wire_ref,
+)
 from .convert.hub import HubPublishError
 from .mint_process import MintSlot
 from .api.errors import (
@@ -433,17 +438,6 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     )
 
 
-def _component_overrides(binding: Any) -> Tuple[Tuple[str, str], ...]:
-    """(component, canonical ref) substitutions the binding carries (pgw#617)."""
-    return tuple(getattr(binding, "component_overrides", ()) or ())
-
-
-def _binding_wire_refs(binding: Any) -> List[str]:
-    """The base wire ref plus every component-override ref (pgw#617): the
-    full set of refs materializing this binding pins/downloads."""
-    return [wire_ref(binding), *(ref for _, ref in _component_overrides(binding))]
-
-
 def _snapshot_files_without_components(
     snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
 ) -> "List[pb.SnapshotFile]":
@@ -486,7 +480,7 @@ def _alias_binding_matches(alias: "EndpointSpec", slot_key: str, ref: str) -> bo
         return False
     if not comp:
         return wire_ref(binding).strip() == ref
-    return (comp, ref) in _component_overrides(binding)
+    return (comp, ref) in component_overrides(binding)
 
 
 def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
@@ -1871,7 +1865,7 @@ class ModelStore:
         Only components the snapshot ACTUALLY carries as a subfolder are
         excluded, so the value is a fetch fact and not a guess — and a
         narrowed tree therefore keys on exactly what was left out."""
-        overrides = _component_overrides(binding)
+        overrides = component_overrides(binding)
         if not overrides:
             return ()
         present = {
@@ -5394,7 +5388,7 @@ class Executor:
         return list(dict.fromkeys(
             [
                 r for s in slots
-                for r in _binding_wire_refs(spec.models[s])
+                for r in binding_wire_refs(spec.models[s])
                 if r not in execution_lane_refs
             ]
             + shared_ids
@@ -5525,7 +5519,7 @@ class Executor:
             if rec.ready and not rec.stale:
                 setup_refs = [
                     r for slot in self._setup_slots(spec)
-                    for r in _binding_wire_refs(spec.models[slot])
+                    for r in binding_wire_refs(spec.models[slot])
                 ]
                 for ref in setup_refs:
                     wanted = self.store.snapshot_digest(
@@ -5806,7 +5800,7 @@ class Executor:
                 # th#1322's numeric home, so the boot span and the activity
                 # stream agree on one number rather than two derivations.
                 activity_mod.emit_event(
-                    "warmup",
+                    activity_mod.KIND_WARMUP_SUMMARY,
                     f"boot warmup for {spec.name} "
                     f"({'armed' if armed else 'unarmed'}, {ran} forward"
                     f"{'' if ran == 1 else 's'})",
@@ -5856,7 +5850,7 @@ class Executor:
                 getattr(b, "flavor", "") or "",
                 getattr(b, "storage_dtype", "") or "",
                 getattr(b, "dtype", "") or "",
-                tuple(getattr(b, "component_overrides", ()) or ()),
+                component_overrides(b),
             )
             for slot, b in sorted(spec.models.items())
         )
@@ -6289,7 +6283,7 @@ class Executor:
         gated: List[str] = []
         for name, spec in self.specs.items():
             bound = any(
-                ref in _binding_wire_refs(binding)
+                ref in binding_wire_refs(binding)
                 for slot, binding in spec.models.items()
                 if slot not in spec.slots
             )
@@ -6433,7 +6427,7 @@ class Executor:
                 ref, snap, binding=binding)
             slot_identities[slot] = materialized.identity
             comps: Dict[str, str] = {}
-            for comp, comp_ref in _component_overrides(binding):
+            for comp, comp_ref in component_overrides(binding):
                 try:
                     comp_binding = self._hub_binding(comp_ref)
                 except ValueError:
@@ -6512,7 +6506,7 @@ class Executor:
                 | {
                     comp_ref
                     for slot in setup_slots
-                    for _, comp_ref in _component_overrides(spec.models[slot])
+                    for _, comp_ref in component_overrides(spec.models[slot])
                 }
             )
             rec.held_snapshot_digests = {
@@ -6539,7 +6533,7 @@ class Executor:
                         rec.held_snapshot_digests.get(comp_ref, ""),
                     )
                     for slot in setup_slots
-                    for comp, comp_ref in _component_overrides(spec.models[slot])
+                    for comp, comp_ref in component_overrides(spec.models[slot])
                 ]
             )
             setup = getattr(instance, "setup", None)

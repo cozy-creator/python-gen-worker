@@ -265,6 +265,27 @@ def wire_ref(binding: Binding) -> str:
     return binding.path
 
 
+def component_overrides(binding: Binding) -> tuple[tuple[str, str], ...]:
+    """The ``(component, canonical ref)`` substitutions ``binding`` carries
+    (pgw#617), normalized and sorted by :class:`ModelRef` itself.
+
+    pgw#982: this and :func:`binding_wire_refs` live HERE, beside the field
+    they read — they answer "what does this binding resolve to", which is not
+    an executor internal. Every consumer (the executor, the rotation preload
+    driver) names the SAME derivation, so placement semantics cannot fork.
+
+    ``getattr`` so an externally-constructed stand-in is answered, not raised
+    at.
+    """
+    return tuple(getattr(binding, "component_overrides", ()) or ())
+
+
+def binding_wire_refs(binding: Binding) -> list[str]:
+    """The base :func:`wire_ref` plus every component-override ref (pgw#617):
+    the full set of refs materializing this binding pins and downloads."""
+    return [wire_ref(binding), *(ref for _, ref in component_overrides(binding))]
+
+
 def rebind_pick(
     binding: Binding,
     *,
@@ -316,5 +337,6 @@ def rebind_pick(
 
 __all__ = [
     "Binding", "BINDING_TYPES", "Civitai", "HF", "Hub", "ModelRef",
-    "ModelScope", "STORAGE_DTYPES", "rebind_pick", "wire_ref",
+    "ModelScope", "STORAGE_DTYPES", "binding_wire_refs", "component_overrides",
+    "rebind_pick", "wire_ref",
 ]

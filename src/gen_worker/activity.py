@@ -48,7 +48,19 @@ from .pb import worker_scheduler_pb2 as pb
 logger = logging.getLogger(__name__)
 
 KIND_SELF_MINT_COMPILE = "self_mint_compile"
+#: The RUNNING setup+warmup activity — opened by :func:`begin`, ended when the
+#: load window closes. An eager release's boot load runs under this kind
+#: through the same executor call site (th#1021).
 KIND_WARMUP = "warmup"
+# pgw#1067 (worker half of th#1723): the boot-forward roll-up is a countable
+# EVENT about a span that already ended, and it needs its OWN kind. The hub
+# keys `info.Activities` on kind alone, and the `warmup` slot feeds
+# `SelfMintActivityRunning` (stall monitor, cap turnover, unservable reaper) and
+# `InFlightMintKinds` — so emitting the terminal roll-up as `warmup` made a
+# still-loading worker read as finished to all of them. No hub change: every
+# kind is stored generically and served at
+# GET /v1/admin/worker-activity-events?kind=.
+KIND_WARMUP_SUMMARY = "warmup_summary"
 # pgw#680: one tenant request hit fail-on-recompile on a compiled lane and
 # was served eager; phase carries the guard-reason class token, detail the
 # full confession. The hub accepts any kind and logs completions verbatim,

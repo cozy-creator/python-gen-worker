@@ -55,7 +55,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
 from . import dispatch
-from .api.binding import wire_ref
+from .api.binding import binding_wire_refs, component_overrides, wire_ref
 from .models import residency as residency_mod
 from .models.loading import ComponentSubstitutionError
 from .models.pinned_swap import prestage_module
@@ -278,17 +278,13 @@ class Preloader:
 
     def _instance_refs(self, effective: Any) -> Dict[str, Any]:
         """ref -> binding for every setup slot and component override."""
-        # CYCLE: executor imports preload; hoisting makes `gen_worker.entrypoint`
-        # fail at boot.
-        from .executor import _binding_wire_refs, _component_overrides
-
         ex = self._ex
         out: Dict[str, Any] = {}
         for slot in ex._setup_slots(effective):
             binding = effective.models[slot]
-            for ref in _binding_wire_refs(binding):
+            for ref in binding_wire_refs(binding):
                 out.setdefault(ref, binding)
-            for _comp, comp_ref in _component_overrides(binding):
+            for _comp, comp_ref in component_overrides(binding):
                 try:
                     out.setdefault(comp_ref, ex._hub_binding(comp_ref))
                 except ValueError:
@@ -378,8 +374,6 @@ class Preloader:
         disk reads). Shared components already resident stay untouched —
         the component-first ruling by construction."""
 
-        # CYCLE (see _stage_components_): executor imports preload.
-        from .executor import _component_overrides
         # CYCLE: models.loading is reached through executor, which imports preload.
         from .models.loading import load_component_override
 
@@ -411,7 +405,7 @@ class Preloader:
             if not digests:
                 continue
             sizes = ex.store.component_sizes(ref)
-            overridden = {c for c, _ in _component_overrides(binding)}
+            overridden = {c for c, _ in component_overrides(binding)}
             for comp, digest in sorted(digests.items()):
                 if self._stopped or self._ex.draining:
                     return staged_any
