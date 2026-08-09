@@ -1571,7 +1571,7 @@ def hydrate_modular_pipeline(
             for n in names:
                 comp_src = Path(sources[n])
                 comp_bytes = disk_gc.tree_bytes(comp_src)
-                load_progress.set_phase(f"hydrate:{n}")
+                load_progress.set_phase(f"hydrate:{n}", comp_bytes)
                 _admit_component_staging(n, comp_bytes)
                 kwargs: Dict[str, Any] = {
                     "pretrained_model_name_or_path": {n: sources[n]},
