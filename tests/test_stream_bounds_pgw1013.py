@@ -460,18 +460,29 @@ def _resolve_route(rig: _Rig, repo: str, entry: Dict[str, Any]) -> None:
     rig.routes[f"/api/v1/repos/{repo}/resolve"] = _Route(body)
 
 
-def _fetch_cell(rig: _Rig, cache: Path, key: str) -> Optional[Path]:
-    from gen_worker import aot_cells
-    from gen_worker import aot_serve
-    from gen_worker import boot_phases as boot_mod
+def _fetch_cell(rig: _Rig, cache: Path, entry: Dict[str, Any],
+                digest: str) -> Optional[Path]:
+    """pgw#904: cell bytes arrive as the EXACT named artifact from the
+    grant's transport (`aot_delivery`), never a discovery fetch — the same
+    bounded-read invariants, at the delivery seam that replaced it."""
+    from types import SimpleNamespace
 
-    with boot_mod.span(
-        boot_mod.PHASE_CELL_FETCH,
-        artifact_kind=aot_serve.ARTIFACT_KIND,
-        artifact_key=key,
-    ) as fetch:
-        return aot_cells._download_artifact_inner(
-            _url(rig, ""), "bearer", "fam", "ckpt-1", key, cache, fetch)
+    from gen_worker import aot_delivery
+
+    presigned = SimpleNamespace(files=[SimpleNamespace(
+        path=str(entry.get("path") or ""),
+        size_bytes=int(entry.get("size_bytes") or 0),
+        digest=str(entry.get("digest") or ""),
+        url=str(entry.get("url") or ""),
+        chunk_size_bytes=0,
+        chunks=(),
+    )])
+    try:
+        return aot_delivery.materialize_named_artifact(
+            "root/family-fam#ck", digest, presigned,
+            cache_dir=cache, what="stream-bounds rig")
+    except aot_delivery.NamedArtifactUnavailable:
+        return None
 
 
 def _repo_for(family: str = "fam") -> str:
@@ -482,11 +493,9 @@ def _repo_for(family: str = "fam") -> str:
 
 def test_cell_artifact_legitimate_transfer_is_unaffected(rig: _Rig, tmp_path: Path) -> None:
     url = _serve(rig, "/cell.tar.gz", ARTIFACT)
-    _resolve_route(rig, _repo_for(), {
-        "path": "cell.tar.gz", "url": url,
-        "digest": ARTIFACT_DIGEST, "size_bytes": len(ARTIFACT),
-    })
-    out = _fetch_cell(rig, tmp_path, "k-ok")
+    entry = {"path": "cell.tar.gz", "url": url,
+             "digest": ARTIFACT_DIGEST, "size_bytes": len(ARTIFACT)}
+    out = _fetch_cell(rig, tmp_path, entry, ARTIFACT_DIGEST)
     assert out is not None and out.read_bytes() == ARTIFACT
 
 
@@ -497,10 +506,8 @@ def test_cell_artifact_without_size_bytes_is_a_typed_miss(rig: _Rig, tmp_path: P
     a miss rather than an unbounded fetch — a cell miss self-mints, so failing
     closed here is free."""
     url = _serve(rig, "/cell-nosize.tar.gz", ARTIFACT)
-    _resolve_route(rig, _repo_for(), {
-        "path": "cell-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST,
-    })
-    assert _fetch_cell(rig, tmp_path, "k-nosize") is None
+    entry = {"path": "cell-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST}
+    assert _fetch_cell(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
     assert _served(rig, "/cell-nosize.tar.gz") == 0, "no bytes fetched at all"
 
 
@@ -508,12 +515,11 @@ def test_cell_artifact_oversized_stream_is_abandoned_mid_transfer(
     rig: _Rig, tmp_path: Path
 ) -> None:
     url = _serve(rig, "/cell-big.tar.gz", b"\0" * BODY_BYTES)
-    _resolve_route(rig, _repo_for(), {
-        "path": "cell-big.tar.gz", "url": url,
-        "digest": ARTIFACT_DIGEST, "size_bytes": DECLARED_BYTES,
-    })
+    entry = {"path": "cell-big.tar.gz", "url": url,
+             "digest": ARTIFACT_DIGEST, "size_bytes": DECLARED_BYTES}
 
-    assert _fetch_cell(rig, tmp_path, "k-big") is None
+    assert _fetch_cell(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
     _aborted_early(rig, "/cell-big.tar.gz")
-    assert not (tmp_path / "aot-cells" / "k-big.tar.gz").exists()
-    assert not (tmp_path / "aot-cells" / "k-big.part").exists()
+    hexname = ARTIFACT_DIGEST.split(":", 1)[-1]
+    assert not (tmp_path / "aot-cells" / f"{hexname}.tar.gz").exists()
+    assert not (tmp_path / "aot-cells" / f"{hexname}.part").exists()

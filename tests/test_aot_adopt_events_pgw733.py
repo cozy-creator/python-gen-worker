@@ -22,15 +22,12 @@ still named, and now it is also timed and bound to the candidate's ref+digest.
 from __future__ import annotations
 
 import platform
-import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
 
 from gen_worker import activity, aot_serve
-from gen_worker.cell_adopt import AdoptOutcome
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
 #: share of that induced quantity rather than a bare constant (pgw#795). This is

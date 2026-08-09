@@ -149,11 +149,8 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     stamp really does classify this pipe as mandatory, and that is the whole
     point: mandatory must stop meaning "cannot serve eager".
     """
-    from gen_worker import aot_cells
-
     monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT", raising=False)
     gw_config.reload_for_test()
-    monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))

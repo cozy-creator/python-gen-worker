@@ -9870,7 +9870,9 @@ class Executor:
             adapters=adapters,
             snapshots=dict(run.snapshots) if run.snapshots else {},
             input_manifest=manifest_from_run_job(run.input_assets),
-            fence=functools.partial(self._validate_required_compile, run=run),
+            # Positional call through the LIVE method (tests and tooling
+            # observe/replace `_validate_required_compile` by name).
+            fence=lambda s: self._validate_required_compile(s, run),
             config_snapshot=_config_snapshot,
             org=str(run.org or ""),
             invoker_id=str(run.invoker_id or ""),
