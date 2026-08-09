@@ -172,6 +172,7 @@ def load_slot(
             components=components or None,
             component_trees=component_trees or None,
             declared_vram_gb=declared_vram_gb,
+            ref=ref,
         )
         out.obj = pipe
 
