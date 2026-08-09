@@ -175,15 +175,21 @@ def test_the_strict_hot_adopt_arm_entry_point_is_gone() -> None:
     assert hasattr(cc, "stage_artifact")
 
 
-def test_build_no_longer_takes_a_requested_cell_key_echo() -> None:
+def test_the_demand_echoing_build_entry_point_is_gone_entirely() -> None:
     """A demand-driven mint used to echo the worker-computed key it had to
     satisfy. Nothing has issued demand-driven mints since the forge was
-    deleted, and no caller passed it."""
-    import inspect
+    deleted, and no caller passed it.
 
+    pgw#1032 asserted the PARAMETER had left `compile_cache.build`'s signature.
+    pgw#1035 then deleted `build` outright — the whole-pipeline dynamo mint had
+    no caller at all, and `aot_cells.discover` rejects the artifact kind it
+    produced. Absence of the function is the STRONGER form of the same claim
+    (a parameter cannot come back to a function that does not exist), so this
+    is the assertion that survives the merge of the two lanes.
+    """
     from gen_worker import compile_cache as cc
 
-    assert "requested_cell_key" not in inspect.signature(cc.build).parameters
+    assert not hasattr(cc, "build")
 
 
 # ---------------------------------------------------------------------------

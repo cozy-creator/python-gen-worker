@@ -72,12 +72,18 @@
 #       one that is left.
 #     compile_cache.seed_artifact — LISTED 2026-08-08 (pgw#1035). It became
 #       caller-less when `prepare` was deleted, and it is deliberately NOT
-#       deleted with it: it is the entry point of the delivered-inductor-cache
-#       ADOPT LANE (stage -> verify in isolation -> activate under the lock),
-#       whose remaining production callers live in the executor's
-#       ADOPT_COMPILE_CACHE handler that pgw#1032/th#1702 is retiring, and
-#       whose whole-lane fate is a ratification Paul owes. Three real-compile
-#       proofs drive the transaction through it (cell portability gw#611, adopt
+#       deleted with it: it is one entry point of the delivered-inductor-cache
+#       ADOPT LANE (stage -> verify in isolation -> activate under the lock).
+#       RE-VERIFIED after pgw#1032 MERGED (`ddf8b8e3`), which changed the facts
+#       this note was first written against: the ADOPT_COMPILE_CACHE handler is
+#       now GONE, and `arm_staged_artifact` went with it. What survives is the
+#       BOOT path — `enable` -> `stage_artifact` -> `artifact_drift` ->
+#       `_activate_staged` — which is still reached, so the lane is NOT dead
+#       code and must not be deleted as such. The open question is narrower and
+#       unchanged: whether anything still PRODUCES a delivered
+#       `torch-inductor-cache` artifact for that path to consume. That is the
+#       ratification Paul owes. Three real-compile proofs drive the
+#       transaction through THIS entry (cell portability gw#611, adopt
 #       collision pgw#751, executor adopt); routing them at `stage_artifact` +
 #       `_activate_staged` would put tests on module privates to buy nothing.
 #       It goes when the lane goes, or it gains a caller when the lane stays.
