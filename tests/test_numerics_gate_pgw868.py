@@ -237,6 +237,8 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
 
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
     monkeypatch.setattr(
+        aot, "_entry_admission_drift", lambda *a, **k: None)
+    monkeypatch.setattr(
         aot, "_load_package", lambda path, entry="model": packages[entry])
     module = ProbeDenoiser()
     pipeline = ProbePipeline(module)
@@ -425,6 +427,8 @@ def test_the_verdict_is_bisectable_to_ONE_named_axis(
 
     # And now the bisection itself: re-arm and probe ONLY the named axis.
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
+    monkeypatch.setattr(
+        aot, "_entry_admission_drift", lambda *a, **k: None)
     monkeypatch.setattr(
         aot, "_load_package", lambda path, entry="model": packages[entry])
     module = ProbeDenoiser()
