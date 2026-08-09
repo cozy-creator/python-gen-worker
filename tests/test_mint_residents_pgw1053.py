@@ -151,7 +151,7 @@ def _declare() -> Any:
         targets=("unet",),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 2}), GraphClass(dims={"B": 1})),
-        inputs=(Input("sample", shape=("B", 4)),),
+        inputs=(Input("sample", shape=("B", 4), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     ))
