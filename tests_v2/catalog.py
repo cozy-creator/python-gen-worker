@@ -332,7 +332,7 @@ CATALOG: Dict[str, Row] = {
     ),
     "slow": Row(
         "slow", "unary",
-        behavior="30s await: cancel/deadline target",
+        behavior="30s await: cancel target (no wall deadline exists, pgw#904)",
     ),
     "sleepy": Row(
         "sleepy", "unary",
