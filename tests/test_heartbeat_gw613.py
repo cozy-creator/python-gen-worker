@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import gen_worker.lifecycle as lifecycle_mod
+from gen_worker.config import Settings
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.lifecycle import HEARTBEAT_INTERVAL_MS, Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -45,8 +46,8 @@ def _lifecycle(tmp_path: Path) -> tuple[Lifecycle, _FakeTransport]:
     store = ModelStore(_noop_send, cache_dir=tmp_path)
     ex = Executor([], _noop_send, store=store)
     lc = Lifecycle(
-        SimpleNamespace(bootstrap_worker_jwt="", worker_id="w-beat",
-                        runpod_pod_id="", worker_image_digest=""),
+        Settings(bootstrap_worker_jwt="", worker_id="w-beat",
+                 runpod_pod_id="", worker_image_digest=""),
         ex,
     )
     transport = _FakeTransport()

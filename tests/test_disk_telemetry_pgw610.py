@@ -13,8 +13,8 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
+from gen_worker.config import Settings
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.models.disk_telemetry import DISK_QUANTUM_BYTES
@@ -147,8 +147,8 @@ def test_hello_and_state_delta_carry_measured_disk(tmp_path: Path) -> None:
         await store.refresh_disk_usage_report()
         ex = Executor([], _noop_send, store=store)
         lc = Lifecycle(
-            SimpleNamespace(bootstrap_worker_jwt="", worker_id="w-test",
-                            runpod_pod_id="", worker_image_digest=""),
+            Settings(bootstrap_worker_jwt="", worker_id="w-test",
+                     runpod_pod_id="", worker_image_digest=""),
             ex,
         )
         delta = lc._state_delta()
