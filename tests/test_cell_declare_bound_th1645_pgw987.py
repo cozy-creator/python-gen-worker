@@ -44,9 +44,14 @@ from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure, http_origin
 from gen_worker.convert.hub import HubPublishError
 from gen_worker.models import chunk_upload as cu
+from harness.cell_meta import exported_cell_meta
 
-CELL_KEY = "ck5-34b26365277a504655e6fe4f6bb42071b70df90aef1612a777325bcc"
 FAMILY = "sdxl"
+# pgw#1046: computed from `_meta()`'s identity blocks, never invented — the
+# publish path refuses a stamp its recorded axes do not describe.
+CELL_KEY = exported_cell_meta(
+    family=FAMILY, sku="rtx-4090", gen_worker="0.91.0",
+    weight_lane="w8a8", lora_bucket=64)["cell_key"]
 
 # The hub's group-wide default (internal/api/api.go: `maxRequestBodyMiddleware(32 << 20)`).
 HUB_BODY_CAP = 32 << 20
@@ -261,10 +266,13 @@ def _guard_manifest(graphs: int, rows: int) -> dict:
 def _meta() -> dict:
     """A real cell envelope: the 34 keys a published sdxl cell carries, with
     the two unbounded blocks at their measured magnitudes."""
-    meta = {
-        "cell_key": CELL_KEY, "family": FAMILY, "sku": "rtx-4090", "sm": "89",
-        "gen_worker": "0.91.0", "kind": "aot-inductor-export", "format": "pt2",
-        "compile_mode": "regional", "weight_lane": "w8a8", "lora_bucket": 64,
+    # pgw#1046: the identity blocks are REAL (the publish path recomputes the
+    # key from them and refuses a cell that cannot state one); everything after
+    # them is the measured bulk this test exists to size.
+    meta = exported_cell_meta(
+        family=FAMILY, sku="rtx-4090", gen_worker="0.91.0",
+        weight_lane="w8a8", lora_bucket=64)
+    meta |= {
         "torch": "2.9.0+cu128", "triton": "3.5.0", "cuda": "12.8",
         "cuda_driver": "570.86", "storage_dtype": "fp8", "source_ref": "root/sdxl",
         "source_digest": "", "family_reason": "declared-by-endpoint",
@@ -273,8 +281,6 @@ def _meta() -> dict:
         "guidance_scales": [7.5], "content_keys": ["unet", "vae"],
         "libs": ["diffusers"], "image_digest": "sha256:" + "e" * 64,
         "graph_signature": "sha256:" + "f" * 32,
-        "env_seal": {"seal": "sha256:" + "a" * 64},
-        "toolchain": {"nvcc": "12.8", "gcc": "13.2"},
         "loaded_libs": {f"lib{i}": f"1.{i}.0" for i in range(40)},
         "code_closure": {f"fn_{i}": "sha256:" + "b" * 64 for i in range(60)},
         # The two unbounded blocks, at measured magnitude.

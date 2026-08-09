@@ -238,7 +238,7 @@ def test_the_pipeline_is_left_armed_after_the_branchless_exports(cell) -> None:
 
 def test_the_stamped_key_is_recomputable_from_the_recorded_facts(cell) -> None:
     meta = dict(cell["result"].metadata)
-    assert aot_mint.cell_identity(meta, _spec()).digest == meta["cell_key"]
+    assert aot_mint.cell_identity(meta).digest == meta["cell_key"]
 
 
 def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(

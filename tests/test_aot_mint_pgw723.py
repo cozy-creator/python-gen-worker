@@ -753,7 +753,7 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     assert meta["toolchain"] and meta["sm"] == "sm_89"
     # pgw#1034: the envelope records NO `code_closure` — nothing ever read it.
     assert "code_closure" not in meta
-    assert aot_mint.cell_identity(meta, _cell_spec()).digest == result.cell_key
+    assert aot_mint.cell_identity(meta).digest == result.cell_key
 
     # The mint-phase table (#757): the class count and the phases are data —
     # on the RESULT/published metadata, never in the packed envelope (the
@@ -899,7 +899,7 @@ def _meta_for(program: Any, package: Path, spec: aot_mint.ExportSpec) -> Dict[st
         lora_bucket=spec.lora_bucket,
     )
     meta.update(aot_mint.shared_identity_blocks(spec))
-    meta["cell_key"] = aot_mint.cell_identity(meta, spec).digest
+    meta["cell_key"] = aot_mint.cell_identity(meta).digest
     return meta
 
 
@@ -973,11 +973,11 @@ def test_cell_identity_refuses_an_artifact_with_no_class_set(
     hollow["entries"] = {}
     hollow["combined_graph_hash"] = ""
     with pytest.raises(aot_mint.MintRefused, match="entries"):
-        aot_mint.cell_identity(hollow, spec)
+        aot_mint.cell_identity(hollow)
     unhashed = json.loads(json.dumps(meta))
     unhashed["entries"][ENTRY]["class_hash"] = ""
     with pytest.raises(aot_mint.MintRefused, match="class_hash"):
-        aot_mint.cell_identity(unhashed, spec)
+        aot_mint.cell_identity(unhashed)
 
 
 def test_cell_identity_refuses_an_artifact_with_no_sm(
@@ -987,7 +987,7 @@ def test_cell_identity_refuses_an_artifact_with_no_sm(
     meta = _meta_for(_export_lifted(), packages["code_only"], spec)
     meta["sm"] = ""
     with pytest.raises(aot_mint.MintRefused, match="compute capability"):
-        aot_mint.cell_identity(meta, spec)
+        aot_mint.cell_identity(meta)
 
 
 def test_key_scheme_is_unchanged_by_the_new_kind(
@@ -997,7 +997,7 @@ def test_key_scheme_is_unchanged_by_the_new_kind(
     discriminator, so no KEY_SCHEME bump strands the dynamo cells."""
     spec = _spec()
     meta = _meta_for(_export_lifted(), packages["code_only"], spec)
-    key = aot_mint.cell_identity(meta, spec)
+    key = aot_mint.cell_identity(meta)
     assert key.axes_dict()["kind"] == aot_serve.ARTIFACT_KIND
     assert key.digest.startswith(cell_key.KEY_SCHEME + "-")
     assert cell_key.is_key(key.digest)

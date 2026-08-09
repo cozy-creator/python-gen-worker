@@ -91,6 +91,19 @@ _REQUIRED = ("format", "kind", "family", "sm", "contract", "env_seal",
 # compilation ("regional" per-block cells are different artifacts, ie#381).
 _OPTIONAL = ("lane", "mode")
 
+#: The `kind` AXIS VALUE (and envelope `kind`) of an exported .pt2 cell — the
+#: only publishable kind since pgw#1010. `from_axes` validates axis NAMES, so
+#: the value discriminates without a KEY_SCHEME bump.
+EXPORTED_KIND = "aot-inductor"
+
+#: pgw#1046: the envelope block recording an exported cell's DECLARED TRAFFIC
+#: (shapes / text_lens / guidance). It is not an axis — it is the last part of
+#: the `contract` axis's input that used to exist only in the mint's live
+#: `ExportSpec`. Recorded, the whole exported-cell key is recomputable from the
+#: artifact alone, which is what lets publish state full identity axes instead
+#: of a subset (`fleet_cells._identity_axes`).
+EXPORT_TRAFFIC_KEY = "declared_traffic"
+
 
 class CellKeyError(ValueError):
     """The runtime cannot state a required key axis."""
@@ -240,16 +253,17 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     EXPORTED (``aot-inductor``) cells are refused here BY NAME (pgw#735): they
     ride the same key space — the axis names are what :func:`from_axes`
     validates, and the kind is an envelope value, so no scheme bump was needed —
-    but their axes are not an inductor cache's, and their key is STAMPED at mint.
-    Read ``meta["cell_key"]``; do not recompute an exported cell's identity from
-    these fields.
+    but their axes are not an inductor cache's. Call
+    :func:`from_exported_artifact_metadata`, which recomputes them from the
+    blocks that kind records.
     """
     kind = str(meta.get("kind") or "")
-    if kind == "aot-inductor":
+    if kind == EXPORTED_KIND:
         raise CellKeyError(
-            "artifact kind 'aot-inductor' (exported .pt2) has a STAMPED key — "
-            "read meta['cell_key'] instead of recomputing from inductor-cache "
-            f"axes (stamped={str(meta.get('cell_key') or '') or 'MISSING'})")
+            "artifact kind 'aot-inductor' (exported .pt2) keys off its own "
+            "recorded blocks — call from_exported_artifact_metadata() instead "
+            "of recomputing from inductor-cache axes "
+            f"(stamped={str(meta.get('cell_key') or '') or 'MISSING'})")
     if kind != "torch-inductor-cache":
         raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
 
@@ -280,6 +294,104 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         ),
         "mode": "" if mode == "whole" else mode,
         "sm": str(meta.get("sm") or ""),
+        "contract": contract_digest(contract_facts),
+        "env_seal": env_seal.seal_digest(seal),
+        "toolchain": facts_digest(toolchain),
+    })
+
+
+def from_exported_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
+    """The key an EXPORTED (``aot-inductor``) cell's OWN recorded facts describe.
+
+    The counterpart of :func:`from_artifact_metadata` for the only publishable
+    kind (pgw#1010), and the SINGLE implementation of that key: ``aot_mint``
+    stamps what this returns and the publish path recomputes it, so the axes a
+    cell is published under cannot drift from the axes its key was minted from.
+
+    Every axis is read from a recorded block, never from a probe and never from
+    the ``cell_key`` stamp (pgw#1046 recorded ``declared_traffic`` for exactly
+    this reason — the traffic contract used to live only in the mint's
+    ``ExportSpec``, so an artifact could not restate its own ``contract`` axis
+    and publish fell back to a 6-axis subset carrying neither ``toolchain`` nor
+    ``env_seal``). Raises :class:`CellKeyError` when a fact is missing: a cell
+    that cannot name an axis has no identity, and must not be published under a
+    partial one.
+
+    The ``contract`` axis is the pgw#716 formula: the cell keys on the
+    ``combined_graph_hash`` — first 16 hex of the sha256 over the
+    newline-joined SORTED per-class hashes — while the per-class hashes ride
+    ``entries[*].class_hash`` so a mismatch NAMES the class.
+
+    CONTRACT-FACTS SHAPE (v3, pgw#758/#817/#846): ``shell_digest`` and the
+    ``mode`` axis are pinned ``""`` since regional was retired, so the
+    whole-graph key is byte-identical to what it has been since pgw#758.
+    pgw#1046 changed WHERE the facts are read from, never their shape — no
+    cell re-keys.
+    """
+    kind = str(meta.get("kind") or "")
+    if kind != EXPORTED_KIND:
+        raise CellKeyError(
+            f"artifact kind {kind!r} is not an exported cell; call "
+            "from_artifact_metadata() for an inductor cache")
+    sm = str(meta.get("sm") or "")
+    if not sm:
+        raise CellKeyError(
+            "cannot state the compute capability (sm) of this runtime; an "
+            "exported cell has no identity without it — mint on the target GPU")
+    entries = dict(meta.get("entries") or {})
+    combined = str(meta.get("combined_graph_hash") or "")
+    if not entries or not combined:
+        raise CellKeyError(
+            "the envelope recorded no entries/combined_graph_hash; a "
+            "multi-graph cell must not be keyed without its class set "
+            "(pgw#716/#758)")
+    unhashed = sorted(
+        name for name, block in entries.items()
+        if not str((block or {}).get("class_hash") or ""))
+    if unhashed:
+        raise CellKeyError(
+            f"entries {unhashed[:4]!r} carry no class_hash; a class the key "
+            f"cannot name is a class a mismatch cannot name (pgw#716)")
+    traffic = meta.get(EXPORT_TRAFFIC_KEY)
+    if not isinstance(traffic, dict) or not traffic:
+        raise CellKeyError(
+            f"artifact records no {EXPORT_TRAFFIC_KEY!r} block; its declared "
+            "traffic contract is unrecoverable, so the 'contract' axis cannot "
+            "be restated from the artifact (pgw#1046)")
+    seal = meta.get(env_seal.SEAL_KEY)
+    if not isinstance(seal, dict) or not seal:
+        raise CellKeyError(
+            "artifact records no env_seal block; no key identity — its "
+            "execution environment is unproven")
+    toolchain = meta.get("toolchain")
+    if not isinstance(toolchain, dict) or not toolchain:
+        raise CellKeyError(
+            "artifact records no toolchain block; no recipe identity")
+    contract_facts: Dict[str, Any] = {
+        "v": 3,
+        "combined_graph_hash": combined,
+        "shell_digest": "",
+        "targets": sorted({
+            str((block or {}).get("target") or "") for block in entries.values()}),
+        "shapes": sorted(
+            [int(v) for v in row] for row in (traffic.get("shapes") or ())),
+        "text_lens": sorted({int(v) for v in (traffic.get("text_lens") or ())}),
+        "guidance": sorted(float(v) for v in (traffic.get("guidance") or ())),
+        "lora_bucket": int(meta.get("lora_bucket") or 0),
+        "strict": bool(meta.get("strict_export")),
+    }
+    return from_axes({
+        "format": str(meta.get("format") or ""),
+        "kind": EXPORTED_KIND,
+        "family": str(meta.get("family") or ""),
+        "lane": _canonical_execution_lane(
+            str(meta.get("weight_lane") or ""),
+            int(meta.get("lora_bucket") or 0),
+        ),
+        # pgw#846: an exported cell is always whole-graph; "" is the
+        # optional-axis value `from_axes` omits.
+        "mode": "",
+        "sm": sm,
         "contract": contract_digest(contract_facts),
         "env_seal": env_seal.seal_digest(seal),
         "toolchain": facts_digest(toolchain),
@@ -326,12 +438,15 @@ def mismatch(meta: Mapping[str, Any], requested: "str | CellKey") -> str:
 
 __all__ = [
     "KEY_SCHEME",
+    "EXPORTED_KIND",
+    "EXPORT_TRAFFIC_KEY",
     "CellKey",
     "CellKeyError",
     "compute",
     "contract_digest",
     "facts_digest",
     "from_artifact_metadata",
+    "from_exported_artifact_metadata",
     "from_axes",
     "is_key",
     "mismatch",

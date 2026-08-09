@@ -50,14 +50,20 @@ def test_proven_since_requires_new_successful_calls_and_no_revocation():
 
 def test_exported_kind_cell_key_refusals_are_named():
     """cell_key.from_artifact_metadata recomputes INDUCTOR-cache axes. An
-    exported cell rides the same key space but its key is STAMPED at mint,
-    so the refusal must say so by name instead of failing opaquely."""
+    exported cell rides the same key space but not those axes, so the refusal
+    must name the function that DOES key it instead of failing opaquely.
+
+    pgw#1046 changed what that redirect says: an exported cell's key used to be
+    readable only as the mint's stamp, and is now recomputable from the cell's
+    own recorded blocks (``from_exported_artifact_metadata``). The stamp still
+    appears in the message because a caller holding a bad envelope wants to see
+    which cell it was holding."""
     with pytest.raises(cell_key.CellKeyError) as exc:
         cell_key.from_artifact_metadata(
             {"kind": "aot-inductor", "cell_key": "ck1-" + "a" * 56})
     message = str(exc.value)
     assert "aot-inductor" in message
-    assert "cell_key" in message and "STAMPED" in message
+    assert "from_exported_artifact_metadata" in message
     assert "ck1-" + "a" * 56 in message
 
     with pytest.raises(cell_key.CellKeyError) as missing:

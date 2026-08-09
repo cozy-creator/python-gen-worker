@@ -499,7 +499,7 @@ class CellPublisher:
                 "it is fenced (pgw#712)")
         key = str(meta.get("cell_key") or "").strip()
         if not key:
-            key = cell_key.from_artifact_metadata(meta).digest
+            key = _recomputed_key(meta).digest
         axes = {
             "sku": str(meta.get("sku") or ""),
             "image_digest": self.image_digest,
@@ -635,47 +635,70 @@ def _publish_failure_phase(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
-    """The ck axes that hash into this cell's key, for the hub's inventory.
+#: pgw#1046: the published axis carrying the artifact's ``combined_graph_hash``
+#: — the value pgw#903's pre-dlopen fence compares against
+#: ``Arm.graph_contract_digest``, and the key tensorhub's producer reads
+#: (``runattempt.ArmFromVerifiedCell``, `axisGraphContract`). NOT a ck axis: it
+#: does not hash into the key directly, it is folded into the ``contract`` axis
+#: via the contract facts. It rides this map because this map is the only
+#: channel the hub has for facts it cannot recompute.
+GRAPH_CONTRACT_AXIS = "graph_contract"
 
-    Recomputed from the artifact's OWN recorded axes so a stamp can never
-    disagree with what it summarizes — the same rule
-    :func:`cell_key.from_artifact_metadata` enforces for the key itself.
 
-    Two artifacts legitimately cannot state them: EXPORTED (``aot-inductor``)
-    cells carry a STAMPED key whose axes are not an inductor cache's
-    (pgw#735), and pre-key artifacts record no contract block at all. Both
-    fall back to the axes the metadata does hold, so the hub still learns the
-    family, the lane and the card rather than nothing. Never raises — an
-    inventory detail must not fail a publish.
+def _recomputed_key(meta: Mapping[str, Any]) -> CellKey:
+    """The key this cell's OWN recorded facts describe, by kind.
+
+    One dispatch for the whole publish path, so the key a cell is published
+    UNDER and the axes it is published WITH can never come from two different
+    derivations of its metadata.
     """
     try:
-        return {k: str(v) for k, v in
-                cell_key.from_artifact_metadata(meta).axes_dict().items()}
-    except Exception:  # noqa: BLE001 — diagnostic only, never fatal
-        pass
-    fallback: Dict[str, str] = {}
-    for name, value in (
-        ("family", family or meta.get("family")),
-        ("kind", meta.get("kind")),
-        ("format", meta.get("format")),
-        ("sm", meta.get("sm")),
-        ("mode", meta.get("compile_mode")),
-    ):
-        text = str(value or "").strip()
-        if text:
-            fallback[name] = text
-    try:
-        base, observed = cc.execution_lane_bucket(str(meta.get("weight_lane") or ""))
-        bucket = observed or int(meta.get("lora_bucket") or 0)
-        token = cc.execution_lane_token(base)
-        execution_lane = f"{token}-lora{bucket}" if bucket and token else (
-            f"lora{bucket}" if bucket else token)
-        if execution_lane:
-            fallback["lane"] = execution_lane
-    except Exception:  # noqa: BLE001
-        pass
-    return fallback
+        if str(meta.get("kind") or "") == cell_key.EXPORTED_KIND:
+            return cell_key.from_exported_artifact_metadata(meta)
+        return cell_key.from_artifact_metadata(meta)
+    except cell_key.CellKeyError as exc:
+        raise CellPublishRefused(
+            f"cell states no computable identity ({exc}); publishing it under "
+            "partial axes would produce a row the fleet cannot arm from "
+            "(pgw#1046)") from exc
+
+
+def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
+    """The identity axes the hub records for this cell, RECOMPUTED from the
+    artifact's own facts.
+
+    This is not inventory. th#1457's producer builds the worker's
+    ``ExecutionSpec`` out of exactly this map: ``ArtifactFromCellRecord`` reads
+    ``toolchain`` and ``env_seal`` from it, ``ArmFromVerifiedCell`` reads
+    ``graph_contract``, and pgw#904's landed consumer REFUSES an
+    ``ArtifactIdentity`` missing any of them. A row published without them is a
+    cell the fleet can never arm.
+
+    So this FAILS CLOSED (pgw#1046). It used to fall back for exported cells —
+    the only publishable kind since pgw#1010 — to ``{family, kind, format, sm,
+    mode, lane}``, dropping both digests, on the reasoning that "an inventory
+    detail must not fail a publish". The detail is not inventory, and a cell
+    published under a partial identity costs a whole mint to discover. A mint
+    that cannot name an axis raises :class:`CellPublishRefused` here, before a
+    byte moves.
+
+    ``graph_contract`` is the one entry that is not a ck axis; see
+    :data:`GRAPH_CONTRACT_AXIS`.
+    """
+    kind = str(meta.get("kind") or "")
+    key = _recomputed_key(meta)
+    stamped = str(meta.get("cell_key") or "").strip()
+    if stamped and stamped != key.digest:
+        raise CellPublishRefused(
+            f"cell_key stamp {stamped} disagrees with the key its recorded "
+            f"axes describe ({key.digest}); refusing to publish an identity "
+            "the artifact does not corroborate")
+    axes = {k: str(v) for k, v in key.axes_dict().items()}
+    if kind == cell_key.EXPORTED_KIND:
+        # Non-empty by construction: the key above refuses a cell whose
+        # envelope records no `combined_graph_hash` at all.
+        axes[GRAPH_CONTRACT_AXIS] = str(meta["combined_graph_hash"]).strip()
+    return axes
 
 
 #: pgw#815: publishes currently in flight, keyed by cell key. A self-mint

@@ -31,13 +31,13 @@ from pathlib import Path
 
 import pytest
 
+from gen_worker import aot_serve, cell_key, env_seal
 from gen_worker import fleet_cells as fc
 from gen_worker import receipts
 from gen_worker.convert.hub import HubPublishError
 from gen_worker.models import chunk_upload as cu
 from gen_worker.procsplit import actions
 
-CELL_KEY = "ck1-" + "b" * 56
 FAMILY = "sdxl"
 
 # Small enough to keep the test in kilobytes, large enough that the artifact
@@ -228,8 +228,35 @@ def artifact(tmp_path: Path) -> Path:
     return out
 
 
+# pgw#1046: a REAL exported-cell envelope, not the identity-less stub this
+# fixture used to carry. The publish path now recomputes the cell's key from
+# these blocks and refuses anything that cannot state one, so a stub here would
+# only prove that a cell the fleet can never arm still uploads.
+_CLASS_HASH = "a" * 16
+GRAPH_CONTRACT = aot_serve.combined_graph_hash([_CLASS_HASH])
 META = {
-    "cell_key": CELL_KEY, "family": FAMILY, "sku": "l4", "sm": "89",
+    "family": FAMILY, "sku": "l4", "sm": "89",
+    "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
+    "weight_lane": "w8a8", "lora_bucket": 64, "strict_export": True,
+    "entries": {"unet/main": {
+        "target": "unet", "fork": [], "class_dims": [],
+        "range_digest": "r1", "class_hash": _CLASS_HASH, "graph": {"v": 2},
+    }},
+    "combined_graph_hash": GRAPH_CONTRACT,
+    "env_seal": {"v": 1, "torch": "2.9.0"},
+    "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
+    "declared_traffic": {
+        "shapes": [[1024, 1024]], "text_lens": [77], "guidance": [7.5]},
+}
+CELL_KEY = cell_key.from_exported_artifact_metadata(META).digest
+META["cell_key"] = CELL_KEY
+
+#: The shape every cell in the corpus was published under before pgw#1046 —
+#: `_identity_axes`' six-axis FALLBACK, carrying neither identity digest. Kept
+#: as a fixture so the refusal below is pinned against the real historical row,
+#: not against an invented one.
+TODAYS_FALLBACK_META = {
+    "cell_key": "ck1-" + "b" * 56, "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "compile_mode": "regional", "weight_lane": "w8a8", "lora_bucket": 64,
 }
@@ -307,6 +334,82 @@ def test_intent_carries_the_identity_axes_and_the_mint_cost(hub, artifact):
     # decodes no such fields, so sending them was a blake3 hash pass whose
     # result nothing read.
     assert set(complete) == {"family", "cell_key", "checkpoint_id", "ok"}
+
+
+# ---------------------------------------------------------------------------
+# pgw#1046 — what the hub needs to ARM the cell it just accepted
+#
+# th#1457's producer builds the worker's ExecutionSpec out of this exact map:
+# `ArtifactFromCellRecord` reads `toolchain`/`env_seal`, `ArmFromVerifiedCell`
+# reads `graph_contract`, and pgw#904's landed consumer refuses an
+# ArtifactIdentity missing any of them. Before this, EVERY published cell fell
+# to a six-axis subset that carried none — so the whole corpus was structurally
+# unarmable, and it cost a mint per pod to find out.
+# ---------------------------------------------------------------------------
+
+
+def test_publish_intent_states_the_full_arming_identity(hub, artifact):
+    """GREEN. The three axes the hub cannot recompute reach it, each recomputed
+    from the artifact's OWN recorded blocks — plus the complete ck axis set.
+
+    RED before the fix: `identity_axes` was
+    ``{family, kind, format, sm, mode, lane}`` and this asserts on three keys
+    that were not in it."""
+    _publisher(hub).publish(FAMILY, artifact, dict(META))
+    intent = next(b for p, b in hub.httpd.calls if p.endswith("publish-intent"))
+    axes = intent["identity_axes"]
+
+    # Derived from the recorded blocks, never from a second stamp.
+    assert axes["toolchain"] == cell_key.facts_digest(META["toolchain"])
+    assert axes["env_seal"] == env_seal.seal_digest(META["env_seal"])
+    assert axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
+
+    # ...and the axes hash to the key the cell is published under, so the hub's
+    # row and its flavor cannot describe two different cells.
+    ck = {k: v for k, v in axes.items() if k != fc.GRAPH_CONTRACT_AXIS}
+    assert cell_key.from_axes(ck).digest == intent["cell_key"] == CELL_KEY
+    assert set(ck) == {"format", "kind", "family", "lane", "sm",
+                       "contract", "env_seal", "toolchain"}
+
+
+def test_the_pre_fix_fallback_row_shape_can_no_longer_be_published(hub, artifact):
+    """RED-CHAIN PIN. The exact envelope the corpus was published from is now
+    refused BEFORE a byte moves, by name, instead of producing the six-axis row
+    tensorhub's `TestTH1457TodaysFallbackAxesRowRefusesTyped` proves unarmable.
+
+    That hub-side test stays valid and must not be weakened: it guards the
+    REFUSAL of a row shape that already exists in the store. This test guards
+    the other end — that the worker can no longer create one."""
+    with pytest.raises(fc.CellPublishRefused) as exc:
+        _publisher(hub).publish(FAMILY, artifact, dict(TODAYS_FALLBACK_META))
+    assert "no computable identity" in str(exc.value)
+    assert not hub.httpd.calls, "refused before the intent left the pod"
+
+    # And the shape itself is unreachable: nothing in the publish path can
+    # still emit an axis map without the two identity digests.
+    with pytest.raises(fc.CellPublishRefused):
+        fc._identity_axes(FAMILY, dict(TODAYS_FALLBACK_META))
+
+
+def test_a_stamp_that_disagrees_with_the_recorded_axes_is_refused(hub, artifact):
+    """A cell whose `cell_key` does not describe its own blocks is a cell the
+    hub would index under one identity and the worker would fence on another."""
+    forged = dict(META)
+    forged["cell_key"] = "ck1-" + "9" * 56
+    with pytest.raises(fc.CellPublishRefused, match="disagrees"):
+        _publisher(hub).publish(FAMILY, artifact, forged)
+    assert not hub.httpd.calls
+
+
+def test_a_cell_with_no_graph_contract_is_refused(hub, artifact):
+    """pgw#903's pre-dlopen fence compares `Arm.graph_contract_digest` against
+    the artifact's `combined_graph_hash`; a cell that records none can never
+    pass it, so it must never reach the store."""
+    hollow = dict(META)
+    hollow["combined_graph_hash"] = ""
+    with pytest.raises(fc.CellPublishRefused):
+        _publisher(hub).publish(FAMILY, artifact, hollow)
+    assert not hub.httpd.calls
 
 
 def test_seam_authorizes_the_live_publish_payloads(hub, artifact):
