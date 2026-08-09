@@ -135,7 +135,7 @@ class LoadProgressReporter:
     def __enter__(self) -> "LoadProgressReporter":
         return self.start()
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.stop(clean=exc_type is None)
 
     # -- sampling -----------------------------------------------------------

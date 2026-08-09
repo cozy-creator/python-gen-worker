@@ -1425,16 +1425,15 @@ def _admit_component_staging(component: str, nbytes: int) -> None:
         return
     floor = _staging_floor_bytes(total)
     required = int(nbytes) + floor
-    kwargs = dict(
-        incoming_bytes=int(nbytes), floor_bytes=floor,
-        required_bytes=required, available_before_bytes=avail,
-        available_after_bytes=avail, total_bytes=total,
-    )
     label = f"modular component {component!r}"
-    if required > total:
-        raise HostRamCapacityError(label, **kwargs)
-    if required > avail:
-        raise InsufficientHostRamError(label, **kwargs)
+    cls = (HostRamCapacityError if required > total
+           else InsufficientHostRamError if required > avail else None)
+    if cls is not None:
+        raise cls(
+            label, incoming_bytes=int(nbytes), floor_bytes=floor,
+            required_bytes=required, available_before_bytes=avail,
+            available_after_bytes=avail, total_bytes=total,
+        )
 
 
 def hydrate_modular_pipeline(
