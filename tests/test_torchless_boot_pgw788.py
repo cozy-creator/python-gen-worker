@@ -65,7 +65,9 @@ def test_torchless_worker_completes_the_boot_seal(torchless, monkeypatch):
     seal = env_seal.establish()
 
     assert seal["config"]["torch"] == torch_capability.ABSENT
-    assert seal["inductor"] == torch_capability.ABSENT
+    # pgw#1049: torchless declares NO codegen clamp — an empty declared
+    # inductor block, same as a non-x86 host (absence rides `config`).
+    assert seal["inductor"] == {}
     assert seal["posture"] == {"torch": torch_capability.ABSENT}
     # A seal that states the absence is still a KEY: it digests, and the
     # boot-vs-point-of-use check agrees with itself.

@@ -141,7 +141,9 @@ def test_env_seal_imposes_canonical_config_and_refuses_drift(monkeypatch) -> Non
         assert torch.backends.cudnn.allow_tf32 is True
         assert torch.get_float32_matmul_precision() == "high"
         assert torch.backends.cudnn.benchmark is False
-        assert env_seal.CANONICAL_CONFIG.items() <= seal["config"].items()
+        from gen_worker import settings_authority as sa
+
+        assert sa.DECLARED_TORCH.items() <= seal["config"].items()
 
         # The digest is the env_seal cell-key axis: deterministic.
         digest = env_seal.seal_digest(seal)
@@ -149,8 +151,8 @@ def test_env_seal_imposes_canonical_config_and_refuses_drift(monkeypatch) -> Non
         assert digest == env_seal.seal_digest(entrypoint._establish_env_seal())
 
         # Refusal 1: an undeclared knob refuses BY NAME (one-way door).
-        with pytest.raises(env_seal.EnvSealError, match="not_a_knob"):
-            env_seal.establish_config(overrides={"not_a_knob": "1"})
+        with pytest.raises(sa.SettingsImpositionError, match="not_a_knob"):
+            sa.impose_torch(overrides={"not_a_knob": "1"})
 
         # Refusal 2: point-of-use drift refuses, naming the fact and both
         # values — endpoint code mutating config behind our back is a named
@@ -412,10 +414,12 @@ def test_seal_order_is_settings_then_seal_then_probe(monkeypatch) -> None:
 def test_torchless_declared_knob_refuses_by_name(torchless) -> None:
     """Every canonical knob is a torch flag; honouring one on a torchless
     worker would silently fork cell identity — refuse, naming the knob."""
-    with pytest.raises(env_seal.EnvSealError, match="cudnn_benchmark"):
-        env_seal.establish_config(overrides={"cudnn_benchmark": "False"})
-    with pytest.raises(env_seal.EnvSealError, match="TORCHLESS"):
-        env_seal.establish_config(overrides={"cudnn_benchmark": "False"})
+    from gen_worker import settings_authority as sa
+
+    with pytest.raises(sa.SettingsImpositionError, match="cudnn_benchmark"):
+        sa.impose_torch(overrides={"cudnn_benchmark": "False"})
+    with pytest.raises(sa.SettingsImpositionError, match="TORCHLESS"):
+        sa.impose_torch(overrides={"cudnn_benchmark": "False"})
     # The torchless seal itself still stands: absence is a keyable fact.
     cfg = env_seal.effective_config()
     assert cfg.get("torch") == "absent"
