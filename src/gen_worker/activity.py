@@ -96,6 +96,15 @@ KIND_CELL_NUMERICS = "cell_numerics"
 # detail lists component<-local_source pairs (the hydration guard's proof that
 # every weight came from OUR tree, bankable hub-side; phase=hydrated).
 KIND_MODULAR_HYDRATION = "modular_hydration"
+# pgw#1048: a non-modular composition named a component that is in neither the
+# materialized tree nor the dispatched injection. `phase=refused` — the load
+# did NOT happen and will not be retried for this dispatched identity, because
+# a refetch cannot widen a manifest the hub narrowed (th#1711/th#1715). The
+# detail names missing/expected/injected: without it the hub sees only
+# `OSError: Error no file named config.json found in directory <root>`, which
+# names neither the component nor the cause, and which pgw#1047 watched a pod
+# retry for 9 minutes.
+KIND_COMPONENT_MISS = "component_miss"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"

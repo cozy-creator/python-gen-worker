@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .. import activity as activity_mod
 from ..component_vocab import (
@@ -1347,6 +1347,154 @@ class ModularHydrationError(RuntimeError):
     snapshot's index happens to name."""
 
 
+class ComponentSubstitutionError(RuntimeError):
+    """A non-modular diffusers composition names a component the local tree
+    does not carry and the dispatch injected nothing for it (pgw#1048).
+
+    DETERMINISTIC: the tree is already materialized and the injected set is
+    already known, so nothing about a retry can change the answer — a refetch
+    cannot widen a manifest the hub narrowed. Callers classify it terminal for
+    the dispatched identity rather than retryable.
+
+    ``missing``/``expected``/``injected``/``tree`` carry the comparison the
+    raw ``OSError: Error no file named config.json found in directory <root>``
+    does not: what the composition wanted, what the tree had, what arrived."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tree: str = "",
+        missing: Sequence[str] = (),
+        expected: Sequence[str] = (),
+        injected: Sequence[str] = (),
+    ) -> None:
+        super().__init__(message)
+        self.tree = tree
+        self.missing = tuple(missing)
+        self.expected = tuple(expected)
+        self.injected = tuple(injected)
+
+
+def _component_dir_present(root: Path, component: str) -> bool:
+    """True when the tree carries a non-empty ``<root>/<component>/`` dir.
+
+    Deliberately not a config-name check: schedulers, tokenizers, processors
+    and models each name their config differently, and a layout we do not
+    model must not be refused. An ABSENT (or empty) dir is the narrowing this
+    guards — the shape th#1711 produces when it withholds a component's files
+    from the outbound snapshot."""
+    src = root / component
+    if not src.is_dir():
+        return False
+    return next(src.iterdir(), None) is not None
+
+
+def _pipeline_component_names(cls: Any) -> Optional[set]:
+    """Component names the pipeline CLASS will actually construct, by
+    diffusers' OWN rule (``_get_signature_keys``: required ``__init__``
+    parameters plus the declared optional components), falling back to the
+    ``__init__`` signature for classes that predate it.
+
+    None when the class cannot be introspected (``**kwargs`` catch-alls), in
+    which case the index is judged in full. Judging the index alone would
+    refuse a load diffusers would have completed: a component the index names
+    and the signature does not is one ``from_pretrained`` never touches."""
+    getter = getattr(cls, "_get_signature_keys", None)
+    if callable(getter):
+        try:
+            expected, _optional = getter(cls)
+            return set(expected)
+        except Exception:  # noqa: BLE001 — any introspection gap => judge all
+            pass
+    init = getattr(cls, "__init__", None)
+    if init is None:
+        return None
+    try:
+        params = inspect.signature(init).parameters
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return None
+    names = {
+        name for name, p in params.items()
+        if name != "self"
+        and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+    }
+    return names or None
+
+
+def assert_composition_satisfiable(
+    cls: Any,
+    path: str | Path,
+    *,
+    components: Optional[Dict[str, Any]] = None,
+    ref: str = "",
+) -> None:
+    """Refuse a diffusers-layout load whose composition cannot be satisfied.
+
+    ``model_index.json`` names the parts; each must arrive either from its own
+    dir in the local tree or through the pgw#617 ``components=`` injection the
+    dispatched binding's overrides derive. When one does neither, diffusers
+    raises ``OSError: Error no file named config.json found in directory
+    <snapshot root>`` — naming neither the component nor the cause — and the
+    caller retries a condition no retry can fix (pgw#1047: a pod burned 9
+    minutes on it before the hub reaped it).
+
+    Skipped, because the composition is not this tree's to satisfy: layouts
+    with no readable ``model_index.json`` (single-file checkpoints,
+    transformers trees, root-layout quantized artifacts — all of which
+    detect only in the absence of an index), the svdq lane (it swaps a
+    nunchaku denoiser in and ignores ``components=`` outright), and gguf
+    snapshots (the denoiser is a loose ``.gguf``, not a component dir).
+    Also skipped per-component: anything the index names that the pipeline
+    class's own signature does not (see :func:`_pipeline_component_names`).
+    The modular lane never reaches here — it refuses in
+    :func:`hydrate_modular_pipeline` with ``ModularHydrationError``."""
+    root = Path(path)
+    expected = model_index_component_classes(root)
+    if not expected:
+        return
+    declared = _pipeline_component_names(cls)
+    if declared is not None:
+        expected = {k: v for k, v in expected.items() if k in declared}
+        if not expected:
+            return
+    injected = tuple(sorted(components or ()))
+    missing = tuple(
+        name for name in sorted(expected)
+        if name not in (components or {})
+        and not _component_dir_present(root, name)
+    )
+    if not missing:
+        return
+    # Only on the refusal path: both probes walk the tree, and the happy path
+    # must not pay for a lane it is not on.
+    if detect_svdq_artifact(root) is not None:
+        return
+    if detect_gguf_snapshot(root) is not None:
+        return
+    detail = (
+        f"pipeline={getattr(cls, '__name__', cls)} "
+        f"ref={ref or '<none>'} tree={root} "
+        f"missing={','.join(missing)} "
+        f"expected={','.join(sorted(expected))} "
+        f"injected={','.join(injected) or '<nothing>'}"
+    )
+    activity_mod.emit_event(
+        activity_mod.KIND_COMPONENT_MISS, detail, phase="refused")
+    raise ComponentSubstitutionError(
+        f"base tree {root} carries no {missing[0]!r}/ and the dispatch "
+        f"injected " + (f"only {list(injected)}" if injected else "nothing")
+        + f" for it (composition {getattr(cls, '__name__', cls)} names "
+        f"{sorted(expected)}; missing {list(missing)}). A narrowed snapshot "
+        f"with no matching component override is the th#1711/th#1715 shape — "
+        f"deterministic, so this load is refused rather than retried.",
+        tree=str(root), missing=missing,
+        expected=tuple(sorted(expected)), injected=injected,
+    )
+
+
 def is_modular_pipeline_class(cls: Any) -> bool:
     """Duck-typed: a modular pipeline class exposes ``load_components``
     (weights hydrate AFTER construction) — ``DiffusionPipeline`` does not."""
@@ -1908,6 +2056,7 @@ def load_from_pretrained(
     components: Optional[Dict[str, Any]] = None,
     component_trees: Optional[Dict[str, str]] = None,
     declared_vram_gb: float = 0.0,
+    ref: str = "",
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
@@ -1939,6 +2088,11 @@ def load_from_pretrained(
             f"component_trees is the MODULAR delivery mechanism and "
             f"{getattr(cls, '__name__', cls)} is not a modular pipeline "
             f"class; non-modular overrides ride components= (pgw#617)")
+    # pgw#1048: the composition the index names must be satisfiable from the
+    # tree plus the injection BEFORE any lane touches from_pretrained. A
+    # component that is in neither is a deterministic miss, and every lane
+    # below reports it as the same nameless OSError against the snapshot root.
+    assert_composition_satisfiable(cls, path, components=components, ref=ref)
     # SVDQuant/nunchaku 4-bit flavors (gw#415): self-describing snapshots take
     # the svdq lane — a nunchaku transformer swapped into the standard
     # pipeline. Detection precedes every other rung; failures are typed
@@ -2209,5 +2363,7 @@ __all__ = [
     "is_modular_pipeline_class",
     "hydrate_modular_pipeline",
     "ModularHydrationError",
+    "ComponentSubstitutionError",
+    "assert_composition_satisfiable",
     "load_gguf_pipeline",
 ]

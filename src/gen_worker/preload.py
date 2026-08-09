@@ -57,6 +57,7 @@ from . import activity as activity_mod
 from . import dispatch
 from .api.binding import wire_ref
 from .models import residency as residency_mod
+from .models.loading import ComponentSubstitutionError
 from .models.pinned_swap import prestage_module
 from pathlib import Path
 import functools
@@ -112,6 +113,13 @@ class Preloader:
         # background stage this generation — retried only on a new desired
         # set, never in a loop.
         self._failed: set = set()
+        # pgw#1048: identities REFUSED deterministically (a composition the
+        # tree plus the injection cannot satisfy). Never cleared by a new
+        # desired set: the verdict is a function of the identity's own bytes,
+        # so re-sending the same DesiredInstance cannot change it. A hub that
+        # fixes the binding sends DIFFERENT bytes and is retried on merit —
+        # that is the progress signal here, and it is why there is no timer.
+        self._refused: set = set()
 
     # ---- inputs -----------------------------------------------------------
 
@@ -189,12 +197,29 @@ class Preloader:
             if self._stopped or self._ex.draining:
                 return False
             ident = instance.SerializeToString(deterministic=True)
-            if ident in self._failed:
+            if ident in self._failed or ident in self._refused:
                 continue
             try:
                 did = await self._stage_instance(instance)
             except asyncio.CancelledError:
                 raise
+            except ComponentSubstitutionError as exc:
+                # pgw#1048: deterministic, not a failure to retry. The tree is
+                # materialized and the injection is known, so the next desired
+                # set carrying these same bytes has the same answer — pgw#1047
+                # measured that loop as 9 minutes of a paid pod.
+                self._refused.add(ident)
+                logger.error(
+                    "rotation preload REFUSED %s: %s", instance.function_name, exc)
+                activity_mod.emit_event(
+                    activity_mod.KIND_ROTATION_PRELOAD,
+                    f"fn={instance.function_name} "
+                    f"generation={self._generation}: stage REFUSED, terminal "
+                    f"for this dispatched identity (a refetch cannot satisfy "
+                    f"it): {type(exc).__name__}: {exc}",
+                    phase="stage_refused",
+                )
+                continue
             except Exception as exc:
                 self._failed.add(ident)
                 logger.warning(
