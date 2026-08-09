@@ -18,6 +18,10 @@ src/micro_diffusion/
   pipeline.py         MicroPipeline: .transformer / .decoder, from_pretrained
   aot_declaration.py  the Compile declaration — 3 entries, container inputs
   main.py             @endpoint Generate: generate (cfg on) / generate_turbo (cfg off)
+  *_4d.py             micro-4d: the pgw#998 nonlinear-extent (z-image) shape
+  *_escape.py         micro-escape: author-defined ops (pgw#1062), GPU-only
+  *_conv.py           micro-conv: STATIC-ROWS (sdxl's strategy) — conv-bearing,
+                      4 static entries, int64 timestep, persistent named buffer (pgw#1073)
 ```
 
 ## The three entries, and why exactly three

@@ -135,8 +135,8 @@ class MicroPipeline:
         return self.unpatchify(cells, grid)
 
 
-__all__ = ["MicroConfig", "MicroEscapePipeline", "MicroGridPipeline",
-           "MicroPipeline", "MicroW8a8Pipeline"]
+__all__ = ["MicroConfig", "MicroConvPipeline", "MicroEscapePipeline",
+           "MicroGridPipeline", "MicroPipeline", "MicroW8a8Pipeline"]
 
 
 class MicroGridPipeline(MicroPipeline):
@@ -189,6 +189,41 @@ class MicroW8a8Pipeline(MicroPipeline):
             str(root / "decoder" / "diffusion_pytorch_model.safetensors")),
             strict=True)
         return cls(transformer.eval(), decoder.eval(), source=str(root))
+
+
+class MicroConvPipeline:
+    """The pgw#1073 conv vehicle's pipeline: the ``unet`` target only.
+
+    NOT a MicroPipeline subclass — a conv UNet cannot load the DiT state
+    dict, so this class derives its weights deterministically from the SAME
+    checkpoint tree's declared seed (``build_conv_denoiser``: a pure function
+    of ``seed + 1``). Same tree, same snapshot digest, one catalog checkpoint
+    for every micro family — the micro-4d/micro-escape precedent taken one
+    step further.
+    """
+
+    def __init__(self, unet: Any, source: str = "") -> None:
+        self.unet = unet
+        self.config = unet.config
+        self.source = source
+
+    @classmethod
+    def from_pretrained(cls, path: str, **_kw: Any) -> "MicroConvPipeline":
+        from .model_conv import build_conv_denoiser
+
+        root = Path(path)
+        if not (root / "config.json").is_file():
+            materialize(root, seed=SEED)
+        config = load_config(root)
+        return cls(build_conv_denoiser(config).eval(), source=str(root))
+
+    def to(self, device: Any) -> "MicroConvPipeline":
+        self.unet.to(device)
+        return self
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.unet.parameters()).device
 
 
 class MicroEscapePipeline(MicroPipeline):
