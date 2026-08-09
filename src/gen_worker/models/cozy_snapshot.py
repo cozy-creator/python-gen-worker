@@ -683,6 +683,14 @@ class CozySnapshotDownloader:
                     # CPU-sampling watchdog thread (I/O-bound fills are
                     # CPU-light by design and would otherwise starve it).
                     _activity.note_progress()
+                # pgw#1041: fetched bytes as an activity COUNTER, so the 10s
+                # beat carries byte-level fetch progress to the hub (the
+                # heartbeat above proves liveness but reports no number).
+                # Activity-scoped: finished on phase change/activity end
+                # (pgw#962), re-acquired per tick.
+                act = _activity.current()
+                if act is not None:
+                    act.counter("download:bytes", "bytes").add(n)
                 d = done if total is None else min(done, total)
             if progress is not None:
                 try:

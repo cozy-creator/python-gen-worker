@@ -33,6 +33,7 @@ from ..api.binding import ModelRef, wire_ref
 from ..config import Settings, current_or
 
 _STANDALONE = Settings()
+from . import disk_gc, load_progress
 from .cache_paths import tensorhub_cas_dir
 from .errors import UrlExpiredError
 from .ladder import maybe_rebind_family_fp8
@@ -151,70 +152,86 @@ def load_slot(
                 "serving at base precision")
             storage_dtype = ""
 
-    pipe = load_from_pretrained(
-        annotation, path, dtype=dtype, storage_dtype=storage_dtype,
-        components=components or None,
-        component_trees=component_trees or None,
-        declared_vram_gb=declared_vram_gb,
-    )
-    out.obj = pipe
+    # pgw#1041: byte-level staging progress + death breadcrumb for the whole
+    # load (hydration AND placement). The counter feeds the existing 10s
+    # activity beat; the breadcrumb names the phase a SIGKILL lands in.
+    staged_total = disk_gc.tree_bytes(Path(path))
+    for tree in (component_trees or {}).values():
+        staged_total += disk_gc.tree_bytes(Path(tree))
+    # `clean=True` even on a raise: a Python-level failure reports itself, so
+    # the breadcrumb clears. Only a kernel kill skips the finally — exactly
+    # the death the surviving breadcrumb is for.
+    reporter = load_progress.LoadProgressReporter(
+        f"{slot or 'slot'}:{ref or path}", staged_total).start()
+    try:
+        pipe = load_from_pretrained(
+            annotation, path, dtype=dtype, storage_dtype=storage_dtype,
+            components=components or None,
+            component_trees=component_trees or None,
+            declared_vram_gb=declared_vram_gb,
+        )
+        out.obj = pipe
 
-    # pgw#683: the composition must present ONE compute dtype to its GEMMs.
-    # Fail HERE, naming the component and the tensor, instead of at warm unit
-    # 4/18 with torch's `mat1 and mat2 must have the same dtype` — which names
-    # neither, and which cost `generate` on a live prod release.
-    assert_uniform_compute_dtype(
-        pipe, composition_compute_dtype(path, dtype), label=f"slot {slot!r} ({ref})")
+        # pgw#683: the composition must present ONE compute dtype to its GEMMs.
+        # Fail HERE, naming the component and the tensor, instead of at warm unit
+        # 4/18 with torch's `mat1 and mat2 must have the same dtype` — which names
+        # neither, and which cost `generate` on a live prod release.
+        assert_uniform_compute_dtype(
+            pipe, composition_compute_dtype(path, dtype), label=f"slot {slot!r} ({ref})")
 
-    rung = str(getattr(pipe, "_cozy_adaptive_rung", "") or "")
-    cast_failed = getattr(
-        pipe, "_cozy_fp8_storage_requested", False
-    ) and not getattr(pipe, "_cozy_fp8_storage_ok", True)
-    if rung == RUNG_NF4_UNLANDED:
-        # pgw#824: the emergency rung ENGAGED and landed on nothing. Routed
-        # through the same SlotLoad.rung path as every sibling rung, so it
-        # reaches ServePlan/FnDegraded via `_record_adaptive_rung` instead of
-        # dying in a log line. It used to clear the stamp, which suppressed the
-        # only report the ladder had — the worst outcome was the silent one.
-        out.rung = rung
-        out.rung_detail = (
-            f"adaptive fit rung 'nf4' engaged at load for slot {slot!r} "
-            f"({type(pipe).__name__}) and landed on ZERO modules; this slot "
-            f"serves FULL PRECISION over the VRAM it was budgeted, and only "
-            f"the offload ladder carries it")
-    elif rung == "nf4" or (rung == "fp8" and not cast_failed):
-        # gw#491: the loader engaged an emergency rung because free VRAM at
-        # load was tighter than planning assumed.
-        out.rung = rung
-        out.rung_detail = (
-            f"adaptive fit rung {rung!r} engaged at load for slot {slot!r} "
-            f"({type(pipe).__name__}); free VRAM below the stored-precision "
-            "footprint")
-    elif cast_failed and not rung:
-        # th#737 backstop: the RESOLUTION cast was attempted at load and
-        # failed on every target — structural report, not a silent bf16
-        # fallback. (A failed adaptive fp8 is not a plan deviation: the plan
-        # was base precision.)
-        out.cast_fail_wanted = storage_dtype or "fp8"
-        out.cast_fail_detail = (
-            f"fp8 storage failed on every component of slot {slot!r} "
-            f"({type(pipe).__name__}); serving at base precision")
-    elif (force_storage_dtype and not rung
-          and getattr(pipe, "_cozy_fp8_storage_requested", False)
-          and getattr(pipe, "_cozy_fp8_storage_ok", True)):
-        # th#1043: a joint shared-lane fit forced fp8 storage the binding
-        # never asked for — report it structurally (FnDegraded) exactly like
-        # an adaptive rung; a silent precision downgrade lies to placement.
-        out.rung = "fp8"
-        out.rung_detail = (
-            f"joint shared-lane fit forced fp8 storage for slot {slot!r} "
-            f"({type(pipe).__name__}); sibling lanes share the VRAM budget")
+        rung = str(getattr(pipe, "_cozy_adaptive_rung", "") or "")
+        cast_failed = getattr(
+            pipe, "_cozy_fp8_storage_requested", False
+        ) and not getattr(pipe, "_cozy_fp8_storage_ok", True)
+        if rung == RUNG_NF4_UNLANDED:
+            # pgw#824: the emergency rung ENGAGED and landed on nothing. Routed
+            # through the same SlotLoad.rung path as every sibling rung, so it
+            # reaches ServePlan/FnDegraded via `_record_adaptive_rung` instead of
+            # dying in a log line. It used to clear the stamp, which suppressed the
+            # only report the ladder had — the worst outcome was the silent one.
+            out.rung = rung
+            out.rung_detail = (
+                f"adaptive fit rung 'nf4' engaged at load for slot {slot!r} "
+                f"({type(pipe).__name__}) and landed on ZERO modules; this slot "
+                f"serves FULL PRECISION over the VRAM it was budgeted, and only "
+                f"the offload ladder carries it")
+        elif rung == "nf4" or (rung == "fp8" and not cast_failed):
+            # gw#491: the loader engaged an emergency rung because free VRAM at
+            # load was tighter than planning assumed.
+            out.rung = rung
+            out.rung_detail = (
+                f"adaptive fit rung {rung!r} engaged at load for slot {slot!r} "
+                f"({type(pipe).__name__}); free VRAM below the stored-precision "
+                "footprint")
+        elif cast_failed and not rung:
+            # th#737 backstop: the RESOLUTION cast was attempted at load and
+            # failed on every target — structural report, not a silent bf16
+            # fallback. (A failed adaptive fp8 is not a plan deviation: the plan
+            # was base precision.)
+            out.cast_fail_wanted = storage_dtype or "fp8"
+            out.cast_fail_detail = (
+                f"fp8 storage failed on every component of slot {slot!r} "
+                f"({type(pipe).__name__}); serving at base precision")
+        elif (force_storage_dtype and not rung
+              and getattr(pipe, "_cozy_fp8_storage_requested", False)
+              and getattr(pipe, "_cozy_fp8_storage_ok", True)):
+            # th#1043: a joint shared-lane fit forced fp8 storage the binding
+            # never asked for — report it structurally (FnDegraded) exactly like
+            # an adaptive rung; a silent precision downgrade lies to placement.
+            out.rung = "fp8"
+            out.rung_detail = (
+                f"joint shared-lane fit forced fp8 storage for slot {slot!r} "
+                f"({type(pipe).__name__}); sibling lanes share the VRAM budget")
 
-    # Worker-owned placement/offload policy: one decider for the whole
-    # worker; endpoints never write device/offload code. A CUDA OOM inside
-    # is a ladder transition, not a failure.
-    if device.strip().lower() != "cpu":
-        out.placed = place_pipeline(pipe, mode=mode, ref=ref, strict_vram=strict_vram)
+        # Worker-owned placement/offload policy: one decider for the whole
+        # worker; endpoints never write device/offload code. A CUDA OOM inside
+        # is a ladder transition, not a failure.
+        if device.strip().lower() != "cpu":
+            reporter.set_phase("place")
+            out.placed = place_pipeline(
+                pipe, mode=mode, ref=ref, strict_vram=strict_vram)
+    finally:
+        reporter.stop(clean=True)
     return out
 
 
