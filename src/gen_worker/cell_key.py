@@ -148,7 +148,7 @@ def is_key(value: str) -> bool:
     into ``unreadable_cell_key``, which is both a lie and a filter no axis
     justifies. A cell of an older scheme is admitted to the candidate list and
     then ruled on by the axes that actually decide whether this runtime can
-    execute it — the artifact contract, the identity axes and the numerics
+    execute it — the declared envelope, the identity axes and the numerics
     gate — not by the label on it.
     """
     v = str(value or "")

@@ -63,7 +63,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
-from .artifact_contract import (
+from .tensor_layout_contract import (
     CONTRACT_COZY_SVDQ_NVFP4_LR8,
     CONTRACT_NUNCHAKU_V1,
     implements_contract,

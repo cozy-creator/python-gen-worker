@@ -1,7 +1,7 @@
 """W4A4 nvfp4 loader mode (gw#540) — the gw#534 W8A8 pattern one tier down.
 
 A ``#nvfp4-w4a4`` flavor is a normal diffusers tree whose denoiser holds
-calibrated nvfp4 weights WITH two-level scales — the artifact contract
+calibrated nvfp4 weights WITH two-level scales — the tensor-layout contract
 (frozen in gw#540, consumed verbatim by the conversion side):
 
 - per quantized Linear ``L`` (modelopt export_hf_checkpoint shapes):
@@ -82,7 +82,7 @@ class W4a4Error(RuntimeError):
 
 
 class W4a4SnapshotError(W4a4Error):
-    """The flavor snapshot violates the artifact contract."""
+    """The flavor snapshot violates the tensor-layout contract."""
 
 
 @dataclass(frozen=True)

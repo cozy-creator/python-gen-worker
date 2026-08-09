@@ -46,7 +46,7 @@ class _TinyTwin(torch.nn.Module):
 
 
 class _TinyRenamed(torch.nn.Module):
-    """Same math, different parameter FQNs — a DIFFERENT artifact contract."""
+    """Same math, different parameter FQNs — a DIFFERENT tensor-binding contract."""
 
     def __init__(self, width: int = 8) -> None:
         super().__init__()
@@ -156,7 +156,7 @@ def test_same_graph_different_recipe_shares_the_hash():
 def test_module_rename_is_a_new_key():
     """A parameter FQN is what the serve path binds resident weights BY
     (pgw#721's constants-bound gate refuses by name), so renaming the module
-    that holds a weight is a different artifact contract, not the same graph."""
+    that holds a weight is a different tensor-binding contract, not the same graph."""
     assert gh.graph_hash(_export(_Tiny())) != gh.graph_hash(
         _export(_TinyRenamed()))
 

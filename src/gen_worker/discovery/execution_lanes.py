@@ -23,7 +23,7 @@ import pkgutil
 
 import msgspec
 
-from gen_worker.models.artifact_contract import (
+from gen_worker.models.tensor_layout_contract import (
     ContractDecoder,
     contract_decoders_of,
 )

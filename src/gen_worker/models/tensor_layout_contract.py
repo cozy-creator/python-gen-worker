@@ -1,5 +1,12 @@
-"""th#1580 A4 (§1.30 declaration 2+3): a decoder declares WHICH ARTIFACT
+"""th#1580 A4 (§1.30 declaration 2+3): a decoder declares WHICH TENSOR-LAYOUT
 CONTRACT it implements, beside the code that implements it.
+
+The tensor-layout contract (th#1721; was "the artifact contract") is how
+tensors exist ON DISK — byte packing, scale layout, swizzle, key-naming
+convention, file topology — named by a descriptor handle
+``<producer>.<format>@<major>``. Its sibling, the tensor-binding contract
+(pgw#857, ``docs/endpoint-authoring.md``), is how a tensor is ADDRESSED at
+load: bound by name, or baked as a literal.
 
 The endpoint half of §1.30's compatibility intersection is DERIVED at image
 build (``gen_worker.discovery.execution_lanes``) from these markers. A
@@ -7,9 +14,9 @@ hand-maintained capability list is a second trusted string — the defect class
 th#1580 exists to remove — so there is no list: the declaration is a property
 of the decoder function, and it ships or fails to ship with it.
 
-The vocabulary lives in tensorhub's ``internal/artifactcontract`` (A2:
-contracts are CODE). This module carries only the handles a decoder may name
-and refuses anything else; it does not re-specify the descriptors.
+The vocabulary lives in tensorhub's ``internal/tensorlayout`` (A2: contracts
+are CODE). This module carries only the handles a decoder may name and refuses
+anything else; it does not re-specify the descriptors.
 
 **No exclusion marker exists, deliberately** (A4 corollary, Paul 2026-08-04).
 Exclusions are DERIVED from declared traits — ``composes_lora`` crossed with a
@@ -61,7 +68,7 @@ class ContractDecoder(msgspec.Struct, frozen=True, kw_only=True):
 # The declaration lives ON THE DECODER OBJECT, not in a module-level registry.
 # That is the point: it cannot be present without the decoder, cannot survive
 # the decoder being removed, and cannot be assembled anywhere else.
-MARKER = "__cozy_artifact_contracts__"
+MARKER = "__cozy_tensor_layout_contracts__"
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -76,7 +83,7 @@ def _validate(dec: ContractDecoder) -> None:
         raise ValueError(
             f"{dec.decoder}: contract {dec.contract!r} is not registered. "
             "Contracts are CODE (th#1580 A2): register it in tensorhub's "
-            "internal/artifactcontract with a descriptor and a probe set "
+            "internal/tensorlayout with a descriptor and a probe set "
             "before a decoder may claim it."
         )
     if not dec.serves:

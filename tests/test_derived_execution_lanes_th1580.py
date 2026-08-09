@@ -26,14 +26,14 @@ from gen_worker.discovery.execution_lanes import (
     execution_lanes_for_function,
     manifest_block,
 )
-from gen_worker.models.artifact_contract import (
+from gen_worker.models.tensor_layout_contract import (
     CONTRACT_COZY_FP8_ROWWISE,
     CONTRACT_NUNCHAKU_V1,
     implements_contract,
 )
 
 _GOOD_A = '''
-from gen_worker.models.artifact_contract import implements_contract
+from gen_worker.models.tensor_layout_contract import implements_contract
 
 @implements_contract(
     contract="nunchaku.v1@1", serves=("svdq-fp4-w4a4",), composes_lora=False,
@@ -44,7 +44,7 @@ def decode_svdq(tensors):
 '''
 
 _GOOD_B = '''
-from gen_worker.models.artifact_contract import implements_contract
+from gen_worker.models.tensor_layout_contract import implements_contract
 
 @implements_contract(
     contract="cozy.fp8-rowwise@1", serves=("fp8-w8a8-dynamic",),
@@ -59,7 +59,7 @@ def decode_fp8(tensors):
 _BROKEN = '''
 import a_dependency_this_image_does_not_have  # noqa: F401
 
-from gen_worker.models.artifact_contract import implements_contract
+from gen_worker.models.tensor_layout_contract import implements_contract
 
 @implements_contract(
     contract="bfl.nvfp4-preswizzled@1", serves=("nvfp4-w4a4-static",),

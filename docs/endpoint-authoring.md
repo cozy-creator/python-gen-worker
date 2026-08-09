@@ -69,14 +69,37 @@ annotation (`FluxPipeline` → `from_pretrained`; `str`/`Path` → the local
 snapshot dir), and owns device placement and low-VRAM offload. Endpoint code
 never calls `.to("cuda")`, `enable_model_cpu_offload()`, or `empty_cache()`.
 
-## The weight-binding contract: `register_buffer`, never a plain attribute (pgw#857)
+## The tensor-binding contract: `register_buffer`, never a plain attribute (pgw#857)
 
-A compiled cell rebinds weights **by name** at load, which is what lets one cell
+A compiled cell rebinds tensors **by name** at load, which is what lets one cell
 serve every fine-tune of a family. That only holds if every tensor your model
-needs is reachable through `state_dict()`. **The weight-binding contract** is
-that rule: a tensor your module holds is either a named state-dict entry the CAS
-delivers and rebinds, or it is baked into the artifact — there is no third
-outcome, and you choose which one by how you assign it.
+needs is reachable through `state_dict()`. **The tensor-binding contract**
+(formerly "weight-binding") is that rule — the artifact's LINKING rule for
+tensors. A tensor your module holds is either:
+
+- **bound by name at load** (DYNAMIC) — a named `state_dict` entry the CAS
+  delivers and rebinds. It is an opaque slot the compiler must never
+  value-specialize, and that opacity is exactly what makes a cell
+  CHECKPOINT-AGNOSTIC;
+- **a baked literal** (STATIC) — its value folds into the artifact's identity,
+  so two checkpoints differing only in that value need different cells. This
+  case is driven to zero;
+- for GB-scale derived data, neither: a **named CAS component** (corollary
+  below), bound by name exactly like a weight.
+
+There is no fourth outcome, and you choose which one by how you assign it.
+
+`tensor-` and not `weight-`, deliberately: the rule governs scales, buffers and
+computed tables, not just trained weights. Its sibling is the **tensor-layout
+contract** — how tensors exist ON DISK (byte packing, scale layout, swizzle,
+key-naming convention, file topology), named by a descriptor handle
+`<producer>.<format>@<major>`. Layout says what the bytes ARE; binding says how
+they are ADDRESSED at load.
+
+**You configure the compiler by how you write the code.** The classification is
+not a setting supplied out of band — it derives from `state_dict` membership at
+trace time. The code IS the configuration, and the assignment style below is the
+whole of it.
 
 If your model class holds a tensor that is **not** a learned parameter — a rope
 frequency table, a precomputed mask, any "just a cache" — **register it as a
