@@ -9,12 +9,15 @@ cgroup-v1 layout (the exact files measured on the AP-JP-1 H100 host)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
+from typing import List
 
 import pytest
 
+from gen_worker import activity as activity_mod
 from gen_worker import postmortem
 from gen_worker import progress as progress_mod
 from gen_worker.capability import (
@@ -24,8 +27,38 @@ from gen_worker.capability import (
 from gen_worker.models import load_progress, provision
 from gen_worker.models.loading import load_from_pretrained
 from gen_worker.models.memory import HostRam
+from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.modular_endpoint import TinyModularPipeline, build_base_tree
+
+
+class _PhaseEvents:
+    """The REAL activity sink the worker transport installs, drained after
+    the load — so these assertions read exactly the ActivityUpdates a hub
+    would receive, not an in-process spy."""
+
+    def __init__(self) -> None:
+        self.sent: List[pb.WorkerMessage] = []
+        self.loop = asyncio.new_event_loop()
+
+    def __enter__(self) -> "_PhaseEvents":
+        async def _send(msg: pb.WorkerMessage) -> None:
+            self.sent.append(msg)
+
+        activity_mod.bind_sink(_send, self.loop)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.loop.run_until_complete(asyncio.sleep(0.02))
+        activity_mod.bind_sink(None, None)
+        self.loop.close()
+
+    def of_kind(self, kind: str) -> List[pb.ActivityUpdate]:
+        return [
+            m.activity_update for m in self.sent
+            if m.WhichOneof("msg") == "activity_update"
+            and m.activity_update.kind == kind
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +195,31 @@ def test_component_admission_refuses_transient(tmp_path, monkeypatch):
     assert exc.value.required_bytes > exc.value.available_before_bytes
 
 
+def test_a_refused_phase_is_closed_as_ended_not_complete(tmp_path, monkeypatch):
+    """`load_slot` stops the reporter from a `finally`, so the refused phase
+    is closed by the same row a successful one is. It may not claim the
+    component completed — the span is the fact; the typed refusal is the
+    outcome, and it is raised."""
+    from gen_worker.models import loading as loading_mod
+
+    monkeypatch.setattr(postmortem, "LOAD_PROGRESS_PATH", tmp_path / "m.json")
+    monkeypatch.setattr(
+        loading_mod, "probe_host_ram", lambda: _ram(64.0, 0.001))
+    tree = build_base_tree(tmp_path / "base", fill=1.0)
+
+    with _PhaseEvents() as events:
+        with pytest.raises(InsufficientHostRamError):
+            provision.load_slot(
+                TinyModularPipeline, str(tree), slot="pipeline",
+                ref="test/tiny:latest", mode="auto", device="cpu")
+
+    done = events.of_kind(load_progress.EVENT_PHASE_DONE)
+    assert done, "the phase that refused must still close its span"
+    assert all("complete" not in ev.detail for ev in done), [
+        ev.detail for ev in done]
+    assert done[-1].phase.startswith("hydrate:")
+
+
 def test_component_admission_refuses_structural(tmp_path, monkeypatch):
     """A component bigger than the whole cgroup is the pgw#752 hardware
     verdict (disable the function here), not a retry."""
@@ -180,15 +238,105 @@ def test_hydration_reports_per_component_phases(tmp_path, monkeypatch):
     """The 94-minute black box: hydration must announce each component."""
     from gen_worker.models import loading as loading_mod
 
-    phases: list[str] = []
+    phases: list[tuple[str, int]] = []
     monkeypatch.setattr(
         loading_mod.load_progress, "set_phase",
-        lambda phase: phases.append(phase))
+        lambda phase, nbytes=0: phases.append((phase, nbytes)))
     tree = build_base_tree(tmp_path / "base", fill=1.0)
     pipe = load_from_pretrained(TinyModularPipeline, tree)
     assert pipe.unet is not None
-    hydrated = [p.split(":", 1)[1] for p in phases if p.startswith("hydrate:")]
+    hydrated = {
+        p.split(":", 1)[1]: n for p, n in phases if p.startswith("hydrate:")
+    }
     assert "unet" in hydrated and "vae" in hydrated
+    # The component's own staging size rides the phase — the admission check
+    # and the report must be talking about the same bytes.
+    assert all(n > 0 for n in hydrated.values()), hydrated
+
+
+# ---------------------------------------------------------------------------
+# the phase events: what the worker is DOING, while it is still alive
+# ---------------------------------------------------------------------------
+
+
+def test_live_load_names_each_component_to_the_hub(tmp_path, monkeypatch):
+    """The 94-minute black box, hub-side. The breadcrumb only reaches the hub
+    through a DEATH and the byte counter only says a number is moving; a load
+    that is merely slow must still name the component it is on, durably."""
+    marker = tmp_path / "load-progress.json"
+    monkeypatch.setattr(postmortem, "LOAD_PROGRESS_PATH", marker)
+    tree = build_base_tree(tmp_path / "base", fill=1.0)
+
+    with _PhaseEvents() as events:
+        sl = provision.load_slot(
+            TinyModularPipeline, str(tree), slot="pipeline",
+            ref="test/tiny:latest", mode="auto", device="cpu")
+    assert sl.obj is not None
+
+    started = events.of_kind(load_progress.EVENT_PHASE)
+    done = events.of_kind(load_progress.EVENT_PHASE_DONE)
+    # Every entry is a COMPLETED update, which is what makes it durable
+    # hub-side (th#1250: a RUNNING update survives only on a phase change,
+    # and this load does not own the enclosing activity's phase).
+    assert started and done
+    for ev in started + done:
+        assert ev.state == pb.ActivityState.ACTIVITY_STATE_COMPLETED
+
+    entered = [ev.phase for ev in started]
+    assert entered[0] == "load"
+    assert "hydrate:unet" in entered and "hydrate:vae" in entered
+    # The component's own tree size rides the entry row: the operator reading
+    # a stuck load learns WHICH component and HOW BIG without a second query.
+    unet = next(ev for ev in started if ev.phase == "hydrate:unet")
+    assert "GiB tree" in unet.detail and "test/tiny:latest" in unet.detail
+
+    # Every phase that was entered was also closed, exactly once, and the
+    # spans are measured rather than interpolated into the text (th#1322).
+    assert [ev.phase for ev in done] == entered
+    assert all(ev.duration_ms >= 0 for ev in done)
+    assert all("GiB" in ev.detail for ev in done)
+    assert all(ev.duration_ms == 0 for ev in started), (
+        "an entry row measures nothing yet; 0 means 'not measured here'")
+
+
+def test_a_phase_that_never_ends_still_announced_itself(tmp_path):
+    """The hang case: no completion event exists, but the entry event for the
+    phase the load is stuck in was already durable when it entered."""
+    marker = tmp_path / "load-progress.json"
+    rep = load_progress.LoadProgressReporter(
+        "pipeline:test/ref", 4 << 30, marker_path=marker, interval_s=0.2)
+    try:
+        with _PhaseEvents() as events:
+            rep.start()
+            rep.set_phase("hydrate:transformer", 2 << 30)
+            # ... and here the kernel kills us: no stop(), no completion event.
+    finally:
+        # Only to retire the sampler thread; the sink is already unbound, so
+        # nothing this emits can reach the assertions below.
+        rep.stop(clean=False)
+
+    entered = [ev.phase for ev in events.of_kind(load_progress.EVENT_PHASE)]
+    closed = [ev.phase for ev in events.of_kind(load_progress.EVENT_PHASE_DONE)]
+    assert entered == ["load", "hydrate:transformer"]
+    assert closed == ["load"], "the phase we died in must not report complete"
+    # And the breadcrumb agrees with the last entry event.
+    assert json.loads(marker.read_text())["phase"] == "hydrate:transformer"
+
+
+def test_repeated_set_phase_does_not_split_a_span(tmp_path):
+    """One phase, one span — a component that reports itself twice must not
+    read as two components (the th#1322 `frame()` rule, same reason)."""
+    with _PhaseEvents() as events:
+        rep = load_progress.LoadProgressReporter(
+            "pipeline:test/ref", 1000,
+            marker_path=tmp_path / "m.json", interval_s=0.2)
+        rep.start()
+        rep.set_phase("hydrate:vae", 10)
+        rep.set_phase("hydrate:vae", 20)
+        rep.stop(clean=True)
+
+    entered = [ev.phase for ev in events.of_kind(load_progress.EVENT_PHASE)]
+    assert entered == ["load", "hydrate:vae"]
 
 
 def test_load_slot_clears_breadcrumb_on_success(tmp_path, monkeypatch):
