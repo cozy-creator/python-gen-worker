@@ -94,10 +94,11 @@ def _meta_with_entries_only() -> Dict[str, Any]:
 @pytest.fixture()
 def armed(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     """Record which module `arm_aot` installed the lifted binding on."""
-    from gen_worker import aot_serve, trt_engine
+    from gen_worker import aot_serve, artifact_meta
 
     monkeypatch.setattr(
-        trt_engine, "unpack_metadata", lambda p: _meta_with_entries_only())
+        artifact_meta, "try_read_metadata",
+        lambda p: _meta_with_entries_only())
     monkeypatch.setattr(provision, "arm_route", lambda mode: object())
     monkeypatch.setattr(
         aot_serve, "enable", lambda *a, **k: AdoptOutcome.hit("armed"))

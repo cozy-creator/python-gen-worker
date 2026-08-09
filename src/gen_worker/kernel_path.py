@@ -77,6 +77,8 @@ from typing import (
 
 import msgspec
 
+from . import artifact_meta
+
 logger = logging.getLogger(__name__)
 
 # --- vocabulary -------------------------------------------------------------
@@ -956,18 +958,9 @@ def adopt_from_artifact(artifact: Any, *, source: str = "") -> str:
     if artifact is None:
         return adopt(None, source=source)
     try:
-        import json
-        import tarfile
-
-        with tarfile.open(str(artifact), "r:*") as tar:
-            for member in tar:
-                if member.name == "metadata.json" and member.isfile():
-                    fh = tar.extractfile(member)
-                    if fh is None:
-                        break
-                    meta = json.loads(fh.read().decode())
-                    return adopt(meta, source=source or str(artifact))
-        raise ExecutionLaneProbeError("artifact has no metadata.json")
+        return adopt(
+            artifact_meta.read_metadata(artifact),
+            source=source or str(artifact))
     except Exception as exc:  # noqa: BLE001 — never fails a load
         pin(DEFAULT_EXECUTION_LANE, (
             f"{REASON_UNREADABLE}: cannot read the verdict from "

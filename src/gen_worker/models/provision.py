@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from .. import artifact_meta
 from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
@@ -264,15 +265,12 @@ def arm_aot(
     proven order). Rolled back on a failed arm so a dynamo fallthrough never
     traces a lifted forward it did not ask for.
     """
-    # Deferred: hoisting drags aot_serve + trt_engine onto the
-    # `import gen_worker` path (+39 modules).
-    from .. import aot_serve, trt_engine
+    # Deferred: hoisting drags aot_serve onto the `import gen_worker` path
+    # (+39 modules).
+    from .. import aot_serve
 
     if meta is None:
-        try:
-            meta = trt_engine.unpack_metadata(Path(artifact))
-        except Exception:
-            meta = None
+        meta = artifact_meta.try_read_metadata(artifact)
     lifted_target: Any = None
     lifted_installed = False
     #: pgw#999: why the lifted-binding install failed, if it did. Carried into
@@ -525,10 +523,7 @@ def enable_compiled(
         # the shared envelope member across all artifact kinds (the pgw#709
         # receipts gate above reads it from the same place), so `kind` is the
         # dispatch key: absent/unknown falls through to the inductor lane.
-        try:
-            meta = trt_engine.unpack_metadata(Path(artifact))
-        except Exception:
-            meta = None
+        meta = artifact_meta.try_read_metadata(artifact)
         kind = str((meta or {}).get("kind") or "")
         if kind == aot_serve.ARTIFACT_KIND:
             aot = arm_aot(pipe, cfg, cache_dir, Path(artifact), bucket, meta)

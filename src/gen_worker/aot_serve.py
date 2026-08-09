@@ -89,6 +89,7 @@ from typing import (
 from . import activity as activity_mod
 from . import aot_flatten
 from . import aot_identity
+from . import artifact_meta
 from . import host_isa
 from .cell_adopt import AdoptOutcome
 from . import shape_growth
@@ -724,7 +725,11 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
     return ""
 
 
-def verify_contract(meta: Dict[str, Any]) -> str:
+def verify_contract(
+    meta: Dict[str, Any],
+    *,
+    entries: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> str:
     """'' when the artifact's ``entries`` contract is self-consistent, else
     the reason.
 
@@ -733,11 +738,17 @@ def verify_contract(meta: Dict[str, Any]) -> str:
     off ``metadata.json``, which is where ``aot_serve`` has always served it
     from. It is verified HERE, on the staged bytes, and never against a
     control-plane declare that is not required to carry it (pgw#988).
+
+    ``entries`` is the already-validated map from :func:`_unpack` when the arm
+    path has one (pgw#1040 — same pure parse, threaded rather than repeated);
+    ``None`` parses it here, which is what a caller holding only a metadata
+    dict does.
     """
-    try:
-        entries = entries_from_meta(meta)
-    except ValueError as exc:
-        return f"malformed declared contract: {exc}"
+    if entries is None:
+        try:
+            entries = entries_from_meta(meta)
+        except ValueError as exc:
+            return f"malformed declared contract: {exc}"
     strict = bool(meta.get("strict_export", True))
     bucket = int(meta.get("lora_bucket") or 0)
     hashes: List[str] = []
@@ -758,14 +769,23 @@ def verify_contract(meta: Dict[str, Any]) -> str:
     return ""
 
 
-def verify(meta: Dict[str, Any], *, family: str = "") -> str:
+def verify(
+    meta: Dict[str, Any],
+    *,
+    family: str = "",
+    entries: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> str:
     """'' when a cell's FULL metadata matches this runtime, else the reason.
 
     Both halves, for callers holding an artifact's own ``metadata.json``
     (:func:`stage_artifact`). Discovery, which holds only a declare, calls
     :func:`verify_declared` and reaches this one after the fetch.
+
+    ``entries`` threads the already-validated map through to
+    :func:`verify_contract` (pgw#1040).
     """
-    return verify_declared(meta, family=family) or verify_contract(meta)
+    return (verify_declared(meta, family=family)
+            or verify_contract(meta, entries=entries))
 
 
 #: :func:`host_isa_reason`'s refusal for a cell that stamped no requirement.
@@ -888,6 +908,21 @@ def pack(content_dir: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
 
 def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
     """Extract the fixed member set into ``dest_root``; returns metadata."""
+    return _unpack(artifact, dest_root)[0]
+
+
+def _unpack(
+    artifact: Path, dest_root: Path,
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """:func:`unpack`, also handing back the ``entries`` map it had to parse.
+
+    pgw#1040: one arm used to run :func:`entries_from_meta` three times over
+    the same bytes — here for the literal-payload check, again in
+    :func:`verify_contract`, and a third time in :func:`load_and_wrap` — and
+    each pass re-parses every entry's full contract and constant table. The
+    parse is the same pure function of the same dict every time, so the arm
+    path threads ONE result from here instead.
+    """
     dest_root = Path(dest_root)
     dest_root.mkdir(parents=True, exist_ok=True)
     meta: Dict[str, Any] = {}
@@ -915,15 +950,16 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
         raise ValueError(f"{ARTIFACT_KIND} artifact {artifact} has no {METADATA_NAME}")
     # A literal-sourced constant with no payload member would only be
     # discovered at bind time, mid-arm. Name it (and its entry) here.
+    entries = entries_from_meta(meta)
     literals = [
         f"{name}{LITERAL_SEP}{s.fqn}"
-        for name, block in entries_from_meta(meta).items()
+        for name, block in entries.items()
         for s in constants_from_meta(block) if s.source == SOURCE_LITERAL]
     if literals and LITERALS_NAME not in seen:
         raise ValueError(
             f"{ARTIFACT_KIND} artifact {artifact} declares literal constants "
             f"{sorted(literals)[:4]!r} but carries no {LITERALS_NAME}")
-    return meta
+    return meta, entries
 
 
 #: Read the packed envelope without unpacking the cell.
@@ -934,6 +970,14 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
 #: real minted tarballs. ``trt_engine.unpack_metadata`` is byte-identical; that
 #: dedup belongs to the TRT-engine ratification, not here, because whichever
 #: module survives owns the shared one.
+#:
+#: pgw#1040 collapsed the OTHER seven envelope readers into
+#: :func:`artifact_meta.read_metadata` and left this one alone ON PURPOSE.
+#: Delegating it makes it a one-line alias, which the pgw#849 ratchet then
+#: reports as a STALE baseline entry — an edit to
+#: ``scripts/unreached_surface_baseline.txt``, which a live sibling lane is
+#: rewriting. It costs nothing to wait: this function and its baseline line die
+#: together in whichever cut settles the TRT ratification.
 def unpack_metadata(artifact: Path) -> Dict[str, Any]:
     """Read ONLY metadata.json from an artifact (kind sniffing — cheap)."""
     with tarfile.open(artifact, mode="r:*") as tar:
@@ -948,6 +992,9 @@ def unpack_metadata(artifact: Path) -> Dict[str, Any]:
 @dataclass
 class _StagedAotArtifact:
     metadata: Dict[str, Any]
+    #: The validated ``entries`` map of :attr:`metadata`, parsed ONCE while
+    #: staging (pgw#1040) and threaded to every consumer in the arm.
+    entries: Dict[str, Dict[str, Any]]
     root: Path
     temporary: "tempfile.TemporaryDirectory[str]"
 
@@ -977,13 +1024,13 @@ def stage_artifact(
     temporary = tempfile.TemporaryDirectory(prefix="aot-stage-", dir=base)
     root = Path(temporary.name)
     try:
-        meta = unpack(Path(artifact), root)
+        meta, entries = _unpack(Path(artifact), root)
         # pgw#754: rule on host-CPU executability FIRST and by name — the
         # one failure mode that must never reach dlopen.
         isa_reason = host_isa_reason(meta)
         if isa_reason:
             raise AdoptError("host_isa_unsupported", isa_reason)
-        reason = verify(meta, family=family)
+        reason = verify(meta, family=family, entries=entries)
         if reason:
             raise AdoptError("key_mismatch", reason)
         # pgw#903: "can this runtime execute it" is answered above; this
@@ -1002,7 +1049,7 @@ def stage_artifact(
         sm_reason = verify_package_compute_capability(root / PACKAGE_NAME)
         if sm_reason:
             raise AdoptError("sm_mismatch", sm_reason)
-        return _StagedAotArtifact(meta, root, temporary)
+        return _StagedAotArtifact(meta, entries, root, temporary)
     except AdoptError:
         temporary.cleanup()
         raise
@@ -2142,10 +2189,8 @@ def load_and_wrap(
         Path(artifact), family, cache_dir=cache_dir, expected=expected)
     try:
         meta = staged.metadata
-        try:
-            entries = entries_from_meta(meta)
-        except ValueError as exc:
-            raise AdoptError("contract_invalid", str(exc)) from exc
+        # pgw#1040: parsed and validated once, while staging.
+        entries = staged.entries
 
         # Group the entries by target and resolve every owner module first —
         # an unresolvable target must refuse before any package is dlopen'd.
@@ -2248,18 +2293,10 @@ def _adopt_identity(artifact: Path) -> str:
     """Best-effort ``family=… key=…`` from the artifact's own metadata for
     the typed adopt event — a refusal must name the candidate cell even when
     the refusal itself is a metadata problem."""
-    try:
-        with tarfile.open(artifact, mode="r:*") as tar:
-            for member in tar:
-                if member.name == METADATA_NAME and member.isfile():
-                    src = tar.extractfile(member)
-                    assert src is not None
-                    meta = json.loads(src.read().decode())
-                    return (f"family={meta.get('family')} "
-                            f"key={meta.get('cell_key')}")
-    except Exception:  # noqa: BLE001 — identity is best-effort by contract
-        pass
-    return f"artifact={artifact.name}"
+    meta = artifact_meta.try_read_metadata(artifact)
+    if meta is None:
+        return f"artifact={artifact.name}"
+    return f"family={meta.get('family')} key={meta.get('cell_key')}"
 
 
 def enable(

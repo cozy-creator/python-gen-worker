@@ -685,12 +685,14 @@ def _arm_aot(
     """Drive provision.enable_compiled at an AOT artifact; returns the
     lifted-binding observations recorded at aot_serve.enable call time."""
     from gen_worker import compile_cache as cc
-    from gen_worker import trt_engine
+    from gen_worker import artifact_meta
 
     monkeypatch.setattr(cc, "has_compile_target", lambda p, c: True)
     monkeypatch.setattr(cc, "enable", lambda *a, **k: False)
+    # pgw#1040: the arm's kind sniff reads the envelope through the ONE
+    # stdlib reader, not through `trt_engine.unpack_metadata`.
     monkeypatch.setattr(
-        trt_engine, "unpack_metadata",
+        artifact_meta, "try_read_metadata",
         lambda p: {"kind": aot_serve.ARTIFACT_KIND, "module": "unet"})
     observed: List[bool] = []
 

@@ -94,13 +94,13 @@ import hashlib
 import json
 import logging
 import re
-import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Tuple)
 
 from . import activity as activity_mod
+from . import artifact_meta
 from . import torch_capability
 import argparse
 
@@ -1084,16 +1084,13 @@ def load_manifest(path: Path) -> Dict[str, Any]:
         data = json.loads(path.read_text())
         found = data.get(MANIFEST_KEY, data) if isinstance(data, dict) else None
     else:
-        # CYCLE: env_seal -> guard_closure -> compile_cache -> registry -> cell_key
-        # -> env_seal. This is the edge that must not be static.
-        from . import compile_cache as cc
-
-        found = None
-        with tarfile.open(path, mode="r:*") as tar:
-            member = tar.getmember(cc.METADATA_NAME)
-            f = tar.extractfile(member)
-            meta = json.loads(f.read().decode()) if f else {}
-            found = meta.get(MANIFEST_KEY)
+        # `artifact_meta` is stdlib-only, which is why the read is a plain
+        # top-level import here: the function-local `compile_cache` import this
+        # replaces existed to keep the
+        # env_seal -> guard_closure -> compile_cache -> registry -> cell_key
+        # -> env_seal cycle out of module scope, and the shared reader closes
+        # that edge outright.
+        found = artifact_meta.read_metadata(path).get(MANIFEST_KEY)
     if not isinstance(found, dict) or not found.get("graphs"):
         raise GuardClosureError(
             f"{path} carries no guard manifest — pre-pgw#681 cell or bare "
