@@ -44,6 +44,13 @@ COPY . /app
 RUN uv pip install --no-cache --link-mode copy \
       --system --break-system-packages --no-deps --no-sources /app
 
+# pgw#823/pgw#1017: the pytorch runtime bases ship CUDA as pip wheels and never
+# create /usr/local/cuda, so AOT export reaches the LINK step and dies. Compose
+# the root from parts the image already ships. Dockerfile-less families get this
+# from the hub's synthesized Dockerfile (cudaRootLine); a family that writes its
+# own Dockerfile must ask for it explicitly. No-op if a root already exists.
+RUN python -m gen_worker.cuda_root
+
 # The checkpoint, generated and VERIFIED in the same layer. `--verify`
 # regenerates every tensor and byte-compares: an image whose weights did not
 # reproduce from the seed fails the build instead of shipping a checkpoint
