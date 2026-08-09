@@ -279,6 +279,8 @@ def check_endpoint(source_dir: Path) -> List[Finding]:
     where every row in the registry is established by a layer the hub writes.
     That asymmetry is the whole subject of this module.
     """
+    if source_dir.is_file() and source_dir.name == "Dockerfile":
+        source_dir = source_dir.parent
     dockerfile = source_dir / "Dockerfile"
     if not dockerfile.is_file():
         return []
@@ -323,7 +325,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(describe_registry())
         return 0
 
-    findings = check_paths(args.paths or [Path(".")])
+    paths = list(args.paths) or [Path(".")]
+    for path in paths:
+        if not path.exists():
+            print(f"error: {path}: no such path", file=sys.stderr)
+            return 2
+        # Say what was checked. A check that passes because it looked at
+        # nothing reads exactly like a check that passed.
+        target = path.parent if path.name == "Dockerfile" else path
+        if not (target / "Dockerfile").is_file():
+            print(f"{path}: no Dockerfile — this endpoint takes the "
+                  f"synthesized path, where the hub establishes every one of "
+                  f"these steps itself. Nothing to check.", file=sys.stderr)
+
+    findings = check_paths(paths)
     for finding in findings:
         print(f"error: {finding}", file=sys.stderr)
     if findings:

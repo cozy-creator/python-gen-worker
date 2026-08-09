@@ -302,6 +302,35 @@ def test_the_checker_is_runnable_as_one_line_and_exits_nonzero(tmp_path: Path
     assert ok.returncode == 0, ok.stderr
 
 
+def test_the_checker_says_when_it_checked_NOTHING(tmp_path: Path) -> None:
+    """A pass because there was no Dockerfile must not read like a pass.
+
+    A green line that means "I looked at nothing" is how a gate becomes
+    decorative, and a repo wiring this into CI over the wrong directory would
+    get exactly that.
+    """
+    empty = tmp_path / "nodockerfile"
+    empty.mkdir()
+    proc = subprocess.run(
+        [sys.executable, "-m", "gen_worker.build_guarantees", str(empty)],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO),
+        env={"PYTHONPATH": str(REPO / "src"), "PATH": "/usr/bin:/bin"})
+    assert proc.returncode == 0
+    assert "no Dockerfile" in proc.stderr
+
+    missing = subprocess.run(
+        [sys.executable, "-m", "gen_worker.build_guarantees",
+         str(tmp_path / "nope")],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO),
+        env={"PYTHONPATH": str(REPO / "src"), "PATH": "/usr/bin:/bin"})
+    assert missing.returncode == 2, "a mistyped path must not pass"
+
+
+def test_a_dockerfile_path_checks_its_own_directory() -> None:
+    """`... build_guarantees examples/x/Dockerfile` is the obvious mistake."""
+    assert bg.check_endpoint(MICRO / "Dockerfile") == []
+
+
 def test_the_registry_is_printable_for_an_author() -> None:
     text = bg.describe_registry()
     for row in bg.REGISTRY:
