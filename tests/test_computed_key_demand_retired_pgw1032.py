@@ -41,7 +41,6 @@ _SHARED_AXES: Dict[str, str] = {
     "format": "2",
     "family": FAMILY,
     "lane": "w8a8",
-    "mode": "",
     "sm": "89",
     "contract": "0123456789abcdef",
     "env_seal": "fedcba9876543210",

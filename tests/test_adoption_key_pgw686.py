@@ -124,7 +124,6 @@ def _requested(weight_lane: str) -> str:
     return ck.compute(
         "sdxl", weight_lane, 64,
         contract=ck.contract_digest(_SHAPE_CONTRACT),
-        regional=False,
     ).digest
 
 

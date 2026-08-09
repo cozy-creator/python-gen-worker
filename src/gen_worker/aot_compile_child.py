@@ -162,7 +162,7 @@ def run(job: EntryJob) -> int:
     # an axis nobody changed (pgw#784's rule, same reason).
     # NOT reordered to put `import torch` first, tempting as that is for the
     # attribution: `scrub_env()` must run before torch reads the environment
-    # (env_seal's whole contract), and `establish_config` imports torch itself.
+    # (env_seal's whole contract), and the torch imposition imports torch.
     # So the seal legitimately OWNS the torch import, and the split below —
     # published by env_seal as telemetry — is how it gets named anyway.
     with ledger.span("child_seal_s"):

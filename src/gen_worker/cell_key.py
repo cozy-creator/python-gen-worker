@@ -27,9 +27,11 @@ exist for this runtime.
     contract      digest of the DECLARED shape contract (SDK v2, pgw#647):
                   shapes, targets, text_len, dynamic dims, regional mode,
                   lora bucket, warm guidance classes
-    env_seal      digest of the execution-environment seal (pgw#696):
-                  process posture + frozen config flags + portable inductor
-                  config (+ operator epoch). Internally versioned (seal_v)
+    env_seal      digest of the execution-environment seal — since
+                  pgw#1049 a digest of the settings DECLARATION (env, torch
+                  flags + knobs, dynamo posture, host-ISA clamp, process
+                  posture) plus the toolchain library content fact.
+                  Internally versioned (seal_v)
     toolchain     CONTENT digest of the compile stack (pgw#710): dist-info
                   RECORDs of torch/triton/nvidia-*/diffusers/transformers
                   + the bundled ptxas/nvdisasm binaries. Replaces the old

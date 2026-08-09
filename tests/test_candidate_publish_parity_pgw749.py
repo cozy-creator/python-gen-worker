@@ -122,8 +122,7 @@ def test_cold_candidate_key_equals_warm_published_key(
     # `cell_lookups()` advertisement of the same digest, not the digest).
     _phase(monkeypatch, tmp_path, "cold", _COLD_LIBS)
     candidate = ck.compute(
-        "sdxl", "w8a8", 64,
-        contract=cfg.contract_digest(), regional=False,
+        "sdxl", "w8a8", 64, contract=cfg.contract_digest(),
     ).digest
 
     # Warm phase, fresh snapshot — the mint stamping its artifact.

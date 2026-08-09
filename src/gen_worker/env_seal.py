@@ -88,9 +88,11 @@ logger = logging.getLogger(__name__)
 # become the declared tables, and the declared env (incl. the imposed
 # PYTHONHASHSEED=0, executing the pgw#1034 HUMAN_MUST_DO decision) is sealed.
 # RE-KEY COST, stated per §1.27(g): every cell minted under seal v3 stops
-# matching and is re-minted once, per (family, lane, sm). The corpus is
-# effectively empty (see the PR/tracker for the measured row count), so this
-# is the cheapest moment the fleet will ever have for it.
+# matching and is re-minted once, per (family, lane, sm). MEASURED
+# 2026-08-09: the published corpus is ONE `cell_receipts` row fleet-wide
+# (e2e-dev stack; a `ck5-…` key from before the pgw#958 scheme reset, so it
+# matches no ck1 runtime under ANY seal version) plus A1's in-flight mint —
+# zero live matches stranded, the cheapest re-key this fleet will ever have.
 SEAL_VERSION = 4
 SEAL_KEY = "env_seal"
 
@@ -139,8 +141,9 @@ SCRUB_PREFIXES = (
 
 
 class EnvSealError(RuntimeError):
-    """The environment could not be imposed (a canonical flag did not take
-    effect, an unknown knob was declared) or drifted after boot."""
+    """The live settings drifted from the boot/declared state (the pgw#719
+    tripwire), or the host-ISA clamp could not be imposed. Imposition
+    failures raise ``settings_authority.SettingsImpositionError``."""
 
 
 def scrub_env() -> List[str]:
@@ -315,13 +318,14 @@ def write_library_memo(path: Path) -> int:
     whether that is worth a typed event; children fall back to the full
     rehash either way."""
     digests: Dict[str, str] = {}
-    for _base, lib_path in sorted(_toolchain_lib_paths().items()):
-        try:
-            st = os.stat(lib_path)
-            digests[_memo_key(lib_path, st.st_mtime_ns, st.st_size)] = (
-                _lib_digest_memoized(lib_path, st.st_mtime_ns, st.st_size))
-        except OSError:
-            continue  # the child will record <unreadable> on its own stat
+    for _base, lib_paths in sorted(_toolchain_lib_paths().items()):
+        for lib_path in lib_paths:
+            try:
+                st = os.stat(lib_path)
+                digests[_memo_key(lib_path, st.st_mtime_ns, st.st_size)] = (
+                    _lib_digest_memoized(lib_path, st.st_mtime_ns, st.st_size))
+            except OSError:
+                continue  # the child will record <unreadable> on its own stat
     encoded = json.dumps(
         {"memo_v": _MEMO_V, "digests": digests},
         sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -405,10 +409,17 @@ def _toolchain_lib_dirs() -> Tuple[Path, ...]:
     return tuple(dirs)
 
 
-def _toolchain_lib_paths() -> Dict[str, str]:
-    """{basename: path} of every toolchain native lib the python env ships.
-    Duplicate basenames resolve by sorted path (deterministic)."""
-    paths: Dict[str, str] = {}
+def _toolchain_lib_paths(
+    all_copies: bool = False,
+) -> Dict[str, List[str]]:
+    """{basename: [paths]} of every toolchain native lib the python env
+    ships. Identity uses the FIRST path per basename (sorted-root order,
+    deterministic); ``all_copies`` keeps every one — an env can ship the
+    same basename twice with different bytes (cu126: triton/backends and
+    nvidia/cuda_cupti both carry a ``libcupti.so.12``), and the live
+    substitution check must not read the env's own second copy as an
+    LD_PRELOAD (pgw#1049, found by aot_mint's new pre-trace tripwire)."""
+    paths: Dict[str, List[str]] = {}
     for root in _toolchain_lib_dirs():
         if not root.is_dir():
             continue
@@ -420,7 +431,9 @@ def _toolchain_lib_paths() -> Dict[str, str]:
                 continue  # defense in depth; see pgw#745
             if path.is_symlink() or not path.is_file():
                 continue  # digest real files once; alias links add nothing
-            paths.setdefault(base, str(path))
+            bucket = paths.setdefault(base, [])
+            if all_copies or not bucket:
+                bucket.append(str(path))
     return paths
 
 
@@ -435,12 +448,29 @@ def toolchain_library_digests() -> Tuple[Tuple[str, str], ...]:
     paths = _toolchain_lib_paths()
     for base in sorted(paths):
         try:
-            st = os.stat(paths[base])
+            st = os.stat(paths[base][0])
             out[base] = _lib_digest_memoized(
-                paths[base], st.st_mtime_ns, st.st_size)
+                paths[base][0], st.st_mtime_ns, st.st_size)
         except OSError:
             out[base] = "<unreadable>"
     return tuple(sorted(out.items()))
+
+
+def _shipped_digest_sets() -> Dict[str, Tuple[str, ...]]:
+    """EVERY digest the env ships per basename — the live substitution
+    check's reference set. Identity keeps the deterministic first copy; a
+    mapped lib matching ANY shipped copy is the env's own file, not an
+    LD_PRELOAD substitution."""
+    out: Dict[str, List[str]] = {}
+    for base, lib_paths in _toolchain_lib_paths(all_copies=True).items():
+        for lib_path in lib_paths:
+            try:
+                st = os.stat(lib_path)
+                out.setdefault(base, []).append(_lib_digest_memoized(
+                    lib_path, st.st_mtime_ns, st.st_size))
+            except OSError:
+                continue
+    return {base: tuple(v) for base, v in out.items()}
 
 
 # The identity manifest is FROZEN at first computation: the disk content is
@@ -556,12 +586,16 @@ def assert_seal_unchanged(label: str = "") -> None:
     snapshot = dict(frozen_library_digests())
     if snapshot:
         current = dict(loaded_library_digests())
+        shipped = _shipped_digest_sets()
         for base in sorted(snapshot):
             now = current.get(base)
-            if now is not None and now != snapshot[base]:
-                diffs.append(
-                    f"loaded lib {base}: boot {snapshot[base]} != now {now} "
-                    "(native library substituted after boot)")
+            if now is None or now == snapshot[base]:
+                continue
+            if now in shipped.get(base, ()):
+                continue  # the env's own alternate copy, not a substitution
+            diffs.append(
+                f"loaded lib {base}: boot {snapshot[base]} != now {now} "
+                "(native library substituted after boot)")
     if diffs:
         raise EnvSealError(
             f"environment drifted since boot ({label or 'point-of-use'}): "

@@ -2258,7 +2258,7 @@ def _compile_entries_parallel(
         # member and its SPLIT is an overlay — and the split is the whole
         # answer to "what is the seal still costing": pgw#832 cut the library
         # hash to ~0.07 s (measured), while the child's `import torch`, which
-        # `establish_config` owns, is the rest. Without the overlay a reader
+        # the torch imposition owns, is the rest. Without the overlay a reader
         # sees only the sum and re-opens a closed question.
         overlays = pool.entry_overlays.get(row.name) or {}
         if overlays:
