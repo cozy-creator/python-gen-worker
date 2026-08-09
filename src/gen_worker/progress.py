@@ -22,7 +22,6 @@ from typing import Dict, List, Optional
 
 UNIT_BYTES = "bytes"
 UNIT_STEPS = "steps"
-UNIT_GRAPHS = "graphs"
 # Combined watchdog evidence (process+children CPU seconds + process disk
 # IO MB, see activity._default_evidence) — covers load/compile phases with
 # no natural app-level counter.

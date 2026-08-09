@@ -50,12 +50,6 @@ class ComponentVocabulary:
     def is_denoiser(self, name: str) -> bool:
         return _head(name) in self.denoisers
 
-    def is_text_encoder(self, name: str) -> bool:
-        return _head(name) in self.text_encoders
-
-    def is_vae(self, name: str) -> bool:
-        return _head(name) in self.vaes
-
     def role_of(self, name: str) -> str:
         head = _head(name)
         if head in self.denoisers:

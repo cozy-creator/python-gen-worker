@@ -517,16 +517,6 @@ def remove_lifted_lora_execution_lanes(pipe: Any) -> None:
         remove_lifted_lora_forward(model)
 
 
-def lifted_execution_lane_kwargs(pipe: Any) -> Dict[str, Dict[str, Any]]:
-    """component -> the two call kwargs for that component's compiled unit."""
-    out: Dict[str, Dict[str, Any]] = {}
-    for comp, model in branch_targets(pipe).items():
-        binding = lifted_binding(model)
-        if binding is not None:
-            out[comp] = binding.call_kwargs()
-    return out
-
-
 def swap_lifted_execution_lane_set(
     pipe: Any,
     routed: Mapping[str, Sequence[Tuple[Dict[str, Any], float, str]]],
@@ -693,7 +683,6 @@ __all__ = [
     "install_lifted_lora_execution_lanes",
     "lifted_binding",
     "lifted_input_names",
-    "lifted_execution_lane_kwargs",
     "is_exported_program",
     "lora_constant_fqns",
     "package_constant_audit",

@@ -269,7 +269,7 @@ class Lifecycle:
         # down as a plain value. A claim is not a credential.
         self.release_id = (
             str(claims.get("release_id") or "").strip()
-            or str(getattr(settings, "worker_release_id", "") or "").strip()
+            or settings.worker_release_id.strip()
         )
         self.intent_registry = IntentRegistry(
             self.release_id,

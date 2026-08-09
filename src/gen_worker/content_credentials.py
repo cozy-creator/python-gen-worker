@@ -58,10 +58,13 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 import os
 import tempfile
 from .procsplit import broker
+
+if TYPE_CHECKING:
+    from .config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +188,7 @@ _config: Optional[_SignerConfig] = None
 _remote: Optional[_RemoteSigner] = None
 
 
-def configure(settings: Any) -> None:
+def configure(settings: Settings) -> None:
     """Install (or clear) the process-wide signer config from Settings.
 
     Called once at worker startup. Raises when signing is configured but
@@ -196,8 +199,8 @@ def configure(settings: Any) -> None:
     """
     global _configured, _config
     _refuse_pod_private_key_material(settings)
-    inline_cert = str(getattr(settings, "c2pa_cert_pem", "") or "").strip()
-    cert_path = str(getattr(settings, "c2pa_cert_path", "") or "").strip()
+    inline_cert = settings.c2pa_cert_pem.strip()
+    cert_path = settings.c2pa_cert_path.strip()
     with _lock:
         if not inline_cert and not cert_path:
             _config = None
@@ -216,11 +219,11 @@ def configure(settings: Any) -> None:
                 cert_pem = open(cert_path, "rb").read()
             except OSError as e:
                 raise C2paSigningError(f"cannot read C2PA signing cert: {e}") from e
-        alg = str(getattr(settings, "c2pa_alg", "") or "es256").strip().lower()
+        alg = (settings.c2pa_alg or "es256").strip().lower()
         cfg = _SignerConfig(
             cert_pem=cert_pem,
             alg=alg,
-            ta_url=str(getattr(settings, "c2pa_ta_url", "") or "").strip(),
+            ta_url=settings.c2pa_ta_url.strip(),
             generator_version=_generator_version(),
         )
         # Startup probe of everything checkable without the hub: the cert

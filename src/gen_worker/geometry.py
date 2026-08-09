@@ -98,8 +98,6 @@ class FamilyGeometry(msgspec.Struct, frozen=True, kw_only=True):
     buckets: tuple[tuple[int, int], ...]
     #: Latent/patch alignment every row must satisfy.
     multiple_of: int = 16
-    #: Largest area an edit may be asked to produce. None -> ``native_area``.
-    max_edit_area: Optional[int] = None
 
     def __post_init__(self) -> None:
         if not self.buckets:
@@ -123,10 +121,6 @@ class FamilyGeometry(msgspec.Struct, frozen=True, kw_only=True):
                     f"outside {lo}..{hi}x (ie#599: this is exactly the t2i-table-on-an-"
                     f"edit-lane defect)"
                 )
-
-    @property
-    def edit_area_ceiling(self) -> int:
-        return self.native_area if self.max_edit_area is None else self.max_edit_area
 
     def assert_declared(self, shapes: Sequence[tuple[int, int]]) -> None:
         """Every bucket must be a declared compile shape. Call from tests."""

@@ -26,7 +26,6 @@ _JUNK_EXTS = {
     ".onnx", ".onnx_data", ".pb", ".h5", ".tflite", ".engine", ".plan",
     ".mlmodel", ".mlpackage", ".msgpack", ".nemo", ".xml",
 }
-_DEMO_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mp3", ".wav", ".avif"}
 _ALWAYS_INCLUDE = {"readme.md", "license", "license.md", "license.txt", "notice", "usage_policy.md"}
 
 _SIZE_REFUSE_BYTES = 100 * 1024 * 1024 * 1024

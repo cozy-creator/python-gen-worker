@@ -70,7 +70,6 @@ from .svdq_awq_packed import awq_packed_supported, build_awq_packed_linear
 logger = logging.getLogger(__name__)
 
 SVDQ_ENGINE_NATIVE = "native"
-SVDQ_ENGINE_NUNCHAKU = "nunchaku"
 
 # Blackwell fp4 tensor cores — the SAME silicon window as the #nvfp4-w4a4 lane
 # (both are block-scaled nvfp4 through torch._scaled_mm / cuBLASLt). torch's own
@@ -611,7 +610,6 @@ def load_svdq_native_pipeline(cls: Any, path: Any, art: Any, *,
 
 __all__ = [
     "SVDQ_ENGINE_NATIVE",
-    "SVDQ_ENGINE_NUNCHAKU",
     "SVDQ_NATIVE_FP4_SMS",
     "SvdqNativeError",
     "adanorm_splits_for",
