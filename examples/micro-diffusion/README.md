@@ -107,6 +107,72 @@ Preconditions (all verified before step 1, none assumed):
   is a CATALOG slot with no code default, so a first release needs a binding
   naming a repo that already exists AND resolves (th#1087 + th#980).
 
+### 0. Catalog bootstrap — `tensorhub/micro-diffusion` must EXIST and RESOLVE
+
+Do this once per stack, before anything else. **Skipping it costs a build**:
+`main.py` declares `Slot(MicroPipeline, selected_by="model")` — a CATALOG slot
+with no `default_checkpoint=`, deliberately, because that is sdxl's shape and
+the shape the delegation boundary must survive. Since th#1087 a first release
+must carry a binding, and th#980 then checks that binding against the live
+catalog. On a stack with no such repo the deploy answers:
+
+```
+binding_repo_not_found — repo "tensorhub/micro-diffusion" does not exist   (422)
+```
+
+**An EMPTY repo does not satisfy it.** The gate
+(`internal/bindingcheck/check.go`, `checkTensorhubBinding`) does three things
+in order: resolve the owner org, `GetRepo`, then
+`ResolveCheckpointSelector(tag)` — and a repo with no checkpoint fails the
+third with the SAME `binding_repo_not_found` code. So the README's older
+"the pod regenerates the weights if the binding resolved to an empty tree"
+idea is not reachable through the deploy gate as it stands; the bootstrap
+publishes the tree.
+
+Which is cheap, because the tree is generated, not downloaded — the whole
+1.12 MB is a pure function of seed 997:
+
+```
+python -m micro_diffusion.weights --out /tmp/micro-weights --seed 997 --verify
+```
+
+Then the ordinary 3-step CAS publish v2 flow, as an operator
+(`POST /api/v1/password/login` → `access_token`):
+
+```
+POST /api/v1/repos/tensorhub/micro-diffusion/publishes
+     {"mode":"replace","files":[{path,size_bytes,digest:"sha256:<hex>"}...],
+      "tags":[{"tag":"prod"}]}
+PUT  <each grant.put_url>            # grant.headers VERBATIM — never rebuild
+POST /api/v1/repos/tensorhub/micro-diffusion/publishes/<id>/complete
+```
+
+Two things that are easy to get wrong:
+
+- **The repo row must be in the `tensorhub` org.** `POST /api/v1/repos` with a
+  user JWT always creates in the caller's PERSONAL org (`createRepo` →
+  `authorizePersonalOrgPermissionGin`), so a plain operator cannot create a
+  root-org repo through the API at all. Use an org-bound service token, or the
+  same direct `INSERT INTO repos` the e2e harness uses for root-org fixtures
+  (`e2e/scenarios/publish_v2_test.go`, `newThrowawayRepo`).
+- **Stamp `model_family = micro-diffusion`.** The byte classifier answers
+  `family_reason: "no architecture signature matched"` for a toy checkpoint, so
+  the family comes from the repo row (it fills blanks) or from
+  `PATCH /api/v1/repos/tensorhub/micro-diffusion/checkpoints/<id>/classification`.
+  Without it the gate fails closed on `binding_incompatible`: *"slot declares
+  family … but the artifact's family is undeterminable"*.
+
+One checkpoint serves all three families: `micro-4d` and `micro-escape` both
+root to `micro-diffusion` (they `load_state_dict(base.transformer.state_dict(),
+strict=True)`), so the seed-997 tree satisfies every slot the package declares.
+
+Verify before spending anything — the tag must resolve:
+
+```
+GET /api/v1/repos/tensorhub/micro-diffusion/tags/resolve?tag=prod
+GET /api/v1/repos/tensorhub/micro-diffusion/checkpoints     # model_family stamped
+```
+
 ### 1. Wheel — pin the endpoint at the version under test
 
 `gen-worker==<version>` in `pyproject.toml`, `uv lock`, tar the directory.
