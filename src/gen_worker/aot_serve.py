@@ -1494,6 +1494,67 @@ def resolve_constants(
     return out
 
 
+def _tensor_bytes(values: Iterable[Any]) -> int:
+    total = 0
+    for v in values:
+        try:
+            total += int(v.numel()) * int(v.element_size())
+        except Exception:  # noqa: BLE001 — sizing is context, never a gate
+            continue
+    return total
+
+
+def _device_memory_line() -> str:
+    """One human line of live device memory for a typed refusal."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return "device=cpu"
+        free, total = torch.cuda.mem_get_info()
+        return (f"device free {free / (1 << 20):.0f} MiB of "
+                f"{total / (1 << 20):.0f} MiB")
+    except Exception:  # noqa: BLE001 — context, never a gate
+        return "device=unknown"
+
+
+def target_constant_pool(
+    entry_constants: Iterable[Sequence[ConstantSpec]],
+    state_dict: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """ONE owned device copy of a target's state_dict-sourced constants,
+    shared by every entry that binds against it (pgw#1042).
+
+    pgw#812 D3 priced the whole-graph copying bind at "one duplicate of the
+    weights" — true per RUNNER, and pgw#758's multi-graph cells silently made
+    it one duplicate per ENTRY: `load_and_wrap` binds every entry before any
+    wrap, so an N-entry cell demanded N x the target's constants in device
+    memory at arm time. On sdxl w8a8-lora64 (36 entries, ~GBs per UNet entry)
+    that is more VRAM than the card has, and the failing cudaMalloc surfaced
+    as the anonymous `model_container_runner.cpp:289` API failure that killed
+    the pgw#868 A1 publish twice.
+
+    The pool restores D3's stated cost: entries bind BY REFERENCE
+    (``user_managed=True``) against clones owned by the arm marker, so the
+    artifact still never aliases resident weights (a post-arm resident
+    mutation cannot silently change an armed cell) and the whole cell costs
+    ONE duplicate per target, whatever its entry count.
+    """
+    out: Dict[str, Any] = {}
+    for specs in entry_constants:
+        for spec in specs:
+            if spec.source != SOURCE_STATE_DICT or spec.fqn in out:
+                continue
+            value = state_dict.get(spec.fqn)
+            if value is None:
+                continue  # resolve_constants names the miss, typed, per entry
+            try:
+                out[spec.fqn] = value.detach().clone()
+            except Exception:  # noqa: BLE001 — duck-typed rigs hand non-tensors
+                out[spec.fqn] = value
+    return out
+
+
 def assert_bindable(
     specs: Sequence[ConstantSpec], runner_fqns: Iterable[str],
 ) -> None:
@@ -1568,15 +1629,14 @@ class ArtifactRunner:
 
         ``user_managed=True`` binds BY REFERENCE (pgw#812 D3): the artifact
         keeps pointers to the caller's tensors instead of copying them into
-        its own constant buffer. The default False is right for a whole-graph
-        cell — one duplicate of the weights, and the artifact owns its own
-        lifetime. It is FATAL for a regional cell: N block instances each
-        load their own runner, so a copying bind means N copies of that
-        block's weights in VRAM (flux2: a second whole model). The caller
-        that passes True is asserting that the tensors outlive this runner —
-        which for a regional arm holds by construction, because the values
-        come from the resident pipeline's own ``state_dict`` and the shim
-        that calls the runner is installed ON that module.
+        its own constant buffer. A copying bind is one duplicate of the
+        weights PER RUNNER — and pgw#758's multi-graph cells bind every
+        entry up front, so an N-entry cell paid N duplicates and OOM'd the
+        sdxl arm (pgw#1042). The whole-graph arm therefore binds by
+        reference against ONE marker-owned pool per target
+        (:func:`target_constant_pool`). The caller that passes True is
+        asserting that the tensors outlive this runner — the pool rides the
+        arm marker for exactly that reason.
         """
         try:
             table = self.package.get_constant_fqns()
@@ -1612,26 +1672,46 @@ class ArtifactRunner:
         # and binding (they are derived), not to loosen this gate.
         #
         # pgw#817/D3: `user_managed` is passed only when asked for, so the
-        # whole-graph path's call shape is byte-identical to what pgw#721/#723
+        # copying path's call shape is byte-identical to what pgw#721/#723
         # measured on a pod. A torch whose `load_constants` has no such
-        # parameter is a NAMED refusal rather than a silent copy — a regional
-        # arm that silently copied would OOM the card N blocks later, which is
-        # a far worse way to learn the same fact.
-        if user_managed:
-            try:
-                self.package.load_constants(
-                    values, check_full_update=True, user_managed=True)
-            except TypeError as exc:
-                if "user_managed" not in str(exc):
-                    raise
-                raise ConstantsUnboundError(
-                    "user_managed_unsupported",
-                    f"this torch's load_constants has no user_managed "
-                    f"parameter, so every constant would be COPIED — for a "
-                    f"regional cell that is one copy of the block weights per "
-                    f"instance ({type(exc).__name__}: {exc})") from exc
-        else:
-            self.package.load_constants(values, check_full_update=True)
+        # parameter is a NAMED refusal rather than a silent copy — a caller
+        # that asked for by-reference and silently copied would OOM the card
+        # N binds later, which is a far worse way to learn the same fact.
+        #
+        # pgw#1042: the residual C++ failure is CLASSIFIED. The pod's 36/36
+        # sdxl mint died at publish as an anonymous `RuntimeError:
+        # update_constant_buffer_func_(...) API call failed at
+        # model_container_runner.cpp:289` — the real message (a cudaMalloc
+        # OOM from per-entry constant copies) went to a stderr no pod
+        # exposes. Every failure inside the AOTI update is now a typed
+        # ConstantsUnboundError carrying the entry, the constants' size and
+        # the card's live free/total, so the hub row names the failure class.
+        try:
+            if user_managed:
+                try:
+                    self.package.load_constants(
+                        values, check_full_update=True, user_managed=True)
+                except TypeError as exc:
+                    if "user_managed" not in str(exc):
+                        raise
+                    raise ConstantsUnboundError(
+                        "user_managed_unsupported",
+                        f"this torch's load_constants has no user_managed "
+                        f"parameter, so every constant would be COPIED — one "
+                        f"copy of the target weights per bound entry "
+                        f"({type(exc).__name__}: {exc})") from exc
+            else:
+                self.package.load_constants(values, check_full_update=True)
+        except (ConstantsUnboundError, TypeError):
+            raise
+        except RuntimeError as exc:
+            raise ConstantsUnboundError(
+                "injection_failed",
+                f"entry {self.entry or self.module_name or 'unknown'}: the "
+                f"artifact refused the constant update inside AOTI "
+                f"({type(exc).__name__}: {exc}); {len(values)} constants, "
+                f"{_tensor_bytes(values.values()) / (1 << 20):.0f} MiB, "
+                f"{_device_memory_line()}") from exc
         self.user_managed = bool(user_managed)
         self.bound_fqns = tuple(sorted(values))
         self.bound = True
@@ -2232,12 +2312,20 @@ def load_and_wrap(
                 raise AdoptError("contract_invalid", str(exc)) from exc
 
         # Load + bind EVERY entry before the first live mutation.
+        #
+        # pgw#1042: entries bind BY REFERENCE against ONE owned pool per
+        # target (see target_constant_pool) — the per-entry copying bind
+        # multiplied the target's constants by its entry count and OOM'd the
+        # sdxl w8a8-lora64 arm on a 48 GB card. The pools (and the literal
+        # tensors) are stored on the marker below: user_managed containers
+        # hold raw pointers, so the bound values must outlive the runners.
         dispatches: Dict[str, EntryDispatch] = {}
+        pools: Dict[str, Dict[str, Any]] = {}
         total_constants = 0
         for target, rows in groups.items():
             module, _attr = owners[target]
             state_dict = resident_constants(module)
-            runners: List[Tuple[str, ArtifactRunner]] = []
+            parsed: List[Tuple[str, Any, Tuple[ConstantSpec, ...]]] = []
             for name, block in rows:
                 try:
                     contract = contract_from_meta(block)
@@ -2248,12 +2336,19 @@ def load_and_wrap(
                 except ValueError as exc:
                     raise AdoptError(
                         "contract_invalid", f"entry {name!r}: {exc}") from exc
+                parsed.append((name, contract, constants))
+            pool = target_constant_pool(
+                (constants for _n, _c, constants in parsed), state_dict)
+            pools[target] = pool
+            runners: List[Tuple[str, ArtifactRunner]] = []
+            for name, contract, constants in parsed:
                 package = _load_package(staged.root / PACKAGE_NAME, name)
                 runner = ArtifactRunner(
                     package=package, contract=contract, constants=constants,
                     module_name=target, entry=name, family=family)
                 try:
-                    runner.bind(state_dict, literals_by_entry.get(name, {}))
+                    runner.bind(pool, literals_by_entry.get(name, {}),
+                                user_managed=True)
                 except ConstantsUnboundError as exc:
                     raise AdoptError(
                         f"constants_{exc.reason}",
@@ -2277,7 +2372,15 @@ def load_and_wrap(
                 "attr": attr,
                 "state": module_marker.get("state", {}),
             }
-        setattr(pipeline, _MARKER_ATTR, {"meta": meta, "targets": target_rows})
+        # `bound_constants` is LIFETIME, not bookkeeping (pgw#1042): every
+        # runner bound user_managed, so the containers hold raw pointers into
+        # these pools and literal tensors. They live exactly as long as the
+        # arm — unwrap drops the marker and the device memory with it.
+        setattr(pipeline, _MARKER_ATTR, {
+            "meta": meta, "targets": target_rows,
+            "bound_constants": {
+                "pools": pools, "literals": literals_by_entry},
+        })
         logger.info(
             "aot-serve: loaded+bound %d entr%s across %d target(s) in %.1fs "
             "(%d declared constants, combined_graph_hash=%s)",
@@ -2566,6 +2669,7 @@ __all__ = [
     "set_ingress_refusal_callback",
     "report_ingress_refusal",
     "split_literals",
+    "target_constant_pool",
     "torch_version",
     "unpack",
     "unpack_metadata",

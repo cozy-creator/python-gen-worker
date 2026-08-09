@@ -420,7 +420,8 @@ def test_dispatch_refuses_ambiguity_by_name() -> None:
         def get_constant_fqns(self):
             return []
 
-        def load_constants(self, values, check_full_update=True):
+        def load_constants(self, values, check_full_update=True,
+                           user_managed=False):
             pass
 
         def __call__(self, *feeds):
@@ -448,11 +449,11 @@ def test_all_entries_bind_before_any_wrap(minted_cell, monkeypatch, tmp_path) ->
     real_bind = aot_serve.ArtifactRunner.bind
     calls: list = []
 
-    def bind_second_fails(self, state_dict, literals):
+    def bind_second_fails(self, state_dict, literals, **kwargs):
         calls.append(self.entry)
         if len(calls) == 2:
             raise aot_serve.ConstantsUnboundError("constant_unresolved", "boom")
-        return real_bind(self, state_dict, literals)
+        return real_bind(self, state_dict, literals, **kwargs)
 
     monkeypatch.setattr(aot_serve.ArtifactRunner, "bind", bind_second_fails)
     with pytest.raises(compile_cache.AdoptError):

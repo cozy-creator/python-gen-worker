@@ -350,6 +350,15 @@ def run_cycle(
                   f"covers={dev['covers']}")
     result.env = leg.facts
 
+    # pgw#1042: the rig parent seals exactly as a worker boot does. Without
+    # this the parent's computed key axes (env_seal above all) describe an
+    # UN-established process no pod ever runs, and the handback leg's
+    # axis guard would refuse every healthy mint.
+    from gen_worker import env_seal as _env_seal
+
+    _env_seal.establish()
+    leg.facts["env_seal"] = _env_seal.seal_digest(_env_seal.effective_seal())
+
     # -- weights -------------------------------------------------------------
     from harness.tiny_diffusion import SYNTHETIC_RUNTIME_ENV
 
@@ -462,6 +471,78 @@ def run_cycle(
     if stage == "mint":
         result.total_s = time.monotonic() - t0
         return result
+
+    # -- the handback (pgw#1042): the parent adopts its OWN child's cell -----
+    # The pod order: `adopt_delegated_mint` on the mint-opening parent's live
+    # pipeline runs BEFORE anything publishes (gw#612 — only a cell that can
+    # arm ships). The gauntlet ran green for months while this exact leg was
+    # failing on every sdxl pod, because the rig only ever adopted in a fresh
+    # SECOND process.
+    if veh.parent_pipe is not None:
+        import gc
+
+        from gen_worker import aot_serve as _aserve
+        from gen_worker import cell_key as _ck
+        from gen_worker import compile_cache as _cc
+        from gen_worker import fleet_cells as _fc
+        from gen_worker.models import loading as _loading
+
+        leg = result.add(Leg("handback"))
+        g0 = time.monotonic()
+        if dev["device_kind"] != "cuda":
+            # The parent must state the same supplied runtime the child
+            # sealed under, or the axis guard would refuse a cardless cycle
+            # on `sm` — the same rule both child processes already follow.
+            os.environ[SYNTHETIC_RUNTIME_ENV] = "1"
+            from harness.tiny_diffusion import install_synthetic_runtime_if_asked
+
+            install_synthetic_runtime_if_asked()
+        hb_root = root / "handback"
+        hb_root.mkdir(parents=True, exist_ok=True)
+        hb_artifact = hb_root / "cell.tar.gz"
+        shutil.copy2(str(outcome.artifact), hb_artifact)
+        pipe, hb_cfg = veh.parent_pipe(
+            tree, "cuda" if dev["device_kind"] == "cuda" else "cpu")
+        bucket = int(getattr(hb_cfg, "lora_bucket", 0) or 0)
+        arm = _ck.compute(
+            veh.family, _loading.pipeline_weight_lane(pipe), bucket,
+            contract=_ck.contract_digest(_cc.declared_contract_facts(hb_cfg)),
+            regional=bool(getattr(hb_cfg, "regional", False)))
+        (hb_root / "mint-root").mkdir(exist_ok=True)
+        pending = _fc.PendingSelfMint(
+            family=veh.family, cell_key=arm.digest,
+            ref=f"{_cc.system_repo(veh.family)}#{arm.digest}",
+            cfg=hb_cfg, target=hb_root / "adopted.tar.gz",
+            mint_root=hb_root / "mint-root", publisher=None,
+            cache_dir=hb_root / "cache", arm_key=arm)
+        minted = _fc.adopt_delegated_mint(pipe, pending, hb_artifact)
+        leg.seconds = time.monotonic() - g0
+        reason, why = _fc.adopt_refusal(pending)
+        leg.ok = minted is not None
+        leg.facts = {
+            "arm_key": arm.digest,
+            "cell_key": str(getattr(minted, "cell_key", "") or ""),
+            "arm_reason": reason,
+            "detail": (why or "")[:400],
+        }
+        leg.detail = (
+            f"parent adopted {leg.facts['cell_key'][:20]} "
+            f"(arm_key={arm.digest[:20]})" if leg.ok
+            else f"{reason}: {(why or '')[:200]}")
+        # Return the VRAM before the publish/adopt legs need it.
+        _aserve.unwrap(pipe)
+        del pipe
+        gc.collect()
+        try:
+            import torch as _torch
+
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 — cleanup only
+            pass
+        if not leg.ok:
+            result.total_s = time.monotonic() - t0
+            return result
 
     # -- publish -------------------------------------------------------------
     from harness.cell_hub import LocalCellHub
