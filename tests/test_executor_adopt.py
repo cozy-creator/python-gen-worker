@@ -2692,9 +2692,12 @@ def test_fetch_compile_snapshot_selects_exact_execution_lane(tmp_path, execution
         assert seen == [plain_ref]
 
 
-def test_prepare_with_explicit_artifact_seeds(tmp_path):
+def test_seeding_an_explicit_artifact_writes_the_live_cache(tmp_path):
+    """pgw#1035: `cc.prepare` — a None-returning wrapper with no production
+    caller — is gone. `seed_artifact` is what the adopt lane calls, and it is
+    the same transaction: stage, verify in isolation, activate under the lock."""
     artifact = _artifact(tmp_path)
-    meta = cc.prepare(FAMILY, cache_dir=tmp_path / "cache", artifact=artifact)
+    meta = cc.seed_artifact(artifact, FAMILY, cache_dir=tmp_path / "cache")
     assert meta is not None and meta["family"] == FAMILY
     assert (tmp_path / "cache" / "compile-cache" / "inductor" / "g" / "code.py").exists()
 

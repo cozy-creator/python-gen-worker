@@ -7,14 +7,15 @@ DB is a rebuildable index" (th#659) that made bucket write access
 equivalent to arbitrary cell delivery after any index rebuild.
 
 The hub now signs a ``cell-receipt-v1`` compact JWS at publish-finalize
-binding: cell_key + the hub-ATTESTED axes + owning endpoint + the snapshot
+binding: cell_key + owning endpoint + the publisher-trust rung + the snapshot
 digest (the derivation binding Nix's fingerprint famously omits) + the
 packed tarball's ALGORITHM-TAGGED digest AND integral size (Bazel REv2:
 size is part of the digest). This module is the WORKER half: before arming any hub-delivered
 artifact the worker fetches the receipt, verifies the signature against
 the hub's public artifact-signing JWKS, checks every binding against the
-local bytes, and re-checks the operator revocation list (R2's targeted
-recall — the env_seal ``epoch`` salt is too broad for a single bad cell).
+local bytes, and re-checks the operator revocation list — R2's targeted
+recall, and since pgw#1034 the ONLY recall lever (the env_seal ``epoch``
+salt was too broad for a single bad cell and is gone).
 
 Refusal semantics: a failed receipt DISCARDS the delivered artifact with a
 loud typed ``cell_receipt_refused`` activity event and falls through to
@@ -50,7 +51,7 @@ import tarfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple
 
 import requests
 from cryptography.exceptions import InvalidSignature
@@ -76,9 +77,16 @@ RECEIPT_VERSION = "cell-receipt-v2"
 # unparseable tier must land on the NARROWER rule.
 CELL_PUBLISHER_TIER_PLATFORM = "platform"
 CELL_PUBLISHER_TIER_ORG = "org"
-# The algorithms this worker can actually recompute from local bytes. A
-# receipt naming anything else is refused, never assumed.
-ARTIFACT_DIGEST_ALGORITHMS = ("sha256",)
+# The algorithm this worker can actually recompute from local bytes. A receipt
+# naming anything else is refused, never assumed.
+#
+# pgw#1034 collapsed the multi-algorithm ceremony — a 1-tuple, a digest MAP, an
+# ``algorithms=`` parameter and a list-valued query param, all shaped for a
+# second algorithm that does not exist and has no dated plan. The tag stays on
+# the wire (a bare hex string silently acquires whatever algorithm the reader
+# assumed, which is the whole reason th#1303 tagged it), so adding an algorithm
+# later is still a local change — it just is not pre-paid here.
+ARTIFACT_DIGEST_ALGORITHM = "sha256"
 JWKS_PATH = "/api/v1/artifacts/.well-known/jwks.json"
 RECEIPT_PATH = "/v1/worker/cells/receipt"
 REVOCATIONS_PATH = "/v1/worker/cells/revocations"
@@ -97,25 +105,39 @@ class ReceiptError(RuntimeError):
 
 @dataclass(frozen=True)
 class Receipt:
-    """Decoded, signature-verified cell receipt claims."""
+    """Decoded, signature-verified cell receipt claims — the ones something
+    CHECKS.
+
+    pgw#1034 dropped six that nothing did: ``axes``, ``publisher``,
+    ``artifact_path``, ``manifest_digest``, ``fingerprint_digest`` and
+    ``issued_at_unix``. The signature still covers the whole payload, so a
+    claim this worker does not decode is neither trusted nor forgeable — it is
+    simply not a promise anyone here relies on. Two notes worth keeping:
+
+    * ``manifest_digest``/``fingerprint_digest`` are additive ``omitempty``
+      claims the hub hashes in (``api/cell_receipts.go``); the content they
+      cover is already bound by ``snapshot_digest``, and removing an additive
+      claim does not move ``RECEIPT_VERSION``. The hub half is th#1699-#1704's.
+    * ``issued_at_unix`` had NO freshness check anywhere, and adding one would
+      be a fixed-duration condemn — the thing the no-magic-timeouts rule
+      forbids. Receipt currency is the REVOCATION list (:data:`REVOCATIONS_PATH`,
+      fail-closed when unreadable), which is an authority answering, not a
+      clock guessing.
+
+    A claim added back must arrive with the code that refuses on it.
+    """
 
     version: str
     family: str
     cell_key: str
-    axes: Dict[str, str]
     owning_endpoint_id: str
-    publisher: str
     # th#1657: the publisher-trust boundary, inside the signature.
     publisher_tier: str
     publisher_org_id: str
     snapshot_digest: str
-    artifact_path: str
     # Canonical, ALGORITHM-TAGGED ("<algo>:<hex>"). Never bare hex.
     artifact_digest: str
     artifact_size_bytes: int
-    manifest_digest: str
-    fingerprint_digest: str
-    issued_at_unix: int
 
 
 @dataclass
@@ -323,7 +345,7 @@ def canonical_artifact_digest(digest: str) -> str:
         raise ReceiptError(
             "receipt_digest_untagged",
             f"artifact digest {d[:16]}… carries no algorithm tag")
-    if algo not in ARTIFACT_DIGEST_ALGORITHMS:
+    if algo != ARTIFACT_DIGEST_ALGORITHM:
         raise ReceiptError("receipt_digest_algorithm_unsupported", f"algo={algo!r}")
     if not _is_hex64(hex_part):
         raise ReceiptError(
@@ -376,31 +398,20 @@ def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receip
     artifact = payload.get("artifact")
     if not isinstance(artifact, dict):
         raise ReceiptError("receipt_malformed", "no artifact binding")
-    axes_raw = payload.get("axes")
-    axes: Dict[str, str] = {}
-    if isinstance(axes_raw, dict):
-        axes = {str(k): str(v) for k, v in axes_raw.items()}
     try:
         size_bytes = int(artifact.get("size_bytes") or 0)
-        issued_at = int(payload.get("iat") or 0)
     except (TypeError, ValueError) as exc:
         raise ReceiptError("receipt_malformed", f"numeric claim: {exc}") from exc
     return Receipt(
         version=version,
         family=str(payload.get("family") or ""),
         cell_key=str(payload.get("cell_key") or ""),
-        axes=axes,
         owning_endpoint_id=str(payload.get("owning_endpoint_id") or ""),
-        publisher=str(payload.get("publisher") or ""),
         publisher_tier=_normalize_publisher_tier(payload.get("publisher_tier")),
         publisher_org_id=str(payload.get("publisher_org_id") or ""),
         snapshot_digest=str(payload.get("snapshot_digest") or ""),
-        artifact_path=str(artifact.get("path") or ""),
         artifact_digest=canonical_artifact_digest(str(artifact.get("digest") or "")),
         artifact_size_bytes=size_bytes,
-        manifest_digest=str(payload.get("manifest_digest") or ""),
-        fingerprint_digest=str(payload.get("fingerprint_digest") or ""),
-        issued_at_unix=issued_at,
     )
 
 
@@ -453,25 +464,21 @@ def _kid_of(jws: str) -> str:
     return str(header.get("kid") or "").strip() if isinstance(header, dict) else ""
 
 
-def _fetch_receipt_jws(cfg: _Config, digests: Mapping[str, str], cell_key: str) -> str:
+def _fetch_receipt_jws(cfg: _Config, digest: str, cell_key: str) -> str:
     """Fetch the signed receipt for one artifact.
 
-    The lookup key is the ALGORITHM-TAGGED digest. It stays a list-valued
-    param — one request carrying every digest this worker computed, matched
-    hub-side — rather than a 404-and-retry chain per algorithm: a silent
-    per-algorithm downgrade would make "which digest armed this cell?"
-    unanswerable, and th#715 says a 404 from a proxy is not a 404 from the
-    hub. Today the list has one member; the SHAPE is what keeps a future
-    algorithm from needing a new round-trip protocol.
+    The lookup key is the ALGORITHM-TAGGED digest — never bare hex, which
+    silently acquires whatever algorithm the reader assumed. There is no
+    per-algorithm 404-and-retry chain and never was: a silent downgrade would
+    make "which digest armed this cell?" unanswerable, and th#715 says a 404
+    from a proxy is not a 404 from the hub.
 
     pgw#763 delta 1: parent-mediated when the split is on (the child holds no
-    worker JWT); the identical GET otherwise. The repeated ``artifact_digest``
-    key rides as a list value — requests encodes that as repeated params, and
-    the seam's action table allowlists it the same way.
+    worker JWT); the identical GET otherwise.
     """
     params: Dict[str, Any] = {
         "cell_key": cell_key,
-        "artifact_digest": [f"{algo}:{hex_digest}" for algo, hex_digest in digests.items()],
+        "artifact_digest": digest,
     }
     resp = broker.request(
         "GET",
@@ -482,10 +489,9 @@ def _fetch_receipt_jws(cfg: _Config, digests: Mapping[str, str], cell_key: str) 
         timeout=_HTTP_TIMEOUT_S,
     )
     if resp.status_code == 404:
-        offered = ",".join(f"{a}:{h[:16]}" for a, h in sorted(digests.items()))
         raise ReceiptError(
             "receipt_not_found",
-            f"no hub receipt for {offered} key={cell_key}",
+            f"no hub receipt for {digest[:23]} key={cell_key}",
         )
     if resp.status_code != 200:
         raise ReceiptError("receipt_fetch_failed", f"{RECEIPT_PATH} -> {resp.status_code}")
@@ -529,23 +535,13 @@ def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
 # -- local bindings ---------------------------------------------------------
 
 
-def artifact_digests(path: Path, algorithms: Iterable[str] = ARTIFACT_DIGEST_ALGORITHMS) -> Dict[str, str]:
-    """Every digest this worker can offer for ``path``, in ONE read pass.
-
-    One algorithm today (sha256, pgw#807): the map SHAPE survives so a second
-    one is a table entry rather than a rewrite of the fetch and the compare.
-    """
-    hashers: Dict[str, object] = {}
-    for algo in algorithms:
-        if algo == "sha256":
-            hashers[algo] = hashlib.sha256()
-        else:
-            raise ReceiptError("receipt_digest_algorithm_unsupported", f"algo={algo!r}")
+def artifact_digest(path: Path) -> str:
+    """This worker's ALGORITHM-TAGGED digest of ``path`` (``sha256:<hex>``)."""
+    hasher = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
-            for hasher in hashers.values():
-                hasher.update(chunk)  # type: ignore[attr-defined]
-    return {algo: str(h.hexdigest()) for algo, h in hashers.items()}  # type: ignore[attr-defined]
+            hasher.update(chunk)
+    return f"{ARTIFACT_DIGEST_ALGORITHM}:{hasher.hexdigest()}"
 
 
 def _embedded_meta(artifact: Path) -> Dict[str, object]:
@@ -594,27 +590,20 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     if not meta_key:
         raise ReceiptError("artifact_unkeyed", f"{artifact.name} metadata has no cell_key")
 
-    digests = artifact_digests(artifact)
+    local = artifact_digest(artifact)
     size = artifact.stat().st_size
 
-    jws = _fetch_receipt_jws(cfg, digests, meta_key)
+    jws = _fetch_receipt_jws(cfg, local, meta_key)
     receipt = verify_receipt_jws(jws, _jwks_for(cfg, _kid_of(jws)))
 
-    # Dispatch on the receipt's OWN algorithm tag. Hardcoding one here is how
-    # a sha256-bound cell gets checked with blake3 and every honest artifact
-    # looks corrupt; `canonical_artifact_digest` has already guaranteed the
-    # tag is present and supported, so there is no untagged branch to fall
-    # into and nothing compares against an empty string.
-    algo, _, want = receipt.artifact_digest.partition(":")
-    local = digests.get(algo, "")
-    if not local:
-        raise ReceiptError(
-            "receipt_digest_algorithm_unsupported",
-            f"receipt binds {algo} which this worker did not compute")
-    if local != want:
+    # Both sides are ALGORITHM-TAGGED and `canonical_artifact_digest` has
+    # already refused any tag this worker cannot recompute, so this is one
+    # comparison with no untagged branch to fall into and nothing compared
+    # against an empty string.
+    if local != receipt.artifact_digest:
         raise ReceiptError(
             "receipt_digest_mismatch",
-            f"{algo} receipt={want[:16]} local={local[:16]}")
+            f"receipt={receipt.artifact_digest[:23]} local={local[:23]}")
     if receipt.artifact_size_bytes != size:
         raise ReceiptError(
             "receipt_size_mismatch",
@@ -690,12 +679,12 @@ def gate_delivered_artifact(artifact: Path, family: str) -> bool:
 
 
 __all__ = [
-    "ARTIFACT_DIGEST_ALGORITHMS",
+    "ARTIFACT_DIGEST_ALGORITHM",
     "CELL_PUBLISHER_TIER_ORG",
     "CELL_PUBLISHER_TIER_PLATFORM",
     "Receipt",
     "ReceiptError",
-    "artifact_digests",
+    "artifact_digest",
     "canonical_artifact_digest",
     "configure",
     "configured",

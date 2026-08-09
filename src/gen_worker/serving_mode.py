@@ -31,6 +31,7 @@ from typing import Any, Optional, Tuple
 
 from . import aot_serve
 from . import compile_cache
+from .cell_adopt import EagerPhase
 
 logger = logging.getLogger(__name__)
 
@@ -61,16 +62,23 @@ _PER_REQUEST_FALLBACKS = frozenset({
 # The posture token is the SAME token the decline's `self_mint_skipped` /
 # `self_mint_started` activity event carries in `phase`, so a request row and
 # the worker's own event stream join on one string instead of on a sentence.
+#
+# pgw#1035: these are ALIASES of :class:`cell_adopt.EagerPhase`, not a second
+# spelling of it. They used to be bare literals here while the arming lane's own
+# tokens lived in the enum — two lists of the same wire vocabulary, which is the
+# drift channel `EagerPhase` exists to close, and only `mint_in_progress` was
+# ever pinned across. Values are unchanged; the hub's grouped history is
+# untouched.
 #: The arming brain has not answered yet (boot in flight, setup not finished).
-POSTURE_ARM_PENDING = "arm_pending"
+POSTURE_ARM_PENDING = EagerPhase.ARM_PENDING.value
 #: A mint is being built right now (delegated child, background driver); this
 #: worker serves eager until it adopts. Transient BY CONSTRUCTION.
-POSTURE_MINT_IN_PROGRESS = "mint_in_progress"
+POSTURE_MINT_IN_PROGRESS = EagerPhase.MINT_IN_PROGRESS.value
 #: The release declared no compile target at all — eager is the contract, not
 #: a degradation. Kept distinct so it never pollutes the defect classes.
-POSTURE_NO_COMPILE_DECLARED = "no_compile_declared"
+POSTURE_NO_COMPILE_DECLARED = EagerPhase.NO_COMPILE_DECLARED.value
 #: Terminal fallback when a decline reached the request path unclassified.
-POSTURE_UNCOMPILED = "uncompiled"
+POSTURE_UNCOMPILED = EagerPhase.UNCOMPILED.value
 
 #: Step-count field names, in precedence order. Matches warmup._STEP_FIELDS so
 #: the boot warmup and the served request agree on what "steps" means.

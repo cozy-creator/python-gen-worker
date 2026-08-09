@@ -509,19 +509,35 @@ def test_swap_never_invokes_an_unbound_runner():
 # ---------------------------------------------------------------------------
 
 
-def test_labels_and_refs():
-    assert aot.torch_maj_min("2.13.0+cu130") == "2.13"
-    assert aot.torch_maj_min("") == ""
-    assert aot.flavor_label("l4", "2.13.0+cu130", "w8a8") == "aot-l4-torch2.13-w8a8"
-    assert aot.flavor_label("", "2.13.0", "w8a8") == ""
-    assert aot.is_aot_ref(f"root/family-{FAMILY}#aot-l4-torch2.13-w8a8") is True
-    assert aot.is_aot_ref(
-        f"root/family-{FAMILY}#aot-l4-torch2.13-w8a8", family="other") is False
-    assert aot.is_aot_ref(f"root/family-{FAMILY}#trt-l4-trt10.16-fp16") is False
-    # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
-    # it would then be scored by FX hits).
-    assert aot.is_aot_ref(
-        f"root/family-{FAMILY}#ck1-0123456789abcdef") is False
+def test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key():
+    """pgw#1035: one recognizer, not two.
+
+    The label form (`#aot-<sku>-torch<mm>-<lane>`) had exactly one producer —
+    `aot_serve.flavor_label`, which had no callers — so `is_aot_ref`'s
+    `startswith("aot-")` branch could only match a string this codebase no
+    longer writes. What is left is the rule pgw#1033 stated: whoever reads a
+    `cell_key` off an `aot-inductor` envelope registers it.
+    """
+    # File-unique, and UNREGISTERED afterwards. `_KNOWN_AOT_KEYS` is
+    # process-global, so a key left registered is a claim every later test in
+    # this worker inherits — `"ck1-" + "b" * 56` is a shared literal in four
+    # other files and would have been exactly that landmine.
+    key = "ck1-" + "d721" + "f" * 52
+    try:
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}") is False
+        aot.note_aot_key(key)
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}") is True
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}", family="other") is False
+        # The retired label form is NOT a shortcut back in.
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#aot-l4-torch2.13-w8a8") is False
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#trt-l4-trt10.16-fp16") is False
+        # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
+        # it would then be scored by FX hits).
+        assert aot.is_aot_ref(
+            f"root/family-{FAMILY}#ck1-0123456789abcdef") is False
+    finally:
+        with aot._KNOWN_AOT_KEYS_LOCK:
+            aot._KNOWN_AOT_KEYS.discard(key)
 
 
 def test_verify_refuses_baked_weights(stub_runtime):
@@ -649,42 +665,6 @@ def test_unpack_refuses_declared_literals_with_no_payload(tmp_path):
         aot.unpack(path, tmp_path / "out")
     ok = _tar(tmp_path, meta, literals=True, name="ok.tar.gz")
     assert aot.unpack(ok, tmp_path / "out2")["kind"] == aot.ARTIFACT_KIND
-
-
-def test_stage_artifact_leaves_nothing_behind_on_rejection(tmp_path, monkeypatch):
-    monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME, torch="9.9.9"))
-    cache = tmp_path / "cache"
-    path = _tar(tmp_path)
-    from gen_worker.compile_cache import AdoptError
-    with pytest.raises(AdoptError) as excinfo:
-        aot.stage_artifact(path, FAMILY, cache_dir=cache)
-    assert excinfo.value.reason == "key_mismatch"
-    assert list(cache.iterdir()) == []
-
-
-def test_is_aot_artifact_sniffs_kind(tmp_path):
-    assert aot.is_aot_artifact(_tar(tmp_path)) is True
-    assert aot.is_aot_artifact(
-        _tar(tmp_path, _meta(kind="trt-engine"), name="t.tar.gz")) is False
-    junk = tmp_path / "junk.tar.gz"
-    junk.write_bytes(b"not a tarball")
-    assert aot.is_aot_artifact(junk) is False
-
-
-def test_find_artifact(tmp_path):
-    path = _tar(tmp_path)
-    assert aot.find_artifact(path) == path
-    snap = tmp_path / "snap"
-    (snap / "nested").mkdir(parents=True)
-    target = snap / "nested" / "cell.tar.gz"
-    target.write_bytes(b"x")
-    assert aot.find_artifact(snap) == target
-    assert aot.find_artifact(tmp_path / "empty") is None
-
-
-# ---------------------------------------------------------------------------
-# adoption: enable() + the provision dispatch (same HIT path as dynamo)
-# ---------------------------------------------------------------------------
 
 
 def test_enable_arms_and_binds_from_resident_weights(tmp_path, monkeypatch, stub_runtime):

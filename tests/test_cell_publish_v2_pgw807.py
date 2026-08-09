@@ -375,14 +375,13 @@ def test_receipt_reader_round_trips_a_sha256_bound_receipt(artifact, monkeypatch
     """The reader half of the flip: `sha256:<hex>` — the only thing a cell can
     be bound to now — is the only digest computed, the only tag accepted, and
     an untagged or blake3-tagged claim is a typed refusal."""
-    digests = receipts.artifact_digests(artifact)
-    assert set(digests) == {"sha256"}, "blake3 left the receipt path (pgw#807)"
+    tagged = receipts.artifact_digest(artifact)
+    assert tagged.startswith("sha256:"), "blake3 left the receipt path (pgw#807)"
 
-    tagged = receipts.canonical_artifact_digest("sha256:" + digests["sha256"])
-    assert tagged == "sha256:" + digests["sha256"]
+    assert receipts.canonical_artifact_digest(tagged) == tagged
     # Untagged is a refusal, never an assumed algorithm.
     with pytest.raises(receipts.ReceiptError) as exc:
-        receipts.canonical_artifact_digest(digests["sha256"])
+        receipts.canonical_artifact_digest(tagged.split(":", 1)[1])
     assert exc.value.reason == "receipt_digest_untagged"
     # A blake3-bound receipt is now a REFUSAL, not a second supported arm:
     # the protocol that minted it is gone and the cell it names must be

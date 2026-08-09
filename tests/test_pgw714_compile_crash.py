@@ -107,7 +107,7 @@ def reset_compile_disable():
 
 def test_process_disable_makes_apply_a_noop(reset_compile_disable):
     cc.disable_process_compiles("1 process signal death(s) during compile")
-    assert cc.process_compiles_disabled()
+    assert cc._PROCESS_COMPILES_DISABLED
 
     class Pipe:  # never armed: apply must return before touching torch
         pass

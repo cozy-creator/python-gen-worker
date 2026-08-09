@@ -674,7 +674,14 @@ def test_w8a8_identity_gate_drops_cuda_driver_keeps_rest(monkeypatch):
     meta["cuda_driver"] = "13010"
     assert cc.verify(meta, family="fam") == ""
     assert cc.contract_drift(meta, pipe, cfg) == ""
-    # the honest axes stay fail-closed, with named values
+    # the honest axes stay fail-closed, with named values.
+    #
+    # pgw#1035: this loop is now the SOLE guardian of gw#577 finding (b). The
+    # producer-side twin — `build`'s refusal to mint a w8a8 cell without a
+    # `serving_image_digest` — went with `build`, which had no caller. That is
+    # the correct survivor of the two: a serving pod runs THIS one, on the
+    # artifact's own recorded axes, at adopt time, against cells it did not
+    # mint. Do not delete it without replacing the gate.
     for field in ("sm", "cuda", "image_digest"):
         broken = dict(meta)
         broken[field] = ""
@@ -721,16 +728,6 @@ def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
         cc.enable(pipe, cfg, cache_dir, artifact=artifact2)
     assert "module graph signature" in str(exc.value)
     assert "1" * 12 in str(exc.value)
-
-
-def test_build_refuses_w8a8_mint_without_serving_image_digest(tmp_path):
-    """gw#577 finding (b): a w8a8 cell stamped with the PRODUCER image's
-    digest can never be adopted by the fleet — refuse before any work."""
-    with pytest.raises(RuntimeError, match="serving_image_digest"):
-        cc.build(
-            tmp_path, tmp_path / "out", shapes=[(768, 768)],
-            family="fam", storage_dtype="fp8-w8a8",
-        )
 
 
 def test_cache_collision_and_merge_failure_leave_live_tree_unchanged(
@@ -862,18 +859,17 @@ def test_apply_stays_eager_without_cache():
     assert getattr(pipe, "_cozy_compile", None) is None
 
 
-def test_prepare_without_sources_is_none(tmp_path):
-    assert cc.prepare("sd15", cache_dir=tmp_path) is None
-
-
-def test_prepare_rejects_key_mismatch(tmp_path):
+def test_seeding_rejects_a_key_mismatch(tmp_path):
+    """pgw#1035: `prepare` (a swallow-everything wrapper with no production
+    caller) is gone; `seed_artifact` is the entry the adopt lane uses, and it
+    RAISES the named refusal instead of logging it and returning None."""
     src = _capture_tree(tmp_path / "cap")
     meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
     meta["torch"] = "0.0.0"  # never matches this runtime
     art = cc.pack(src, tmp_path / "art.tar.gz", meta)
-    assert cc.prepare(
-        "sd15", cache_dir=tmp_path / "cache", artifact=art,
-    ) is None
+    with pytest.raises(cc.AdoptError) as exc:
+        cc.seed_artifact(art, "sd15", cache_dir=tmp_path / "cache")
+    assert exc.value.reason == "key_mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -1418,19 +1414,15 @@ def _write_fx_entry(root, key: str, lines: list) -> None:
 def test_fx_key_forensics_names_the_diverging_component(tmp_path):
     """gw#608: a store-served boot that recompiled must be able to name the
     exact FxGraphHashDetails component its fresh keys diverge on, by diffing
-    its own saved entries against the seeded cell's."""
-    capture = tmp_path / "capture"
-    _write_fx_entry(capture / "inductor", "fseededkey111", _fx_lines("cell-value"))
-    (capture / "triton").mkdir()
-    artifact = cc.pack(capture, tmp_path / "cell.tar.gz", {"format": 2})
+    its own saved entries against the seeded cell's.
 
-    live = tmp_path / "live-inductor"
-    _write_fx_entry(live, "ffreshkey2222", _fx_lines("boot-value"))
-
-    seeded = cc.artifact_fx_lines(artifact)
-    observed = cc.live_fx_lines(live)
-    assert set(seeded) == {"fseededkey111"}
-    assert set(observed) == {"ffreshkey2222"}
+    pgw#1035: the two dict-building readers this used to go through
+    (`artifact_fx_lines` / `live_fx_lines`) had no production caller — the live
+    report at `_adopt_divergence_report` builds its own from `_fx_entry_lines`
+    — so the test states the same inputs directly.
+    """
+    seeded = {"fseededkey111": _fx_lines("cell-value")}
+    observed = {"ffreshkey2222": _fx_lines("boot-value")}
 
     report = cc.fx_key_forensics(seeded, observed)
     assert "inductor_config[foo]" in report

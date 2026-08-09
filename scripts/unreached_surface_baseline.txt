@@ -21,11 +21,16 @@
 #       (`c47dc46`) gave all three their first production callers, the guard went
 #       red on STALE, and the lines came out. A symbol ceasing to be dead code is
 #       this guard's nicest failure mode, and the ratchet turned the right way.
-#     compile_cache.assert_closure_complete — the code-closure completeness
-#       gate ("a dynamic import is hiding trace-relevant code from the recipe
-#       key"). Its only caller is a test.
-#     aot_serve.is_aot_artifact — its own docstring says "kind sniff for the
-#       provision.enable_compiled dispatch". That dispatch does not call it.
+#     compile_cache.assert_closure_complete — ✅ DELISTED 2026-08-08 (pgw#1035)
+#       by DELETION, with closure_completeness_gap behind it. The original
+#       finding: the code-closure completeness gate ("a dynamic import is
+#       hiding trace-relevant code from the recipe key"), only caller a test.
+#       pgw#990 had already demoted the closure from a key axis to a memo, so
+#       the honesty this gate protected stopped being load-bearing before the
+#       gate was ever wired.
+#     aot_serve.is_aot_artifact — ✅ DELISTED 2026-08-08 (pgw#1035) by DELETION.
+#       Its own docstring said "kind sniff for the provision.enable_compiled
+#       dispatch"; that dispatch never called it.
 #     aot_declaration.named_dynamic_rows — ✅ DELISTED 2026-08-08 (pgw#1030) by
 #       DELETION. It bridged declaration rows that NAME a Dim into per-binding
 #       DynamicDim rows; nothing ever ran it.
@@ -36,13 +41,52 @@
 #     aot_serve.realigned_inputs / served_entry_calls / EntryDispatch.refusal_counts
 #       — the pgw#790/#791 adapter-fork and realignment tax, measured "rather
 #       than inferred from a stderr line nobody can read", and never reported.
-#     compile_cache.artifact_fx_lines / live_fx_lines — fx forensics that
-#       fx_key_forensics does not reach.
+#       AUDITED FOR DELETION AND KEPT 2026-08-08 (pgw#1035): all three are the
+#       built-but-UNWIRED class, whose fix is one caller carrying all three
+#       (a JobMetrics or activity field), not three diffs that hide the gap.
+#       `served_entry_calls` additionally has a real consumer — the mint rig's
+#       vehicle table, driven by scripts/rig_gauntlet.py.
+#     compile_cache.artifact_fx_lines / live_fx_lines — ✅ DELISTED 2026-08-08
+#       (pgw#1035) by DELETION. fx forensics that fx_key_forensics does not
+#       reach: the live divergence report builds its own line dicts from
+#       `_fx_entry_lines`, so these two were a second way to do the same thing
+#       that only the test ever took.
 #
 #   Dead or duplicated surface
-#     compile_cache.build / prepare (the JIT build path), aot_serve.flavor_label
-#     and find_artifact (compile_cache's same-named versions are the live ones),
+#     compile_cache.build / prepare (the JIT build path) — ✅ DELISTED
+#       2026-08-08 (pgw#1035) by DELETION, 259 lines. `build` was the
+#       whole-pipeline dynamo mint superseded by aot_mint; `prepare` was a
+#       swallow-everything wrapper over `seed_artifact`.
+#     aot_serve.flavor_label and find_artifact — ✅ DELISTED 2026-08-08
+#       (pgw#1035) by DELETION (compile_cache's same-named versions are the
+#       live ones). `torch_maj_min` went with `flavor_label`, its only caller,
+#       and `is_aot_ref`'s `aot-` label branch went with the label's only
+#       producer.
 #     aot_package.package_entry_names, guard_closure.manifest_digest.
+#     aot_serve.unpack_metadata — LISTED 2026-08-08 (pgw#1035). It became
+#       caller-less when `is_aot_artifact` was deleted, and is KEPT: it is the
+#       AOT lane's own reader of its own packed envelope, driven over real
+#       minted tarballs by the pgw#699 double-mint byte-compare proof.
+#       `trt_engine.unpack_metadata` is byte-identical; that dedup belongs to
+#       the TRT-engine ratification, because whichever module survives owns the
+#       one that is left.
+#     compile_cache.seed_artifact — LISTED 2026-08-08 (pgw#1035). It became
+#       caller-less when `prepare` was deleted, and it is deliberately NOT
+#       deleted with it: it is one entry point of the delivered-inductor-cache
+#       ADOPT LANE (stage -> verify in isolation -> activate under the lock).
+#       RE-VERIFIED after pgw#1032 MERGED (`ddf8b8e3`), which changed the facts
+#       this note was first written against: the ADOPT_COMPILE_CACHE handler is
+#       now GONE, and `arm_staged_artifact` went with it. What survives is the
+#       BOOT path — `enable` -> `stage_artifact` -> `artifact_drift` ->
+#       `_activate_staged` — which is still reached, so the lane is NOT dead
+#       code and must not be deleted as such. The open question is narrower and
+#       unchanged: whether anything still PRODUCES a delivered
+#       `torch-inductor-cache` artifact for that path to consume. That is the
+#       ratification Paul owes. Three real-compile proofs drive the
+#       transaction through THIS entry (cell portability gw#611, adopt
+#       collision pgw#751, executor adopt); routing them at `stage_artifact` +
+#       `_activate_staged` would put tests on module privates to buy nothing.
+#       It goes when the lane goes, or it gains a caller when the lane stays.
 #       aot_mint.replace_spec — ✅ DELISTED 2026-08-05 by DELETION. It was a
 #       one-line wrapper over `dataclasses.replace` that existed, per its own
 #       docstring, "so the deferred-import dance does not have to repeat at
@@ -97,18 +141,12 @@ gen_worker.aot_inputs.inputs_for()
 gen_worker.aot_inputs.latent_dims()
 gen_worker.aot_package.package_entry_names()
 gen_worker.aot_serve.EntryDispatch.refusal_counts()
-gen_worker.aot_serve.find_artifact()
-gen_worker.aot_serve.flavor_label()
-gen_worker.aot_serve.is_aot_artifact()
 gen_worker.aot_serve.realigned_inputs()
 gen_worker.aot_serve.served_entry_calls()
+gen_worker.aot_serve.unpack_metadata()
 gen_worker.boot_phases.BootSpan.skipped()
 gen_worker.boot_phases.servable_ms()
-gen_worker.compile_cache.artifact_fx_lines()
-gen_worker.compile_cache.assert_closure_complete()
-gen_worker.compile_cache.build()
-gen_worker.compile_cache.live_fx_lines()
-gen_worker.compile_cache.prepare()
+gen_worker.compile_cache.seed_artifact()
 gen_worker.guard_closure.manifest_digest()
 
 # ---------------------------------------------------------------------------

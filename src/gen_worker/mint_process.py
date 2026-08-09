@@ -129,32 +129,27 @@ _STDERR_TAIL_BYTES = 8192
 MAX_ATTEMPTS = 2
 
 
-class DynamicDimSpec(msgspec.Struct, frozen=True, kw_only=True):
-    """One ``registry.Dynamic`` row, flattened for the wire."""
-
-    dim: str
-    min: int
-    max: int
-
-
 class CompileCellSpec(msgspec.Struct, frozen=True, kw_only=True):
-    """The declared compile contract, flattened.
+    """The declared compile contract, flattened — exactly the facts the CHILD
+    reads.
 
     The PARENT sends this rather than letting the child re-derive it from the
-    decorator: the cell key digests ``CompileCell.contract_facts()``, and the
-    class-scoped ``guidance_scales``/``text_lens`` unions live on the spec,
-    not on the decl. A child that rebuilt the cfg from the decorator alone
-    would compute a DIFFERENT key and the parent's adopt would then reject
-    its own artifact on a contract axis. One cfg, stated once, by the side
-    that owns the key.
+    decorator, because the class-scoped ``guidance_scales``/``text_lens``
+    unions live on the spec and not on the decl: a child rebuilding from
+    ``@endpoint`` alone would export a different declaration than the parent
+    asked for. It is NOT a key-derivation wire — since pgw#758/#1010 the child
+    computes no key at all; the parent stamps it from the returned envelope.
+
+    pgw#1034 therefore dropped ``regional``/``text_len``/``dynamic``: they
+    crossed the wire and no child consumer read them
+    (``fleet_cells.aot_export_spec`` and ``compile_cache.resolve_targets`` read
+    family/targets/shapes/text_lens/guidance/bucket, and nothing else does).
+    Any field added back must name the child code that reads it.
     """
 
     shapes: Tuple[Tuple[int, ...], ...] = ()
     targets: Tuple[str, ...] = ()
     family: str = ""
-    regional: bool = False
-    text_len: Optional[int] = None
-    dynamic: Tuple[DynamicDimSpec, ...] = ()
     lora_bucket: int = 0
     guidance_scales: Tuple[float, ...] = ()
     text_lens: Tuple[int, ...] = ()
@@ -762,7 +757,6 @@ __all__ = [
     "ABANDONED",
     "CRASHED",
     "CompileCellSpec",
-    "DynamicDimSpec",
     "EXIT_BAD_REQUEST",
     "EXIT_MINTED",
     "EXIT_REFUSED",

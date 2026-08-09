@@ -260,7 +260,16 @@ def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
     copy.write_bytes(tar_bytes)
     assert minted.snapshot_digest == "sha256:" + sha256_file(copy)
     # Adoption is memoized for same-key siblings: publish resolves once.
-    assert _adopted(monkeypatch, pending) is minted
+    #
+    # Asserted by calling the adopt DIRECTLY on the same child path, rather
+    # than re-staging bytes through `_adopted`. Two reasons, and the second is
+    # why this line used to fail under load: a memo that short-circuits never
+    # opens the file, so not touching it is the stronger claim — and
+    # `publish_self_mint` above has already `rmtree`'d `pending.mint_root` on
+    # its own thread, so `_adopted`'s mkdir-then-write raced that reaper and
+    # lost with a FileNotFoundError whenever the publish path got there first.
+    assert fc.adopt_delegated_mint(
+        _Pipe(), pending, pending.mint_root / "child-cell.tar.gz") is minted
     fc.publish_self_mint(pending)
     assert len(calls) == 1
 

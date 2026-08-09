@@ -108,9 +108,11 @@ ACTIONS: Dict[str, HubAction] = {
         ),
         # pgw#709 cell-receipt gate: fetch one receipt, fetch the revocation
         # list. Read-only, and the gate fails closed without them.
-        # ``artifact_digest`` repeats (pgw#807: one request offers every
-        # tagged digest; a per-algorithm 404-and-retry chain is a downgrade).
-        # The bare ``blake3`` key is gone with the v1 publish protocol.
+        # ``artifact_digest`` is ONE algorithm-tagged digest (pgw#1034 collapsed
+        # the multi-algorithm ceremony; the bare ``blake3`` key had already gone
+        # with the v1 publish protocol). The repeat handling below still accepts
+        # a list — it is parse-side input validation on an untrusted seam, not a
+        # promise to any particular caller.
         _a(
             "cells.receipt",
             "GET",
@@ -173,7 +175,9 @@ ACTIONS: Dict[str, HubAction] = {
 ACTION_REPORT_DETAIL = "report.detail"
 
 _MAX_STR = 8192
-# Repeats per query key (the v2 receipt fetch offers a handful of digests).
+# Repeats per query key. No action sends a repeated key today (pgw#1034 made
+# the receipt fetch's ``artifact_digest`` a scalar); this bounds the shape the
+# PARSER must accept from a process that runs tenant code, so it stays.
 _MAX_QUERY_REPEATS = 8
 # The seam's control-body cap. pgw#783's job-result seam accountant
 # (procsplit/seam.py) reuses THIS constant as its ceiling so the two halves of

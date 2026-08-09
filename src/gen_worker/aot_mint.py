@@ -2092,9 +2092,12 @@ def _mint_cell(
         # deliberately carries no wall clocks — and the margin threshold is
         # what makes the discrete answer reproducible across two mints.
         meta[kernel_path.META_KEY] = kernel_path.envelope_block(execution_lane_verdict)
-    mode_drift = aot_package.strict_mode_drift(meta, spec.strict)
-    if mode_drift:
-        raise MintRefused("trace-mode drift: " + "; ".join(mode_drift))
+    # pgw#1034: no strict-mode drift gate here. It compared
+    # ``meta["strict_export"]`` against the value it had just been assigned
+    # from, thirteen lines up — it could not fail. Trace mode is bound where it
+    # can actually be wrong: ``aot_serve.verify_contract`` recomputes every
+    # entry's ``class_hash`` with the mode the FOREIGN bytes record, so a cell
+    # traced in the other mode is refused on staged bytes, by name.
 
     timings["declare_s"] = round(time.monotonic() - t0, 2)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
@@ -2873,7 +2876,10 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
         "sm": str(cc.runtime_key().get("sm") or ""),
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
-        "code_closure": dict(cc.static_code_closure(tuple(spec.closure_roots))),
+        # pgw#1034: no ``code_closure``. pgw#990 took source content out of the
+        # key; the memo it was demoted to is `compile_cache`'s own block, read
+        # by the local re-trace off ITS copy. This one had zero readers and cost
+        # a per-mint AST walk of the whole import closure plus declare size.
         "content_keys": dict(cc.content_keys()),
         "loaded_libs": dict(env_seal.frozen_library_digests()),
         "gen_worker": cc.gen_worker_version(),
@@ -3287,7 +3293,6 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
         strict=bool(body.get("strict", True)),
         source_ref=str(body.get("source_ref") or ""),
         source_digest=str(body.get("source_digest") or ""),
-        closure_roots=tuple(str(v) for v in body.get("closure_roots") or ()),
     )
     if not spec.family:
         raise MintRefused(f"mint request {path} must name 'family'")

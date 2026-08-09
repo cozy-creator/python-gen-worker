@@ -205,13 +205,6 @@ def torch_version() -> str:
         return ""
 
 
-def torch_maj_min(version: str) -> str:
-    parts = str(version or "").split(".")
-    if len(parts) < 2 or not parts[0]:
-        return ""
-    return f"{parts[0]}.{parts[1]}"
-
-
 def runtime_key() -> Dict[str, str]:
     """Consumer-side half of the artifact key, probed from this process.
 
@@ -230,15 +223,6 @@ def runtime_key() -> Dict[str, str]:
     except Exception:
         pass
     return key
-
-
-def flavor_label(sku: str, version: str, precision: str) -> str:
-    """``aot-l4-torch2.13-w8a8``. The FULL torch version lives in metadata;
-    the label carries maj.min for humans and selection."""
-    mm = torch_maj_min(version)
-    if not sku or not mm or not precision:
-        return ""
-    return f"aot-{sku}-torch{mm}-{precision}"
 
 
 # Stamped cell keys this process LEARNED name aot-inductor artifacts
@@ -271,14 +255,16 @@ def note_aot_key(cell_key: str) -> None:
 def is_aot_ref(ref: str, family: str = "") -> bool:
     """True when ``ref`` names an AOTI cell (optionally of one family).
 
-    Recognizes both the label form (``#aot-<sku>-...``) and any stamped
-    cell key this process learned via :func:`note_aot_key`.
+    ONE recognizer: the stamped cell keys this process learned via
+    :func:`note_aot_key`. pgw#1035 deleted the second, a
+    ``flavor.startswith("aot-")`` label sniff — the only producer of that label
+    form was ``aot_serve.flavor_label``, which had no caller and is gone. A cell
+    ref carries a stamped KEY, so a label branch could only ever have matched a
+    string this codebase no longer writes.
     """
     fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
         return False
-    if flavor.startswith("aot-"):
-        return True
     with _KNOWN_AOT_KEYS_LOCK:
         return flavor in _KNOWN_AOT_KEYS
 
@@ -940,6 +926,14 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
     return meta
 
 
+#: Read the packed envelope without unpacking the cell.
+#:
+#: pgw#1035: no serving-path caller since ``is_aot_artifact`` (its only one)
+#: was deleted, and DELIBERATELY KEPT — this is the AOT lane's own reader of its
+#: own envelope, and the pgw#699 double-mint byte-compare proof drives it over
+#: real minted tarballs. ``trt_engine.unpack_metadata`` is byte-identical; that
+#: dedup belongs to the TRT-engine ratification, not here, because whichever
+#: module survives owns the shared one.
 def unpack_metadata(artifact: Path) -> Dict[str, Any]:
     """Read ONLY metadata.json from an artifact (kind sniffing — cheap)."""
     with tarfile.open(artifact, mode="r:*") as tar:
@@ -949,16 +943,6 @@ def unpack_metadata(artifact: Path) -> Dict[str, Any]:
                 assert src is not None
                 return json.loads(src.read().decode())
     raise ValueError(f"artifact {artifact} has no {METADATA_NAME}")
-
-
-def is_aot_artifact(artifact: Path) -> bool:
-    """Kind sniff for the ``provision.enable_compiled`` dispatch. Never
-    raises: an unreadable/foreign artifact is simply not ours."""
-    try:
-        meta = unpack_metadata(Path(artifact))
-    except Exception:
-        return False
-    return str(meta.get("kind") or "") == ARTIFACT_KIND
 
 
 @dataclass
@@ -1025,14 +1009,6 @@ def stage_artifact(
     except Exception as exc:
         temporary.cleanup()
         raise AdoptError("artifact_invalid", str(exc)) from exc
-
-
-def find_artifact(root: Path) -> Optional[Path]:
-    """The artifact tarball inside a downloaded snapshot dir (or the file)."""
-    root = Path(root)
-    if root.is_file():
-        return root
-    return next(iter(sorted(root.rglob("*.tar.gz"))), None)
 
 
 # ---------------------------------------------------------------------------
@@ -2367,6 +2343,14 @@ def realigned_inputs(pipeline: Any) -> Dict[str, int]:
     Zero is the contract holding. Non-zero is the tax MEASURED rather than
     inferred from a stderr line nobody can read — and it is paid at ingress
     into an owned buffer, not by the runner per call.
+
+    pgw#1035 audited this for deletion and KEPT it. It has no fleet reader —
+    but neither do its two siblings :func:`ingress_refusals` and
+    :func:`served_entry_calls` (the mint rig drives the latter), and deleting
+    one of three sibling measurements would make the #791 tax unobservable
+    while leaving the machinery that computes it. This is the built-but-UNWIRED
+    class, whose fix is a caller — a JobMetrics or activity field carrying all
+    three — not a diff that hides the gap.
     """
     out: Dict[str, int] = {}
     for state in _marker_states(pipeline):
@@ -2526,13 +2510,10 @@ __all__ = [
     "entries_from_meta",
     "execution_count",
     "proven_since",
-    "find_artifact",
-    "flavor_label",
     "host_isa_reason",
     "NO_HOST_ISA_STAMP",
     "ingress_class_name",
     "ingress_refusals",
-    "is_aot_artifact",
     "is_aot_ref",
     "is_armed",
     "lifted_call_kwargs",
@@ -2548,7 +2529,6 @@ __all__ = [
     "set_ingress_refusal_callback",
     "report_ingress_refusal",
     "split_literals",
-    "torch_maj_min",
     "torch_version",
     "unpack",
     "unpack_metadata",

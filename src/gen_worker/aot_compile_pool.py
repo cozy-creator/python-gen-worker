@@ -142,31 +142,31 @@ SERVING_HEADROOM_CPUS = 2
 #: the work and leave the box idle through the other three quarters.
 CPUS_PER_ENTRY_WORKER = 2
 
-#: Hard ceiling regardless of how fat the pod is. Past this the shared
-#: inductor cache, the page cache and the disk holding N saved programs stop
-#: behaving, and the remaining serial terms (export, package, pack) dominate
-#: anyway: at 18 entries, K=8 is already ceil(18/8)=3 rounds against K=6's 3.
+#: Hard ceiling regardless of how fat the pod is.
 #:
-#: RE-PRICED for regional (pgw#817 / pgw#812 S7). Regional does NOT multiply
-#: with K — it changes what K is dividing:
+#: §4.24, re-derived pgw#1035. The previous defense was twenty lines pricing
+#: this against REGIONAL mints — a kind pgw#846 retired — and it turned on
+#: ``aot_mint._block_device_fraction``, a function that no longer exists. A
+#: constant defended by a deleted function and a retired feature is undefended.
 #:
-#: * The entry COUNT goes UP, not down: one entry per (plan, block class), so
-#:   sdxl's 18 whole-graph entries become 18 x 2 = 36 block entries. #812 S7's
-#:   worry ("once a family's cell is 2 entries instead of 18, K > 2 buys
-#:   nothing") describes a cell whose SHAPE rows also collapse; on a
-#:   static-rows family like sdxl the rows stay and the classes multiply.
-#: * Each entry is ~14x cheaper (19.4 s vs 274.7 s measured), so the SERIAL
-#:   terms this ceiling was defending against — export, package, pack — are a
-#:   much larger fraction of a regional mint. Widening past 8 buys
-#:   proportionally less than it did for whole-graph.
-#: * The binding resource moves. Whole-graph, K is VRAM-bound because each
-#:   child holds the whole model; a block child holds one block, so
-#:   ``aot_mint._block_device_fraction`` shrinks the per-entry device ask and
-#:   K becomes vCPU-bound again on a fat card.
+#: THE THREAT this bounds, named: K entry children compile CONCURRENTLY into
+#: ONE shared inductor cache directory, each linking its own wrapper TU. Past
+#: some K the contention is not the compile — it is the cache directory's
+#: write amplification, the page cache thrashing between N saved programs, and
+#: N concurrent ``cc1plus`` link steps on a box whose disk the serving process
+#: also uses. Nothing here has ever been measured failing at 8; what HAS been
+#: measured is the other side of the trade, and it is what fixes the number.
 #:
-#: The ceiling therefore stays at 8 deliberately: it is no longer the binding
-#: constraint on the shape that matters, and raising it would be sizing for a
-#: term that regional already made small.
+#: WHY 8 AND NOT MORE: K only buys whole ROUNDS. sdxl's 18 entries take
+#: ceil(18/8) = 3 rounds; K=6 also takes 3. The next round-boundary win for 18
+#: entries is K=9, and the serial terms K never touches (export, package,
+#: pack) already dominate what that would save. 8 is one step above the point
+#: where rounds stop improving for the largest real family.
+#:
+#: WHAT WOULD FALSIFY IT: a family whose entry count makes ceil(N/K) strictly
+#: decrease past K=8 AND whose per-entry compile still dominates the serial
+#: terms. Measure ``mint_phases`` on that family before raising this; do not
+#: raise it because a pod looks idle.
 MAX_ENTRY_WORKERS = 8
 
 #: Host RAM the pool must leave alone: the serving process's own resident set
@@ -174,10 +174,35 @@ MAX_ENTRY_WORKERS = 8
 #: top so that a tenant request arriving mid-mint does not meet an OOM killer.
 ENTRY_RSS_RESERVE_BYTES = 4 * 1024**3
 
-#: Per-entry peak RSS assumed before anything has been measured on this pod.
-#: Codegen holds the whole generated source plus inductor's IR, and cc1plus on
-#: the wrapper TU is the peak — MEASURED at 2.09 GiB on the real sdxl wrapper
-#: TU, so host RAM is the LOOSEST of the three bounds, not the binding one.
+#: Per-entry peak RSS assumed before this (family, lane) has banked one.
+#:
+#: §4.24, re-derived pgw#1035 against the row it was accused of contradicting.
+#: THE THREAT: K entry children whose summed peak RSS exceeds available host
+#: RAM, and the OOM killer takes the SERVING process mid-request — the mint's
+#: whole premise is that the worker keeps serving (pgw#784).
+#:
+#: WHY THIS IS NOT pgw#877 #5's REFUSE-TO-WIDEN CASE, which deleted the DEVICE
+#: twin of this constant. Two differences, both load-bearing:
+#:
+#: * That branch fires when the per-entry device footprint is genuinely
+#:   UNKNOWN — no number, from anywhere, for the entry about to run. This one
+#:   is a MEASURED number: 2.09 GiB, on the real sdxl wrapper TU (codegen holds
+#:   the generated source plus inductor's IR; ``cc1plus`` on the wrapper TU is
+#:   the peak), carried at a 1.43x margin. "Not yet banked for this
+#:   (family, lane)" is not "unmeasured".
+#: * Overshooting the card is a hard CUDA OOM with no soft landing.
+#:   Overshooting host RAM lands first in ``ENTRY_RSS_RESERVE_BYTES`` (4 GiB,
+#:   deliberately larger than one entry) and then in reclaim, which is why host
+#:   RAM has been the LOOSEST of the three bounds on every pod measured.
+#:
+#: Refusing to widen here would therefore not buy safety; it would pin K=1 on
+#: every cold pod's first mint, which is every mint of a new (family, lane).
+#:
+#: WHAT WOULD FALSIFY IT: an entry child measured above 3 GiB peak RSS, or any
+#: mint-time host OOM. Either means this bound, not the device bound, was
+#: binding — and the answer then is to make the FIRST entry serial and bank its
+#: peak, not to guess a larger constant.
+#:
 #: Banked per (family, lane) once measured, exactly like
 #: ``mint_budget.record_child_peak`` banks the device peak.
 DEFAULT_ENTRY_PEAK_RSS_BYTES = 3 * 1024**3

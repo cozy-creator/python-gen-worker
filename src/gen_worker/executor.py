@@ -33,6 +33,7 @@ import msgspec
 
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
+from . import cell_adopt
 from . import cpu_budget
 from . import kernel_path
 from . import mint_budget
@@ -5895,7 +5896,7 @@ class Executor:
             f"fn={function}: setup finished with a declared compile target, "
             f"no compiled artifact armed and no mint in flight — this worker "
             f"serves eager for the rest of its life and publishes no cell",
-            phase="boot_ended_uncompiled",
+            phase=cell_adopt.EagerPhase.BOOT_ENDED_UNCOMPILED.value,
         )
 
     @contextmanager

@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import activity, fleet_cells, serving_mode
+from gen_worker import activity, executor, fleet_cells, serving_mode
 from gen_worker.cell_adopt import EagerPhase
 
 
@@ -196,11 +196,55 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "CELL_QUARANTINED": "cell_quarantined",
         "MINT_IN_PROGRESS": "mint_in_progress",
         "MINT_UNAVAILABLE": "mint_unavailable",
+        # pgw#1035 folded the SECOND posture vocabulary in. These four rode the
+        # same two wire columns as the ten above — `phase` on
+        # `self_mint_skipped`/`self_mint_started`, and the request row's
+        # `fallback_reason` — as bare literals in `serving_mode` and
+        # `executor`, which is exactly the two-lists-of-literals drift channel
+        # this enum exists to close. VALUES ARE UNCHANGED, so every row the hub
+        # has already grouped under these strings still joins.
+        "ARM_PENDING": "arm_pending",
+        "NO_COMPILE_DECLARED": "no_compile_declared",
+        "UNCOMPILED": "uncompiled",
+        "BOOT_ENDED_UNCOMPILED": "boot_ended_uncompiled",
     }
     # The join the ArmOutcome docstring claims: a delegated mint's decline and
     # the serving posture that describes it are ONE token, not two that happen
-    # to be spelled alike today.
+    # to be spelled alike today. pgw#1035: all four postures now, not just one.
     assert EagerPhase.MINT_IN_PROGRESS == serving_mode.POSTURE_MINT_IN_PROGRESS
+    assert EagerPhase.ARM_PENDING == serving_mode.POSTURE_ARM_PENDING
+    assert EagerPhase.NO_COMPILE_DECLARED == serving_mode.POSTURE_NO_COMPILE_DECLARED
+    assert EagerPhase.UNCOMPILED == serving_mode.POSTURE_UNCOMPILED
+
+
+def test_the_posture_tokens_are_the_enum_and_not_a_second_spelling() -> None:
+    """RED before pgw#1035: `serving_mode`'s POSTURE_* were bare string
+    literals, so renaming an `EagerPhase` member left them silently behind on
+    the same wire columns — the drift `EagerPhase` was created to prevent,
+    reproduced one module over.
+
+    Identity of VALUE is not enough to prove that (two literals spelled alike
+    pass it), so this asserts the aliases are derived FROM the members.
+    """
+    import gen_worker.serving_mode as sm
+
+    for posture, member in (
+        (sm.POSTURE_ARM_PENDING, EagerPhase.ARM_PENDING),
+        (sm.POSTURE_MINT_IN_PROGRESS, EagerPhase.MINT_IN_PROGRESS),
+        (sm.POSTURE_NO_COMPILE_DECLARED, EagerPhase.NO_COMPILE_DECLARED),
+        (sm.POSTURE_UNCOMPILED, EagerPhase.UNCOMPILED),
+    ):
+        assert posture == member.value
+        assert posture is member.value, (
+            f"{member.name} must be an ALIAS of the member, not a second "
+            f"literal that happens to match it today")
+
+    # The executor's boot-terminal token is the same vocabulary, not a tenth
+    # bare literal sitting next to it.
+    src = inspect.getsource(executor)
+    assert 'phase="boot_ended_uncompiled"' not in src, (
+        "the boot-terminal posture must ride EagerPhase, not a bare literal")
+    assert "EagerPhase.BOOT_ENDED_UNCOMPILED" in src
 
 
 def test_a_quarantined_cell_is_a_typed_event_not_a_log_line() -> None:
