@@ -478,8 +478,8 @@ def declared_range_gaps(
        placeholder, so the dim never became symbolic at all;
     2. **solved range** — the governing symbol's range in the exported program
        must COVER the declared ``[min, max]``. A collapsed (``lower == upper``)
-       or narrowed range is a pin, and the artifact admits less traffic than it
-       advertises;
+       or narrowed range is a pin, and the artifact declares a narrower ENVELOPE
+       than it advertises;
     3. **pinning guards** — an equality guard in the shape env mentioning a
        declared symbol. A dim that is genuinely a function of the declared
        extents forces the tracer to record ``Eq(h*w, N)``; a dim that merely
@@ -554,8 +554,8 @@ def declared_range_gaps(
                         gaps.append(
                             f"{input_name}[{d.axis}] ({expr}) solved to "
                             f"[{lo}, {hi}] which does not cover the declared "
-                            f"[{d.min}, {d.max}] — the artifact admits less "
-                            f"traffic than it advertises")
+                            f"[{d.min}, {d.max}] — the artifact declares a "
+                            f"narrower envelope than it advertises")
                     continue
             for sym in syms:
                 interval = ranges.get(sym)
@@ -583,7 +583,7 @@ def declared_range_gaps(
                         f"{input_name}[{d.axis}] symbol {sym} solved to "
                         f"[{lo * factor}, {hi * factor}] which does not cover "
                         f"the declared [{d.min}, {d.max}] — the artifact "
-                        f"admits less traffic than it advertises")
+                        f"declares a narrower envelope than it advertises")
                 covered = True
                 break
             if not covered and not syms:
@@ -2144,7 +2144,7 @@ def _mint_cell(
         # the merge is auditable from the envelope alone — a reader asking
         # "where did class row X go" gets an answer instead of an absence.
         # NOT a `class_hash` fact (see `aot_serve.class_hash`, which folds
-        # named fields only): an alias declares no traffic the surviving
+        # named fields only): an alias declares no envelope the surviving
         # entry's own contract does not already declare, so it must not
         # re-key an otherwise identical cell.
         merged = class_aliases.get(row.name) or ()
@@ -2169,7 +2169,9 @@ def _mint_cell(
             source_digest=spec.source_digest,
         )
     except ValueError as exc:
-        # The envelope validates the contract it is handed. A malformed one must
+        # The cell-metadata envelope validates the contract it is handed (the
+        # OTHER "envelope" — the declared serving region — is what the range
+        # gates above police). A malformed one must
         # fail HERE, on the mint pod, not at serve time on a paying request.
         raise MintRefused(
             f"envelope refused the declared contract: {exc}") from exc
@@ -3240,7 +3242,8 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
         "sm": str(cc.runtime_key().get("sm") or ""),
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
-        # pgw#1046: the declared traffic the `contract` axis folds. It used to
+        # pgw#1046: the declared ENVELOPE the `contract` axis folds (the axis
+        # STRING stays `contract` until the pgw#1059 ck1 redefinition). It used to
         # live ONLY in the live `ExportSpec`, so an exported cell could not
         # restate its own contract axis — and the publish path, unable to
         # recompute the key, fell back to a 6-axis subset carrying neither
@@ -3302,8 +3305,9 @@ def cell_identity(meta: Mapping[str, Any]) -> cell_key.CellKey:
     implementation, so the key the mint stamps and the axes the publish path
     declares (``fleet_cells._identity_axes``) are the same object rather than
     two derivations that can drift. pgw#1046 moved it there and dropped the
-    ``spec`` parameter: every input is now a RECORDED block (the traffic
-    contract rides ``declared_traffic``), which is what makes the recomputation
+    ``spec`` parameter: every input is now a RECORDED block (the declared
+    ENVELOPE rides ``declared_traffic`` — the block key's rename is on the
+    pgw#1059 list), which is what makes the recomputation
     possible off the artifact alone. No cell re-keys — the contract-facts shape
     and every axis value are unchanged.
 
