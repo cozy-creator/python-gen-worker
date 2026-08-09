@@ -547,7 +547,7 @@ def streaming_fp8_storage_cast(
 
 # ---------------------------------------------------------------------------
 # W8A8 per-channel-scaled fp8 producer (gw#557 / ie#494) — data-free requant
-# from the bf16 source, streaming. The artifact contract is gw#534's
+# from the bf16 source, streaming. The tensor-layout contract is gw#534's
 # ``#fp8-w8a8`` (consumed by gen_worker.models.w8a8): per quantized Linear a
 # F8_E4M3 ``weight`` plus a F32 [out] ``weight_scale`` DEQUANT twin; excluded
 # layers stay at source precision with NO scale tensor. Activation scales are

@@ -31,6 +31,30 @@ is what makes its refusals readable:
   artifact rather than declared beside it. A label carried alongside an artifact
   can drift from it, and a label that can drift is not an identity (pgw#1058).
 
+Two further contracts share the word and are neither of the above. Both are
+about the WEIGHTS, not about the compiled program:
+
+- **The tensor-layout contract** — how tensors exist ON DISK: byte packing,
+  scale layout, swizzle, key-naming convention, file topology. Named by a
+  registered descriptor handle `<producer>.<format>@<major>`
+  (`cozy.fp8-rowwise@1`, `cozy.svdq-nvfp4-lr8@1`, …); a decoder declares the
+  handles it implements with `@implements_contract`
+  (`gen_worker.models.tensor_layout_contract`), and the vocabulary itself lives
+  in tensorhub. It says what the bytes ARE and nothing about compilation.
+  (th#1580 / th#1721; was called "the artifact contract".)
+- **The tensor-binding contract** — the artifact's LINKING rule for tensors:
+  bound by name at load (DYNAMIC — an opaque slot the compiler must never
+  value-specialize, which is what makes a cell checkpoint-agnostic) versus a
+  baked literal (STATIC — the value folds into cell identity; driven to zero).
+  GB-scale derived data is neither and becomes a named CAS component. The
+  classification derives from `state_dict` membership at trace time: the author
+  configures the compiler by how the code is written, never out of band.
+  Authoring rules in `docs/endpoint-authoring.md`. (pgw#857; was
+  "weight-binding".)
+
+`tensor-` and not `weight-` in both names, deliberately — they govern scales,
+buffers and computed tables, not just trained weights.
+
 Widening the envelope moves the promise; it does not move the fact. The cell key
 still fuses both halves into one `contract` axis — splitting it into
 `graph` x `envelope` is a single coordinated change to the key schema (pgw#1059,

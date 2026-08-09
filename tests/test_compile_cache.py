@@ -950,9 +950,9 @@ def test_artifact_metadata_video_shapes_and_storage_dtype():
     assert cc.verify(meta, family="ltx-2.3") == ""
 
 
-def test_guidance_regimes_are_artifact_contract_axis():
+def test_guidance_regimes_are_an_envelope_axis():
     """SDK v2: warm guidance regimes live on the enriched CompileCell (from
-    payload CompileAxis classes), and remain an artifact contract axis."""
+    payload CompileAxis classes), and remain part of the declared envelope."""
     torch = pytest.importorskip("torch")
 
     class _Pipe:

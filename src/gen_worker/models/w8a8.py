@@ -1,7 +1,7 @@
 """W8A8 fp8-GEMM loader mode (gw#534).
 
 A ``#fp8-w8a8`` flavor is a normal diffusers tree whose denoiser holds
-calibrated fp8-E4M3 weights WITH scales — the artifact contract (frozen in
+calibrated fp8-E4M3 weights WITH scales — the tensor-layout contract (frozen in
 gw#534, consumed verbatim by the conversion side):
 
 - per quantized Linear ``L``: ``L.weight`` (F8_E4M3, [out, in]),
@@ -40,7 +40,7 @@ from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
 from .safetensors_header import header_len_ok
-from .artifact_contract import CONTRACT_COZY_FP8_ROWWISE, implements_contract
+from .tensor_layout_contract import CONTRACT_COZY_FP8_ROWWISE, implements_contract
 from typing import Any, Dict, List, Optional
 import shutil
 
@@ -61,7 +61,7 @@ class W8a8Error(RuntimeError):
 
 
 class W8a8SnapshotError(W8a8Error):
-    """The flavor snapshot violates the artifact contract."""
+    """The flavor snapshot violates the tensor-layout contract."""
 
 
 @dataclass(frozen=True)

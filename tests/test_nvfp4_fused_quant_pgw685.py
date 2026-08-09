@@ -79,7 +79,7 @@ def test_reference_chain_shapes_and_dequant_error() -> None:
 
 def test_low_nibble_holds_the_even_element() -> None:
     """The packed convention (element 2j in the LOW nibble) is what
-    ``torch.float4_e2m1fn_x2`` and the artifact contract assume; getting it
+    ``torch.float4_e2m1fn_x2`` and the tensor-layout contract assume; getting it
     backwards silently transposes every pair."""
     x = torch.zeros(1, 32)
     x[0, 0] = 6.0   # even position -> low nibble, code 7

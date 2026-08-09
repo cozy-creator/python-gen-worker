@@ -27,7 +27,7 @@ import sys
 
 from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
-from .artifact_contract import CONTRACT_PLAIN_BF16, implements_contract
+from .tensor_layout_contract import CONTRACT_PLAIN_BF16, implements_contract
 from .fp8_storage import restructure_fp8_storage
 from .memory import get_available_vram_gb, meta_tensors, probe_host_ram
 from .safetensors_header import header_len_ok

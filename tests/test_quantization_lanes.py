@@ -27,7 +27,7 @@ pytest.importorskip("accelerate")
 
 # ---------------------------------------------------------------------------
 # gw#534: W8A8 fp8-GEMM contract — real tiny diffusers pipeline (CPU, no
-# network), producer writes the exact artifact contract, loader dequants to
+# network), producer writes the exact tensor-layout contract, loader dequants to
 # bf16-resident and reproduces source weights to fp8 rounding.
 # ---------------------------------------------------------------------------
 
