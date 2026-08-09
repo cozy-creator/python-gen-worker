@@ -25,9 +25,11 @@ import os
 import struct
 import sys
 
+from ..capability import HostRamCapacityError, InsufficientHostRamError
+from . import disk_gc, load_progress
 from .artifact_contract import CONTRACT_PLAIN_BF16, implements_contract
 from .fp8_storage import restructure_fp8_storage
-from .memory import get_available_vram_gb, meta_tensors
+from .memory import get_available_vram_gb, meta_tensors, probe_host_ram
 from .safetensors_header import header_len_ok
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
 from .w4a4 import (
@@ -1392,6 +1394,48 @@ def _weightless_model_dir(src: Path) -> bool:
     return next(src.rglob("*.safetensors"), None) is None
 
 
+_GIB = 1024 ** 3
+# Mirrors residency/staging's host-RAM floor policy (gw#407).
+_STAGING_FLOOR_GB = 8.0
+_STAGING_FLOOR_FRACTION = 0.2
+
+
+def _staging_floor_bytes(total_bytes: int) -> int:
+    if total_bytes <= 0:
+        return int(_STAGING_FLOOR_GB * _GIB)
+    return int(min(_STAGING_FLOOR_GB * _GIB,
+                   max(_GIB, total_bytes * _STAGING_FLOOR_FRACTION)))
+
+
+def _admit_component_staging(component: str, nbytes: int) -> None:
+    """pgw#1041: admit ONE component's staging against the cgroup budget.
+
+    ``probe_host_ram`` already speaks cgroup (v1 and v2) and credits clean
+    reclaimable page cache (pgw#752), so the just-fetched tree's own cache
+    never blocks its own load. A component that cannot fit an EMPTY host is
+    the structural pgw#752 verdict; one that cannot fit right now is the
+    transient one. Both carry the measured numbers. An unreadable probe
+    fails open — no worse than the unchecked load it replaces."""
+    if nbytes <= 0:
+        return
+    ram = probe_host_ram()
+    total = int(ram.total_gb * _GIB)
+    avail = int(ram.available_gb * _GIB)
+    if total <= 0:
+        return
+    floor = _staging_floor_bytes(total)
+    required = int(nbytes) + floor
+    label = f"modular component {component!r}"
+    cls = (HostRamCapacityError if required > total
+           else InsufficientHostRamError if required > avail else None)
+    if cls is not None:
+        raise cls(
+            label, incoming_bytes=int(nbytes), floor_bytes=floor,
+            required_bytes=required, available_before_bytes=avail,
+            available_after_bytes=avail, total_bytes=total,
+        )
+
+
 def hydrate_modular_pipeline(
     pipe: Any,
     path: str | Path,
@@ -1503,12 +1547,6 @@ def hydrate_modular_pipeline(
 
     names = sorted(sources)
     if names:
-        kwargs: Dict[str, Any] = {
-            "pretrained_model_name_or_path": {n: sources[n] for n in names},
-            "subfolder": {n: "" for n in names},
-        }
-        if torch_dtype is not None:
-            kwargs["torch_dtype"] = torch_dtype
         # load_components swallows per-component load failures into a
         # diffusers logger warning and registers nothing — capture that text
         # so the typed refusal below can carry the actual cause.
@@ -1522,7 +1560,27 @@ def hydrate_modular_pipeline(
         handler = _Capture(level=logging.WARNING)
         dlog.addHandler(handler)
         try:
-            pipe.load_components(names=names, **kwargs)
+            # pgw#1041 (pgw#1026's minimal per-stage form on this lane): one
+            # component at a time, admission-checked against the CGROUP
+            # budget before it stages, page cache chilled after it lands.
+            # ie#615 attempt 4 measured the whole-tree form running the
+            # cgroup AT its ceiling (max_usage == limit, 250.0/251.0 GB):
+            # staged anon plus the tree's own read cache share one limit, so
+            # sequencing + chilling is what keeps the high-water at
+            # anon + ONE component instead of anon + the whole tree.
+            for n in names:
+                comp_src = Path(sources[n])
+                comp_bytes = disk_gc.tree_bytes(comp_src)
+                load_progress.set_phase(f"hydrate:{n}")
+                _admit_component_staging(n, comp_bytes)
+                kwargs: Dict[str, Any] = {
+                    "pretrained_model_name_or_path": {n: sources[n]},
+                    "subfolder": {n: ""},
+                }
+                if torch_dtype is not None:
+                    kwargs["torch_dtype"] = torch_dtype
+                pipe.load_components(names=[n], **kwargs)
+                disk_gc.reclaim_file_cache(comp_src)
         finally:
             dlog.removeHandler(handler)
         missing = [n for n in names if getattr(pipe, n, None) is None]

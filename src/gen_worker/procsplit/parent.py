@@ -281,6 +281,13 @@ class _ChildSlot:
             postmortem.group_fault_dump_path(group.ordinal, parent._postmortem_dir)
             if parent._topology.execution_groups > 1 else None
         )
+        # pgw#1041: the load path's breadcrumb — consumed on a signal death
+        # so a SIGKILL mid-load names its phase/component and byte counts.
+        self.load_progress_path = (
+            postmortem.group_load_progress_path(
+                group.ordinal, parent._postmortem_dir)
+            if parent._topology.execution_groups > 1 else None
+        )
 
         self.server: Optional[asyncio.AbstractServer] = None
         self.link: Optional[_ChildLink] = None
@@ -940,6 +947,7 @@ class _ChildSlot:
                     signal_name=str(verdict.get("signal_name") or ""),
                     inflight_path=self.inflight_marker_path,
                     dump_path=self.fault_dump_path,
+                    load_progress_path=self.load_progress_path,
                 ))
             except Exception:
                 logger.warning("signal-death attribution failed", exc_info=True)

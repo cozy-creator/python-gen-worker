@@ -6649,7 +6649,8 @@ class Executor:
             # VRAM make-room may demote the old pipeline into host RAM. Admit
             # the incoming load only AFTER that transition so the probe sees
             # the actual post-demotion pressure (pgw#541).
-            await self._ensure_host_ram_for(spec, paths)
+            await self._ensure_host_ram_for(
+                spec, paths, component_paths=component_paths)
             instance = spec.cls()
             # Stamp provisional ownership BEFORE tenant setup/warmup. The
             # record is not advertised until rec.ready becomes true, but an
@@ -7897,7 +7898,12 @@ class Executor:
             )
         return advised
 
-    async def _ensure_host_ram_for(self, spec: EndpointSpec, paths: Dict[str, str]) -> None:
+    async def _ensure_host_ram_for(
+        self,
+        spec: EndpointSpec,
+        paths: Dict[str, str],
+        component_paths: Optional[Dict[str, Dict[str, str]]] = None,
+    ) -> None:
         """Owner-aware host-RAM admission (gw#407/pgw#541). ``from_pretrained``
         stages the full weight set in host RAM before placement; loading into
         a nearly-full host pushes it into reclaim-thrash that stalls the whole
@@ -7928,6 +7934,14 @@ class Executor:
         for slot, p in paths.items():
             if slot in slots:
                 slot_bytes = await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
+                # pgw#1041: a pgw#617/th#980 component override stages its
+                # OWN materialized tree alongside the (narrowed) base — the
+                # slot's true staging requirement is their sum. ie#615:
+                # counting only the base under-admitted by the override's
+                # 27.6 GB.
+                for comp_path in ((component_paths or {}).get(slot) or {}).values():
+                    slot_bytes += await asyncio.to_thread(
+                        disk_gc.tree_bytes, Path(comp_path))
                 ref = wire_ref(spec.models[slot])
                 if slot_bytes > incoming:
                     incoming = slot_bytes

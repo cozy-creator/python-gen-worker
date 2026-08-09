@@ -160,17 +160,45 @@ def _deepest(name: str) -> Optional[Path]:
     return None
 
 
-def oom_kill_count() -> int:
-    """``memory.events`` oom_kill for this cgroup (0 when unreadable).
+# ---- cgroup v1 (pgw#1041) --------------------------------------------------
+#
+# RunPod's AP-JP-1 H100 hosts (and any other cgroup-v1 fleet) mount the
+# memory controller at /sys/fs/cgroup/memory and have NO memory.max /
+# memory.current / memory.events. The attempt-4 H3 death report read
+# "memory.max=unlimited ... memory.events={}" on a container whose v1 limit
+# was 233.8GiB — the postmortem was blind on exactly the pod class that
+# OOM-kills. v1 spells the same facts differently:
+#     memory.limit_in_bytes / memory.usage_in_bytes / memory.max_usage_in_bytes
+#     memory.oom_control ("oom_kill N" line, kernel >= 4.13)
 
-    Counts kernel OOM kills in this cgroup since it was created. A delta
-    across a worker death is direct proof the kernel did it.
+_V1_MEM = _CGROUP_ROOT / "memory"
+# v1 "unlimited" territory (kernel reports ~0x7ffffffffffff000).
+_V1_UNLIMITED = 1 << 60
+
+
+def _v1_int(name: str) -> Optional[int]:
+    v = _read_int(_V1_MEM / name)
+    if v is None or not 0 <= v < _V1_UNLIMITED:
+        return None
+    return v
+
+
+def _v1_oom_control() -> Dict[str, int]:
+    return _read_keyed(_V1_MEM / "memory.oom_control")
+
+
+def oom_kill_count() -> int:
+    """Kernel OOM kills in this cgroup since creation (0 when unreadable).
+
+    v2: ``memory.events`` oom_kill; v1 fallback: the ``oom_kill`` counter in
+    ``memory.oom_control``. A delta across a worker death is direct proof
+    the kernel did it.
     """
     p = _deepest("memory.events")
-    if p is None:
-        return 0
-    events = _read_keyed(p)
-    return int(events.get("oom_kill", 0) or 0)
+    if p is not None:
+        events = _read_keyed(p)
+        return int(events.get("oom_kill", 0) or 0)
+    return int(_v1_oom_control().get("oom_kill", 0) or 0)
 
 
 def container_limits() -> Dict[str, Any]:
@@ -192,6 +220,15 @@ def container_limits() -> Dict[str, Any]:
     facts["memory_swap_max_bytes"] = _read_int(swap_max) if swap_max else None
     ev = _deepest("memory.events")
     facts["memory_events"] = _read_keyed(ev) if ev else {}
+    facts["cgroup_flavor"] = "v2" if mem_max is not None else "none"
+    if mem_max is None and (_V1_MEM / "memory.limit_in_bytes").exists():
+        # pgw#1041: v1 host — the same facts under their v1 names.
+        facts["cgroup_flavor"] = "v1"
+        facts["memory_max_bytes"] = _v1_int("memory.limit_in_bytes")
+        facts["memory_current_bytes"] = _v1_int("memory.usage_in_bytes")
+        facts["memory_peak_bytes"] = _v1_int("memory.max_usage_in_bytes")
+        facts["memory_swap_max_bytes"] = _v1_int("memory.memsw.limit_in_bytes")
+        facts["memory_events"] = _v1_oom_control()
     # pgw#975: the one fact that decides whether the pgw#763 split can report at
     # all. `memory.oom.group=1` makes the kernel kill the whole cgroup as a unit
     # — parent included — and `mem_cgroup_get_oom_group()` is consulted on the
@@ -482,6 +519,7 @@ def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
 _INFLIGHT_NAME = "gen-worker-inflight.json"
 _CRASH_REGISTRY_NAME = "gen-worker-crash-streaks.json"
 _FAULT_DUMP_NAME = "gen-worker-fault-dump.txt"
+_LOAD_PROGRESS_NAME = "gen-worker-load-progress.json"
 
 #: Signal deaths mid-flight on one function, on one pod, before the gate
 #: refuses it. 2 = one free retry for a genuinely transient fault.
@@ -531,6 +569,53 @@ def _local_marker_path(name: str) -> Path:
 INFLIGHT_PATH = _local_marker_path(_INFLIGHT_NAME)
 CRASH_REGISTRY_PATH = _sibling(_CRASH_REGISTRY_NAME)
 FAULT_DUMP_PATH = _local_marker_path(_FAULT_DUMP_NAME)
+LOAD_PROGRESS_PATH = _local_marker_path(_LOAD_PROGRESS_NAME)
+
+
+def group_load_progress_path(
+    ordinal: int, marker_dir: Optional[Path] = None,
+) -> Path:
+    return _group_marker_path(_LOAD_PROGRESS_NAME, ordinal, marker_dir)
+
+
+def write_load_progress(
+    record: Dict[str, Any], path: Optional[Path] = None,
+) -> None:
+    """pgw#1041: the load path's death breadcrumb — overwritten every
+    reporter tick, consumed by the death attribution. A SIGKILL mid-load
+    then names the phase/component and the last byte count instead of a
+    94-minute blank."""
+    path = path or LOAD_PROGRESS_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(record, default=str))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def clear_load_progress(path: Optional[Path] = None) -> None:
+    path = path or LOAD_PROGRESS_PATH
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def take_load_progress(path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Read and consume the last load-progress breadcrumb (None when absent)."""
+    path = path or LOAD_PROGRESS_PATH
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    clear_load_progress(path)
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
 
 _fault_dump_file: Optional[Any] = None
 
@@ -768,6 +853,7 @@ def attribute_signal_death(
     inflight_path: Optional[Path] = None,
     registry_path: Optional[Path] = None,
     dump_path: Optional[Path] = None,
+    load_progress_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Everything the post-mortem reporter can attach to a signal death:
     the in-flight markers (consumed), the fault-dump tail, and — for each
@@ -801,6 +887,12 @@ def attribute_signal_death(
     tail = fault_dump_tail(dump_path)
     if tail:
         extra["fault_dump_tail"] = tail
+    # pgw#1041: a death mid-load names the phase/component and last byte
+    # count — the difference between "SIGKILL" and "SIGKILL at
+    # hydrate:transformer, 48.2/94.3 GiB staged".
+    progress = take_load_progress(load_progress_path)
+    if progress:
+        extra["last_load_progress"] = progress
     return extra
 
 
@@ -856,27 +948,36 @@ def attribute_all_signal_deaths(
         "worker",
         marker_dir / _INFLIGHT_NAME if marker_dir is not None else INFLIGHT_PATH,
         marker_dir / _FAULT_DUMP_NAME if marker_dir is not None else FAULT_DUMP_PATH,
+        marker_dir / _LOAD_PROGRESS_NAME if marker_dir is not None
+        else LOAD_PROGRESS_PATH,
     )]
     pairs.extend(
-        (p.name, p / _INFLIGHT_NAME, p / _FAULT_DUMP_NAME)
+        (p.name, p / _INFLIGHT_NAME, p / _FAULT_DUMP_NAME,
+         p / _LOAD_PROGRESS_NAME)
         for p in _group_marker_dirs(marker_dir)
     )
     seen: set[tuple[Path, Path]] = set()
     inflight: list[Dict[str, Any]] = []
     streaks: Dict[str, int] = {}
     tails: list[str] = []
-    for label, inflight_path, dump_path in pairs:
+    progress_rows: Dict[str, Dict[str, Any]] = {}
+    for label, inflight_path, dump_path, progress_path in pairs:
         key = (inflight_path, dump_path)
         if key in seen:
             continue
         seen.add(key)
-        if not inflight_path.exists() and not dump_path.exists():
+        if not (inflight_path.exists() or dump_path.exists()
+                or progress_path.exists()):
             continue
         detail = attribute_signal_death(
             signal_name=signal_name,
             inflight_path=inflight_path,
             dump_path=dump_path,
+            load_progress_path=progress_path,
         )
+        row = detail.get("last_load_progress")
+        if isinstance(row, dict):
+            progress_rows[label] = row
         rows = detail.get("inflight")
         if isinstance(rows, list):
             inflight.extend(r for r in rows if isinstance(r, dict))
@@ -893,6 +994,11 @@ def attribute_all_signal_deaths(
         extra["native_crash_streaks"] = streaks
     if tails:
         extra["fault_dump_tail"] = "\n\n".join(tails)[-_FAULT_DUMP_TAIL_BYTES:]
+    if progress_rows:
+        extra["last_load_progress"] = (
+            progress_rows["worker"] if list(progress_rows) == ["worker"]
+            else progress_rows
+        )
     return extra
 
 
@@ -923,6 +1029,11 @@ __all__ = [
     "format_detail",
     "group_fault_dump_path",
     "group_inflight_path",
+    "group_load_progress_path",
+    "LOAD_PROGRESS_PATH",
+    "clear_load_progress",
+    "take_load_progress",
+    "write_load_progress",
     "native_crash_streaks",
     "note_inflight",
     "oom_kill_count",
