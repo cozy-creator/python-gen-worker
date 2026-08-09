@@ -263,13 +263,6 @@ class HFSourcePlan:
             out.append((p, int(self.sizes.get(p, 0)), cid))
         return sorted(out)
 
-    def bank_extra(self) -> dict[str, str]:
-        attrs = {str(k): str(v) for k, v in (self.classification.attrs or {}).items()}
-        return {
-            "strategy": str(self.classification.strategy),
-            "attrs": json.dumps(attrs, sort_keys=True, separators=(",", ":")),
-        }
-
 
 @dataclass
 class CivitaiSourcePlan:
@@ -296,13 +289,6 @@ class CivitaiSourcePlan:
                 return []
             out.append((str(f.get("name")), int(f.get("size_bytes") or 0), f"sha256:{sha}"))
         return sorted(out)
-
-    def bank_extra(self) -> dict[str, str]:
-        model = self.payload.get("model") if isinstance(self.payload.get("model"), dict) else {}
-        return {
-            "base_model": str(self.payload.get("baseModel") or ""),
-            "model_type": str((model or {}).get("type") or ""),
-        }
 
 
 def _civitai_manifest_revision(file_names: list[str]) -> str:

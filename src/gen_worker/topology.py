@@ -108,10 +108,6 @@ def current_device_group() -> int:
     return _current_group.get()
 
 
-def set_device_group(ordinal: int) -> contextvars.Token:
-    return _current_group.set(int(ordinal))
-
-
 # The delivered packing, published process-wide so the ambient group ordinal
 # can be TRANSLATED into the cards that group actually owns. An ordinal is not
 # a device index — at degree D group g owns ``[g*D, (g+1)*D)`` — and the
@@ -127,10 +123,6 @@ def install_topology(topo: Optional["ExecutionTopology"]) -> None:
     """Publish the delivered packing for the ordinal -> device translation."""
     global _installed
     _installed = topo
-
-
-def installed_topology() -> Optional["ExecutionTopology"]:
-    return _installed
 
 
 def group_devices(ordinal: Optional[int] = None) -> Tuple[int, ...]:

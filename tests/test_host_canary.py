@@ -13,11 +13,11 @@ classification are pure and tested against verbatim ``nvidia-smi`` output.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 import pytest
 
 from gen_worker import host_canary as hc
+from gen_worker.config import Settings
 from gen_worker.executor import Executor
 from gen_worker.lifecycle import Lifecycle
 
@@ -96,8 +96,8 @@ def _fake_cuda(monkeypatch: pytest.MonkeyPatch):
 def _hello_canary(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(hc, "_cached", None)
     lc = Lifecycle(
-        SimpleNamespace(bootstrap_worker_jwt="", worker_id="w-748",
-                        runpod_pod_id="", worker_image_digest=""),
+        Settings(bootstrap_worker_jwt="", worker_id="w-748",
+                 runpod_pod_id="", worker_image_digest=""),
         Executor([], lambda *a, **k: None),
     )
     return lc.build_hello().resources.host_canary

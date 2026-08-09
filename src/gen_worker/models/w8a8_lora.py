@@ -664,10 +664,6 @@ def clear_branch_execution_lanes(pipe: Any) -> None:
         clear_branch_adapters(model)
 
 
-def branch_execution_lanes_active(pipe: Any) -> bool:
-    return any(branches_active(m) for m in branch_targets(pipe).values())
-
-
 def pipeline_branch_bucket(pipe: Any) -> int:
     """The pipeline's branch bucket — one value across the denoiser set (the
     set is always enabled/resized together), 0 when no branch is enabled."""
@@ -1133,7 +1129,6 @@ __all__ = [
     "apply_branch_adapters",
     "branch_bucket",
     "branch_execution_lane",
-    "branch_execution_lanes_active",
     "branch_modules",
     "branch_targets",
     "branches_active",

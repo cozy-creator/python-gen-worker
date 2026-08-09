@@ -10,7 +10,6 @@ import logging
 import threading
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import msgspec
 import pytest
@@ -30,6 +29,7 @@ from gen_worker.models import provision
 from gen_worker.api.binding import Hub
 from gen_worker.api.binding import wire_ref
 from gen_worker.api.errors import RetryableError
+from gen_worker.config import Settings
 from gen_worker.executor import Executor
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -323,7 +323,7 @@ def test_compile_target_state_delta_is_exact_and_ready_only(tmp_path):
     assert target.active_compile_snapshot_digest == ""
 
     lifecycle = Lifecycle(
-        SimpleNamespace(bootstrap_worker_jwt="", worker_id="worker"), ex)
+        Settings(bootstrap_worker_jwt="", worker_id="worker"), ex)
     delta = lifecycle._state_delta()
     assert delta.compile_targets == ex.compile_targets()
 
@@ -1095,7 +1095,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert _events(sent, pb.MODEL_STATE_FAILED) == []
 
     lifecycle = Lifecycle(
-        SimpleNamespace(bootstrap_worker_jwt="", worker_id="worker"), ex)
+        Settings(bootstrap_worker_jwt="", worker_id="worker"), ex)
     failed_delta = lifecycle._state_delta()
     assert "edit" in failed_delta.available_functions
     assert "generate" in failed_delta.available_functions

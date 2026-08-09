@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 _PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
-_STALE_MIRROR_CLAIM_ERROR_CODES = {"source_version_not_found", "source_variants_not_found"}
 _MAX_OUTPUT_FILE_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB hard cap per file.
 _FILE_API_HTTP_TIMEOUT_S = 60
 _FILE_API_STREAM_CHUNK_TIMEOUT_S = 120

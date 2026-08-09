@@ -24,7 +24,7 @@ import gc
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, TypeVar
+from typing import Any, Dict, Iterable, List, Optional
 
 import msgspec
 
@@ -1350,38 +1350,6 @@ def _default_disk_offload_path() -> Optional[str]:
 # ---------------------------------------------------------------------------
 # OOM retry
 # ---------------------------------------------------------------------------
-
-
-_DEFAULT_ESCALATION: tuple[str, ...] = (
-    "vae_only", "model_offload", "group_offload", "sequential",
-)
-
-T = TypeVar("T")
-
-
-def _escalate_pipeline_mode(
-    pipeline: Any,
-    *,
-    logger: logging.Logger,
-    escalation: tuple[str, ...],
-) -> bool:
-    """Move a pipeline one step further up the offload ladder. False if maxed."""
-    cur = getattr(pipeline, _COZY_MODE_ATTR, None)
-    idx = escalation.index(cur) if cur in escalation else -1
-    next_idx = idx + 1
-    if next_idx >= len(escalation):
-        return False
-    next_mode = escalation[next_idx]
-    try:
-        delattr(pipeline, _COZY_MODE_ATTR)
-    except Exception:
-        try:
-            setattr(pipeline, _COZY_MODE_ATTR, None)
-        except Exception:
-            pass
-    logger.warning("low_vram: escalating %s -> %s on OOM", cur, next_mode)
-    apply_low_vram_config(pipeline, mode=next_mode, logger=logger)
-    return True
 
 
 def rearm_offload(pipeline: Any, mode: Mode = "model_offload") -> bool:

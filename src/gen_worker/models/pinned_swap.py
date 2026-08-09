@@ -283,23 +283,6 @@ def prestage_module(module: Any) -> int:
     return pinned_bytes
 
 
-def prestage_object(obj: Any) -> int:
-    """:func:`prestage_module` over a residency object: a bare ``nn.Module``
-    or a pipeline exposing ``components``. Returns total bytes pinned."""
-    try:
-        import torch.nn as nn
-    except Exception:
-        return 0
-    if isinstance(obj, nn.Module):
-        return prestage_module(obj)
-    comps = getattr(obj, "components", None)
-    if isinstance(comps, dict) and comps:
-        return sum(
-            prestage_module(m) for m in comps.values() if isinstance(m, nn.Module)
-        )
-    return 0
-
-
 def cached_swap_bytes(obj: Any) -> int:
     """Bytes already staged in pinned host caches under ``obj`` — a demote of
     this object needs that much LESS fresh host RAM."""
@@ -331,5 +314,4 @@ __all__ = [
     "swap_object",
     "cached_swap_bytes",
     "prestage_module",
-    "prestage_object",
 ]

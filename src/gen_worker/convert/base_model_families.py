@@ -57,11 +57,6 @@ def civitai_to_family(value: str) -> Optional[str]:
     return foreign_to_family(CIVITAI, value)
 
 
-def registered_foreign_sources() -> tuple[str, ...]:
-    with _lock:
-        return tuple(sorted(_maps))
-
-
 def reset_foreign_family_maps() -> None:
     """Tests only."""
     with _lock:
@@ -73,6 +68,5 @@ __all__ = [
     "civitai_to_family",
     "declare_foreign_family_map",
     "foreign_to_family",
-    "registered_foreign_sources",
     "reset_foreign_family_maps",
 ]
