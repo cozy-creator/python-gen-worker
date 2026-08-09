@@ -72,8 +72,8 @@ def test_key_deterministic_and_axis_sensitive():
 
 
 def test_empty_optional_axis_equals_absent():
-    absent = {k: v for k, v in _AXES.items() if k not in ("lane", "mode")}
-    empty = dict(absent, lane="", mode="")
+    absent = {k: v for k, v in _AXES.items() if k != "lane"}
+    empty = dict(absent, lane="")
     assert ck.from_axes(absent).digest == ck.from_axes(empty).digest
 
 
@@ -163,19 +163,28 @@ def test_execution_lane_canonicalization(fixed_runtime):
             != ck.compute("f", "", contract=_CONTRACT).digest)
 
 
-def test_regional_mode_is_identity(fixed_runtime):
-    """Regional per-block cells are different artifacts (ie#381)."""
-    assert (ck.compute("f", regional=True, contract=_CONTRACT).digest
-            != ck.compute("f", contract=_CONTRACT).digest)
-    assert (ck.from_axes(dict(_AXES, mode="regional")).digest
-            != ck.from_axes(_AXES).digest)
+def test_mode_axis_is_deleted_and_regional_rides_the_contract(fixed_runtime):
+    """`mode` deleted per Paul 2026-08-09 (pgw#1049): pinned "" since
+    regional died, and empty optionals never entered the canonical form, so
+    the deletion moves ZERO digests. Regional discrimination was never lost
+    — `regional` is a declared-contract fact, so it rides the `contract`
+    axis. A stale caller shipping `mode` gets a TYPED refusal, never a
+    silent drop."""
+    with pytest.raises(ck.CellKeyError, match="unknown cell-key axis 'mode'"):
+        ck.from_axes(dict(_AXES, mode="regional"))
+    with pytest.raises(ck.CellKeyError, match="unknown cell-key axis 'mode'"):
+        ck.from_axes(dict(_AXES, mode=""))
+    plain = cc.declared_contract_facts(_ContractCfg(regional=False))
+    regional = cc.declared_contract_facts(_ContractCfg(regional=True))
+    assert (ck.compute("f", contract=ck.contract_digest(regional)).digest
+            != ck.compute("f", contract=ck.contract_digest(plain)).digest)
     facts = cc.declared_contract_facts(_ContractCfg(regional=True))
     meta = cc.artifact_metadata(
         family="f", shapes=((768, 768),), targets=("transformer",),
         compile_mode="regional", shape_contract=facts,
     )
     assert meta["cell_key"] == ck.compute(
-        "f", regional=True, contract=ck.contract_digest(facts)).digest
+        "f", contract=ck.contract_digest(facts)).digest
 
 
 def test_contract_axis_fences_newer_contract(fixed_runtime):

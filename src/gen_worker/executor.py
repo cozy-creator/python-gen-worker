@@ -48,6 +48,7 @@ from .transport import FatalTransportError
 from . import cpu_budget
 from . import kernel_path
 from . import mint_budget
+from . import settings_authority
 from . import progress as progress_mod
 from . import serving_mode as serving_mode_mod
 from . import warmup
@@ -3266,11 +3267,12 @@ class Executor:
         self._settings = settings
         self.store = store or ModelStore(send)
         # pgw#654: TF32 is PROCESS-GLOBAL state — set once at executor
-        # bootstrap, never inside per-instance endpoint setup. Largely moot
-        # on the bf16 compute path (it affects residual fp32 matmuls only).
-        if torch is not None and torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+        # bootstrap, never inside per-instance endpoint setup. pgw#1049: the
+        # write is the settings authority's (its declared table IS the
+        # pgw#654 posture); calling it here keeps embedder/test processes
+        # that never ran env_seal.establish on the declared posture too.
+        if torch is not None:
+            settings_authority.impose_torch()
         self.intent_registry: Optional[IntentRegistry] = None
         for s in specs:
             for b in s.models.values():

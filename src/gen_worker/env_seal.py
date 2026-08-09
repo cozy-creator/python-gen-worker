@@ -1,10 +1,12 @@
-"""Execution-environment seal — ERASE AND IMPOSE (pgw#718/#719).
+"""Execution-environment seal — ERASE, IMPOSE, SEAL THE DECLARATION
+(pgw#718/#719, re-pointed by pgw#1049).
 
 Paul's env contract: the worker OWNS its process environment. We do not
 audit the world's env vars and refuse on surprises (the superseded #696
 allowlist — it bit a 0.70.3 boot on an informational base-image var); we
-ERASE the behavior namespaces wholesale and IMPOSE the canonical
-configuration as code:
+ERASE the behavior namespaces wholesale and IMPOSE the declared
+configuration (``settings_authority`` — the single writer of torch
+settings):
 
 * :func:`scrub_env` — delete every var in the behavior namespaces
   (``TORCH*``/``PYTORCH*``/``TRITON*``/``CUBLAS*``/``CUDNN*``/
@@ -12,34 +14,31 @@ configuration as code:
   names; NEVER fail. Load-bearing order: the entrypoint calls it BEFORE
   torch imports (many vars are read at import/CUDA-init time). Plumbing
   (CUDA_VISIBLE_DEVICES, paths, credentials) is untouched.
-* :data:`CANONICAL_CONFIG` + :func:`establish_config` — impose every
-  behavior flag explicitly via torch APIs and verify the read-back. The
-  canonical values ARE the ratified serving posture (pgw#654 TF32-on; see
-  the table comment) — the point is that CODE decides them, never a
-  library default and never an env var, and mint==serve by construction.
-  The ONLY route to non-canonical behavior is a typed knob:
-  ``establish_config(overrides=...)`` with keys validated against the
-  canonical table — sealed, therefore keyed. One-way door: a scrubbed var
-  that turns out to be needed becomes a knob, never an unscrub.
-* :func:`effective_seal` — {seal_v, epoch, posture, config read-back,
-  portable inductor digest, loaded-library digest (pgw#719: the native
-  ``.so`` set actually mapped into the process — closes the
-  LD_PRELOAD/LD_LIBRARY_PATH substitution hole that env vars and package
-  RECORDs cannot see)}. After scrub+impose the seal is a pure function of
-  (SDK build x declared knobs). Its :func:`seal_digest` is the ``env_seal``
-  key axis; ``seal_v`` versions the dict, so new sealed facts change
-  digest VALUES only, never the axis set.
-* :func:`assert_seal_unchanged` — boot-vs-point-of-use (pgw#719): the boot
-  seal is stored at :func:`establish`; every mint trace re-reads the
-  effective state first and REFUSES on drift, naming the fact and both
-  values (endpoint code mutating config/env behind our back becomes a
-  named error, never a silently different graph). The per-call serving
-  window is covered by dynamo's GlobalStateGuard + the pgw#680 guard-miss
-  doctrine.
+* :func:`establish` — impose the declaration (env, torch flags + declared
+  knobs, dynamo shape posture, host-ISA clamp, process posture), verify
+  every read-back against it, fail closed on mismatch.
+* :func:`effective_seal` — the seal is a digest of the DECLARATION
+  (pgw#1049): ``settings_authority.declaration()`` facts plus the
+  loaded-library digest (pgw#719: the native ``.so`` set the python env
+  ships — closes the LD_PRELOAD/LD_LIBRARY_PATH substitution hole that env
+  vars and package RECORDs cannot see). Ambient mutation is structurally
+  unable to move the digest — torch wheel defaults ride the ``toolchain``
+  key axis, and everything else in the codegen surface is either declared
+  (sealed) or erased. ``seal_v`` versions the dict, so new sealed facts
+  change digest VALUES only, never the axis set.
+* :func:`assert_seal_unchanged` — the runtime TRIPWIRE (pgw#719, kept
+  deliberately as read-back where the seal itself no longer is): boot
+  stores the live read-back (posture, torch flags, dynamo facts, FULL
+  portable inductor digest); every mint trace re-reads and REFUSES on
+  drift, naming the fact and both values. Since boot verified read-back ==
+  declaration, any trip is also a declaration mismatch: ambient mutation
+  becomes a named refusal, never a silently different graph — and never a
+  different key. The per-call serving window is covered by dynamo's
+  GlobalStateGuard + the pgw#680 guard-miss doctrine.
 
 The seal dict rides cell metadata verbatim (``artifact_metadata``), so
 ``cell_key.from_artifact_metadata`` recomputes the axis from recorded facts
-and a stamp can never disagree with the environment it summarizes.
+and a stamp can never disagree with the declaration it summarizes.
 """
 
 from __future__ import annotations
@@ -54,7 +53,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from . import guard_closure, host_isa, torch_capability
+from . import guard_closure, host_isa, settings_authority, torch_capability
 import importlib.util
 
 logger = logging.getLogger(__name__)
@@ -82,28 +81,18 @@ logger = logging.getLogger(__name__)
 # pgw#1042 bumped 2 -> 3 by EXCLUDING torch's compile-injected
 # `aot_inductor.metadata` from the inductor fact (see _PORTABLE_VOLATILE).
 # RE-KEY COST: zero — no cell has ever been published under v2.
-SEAL_VERSION = 3
-SEAL_KEY = "env_seal"
-
-# Behavior-affecting global flags: ONE canonical value each, set explicitly
-# by establish_config() and read back effective. String-valued for JSON
-# determinism.
 #
-# The canonical values ARE the ratified SERVING posture, not a preference:
-# pgw#654 sets TF32 ON at executor bootstrap (bf16 compute path; TF32
-# touches residual fp32 matmuls only), and inductor hashes the TF32 state
-# (`cuda_matmul_settings`) into every inner FX key — so a mint sealed with
-# TF32 off could never HIT in a pgw#654 serving process. The #719 drift
-# check surfaced exactly that divergence live (every suite mint refused
-# once an executor bootstrap ran); the seal's job is mint==serve
-# consistency, so the table matches pgw#654. Note the 2.13 coupling:
-# allow_tf32=True implies float32_matmul_precision "high".
-CANONICAL_CONFIG: Dict[str, str] = {
-    "float32_matmul_precision": "high",
-    "cuda_matmul_allow_tf32": "True",
-    "cudnn_allow_tf32": "True",
-    "cudnn_benchmark": "False",
-}
+# pgw#1049 bumped 3 -> 4: the seal derives from settings_authority's
+# DECLARATION, not from read-back — the `inductor` fact becomes the declared
+# codegen clamp instead of a save_config_portable() digest, `posture`/`config`
+# become the declared tables, and the declared env (incl. the imposed
+# PYTHONHASHSEED=0, executing the pgw#1034 HUMAN_MUST_DO decision) is sealed.
+# RE-KEY COST, stated per §1.27(g): every cell minted under seal v3 stops
+# matching and is re-minted once, per (family, lane, sm). The corpus is
+# effectively empty (see the PR/tracker for the measured row count), so this
+# is the cheapest moment the fleet will ever have for it.
+SEAL_VERSION = 4
+SEAL_KEY = "env_seal"
 
 # The behavior namespaces scrub_env ERASES wholesale (pgw#718). Known or
 # unknown, hostile or informational: after the scrub, torch behavior is
@@ -122,6 +111,30 @@ SCRUB_PREFIXES = (
     "NVIDIA_TF32",  # flips numerics under every torch flag
     "OMP_",        # thread counts enter cpp codegen decisions
     "MKL_",
+    # pgw#1049 ambient-input census: the behavior namespaces the census scan
+    # of the installed torch/triton tree proved are CONSULTED and were not
+    # yet erased. Same doctrine — an ambient value is deleted, never honored;
+    # what we need post-scrub is imposed (settings_authority.DECLARED_ENV).
+    "NCCL_",       # collective transport behavior (NVLS/P2P re-imposed by us)
+    "ATEN_",       # ATEN_CPU_CAPABILITY flips CPU kernel dispatch
+    "AOT_INDUCTOR",   # AOTI build/debug knobs (opt level, LTO, debug symbols)
+    "AOTINDUCTOR",    # AOTI repro knobs
+    "AOTI_",          # AOTI runtime knobs
+    "AOT_PARTITIONER_DEBUG",
+    "INDUCTOR_",   # inductor dump/provenance/test knobs
+    "CUTLASS_", "CUTEDSL_",   # kernel-backend tuning
+    "KMP_",        # Intel OpenMP runtime (same family as OMP_/MKL_)
+    "CUDA_LAUNCH_BLOCKING",   # serializes every launch — behavior, not a path
+    "CUDA_MODULE_LOADING",    # lazy/eager module load behavior
+    "CUDA_PROFILE",
+    "ENABLE_PERSISTENT_TMA_MATMUL",   # matmul kernel selection
+    "ENABLE_TEMPLATE_TMA_STORE",
+    "ENABLE_TMA_LOAD_FOR_TEMPLATE_EPILOGUE",
+    "TENSORIFY_PYTHON_SCALARS",       # dynamo scalar handling
+    "FAKE_ALLOW_META",                # functorch fake-tensor behavior
+    "FX_PATCH_GETITEM",               # fx tracing behavior
+    "PARTITIONER_MEMORY_BUDGET_PARETO",  # aot_autograd partitioner behavior
+    "UNSAFE_SKIP_FSDP_MODULE_GUARDS",    # dynamo guard behavior
 )
 
 
@@ -151,90 +164,23 @@ def scrub_env() -> List[str]:
 
 
 def effective_config() -> Dict[str, str]:
-    """The live values of every sealed config flag (read back, never
-    assumed). Post-scrub these are a pure function of (SDK build x
-    declared knobs) — no env var can reach them. The hash-seed facts
-    record interpreter-level ordering entropy (pgw#719). They are RECORDED,
-    not imposed, and that is deliberate rather than unfinished: ``PYTHONHASHSEED``
-    is read by CPython at interpreter startup, so imposing it means re-exec'ing
-    the entrypoint — a boot-path change with its own proof owed (pgw#1034 left
-    it as a named decision). ``SCRUB_PREFIXES`` does not cover ``PYTHON``, so an
-    operator CAN set a seed here; recording it is what makes that divergence
-    visible in the key instead of silently forking the traced graph.
+    """The LIVE values of the sealed config surface — the TRIPWIRE's config
+    fact, never the seal's (pgw#1049: the seal digests the declaration).
+    The hash-seed facts record what this interpreter actually booted with;
+    :func:`establish` refuses when they diverge from the declared
+    ``PYTHONHASHSEED=0`` (imposition is the entrypoint's re-exec —
+    ``settings_authority.ensure_interpreter_env``).
 
     pgw#788: a torchless worker has no matmul/cudnn surface to read back, so it
-    seals the ABSENCE as a fact instead of crashing on the import."""
-    torch = torch_capability.torch_or_none()
-    if torch is None:
-        return {
-            "torch": torch_capability.ABSENT,
-            "python_hash_seed": os.environ.get("PYTHONHASHSEED", ""),
-            "hash_randomization": str(sys.flags.hash_randomization),
-            **host_isa.effective(),
-        }
-
-    return {
-        "float32_matmul_precision": str(torch.get_float32_matmul_precision()),
-        "cuda_matmul_allow_tf32": str(torch.backends.cuda.matmul.allow_tf32),
-        "cudnn_allow_tf32": str(torch.backends.cudnn.allow_tf32),
-        "cudnn_benchmark": str(torch.backends.cudnn.benchmark),
+    reads the ABSENCE as a fact instead of crashing on the import."""
+    base = {
         "python_hash_seed": os.environ.get("PYTHONHASHSEED", ""),
         "hash_randomization": str(sys.flags.hash_randomization),
-        # pgw#754: the host codegen target. Named here (beyond the opaque
-        # inductor digest, which also covers cpp.march/cpp.simdlen) so a
-        # cohort split is legible in the seal itself.
+        # pgw#754: the host codegen target, read back live so a drifted clamp
+        # is named legibly (beyond the opaque inductor digest below).
         **host_isa.effective(),
     }
-
-
-def establish_config(
-    overrides: Optional[Mapping[str, str]] = None,
-) -> Dict[str, str]:
-    """Impose the canonical table (plus DECLARED knob overrides) via torch
-    APIs, then verify the read-back. ``overrides`` is the typed-knob
-    surface (pgw#718): keys must exist in :data:`CANONICAL_CONFIG` — the
-    only route to non-canonical behavior is a declared knob, which is
-    sealed and therefore keyed. An unknown knob refuses, named.
-
-    pgw#788: on a torchless worker there is nothing to impose. The knob names are
-    still validated (that contract is torch-free) and the seal records
-    ``torch: "absent"``. A DECLARED knob is a different matter: every canonical
-    knob is a torch flag, so an endpoint that declares one in a torchless image
-    is misconfigured, and honouring it silently would fork cell identity — so
-    that refuses, named."""
-    table = dict(CANONICAL_CONFIG)
-    if overrides:
-        unknown = sorted(set(overrides) - set(table))
-        if unknown:
-            raise EnvSealError(
-                f"unknown config knob(s) {unknown!r}: not in the canonical "
-                "table (env_seal.CANONICAL_CONFIG) — declare the knob "
-                "there first (one-way door: knobs in, env vars never)")
-        table.update({k: str(v) for k, v in overrides.items()})
-    torch = torch_capability.torch_or_none()
-    if torch is None:
-        if overrides:
-            raise EnvSealError(
-                f"config knob(s) {sorted(overrides)!r} declared on a TORCHLESS "
-                "worker: every canonical knob is a torch flag, so there is "
-                "nothing to impose them on. Either ship torch in this image or "
-                "drop the knob — honouring it silently would fork cell "
-                "identity (pgw#788)")
-        return effective_config()
-    torch.set_float32_matmul_precision(table["float32_matmul_precision"])
-    torch.backends.cuda.matmul.allow_tf32 = (
-        table["cuda_matmul_allow_tf32"] == "True")
-    torch.backends.cudnn.allow_tf32 = (table["cudnn_allow_tf32"] == "True")
-    torch.backends.cudnn.benchmark = (table["cudnn_benchmark"] == "True")
-    effective = effective_config()
-    diffs: List[str] = [
-        f"{name}: imposed {want!r} != effective {effective.get(name)!r}"
-        for name, want in table.items()
-        if effective.get(name) != want
-    ]
-    if diffs:
-        raise EnvSealError("config freeze failed: " + "; ".join(diffs))
-    return effective
+    return {**settings_authority.torch_readback(), **base}
 
 
 # Config entries torch MUTATES as a compile side effect — outputs, not knobs.
@@ -519,20 +465,27 @@ def frozen_library_digests() -> Tuple[Tuple[str, str], ...]:
     return _LIB_SNAPSHOT
 
 
+#: Declared knob overrides this process was established with — part of the
+#: declaration, therefore part of the seal (a knob is keyed identity).
+_ESTABLISHED_OVERRIDES: Optional[Dict[str, str]] = None
+
+
 def effective_seal() -> Dict[str, Any]:
-    """The live seal dict — recorded verbatim in cell metadata. The
-    loaded-libs FACT is the combined digest of the BOOT-frozen library
-    snapshot (identity); the per-library list rides metadata via
-    ``compile_cache.artifact_metadata`` so a mismatch names the library."""
+    """The seal dict — a digest of the DECLARATION (pgw#1049), recorded
+    verbatim in cell metadata. Its settings facts come from
+    ``settings_authority.declaration()``; ambient mutation cannot move them
+    (it trips :func:`assert_seal_unchanged` instead). The one measured fact
+    is ``loaded_libs`` — the combined digest of the BOOT-frozen library
+    snapshot (toolchain CONTENT, not a setting; the per-library list rides
+    metadata via ``compile_cache.artifact_metadata`` so a mismatch names the
+    library)."""
     libs_encoded = json.dumps(
         dict(frozen_library_digests()), sort_keys=True,
         separators=(",", ":"), ensure_ascii=True,
     ).encode()
     return {
         "seal_v": SEAL_VERSION,
-        "posture": guard_closure.posture_snapshot(),
-        "config": effective_config(),
-        "inductor": inductor_config_digest(),
+        **settings_authority.declaration(_ESTABLISHED_OVERRIDES),
         "loaded_libs": hashlib.sha256(libs_encoded).hexdigest()[:16],
     }
 
@@ -545,9 +498,27 @@ def seal_digest(seal: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
-# The boot seal (pgw#719): stored by establish(); every mint trace asserts
-# the live state against it before tracing.
-_BOOT_SEAL: Optional[Dict[str, Any]] = None
+def settings_readback() -> Dict[str, Any]:
+    """The live settings state — the TRIPWIRE surface (pgw#719/pgw#1049).
+
+    Deliberately read-back where :func:`effective_seal` no longer is: the
+    seal states the declaration; this states the process. The ``inductor``
+    fact is the digest of the FULL portable config (wheel defaults included,
+    torch-owned compile outputs excluded — ``_PORTABLE_VOLATILE``), so a
+    mutation of an entry the declaration never names is still caught and
+    refused by name, instead of silently forking the traced graph."""
+    return {
+        "posture": guard_closure.posture_snapshot(),
+        "config": effective_config(),
+        "dynamo": settings_authority.dynamo_readback(),
+        "inductor": inductor_config_digest(),
+    }
+
+
+# The boot read-back (pgw#719): stored by establish() AFTER read-back was
+# verified == declaration; every mint trace asserts the live state against
+# it before tracing.
+_BOOT_READBACK: Optional[Dict[str, Any]] = None
 
 
 def _seal_diff(boot: Mapping[str, Any], live: Mapping[str, Any]) -> List[str]:
@@ -565,20 +536,23 @@ def _seal_diff(boot: Mapping[str, Any], live: Mapping[str, Any]) -> List[str]:
 
 
 def assert_seal_unchanged(label: str = "") -> None:
-    """Point-of-use enforcement (pgw#719): the effective environment must
-    still be the BOOT environment. First call without an established boot
-    seal adopts the current state as boot (embedders/tests); any later
-    drift refuses, naming the fact and both values — endpoint code
-    mutating config/env behind our back becomes a named error, never a
-    silently different graph. The boot-frozen library snapshot is
-    re-digested LIVE here: a substituted native lib (LD_PRELOAD-style,
-    post-boot) is named even though the seal fact itself is frozen."""
-    global _BOOT_SEAL
-    live = effective_seal()
-    if _BOOT_SEAL is None:
-        _BOOT_SEAL = live
+    """Point-of-use enforcement (pgw#719): the LIVE settings must still be
+    the BOOT settings — and boot verified those against the declaration, so
+    a trip is a declaration mismatch by transitivity. First call without an
+    established boot read-back adopts the current state as boot
+    (embedders/tests); any later drift refuses, naming the fact and both
+    values — code mutating config/env behind our back becomes a named error,
+    never a silently different graph, and NEVER a different key (pgw#1049:
+    the seal derives from the declaration and cannot follow the drift). The
+    boot-frozen library snapshot is re-digested LIVE here: a substituted
+    native lib (LD_PRELOAD-style, post-boot) is named even though the seal
+    fact itself is frozen."""
+    global _BOOT_READBACK
+    live = settings_readback()
+    if _BOOT_READBACK is None:
+        _BOOT_READBACK = live
         return
-    diffs = _seal_diff(_BOOT_SEAL, live)
+    diffs = _seal_diff(_BOOT_READBACK, live)
     snapshot = dict(frozen_library_digests())
     if snapshot:
         current = dict(loaded_library_digests())
@@ -608,10 +582,14 @@ LAST_ESTABLISH_SPANS: Dict[str, float] = {}
 
 def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """The boot entry (entrypoint wiring): SCRUB the behavior namespaces,
-    IMPOSE the canonical config (+ declared knobs) and posture, store the
-    boot seal, return it. Never refuses on env content — only on an
-    imposition that does not take effect or an undeclared knob."""
-    global _BOOT_SEAL
+    IMPOSE the declaration (env, torch flags + declared knobs, dynamo shape
+    posture, host-ISA clamp, process posture), verify every read-back
+    against it, store the boot read-back for the tripwire, return the seal.
+    Never refuses on ambient env content — only on an imposition that does
+    not take effect, an undeclared knob, or an interpreter that booted
+    outside the declared env (``settings_authority.ensure_interpreter_env``
+    is the imposition for that one)."""
+    global _BOOT_READBACK, _ESTABLISHED_OVERRIDES
 
     spans: Dict[str, float] = {}
     marks = [time.monotonic()]
@@ -621,18 +599,27 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
         spans[name] = round(marks[-1] - marks[-2], 3)
 
     scrub_env()
+    # Re-impose OUR declared env after the scrub erased the whole namespace
+    # (an ambient value is deleted, never honored), and refuse if the
+    # interpreter itself booted outside the declaration (hash seed).
+    settings_authority.impose_process_env()
+    settings_authority.verify_interpreter_env()
     mark("seal_scrub_s")
-    establish_config(overrides)
+    settings_authority.impose_torch(overrides)
     mark("seal_config_s")
     try:
         host_isa.impose()
     except host_isa.HostIsaError as exc:
         raise EnvSealError(str(exc)) from exc
     mark("seal_isa_s")
+    settings_authority.impose_dynamo()
+    mark("seal_dynamo_s")
     guard_closure.establish_posture()
     mark("seal_posture_s")
     cold_libs = _LIB_SNAPSHOT is None
-    _BOOT_SEAL = effective_seal()
+    _ESTABLISHED_OVERRIDES = dict(overrides) if overrides else None
+    _BOOT_READBACK = settings_readback()
+    seal = effective_seal()
     mark("seal_effective_s")
     # The library pass is timed where it runs (frozen_library_digests), not
     # inferred from `seal_effective_s`: with a pgw#832 memo the pass shrinks
@@ -643,11 +630,10 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     spans["seal_libhash_s"] = _LAST_LIBHASH_S if cold_libs else 0.0
     LAST_ESTABLISH_SPANS.clear()
     LAST_ESTABLISH_SPANS.update(spans)
-    return dict(_BOOT_SEAL)
+    return seal
 
 
 __all__ = [
-    "CANONICAL_CONFIG",
     "LAST_ESTABLISH_SPANS",
     "EnvSealError",
     "SCRUB_PREFIXES",
@@ -658,11 +644,11 @@ __all__ = [
     "effective_config",
     "effective_seal",
     "establish",
-    "establish_config",
     "inductor_config_digest",
     "frozen_library_digests",
     "loaded_library_digests",
     "scrub_env",
     "seal_digest",
+    "settings_readback",
     "write_library_memo",
 ]

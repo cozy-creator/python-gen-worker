@@ -1509,6 +1509,10 @@ def mint(
     # a beat fires would announce the problem after the expensive part has
     # started; reporting it here makes a broken handoff visible at boot.
     report_podguard_status()
+    # pgw#719/pgw#1049: the tripwire, before ANY trace — drifted settings
+    # refuse by name here; they can no longer move the (declaration-derived)
+    # seal, so this is the only place ambient mutation can surface.
+    env_seal.assert_seal_unchanged("aot_mint")
     progress = MintProgress(
         inductor_configs=inductor_configs, on_progress=on_progress)
     if phase_snapshot is not None:

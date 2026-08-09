@@ -85,7 +85,7 @@ def test_establish_wires_the_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(inductor_config.cpp, "march", None)
     monkeypatch.setattr(inductor_config.cpp, "simdlen", None)
-    monkeypatch.setattr(env_seal, "_BOOT_SEAL", None)
+    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     seal = env_seal.establish()
     assert seal["config"]["cpp_march"] == host_isa.mint_march()
 

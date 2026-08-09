@@ -1287,7 +1287,6 @@ def _arming_policy(
             family, loading.pipeline_weight_lane(pipe), bucket,
             contract=cell_key.contract_digest(
                 cc.declared_contract_facts(cfg)),
-            regional=bool(getattr(cfg, "regional", False)),
         )
         key = arm_key.digest
     except Exception as exc:  # noqa: BLE001 — key axes must be computable

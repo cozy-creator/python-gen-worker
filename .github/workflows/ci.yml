@@ -213,6 +213,21 @@ jobs:
       - name: pgw#931 guard - config reads outside the pipeline
         run: uv run python scripts/lint_config_reads.py
 
+      # GATING (pgw#1049): exactly ONE authority writes torch settings
+      # (`us -> pytorch settings`). Any write outside the authority modules
+      # needs a CLASSIFIED line in scripts/settings_writers_allowlist.txt;
+      # stale rows are red too.
+      - name: pgw#1049 guard - torch-settings writes outside the authority
+        run: uv run python scripts/lint_settings_writers.py
+
+      # GATING (pgw#1049): the ambient-input census's structural claims —
+      # IMPOSED rows exist in DECLARED_ENV, NEUTRALIZED rows are actually
+      # scrub-covered, watched env literals in the tree are classified. The
+      # completeness half (against the INSTALLED torch) runs in `tests` as
+      # tests/test_ambient_census_pgw1049.py.
+      - name: pgw#1049 guard - ambient-input census structural claims
+        run: uv run python scripts/lint_ambient_census.py
+
       # GATING (pgw#891/pgw#904): a connected worker may not reconstruct or
       # substitute a Hub decision. The real repair is pgw#891's exact
       # ExecutionSpec and its schema half is th#1457's, so the deletion cannot

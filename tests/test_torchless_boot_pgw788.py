@@ -61,7 +61,7 @@ def torchless(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_torchless_worker_completes_the_boot_seal(torchless, monkeypatch):
-    monkeypatch.setattr(env_seal, "_BOOT_SEAL", None, raising=False)
+    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None, raising=False)
     seal = env_seal.establish()
 
     assert seal["config"]["torch"] == torch_capability.ABSENT
@@ -99,16 +99,20 @@ def test_torchless_posture_assertion_agrees_with_its_own_seal(torchless):
 def test_declared_knob_on_a_torchless_worker_refuses_by_name(torchless):
     """Every canonical knob is a torch flag. Silently ignoring one would fork
     cell identity, so a torchless worker that declares one refuses."""
-    with pytest.raises(env_seal.EnvSealError) as exc:
-        env_seal.establish_config({"cudnn_benchmark": "True"})
+    from gen_worker import settings_authority as sa
+
+    with pytest.raises(sa.SettingsImpositionError) as exc:
+        sa.impose_torch({"cudnn_benchmark": "True"})
     assert "TORCHLESS" in str(exc.value)
     assert "cudnn_benchmark" in str(exc.value)
 
 
 def test_unknown_knob_still_refuses_without_torch(torchless):
     """The knob-name contract is torch-free and must not be skipped."""
-    with pytest.raises(env_seal.EnvSealError) as exc:
-        env_seal.establish_config({"not_a_knob": "1"})
+    from gen_worker import settings_authority as sa
+
+    with pytest.raises(sa.SettingsImpositionError) as exc:
+        sa.impose_torch({"not_a_knob": "1"})
     assert "not_a_knob" in str(exc.value)
 
 

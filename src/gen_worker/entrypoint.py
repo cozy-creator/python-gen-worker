@@ -12,27 +12,16 @@ import os
 import faulthandler
 import signal
 
-# Reduce CUDA allocator fragmentation for tight-VRAM worker processes.
-# Set BEFORE any module imports torch (PyTorch reads this env var only at
-# first cudaMalloc; setting it later is a no-op). gen-worker entrypoint is
-# the first module loaded in every worker process, so putting it here gives
-# library-wide coverage across conversion / inference / training workers.
-#
-# `setdefault` so an operator-set value (Dockerfile ENV or docker-compose env)
-# overrides. The flag uses CUDA's virtual-memory APIs to grow allocator
-# segments on demand, recovering hundreds of MiB of "reserved-but-unallocated"
-# headroom that the default fixed-segment allocator wastes. See:
-# https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# pgw#1049: the declared process env (PYTORCH_CUDA_ALLOC_CONF, the autograd
+# cache disable, PYTHONHASHSEED for children), imposed BEFORE any module
+# imports torch — several are read at torch import / first cudaMalloc. The
+# entrypoint is the first module loaded in every worker process, so this is
+# library-wide coverage; the values and their rationales live in ONE place,
+# settings_authority.DECLARED_ENV. Imposed, not setdefault'd: an ambient
+# value would be erased by env_seal.scrub_env anyway (never honored).
+from .settings_authority import impose_process_env  # noqa: E402
 
-# gw#608: compile-cell portability requires the (portable) FxGraphCache to be
-# the lookup surface — the AOTAutogradCache key embeds a process memory
-# address (ASLR) and can never hit across pods. TORCHINDUCTOR_AUTOGRAD_CACHE
-# is an `env_name_force` config read ONCE at torch import, and runtime config
-# assignments are thread-local (ContextVar) in torch>=2.13, so this must be
-# set here, before any torch import, to bind every thread and every
-# compile-worker subprocess. See compile_cache._disable_aot_autograd_cache.
-os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "0")
+impose_process_env()
 
 # pgw#763: this process becomes the CONTROL PARENT — gRPC stream, identity,
 # JWT, child supervision — and must run BEFORE the heavy imports below so it
@@ -40,6 +29,13 @@ os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "0")
 # with GEN_WORKER_COMPUTE_CHILD=1) and only ever exits deliberately. The split
 # is unconditional; only a compute child falls through to the imports below.
 if __name__ == "__main__":
+    # pgw#1049: interpreter-level declared env (PYTHONHASHSEED) — CPython
+    # read it at interpreter start, so a pod whose image env lacks it gets
+    # ONE re-exec here, before the procsplit fork; every child inherits it.
+    from .settings_authority import ensure_interpreter_env  # noqa: E402
+
+    ensure_interpreter_env()
+
     from .procsplit import is_compute_child  # noqa: E402
 
     if not is_compute_child():

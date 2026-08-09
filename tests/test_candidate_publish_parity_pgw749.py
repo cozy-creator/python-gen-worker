@@ -65,7 +65,7 @@ def _pinned_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         cc, "static_code_closure",
         lambda roots=(): (("gen_worker/compile_cache.py", "3" * 16),))
     monkeypatch.setattr(cc, "content_keys", lambda: ())
-    monkeypatch.setattr(env_seal, "_BOOT_SEAL", None)
+    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     monkeypatch.setattr(env_seal, "_LIB_SNAPSHOT", None)
     yield
 

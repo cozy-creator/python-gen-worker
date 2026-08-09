@@ -51,6 +51,8 @@ from datetime import timedelta
 from typing import Any, Callable, List, Optional, Sequence, Tuple, cast
 import multiprocessing as mp
 
+from .. import settings_authority
+
 logger = logging.getLogger(__name__)
 
 # A follower that has not reached the store rendezvous by this deadline is
@@ -180,7 +182,9 @@ def _refuse_nvls_multicast() -> None:
     refusing.
     """
     previous = os.environ.get(_NVLS_ENV)
-    os.environ[_NVLS_ENV] = "0"
+    # pgw#1049: the write is the settings authority's (NCCL_NVLS_ENABLE=0 is
+    # in DECLARED_ENV); this site keeps the drop-an-override warning below.
+    settings_authority.impose_process_env()
     if previous not in (None, "0"):
         logger.warning(
             "%s was %r; overwritten to 0. NVLS multicast cannot be bound in "

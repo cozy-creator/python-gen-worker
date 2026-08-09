@@ -204,17 +204,19 @@ def test_establish_config_imposes_the_serving_posture() -> None:
     """The canonical table IS the pgw#654 serving posture (TF32 on):
     establish must impose it from ANY prior state and verify the read-back
     — code decides the flags, never a library default or an env var."""
+    from gen_worker import settings_authority as sa
+
     before = torch.backends.cudnn.allow_tf32
     try:
         torch.backends.cudnn.allow_tf32 = False  # non-canonical prior state
-        effective = _env_seal().establish_config()
+        effective = sa.impose_torch()
         assert effective["cudnn_allow_tf32"] == "True"
         assert torch.backends.cudnn.allow_tf32 is True
         assert effective["float32_matmul_precision"] == "high"
-        assert _env_seal().effective_config() == effective
+        assert sa.torch_readback() == effective
     finally:
         torch.backends.cudnn.allow_tf32 = before
-        _env_seal().establish_config()
+        sa.impose_torch()
 
 
 def test_seal_digest_tracks_config_flags() -> None:

@@ -36,7 +36,6 @@ from functools import lru_cache
 from typing import Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, Union
 
 from . import torch_capability
-import threading
 
 logger = logging.getLogger(__name__)
 
@@ -134,41 +133,22 @@ def mint_simdlen(march: Optional[str]) -> Optional[int]:
 
 
 def _impose_default(inductor_config: object, key: str, value: object) -> None:
-    """Write the PROCESS-WIDE fallback for an inductor config key.
+    """Process-wide fallback write, via the ONE shared mechanism
+    (``settings_authority.impose_config_default`` — pgw#1049), wrapped so
+    this module's callers keep their typed :class:`HostIsaError`."""
+    from . import settings_authority
 
-    ``inductor_config.cpp.march = x`` sets a ``user_override``, and torch
-    documents that layer as thread-local — it is a ``ContextVar``, so only
-    the thread that assigned it ever reads it back. Every OTHER thread falls
-    through the precedence chain to ``default``, which is the layer this
-    writes. Nothing else in the chain is settable at runtime: ``alias`` and
-    the two ``env_value_*`` layers are resolved once at install time.
-    """
-    entry = getattr(inductor_config, "_config", {}).get(key)
-    if entry is None:
+    try:
+        settings_authority.impose_config_default(inductor_config, key, value)
+    except settings_authority.SettingsImpositionError as exc:
         raise HostIsaError(
-            f"isa clamp cannot reach a process-wide target: torch's inductor "
-            f"config has no {key!r} entry to set a default on. torch's config "
-            f"internals changed; the clamp must be re-seated before any host "
-            f"compile can be trusted to be portable.")
-    entry.default = value
+            f"isa clamp cannot reach a process-wide target: {exc}") from exc
 
 
 def _read_in_fresh_thread(fn: object) -> object:
-    """Run ``fn`` on a brand-new thread and return its value.
+    from . import settings_authority
 
-    A fresh thread starts with an empty ``ContextVar`` context, so this reads
-    exactly what a background compile thread would read.
-    """
-
-    box: Dict[str, object] = {}
-
-    def _run() -> None:
-        box["v"] = fn()  # type: ignore[operator]
-
-    t = threading.Thread(target=_run, name="host-isa-readback", daemon=True)
-    t.start()
-    t.join()
-    return box.get("v")
+    return settings_authority.read_in_fresh_thread(fn)  # type: ignore[arg-type]
 
 
 def impose() -> Dict[str, str]:
