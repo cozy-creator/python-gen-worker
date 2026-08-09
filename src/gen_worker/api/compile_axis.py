@@ -123,7 +123,7 @@ class PayloadAxis:
         self._matchers = matchers
 
     def classify(self, value: Any) -> Optional[str]:
-        """The class name ``value`` falls in, or None (out of contract)."""
+        """The class name ``value`` falls in, or None (outside the envelope)."""
         for name, warm, match in zip(self.class_names, self.warm_values, self._matchers):
             if match is not None:
                 try:

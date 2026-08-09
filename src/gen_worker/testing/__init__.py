@@ -63,7 +63,7 @@ from typing import (
 import msgspec
 
 from ..api.binding import ModelRef
-from ..api.shape_contract import (
+from ..api.sdk_shape import (
     DELETED_FIELDS,
     DeclarationShapeError,
     DeletedField,

@@ -13,6 +13,33 @@
 > packing or publishing an inductor cache are history; the keying, verification
 > and lane material still applies to the cell that survived.
 
+## Vocabulary: the graph digest is a fact, the envelope is a promise
+
+A cell states two different kinds of thing about itself, and keeping them apart
+is what makes its refusals readable:
+
+- **The graph digest** — the digest of the traced graph. A MEASURED FACT about
+  the program that was exported: same computation, same digest, on any pod. One
+  derivation, used identically when the cell is stamped, looked up and admitted.
+- **The envelope** — the DECLARED serving region: which resolutions, text
+  lengths, guidance values and batch sizes the cell promises to serve. As in a
+  flight envelope: a declared region of operation, with graceful fallback
+  outside it. A request outside the envelope is not an error — it is served
+  eager and named (`request out of declared envelope, serving eager`).
+- **`input_contract`** — DERIVED, not a third fact. It is a projection of the
+  packaged program's own placeholder list and container arities, read off the
+  artifact rather than declared beside it. A label carried alongside an artifact
+  can drift from it, and a label that can drift is not an identity (pgw#1058).
+
+Widening the envelope moves the promise; it does not move the fact. The cell key
+still fuses both halves into one `contract` axis — splitting it into
+`graph` x `envelope` is a single coordinated change to the key schema (pgw#1059,
+landing pre-launch as a REDEFINITION of `ck1` with the disposable corpus purged),
+so the KEY still says `contract` while the prose already says which half it
+means. Do not rename an axis, a metadata block key or a wire field ahead of that
+change: a name that participates in a digest re-keys every published cell the
+moment it moves.
+
 Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
 (model, shape) and needs a C toolchain prod worker images don't ship. The
 split:
@@ -51,10 +78,10 @@ gate + `root` is a platform-reserved slug tenants cannot claim). Tenant
 custom-code endpoints
 get per-release private caches (same-principal rule) — not implemented yet.
 
-Family keying: caches key on the traced graph + shapes, not weights — one
-artifact serves every fine-tune of a family. Add a boot `warmup()` that
-renders each declared shape (see examples/flux2-klein-image) so requests
-never see the (cache-served) compile.
+Family keying: caches key on the graph digest + the declared envelope, not on
+weights — one artifact serves every fine-tune of a family. Add a boot `warmup()`
+that renders each shape the envelope declares (see examples/flux2-klein-image)
+so requests never see the (cache-served) compile.
 
 ## Self-loading (str/Path-slot) endpoints — pgw#517
 
@@ -65,7 +92,7 @@ the worker loads itself — a slot annotated with the pipeline class (e.g.
 **self-loading**: the endpoint constructs (and places) the pipeline inside
 its own `setup()`, so the executor never sees the object and has nothing to
 arm compile on. Declaring `compile=Compile(...)` on such an endpoint used to
-be silently inert — the manifest/shape contract still got seeded, but
+be silently inert — the manifest's compile block still got seeded, but
 nothing ever compiled. Registration (`registry.py` `_validate_compile_arms`,
 at decoration time, not discovery) now raises on this combination. It is a
 best-effort source scan, so it stays silent when `inspect.getsource(setup)`

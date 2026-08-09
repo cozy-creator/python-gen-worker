@@ -3,7 +3,7 @@
 The load-bearing test in this file is the RANGE-COLLISION one: pgw#704 measured
 three sdxl exports differing ONLY in declared dynamic range collapsing to one
 node-only digest (``9dd33abbc7617d98``), which would let a worker adopt a cell
-that refuses the traffic its key promised. Everything else here pins the
+that refuses the envelope its key promised. Everything else here pins the
 properties ck6 exists for — same graph shares a key, weight values never key,
 different graph never shares.
 """
@@ -110,8 +110,8 @@ def test_declared_range_must_not_collide_pgw704_s8():
     digests = [gh.digest_lines(each) for each in lines]
 
     # The measured finding this test exists for: the NODES are identical across
-    # all three, so a node-only hash gives one digest for three artifacts that
-    # admit different traffic.
+    # all three, so a node-only hash gives one digest for three artifacts
+    # whose declared envelopes differ.
     assert _node_lines(lines[0]) == _node_lines(lines[1]) == _node_lines(lines[2])
     node_only = {gh.digest_lines(_node_lines(each)) for each in lines}
     assert len(node_only) == 1, "premise broken: nodes were expected to collide"
@@ -119,7 +119,7 @@ def test_declared_range_must_not_collide_pgw704_s8():
     # ...and the fix: ranges are IN the canonical form, so the three keys differ.
     assert len(set(digests)) == 3, (
         "three exports admitting different shape ranges share a graph hash — "
-        "adopting one against another's key refuses traffic the key promised")
+        "adopting one against another's key refuses the envelope the key promised")
     assert len({_sym_lines(each) for each in lines}) == 3
     for line_set in lines:
         assert _sym_lines(line_set), "no range facts recorded for a dynamic dim"

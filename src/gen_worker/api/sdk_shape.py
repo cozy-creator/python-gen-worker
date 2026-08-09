@@ -1,9 +1,15 @@
-"""The SDK's own declaration-shape contract (pgw#942).
+"""The shape of the SDK's OWN declaration surface (pgw#942).
+
+Nothing here concerns a served graph: this is the SDK stating which fields
+its declaration types do and do not have. It was ``api.shape_contract`` until
+pgw#1060, which took the name back — ``shape_contract`` is a cell-metadata
+block about a compiled graph, and one name for two unrelated things is what
+the naming rulings exist to stop.
 
 A field that the SDK DELETED is a fact only the SDK knows. Before this
 module, 25 of 28 endpoint packages asserted that knowledge for it — 91
 ``assert not hasattr(...)`` lines plus 46 ``for deleted in (...)`` loops,
-each naming fields the pinned SDK cannot ship. That is a shape contract
+each naming fields the pinned SDK cannot ship. That is one declaration shape
 written 25 times by the parties least able to maintain it: one rename here
 broke 25 downstream suites at once.
 
@@ -68,7 +74,7 @@ DELETED_FIELDS: Tuple[DeletedField, ...] = (
         name="regimes",
         deleted_at="0.60.0",
         reason=(
-            "SDK v2 (pgw#647): the endpoint declares one shape contract, not a set "
+            "SDK v2 (pgw#647): the endpoint declares one envelope, not a set "
             "of named operating regimes the hub had to re-derive."
         ),
     ),

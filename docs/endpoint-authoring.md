@@ -69,7 +69,14 @@ annotation (`FluxPipeline` → `from_pretrained`; `str`/`Path` → the local
 snapshot dir), and owns device placement and low-VRAM offload. Endpoint code
 never calls `.to("cuda")`, `enable_model_cpu_offload()`, or `empty_cache()`.
 
-## Tensor state: `register_buffer`, never a plain attribute (pgw#857)
+## The weight-binding contract: `register_buffer`, never a plain attribute (pgw#857)
+
+A compiled cell rebinds weights **by name** at load, which is what lets one cell
+serve every fine-tune of a family. That only holds if every tensor your model
+needs is reachable through `state_dict()`. **The weight-binding contract** is
+that rule: a tensor your module holds is either a named state-dict entry the CAS
+delivers and rebinds, or it is baked into the artifact — there is no third
+outcome, and you choose which one by how you assign it.
 
 If your model class holds a tensor that is **not** a learned parameter — a rope
 frequency table, a precomputed mask, any "just a cache" — **register it as a
@@ -103,6 +110,28 @@ into every compiled artifact, and you have coupled your cell identity to a
 number you probably meant to be a cache.
 
 A registered buffer costs nothing and stays a weight.
+
+### Corollary: a GB-scale derived tensor is a saved component, not a buffer (pgw#1056)
+
+The buffer rule above assumes the tensor is small enough that computing it at
+`__init__` is free. **Scale decides, not provenance.** A large tensor derived
+from config — MiniMax-H3's precomputed step-count positional tables are GBs — is
+neither an init-computed buffer nor a baked literal. It is **saved model data**:
+a named CAS component with its own safetensors header, bound by name exactly
+like a weight (the composition system already does this for fp8 overrides).
+Precompute it once, publish it as a component, and delete the generator.
+
+The test is size, not where the numbers came from: big ⇒ component; only
+trivially recomputable state stays a `register_buffer`-computed tensor.
+
+### Corollary: `__init__` must be meta-device safe (pgw#1056, coming)
+
+The zero-download forge instantiates your module on the **meta device** — code
+plus config plus the safetensors header, no tensor bytes. A module that does
+REAL tensor computation in `__init__` breaks that silently. A gate is coming
+that detects materialized real tensors at instantiation and refuses with
+authoring guidance, so the violation is caught at mint time instead of after a
+cell ships. Write `__init__` so it allocates shapes and dtypes, never values.
 
 ## Imports go at module top — including torch
 
@@ -369,7 +398,7 @@ with its real `sha256` and `size_bytes`. `ctx.log` and `ctx.progress` are
 captured at the emitter seam, so neither needs an override either.
 
 **Do not assert the SDK's own shape.** A field the SDK deleted is the SDK's
-fact: it is listed once in `gen_worker.api.shape_contract.DELETED_FIELDS`
+fact: it is listed once in `gen_worker.api.sdk_shape.DELETED_FIELDS`
 and asserted by the SDK's suite. An endpoint asserts what IT declares, and
 gets the deleted-field walk for free:
 

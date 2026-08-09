@@ -119,7 +119,8 @@ Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
   `Civitai`, `ModelScope`, `ModelRef`
 - Model selection: `Model`, `ModelChoice`, `ModelDefaults`, `Slot`,
   `ResolvedSlot`, `gen_worker.families.GenerationDefaults`
-- Compile contract: `Compile`, `CompileAxis`, `AxisClass`, `DynamicDim`,
+- Compile envelope (the declared serving region — resolutions, text lengths,
+  guidance, batch): `Compile`, `CompileAxis`, `AxisClass`, `DynamicDim`,
   `pad_text_sequence`; per-request views: `ctx.for_request` / `gen_worker.view`
 - Contexts: `RequestContext` (≤15 members), `ConversionContext`,
   `DatasetContext`, `TrainingContext`
@@ -165,6 +166,8 @@ hard-fails if `gen_worker` resolves outside `src/`).
   `prefetch`, `field=value` grammar, `--offline`, exit codes.
 - [docs/dockerfile.md](docs/dockerfile.md) — bring-your-own-Dockerfile contract.
 - [docs/endpoint-envs.md](docs/endpoint-envs.md) — tenant envs/secrets.
+- [docs/compile-cache.md](docs/compile-cache.md) — compiled cells: the graph
+  digest vs the declared envelope, kernel lanes, JIT intake.
 
 ## Examples
 

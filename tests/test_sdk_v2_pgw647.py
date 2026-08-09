@@ -181,7 +181,7 @@ def test_enum_axis_from_literal():
     (axis,) = extract_payload_axes("owner", _LitIn)
     assert axis.class_names == ("1:1", "3:4", "16:9")
     assert axis.classify("3:4") == "3:4"
-    assert axis.classify("9:16") is None  # out of contract
+    assert axis.classify("9:16") is None  # outside the envelope
 
 
 def test_axis_warm_must_satisfy_its_own_match():
