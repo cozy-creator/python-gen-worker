@@ -145,9 +145,11 @@ class _Harness:
         seed_forward_s: float = 0.0,
         tenant_forward_s: float = 0.01,
         tenant_oom_once: bool = False,
+        mint_lives_until_abandoned: bool = False,
     ) -> None:
         self.tmp_path = tmp_path
         self.compile_delay_s = compile_delay_s
+        self.mint_lives_until_abandoned = mint_lives_until_abandoned
         self.seed_forward_s = seed_forward_s
         self.tenant_forward_s = tenant_forward_s
         self.tenant_oom_once = tenant_oom_once
@@ -227,6 +229,35 @@ class _Harness:
         # The child takes `compile_delay_s` to produce its cell, and honours the
         # parent's abandon signal — which is what a tenant OOM pulls.
         abandon = kwargs.get("abandon")
+        if self.mint_lives_until_abandoned:
+            # pgw#1037: a row that asserts the mint LOSES an eviction race may
+            # not express the mint's liveness as a duration. `compile_delay_s`
+            # made the child finalize after a fixed 1.5 s while the test raced
+            # an unbounded boot -> dispatch -> OOM latency to reach the
+            # eviction first; on a loaded runner the mint won, published, and
+            # the row failed JOB_STATUS_RETRYABLE != OK for a path the code
+            # under test had handled correctly (three CI cycles, two lanes,
+            # then twice consecutively on the 0.96.0 cut).
+            #
+            # The child now lives on a CONDITION: it finishes when, and only
+            # when, the parent abandons it. The 60 is spelled INLINE and is a
+            # HANG bound, not a budget for work — gw#666's own escape hatch
+            # ("spell the bound inline") for the one case where absence is the
+            # failure: a product regression that never abandons must fail RED
+            # and NAMED rather than hang the suite. No healthy run approaches
+            # it; the eviction it waits for lands in milliseconds.
+            assert abandon is not None, (
+                "the mint lane must hand the child an abandon signal")
+            try:
+                await asyncio.wait_for(abandon.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                raise AssertionError(
+                    "the parent never abandoned the mint — the eviction path "
+                    "never ran"
+                ) from None
+            return mint_delegate.DelegatedResult(
+                status=mint_delegate.ABANDONED, attempts=1,
+                detail="abandoned by the parent")
         if self.compile_delay_s:
             if abandon is not None:
                 try:
@@ -436,7 +467,8 @@ def test_tenant_oom_evicts_the_mint_and_the_request_completes(
     freed, and the same request re-runs eager to OK on this same worker."""
     h = _Harness(
         tmp_path, monkeypatch,
-        compile_delay_s=1.5, seed_forward_s=0.05, tenant_oom_once=True)
+        compile_delay_s=0.02, seed_forward_s=0.05, tenant_oom_once=True,
+        mint_lives_until_abandoned=True)
 
     async def _run() -> None:
         await h.boot()
