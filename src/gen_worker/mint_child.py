@@ -657,7 +657,11 @@ def _mint_aot(
             # pgw#947: the MEASURED serving-kernel lane for this card. The
             # discrete verdict lands in the packed envelope (serving reads it
             # instead of an SM tuple); the numbers ride the result metadata.
-            execution_lane_verdict=execution_lane_verdict)
+            execution_lane_verdict=execution_lane_verdict,
+            # pgw#1053: this process exits when the mint ends — its pipeline
+            # serves nobody after the last export, so surrender it and let
+            # the compile pool re-derive K against the freed card.
+            release_residents=True)
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod
@@ -675,7 +679,13 @@ def _mint_aot(
         os.replace(artifact, target)
     frame(phase="finalize", note=f"cell {result.cell_key}")
 
-    peak = _peak_vram()
+    # pgw#1053: the release resets the allocator's high-water so the pool can
+    # regrant K — the TRUE peak was banked into the timings first, and the
+    # report must carry it or `record_child_peak` learns the post-release
+    # residue instead of what the mint really held.
+    peak = max(
+        _peak_vram(),
+        int(result.timings.get("peak_vram_before_release_bytes", 0) or 0))
     return MintReport(
         status="minted",
         artifact=str(target),

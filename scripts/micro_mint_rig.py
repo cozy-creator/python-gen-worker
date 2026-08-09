@@ -266,11 +266,18 @@ def _mint_slot(tree: Path, ref_path: str) -> Any:
 def _mint_request(
     workdir: Path, tree: Path, veh: Any, *,
     ordinal: int = 0, cap_bytes: int = MINT_VRAM_BYTES,
+    entry_device_peak_bytes: int = 0,
 ) -> Any:
     """Built through `mint_delegate.build_request` — the REAL parent chain.
 
     Not a hand-written `MintRequest`: the thing under test is the handoff, and
     a hand-written request is the one shape the handoff can never produce.
+
+    ``entry_device_peak_bytes`` is the pgw#877 banked measurement a serving
+    parent would hand down after a previous mint on the pod — the rig
+    forwards an operator-supplied value so a GPU cycle can open on the
+    measured basis and take the pool path (K>1), which is where pgw#1052's
+    overlap and pgw#1053's release are observable.
     """
     from gen_worker import mint_delegate
     from gen_worker.mint_delegate import MintTask
@@ -287,7 +294,8 @@ def _mint_request(
         slots={"pipeline": _mint_slot(tree, veh.ref_path)}, device=ordinal,
         execution_lane="", configs={})
     return mint_delegate.build_request(
-        task, workdir=workdir, cap_bytes=cap_bytes)
+        task, workdir=workdir, cap_bytes=cap_bytes,
+        entry_device_peak_bytes=int(entry_device_peak_bytes))
 
 
 #: What the rig's endpoint function DECLARES, the way a real build reads it off
@@ -323,6 +331,7 @@ def run_cycle(
     device: str = "auto", vehicle: str = DEFAULT_VEHICLE,
     hub_env_mode: bool = False,
     hub_env_entries: Optional[Dict[str, str]] = None,
+    entry_device_peak_bytes: int = 0,
 ) -> RigResult:
     from harness import rig_vehicles
 
@@ -383,7 +392,8 @@ def run_cycle(
     request = _mint_request(workdir, tree, veh,
                             ordinal=int(dev["device_ordinal"]),
                             cap_bytes=(MINT_VRAM_BYTES
-                                       if dev["device_kind"] == "cuda" else 0))
+                                       if dev["device_kind"] == "cuda" else 0),
+                            entry_device_peak_bytes=entry_device_peak_bytes)
     leg.ok, leg.seconds = True, time.monotonic() - g0
     entries = _declared_entries(veh)
     leg.facts = {"family": request.family,
@@ -756,6 +766,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--hub-env-entry", action="append", default=[], metavar="NAME=VALUE",
         help="an endpoint_env_entries row the operator has set; repeatable. "
              "Only names the release DECLARES are delivered.")
+    parser.add_argument(
+        "--entry-device-peak-bytes", type=int, default=0,
+        help="pgw#877/#1052: hand the child a banked per-entry device peak, "
+             "as a serving parent would after a previous mint on the pod — "
+             "opens the width on the measured basis so a GPU cycle takes the "
+             "pool path (K>1), where the overlap and the residents release "
+             "are observable")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     root = Path(args.root)
@@ -773,7 +790,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = run_cycle(root, stage=args.stage, force_load=args.force_load,
                            device=args.device, vehicle=args.vehicle,
                            hub_env_mode=args.hub_env,
-                           hub_env_entries=entries)
+                           hub_env_entries=entries,
+                           entry_device_peak_bytes=args.entry_device_peak_bytes)
     except RigRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
