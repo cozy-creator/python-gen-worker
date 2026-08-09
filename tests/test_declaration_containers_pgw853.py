@@ -102,7 +102,7 @@ def _list_declaration(repeat: Any = "N") -> Compile:
         ),
         inputs=(
             Input("x", shape=(("config", "in_channels"), 1, "H_lat", "W_lat"),
-                  repeat=repeat),
+                  repeat=repeat, dtype="model"),
             Input("t", shape=("N",), dtype="float32"),
         ),
         shape_strategy="dynamic-collapse",
@@ -122,7 +122,7 @@ def _template_declaration() -> Compile:
             Dim("W_pat", carried_by=(("hidden_states", 2),)),
         ),
         classes=(GraphClass(dims={"B": 1, "H_pat": 4, "W_pat": 6}),),
-        inputs=(Input("hidden_states", shape=("B", "H_pat", "W_pat")),),
+        inputs=(Input("hidden_states", shape=("B", "H_pat", "W_pat"), dtype="model"),),
         args=(
             Arg("img_shapes", template=[(1, "H_pat", "W_pat")], repeat="B"),
             Arg("return_dict", False),
@@ -309,7 +309,7 @@ def test_a_template_naming_an_undeclared_dim_refuses_at_MINT_not_import() -> Non
         targets=("transformer",), text_len=0, shapes=((64, 64),),
         dims=(Dim("B", carried_by=(("hidden_states", 0),)),),
         classes=(GraphClass(dims={"B": 1}),),
-        inputs=(Input("hidden_states", shape=("B", 4, 6)),),
+        inputs=(Input("hidden_states", shape=("B", 4, 6), dtype="model"),),
         args=(Arg("img_shapes", template=[[(1, "NOPE", 2)]]),),
         shape_strategy="static-rows", warm_changes_key=False,
     )
@@ -324,7 +324,7 @@ def test_a_zero_arity_container_is_refused_by_name() -> None:
         **{**{f: getattr(decl, f) for f in decl.__struct_fields__},
            "classes": (GraphClass(dims={"N": 2, "H_lat": 8, "W_lat": 8}),),
            "inputs": (Input("x", shape=(4, 1, "H_lat", "W_lat"),
-                            repeat=("config", "missing_field")),
+                            repeat=("config", "missing_field"), dtype="model"),
                       Input("t", shape=("N",), dtype="float32"))})
     with pytest.raises(MintRefused) as excinfo:
         declared_inputs(_ListModule(), _spec(bad.family), bad)
@@ -358,7 +358,7 @@ def test_existing_declarations_are_byte_identical() -> None:
     4b/9b, wan t2v/i2v/ti2v and sdxl — declarations AND derived entries,
     dynamic rows included.
     """
-    plain = Input("hidden_states", shape=("B", 4, 6))
+    plain = Input("hidden_states", shape=("B", 4, 6), dtype="model")
     assert "repeat" not in plain.as_row()
     assert set(plain.as_row()) == {"name", "shape", "dtype", "value", "targets"}
 
@@ -372,7 +372,7 @@ def test_existing_declarations_are_byte_identical() -> None:
         shapes=((64, 64),),
         dims=(Dim("B", carried_by=(("hidden_states", 0),)),),
         classes=(GraphClass(dims={"B": 1}),),
-        inputs=(Input("hidden_states", shape=("B", 4, 6)),),
+        inputs=(Input("hidden_states", shape=("B", 4, 6), dtype="model"),),
         args=(Arg("return_dict", False),),
         shape_strategy="static-rows", warm_changes_key=False,
     )
@@ -410,7 +410,7 @@ def _arg_carried_declaration(rows: Any = None) -> Compile:
             Dim("W_pat", carried_by=(("img_shapes", 2),)),
         ),
         classes=rows or (GraphClass(dims={"B": 1, "H_pat": 4, "W_pat": 6}),),
-        inputs=(Input("hidden_states", shape=("B", 4, 6)),),
+        inputs=(Input("hidden_states", shape=("B", 4, 6), dtype="model"),),
         args=(Arg("img_shapes", template=[(1, "H_pat", "W_pat")], repeat="B"),
               Arg("return_dict", False)),
         shape_strategy="static-rows", warm_changes_key=False,
@@ -468,6 +468,6 @@ def test_a_dim_binding_nothing_declared_is_still_refused() -> None:
             targets=("transformer",), text_len=0, shapes=((64, 64),),
             dims=(Dim("H_pat", carried_by=(("return_dict", 1),)),),
             classes=(GraphClass(dims={"H_pat": 4}),),
-            inputs=(Input("hidden_states", shape=(1, 4, 6)),),
+            inputs=(Input("hidden_states", shape=(1, 4, 6), dtype="model"),),
             args=(Arg("return_dict", False),),
             shape_strategy="static-rows", warm_changes_key=False)

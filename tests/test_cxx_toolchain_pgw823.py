@@ -127,7 +127,7 @@ def test_the_parent_no_longer_second_guesses_the_image(
         family="sdxl", targets=("unet",),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 2}),),
-        inputs=(Input("sample", shape=("B", 4)),),
+        inputs=(Input("sample", shape=("B", 4), dtype="model"),),
         shape_strategy="static-rows", warm_changes_key=False)
     # Patch the caller's binding too: fleet_cells imports the name at module
     # scope (pgw#976), so patching only export_contract leaves the real one bound.

@@ -40,6 +40,7 @@ from .aot_contract import ADAPTER_FORK, DynamicDim, ExportSpec, MintRefused
 from .api.decorators import Compile
 from .api.export_contract import (
     DYNAMIC_COLLAPSE,
+    MODEL_DTYPE,
     STATIC_ROWS,
     Arg,
     Dim,
@@ -577,15 +578,25 @@ def declared_inputs(
 
     values: Dict[str, Any] = {}
     for row in rows:
-        if row.dtype:
+        # pgw#1058: dtype is a REQUIRED declaration — "model" is the explicit
+        # inheritance word, and an empty dtype (only reachable through a
+        # hand-built row that dodged Input's own validation) is refused
+        # rather than guessed. The silent module-dtype default is what minted
+        # sdxl's scalar timestep bfloat16 against float32 traffic: 36 entries,
+        # zero admissible calls, published.
+        if row.dtype == MODEL_DTYPE:
+            dtype = mod_dtype
+        elif row.dtype:
             name = _DTYPES.get(row.dtype)
             if name is None:
                 raise MintRefused(
                     f"input {row.name!r} declares unknown dtype {row.dtype!r} "
-                    f"(known: {sorted(set(_DTYPES))!r})")
+                    f"(known: {sorted({*_DTYPES, MODEL_DTYPE})!r})")
             dtype = getattr(torch, name)
         else:
-            dtype = mod_dtype
+            raise MintRefused(
+                f"input {row.name!r} declares no dtype; declare a torch "
+                f"dtype or the explicit word {MODEL_DTYPE!r} (pgw#1058)")
         shape = tuple(
             _resolve_axis(e, seed, config, input_name=row.name,
                           family=decl.family)

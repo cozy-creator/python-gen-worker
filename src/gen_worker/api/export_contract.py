@@ -105,6 +105,21 @@ SHAPE_STRATEGIES = (STATIC_ROWS, DYNAMIC_COLLAPSE)
 
 _FORK_SOURCES = ("pipeline", "module")
 
+#: The explicit "this input follows the resolved module's own dtype" word.
+#: It exists so inheritance is a STATEMENT the declaration author owns, never
+#: a silent default (pgw#1058).
+MODEL_DTYPE = "model"
+
+#: Every dtype word an ``Input`` row may declare. Aliases canonicalise in
+#: ``gen_worker.aot_declaration``; this is the admission vocabulary, checked
+#: at construction so a typo'd or omitted dtype fails the declaring repo's
+#: import, not a rented mint pod.
+INPUT_DTYPES = (
+    MODEL_DTYPE,
+    "fp16", "float16", "bf16", "bfloat16", "fp32", "float32",
+    "int32", "int64", "bool",
+)
+
 
 class DeclarationError(ValueError):
     """An export declaration is malformed. Raised at declaration time (module
@@ -439,9 +454,16 @@ class Input(msgspec.Struct, frozen=True):
     ``added_cond_kwargs.text_embeds`` — the container dict is built and fed
     as ONE argument). ``shape`` entries are :data:`AxisSpec`; a rank-0
     tensor is ``shape=()`` with ``value`` (sdxl's scalar timestep).
-    ``dtype`` "" means the resolved module's own dtype (the
-    resident-precision truth); anything else names an explicit torch dtype
-    (wan's int64 scalar timestep, ti2v's float32 per-token one).
+
+    ``dtype`` is REQUIRED (pgw#1058): either a torch dtype name (wan's int64
+    scalar timestep, ti2v's float32 per-token one) or the explicit word
+    ``"model"`` — the resolved module's own dtype, stated on purpose. There
+    is no default: an exported graph is dtype-specialized, so the ingress
+    dtype of every input is part of the class the cell claims to serve, and
+    an omitted dtype used to inherit the module's weight dtype SILENTLY —
+    which is how sdxl's scalar timestep was minted bfloat16 while every real
+    scheduler presents float32, and a 36-entry cell admitted nothing it was
+    published for. A guessed fact is not a declaration.
 
     There is NO args/kwargs choice to declare: all-positional example feeds
     are a MINT OBLIGATION (pod 9, pgw#723 residuals — an AOTI package's call
@@ -455,7 +477,7 @@ class Input(msgspec.Struct, frozen=True):
 
     name: str
     shape: Tuple[AxisSpec, ...]
-    dtype: str = ""
+    dtype: str = ""  # required; "" refused in __post_init__ (pgw#1058)
     value: Optional[float] = None
     targets: Tuple[str, ...] = ()
     #: pgw#853: the parameter is a LIST of this many tensors, each of
@@ -475,7 +497,22 @@ class Input(msgspec.Struct, frozen=True):
         force(self, "shape", tuple(
             _axis_spec(entry, f"Input {self.name!r} axis spec")
             for entry in tuple(self.shape)))
-        force(self, "dtype", str(self.dtype or "").strip())
+        dtype = str(self.dtype or "").strip()
+        if not dtype:
+            raise DeclarationError(
+                f"Input {self.name!r} declares no dtype. The ingress dtype "
+                f"of every input is part of the graph class an exported cell "
+                f"claims to serve, and it is a fact about the CALL (a "
+                f"scheduler's float32 timestep), not about the weights — so "
+                f"it cannot be inherited silently. Declare a torch dtype "
+                f"({', '.join(d for d in INPUT_DTYPES if d != MODEL_DTYPE)}) "
+                f"or the explicit word {MODEL_DTYPE!r} for the resolved "
+                f"module's own dtype (pgw#1058)")
+        if dtype not in INPUT_DTYPES:
+            raise DeclarationError(
+                f"Input {self.name!r} declares unknown dtype {dtype!r} "
+                f"(known: {sorted(INPUT_DTYPES)!r})")
+        force(self, "dtype", dtype)
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
 
     @property

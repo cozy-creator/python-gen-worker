@@ -51,7 +51,7 @@ def _decl(*forks: Fork, family: str = "harness-fork-family") -> Compile:
         classes=(GraphClass(
             dims={"B": 1},
             fork={f.name: f.served[0] for f in forks} if fork_names else {}),),
-        inputs=(Input("hidden_states", shape=("B", 4, 6)),),
+        inputs=(Input("hidden_states", shape=("B", 4, 6), dtype="model"),),
         shape_strategy="static-rows", warm_changes_key=False,
     )
 

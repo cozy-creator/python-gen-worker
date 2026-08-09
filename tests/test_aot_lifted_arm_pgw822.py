@@ -81,7 +81,7 @@ def _declare(**changes: Any) -> Any:
         targets=("unet",),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 2}),),
-        inputs=(Input("sample", shape=("B", BUCKET)),),
+        inputs=(Input("sample", shape=("B", BUCKET), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     )
@@ -252,8 +252,8 @@ def test_the_lifted_pair_is_admitted_on_a_lift_CAPABLE_target() -> None:
 
 def test_a_declared_input_the_module_does_not_take_is_named() -> None:
     decl = _declare(inputs=(
-        Input("sample", shape=("B", BUCKET)),
-        Input("encoder_hidden_states", shape=("B", BUCKET)),
+        Input("sample", shape=("B", BUCKET), dtype="model"),
+        Input("encoder_hidden_states", shape=("B", BUCKET), dtype="model"),
     ))
     gaps = aot_mint.declaration_module_gaps(
         _container_only_pipe(), _spec(), decl)
@@ -280,8 +280,8 @@ def test_the_parent_declines_the_mint_by_name_instead_of_renting(monkeypatch) ->
     cost a log line and not a pod. Serving is untouched — the decline falls
     back to the dynamo recipe exactly as every other named decline does."""
     decl = _declare(inputs=(
-        Input("sample", shape=("B", BUCKET)),
-        Input("encoder_hidden_states", shape=("B", BUCKET)),
+        Input("sample", shape=("B", BUCKET), dtype="model"),
+        Input("encoder_hidden_states", shape=("B", BUCKET), dtype="model"),
     ))
     assert decl is not None
     pipe = _container_only_pipe()
