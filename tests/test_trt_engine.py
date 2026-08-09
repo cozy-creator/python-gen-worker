@@ -21,9 +21,6 @@ from test_executor_adopt import (  # noqa: F401 — shared harness
     CACHE_REF,
     DIGEST_A,
     FAMILY,
-    OP_A,
-    _adopt,
-    _events,
     _spec,
     _wire_executor,
 )
@@ -401,80 +398,18 @@ def test_fetch_compile_snapshot_deterministically_prefers_trt(tmp_path):
         assert got.snapshot_digest == DIGEST_A
 
 
-def test_adopt_trt_ref_wraps_and_reports(tmp_path, monkeypatch):
-    (tmp_path / "snap").mkdir()
-    _tar(tmp_path / "snap")
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-
-    calls = []
-
-    def _fake_load_and_wrap(pipeline, cfg, artifact, cache_dir=None):
-        calls.append((pipeline, cfg, Path(artifact)))
-        setattr(pipeline, te._MARKER_ATTR, {
-            "meta": _meta(),
-            "state": {"failure_callback": None},
-            "module": pipeline.transformer,
-        })
-        return _meta()
-
-    monkeypatch.setattr(te, "load_and_wrap", _fake_load_and_wrap)
-    counts = iter((0, 1))
-    monkeypatch.setattr(te, "execution_count", lambda _pipeline: next(counts))
-    from test_executor_adopt import _Endpoint
-
-    warmups_before = _Endpoint.warmups
-    _adopt(ex, ref=TRT_REF)
-    assert len(calls) == 1
-    assert calls[0][2].name.endswith(".tar.gz")
-    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
-    assert len(adopted) == 1 and adopted[0].ref == TRT_REF
-    assert adopted[0].operation_id == OP_A
-    assert _Endpoint.warmups == warmups_before + 1  # one warmup after the swap
-
-
-def test_adopt_trt_key_mismatch_stays_eager(tmp_path, monkeypatch):
-    (tmp_path / "snap").mkdir()
-    _tar(tmp_path / "snap")
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-
-    def _mismatch(pipeline, cfg, artifact, cache_dir=None):
-        raise cc.AdoptError("key_mismatch", "trt '10.16.0.14' != runtime '10.15.2.1'")
-
-    monkeypatch.setattr(te, "load_and_wrap", _mismatch)
-    _adopt(ex, ref=TRT_REF)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    # gw#577: the wire refusal names the mismatched axis + both values
-    assert len(failed) == 1 and failed[0].error == (
-        "adopt_failed:key_mismatch: trt '10.16.0.14' != runtime '10.15.2.1'"
-    )
-    assert failed[0].snapshot_digest == DIGEST_A
-    assert failed[0].operation_id == OP_A
-    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
-
-
-def test_adopt_trt_warmup_must_execute_engine_or_roll_back(tmp_path, monkeypatch):
-    (tmp_path / "snap").mkdir()
-    _tar(tmp_path / "snap")
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(te, "load_and_wrap", lambda *args, **kwargs: _meta())
-    monkeypatch.setattr(te, "execution_count", lambda _pipeline: 0)
-    unwrapped = []
-    monkeypatch.setattr(te, "unwrap", lambda pipeline: unwrapped.append(pipeline) or True)
-
-    _adopt(ex, ref=TRT_REF)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert len(failed) == 1
-    assert failed[0].error == (
-        "adopt_failed:engine_not_executed: "
-        "warmup did not execute the attached TRT engine"
-    )
-    assert unwrapped
-    target = ex.compile_targets()[0]
-    assert target.active_compile_ref == ""
-    assert target.active_compile_snapshot_digest == ""
+# pgw#1032: the three hot-adopt TRT tests that lived here
+# (test_adopt_trt_ref_wraps_and_reports, test_adopt_trt_key_mismatch_stays_eager,
+# test_adopt_trt_warmup_must_execute_engine_or_roll_back) are deleted with the
+# ADOPT_COMPILE_CACHE handler they drove — the hub push that would have carried
+# a TRT ref was keyed off the COMPUTED cell key, a space with no producer since
+# pgw#1010, so no stack ever dispatched one. What is left here is the SNAPSHOT
+# CONSUMER (test_fetch_compile_snapshot_deterministically_prefers_trt above)
+# and the kind dispatch on an artifact this pod already holds
+# (test_enable_compiled_dispatches_on_artifact_kind below). Note the consumer
+# is now DARK: th#1702 deletes the hub's snapshot attach, so nothing fills the
+# map it reads. It stands because pgw#904 replaces it with a hub-RESOLVED
+# `Arm.artifact`, and that lane owns the cut.
 
 
 def test_enable_compiled_dispatches_on_artifact_kind(tmp_path, monkeypatch):

@@ -3444,44 +3444,6 @@ def artifact_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     return ""
 
 
-def arm_staged_artifact(
-    pipeline: Any,
-    cfg: Any,
-    staged: _StagedArtifact,
-) -> Dict[str, Any]:
-    """Activate and arm an already-verified artifact under the process lock.
-
-    This strict entry point is used by hot adoption: unlike :func:`enable`, a
-    mismatch is returned as a classified :class:`AdoptError` instead of an
-    eager fallback. Expensive tar extraction happened before the executor's
-    model/GPU locks; the process lock covers only atomic cache activation and
-    wrapper installation.
-    """
-    try:
-        with _SEED_ARM_LOCK:
-            meta = staged.metadata
-            _reconcile_resident_mode(meta, pipeline)
-            drift = artifact_drift(meta, pipeline, cfg)
-            if drift:
-                raise AdoptError("key_mismatch", drift)
-            _activate_staged(staged)
-            unwrap(pipeline)
-            try:
-                if not apply(pipeline, cfg, cache_ready=True):
-                    raise AdoptError("no_target")
-            except Exception:
-                unwrap(pipeline)
-                raise
-            # pgw#672: hot adoption runs idle-only; drop stale in-memory
-            # compiled code so the adoption's proof warmup consults the
-            # just-seeded FX entries (a real hit) instead of being served
-            # counter-silently by a prior arm's resident code.
-            reset_target_code(pipeline)
-            return meta
-    finally:
-        staged.close()
-
-
 def enable(
     pipeline: Any,
     cfg: Any,
@@ -3734,7 +3696,6 @@ def build(
     declared_vram_gb: float = 0.0,
     serving_image_digest: str = "",
     lora_bucket: int = 0,
-    requested_cell_key: str = "",
     pipeline_class: str = "",
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
     """Compile a diffusers pipeline over ``shapes`` and package the resulting
@@ -3919,23 +3880,14 @@ def build(
         # a wrong class shows up as serving cache misses, which the warmup
         # proof refuses loudly).
         meta["pipeline_class"] = str(pipeline_class).strip()
-    # gw#581/th#883: re-stamp the key over the final axes, then honor the
-    # forge's echo — a demand-driven mint names the exact worker-computed
-    # key it must satisfy, and publishing a cell under a key its own axes
-    # do not describe would be a permanently un-armable store entry.
-
+    # gw#581/th#883: stamp the key over the final axes.
+    #
+    # pgw#1032: the `requested_cell_key` ECHO is gone. It let a demand-driven
+    # mint name the exact worker-computed key it had to satisfy — but the
+    # forge that issued demand-driven mints was deleted (th#1127), no caller
+    # has passed the parameter since, and a COMPUTED key is a space nothing
+    # publishes into any more (pgw#1010). The stamp below is the sole key.
     cell_key.stamp(meta)
-    if str(requested_cell_key or "").strip():
-        reason = cell_key.mismatch(meta, str(requested_cell_key).strip())
-        if reason:
-            try:
-                axes = cell_key.from_artifact_metadata(meta).canonical()
-            except cell_key.CellKeyError:
-                axes = "<not key-complete>"
-            raise RuntimeError(
-                "cell mint does not satisfy the requested cell key "
-                f"({reason}); producer axes: {axes}"
-            )
     label = flavor_label(meta["sku"], meta["torch"], meta.get("weight_lane", ""))
     artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)
     return artifact, meta, timings

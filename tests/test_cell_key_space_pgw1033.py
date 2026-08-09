@@ -338,52 +338,15 @@ def test_an_owed_mint_advertises_no_artifact_identity(
 
 
 # ---------------------------------------------------------------------------
-# 5. The pgw#686 divergence warning (INTERIM — pgw#1032 deletes it outright)
+# 5. The pgw#686 divergence warning — DELETED by pgw#1032
+#
+# `_warn_cell_key_divergence` and its two tests
+# (`test_a_healthy_self_minted_AOT_boot_logs_no_key_divergence`,
+# `test_a_divergence_inside_one_key_space_is_still_loud`) are gone with
+# `requested_cell_key` itself. This issue's fix was the INTERIM it announced:
+# silencing a warning whose whole premise — that a self-minted cell's key
+# should equal the key this runtime computes — is false for every mint there
+# is. With the computed key no longer produced there is no divergence left to
+# judge, loudly or quietly. The disjointness the warning kept tripping over is
+# now asserted directly in `test_computed_key_demand_retired_pgw1032.py`.
 # ---------------------------------------------------------------------------
-
-
-def _target(active: str, requested: str) -> Any:
-    from gen_worker import executor
-
-    return executor._CompileTargetRecord(
-        incarnation_id="inc-1", spec=None, pipeline=object(),  # type: ignore[arg-type]
-        pipeline_weight_lane="w8a8", lora_bucket=0, contract_digest="d",
-        requested_cell_key=requested, active_compile_ref=active,
-        active_self_mint=True)
-
-
-def test_a_healthy_self_minted_AOT_boot_logs_no_key_divergence(
-    _miss: None, _events: List[Tuple[str, str, str]],
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-) -> None:
-    """RED at HEAD: an ERROR on EVERY healthy AOT boot. The warning compared
-    the stamped key of the active cell against the computed key the runtime
-    requests — two spaces that cannot agree — and since pgw#1010 an AOT cell
-    is the only cell a worker mints."""
-    from gen_worker import executor
-
-    pending = _arm().self_mint
-    assert pending is not None
-    minted = _adopt(monkeypatch, pending)
-    assert minted is not None
-
-    with caplog.at_level("ERROR", logger="gen_worker.executor"):
-        executor.Executor._warn_cell_key_divergence(
-            "sdxl-endpoint", _target(minted.ref, ARM_KEY))
-    assert "cell_key_divergence" not in caplog.text, (
-        "a stamped cell key can never equal a computed request; this ERROR "
-        "fired on every healthy AOT boot and named a fleet-wide zero-adoption "
-        "outage that was not happening")
-
-
-def test_a_divergence_inside_one_key_space_is_still_loud(
-    _miss: None, caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The judgement it CAN make stays: same space, different key."""
-    from gen_worker import executor
-
-    stale = f"root/family-{FAMILY}#ck1-" + "c" * 56
-    with caplog.at_level("ERROR", logger="gen_worker.executor"):
-        executor.Executor._warn_cell_key_divergence(
-            "sdxl-endpoint", _target(stale, ARM_KEY))
-    assert "cell_key_divergence" in caplog.text

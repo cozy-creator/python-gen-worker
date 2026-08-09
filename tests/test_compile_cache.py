@@ -1244,18 +1244,11 @@ def test_enable_reconciles_vae_only_pipeline_to_off_cell(tmp_path, monkeypatch):
     }
 
 
-def test_arm_staged_artifact_reconciles_resident_drift(tmp_path, monkeypatch):
-    """Hot adopt: the same resident convergence, no AdoptError."""
-    pipe = _resident_pipe("vae_only")
-    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
-    artifact = _resident_cell(tmp_path, pipe, cfg, low_vram_mode="off")
-    monkeypatch.setattr(cc, "apply", lambda *a, **kw: True)
-
-    staged = cc.stage_artifact(artifact, "fam", cache_dir=tmp_path / "cache")
-    meta = cc.arm_staged_artifact(pipe, cfg, staged)
-    assert meta["low_vram_mode"] == "off"
-    assert pipe._cozy_low_vram_mode == "off"
-    assert not any(pipe.flags.values())
+# pgw#1032: `test_arm_staged_artifact_reconciles_resident_drift` is deleted with
+# `arm_staged_artifact` itself — the STRICT arm entry point existed only for
+# hub-commanded hot adoption, which nothing has ever dispatched. The resident
+# convergence it checked is the same one `enable()` performs, and
+# `test_enable_reconciles_*` above/below cover it on the live path.
 
 
 def test_enable_reconciles_off_pipeline_to_vae_only_cell(tmp_path, monkeypatch):
@@ -1273,8 +1266,13 @@ def test_enable_reconciles_off_pipeline_to_vae_only_cell(tmp_path, monkeypatch):
 
 
 def test_offload_mode_drift_still_refuses(tmp_path, monkeypatch):
-    """model_offload traces genuinely different graphs: enable() on a w8a8
-    lane raises the named refusal; hot adopt classifies key_mismatch."""
+    """model_offload traces genuinely different graphs: enable() on a w8a8 lane
+    raises the named refusal.
+
+    pgw#1032: the hot-adopt half (`arm_staged_artifact` classifying the same
+    drift as `key_mismatch`) is deleted with the adoption it served. The
+    refusal on the LIVE path is what protects serving, and it is unchanged.
+    """
     pipe = _resident_pipe("model_offload")
     pipe._cozy_weight_lane = "w8a8"
     cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
@@ -1285,12 +1283,6 @@ def test_offload_mode_drift_still_refuses(tmp_path, monkeypatch):
 
     with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="low_vram_mode"):
         cc.enable(pipe, cfg, tmp_path / "cache", artifact)
-    assert pipe._cozy_low_vram_mode == "model_offload"
-
-    staged = cc.stage_artifact(artifact, "fam", cache_dir=tmp_path / "cache")
-    with pytest.raises(cc.AdoptError, match="low_vram_mode") as exc:
-        cc.arm_staged_artifact(pipe, cfg, staged)
-    assert exc.value.reason == "key_mismatch"
     assert pipe._cozy_low_vram_mode == "model_offload"
 
 

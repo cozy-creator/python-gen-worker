@@ -30,7 +30,7 @@ from gen_worker.models import provision
 from gen_worker.api.binding import Hub
 from gen_worker.api.binding import wire_ref
 from gen_worker.api.errors import RetryableError
-from gen_worker.executor import Executor, _Job
+from gen_worker.executor import Executor
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec, extract_specs
@@ -248,82 +248,23 @@ def _events(sent, state):
             if m.WhichOneof("msg") == "model_event" and m.model_event.state == state]
 
 
-# th#875's hub-side re-arm matcher compares these adopt statuses EXACTLY;
-# the worker must keep them bare (no appended detail) on the wire (gw#577).
-_TRANSIENT_REASONS = (
-    "adopt_failed:model_in_use", "adopt_failed:target_not_ready",
-    "adopt_failed:target_replaced", "adopt_failed:download",
-)
-
-
-def _assert_failed(
-    sent, error, digest=DIGEST_A, operation_id=OP_A,
-    target_incarnation_id=None,
-):
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    # gw#577: terminal refusals may carry ": <exact reason>" after the
-    # classified code; the th#875 transient vocabulary must stay bare.
-    assert failed and (
-        failed[-1].error == error
-        or failed[-1].error.startswith(error + ":")
-    )
-    if error in _TRANSIENT_REASONS:
-        assert failed[-1].error == error
-    assert failed[-1].snapshot_digest == digest
-    assert failed[-1].operation_id == operation_id
-    if target_incarnation_id is None:
-        assert failed[-1].target_incarnation_id
-    else:
-        assert failed[-1].target_incarnation_id == target_incarnation_id
-    return failed[-1]
-
-
-_TARGET_UNSET = object()
-
-
 def _target_id(ex) -> str:
     (target,) = ex.compile_targets()
     return target.incarnation_id
 
 
-def _adopt(
-    ex, ref=CACHE_REF, digest=DIGEST_A, operation_id=OP_A,
-    target_incarnation_id=_TARGET_UNSET,
-):
-    if target_incarnation_id is _TARGET_UNSET:
-        targets = ex.compile_targets()
-        target_incarnation_id = (
-            targets[0].incarnation_id if targets else "missing-incarnation")
-    asyncio.run(ex.handle_model_op(
-        pb.ModelOp(
-            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
-            ref=ref,
-            snapshot=pb.Snapshot(digest=digest),
-            operation_id=operation_id,
-            target_incarnation_id=target_incarnation_id,
-        )
-    ))
-
-
 # ---------------------------------------------------------------------------
-# ref helpers
-# ---------------------------------------------------------------------------
-
-
-def test_family_from_ref_and_is_cache_ref():
-    assert cc.family_from_ref(CACHE_REF) == FAMILY
-    assert cc.family_from_ref(f"root/family-{FAMILY}:latest@blake3:aa#inductor-x") == FAMILY
-    assert cc.family_from_ref("acme/model:latest") == ""
-    assert cc.family_from_ref("root/other-repo#inductor-x") == ""
-    assert cc.is_cache_ref(CACHE_REF)
-    assert cc.is_cache_ref(CACHE_REF, FAMILY)
-    assert not cc.is_cache_ref(CACHE_REF, "sdxl")
-    assert not cc.is_cache_ref(f"root/family-{FAMILY}")  # no inductor flavor
-    assert not cc.is_cache_ref("acme/model#inductor-x")
-
-
-# ---------------------------------------------------------------------------
-# adoption success
+# pgw#1032 deleted the whole HOT-ADOPTION suite that lived here (the `_adopt`
+# harness, `_assert_failed`, the success/classified-failure sections, the
+# target-replaced and republish-reload cases, and the per-target quarantine
+# tests). They drove `Executor.handle_model_op`, which answered the hub's
+# `ModelOp{ADOPT_COMPILE_CACHE}` push — a push keyed off the COMPUTED cell key,
+# a space with no producer since pgw#1010, so no stack has ever dispatched one.
+# The behaviour they guarded is gone with the handler; nothing was weakened to
+# keep a test green. What remains below is the LIVE path — the worker arming a
+# cell it ACQUIRED itself (`aot_cells` fetch-and-filter; th#1702 deletes the
+# hub's snapshot attach too, so nothing is pushed to a pod any more) — and the
+# runtime-guard revocation the dispatch fence rides.
 # ---------------------------------------------------------------------------
 
 
@@ -331,391 +272,6 @@ def _fake_counters(monkeypatch, *, hits=3, misses=1):
     """Simulate exact-object cache proof inside the endpoint warmup."""
     monkeypatch.setitem(_FAKE_WARM_PROOF, "hits", hits)
     monkeypatch.setitem(_FAKE_WARM_PROOF, "misses", misses)
-
-
-def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    _Endpoint.warmups = 0
-
-    applied: list[tuple] = []
-
-    def _fake_apply(pipeline, cfg, *, cache_ready, guard=True):
-        applied.append((pipeline, cfg, cache_ready))
-        _mark_fake_guard(pipeline)
-        return True
-
-    monkeypatch.setattr(cc, "apply", _fake_apply)
-    _fake_counters(monkeypatch, hits=3, misses=1)
-    _adopt(ex)
-
-    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
-    assert len(adopted) == 1
-    assert adopted[0].ref == CACHE_REF
-    assert adopted[0].snapshot_digest == DIGEST_A
-    assert adopted[0].operation_id == OP_A
-    assert adopted[0].target_incarnation_id == _target_id(ex)
-    assert adopted[0].duration_ms >= 0
-    assert adopted[0].cache_hits == 3
-    assert adopted[0].cache_misses == 1
-    assert adopted[0].warmup_s >= 0
-    assert not _events(sent, pb.MODEL_STATE_FAILED)
-    assert len(applied) == 1 and applied[0][2] is True
-    assert isinstance(applied[0][0], _Pipe)
-    assert _Endpoint.warmups == 1
-    target = ex.compile_targets()[0]
-    assert target.active_compile_ref == CACHE_REF
-    assert target.active_compile_snapshot_digest == DIGEST_A
-
-
-def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
-    """gw#391 honest failure mode: ADOPTED-while-silently-eager is impossible.
-    A warmup observing zero fxgraph hits unwraps back to eager and reports
-    adopt_failed:cache_miss."""
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", _guarded_apply)
-    _fake_counters(monkeypatch, hits=0, misses=2)
-    unwrapped: list = []
-    monkeypatch.setattr(cc, "unwrap", lambda obj: unwrapped.append(obj))
-
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:cache_miss")
-    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
-    assert any(isinstance(o, _Pipe) for o in unwrapped)  # rollback ran
-    target = ex.compile_targets()[0]
-    assert target.active_compile_ref == ""
-    assert target.active_compile_snapshot_digest == ""
-
-
-def test_endpoint_without_warmup_exposes_no_adopt_target(tmp_path, monkeypatch):
-    """An endpoint without a warmup contract advertises no false target."""
-
-    class _NoWarmupEndpoint:
-        def setup(self, pipeline: str) -> None:  # pragma: no cover
-            pass
-
-        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
-            return _Out()
-
-    _artifact(tmp_path)
-    spec = EndpointSpec(
-        name="ep", method=_NoWarmupEndpoint.run, kind="inference",
-        payload_type=_In, output_mode="single", cls=_NoWarmupEndpoint,
-        attr_name="run", models={"pipeline": Hub("acme/klein-finetune")},
-        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-    )
-    ex, sent = _wire_executor(spec, tmp_path)
-    rec = ex._classes[spec.instance_key]
-    rec.instance = _NoWarmupEndpoint()
-    rec.ready = True
-    monkeypatch.setattr(
-        cc, "apply", lambda *args, **kwargs: pytest.fail("must not adopt"))
-
-    assert ex.compile_targets() == []
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:target_not_ready")
-    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
-
-
-def test_adopt_resident_prep_mode_drift_converges(tmp_path, monkeypatch):
-    """gw#588: 'off' and 'vae_only' are both fully-resident preps — hot adopt
-    converges the pipeline to the cell's traced mode and adopts instead of
-    refusing (ie#501 run 18)."""
-    _artifact(tmp_path, low_vram_mode="off")
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    obj = ex.store.residency.obj(wire_ref(spec.models["pipeline"]))
-    obj._cozy_low_vram_mode = "vae_only"
-    monkeypatch.setattr(cc, "apply", _guarded_apply)
-    _fake_counters(monkeypatch, hits=2, misses=0)
-
-    _adopt(ex)
-    assert len(_events(sent, pb.MODEL_STATE_ADOPTED)) == 1
-    assert not _events(sent, pb.MODEL_STATE_FAILED)
-    assert obj._cozy_low_vram_mode == "off"
-
-
-def test_adopt_offload_prep_mode_drift_rejected(tmp_path, monkeypatch):
-    """gw#391: an offload prep mode traces genuinely different graphs — a
-    pipeline prepped under one can only miss, so adoption still rejects it
-    deterministically (key_mismatch) before any wrap or warmup."""
-    _artifact(tmp_path, low_vram_mode="off")
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    obj = ex.store.residency.obj(wire_ref(spec.models["pipeline"]))
-    obj._cozy_low_vram_mode = "model_offload"
-    applied: list = []
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: applied.append(1) or True)
-
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:key_mismatch")
-    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
-    assert not applied  # rejected before the wrap
-    assert obj._cozy_low_vram_mode == "model_offload"
-
-
-def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", _guarded_apply)
-    monkeypatch.setattr(_Endpoint, "warmup", lambda self: 1 / 0)
-
-    _adopt(ex)
-    _assert_failed(sent, "adopt_failed:warmup")
-    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
-
-
-# ---------------------------------------------------------------------------
-# classified failures
-# ---------------------------------------------------------------------------
-
-
-def _case_key_mismatch(tmp_path, monkeypatch):
-    # pgw#691/ck3: sku drift no longer mismatches (metadata-only axis);
-    # torch drift is the representative key mismatch.
-    _artifact(tmp_path, torch="0.0.0+nope")
-    ex, sent = _wire_executor(_spec(), tmp_path)
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: pytest.fail("must not re-wrap"))
-    return ex, sent, {}, None
-
-
-def _case_model_in_use(tmp_path, monkeypatch):
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    ex.jobs[("r1", 1)] = _Job(request_id="r1", attempt=1, spec=spec)
-
-    calls: list[str] = []
-
-    async def _no_download(ref, snapshot=None, *, binding=None):  # pragma: no cover
-        calls.append(ref)
-        return tmp_path / "snap"
-
-    ex.store.ensure_local = _no_download  # type: ignore[method-assign]
-
-    def _refused_before_download():
-        assert calls == []  # refused before any download
-
-    return ex, sent, {}, _refused_before_download
-
-
-def _case_family_mismatch(tmp_path, monkeypatch):
-    # _adopt's ref names flux2-klein-4b; only sdxl is declared
-    spec = _spec(Compile(shapes=((768, 768),), family="sdxl"))
-    ex, sent = _wire_executor(spec, tmp_path)
-    return ex, sent, {}, None
-
-
-def _case_target_not_ready(tmp_path, monkeypatch):
-    ex, sent = _wire_executor(_spec(), tmp_path, ready=False, resident=False)
-    return ex, sent, {}, None
-
-
-def _case_bad_ref(tmp_path, monkeypatch):
-    ex, sent = _wire_executor(_spec(), tmp_path)
-    return ex, sent, {"ref": "acme/not-a-cache:latest"}, None
-
-
-def _case_artifact_missing(tmp_path, monkeypatch):
-    (tmp_path / "snap").mkdir()  # empty snapshot dir: no tarball
-    ex, sent = _wire_executor(_spec(), tmp_path)
-    return ex, sent, {}, None
-
-
-@pytest.mark.parametrize(
-    ("case", "error"),
-    [
-        (_case_key_mismatch, "adopt_failed:key_mismatch"),
-        (_case_model_in_use, "adopt_failed:model_in_use"),
-        (_case_family_mismatch, "adopt_failed:target_family_mismatch"),
-        (_case_target_not_ready, "adopt_failed:target_not_ready"),
-        (_case_bad_ref, "adopt_failed:bad_ref"),
-        (_case_artifact_missing, "adopt_failed:artifact_missing"),
-    ],
-    ids=[
-        "key-mismatch-stays-eager", "refuses-while-jobs-in-flight",
-        "target-from-another-family", "target-not-ready", "bad-ref",
-        "artifact-missing",
-    ],
-)
-def test_adopt_classified_failures(tmp_path, monkeypatch, case, error):
-    ex, sent, adopt_kwargs, extra_check = case(tmp_path, monkeypatch)
-    _adopt(ex, **adopt_kwargs)
-    _assert_failed(sent, error)
-    if extra_check is not None:
-        extra_check()
-
-
-@pytest.mark.parametrize(
-    ("digest", "operation_id", "error"),
-    [
-        (None, OP_A, "adopt_failed:missing_snapshot_digest"),
-        ("", OP_A, "adopt_failed:missing_snapshot_digest"),
-        ("   ", OP_A, "adopt_failed:missing_snapshot_digest"),
-        (DIGEST_A, None, "adopt_failed:missing_operation_id"),
-        (DIGEST_A, "", "adopt_failed:missing_operation_id"),
-        (DIGEST_A, "   ", "adopt_failed:missing_operation_id"),
-    ],
-)
-def test_adopt_missing_identity_fails_before_work_or_resident_inference(
-    tmp_path, monkeypatch, digest, operation_id, error,
-):
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    ex.store._resident_identities[CACHE_REF] = ("resident-digest", 42)
-
-    async def _must_not_adopt(*args, **kwargs):  # pragma: no cover
-        pytest.fail("missing digest must fail before adoption work")
-
-    monkeypatch.setattr(ex, "_adopt_compile_cache", _must_not_adopt)
-    kwargs = {
-        "op": pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
-        "ref": CACHE_REF,
-    }
-    if digest is not None:
-        kwargs["snapshot"] = pb.Snapshot(digest=digest)
-    if operation_id is not None:
-        kwargs["operation_id"] = operation_id
-    kwargs["target_incarnation_id"] = _target_id(ex)
-
-    asyncio.run(ex.handle_model_op(pb.ModelOp(**kwargs)))
-
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert len(failed) == 1
-    assert failed[0].error == error
-    assert failed[0].snapshot_digest == (digest or "")
-    assert failed[0].operation_id == (operation_id or "")
-    assert failed[0].target_incarnation_id == _target_id(ex)
-    assert failed[0].residency_generation == 0
-    assert ex.store.resident_identity(CACHE_REF) == ("resident-digest", 42)
-    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
-
-
-def test_adopt_unexpected_failure_echoes_operation_digest(tmp_path, monkeypatch):
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-
-    async def _explode(*args, **kwargs):
-        raise RuntimeError("unexpected")
-
-    monkeypatch.setattr(ex, "_adopt_compile_cache", _explode)
-    _adopt(ex, digest=DIGEST_B)
-
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert len(failed) == 1
-    # gw#577: the unexpected-failure event carries the exception text
-    assert failed[0].error == "adopt_failed:runtimeerror: unexpected"
-    assert failed[0].snapshot_digest == DIGEST_B
-    assert failed[0].operation_id == OP_A
-    assert failed[0].target_incarnation_id == _target_id(ex)
-
-
-@pytest.mark.parametrize("digest_b", [DIGEST_A, DIGEST_B])
-def test_adopt_serializes_same_ref_ops_across_transport_reconnect(
-    tmp_path, monkeypatch, digest_b,
-):
-    """Old-session A finishes on the new transport before B may mutate."""
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, old_transport = _wire_executor(spec, tmp_path)
-    new_transport: list[pb.WorkerMessage] = []
-    active_transport = {"sent": old_transport}
-
-    async def _send(msg: pb.WorkerMessage) -> None:
-        active_transport["sent"].append(msg)
-
-    ex._send = _send
-    monkeypatch.setattr(cc, "apply", _guarded_apply)
-    _fake_counters(monkeypatch, hits=1, misses=0)
-
-    async def run():
-        a_started = asyncio.Event()
-        release_a = asyncio.Event()
-        entered = 0
-
-        async def _ensure(ref, snapshot=None, *, binding=None):
-            nonlocal entered
-            entered += 1
-            if entered == 1:
-                a_started.set()
-                await release_a.wait()
-            return tmp_path / "snap"
-
-        ex.store.ensure_local = _ensure  # type: ignore[method-assign]
-        op_a = pb.ModelOp(
-            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
-            ref=CACHE_REF,
-            snapshot=pb.Snapshot(digest=DIGEST_A),
-            operation_id=OP_A,
-            target_incarnation_id=_target_id(ex),
-        )
-        op_b = pb.ModelOp(
-            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
-            ref=CACHE_REF,
-            snapshot=pb.Snapshot(digest=digest_b),
-            operation_id=OP_B,
-            target_incarnation_id=_target_id(ex),
-        )
-
-        task_a = asyncio.create_task(ex.handle_model_op(op_a))
-        await a_started.wait()
-        active_transport["sent"] = new_transport
-        task_b = asyncio.create_task(ex.handle_model_op(op_b))
-        await asyncio.sleep(0)
-        assert entered == 1  # B cannot enter download while A owns the lock.
-        release_a.set()
-        await asyncio.gather(task_a, task_b)
-        # Once A proves the target active, an exact replay is acknowledged
-        # without work and a different digest requires record reload. Neither
-        # may unwrap the active target in place.
-        assert entered == 1
-
-    asyncio.run(run())
-
-    assert old_transport == []
-    adopted = _events(new_transport, pb.MODEL_STATE_ADOPTED)
-    if digest_b == DIGEST_A:
-        assert [event.ref for event in adopted] == [CACHE_REF, CACHE_REF]
-        assert [event.snapshot_digest for event in adopted] == [DIGEST_A, DIGEST_A]
-        assert [event.operation_id for event in adopted] == [OP_A, OP_B]
-    else:
-        assert [event.ref for event in adopted] == [CACHE_REF]
-        failed = _events(new_transport, pb.MODEL_STATE_FAILED)
-        assert len(failed) == 1
-        assert failed[0].error == "adopt_failed:active_replace_requires_reload"
-        assert failed[0].snapshot_digest == DIGEST_B
-        assert failed[0].operation_id == OP_B
-    assert all(
-        event.target_incarnation_id == _target_id(ex)
-        for event in adopted + _events(new_transport, pb.MODEL_STATE_FAILED)
-    )
-
-
-def test_ordinary_model_events_never_spoof_an_adoption_operation_id(tmp_path):
-    spec = _spec()
-    ex, _sent = _wire_executor(spec, tmp_path)
-    ordinary = ex.store.model_event(
-        MODEL_REF,
-        pb.MODEL_STATE_IN_RAM,
-        identity=(DIGEST_A, 7),
-    )
-    assert ordinary.snapshot_digest == DIGEST_A
-    assert ordinary.residency_generation == 7
-    assert ordinary.operation_id == ""
-    assert ordinary.target_incarnation_id == ""
-
-
-def test_old_worker_semantics_unknown_kind_is_silent(tmp_path):
-    """proto3 forward-compat guarantee the hub relies on: an op kind this
-    worker doesn't know produces no ModelEvent at all."""
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    asyncio.run(ex.handle_model_op(pb.ModelOp(op=99, ref=CACHE_REF)))
-    assert not [m for m in sent if m.WhichOneof("msg") == "model_event"]
 
 
 # ---------------------------------------------------------------------------
@@ -908,67 +464,6 @@ def test_unrelated_record_loading_preserves_existing_target(tmp_path):
     other_rec = ex._classes[other.instance_key]
     other_rec.ready = False  # a different record is still loading
     assert [t.incarnation_id for t in ex.compile_targets()] == [first_id]
-
-
-def test_adopt_rejects_target_replaced_during_download(tmp_path, monkeypatch):
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    target_id = _target_id(ex)
-
-    async def run():
-        started = asyncio.Event()
-        release = asyncio.Event()
-
-        async def _ensure(ref, snapshot=None, *, binding=None):
-            started.set()
-            await release.wait()
-            return tmp_path / "snap"
-
-        ex.store.ensure_local = _ensure  # type: ignore[method-assign]
-        task = asyncio.create_task(ex.handle_model_op(pb.ModelOp(
-            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
-            ref=CACHE_REF,
-            snapshot=pb.Snapshot(digest=DIGEST_A),
-            operation_id=OP_A,
-            target_incarnation_id=target_id,
-        )))
-        await started.wait()
-        rec = ex._classes[spec.instance_key]
-        rec.compile_targets.clear()
-        rec.ready = False
-        release.set()
-        await task
-
-    asyncio.run(run())
-    _assert_failed(
-        sent, "adopt_failed:target_replaced", target_incarnation_id=target_id)
-
-
-def test_active_digest_republish_requires_reload_without_unwrap(tmp_path, monkeypatch):
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", _guarded_apply)
-    _fake_counters(monkeypatch, hits=2, misses=0)
-    _adopt(ex, digest=DIGEST_A)
-    target_before = ex.compile_targets()[0]
-    assert target_before.active_compile_snapshot_digest == DIGEST_A
-
-    unwraps = []
-    monkeypatch.setattr(cc, "unwrap", lambda obj: unwraps.append(obj) or True)
-    sent.clear()
-    _adopt(ex, digest=DIGEST_B, operation_id=OP_B)
-    _assert_failed(
-        sent,
-        "adopt_failed:active_replace_requires_reload",
-        digest=DIGEST_B,
-        operation_id=OP_B,
-        target_incarnation_id=target_before.incarnation_id,
-    )
-    target_after = ex.compile_targets()[0]
-    assert target_after.active_compile_snapshot_digest == DIGEST_A
-    assert unwraps == []
 
 
 def _cold_spec(binding=None) -> EndpointSpec:
@@ -1648,18 +1143,10 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert list(target.function_names) == ["edit", "generate"]
     assert target.active_compile_ref == cell_ref
 
-    # Replay binds a real operation identity to the boot-attached active cell,
-    # then a runtime guard failure revokes the compiled identity — pgw#672:
-    # the aliases STAY dispatchable at explicit eager tier (a broken
-    # optimization never kills a serving worker); the identity is
-    # quarantined in-process so it is never re-adopted this boot.
-    _adopt(
-        ex,
-        ref=cell_ref,
-        digest=DIGEST_A,
-        operation_id=OP_A,
-        target_incarnation_id=target.incarnation_id,
-    )
+    # A runtime guard failure revokes the compiled identity — pgw#672: the
+    # aliases STAY dispatchable at explicit eager tier (a broken optimization
+    # never kills a serving worker); the identity is quarantined in-process so
+    # it is never re-armed this boot.
     found = ex._compile_target(target.incarnation_id)
     assert found is not None
     rec, internal = found
@@ -1685,10 +1172,10 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert tripped.active_compile_ref == ""
     assert ex.serving_tiers() == {"edit": "eager", "generate": "eager"}
     assert cc.cell_quarantined_in_process(cell_ref)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert len(failed) == 1
-    assert failed[0].error == "adopt_failed:runtime_guard"
-    assert failed[0].operation_id == OP_A
+    # pgw#1032: revocation is state-only. The `adopt_failed:runtime_guard`
+    # ModelEvent terminated a hub-commanded adoption operation, and there is no
+    # operation to terminate — the tier flip above is the wire-visible signal.
+    assert _events(sent, pb.MODEL_STATE_FAILED) == []
 
     lifecycle = Lifecycle(
         SimpleNamespace(bootstrap_worker_jwt="", worker_id="worker"), ex)
@@ -2957,25 +2444,27 @@ def test_required_compile_rejects_missing_fence_and_binding_digest_drift(tmp_pat
         ex._validate_required_compile(other, run)
 
 
-def test_runtime_guard_revokes_state_emits_one_causal_failure_and_quarantines(
-    tmp_path,
-):
+def test_runtime_guard_revokes_state_and_quarantines_the_cell(tmp_path):
+    """The LIVE revocation path, on a cell this worker armed at boot.
+
+    pgw#1032 removed two things this test used to also assert: the `_adopt`
+    call that established the active identity (the hub-commanded adoption is
+    gone — a cell is ACQUIRED by the worker's own `aot_cells` discovery and
+    armed at boot, which is what `_active_w8a8_target` stands in for), and the
+    causal `adopt_failed:runtime_guard` ModelEvent,
+    which existed only to terminate an adoption operation nothing issues. What
+    revocation MEANS is unchanged and still asserted: the target drops its
+    active identity, the record stays serving at explicit eager, the cell is
+    quarantined process-wide, and the dispatch fence refuses the pinned run.
+    """
     spec = replace(
         _spec(), models={"pipeline": Hub(
             "acme/klein-finetune", flavor="fp8-w8a8")})
     ex, sent = _wire_executor(spec, tmp_path)
     active = _active_w8a8_target(ex)
     active_ref = active.active_compile_ref
-    active_digest = active.active_compile_snapshot_digest
     active_id = active.incarnation_id
     required_run = _required_run(spec, active)
-    _adopt(
-        ex,
-        ref=active_ref,
-        digest=active_digest,
-        operation_id=OP_A,
-        target_incarnation_id=active_id,
-    )
     sent.clear()
     found = ex._compile_target(active_id)
     assert found is not None
@@ -3001,286 +2490,17 @@ def test_runtime_guard_revokes_state_emits_one_causal_failure_and_quarantines(
     assert revoked.active_compile_snapshot_digest == ""
     # pgw#672: the record is NOT marked stale and the aliases stay
     # dispatchable — the object serves explicit eager; the identity is
-    # quarantined per-target and process-wide.
+    # quarantined process-wide, which is the half `fleet_cells` reads on the
+    # arm path so this boot never re-arms the cell that just exploded.
     assert rec.stale is False
     assert spec.name not in ex.unavailable
     assert cc.cell_quarantined_in_process(active_ref)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert len(failed) == 1
-    assert failed[0].error == "adopt_failed:runtime_guard"
-    assert failed[0].ref == active_ref
-    assert failed[0].snapshot_digest == active_digest
-    assert failed[0].operation_id == OP_A
-    assert failed[0].target_incarnation_id == active_id
+    # pgw#1032: no ModelEvent. The causal terminal belonged to a hub-commanded
+    # adoption operation, and there is no operation to terminate.
+    assert _events(sent, pb.MODEL_STATE_FAILED) == []
 
     with pytest.raises(RetryableError, match="required_compile_identity_mismatch"):
         ex._validate_required_compile(spec, required_run)
-
-    sent.clear()
-    # A controller-only desired/order rewrite can mint a new operation ID but
-    # does not change executable identity. The same target + immutable cell
-    # remains quarantined and cannot repeat wrap/warmup.
-    _adopt(
-        ex,
-        ref=active_ref,
-        digest=active_digest,
-        operation_id=OP_B,
-        target_incarnation_id=active_id,
-    )
-    _assert_failed(
-        sent,
-        "adopt_failed:cell_quarantined",
-        digest=active_digest,
-        operation_id=OP_B,
-        target_incarnation_id=active_id,
-    )
-
-
-def test_cell_quarantine_survives_successful_different_cell_adoption(
-    tmp_path, monkeypatch,
-):
-    """A failure stays sticky on its incarnation after B becomes active."""
-    _artifact(tmp_path)
-    spec = _spec()
-    ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", _guarded_apply)
-    _fake_counters(monkeypatch, hits=1, misses=0)
-    target_id = _target_id(ex)
-
-    _adopt(
-        ex,
-        digest=DIGEST_A,
-        operation_id=OP_A,
-        target_incarnation_id=target_id,
-    )
-    found = ex._compile_target(target_id)
-    assert found is not None
-    _rec, target = found
-    callback = getattr(target.pipeline, cc._MARKER_ATTR)[
-        "failure_signal"
-    ]["callback"]
-    assert callable(callback)
-
-    async def _trip_a() -> None:
-        ex._loop = asyncio.get_running_loop()
-        await asyncio.to_thread(callback, "cell A failed")
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
-    asyncio.run(_trip_a())
-    assert (CACHE_REF, DIGEST_A) in target.failed_compile_identities
-
-    sent.clear()
-    _adopt(
-        ex,
-        digest=DIGEST_B,
-        operation_id=OP_B,
-        target_incarnation_id=target_id,
-    )
-    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
-    assert len(adopted) == 1
-    assert adopted[0].snapshot_digest == DIGEST_B
-    assert (CACHE_REF, DIGEST_A) in target.failed_compile_identities
-
-    sent.clear()
-    _adopt(
-        ex,
-        digest=DIGEST_A,
-        operation_id="adopt-operation-c",
-        target_incarnation_id=target_id,
-    )
-    _assert_failed(
-        sent,
-        "adopt_failed:cell_quarantined",
-        digest=DIGEST_A,
-        operation_id="adopt-operation-c",
-        target_incarnation_id=target_id,
-    )
-    (still_b,) = ex.compile_targets()
-    assert still_b.active_compile_snapshot_digest == DIGEST_B
-
-
-def test_multifunction_adoption_keeps_target_identity_through_guard_failure(
-    tmp_path, monkeypatch,
-):
-    """ADOPTED -> StateDelta -> causal guard failure keeps one target key.
-
-    Tensorhub correlates the pending operation to the pre-adoption target
-    identity, including its function aliases. Adoption therefore proves the
-    entire advertised set and never narrows it in place before a later guard
-    event can quarantine the exact operation.
-    """
-    import gen_worker.executor as executor_mod
-
-    artifact = _artifact(tmp_path)
-    model_dir = tmp_path / "multifunction-model"
-    model_dir.mkdir()
-
-    @endpoint(
-        models={"pipeline": Hub("acme/flux-base")},
-        resources=Resources(gpu=True),
-        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-    )
-    class _FluxBaseEndpoint:
-        def setup(self, pipeline: _LoadablePipe) -> None:
-            self.pipeline = pipeline
-
-        def generate(self, ctx, payload: _In) -> _Out:
-            _record_fake_warm(self.pipeline)
-            return _Out(y="ok")
-
-        def edit(self, ctx, payload: _In) -> _Out:
-            _record_fake_warm(self.pipeline)
-            return _Out(y="ok")
-
-    specs = extract_specs(_FluxBaseEndpoint)
-    generate = next(spec for spec in specs if spec.name == "generate")
-    model_ref = wire_ref(generate.models["pipeline"])
-    pipe = _Pipe()
-    sent: list[pb.WorkerMessage] = []
-
-    async def _send(msg):
-        sent.append(msg)
-
-    ex = Executor(specs, _send)
-    ex.store._cache_dir = tmp_path / "cas"
-
-    async def _download(ref, **kwargs):
-        return model_dir
-
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
-    monkeypatch.setattr(
-        provision,
-        "load_slot",
-        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
-    )
-    asyncio.run(ex.ensure_setup(generate, {
-        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-    }))
-    (before,) = ex.compile_targets()
-    assert list(before.function_names) == ["edit", "generate"]
-    assert before.active_compile_ref == ""
-
-    async def _local_cell(ref, snapshot=None, *, binding=None):
-        return artifact.parent
-
-    ex.store.ensure_local = _local_cell  # type: ignore[method-assign]
-    monkeypatch.setattr(cc, "apply", _guarded_apply)
-    _fake_counters(monkeypatch, hits=1, misses=0)
-    _adopt(
-        ex,
-        operation_id=OP_A,
-        target_incarnation_id=before.incarnation_id,
-    )
-    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
-    assert len(adopted) == 1
-    assert adopted[0].target_incarnation_id == before.incarnation_id
-
-    lifecycle = Lifecycle(
-        SimpleNamespace(bootstrap_worker_jwt="", worker_id="worker"), ex)
-    (after_adopt,) = lifecycle._state_delta().compile_targets
-    assert after_adopt.incarnation_id == before.incarnation_id
-    assert list(after_adopt.function_names) == list(before.function_names)
-    assert after_adopt.active_compile_ref == CACHE_REF
-
-    found = ex._compile_target(before.incarnation_id)
-    assert found is not None
-    _rec, internal = found
-    signal = getattr(internal.pipeline, cc._MARKER_ATTR)["failure_signal"]
-    callback = signal["callback"]
-    assert callable(callback)
-
-    async def _trip() -> None:
-        ex._loop = asyncio.get_running_loop()
-        await asyncio.to_thread(callback, "compiled graph exploded")
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
-    asyncio.run(_trip())
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert len(failed) == 1
-    assert failed[0].error == "adopt_failed:runtime_guard"
-    assert failed[0].operation_id == OP_A
-    assert failed[0].target_incarnation_id == before.incarnation_id
-
-    (after_guard,) = lifecycle._state_delta().compile_targets
-    assert after_guard.incarnation_id == before.incarnation_id
-    assert list(after_guard.function_names) == list(before.function_names)
-    assert after_guard.active_compile_ref == ""
-    assert after_guard.active_compile_snapshot_digest == ""
-
-
-def test_hot_adoption_rejects_an_unproven_advertised_function_alias(
-    tmp_path, monkeypatch,
-):
-    """One function's cache hit cannot certify its advertised sibling."""
-    import gen_worker.executor as executor_mod
-
-    artifact = _artifact(tmp_path)
-    model_dir = tmp_path / "partial-function-proof-model"
-    model_dir.mkdir()
-
-    @endpoint(
-        models={"pipeline": Hub("acme/flux-base")},
-        resources=Resources(gpu=True),
-        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
-    )
-    class _PartiallyCoveredEndpoint:
-        def setup(self, pipeline: _LoadablePipe) -> None:
-            self.pipeline = pipeline
-
-        def generate(self, ctx, payload: _In) -> _Out:
-            _record_fake_warm(self.pipeline)
-            return _Out(y="ok")
-
-        def edit(self, ctx, payload: _In) -> _Out:
-            return _Out(y="eager-only")
-
-    specs = extract_specs(_PartiallyCoveredEndpoint)
-    generate = next(spec for spec in specs if spec.name == "generate")
-    model_ref = wire_ref(generate.models["pipeline"])
-    pipe = _Pipe()
-    sent: list[pb.WorkerMessage] = []
-
-    async def _send(msg):
-        sent.append(msg)
-
-    ex = Executor(specs, _send)
-    ex.store._cache_dir = tmp_path / "cas"
-
-    async def _download(ref, **kwargs):
-        return model_dir
-
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
-    monkeypatch.setattr(
-        provision,
-        "load_slot",
-        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
-    )
-    asyncio.run(ex.ensure_setup(generate, {
-        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-    }))
-    (before,) = ex.compile_targets()
-    assert list(before.function_names) == ["edit", "generate"]
-
-    async def _local_cell(ref, snapshot=None, *, binding=None):
-        return artifact.parent
-
-    ex.store.ensure_local = _local_cell  # type: ignore[method-assign]
-    monkeypatch.setattr(cc, "apply", _guarded_apply)
-    _fake_counters(monkeypatch, hits=1, misses=0)
-    _adopt(ex, target_incarnation_id=before.incarnation_id)
-
-    _assert_failed(
-        sent,
-        "adopt_failed:function_alias_unproven",
-        target_incarnation_id=before.incarnation_id,
-    )
-    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
-    (after,) = ex.compile_targets()
-    assert after.incarnation_id == before.incarnation_id
-    assert list(after.function_names) == list(before.function_names)
-    assert after.active_compile_ref == ""
 
 
 def test_guard_revocation_between_intake_and_gpu_turn_fails_final_fence(
@@ -3291,13 +2511,6 @@ def test_guard_revocation_between_intake_and_gpu_turn_fails_final_fence(
             "acme/klein-finetune", flavor="fp8-w8a8")})
     ex, sent = _wire_executor(spec, tmp_path)
     active = _active_w8a8_target(ex)
-    _adopt(
-        ex,
-        ref=active.active_compile_ref,
-        digest=active.active_compile_snapshot_digest,
-        operation_id=OP_A,
-        target_incarnation_id=active.incarnation_id,
-    )
     sent.clear()
     found = ex._compile_target(active.incarnation_id)
     assert found is not None
@@ -3335,7 +2548,9 @@ def test_guard_revocation_between_intake_and_gpu_turn_fails_final_fence(
         await asyncio.sleep(0)
 
     asyncio.run(scenario())
-    assert len(_events(sent, pb.MODEL_STATE_FAILED)) == 1
+    # pgw#1032: revocation is state-only now; the causal ModelEvent went with
+    # the adoption operation it used to terminate.
+    assert _events(sent, pb.MODEL_STATE_FAILED) == []
 
 
 def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_path):
@@ -3563,37 +2778,14 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_fresh_boot_advertises_candidate_cell_lookups(monkeypatch):
-    """gw#605 revert-turns-red: a FRESHLY BOOTED worker (no ensure_setup yet
-    — the lazy class records are empty) must advertise its pre-load
-    CANDIDATE cell keys, or the hub can never attach a stored cell before
-    setup starts and every fresh boot re-mints (live-found: the store-served
-    path was structurally dead — the cell only entered the release config
-    after the worker's own mint advertised the key)."""
-    from gen_worker import cell_key as cell_key_mod
-
-    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
-
-    async def _send(_msg):
-        return None
-
-    ex = Executor([spec], _send)
-
-    computed: list = []
-
-    class _Key:
-        digest = "ck1-" + "5" * 56
-
-    def _compute(family, execution_lane="", bucket=0, **kw):
-        computed.append((family, execution_lane))
-        return _Key()
-
-    monkeypatch.setattr(cell_key_mod, "compute", _compute)
-    lookups = ex.cell_lookups()
-    assert [(lu.family, lu.cell_key) for lu in lookups] == [
-        (FAMILY, _Key.digest)]
-    # The mandatory lane candidate was computed for the declared w8a8 ref.
-    assert (FAMILY, "w8a8") in computed
+# pgw#1032: `test_fresh_boot_advertises_candidate_cell_lookups` is deleted with
+# `Executor.cell_lookups`. gw#605 wrote it to keep a fresh boot advertising
+# pre-load CANDIDATE keys so the hub could attach a stored cell before setup —
+# but those candidates are COMPUTED (kind="inductor") keys, and since pgw#1010
+# no mint publishes into that space, so the attach it protected could never
+# have resolved. Cold-boot adoption is `aot_cells` fetch-and-filter now
+# (pgw#904 owns its replacement), which does not go through the hub's key
+# lookup at all.
 
 
 # ---------------------------------------------------------------------------

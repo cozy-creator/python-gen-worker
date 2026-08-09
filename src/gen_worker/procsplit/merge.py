@@ -103,8 +103,6 @@ def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
 
     targets: List[pb.CompileTarget] = []
     seen_targets = set()
-    lookups: List[pb.CellLookup] = []
-    seen_lookups = set()
     for d in deltas:
         for t in d.compile_targets:
             # incarnation_id is a uuid4 minted per live object, so children
@@ -113,12 +111,6 @@ def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
                 continue
             seen_targets.add(t.incarnation_id)
             targets.append(t)
-        for cl in d.cell_lookups:
-            key = (cl.family, cl.cell_key)
-            if key in seen_lookups:
-                continue
-            seen_lookups.add(key)
-            lookups.append(cl)
 
     merged = pb.StateDelta(
         phase=merge_phase([d.phase for d in deltas]),
@@ -136,8 +128,8 @@ def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
             d.observed_residency_generation for d in deltas
         ),
         observed_config_generation=min(d.observed_config_generation for d in deltas),
+        # pgw#1032: no `cell_lookups` — no child produces them any more.
         compile_targets=targets,
-        cell_lookups=lookups,
     )
     # THE TRAP: disk is NOT summable. All G children share ONE container
     # filesystem, so summing their statvfs reports would tell the hub the pod

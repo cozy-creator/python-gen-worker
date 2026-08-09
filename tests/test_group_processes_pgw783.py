@@ -321,15 +321,15 @@ def test_phase_is_the_least_ready_group_and_ERROR_dominates():
         pb.WORKER_PHASE_ERROR
 
 
-def test_compile_targets_union_and_cell_lookups_dedup():
-    a = _delta(compile_targets=[pb.CompileTarget(incarnation_id="i1", family="f")],
-               cell_lookups=[pb.CellLookup(family="f", cell_key="ck1-a")])
-    b = _delta(compile_targets=[pb.CompileTarget(incarnation_id="i2", family="f")],
-               cell_lookups=[pb.CellLookup(family="f", cell_key="ck1-a"),
-                             pb.CellLookup(family="f", cell_key="ck1-b")])
+def test_compile_targets_union():
+    """pgw#1032: the `cell_lookups` half of this test is deleted with the
+    surface it guarded — no child produces lookups any more, so the merge has
+    nothing to dedup. The compile-target union is untouched."""
+    a = _delta(compile_targets=[pb.CompileTarget(incarnation_id="i1", family="f")])
+    b = _delta(compile_targets=[pb.CompileTarget(incarnation_id="i2", family="f")])
     merged = merge_state_deltas([a, b])
     assert [t.incarnation_id for t in merged.compile_targets] == ["i1", "i2"]
-    assert [cl.cell_key for cl in merged.cell_lookups] == ["ck1-a", "ck1-b"]
+    assert list(merged.cell_lookups) == []
 
 
 def test_residency_UNIONS_refs_and_takes_the_strongest_tier():

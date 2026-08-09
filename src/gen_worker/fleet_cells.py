@@ -92,13 +92,17 @@ class SelfMint:
 
     Produced only by :func:`adopt_delegated_mint`, after the child's cell
     passes the same arm gates a hub-delivered one does. The serving-bootstrap
-    half of gw#587/th#910:
-    the minting worker ADVERTISES this identity under its own key so the
-    hub's self-attested dispatch fence
-    (``ActiveCompileRef == KeyRef(family, requested_cell_key)``) and
-    ``active_compile_artifacts`` accounting treat the mint exactly like a
-    delivered cell — the warmup proof, not the artifact source, gates
+    half of gw#587/th#910: the minting worker ADVERTISES this identity — the
+    key STAMPED on the bytes it serves — so ``active_compile_artifacts``
+    accounting treats the mint exactly like a cell this pod DISCOVERED and
+    pulled (``aot_cells``); the warmup proof, not the artifact source, gates
     serving.
+
+    pgw#1032: the hub fence this feeds is the one that verifies the ADVERTISED
+    active ref against the hub's own store. The old self-attested spelling
+    (``ActiveCompileRef == KeyRef(family, requested_cell_key)``) compared a
+    stamped key against a COMPUTED one — disjoint spaces since pgw#1010, so it
+    could never match — and is retired with the requested key itself.
     """
 
     family: str

@@ -250,7 +250,6 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
         fleet_cells, "publish_self_mint", lambda p: published.append(p))
     ex, rec, bg, pending, (pipe,) = _wired(tmp_path, monkeypatch)
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
-    monkeypatch.setattr(ex, "_warn_cell_key_divergence", lambda n, t: None)
     monkeypatch.setattr(ex, "_bind_compile_guard", lambda r, t: True)
 
     act = _Act()
@@ -291,7 +290,6 @@ def test_shared_sharers_mint_one_cell_between_them(
     monkeypatch.setattr(fleet_cells, "publish_self_mint", lambda p: None)
     ex, rec, bg, _pending, objs = _wired(tmp_path, monkeypatch, pipes=2)
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
-    monkeypatch.setattr(ex, "_warn_cell_key_divergence", lambda n, t: None)
     monkeypatch.setattr(ex, "_bind_compile_guard", lambda r, t: True)
 
     asyncio.run(ex._delegated_mint_run(rec, bg, _Act()))
