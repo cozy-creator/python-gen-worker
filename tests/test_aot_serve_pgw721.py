@@ -518,18 +518,26 @@ def test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key():
     longer writes. What is left is the rule pgw#1033 stated: whoever reads a
     `cell_key` off an `aot-inductor` envelope registers it.
     """
-    key = "ck1-" + "b" * 56
-    assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}") is False
-    aot.note_aot_key(key)
-    assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}") is True
-    assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}", family="other") is False
-    # The retired label form is NOT a shortcut back in.
-    assert aot.is_aot_ref(f"root/family-{FAMILY}#aot-l4-torch2.13-w8a8") is False
-    assert aot.is_aot_ref(f"root/family-{FAMILY}#trt-l4-trt10.16-fp16") is False
-    # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
-    # it would then be scored by FX hits).
-    assert aot.is_aot_ref(
-        f"root/family-{FAMILY}#ck1-0123456789abcdef") is False
+    # File-unique, and UNREGISTERED afterwards. `_KNOWN_AOT_KEYS` is
+    # process-global, so a key left registered is a claim every later test in
+    # this worker inherits — `"ck1-" + "b" * 56` is a shared literal in four
+    # other files and would have been exactly that landmine.
+    key = "ck1-" + "d721" + "f" * 52
+    try:
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}") is False
+        aot.note_aot_key(key)
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}") is True
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}", family="other") is False
+        # The retired label form is NOT a shortcut back in.
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#aot-l4-torch2.13-w8a8") is False
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#trt-l4-trt10.16-fp16") is False
+        # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
+        # it would then be scored by FX hits).
+        assert aot.is_aot_ref(
+            f"root/family-{FAMILY}#ck1-0123456789abcdef") is False
+    finally:
+        with aot._KNOWN_AOT_KEYS_LOCK:
+            aot._KNOWN_AOT_KEYS.discard(key)
 
 
 def test_verify_refuses_baked_weights(stub_runtime):

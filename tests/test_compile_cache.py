@@ -674,7 +674,14 @@ def test_w8a8_identity_gate_drops_cuda_driver_keeps_rest(monkeypatch):
     meta["cuda_driver"] = "13010"
     assert cc.verify(meta, family="fam") == ""
     assert cc.contract_drift(meta, pipe, cfg) == ""
-    # the honest axes stay fail-closed, with named values
+    # the honest axes stay fail-closed, with named values.
+    #
+    # pgw#1035: this loop is now the SOLE guardian of gw#577 finding (b). The
+    # producer-side twin — `build`'s refusal to mint a w8a8 cell without a
+    # `serving_image_digest` — went with `build`, which had no caller. That is
+    # the correct survivor of the two: a serving pod runs THIS one, on the
+    # artifact's own recorded axes, at adopt time, against cells it did not
+    # mint. Do not delete it without replacing the gate.
     for field in ("sm", "cuda", "image_digest"):
         broken = dict(meta)
         broken[field] = ""
@@ -721,29 +728,6 @@ def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
         cc.enable(pipe, cfg, cache_dir, artifact=artifact2)
     assert "module graph signature" in str(exc.value)
     assert "1" * 12 in str(exc.value)
-
-
-def test_a_w8a8_cell_missing_an_identity_axis_is_refused(tmp_path):
-    """gw#577 finding (b): a w8a8 cell that cannot pin the image it was minted
-    in can never be honestly adopted by the fleet.
-
-    pgw#1035 deleted `build`'s producer-side pre-check with `build` itself (the
-    whole-pipeline dynamo mint had no caller). The gate that MATTERS survives
-    and is the one a serving pod actually runs: `contract_drift` refuses a
-    quantized-lane cell missing any of sm / cuda / image_digest, on the
-    artifact's own recorded axes, at adopt time.
-    """
-    wc = {"quantized": True, "gemm_mode": "pertensor",
-          "activation_scaling": ["static"]}
-    meta = cc.artifact_metadata(
-        family="fam", shapes=[(768, 768)], targets=["transformer"],
-        storage_dtype="fp8-w8a8", weight_lane="w8a8",
-        graph_signature="1" * 64, weight_contract=wc)
-    meta["image_digest"] = ""
-    pipe = _Pipe(_Module())
-    setattr(pipe, cc.EXECUTION_LANE_ATTR, "w8a8")
-    reason = cc.contract_drift(meta, pipe, Compile(shapes=((768, 768),)))
-    assert "image_digest identity" in reason
 
 
 def test_cache_collision_and_merge_failure_leave_live_tree_unchanged(
