@@ -97,7 +97,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple)
+    Any, Callable, Dict, Generator, Iterator, List, Mapping, Optional,
+    Sequence, Tuple)
 
 from . import activity as activity_mod
 from . import (
@@ -1486,8 +1487,17 @@ def mint(
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     phase_snapshot: Optional[Path] = None,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
+    release_residents: bool = False,
 ) -> MintResult:
     """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
+
+    ``release_residents`` (pgw#1053) is the CALLER's statement that it has no
+    further use for ``pipeline`` after the last row exports — the mint then
+    projects the pipeline and the retained programs to code-only and hands
+    the device memory back to the compile pool's budget. The mint child and
+    the operator CLI say True (their pipeline dies with the process); library
+    callers and tests that keep using the pipeline afterwards default False.
+    A lifecycle fact stated by the owner, not a tuning knob.
 
     pgw#825: an aborted mint used to report a wall-clock total and nothing
     else — `compile_s`, `export_s` and `n_entries` all parsed to `-` — so a
@@ -1544,6 +1554,7 @@ def mint(
             entry_peak_rss_bytes=entry_peak_rss_bytes,
             entry_device_peak_bytes=entry_device_peak_bytes,
             execution_lane_verdict=execution_lane_verdict,
+            release_residents=release_residents,
             progress=progress)
     except BaseException as exc:
         _attach_partial_phases(exc, progress)
@@ -1833,6 +1844,7 @@ def _mint_cell(
     entry_peak_rss_bytes: int = 0,
     entry_device_peak_bytes: int = 0,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
+    release_residents: bool = False,
     progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
@@ -1935,7 +1947,6 @@ def _mint_cell(
     progress.width = width
 
     minted = progress.minted
-    disarmed = False
     # pgw#822: the adapter-BEARING classes are exported from the lifted
     # forward. Arming it is this function's job, not the caller's — see
     # `_arm_branches`.
@@ -1951,6 +1962,9 @@ def _mint_cell(
     # terms are INDUCTOR'S, and ~56 % of which was never observed — does not
     # describe it. A probe: it reads and clears a counter and decides
     # nothing (pgw#830 — instrument first, optimise never in the same change).
+    # Still honest under pgw#1052's overlap: the compile children are separate
+    # OS processes, so their device use never lands in THIS allocator's
+    # counters — the export figures stay the export's.
     try:
         import torch as _t
         if _t.cuda.is_available():
@@ -1965,49 +1979,44 @@ def _mint_cell(
     progress.beat(
         PHASE_TRACE_GRAPH, 0, len(rows),
         f"{len(rows)} declared class row(s)")
-    try:
-        for index, (plan, arm) in enumerate(rows, start=1):
-            if arm is False and not disarmed:
-                # ONE toggle for the whole branchless group (the rows are
-                # ordered adapter-bearing first): disable/enable reallocates
-                # every leaf's branch container, and doing it per entry would
-                # be N times the VRAM churn for the same graphs.
-                _disarm_branches(pipeline)
-                disarmed = True
-            # Reported BEFORE the work, not after: a row that never returns
-            # is the one a reader most needs named, and an after-the-fact tick
-            # names only the rows that finished.
-            progress.beat(
-                PHASE_TRACE_GRAPH, index, len(rows),
-                _decl.plan_entry_name(plan))
-            with export_footprint.row():
-                minted.append(_export_entry(
-                    pipeline, spec, plan, decl,
-                    inductor_configs=inductor_configs,
-                    compile_now=not parallel))
-    finally:
-        if disarmed:
-            _arm_branches(pipeline, int(spec.lora_bucket or 0))
-    # Asked of the EXPORTED programs: a cell whose entries cannot be told
-    # apart at dispatch must cost seconds to refuse, not a full compile bill
-    # (the pgw#825 discipline, one gate over). Exact on the parallel path,
-    # which is every real mint — pgw#809 sizes width off the pod's own budget
-    # and the pool has not built a kernel yet. A width-1 serial mint has
-    # already compiled as it exported, so there it refuses late; correct
-    # either way, cheap where it matters.
-    #
-    # pgw#917: and it MERGES before it refuses. Declared rows that reduce to
-    # one ingress contract over one target with byte-identical code are one
-    # dispatchable class — compiling each of them separately buys nothing and
-    # makes the cell undispatchable, which is the same fact twice.
-    minted, class_aliases = canonicalize_dispatch_classes(minted)
-    timings["canonicalized_entries"] = float(
-        sum(len(rows) for rows in class_aliases.values()))
 
-    if parallel:
+    def _rows_source() -> Iterator[_MintedEntry]:
+        """Export every declared row IN ORDER — serial, in this process,
+        inside the one branch-arm toggle (pgw#790). One body for the serial
+        and the overlapped paths: pgw#1052 changes the HANDOFF time of each
+        exported row, never the export order or its gates."""
+        disarmed = False
+        try:
+            for index, (plan, arm) in enumerate(rows, start=1):
+                if arm is False and not disarmed:
+                    # ONE toggle for the whole branchless group (the rows are
+                    # ordered adapter-bearing first): disable/enable
+                    # reallocates every leaf's branch container, and doing it
+                    # per entry would be N times the VRAM churn for the same
+                    # graphs.
+                    _disarm_branches(pipeline)
+                    disarmed = True
+                # Reported BEFORE the work, not after: a row that never
+                # returns is the one a reader most needs named, and an
+                # after-the-fact tick names only the rows that finished.
+                progress.beat(
+                    PHASE_TRACE_GRAPH, index, len(rows),
+                    _decl.plan_entry_name(plan))
+                with export_footprint.row():
+                    entry = _export_entry(
+                        pipeline, spec, plan, decl,
+                        inductor_configs=inductor_configs,
+                        compile_now=not parallel)
+                minted.append(entry)
+                yield entry
+        finally:
+            if disarmed:
+                _arm_branches(pipeline, int(spec.lora_bucket or 0))
+
+    def _close_export_phase() -> None:
         timings["export_all_s"] = round(time.monotonic() - t_export, 2)
-        # Sampled BEFORE the pool is built, so no inductor allocation can be
-        # attributed to export. Reported even when zero (no CUDA / probe
+        # Sampled the moment the LAST row exports — before pgw#1053's release
+        # can reset the counters. Reported even when zero (no CUDA / probe
         # failed), because a missing key and a measured zero are different
         # facts and the width rule must be able to tell them apart.
         try:
@@ -2024,24 +2033,95 @@ def _mint_cell(
         # sizes a pool — and the width rule spent its whole life dividing by
         # the first one, which is why it always answered 1.
         timings.update(export_footprint.facts())
-        # pgw#1030: `aot_export_parallel.decide(...)` was recorded here —
-        # six floats describing the width a PARALLEL export would have run
-        # at. Export is unconditionally serial (the loop above), nothing
-        # ever consumed the decision, and the module duplicated the compile
-        # pool's card-budget logic. Deleted with the module.
+
+    if parallel:
+        # pgw#1052: the pool exists BEFORE the first row exports, and each row
+        # is handed to it AS IT EXPORTS — producer ~113 s/row against a pool
+        # consuming ~127 s/row at K=2 (attempt 30), so the two phases shadow
+        # each other and the wall collapses toward max(export, compile).
+        # The census inside the pool is still taken before any child exists
+        # (pgw#992's requirement); the export phase's own growth after that
+        # reading is priced per spawn by `_spawn_admitted`.
+        #
+        # pgw#917 runs TWICE, deliberately: an arriving row that duplicates an
+        # earlier row's ingress+identity is aliased at arrival (no compile
+        # spent, and a same-ingress DIFFERENT-identity collision refuses at
+        # row N — bounded waste on the refusal path buys the overlap on every
+        # green mint); the original batch gate re-runs over the kept rows at
+        # drain as the safety net for clusters only visible transitively.
+        arrival = _ArrivalCanon()
+        arrival_aliases: Dict[str, List[_MintedEntry]] = {}
+        kept: List[_MintedEntry] = []
+
+        pool = aot_compile_pool.EntryCompilePool(
+            # A SIBLING of work/, never inside it — see the note on
+            # `_compile_entries_parallel`.
+            work.parent / "entry-pool", width=width,
+            inductor_configs=inductor_configs)
+        t_pool = time.monotonic()
+
+        def _feed() -> "Generator[Tuple[str, Any], None, None]":
+            for entry in _rows_source():
+                keeper = arrival.admit(entry)
+                if keeper is not None:
+                    arrival_aliases.setdefault(keeper.name, []).append(entry)
+                    continue
+                kept.append(entry)
+                yield entry.name, entry.program
+            # The producer is exhausted: close the export phase's books, then
+            # — when the caller surrendered the pipeline — hand the dead
+            # residents back and let the pool re-derive K against the freed
+            # budget (pgw#1053).
+            _close_export_phase()
+            if release_residents:
+                t0 = time.monotonic()
+                timings.update(_release_mint_residents(pipeline, minted))
+                timings["residents_release_s"] = round(
+                    time.monotonic() - t0, 2)
+                pool.note_residents_released()
+
         progress.beat(
-            PHASE_INDUCTOR_COMPILE, 0, len(minted),
-            f"{len(minted)} entries, {width.workers} wide")
-        progress.pool_ledger = _compile_entries_parallel(
-            minted, work, width, inductor_configs=inductor_configs,
-            progress=progress,
-            on_entry=lambda name, done, total: progress.beat(
-                PHASE_INDUCTOR_COMPILE, done, total, name))
-        # NOTE: `_compile_entries_parallel` refreshes `progress.pool_ledger`
-        # on every completed entry (pgw#848), so the snapshot each beat writes
-        # already carries a LIVE ledger — K, its binding, efficiency, peaks —
-        # rather than only the width. An abandoned mint's row is the one that
-        # needs it most.
+            PHASE_INDUCTOR_COMPILE, 0, len(rows),
+            f"pool up front, {width.workers} wide — overlapped with export "
+            f"(pgw#1052)")
+        source = _feed()
+        try:
+            by_entry = _drive_pool(
+                pool, source, expected_total=len(rows), progress=progress,
+                on_entry=lambda name, done, total: progress.beat(
+                    PHASE_INDUCTOR_COMPILE, done, total, name))
+        finally:
+            source.close()
+        # NOTE: `_drive_pool` refreshes `progress.pool_ledger` on every
+        # completed entry (pgw#848), so the snapshot each beat writes already
+        # carries a LIVE ledger — K, its binding, efficiency, peaks — rather
+        # than only the width. An abandoned mint's row is the one that needs
+        # it most.
+        minted, late_aliases = canonicalize_dispatch_classes(kept)
+        class_aliases = _merge_alias_maps(arrival_aliases, late_aliases)
+        if arrival_aliases:
+            _emit_arrival_alias_event(arrival_aliases, len(rows))
+        _fold_pool_results(minted, pool, by_entry)
+        logger.info(
+            "aot-mint: pgw#809/pgw#1052 pool compiled %d entr%s at K=%d in "
+            "%.0fs overlapped with export (sum of entry seconds %.0fs, peak "
+            "child RSS %.1f GiB)",
+            len(minted), "y" if len(minted) == 1 else "ies",
+            pool.width.workers, time.monotonic() - t_pool,
+            sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3)
+        progress.pool_ledger = _pool_facts(pool)
+    else:
+        for _entry in _rows_source():
+            pass
+        # Asked of the EXPORTED programs: a cell whose entries cannot be told
+        # apart at dispatch must cost seconds to refuse, not a full compile
+        # bill (the pgw#825 discipline, one gate over). A width-1 serial mint
+        # has already compiled as it exported, so here it refuses late;
+        # correct either way — the parallel path refuses at ARRIVAL
+        # (pgw#1052), which is where it matters.
+        minted, class_aliases = canonicalize_dispatch_classes(minted)
+    timings["canonicalized_entries"] = float(
+        sum(len(rows) for rows in class_aliases.values()))
     timings["entry_workers"] = float(width.workers)
 
     t0 = time.monotonic()
@@ -2180,36 +2260,20 @@ def _entry_device_bytes(
     return int(budget.need_bytes), "estimated"
 
 
-def _compile_entries_parallel(
-    minted: List[_MintedEntry],
-    work: Path,
-    width: aot_compile_pool.PoolWidth,
+def _drive_pool(
+    pool: aot_compile_pool.EntryCompilePool,
+    entries: Any,
     *,
-    inductor_configs: Optional[Mapping[str, Any]] = None,
+    expected_total: int = 0,
     on_entry: Optional[Callable[[str, int, int], None]] = None,
     progress: Optional["MintProgress"] = None,
-) -> Dict[str, Any]:
-    """pgw#809: fill every entry's ``files`` K-wide, out of process.
+) -> Dict[str, List[str]]:
+    """Run one :class:`~gen_worker.aot_compile_pool.EntryCompilePool` and map
+    its failures onto the mint's own vocabulary.
 
-    Returns the pool's own ledger (pgw#830) so it reaches the phase table:
-    the pool emits it as a typed event too, but that emission happens in the
-    mint CHILD, which holds no orchestrator session — pgw#842.
-
-    Mutates ``minted`` in place, and every entry MUST come back with files —
-    a pool that quietly returned fewer entries than it was given would pack a
-    short cell. Assembly is by entry NAME: ``package_cell`` reads
-    ``{row.name: row.files}`` in the order ``minted`` already holds (the
-    declaration's order), so completion order is not observable in the
-    artifact.
+    ``entries`` is either the fully-exported list (the serial-export shape the
+    pgw#848 tests drive) or pgw#1052's live producer iterator.
     """
-    # A SIBLING of work/, never inside it. pack() only copies a fixed member
-    # set so debris there would be harmless today, but a pool workdir living
-    # inside the directory that becomes the artifact is one refactor away from
-    # putting job files and stderr tails into a cell.
-    pool = aot_compile_pool.EntryCompilePool(
-        work.parent / "entry-pool", width=width,
-        inductor_configs=inductor_configs)
-    t0 = time.monotonic()
 
     def _tick(name: str, done: int, total: int) -> None:
         # pgw#848: refresh the ledger BEFORE the beat, so the snapshot the
@@ -2222,8 +2286,8 @@ def _compile_entries_parallel(
             on_entry(name, done, total)
 
     try:
-        by_entry = pool.compile(
-            [(row.name, row.program) for row in minted], on_entry=_tick)
+        return pool.compile(
+            entries, on_entry=_tick, expected_total=expected_total)
     except aot_compile_pool.EntryCompileFailed as exc:
         # pgw#848: the pool's ledger and its MEASURED peak have to survive the
         # failure, because the aborted phase table is what the parent banks
@@ -2239,7 +2303,23 @@ def _compile_entries_parallel(
                 str(exc), entry=exc.entry, basis=exc.basis,
                 peak_rss_bytes=exc.peak_rss_bytes) from exc
         raise MintRefused(str(exc)) from exc
-    wall = time.monotonic() - t0
+
+
+def _fold_pool_results(
+    minted: Sequence[_MintedEntry],
+    pool: aot_compile_pool.EntryCompilePool,
+    by_entry: Mapping[str, List[str]],
+) -> None:
+    """Fold the pool's results back onto the entries that will PACK.
+
+    Every packed entry MUST have files — a pool that quietly returned fewer
+    entries than the cell declares would pack a short cell. Assembly is by
+    entry NAME: ``package_cell`` reads ``{row.name: row.files}`` in the order
+    ``minted`` already holds (the declaration's order), so completion order is
+    not observable in the artifact. An entry the drain-time pgw#917 pass
+    merged away may have compiled files nobody folds; its work is the bounded
+    waste pgw#1052 states, never a packing input.
+    """
     missing = [row.name for row in minted if row.name not in by_entry]
     if missing:
         raise MintRefused(
@@ -2263,6 +2343,36 @@ def _compile_entries_parallel(
         overlays = pool.entry_overlays.get(row.name) or {}
         if overlays:
             row.timings["overlays"] = dict(overlays)
+
+
+def _compile_entries_parallel(
+    minted: List[_MintedEntry],
+    work: Path,
+    width: aot_compile_pool.PoolWidth,
+    *,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+    on_entry: Optional[Callable[[str, int, int], None]] = None,
+    progress: Optional["MintProgress"] = None,
+) -> Dict[str, Any]:
+    """pgw#809: fill every entry's ``files`` K-wide, out of process — the
+    already-exported-list shape. The production mint overlaps export with the
+    pool instead (pgw#1052, in ``_mint_cell``); this survives as the driver
+    for a pre-exported entry set and returns the pool's own ledger (pgw#830)
+    so it reaches the phase table.
+    """
+    # A SIBLING of work/, never inside it. pack() only copies a fixed member
+    # set so debris there would be harmless today, but a pool workdir living
+    # inside the directory that becomes the artifact is one refactor away from
+    # putting job files and stderr tails into a cell.
+    pool = aot_compile_pool.EntryCompilePool(
+        work.parent / "entry-pool", width=width,
+        inductor_configs=inductor_configs)
+    t0 = time.monotonic()
+    by_entry = _drive_pool(
+        pool, [(row.name, row.program) for row in minted],
+        on_entry=on_entry, progress=progress)
+    wall = time.monotonic() - t0
+    _fold_pool_results(minted, pool, by_entry)
     logger.info(
         "aot-mint: pgw#809 pool compiled %d entr%s at K=%d in %.0fs "
         "(sum of entry seconds %.0fs, peak child RSS %.1f GiB)",
@@ -2553,6 +2663,241 @@ def canonicalize_dispatch_classes(
             phase="entry_merged",
         )
     return [row for row in minted if row.name not in dropped], aliases
+
+
+class _ArrivalCanon:
+    """pgw#917's merge-or-refuse decision, taken when the entry ARRIVES.
+
+    pgw#1052 overlaps export with the compile pool, so the batch gate's
+    moment — "after the last export, before the first compile" — no longer
+    exists. The decision moves to arrival: a row that duplicates an earlier
+    kept row's ingress contract AND identity is aliased onto it (no compile is
+    ever spent on it), and a same-ingress DIFFERENT-identity collision refuses
+    at row N — bounded waste on the refusal path (at most N-1 compiles, on a
+    mint that was going to refuse anyway) buys the 65-minute overlap on every
+    green mint. That trade is pgw#1052's, stated here and in its tracker row.
+
+    Deliberately NOT a replacement for :func:`canonicalize_dispatch_classes`:
+    the batch gate re-runs over the kept rows at drain as the safety net for
+    the one shape this incremental view cannot see — a cluster whose members
+    admit each other only TRANSITIVELY through a later row. Its survivor is
+    then chosen exactly as before; an arrival alias's survivor is the row that
+    arrived first, which for every family measured (sdxl's area-preserving
+    aspect rows all mutually admit directly) is the same cluster either way.
+    """
+
+    def __init__(self) -> None:
+        self._kept: Dict[Tuple[str, Any], List[
+            Tuple[_MintedEntry, Any, Tuple[Dict[str, Any], ...],
+                  Dict[str, Any]]]] = {}
+
+    def admit(self, row: _MintedEntry) -> Optional[_MintedEntry]:
+        """The kept sibling ``row`` aliases onto, or ``None`` (compile it).
+
+        Raises :class:`MintRefused` on a same-ingress different-identity
+        collision, naming the pair and the differing axes (pgw#917's
+        sentence, at arrival time).
+        """
+        fork = {str(n): v for n, v in tuple(row.spec.fork)}
+        group = (str(row.spec.target), fork.get(ADAPTER_FORK))
+        try:
+            contract, calls, meta = _entry_ingress_declaration(row)
+        except (aot_package.PackageIntrospectionError, ValueError) as exc:
+            # An unreadable declaration is not "probably fine": it is a cell
+            # whose dispatchability nobody can prove.
+            raise MintRefused(
+                f"entry {row.name!r}: dispatch-ambiguity gate cannot read "
+                f"the declared ingress contract, so this cell cannot be "
+                f"shown to be dispatchable at all: {exc}") from exc
+        for kept_row, kept_contract, kept_calls, kept_meta in \
+                self._kept.get(group, ()):
+            if not (any(_admits(kept_contract, call) for call in calls)
+                    or any(_admits(contract, call) for call in kept_calls)):
+                continue
+            identities = {
+                kept_row.name: _class_identity(kept_row, kept_meta),
+                row.name: _class_identity(row, meta),
+            }
+            axes = _differing_axes(identities)
+            if axes:
+                raise MintRefused(
+                    f"dispatch-ambiguity gate: {sorted(identities)!r} collide "
+                    f"at ingress but are NOT one class — they differ on "
+                    f"{list(axes)!r}, so every call they carry would be "
+                    f"refused 'entry_ambiguous' and served EAGER. Fix the "
+                    f"declaration so every entry's ingress contract is "
+                    f"uniquely admitting (pgw#917; refused at ARRIVAL under "
+                    f"pgw#1052 — the rows already exported are the bounded "
+                    f"waste that refusal costs)")
+            logger.info(
+                "aot-mint: pgw#917 declared class row %r aliased onto %r at "
+                "arrival — identical ingress contract, target and code, so "
+                "no compile is spent on it (pgw#1052)",
+                row.name, kept_row.name)
+            return kept_row
+        self._kept.setdefault(group, []).append((row, contract, calls, meta))
+        return None
+
+
+def _merge_alias_maps(
+    arrival: Mapping[str, List["_MintedEntry"]],
+    late: Mapping[str, Tuple["_MintedEntry", ...]],
+) -> Dict[str, Tuple["_MintedEntry", ...]]:
+    """One alias map out of the arrival-time and drain-time pgw#917 passes.
+
+    A drain-time merge can drop a keeper that itself collected arrival
+    aliases; those re-home onto the surviving entry so no declared class row
+    ever falls out of the envelope's ``aliases`` audit trail.
+    """
+    surviving_by_dropped = {
+        dropped.name: keep
+        for keep, dropped_rows in late.items() for dropped in dropped_rows}
+    merged: Dict[str, List["_MintedEntry"]] = {
+        keep: list(rows) for keep, rows in late.items()}
+    for keeper_name, rows in arrival.items():
+        home = surviving_by_dropped.get(keeper_name, keeper_name)
+        merged.setdefault(home, []).extend(rows)
+    return {keep: tuple(rows) for keep, rows in merged.items()}
+
+
+def _emit_arrival_alias_event(
+    arrival: Mapping[str, List["_MintedEntry"]], declared: int,
+) -> None:
+    """The pgw#917 canonicalization event for arrival-time merges — the batch
+    gate emits its own for drain-time ones, and both are telemetry."""
+    try:
+        dropped = sum(len(rows) for rows in arrival.values())
+        activity_mod.emit_event(
+            "aot_class_canonicalized",
+            f"{dropped} of {declared} declared class rows reduce to an "
+            f"ingress contract a sibling already declares; aliased AT ARRIVAL "
+            f"(pgw#1052) instead of compiling a class the dispatch could "
+            f"never select: "
+            + "; ".join(
+                f"{keep} <- {[r.name for r in rows]}"
+                for keep, rows in sorted(arrival.items())[:4]),
+            phase="entry_merged",
+        )
+    except Exception:  # pragma: no cover — telemetry never fails a mint
+        logger.debug("aot-mint: arrival alias event failed", exc_info=True)
+
+
+def _release_mint_residents(
+    pipeline: Any, minted: Sequence["_MintedEntry"],
+) -> Dict[str, float]:
+    """pgw#1053: hand the mint parent's dead residents back to the card.
+
+    From the moment the LAST row exports, neither the composed pipeline nor
+    the retained programs' weight aliases do anything for the rest of the mint
+    — measured at 16.2 GiB held through the entire 97-minute compile phase on
+    the L40S (attempt 30), which with the pgw#992 budget is most of what held
+    K at 2. This is the MINT PARENT'S OWN copy: the serving worker's eager
+    pipeline lives in a different process and is untouched here (its
+    forge-pod release is ``mint_delegate``'s, and a serving pod keeps eager
+    resident per Paul's ruling — GPU hot, eager minimally disrupted).
+
+    Projection, not deletion. Every retained ``ExportedProgram`` keeps its
+    graph, signature, placeholders and LITERAL values (a literal ships inside
+    the artifact and is keyed by VALUE — pgw#857), while its state_dict-
+    sourced constants — device aliases of the pipeline weights — become meta
+    tensors of the same shape and dtype. Every parent-side gate that still
+    runs (``program_package_drift``, ``unbindable_constants``,
+    ``input_contract``, ``entry_graph_block``, ``_write_literals``, the
+    drain-time pgw#917 pass) reads names, shapes and literal bytes only, so
+    NO gate is dropped; each runs against the code-only projection. The
+    compile children read the STAGED programs from disk, written before this
+    runs, byte for byte — nothing about the artifact can move (pgw#846).
+
+    Best-effort in every direction: a tensor or module that refuses the
+    projection is skipped, and the release reports what it actually freed. A
+    partially released card still widens by what came back. Superseded by
+    construction once pgw#1056's fake-weight mint lands (there is then no
+    resident to release); the pool-side regrant it feeds
+    (``note_residents_released``) is exactly what that mint's verification
+    load will use too.
+    """
+    facts: Dict[str, float] = {}
+    try:
+        import gc
+
+        import torch
+    except Exception:  # noqa: BLE001 — no torch, nothing resident
+        return facts
+    cuda = False
+    before = 0
+    try:
+        cuda = torch.cuda.is_available()
+        if cuda:
+            before = int(torch.cuda.memory_reserved())
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        cuda = False
+
+    def _meta(value: Any) -> Any:
+        try:
+            if isinstance(value, torch.Tensor) and value.device.type != "meta":
+                return value.to("meta")
+        except Exception:  # noqa: BLE001 — an unmovable tensor stays
+            pass
+        return value
+
+    for row in minted:
+        program = row.program
+        weights = set(aot_package.program_state_dict_fqns(program))
+        state = getattr(program, "state_dict", None)
+        if isinstance(state, dict):
+            for fqn in list(state):
+                state[fqn] = _meta(state[fqn])
+        constants = getattr(program, "constants", None)
+        if isinstance(constants, dict):
+            # Only the state_dict-sourced entries: everything else is a
+            # LITERAL whose bytes still have to reach `_write_literals`.
+            for fqn in list(constants):
+                if fqn in weights:
+                    constants[fqn] = _meta(constants[fqn])
+    modules: List[Any] = []
+    candidates: List[Any] = [pipeline]
+    try:
+        candidates.extend(vars(pipeline).values())
+    except TypeError:
+        pass
+    candidates.extend(row.owner for row in minted)
+    for obj in candidates:
+        if isinstance(obj, torch.nn.Module) \
+                and all(obj is not m for m in modules):
+            modules.append(obj)
+    refused = 0
+    for module in modules:
+        try:
+            module.to("meta")
+        except Exception:  # noqa: BLE001 — best effort, reported below
+            refused += 1
+            logger.debug(
+                "aot-mint: pgw#1053 module %s refused the meta projection; "
+                "its storage stays resident", type(module).__name__,
+                exc_info=True)
+    gc.collect()
+    facts["residents_release_modules"] = float(len(modules) - refused)
+    if cuda:
+        try:
+            torch.cuda.empty_cache()
+            after = int(torch.cuda.memory_reserved())
+            facts["residents_released_bytes"] = float(max(0, before - after))
+            # The TRUE mint peak, banked before the reset erases it: the
+            # parent's `record_child_peak` loop must keep learning what this
+            # process really held, not what it held after surrendering.
+            facts["peak_vram_before_release_bytes"] = float(
+                torch.cuda.max_memory_allocated())
+            # Load-bearing: the pool's own high-water must restart from the
+            # released level or `note_residents_released` can regrant nothing.
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:  # noqa: BLE001 — a probe never changes an outcome
+            pass
+    logger.info(
+        "aot-mint: pgw#1053 mint residents released — %d module(s) projected "
+        "to meta, %.2f GiB handed back",
+        len(modules) - refused,
+        facts.get("residents_released_bytes", 0.0) / 1024**3)
+    return facts
 
 
 def _gate_and_declare_entry(
@@ -3327,7 +3672,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 3
     try:
         pipeline, _build_inputs = compose_for_mint(model, spec, body)
-        result = mint(pipeline, spec, Path(args.out))
+        # pgw#1053: an operator mint's pipeline is composed for the mint and
+        # dies with the process — surrender it once the last row exports.
+        result = mint(pipeline, spec, Path(args.out), release_residents=True)
     except MintRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2

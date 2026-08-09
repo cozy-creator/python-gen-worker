@@ -40,6 +40,7 @@ from . import aot_resume
 from . import mint_budget
 from . import mint_process
 from . import progress as progress_mod
+from . import worker_goals
 from .mint_process import MintOutcome, MintRequest
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,140 @@ ADOPTED = "adopted"
 DECLINED = "declined"
 FAILED = "failed"
 ABANDONED = mint_process.ABANDONED
+
+
+# ---------------------------------------------------------------------------
+# pgw#1053: the parked eager pipeline — a forge-goal pod's 9.54 GiB co-tenant
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ParkedEager:
+    """A serving-process pipeline moved to host RAM for the life of a mint.
+
+    Holds exactly what restoration needs: the modules that were moved, and
+    the device string they came from.
+    """
+
+    modules: Tuple[Any, ...]
+    device: str
+
+
+def _eager_modules(pipe: Any) -> Tuple[Any, ...]:
+    """The distinct ``nn.Module`` objects a pipeline is made of — the same
+    walk :func:`mint_budget.device_of` sizes the card with."""
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 — no torch, nothing resident
+        return ()
+    out: list = []
+    candidates = [pipe]
+    try:
+        candidates.extend(vars(pipe).values())
+    except TypeError:
+        pass
+    for obj in candidates:
+        if isinstance(obj, torch.nn.Module) and all(obj is not m for m in out):
+            out.append(obj)
+    return tuple(out)
+
+
+def maybe_park_eager(pipe: Any, goals: Any = None) -> Optional[ParkedEager]:
+    """Park the serving process's eager pipeline for the mint — IFF the goal
+    set says nobody is served by it (pgw#1053).
+
+    The parent's eager pipeline held **9.54 GiB** through attempt 30's whole
+    165-minute mint on a pod whose goal set admits no tenant dispatch — VRAM
+    serving nobody, priced straight out of the mint child's budget and the
+    compile pool's K. The GOALS machinery decides, never a mode probe
+    (pgw#930): a pod holding a serve goal keeps eager resident and hot — Paul
+    ruling 2, eager is minimally disrupted and the GPU stays warm — and this
+    function then does not touch it. Only a pod with no serve goal parks,
+    because there the "tenant" every reserve protects does not exist.
+
+    CPU-park rather than teardown, so the ADOPT step at the end of the mint
+    still has the real weights to bind and prove against —
+    :func:`restore_eager_pipeline` moves them back first. The pgw#763
+    host-move guard stays armed and is the budget check: a pipeline host RAM
+    cannot hold refuses typed, the park unwinds what it moved, and the mint
+    proceeds against the resident card exactly as today.
+    """
+    goals = worker_goals.current() if goals is None else goals
+    if pipe is None or goals.tenant_reserve_applies():
+        return None
+    modules = _eager_modules(pipe)
+    on_device = []
+    device = ""
+    for module in modules:
+        try:
+            param = next(
+                (t for t in module.parameters(recurse=True) if t.is_cuda),
+                None)
+        except Exception:  # noqa: BLE001 — an unreadable module stays put
+            param = None
+        if param is not None:
+            on_device.append(module)
+            device = device or str(param.device)
+    if not on_device:
+        return None
+    moved: list = []
+    try:
+        for module in on_device:
+            module.to("cpu")      # pgw#763 guard checks the host budget
+            moved.append(module)
+    except Exception as exc:  # noqa: BLE001 — typed refusal or torch failure
+        for module in moved:
+            try:
+                module.to(device)
+            except Exception:  # noqa: BLE001 — best-effort unwind
+                logger.exception(
+                    "mint-delegate: pgw#1053 park unwind failed; the "
+                    "pipeline may be split across devices")
+        logger.warning(
+            "mint-delegate: pgw#1053 eager park refused (%s: %s) — the "
+            "pipeline stays resident and the mint budgets around it as "
+            "before", type(exc).__name__, exc)
+        return None
+    freed = 0
+    try:
+        import torch
+
+        torch.cuda.empty_cache()
+        free, total = torch.cuda.mem_get_info()
+        freed = int(free)
+        _ = total
+    except Exception:  # noqa: BLE001 — telemetry only
+        pass
+    activity_mod.emit_event(
+        activity_mod.KIND_AOT_MINT,
+        f"pgw#1053: no serve goal — parked the eager pipeline "
+        f"({len(moved)} module(s)) to host RAM for the mint; device free now "
+        f"{freed / 1024**3:.2f} GiB",
+        phase="residents",
+    )
+    return ParkedEager(modules=tuple(moved), device=device or "cuda")
+
+
+def restore_eager_pipeline(parked: ParkedEager) -> bool:
+    """Move a parked pipeline back onto its card. False = it did not all come
+    back, and the caller must not adopt against a half-resident pipeline."""
+    ok = True
+    for module in parked.modules:
+        try:
+            module.to(parked.device)
+        except Exception:  # noqa: BLE001 — reported, never raised
+            ok = False
+            logger.exception(
+                "mint-delegate: pgw#1053 eager restore failed for %s",
+                type(module).__name__)
+    if not ok:
+        activity_mod.emit_event(
+            activity_mod.KIND_AOT_MINT,
+            "pgw#1053: eager pipeline did NOT fully restore after the mint — "
+            "adoption is refused against a half-resident pipeline",
+            phase="residents",
+        )
+    return ok
 
 
 def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
@@ -255,12 +390,37 @@ async def build_cell(
 ) -> DelegatedResult:
     """Build and adopt one cell in a child process. Never raises for a mint
     failure — the worker must never die with its mint."""
-    from . import fleet_cells
-
-    pending = task.pending
     device = (
         task.device if task.device is not None
         else mint_budget.device_of(task.pipe))
+    # pgw#1053: with no serve goal there is no tenant, and the eager pipeline
+    # is a 9.54 GiB co-tenant of its own mint. Parked BEFORE the first budget
+    # probe so `co_residency` prices the freed card; restored before ADOPT,
+    # which needs the real weights (and unconditionally on the way out, so
+    # this process is left as it was found whatever the outcome).
+    parked_ref: list = [maybe_park_eager(task.pipe)]
+    try:
+        return await _build_cell_attempts(
+            task, act=act, abandon=abandon, max_attempts=max_attempts,
+            device=device, parked_ref=parked_ref)
+    finally:
+        if parked_ref[0] is not None:
+            restore_eager_pipeline(parked_ref[0])
+            parked_ref[0] = None
+
+
+async def _build_cell_attempts(
+    task: MintTask,
+    *,
+    act: Any,
+    abandon: Any,
+    max_attempts: int,
+    device: Optional[int],
+    parked_ref: list,
+) -> DelegatedResult:
+    from . import fleet_cells
+
+    pending = task.pending
     family = str(pending.family)
     attempts = 0
     budget: Optional[mint_budget.MintBudget] = None
@@ -355,6 +515,22 @@ async def build_cell(
                 budget=budget)
 
         if outcome.minted and outcome.artifact is not None:
+            # pgw#1053: adoption binds constants from the RESIDENT weights and
+            # runs the parity proof against them — the parked pipeline comes
+            # back first, or the adopt would prove against host-RAM ghosts.
+            if parked_ref[0] is not None:
+                restored = restore_eager_pipeline(parked_ref[0])
+                parked_ref[0] = None
+                if not restored:
+                    fleet_cells.abandon_self_mint(pending)
+                    return DelegatedResult(
+                        status=FAILED, attempts=attempts, budget=budget,
+                        reason="eager_restore_failed",
+                        detail=(
+                            "the parked eager pipeline did not fully restore "
+                            "to its device after the mint (pgw#1053) — "
+                            "adoption is refused rather than proven against "
+                            "a half-resident pipeline"))
             act.phase(activity_mod.PHASE_SEAL_PUBLISH)
             minted = fleet_cells.adopt_delegated_mint(
                 task.pipe, pending, outcome.artifact)
@@ -503,8 +679,11 @@ __all__ = [
     "FAILED",
     "DelegatedResult",
     "MintTask",
+    "ParkedEager",
     "build_cell",
     "build_request",
     "cfg_spec",
+    "maybe_park_eager",
+    "restore_eager_pipeline",
     "scratch_root",
 ]

@@ -59,7 +59,8 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple)
+    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional,
+    Sequence, Tuple)
 
 import msgspec
 
@@ -382,6 +383,26 @@ def card_census(device: int = -1) -> CardCensus:
             "sampled")
     except Exception:  # noqa: BLE001 — an unreadable card licenses nothing
         return CardCensus(0, 0, 0, "unreadable")
+
+
+def own_reserved_now(device: int = -1) -> int:
+    """This process's CURRENT reserved bytes (-1 = unreadable).
+
+    pgw#1053: the post-release floor. Distinct from
+    :func:`own_device_high_water` on purpose — the high-water answers "what
+    did this process ever hold" and can only be re-baselined through
+    ``reset_peak_memory_stats``; this answers "what does it hold NOW", which
+    is what the released budget re-derives from.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return -1
+        dev = torch.cuda.current_device() if device < 0 else int(device)
+        return int(torch.cuda.memory_reserved(dev))
+    except Exception:  # noqa: BLE001 — unreadable regrants nothing
+        return -1
 
 
 def own_device_high_water(device: int = -1) -> int:
@@ -1024,6 +1045,14 @@ class PoolLedger:
     #: The pool refills a freed slot only after staging the next program, so
     #: this is export-vs-compile SERIALIZATION, measured.
     idle_staging_s: float = 0.0
+    #: pgw#1052: free-slot seconds while the parent was PULLING the entry
+    #: source — which, on the overlapped mint path, is the export itself
+    #: (``torch.export`` runs in the parent when the pool asks for the next
+    #: entry). This is the producer-side half of the serialization
+    #: ``idle_staging_s`` measures on the save side: it prices exactly how
+    #: much the single-threaded producer starved the pool, which is the
+    #: number that says when the fused export child (pgw#1000) is owed.
+    idle_source_s: float = 0.0
     #: Free-slot seconds with nothing left to start: the straggler tail.
     idle_drain_s: float = 0.0
     #: Free-slot seconds inside ``Popen`` itself.
@@ -1052,7 +1081,7 @@ class PoolLedger:
     @property
     def idle_s(self) -> float:
         return round(
-            self.idle_staging_s + self.idle_drain_s
+            self.idle_staging_s + self.idle_source_s + self.idle_drain_s
             + self.idle_spawn_s + self.idle_other_s, 3)
 
     @property
@@ -1067,6 +1096,7 @@ class PoolLedger:
             "pool_idle_s": self.idle_s,
             "pool_efficiency": self.efficiency,
             "idle_staging_s": round(self.idle_staging_s, 3),
+            "idle_source_s": round(self.idle_source_s, 3),
             "idle_drain_s": round(self.idle_drain_s, 3),
             "idle_spawn_s": round(self.idle_spawn_s, 3),
             "idle_other_s": round(self.idle_other_s, 3),
@@ -1303,6 +1333,21 @@ class EntryCompilePool:
         #: census it cannot read refuses the widen rather than assuming an
         #: empty card.
         self.census = card_census()
+        #: pgw#1053: the OWN term's floor in the simultaneity budget. Seeded
+        #: from the construction census (the resident pipeline), and
+        #: re-baselined by :meth:`note_residents_released` when the mint
+        #: parent provably hands its residents back — the ONE way the budget's
+        #: own term is ever allowed to shrink. Without an explicit floor,
+        #: ``max(own_device_high_water(), census.own_reserved_bytes)`` pins
+        #: the budget to the construction-time pipeline forever, and a release
+        #: frees bytes the arithmetic can never grant.
+        self._own_floor_bytes = int(self.census.own_reserved_bytes)
+        #: pgw#1053: bytes the release handed back, added to the CONSTRUCTION
+        #: free reading when K is re-derived. ``_rewiden`` deliberately never
+        #: re-probes a card K children are sitting on; the release's gain is
+        #: instead reconstructed as "the construction free figure plus what
+        #: the residents measurably returned", which children cannot distort.
+        self._free_gain_bytes = 0
         #: The terms of the last simultaneity decision, merged into the width
         #: row so a future OOM names WHICH term was wrong instead of leaving a
         #: reader to diff two pods that no longer exist.
@@ -1434,8 +1479,9 @@ class EntryCompilePool:
     # -- the run ----------------------------------------------------------
 
     def compile(
-        self, entries: Sequence[Tuple[str, Any]],
+        self, entries: Iterable[Tuple[str, Any]],
         *, on_entry: Optional[Callable[[str, int, int], None]] = None,
+        expected_total: int = 0,
     ) -> Dict[str, List[str]]:
         """``[(entry, ExportedProgram)] -> {entry: [file, ...]}``.
 
@@ -1444,6 +1490,20 @@ class EntryCompilePool:
         entry NAME, never by completion, so the packaged cell cannot depend
         on which child finished first.
 
+        ``entries`` may be a SEQUENCE (every entry already exported — the
+        pre-pgw#1052 shape, unchanged) or an ITERATOR that produces entries
+        as they become ready. Pulling from an iterator runs the PRODUCER's
+        own work on this thread — on the overlapped mint path that is a
+        ``torch.export`` of the next declared row — while the children keep
+        compiling in their own processes. That single sentence is the whole
+        of pgw#1052: the phases were sequential by code, not by necessity.
+        The iterator contract is deliberately narrow — ``(name, program)``
+        pairs, staged internally — so a later producer that ships structure
+        instead of a full program (pgw#1056's fake-weight mint) changes
+        ``_stage``, not this orchestration. ``expected_total`` is the
+        producer's best count for progress reporting; the ledger records the
+        REAL count once the source is exhausted.
+
         ``on_entry(name, done, total)`` (pgw#824) fires as each entry lands.
         This loop is the longest wire-silent stretch of a mint — an 18-entry
         sdxl cell spends the bulk of its wall clock right here — and until now
@@ -1451,8 +1511,6 @@ class EntryCompilePool:
         reporting is best-effort by construction: a raising callback must never
         cost the mint the entries it already has.
         """
-        pending: List[Tuple[int, str, Any]] = [
-            (i, name, prog) for i, (name, prog) in enumerate(entries)]
         staged: List[Tuple[EntryJob, Path]] = []
         running: List[_Running] = []
         done: Dict[str, List[str]] = {}
@@ -1461,18 +1519,47 @@ class EntryCompilePool:
         # for one would idle a core through every round; one spare removes
         # that without turning an 18-entry sdxl cell into ~46 GB on disk.
         failure: Optional[EntryCompileFailed] = None
+        # pgw#832: seed BEFORE the pool wall starts, so the cost is its own
+        # named line (`seal_seed_s`) and never inside the capacity identity.
+        self._seed_seal_memo()
+        streamed = not isinstance(entries, (list, tuple))
+        if streamed:
+            source: Iterator[Tuple[str, Any]] = iter(entries)
+            total = max(0, int(expected_total))
+            pulled = 0
+        else:
+            pending = [(i, name, prog)
+                       for i, (name, prog) in enumerate(entries)]
+            total = len(pending)
+            self.ledger.entries = total
+            # pgw#848 item 5: admission BEFORE the wall on the sequence path.
+            # It is parent-serial and occupies no worker slot, so charging it
+            # to the pool's capacity would price a recovered 626 s entry as
+            # pool idle. (The streamed path admits per pull instead — the
+            # entry does not exist before the pull, and the pull is already
+            # inside the wall by construction.)
+            pending = self._admit_banked(pending, done, on_entry, total)
+            source = iter([(name, prog) for _i, name, prog in pending])
+            pulled = total - len(pending)
+        exhausted = False
+
+        def _known_total() -> int:
+            if not streamed:
+                return total
+            return pulled if exhausted else max(total, pulled)
+
+        def _cb(name: str) -> None:
+            if on_entry is not None:
+                try:
+                    on_entry(name, len(done), _known_total())
+                except Exception:  # noqa: BLE001 — telemetry never fails a mint
+                    logger.debug(
+                        "entry-pool progress callback failed", exc_info=True)
+
         # pgw#830: exact idle accounting. Every wall second is multiplied by
         # the number of FREE worker slots at that moment and charged to
         # whatever the parent was doing — so `pool_idle_s` is not a residual
         # anybody has to trust, it is a sum with named causes.
-        self.ledger.entries = len(entries)
-        # pgw#832: seed BEFORE the pool wall starts, so the cost is its own
-        # named line (`seal_seed_s`) and never inside the capacity identity.
-        self._seed_seal_memo()
-        # pgw#848 item 5: likewise BEFORE the wall. Admission is parent-serial
-        # and occupies no worker slot, so charging it to the pool's capacity
-        # would price a recovered 626 s entry as pool idle.
-        pending = self._admit_banked(pending, done, on_entry, len(entries))
         pool_t0 = mark = time.monotonic()
 
         def charge(bucket: str, free: int) -> None:
@@ -1492,35 +1579,68 @@ class EntryCompilePool:
             mark = now
 
         try:
-            while pending or staged or running:
+            while True:
                 # Re-read every round: `_rewiden` can widen K after an entry
                 # lands, and a staging cap frozen at the construction width
                 # would starve the slots it just opened.
                 staged_cap = max(1, self.width.workers + INFLIGHT_PROGRAM_SLACK)
-                while (pending and not failure
-                       and len(staged) + len(running) < staged_cap):
-                    index, name, program = pending.pop(0)
-                    free = self.width.workers - len(running)
-                    staged.append(self._stage(name, program, index))
-                    # The freed slot waits for the NEXT program to be written
-                    # before it can be refilled: export-vs-compile
-                    # serialization, charged where it happens.
-                    charge("idle_staging_s", free)
+                # SPAWN first: a freed slot takes already-staged work before
+                # the parent disappears into a source pull that, on the
+                # overlapped path, can be minutes of export.
                 while staged and not failure \
-                        and len(running) < self.width.workers:
+                        and len(running) < self.width.workers \
+                        and self._spawn_admitted(len(running)):
                     job, job_path = staged.pop(0)
                     free = self.width.workers - len(running)
                     running.append(
                         self._spawn(job, job_path, Path(job.program)))
                     charge("idle_spawn_s", free)
+                # PULL one entry when there is stage room. The pull IS the
+                # producer's work (pgw#1052); the fresh program spawns at the
+                # top of the next iteration.
+                if not exhausted and not failure \
+                        and len(staged) + len(running) < staged_cap:
+                    free = self.width.workers - len(running)
+                    try:
+                        name, program = next(source)
+                    except StopIteration:
+                        exhausted = True
+                        self.ledger.entries = pulled
+                        charge("idle_source_s", free)
+                        continue
+                    charge("idle_source_s", free)
+                    pulled += 1
+                    if streamed:
+                        self.ledger.entries = pulled
+                        if self.bank is not None:
+                            # pgw#848 item 5 on the streamed path: per-pull
+                            # admission, same order-of-operations safety (the
+                            # graph hash is re-derived from THIS export).
+                            admission = self.bank.admit(name, program)
+                            if admission.ok:
+                                done[name] = list(admission.files)
+                                self._refresh_resume_facts()
+                                _cb(name)
+                                continue
+                    free = self.width.workers - len(running)
+                    staged.append(self._stage(name, program, pulled - 1))
+                    # The freed slot waits for the NEXT program to be written
+                    # before it can be refilled: export-vs-compile
+                    # serialization, charged where it happens.
+                    charge("idle_staging_s", free)
+                    continue
                 if not running:
-                    break
+                    if failure is not None or (exhausted and not staged):
+                        break
+                    continue
                 free = self.width.workers - len(running)
                 # Nothing left to start: the free slots are the straggler
                 # tail, which is a SCHEDULING loss and not a compile cost.
                 # pgw#829's entry collapse moves this number; nothing about
-                # the compiler does.
-                bucket = "idle_drain_s" if not (pending or staged) \
+                # the compiler does. A slot held by the LIVE simultaneity
+                # bound (`_spawn_admitted`) lands in `idle_other_s` with the
+                # holding terms recorded on `simultaneity`.
+                bucket = "idle_drain_s" if exhausted and not staged \
                     else "idle_other_s"
                 finished = self._reap(running)
                 if finished is None:
@@ -1538,12 +1658,7 @@ class EntryCompilePool:
                 # (`_collect` -> `observe_entry_device`). Ask K again with the
                 # measurement in place of the estimate the pool was built on.
                 self._rewiden()
-                if on_entry is not None:
-                    try:
-                        on_entry(finished.entry, len(done), len(entries))
-                    except Exception:  # noqa: BLE001 — telemetry never fails a mint
-                        logger.debug(
-                            "entry-pool progress callback failed", exc_info=True)
+                _cb(finished.entry)
                 # Collection (report read, program unlink) and pgw#824's
                 # progress callback both run with the slot ALREADY FREE, so
                 # they are charged as idle rather than left outside the split
@@ -1816,8 +1931,16 @@ class EntryCompilePool:
         if not self.census.readable or ask <= 0:
             terms["simultaneity_verdict"] = "unreadable — no widen"
             return None, terms
-        own_peak = max(
-            own_device_high_water(), int(self.census.own_reserved_bytes))
+        # pgw#1053: the floor is `_own_floor_bytes`, not the construction
+        # census verbatim — identical until `note_residents_released`
+        # re-baselines it, which the caller may only do after a real release
+        # plus `reset_peak_memory_stats` (so the high-water restarts from the
+        # released level rather than remembering the pipeline).
+        own_peak = max(own_device_high_water(), int(self._own_floor_bytes))
+        if self._free_gain_bytes > 0:
+            # pgw#1053: the release rides every later decision row — a widen
+            # or a hold after it must say the budget it ran against moved.
+            terms["residents_released_bytes"] = int(self._free_gain_bytes)
         reserve = DEVICE_RESERVE_BYTES \
             if WorkerGoals(serve=self.width.serve_goal,
                            mint=self.width.mint_goal).tenant_reserve_applies() \
@@ -1883,7 +2006,76 @@ class EntryCompilePool:
             reason=(f"K={capped} (simultaneity-bound): {self.width.reason} — "
                     f"narrowed to what the card holds at once"))
 
-    def _rewiden(self) -> None:
+    def note_residents_released(self) -> None:
+        """pgw#1053: the mint parent PROVABLY handed its residents back.
+
+        Called by the mint after the last row exports, once it has dropped its
+        pipeline and the retained programs' weight aliases, run
+        ``empty_cache()`` AND ``reset_peak_memory_stats()`` — the reset is
+        load-bearing: it is what lets ``own_device_high_water`` restart from
+        the released level instead of remembering the pipeline forever.
+
+        Two things happen, both measured rather than asserted:
+
+        * the OWN floor of the simultaneity budget re-baselines to what this
+          process holds NOW (the delta is exactly what the driver got back);
+        * K is re-derived through the SAME pgw#992-bounded path a measured
+          entry peak takes — with the construction ask when fewer than
+          :data:`REWIDEN_MIN_SAMPLES` children have reported, because the
+          release moved the BUDGET, not the divisor, and holding a freed card
+          at the resident-priced K would be pgw#842's underwidth defect with a
+          receipt attached.
+
+        A no-op on a cardless pool (nothing was priced off a card) and after a
+        release that freed nothing (the floor only ever re-baselines DOWN).
+        """
+        if not self.census.readable:
+            return
+        now = own_reserved_now()
+        if now < 0:
+            return
+        freed = max(0, int(self._own_floor_bytes) - now)
+        if freed <= 0:
+            return
+        self._own_floor_bytes = now
+        self._free_gain_bytes += freed
+        logger.info(
+            "aot-pool: pgw#1053 residents released %.2f GiB back to the "
+            "simultaneity budget (own floor %.2f GiB)",
+            freed / 1024**3, now / 1024**3)
+        self._rewiden(trigger="release")
+
+    def _spawn_admitted(self, running_count: int) -> bool:
+        """May a (``running_count + 1``)-th child exist on this card NOW?
+
+        pgw#992 continued under pgw#1052. The construction-time simultaneity
+        bound prices the residents as they stood when the pool was BUILT — and
+        the overlapped mint builds the pool before the export phase, whose own
+        device growth (measured 9.0 -> 15.6 GiB reserved across a 36-row sdxl
+        export) arrives after that reading. This re-asks the SAME budget with
+        the live own high-water before every spawn: a spawn the budget cannot
+        hold WAITS — for a sibling to exit, or for the pgw#1053 release to
+        grow the budget — instead of being priced against a reading it
+        postdates. Nothing narrows and nothing is killed; a spawn is deferred
+        to a boundary the card admits. Floor 1: the serial path must always
+        be reachable or the pool deadlocks against its own bound.
+        """
+        if running_count <= 0:
+            return True
+        ask = int(self.width.per_entry_device_bytes or 0)
+        if ask <= 0 or not self.census.readable:
+            return True
+        budget, terms = self.entry_budget_bytes(ask)
+        if budget is None:
+            return True
+        k_cap = max(1, int(terms["simultaneity_k_cap"]))
+        if running_count < k_cap:
+            return True
+        terms["simultaneity_spawn_held_at"] = int(running_count)
+        self.simultaneity = terms
+        return False
+
+    def _rewiden(self, *, trigger: str = "measured") -> None:
         """Re-derive K from what the entry children MEASURED (pgw#868 A4),
         bounded by what the CARD can hold at once (pgw#992).
 
@@ -1929,10 +2121,19 @@ class EntryCompilePool:
         or the traced graph — the device lock already serializes the one thing
         that is shared (``benchmark_all_configs``) — so this is a PROCESS
         change under pgw#846's rule, and the emitted files are untouched.
+
+        ``trigger="release"`` (pgw#1053) is the residents-release re-ask: the
+        budget's own term just shrank by a MEASURED amount, so the same
+        derivation runs even before :data:`REWIDEN_MIN_SAMPLES` children have
+        reported — the divisor then stays the CONSTRUCTION ask on the
+        construction basis (never a new guess), and only the budget moved.
         """
-        if self.device_samples < REWIDEN_MIN_SAMPLES:
+        released = trigger == "release"
+        if not self.width.device_lock:
             return
-        if self.peak_device_bytes <= 0 or not self.width.device_lock:
+        measured = (self.device_samples >= REWIDEN_MIN_SAMPLES
+                    and self.peak_device_bytes > 0)
+        if not measured and not released:
             return
         base = self.width_initial
         if base.free_device_bytes <= 0:
@@ -1941,7 +2142,12 @@ class EntryCompilePool:
             # free figure here is the guess this method exists to delete.
             return
         try:
-            ask = mint_budget.entry_device_ask(int(self.peak_device_bytes))
+            if measured:
+                ask = mint_budget.entry_device_ask(int(self.peak_device_bytes))
+                basis = "measured"
+            else:
+                ask = int(base.per_entry_device_bytes or 0)
+                basis = base.per_entry_device_basis
             if ask <= 0:
                 return
             # pgw#992: the cap comes FIRST and is recorded whether or not the
@@ -1960,8 +2166,13 @@ class EntryCompilePool:
                 base.entries,
                 limit=base.limit,
                 device_bytes=ask,
-                device_basis="measured",
-                free_vram_bytes=int(base.free_device_bytes),
+                device_basis=basis,
+                # pgw#1053: the construction reading plus what the release
+                # measurably returned — never a re-probe of a card K running
+                # children are sitting on (their footprints would read as
+                # absent capacity).
+                free_vram_bytes=int(
+                    base.free_device_bytes + self._free_gain_bytes),
                 available_bytes=int(base.available_bytes),
                 vcpus=int(base.vcpus),
                 peak_rss_bytes=int(self.peak_rss_bytes or 0),
@@ -1996,16 +2207,18 @@ class EntryCompilePool:
             return
         wider = replace(wider, workers=granted)
         logger.info(
-            "aot-pool: pgw#868 A4 K %d -> %d — per-entry device ask measured "
-            "at %.2f GiB over %d entr%s against the %.2f GiB (%s) the pool "
-            "was sized with, within a %.2f GiB simultaneous budget (pgw#992)",
-            self.width.workers, wider.workers, ask / 1024**3,
-            self.device_samples, "y" if self.device_samples == 1 else "ies",
+            "aot-pool: K %d -> %d (%s) — per-entry device ask %.2f GiB (%s, "
+            "%d report(s)) against the %.2f GiB (%s) the pool was sized "
+            "with, within a %.2f GiB simultaneous budget (pgw#992/pgw#1053)",
+            self.width.workers, wider.workers, trigger, ask / 1024**3,
+            basis, self.device_samples,
             base.per_entry_device_bytes / 1024**3,
             base.per_entry_device_basis, budget / 1024**3)
         self.width = wider
         self.ledger.workers = wider.workers
-        self._emit_width("re-derived from measured entry peaks")
+        self._emit_width(
+            "re-derived from measured entry peaks" if trigger == "measured"
+            else "re-derived after residents release (pgw#1053)")
 
     def _collect(self, row: _Running) -> List[str]:
         elapsed = time.monotonic() - row.started
