@@ -53,9 +53,6 @@ from harness.toy_endpoints import (
     EchoOut,
 )
 
-_TIMEOUT = 15.0
-
-
 def _payload(text: str = "marco") -> bytes:
     return msgspec.msgpack.encode(EchoIn(text=text))
 
@@ -226,7 +223,7 @@ def test_run_attempt_binds_slots_from_grant_transport(tmp_path: Path) -> None:
             conn.send(run_attempt=_attempt(
                 "ra-slots", 1, spec,
                 snapshots={pipe_snap.digest: pipe_snap, vae_snap.digest: vae_snap}))
-            res = conn.wait_for(is_result_for("ra-slots"), timeout=_TIMEOUT).job_result
+            res = conn.wait_for(is_result_for("ra-slots")).job_result
             assert res.status == pb.JOB_STATUS_OK
             assert _decode(res.inline).response == "exact-pipeline-bytes"
     finally:
@@ -309,8 +306,7 @@ def test_alternating_specs_reuse_ready_instances(tmp_path: Path) -> None:
                 conn.send(run_attempt=_attempt(
                     rid, 1, spec_for(digest, pipe_ref, snap),
                     snapshots=transport))
-                res = conn.wait_for(
-                    is_result_for(rid), timeout=_TIMEOUT).job_result
+                res = conn.wait_for(is_result_for(rid)).job_result
                 assert res.status == pb.JOB_STATUS_OK, res.safe_message
                 return _decode(res.inline).response
 

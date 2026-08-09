@@ -35,16 +35,6 @@ def test_flavor_label():
     assert cc.flavor_label("h100-80gb-hbm3", "2.11.0") == "inductor-h100-80gb-hbm3-torch2.11"
 
 
-def test_cell_execution_lane_is_exact_and_checkpoint_free():
-    assert cc.cell_execution_lane(
-        "root/family-sdxl#inductor-rtx-4090-torch2.13-w8a8"
-    ) == "w8a8"
-    assert cc.cell_execution_lane(
-        "root/family-sdxl#inductor-rtx-4090-torch2.13"
-    ) == ""
-    assert cc.cell_execution_lane("owner/checkpoint#fp8-w8a8") == ""
-
-
 @pytest.mark.parametrize(
     ("execution_lane", "bucket"),
     [
@@ -1123,7 +1113,7 @@ def test_endpoint_compile_reaches_spec():
 
 
 def test_flavor_label_carries_weight_lane_gw534() -> None:
-    from gen_worker.compile_cache import flavor_label, is_cache_ref, execution_lane_token
+    from gen_worker.compile_cache import flavor_label, execution_lane_token
 
     assert flavor_label("rtx-4090", "2.9.1+cu128") == "inductor-rtx-4090-torch2.9"
     assert flavor_label("h100-80gb-hbm3", "2.13.0+cu130", "w8a8") == (
@@ -1131,7 +1121,6 @@ def test_flavor_label_carries_weight_lane_gw534() -> None:
     assert flavor_label("rtx-4090", "2.9.1", "fp8-hooks") == (
         "inductor-rtx-4090-torch2.9-w8a16")
     assert execution_lane_token("") == "" and execution_lane_token("w8a8") == "w8a8"
-    assert is_cache_ref("root/family-qwen-image#inductor-h100-80gb-hbm3-torch2.13-w8a8")
 
 
 def test_resolve_pipeline_class_gw586() -> None:

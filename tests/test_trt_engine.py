@@ -70,7 +70,6 @@ def test_labels_and_refs():
     assert te.is_engine_ref(TRT_REF, FAMILY)
     assert not te.is_engine_ref(TRT_REF, "sdxl")
     assert not te.is_engine_ref(CACHE_REF)  # inductor flavor is not an engine
-    assert not cc.is_cache_ref(TRT_REF)  # and vice versa — disjoint kinds
     assert not te.is_engine_ref("acme/model#trt-x")
 
 
@@ -368,48 +367,6 @@ def test_refit_weights_applies_transform_and_fails_closed():
     with pytest.raises(cc.AdoptError) as exc:
         te.refit_weights(sd, [{"name": "n", "key": "gone", "transform": ""}])
     assert exc.value.reason == "refit_missing_key"
-
-
-# ---------------------------------------------------------------------------
-# executor dispatch — boot attach + hot adopt route trt refs to trt_engine
-# ---------------------------------------------------------------------------
-
-
-def test_fetch_compile_snapshot_deterministically_prefers_trt(tmp_path):
-    spec = _spec()
-    ex, _sent = _wire_executor(spec, tmp_path)
-    trt_dir = tmp_path / "trt-snap"
-    trt_dir.mkdir()
-    _tar(trt_dir)
-    inductor_dir = tmp_path / "ind-snap"
-    inductor_dir.mkdir()
-    (inductor_dir / "inductor-rtx-4090-torch2.9.tar.gz").write_bytes(b"x")
-
-    async def _ensure(ref, snapshot=None, *, binding=None):
-        return trt_dir if te.is_engine_ref(ref) else inductor_dir
-
-    ex.store.ensure_local = _ensure  # type: ignore[method-assign]
-    for refs in ((CACHE_REF, TRT_REF), (TRT_REF, CACHE_REF)):
-        snaps = {ref: pb.Snapshot(digest=DIGEST_A) for ref in refs}
-        got = asyncio.run(ex._fetch_compile_snapshot(spec, snaps))
-        assert got is not None
-        assert got.path.parent == trt_dir
-        assert got.ref == TRT_REF
-        assert got.snapshot_digest == DIGEST_A
-
-
-# pgw#1032: the three hot-adopt TRT tests that lived here
-# (test_adopt_trt_ref_wraps_and_reports, test_adopt_trt_key_mismatch_stays_eager,
-# test_adopt_trt_warmup_must_execute_engine_or_roll_back) are deleted with the
-# ADOPT_COMPILE_CACHE handler they drove — the hub push that would have carried
-# a TRT ref was keyed off the COMPUTED cell key, a space with no producer since
-# pgw#1010, so no stack ever dispatched one. What is left here is the SNAPSHOT
-# CONSUMER (test_fetch_compile_snapshot_deterministically_prefers_trt above)
-# and the kind dispatch on an artifact this pod already holds
-# (test_enable_compiled_dispatches_on_artifact_kind below). Note the consumer
-# is now DARK: th#1702 deletes the hub's snapshot attach, so nothing fills the
-# map it reads. It stands because pgw#904 replaces it with a hub-RESOLVED
-# `Arm.artifact`, and that lane owns the cut.
 
 
 def test_enable_compiled_dispatches_on_artifact_kind(tmp_path, monkeypatch):

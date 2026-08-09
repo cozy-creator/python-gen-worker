@@ -24,6 +24,7 @@ Layers exercised:
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import Any, List
 
 import msgspec
@@ -189,9 +190,13 @@ def test_the_refusal_ends_the_job_terminally() -> None:
 
     class _Job:
         spec = None
+        request_id = "r-refused"
+        attempt = 1
 
     job = _Job()
     job.spec = ex.specs["gen"]  # type: ignore[attr-defined]
-    asyncio.run(ex._run_job(job, _run()))  # type: ignore[arg-type]
+    # pgw#904: the driver takes the head's projection, not the wire message.
+    asyncio.run(ex._run_job(
+        job, functools.partial(ex._legacy_order, job, _run())))  # type: ignore[arg-type]
     assert finished["status"] == pb.JOB_STATUS_RETRYABLE, finished
     assert "no resolved compute" in finished["msg"]

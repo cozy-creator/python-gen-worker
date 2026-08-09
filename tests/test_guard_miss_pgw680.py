@@ -556,9 +556,10 @@ class _Rig:
             pass
         monkeypatch.setattr(
             self.ex, "_enable_compiled",
-            lambda p, cfg, artifact, delivered=None: fleet_cells.enable_compiled(
-                p, cfg, self.ex.store._cache_dir, artifact,
-                publisher=None))
+            lambda p, cfg, artifact, delivered=None, arm=None:
+                fleet_cells.enable_compiled(
+                    p, cfg, self.ex.store._cache_dir, artifact,
+                    publisher=None))
 
     def boot(self, spec: EndpointSpec) -> None:
         model_ref = wire_ref(spec.models["pipeline"])

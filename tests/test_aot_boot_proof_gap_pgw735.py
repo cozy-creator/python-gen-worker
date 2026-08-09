@@ -138,11 +138,26 @@ def _executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Executor:
     return ex
 
 
+def _orders(run):
+    """pgw#904: the driver reads neutral slot orders, never the wire message."""
+    from gen_worker import dispatch
+
+    return {
+        b.slot: dispatch.SlotOrder(
+            ref=b.ref.strip(),
+            components=tuple(sorted(
+                (str(k).strip(), str(v).strip())
+                for k, v in b.components.items())),
+        )
+        for b in run.models if b.slot
+    }
+
+
 def _boot(ex: Executor, ref: str = "acme/sdxl-base:prod") -> None:
     spec = ex.specs["generate"]
     run = pb.RunJob(function_name="generate",
                     models=[pb.ModelBinding(slot="pipeline", ref=ref)])
-    eff = ex._effective_spec(spec, run)
+    eff = ex._dispatched_spec(spec, _orders(run))
     # Key the snapshot map by the NORMAL FORM the worker will actually look
     # up, not the raw string — th#1276 moved which tag the normal form elides
     # (`:prod` now, `:latest` before), and a hand-spelled key silently misses.

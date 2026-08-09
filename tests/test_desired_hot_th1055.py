@@ -191,6 +191,34 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
     return ex, sent, enables
 
 
+def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
+    """pgw#904: an advertised identity now comes from the worker's OWN mint
+    (delivered-cell selection is deleted); stamp it the way the live fleet
+    policy does — an ArmOutcome carrying the finalized SelfMint."""
+    from gen_worker import fleet_cells
+
+    def _enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
+                delegate=None, delivered_ref="", delivered_digest=""):
+        setattr(pipe, cc._MARKER_ATTR, {
+            "failure_signal": {
+                "callback": None,
+                "lock": threading.Lock(),
+                "successful_calls": 0,
+                "cache_hits": 0,
+                "cache_misses": 0,
+            },
+            "originals": [],
+            "regional_mods": [],
+        })
+        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
+            family=FAMILY, cell_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+            snapshot_digest=digest, artifact=artifact_path))
+
+    return _enable
+
+
+
+
 def _failed_model_events(sent: List[pb.WorkerMessage]) -> List[pb.ModelEvent]:
     return [
         m.model_event for m in sent
@@ -208,6 +236,10 @@ def test_slot_only_desired_instance_warms_and_arms(tmp_path, monkeypatch) -> Non
     setup_calls: List[Tuple[str, str]] = []
     ex, sent, enables = _harness(tmp_path, monkeypatch,
                                  [_slot_only_spec(setup_calls)])
+    from gen_worker import fleet_cells as fleet_cells_mod
+    monkeypatch.setattr(
+        fleet_cells_mod, "enable_compiled",
+        _mint_enable(CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
     ex.apply_model_resolutions(
         {AUTHORED_REF: (RESOLVED_REF, "", "fp8-w8a8-dynamic+compiled")})
 
@@ -217,14 +249,12 @@ def test_slot_only_desired_instance_warms_and_arms(tmp_path, monkeypatch) -> Non
                 pb.ModelBinding(slot="adapter", ref=ADAPTER_REF)],
     )
     snapshots = {RESOLVED_REF: _snapshot("aa" * 32),
-                 ADAPTER_REF: _snapshot("ab" * 32),
-                 CELL_REF: _snapshot("bb" * 32)}
+                 ADAPTER_REF: _snapshot("ab" * 32)}
     asyncio.run(ex.ensure_desired_instance(desired, snapshots))
 
     assert len(setup_calls) == 1
     pipeline_path, adapter_path = setup_calls[0]
     assert "fp8-w8a8" in pipeline_path
-    assert len(enables) == 1
     (target,) = ex.compile_targets()
     assert target.active_compile_ref == CELL_REF
     assert "generate" in ex.available_functions()

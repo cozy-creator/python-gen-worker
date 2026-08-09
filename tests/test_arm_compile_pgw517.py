@@ -27,6 +27,7 @@ from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.api.errors import RetryableError
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.models import provision
+from gen_worker import fleet_cells
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec, extract_specs
 from gen_worker.cell_adopt import AdoptOutcome
@@ -379,6 +380,19 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
             return _Out()
 
     monkeypatch.setattr(provision, "enable_compiled", _fake_enable)
+    cell_ref = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
+
+    def _mint_enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
+                     delegate=None, delivered_ref="", delivered_digest=""):
+        # pgw#904: the advertised identity comes from the worker's OWN mint
+        # (delivered-cell selection is deleted).
+        _fake_enable(pipe, cfg, cache_dir, artifact)
+        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
+            family=FAMILY, cell_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+            snapshot_digest="blake3:" + "b" * 64,
+            artifact=tmp_path / "cell.tar.gz"))
+
+    monkeypatch.setattr(fleet_cells, "enable_compiled", _mint_enable)
     compile_cfg = Compile(family=FAMILY, shapes=((768, 768),), text_len=0)
     spec = EndpointSpec(
         name="wan-w8a8", method=Endpoint.run, kind="inference",
@@ -387,19 +401,12 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
         resources=Resources(gpu=True), compile=compile_cfg,
     )
     model_ref = wire_ref(spec.models["model"])
-    cell_ref = (
-        f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
-    )
-    snap = tmp_path / "snap"
-    snap.mkdir()
-    (snap / "cell.tar.gz").write_bytes(b"delivered-cell")
     sent: list = []
 
     async def _go() -> Executor:
         ex = _executor(spec, tmp_path, sent, monkeypatch)
         await ex.ensure_setup(spec, {
             model_ref: pb.Snapshot(digest="blake3:" + "a" * 64),
-            cell_ref: pb.Snapshot(digest="blake3:" + "b" * 64),
         })
         return ex
 

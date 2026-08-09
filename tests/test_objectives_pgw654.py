@@ -291,18 +291,17 @@ def test_wire_distillation_status_reaches_the_slot_backstop() -> None:
             return ROut(y="ok")
 
     spec = extract_specs(Gen)[0]
-    run = pb.RunJob(
-        models=[
-            pb.ModelBinding(
-                slot="pipeline",
-                ref="acme/plain-xl",
-                distilled=False,
-                distilled_status="unclassified",
-            )
-        ]
-    )
+    from gen_worker import dispatch
 
-    result = resolved_slots_kwargs(spec, run)
+    slots = {
+        "pipeline": dispatch.SlotOrder(
+            ref="acme/plain-xl",
+            distilled=False,
+            distilled_status="unclassified",
+        )
+    }
+
+    result = resolved_slots_kwargs(spec, slots)
 
     assert "pipeline" not in result["resolved_slots"]
     assert "unclassified" in result["slot_errors"]["pipeline"]
