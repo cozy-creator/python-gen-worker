@@ -1287,7 +1287,6 @@ def _arming_policy(
             family, loading.pipeline_weight_lane(pipe), bucket,
             contract=cell_key.contract_digest(
                 cc.declared_contract_facts(cfg)),
-            regional=bool(getattr(cfg, "regional", False)),
         )
         key = arm_key.digest
     except Exception as exc:  # noqa: BLE001 — key axes must be computable
@@ -1431,7 +1430,7 @@ def _packed_metadata(artifact: Path) -> Dict[str, Any]:
 #: The key axes the computed ARM identity and the stamped cell identity
 #: SHARE. `kind` and `contract` are disjoint by formula (pgw#1032/#1033:
 #: kind "inductor" vs "aot-inductor", declared-facts digest vs traced-graph
-#: facts digest) and `mode` is "" on both sides of a whole-graph mint.
+#: facts digest); the vestigial `mode` axis is DELETED (pgw#1049).
 _SHARED_KEY_AXES = ("family", "format", "lane", "sm", "env_seal", "toolchain")
 
 

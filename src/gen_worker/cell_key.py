@@ -27,9 +27,11 @@ exist for this runtime.
     contract      digest of the DECLARED shape contract (SDK v2, pgw#647):
                   shapes, targets, text_len, dynamic dims, regional mode,
                   lora bucket, warm guidance classes
-    env_seal      digest of the execution-environment seal (pgw#696):
-                  process posture + frozen config flags + portable inductor
-                  config (+ operator epoch). Internally versioned (seal_v)
+    env_seal      digest of the execution-environment seal — since
+                  pgw#1049 a digest of the settings DECLARATION (env, torch
+                  flags + knobs, dynamo posture, host-ISA clamp, process
+                  posture) plus the toolchain library content fact.
+                  Internally versioned (seal_v)
     toolchain     CONTENT digest of the compile stack (pgw#710): dist-info
                   RECORDs of torch/triton/nvidia-*/diffusers/transformers
                   + the bundled ptxas/nvdisasm binaries. Replaces the old
@@ -87,9 +89,15 @@ _DIGEST_HEX = 56
 _REQUIRED = ("format", "kind", "family", "sm", "contract", "env_seal",
              "toolchain")
 # Axes that may be legitimately absent ("" => omitted from canonical form):
-# lane "" is the plain-resident graph family; mode "" is whole-graph
-# compilation ("regional" per-block cells are different artifacts, ie#381).
-_OPTIONAL = ("lane", "mode")
+# lane "" is the plain-resident graph family.
+#
+# `mode` DELETED per Paul 2026-08-09 (pgw#1049): pinned "" since regional
+# died (#846), and empty optionals never enter the canonical form, so no
+# minted key ever contained it — zero re-key by construction, no scheme
+# bump. Regional discrimination was redundant anyway: `regional` is a
+# declared-contract fact, so it rides the `contract` axis. A stale caller
+# passing `mode` now gets from_axes' typed unknown-axis refusal.
+_OPTIONAL = ("lane",)
 
 #: The `kind` AXIS VALUE (and envelope `kind`) of an exported .pt2 cell — the
 #: only publishable kind since pgw#1010. `from_axes` validates axis NAMES, so
@@ -215,13 +223,14 @@ def compute(
     lora_bucket: int = 0,
     *,
     contract: str,
-    regional: bool = False,
 ) -> CellKey:
     """The key THIS runtime wants for ``family`` on ``weight_lane`` —
     computed purely statically (no trace, no execution): live probes for
     sm/posture/config, dist-info + binary content for the toolchain.
     (pgw#1030: the ``closure_roots`` parameter is deleted — pgw#990 removed
-    code identity from the key and the body never read it.) Raises
+    code identity from the key and the body never read it; pgw#1049 deleted
+    the vestigial ``regional`` parameter with the ``mode`` axis — regional
+    is a declared-contract fact and rides ``contract``.) Raises
     :class:`CellKeyError` when a required axis is unavailable — callers on
     non-CUDA runtimes simply have no key."""
     from . import compile_cache as cc  # cycle: compile_cache imports cell_key
@@ -232,7 +241,6 @@ def compute(
         "kind": "inductor",
         "family": str(family or ""),
         "lane": _canonical_execution_lane(weight_lane, lora_bucket),
-        "mode": "regional" if regional else "",
         "sm": rt["sm"],
         "contract": str(contract or ""),
         "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
@@ -267,7 +275,6 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     if kind != "torch-inductor-cache":
         raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
 
-    mode = str(meta.get("compile_mode") or "whole")
     contract_facts = meta.get("shape_contract")
     if not isinstance(contract_facts, dict) or not contract_facts:
         raise CellKeyError(
@@ -292,7 +299,6 @@ def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
             str(meta.get("weight_lane") or ""),
             int(meta.get("lora_bucket") or 0),
         ),
-        "mode": "" if mode == "whole" else mode,
         "sm": str(meta.get("sm") or ""),
         "contract": contract_digest(contract_facts),
         "env_seal": env_seal.seal_digest(seal),
@@ -388,9 +394,6 @@ def from_exported_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
             str(meta.get("weight_lane") or ""),
             int(meta.get("lora_bucket") or 0),
         ),
-        # pgw#846: an exported cell is always whole-graph; "" is the
-        # optional-axis value `from_axes` omits.
-        "mode": "",
         "sm": sm,
         "contract": contract_digest(contract_facts),
         "env_seal": env_seal.seal_digest(seal),

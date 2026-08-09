@@ -134,13 +134,29 @@ def _fresh_process_settings():
     gw_worker_goals.reset_for_test()
 
 
+def pytest_configure(config):
+    # pgw#1049: same treatment as tests/conftest.py — the declared
+    # interpreter env (PYTHONHASHSEED=0), imposed by ONE re-exec with global
+    # capture stopped first so the re-exec'd run still owns the terminal.
+    # xdist workers inherit the env from the re-exec'd master.
+    from gen_worker.settings_authority import (
+        _interpreter_env_diffs, ensure_interpreter_env)
+
+    if not _interpreter_env_diffs():
+        return
+    capman = config.pluginmanager.getplugin("capturemanager")
+    if capman is not None:
+        capman.stop_global_capturing()
+    ensure_interpreter_env()  # execs; never returns (or raises for -E)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_boot_seal():
     from gen_worker import env_seal
 
-    env_seal._BOOT_SEAL = None
+    env_seal._BOOT_READBACK = None
     yield
-    env_seal._BOOT_SEAL = None
+    env_seal._BOOT_READBACK = None
 
 
 @pytest.fixture(autouse=True)

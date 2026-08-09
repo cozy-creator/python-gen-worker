@@ -113,7 +113,6 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
             family, cc.cell_base_execution_lane(pipe),
             int(getattr(cfg, "lora_bucket", 0) or 0),
             contract=cell_key.contract_digest(cc.declared_contract_facts(cfg)),
-            regional=bool(getattr(cfg, "regional", False)),
         )
     except cell_key.CellKeyError:
         reason = cc.verify(meta, family=family)

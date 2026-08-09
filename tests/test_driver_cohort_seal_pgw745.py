@@ -26,7 +26,7 @@ from gen_worker import env_seal
 @pytest.fixture(autouse=True)
 def _fresh_snapshot(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(env_seal, "_LIB_SNAPSHOT", None)
-    monkeypatch.setattr(env_seal, "_BOOT_SEAL", None)
+    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     yield
 
 

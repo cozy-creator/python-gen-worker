@@ -204,30 +204,38 @@ def test_establish_config_imposes_the_serving_posture() -> None:
     """The canonical table IS the pgw#654 serving posture (TF32 on):
     establish must impose it from ANY prior state and verify the read-back
     — code decides the flags, never a library default or an env var."""
+    from gen_worker import settings_authority as sa
+
     before = torch.backends.cudnn.allow_tf32
     try:
         torch.backends.cudnn.allow_tf32 = False  # non-canonical prior state
-        effective = _env_seal().establish_config()
+        effective = sa.impose_torch()
         assert effective["cudnn_allow_tf32"] == "True"
         assert torch.backends.cudnn.allow_tf32 is True
         assert effective["float32_matmul_precision"] == "high"
-        assert _env_seal().effective_config() == effective
+        assert sa.torch_readback() == effective
     finally:
         torch.backends.cudnn.allow_tf32 = before
-        _env_seal().establish_config()
+        sa.impose_torch()
 
 
-def test_seal_digest_tracks_config_flags() -> None:
-    """Flipping one sealed flag changes the seal digest — and therefore the
-    key (red pre-fix: no env_seal axis, keys blind to config)."""
+def test_seal_digest_tracks_the_declaration_not_live_flags() -> None:
+    """pgw#1049 REVERSES this test's original claim: the seal digests the
+    DECLARATION, so a behind-our-back flag flip can no longer move it — it
+    trips the pgw#719 wire instead. A DECLARED change (a knob) still moves
+    the digest, which is what keeps config in the key."""
+    from gen_worker import settings_authority as sa
+
     baseline = _env_seal().seal_digest(_env_seal().effective_seal())
     before = torch.backends.cudnn.benchmark
     try:
         torch.backends.cudnn.benchmark = not before
-        assert _env_seal().seal_digest(_env_seal().effective_seal()) != baseline
+        assert _env_seal().seal_digest(_env_seal().effective_seal()) == baseline
     finally:
         torch.backends.cudnn.benchmark = before
-    assert _env_seal().seal_digest(_env_seal().effective_seal()) == baseline
+    knobbed = dict(_env_seal().effective_seal())
+    knobbed["config"] = sa.validated_table({"cudnn_benchmark": "True"})
+    assert _env_seal().seal_digest(knobbed) != baseline
 
 
 def test_ck1_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:

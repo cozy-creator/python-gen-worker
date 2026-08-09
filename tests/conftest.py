@@ -55,6 +55,28 @@ if str(Path(__file__).parent) not in sys.path:
 
 import gen_worker  # noqa: E402
 
+# pgw#1049: the suite runs under the DECLARED interpreter env — the exact
+# imposition the entrypoint performs at boot (PYTHONHASHSEED=0; env_seal.
+# establish refuses without it). CPython read the seed at interpreter start,
+# so a pytest launched without it gets ONE re-exec, in pytest_configure
+# below — import time is too late to own the terminal: global fd capture is
+# already live, and an exec under it inherits the capture tmpfiles as
+# stdout/stderr, so the whole re-exec'd run reports silently (observed:
+# green run, zero bytes of output). Capture is stopped first, then exec.
+from gen_worker.settings_authority import (  # noqa: E402
+    _interpreter_env_diffs, ensure_interpreter_env, impose_process_env)
+
+impose_process_env()  # children spawned by tests inherit the declared env
+
+
+def pytest_configure(config):
+    if not _interpreter_env_diffs():
+        return
+    capman = config.pluginmanager.getplugin("capturemanager")
+    if capman is not None:
+        capman.stop_global_capturing()
+    ensure_interpreter_env()  # execs; never returns (or raises for -E)
+
 # Deterministic CPU encode wherever the suite runs (gw#476): never probe or
 # engage NVENC from tests — CI has no GPU, and dev boxes that have one must
 # not do GPU work from the unit suite. Selection tests override + refresh
@@ -186,9 +208,9 @@ def _fresh_boot_seal():
     against a boot seal adopted under another test's transient flags."""
     from gen_worker import env_seal as _es
 
-    _es._BOOT_SEAL = None
+    _es._BOOT_READBACK = None
     yield
-    _es._BOOT_SEAL = None
+    _es._BOOT_READBACK = None
 
 
 @pytest.fixture(autouse=True)

@@ -21,9 +21,9 @@ from gen_worker.registry import CompileCell
 
 @pytest.fixture(autouse=True)
 def _reset_boot_seal(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(env_seal, "_BOOT_SEAL", None)
+    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     yield
-    env_seal._BOOT_SEAL = None
+    env_seal._BOOT_READBACK = None
 
 
 @pytest.fixture(autouse=True)
@@ -90,26 +90,32 @@ def test_establish_scrubs_then_imposes_and_is_pure(
     assert "CUBLAS_WORKSPACE_CONFIG" not in os.environ
     # No env-derived facts survive in the config block.
     assert "CUBLAS_WORKSPACE_CONFIG" not in seal_a["config"]
-    env_seal._BOOT_SEAL = None
+    env_seal._BOOT_READBACK = None
     seal_b = env_seal.establish()
     assert env_seal.seal_digest(seal_a) == env_seal.seal_digest(seal_b)
 
 
 def test_typed_knob_is_sealed_and_unknown_knob_refuses() -> None:
+    from gen_worker import settings_authority as sa
+
     try:
-        default = env_seal.establish_config()
+        default = sa.impose_torch()
         assert default["cudnn_benchmark"] == "False"
-        base_digest = env_seal.seal_digest(env_seal.effective_seal())
-        knobbed = env_seal.establish_config(
+        base_digest = env_seal.seal_digest(env_seal.establish())
+        env_seal._BOOT_READBACK = None
+        knobbed_seal = env_seal.establish(
             overrides={"cudnn_benchmark": "True"})
-        assert knobbed["cudnn_benchmark"] == "True"
+        assert knobbed_seal["config"]["cudnn_benchmark"] == "True"
         assert torch.backends.cudnn.benchmark is True
-        # The knob is SEALED — a knobbed process has a different identity.
-        assert env_seal.seal_digest(env_seal.effective_seal()) != base_digest
-        with pytest.raises(env_seal.EnvSealError, match="not_a_real_knob"):
-            env_seal.establish_config(overrides={"not_a_real_knob": "1"})
+        # The knob is SEALED — a knobbed process has a different identity
+        # (pgw#1049: because it is part of the DECLARATION, not because a
+        # read-back happened to see it).
+        assert env_seal.seal_digest(knobbed_seal) != base_digest
+        with pytest.raises(sa.SettingsImpositionError, match="not_a_real_knob"):
+            sa.impose_torch(overrides={"not_a_real_knob": "1"})
     finally:
-        env_seal.establish_config()  # restore canonical
+        env_seal._BOOT_READBACK = None
+        env_seal.establish()  # restore canonical
 
 
 def test_hash_seed_facts_ride_the_seal() -> None:

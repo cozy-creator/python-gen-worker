@@ -47,9 +47,11 @@ def test_entrypoint_establishes_effective_seal() -> None:
     assert torch.backends.cudnn.allow_tf32 is True
     assert torch.backends.cuda.matmul.allow_tf32 is True
     assert torch.get_float32_matmul_precision() == "high"
-    # Every canonical entry is effective in the seal (the seal also records
-    # interpreter facts like the hash-seed pair, pgw#719).
-    assert env_seal.CANONICAL_CONFIG.items() <= seal["config"].items()
+    # Every canonical entry is stated by the seal — pgw#1049: as the
+    # DECLARATION (boot verified the read-back against it).
+    from gen_worker import settings_authority as sa
+
+    assert sa.DECLARED_TORCH.items() <= seal["config"].items()
     # The digest is the env_seal key axis and is deterministic.
     assert env_seal.seal_digest(seal) == env_seal.seal_digest(
         entrypoint._establish_env_seal())

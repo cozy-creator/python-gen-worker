@@ -506,8 +506,7 @@ def run_cycle(
         bucket = int(getattr(hb_cfg, "lora_bucket", 0) or 0)
         arm = _ck.compute(
             veh.family, _loading.pipeline_weight_lane(pipe), bucket,
-            contract=_ck.contract_digest(_cc.declared_contract_facts(hb_cfg)),
-            regional=bool(getattr(hb_cfg, "regional", False)))
+            contract=_ck.contract_digest(_cc.declared_contract_facts(hb_cfg)))
         (hb_root / "mint-root").mkdir(exist_ok=True)
         pending = _fc.PendingSelfMint(
             family=veh.family, cell_key=arm.digest,
@@ -717,6 +716,13 @@ def _adopt_miss_log(stderr: str) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # pgw#1049: the rig parent seals as a worker boot does (establish below),
+    # and establish now fail-closes on an interpreter outside the declared
+    # env — this is the STANDALONE entry's sanctioned imposition (one
+    # re-exec, same as the worker entrypoint's).
+    from gen_worker.settings_authority import ensure_interpreter_env
+
+    ensure_interpreter_env()
     parser = argparse.ArgumentParser(
         prog="micro_mint_rig",
         description="pgw#978 — run the whole mint machinery locally.")

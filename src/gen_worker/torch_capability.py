@@ -5,7 +5,7 @@ A worker with no torch is a first-class shape, not a degenerate GPU worker
 bare-imported torch with no guard —
 
     entrypoint.py -> env_seal.establish()
-                  -> establish_config()            (env_seal)
+                  -> settings_authority.impose_torch()
                   -> host_isa.impose()
                   -> guard_closure.establish_posture()
 

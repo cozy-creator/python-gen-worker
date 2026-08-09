@@ -126,9 +126,10 @@ def test_the_goal_declaration_is_not_a_sealed_knob() -> None:
     destroy the single property the forge exists to have. Same reasoning that
     keeps ``GEN_WORKER_PREFER_AOT`` out of the table.
     """
-    assert "WORKER_MODE" not in env_seal.CANONICAL_CONFIG
-    assert not any(
-        "WORKER_MODE" in str(k) for k in env_seal.CANONICAL_CONFIG)
+    from gen_worker import settings_authority as sa
+
+    assert "WORKER_MODE" not in sa.DECLARED_TORCH
+    assert not any("WORKER_MODE" in str(k) for k in sa.DECLARED_TORCH)
 
 
 def test_goals_do_not_move_the_env_seal(

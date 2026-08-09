@@ -1,0 +1,25 @@
+# pgw#1049 — torch-settings write sites OUTSIDE the authority, classified.
+# Enforced by scripts/lint_settings_writers.py: an unclassified write is red,
+# a row matching nothing is red. Keyed on <path>::<site>, never a line number.
+#
+# There is NO general exemption class. A write that is not SCOPED (restores on
+# exit), PLUMBING (a path, not a behavior) or SCRUB (an erase) moves into
+# gen_worker/settings_authority.py.
+
+# The pgw#680 guard-miss doctrine's fail-on-recompile window and the pgw#756
+# dynamo-disable window: thread-local `config.patch` context managers, restored
+# on exit; the serving window is covered by dynamo's GlobalStateGuard.
+src/gen_worker/compile_cache.py::torch._dynamo.config.patch  SCOPED  pgw#680/pgw#756 thread-local patch windows, restored on exit
+
+# The topology canary's differential NCCL probe: sets/clears P2P for a bounded
+# mp.spawn probe and restores the saved value in its finally block — a
+# measurement of transport behavior, never serving state.
+src/gen_worker/host_canary.py::os.environ[NCCL_P2P_DISABLE]  SCOPED  differential probe env, saved/restored around mp.spawn
+src/gen_worker/host_canary.py::os.environ.pop(NCCL_P2P_DISABLE)  SCOPED  the probe's clear half of the same save/restore
+src/gen_worker/host_canary.py::os.environ[<dynamic>]  SCOPED  the probe's restore loop writing the SAVED values back
+
+# Cache-dir redirects: where compile bytes land, never what bytes are
+# generated (inductor entries are content-addressed). The sanctioned window
+# is post-scrub (env_seal docstring).
+src/gen_worker/compile_cache.py::os.environ[<dynamic>]  PLUMBING  capture_env's TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR redirect (gw#391)
+src/gen_worker/entrypoint.py::os.environ[<dynamic>]  PLUMBING  pgw#783 per-group inductor/triton cache isolation dirs

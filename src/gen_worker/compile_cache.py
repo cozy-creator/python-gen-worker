@@ -71,7 +71,7 @@ import inspect
 import pickle
 import sys
 
-from . import cell_key, env_seal, guard_closure, hot_swap
+from . import cell_key, env_seal, guard_closure, hot_swap, settings_authority
 from .api.errors import RetryableError
 from .models import w8a8_lora
 from .models.loading import pipeline_weight_lane
@@ -1308,13 +1308,9 @@ def _set_semantic_cache_tag(pipeline: Any, cfg: Any) -> None:
     (torch.compiler.config), set at every arm before its warm compiles; a
     later cross-family arm in the same process retags before its own
     compiles — a mid-serve heal recompile under the newer tag can only
-    MISS, never cross-consume."""
-    try:
-        import torch.compiler.config as compiler_config
-
-        compiler_config.cache_key_tag = _semantic_cache_tag(pipeline, cfg)
-    except Exception:
-        logger.debug("semantic cache tag: unavailable", exc_info=True)
+    MISS, never cross-consume. The write itself is the authority's
+    (pgw#1049 fence)."""
+    settings_authority.set_compiler_cache_tag(_semantic_cache_tag(pipeline, cfg))
 
 
 def capture_env(root: Path) -> Path:
@@ -1327,50 +1323,12 @@ def capture_env(root: Path) -> Path:
         d = root / sub
         d.mkdir(parents=True, exist_ok=True)
         os.environ[env] = str(d)
-    _disable_aot_autograd_cache()
+    # gw#608: portability needs the (portable) FxGraphCache as the lookup
+    # surface — the authority owns the write (settings_authority docstring
+    # carries the full ASLR/thread-local history).
+    settings_authority.disable_autograd_cache()
     _reset_inductor_latch()
     return root
-
-
-def _disable_aot_autograd_cache() -> None:
-    """gw#608: the AOTAutogradCache key hashes ``fx_kwargs[get_decomp_fn]``
-    via the function's REPR — which embeds the process memory address
-    (ASLR), so AOT keys can NEVER match across processes/pods. On the
-    consumer, the AOT-layer miss recompiles without consulting the on-disk
-    FX entries, so a byte-portable cell reports cache_hits=0 (live: two
-    hosts, 8/8 misses on graphs whose FxGraphCache keys were bit-identical
-    across three independent mints). Compiled-cell portability therefore
-    requires the FX cache to be the lookup surface: disable the AOT layer
-    symmetrically for producer capture and consumer seeding. Costs a cheap
-    AOT re-analysis per fresh process; the expensive inductor compile still
-    serves from the (portable) FX entries.
-
-    LIVE DISPROOF of the 0.40.4/0.40.5 shape (2026-07-21, B200 pods,
-    gen-worker 0.40.5): the mint capture still packed 8 ASLR-keyed
-    ``aotautograd/`` entries and the store-served sibling still failed 8/8
-    — because in torch 2.13 ``ConfigModule`` user overrides are a
-    ContextVar, i.e. THREAD-LOCAL: the assignment below ran on the arming
-    thread while the warmup compile ran on another thread that still saw
-    the default True. The env var is no rescue post-import
-    (``env_name_force`` is read once at config install). Process-global
-    disable therefore needs BOTH: the pre-torch-import env in the
-    entrypoint (fresh processes, incl. compile-worker subprocesses) and
-    the installed config entry's ``env_value_force`` mutated here (torch
-    already imported — tools, tests, embedders)."""
-    os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = "0"
-
-    if "torch" not in sys.modules:
-        return
-    try:
-        import torch._functorch.config as fconf
-
-        fconf.enable_autograd_cache = False  # this thread (fast path, public API)
-        # Process-global: user overrides are thread-local ContextVars in
-        # torch>=2.13; the entry-level env force is consulted by every
-        # thread with top precedence.
-        fconf._config["enable_autograd_cache"].env_value_force = False  # type: ignore[attr-defined]
-    except Exception:
-        logger.debug("compile-cache: AOT autograd cache disable unavailable", exc_info=True)
 
 
 def _reset_inductor_latch() -> None:
@@ -2298,24 +2256,6 @@ def _regional_dynamic_decline(cfg: Any, target: str) -> str:
         f"RESULT 3: free on a conv-free region)")
 
 
-def _apply_declared_shape_config(cfg: Any) -> None:
-    """The v2 dynamo posture: nothing becomes dynamic by accident.
-
-    ``automatic_dynamic_shapes=False`` — never promote a dim on change (a
-    novel signature is a guard miss routed by the consumer guards, never a
-    silent recompile-to-dynamic); ``assume_static_by_default=True`` —
-    unmarked dims are static. Declared dynamism arrives ONLY through
-    explicit ``mark_dynamic`` marks (``_with_declared_marks``)."""
-    try:
-        import torch._dynamo
-
-        torch._dynamo.config.automatic_dynamic_shapes = False
-        torch._dynamo.config.assume_static_by_default = True
-    except Exception:
-        logger.debug("compile-cache: could not set dynamo shape config",
-                     exc_info=True)
-
-
 def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callable[..., Any]:
     """Wrap a compiled callable so every call marks the DECLARED dynamic
     dims on its tensor inputs before dynamo sees them.
@@ -2964,8 +2904,8 @@ def apply(
     import torch
 
     # gw#608: cross-pod cell portability requires the (portable) FX graph
-    # cache to be the lookup surface — see _disable_aot_autograd_cache.
-    _disable_aot_autograd_cache()
+    # cache to be the lookup surface.
+    settings_authority.disable_autograd_cache()
     # The two inner-key alignments (both symmetric mint/consumer by
     # construction: every compile path arms through apply()):
     _install_fx_system_shim()          # SKU name -> sm token (P0, review §6.1)
@@ -2975,17 +2915,7 @@ def apply(
     # bigger than that (LTX: 12 video graphs, ie#381) would silently fall
     # back to eager for every shape past the limit. Size it to the declared
     # shape set — never lower an operator-raised value.
-    try:
-        import torch._dynamo
-
-        want = len(tuple(cfg.shapes)) + 8
-        torch._dynamo.config.cache_size_limit = max(
-            int(torch._dynamo.config.cache_size_limit), want)
-        if hasattr(torch._dynamo.config, "recompile_limit"):
-            torch._dynamo.config.recompile_limit = max(
-                int(torch._dynamo.config.recompile_limit), want)
-    except Exception:
-        logger.debug("compile-cache: could not raise recompile limit", exc_info=True)
+    settings_authority.raise_dynamo_cache_limits(len(tuple(cfg.shapes)) + 8)
 
     regional = bool(getattr(cfg, "regional", False))
 
@@ -3030,7 +2960,7 @@ def apply(
             # casting + much cheaper cold compile. Blocks are compiled in
             # place; the guard wrapper clears them on the first failure.
             #
-            _apply_declared_shape_config(cfg)
+            settings_authority.impose_dynamo()
             owner.compile_repeated_blocks(dynamic=None)
             # pgw#681: regional entry crosses the same canonical boundary as
             # whole-graph entry — block guards mint over canonical inputs.
@@ -3069,7 +2999,7 @@ def apply(
         # ONLY dynamism. `dynamic=False` + mark_dynamic is NOT expressible
         # (torch raises ConstraintViolationError), so the global guard is
         # the config pair + dynamic=None, never dynamic=False.
-        _apply_declared_shape_config(cfg)
+        settings_authority.impose_dynamo()
         compiled = torch.compile(fn, dynamic=None)
         declared_dynamic = tuple(getattr(cfg, "dynamic", ()) or ())
         if declared_dynamic:
@@ -3346,7 +3276,6 @@ def enable(
                         contract=cell_key.contract_digest(
                             declared_contract_facts(
                                 cfg, lora_bucket_override=eff_bucket)),
-                        regional=bool(getattr(cfg, "regional", False)),
                     )
                     if not cell_key.mismatch(meta, want):
                         self_key = want.digest
