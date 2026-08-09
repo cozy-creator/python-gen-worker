@@ -89,11 +89,11 @@ def _sdxl_shaped(scoped: bool) -> Compile:
                     why="CFG is ONE batch-2 forward; the decoder sees one latent"),),
         classes=tuple(classes),
         inputs=(
-            Input("sample", shape=("B", 4, "H_lat", "W_lat"), targets=("unet",)),
-            Input("timestep", shape=(), value=1.0, targets=("unet",)),
+            Input("sample", shape=("B", 4, "H_lat", "W_lat"), targets=("unet",), dtype="model"),
+            Input("timestep", shape=(), value=1.0, targets=("unet",), dtype="model"),
             Input("encoder_hidden_states", shape=("B", "T_txt", 2048),
-                  targets=("unet",)),
-            Input("z", shape=("B_img", 4, "H_lat", "W_lat"), targets=("vae.decode",)),
+                  targets=("unet",), dtype="model"),
+            Input("z", shape=("B_img", 4, "H_lat", "W_lat"), targets=("vae.decode",), dtype="model"),
             Input("input_ids", shape=("B_txt", "T_txt"), dtype="int64",
                   targets=("text_encoder",)),
         ),
@@ -139,7 +139,7 @@ def test_unscoped_declaration_is_unchanged_and_serialises_identically() -> None:
         shapes=((1024, 1024),),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 1}), GraphClass(dims={"B": 2})),
-        inputs=(Input("sample", shape=("B", 4, 128, 128)),),
+        inputs=(Input("sample", shape=("B", 4, 128, 128), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     )
@@ -168,7 +168,7 @@ def test_a_scoped_row_may_not_carry_a_dim_its_target_cannot_receive() -> None:
                            targets=("text_encoder",)),
             ),
             inputs=(
-                Input("sample", shape=("B", 4, "H_lat", 128), targets=("unet",)),
+                Input("sample", shape=("B", 4, "H_lat", 128), targets=("unet",), dtype="model"),
                 Input("input_ids", shape=("B_txt", 77), dtype="int64",
                       targets=("text_encoder",)),
             ),
@@ -187,7 +187,7 @@ def test_a_target_with_no_class_row_is_refused_by_name() -> None:
         shapes=((1024, 1024),),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 2}, targets=("unet",)),),
-        inputs=(Input("sample", shape=("B", 4, 128, 128), targets=("unet",)),),
+        inputs=(Input("sample", shape=("B", 4, 128, 128), targets=("unet",), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     )
@@ -204,7 +204,7 @@ def test_a_class_row_may_not_name_an_undeclared_target() -> None:
             shapes=((1024, 1024),),
             dims=(Dim("B", carried_by=(("sample", 0),)),),
             classes=(GraphClass(dims={"B": 2}, targets=("vae.decode",)),),
-            inputs=(Input("sample", shape=("B", 4, 128, 128)),),
+            inputs=(Input("sample", shape=("B", 4, 128, 128), dtype="model"),),
             shape_strategy="static-rows",
             warm_changes_key=False,
         )
@@ -335,18 +335,18 @@ def _sdxl_with_decoder() -> Compile:
         classes=tuple(classes),
         inputs=(
             Input("sample", shape=("B", ("config", "in_channels"), "H_lat", "W_lat"),
-                  targets=("unet",)),
-            Input("timestep", shape=(), value=1.0, targets=("unet",)),
+                  targets=("unet",), dtype="model"),
+            Input("timestep", shape=(), value=1.0, targets=("unet",), dtype="model"),
             Input("encoder_hidden_states",
                   shape=("B", "T_txt", ("config", "cross_attention_dim")),
-                  targets=("unet",)),
+                  targets=("unet",), dtype="model"),
             Input("added_cond_kwargs.text_embeds", shape=("B", 1280),
-                  targets=("unet",)),
-            Input("added_cond_kwargs.time_ids", shape=("B", 6), targets=("unet",)),
+                  targets=("unet",), dtype="model"),
+            Input("added_cond_kwargs.time_ids", shape=("B", 6), targets=("unet",), dtype="model"),
             # Decoder.forward(sample, latent_embeds=None); `latent_embeds` is
             # the temporal-decoder argument SDXL never passes.
             Input("sample", shape=("B", ("config", "in_channels"), "H_lat", "W_lat"),
-                  targets=("vae.decoder",)),
+                  targets=("vae.decoder",), dtype="model"),
         ),
         # `Decoder.forward` has no `return_dict` parameter — the UNet's escape
         # is the UNet's alone.

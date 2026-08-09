@@ -2242,6 +2242,29 @@ def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
     return module, attr
 
 
+def _entry_admission_drift(
+    package_path: Path, entry: str, inputs_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """The pgw#1058 arm-side identity check: one entry's declared manifest
+    rows verified against the artifact's OWN generated input guards, through
+    the SAME ``aot_package.admission_drift`` the mint's package gate ran.
+
+    A module attribute (like :func:`_load_package`) so unit rigs serving
+    fake package bytes can substitute it; the import is function-local
+    because ``aot_package`` imports this module's SOURCE_* vocabulary at
+    its top."""
+    from . import aot_package
+
+    try:
+        drift = aot_package.admission_drift(
+            Path(package_path), entry, inputs_rows)
+    except aot_package.PackageIntrospectionError as exc:
+        raise AdoptError("admission_drift", f"entry {entry!r}: {exc}") from exc
+    if drift:
+        raise AdoptError(
+            "admission_drift", f"entry {entry!r}: " + "; ".join(drift[:6]))
+
+
 def load_and_wrap(
     pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None,
     *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
@@ -2332,6 +2355,15 @@ def load_and_wrap(
                 except ValueError as exc:
                     raise AdoptError(
                         "contract_invalid", f"entry {name!r}: {exc}") from exc
+                # pgw#1058: the admission contract this dispatch will enforce
+                # must BE the one the artifact's own generated guards enforce
+                # — the same derivation the mint's package gate ran, re-run
+                # where the bytes arrive, so a label that drifted (or was
+                # corrupted) between publish and adopt is a named refusal
+                # here and never an opaque per-call admission miss.
+                _entry_admission_drift(
+                    staged.root / PACKAGE_NAME, name,
+                    list(block.get("inputs") or []))
                 parsed.append((name, contract, constants))
             pool = target_constant_pool(
                 (constants for _n, _c, constants in parsed), state_dict)

@@ -207,7 +207,7 @@ def test_fork_and_input_targets_must_exist() -> None:
     with pytest.raises(DeclarationError, match="vae.decode"):
         _decl(forks=(Fork("cfg", served=(False,), targets=("vae.decode",)),))
     with pytest.raises(DeclarationError, match="not in Compile.targets"):
-        _decl(inputs=(Input("hidden_states", shape=("B",), targets=("vae",)),))
+        _decl(inputs=(Input("hidden_states", shape=("B",), targets=("vae",), dtype="model"),))
 
 
 def test_dim_bindings_must_name_declared_inputs_when_inputs_exist() -> None:
@@ -216,7 +216,7 @@ def test_dim_bindings_must_name_declared_inputs_when_inputs_exist() -> None:
     # now names both kinds of row it looked for.
     with pytest.raises(DeclarationError,
                        match="binds 'hidden_states'.*no declared Arg templates"):
-        _decl(inputs=(Input("other", shape=("B", "H")),))
+        _decl(inputs=(Input("other", shape=("B", "H"), dtype="model"),))
 
 
 def test_shapes_omittable_only_with_classes() -> None:
@@ -232,12 +232,12 @@ def test_shapes_omittable_only_with_classes() -> None:
 
 def test_input_axis_specs() -> None:
     i = Input("hidden_states",
-              shape=("B", ("config", "in_channels"), "H", "W"))
+              shape=("B", ("config", "in_channels"), "H", "W"), dtype="model")
     assert i.shape[1] == ("config", "in_channels")
     with pytest.raises(DeclarationError, match="axis spec"):
-        Input("x", shape=(("cfg", "in_channels"),))
+        Input("x", shape=(("cfg", "in_channels"),), dtype="model")
     with pytest.raises(DeclarationError, match="positive"):
-        Input("x", shape=(0,))
+        Input("x", shape=(0,), dtype="model")
     assert Arg("return_dict", False).value is False
 
 

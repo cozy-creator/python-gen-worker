@@ -78,7 +78,7 @@ def _declare() -> Any:
         targets=("unet",),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 2}),),
-        inputs=(Input("sample", shape=("B", BUCKET)),),
+        inputs=(Input("sample", shape=("B", BUCKET), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     ))

@@ -2591,8 +2591,19 @@ def _gate_and_declare_entry(
         inputs, symbols = aot_package.input_contract(
             row.program, row.flat_leaves)
         constants = aot_package.constants_manifest(package, entry)
+        # pgw#1058: the manifest rows this envelope will carry, proven against
+        # the artifact's OWN generated input guards before anything can
+        # publish. Same doctrine as the constant manifest: two independent
+        # readings (program vs generated wrapper) that must agree, so a label
+        # that drifted from its artifact fails closed HERE, not as an opaque
+        # 36/36 admission miss on every adopting pod.
+        admission = aot_package.admission_drift(package, entry, inputs)
     except aot_package.PackageIntrospectionError as exc:
         raise MintRefused(f"entry {entry!r}: declaration: {exc}") from exc
+    if admission:
+        raise MintRefused(
+            f"entry {entry!r}: admission drift (pgw#1058): "
+            + "; ".join(admission[:6]))
     block: Dict[str, Any] = {
         "target": row.spec.target,
         "fork": [[str(n), v] for n, v in sorted(row.spec.fork)],
