@@ -2092,6 +2092,10 @@ def _mint_cell(
                     PHASE_INDUCTOR_COMPILE, done, total, name))
         finally:
             source.close()
+            # On EVERY terminus — a producer refusal at row N leaves the rows
+            # already compiled priced in the snapshot (pgw#848's discipline,
+            # extended to the overlapped shape).
+            progress.pool_ledger = _pool_facts(pool)
         # NOTE: `_drive_pool` refreshes `progress.pool_ledger` on every
         # completed entry (pgw#848), so the snapshot each beat writes already
         # carries a LIVE ledger — K, its binding, efficiency, peaks — rather

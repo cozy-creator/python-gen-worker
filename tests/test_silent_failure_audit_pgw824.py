@@ -428,9 +428,10 @@ def test_the_entry_compile_pool_reports_each_entry_as_it_lands() -> None:
 
     src = inspect.getsource(aot_compile_pool.EntryCompilePool.compile)
     assert "on_entry" in src
-    assert "len(done), len(entries)" in src, (
+    assert "len(done), _known_total()" in src, (
         "progress must carry BOTH a step and a total — a bare step is not "
-        "progress, it is a counter")
+        "progress, it is a counter (pgw#1052: the total is the producer's "
+        "declared count until the source is exhausted, then the real one)")
 
 
 def test_progress_reporting_never_costs_the_mint_its_work() -> None:

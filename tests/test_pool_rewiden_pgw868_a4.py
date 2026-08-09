@@ -322,9 +322,12 @@ def test_the_staging_cap_follows_the_width(tmp_path: Path) -> None:
     src = Path("src/gen_worker/aot_compile_pool.py").read_text()
     body = src.split("def compile(", 1)[1]
     assert "staged_cap = max(1, self.width.workers" in body
-    head, _rest = body.split("while (pending and not failure", 1)
-    assert "while pending or staged or running:" in head
-    assert head.index("while pending or staged or running:") \
+    # pgw#1052 reshaped the loop (`while True:` with the pull inside it); the
+    # invariant is unchanged: staged_cap is recomputed at the TOP of every
+    # round, after `_rewiden` may have moved the width.
+    head, _rest = body.split("while staged and not failure", 1)
+    assert "while True:" in head
+    assert head.index("while True:") \
         < head.index("staged_cap = max(1, self.width.workers"), (
         "staged_cap must be recomputed INSIDE the round loop, after "
         "_rewiden may have moved the width")
