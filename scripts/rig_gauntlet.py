@@ -43,6 +43,7 @@ ORDER = (
     "micro",
     "micro-lora",
     "micro-4d",
+    "micro-escape",
     "micro-w8a8",
     "micro-w8a8-lora",
     "micro-lora-plain-parent",
