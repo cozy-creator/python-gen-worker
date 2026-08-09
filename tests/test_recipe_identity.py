@@ -26,6 +26,7 @@ from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure as gc
 from gen_worker.registry import CompileCell
+from harness.cell_meta import exported_cell_meta
 
 FAMILY = "toyfam"
 
@@ -191,7 +192,11 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     posts: list = []
-    key = "ck1-" + "c" * 56
+    # pgw#1046: a real exported-cell envelope — publish recomputes the key from
+    # the recorded blocks and refuses a cell that cannot state one.
+    meta = exported_cell_meta(family=FAMILY, sku="l4", gen_worker="1.0.0",
+                              **{gc.MANIFEST_KEY: _manifest()})
+    key = meta["cell_key"]
 
     class _FakeResp:
         def __init__(self, code: int, body: Dict[str, Any]) -> None:
@@ -232,8 +237,6 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
     monkeypatch.setattr(hub_mod, "HubClient", _FakeHub)
     artifact = tmp_path / "cell.tar.gz"
     artifact.write_bytes(b"cell-bytes")
-    meta = {"cell_key": key, "sku": "l4", "gen_worker": "1.0.0",
-            gc.MANIFEST_KEY: _manifest()}
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
     assert pub.publish(FAMILY, artifact, meta) == "cp-1"
