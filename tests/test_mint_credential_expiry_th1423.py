@@ -35,16 +35,17 @@ import pytest
 
 from gen_worker import fleet_cells as fc
 from gen_worker.convert.hub import HubPublishError
+from harness.cell_meta import exported_cell_meta
 
 LAPSE_S = 150  # how far past `exp` the presented credential is, in the JWT
-CELL_KEY = "ck1-" + "e" * 56
 FAMILY = "sdxl"
 
-META = {
-    "cell_key": CELL_KEY, "family": FAMILY, "sku": "l4", "sm": "89",
-    "gen_worker": "0.76.6", "kind": "aot-inductor", "format": "pt2",
-    "compile_mode": "regional", "weight_lane": "w8a8", "lora_bucket": 64,
-}
+# pgw#1046: a real exported-cell envelope. The publish path recomputes the key
+# from the recorded blocks and refuses a cell that cannot state one, so the
+# credential-lapse legs below have to ride a cell that could genuinely publish.
+META = exported_cell_meta(family=FAMILY, gen_worker="0.76.6",
+                          weight_lane="w8a8", lora_bucket=64)
+CELL_KEY = META["cell_key"]
 
 
 def _jwt(*, lifetime_s: float) -> str:

@@ -650,11 +650,16 @@ def test_fork_and_row_reach_the_cell_identity() -> None:
         entry["class_hash"] = ch
         meta = {
             "sm": "sm_89", "format": 2, "family": "sdxl-shaped",
+            "kind": aot_serve.ARTIFACT_KIND,
             "entries": {"unet/main": entry},
             "combined_graph_hash": aot_serve.combined_graph_hash([ch]),
+            # pgw#1046: every key input is now a RECORDED block, so this
+            # fixture states them rather than relying on an empty-dict digest.
+            "env_seal": {"v": 1}, "toolchain": {"torch": "2.9.0"},
+            "declared_traffic": {"shapes": [], "text_lens": [], "guidance": []},
+            "lora_bucket": 0, "strict_export": True,
         }
-        spec = ExportSpec(family="sdxl-shaped", target="unet")
-        return aot_mint.cell_identity(meta, spec).digest
+        return aot_mint.cell_identity(meta).digest
 
     a = _identity([["cfg", True]], [])
     b = _identity([["cfg", False]], [])

@@ -150,15 +150,14 @@ def test_combined_graph_hash_is_the_verbatim_ck6_formula() -> None:
 
 def test_cell_key_folds_the_combined_hash(minted_cell) -> None:
     meta = dict(minted_cell["result"].metadata)
-    spec = aot_mint.ExportSpec(family=FAMILY, target="")
-    assert aot_mint.cell_identity(meta, spec).digest == meta["cell_key"]
+    assert aot_mint.cell_identity(meta).digest == meta["cell_key"]
     # Perturb one entry's class hash: the combined hash — and the key — move.
     meta2 = json.loads(json.dumps(meta))
     name = next(iter(meta2["entries"]))
     meta2["entries"][name]["class_hash"] = "0" * 16
     meta2["combined_graph_hash"] = aot_serve.combined_graph_hash(
         row["class_hash"] for row in meta2["entries"].values())
-    assert aot_mint.cell_identity(meta2, spec).digest != meta["cell_key"]
+    assert aot_mint.cell_identity(meta2).digest != meta["cell_key"]
 
 
 def test_per_class_hashes_ride_metadata_and_name_the_class(minted_cell) -> None:

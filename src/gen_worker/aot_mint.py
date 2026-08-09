@@ -2105,7 +2105,7 @@ def _mint_cell(
         minted, timings, inductor_configs, width, progress.pool_ledger)
     _emit_phase_event(spec, phase_table)
 
-    meta["cell_key"] = key = cell_identity(meta, spec).digest
+    meta["cell_key"] = key = cell_identity(meta).digest
     t0 = time.monotonic()
     artifact = aot_serve.pack(work, out_dir / f"{key}.tar.gz", meta)
     timings["pack_s"] = round(time.monotonic() - t0, 2)
@@ -2876,6 +2876,19 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
         "sm": str(cc.runtime_key().get("sm") or ""),
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
+        # pgw#1046: the declared traffic the `contract` axis folds. It used to
+        # live ONLY in the live `ExportSpec`, so an exported cell could not
+        # restate its own contract axis — and the publish path, unable to
+        # recompute the key, fell back to a 6-axis subset carrying neither
+        # `toolchain` nor `env_seal`, which is precisely what the hub needs to
+        # mint an `ArtifactIdentity` the worker will accept. Recorded in the
+        # SHAPE `cell_key.contract_digest` consumes, so the digest — and every
+        # existing cell key — is byte-identical to before.
+        cell_key.EXPORT_TRAFFIC_KEY: {
+            "shapes": sorted([int(v) for v in row] for row in spec.shapes),
+            "text_lens": sorted({int(v) for v in spec.text_lens}),
+            "guidance": sorted(float(v) for v in spec.guidance_scales),
+        },
         # pgw#1034: no ``code_closure``. pgw#990 took source content out of the
         # key; the memo it was demoted to is `compile_cache`'s own block, read
         # by the local re-trace off ITS copy. This one had zero readers and cost
@@ -2918,83 +2931,26 @@ def _treespec_text(spec: Any) -> str:
         return repr(spec)
 
 
-def cell_identity(meta: Mapping[str, Any], spec: ExportSpec) -> cell_key.CellKey:
+def cell_identity(meta: Mapping[str, Any]) -> cell_key.CellKey:
     """The cell key a multi-graph artifact's OWN recorded facts describe.
 
-    Computed from the recorded blocks, never from separate probes, so the stamp
-    can never disagree with the axes it summarizes — the discipline
-    ``cell_key.from_artifact_metadata`` enforces for dynamo cells, mirrored for
-    the new kind. ``cell_key.from_axes`` already accepts any ``kind`` VALUE (it
-    validates axis NAMES), so no KEY_SCHEME bump: the axis set is unchanged and
-    ``kind`` does the discriminating. No dynamo cell is stranded.
+    The computation is :func:`cell_key.from_exported_artifact_metadata` — ONE
+    implementation, so the key the mint stamps and the axes the publish path
+    declares (``fleet_cells._identity_axes``) are the same object rather than
+    two derivations that can drift. pgw#1046 moved it there and dropped the
+    ``spec`` parameter: every input is now a RECORDED block (the traffic
+    contract rides ``declared_traffic``), which is what makes the recomputation
+    possible off the artifact alone. No cell re-keys — the contract-facts shape
+    and every axis value are unchanged.
 
-    The ``contract`` axis is the pgw#716 formula, IMPLEMENTED AS ANTICIPATED:
-    the cell keys on the ``combined_graph_hash`` — first 16 hex of the sha256
-    over the newline-joined SORTED per-class hashes — while the per-class
-    hashes ride ``entries[*].class_hash`` so a mismatch NAMES the class. Each
-    class hash folds that entry's ``range_digest`` (the #723 S3 requirement:
-    three exports differing ONLY in declared range produced identical node-only
-    digests) plus its coordinate and graph-interface block.
-
-    CONTRACT-FACTS SHAPE CHANGE (v1 -> v2, pgw#758): this re-keys every
-    published ``aot-inductor`` cell; single-graph format-1 cells are RETIRED —
-    correct and expected under exact identity.
-
-    CONTRACT-FACTS SHAPE CHANGE (v2 -> v3, pgw#817): ``shell_digest`` joined
-    the facts for the (since-retired) regional kind. pgw#846 retires regional
-    but deliberately KEEPS the v3 shape with ``shell_digest`` pinned ``""``
-    and the ``mode`` axis ``""`` — the whole-graph key is byte-identical to
-    what it was before and after pgw#817, so nothing re-keys.
+    A missing fact is a :class:`MintRefused` here because at mint time it means
+    this pod cannot name its own product; the same absence at publish time is a
+    publish refusal, not a fallback.
     """
-
-    sm = str(meta.get("sm") or "")
-    if not sm:
-        raise MintRefused(
-            "cannot state the compute capability (sm) of this runtime; an "
-            "exported cell has no identity without it — mint on the target GPU")
-    entries = dict(meta.get("entries") or {})
-    combined = str(meta.get("combined_graph_hash") or "")
-    if not entries or not combined:
-        raise MintRefused(
-            "the envelope recorded no entries/combined_graph_hash; a "
-            "multi-graph cell must not be keyed without its class set "
-            "(pgw#716/#758)")
-    unhashed = sorted(
-        name for name, block in entries.items()
-        if not str((block or {}).get("class_hash") or ""))
-    if unhashed:
-        raise MintRefused(
-            f"entries {unhashed[:4]!r} carry no class_hash; a class the key "
-            f"cannot name is a class a mismatch cannot name (pgw#716)")
-    contract_facts: Dict[str, Any] = {
-        "v": 3,
-        "combined_graph_hash": combined,
-        # pgw#846: always "" — kept in the v3 shape so the whole-graph
-        # contract digest (and every derived cell identity) does not move.
-        "shell_digest": "",
-        "targets": sorted({
-            str((block or {}).get("target") or "") for block in entries.values()}),
-        "shapes": sorted([int(v) for v in row] for row in spec.shapes),
-        "text_lens": sorted({int(v) for v in spec.text_lens}),
-        "guidance": sorted(float(v) for v in spec.guidance_scales),
-        "lora_bucket": int(spec.lora_bucket or 0),
-        "strict": bool(spec.strict),
-    }
-    contract = cell_key.contract_digest(contract_facts)
-    return cell_key.from_axes({
-        "format": str(meta.get("format") or ""),
-        "kind": aot_serve.ARTIFACT_KIND,
-        "family": str(meta.get("family") or ""),
-        "lane": spec.execution_lane_label(),
-        # pgw#846: an exported cell is always whole-graph again; "" is the
-        # optional-axis value `from_axes` omits, matching every pre-regional
-        # whole-graph key.
-        "mode": "",
-        "sm": sm,
-        "contract": contract,
-        "env_seal": env_seal.seal_digest(dict(meta.get(env_seal.SEAL_KEY) or {})),
-        "toolchain": cell_key.facts_digest(dict(meta.get("toolchain") or {})),
-    })
+    try:
+        return cell_key.from_exported_artifact_metadata(meta)
+    except cell_key.CellKeyError as exc:
+        raise MintRefused(str(exc)) from exc
 
 
 def _state_dict_keys(module: Any) -> Tuple[str, ...]:

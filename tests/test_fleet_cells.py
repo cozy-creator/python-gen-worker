@@ -35,6 +35,7 @@ from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure
 from gen_worker.models import provision
 from gen_worker.cell_adopt import AdoptOutcome
+from harness.cell_meta import exported_cell_meta
 
 
 class _Cfg:
@@ -375,7 +376,10 @@ class _FakeResp:
 
 def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     posts: list = []
-    key = "ck1-" + "c" * 56
+    # pgw#1046: a real exported-cell envelope — the publish path recomputes the
+    # key from its blocks, so an invented one is refused before the intent.
+    meta = exported_cell_meta(sku="b200", gen_worker="0.39.0")
+    key = meta["cell_key"]
 
     def _post(url, headers=None, json=None, timeout=None):
         posts.append((url, json))
@@ -432,7 +436,6 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "worker-jwt",
         image_digest="sha256:img")
-    meta = {"cell_key": key, "sku": "b200", "gen_worker": "0.39.0"}
     assert pub.publish("fam", artifact, meta) == "cp-42"
 
     intent_url, intent_body = posts[0]
@@ -481,7 +484,7 @@ def test_publisher_typed_refusal_is_terminal(monkeypatch, tmp_path):
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "worker-jwt", image_digest="d")
     with pytest.raises(fc.CellPublishRefused, match="cell_publish_forged_axis"):
-        pub.publish("fam", artifact, {"cell_key": "ck1-" + "d" * 56})
+        pub.publish("fam", artifact, exported_cell_meta())
 
 
 def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
@@ -515,7 +518,7 @@ def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "worker-jwt", image_digest="d")
     with pytest.raises(RuntimeError, match="upload exploded"):
-        pub.publish("fam", artifact, {"cell_key": "ck1-" + "e" * 56})
+        pub.publish("fam", artifact, exported_cell_meta())
     complete_url, complete_body = posts[-1]
     assert complete_url.endswith("/publish-complete")
     assert complete_body["ok"] is False and "upload exploded" in complete_body["error"]
