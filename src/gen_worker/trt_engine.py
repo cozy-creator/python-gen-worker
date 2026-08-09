@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from . import activity as activity_mod
+from . import artifact_meta
 from .cell_adopt import AdoptOutcome
 from .compile_cache import (
     AdoptError,
@@ -261,14 +262,12 @@ def stage_artifact(
 
 
 def unpack_metadata(artifact: Path) -> Dict[str, Any]:
-    """Read ONLY metadata.json from an artifact (kind sniffing — cheap)."""
-    with tarfile.open(artifact, mode="r:*") as tar:
-        for member in tar:
-            if member.name == METADATA_NAME and member.isfile():
-                src = tar.extractfile(member)
-                assert src is not None
-                return json.loads(src.read().decode())
-    raise ValueError(f"artifact {artifact} has no {METADATA_NAME}")
+    """Read ONLY metadata.json from an artifact (kind sniffing — cheap).
+
+    The shared :mod:`artifact_meta` reader; the refusal stays a
+    :class:`ValueError` subclass, which is what every caller classifies on.
+    """
+    return artifact_meta.read_metadata(artifact)
 
 
 def find_artifact(root: Path) -> Optional[Path]:

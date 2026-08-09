@@ -292,10 +292,10 @@ def test_a_failed_lifted_install_reaches_the_refusal_it_causes(
     # `arm_aot` imports these INSIDE the function body (they drag 39 modules
     # onto the `import gen_worker` path), so they are patched on their own
     # modules rather than as attributes of `provision`.
-    from gen_worker import aot_serve, trt_engine
+    from gen_worker import aot_serve, artifact_meta
 
     monkeypatch.setattr(
-        trt_engine, "unpack_metadata",
+        artifact_meta, "try_read_metadata",
         lambda p: {"targets": ["unet"], "module": "unet", "mode": ""})
     monkeypatch.setattr(provision, "arm_route", lambda mode: object())
 

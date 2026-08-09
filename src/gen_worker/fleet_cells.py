@@ -49,7 +49,6 @@ import json
 import logging
 import os
 import shutil
-import tarfile
 import tempfile
 import threading
 import time
@@ -59,7 +58,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 
 from . import activity as activity_mod
-from . import aot_cells, aot_serve, cell_key
+from . import aot_cells, aot_serve, artifact_meta, cell_key
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
@@ -1353,11 +1352,7 @@ def _arming_policy(
 
 def _packed_metadata(artifact: Path) -> Dict[str, Any]:
     """The stamped metadata inside a packed cell (metadata members only)."""
-    with tarfile.open(artifact, mode="r:*") as tar:
-        member = tar.extractfile(cc.METADATA_NAME)
-        if member is None:
-            raise RuntimeError(f"{artifact} carries no {cc.METADATA_NAME}")
-        return dict(json.loads(member.read().decode()))
+    return artifact_meta.read_metadata(artifact)
 
 
 def adopt_delegated_mint(

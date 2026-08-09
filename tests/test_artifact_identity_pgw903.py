@@ -242,7 +242,7 @@ def test_stage_artifact_refuses_a_wrong_identity_before_any_load(
     runtime-key and sm gates are neutralized so the ONLY thing under test is
     identity — otherwise a green run could mean 'refused for the wrong
     reason'."""
-    monkeypatch.setattr(aot_serve, "verify", lambda meta, family="": "")
+    monkeypatch.setattr(aot_serve, "verify", lambda meta, **kw: "")
     monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
     loaded: list[Any] = []
     monkeypatch.setattr(
@@ -265,7 +265,7 @@ def test_stage_artifact_refuses_a_wrong_identity_before_any_load(
 def test_stage_artifact_with_a_matching_identity_reaches_the_load_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(aot_serve, "verify", lambda meta, family="": "")
+    monkeypatch.setattr(aot_serve, "verify", lambda meta, **kw: "")
     monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
     reached: list[Any] = []
     monkeypatch.setattr(
@@ -288,7 +288,7 @@ def test_no_expectation_leaves_the_legacy_path_byte_identical(
     """Until the cutover, RunJob dispatches carry no immutable spec. Absent an
     expectation the gate must not invent one — a default expectation would
     refuse every cell the fleet serves today."""
-    monkeypatch.setattr(aot_serve, "verify", lambda meta, family="": "")
+    monkeypatch.setattr(aot_serve, "verify", lambda meta, **kw: "")
     monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
     monkeypatch.setattr(
         aot_serve, "verify_package_compute_capability", lambda path: "")
@@ -312,7 +312,7 @@ def test_an_internally_corrupt_artifact_keeps_its_own_distinct_refusal(
     monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
     monkeypatch.setattr(
         aot_serve, "verify",
-        lambda meta, family="": "entry 'unet': class_hash does not match its recorded facts")
+        lambda meta, **kw: "entry 'unet': class_hash does not match its recorded facts")
     with pytest.raises(aot_serve.AdoptError) as exc:
         aot_serve.stage_artifact(
             _artifact(tmp_path, _meta()), "micro",

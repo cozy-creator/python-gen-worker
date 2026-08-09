@@ -608,6 +608,27 @@ def execution_lane_token(weight_lane: str) -> str:
     return tok
 
 
+def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
+    """:func:`execution_lane_token` with a DECLARED bucket fallback: the
+    label for a lane whose bucket rides beside the lane string rather than
+    inside it (``("w8a8", 128)`` -> ``"w8a8-lora128"``). A bucket the lane
+    string already carries wins — it is what was actually traced.
+
+    pgw#1040: this body existed twice, byte for byte, as
+    ``cell_key._canonical_execution_lane`` and
+    ``aot_contract.ExportSpec.execution_lane_label``. One produces a cell-key
+    AXIS and the other the label stamped into a cell's metadata, so the two
+    copies drifting apart does not degrade — it mints cells under one name and
+    looks them up under another. Both now call this.
+    """
+    base, observed = execution_lane_bucket(str(weight_lane or ""))
+    bucket = observed or int(lora_bucket or 0)
+    token = execution_lane_token(base)
+    if bucket:
+        return f"{token}-lora{bucket}" if token else f"lora{bucket}"
+    return token
+
+
 def cell_base_execution_lane(pipeline: Any) -> str:
     """Base weight lane for CELL-IDENTITY computation (advertised requested
     keys, pull-by-key lookups, local-store lookups): the pipeline probe

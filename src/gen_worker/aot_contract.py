@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from .compile_cache import execution_lane_bucket, execution_lane_token
+from .compile_cache import execution_lane_label as _execution_lane_label
 
 
 class MintRefused(RuntimeError):
@@ -140,12 +140,9 @@ class ExportSpec:
     source_digest: str = ""
 
     def execution_lane_label(self) -> str:
-        base, observed = execution_lane_bucket(self.weight_lane)
-        bucket = observed or self.lora_bucket
-        token = execution_lane_token(base)
-        if bucket:
-            return f"{token}-lora{bucket}" if token else f"lora{bucket}"
-        return token
+        """This spec's lane label — ONE implementation, shared with the
+        cell-key axis it has to agree with (pgw#1040)."""
+        return _execution_lane_label(self.weight_lane, self.lora_bucket)
 
 
 __all__ = ["ADAPTER_FORK", "DynamicDim", "ExportSpec", "MintRefused"]

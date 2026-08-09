@@ -47,7 +47,6 @@ import binascii
 import hashlib
 import json
 import logging
-import tarfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +58,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from . import activity as activity_mod
+from . import artifact_meta
 from .procsplit import broker
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,6 @@ RECEIPT_PATH = "/v1/worker/cells/receipt"
 REVOCATIONS_PATH = "/v1/worker/cells/revocations"
 
 _HTTP_TIMEOUT_S = 30
-_METADATA_NAME = "metadata.json"
 
 
 class ReceiptError(RuntimeError):
@@ -545,20 +544,12 @@ def artifact_digest(path: Path) -> str:
 
 
 def _embedded_meta(artifact: Path) -> Dict[str, object]:
-    """The artifact's packed ``metadata.json`` — read directly (stdlib
-    tarfile) so this module never imports the compile stack."""
+    """The artifact's packed ``metadata.json``, through the one stdlib-only
+    reader — so this module still never imports the compile stack."""
     try:
-        with tarfile.open(artifact, mode="r:*") as tar:
-            for member in tar:
-                if member.name == _METADATA_NAME and member.isfile():
-                    f = tar.extractfile(member)
-                    if f is None:
-                        break
-                    loaded = json.loads(f.read().decode("utf-8"))
-                    return dict(loaded) if isinstance(loaded, dict) else {}
-    except (OSError, tarfile.TarError, ValueError, UnicodeDecodeError) as exc:
+        return dict(artifact_meta.read_metadata(artifact))
+    except artifact_meta.ArtifactMetadataError as exc:
         raise ReceiptError("artifact_unreadable", f"{artifact.name}: {exc}") from exc
-    raise ReceiptError("artifact_unreadable", f"{artifact.name}: no {_METADATA_NAME}")
 
 
 def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:

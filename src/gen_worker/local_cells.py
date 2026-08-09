@@ -48,17 +48,16 @@ The store root is ``$GEN_WORKER_LOCAL_CELLS_DIR`` (exported by cozy-local's
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
 import sys
-import tarfile
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 from . import activity as activity_mod
+from . import artifact_meta
 from . import compile_cache as cc
 from .models.loading import pipeline_weight_lane
 from .models import provision
@@ -88,14 +87,9 @@ def cell_path(family: str, weight_lane: str = "", root: Optional[Path] = None) -
 def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
     """'' when the stored cell is adoptable by this runtime + pipeline, else
     the mismatch reason (production verify() + drift parity, verbatim)."""
-    try:
-        with tarfile.open(artifact, mode="r:*") as tar:  # metadata only
-            member = tar.extractfile(cc.METADATA_NAME)
-            if member is None:
-                return "no metadata.json"
-            meta = json.loads(member.read().decode())
-    except Exception as exc:  # noqa: BLE001 — any unreadable cell re-mints
-        return f"unreadable artifact ({exc})"
+    meta = artifact_meta.try_read_metadata(artifact)
+    if meta is None:
+        return f"unreadable artifact ({artifact})"
     # th#883/gw#581: ONE compatibility brain when a key exists on both sides —
     # the exact key comparison fleet workers use.
     #
