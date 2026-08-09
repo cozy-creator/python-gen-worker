@@ -97,12 +97,15 @@ Preconditions (all verified before step 1, none assumed):
   platform-paid work).
 - The wheel is a version that has completed a local `task rig:micro` cycle.
   A wheel nothing has proven locally is what this whole family exists to stop.
-- **pgw#1017's `cuda_root` gap is closed.** ⛔ It is not, today. This family
-  ships its own Dockerfile, so it gets no composed `/usr/local/cuda`, and
-  torch's `cpp_extension` finds no CUDA on the pytorch runtime base. The mint
-  would boot, load, export and then die at `CUDA_HOME environment variable is
-  not set` — a paid failure where the missing-`g++` sibling was a free one.
-  **The pod runbook is blocked on that, independently of Paul's go.**
+- **pgw#1017's `cuda_root` gap is closed** (pgw#1068). A family that ships its
+  own Dockerfile gets no composed `/usr/local/cuda` — Dockerfile-LESS families
+  inherit it from the hub's synthesized Dockerfile (`cudaRootLine`) — so this
+  one asks for it explicitly: `RUN python -m gen_worker.cuda_root` after the
+  app install. Without that line the 0.96.x discovery precondition refuses the
+  build (`aot precondition cuda_root: … Missing: the root itself`).
+- **Step 0 below has been run against the target stack.** The `pipeline` slot
+  is a CATALOG slot with no code default, so a first release needs a binding
+  naming a repo that already exists AND resolves (th#1087 + th#980).
 
 ### 1. Wheel — pin the endpoint at the version under test
 

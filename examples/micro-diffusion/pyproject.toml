@@ -8,15 +8,12 @@ dependencies = [
     # the gen-worker version, so a range would make an adopted cell's identity
     # depend on what the build happened to resolve.
     #
-    # ⚠️ THIS FAMILY'S SERVE PATH REQUIRES pgw#994. It declares a `repeat=`
-    # container input with a plain input after it, which is precisely the
-    # shape whose contract positions pgw#994 fixed. On 0.93.3 the cell MINTS
-    # and SEALS and then refuses at ingress on its first served call — the
-    # same failure z-image's tracker entry describes. Bump this to the first
-    # release carrying `2165c2d5` (0.93.4, or a master build) before any pod
-    # run; the local rig already runs against master and its parity leg is
-    # currently a green proof of that fix.
-    "gen-worker==0.93.3",
+    # ⚠️ THIS FAMILY'S SERVE PATH REQUIRES pgw#994 (`2165c2d5`): it declares a
+    # `repeat=` container input with a plain input after it, and on <0.93.4 the
+    # cell MINTS and SEALS and then refuses at ingress on its first served
+    # call. Never pin below that. 0.96.1 also matches the ie `e7384fc`
+    # fleet cutover, so the micro family and the fleet share one wheel.
+    "gen-worker==0.96.1",
     "msgspec>=0.18",
     "safetensors>=0.4",
     "pillow",
