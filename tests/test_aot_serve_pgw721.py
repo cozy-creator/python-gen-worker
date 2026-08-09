@@ -88,7 +88,9 @@ class FakePackage:
             raise RuntimeError("no constant table in this artifact")
         return list(self._fqns)
 
-    def load_constants(self, values, check_full_update=False):
+    def load_constants(self, values, check_full_update=False,
+                        user_managed=False):
+        # torch 2.13's real signature carries user_managed (pgw#1042).
         self.full_update_asked = check_full_update
         if check_full_update and set(values) != set(self._fqns):
             raise RuntimeError("partial constant update refused by torch")

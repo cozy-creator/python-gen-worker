@@ -78,7 +78,11 @@ logger = logging.getLogger(__name__)
 # is a fleet-wide recall, and a recall is a recorded operator intent with an
 # actor and a reason, which an env var on a pod is not. The hub's
 # `cell_revocations` (th#1499) is where a recall lives.
-SEAL_VERSION = 2
+#
+# pgw#1042 bumped 2 -> 3 by EXCLUDING torch's compile-injected
+# `aot_inductor.metadata` from the inductor fact (see _PORTABLE_VOLATILE).
+# RE-KEY COST: zero — no cell has ever been published under v2.
+SEAL_VERSION = 3
 SEAL_KEY = "env_seal"
 
 # Behavior-affecting global flags: ONE canonical value each, set explicitly
@@ -233,16 +237,27 @@ def establish_config(
     return effective
 
 
+# Config entries torch MUTATES as a compile side effect — outputs, not knobs.
+# `torch._inductor.aot_compile` writes machine facts (AOTI_CPU_ISA,
+# AOTI_COMPUTE_CAPABILITY, ...) into the global `aot_inductor.metadata` and
+# `save_config_portable()` includes it, so a process that has compiled digests
+# differently from its own boot — the pgw#1042 parent/child seal divergence.
+_PORTABLE_VOLATILE = ("aot_inductor.metadata",)
+
+
 def inductor_config_digest() -> str:
     """Digest of torch's PORTABLE inductor config — the codegen surface a
     cell's kernels were minted under (machine-specific entries excluded by
-    torch itself). ``"absent"`` on a torchless worker (pgw#788) — a declared
+    torch itself, torch's own compile-side-effect entries excluded here:
+    pgw#1042). ``"absent"`` on a torchless worker (pgw#788) — a declared
     fact, so the seal digest stays meaningful for CPU cells."""
     if not torch_capability.present():
         return torch_capability.ABSENT
     import torch._inductor.config as inductor_config
 
-    portable = inductor_config.save_config_portable()
+    portable = dict(inductor_config.save_config_portable())
+    for key in _PORTABLE_VOLATILE:
+        portable.pop(key, None)
     encoded = json.dumps(
         portable, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
         default=str,

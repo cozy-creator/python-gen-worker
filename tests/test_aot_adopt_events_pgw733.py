@@ -72,7 +72,10 @@ class FakePackage:
         return list(self._fqns)
 
     def load_constants(self, values: Dict[str, Any],
-                       check_full_update: bool = False) -> None:
+                       check_full_update: bool = False,
+                       user_managed: bool = False) -> None:
+        # torch 2.13's real signature carries user_managed (pgw#1042: the
+        # whole-graph arm binds by reference against the per-target pool).
         if check_full_update and set(values) != set(self._fqns):
             raise RuntimeError("partial constant update refused by torch")
         self.loaded = dict(values)

@@ -70,6 +70,12 @@ class Vehicle:
     #: `w8a8_gemm_mode()` answers "" without CUDA — which the module class
     #: refuses — so a cardless run of these is NOT-RUN, never a red.
     gpu_only: bool = False
+    #: pgw#1042: (tree, device) -> (pipe, cfg) for the PARENT-side handback —
+    #: the rig process that opened the mint adopting its own child's cell
+    #: through `fleet_cells.adopt_delegated_mint`, exactly as a pod does
+    #: BEFORE anything publishes. None skips the leg (the tiny plumbing
+    #: vehicle has no loadable pipeline class).
+    parent_pipe: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +335,34 @@ def _micro_adopt_source_for(bucket: int) -> Any:
     return _source
 
 
+def _micro_parent_for(bucket: int, pipeline_cls: str = "MicroPipeline",
+                      cell: Any = None) -> Any:
+    """(tree, device) -> (pipe, cfg): the mint-opening parent's own pipeline,
+    on the mint's lane — what `adopt_delegated_mint` arms on a pod
+    (pgw#1042). Mirrors the adopt sources: same class, same device rule,
+    same lane application."""
+
+    def _build(tree: Path, device: str) -> Tuple[Any, Any]:
+        import micro_diffusion.pipeline as pl
+        from gen_worker import compile_cache as cc
+
+        pipe = getattr(pl, pipeline_cls).from_pretrained(str(tree)).to(device)
+        if pipeline_cls == "MicroW8a8Pipeline":
+            # The production loader stamps the base weight lane at load
+            # (`models/w8a8.py`: `pipe._cozy_weight_lane = "w8a8"`), and the
+            # parent's arm key reads THAT stamp (`pipeline_weight_lane`).
+            # MicroW8a8Pipeline builds its denoiser directly, so the rig
+            # parent mirrors the stamp or its lane axis is "" and the
+            # pgw#1042 guard (correctly) refuses the handback.
+            pipe._cozy_weight_lane = "w8a8"
+        if bucket:
+            cc.apply_lora_execution_lane(pipe, bucket)
+        cfg = cell() if cell is not None else _micro_cell(bucket)
+        return pipe, cfg
+
+    return _build
+
+
 def _micro_checkpoint(root: Path) -> Path:
     from micro_diffusion.weights import materialize
 
@@ -359,6 +393,7 @@ MICRO = Vehicle(
     checkpoint_bytes=_micro_checkpoint_bytes,
     compile_cell=_micro_cell,
     adopt_source=_micro_adopt_source_for(0),
+    parent_pipe=_micro_parent_for(0),
     covers=("org-worker packaging: 3 export entries (2 fork arms + a second "
             "target), CONTAINER inputs with a plain input after them "
             "(pgw#993/pgw#994), a derived dynamic range, generated weights"),
@@ -389,6 +424,7 @@ MICRO_LORA = Vehicle(
     checkpoint_bytes=_micro_checkpoint_bytes,
     compile_cell=lambda: _micro_cell(MICRO_LORA_BUCKET),
     adopt_source=_micro_adopt_source_for(MICRO_LORA_BUCKET),
+    parent_pipe=_micro_parent_for(MICRO_LORA_BUCKET),
     covers=(f"everything `micro` covers, on the BRANCH-BEARING graph "
             f"(lora_bucket={MICRO_LORA_BUCKET}): the mint child applies the "
             f"LoRA execution lane before tracing and the parent's arm runs "
@@ -418,8 +454,10 @@ MICRO_LORA_PLAIN_PARENT = Vehicle(
     checkpoint_bytes=_micro_checkpoint_bytes,
     compile_cell=lambda: _micro_cell(MICRO_LORA_BUCKET),
     # The MINT is bucket 64; the ADOPTER is bucket 0. That mismatch is the
-    # whole point of the leg.
+    # whole point of the leg. The HANDBACK parent carries the mint's own
+    # bucket — the pod that opened the mint always matches its own request.
     adopt_source=_micro_adopt_source_for(0),
+    parent_pipe=_micro_parent_for(MICRO_LORA_BUCKET),
     covers=("the pgw#999 design question: a bucket-bearing cell offered to a "
             "parent on the plain lane"),
     expect="red",
@@ -541,6 +579,7 @@ MICRO_4D = Vehicle(
     checkpoint_bytes=_micro_checkpoint_bytes,
     compile_cell=_micro_4d_cell,
     adopt_source=_micro_4d_adopt_source,
+    parent_pipe=_micro_parent_for(0, "MicroGridPipeline", _micro_4d_cell),
     covers=("pgw#998's shape — a 4-D latent with BOTH spatial axes dynamic, so "
             "every matmul's M extent is NONLINEAR in the traced symbols. This "
             "is z-image's declaration, and the seam that was unlowerable "
@@ -701,6 +740,7 @@ def _w8a8_vehicle(name: str, bucket: int) -> Vehicle:
         checkpoint_bytes=_micro_checkpoint_bytes,
         compile_cell=lambda: _micro_cell(bucket),
         adopt_source=_micro_w8a8_adopt_source_for(bucket),
+        parent_pipe=_micro_parent_for(bucket, "MicroW8a8Pipeline"),
         gpu_only=True,
         covers=(f"attempt 26's lane string `{lane}` — a REAL fp8 artifact from "
                 f"the SDK's own `quantize_tree_w8a8`, loaded by "
