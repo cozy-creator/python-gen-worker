@@ -803,9 +803,146 @@ MICRO_W8A8 = _w8a8_vehicle("micro-w8a8", 0)
 MICRO_W8A8_LORA = _w8a8_vehicle("micro-w8a8-lora", MICRO_LORA_BUCKET)
 
 
+# ---------------------------------------------------------------------------
+# micro-escape — pgw#1062's standing member: author-defined ops (the pgw#1059
+# amendment-7 escape hatch) through the whole mint. GPU-only: inductor lowers
+# a Triton impl on every backend that declares one and CPU declares none
+# (measured: `0 compatible backends for target (cpu)`).
+# ---------------------------------------------------------------------------
+
+
+def _micro_escape_cell() -> Any:
+    from gen_worker.registry import CompileCell
+
+    from micro_diffusion.aot_declaration_escape import COND_LEN, PIXEL_ROWS
+
+    return CompileCell(
+        shapes=PIXEL_ROWS, targets=("transformer",), family="micro-escape",
+        regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+        guidance_scales=(), text_lens=())
+
+
+_MICRO_ESCAPE_ADOPT = '''
+import json, logging, os, sys
+for p in %(paths)r:
+    sys.path.insert(0, p)
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+import harness.rig_runtime  # noqa: F401
+import torch
+from pathlib import Path
+from gen_worker import aot_serve
+from gen_worker.models import provision
+from gen_worker.registry import CompileCell
+from micro_diffusion.aot_declaration_escape import (
+    ARITY, COND_LEN, PIXEL_ROWS, TOKEN_ROWS)
+from micro_diffusion.pipeline import MicroEscapePipeline
+
+torch.set_num_threads(2)
+DEVICE = "cuda"  # gpu_only vehicle: the ops in the graph require the card
+cfg = CompileCell(
+    shapes=PIXEL_ROWS, targets=("transformer",), family="micro-escape",
+    regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+    guidance_scales=(), text_lens=())
+pipe = MicroEscapePipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+ref = MicroEscapePipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+config = pipe.config
+
+
+def _feed(tokens):
+    gen = torch.Generator().manual_seed(1062)
+    x = [torch.randn(tokens, config.in_channels, generator=gen).to(DEVICE)
+         for _ in range(ARITY)]
+    t = torch.full((ARITY,), 100.0, device=DEVICE)
+    cond = [torch.randn(COND_LEN, config.cond_dim, generator=gen).to(DEVICE)
+            for _ in range(ARITY)]
+    return x, t, cond
+
+
+# The row the artifact was NOT seeded on, so the derived range is exercised —
+# through the custom-op fallback, the triton_op kernel and the raw HOP.
+ARMS = [("transformer", TOKEN_ROWS[0])]
+eager = {}
+with torch.no_grad():
+    for name, tokens in ARMS:
+        x, t, cond = _feed(tokens)
+        eager[name] = ref.transformer(x, t, cond).clone()
+
+from harness.rig_fetch import fetch_named_cell as _fetch_cell
+from types import SimpleNamespace as _CellNS
+import hashlib as _hl
+from gen_worker import compile_cache as _syscc
+try:
+    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+except Exception as _exc:
+    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
+    cell = None
+else:
+    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    cell = _CellNS(
+        artifact=_art, cell_key=_key0, family=cfg.family,
+        ref=_syscc.system_repo(cfg.family) + "#" + _key0,
+        snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
+out = {"pid": os.getpid(), "ok": cell is not None}
+if cell is not None:
+    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+    out.update({
+        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "snapshot_digest": cell.snapshot_digest,
+        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "entries": sorted((meta.get("entries") or {})),
+    })
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), 0)
+    out["armed"] = bool(outcome)
+    out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
+    out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
+    if outcome:
+        deltas = {}
+        with torch.no_grad():
+            for name, tokens in ARMS:
+                x, t, cond = _feed(tokens)
+                deltas[name] = float(
+                    (pipe.transformer(x, t, cond) - eager[name]).abs().max())
+        out["parity_max_abs"] = deltas
+        out["execution_count"] = int(aot_serve.execution_count(pipe))
+        out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
+        out["ok"] = bool(out["parity_ok"]) and out["execution_count"] > 0
+    else:
+        out["ok"] = False
+print("RIG_ADOPT " + json.dumps(out))
+'''
+
+
+def _micro_escape_adopt_source(base: str, cache: Path, checkpoint: str) -> str:
+    return _MICRO_ESCAPE_ADOPT % {
+        "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
+        "base": base, "cache": str(cache), "checkpoint": checkpoint}
+
+
+MICRO_ESCAPE = Vehicle(
+    name="micro-escape",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main_escape"),
+    function="generate-escape",
+    family="micro-escape",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=_micro_escape_cell,
+    adopt_source=_micro_escape_adopt_source,
+    parent_pipe=_micro_parent_for(0, "MicroEscapePipeline", _micro_escape_cell),
+    gpu_only=True,
+    covers=("pgw#1062 (pgw#1059 amendment 7's escape hatch): author-defined "
+            "ops through the WHOLE mint — a torch.library custom op with a "
+            "fake kernel, a triton_op'd hand-written Triton kernel, and a raw "
+            "@triton.jit call, all inside the traced graph. RED proof: drop "
+            "the custom op's register_fake and the mint child refuses at "
+            "export"),
+)
+
+
 VEHICLES: Dict[str, Vehicle] = {
     v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA_PLAIN_PARENT,
-                        MICRO_4D, MICRO_W8A8, MICRO_W8A8_LORA)}
+                        MICRO_4D, MICRO_ESCAPE, MICRO_W8A8, MICRO_W8A8_LORA)}
 DEFAULT_VEHICLE = TINY.name
 
 
@@ -817,6 +954,7 @@ def vehicle(name: str) -> Vehicle:
             f"unknown rig vehicle {name!r} (known: {sorted(VEHICLES)!r})")
 
 
-__all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_LORA", "MICRO_LORA_BUCKET",
-           "MICRO_4D", "MICRO_LORA_PLAIN_PARENT", "MICRO_W8A8",
-           "MICRO_W8A8_LORA", "TINY", "VEHICLES", "Vehicle", "vehicle"]
+__all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_ESCAPE", "MICRO_LORA",
+           "MICRO_LORA_BUCKET", "MICRO_4D", "MICRO_LORA_PLAIN_PARENT",
+           "MICRO_W8A8", "MICRO_W8A8_LORA", "TINY", "VEHICLES", "Vehicle",
+           "vehicle"]

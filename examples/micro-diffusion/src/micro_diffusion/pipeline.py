@@ -135,8 +135,8 @@ class MicroPipeline:
         return self.unpatchify(cells, grid)
 
 
-__all__ = ["MicroConfig", "MicroGridPipeline", "MicroPipeline",
-           "MicroW8a8Pipeline"]
+__all__ = ["MicroConfig", "MicroEscapePipeline", "MicroGridPipeline",
+           "MicroPipeline", "MicroW8a8Pipeline"]
 
 
 class MicroGridPipeline(MicroPipeline):
@@ -189,3 +189,21 @@ class MicroW8a8Pipeline(MicroPipeline):
             str(root / "decoder" / "diffusion_pytorch_model.safetensors")),
             strict=True)
         return cls(transformer.eval(), decoder.eval(), source=str(root))
+
+
+class MicroEscapePipeline(MicroPipeline):
+    """The pgw#1062 vehicle's pipeline: same weights, escape-hatch transformer.
+
+    Only `.transformer` differs — a :class:`MicroEscapeDenoiser`, whose graph
+    carries a custom op (with fake kernel), a `triton_op` kernel and a raw
+    `@triton.jit` call. GPU-only: see `model_escape` for the measured reason.
+    """
+
+    @classmethod
+    def from_pretrained(cls, path: str, **_kw: Any) -> "MicroEscapePipeline":
+        from .model_escape import MicroEscapeDenoiser
+
+        base = MicroPipeline.from_pretrained(path)
+        escape = MicroEscapeDenoiser(base.config)
+        escape.load_state_dict(base.transformer.state_dict(), strict=True)
+        return cls(escape.eval(), base.decoder, source=base.source)
