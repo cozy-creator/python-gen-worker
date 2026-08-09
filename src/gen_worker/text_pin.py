@@ -21,8 +21,8 @@ from typing import Any, Optional, Tuple
 
 class TextLengthExceededError(ValueError):
     """The encoded prompt is longer than the declared ``Compile(text_len=)``
-    pin — an out-of-contract request. Typed refusal (same posture as
-    over-rank LoRAs), never a silently minted graph."""
+    pin — a request outside the declared envelope. Typed refusal (same posture
+    as over-rank LoRAs), never a silently minted graph."""
 
 
 def pad_text_sequence(

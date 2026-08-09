@@ -181,7 +181,7 @@ def test_a_real_hierarchy_with_both_triggers_closes(monkeypatch):
             compiled(torch.randn(2, 8))
         report = gc.audit_armed(pipe, _cfg())
         assert not report.leaks, (
-            "an in-contract call on a real module hierarchy leaked: "
+            "a call inside the declared envelope on a real module hierarchy leaked: "
             + "; ".join(str(leak) for leak in report.leaks))
         gc.closure_manifest(pipe, _cfg(), label="sdxl")
         counts = report.verdict_counts()

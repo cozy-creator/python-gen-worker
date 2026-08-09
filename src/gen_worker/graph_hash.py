@@ -21,7 +21,7 @@ the sdxl UNet exported three times differing ONLY in declared dynamic range
 (``VR[64,160]`` / ``VR[64,320]`` / ``VR[96,128]``) produced ONE node-only digest
 (``9dd33abbc7617d98``) for all three. The ranges live in
 ``ExportedProgram.range_constraints`` — a field BESIDE the graph, not in its
-nodes — so a node-only hash collides artifacts that admit DIFFERENT traffic:
+nodes — so a node-only hash collides artifacts whose declared ENVELOPES differ:
 adopt the ``[96,128]`` cell against a ``[64,160]`` key and 1024x1024 requests are
 refused by an artifact whose key promised to serve them. Symbolic ranges are the
 OPPOSITE of the non-semantic noise scrubbed below, and they are equally a defect
@@ -231,7 +231,7 @@ def _range_lines(ranges: Any, syms: _Symbols) -> List[str]:
     """Symbolic-dim RANGE lines — the pgw#704 S8 soundness fix.
 
     Emitted for every symbol the graph actually uses, in canonical symbol
-    order, so three artifacts admitting different traffic cannot collide.
+    order, so three artifacts declaring different envelopes cannot collide.
     """
     if not ranges:
         return []
@@ -240,8 +240,8 @@ def _range_lines(ranges: Any, syms: _Symbols) -> List[str]:
     for symbol, value_range in ranges.items():
         canonical = by_raw.get(str(symbol))
         if canonical is None:
-            # A constrained symbol the graph never mentions cannot change what
-            # the artifact admits; recording it would key on shape-env noise.
+            # A constrained symbol the graph never mentions cannot change the
+            # artifact's envelope; recording it would key on shape-env noise.
             continue
         lines.append(
             f"{SYM_PREFIX}{canonical} range=["

@@ -178,12 +178,12 @@ def test_noncanonical_minted_stride_is_a_leak() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Acceptance: an out-of-contract scalar leak is RECORDED, not refused
+# Acceptance: an out-of-envelope scalar leak is RECORDED, not refused
 # (pgw#756 — the classifier lost its veto; see test_guard_gate_advisory_pgw756)
 # ---------------------------------------------------------------------------
 
 
-def test_out_of_contract_scalar_is_recorded_naming_the_variable() -> None:
+def test_out_of_envelope_scalar_is_recorded_naming_the_variable() -> None:
     def forward(self: Any, x: Any, scale: float) -> Any:
         return self.lin(x) * scale
 

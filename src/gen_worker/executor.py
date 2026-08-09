@@ -5975,8 +5975,8 @@ class Executor:
         # is proven on an object once ALL of its graph classes proved there.
         proven_keys: Dict[int, set] = {}
         # pgw#844: which objects proved through the EXPORTED lane. An exported
-        # artifact refuses an out-of-contract shape BY NAME and serves that one
-        # call eager while staying armed, so a graph class it did not serve is
+        # artifact refuses a shape outside its declared envelope BY NAME and
+        # serves that call eager while staying armed, so a class it did not serve is
         # a per-shape posture, not a silent recompile — which is what lets the
         # attribution below be per-class for this lane and stay all-or-nothing
         # for dynamo, where an unproven class means an unannounced recompile.

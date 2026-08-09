@@ -23,8 +23,9 @@ inside.  "It heals on the JIT path" is therefore not an answer.
 
 What this module owns
 ---------------------
-* the **vocabulary**: a shape gap is a named DECLARED CLASS the armed cell does
-  not cover, not a dynamo input signature — arm-agnostic by construction;
+* the **vocabulary**: a shape gap is a named DECLARED CLASS outside the armed
+  cell's ENVELOPE — the declared serving region, not a dynamo input signature —
+  so it is arm-agnostic by construction;
 * the **countable fact**: :data:`activity.KIND_SHAPE_GAP`, the AOT counterpart
   of pgw#680's ``guard_miss``, so the hub can count coverage holes on either
   arm with one grouped query;
@@ -196,8 +197,9 @@ def report(gap: ShapeGap) -> bool:
             activity_mod.KIND_SHAPE_GAP,
             f"arm={gap.arm} family={gap.family} target={gap.target} "
             f"cell={gap.cell_key or '<none>'} class={gap.declared_class}: "
-            f"the armed cell does not cover this declared graph class; the "
-            f"request is served EAGER and named at ingress"
+            f"request out of declared envelope: the armed cell does not cover "
+            f"this graph class, so the request is served EAGER and named at "
+            f"ingress"
             + (f" — {gap.detail}" if gap.detail else ""),
             phase=gap.reason,
         )

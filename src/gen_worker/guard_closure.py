@@ -874,7 +874,7 @@ def closure_manifest(pipeline: Any, cfg: Any, label: str = "") -> Dict[str, Any]
         lines = list(report.leaks) + [f"UNPROVEN {u}" for u in report.unproven]
         detail = (
             f"guard-closure ADVISORY ({name}): {len(report.leaks)} "
-            f"out-of-contract guard(s), {len(report.unproven)} unreadable "
+            f"guard(s) outside the declared envelope, {len(report.unproven)} unreadable "
             f"entrie(s) — recorded in the cell manifest, mint continues "
             f"(pgw#756; the consumer's own guard evaluation is the real "
             f"check):\n  " + "\n  ".join(lines))
@@ -925,7 +925,7 @@ def _canonical_tensor(t: Any, path: str, label: str, dtypes: Dict[str, str]) -> 
     if seen != str(t.dtype):
         raise GuardBoundaryError(
             f"compiled ingress {label}: {path} arrived as {t.dtype} but "
-            f"this boundary first observed {seen} — out-of-contract dtype "
+            f"this boundary first observed {seen} — undeclared dtype "
             "drift at the compiled graph boundary")
     return t
 
