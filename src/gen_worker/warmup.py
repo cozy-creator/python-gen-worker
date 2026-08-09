@@ -91,6 +91,7 @@ from typing import (
 
 import msgspec
 
+from . import dispatch
 from .api.compile_axis import PayloadAxis
 from .api.decorators import EndpointDecl, NoWarmup
 from .api.errors import IllegalCombination
@@ -795,44 +796,47 @@ def spec_root_slot(spec: "EndpointSpec") -> str:
 
 
 def resolved_slots_kwargs(
-    spec: "EndpointSpec", run: Any = None,
+    spec: "EndpointSpec",
+    slots: Optional[Mapping[str, "dispatch.SlotOrder"]] = None,
+    adapters: Optional[Mapping[str, Tuple["dispatch.AdapterOrder", ...]]] = None,
 ) -> Dict[str, Any]:
     """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
-    ``Slot``-declared slot's repo-metadata ``ModelBinding.inference_defaults``
-    over its code fallback preset, then apply each riding lora's
-    ``LoraOverlay.inference_defaults`` as a FIELD-LEVEL override, in lora
-    order (pgw#516 composition rule — see ``api.slot._apply_lora_overrides``).
+    ``Slot``-declared slot's repo-metadata ``inference_defaults`` over its
+    code fallback preset, then apply each riding lora's own
+    ``inference_defaults`` as a FIELD-LEVEL override, in lora order (pgw#516
+    composition rule — see ``api.slot._apply_lora_overrides``).
 
     Returns the ``resolved_slots=`` / ``slot_errors=`` / ``root_slot=`` kwargs
     for ``RequestContext.__init__``. A slot that fails to resolve (no metadata
     + no fallback, or no ref) is deferred to a ``ctx.slots[name]`` access
     error instead of failing the whole dispatch.
 
-    ``run=None`` is the WARM shape: no per-dispatch binding metadata, so every
-    slot resolves from the spec's own declaration. That is what makes this
-    reachable from the delegated mint child, which has the spec and no job.
+    ``slots``/``adapters`` are the NEUTRAL per-dispatch orders (pgw#904) —
+    never a wire message. ``None`` is the WARM shape: no per-dispatch binding
+    metadata, so every slot resolves from the spec's own declaration. That is
+    what makes this reachable from the delegated mint child, which has the
+    spec and no job.
     """
     if not spec.slots:
         return {"resolved_slots": {}, "slot_errors": {}, "root_slot": ""}
 
-    run_models = list(run.models) if run is not None else []
+    slot_orders = dict(slots or {})
     raw_defaults = {
-        b.slot: b.inference_defaults for b in run_models if b.inference_defaults}
+        name: so.inference_defaults
+        for name, so in slot_orders.items() if so.inference_defaults}
     lora_defaults = {
-        b.slot: tuple(
-            lo.inference_defaults for lo in b.loras if lo.inference_defaults)
-        for b in run_models if b.loras
+        name: tuple(a.inference_defaults for a in advs if a.inference_defaults)
+        for name, advs in dict(adapters or {}).items()
     }
     # pgw#654: the resolved checkpoint's stamped objective/distilled facts
     # ride the binding; the per-function declaration is the backstop (the
     # hub gates checkpoint<->function compatibility at deploy/dispatch).
     objectives = {
-        b.slot: str(getattr(b, "objective", "") or "") for b in run_models}
+        name: so.objective for name, so in slot_orders.items()}
     distilled_facts = {
-        b.slot: bool(getattr(b, "distilled", False)) for b in run_models}
+        name: so.distilled for name, so in slot_orders.items()}
     distilled_statuses = {
-        b.slot: str(getattr(b, "distilled_status", "") or "")
-        for b in run_models}
+        name: so.distilled_status for name, so in slot_orders.items()}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
     for name, slot in spec.slots.items():

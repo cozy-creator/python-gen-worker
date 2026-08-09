@@ -29,7 +29,7 @@ import msgspec
 import pytest
 
 import gen_worker
-from gen_worker import aot_cells, aot_serve, compile_cache, fleet_cells
+from gen_worker import aot_serve, compile_cache, fleet_cells
 from gen_worker.api.decorators import Compile
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
 from gen_worker.executor import Executor
@@ -109,7 +109,7 @@ def _fake_arm(key: str, ref: str):
         setattr(unet, aot_serve._MARKER_ATTR, marker)
         setattr(pipe, aot_serve._MARKER_ATTR, marker)
         aot_serve.note_aot_key(key)
-        adopted = aot_cells.AdoptedAotCell(
+        adopted = fleet_cells.SelfMint(
             family=FAMILY, cell_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
             artifact=Path(cache_dir or ".") / "cell.tar")

@@ -151,8 +151,7 @@ SOURCE_LITERAL = "literal"
 #: Paul's ruling ("AOT cells are locked into the sm_x version, not the actual
 #: GPU"), the pgw#691 collapse that removed it from cell identity on
 #: byte-identical evidence, and the pgw#754 ISA clamp that made the host half
-#: portable. It stays in metadata for observability and as the discovery
-#: SELECTION PREFERENCE (``aot_cells._candidates``) — never as a refusal.
+#: portable. It stays in metadata for observability — never as a refusal.
 IDENTITY_AXES: Tuple[str, ...] = ("sm", "torch", "cuda")
 
 
@@ -236,7 +235,7 @@ def runtime_key() -> Dict[str, str]:
 #
 # THE RULE (pgw#1033): whoever reads a ``cell_key`` off an ``aot-inductor``
 # envelope registers it. There are two such readers on the serving path —
-# ``aot_cells.discover`` (a delivered cell) and
+# the delivered/named-cell arm and
 # ``fleet_cells.adopt_delegated_mint`` (this pod's OWN mint). Only the first
 # registered, so a self-minted cell — the one artifact this process is
 # certain is exported — was the one ref ``is_aot_ref`` did not recognize.
@@ -789,8 +788,6 @@ def verify(
 
 
 #: :func:`host_isa_reason`'s refusal for a cell that stamped no requirement.
-#: Also the ``aot_cells`` discovery reject class, so the same fact has one name
-#: whether it is ruled on before download or after staging.
 NO_HOST_ISA_STAMP = "no_host_isa_stamp"
 
 
@@ -798,9 +795,8 @@ def host_isa_reason(meta: Mapping[str, Any]) -> str:
     """'' when this host's CPU can execute the artifact's packaged host
     code, else the refusal reason (pgw#754).
 
-    Reads the mint's ``host_isa`` requirement stamp — metadata-only, so
-    discovery (``aot_cells._candidates``) filters unexecutable cells BEFORE
-    downloading them. An artifact carrying NO stamp is refused here: its true
+    Reads the mint's ``host_isa`` requirement stamp — metadata-only.
+    An artifact carrying NO stamp is refused here: its true
     ISA need is undiscoverable from metadata, an AVX-512-built ``.pt2``
     SIGILLs (exit 132 inside ``aoti_load_package``) on a host without it, and
     the miss policy for a refused cell is a self-mint that stamps one.
@@ -2407,6 +2403,8 @@ def enable(
     cfg: Any,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
+    *,
+    expected: "Optional[aot_identity.ExpectedIdentity]" = None,
 ) -> AdoptOutcome:
     """Consumer entry point: verify + load + bind + swap an AOTI artifact.
 
@@ -2424,7 +2422,9 @@ def enable(
     if artifact is None:
         return AdoptOutcome.miss("no_artifact")
     try:
-        meta = load_and_wrap(pipeline, cfg, Path(artifact), cache_dir=cache_dir)
+        meta = load_and_wrap(
+            pipeline, cfg, Path(artifact), cache_dir=cache_dir,
+            expected=expected)
     except Exception as exc:
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
         identity = _adopt_identity(Path(artifact))

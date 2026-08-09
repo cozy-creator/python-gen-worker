@@ -993,6 +993,24 @@ class Lifecycle:
                 await self.executor.handle_run_job(msg.run_job)
             finally:
                 self._resume_residency_reconcile()
+        elif which == "run_attempt":
+            # pgw#904: the Plan head. Same admission bracket as run_job — a
+            # tenant request preempts unrelated background transfer/setup.
+            attempt = msg.run_attempt
+            if self.intent_registry.protocol_rejected:
+                if attempt.HasField("attempt") and attempt.attempt.request_id:
+                    await self.executor._send_result(
+                        attempt.attempt.request_id,
+                        int(attempt.attempt.attempt),
+                        pb.JOB_STATUS_RETRYABLE,
+                        safe_message="worker rejected mandatory desired state",
+                    )
+                return
+            self._cancel_residency_reconcile()
+            try:
+                await self.executor.handle_run_attempt(attempt)
+            finally:
+                self._resume_residency_reconcile()
         elif which == "cancel_job":
             self.executor.handle_cancel(msg.cancel_job)
         elif which == "model_op":
@@ -1004,9 +1022,8 @@ class Lifecycle:
             # longer act on.
             logger.warning(
                 "ignoring retired ModelOp (pgw#1032): hot compile-cache "
-                "adoption is gone; this worker ACQUIRES cells itself "
-                "(aot_cells fetch-and-filter at arm time) — the hub never "
-                "pushes one")
+                "adoption is gone; a cell arrives only as a Plan's exact "
+                "Arm.artifact (pgw#904) — the hub never pushes one")
         elif which == "drain":
             self.start_drain(int(msg.drain.deadline_ms or 0))
         elif which is None:

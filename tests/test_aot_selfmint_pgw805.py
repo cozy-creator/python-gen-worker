@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import aot_cells, aot_mint, fleet_cells, mint_delegate
+from gen_worker import aot_mint, fleet_cells, mint_delegate
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
     export_declaration, register_export_declaration, reset_export_declarations,
@@ -121,7 +121,6 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     resolvable compile target, CUDA and a toolchain — and no cell.
     """
     gw_config.reload_for_test()
-    monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))

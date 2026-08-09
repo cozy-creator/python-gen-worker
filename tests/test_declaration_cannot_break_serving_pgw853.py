@@ -31,7 +31,7 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
-from gen_worker import aot_cells, fleet_cells
+from gen_worker import fleet_cells
 from gen_worker.aot_mint import MintRefused
 from gen_worker.api.export_contract import (
     DeclarationError, export_declaration, has_export_declaration,
@@ -243,7 +243,6 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """A real AOT discovery miss on an otherwise mint-capable pod."""
     gw_config.reload_for_test()
-    monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))

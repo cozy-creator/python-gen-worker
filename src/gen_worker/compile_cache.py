@@ -703,38 +703,10 @@ def parse_cell_ref(ref: str) -> Tuple[str, str]:
     return th.repo[len("family-"):], th.flavor or ""
 
 
-def cell_execution_lane(ref: str) -> str:
-    """The compiled weight-lane token encoded in a system-cell ref.
-
-    The flavor is human/routing metadata; artifact metadata remains the
-    authority. This narrow parser exists so a worker presented several cells
-    for one family tries the exact lane instead of whichever mapping entry
-    happened to arrive first (ie#496).
-    """
-    _family, flavor = parse_cell_ref(ref)
-    _prefix, sep, suffix = flavor.partition("-torch")
-    if not sep:
-        return ""
-    _version, sep, execution_lane = suffix.partition("-")
-    return execution_lane if sep else ""
-
-
 def family_from_ref(ref: str) -> str:
     """Family encoded in a compile-cache ref; '' when the ref is not a
     system-family cell ref."""
     return parse_cell_ref(ref)[0]
-
-
-def is_cache_ref(ref: str, family: str = "") -> bool:
-    """True when ``ref`` names an inductor compile-cache cell (optionally of
-    one specific family). Cells are flavored either with the legacy human
-    label (``inductor-<sku>-torch<mm>[-lane]``) or, post-th#883, with the
-    worker-computed cell key itself (``ck1-<sha256>`` — pull-by-key)."""
-
-    fam, flavor = parse_cell_ref(ref)
-    if not fam or (family and fam != family):
-        return False
-    return flavor.startswith("inductor-") or cell_key.is_key(flavor)
 
 
 def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = None) -> Dict[str, Any]:
@@ -1786,15 +1758,6 @@ class CellSelectionBugError(RuntimeError):
 
 class CompiledExecutionLaneUnavailableError(RetryableError):
     """A precision lane whose production contract requires a cell is unsafe."""
-
-
-def find_artifact(root: Path) -> Optional[Path]:
-    """The compile-cache tarball inside a downloaded snapshot dir (or the
-    file itself)."""
-    root = Path(root)
-    if root.is_file():
-        return root
-    return next(iter(sorted(root.rglob("*.tar.gz"))), None)
 
 
 def _merge_staged_cache(staged: Path, live: Path) -> None:
@@ -3729,7 +3692,7 @@ def arm_jit_intake(pipe: Any, cfg: Any) -> None:
     the declared targets are enabled cold-allowed and GUARDED, this pod's own
     warmup performs the compile, and the pod serves compiled for its own life.
     Nothing is captured, packed, keyed or published — a JIT cell is an artifact
-    class with no consumer (``aot_cells`` adopts ``aot-inductor`` only), so
+    class with no consumer (only ``aot-inductor`` cells are ever adopted), so
     every honest cold boot re-compiles and that is the contract, not a gap.
 
     This used to be ``begin_fleet_mint``, which additionally re-pointed the
@@ -3786,7 +3749,6 @@ __all__ = [
     "capture_env",
     "cell_base_execution_lane",
     "drop_lora_execution_lane",
-    "cell_execution_lane",
     "contract_drift",
     "counters_delta",
     "cache_hit_count",
@@ -3798,7 +3760,6 @@ __all__ = [
     "execution_contract_digest",
     "family_from_ref",
     "parse_cell_ref",
-    "find_artifact",
     "flavor_label",
     "fx_cache_failure_report",
     "fx_key_forensics",
@@ -3809,7 +3770,6 @@ __all__ = [
     "set_guard_miss_callback",
     "tenant_serve_window",
     "inductor_counters",
-    "is_cache_ref",
     "is_compile_armed",
     "execution_lane_bucket",
     "execution_lane_token",

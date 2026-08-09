@@ -21,7 +21,7 @@ Under self-mint the arming policy for a compile-declared function becomes:
      compile them, and produce NOTHING. This is pgw#1010's cut, and it is
      the ratified reuse ruling made structural: reuse is AOT-only, JIT is
      intake with honest cold boots. A JIT cell had no possible consumer
-     (``aot_cells`` adopts ``aot-inductor`` only, by name), so every one
+     (only ``aot-inductor`` artifacts are ever adopted, by name), so every one
      minted was pod time and platform storage spent on an artifact nothing
      could ever adopt. There is no seal, no key, no publish and no
      ``cell_store`` row on this path; the ONLY artifact class this module
@@ -58,7 +58,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 
 from . import activity as activity_mod
-from . import aot_cells, aot_serve, artifact_meta, cell_key, env_seal
+from . import aot_identity, aot_serve, artifact_meta, cell_key, env_seal
 # Class import beside the module import: inside `PendingSelfMint` the field
 # named `cell_key` shadows the module, so the `arm_key` annotation needs the
 # class under its own name.
@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 
 #: pgw#805 mint recipes, as re-cut by pgw#1010. ``aot`` (torch.export +
 #: AOTInductor) is the ONLY recipe that produces an artifact — the only kind
-#: ``aot_cells.discover`` will ever adopt. ``dynamo`` is no longer a mint at
+#: a hub-named ``Arm.artifact`` can deliver (pgw#904). ``dynamo`` is no longer a mint at
 #: all: it names the JIT INTAKE posture a family without an export declaration
 #: serves under (compile in this process, serve compiled for this pod's life,
 #: publish nothing). Kept as a distinct token because every decline that
@@ -97,9 +97,8 @@ class SelfMint:
     passes the same arm gates a hub-delivered one does. The serving-bootstrap
     half of gw#587/th#910: the minting worker ADVERTISES this identity — the
     key STAMPED on the bytes it serves — so ``active_compile_artifacts``
-    accounting treats the mint exactly like a cell this pod DISCOVERED and
-    pulled (``aot_cells``); the warmup proof, not the artifact source, gates
-    serving.
+    accounting treats the mint exactly like a hub-delivered cell; the warmup
+    proof, not the artifact source, gates serving.
 
     pgw#1032: the hub fence this feeds is the one that verifies the ADVERTISED
     active ref against the hub's own store. The old self-attested spelling
@@ -333,35 +332,10 @@ _UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
     "weight_contract",  # per-tensor weight rows
 })
 
-# pgw#988 — the OTHER half of this decision, asserted rather than assumed.
-#
-# What the declare carries and what the consumer verifies off it are two halves
-# of ONE contract, and until now they were two independent computations of it in
-# two modules. th#1645 dropped `entries` here — right about SIZE — while
-# `aot_cells._candidates` still refused any cell whose declare had no entries
-# map, so 100% of AOT cells published from that commit on were undiscoverable on
-# every pod. A pod that finds no cell mints its own, so the fleet paid a full
-# compile per cold boot and the failure presented as COST, never as an error.
-#
-# Checked at import, over two frozensets, so the next block that moves fails
-# every test run rather than a fleet.
-def assert_declare_contract(
-    dropped: "frozenset[str]" = _UNBOUNDED_ENVELOPE_BLOCKS,
-    read: "frozenset[str]" = aot_cells.DECLARE_CONTRACT_KEYS,
-) -> None:
-    """Raise when the declare strips a key its consumer still verifies."""
-    breach = sorted(dropped & read)
-    if breach:
-        raise RuntimeError(
-            f"cell declare contract broken (pgw#988): {breach!r} is stripped "
-            "from the publish declare but is still read off it by "
-            "aot_cells._candidates — every cell published this way would be "
-            "undiscoverable, and every pod would re-mint. Either keep the "
-            "block in the declare or stop verifying against it before the "
-            "download.")
-
-
-assert_declare_contract()
+# pgw#904: the pgw#988 declare-contract assert died with `aot_cells`. The
+# declare's worker-side CONSUMER (fetch-and-filter discovery) is deleted —
+# the hub now resolves the exact artifact and names it in `Arm.artifact`, so
+# the declare's reader is the hub, and its contract is enforced there.
 
 # The stated ceiling on a cell's CONTROL-plane declare (§4.24). Measured
 # basis: the same real cell's metadata minus the blocks above is 285 KB, and
@@ -978,6 +952,137 @@ def enable_compiled(
     return dataclasses.replace(outcome, adoptions=tuple(adoptions))
 
 
+class OrderedArmError(cc.CompiledExecutionLaneUnavailableError):
+    """An ordered (Plan-named) arm could not be satisfied AS NAMED.
+
+    Typed and terminal for the attempt: the hub named one exact arm, so there
+    is no sibling to scan, no self-mint to fall back to and no eager degrade —
+    any of those would substitute an artifact the spec did not name (pgw#904).
+    ``reason`` is the countable token; the message names expected/have.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        super().__init__(f"{reason}: {detail}")
+
+
+def arm_ordered(
+    pipe: Any,
+    cfg: Any,
+    cache_dir: Optional[Path],
+    *,
+    backend: str,
+    artifact: Optional[Path],
+    delivered_ref: str,
+    delivered_digest: str,
+    expected: Optional["aot_identity.ExpectedIdentity"],
+    publisher_org: str,
+) -> ArmOutcome:
+    """Obey one Plan's ``Arm`` (pgw#904) — the fleet POLICY does not run.
+
+    ``aot_cell`` arms exactly the pre-materialized ``artifact`` (its bytes
+    already verified against the spec's content digest by the head): the
+    hub-signed receipt is verified STRICTLY (a refused receipt is a typed
+    refusal, never a drop-to-eager), the receipt's ``publisher_org_id`` must
+    equal the org the spec named (§4.26 — the trust answer is WHO produced
+    it), and pgw#903's declared-identity verification runs inside
+    ``stage_artifact`` via ``expected``. ``dynamo`` arms JIT intake.
+    ``eager_only`` arms nothing, by order.
+    """
+    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    if bucket and not cc.has_compile_target(pipe, cfg):
+        bucket = 0  # bare component slot (gw#627): branchless-eager, not an error
+
+    if backend == "eager_only":
+        if artifact is not None:
+            raise OrderedArmError(
+                "artifact_on_eager_arm",
+                "the spec ordered eager_only but an artifact was materialized "
+                "— refusing to arm anything the spec did not name")
+        return ArmOutcome(armed=False, eager_reason=EagerPhase.HUB_ORDERED_EAGER)
+
+    if backend == "dynamo":
+        if artifact is not None:
+            raise OrderedArmError(
+                "artifact_on_dynamo_arm",
+                "the spec ordered a dynamo (JIT intake) arm but an artifact "
+                "was materialized — since pgw#1010 dynamo has no artifact")
+        if bucket:
+            cc.apply_lora_execution_lane(pipe, bucket)
+        try:
+            cc.arm_jit_intake(pipe, cfg)
+        except Exception as exc:  # noqa: BLE001 — typed refusal, never silent
+            if bucket:
+                cc.drop_lora_execution_lane(pipe)
+            raise OrderedArmError(
+                "jit_arm_failed", f"ordered JIT intake arm failed: {exc}"
+            ) from exc
+        return ArmOutcome(armed=True)
+
+    if backend != "aot_cell":
+        raise OrderedArmError(
+            "unknown_ordered_backend", f"no arm for backend {backend!r}")
+    if artifact is None or expected is None:
+        raise OrderedArmError(
+            "artifact_unmaterialized",
+            "an aot_cell arm reached arming with no materialized artifact "
+            "or no expected identity — the head must supply both")
+
+    # Deferred: receipts pulls +151 modules onto the `import gen_worker` path.
+    from . import receipts
+
+    family = str(getattr(cfg, "family", "") or "")
+    if not receipts.configured():
+        raise OrderedArmError(
+            "receipt_gate_unconfigured",
+            "an ordered cell arm requires the hub receipt gate; this process "
+            "has no hub wiring to verify the publisher against")
+    try:
+        receipt = receipts.verify_delivered_artifact(Path(artifact), family)
+    except receipts.ReceiptError as exc:
+        raise OrderedArmError(
+            "artifact_receipt_refused", f"{exc.reason}: {exc}") from exc
+    want_org = str(publisher_org or "").strip()
+    have_org = str(receipt.publisher_org_id or "").strip()
+    # Exact publisher (§4.26): the spec NAMES the producing org and the signed
+    # receipt must name the same one. Fail-closed on silence — an artifact
+    # whose receipt cannot name its publisher cannot be shown to match.
+    if not want_org or have_org != want_org:
+        raise OrderedArmError(
+            "publisher_mismatch",
+            f"publisher_org: expected {want_org or '<unnamed>'}, receipt "
+            f"names {have_org or '<unnamed>'}")
+
+    if bucket:
+        cc.apply_lora_execution_lane(pipe, bucket)
+    started = time.monotonic()
+    try:
+        outcome = provision.arm_aot(
+            pipe, cfg, cache_dir, Path(artifact), bucket, expected=expected)
+    except BaseException:
+        if bucket:
+            cc.drop_lora_execution_lane(pipe)
+        raise
+    arm_ms = int(round(max(0.0, time.monotonic() - started) * 1000.0))
+    row = CellAdoption(
+        ref=delivered_ref,
+        snapshot_digest=delivered_digest,
+        artifact_kind=aot_serve.ARTIFACT_KIND,
+        arm_ms=arm_ms,
+        armed=outcome.armed,
+        reason=outcome.reason,
+        detail=outcome.detail or outcome.identity,
+        pipeline_id=id(pipe),
+    )
+    if not outcome.armed:
+        if bucket:
+            cc.drop_lora_execution_lane(pipe)
+        raise OrderedArmError(
+            outcome.reason or "ordered_arm_refused",
+            f"the named cell did not arm: {outcome.detail or outcome.identity}")
+    return ArmOutcome(armed=True, adoptions=(row,))
+
+
 def _arming_policy(
     pipe: Any,
     cfg: Any,
@@ -1034,83 +1139,11 @@ def _arming_policy(
     elif not delegate:
         delegate_refusal = "caller_forced_in_process"
 
-    # PREFER a published aot-inductor cell over the delivered dynamo artifact.
-    # Discovery is fetch-and-filter (the worker cannot compute a stamped AOT
-    # key); the downloaded artifact rides the SAME choke point below, so the
-    # pgw#709 receipt gate and the aot_serve arm gates run unchanged. Any
-    # miss/failure falls through to today's policy with the originally
-    # delivered artifact.
-    #
-    # pgw#990: UNCONDITIONAL. This was `aot_cells.prefer_aot()` — a default-OFF
-    # pilot switch carried by a release-scoped env entry — and the release
-    # stopped declaring the name on 2026-08-05, so every serving pod between
-    # then and attempt twenty-four skipped discovery entirely and self-minted
-    # over a published cell. Adoption is the path; a gate that un-arms it on a
-    # rebuild protects nothing.
-    if (
-        family
-        and publisher is not None
-        and publisher.enabled()
-        and cc.has_compile_target(pipe, cfg)
-    ):
-        adopted = aot_cells.discover(
-            pipe, cfg,
-            base_url=publisher.base_url,
-            worker_jwt=publisher.worker_jwt,
-            cache_dir=cache_dir,
-        )
-        if adopted is not None:
-            try:
-                aot_out, aot_row = _arm_candidate(
-                    pipe, cfg, cache_dir, adopted.artifact,
-                    ref=adopted.ref,
-                    snapshot_digest=adopted.snapshot_digest,
-                    artifact_kind=aot_serve.ARTIFACT_KIND,
-                )
-            except cc.CompiledExecutionLaneUnavailableError:
-                # The AOT arm refused and the mandatory-lane no-artifact
-                # fallthrough raised — the ordinary policy below (with the
-                # delivered artifact) is still to run, so this is not
-                # terminal here.
-                logger.warning(
-                    "fleet-cells: discovered AOT cell %s did not arm; "
-                    "falling through to the ordinary arming policy",
-                    adopted.ref)
-                adoptions.append(CellAdoption(
-                    ref=adopted.ref,
-                    snapshot_digest=adopted.snapshot_digest,
-                    artifact_kind=aot_serve.ARTIFACT_KIND,
-                    arm_ms=0,
-                    armed=False,
-                    reason="lane_unavailable",
-                    detail=(
-                        f"family={family} key={adopted.cell_key}: arm refused "
-                        "and the mandatory-lane fallthrough raised; ordinary "
-                        "policy resumes with the delivered artifact"),
-                    pipeline_id=id(pipe),
-                ))
-            else:
-                if aot_out.armed and not aot_serve.is_armed(pipe):
-                    # Armed, but not through the exported artifact (e.g. a
-                    # seeded dynamo cell picked up on the fallthrough): honest
-                    # plain HIT — never advertise the AOT identity for bytes
-                    # this pipe does not serve, so the DISCOVERED cell's own
-                    # adoption is a miss with its own token.
-                    aot_row = dataclasses.replace(
-                        aot_row, armed=False, reason="armed_other_path",
-                        detail=(
-                            f"family={family} key={adopted.cell_key}: armed "
-                            "via the fallthrough, NOT the discovered "
-                            "artifact; AOT identity not advertised"))
-                    adoptions.append(aot_row)
-                    return ArmOutcome(armed=True)
-                adoptions.append(aot_row)
-                if aot_out.armed:
-                    logger.info(
-                        "fleet-cells: armed discovered AOT cell %s (pgw#722)",
-                        adopted.ref)
-                    return ArmOutcome(armed=True, self_mint=adopted)
-
+    # pgw#904: catalog discovery (`aot_cells.discover` fetch-and-filter) is
+    # DELETED. A connected worker never lists, ranks or chooses a published
+    # cell — the hub resolves the exact artifact and names it in
+    # `Arm.artifact`, and `arm_ordered` is that path. What remains below is
+    # the hub-less policy: the delivered artifact, then self-mint/intake.
     try:
         delivered_out, delivered_row = _arm_candidate(
             pipe, cfg, cache_dir, artifact,
@@ -1540,10 +1573,10 @@ def adopt_delegated_mint(
     state["meta"] = dict(meta)
     # pgw#1033: this process has now READ a stamped `aot-inductor` key off a
     # packed envelope, which is the one event that teaches a runtime that a
-    # key-flavored ref names an EXPORTED cell. `aot_cells.discover` registers
-    # the keys it learns for the same reason; a SELF-MINTED cell was the
+    # key-flavored ref names an EXPORTED cell (the delivered-arm path
+    # registers its keys the same way; a SELF-MINTED cell was the
     # unregistered half, so the executor's #734/#735 kind dispatch scored this
-    # pod's own `.pt2` by FX cache hits it can never produce.
+    # pod's own `.pt2` by FX cache hits it can never produce).
     aot_serve.note_aot_key(minted.cell_key)
     # th#1355: the mint cost, banked at the moment the cell becomes real.
     state["mint_duration_ms"] = max(
@@ -1758,7 +1791,7 @@ def mint_recipe(
 ) -> str:
     """WHICH mint a miss on this pipeline should run (pgw#805).
 
-    The AOT lane was a pure CONSUMER: ``aot_cells.discover`` filtered for
+    The AOT lane was a pure CONSUMER: discovery filtered for
     ``kind == "aot-inductor"`` artifacts and a miss fell through to the dynamo
     self-mint, whose cell can never satisfy that filter. So a fleet missed,
     re-minted the wrong kind (or nothing), and missed identically on every

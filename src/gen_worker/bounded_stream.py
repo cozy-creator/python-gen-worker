@@ -6,7 +6,7 @@ body to disk. Three checked the running byte count INSIDE the loop and aborted
 at the first excess byte (`models/chunk_cas._fetch_chunk_to_offset`,
 `models/cozy_cas._stream`, `input_assets._download`, `url_fetch._read_capped`).
 Four wrote the whole body first and compared sizes AFTER the loop ended
-(`request_context._download_blob_by_digest`, `aot_cells` whole-file branch,
+(`request_context._download_blob_by_digest`, the cell-fetch whole-file branch,
 `models/download._civitai_stream_one`, `request_context/_datasets.
 _download_url_streamed`). Same threat, two verdicts.
 

@@ -18,12 +18,12 @@ randomly-initialized toy latent-diffusion model on this box's card:
   1. resolve      — the parent builds a real `MintSlot` (identity + bytes)
   2. handoff      — `mint_delegate.build_request` -> `MintRequest` -> a JSON file
   3. spawn        — `mint_process.run_mint` starts a REAL child interpreter
-  4. load         — the child re-runs discovery and `run_setup` from scratch
+  4. load         — the child re-runs module discovery and `run_setup` from scratch
   5. warm         — `warmup_forward` over the endpoint's own declared plan
   6. export       — real `torch.export` + real AOTInductor compile + link
   7. seal         — real cell key, real packed artifact, real envelope
   8. publish      — the real `CellPublisher` wire to a LOCAL hub (7 HTTP calls)
-  9. adopt        — a SECOND OS process discovers and adopts the cell
+  9. adopt        — a SECOND OS process fetches the exact named cell and adopts it
 
 Legs 1-5 are where 9 of attempt twenty's 12 walls were.
 
@@ -568,6 +568,7 @@ def run_cycle(
         g0 = time.monotonic()
         adopted = _adopt_in_subprocess(
             hub.base, root, veh, tree,
+            checkpoint_id=checkpoint_id,
             synthetic_runtime=bool(
                 next(lg for lg in result.legs
                      if lg.name == "mint-child").facts.get("synthetic_runtime")))
@@ -656,9 +657,12 @@ def _branchless(names: List[str]) -> List[str]:
 
 def _adopt_in_subprocess(
     base: str, root: Path, veh: Any, tree: Path, *,
+    checkpoint_id: str,
     synthetic_runtime: bool = False,
 ) -> Dict[str, Any]:
-    """A SECOND OS process doing the discovery.
+    """A SECOND OS process adopting the EXACT published cell (pgw#904:
+    it is TOLD the checkpoint id — discovery is deleted; a serving pod is
+    told by `Arm.artifact` the same way).
 
     In-process adoption would be a different test: the whole cross-pod claim is
     that a cell minted by one interpreter is servable by another that shares
@@ -667,7 +671,7 @@ def _adopt_in_subprocess(
     """
     cache = root / "adopt-cache" / veh.name
     cache.mkdir(parents=True, exist_ok=True)
-    src = veh.adopt_source(base, cache)
+    src = veh.adopt_source(base, cache, checkpoint_id)
     from harness.tiny_diffusion import SYNTHETIC_RUNTIME_ENV
 
     env = dict(os.environ)
@@ -703,7 +707,7 @@ def _adopt_in_subprocess(
 
 def _adopt_miss_log(stderr: str) -> str:
     lines = [ln for ln in stderr.splitlines()
-             if "aot-cells" in ln or "aot_cells" in ln or "verify" in ln]
+             if "rig-fetch" in ln or "aot" in ln or "verify" in ln]
     return "\n".join(lines[-12:]) or stderr[-800:]
 
 

@@ -29,15 +29,13 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from gen_worker import activity, aot_cells, aot_serve, fleet_cells
+from gen_worker import activity, aot_serve
 from gen_worker.cell_adopt import AdoptOutcome
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
 #: share of that induced quantity rather than a bare constant (pgw#795). This is
 #: a LOWER bound on work the test itself produced: a slow runner only raises the
 #: measured value, so nothing here can fail because the machine was busy.
-_INDUCED_ARM_S = 0.02
-_MEASURED_ARM_FLOOR_MS = int(_INDUCED_ARM_S * 1000 * 0.75)
 
 FAMILY = "sdxl"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
@@ -165,11 +163,6 @@ def stub_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
 
 
-def _reasons(outcome: Any) -> List[str]:
-    """The classified reason of every adoption ATTEMPT, in order."""
-    return [row.reason for row in outcome.adoptions]
-
-
 # ---------------------------------------------------------------------------
 # aot_serve.enable — the classified inner reason, success AND failure
 # ---------------------------------------------------------------------------
@@ -232,167 +225,6 @@ def test_constants_refusal_named_on_the_wire(
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
     assert not out.armed
     assert out.reason.startswith("constants_")
-
-
-# ---------------------------------------------------------------------------
-# discovery — pre-clamp (unstamped host_isa) cells are retired by name
-# ---------------------------------------------------------------------------
-
-
-def test_candidates_retire_unstamped_preclamp_cells(
-    stub_runtime: None,
-) -> None:
-    """Live-proven 2026-07-29 (pod 3cjmd3ohuk98a5): an unstamped pre-clamp
-    cell passes every metadata gate, gets downloaded, then refuses at stage.
-    Discovery must retire the whole class instead of shipping doomed
-    candidates. pgw#950 deleted the stage-time torch-package sniff that used
-    to catch the survivors, so this filter is now the ONLY thing between an
-    unstamped cell and a wasted download."""
-    from gen_worker import host_isa
-
-    stamped = _meta(host_isa=host_isa.stamp())
-    unstamped = _meta()
-    unstamped.pop("host_isa")
-    items = [
-        {"checkpoint_id": "ck-old-preclamp",
-         "updated_at": "2026-07-30T00:00:00Z", "metadata": unstamped},
-        {"checkpoint_id": "ck-stamped",
-         "updated_at": "2026-07-28T00:00:00Z", "metadata": stamped},
-    ]
-    rows = aot_cells._candidates(items, FAMILY, "")
-    assert [r[1] for r in rows] == ["ck-stamped"]
-
-
-# ---------------------------------------------------------------------------
-# fleet_cells F1 consumer — outcome bound to the DISCOVERED candidate
-# ---------------------------------------------------------------------------
-
-
-class _StubPublisher:
-    base_url = "http://hub.invalid"
-
-    def enabled(self) -> bool:
-        return True
-
-    def worker_jwt(self) -> str:
-        return "jwt"
-
-
-@dataclass
-class _FleetCfg:
-    family: str = FAMILY
-    lora_bucket: int = 0
-
-
-class _FleetPipe:
-    pass
-
-
-@pytest.fixture()
-def _f1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
-    """Flag on + a discovered candidate; provision seam is per-test."""
-    from gen_worker import compile_cache as cc
-    from gen_worker import config as gw_config
-
-    gw_config.reload_for_test()
-    monkeypatch.setattr(cc, "has_compile_target", lambda pipe, cfg: True)
-    art = tmp_path / "cell.tar.gz"
-    art.write_bytes(b"artifact")
-    adopted = aot_cells.AdoptedAotCell(
-        family=FAMILY, cell_key=KEY, ref=f"root/family-{FAMILY}#{KEY}",
-        snapshot_digest="blake3:" + "5" * 64, artifact=art)
-    monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: adopted)
-    yield adopted
-    gw_config.reload_for_test()
-
-
-def test_fleet_success_is_one_measured_adoption_bound_to_the_candidate(
-    monkeypatch: pytest.MonkeyPatch, _f1: Any,
-) -> None:
-    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> Any:
-        pipe._cozy_aot = {"state": {"failed": False}}
-        time.sleep(_INDUCED_ARM_S)  # a real arm costs time; a measured one records it
-        return AdoptOutcome.hit(f"family={FAMILY} key={KEY}")
-
-    monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _enable)
-    outcome = fleet_cells.enable_compiled(
-        _FleetPipe(), _FleetCfg(), publisher=_StubPublisher())  # type: ignore[arg-type]
-    assert outcome.armed and outcome.self_mint is _f1
-    assert len(outcome.adoptions) == 1
-    row = outcome.adoptions[0]
-    assert row.armed and row.reason == ""
-    # The identity the hub fences an adoption on, and the number the whole
-    # measurement lane exists for. `arm_ms == 0` is what shipped for a year.
-    assert row.ref == _f1.ref and row.snapshot_digest == _f1.snapshot_digest
-    assert row.artifact_kind == aot_serve.ARTIFACT_KIND
-    assert row.arm_ms >= _MEASURED_ARM_FLOOR_MS, (
-        "the adoption recorded no time at all")
-
-
-def test_fleet_did_not_arm_is_a_measured_refusal_naming_the_candidate(
-    monkeypatch: pytest.MonkeyPatch, _f1: Any, tmp_path: Path,
-) -> None:
-    delivered = tmp_path / "delivered.tar.gz"
-    delivered.write_bytes(b"dynamo")
-    monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: (
-            AdoptOutcome.hit() if artifact == delivered
-            else AdoptOutcome.miss("key_mismatch", f"key={KEY}")))
-    outcome = fleet_cells.enable_compiled(
-        _FleetPipe(), _FleetCfg(), artifact=delivered,
-        publisher=_StubPublisher(),  # type: ignore[arg-type]
-        delivered_ref="root/family-sdxl#ck1-delivered",
-        delivered_digest="blake3:" + "7" * 64)
-    assert outcome.armed and outcome.self_mint is None
-    # BOTH attempts are on the ledger, in order: the discovered cell that
-    # refused, then the delivered cell that armed. The old vocabulary recorded
-    # the refusal and nothing at all for the adoption that actually happened.
-    assert _reasons(outcome) == ["key_mismatch", ""]
-    assert outcome.adoptions[0].ref == _f1.ref
-    assert not outcome.adoptions[0].armed
-    assert outcome.adoptions[1].armed
-    assert outcome.adoptions[1].ref == "root/family-sdxl#ck1-delivered"
-
-
-def test_fleet_armed_other_path_never_advertises_aot(
-    monkeypatch: pytest.MonkeyPatch, _f1: Any,
-) -> None:
-    monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.hit())  # marker absent
-    outcome = fleet_cells.enable_compiled(
-        _FleetPipe(), _FleetCfg(), publisher=_StubPublisher())  # type: ignore[arg-type]
-    assert outcome.armed and outcome.self_mint is None
-    assert _reasons(outcome) == ["armed_other_path"]
-    row = outcome.adoptions[0]
-    assert not row.armed, "the DISCOVERED cell is not what armed this pipe"
-    assert row.ref == _f1.ref and KEY in row.detail
-
-
-def test_fleet_execution_lane_unavailable_is_recorded_against_the_candidate(
-    monkeypatch: pytest.MonkeyPatch, _f1: Any, tmp_path: Path,
-) -> None:
-    from gen_worker import compile_cache as cc
-
-    delivered = tmp_path / "delivered.tar.gz"
-    delivered.write_bytes(b"dynamo")
-    calls: List[Any] = []
-
-    def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any) -> Any:
-        calls.append(artifact)
-        if len(calls) == 1:
-            raise cc.CompiledExecutionLaneUnavailableError("no cell for w8a8")
-        return AdoptOutcome.hit()
-
-    monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _enable)
-    outcome = fleet_cells.enable_compiled(
-        _FleetPipe(), _FleetCfg(), artifact=delivered,
-        publisher=_StubPublisher())  # type: ignore[arg-type]
-    assert outcome.armed
-    assert _reasons(outcome) == ["lane_unavailable", ""]
-    assert outcome.adoptions[0].ref == _f1.ref
-    assert KEY in outcome.adoptions[0].detail
 
 
 # ---------------------------------------------------------------------------

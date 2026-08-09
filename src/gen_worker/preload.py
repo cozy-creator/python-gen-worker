@@ -51,9 +51,10 @@ import concurrent.futures
 import logging
 import os
 import typing
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
+from . import dispatch
 from .api.binding import wire_ref
 from .models import residency as residency_mod
 from .models.pinned_swap import prestage_module
@@ -229,22 +230,24 @@ class Preloader:
         spec = ex.specs.get(instance.function_name)
         if spec is None or spec.cls is None:
             return None
-        remapped: List[pb.ModelBinding] = []
+        orders: Dict[str, dispatch.SlotOrder] = {}
         for m in instance.models:
-            binding = pb.ModelBinding()
-            binding.CopyFrom(m)
-            binding.slot = m.slot.strip()
+            slot = m.slot.strip()
             ref = m.ref.strip()
             pick = ex._model_resolutions.get(ref)
             if pick is not None and pick[0]:
                 ref = pick[0]
-            binding.ref = ref
-            remapped.append(binding)
-        if any(not b.slot or not b.ref for b in remapped):
-            return None
-        run = pb.RunJob(function_name=instance.function_name, models=remapped)
+            if not slot or not ref:
+                return None
+            orders[slot] = dispatch.SlotOrder(
+                ref=ref,
+                components=tuple(sorted(
+                    (str(k).strip(), str(v).strip())
+                    for k, v in m.components.items()
+                    if str(k).strip() and str(v).strip())),
+            )
         try:
-            return ex._effective_spec(spec, run)
+            return ex._dispatched_spec(spec, orders)
         except Exception:
             return None
 

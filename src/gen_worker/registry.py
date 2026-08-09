@@ -150,7 +150,6 @@ class EndpointSpec:
     payload_axes: tuple = ()
     # SDK v2: resident traced LoRA rank bucket (decorator-level; 0 = branchless).
     lora_bucket: int = 0
-    timeout_ms: Optional[int] = None
     runtime: Optional[str] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
     # th#826: the function makes endpoint-to-endpoint child calls; emitted

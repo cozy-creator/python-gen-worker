@@ -600,8 +600,8 @@ def _mint_aot(
     whole declared graph-class set, packed as ONE multi-graph cell (pgw#758).
 
     This is the wire that never existed. ``aot_mint.mint`` has been complete
-    and operator-driven since pgw#723/#758, and ``aot_cells.discover`` has
-    filtered for its artifact kind since pgw#722 — but no serving-pod code
+    and operator-driven since pgw#723/#758, and discovery filtered for its
+    artifact kind since pgw#722 — but no serving-pod code
     path imported ``aot_mint``, so a discovery MISS could only ever fall
     through to the dynamo recipe, whose cell that filter rejects. Every pod
     missed, "re-minted" the wrong kind, and the next pod missed identically.
