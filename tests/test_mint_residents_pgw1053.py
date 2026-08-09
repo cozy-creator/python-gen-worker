@@ -173,6 +173,20 @@ def _fake_sm(monkeypatch) -> None:
         "cuda": full["cuda"]})
 
 
+def _wide_pool(monkeypatch) -> None:
+    """The width is STATED, not derived (the pgw#809 discipline): a 4-vCPU CI
+    runner honestly derives K=1 and the release below only runs on the pooled
+    path. The REAL policy runs on pinned resource inputs."""
+    real = pool_mod.entry_workers
+
+    def _wide(entries: int, **kw: Any) -> Any:
+        kw.update(vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
+                  device_lock=True)
+        return real(entries, **kw)
+
+    monkeypatch.setattr(pool_mod, "entry_workers", _wide)
+
+
 def test_full_mint_with_release_packs_and_keys_identically(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -180,6 +194,7 @@ def test_full_mint_with_release_packs_and_keys_identically(
     package gate runs against the projection, the artifact keys identically —
     and the pipeline is PROVABLY released (weights on meta afterwards)."""
     _fake_sm(monkeypatch)
+    _wide_pool(monkeypatch)
     _declare()
     spec = aot_mint.ExportSpec(family=FAMILY, target="")
 

@@ -254,6 +254,22 @@ def fake_sm(monkeypatch):
     return full
 
 
+@pytest.fixture
+def wide_pool(monkeypatch):
+    """The width is STATED, not derived (the pgw#809 discipline): a 4-vCPU CI
+    runner honestly derives K=1, and every pool-path assertion below would
+    then pass while exercising no pool at all. The REAL policy still runs —
+    only its resource inputs are pinned to a box wide enough to pool."""
+    real = pool_mod.entry_workers
+
+    def _wide(entries: int, **kw: Any) -> Any:
+        kw.update(vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
+                  device_lock=True)
+        return real(entries, **kw)
+
+    monkeypatch.setattr(pool_mod, "entry_workers", _wide)
+
+
 def _mint(tmp: Path, *, entry_workers: int = 0) -> aot_mint.MintResult:
     pipe = types.SimpleNamespace(unet=TinyUNet())
     spec = aot_mint.ExportSpec(family=FAMILY, target="")
@@ -261,7 +277,7 @@ def _mint(tmp: Path, *, entry_workers: int = 0) -> aot_mint.MintResult:
 
 
 def test_overlapped_and_serial_mints_share_one_cell_key(
-    tmp_path: Path, fake_sm: Dict[str, str],
+    tmp_path: Path, fake_sm: Dict[str, str], wide_pool: None,
 ) -> None:
     """pgw#846: the overlap is a process change. The serial path (a forced
     K=1) and the overlapped pool path must stamp the SAME cell key — and the
@@ -284,7 +300,9 @@ def test_overlapped_and_serial_mints_share_one_cell_key(
         "the pool ledger must charge producer time to its named bucket")
 
 
-def test_beats_interleave_export_and_pool(tmp_path: Path, fake_sm) -> None:
+def test_beats_interleave_export_and_pool(
+    tmp_path: Path, fake_sm, wide_pool: None,
+) -> None:
     """The obligation beat stays honest while two phases run concurrently:
     trace_graph and inductor_compile positions INTERLEAVE on the wire rather
     than forming two disjoint blocks."""
