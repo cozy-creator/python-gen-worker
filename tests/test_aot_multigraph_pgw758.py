@@ -78,7 +78,7 @@ def _declare(family: str = FAMILY) -> Any:
         forks=(Fork("cfg", served=(True, False)),),
         classes=(GraphClass(dims={"B": 2}, fork={"cfg": True}),
                  GraphClass(dims={"B": 1}, fork={"cfg": False})),
-        inputs=(Input("sample", shape=("B", 4)),),
+        inputs=(Input("sample", shape=("B", 4), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     ))
@@ -293,7 +293,7 @@ def _declare_warm(warm: bool, family: str) -> None:
         targets=("unet",),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 2}),),
-        inputs=(Input("sample", shape=("B", 4)),),
+        inputs=(Input("sample", shape=("B", 4), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=warm,
     ))

@@ -163,6 +163,8 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 @pytest.fixture()
 def stub_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
+    monkeypatch.setattr(
+        aot_serve, "_entry_admission_drift", lambda *a, **k: None)
 
 
 def _reasons(outcome: Any) -> List[str]:

@@ -298,7 +298,7 @@ def _list_declaration(repeat: Any) -> Compile:
         ),
         inputs=(
             Input("x", shape=(("config", "in_channels"), 1, "H_lat", "W_lat"),
-                  repeat=repeat),
+                  repeat=repeat, dtype="model"),
             Input("t", shape=(2,), dtype="float32"),
         ),
         shape_strategy="dynamic-collapse",

@@ -205,8 +205,12 @@ def _tar(tmp_path: Path, meta=None, literals=False, name="cell.tar.gz") -> Path:
 
 @pytest.fixture
 def stub_runtime(monkeypatch):
-    """Pin the runtime key so verify() passes without a GPU."""
+    """Pin the runtime key so verify() passes without a GPU, and stand down
+    the pgw#1058 guard cross-check — these rigs serve fake package bytes with
+    no generated wrapper to read. The gate has its own real-package tests
+    (test_admission_identity_pgw1058)."""
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
+    monkeypatch.setattr(aot, "_entry_admission_drift", lambda *a, **k: None)
 
 
 # ---------------------------------------------------------------------------

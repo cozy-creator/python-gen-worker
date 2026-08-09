@@ -303,7 +303,7 @@ def _mint(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         # TWO classes, so "entry i of N" has something to count.
         classes=(GraphClass(dims={"B": 1}), GraphClass(dims={"B": 2})),
-        inputs=(Input("sample", shape=("B", _WIDTH)),),
+        inputs=(Input("sample", shape=("B", _WIDTH), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     ))

@@ -36,7 +36,7 @@ import struct
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from . import aot_flatten
 from .aot_serve import SOURCE_LITERAL, SOURCE_STATE_DICT
@@ -600,6 +600,169 @@ def unbindable_constants(
 
 
 # ---------------------------------------------------------------------------
+# The generated input guards — the artifact's OWN admission facts (pgw#1058)
+# ---------------------------------------------------------------------------
+#
+# AOTInductor renders, per user input, a `check_input_<i>` function into the
+# generated wrapper: an exact dtype check always, an exact equality check per
+# STATIC dim, and range checks (no equality) per symbolic dim. Those checks
+# are what the compiled object itself will enforce — so they are the one
+# package-side reading of the ingress contract that cannot drift from the
+# artifact. `input_guard_drift` compares them against the declared manifest
+# rows, making the manifest a VERIFIED ECHO of the artifact rather than a
+# carried-alongside label (pgw#1058: attempt 30 published a cell whose every
+# entry was specialized on a dtype real traffic never presents; the label was
+# honest about the program, so only a reading of the artifact's own guards —
+# or a real call — can rule on what the program admits).
+
+_INPUT_GUARD_FN = re.compile(r"static\s+void\s+check_input_(\d+)\s*\(")
+_GUARD_DTYPE = re.compile(r"expected_dtype\s*=\s*aoti_torch_dtype_(\w+)\s*\(")
+_GUARD_STATIC_DIM = re.compile(r"if\s*\(\s*(\d+)\s*!=\s*\w+_size\[(\d+)\]\s*\)")
+
+
+@dataclass(frozen=True)
+class InputGuard:
+    """One input's generated admission checks, read off the artifact.
+
+    ``dims`` carries only the dims the artifact checks for EQUALITY — its
+    statically specialized dims. A symbolic dim has range checks and no
+    equality check, so its absence here is itself a fact: a dim present in
+    ``dims`` that the manifest declares symbolic is a lying label.
+    """
+
+    index: int
+    dtype: str
+    dims: Tuple[Tuple[int, int], ...]  # (dim position, required value)
+
+    def dim_map(self) -> Dict[int, int]:
+        return dict(self.dims)
+
+
+def input_guards(package: Path, entry: str = "") -> Tuple[InputGuard, ...]:
+    """Every ``check_input_<i>`` of one named model, in input order.
+
+    Parsed from the artifact's own generated wrapper — no CUDA, no dlopen —
+    exactly like the constant table above. Refuses (never returns empty) when
+    the wrapper declares no input checks: the pinned toolchain demonstrably
+    emits them, so their absence means the parse went blind, and a gate that
+    silently sees no guards is the pgw#1058 hole reopened.
+    """
+    source = _wrapper_source(Path(package), entry)
+    return guards_from_wrapper_source(source, where=str(package))
+
+
+def guards_from_wrapper_source(
+    source: str, where: str = "",
+) -> Tuple[InputGuard, ...]:
+    """:func:`input_guards` on wrapper SOURCE — split out so the gate can be
+    asserted against captured wrapper bytes (the pgw#1058 evidence fixture)
+    without a whole ``.pt2``."""
+    starts = [(int(m.group(1)), m.start()) for m in _INPUT_GUARD_FN.finditer(source)]
+    if not starts:
+        raise PackageIntrospectionError(
+            f"{where or 'wrapper'}: generated wrapper declares no "
+            f"check_input_<i> functions — the artifact's own admission "
+            f"checks cannot be read, so nothing can prove the declared "
+            f"manifest describes this program (pgw#1058)")
+    starts.sort(key=lambda pair: pair[1])
+    out: List[InputGuard] = []
+    for pos, (index, begin) in enumerate(starts):
+        end = starts[pos + 1][1] if pos + 1 < len(starts) else len(source)
+        body = source[begin:end]
+        dtype = _GUARD_DTYPE.search(body)
+        if dtype is None:
+            raise PackageIntrospectionError(
+                f"{where or 'wrapper'}: check_input_{index} declares no "
+                f"expected dtype — the guard cannot be compared (pgw#1058)")
+        dims = tuple(
+            (int(dim), int(value))
+            for value, dim in _GUARD_STATIC_DIM.findall(body)
+        )
+        out.append(InputGuard(index=index, dtype=dtype.group(1), dims=dims))
+    indices = [g.index for g in out]
+    if indices != list(range(len(out))):
+        raise PackageIntrospectionError(
+            f"{where or 'wrapper'}: check_input indices {indices!r} are not "
+            f"dense from 0 — the guard order cannot be matched to the "
+            f"declared input positions (pgw#1058)")
+    return tuple(out)
+
+
+def input_guard_drift(
+    inputs_rows: Sequence[Mapping[str, Any]],
+    guards: Sequence[InputGuard],
+) -> List[str]:
+    """Named reasons the declared manifest rows do NOT describe the program
+    whose guards these are; empty when they agree.
+
+    The comparison that makes an entry's label a verified echo (pgw#1058):
+    rows come from the ``ExportedProgram`` (or a packed ``metadata.json``),
+    guards from the artifact's own generated wrapper — two independent
+    readings that must agree, the same doctrine as the constant manifest.
+    Every reason names the input, the axis and both values. Callers turn a
+    non-empty list into a refusal — at package time so a divergent cell is
+    never published, and at arm time so a corrupted one is never served.
+    """
+    rows = sorted(inputs_rows, key=lambda r: int(r.get("position", 0)))
+    reasons: List[str] = []
+    if len(rows) != len(guards):
+        return [
+            f"the manifest declares {len(rows)} input(s) but the artifact "
+            f"guards {len(guards)} — the two cannot describe one call "
+            f"contract (pgw#1058)"
+        ]
+    for row, guard in zip(rows, guards):
+        name = str(row.get("name") or f"input_{guard.index}")
+        declared_dtype = str(row.get("dtype") or "")
+        if declared_dtype != guard.dtype:
+            reasons.append(
+                f"input {name!r}: manifest declares dtype {declared_dtype!r} "
+                f"but the artifact's own guard requires {guard.dtype!r}")
+        shape = list(row.get("shape") or [])
+        guarded = guard.dim_map()
+        for pos, declared in enumerate(shape):
+            if isinstance(declared, int):
+                have = guarded.pop(pos, None)
+                if have is None:
+                    reasons.append(
+                        f"input {name!r} dim {pos}: manifest declares static "
+                        f"{declared} but the artifact states no equality "
+                        f"check there — the program did not specialize the "
+                        f"dim the label claims")
+                elif have != declared:
+                    reasons.append(
+                        f"input {name!r} dim {pos}: manifest declares static "
+                        f"{declared} but the artifact's guard requires {have}")
+            else:
+                have = guarded.pop(pos, None)
+                if have is not None:
+                    reasons.append(
+                        f"input {name!r} dim {pos}: manifest declares "
+                        f"symbolic {declared!r} but the artifact's guard "
+                        f"requires exactly {have} — the program is more "
+                        f"specialized than its label admits")
+        for pos, have in sorted(guarded.items()):
+            reasons.append(
+                f"input {name!r} dim {pos}: the artifact guards {have} on a "
+                f"dim the manifest does not declare (declared rank "
+                f"{len(shape)})")
+    return reasons
+
+
+def admission_drift(
+    package: Path, entry: str, inputs_rows: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    """:func:`input_guard_drift` against one named model of a ``.pt2``.
+
+    ONE function, two call sites, per the pgw#1058 ruling: the mint's
+    package gate (a divergent cell is never published) and the arm's
+    per-entry verification (a corrupted one is never served) must be the
+    same derivation, or the gate models the arm and drifts from it.
+    """
+    return input_guard_drift(inputs_rows, input_guards(Path(package), entry))
+
+
+# ---------------------------------------------------------------------------
 # The ingress contract — recorded so B2 CAN be asserted
 # ---------------------------------------------------------------------------
 
@@ -730,8 +893,13 @@ def _dtype_name(value: Any) -> str:
 
 __all__ = [
     "DeclaredConstant",
+    "InputGuard",
     "PackageIntrospectionError",
+    "admission_drift",
     "code_only_violations",
+    "guards_from_wrapper_source",
+    "input_guard_drift",
+    "input_guards",
     "constant_names",
     "constants_in_so",
     "constants_manifest",

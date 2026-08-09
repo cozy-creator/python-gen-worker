@@ -224,7 +224,7 @@ def _cell_decl(family: str = CELL_FAMILY) -> Compile:
         family=family, targets=("unet",),
         dims=(Dim("B", carried_by=(("x", 0),)),),
         classes=(GraphClass(dims={"B": 4}),),
-        inputs=(Input("x", shape=("B", WIDTH)),),
+        inputs=(Input("x", shape=("B", WIDTH), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     )
@@ -685,7 +685,7 @@ def test_mint_requires_the_declared_warm_canon(
         family="warmless", targets=("unet",),
         dims=(Dim("B", carried_by=(("x", 0),)),),
         classes=(GraphClass(dims={"B": 4}),),
-        inputs=(Input("x", shape=("B", WIDTH)),),
+        inputs=(Input("x", shape=("B", WIDTH), dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=None,
     )
@@ -845,7 +845,7 @@ def test_mint_refuses_a_class_the_graph_cannot_make_dynamic(
         family="pinned723", targets=("unet",),
         dims=(Dim("B", carried_by=(("x", 0),)),),
         classes=(GraphClass(dims={"B": 2}), GraphClass(dims={"B": 4})),
-        inputs=(Input("x", shape=("B", WIDTH)),),
+        inputs=(Input("x", shape=("B", WIDTH), dtype="model"),),
         shape_strategy="dynamic-collapse",
         warm_changes_key=False,
     )
