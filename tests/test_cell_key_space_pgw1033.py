@@ -38,7 +38,7 @@ from typing import Any, List, Tuple
 
 import pytest
 
-from gen_worker import aot_cells, aot_serve, compile_cache, fleet_cells
+from gen_worker import aot_serve, compile_cache, fleet_cells
 from gen_worker import config as gw_config
 from gen_worker import mint_delegate
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
@@ -118,7 +118,6 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     """A mint-capable pod with no cell: the pgw#805 miss shape, one lane."""
     gw_config.reload_for_test()
-    monkeypatch.setattr(aot_cells, "discover", lambda *a, **k: None)
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))

@@ -163,13 +163,7 @@ gen_worker.guard_closure.manifest_digest()
 #   explaining why it exists. Caught by this ratchet within hours of landing,
 #   which is the first time it has flagged live work rather than history.
 #
-#   pgw#903 (landed 2026-08-08) — `expected_from_plan` projects the immutable
-#   Plan's arm into the identity `stage_artifact` verifies. `verify_declared_identity`
-#   IS wired (stage_artifact calls it); this one waits on the caller that HOLDS a
-#   Plan, which is pgw#904's RunAttempt arming path. Until then RunJob is the live
-#   dispatch and no production frame has a Plan to project. **Delete this line in
-#   pgw#904's commit** — if it is still here when pgw#904 closes, the arming path
-#   is still resolving instead of arming what the hub named, and the guard was
-#   right.
+#   (pgw#903's `expected_from_plan` entry left with pgw#904: the RunAttempt
+#   arming path now projects the Plan into the identity `stage_artifact`
+#   verifies, exactly as the entry instructed.)
 # ---------------------------------------------------------------------------
-gen_worker.aot_identity.expected_from_plan()

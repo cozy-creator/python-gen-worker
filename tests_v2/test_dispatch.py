@@ -209,14 +209,19 @@ def test_cancel_and_deadline_unwind_without_leak(hub) -> None:
         res = conn.wait_for(is_result_for("r-slow")).job_result
         assert res.status == pb.JOB_STATUS_CANCELED
 
-        # Deadline: typed FATAL with the named cause, and the worker is FREE —
-        # the very next job serves.
+        # pgw#904 part (d): the wall deadline is DEAD. A wire `timeout_ms`
+        # kills nothing — no result appears when it expires — and the job
+        # ends only through a real terminal edge (here, a cancel). Kill and
+        # condemn come from liveness + progress-staleness, never a clock.
         conn.send(run_job=pb.RunJob(
-            request_id="r-deadline", attempt=1, function_name="slow",
+            request_id="r-no-deadline", attempt=1, function_name="slow",
             input_payload=catalog.row("slow").input_bytes(), timeout_ms=300))
-        res = conn.wait_for(is_result_for("r-deadline")).job_result
-        assert res.status == pb.JOB_STATUS_FATAL
-        assert res.safe_message == "deadline exceeded"
+        conn.wait_for(is_accept_for("r-no-deadline"))
+        time.sleep(1.0)  # 3x the old bound: a deadline kill would have landed
+        assert conn.count(is_result_for("r-no-deadline")) == 0
+        conn.send(cancel_job=pb.CancelJob(request_id="r-no-deadline", attempt=1))
+        res = conn.wait_for(is_result_for("r-no-deadline")).job_result
+        assert res.status == pb.JOB_STATUS_CANCELED
         conn.send(run_job=pb.RunJob(
             request_id="r-next", attempt=1, function_name="echo",
             input_payload=catalog.row("echo").input_bytes(text="marco")))

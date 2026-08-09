@@ -325,8 +325,8 @@ def _boot(
     if exported:
         # The exported lane is identified by the ref the hub delivers; a
         # stamped cell key is only computable on CUDA, so this process is TOLD
-        # the flavor is an AOT cell exactly as `aot_cells.discover` tells a
-        # pod. Everything downstream of that classification is production code.
+        # the flavor is an AOT cell exactly as a Plan's `Arm.artifact` tells a
+        # pod (pgw#904). Everything downstream of that is production code.
         aot_serve.note_aot_key(FLAVOR)
 
     artifact = _cell_snapshot(tmp_path)
@@ -353,10 +353,15 @@ def _boot(
     monkeypatch.setattr(
         ex, "_enable_compiled", _arm if exported else _arm_dynamo)
 
+    # pgw#904: the cell is an exact ORDER (Arm.artifact), never a snapshot
+    # entry the worker scans for.
+    arm_order = executor_mod._ArmOrder(
+        backend="aot_cell",
+        selection=executor_mod._CompileArtifactSelection(
+            path=artifact, ref=CELL_REF, snapshot_digest=CELL_DIGEST))
     asyncio.run(ex.ensure_setup(generate, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-        CELL_REF: pb.Snapshot(digest=CELL_DIGEST),
-    }))
+    }, arm=arm_order))
     return ex, generate, pipe, events
 
 

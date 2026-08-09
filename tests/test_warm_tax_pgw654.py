@@ -127,13 +127,28 @@ def _executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Executor:
     return ex
 
 
+def _orders(run):
+    """pgw#904: the driver reads neutral slot orders, never the wire message."""
+    from gen_worker import dispatch
+
+    return {
+        b.slot: dispatch.SlotOrder(
+            ref=b.ref.strip(),
+            components=tuple(sorted(
+                (str(k).strip(), str(v).strip())
+                for k, v in b.components.items())),
+        )
+        for b in run.models if b.slot
+    }
+
+
 def _pick(ex: Executor, name: str, ref: str) -> Any:
     spec = ex.specs[name]
     run = pb.RunJob(
         function_name=name,
         models=[pb.ModelBinding(slot="pipeline", ref=ref)],
     )
-    return ex._effective_spec(spec, run)
+    return ex._dispatched_spec(spec, _orders(run))
 
 
 def _snapshots(ref: str, digest: str) -> dict:
@@ -218,7 +233,7 @@ def test_warm_contract_key_splits_on_execution_lane_and_overrides_not_ref(
         slot="pipeline", ref="acme/sdxl-base",
         components={"vae": "tensorhub/sdxl-vae-fp16-fix"},
     )])
-    overridden = ex._effective_spec(ex.specs["generate"], run)
+    overridden = ex._dispatched_spec(ex.specs["generate"], _orders(run))
     assert ex._warm_contract_key(overridden) != ex._warm_contract_key(base)
 
 

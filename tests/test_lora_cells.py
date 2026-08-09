@@ -18,7 +18,6 @@ pytest.importorskip("diffusers")
 pytest.importorskip("accelerate")
 
 from gen_worker import Compile, endpoint, compile_cache
-from gen_worker.executor import _cell_execution_lane_matches
 from gen_worker.models import provision
 from gen_worker.models.w8a8 import detect_w8a8_artifact, load_w8a8_denoiser, quantize_tree_w8a8
 from gen_worker.models.w8a8_lora import RANK_BUCKETS, branch_bucket
@@ -143,12 +142,6 @@ def test_execution_lane_token_and_label_carry_bucket() -> None:
         "inductor-rtx-4090-torch2.13-lora32")
 
 
-def test_cell_execution_lane_roundtrip_through_ref() -> None:
-    ref = "root/family-qwen-image#inductor-h100-sxm-torch2.13-w8a8-lora128"
-    assert compile_cache.cell_execution_lane(ref) == "w8a8-lora128"
-    assert compile_cache.execution_lane_bucket(compile_cache.cell_execution_lane(ref)) == ("w8a8", 128)
-
-
 # ---------------------------------------------------------------------------
 # Lane apply/rollback (real w8a8 + plain denoisers)
 # ---------------------------------------------------------------------------
@@ -199,47 +192,6 @@ def test_enable_compiled_w8a8_fail_closed_keeps_contract(w8a8_pipe: Any) -> None
     cfg = _cfg("loracells-test", lora_bucket=128)
     with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
         provision.enable_compiled(w8a8_pipe, cfg, cache_dir=None, artifact=None)
-
-
-# ---------------------------------------------------------------------------
-# Lane-exact cell pick (the boot-attach filter)
-# ---------------------------------------------------------------------------
-
-
-def test_cell_pick_is_execution_lane_and_bucket_exact() -> None:
-    fam = "qwen-image"
-    plain = f"root/family-{fam}#inductor-h100-sxm-torch2.13"
-    w8a8 = f"root/family-{fam}#inductor-h100-sxm-torch2.13-w8a8"
-    w8a8_l128 = f"root/family-{fam}#inductor-h100-sxm-torch2.13-w8a8-lora128"
-    w8a8_l32 = f"root/family-{fam}#inductor-h100-sxm-torch2.13-w8a8-lora32"
-    plain_l32 = f"root/family-{fam}#inductor-h100-sxm-torch2.13-lora32"
-
-    def pick(ref: str, *, w8a8_execution_lane: bool, bucket: int) -> bool:
-        return _cell_execution_lane_matches(ref, fam, want_execution_lane="w8a8" if w8a8_execution_lane else "", want_bucket=bucket)
-
-    # branchless w8a8 endpoint: exactly the branchless w8a8 cell
-    assert pick(w8a8, w8a8_execution_lane=True, bucket=0)
-    assert not pick(w8a8_l128, w8a8_execution_lane=True, bucket=0)
-    assert not pick(plain, w8a8_execution_lane=True, bucket=0)
-    # lora128 w8a8 endpoint: exactly the lora128 w8a8 cell
-    assert pick(w8a8_l128, w8a8_execution_lane=True, bucket=128)
-    assert not pick(w8a8, w8a8_execution_lane=True, bucket=128)
-    assert not pick(w8a8_l32, w8a8_execution_lane=True, bucket=128)
-    assert not pick(plain_l32, w8a8_execution_lane=True, bucket=128)
-    # plain lora32 endpoint: never a w8a8 cell, never branchless
-    assert pick(plain_l32, w8a8_execution_lane=False, bucket=32)
-    assert not pick(w8a8_l32, w8a8_execution_lane=False, bucket=32)
-    assert not pick(plain, w8a8_execution_lane=False, bucket=32)
-    # wrong family never matches
-    assert not _cell_execution_lane_matches(
-        w8a8_l128, "sdxl", want_execution_lane="w8a8", want_bucket=128)
-    # w4a4 (gw#540): mandated-lane exactness, and plain endpoints never
-    # fetch a quantized-lane cell
-    w4a4 = f"root/family-{fam}#inductor-rtx-5090-torch2.13-w4a4"
-    assert _cell_execution_lane_matches(w4a4, fam, want_execution_lane="w4a4", want_bucket=0)
-    assert not _cell_execution_lane_matches(w4a4, fam, want_execution_lane="w8a8", want_bucket=0)
-    assert not _cell_execution_lane_matches(w4a4, fam, want_execution_lane="", want_bucket=0)
-    assert not _cell_execution_lane_matches(w8a8, fam, want_execution_lane="w4a4", want_bucket=0)
 
 
 def test_rank_buckets_cover_declared_cells() -> None:

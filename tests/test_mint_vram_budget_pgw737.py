@@ -145,9 +145,11 @@ class _Harness:
         seed_forward_s: float = 0.0,
         tenant_forward_s: float = 0.01,
         tenant_oom_once: bool = False,
+        hold_mint: bool = False,
     ) -> None:
         self.tmp_path = tmp_path
         self.compile_delay_s = compile_delay_s
+        self.hold_mint = hold_mint
         self.seed_forward_s = seed_forward_s
         self.tenant_forward_s = tenant_forward_s
         self.tenant_oom_once = tenant_oom_once
@@ -227,6 +229,18 @@ class _Harness:
         # The child takes `compile_delay_s` to produce its cell, and honours the
         # parent's abandon signal — which is what a tenant OOM pulls.
         abandon = kwargs.get("abandon")
+        if self.hold_mint:
+            # pgw#1037: the mint's liveness is a CONDITION, never a duration.
+            # A fixed delay raced an unbounded boot->dispatch latency and on a
+            # loaded runner the mint finalized first, so the eviction path
+            # under test was never entered (three CI cycles across two lanes).
+            # Held open until the parent abandons it — which is exactly what
+            # the tenant-OOM eviction pulls — it is in flight BY CONSTRUCTION.
+            assert abandon is not None, "hold_mint requires the abandon signal"
+            await abandon.wait()
+            return mint_delegate.DelegatedResult(
+                status=mint_delegate.ABANDONED, attempts=1,
+                detail="abandoned by the parent")
         if self.compile_delay_s:
             if abandon is not None:
                 try:
@@ -436,7 +450,7 @@ def test_tenant_oom_evicts_the_mint_and_the_request_completes(
     freed, and the same request re-runs eager to OK on this same worker."""
     h = _Harness(
         tmp_path, monkeypatch,
-        compile_delay_s=1.5, seed_forward_s=0.05, tenant_oom_once=True)
+        hold_mint=True, seed_forward_s=0.05, tenant_oom_once=True)
 
     async def _run() -> None:
         await h.boot()

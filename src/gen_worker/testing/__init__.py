@@ -323,8 +323,8 @@ def fake_context(
     ``slots`` maps slot name -> ``(ref, defaults)`` — exactly what a
     ``Slot``-declared endpoint's handler reads via
     ``ctx.slots["<name>"].ref`` / ``.defaults``. Every other
-    :class:`RequestContext` constructor kwarg (``owner``, ``timeout_ms``,
-    ``compute``, ...) passes through via ``**kwargs``.
+    :class:`RequestContext` constructor kwarg (``owner``, ``invoker_id``,
+    ...) passes through via ``**kwargs``.
 
     ``recorder`` (pgw#942) turns on RECORDING MODE: saves land in
     ``recorder.saved`` and events in ``recorder.events``, and outputs are

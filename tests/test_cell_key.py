@@ -216,31 +216,6 @@ def test_trt_metadata_has_no_cell_key():
         ck.from_artifact_metadata(dict(_AXES, kind="trt-engine"))
 
 
-def test_is_cache_ref_accepts_key_flavor():
-    key = ck.from_axes(_AXES).digest
-    assert cc.is_cache_ref(f"root/family-ltx-2.3#{key}")
-    assert cc.is_cache_ref(f"root/family-ltx-2.3#{key}", "ltx-2.3")
-    assert not cc.is_cache_ref(f"root/family-ltx-2.3#{key}", "sdxl")
-    assert not cc.is_cache_ref(f"owner/repo#{key}")
-
-
-def test_cell_execution_lane_matcher_uses_candidate_keys():
-    from gen_worker.executor import _cell_execution_lane_matches
-
-    key = ck.from_axes(_AXES).digest
-    ref = f"root/family-ltx-2.3#{key}"
-    assert _cell_execution_lane_matches(
-        ref, "ltx-2.3", want_execution_lane="w8a8", want_bucket=0,
-        candidate_keys={key})
-    assert not _cell_execution_lane_matches(
-        ref, "ltx-2.3", want_execution_lane="w8a8", want_bucket=0,
-        candidate_keys={"ck1-" + "0" * 56})
-    # legacy labels keep the lane-parse policy
-    assert _cell_execution_lane_matches(
-        "root/family-ltx-2.3#inductor-b200-torch2.13-w8a8",
-        "ltx-2.3", want_execution_lane="w8a8", want_bucket=0)
-
-
 class _Target:
     def forward(self, value):
         return value

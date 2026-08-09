@@ -769,7 +769,6 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             "output_schema": output_schema,
             "incremental_output": incremental,
             "is_async": es.is_async,
-            "timeout_ms": es.timeout_ms,
         }
         # th#826: the child-call declaration — the hub mints the invoke_child
         # capability grant only for declaring functions. Omitted when false.

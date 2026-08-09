@@ -54,8 +54,9 @@ class Vehicle:
     checkpoint_bytes: Callable[[Path], int]
     #: () -> the ``registry.CompileCell`` the delegation boundary carries.
     compile_cell: Callable[[], Any]
-    #: (base_url, cache_dir) -> python source for the adopting process.
-    adopt_source: Callable[[str, Path], str]
+    #: (base_url, cache_dir, published checkpoint id) -> python source for
+    #: the adopting process (pgw#904: told the exact cell, never listing).
+    adopt_source: Callable[[str, Path, str], str]
     #: What this vehicle proves that the other does not — printed, so a
     #: reported cycle time is never read against the wrong vehicle.
     covers: str
@@ -100,7 +101,6 @@ sys.path.insert(0, %(tests)r)
 sys.path.insert(0, %(src)r)
 from pathlib import Path
 from types import SimpleNamespace
-from gen_worker import aot_cells
 from gen_worker.registry import CompileCell
 from harness import tiny_diffusion_endpoint as ep
 from harness.tiny_diffusion import TinyUNet
@@ -110,25 +110,33 @@ cfg = CompileCell(
     regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
     guidance_scales=(), text_lens=())
 pipe = SimpleNamespace(unet=TinyUNet().eval())
-cell = aot_cells.discover(
-    pipe, cfg, base_url=%(base)r,
-    worker_jwt=lambda: "local-rig-worker-jwt",
-    cache_dir=Path(%(cache)r))
-out = {"pid": os.getpid(), "ok": cell is not None}
-if cell is not None:
+from harness.rig_fetch import fetch_named_cell
+
+try:
+    artifact = fetch_named_cell(
+        %(base)r, ep.FAMILY, %(checkpoint)r, Path(%(cache)r))
+except Exception:
+    artifact = None
+out = {"pid": os.getpid(), "ok": artifact is not None}
+if artifact is not None:
+    from gen_worker import aot_serve, compile_cache as _cc
+    meta = aot_serve.unpack_metadata(artifact)
+    key = str(meta.get("cell_key") or "")
+    import hashlib
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
-        "snapshot_digest": cell.snapshot_digest,
-        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "cell_key": key, "family": ep.FAMILY,
+        "ref": _cc.system_repo(ep.FAMILY) + "#" + key,
+        "snapshot_digest": "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "artifact_bytes": artifact.stat().st_size,
     })
 print("RIG_ADOPT " + json.dumps(out))
 """
 
 
-def _tiny_adopt_source(base: str, cache: Path) -> str:
+def _tiny_adopt_source(base: str, cache: Path, checkpoint: str) -> str:
     return _TINY_ADOPT % {
         "tests": str(REPO / "tests"), "src": str(REPO / "src"),
-        "base": base, "cache": str(cache)}
+        "base": base, "cache": str(cache), "checkpoint": checkpoint}
 
 
 def _tiny_checkpoint(root: Path) -> Path:
@@ -189,7 +197,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 import harness.rig_runtime  # noqa: F401
 import torch
 from pathlib import Path
-from gen_worker import aot_cells, aot_serve
+from gen_worker import aot_serve
 from gen_worker.models import provision
 from gen_worker.registry import CompileCell
 from micro_diffusion.aot_declaration import (
@@ -213,14 +221,10 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 pipe = MicroPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
 config = pipe.config
 
-# pgw#999: a BUCKET-bearing cell is keyed on the branch-bearing lane, and
-# `aot_cells.discover` filters candidates by the ADOPTING pipeline's own lane.
-# A pod that boots without the LoRA lane computes `lane=plain` and rejects the
-# cell it asked for with `lane_mismatch` — BEFORE arming is ever attempted, so
-# no `arm_aot` gate ever runs and no adopt reason is produced. Measured here
-# the first time this vehicle ran. So the adopting side puts itself on the same
-# lane the mint was on, which is what a serving pod with this endpoint's
-# declared bucket does at boot.
+# pgw#999: a BUCKET-bearing cell is keyed on the branch-bearing lane, so the
+# adopting side puts itself on the same lane the mint was on — what a serving
+# pod with this endpoint's declared bucket does at boot — or `arm_aot` refuses
+# the very cell it was told to arm.
 if int(getattr(cfg, "lora_bucket", 0) or 0):
     from gen_worker import compile_cache as _cc
     _cc.apply_lora_execution_lane(pipe, int(cfg.lora_bucket))
@@ -263,10 +267,24 @@ with torch.no_grad():
         eager[name] = (ref.decoder(lat) if name == "decoder"
                        else ref.transformer(x, t, cond)).clone()
 
-cell = aot_cells.discover(
-    pipe, cfg, base_url=%(base)r,
-    worker_jwt=lambda: "local-rig-worker-jwt",
-    cache_dir=Path(%(cache)r))
+# pgw#904: the adopting process is TOLD the exact cell (checkpoint id from
+# the publish leg) — discovery is deleted, and a serving pod is told by
+# `Arm.artifact` the same way.
+from harness.rig_fetch import fetch_named_cell as _fetch_cell
+from types import SimpleNamespace as _CellNS
+import hashlib as _hl
+from gen_worker import compile_cache as _syscc
+try:
+    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+except Exception as _exc:
+    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
+    cell = None
+else:
+    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    cell = _CellNS(
+        artifact=_art, cell_key=_key0, family=cfg.family,
+        ref=_syscc.system_repo(cfg.family) + "#" + _key0,
+        snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
@@ -327,10 +345,11 @@ def _micro_adopt_source_for(bucket: int) -> Any:
     its own cell with `lane_mismatch` before arming (measured, pgw#999).
     """
 
-    def _source(base: str, cache: Path) -> str:
+    def _source(base: str, cache: Path, checkpoint: str) -> str:
         return _MICRO_ADOPT % {
             "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
-            "base": base, "cache": str(cache), "bucket": int(bucket)}
+            "base": base, "cache": str(cache), "bucket": int(bucket),
+            "checkpoint": checkpoint}
 
     return _source
 
@@ -439,10 +458,10 @@ MICRO_LORA = Vehicle(
 
 #: A `lora64` cell offered to a parent that boots on the PLAIN lane. This is
 #: A1 step 8's "boot a SECOND pod cold and adopt", and it is EXPECTED to be
-#: refused: `aot_cells.discover` filters candidates by the adopting pipeline's
-#: own lane, so a bucket-less parent computes `lane=plain` and rejects the cell
-#: with `lane_mismatch` BEFORE any arm runs — no `arm_aot` gate, no adopt
-#: reason. Standing here so the day it silently starts passing is visible.
+#: refused. pgw#904 moved the refusal from discovery's lane filter (deleted)
+#: to the arm gate itself: the plain-lane parent fetches the exact named cell
+#: and `arm_aot` refuses it on lane drift. Standing here so the day it
+#: silently starts passing is visible.
 MICRO_LORA_PLAIN_PARENT = Vehicle(
     name="micro-lora-plain-parent",
     modules=(RUNTIME_HOOK, "micro_diffusion.main"),
@@ -461,8 +480,8 @@ MICRO_LORA_PLAIN_PARENT = Vehicle(
     covers=("the pgw#999 design question: a bucket-bearing cell offered to a "
             "parent on the plain lane"),
     expect="red",
-    expect_note=("discovery rejects on `lane_mismatch` before arming — the "
-                 "adopting pod must carry the cell's own lora bucket "
+    expect_note=("the arm gate refuses the exact named cell on lane drift — "
+                 "the adopting pod must carry the cell's own lora bucket "
                  "(required line in attempt 27's choreography)"),
 )
 
@@ -493,7 +512,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 import harness.rig_runtime  # noqa: F401
 import torch
 from pathlib import Path
-from gen_worker import aot_cells, aot_serve
+from gen_worker import aot_serve
 from gen_worker.models import provision
 from gen_worker.registry import CompileCell
 from micro_diffusion.aot_declaration_4d import ARITY, COND_LEN, LATENT_ROWS, PIXEL_ROWS
@@ -528,10 +547,24 @@ with torch.no_grad():
         x, t, cond = _feed(grid)
         eager[name] = pipe.transformer(x, t, cond).clone()
 
-cell = aot_cells.discover(
-    pipe, cfg, base_url=%(base)r,
-    worker_jwt=lambda: "local-rig-worker-jwt",
-    cache_dir=Path(%(cache)r))
+# pgw#904: the adopting process is TOLD the exact cell (checkpoint id from
+# the publish leg) — discovery is deleted, and a serving pod is told by
+# `Arm.artifact` the same way.
+from harness.rig_fetch import fetch_named_cell as _fetch_cell
+from types import SimpleNamespace as _CellNS
+import hashlib as _hl
+from gen_worker import compile_cache as _syscc
+try:
+    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+except Exception as _exc:
+    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
+    cell = None
+else:
+    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    cell = _CellNS(
+        artifact=_art, cell_key=_key0, family=cfg.family,
+        ref=_syscc.system_repo(cfg.family) + "#" + _key0,
+        snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
@@ -562,10 +595,10 @@ print("RIG_ADOPT " + json.dumps(out))
 '''
 
 
-def _micro_4d_adopt_source(base: str, cache: Path) -> str:
+def _micro_4d_adopt_source(base: str, cache: Path, checkpoint: str) -> str:
     return _MICRO_4D_ADOPT % {
         "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
-        "base": base, "cache": str(cache)}
+        "base": base, "cache": str(cache), "checkpoint": checkpoint}
 
 
 MICRO_4D = Vehicle(
@@ -602,7 +635,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 import harness.rig_runtime  # noqa: F401
 import torch
 from pathlib import Path
-from gen_worker import aot_cells, aot_serve, compile_cache as cc
+from gen_worker import aot_serve, compile_cache as cc
 from gen_worker.models import provision
 from gen_worker.registry import CompileCell
 from micro_diffusion.aot_declaration import CFG_ARITY, COND_LEN, PIXEL_ROWS, TOKEN_ROWS
@@ -662,10 +695,24 @@ with torch.no_grad():
         eager[name] = (ref.decoder(lat) if name == "decoder"
                        else ref.transformer(x, t, cond)).clone()
 
-cell = aot_cells.discover(
-    pipe, cfg, base_url=%(base)r,
-    worker_jwt=lambda: "local-rig-worker-jwt",
-    cache_dir=Path(%(cache)r))
+# pgw#904: the adopting process is TOLD the exact cell (checkpoint id from
+# the publish leg) — discovery is deleted, and a serving pod is told by
+# `Arm.artifact` the same way.
+from harness.rig_fetch import fetch_named_cell as _fetch_cell
+from types import SimpleNamespace as _CellNS
+import hashlib as _hl
+from gen_worker import compile_cache as _syscc
+try:
+    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+except Exception as _exc:
+    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
+    cell = None
+else:
+    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    cell = _CellNS(
+        artifact=_art, cell_key=_key0, family=cfg.family,
+        ref=_syscc.system_repo(cfg.family) + "#" + _key0,
+        snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
@@ -719,10 +766,11 @@ print("RIG_ADOPT " + json.dumps(out))
 
 
 def _micro_w8a8_adopt_source_for(bucket: int) -> Any:
-    def _source(base: str, cache: Path) -> str:
+    def _source(base: str, cache: Path, checkpoint: str) -> str:
         return _MICRO_W8A8_ADOPT % {
             "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
-            "base": base, "cache": str(cache), "bucket": int(bucket)}
+            "base": base, "cache": str(cache), "bucket": int(bucket),
+            "checkpoint": checkpoint}
 
     return _source
 

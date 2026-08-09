@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 
 import pytest
 
@@ -195,6 +195,8 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "MANDATORY_LANE_NEEDS_A_CELL": "mandatory_lane_needs_a_cell",
         "CELL_QUARANTINED": "cell_quarantined",
         "MINT_IN_PROGRESS": "mint_in_progress",
+        # pgw#904: the hub's ExecutionSpec ordered eager — the arm obeyed.
+        "HUB_ORDERED_EAGER": "hub_ordered_eager",
         "MINT_UNAVAILABLE": "mint_unavailable",
         # pgw#1035 folded the SECOND posture vocabulary in. These four rode the
         # same two wire columns as the ten above — `phase` on
@@ -460,52 +462,6 @@ def test_the_delegated_mint_actually_passes_the_evidence_callback() -> None:
 
     src = inspect.getsource(mint_delegate.build_cell)
     assert "on_evidence=_on_evidence(act)" in src
-
-
-# ---------------------------------------------------------------------------
-# Invariant 3 — the adoption walk: a MISS says why every candidate lost
-# ---------------------------------------------------------------------------
-
-
-def test_discovery_counts_why_every_candidate_was_rejected() -> None:
-    """RED before pgw#824: `_candidates` dropped rows on `logger.debug` or a
-    bare `continue`, and the `miss` event then said only "no matching cell
-    among N checkpoint(s)".
-
-    True, and useless: a family with 12 published cells that rejects all 12
-    read identically to a family with none, and those are different bugs with
-    different owners. Coalescing with counts is the pattern; dropping is not.
-    """
-    from gen_worker import aot_cells
-
-    rejected: Dict[str, int] = {}
-    items: List[Dict[str, Any]] = [
-        {"metadata": {"kind": "not-an-aot-cell"}},
-        {"metadata": {"kind": "not-an-aot-cell"}},
-        {"metadata": {"kind": aot_cells.aot_serve.ARTIFACT_KIND,
-                      "cell_key": "not a key"}},
-    ]
-    rows = aot_cells._candidates(items, "sdxl", "", rejected)
-
-    assert rows == []
-    assert rejected["not_an_aot_cell"] == 2, "identical rejections COALESCE"
-    assert rejected["unreadable_cell_key"] == 1
-    # the classes are countable tokens, not sentences
-    assert all(" " not in cls for cls in rejected)
-
-
-def test_a_miss_with_no_candidates_at_all_says_so_explicitly() -> None:
-    """"No published cells" and "every published cell was rejected" must not
-    render as the same sentence."""
-    import inspect
-
-    from gen_worker import aot_cells
-
-    src = inspect.getsource(aot_cells._discover_inner)
-    assert "rejected by class" in src
-    assert "no published cells at all" in src
-
-
 # ---------------------------------------------------------------------------
 # Invariant 1 — the two high-severity finds: both corrupt DECISIONS, not just
 # visibility, so both are asserted on the decision, not only on the event.

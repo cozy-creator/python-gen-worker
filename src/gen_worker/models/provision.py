@@ -24,7 +24,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .. import artifact_meta
 from ..cell_adopt import AdoptOutcome
@@ -47,6 +47,9 @@ from .loading import (
 from .memory import place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
 from .. import activity as activity_mod
+
+if TYPE_CHECKING:
+    from ..aot_identity import ExpectedIdentity
 
 __all__ = ["model_index_components"]  # re-export: single source in loading.py (gw#521)
 
@@ -261,6 +264,7 @@ def arm_route(mode: str) -> Optional[str]:
 def arm_aot(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], artifact: Path,
     bucket: int, meta: Optional[Dict[str, Any]] = None,
+    *, expected: "Optional[ExpectedIdentity]" = None,
 ) -> AdoptOutcome:
     """Arm ONE exported ``.pt2`` cell on ``pipe``. The whole AOT arm, in one
     place, for every source of such an artifact.
@@ -356,7 +360,7 @@ def arm_aot(
                     "aot arm: lifted-binding install failed on %r (%s); a "
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
-    outcome = aot_serve.enable(pipe, cfg, cache_dir, artifact)
+    outcome = aot_serve.enable(pipe, cfg, cache_dir, artifact, expected=expected)
     if not outcome.armed and lifted_install_error:
         # The refusal is real; its ROOT is one frame up. Both, in the order a
         # reader needs them: what refused, and what made it refuse.

@@ -290,7 +290,6 @@ class RequestContext(Generic[D]):
         emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
         owner: Optional[str] = None,
         invoker_id: Optional[str] = None,
-        timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
         worker_capability_token: Optional[str] = None,
         local_output_dir: Optional[str] = None,
@@ -306,15 +305,11 @@ class RequestContext(Generic[D]):
         self._job_id = str(job_id or "").strip() or None
         self._owner = owner
         self._invoker_id = invoker_id
-        self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._worker_capability_token = (worker_capability_token or "").strip() or None
         self._local_output_dir = (local_output_dir or "").strip() or None
         self._execution_hints = dict(execution_hints or {})
         self._started_at = time.time()
-        self._deadline: Optional[float] = None
-        if timeout_ms is not None and timeout_ms > 0:
-            self._deadline = self._started_at + (timeout_ms / 1000.0)
         self._canceled = False
         self._boot_warmup = bool(boot_warmup)
         self._execution_lane = ""  # th#1050: executing lane, set by the executor
@@ -381,11 +376,6 @@ class RequestContext(Generic[D]):
         (e.g. ``steps = 1 if ctx.boot_warmup else steps``) — the allocator
         peak is shape-driven, not step-driven."""
         return self._boot_warmup
-
-    @property
-    def deadline(self) -> Optional[float]:
-        """Absolute unix-time deadline, or None when the request is unbounded."""
-        return self._deadline
 
     @property
     def execution_lane(self) -> str:

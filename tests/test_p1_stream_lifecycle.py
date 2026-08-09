@@ -240,16 +240,20 @@ def test_cancel_mid_job_is_cooperative_abort() -> None:
         assert res.status == pb.JOB_STATUS_CANCELED
 
 
-def test_deadline_marks_fatal_and_frees_the_worker() -> None:
+def test_wire_timeout_no_longer_kills_an_advancing_job() -> None:
+    """pgw#904 part (d): `RunJob.timeout_ms` is retired — a handler that
+    outlives the old wall bound COMPLETES. Kill/condemn authority is
+    liveness + progress-staleness (`progress.self_diagnosis()`), never a
+    fixed duration; the staleness abort itself is covered at the executor
+    level in test_run_attempt_cutover_pgw904."""
     with hub_double() as (scheduler, _harness):
         conn = scheduler.wait_connection(0)
         conn.wait_for(is_ready)
         conn.send(run_job=pb.RunJob(
-            request_id="r-deadline", attempt=1, function_name="slow",
-            input_payload=_msgpack("marco"), timeout_ms=300))
-        res = conn.wait_for(is_result_for("r-deadline")).job_result
-        assert res.status == pb.JOB_STATUS_FATAL
-        assert res.safe_message == "deadline exceeded"
+            request_id="r-outlives", attempt=1, function_name="sleepy",
+            input_payload=_msgpack("marco"), timeout_ms=100))
+        res = conn.wait_for(is_result_for("r-outlives")).job_result
+        assert res.status == pb.JOB_STATUS_OK
         conn.send(run_job=pb.RunJob(
             request_id="r-next", attempt=1, function_name="echo",
             input_payload=_msgpack("marco")))

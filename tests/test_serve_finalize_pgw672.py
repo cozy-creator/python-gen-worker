@@ -281,9 +281,10 @@ class _Rig:
         for spec in specs:
             monkeypatch.setattr(
                 self.ex, "_enable_compiled",
-                lambda p, cfg, artifact, delivered=None: fleet_cells.enable_compiled(
-                    p, cfg, self.ex.store._cache_dir, artifact,
-                    publisher=None))
+                lambda p, cfg, artifact, delivered=None, arm=None:
+                    fleet_cells.enable_compiled(
+                        p, cfg, self.ex.store._cache_dir, artifact,
+                        publisher=None))
             break
 
     def boot(self, spec: EndpointSpec) -> None:

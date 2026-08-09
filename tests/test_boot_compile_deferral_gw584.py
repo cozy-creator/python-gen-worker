@@ -216,17 +216,30 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
     return ex, sent, enables
 
 
-def _spy_fetch(ex: Executor, monkeypatch) -> List[Tuple[Optional[dict], Any]]:
-    calls: List[Tuple[Optional[dict], Any]] = []
-    orig = ex._fetch_compile_snapshot
+def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
+    """pgw#904: an advertised identity now comes from the worker's OWN mint
+    (delivered-cell selection is deleted); stamp it the way the live fleet
+    policy does — an ArmOutcome carrying the finalized SelfMint."""
+    from gen_worker import fleet_cells
 
-    async def _spy(spec: EndpointSpec, snapshots: Any) -> Any:
-        selection = await orig(spec, snapshots)
-        calls.append((dict(snapshots) if snapshots else snapshots, selection))
-        return selection
+    def _enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
+                delegate=None, delivered_ref="", delivered_digest=""):
+        setattr(pipe, cc._MARKER_ATTR, {
+            "failure_signal": {
+                "callback": None,
+                "lock": threading.Lock(),
+                "successful_calls": 0,
+                "cache_hits": 0,
+                "cache_misses": 0,
+            },
+            "originals": [],
+            "regional_mods": [],
+        })
+        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
+            family=FAMILY, cell_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+            snapshot_digest=digest, artifact=artifact_path))
 
-    monkeypatch.setattr(ex, "_fetch_compile_snapshot", _spy)
-    return calls
+    return _enable
 
 
 def _startup(ex: Executor) -> Lifecycle:
@@ -259,7 +272,6 @@ def test_boot_defers_compile_declared_function(tmp_path, monkeypatch, caplog) ->
     local.mkdir()
     ex.store.residency.track_disk(AUTHORED_REF, local)
 
-    fetches = _spy_fetch(ex, monkeypatch)
     ensured: List[str] = []
     orig_setup = ex.ensure_setup
 
@@ -273,7 +285,6 @@ def test_boot_defers_compile_declared_function(tmp_path, monkeypatch, caplog) ->
         _startup(ex)
 
     assert ensured == [], f"boot eagerly set up deferred functions: {ensured}"
-    assert fetches == [], "boot reached compile selection with no snapshots"
     assert setup_calls == [] and enables == []
     # Slots stay advertised (per-dispatch serveability); a compile-declared
     # cls function reports loading until hub delivery warms it — the same
@@ -284,45 +295,6 @@ def test_boot_defers_compile_declared_function(tmp_path, monkeypatch, caplog) ->
     deferral_logs = [r.message for r in caplog.records if "gw#584" in r.message]
     assert deferral_logs and "generate" in deferral_logs[0]
     assert "slotted" in deferral_logs[0]
-
-
-# ---------------------------------------------------------------------------
-# 2. hub delivery: resolved bindings + snapshots select the delivered cell
-# ---------------------------------------------------------------------------
-
-
-def test_hub_delivery_selects_delivered_cell(tmp_path, monkeypatch) -> None:
-    setup_calls: List[str] = []
-    ex, _sent, enables = _harness(tmp_path, monkeypatch,
-                                  [_compile_spec(setup_calls)])
-    _startup(ex)
-    _apply_hello_ack(ex)
-    fetches = _spy_fetch(ex, monkeypatch)
-
-    snapshots = {RESOLVED_REF: _snapshot("aa" * 32),
-                 CELL_REF: _snapshot("bb" * 32)}
-    desired = pb.DesiredInstance(
-        function_name="generate",
-        models=[pb.ModelBinding(slot="pipeline", ref=RESOLVED_REF)],
-    )
-    asyncio.run(ex.ensure_desired_instance(desired, snapshots))
-
-    assert setup_calls and RESOLVED_REF.replace("/", "_").replace(
-        ":", "_").replace("#", "_") in setup_calls[0]
-    assert len(fetches) == 1
-    seen_snapshots, selection = fetches[0]
-    assert seen_snapshots is not None and CELL_REF in seen_snapshots
-    assert selection is not None and selection.ref == CELL_REF
-    assert selection.snapshot_digest == "bb" * 32
-    # Materialization armed the SAME selected artifact (one resolved state).
-    assert len(enables) == 1 and enables[0][1] == selection.path
-    (target,) = ex.compile_targets()
-    assert target.active_compile_ref == CELL_REF
-    assert target.pipeline_weight_lane == "w8a8"
-    rec = ex._classes[ex.specs["generate"].instance_key]
-    assert rec.ready
-    assert rec.held_refs == [RESOLVED_REF]
-    assert "generate" in ex.available_functions()
 
 
 # ---------------------------------------------------------------------------
@@ -383,12 +355,15 @@ def test_fenced_runjob_serves_after_desired_warm(tmp_path, monkeypatch) -> None:
     setup_calls: List[str] = []
     ex, sent, _enables = _harness(tmp_path, monkeypatch,
                                   [_compile_spec(setup_calls)])
+    from gen_worker import fleet_cells as fleet_cells_mod
+    monkeypatch.setattr(
+        fleet_cells_mod, "enable_compiled",
+        _mint_enable(CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
     _startup(ex)
     assert setup_calls == []  # boot deferred
     _apply_hello_ack(ex)
 
-    snapshots = {RESOLVED_REF: _snapshot("aa" * 32),
-                 CELL_REF: _snapshot("bb" * 32)}
+    snapshots = {RESOLVED_REF: _snapshot("aa" * 32)}
     desired = pb.DesiredInstance(
         function_name="generate",
         models=[pb.ModelBinding(slot="pipeline", ref=RESOLVED_REF)],
@@ -450,22 +425,22 @@ def test_plain_execution_lane_runjob_cold_setup_after_deferral(tmp_path, monkeyp
     setup_calls: List[str] = []
     ex, sent, _enables = _harness(tmp_path, monkeypatch,
                                   [_plain_compile_spec(setup_calls)])
+    from gen_worker import fleet_cells as fleet_cells_mod
+    monkeypatch.setattr(
+        fleet_cells_mod, "enable_compiled",
+        _mint_enable(PLAIN_CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
     _startup(ex)
     assert setup_calls == []  # boot deferred
-    fetches = _spy_fetch(ex, monkeypatch)
 
     run = pb.RunJob(
         request_id="r1", attempt=1, function_name="generate",
         input_payload=msgspec.msgpack.encode(_In(prompt="a cat")),
         models=[pb.ModelBinding(slot="pipeline", ref=AUTHORED_REF)],
-        snapshots={AUTHORED_REF: _snapshot("aa" * 32),
-                   PLAIN_CELL_REF: _snapshot("bb" * 32)},
+        snapshots={AUTHORED_REF: _snapshot("aa" * 32)},
     )
     res = asyncio.run(_dispatch(ex, sent, run))
     assert res.status == pb.JOB_STATUS_OK, res.safe_message
     assert len(setup_calls) == 1
-    assert fetches and fetches[0][1] is not None
-    assert fetches[0][1].ref == PLAIN_CELL_REF
     (target,) = ex.compile_targets()
     assert target.active_compile_ref == PLAIN_CELL_REF
 

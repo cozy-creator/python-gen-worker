@@ -23,10 +23,10 @@ and since pgw#1010 nothing mints into that key space — every publishable cell
 is STAMPED ``aot-inductor`` — so the push could never have selected a cell.
 
 **Nothing is DELIVERED to a pod any more.** th#1702 also deletes the hub's
-snapshot attach (HelloAck and RunJob both), so the worker ACQUIRES its own
-cell: ``aot_cells`` fetch-and-filter lists the family repo through the hub's
-catalog read API at arm time, downloads what this runtime can serve, and feeds
-it through the same gates. That is the only adoption there is. (pgw#904
+snapshot attach (HelloAck and RunJob both). pgw#904 then deleted worker-side
+fetch-and-filter discovery too: the hub RESOLVES the exact cell and names it
+in ``Arm.artifact``; the worker materializes only that identity and feeds it
+through the same gates. That is the only adoption there is. (pgw#904
 replaces the listing with a hub-RESOLVED ``Arm.artifact`` — still a pull, not
 a push.)
 
@@ -94,6 +94,11 @@ class EagerPhase(StrEnum):
 
     #: Eager with an END — a delegated mint child is building the cell.
     MINT_IN_PROGRESS = "mint_in_progress"
+
+    #: pgw#904: the hub's ExecutionSpec named ``eager_only`` for this arm.
+    #: Eager is the ORDER, not a degradation — the worker armed nothing
+    #: because nothing was named, which is a complete answer.
+    HUB_ORDERED_EAGER = "hub_ordered_eager"
 
     #: pgw#1035: the four tokens below rode the SAME wire columns as the ones
     #: above — `phase` on `self_mint_skipped`/`self_mint_started`, and the

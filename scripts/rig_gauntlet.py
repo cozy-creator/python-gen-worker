@@ -8,7 +8,7 @@ under a minute, in ONE command.
 
 Each variant is a FULL production cycle — resolve, handoff, real child spawn,
 `torch.export` + AOTInductor, seal, publish over the real wire, and a SECOND
-process discovering, arming and comparing every arm against eager. Not a smoke
+process fetching the exact named cell, arming and comparing every arm against eager. Not a smoke
 test: the same machinery a pod runs, at ~15-60 s instead of ~95 minutes.
 
 WHY A TABLE AND NOT A PASS/FAIL. Some variants exist to demonstrate a REFUSAL

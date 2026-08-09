@@ -371,8 +371,13 @@ def py_files(roots) -> List[Path]:
     out: List[Path] = []
     for root in roots:
         if root.exists():
+            # `.venv` is checkout-borne, never tree content: an installed env
+            # under a TOOL_ROOT (examples/from-scratch/.venv, ~10k files) blew
+            # the walk into a RecursionError that a clean `git archive` never
+            # reproduced (pgw#1035's "not reproducible").
             out.extend(p for p in root.rglob("*.py")
                        if "__pycache__" not in p.parts
+                       and ".venv" not in p.parts
                        and p.name != "conftest.py"
                        and p.resolve() != SELF)
     return sorted(out)

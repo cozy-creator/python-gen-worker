@@ -9,7 +9,7 @@ Why a double rather than a compose tensorhub: the rig's value is that a full
 machinery cycle costs seconds on a laptop. A stack with Postgres, MinIO and
 Vault costs minutes to boot and is a second thing that can be broken. What
 matters is that the WIRE is real — every route below is the one
-``fleet_cells.CellPublisher`` and ``aot_cells.discover`` actually call, with the
+``fleet_cells.CellPublisher`` and the rig's exact-fetch adopter actually call, with the
 same status codes and the same envelope shapes, and the store really refuses
 bytes that do not hash to their digest. A cell published here and adopted here
 crossed the same seven HTTP calls it would cross in production.
@@ -104,7 +104,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._bytes(200, blob)
             return
 
-        # aot_cells._discover_inner: GET /api/v1/repos/<repo>/checkpoints
+        # catalog read surface: GET /api/v1/repos/<repo>/checkpoints
         if path.endswith("/checkpoints"):
             repo = path.split("/api/v1/repos/", 1)[-1].rsplit("/checkpoints", 1)[0]
             with srv.lock:  # type: ignore[attr-defined]
@@ -119,7 +119,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 for r in items]})
             return
 
-        # aot_cells._download_artifact_inner: GET /api/v1/repos/<repo>/resolve
+        # harness.rig_fetch.fetch_named_cell: GET /api/v1/repos/<repo>/resolve
         if path.endswith("/resolve"):
             repo = path.split("/api/v1/repos/", 1)[-1].rsplit("/resolve", 1)[0]
             want = (query.get("digest") or [""])[0]
@@ -223,7 +223,7 @@ def slock(srv: Any) -> Any:
 
 class LocalCellHub:
     """A running local hub. ``base`` is what a ``CellPublisher`` /
-    ``aot_cells.discover`` takes as its ``base_url``."""
+    the rig's fetch/publish legs take as their ``base_url``."""
 
     def __init__(self) -> None:
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)

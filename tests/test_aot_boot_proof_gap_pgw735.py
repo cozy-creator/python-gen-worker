@@ -29,7 +29,7 @@ import msgspec
 import pytest
 
 import gen_worker
-from gen_worker import aot_cells, aot_serve, compile_cache, fleet_cells
+from gen_worker import aot_serve, compile_cache, fleet_cells
 from gen_worker.api.decorators import Compile
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
 from gen_worker.executor import Executor
@@ -109,7 +109,7 @@ def _fake_arm(key: str, ref: str):
         setattr(unet, aot_serve._MARKER_ATTR, marker)
         setattr(pipe, aot_serve._MARKER_ATTR, marker)
         aot_serve.note_aot_key(key)
-        adopted = aot_cells.AdoptedAotCell(
+        adopted = fleet_cells.SelfMint(
             family=FAMILY, cell_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
             artifact=Path(cache_dir or ".") / "cell.tar")
@@ -138,11 +138,26 @@ def _executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Executor:
     return ex
 
 
+def _orders(run):
+    """pgw#904: the driver reads neutral slot orders, never the wire message."""
+    from gen_worker import dispatch
+
+    return {
+        b.slot: dispatch.SlotOrder(
+            ref=b.ref.strip(),
+            components=tuple(sorted(
+                (str(k).strip(), str(v).strip())
+                for k, v in b.components.items())),
+        )
+        for b in run.models if b.slot
+    }
+
+
 def _boot(ex: Executor, ref: str = "acme/sdxl-base:prod") -> None:
     spec = ex.specs["generate"]
     run = pb.RunJob(function_name="generate",
                     models=[pb.ModelBinding(slot="pipeline", ref=ref)])
-    eff = ex._effective_spec(spec, run)
+    eff = ex._dispatched_spec(spec, _orders(run))
     # Key the snapshot map by the NORMAL FORM the worker will actually look
     # up, not the raw string — th#1276 moved which tag the normal form elides
     # (`:prod` now, `:latest` before), and a hand-spelled key silently misses.
