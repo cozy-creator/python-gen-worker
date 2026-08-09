@@ -272,6 +272,36 @@ error: aot precondition cuda_root: torch's cpp_extension cannot host-compile on
 
 ---
 
+## Checking your Dockerfile against the platform's own steps
+
+Everything above is a step Tensorhub takes for you when you *don't* ship a
+Dockerfile, and cannot take when you do — your file is yours, and the platform
+never injects layers into it. That asymmetry has produced the same bug four
+times: a step the generated Dockerfile takes, which a hand-written one skips,
+which nothing asks for until a rented pod pays for it.
+
+So the steps are enumerated, and you can ask for them:
+
+```bash
+python -m gen_worker.build_guarantees .      # your endpoint source directory
+python -m gen_worker.build_guarantees --list # what it checks, and why
+```
+
+It exits non-zero and names the missing line, where the platform would have
+refused, and what skipping it costs. Run it in CI for every endpoint that ships
+its own Dockerfile — it needs no build, no image and no GPU, and it decides in
+milliseconds what a build otherwise decides in minutes and a pod in dollars.
+
+An endpoint with no Dockerfile is asked for nothing: it takes the generated
+path, where all of this is already true.
+
+The check is a pre-flight, not the authority. `gen_worker.discovery` still
+verifies the AOT preconditions inside your real image at build time, and
+Tensorhub still inspects the built image. This just moves the cheapest failures
+onto the diff that caused them.
+
+---
+
 ## Full real-world example (managed mode + uv)
 
 ```dockerfile

@@ -18,12 +18,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # wrapper compile never invokes. `gen_worker.discovery` below verifies this at
 # build time and refuses the image if it is missing (pgw#996, pgw#1017).
 #
-# NOT SUFFICIENT ON ITS OWN, and this family is not pod-ready until pgw#1017
-# closes it: torch's cpp_extension also needs a discoverable CUDA root, which
-# this base does not have (CUDA arrives as pip wheels and /usr/local/cuda is
-# never created). Tensorhub's synthesized Dockerfile composes that root; a
-# custom Dockerfile has no equivalent and no precondition covers it yet, so a
-# mint on this image would die at CUDA_HOME after paying for the export.
+# NOT SUFFICIENT ON ITS OWN: torch's cpp_extension also needs a discoverable
+# CUDA root, which this base does not have (CUDA arrives as pip wheels and
+# /usr/local/cuda is never created). The `gen_worker.cuda_root` step below
+# composes it, and the `cuda_root` precondition refuses the build without it.
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl g++ \
