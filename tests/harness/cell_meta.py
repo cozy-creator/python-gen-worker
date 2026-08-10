@@ -46,7 +46,7 @@ def exported_cell_meta(
         "combined_graph_hash": aot_serve.combined_graph_hash([CLASS_HASH]),
         "env_seal": {"v": 1, "torch": "2.9.0"},
         "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
-        "declared_traffic": {
+        "declared_envelope": {
             "shapes": [[1024, 1024]], "text_lens": [77], "guidance": [7.5]},
     }
     meta.update(extra)

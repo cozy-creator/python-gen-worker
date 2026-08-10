@@ -61,8 +61,6 @@ from . import artifact_meta
 from . import compile_cache as cc
 from .models.loading import pipeline_weight_lane
 from .models import provision
-from . import cell_key
-
 logger = logging.getLogger(__name__)
 
 ENV_STORE_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"
@@ -90,34 +88,26 @@ def store_verdict(artifact: Path, family: str, pipe: Any, cfg: Any) -> str:
     meta = artifact_meta.try_read_metadata(artifact)
     if meta is None:
         return f"unreadable artifact ({artifact})"
-    # th#883/gw#581: ONE compatibility brain when a key exists on both sides —
-    # the exact key comparison fleet workers use.
+    # th#883/gw#581/pgw#1059: ONE compatibility brain — the same recorded-
+    # facts verdict the fleet's seeded-arm self-cell check uses
+    # (``cc.local_cell_mismatch``: every ``cc.verify`` axis strict, plus the
+    # execution lane, the declared compile contract, the settings
+    # declaration and the toolchain, each compared with the derivation the
+    # producer used). The retired ``kind="inductor"`` cell key compared the
+    # same facts as one fused digest; the fact-by-fact verdict NAMES the
+    # mismatch instead. pgw#950's posture is unchanged: a cell silent on a
+    # fact is refused — the local store is a cache, and every refusal costs
+    # one re-mint.
     #
-    # pgw#950 deleted the arm below it: a cell that records no computable key
-    # used to fall through to ``cc.verify``'s axis-by-axis check, which is how
-    # a pre-gw#581 cell kept getting adopted. It does not any more. The local
-    # store is a cache; refusing a keyless cell costs one re-mint.
-    #
-    # The ``except`` that remains is NOT that arm. ``cell_key.compute`` needs a
-    # runtime ``sm``, so it raises on a host with no CUDA — the CLI, cozy-local
-    # and library use. There ``cc.verify`` is the only brain that can answer at
-    # all, so it is the no-GPU path, not a legacy one. Typed, so a real bug in
-    # the key brain surfaces instead of being read as "no GPU".
-
-    try:
-        # pgw#686: the ONE base-lane resolution the mint's stamp uses —
-        # the raw pipeline probe is blind to the w8a8 GEMM mode, so a
-        # store save/lookup pair straddling apply_lora_execution_lane would never
-        # match and every boot would re-mint.
-        want = cell_key.compute(
-            family, cc.cell_base_execution_lane(pipe),
-            int(getattr(cfg, "lora_bucket", 0) or 0),
-            contract=cell_key.contract_digest(cc.declared_contract_facts(cfg)),
-        )
-    except cell_key.CellKeyError:
-        reason = cc.verify(meta, family=family)
-    else:
-        reason = cell_key.mismatch(meta, want)
+    # pgw#686: `cc.cell_base_execution_lane` is the ONE base-lane resolution
+    # the mint's stamp uses — the raw pipeline probe is blind to the w8a8
+    # GEMM mode, so a store save/lookup pair straddling
+    # apply_lora_execution_lane would never match and every boot would
+    # re-mint.
+    reason = cc.local_cell_mismatch(
+        dict(meta), family=family,
+        weight_lane=cc.cell_base_execution_lane(pipe), cfg=cfg,
+    )
     if reason:
         return reason
     reason = cc.mode_drift(meta, pipe) or cc.execution_lane_drift(meta, pipe)

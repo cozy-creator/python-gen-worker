@@ -36,9 +36,13 @@ settings):
   different key. The per-call serving window is covered by dynamo's
   GlobalStateGuard + the pgw#680 guard-miss doctrine.
 
-The seal dict rides cell metadata verbatim (``artifact_metadata``), so
-``cell_key.from_artifact_metadata`` recomputes the axis from recorded facts
-and a stamp can never disagree with the declaration it summarizes.
+The seal dict rides cell metadata verbatim (``artifact_metadata``). Since
+pgw#1059 (amendment 4) it is NOT a key axis: the declaration digest and the
+loaded-libs digest fold into the ``toolchain`` axis instead
+(``compile_cache.toolchain_digest`` — "the compiler as we configure it"),
+so a deliberate settings change still re-keys through the axis it honestly
+belongs to, while the boot verify and the pre-trace tripwire here remain
+the GATES that make the fleet-wide single-declaration invariant true.
 """
 
 from __future__ import annotations
@@ -500,28 +504,61 @@ def frozen_library_digests() -> Tuple[Tuple[str, str], ...]:
 _ESTABLISHED_OVERRIDES: Optional[Dict[str, str]] = None
 
 
+def loaded_libs_digest() -> str:
+    """Combined 16-hex digest of the BOOT-frozen loaded-library snapshot
+    (pgw#719): toolchain CONTENT the dist-info RECORDs cannot see — the
+    LD_PRELOAD/LD_LIBRARY_PATH substitution hole. Rides the ``toolchain``
+    key axis (pgw#1059 amendment 4) and the seal dict; the per-library list
+    rides metadata via ``compile_cache.artifact_metadata`` so a mismatch
+    names the library."""
+    libs_encoded = json.dumps(
+        dict(frozen_library_digests()), sort_keys=True,
+        separators=(",", ":"), ensure_ascii=True,
+    ).encode()
+    return hashlib.sha256(libs_encoded).hexdigest()[:16]
+
+
+def declaration_digest() -> str:
+    """16-hex digest of the settings DECLARATION this process was
+    established with (``settings_authority.declaration()`` + the declared
+    knob overrides). This is the value that folds into the ``toolchain``
+    key axis (pgw#1059 amendment 4: "the compiler as we configure it") —
+    a deliberate settings change re-keys through it. Deliberately excludes
+    ``loaded_libs`` (a measured binaries fact with its own toolchain entry)
+    and ``seal_v`` (the seal DICT's shape version, not a declaration
+    fact)."""
+    encoded = json.dumps(
+        settings_authority.declaration(_ESTABLISHED_OVERRIDES),
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
 def effective_seal() -> Dict[str, Any]:
     """The seal dict — a digest of the DECLARATION (pgw#1049), recorded
     verbatim in cell metadata. Its settings facts come from
     ``settings_authority.declaration()``; ambient mutation cannot move them
     (it trips :func:`assert_seal_unchanged` instead). The one measured fact
-    is ``loaded_libs`` — the combined digest of the BOOT-frozen library
-    snapshot (toolchain CONTENT, not a setting; the per-library list rides
-    metadata via ``compile_cache.artifact_metadata`` so a mismatch names the
-    library)."""
-    libs_encoded = json.dumps(
-        dict(frozen_library_digests()), sort_keys=True,
-        separators=(",", ":"), ensure_ascii=True,
-    ).encode()
+    is ``loaded_libs`` (:func:`loaded_libs_digest`).
+
+    pgw#1059 amendment 4: the seal is NO LONGER a key axis. Its declaration
+    and loaded-libs digests fold into the ``toolchain`` axis
+    (``compile_cache.toolchain_digest``); this dict stays RECORDED on every
+    artifact (the observable statement of the declaration a cell was minted
+    under), and its digest stays on the published identity-axis map because
+    the hub's ``ArtifactIdentity.env_seal_digest`` requires it (a wire fact,
+    like ``graph_contract``)."""
     return {
         "seal_v": SEAL_VERSION,
         **settings_authority.declaration(_ESTABLISHED_OVERRIDES),
-        "loaded_libs": hashlib.sha256(libs_encoded).hexdigest()[:16],
+        "loaded_libs": loaded_libs_digest(),
     }
 
 
 def seal_digest(seal: Mapping[str, Any]) -> str:
-    """The ``env_seal`` key-axis value for one seal dict."""
+    """The 16-hex digest of one seal dict — the artifact's ``env_seal``
+    wire fact (published identity-axis map + ``ArtifactIdentity``), no
+    longer a key axis (pgw#1059 amendment 4)."""
     encoded = json.dumps(
         dict(seal), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     ).encode()

@@ -74,9 +74,10 @@ class Leaf:
 
         A mapping leaf takes its BARE KEY because that is the keyword the
         pipeline's own forward uses; a sequence leaf takes ``<param>.<index>``.
-        This is the string the published contracts are keyed by and the one
-        ``contract_digest`` folds into the key, so it is fixed — pgw#994 adds the
-        identity next to it rather than renaming 144 live checkpoints.
+        This is the string the published contracts are keyed by — it rides
+        each entry's ``range_digest``/``class_hash`` and therefore the
+        ``graph`` axis — so it is fixed; pgw#994 adds the identity next to
+        it rather than renaming it on every published cell.
         """
         name = self.param
         for step in self.path:

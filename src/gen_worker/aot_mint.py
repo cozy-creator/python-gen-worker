@@ -3233,25 +3233,26 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
 
     return {
         "weight_lane": str(spec.weight_lane or ""),
-        # pgw#846: an exported cell is always WHOLE-GRAPH (`mode` "").
-        # `shell_digest` likewise: both keys are recorded at their whole-graph
-        # values ("") so the v3 contract-facts shape — and therefore every
-        # existing whole-graph cell key — is byte-identical to pre-#846.
-        "mode": "",
-        "shell_digest": "",
+        # pgw#1059: `mode` and `shell_digest` are DELETED (both pinned ""
+        # since regional died, #846 — recording a constant that says
+        # "unchanged" was only ever keyed byte-compatibility with the fused
+        # v3 contract facts, which die in the same redefinition).
         "sm": str(cc.runtime_key().get("sm") or ""),
+        # The seal dict stays RECORDED (the observable statement of the
+        # declaration this cell was minted under; its digest is a published
+        # wire fact the hub's ArtifactIdentity requires) — but it is no
+        # longer a key axis: the declaration + loaded-libs digests fold into
+        # the `toolchain` block below (pgw#1059 amendment 4).
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
-        # pgw#1046: the declared ENVELOPE the `contract` axis folds (the axis
-        # STRING stays `contract` until the pgw#1059 ck1 redefinition). It used to
-        # live ONLY in the live `ExportSpec`, so an exported cell could not
-        # restate its own contract axis — and the publish path, unable to
-        # recompute the key, fell back to a 6-axis subset carrying neither
-        # `toolchain` nor `env_seal`, which is precisely what the hub needs to
-        # mint an `ArtifactIdentity` the worker will accept. Recorded in the
-        # SHAPE `cell_key.contract_digest` consumes, so the digest — and every
-        # existing cell key — is byte-identical to before.
-        cell_key.EXPORT_TRAFFIC_KEY: {
+        # pgw#1046/pgw#1059: the DECLARED ENVELOPE — the `envelope` axis's
+        # whole input, recorded so an exported cell can restate its own key
+        # from the artifact alone (`cell_key.from_exported_artifact_metadata`;
+        # the publish path recomputes the same axes before a byte moves).
+        # Canonical form is `cell_key.envelope_facts`; the behavior-posture
+        # `overlay` slot (amendment 5) is absent because the overlay menu is
+        # empty.
+        cell_key.EXPORT_ENVELOPE_KEY: {
             "shapes": sorted([int(v) for v in row] for row in spec.shapes),
             "text_lens": sorted({int(v) for v in spec.text_lens}),
             "guidance": sorted(float(v) for v in spec.guidance_scales),
@@ -3305,11 +3306,9 @@ def cell_identity(meta: Mapping[str, Any]) -> cell_key.CellKey:
     implementation, so the key the mint stamps and the axes the publish path
     declares (``fleet_cells._identity_axes``) are the same object rather than
     two derivations that can drift. pgw#1046 moved it there and dropped the
-    ``spec`` parameter: every input is now a RECORDED block (the declared
-    ENVELOPE rides ``declared_traffic`` — the block key's rename is on the
-    pgw#1059 list), which is what makes the recomputation
-    possible off the artifact alone. No cell re-keys — the contract-facts shape
-    and every axis value are unchanged.
+    ``spec`` parameter: every input is a RECORDED block (the declared
+    envelope rides ``declared_envelope``), which is what makes the
+    recomputation possible off the artifact alone.
 
     A missing fact is a :class:`MintRefused` here because at mint time it means
     this pod cannot name its own product; the same absence at publish time is a

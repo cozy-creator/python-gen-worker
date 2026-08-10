@@ -289,7 +289,7 @@ def build_request(
         function=task.function,
         modules=tuple(task.modules),
         family=str(pending.family),
-        cell_key=str(pending.cell_key),
+        arm_token=str(pending.arm_token),
         target=str(Path(workdir) / "cell.tar.gz"),
         work_root=str(workdir),
         report=str(Path(workdir) / mint_process.REPORT_NAME),
@@ -308,7 +308,7 @@ def build_request(
         # the per-entry re-derivation inside it), so a mint child restarted in
         # place on the same pod — or a whole new pending for the same cell on a
         # later boot — finds the same bank.
-        resume=str(aot_resume.bank_root(pending.cell_key)),
+        resume=str(aot_resume.bank_root(pending.arm_token)),
         cfg=cfg_spec(pending.cfg),
         slots=dict(task.slots),
         device=-1 if task.device is None else int(task.device),
@@ -520,7 +520,7 @@ async def build_cell(
                     # finished. It survives every failure (that is the point) and
                     # is dropped on success, which is what keeps a healthy pod's
                     # resume area from being the only thing that grows.
-                    aot_resume.discard(str(pending.cell_key))
+                    aot_resume.discard(str(pending.arm_token))
                     return DelegatedResult(
                         status=ADOPTED, minted=minted, attempts=attempts,
                         budget=budget)
@@ -540,7 +540,7 @@ async def build_cell(
                         if reason else
                         "the child's cell did not adopt on this runtime"))
 
-            _emit_abort(outcome, family, pending.cell_key, attempts)
+            _emit_abort(outcome, family, pending.arm_token, attempts)
             if not (outcome.retryable and attempts < max(1, max_attempts)):
                 fleet_cells.abandon_self_mint(pending)
                 return DelegatedResult(

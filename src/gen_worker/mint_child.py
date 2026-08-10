@@ -242,7 +242,7 @@ def mint_identity(request: MintRequest) -> str:
     DB read before anyone could say which of a pod's cells had died.
     """
     return (
-        f"mint family={request.family!r} arm_key={request.cell_key!r} "
+        f"mint family={request.family!r} arm_key={request.arm_token!r} "
         f"lane={request.execution_lane or '(unset)'!r} "
         f"fn={request.function!r}")
 

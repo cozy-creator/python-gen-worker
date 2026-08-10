@@ -206,7 +206,10 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     function: str
     modules: Tuple[str, ...]
     family: str
-    cell_key: str
+    #: The parent's ArmIdentity token (``arm1-…``) — the obligation this
+    #: child discharges. NOT a cell key (pgw#1059): the cell's key is
+    #: stamped by the mint itself and returned in ``MintReport.cell_key``.
+    arm_token: str
     target: str          # artifact the child writes (.tar.gz), atomically
     #: The child's work root (target, export tree, snapshots). The parent
     #: watches its BYTE GROWTH as one of the two progress signals — pgw#1010
@@ -667,7 +670,7 @@ async def run_mint(
     )
     logger.info(
         "mint_process: spawned pid=%s family=%s key=%s device=%s cap=%s",
-        proc.pid, request.family, request.cell_key[:12] or "-",
+        proc.pid, request.family, request.arm_token[:12] or "-",
         request.device, request.vram_cap_bytes or "none")
 
     frames = asyncio.ensure_future(_pump_frames(proc.stdout, on_frame, state))
