@@ -2330,30 +2330,44 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     return hashlib.sha256(encoded).hexdigest(), weight_contract
 
 
-def _regional_dynamic_decline(cfg: Any, target: str) -> str:
-    """"" when the DYNAMO regional branch may arm ``target``, else the reason.
+def _mark_regional_blocks(owner: Any, dynamic_dims: tuple) -> int:
+    """Apply the DECLARED marks at the compiled-block ingress. Returns the
+    number of blocks wrapped.
 
-    pgw#817/D4 moved the `regional + dynamic` refusal out of the declaration
-    (where it forbade a combination the EXPORT lane measured as free) and into
-    the one lane that genuinely cannot honour it. `compile_repeated_blocks(
-    dynamic=None)` never applies the declared marks, so a dynamo regional arm
-    over a declaration carrying `dynamic=(...)` would serve a graph that does
-    not implement the contract its cell key asserts — the exact failure class
-    pgw#716 exists to prevent. Declining here sends the target to the
-    whole-forward branch, which DOES mark, so the declaration is still served;
-    it is only served by the other lane.
+    pgw#817/D4 answered "compile_repeated_blocks(dynamic=None) never applies
+    the declared marks" by DECLINING the dynamo regional branch whenever a
+    declaration carried ``dynamic=(...)``, which sent the target to the
+    whole-forward branch instead. That refusal is what ie#632 measured on
+    minimax-h3: a 20.1B denoiser whose author declared ``regional=True``
+    precisely because whole-graph inductor planning is unaffordable for its
+    class (ie#381) was silently compiled whole-forward, and every request
+    whose packed sequence differed from the boot warmup's guard-missed to
+    eager for the life of the pod.
+
+    The premise was wrong: ``compile_repeated_blocks`` compiles each repeated
+    BLOCK, so the block call is where this lane's graphs are traced and where
+    the marks belong. ``nn.Module.compile()`` installs ``_compiled_call_impl``;
+    wrapping it with the same :func:`_with_declared_marks` the whole-forward
+    branch uses makes the two lanes honour one declaration.
     """
-    dyn = tuple(getattr(cfg, "dynamic", ()) or ())
-    if not dyn:
-        return ""
-    names = ", ".join(str(getattr(d, "dim", "") or "?") for d in dyn)
-    return (
-        f"target {target!r} declares regional=True AND dynamic=({names}) — "
-        f"the dynamo regional branch calls compile_repeated_blocks("
-        f"dynamic=None) and never applies the declared marks, so it declines "
-        f"and this target takes the whole-forward branch (which does). The "
-        f"AOT export lane implements regional+dynamic directly (pgw#812 "
-        f"RESULT 3: free on a conv-free region)")
+    repeated = tuple(getattr(owner, "_repeated_blocks", ()) or ())
+    if not repeated:
+        return 0
+    marked = 0
+    for module in owner.modules():
+        if type(module).__name__ not in repeated:
+            continue
+        impl = getattr(module, "_compiled_call_impl", None)
+        if impl is None or getattr(impl, "_gw_declared_marks", False):
+            continue
+        wrapped = _with_declared_marks(impl, dynamic_dims)
+        wrapped._gw_declared_marks = True  # type: ignore[attr-defined]
+        module._compiled_call_impl = wrapped
+        marked += 1
+    logger.info(
+        "compile-cache: declared marks applied at the ingress of %d regional "
+        "block(s) on %s", marked, type(owner).__name__)
+    return marked
 
 
 def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callable[..., Any]:
@@ -3043,17 +3057,10 @@ def apply(
     applied: list[str] = []
     originals: list[Tuple[Any, str, Callable[..., Any]]] = []
     regional_mods: list[Any] = []
+    declared_dynamic = tuple(getattr(cfg, "dynamic", ()) or ())
     for target, owner, attr, fn in resolve_targets(pipeline, cfg):
-        # pgw#817/D4: computed BEFORE the branch so a declined regional target
-        # falls through to the whole-forward branch (which does apply the
-        # declared marks) instead of being skipped entirely.
-        regional_decline = _regional_dynamic_decline(cfg, target) \
-            if regional else ""
-        if regional_decline:
-            logger.info("compile-cache: %s", regional_decline)
         if (
             regional
-            and not regional_decline
             and attr == "forward"
             and callable(getattr(owner, "compile_repeated_blocks", None))
         ):
@@ -3063,6 +3070,15 @@ def apply(
             #
             settings_authority.impose_dynamo()
             owner.compile_repeated_blocks(dynamic=None)
+            # pgw#1078: the declared marks are applied at the BLOCK ingress,
+            # which is where this lane's graphs are traced. Without them
+            # `regional=True` + `dynamic=(...)` used to DECLINE and send the
+            # target to the whole-forward branch — silently serving a 20B
+            # denoiser by the one lane its author declared regional to avoid,
+            # then guard-missing to eager on every request whose sequence
+            # differed from the boot warmup's (minimax-h3, ie#632).
+            if declared_dynamic:
+                _mark_regional_blocks(owner, declared_dynamic)
             # pgw#681: regional entry crosses the same canonical boundary as
             # whole-graph entry — block guards mint over canonical inputs.
             ingress = guard_closure.canonical_ingress(fn, target)
@@ -3102,7 +3118,6 @@ def apply(
         # the config pair + dynamic=None, never dynamic=False.
         settings_authority.impose_dynamo()
         compiled = torch.compile(fn, dynamic=None)
-        declared_dynamic = tuple(getattr(cfg, "dynamic", ()) or ())
         if declared_dynamic:
             compiled = _with_declared_marks(compiled, declared_dynamic)
         # pgw#681: the single compiled-graph ingress — canonical strides +
