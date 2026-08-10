@@ -17,6 +17,14 @@ The hub matches the RAW BYTES of the whole Dockerfile, comments included, so
 these checks deliberately do not strip comments either: a file that merely
 mentions the directive while explaining the ban is refused exactly like one
 that uses it.
+
+pgw#1023 folded this defect into the general table: the ban is now the
+``buildkit_cache_mount`` row of ``gen_worker.build_guarantees``, checked over
+every example and every documented block alongside the four other steps a
+hand-written Dockerfile owes. What stays HERE is what is specific to this
+instance — the doc's prose surviving its own copy-paste, and the size argument
+for ``g++`` over ``build-essential`` — and it reads the pattern from the
+registry rather than keeping a second spelling of it.
 """
 
 from __future__ import annotations
@@ -24,19 +32,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
+from gen_worker.build_guarantees import RE_BUILDKIT_CACHE_MOUNT
 
 REPO = Path(__file__).resolve().parents[1]
 
-# tensorhub/internal/builder/validation.go: reBuildKitCacheMount
-RE_BUILDKIT_CACHE_MOUNT = re.compile(r"(?i)--mount\s*=\s*type\s*=\s*cache\b")
-
 DOC = REPO / "docs" / "dockerfile.md"
 FENCED_DOCKERFILE = re.compile(r"```dockerfile\n(.*?)```", re.DOTALL)
-
-
-def _example_dockerfiles() -> list[Path]:
-    return sorted((REPO / "examples").rglob("Dockerfile"))
 
 
 def test_doc_dockerfile_blocks_pass_the_hub_validator() -> None:
@@ -63,16 +64,6 @@ def test_the_ban_is_explained_without_spelling_the_directive() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "path", _example_dockerfiles(), ids=lambda p: p.parent.name
-)
-def test_example_dockerfiles_pass_the_hub_validator(path: Path) -> None:
-    assert not RE_BUILDKIT_CACHE_MOUNT.search(path.read_text()), (
-        f"{path.relative_to(REPO)} carries a BuildKit cache mount and cannot "
-        f"be published"
-    )
-
-
 def test_the_canonical_example_carries_the_aot_host_toolchain() -> None:
     """pgw#1017: the AUTHOR installs it, and the docs must say so.
 
@@ -80,6 +71,12 @@ def test_the_canonical_example_carries_the_aot_host_toolchain() -> None:
     toolchain at build time (`aot_preconditions.CHECK_CXX_TOOLCHAIN`) rather
     than injecting a layer into someone else's file. That only works if the
     canonical file an author copies has the layer.
+
+    WHETHER the layer is there is the registry's question now
+    (`build_guarantees.cxx_toolchain`, checked over every example). What is
+    asserted here is what that row deliberately does not enforce: the SHAPE of
+    the layer, which is a measured size argument rather than a platform
+    refusal.
     """
     path = REPO / "examples" / "micro-diffusion" / "Dockerfile"
     content = path.read_text()
