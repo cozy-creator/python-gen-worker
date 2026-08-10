@@ -216,6 +216,18 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         # for its whole life reporting `serving_mode=jit_cell`.
         "GRAPH_BREAK": "graph_break",
         "DECLARED_RANGE_EXCEEDED": "declared_range_exceeded",
+        # pgw#1093: the three tokens that separate TWO defects the wire could
+        # not tell apart. A target that armed and then broke, and a target
+        # that was never installed at all, both left `is_compile_armed` False
+        # and every reader falling through to `uncompiled` — same
+        # `metrics.lane=…+eager`, same `boot_ended_uncompiled`, zero other
+        # rows (minimax-h3 0.4.4 on 0.98.0, request `55971bce`, $1.15 spent
+        # attributing the wrong one). `compiled_degraded` is an EXECUTION
+        # failure carrying its exception; the other two are WIRING failures
+        # naming the slot and the predicate that refused.
+        "COMPILED_DEGRADED": "compiled_degraded",
+        "ARMED_TARGET_UNRESOLVED": "armed_target_unresolved",
+        "NO_COMPILE_CANDIDATES": "no_compile_candidates",
     }
     # The join the ArmOutcome docstring claims: a delegated mint's decline and
     # the serving posture that describes it are ONE token, not two that happen

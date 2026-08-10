@@ -414,6 +414,18 @@ GRAPH_BREAK_TOKEN = "graph_break"
 #: pgw#1082: the declaration named a dynamic range its own inputs leave.
 DECLARED_RANGE_TOKEN = "declared_range_exceeded"
 
+#: pgw#1093: the CATCH-ALL permanent degrade. A regional/whole-graph target
+#: that raised anything OTHER than a graph break, a declared-range refusal or
+#: a recompile miss used to degrade to eager on a `logger.warning` alone —
+#: and a hub-spawned pod has no reachable stdout, so the degrade was invisible
+#: (pgw#824's own ruling). Worse, `is_compile_armed` then reads False, which
+#: makes an INSTALLED-THEN-DEGRADED target byte-identical on the wire to a
+#: NEVER-INSTALLED one: same `metrics.lane=…+eager`, same
+#: `fallback_reason=uncompiled`, same `boot_ended_uncompiled`, zero other
+#: rows. Two different defects, one indistinguishable reading — which is
+#: exactly how pgw#1093 spent a pod attributing the wrong cause.
+COMPILED_DEGRADE_TOKEN = "compiled_degraded"
+
 
 def _is_graph_break_error(exc: BaseException) -> bool:
     """True for dynamo's fullgraph refusal — the region did NOT trace whole.
@@ -469,6 +481,38 @@ def _emit_graph_break_event(label: str, exc: BaseException) -> None:
         )
     except Exception:  # pragma: no cover — telemetry never fails the serve
         logger.debug("compile-cache: graph-break event emission failed",
+                     exc_info=True)
+
+
+def _emit_compiled_degrade_event(
+    label: str, exc: BaseException, *, lane: str, fail_closed: bool,
+) -> None:
+    """pgw#1093: confess EVERY permanent degrade, whatever raised it.
+
+    The two classified degrades (graph break, declared range) have had their
+    own rows since pgw#1082. Everything else — a kernel that refuses this
+    shape, a dtype mismatch the marks let through, an OOM inside the compiled
+    region, an endpoint mutating a module the arm wrapped — took the
+    `logger.warning` path and reached the wire as nothing at all. This row is
+    what makes "installed and then broke, HERE, for THIS reason" a different
+    fact from "never installed", instead of the same `uncompiled`.
+    """
+    try:
+        from . import activity as activity_mod
+
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            detail=(
+                f"target={label} lane={lane} {COMPILED_DEGRADE_TOKEN}: this "
+                f"target was ARMED and is now permanently EAGER for the rest "
+                f"of this process — {type(exc).__name__}: "
+                f"{_clip(str(exc), 600)}"
+                + (" (mandatory lane)" if fail_closed else "")
+            ),
+            phase=COMPILED_DEGRADE_TOKEN,
+        )
+    except Exception:  # pragma: no cover — telemetry never fails the serve
+        logger.debug("compile-cache: degrade event emission failed",
                      exc_info=True)
 
 
@@ -2891,6 +2935,13 @@ def _guarded(
             # while every request ran eager (the gw#586 class, one lane over).
             if isinstance(failure_signal, dict):
                 failure_signal["degraded"] = True
+                failure_signal["degrade_reason"] = _clip(
+                    f"{type(exc).__name__}: {exc}", 600)
+            # pgw#1093: the whole-graph twin of the regional confession — the
+            # tier flip below is a CAPABILITY projection, not an event, so
+            # without this row the degrade leaves no dated, greppable fact.
+            _emit_compiled_degrade_event(
+                label, exc, lane="whole", fail_closed=fail_closed)
             # Revoke scheduler-visible compiled proof synchronously before the
             # eager fallback: the tier flips to explicit eager on the wire.
             revoke(state["detail"])
@@ -3022,6 +3073,12 @@ def _guarded_regional(
                 # against the rig's 4.31 for the identical recipe).
                 if isinstance(failure_signal, dict):
                     failure_signal["degraded"] = True
+                    # pgw#1093: the reason is carried on the SIGNAL, not only
+                    # in a log line, so `_eager_posture` can name it on every
+                    # request the pod serves afterwards instead of falling
+                    # through to the generic `uncompiled`.
+                    failure_signal["degrade_reason"] = _clip(
+                        f"{type(exc).__name__}: {exc}", 600)
                     if broke:
                         failure_signal["graph_break"] = _clip(str(exc), 600)
                 if broke:
@@ -3031,6 +3088,12 @@ def _guarded_regional(
                         failure_signal["declared_range_exceeded"] = _clip(
                             str(exc), 600)
                     _emit_declared_range_event(label, exc)
+                else:
+                    # pgw#1093: the catch-all that used to reach the wire as
+                    # NOTHING. Without it an installed-then-degraded target
+                    # and a never-installed one are the same reading.
+                    _emit_compiled_degrade_event(
+                        label, exc, lane="regional", fail_closed=fail_closed)
                 # Regional eager state is real only after the in-place block
                 # compilations are gone. Revoke proof after that mutation and
                 # before a state delta can be scheduled.
@@ -3471,6 +3534,23 @@ def graph_break_reason(pipeline: Any) -> str:
     signal = marker.get("failure_signal") if isinstance(marker, dict) else None
     if isinstance(signal, dict):
         return str(signal.get("graph_break") or "")
+    return ""
+
+
+def degrade_reason(pipeline: Any) -> str:
+    """pgw#1093: why this ARMED pipeline is permanently eager, or "".
+
+    Non-empty means `apply()` DID install the compiled callables and a served
+    call then failed permanently. That is a different fact from "no target
+    was ever installed", and before this the two were the same reading:
+    `is_compile_armed` False, `metrics.lane=…+eager`,
+    `fallback_reason=uncompiled`. The executor turns this into a
+    `compiled_degraded` eager posture so the distinction survives to the wire.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
+    if isinstance(signal, dict):
+        return str(signal.get("degrade_reason") or "")
     return ""
 
 
