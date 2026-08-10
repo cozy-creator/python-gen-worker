@@ -46,7 +46,7 @@ from __future__ import annotations
 import contextlib
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Optional, Tuple
+from typing import Any, Iterator, List, Optional, Tuple
 
 from .api.errors import WorkerError
 
@@ -104,7 +104,7 @@ class Census:
     """What the gate saw. Empty ``events`` is the property holding."""
 
     phase: str = ""
-    events: list = field(default_factory=list)
+    events: List[Materialization] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -117,11 +117,14 @@ def is_virtual(tensor: Any) -> bool:
     Meta tensors by device; fake tensors by TYPE, because a fake tensor
     deliberately reports a real device while backing it with no storage.
     """
+    fake_cls: Optional[type] = None
     try:
         from torch._subclasses.fake_tensor import FakeTensor
+
+        fake_cls = FakeTensor
     except Exception:  # noqa: BLE001 — old/absent torch: fall back to device
-        FakeTensor = ()  # type: ignore[assignment]
-    if FakeTensor and isinstance(tensor, FakeTensor):  # type: ignore[arg-type]
+        fake_cls = None
+    if fake_cls is not None and isinstance(tensor, fake_cls):
         return True
     device = getattr(tensor, "device", None)
     if device is None:
@@ -157,7 +160,7 @@ def observe(phase: str, census: Optional[Census] = None) -> Iterator[Census]:
     out = census if census is not None else Census()
     out.phase = str(phase or out.phase)
 
-    class _Watch(TorchFunctionMode):  # type: ignore[misc]
+    class _Watch(TorchFunctionMode):
         def __torch_function__(
             self, func: Any, types: Any, args: Any = (), kwargs: Any = None,
         ) -> Any:
