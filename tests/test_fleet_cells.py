@@ -123,19 +123,44 @@ def _publisher(calls):
 # ---------------------------------------------------------------------------
 
 
-def _adopted(monkeypatch, pending, *, artifact_bytes=b"cell-bytes"):
+_ADOPT_META = {"cell_key": "ck1-" + "d" * 56, "family": "fam",
+               "kind": "aot-inductor"}
+
+
+def _real_cell(path: Path, meta: dict) -> Path:
+    """A tarball with a READABLE `metadata.json` at the root.
+
+    pgw#1098: these helpers used to write raw bytes and patch the metadata
+    read. `adopt_delegated_mint` now refuses `cell_envelope_unreadable` before
+    the arm — unreadable is no longer the same thing as absent — so a test
+    about ADOPTION has to hand it a cell it can actually read.
+    """
+    import io as _io
+    import json as _json
+    import tarfile as _tarfile
+
+    payload = _json.dumps(meta).encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _tarfile.open(path, mode="w:gz") as tar:
+        info = _tarfile.TarInfo("metadata.json")
+        info.size = len(payload)
+        tar.addfile(info, _io.BytesIO(payload))
+    return path
+
+
+def _adopted(monkeypatch, pending):
     """Drive the pending to ADOPTED the way the delegated driver does: the
     child wrote a cell, `arm_aot` accepted it, `adopt_delegated_mint` records
     the identity. The arm itself is `provision`'s to prove (pgw#805)."""
-    child = pending.mint_root / "child-cell.tar.gz"
-    child.parent.mkdir(parents=True, exist_ok=True)
-    child.write_bytes(artifact_bytes)
+    child = _real_cell(pending.mint_root / "child-cell.tar.gz", _ADOPT_META)
     monkeypatch.setattr(
         provision, "arm_aot", lambda *a, **k: AdoptOutcome.hit())
-    monkeypatch.setattr(
-        fc, "_packed_metadata",
-        lambda artifact: {"cell_key": "ck1-" + "d" * 56, "family": "fam",
-                          "kind": "aot-inductor"})
+    # pgw#1098: the pgw#1042 divergence gate now actually RUNS on these
+    # fixtures. It used to be skipped silently because `meta` was `None` — the
+    # very hole this issue closes — so stubbing it here is making an existing
+    # bypass EXPLICIT, not adding one. These tests are about the publish path;
+    # the gate's own verdict is `test_handback_key_axes_pgw1042`'s.
+    monkeypatch.setattr(fc, "arm_axis_divergence", lambda arm_key, meta: "")
     return fc.adopt_delegated_mint(_Pipe(), pending, child)
 
 
