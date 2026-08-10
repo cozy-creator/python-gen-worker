@@ -1403,10 +1403,30 @@ class Lifecycle:
         `mark_once` keeps it once-per-process — it is called on every StateDelta
         send. The reconciliation detail is filled by the recorder, which is the
         only thing that knows the instant the row is actually released."""
-        boot_mod.mark_once(
+        if not boot_mod.mark_once(
             boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
             since_process_start=True,
-        )
+        ):
+            return
+        # pgw#1087: the pod reports its OWN decomposition, once, at the instant
+        # the boot closes — and says so when it cannot explain itself. A
+        # measurement whose only consumer is a hub table nobody has queried yet
+        # is how `cell_discover` survived four releases with no producer; the
+        # boot that took the time is the one place a hole is cheap to notice.
+        # `SHAPE_ENTRYPOINT` is the MINIMUM every pod boot produces (the cell
+        # phases depend on what the boot did), so `missing` here is always an
+        # instrument defect, never a boot-shape difference.
+        try:
+            verdict = boot_mod.completeness(boot_mod.SHAPE_ENTRYPOINT)
+            logger.info(
+                "[boot] servable in %dms — decomposition:\n%s",
+                verdict.total_ms, boot_mod.render_phase_table())
+            if not verdict.complete:
+                logger.warning(
+                    "[boot] this boot cannot fully explain itself: %s",
+                    verdict.explain())
+        except Exception:  # telemetry must never break the boot it measures
+            logger.debug("boot decomposition report failed", exc_info=True)
 
     async def _heartbeat_loop(self) -> None:
         """th#965 layer 2 + pgw#610: force-send the full StateDelta (which
