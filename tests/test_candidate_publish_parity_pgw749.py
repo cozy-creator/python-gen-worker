@@ -21,13 +21,12 @@ with exactly that shape."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterator, Tuple
+from typing import Iterator, Tuple
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import cell_key as ck
 from gen_worker import compile_cache as cc
 from gen_worker import env_seal
 from gen_worker.registry import CompileCell
@@ -107,41 +106,38 @@ def _cfg() -> CompileCell:
     )
 
 
-def test_cold_candidate_key_equals_warm_published_key(
+def test_cold_obligation_facts_equal_warm_facts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """The pgw#749 contract end-to-end at the SDK level: the pre-load
-    candidate key (cell_key.compute at a cold phase) must equal the key a
-    compile-warm mint stamps into its artifact metadata
-    (from_artifact_metadata over artifact_metadata). This is exactly the
-    parity boot-attach adoption requires."""
+    """The pgw#749 contract, restated post-pgw#1059: every PRE-TRACE
+    identity fact (the ArmIdentity the obligation opens with, incl. the
+    env-seal and toolchain digests a warm mint records) must be a function
+    of the DISK-shipped environment, never of load phase — otherwise the
+    parent's obligation and the child's recorded facts diverge at the
+    handback seam (`arm_axis_divergence`) on every cold boot."""
+    from gen_worker import fleet_cells
+
     cfg = _cfg()
 
-    # Cold phase — the arm-key computation the fetch-and-filter adoption
-    # path runs (fleet_cells/local_cells; pgw#1032 retired the executor's
-    # `cell_lookups()` advertisement of the same digest, not the digest).
+    # Cold phase — the obligation identity the arming policy computes.
     _phase(monkeypatch, tmp_path, "cold", _COLD_LIBS)
-    candidate = ck.compute(
-        "sdxl", "w8a8", 64, contract=cfg.contract_digest(),
-    ).digest
+    cold = fleet_cells.arm_identity("sdxl", "w8a8", 64, cfg)
+    cold_seal = env_seal.seal_digest(env_seal.effective_seal())
 
-    # Warm phase, fresh snapshot — the mint stamping its artifact.
+    # Warm phase, fresh snapshot — the facts a compile-warm mint records.
     _phase(monkeypatch, tmp_path, "warm", _COLD_LIBS + _WARM_EXTRA)
-    meta: Dict[str, Any] = cc.artifact_metadata(
-        family="sdxl",
-        shapes=cfg.shapes,
-        targets=cfg.targets,
-        guidance_scales=cfg.guidance_scales,
-        weight_lane="w8a8-lora64",
-        lora_bucket=64,
-        shape_contract=cc.declared_contract_facts(cfg),
+    warm = fleet_cells.arm_identity("sdxl", "w8a8", 64, cfg)
+    warm_seal = env_seal.seal_digest(env_seal.effective_seal())
+
+    assert cold_seal == warm_seal, (
+        "the seal digested the phase-dependent mapped set — the pgw#749 "
+        "candidate/publish divergence, reborn")
+    assert cold.facts_dict() == warm.facts_dict(), (
+        "cold-boot obligation facts != compile-warm facts — the handback "
+        "divergence check refuses every honest mint (pgw#749/pgw#1042)"
     )
-    published = ck.from_artifact_metadata(meta).digest
-    assert meta["cell_key"] == published  # the stamp agrees with its axes
-    assert candidate == published, (
-        "cold-boot candidate key != published key — boot-attach adoption "
-        "is structurally dead (pgw#749)"
-    )
+    assert cold.token == warm.token
+    assert cold.facts_dict()["lane"] == "w8a8-lora64"
 
 
 def test_artifact_manifest_records_disk_identity(

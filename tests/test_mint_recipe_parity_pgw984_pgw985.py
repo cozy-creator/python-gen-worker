@@ -184,7 +184,7 @@ def _request(
         regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
     pending = SimpleNamespace(
-        family=ep.FAMILY, cell_key="ck5-recipe-parity", cfg=cfg,
+        family=ep.FAMILY, arm_token="arm1-recipe-parity", cfg=cfg,
         target=workdir / "cell.tar.gz", mint_root=workdir)
     task = mint_delegate.MintTask(
         pending=pending, pipe=None, function=FUNCTION,
@@ -292,7 +292,7 @@ def aot_without_the_export(
     def _stub(request: Any, pipe: Any, cfg: Any, target: Path, **kwargs: Any):
         exported.append({"family": cfg.family, "target": target})
         return mp.MintReport(
-            status="minted", artifact=str(target), cell_key=request.cell_key,
+            status="minted", artifact=str(target), cell_key=request.arm_token,
             phase="finalize", phases=mint_child._close_phases())
 
     monkeypatch.setattr(mint_child, "_mint_aot", _stub)

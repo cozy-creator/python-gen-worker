@@ -241,7 +241,7 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
     child. Round-tripped through the real msgspec encode/decode, because the
     boundary IS a file."""
     pending = SimpleNamespace(
-        family="sdxl", cell_key="ck1-abc",
+        family="sdxl", arm_token="arm1-abc",
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
                         family="sdxl", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
@@ -304,7 +304,7 @@ def test_a_narrowed_tree_with_no_override_refuses_by_name(
     # no discovery, no toolchain probe and no weights read.
     request = mp.MintRequest(
         function="composed-echo", modules=("harness.toy_endpoints",),
-        family="sdxl", cell_key="ck1-abc",
+        family="sdxl", arm_token="arm1-abc",
         target=str(tmp_path / "cell.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
@@ -421,7 +421,7 @@ def _fake_card(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _task(tmp_path: Path) -> mint_delegate.MintTask:
     pending = fleet_cells.PendingSelfMint(
-        family="sdxl", cell_key="ck1-abc", ref="root/family-sdxl#ck1-abc",
+        family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#ck1-abc",
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
                         family="sdxl", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),

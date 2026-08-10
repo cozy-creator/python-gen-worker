@@ -1,23 +1,14 @@
-"""pgw#1032 — the COMPUTED key space has had no producer since pgw#1010, so
-advertising it as deliverable demand advertised nothing.
+"""pgw#1032 (re-cut by pgw#1059) — the COMPUTED key space has had no
+producer since pgw#1010, so advertising it as deliverable demand advertised
+nothing.
 
-Two key digests share the ``ck1-<56 hex>`` shape and are DISJOINT SPACES by
-construction:
-
-* ``cell_key.compute`` hard-codes ``kind="inductor"`` — what THIS runtime's
-  static axes ask for, known before anything is compiled;
-* every publishable cell is STAMPED by ``aot_mint.cell_identity`` with
-  ``kind=aot_serve.ARTIFACT_KIND`` (``"aot-inductor"``) — what the exported
-  cell IS, unknowable until the export finishes.
-
-``kind`` is inside the canonical axis set the digest is taken over, so the two
-can never collide. Since pgw#1010 the AOT export is the ONLY mint any pod
-runs (JIT intake compiles in-process and names no artifact at all), so nothing
-has produced an ``inductor``-kind artifact on any pod since. Every hub
-mechanism keyed on exact equality with a COMPUTED key — store lookup delivery,
-HelloAck snapshot attach, the ``ADOPT_COMPILE_CACHE`` hot push, the
-``cell_demand`` ledger — was therefore structurally unable to fire, and this
-issue deletes the worker half that fed them.
+pgw#1059 finished the cut: the pre-trace "computed key" no longer EXISTS as
+a key at all. An obligation's identity is ``fleet_cells.arm_identity`` — an
+``arm1-``-prefixed token that ``cell_key.is_key`` rejects by SPELLING — and
+the only cell key there is is the STAMP ``aot_mint.cell_identity`` derives
+from the artifact's own recorded facts (graph x envelope x sm x toolchain).
+The two spaces that pgw#1032/#1033 kept disjoint by a ``kind`` axis value
+are now disjoint by grammar, which no reader can miss.
 
 What SURVIVES is the ACTIVE (stamped) advertisement: the worker states the
 identity of the artifact it is actually serving, and the hub's dispatch fence
@@ -26,7 +17,6 @@ verifies THAT against its own store. These tests pin both halves.
 
 from __future__ import annotations
 
-from typing import Dict
 
 import pytest
 
@@ -35,61 +25,39 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 FAMILY = "sdxl"
 
-#: One axis set, spelled once, so the only difference between the two keys
-#: below is the ``kind`` value — which is the whole point.
-_SHARED_AXES: Dict[str, str] = {
-    "format": "2",
-    "family": FAMILY,
-    "lane": "w8a8",
-    "sm": "89",
-    "contract": "0123456789abcdef",
-    "env_seal": "fedcba9876543210",
-    "toolchain": "00112233445566aa",
-}
-
-
 # ---------------------------------------------------------------------------
 # 1. The disjointness proof, in code
 # ---------------------------------------------------------------------------
 
 
-def test_a_computed_key_and_a_stamped_key_are_disjoint_spaces() -> None:
-    """The fact the whole cut rests on: identical axes, different ``kind``,
-    different digest. Exact-key equality between the two can never hold, so
-    every hub mechanism that looked a COMPUTED key up in a store of STAMPED
-    keys was dead by construction."""
-    computed = cell_key.from_axes({**_SHARED_AXES, "kind": "inductor"})
-    stamped = cell_key.from_axes({**_SHARED_AXES, "kind": aot_serve.ARTIFACT_KIND})
+def test_an_arm_token_and_a_stamped_key_are_disjoint_by_grammar() -> None:
+    """pgw#1059: an obligation identity is not a cell key in any reader's
+    eyes — ``arm1-`` never passes ``is_key``, so every mechanism that keys
+    a store of STAMPED keys structurally cannot consume one."""
+    from gen_worker import fleet_cells
 
+    token = fleet_cells.ArmIdentity(facts=(("family", FAMILY),)).token
+    assert token.startswith(fleet_cells.ARM_SCHEME + "-")
+    assert not cell_key.is_key(token)
     assert aot_serve.ARTIFACT_KIND == "aot-inductor"
-    assert computed.digest != stamped.digest, (
-        "kind is inside the canonical axis set the digest covers; if these "
-        "ever collide the pull-by-key delivery this issue retired was not "
-        "dead after all")
-    # Both are well-formed keys — the spaces are indistinguishable by SHAPE,
-    # which is exactly why the divergence went unnoticed for so long.
-    assert cell_key.is_key(computed.digest) and cell_key.is_key(stamped.digest)
 
 
-def test_compute_can_only_ever_mint_an_inductor_kind_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``cell_key.compute`` hard-codes the kind; no caller can widen it."""
-    from gen_worker import compile_cache as cc
-
-    monkeypatch.setattr(cc, "runtime_key", lambda: {"sm": "89", "torch": "2.9"})
-    monkeypatch.setattr(cc, "toolchain_digest", lambda: {"torch": "2.9.0"})
-    key = cell_key.compute(FAMILY, "w8a8", 0, contract="0123456789abcdef")
-    assert key.axes_dict()["kind"] == "inductor"
+def test_the_pre_trace_computed_key_no_longer_exists() -> None:
+    """The producer of the computed key space is DELETED, not merely
+    unplugged: ``cell_key`` exposes no ``compute``/``from_artifact_metadata``
+    — the stamp derivation is the only key derivation there is."""
+    assert not hasattr(cell_key, "compute")
+    assert not hasattr(cell_key, "from_artifact_metadata")
+    assert not hasattr(cell_key, "stamp")
+    assert not hasattr(cell_key, "mismatch")
 
 
-def test_a_stamped_aot_key_is_refused_by_the_computed_brain() -> None:
-    """The other direction of the same wall: an exported cell's identity may
-    not be RECOMPUTED from inductor-cache axes — it is read off the envelope.
-    So the hub could not have bridged the two spaces either."""
-    with pytest.raises(cell_key.CellKeyError, match="aot-inductor"):
-        cell_key.from_artifact_metadata(
-            {"kind": aot_serve.ARTIFACT_KIND, "cell_key": "ck1-" + "b" * 56})
+def test_a_non_exported_kind_has_no_key_identity() -> None:
+    """The other direction of the same wall: only exported cells are keyed;
+    a torch-inductor-cache artifact is refused by name."""
+    with pytest.raises(cell_key.CellKeyError, match="no cell-key identity"):
+        cell_key.from_exported_artifact_metadata(
+            {"kind": "torch-inductor-cache", "cell_key": "ck1-" + "b" * 56})
 
 
 # ---------------------------------------------------------------------------

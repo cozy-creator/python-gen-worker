@@ -49,27 +49,18 @@ def test_proven_since_requires_new_successful_calls_and_no_revocation():
 
 
 def test_exported_kind_cell_key_refusals_are_named():
-    """cell_key.from_artifact_metadata recomputes INDUCTOR-cache axes. An
-    exported cell rides the same key space but not those axes, so the refusal
-    must name the function that DOES key it instead of failing opaquely.
+    """pgw#1059: only exported (`aot-inductor`) cells are keyed, and every
+    refusal names the missing fact instead of failing opaquely."""
+    for kind in ("torch-inductor-cache", "trt-engine", ""):
+        with pytest.raises(cell_key.CellKeyError) as unknown:
+            cell_key.from_exported_artifact_metadata({"kind": kind})
+        assert "no cell-key identity" in str(unknown.value)
 
-    pgw#1046 changed what that redirect says: an exported cell's key used to be
-    readable only as the mint's stamp, and is now recomputable from the cell's
-    own recorded blocks (``from_exported_artifact_metadata``). The stamp still
-    appears in the message because a caller holding a bad envelope wants to see
-    which cell it was holding."""
-    with pytest.raises(cell_key.CellKeyError) as exc:
-        cell_key.from_artifact_metadata(
-            {"kind": "aot-inductor", "cell_key": "ck1-" + "a" * 56})
-    message = str(exc.value)
-    assert "aot-inductor" in message
-    assert "from_exported_artifact_metadata" in message
-    assert "ck1-" + "a" * 56 in message
+    with pytest.raises(cell_key.CellKeyError) as no_sm:
+        cell_key.from_exported_artifact_metadata({"kind": "aot-inductor"})
+    assert "sm" in str(no_sm.value)
 
-    with pytest.raises(cell_key.CellKeyError) as missing:
-        cell_key.from_artifact_metadata({"kind": "aot-inductor"})
-    assert "MISSING" in str(missing.value)
-
-    with pytest.raises(cell_key.CellKeyError) as unknown:
-        cell_key.from_artifact_metadata({"kind": "trt-engine"})
-    assert "no cell-key identity" in str(unknown.value)
+    with pytest.raises(cell_key.CellKeyError) as no_entries:
+        cell_key.from_exported_artifact_metadata(
+            {"kind": "aot-inductor", "sm": "sm_89"})
+    assert "combined_graph_hash" in str(no_entries.value)

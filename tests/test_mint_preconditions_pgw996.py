@@ -442,7 +442,7 @@ def test_the_CHILD_still_refuses_a_toolchainless_AOT_mint(
         slots={}, recipe=mint_child.RECIPE_AOT,
         target="/tmp/x", capture="/tmp/y", device=0, vram_cap_bytes=0,
         modules=[], function="generate", cfg=None, configs={},
-        execution_lane="", report="/tmp/r", cell_key="")
+        execution_lane="", report="/tmp/r", arm_token="")
     with pytest.raises(mint_child.MintChildRefused, match="no C\\+\\+ compiler"):
         mint_child.mint(req)
 

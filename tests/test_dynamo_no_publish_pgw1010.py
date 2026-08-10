@@ -138,7 +138,7 @@ def test_every_pending_is_a_delegated_aot_mint() -> None:
     assert "recipe" not in fields
     assert "capture_dir" not in fields
     pending = fc.PendingSelfMint(
-        family="fam", cell_key="ck5-x", ref="r#ck5-x", cfg=None,
+        family="fam", arm_token="ck5-x", ref="r#ck5-x", cfg=None,
         target=Path("/tmp/cell.tar.gz"), mint_root=Path("/tmp"),
         publisher=None)
     assert pending.delegated is True

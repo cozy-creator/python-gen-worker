@@ -442,13 +442,12 @@ def _sim_apply_factory(sim: _Sim):
     return _sim_apply
 
 
-def _fake_key_compute(family: str, weight_lane: str = "", lora_bucket: int = 0,
-                      *, contract: str, regional: bool = False,
-                      image_digest: Optional[str] = None) -> Any:
+def _fake_arm_identity(family: str, weight_lane: str = "",
+                       lora_bucket: int = 0, cfg: Any = None) -> Any:
     digest = hashlib.blake2s(
-        f"{family}|{weight_lane}|{lora_bucket}|{contract}|{regional}".encode()
+        f"{family}|{weight_lane}|{lora_bucket}".encode()
     ).hexdigest()[:56]
-    return SimpleNamespace(digest="ck1-" + digest, axes={})
+    return SimpleNamespace(token="arm1-" + digest, facts_dict=lambda: {})
 
 
 SHAPE = (768, 768)
@@ -533,7 +532,7 @@ class _Rig:
         monkeypatch.setattr(cc, "apply", _sim_apply_factory(self.sim))
         monkeypatch.setattr(
             cc, "inductor_counters", lambda: dict(self.sim.counters))
-        monkeypatch.setattr(cell_key_mod, "compute", _fake_key_compute)
+        monkeypatch.setattr(fleet_cells, "arm_identity", _fake_arm_identity)
         monkeypatch.setattr(cc, "reset_target_code", lambda pipeline: 0)
         # The sim never enters dynamo, so dynamo's cumulative compile clock
         # never moves. Stub it: what is under test is that the executor READS

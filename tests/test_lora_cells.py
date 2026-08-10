@@ -251,8 +251,9 @@ def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
     raised CellSelectionBugError (`weight_lane 'lora64' != pipeline ''`),
     which cascaded into the gw#608 seeded-cell refusal and retired the pod."""
 
-    # Pin the runtime axes so the self-key computes on a CPU host (the live
-    # failure needs cell_key.compute to succeed — sku/sm come from the GPU).
+    # Pin the runtime axes so the self-verdict computes on a CPU host (the
+    # live failure needs the seeded self-cell check to succeed — sku/sm come
+    # from the GPU).
     rt = {
         "sku": "rtx-4090", "sm": "sm_89", "torch": "2.13.0+cu130",
         "triton": "3.7.1", "cuda": "13.0", "cuda_driver": "13020",
@@ -272,7 +273,7 @@ def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
     meta = compile_cache.artifact_metadata(
         family="loracells-test", shapes=[(64, 64)], targets=["unet"],
         weight_lane="lora64", lora_bucket=64,
-        shape_contract=compile_cache.declared_contract_facts(cfg),
+        declared_compile_contract=compile_cache.declared_compile_facts(cfg),
     )
     artifact = compile_cache.pack(src, tmp_path / "cell.tar.gz", meta)
 

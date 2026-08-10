@@ -9207,7 +9207,7 @@ class Executor:
                 # classification (no cell was produced at all).
                 activity_mod.emit_event(
                     "self_mint_abort",
-                    f"family={pending.family} key={pending.cell_key}: the "
+                    f"family={pending.family} key={pending.arm_token}: the "
                     f"delegated child produced no adoptable cell "
                     f"({result.detail or result.status}); this object stays "
                     f"eager and nothing is published",

@@ -990,16 +990,19 @@ def test_cell_identity_refuses_an_artifact_with_no_sm(
         aot_mint.cell_identity(meta)
 
 
-def test_key_scheme_is_unchanged_by_the_new_kind(
+def test_key_scheme_is_ck1_and_the_axes_are_the_four(
     _gpu_runtime: None, packages: Dict[str, Path],
 ) -> None:
-    """A new artifact KIND rides the existing axis set — ``kind`` is the
-    discriminator, so no KEY_SCHEME bump strands the dynamo cells."""
+    """pgw#1059: the exported cell keys on exactly graph x envelope x sm x
+    toolchain under the (redefined) ck1 scheme — `kind` is a metadata fact
+    the compat gates read, never an axis."""
     spec = _spec()
     meta = _meta_for(_export_lifted(), packages["code_only"], spec)
     key = aot_mint.cell_identity(meta)
-    assert key.axes_dict()["kind"] == aot_serve.ARTIFACT_KIND
+    assert set(key.axes_dict()) == {"graph", "envelope", "sm", "toolchain"}
+    assert key.axes_dict()["graph"] == meta["combined_graph_hash"]
     assert key.digest.startswith(cell_key.KEY_SCHEME + "-")
+    assert cell_key.KEY_SCHEME == "ck1"
     assert cell_key.is_key(key.digest)
 
 

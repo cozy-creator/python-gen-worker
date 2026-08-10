@@ -862,7 +862,7 @@ def _symbol_ranges(program: Any) -> Dict[str, Tuple[int, int]]:
                 f"exported program symbol {symbol} has an unbounded range "
                 f"({getattr(interval, 'lower', None)}.."
                 f"{getattr(interval, 'upper', None)}); an artifact must declare "
-                f"finite admissible traffic (pgw#704 B2)")
+                f"a finite declared envelope (pgw#704 B2)")
         out[str(symbol)] = (lower, upper)
     return out
 

@@ -55,14 +55,16 @@ about the WEIGHTS, not about the compiled program:
 `tensor-` and not `weight-` in both names, deliberately — they govern scales,
 buffers and computed tables, not just trained weights.
 
-Widening the envelope moves the promise; it does not move the fact. The cell key
-still fuses both halves into one `contract` axis — splitting it into
-`graph` x `envelope` is a single coordinated change to the key schema (pgw#1059,
-landing pre-launch as a REDEFINITION of `ck1` with the disposable corpus purged),
-so the KEY still says `contract` while the prose already says which half it
-means. Do not rename an axis, a metadata block key or a wire field ahead of that
-change: a name that participates in a digest re-keys every published cell the
-moment it moves.
+Widening the envelope moves the promise; it does not move the fact. The cell
+key says exactly that since pgw#1059 (the ck1 REDEFINITION, landed pre-launch
+with the disposable corpus purged): the key is `graph` x `envelope` x `sm` x
+`toolchain` — the traced computation, the declared serving region, the GPU
+architecture, and the compiler stack as we configure it (binaries + the
+settings-declaration digest; the env seal's declaration folds in there, its
+boot/pre-trace GATES unchanged). `kind`/`format` are single-valued metadata,
+`family`/`lane` store metadata + discovery scoping, and the membership axiom
+(pgw#1059 amendment 6: "don't key on parameters that don't require us to
+recompile") is enforced by `tests/test_cell_key_pgw1059.py`.
 
 Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
 (model, shape) and needs a C toolchain prod worker images don't ship. The

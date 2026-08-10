@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from gen_worker import cell_key as cell_key_mod
 from gen_worker import activity, aot_serve
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
@@ -132,11 +133,23 @@ def _meta(**over: Any) -> Dict[str, Any]:
         # anywhere: this host's machine, no ISA level.
         "host_isa": {"machine": platform.machine(), "march": "", "simdlen": 0,
                      "level": ""},
+        # pgw#1059: the identity blocks the four-axis key restates from —
+        # verify_contract refuses a stamp the artifact cannot restate.
+        "env_seal": {"seal_v": 4, "env": {"PYTHONHASHSEED": "0"}},
+        "toolchain": {"torch": "t" * 16, "settings_declaration": "d" * 16,
+                      "loaded_libs": "l" * 16},
+        "weight_lane": "w8a8",
+        "declared_envelope": {"shapes": [[1024, 1024]], "text_lens": [77],
+                              "guidance": [7.5]},
     }
     m["combined_graph_hash"] = aot_serve.combined_graph_hash(
         str((b or {}).get("class_hash") or "")
         for b in entries.values() if isinstance(b, dict))
     m.update(over)
+    try:
+        m["cell_key"] = cell_key_mod.from_exported_artifact_metadata(m).digest
+    except cell_key_mod.CellKeyError:
+        pass  # deliberately-malformed variants keep the placeholder stamp
     return m
 
 
@@ -174,7 +187,7 @@ def test_successful_arm_returns_an_armed_outcome_naming_the_cell(
         aot_serve, "_load_package", lambda path, entry: FakePackage())
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
     assert out.armed and out.reason == ""
-    assert KEY in out.identity and FAMILY in out.identity
+    assert _meta()["cell_key"] in out.identity and FAMILY in out.identity
 
 
 def test_key_mismatch_named_on_the_wire(
@@ -185,7 +198,8 @@ def test_key_mismatch_named_on_the_wire(
     art = _tar(tmp_path, _meta(sm="sm_80"))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
     assert not out.armed and out.reason == "key_mismatch"
-    assert KEY in out.detail  # the refusal names the candidate cell
+    # the refusal names the candidate cell (its own restated stamp)
+    assert _meta(sm="sm_80")["cell_key"] in out.detail
 
 
 def test_host_isa_unsupported_named_on_the_wire(

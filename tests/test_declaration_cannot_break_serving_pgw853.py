@@ -253,8 +253,10 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
     monkeypatch.setattr(
-        fleet_cells.cell_key, "compute",
-        lambda *a, **k: type("_K", (), {"digest": "ck1-" + "a" * 56})())
+        fleet_cells, "arm_identity",
+        lambda *a, **k: type("_A", (), {
+            "token": "arm1-" + "a" * 56,
+            "facts_dict": lambda self: {}})())
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
     monkeypatch.setattr(
         fleet_cells.cc, "arm_jit_intake", lambda p, c: None)

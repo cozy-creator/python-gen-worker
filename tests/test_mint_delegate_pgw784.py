@@ -108,8 +108,9 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
     # No CUDA on this box, so the real sm axis is unavailable; the key itself
     # is not what this test is about.
     monkeypatch.setattr(
-        fleet_cells.cell_key, "compute",
-        lambda *a, **k: SimpleNamespace(digest="ck1-test"))
+        fleet_cells, "arm_identity",
+        lambda *a, **k: SimpleNamespace(
+            token="arm1-test", facts_dict=lambda: {}))
 
     prior = dict(os.environ)
     outcome = fleet_cells.enable_compiled(
@@ -121,7 +122,7 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
         "child compiles")
     pending = outcome.self_mint
     assert pending is not None and pending.delegated
-    assert pending.cell_key and pending.target.name.endswith(".tar.gz")
+    assert pending.arm_token and pending.target.name.endswith(".tar.gz")
     for key in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
         assert os.environ.get(key) == prior.get(key), (
             "the process-global inductor cache dir must not move: the child "
@@ -161,7 +162,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
     a child warming at different config traces different graphs and the
     parent's own proof then misses."""
     pending = SimpleNamespace(
-        family="sdxl", cell_key="ck1-abc", cfg=_cfg(),
+        family="sdxl", arm_token="ck1-abc", cfg=_cfg(),
         target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="gen",
@@ -185,7 +186,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
 
 def _task(tmp_path: Path, **over: Any) -> mint_delegate.MintTask:
     pending = fleet_cells.PendingSelfMint(
-        family="sdxl", cell_key="ck1-abc",
+        family="sdxl", arm_token="ck1-abc",
         ref="root/family-sdxl#ck1-abc", cfg=_cfg(),
         target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)

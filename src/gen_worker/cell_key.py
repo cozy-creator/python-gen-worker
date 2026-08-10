@@ -1,65 +1,83 @@
-"""Worker-owned compile-cell identity (gw#581, th#883).
+"""Worker-owned compile-cell identity (gw#581, th#883; redefined by pgw#1059).
 
 ONE compatibility brain: the worker computes the exact key of the compile
-cell its runtime can execute, from its OWN diagnostics, with this module —
-and every consumer of cell identity uses the same code:
+cell from the artifact's OWN recorded facts, with this module — and every
+consumer of cell identity uses the same code: the production mint
+(``aot_mint.mint``) stamps the key it actually produced, and the publish
+path (``fleet_cells._identity_axes``) recomputes the same key from the same
+facts before a byte moves.
 
-* the fleet executor advertises the key it wants (pull-by-key: the hub
-  serves bytes by key or records demand for the forge; it never matches);
-* the production mint (``aot_mint.mint``) stamps the key it actually
-  produced, derived from the artifact's own recorded axes;
-* cozy-local's self-mint (gw#555) looks up / saves its store by the same
-  key.
+THE MEMBERSHIP AXIOM (Paul, 2026-08-09, pgw#1059 amendment 6): **the key
+contains exactly what determines the compiled artifact — nothing else.**
+"Don't key on parameters that don't require us to recompile." That single
+test admits four axes and no more:
 
-The key is the RECIPE DIGEST (Paul's exact-identity ruling): "look at
-our code and say 'this is the graph we need' — that is our unique
-identifier. If the recipe changes it gets a new identifier, stranding the
-old ones, which is fine." No version comparison, no relaxable axes, no
-cross-key candidates — a key either matches exactly or the cell does not
-exist for this runtime.
+    graph         the traced computation: ``combined_graph_hash`` — first 16
+                  hex of sha256 over the newline-joined SORTED per-entry
+                  ``class_hash`` values (pgw#716). Each class hash folds the
+                  entry's target, fork coordinate, class dims, declared-range
+                  digest, graph-interface block, trace mode and lora bucket,
+                  so every trace-shaping fact reaches the key through this
+                  one derivation (``aot_serve.class_hash`` /
+                  ``aot_serve.combined_graph_hash`` — stamped by
+                  ``aot_serve.artifact_metadata``, proven at admission by
+                  ``aot_serve.verify_contract``, READ — never re-derived —
+                  here).
+    envelope      the DECLARED serving region (flight-envelope sense): the
+                  shape ladder x text lens x guidance classes the author
+                  declared, plus the (currently empty) behavior-posture
+                  overlay slot (amendment 5). Changes when the author
+                  widens/narrows served traffic without pretending the
+                  computation changed. ONE derivation:
+                  :func:`envelope_digest` over the recorded
+                  ``declared_envelope`` block.
+    sm            compute capability (sm_89, ...) — the GPU architecture.
+    toolchain     "the compiler stack AS WE CONFIGURE IT" (amendment 4):
+                  CONTENT digest of the compile stack (pgw#710 dist-info
+                  RECORDs + bundled ptxas/nvdisasm binaries) PLUS the
+                  settings DECLARATION digest (pgw#1049 seal v4) and the
+                  boot-frozen loaded-library digest. Content, never version
+                  strings.
 
-    format        artifact format version (compile_cache.ARTIFACT_FORMAT)
-    kind          "inductor" (TRT engines keep their own legacy identity)
-    family        graph identity: fine-tunes of one family share cells
-    lane          canonical traced weight lane token ("", w8a16, w8a8,
-                  [-loraN]) — lane graphs differ (gw#534/gw#561)
-    sm            compute capability (sm_100, ...)
-    contract      digest of the DECLARED shape contract (SDK v2, pgw#647):
-                  shapes, targets, text_len, dynamic dims, regional mode,
-                  lora bucket, warm guidance classes
-    env_seal      digest of the execution-environment seal — since
-                  pgw#1049 a digest of the settings DECLARATION (env, torch
-                  flags + knobs, dynamo posture, host-ISA clamp, process
-                  posture) plus the toolchain library content fact.
-                  Internally versioned (seal_v)
-    toolchain     CONTENT digest of the compile stack (pgw#710): dist-info
-                  RECORDs of torch/triton/nvidia-*/diffusers/transformers
-                  + the bundled ptxas/nvdisasm binaries. Replaces the old
-                  torch/triton/cuda/diffusers/transformers VERSION axes —
-                  content, never version strings
+Axes deliberately NOT in the key, each because it fails the axiom:
 
-pgw#990 DROPS ``code_closure`` from the key. It is still RECORDED on
-every artifact and still drives ``compile_cache``'s local re-trace memo, but
-it is not identity: Paul's final ruling is that identity is the COMPUTATION
-(traced graph x sm x toolchain x env_seal) and "code hashes are a memo, never
-identity". A 147-file content hash made every wheel release re-key every cell
-in the fleet for edits that could not change a traced graph — 0.93.0 -> 0.93.1
-moved the sdxl key on three plumbing files. Cells are stranded by SCHEME here,
-by name, once, instead of silently on every release.
+* ``kind`` / ``format`` — single-valued since pgw#1010 (``aot-inductor`` /
+  format 2): zero information, and ``kind``'s dual digest spaces already
+  killed pull-by-key once (pgw#1032/#1033). They stay METADATA facts that
+  the compat gates (``aot_serve.verify_declared``) refuse on by name.
+* ``family`` / ``lane`` — store metadata + discovery scoping only (Paul:
+  "identity is the computation; family is namespace/metadata only"). Lanes
+  that genuinely differ differ in ``graph`` already (w8a8 ops, lora_a/
+  lora_b lifted inputs); two lanes tracing identical graphs SHOULD share.
+* ``env_seal`` — LEFT the key (amendment 4): with pgw#1049's single
+  settings authority the declaration is ONE value fleet-wide, and a
+  constant axis carries zero bits. Settings are compiler flags, so the
+  declaration digest folds into ``toolchain`` — a deliberate settings
+  change still re-keys, through the axis it honestly belongs to. The
+  seal's non-identity roles survive unchanged as GATES: boot verify
+  (``env_seal.establish`` fail-closed) and the pre-trace tripwire
+  (``env_seal.assert_seal_unchanged``). The seal dict is still RECORDED on
+  every artifact and its digest still rides the published identity-axis
+  map (the hub's ``ArtifactIdentity.env_seal_digest`` requires it — a wire
+  fact, not a key axis, exactly like ``graph_contract``).
+* ``code_closure`` — pgw#990: a memo, never identity.
+* ``sku`` / ``cuda_driver`` / version strings / ``image_digest`` —
+  observability (pgw#691, gw#577, pgw#700).
 
-Axes deliberately NOT in the key, recorded in metadata for observability
-and runtime compat checks (``compile_cache.verify``) only: ``sku`` (pgw#691
-— no guard or artifact fact observes it), ``cuda_driver`` (gw#577),
-``torch``/``triton``/``cuda``/``gen_worker``/``diffusers``/``transformers``
-version strings and ``image_digest`` (exact identity — their CONTENT rides the
-toolchain and code_closure axes; version strings and image identity are
-observability, not identity).
+There is no pre-trace ("arm") cell key any more. The pgw#1033/#1042
+two-digest-space design — a COMPUTED ``kind="inductor"`` key from declared
+facts beside the STAMPED ``aot-inductor`` key from traced facts — is
+retired with the ``contract`` axis that made it necessary: attempt 28 read
+the two as one diverging key, which is exactly the fused-axis failure
+pgw#1059 splits away. A mint obligation is named by
+``fleet_cells.arm_identity`` (NOT a cell key, never ck-prefixed), and the
+cozy-local store verdict compares recorded facts directly
+(``compile_cache.local_cell_mismatch``).
 
 A wrong key can only produce a MISS (eager + demand + forge), never a
-refusal: verify-on-receipt of a self-requested cell degenerates to a digest
-check, and any failure to arm one is by construction a selection-logic bug
-that must surface loudly (``cell_selection_bug``), never a silent eager
-fallback.
+refusal: any failure to arm a self-requested cell is by construction a
+selection-logic bug that must surface loudly (``cell_selection_bug``),
+never a silent eager fallback.
 """
 
 from __future__ import annotations
@@ -68,15 +86,16 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping
-from . import env_seal
 
-# pgw#958 (DESIGN-RULINGS §1.27(g); Paul 2026-08-04, reaffirmed 2026-08-07
-# over pgw#990's ck6 — "the ck6 is wrong and can be removed, the v1 is the
-# correct one"): the counter restarts at 1, and the pre-existing ck1..ck6
-# corpus is PURGED in the same cut (th#1636), so no two cells ever share a
-# scheme token with different meanings. ck1 is the only live scheme; new
-# identity facts ride the content digests (seal_v / closure / toolchain
-# values), never new axes and never a new scheme number.
+# pgw#958 (DESIGN-RULINGS §1.27(g)) and pgw#1059 amendment 1: the counter
+# stays at 1 — Paul 2026-08-09: "stick with version-1 for now since we're
+# still pre-launch". pgw#1059 REDEFINES ck1 (contract -> graph x envelope,
+# metadata axes dropped, env_seal folded into toolchain) and the disposable
+# pre-redefinition corpus is PURGED (pgw#868 runbook step) — the same
+# precedent as the §1.27(g) ck1..ck6 counter reset. The scheme-prefix
+# machinery STAYS: post-launch, the identical change would be ck2 with
+# strand-by-name. New identity FACTS ride the content digests (envelope
+# facts v, toolchain entries), never new axes and never a new scheme number.
 KEY_SCHEME = "ck1"
 _PREFIX = KEY_SCHEME + "-"
 # The key digest doubles as the store flavor token, whose shared grammar
@@ -84,44 +103,45 @@ _PREFIX = KEY_SCHEME + "-"
 # chars: 56 hex chars of SHA-256 (224 bits) keeps the whole key at 60.
 _DIGEST_HEX = 56
 
-# Axes that must be non-empty for a computable key: a runtime that cannot
-# state them has no cell identity (CPU-only build, failed CUDA probe).
-_REQUIRED = ("format", "kind", "family", "sm", "contract", "env_seal",
-             "toolchain")
-# Axes that may be legitimately absent ("" => omitted from canonical form):
-# lane "" is the plain-resident graph family.
-#
-# `mode` DELETED per Paul 2026-08-09 (pgw#1049): pinned "" since regional
-# died (#846), and empty optionals never enter the canonical form, so no
-# minted key ever contained it — zero re-key by construction, no scheme
-# bump. Regional discrimination was redundant anyway: `regional` is a
-# declared-contract fact, so it rides the `contract` axis. A stale caller
-# passing `mode` now gets from_axes' typed unknown-axis refusal.
-_OPTIONAL = ("lane",)
+# THE four axes, all required — see THE MEMBERSHIP AXIOM in the module
+# docstring. There are no optional axes: an exported cell that cannot state
+# one of these has no identity. Adding a name here is adding an axis, which
+# the axiom forbids unless the new fact provably alters the compiled
+# artifact AND cannot ride an existing axis's fact block
+# (tests/test_cell_key_pgw1059.py enforces the set).
+_REQUIRED = ("graph", "envelope", "sm", "toolchain")
+_OPTIONAL: tuple = ()
 
-#: The `kind` AXIS VALUE (and envelope `kind`) of an exported .pt2 cell — the
-#: only publishable kind since pgw#1010. `from_axes` validates axis NAMES, so
-#: the value discriminates without a KEY_SCHEME bump.
+#: The `kind` METADATA value of an exported .pt2 cell — the only publishable
+#: kind since pgw#1010, and since pgw#1059 a compat-gate fact rather than a
+#: key axis (`aot_serve.verify_declared` refuses on it by name).
 EXPORTED_KIND = "aot-inductor"
 
-#: pgw#1046: the envelope block recording an exported cell's DECLARED TRAFFIC
-#: (shapes / text_lens / guidance). It is not an axis — it is the last part of
-#: the `contract` axis's input that used to exist only in the mint's live
-#: `ExportSpec`. Recorded, the whole exported-cell key is recomputable from the
-#: artifact alone, which is what lets publish state full identity axes instead
-#: of a subset (`fleet_cells._identity_axes`).
-EXPORT_TRAFFIC_KEY = "declared_traffic"
+#: pgw#1046/pgw#1059: the cell-metadata block recording an exported cell's
+#: DECLARED ENVELOPE — the declared serving region (shapes / text_lens /
+#: guidance, plus the empty-for-now behavior-posture ``overlay`` slot,
+#: amendment 5). It is the ``envelope`` axis's whole input; recorded on the
+#: artifact so the exported-cell key is recomputable from the artifact alone
+#: (which is what lets publish state full identity axes,
+#: ``fleet_cells._identity_axes``).
+#:
+#: Naming note (pgw#1059 §F): this is the DECLARED envelope — the
+#: Paul-ratified axis noun. The OTHER "envelope" in this codebase is the
+#: cell-metadata blob itself (``kernel_path.envelope_block``, the hub error
+#: envelope). Where both appear, write "the cell-metadata envelope" vs "the
+#: declared envelope".
+EXPORT_ENVELOPE_KEY = "declared_envelope"
 
 
 class CellKeyError(ValueError):
-    """The runtime cannot state a required key axis."""
+    """The artifact (or runtime) cannot state a required key axis."""
 
 
 @dataclass(frozen=True)
 class CellKey:
     """A computed cell identity: canonical axes + their digest."""
 
-    axes: tuple  # sorted ((name, value), ...) — empty values omitted
+    axes: tuple  # sorted ((name, value), ...)
 
     def axes_dict(self) -> Dict[str, str]:
         return dict(self.axes)
@@ -170,15 +190,22 @@ def is_key(value: str) -> bool:
 def from_axes(axes: Mapping[str, str]) -> CellKey:
     """Canonicalize an axes mapping into a :class:`CellKey`.
 
-    Unknown axes are rejected (a new axis is a KEY_SCHEME bump, never a
-    silent widening); empty optional axes are omitted so "" and absent can
-    never diverge.
+    Unknown axes are rejected TYPED — including every pre-pgw#1059 axis name
+    (``contract``, ``env_seal``, ``kind``, ``format``, ``family``, ``lane``):
+    a new axis is forbidden by the membership axiom, and a stale caller
+    shipping a dropped one must fail here, not silently widen the key.
     """
     clean: Dict[str, str] = {}
     for name, value in axes.items():
         text = str(value or "").strip()
         if name not in _REQUIRED and name not in _OPTIONAL:
-            raise CellKeyError(f"unknown cell-key axis {name!r}")
+            raise CellKeyError(
+                f"unknown cell-key axis {name!r}: the key is exactly "
+                f"{list(_REQUIRED)!r} — the membership axiom (pgw#1059 "
+                "amendment 6, Paul: \"don't key on parameters that don't "
+                "require us to recompile\") admits an axis only when the "
+                "fact provably alters the compiled artifact and cannot ride "
+                "an existing axis's fact block")
         if text:
             clean[name] = text
     missing = [name for name in _REQUIRED if not clean.get(name)]
@@ -188,16 +215,10 @@ def from_axes(axes: Mapping[str, str]) -> CellKey:
     return CellKey(axes=tuple(sorted(clean.items())))
 
 
-def _canonical_execution_lane(weight_lane: str, lora_bucket: int = 0) -> str:
-    from . import compile_cache as cc  # cycle: compile_cache imports cell_key
-
-    return cc.execution_lane_label(weight_lane, lora_bucket)
-
-
 def facts_digest(facts: Mapping[str, Any]) -> str:
-    """16-hex canonical digest of one recorded fact block (toolchain /
-    code_closure axes) — computed identically from live probes (compute)
-    and recorded metadata (from_artifact_metadata), so a stamp can never
+    """16-hex canonical digest of one recorded fact block (the toolchain
+    axis; also the declared-compile-contract digest surfaces) — computed
+    identically from live probes and recorded metadata, so a stamp can never
     disagree with the facts it summarizes."""
     encoded = json.dumps(
         dict(facts), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
@@ -205,140 +226,72 @@ def facts_digest(facts: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
-def contract_digest(facts: Mapping[str, Any]) -> str:
-    """Digest of the DECLARED shape-contract facts (SDK v2 axis). Both
-    sides state the same canonical dict — the worker from its EndpointSpec
-    (``compile_cache.declared_contract_facts``), the mint from its build
-    inputs, the artifact from its recorded ``shape_contract`` block — so the
-    digest can never disagree with the facts it summarizes."""
-    encoded = json.dumps(
-        dict(facts), sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()[:16]
+def envelope_facts(block: Mapping[str, Any]) -> Dict[str, Any]:
+    """The canonical form of one DECLARED-ENVELOPE block — the single
+    canonicalizer behind the ``envelope`` axis (used by the mint's recorded
+    block, the publish recomputation, and the pre-mint obligation identity,
+    so no two consumers can canonicalize the same declaration differently).
 
-
-def compute(
-    family: str,
-    weight_lane: str = "",
-    lora_bucket: int = 0,
-    *,
-    contract: str,
-) -> CellKey:
-    """The key THIS runtime wants for ``family`` on ``weight_lane`` —
-    computed purely statically (no trace, no execution): live probes for
-    sm/posture/config, dist-info + binary content for the toolchain.
-    (pgw#1030: the ``closure_roots`` parameter is deleted — pgw#990 removed
-    code identity from the key and the body never read it; pgw#1049 deleted
-    the vestigial ``regional`` parameter with the ``mode`` axis — regional
-    is a declared-contract fact and rides ``contract``.) Raises
-    :class:`CellKeyError` when a required axis is unavailable — callers on
-    non-CUDA runtimes simply have no key."""
-    from . import compile_cache as cc  # cycle: compile_cache imports cell_key
-
-    rt = cc.runtime_key()
-    return from_axes({
-        "format": str(cc.ARTIFACT_FORMAT),
-        "kind": "inductor",
-        "family": str(family or ""),
-        "lane": _canonical_execution_lane(weight_lane, lora_bucket),
-        "sm": rt["sm"],
-        "contract": str(contract or ""),
-        "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
-        "toolchain": facts_digest(dict(cc.toolchain_digest())),
-    })
-
-
-def from_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
-    """The key an artifact's OWN recorded axes describe.
-
-    Derived from the metadata, never from the stamped ``cell_key`` field, so
-    a stamp can never disagree with the axes it summarizes. Raises
-    :class:`CellKeyError` for artifacts that don't record every required axis.
-    That is the ONLY verdict — pgw#950 deleted the second, axis-by-axis verify
-    path keyless cells used to fall back to, on both the fleet and the local
-    store. A cell with no computable key is refused and re-minted.
-
-    EXPORTED (``aot-inductor``) cells are refused here BY NAME (pgw#735): they
-    ride the same key space — the axis names are what :func:`from_axes`
-    validates, and the kind is an envelope value, so no scheme bump was needed —
-    but their axes are not an inductor cache's. Call
-    :func:`from_exported_artifact_metadata`, which recomputes them from the
-    blocks that kind records.
+    ``overlay`` is the behavior-posture slot (pgw#1059 amendment 5): a
+    typed, allowlisted author-settings overlay digested into the envelope
+    when one is declared. The menu is EMPTY today — no entry has passed the
+    §4.25 justification gate — so the slot is omitted whenever falsy, which
+    keeps every current declaration's canonical form free of a field that
+    says "unchanged" (the ``excluded``/``literal_values`` discipline).
     """
-    kind = str(meta.get("kind") or "")
-    if kind == EXPORTED_KIND:
-        raise CellKeyError(
-            "artifact kind 'aot-inductor' (exported .pt2) keys off its own "
-            "recorded blocks — call from_exported_artifact_metadata() instead "
-            "of recomputing from inductor-cache axes "
-            f"(stamped={str(meta.get('cell_key') or '') or 'MISSING'})")
-    if kind != "torch-inductor-cache":
-        raise CellKeyError(f"artifact kind {kind!r} has no cell-key identity")
+    facts: Dict[str, Any] = {
+        "v": 1,
+        "shapes": sorted(
+            [int(v) for v in row] for row in (block.get("shapes") or ())),
+        "text_lens": sorted({int(v) for v in (block.get("text_lens") or ())}),
+        "guidance": sorted(float(v) for v in (block.get("guidance") or ())),
+    }
+    overlay = block.get("overlay")
+    if overlay:
+        facts["overlay"] = {
+            str(k): str(v) for k, v in sorted(dict(overlay).items())}
+    return facts
 
-    contract_facts = meta.get("shape_contract")
-    if not isinstance(contract_facts, dict) or not contract_facts:
-        raise CellKeyError(
-            "artifact records no shape_contract block (pre-cell-key cell); "
-            "no key identity — a newer-contract worker must not consume it"
-        )
-    seal = meta.get(env_seal.SEAL_KEY)
-    if not isinstance(seal, dict) or not seal:
-        raise CellKeyError(
-            "artifact records no env_seal block; no key identity — its "
-            "execution environment is unproven"
-        )
-    toolchain = meta.get("toolchain")
-    if not isinstance(toolchain, dict) or not toolchain:
-        raise CellKeyError(
-            "artifact records no toolchain block; no recipe identity")
-    return from_axes({
-        "format": str(meta.get("format") or ""),
-        "kind": "inductor",
-        "family": str(meta.get("family") or ""),
-        "lane": _canonical_execution_lane(
-            str(meta.get("weight_lane") or ""),
-            int(meta.get("lora_bucket") or 0),
-        ),
-        "sm": str(meta.get("sm") or ""),
-        "contract": contract_digest(contract_facts),
-        "env_seal": env_seal.seal_digest(seal),
-        "toolchain": facts_digest(toolchain),
-    })
+
+def envelope_digest(block: Mapping[str, Any]) -> str:
+    """The ``envelope`` key-axis value for one declared-envelope block."""
+    return facts_digest(envelope_facts(block))
 
 
 def from_exported_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
-    """The key an EXPORTED (``aot-inductor``) cell's OWN recorded facts describe.
+    """The key an EXPORTED (``aot-inductor``) cell's OWN recorded facts
+    describe — THE single implementation of the cell key: ``aot_mint``
+    stamps what this returns and the publish path recomputes it, so the
+    axes a cell is published under cannot drift from the axes its key was
+    minted from.
 
-    The counterpart of :func:`from_artifact_metadata` for the only publishable
-    kind (pgw#1010), and the SINGLE implementation of that key: ``aot_mint``
-    stamps what this returns and the publish path recomputes it, so the axes a
-    cell is published under cannot drift from the axes its key was minted from.
+    Every axis is read from a recorded block, never from a probe and never
+    from the ``cell_key`` stamp (pgw#1046 recorded the declared envelope for
+    exactly this reason). Raises :class:`CellKeyError` when a fact is
+    missing: a cell that cannot name an axis has no identity, and must not
+    be published under a partial one.
 
-    Every axis is read from a recorded block, never from a probe and never from
-    the ``cell_key`` stamp (pgw#1046 recorded ``declared_traffic`` for exactly
-    this reason — the traffic contract used to live only in the mint's
-    ``ExportSpec``, so an artifact could not restate its own ``contract`` axis
-    and publish fell back to a 6-axis subset carrying neither ``toolchain`` nor
-    ``env_seal``). Raises :class:`CellKeyError` when a fact is missing: a cell
-    that cannot name an axis has no identity, and must not be published under a
-    partial one.
+    ``graph`` is READ from ``combined_graph_hash``, never re-derived here —
+    the one derivation lives in ``aot_serve`` (``class_hash`` /
+    ``combined_graph_hash``, stamped by ``artifact_metadata``), and
+    admission (``aot_serve.verify_contract``) recomputes it from the staged
+    bytes so a forged stamp is refused before it can arm. The per-class
+    hashes ride ``entries[*].class_hash`` so a mismatch NAMES the class
+    (pgw#716).
 
-    The ``contract`` axis is the pgw#716 formula: the cell keys on the
-    ``combined_graph_hash`` — first 16 hex of the sha256 over the
-    newline-joined SORTED per-class hashes — while the per-class hashes ride
-    ``entries[*].class_hash`` so a mismatch NAMES the class.
-
-    CONTRACT-FACTS SHAPE (v3, pgw#758/#817/#846): ``shell_digest`` and the
-    ``mode`` axis are pinned ``""`` since regional was retired, so the
-    whole-graph key is byte-identical to what it has been since pgw#758.
-    pgw#1046 changed WHERE the facts are read from, never their shape — no
-    cell re-keys.
+    Pre-pgw#1059 artifacts fail here STRUCTURALLY: they record
+    ``declared_traffic`` (not ``declared_envelope``), so the envelope axis
+    is unrecoverable and the refusal below fires — a pre-redefinition cell
+    can never restate a post-redefinition identity, which is what makes the
+    dev-corpus purge hygiene rather than a correctness precondition.
     """
     kind = str(meta.get("kind") or "")
     if kind != EXPORTED_KIND:
         raise CellKeyError(
-            f"artifact kind {kind!r} is not an exported cell; call "
-            "from_artifact_metadata() for an inductor cache")
+            f"artifact kind {kind!r} has no cell-key identity: only exported "
+            f"{EXPORTED_KIND!r} cells are keyed (pgw#1010/pgw#1059 — JIT is "
+            "intake, local torch-inductor-cache artifacts compare facts via "
+            "compile_cache.local_cell_mismatch)")
     sm = str(meta.get("sm") or "")
     if not sm:
         raise CellKeyError(
@@ -348,9 +301,9 @@ def from_exported_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     combined = str(meta.get("combined_graph_hash") or "")
     if not entries or not combined:
         raise CellKeyError(
-            "the envelope recorded no entries/combined_graph_hash; a "
-            "multi-graph cell must not be keyed without its class set "
-            "(pgw#716/#758)")
+            "the cell-metadata envelope recorded no entries/"
+            "combined_graph_hash; a multi-graph cell must not be keyed "
+            "without its class set (pgw#716/#758)")
     unhashed = sorted(
         name for name, block in entries.items()
         if not str((block or {}).get("class_hash") or ""))
@@ -358,100 +311,34 @@ def from_exported_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         raise CellKeyError(
             f"entries {unhashed[:4]!r} carry no class_hash; a class the key "
             f"cannot name is a class a mismatch cannot name (pgw#716)")
-    traffic = meta.get(EXPORT_TRAFFIC_KEY)
-    if not isinstance(traffic, dict) or not traffic:
+    envelope = meta.get(EXPORT_ENVELOPE_KEY)
+    if not isinstance(envelope, dict) or not envelope:
         raise CellKeyError(
-            f"artifact records no {EXPORT_TRAFFIC_KEY!r} block; its declared "
-            "traffic contract is unrecoverable, so the 'contract' axis cannot "
-            "be restated from the artifact (pgw#1046)")
-    seal = meta.get(env_seal.SEAL_KEY)
-    if not isinstance(seal, dict) or not seal:
-        raise CellKeyError(
-            "artifact records no env_seal block; no key identity — its "
-            "execution environment is unproven")
+            f"artifact records no {EXPORT_ENVELOPE_KEY!r} block; its declared "
+            "envelope is unrecoverable, so the 'envelope' axis cannot be "
+            "restated from the artifact (pgw#1046/pgw#1059)")
     toolchain = meta.get("toolchain")
     if not isinstance(toolchain, dict) or not toolchain:
         raise CellKeyError(
             "artifact records no toolchain block; no recipe identity")
-    contract_facts: Dict[str, Any] = {
-        "v": 3,
-        "combined_graph_hash": combined,
-        "shell_digest": "",
-        "targets": sorted({
-            str((block or {}).get("target") or "") for block in entries.values()}),
-        "shapes": sorted(
-            [int(v) for v in row] for row in (traffic.get("shapes") or ())),
-        "text_lens": sorted({int(v) for v in (traffic.get("text_lens") or ())}),
-        "guidance": sorted(float(v) for v in (traffic.get("guidance") or ())),
-        "lora_bucket": int(meta.get("lora_bucket") or 0),
-        "strict": bool(meta.get("strict_export")),
-    }
     return from_axes({
-        "format": str(meta.get("format") or ""),
-        "kind": EXPORTED_KIND,
-        "family": str(meta.get("family") or ""),
-        "lane": _canonical_execution_lane(
-            str(meta.get("weight_lane") or ""),
-            int(meta.get("lora_bucket") or 0),
-        ),
+        "graph": combined,
+        "envelope": envelope_digest(envelope),
         "sm": sm,
-        "contract": contract_digest(contract_facts),
-        "env_seal": env_seal.seal_digest(seal),
         "toolchain": facts_digest(toolchain),
     })
-
-
-def stamp(meta: Dict[str, Any]) -> Dict[str, Any]:
-    """Stamp ``meta`` with the key its axes describe (mint-time, both the
-    production build and the local self-mint). No-op when the axes are not
-    key-complete (e.g. focused unit fixtures)."""
-    try:
-        meta["cell_key"] = from_artifact_metadata(meta).digest
-    except CellKeyError:
-        meta.pop("cell_key", None)
-    return meta
-
-
-def mismatch(meta: Mapping[str, Any], requested: "str | CellKey") -> str:
-    """'' when the artifact's axes describe exactly the requested key, else
-    a named reason. This is the entire receipt check for a self-requested
-    cell: transport integrity is the CAS digest; identity is this. Passing
-    the full :class:`CellKey` (callers that computed it themselves) names
-    the first differing axis with both values in the reason."""
-    requested_key = requested.digest if isinstance(requested, CellKey) \
-        else str(requested or "")
-    if not is_key(requested_key):
-        return f"requested key {requested_key!r} is not a cell key"
-    try:
-        have = from_artifact_metadata(meta)
-    except CellKeyError as exc:
-        return f"artifact records no computable key ({exc})"
-    if have.digest == requested_key:
-        return ""
-    if isinstance(requested, CellKey):
-        want_axes, have_axes = requested.axes_dict(), have.axes_dict()
-        for name in sorted(set(want_axes) | set(have_axes)):
-            if want_axes.get(name, "") != have_axes.get(name, ""):
-                return (
-                    f"{name}: cell {have_axes.get(name, '')!r} != runtime "
-                    f"{want_axes.get(name, '')!r}"
-                )
-    return f"artifact key {have.digest} != requested {requested_key}"
 
 
 __all__ = [
     "KEY_SCHEME",
     "EXPORTED_KIND",
-    "EXPORT_TRAFFIC_KEY",
+    "EXPORT_ENVELOPE_KEY",
     "CellKey",
     "CellKeyError",
-    "compute",
-    "contract_digest",
+    "envelope_digest",
+    "envelope_facts",
     "facts_digest",
-    "from_artifact_metadata",
     "from_exported_artifact_metadata",
     "from_axes",
     "is_key",
-    "mismatch",
-    "stamp",
 ]

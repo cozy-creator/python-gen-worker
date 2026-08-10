@@ -55,7 +55,7 @@ def _request(workdir: Path) -> mp.MintRequest:
     workdir.mkdir(parents=True, exist_ok=True)
     return mp.MintRequest(
         function="gen", modules=("harness.toy_endpoints",),
-        family="pgw784", cell_key="ck1-liveness",
+        family="pgw784", arm_token="arm1-liveness",
         target=str(workdir / "cell.tar.gz"),
         work_root=str(workdir / "capture"),
         report=str(workdir / mp.REPORT_NAME),

@@ -90,6 +90,7 @@ from . import activity as activity_mod
 from . import aot_flatten
 from . import aot_identity
 from . import artifact_meta
+from . import cell_key as cell_key_mod
 from . import host_isa
 from .cell_adopt import AdoptOutcome
 from . import shape_growth
@@ -485,13 +486,14 @@ def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
 
 
 def range_digest(meta: Mapping[str, Any]) -> str:
-    """Canonical digest of the DECLARED admissible traffic of one artifact.
+    """Canonical digest of one entry's DECLARED ENVELOPE slice — the input
+    ranges the entry admits.
 
     Owed to the exact-identity lane (pgw#716/#717): declared dim ranges live
     in ``ep.range_constraints``, NOT in the graph nodes — three exports
     differing only in declared range produced the identical node-only
-    digest. A node-only ``graph_hashes`` therefore collides artifacts that
-    admit different traffic. Folding THIS digest into the per-class hash
+    digest. A node-only ``graph_hashes`` therefore collides artifacts whose
+    declared envelopes differ. Folding THIS digest into the per-class hash
     closes it. Exposed here (not in ``cell_key``) because this module owns
     the contract's canonical form.
     """
@@ -507,7 +509,7 @@ def range_digest(meta: Mapping[str, Any]) -> str:
         }
         if not s.trivial_identity:
             # pgw#994, on the `excluded` precedent below: the call identity is
-            # part of the declared traffic (two classes that take the same
+            # part of the declared envelope (two classes that take the same
             # tensors in different argument structures are different graphs),
             # but it is keyed only when it is not the trivial identity. Every
             # row published before pgw#994 is trivial, so no live cell is
@@ -524,8 +526,8 @@ def range_digest(meta: Mapping[str, Any]) -> str:
         ],
         "symbols": {k: list(v) for k, v in sorted(contract.symbols.items())},
     }
-    # pgw#790: the NEGATIVE half of the declared admissible traffic. Two
-    # classes that differ only in what they REFUSE admit different traffic,
+    # pgw#790: the NEGATIVE half of the declared envelope. Two
+    # classes that differ only in what they REFUSE declare different envelopes,
     # so the digest must see it or the collision this function exists to
     # close reopens for adapter forks. Keyed only when non-empty: a contract
     # that excludes nothing is the contract every already-published cell
@@ -770,6 +772,31 @@ def verify_contract(
     stamped_combined = str(meta.get("combined_graph_hash") or "")
     if stamped_combined and stamped_combined != combined_graph_hash(hashes):
         return "combined_graph_hash does not match the per-entry class hashes"
+    # pgw#1059: the stamped key must be exactly the key the artifact's OWN
+    # recorded facts describe — the same recomputation the mint stamped and
+    # the publish path corroborated, now proven at ADMISSION on the staged
+    # bytes. Two consequences, both deliberate: a forged/hand-edited stamp is
+    # refused by name, and a PRE-REDEFINITION cell is refused STRUCTURALLY
+    # (its metadata records the old axis set — `declared_traffic`, no
+    # four-axis identity — so the recomputation raises rather than matching),
+    # which is what makes the dev-corpus purge hygiene rather than a
+    # correctness precondition.
+    # Gated on key SHAPE: a ck-shaped stamp is an identity claim and must
+    # restate; a non-key stamp (focused fixtures, torn metadata) is not a
+    # claim — and it can never match a hub row either (`IsCellKey` gates the
+    # store flavor), so nothing downstream can mistake it for identity.
+    stamped_key = str(meta.get("cell_key") or "")
+    if stamped_key and cell_key_mod.is_key(stamped_key):
+        try:
+            recomputed = cell_key_mod.from_exported_artifact_metadata(meta)
+        except cell_key_mod.CellKeyError as exc:
+            return (
+                f"stamped cell_key {stamped_key} is not restatable from the "
+                f"artifact's own recorded facts ({exc})")
+        if recomputed.digest != stamped_key:
+            return (
+                f"stamped cell_key {stamped_key} != the key the artifact's "
+                f"recorded facts describe ({recomputed.digest})")
     return ""
 
 
@@ -1546,8 +1573,8 @@ def assert_ingress(
     * symbolic dims inside the declared inclusive range;
     * **symbol CONSISTENCY** — one symbol appearing in two shapes must take
       the same value. ``range_constraints`` cannot express this, but the
-      graph requires it, so a mismatch is out-of-contract even when both
-      values are individually in range.
+      graph requires it, so a mismatch is outside the declared envelope even
+      when both values are individually in range.
     """
     misses, symbols = ingress_report(contract, args, kwargs, first_only=True)
     if misses:
@@ -1974,13 +2001,17 @@ def no_entry_detail(
     Nothing is silently dropped — ``tried`` and the counts always add up.
     """
     if not missed:
-        return f"no packaged entry admits this call ({tried} tried)"
+        return (
+            f"request out of declared envelope: no packaged entry admits "
+            f"this call ({tried} tried), so the request is served EAGER "
+            f"and named at ingress")
     ranked = sorted(missed, key=lambda row: (row[0], row[1]))
     _distance, closest, misses = ranked[0]
     dims_ok = all(_rung(m.reason) < MISS_RUNGS["static_dim_mismatch"]
                   for m in misses)
     head = (
-        f"no packaged entry admits this call ({tried} tried); CLOSEST entry "
+        f"request out of declared envelope — no packaged entry admits this "
+        f"call, served EAGER ({tried} tried); CLOSEST entry "
         f"{closest!r}"
         f"{' — every declared dim MATCHES' if dims_ok else ''}: "
         + "; ".join(f"{m.reason} ({m.detail})" for m in misses[:2]))
@@ -2288,7 +2319,8 @@ def wrap_module(
 
     An :class:`IngressContractError` is NOT such an error. It is a named,
     counted, per-request contract refusal — the request serves eagerly and
-    the artifact stays armed for in-contract traffic, because one
+    the artifact stays armed for traffic inside the declared envelope,
+    because one
     out-of-range request (or an entry-dispatch miss/ambiguity) says nothing
     about the artifact's health.
 
@@ -2347,7 +2379,7 @@ def wrap_module(
             state["ingress_refusals"] = int(state["ingress_refusals"]) + 1
             state["last_refusal"] = f"{exc.reason}: {exc}"
             logger.warning(
-                "aot-serve: %s REFUSED out-of-contract input (%s: %s); "
+                "aot-serve: %s REFUSED input outside the declared envelope (%s: %s); "
                 "serving this request eager, artifact stays armed",
                 label, exc.reason, exc)
             activity_mod.emit_event(

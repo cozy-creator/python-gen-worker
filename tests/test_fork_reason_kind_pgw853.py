@@ -178,7 +178,7 @@ def test_annotating_changes_neither_the_entries_nor_the_cell_contract() -> None:
     entry names carry fork COORDINATES (from `served`), and the ck2 contract
     axis digests no fork rows at all."""
     from gen_worker.aot_declaration import cell_plans, plan_entry_name
-    from gen_worker.compile_cache import declared_contract_facts
+    from gen_worker.compile_cache import declared_compile_facts
 
     plain = _decl(Fork("kv_cache", served=(False,), unserved=(True,)))
     annotated = _decl(Fork("kv_cache", served=(False,), unserved=(True,),
@@ -186,7 +186,7 @@ def test_annotating_changes_neither_the_entries_nor_the_cell_contract() -> None:
 
     assert [plan_entry_name(p) for p in cell_plans(plain)] == \
         [plan_entry_name(p) for p in cell_plans(annotated)]
-    assert declared_contract_facts(plain) == declared_contract_facts(annotated)
+    assert declared_compile_facts(plain) == declared_compile_facts(annotated)
 
 
 # ---------------------------------------------------------------------------

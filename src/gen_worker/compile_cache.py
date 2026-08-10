@@ -616,10 +616,11 @@ def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
 
     pgw#1040: this body existed twice, byte for byte, as
     ``cell_key._canonical_execution_lane`` and
-    ``aot_contract.ExportSpec.execution_lane_label``. One produces a cell-key
-    AXIS and the other the label stamped into a cell's metadata, so the two
-    copies drifting apart does not degrade — it mints cells under one name and
-    looks them up under another. Both now call this.
+    ``aot_contract.ExportSpec.execution_lane_label``; both were folded here.
+    Since pgw#1059 the lane is store METADATA + discovery scoping, never a
+    key axis — but the one-derivation rule stands for the same reason: a
+    lane stamped under one spelling and scoped under another is a cell
+    discovery can never find.
     """
     base, observed = execution_lane_bucket(str(weight_lane or ""))
     bucket = observed or int(lora_bucket or 0)
@@ -709,10 +710,19 @@ def family_from_ref(ref: str) -> str:
     return parse_cell_ref(ref)[0]
 
 
-def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = None) -> Dict[str, Any]:
-    """Canonical declared-shape-contract facts for ``cfg`` (a
-    ``registry.CompileCell`` or any duck with the same fields) — the ck2
-    ``contract`` cell-key axis digests exactly this dict (pgw#647)."""
+def declared_compile_facts(cfg: Any, *, lora_bucket_override: Optional[int] = None) -> Dict[str, Any]:
+    """Canonical DECLARED compile-contract facts for ``cfg`` (a
+    ``registry.CompileCell`` or any duck with the same fields).
+
+    pgw#1059: this is no longer a key-axis input — the fused ``contract``
+    axis is split into ``graph`` x ``envelope`` and the exported-cell key
+    reads recorded blocks only. What remains of this dict: the
+    torch-inductor-cache block ``declared_compile_contract`` (compared
+    verbatim by :func:`local_cell_mismatch` / :func:`contract_drift` — the
+    cozy-local store verdict), the SDK v2 manifest's opaque
+    ``shape_contract_digest`` (``registry.CompileCell.contract_digest``
+    digests its own near-twin of this dict), and the JIT semantic cache tag.
+    """
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if lora_bucket_override is not None:
         bucket = int(lora_bucket_override)
@@ -720,7 +730,7 @@ def declared_contract_facts(cfg: Any, *, lora_bucket_override: Optional[int] = N
     if not text_lens and getattr(cfg, "text_len", None) is not None:
         text_lens = (int(cfg.text_len),)
     return {
-        "v": 3,
+        "v": 1,
         "shapes": sorted(
             [int(v) for v in row] for row in getattr(cfg, "shapes", ())),
         "targets": [str(t) for t in getattr(cfg, "targets", ())],
@@ -852,20 +862,41 @@ def static_code_closure() -> Tuple[Tuple[str, str], ...]:
 
 @functools.lru_cache(None)
 def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
-    """pgw#710: CONTENT identity of the compile toolchain, per component —
-    the equivalence precondition that lets ``image_digest`` be relaxed
-    (pgw#700) without degrading the compile stack's identity to version
-    strings (the ccache ``compiler_check=mtime`` failure class; sccache's
-    answer — hash the compiler binary and its runtime libs — is the
-    precedent).
+    """pgw#710/pgw#1059: CONTENT identity of "the compiler stack AS WE
+    CONFIGURE IT", per component — the ``toolchain`` key axis's whole input.
 
-    Components: the dist-info ``RECORD`` of torch/triton and every
-    ``nvidia-*`` runtime wheel (RECORD already carries per-file sha256s, so
-    hashing it is whole-package content identity with no multi-GB re-walk)
-    plus the bundled CUDA tool BINARIES (ptxas/nvdisasm ride triton's
-    wheel; a swapped ptxas silently changes emitted cubins). Recorded in
-    metadata, never a key axis."""
-    out: Dict[str, str] = {}
+    The binary half (pgw#710) is the equivalence precondition that lets
+    ``image_digest`` be relaxed (pgw#700) without degrading the compile
+    stack's identity to version strings (the ccache ``compiler_check=mtime``
+    failure class; sccache's answer — hash the compiler binary and its
+    runtime libs — is the precedent): the dist-info ``RECORD`` of
+    torch/triton and every ``nvidia-*`` runtime wheel (RECORD already
+    carries per-file sha256s, so hashing it is whole-package content
+    identity with no multi-GB re-walk) plus the bundled CUDA tool BINARIES
+    (ptxas/nvdisasm ride triton's wheel; a swapped ptxas silently changes
+    emitted cubins).
+
+    The configuration half (pgw#1059 amendment 4, on pgw#1049's seal v4):
+
+    * ``settings_declaration`` — the digest of the settings DECLARATION
+      (env table, torch flags + knobs, dynamo posture, host-ISA clamp,
+      process posture). Settings are compiler flags: with the single
+      settings authority the declaration is one value fleet-wide, so as its
+      own axis it carried zero bits — but a deliberate settings change must
+      still re-key, and this is the axis that change honestly belongs to.
+      The seal's GATE roles (boot verify, pre-trace tripwire) live in
+      ``env_seal`` unchanged.
+    * ``loaded_libs`` — the boot-frozen combined digest of the native
+      ``.so`` set the python env actually maps (pgw#719): toolchain CONTENT
+      the RECORDs cannot see (the LD_PRELOAD/LD_LIBRARY_PATH substitution
+      hole).
+    """
+    from . import env_seal  # late: env_seal imports settings machinery only
+
+    out: Dict[str, str] = {
+        "settings_declaration": env_seal.declaration_digest(),
+        "loaded_libs": env_seal.loaded_libs_digest(),
+    }
     try:
         import importlib.metadata
 
@@ -933,7 +964,7 @@ def artifact_metadata(
     lora_bucket: int = 0,
     graph_signature: str = "",
     weight_contract: Optional[Dict[str, Any]] = None,
-    shape_contract: Optional[Dict[str, Any]] = None,
+    declared_compile_contract: Optional[Dict[str, Any]] = None,
     composition: Iterable[Tuple[str, str]] = (),
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
@@ -968,7 +999,7 @@ def artifact_metadata(
         "lora_bucket": int(lora_bucket or 0),
         "graph_signature": str(graph_signature or ""),
         "weight_contract": dict(weight_contract or {}),
-        "shape_contract": dict(shape_contract or {}),
+        "declared_compile_contract": dict(declared_compile_contract or {}),
         # pgw#697: per-module fingerprint rows so an adoption refusal can
         # name the exact drifted module, not just a digest mismatch.
         "composition": [[str(p), str(d)] for p, d in composition],
@@ -987,12 +1018,12 @@ def artifact_metadata(
         "loaded_libs": dict(env_seal.frozen_library_digests()),
         "libs": _lib_versions(),
     }
-    # gw#581/th#883: stamp the worker-owned cell key the recorded axes
-    # describe. Derived FROM the metadata (never probed separately), so the
-    # stamp can never disagree with the axes it summarizes. Callers that
-    # later override a key axis re-stamp.
-
-    return cell_key.stamp(meta)
+    # pgw#1059: NO cell_key stamp. A torch-inductor-cache artifact has no
+    # cell-key identity any more — the ck1 key names exported cells only,
+    # and the local/seeded verdict compares these recorded facts directly
+    # (local_cell_mismatch), which is strictly more nameable than a fused
+    # digest comparison ever was.
+    return meta
 
 
 def verify(meta: Dict[str, Any], *, family: str = "") -> str:
@@ -1035,6 +1066,75 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     want_fam = str(meta.get("family") or "")
     if family and want_fam != family:
         return f"family {want_fam!r} != {family!r}"
+    return ""
+
+
+def local_cell_mismatch(
+    meta: Dict[str, Any], *, family: str, weight_lane: str, cfg: Any,
+    lora_bucket_override: Optional[int] = None,
+) -> str:
+    """'' when a torch-inductor-cache artifact states exactly this runtime +
+    declaration, else the FIRST mismatch, named.
+
+    pgw#1059: the replacement for the retired ``kind="inductor"`` cell key
+    (``cell_key.compute`` / ``mismatch``). The cozy-local store and the
+    seeded-arm self-cell check need a PRE-TRACE verdict, which a key whose
+    ``graph`` axis is the traced-graph digest cannot give by construction —
+    so the verdict compares the recorded facts directly, each with the same
+    derivation the producer used, and names the fact instead of a digest:
+
+    * every :func:`verify` axis (format, torch/triton/sm/cuda/image,
+      gen_worker, libs, family) — strict, silent axes refused;
+    * the execution lane label (ONE derivation: :func:`execution_lane_label`);
+    * the declared compile contract (ONE derivation:
+      :func:`declared_compile_facts`) — STRICT: a cell recording no block is
+      refused, closing the fixture-shaped gap :func:`contract_drift`
+      deliberately left open;
+    * the settings declaration + loaded libs + binary toolchain, via the
+      recorded ``env_seal`` / ``toolchain`` blocks (the same facts the
+      exported key's ``toolchain`` axis folds).
+
+    The local store is a cache; every refusal here costs one re-mint.
+    """
+    reason = verify(meta, family=family)
+    if reason:
+        return reason
+    want_lane = execution_lane_label(
+        str(weight_lane or ""),
+        int(lora_bucket_override
+            if lora_bucket_override is not None
+            else int(getattr(cfg, "lora_bucket", 0) or 0)))
+    have_lane = execution_lane_label(
+        str(meta.get("weight_lane") or ""),
+        int(meta.get("lora_bucket") or 0))
+    if have_lane != want_lane:
+        return f"execution lane {have_lane!r} != runtime {want_lane!r}"
+    cell_contract = meta.get("declared_compile_contract")
+    if not isinstance(cell_contract, dict) or not cell_contract:
+        return (
+            "artifact records no declared_compile_contract block "
+            "(pre-pgw#1059 cell); refused — a cell that cannot state its "
+            "declaration cannot be shown to match this one")
+    here_contract = declared_compile_facts(
+        cfg, lora_bucket_override=lora_bucket_override)
+    if cell_contract != here_contract:
+        return (
+            "declared compile contract mismatch: "
+            + _first_contract_difference(cell_contract, here_contract))
+    seal = meta.get(env_seal.SEAL_KEY)
+    if not isinstance(seal, dict) or not seal:
+        return "artifact records no env_seal block; refused"
+    want_seal = env_seal.seal_digest(env_seal.effective_seal())
+    have_seal = env_seal.seal_digest(seal)
+    if have_seal != want_seal:
+        return f"env_seal {have_seal!r} != runtime {want_seal!r}"
+    toolchain = meta.get("toolchain")
+    if not isinstance(toolchain, dict) or not toolchain:
+        return "artifact records no toolchain block; refused"
+    want_tc = cell_key.facts_digest(dict(toolchain_digest()))
+    have_tc = cell_key.facts_digest(toolchain)
+    if have_tc != want_tc:
+        return f"toolchain {have_tc!r} != runtime {want_tc!r}"
     return ""
 
 
@@ -1291,14 +1391,14 @@ def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
     already hashes them natively (system info, config, dtypes) and the
     outer key pins them via env_seal/toolchain/code_closure — the tag's job
     is semantics only."""
-    execution_lane = cell_key._canonical_execution_lane(
+    execution_lane = execution_lane_label(
         pipeline_weight_lane(pipeline),
         int(getattr(cfg, "lora_bucket", 0) or 0))
     payload = "|".join((
         str(ARTIFACT_FORMAT), "inductor",
         str(getattr(cfg, "family", "") or ""), execution_lane,
         "regional" if bool(getattr(cfg, "regional", False)) else "whole",
-        cell_key.contract_digest(declared_contract_facts(cfg)),
+        cell_key.facts_digest(declared_compile_facts(cfg)),
     ))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -2381,18 +2481,19 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
             f"guidance_scales {cell_guidance_scales!r} != declared "
             f"{guidance_scales!r}"
         )
-    # SDK v2: the recorded shape contract must be the declared one — a
-    # worker on a newer contract must never serve an older cell (pgw#647).
+    # SDK v2: the recorded declared compile contract must be the declared
+    # one — a worker on a newer contract must never serve an older cell
+    # (pgw#647).
     #
-    # NOT CUT by pgw#950, deliberately: a cell recording NO shape_contract is
-    # skipped here, which is the same silent-axis shape as the arm below, but
-    # ~9 test fixtures build metadata without one (every PRODUCTION mint passes
-    # ``shape_contract=declared_contract_facts(cfg)``, so the gap is fixtures,
-    # not producers). Tightening it is a fixture sweep, not a deletion, so it
-    # is its own change.
-    cell_contract = meta.get("shape_contract") or {}
+    # NOT CUT by pgw#950, deliberately: a cell recording NO block is skipped
+    # here, which is the same silent-axis shape as the arm below, but ~9 test
+    # fixtures build metadata without one (every PRODUCTION mint passes
+    # ``declared_compile_contract=declared_compile_facts(cfg)``, so the gap is
+    # fixtures, not producers). The STRICT verdict lives in
+    # :func:`local_cell_mismatch` (pgw#1059), which refuses the absent block.
+    cell_contract = meta.get("declared_compile_contract") or {}
     if cell_contract:
-        here_contract = declared_contract_facts(cfg)
+        here_contract = declared_compile_facts(cfg)
         if cell_contract != here_contract:
             return (
                 "shape contract mismatch: "
@@ -3249,9 +3350,10 @@ def enable(
             self_key = ""
             if staged is not None:
                 meta = staged.metadata
-                # th#883/gw#581: is this MY cell — the artifact whose axes
-                # describe exactly the key this runtime computes for itself
-                # with the one shared brain? If so, a refusal below is by
+                # th#883/gw#581/pgw#1059: is this MY cell — the artifact
+                # whose RECORDED FACTS state exactly this runtime + this
+                # declaration, judged by the one shared verdict
+                # (local_cell_mismatch)? If so, a refusal below is by
                 # construction a selection/parity bug, never compatibility.
                 try:
                     from .models.loading import (
@@ -3261,24 +3363,26 @@ def enable(
                     # gw#632: the EFFECTIVE bucket — a slot object with no
                     # resolvable compile target (sdxl's bare vae) never rides
                     # the branch lane (provision downgrades apply_lora_execution_lane
-                    # the same way, 0.52.1), so its self-key must not claim
-                    # the family's lora<bucket> cell and then explode on
-                    # lane drift (live: `weight_lane 'lora64' != pipeline ''`
-                    # -> CellSelectionBugError -> gw#608 seeded-cell refusal
-                    # -> all_declared_functions_disabled pod retire).
+                    # the same way, 0.52.1), so its self-verdict must not
+                    # claim the family's lora<bucket> cell and then explode
+                    # on lane drift (live: `weight_lane 'lora64' !=
+                    # pipeline ''` -> CellSelectionBugError -> gw#608
+                    # seeded-cell refusal -> all_declared_functions_disabled
+                    # pod retire).
                     eff_bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
                     if eff_bucket and not has_compile_target(pipeline, cfg):
                         eff_bucket = 0
-                    want = cell_key.compute(
-                        str(getattr(cfg, "family", "") or ""),
-                        _pwl(pipeline),
-                        eff_bucket,
-                        contract=cell_key.contract_digest(
-                            declared_contract_facts(
-                                cfg, lora_bucket_override=eff_bucket)),
-                    )
-                    if not cell_key.mismatch(meta, want):
-                        self_key = want.digest
+                    _fam = str(getattr(cfg, "family", "") or "")
+                    if not local_cell_mismatch(
+                        dict(meta),
+                        family=_fam,
+                        weight_lane=_pwl(pipeline),
+                        cfg=cfg,
+                        lora_bucket_override=eff_bucket,
+                    ):
+                        self_key = (
+                            f"{_fam}/"
+                            f"{execution_lane_label(_pwl(pipeline), eff_bucket) or 'plain'}")
                 except Exception:
                     self_key = ""
                 _reconcile_resident_mode(meta, pipeline)
@@ -3603,7 +3707,7 @@ def mint_artifact(
         lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
         graph_signature=graph_signature,
         weight_contract=weight_contract,
-        shape_contract=declared_contract_facts(cfg),
+        declared_compile_contract=declared_compile_facts(cfg),
         composition=composition_fingerprint(pipe, cfg),
     )
     meta[guard_closure.MANIFEST_KEY] = guard_manifest
@@ -3677,8 +3781,10 @@ __all__ = [
     "arm_jit_intake",
     "capture_env",
     "cell_base_execution_lane",
+    "declared_compile_facts",
     "drop_lora_execution_lane",
     "contract_drift",
+    "local_cell_mismatch",
     "counters_delta",
     "cache_hit_count",
     "cache_miss_count",

@@ -238,7 +238,7 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
     # `aot_contract`, NEVER `aot_mint` — MEASURED (pgw#793/#811 guards, red on
     # the first run of this module): `provision` is a `static_code_closure`
     # entrypoint, the closure walk is an AST walk that follows function-level
-    # imports, and `cell_key.compute` keys every dynamo cell on that closure.
+    # imports, and the closure memo records it on every artifact.
     # Importing the mint DRIVER here dragged `aot_wrapper_split` /
     # `aot_run_impl_split` into cell identity, which both issues forbid: a
     # compile-time transform must re-key nothing. The vocabulary now lives in a
