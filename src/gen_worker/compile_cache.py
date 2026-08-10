@@ -71,7 +71,10 @@ import inspect
 import pickle
 import sys
 
-from . import cell_key, env_seal, guard_closure, hot_swap, settings_authority
+from . import (
+    cell_key, dist_records, env_seal, guard_closure, hot_swap,
+    settings_authority,
+)
 from .api.errors import RetryableError
 from .models import w8a8_lora
 from .models.loading import pipeline_weight_lane
@@ -953,30 +956,26 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
       still re-key, and this is the axis that change honestly belongs to.
       The seal's GATE roles (boot verify, pre-trace tripwire) live in
       ``env_seal`` unchanged.
-    * ``loaded_libs`` — the boot-frozen combined digest of the native
-      ``.so`` set the python env actually maps (pgw#719): toolchain CONTENT
-      the RECORDs cannot see (the LD_PRELOAD/LD_LIBRARY_PATH substitution
-      hole).
+    * ``loaded_libs`` — the boot-frozen per-file manifest of the native
+      ``.so`` set the python env ships (pgw#719), which is what covers the
+      LD_PRELOAD/LD_LIBRARY_PATH substitution hole: it enumerates the FILES
+      rather than the packages, and pgw#1095 derives each digest from the
+      RECORD that installed the file while HASHING anything no RECORD
+      covers — a preloaded or non-wheel object is therefore still content,
+      not an assumption.
     """
-    from . import env_seal  # late: env_seal imports settings machinery only
-
     out: Dict[str, str] = {
         "settings_declaration": env_seal.declaration_digest(),
         "loaded_libs": env_seal.loaded_libs_digest(),
     }
-    try:
-        import importlib.metadata
-
-        # diffusers/transformers/peft ride here at package granularity
-        # (their VERSION axes left the key; content replaces them).
-        wanted = ("torch", "triton", "diffusers", "transformers", "peft")
-        for dist in importlib.metadata.distributions():
-            name = str(dist.metadata.get("Name") or "").lower()
-            if name in wanted or name.startswith("nvidia-"):
-                record = dist.read_text("RECORD") or ""
-                out[name] = hashlib.sha256(record.encode()).hexdigest()[:16]
-    except Exception:
-        logger.debug("toolchain_digest: dist-info walk failed", exc_info=True)
+    # ONE enumeration of the environment's RECORDs (pgw#1095): the seal's
+    # per-FILE digests and this axis's per-PACKAGE digests are two readings of
+    # the same manifests, and reading them twice is how two surfaces start
+    # disagreeing about what is installed.
+    wanted = ("torch", "triton", "diffusers", "transformers", "peft")
+    for name, record in dist_records.record_texts().items():
+        if name in wanted or name.startswith("nvidia-"):
+            out[name] = hashlib.sha256(record.encode()).hexdigest()[:16]
     try:
         import triton
 

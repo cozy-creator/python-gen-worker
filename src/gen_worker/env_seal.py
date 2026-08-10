@@ -21,10 +21,13 @@ settings):
   (pgw#1049): ``settings_authority.declaration()`` facts plus the
   loaded-library digest (pgw#719: the native ``.so`` set the python env
   ships — closes the LD_PRELOAD/LD_LIBRARY_PATH substitution hole that env
-  vars and package RECORDs cannot see). Ambient mutation is structurally
-  unable to move the digest — torch wheel defaults ride the ``toolchain``
-  key axis, and everything else in the codegen surface is either declared
-  (sealed) or erased. ``seal_v`` versions the dict, so new sealed facts
+  vars and a package's *own* metadata cannot see; pgw#1095 derives each
+  shipped lib's content digest from the wheel RECORD that installed it and
+  HASHES anything no RECORD covers, which is exactly the preloaded-object
+  case, so the hole stays closed at a KB-scale read). Ambient mutation is
+  structurally unable to move the digest — torch wheel defaults ride the
+  ``toolchain`` key axis, and everything else in the codegen surface is
+  either declared (sealed) or erased. ``seal_v`` versions the dict, so new sealed facts
   change digest VALUES only, never the axis set.
 * :func:`assert_seal_unchanged` — the runtime TRIPWIRE (pgw#719, kept
   deliberately as read-back where the seal itself no longer is): boot
@@ -56,10 +59,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from . import (
-    boot_phases, guard_closure, host_isa, settings_authority, torch_capability,
+    boot_phases, dist_records, guard_closure, host_isa, settings_authority,
+    torch_capability,
 )
 import importlib.util
 
@@ -259,27 +263,28 @@ def _lib_digest(path: str, mtime_ns: int, size: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# pgw#832: cross-process digest memo for short-lived workers
+# Where a library's identity digest comes from (pgw#1095, pgw#832)
 # ---------------------------------------------------------------------------
-# The identity pass SHA-256s every toolchain .so the image ships (measured:
-# 36 files, 3.96 GB, ~8 s). The lru_cache above amortizes it to once per
-# PROCESS — which stopped being "once" the moment pgw#809's pool made the
-# unit of parallelism a process that compiles one entry and exits: a
-# 72-entry mint re-paid the pass 72 times, K-wide, on the cores the
-# compiles wanted (28 % of per-entry compile_s, measured by pgw#830).
+# THREE sources, in this order, for the SAME value — the 16-hex prefix of the
+# file's sha256. Which one served it changes the cost of a boot by 17 s and
+# changes the seal by nothing:
 #
-# The memo moves WHERE a digest comes from, never what it is. A parent that
-# already paid the pass writes {(path, mtime_ns, size) -> digest} to a file
-# (:func:`write_library_memo`); a child pointed at it via
-# :data:`SEAL_LIB_MEMO_ENV` still enumerates the tree and stats every file
-# ITSELF, and uses a memo digest only when its own (path, mtime_ns, size)
-# matches an entry exactly — any mismatch, absence, or unreadable memo falls
-# back to the full rehash of that file. So the seal is byte-identical to a
-# full rehash in every detectable case, and the ONE undetectable case — a
-# file rewritten with content of the same size and its mtime_ns restored —
-# is exactly the case the in-process lru_cache (keyed on the same triple)
-# has always trusted. The memo widens that existing trust boundary across
-# processes; it does not create a new one.
+# 1. The installing wheel's dist-info RECORD (:mod:`dist_records`, pgw#1050's
+#    ruling: identification stays CONTENT, derived from the declared manifest
+#    rather than re-hashed). A KB-scale read covering, on the measured image,
+#    36 of 36 shipped toolchain libraries.
+# 2. The pgw#832 cross-process memo — now the fallback STORE for whatever
+#    RECORD does not cover, and still what a pgw#809 entry-compile child reads
+#    so a 72-entry mint does not re-pay the pass 72 times, K-wide, on the cores
+#    the compiles wanted (28 % of per-entry compile_s, measured by pgw#830).
+# 3. A full SHA-256 pass over the file — always correct, never skipped: a lib
+#    covered by neither manifest above is HASHED, never assumed.
+#
+# Sources 1 and 2 are trusted under the same shape of guard (see
+# :mod:`dist_records` for the exact statement of what that does and does not
+# catch): the reader stats the file ITSELF and honours a claim only when the
+# file it is looking at is the file the claim describes. Any mismatch, absence
+# or unreadable manifest falls through to (3) for that file alone.
 SEAL_LIB_MEMO_ENV = "GEN_WORKER_SEAL_LIB_MEMO"
 
 _MEMO_V = 1
@@ -310,31 +315,51 @@ def _disk_memo() -> Dict[str, str]:
     return _DISK_MEMO
 
 
-#: pgw#1087: memo hits vs misses over this process's whole library pass.
-#: Counted here rather than derived, because a partial hit — a memo written by
-#: a sibling whose env has since moved — is the interesting case and is
-#: invisible in a boolean.
-_MEMO_HITS = 0
-_MEMO_MISSES = 0
+class DigestSources(NamedTuple):
+    """Where this process's library digests came from (pgw#1087's phase
+    detail). Counted rather than derived: the interesting case is the PARTIAL
+    one — a manifest that covers most of the tree and leaves two files to hash
+    — and it is invisible in a boolean."""
+
+    record: int
+    memo: int
+    hashed: int
 
 
-def memo_counts() -> Tuple[int, int]:
-    """(hits, misses) of the pgw#832 library-digest memo so far."""
-    return _MEMO_HITS, _MEMO_MISSES
+_SOURCES = DigestSources(0, 0, 0)
 
 
-def _lib_digest_memoized(path: str, mtime_ns: int, size: int) -> str:
-    global _MEMO_HITS, _MEMO_MISSES
-    got = _disk_memo().get(_memo_key(path, mtime_ns, size))
-    if got is not None:
-        _MEMO_HITS += 1
-        return got
-    _MEMO_MISSES += 1
+def digest_sources() -> DigestSources:
+    """Per-source counts of the library-identity pass so far."""
+    return _SOURCES
+
+
+def _identity_digest(path: str, mtime_ns: int, size: int) -> str:
+    """THE library-identity resolver: RECORD, then memo, then a full hash.
+    Every caller (the identity manifest, the shipped-copy sets, the live
+    substitution probe) goes through it, so one boot cannot mix a derived
+    digest into one surface and a hashed digest into another."""
+    global _SOURCES
+    recorded = dist_records.digest_for(path, mtime_ns, size)
+    if recorded is not None:
+        _SOURCES = _SOURCES._replace(record=_SOURCES.record + 1)
+        return recorded
+    memoized = _disk_memo().get(_memo_key(path, mtime_ns, size))
+    if memoized is not None:
+        _SOURCES = _SOURCES._replace(memo=_SOURCES.memo + 1)
+        return memoized
+    _SOURCES = _SOURCES._replace(hashed=_SOURCES.hashed + 1)
     return _lib_digest(path, mtime_ns, size)
 
 
 def write_library_memo(path: Path) -> int:
     """Persist this process's toolchain digests for short-lived children.
+
+    pgw#1095 left this in place as the FALLBACK store: where RECORD covers a
+    library the child derives the digest itself and never consults the memo,
+    but a lib no wheel installed (a system object, a hand-patched ``.so``)
+    would otherwise be re-hashed per child, so the parent still banks what it
+    paid.
 
     Cheap in a process that already sealed (the lru_cache is warm: the pass
     degenerates to stats); pays the full hash exactly once otherwise. The
@@ -356,7 +381,7 @@ def write_library_memo(path: Path) -> int:
             try:
                 st = os.stat(lib_path)
                 digests[_memo_key(lib_path, st.st_mtime_ns, st.st_size)] = (
-                    _lib_digest_memoized(lib_path, st.st_mtime_ns, st.st_size))
+                    _identity_digest(lib_path, st.st_mtime_ns, st.st_size))
             except OSError:
                 continue  # the child will record <unreadable> on its own stat
     encoded = json.dumps(
@@ -378,7 +403,11 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
     """(basename, content digest) of every relevant native library the
     LOADER actually mapped into this process (``/proc/self/maps``).
     Deterministic: resolved real paths, sorted basenames. Empty off-Linux
-    (no maps surface — recorded as such)."""
+    (no maps surface — recorded as such).
+
+    Resolved through :func:`_identity_digest` like the manifest it is compared
+    against, so the comparison stays apples-to-apples and an LD_PRELOAD object
+    — which no RECORD covers — is HASHED and therefore named."""
     maps = _MAPS_PATH
     if not maps.is_file():
         return ()
@@ -401,7 +430,8 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
     for base in sorted(paths):
         try:
             st = os.stat(paths[base])
-            out[base] = _lib_digest(paths[base], st.st_mtime_ns, st.st_size)
+            out[base] = _identity_digest(
+                paths[base], st.st_mtime_ns, st.st_size)
         except OSError:
             out[base] = "<unreadable>"
     return tuple(sorted(out.items()))
@@ -481,14 +511,15 @@ def toolchain_library_digests() -> Tuple[Tuple[str, str], ...]:
     the python env SHIPS — deterministic in the installed content,
     independent of what has been dlopened so far. Unreadable files record
     ``<unreadable>``. Enumeration and stat are always THIS process's own;
-    only the per-file digest may come from the pgw#832 memo, and only on an
-    exact (path, mtime_ns, size) match."""
+    only the per-file digest may come from a manifest (:func:`_identity_digest`
+    — the installing wheel's RECORD, then the pgw#832 memo), and only when the
+    file on disk is still the file that manifest describes."""
     out: Dict[str, str] = {}
     paths = _toolchain_lib_paths()
     for base in sorted(paths):
         try:
             st = os.stat(paths[base][0])
-            out[base] = _lib_digest_memoized(
+            out[base] = _identity_digest(
                 paths[base][0], st.st_mtime_ns, st.st_size)
         except OSError:
             out[base] = "<unreadable>"
@@ -505,7 +536,7 @@ def _shipped_digest_sets() -> Dict[str, Tuple[str, ...]]:
         for lib_path in lib_paths:
             try:
                 st = os.stat(lib_path)
-                out.setdefault(base, []).append(_lib_digest_memoized(
+                out.setdefault(base, []).append(_identity_digest(
                     lib_path, st.st_mtime_ns, st.st_size))
             except OSError:
                 continue
@@ -514,14 +545,15 @@ def _shipped_digest_sets() -> Dict[str, Tuple[str, ...]]:
 
 # The identity manifest is FROZEN at first computation: the disk content is
 # already phase-independent (pgw#749), so the freeze is purely an
-# amortization — one hashing pass per process (multi-GB cold, near-free when
-# a pgw#832 memo serves the digests), never a semantic phase pin.
+# amortization — one identity pass per process (multi-GB when it has to hash,
+# a KB-scale manifest read when RECORD covers the tree), never a semantic
+# phase pin.
 _LIB_SNAPSHOT: Optional[Tuple[Tuple[str, str], ...]] = None
 
 #: Seconds the last COLD identity pass took (telemetry only, read by
-#: :func:`establish` into ``seal_libhash_s``). With a memo this measures the
-#: stat-and-lookup pass; without one, the full SHA-256 pass — which is the
-#: whole point of naming it.
+#: :func:`establish` into ``seal_libhash_s``). With RECORD coverage this
+#: measures the manifest-and-stat pass; with none, the full SHA-256 pass —
+#: which is the whole point of naming it.
 _LAST_LIBHASH_S: float = 0.0
 
 
@@ -529,31 +561,37 @@ def frozen_library_digests() -> Tuple[Tuple[str, str], ...]:
     global _LIB_SNAPSHOT, _LAST_LIBHASH_S
     if _LIB_SNAPSHOT is None:
         t0 = time.monotonic()
-        # pgw#1087: THE memo phase. `_LAST_LIBHASH_S` has always measured this
-        # pass but was reported only into the seal dict, where no boot reader
-        # ever joined it to the rest of the boot. As a phase the hit and miss
-        # populations are two rows of the same table and the memo's saving is
-        # a subtraction, not an estimate.
+        # pgw#1087: THE library-identity phase. `_LAST_LIBHASH_S` has always
+        # measured this pass but was reported only into the seal dict, where no
+        # boot reader ever joined it to the rest of the boot. As a phase the
+        # hit and miss populations are two rows of the same table and what a
+        # manifest saves is a subtraction, not an estimate.
         with boot_phases.span(boot_phases.PHASE_LIB_MEMO) as sp:
             _LIB_SNAPSHOT = toolchain_library_digests()
-            hits, misses = memo_counts()
+            src = digest_sources()
+            dists, indexed = dist_records.coverage()
             # `hit`/`partial`/`miss`, never `refused` — all three are
             # successful outcomes of the same phase and the token is what a
-            # hub-side count groups on.
+            # hub-side count groups on. The token answers ONE question: did
+            # this boot re-hash multi-GB of toolchain? The detail says which
+            # manifest spared it, so a coverage regression is a number here
+            # and not a slow boot nobody can explain.
             if not _LIB_SNAPSHOT:
                 # No toolchain libraries enumerated at all (an env with no
-                # torch/triton/nvidia packages). "nothing to hash" and "the
-                # memo served everything" are different answers and must not
-                # share the token `hit`.
+                # torch/triton/nvidia packages). "nothing to hash" and "a
+                # manifest served everything" are different answers and must
+                # not share the token `hit`.
                 token = "no_libs"
-            elif not misses:
+            elif not src.hashed:
                 token = "hit"
-            elif not hits:
+            elif not (src.record or src.memo):
                 token = "miss"
             else:
                 token = "partial"
             sp.classify(
-                token, f"hits={hits} misses={misses} libs={len(_LIB_SNAPSHOT)}")
+                token,
+                f"record={src.record} memo={src.memo} hashed={src.hashed} "
+                f"libs={len(_LIB_SNAPSHOT)} dists={dists} recorded={indexed}")
         _LAST_LIBHASH_S = round(time.monotonic() - t0, 3)
     return _LIB_SNAPSHOT
 
@@ -703,10 +741,11 @@ def assert_seal_unchanged(label: str = "") -> None:
 #: It exists because ``establish()`` is called once per pgw#809 entry-compile
 #: CHILD, so on a 72-entry mint its cost is multiplied by 72 and lands inside
 #: the recorded ``compile_s`` with no name. ``seal_libhash_s`` is the one that
-#: matters: the identity manifest SHA-256s every toolchain ``.so`` the env
-#: ships (measured off-pod: 36 files, 3.96 GB, ~8 s at 0.49 GB/s), and the
-#: memo that makes it "once" is an lru_cache — per PROCESS, so a pool of
-#: short-lived children re-pays it in full every time.
+#: matters: the identity manifest used to SHA-256 every toolchain ``.so`` the
+#: env ships (measured off-pod: 36 files, 3.96 GB, 10.6-17.3 s), once per
+#: PROCESS — so a pool of short-lived children re-paid it in full every time.
+#: pgw#1095 derives those digests from the wheels' RECORDs instead; the pass
+#: is a manifest read, and this span is how a coverage regression shows up.
 LAST_ESTABLISH_SPANS: Dict[str, float] = {}
 
 
@@ -768,11 +807,11 @@ def _establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     seal = effective_seal()
     mark("seal_effective_s")
     # The library pass is timed where it runs (frozen_library_digests), not
-    # inferred from `seal_effective_s`: with a pgw#832 memo the pass shrinks
-    # to stats while the rest of the seal (config read-back, inductor digest)
-    # does not, and naming the wrong part "libhash" would hide exactly the
-    # cost this span exists to expose. Still a split of `seal_effective_s`,
-    # never a partition member.
+    # inferred from `seal_effective_s`: under RECORD coverage the pass shrinks
+    # to a manifest read while the rest of the seal (config read-back, inductor
+    # digest) does not, and naming the wrong part "libhash" would hide exactly
+    # the cost this span exists to expose. Still a split of
+    # `seal_effective_s`, never a partition member.
     spans["seal_libhash_s"] = _LAST_LIBHASH_S if cold_libs else 0.0
     LAST_ESTABLISH_SPANS.clear()
     LAST_ESTABLISH_SPANS.update(spans)
@@ -781,12 +820,14 @@ def _establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
 
 __all__ = [
     "LAST_ESTABLISH_SPANS",
+    "DigestSources",
     "EnvSealError",
     "SCRUB_PREFIXES",
     "SEAL_KEY",
     "SEAL_LIB_MEMO_ENV",
     "SEAL_VERSION",
     "assert_seal_unchanged",
+    "digest_sources",
     "effective_config",
     "effective_seal",
     "establish",
