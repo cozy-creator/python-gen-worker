@@ -10,6 +10,7 @@ asyncio loop; sync tenant code runs in threads via asyncio.to_thread.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import gc
@@ -2208,7 +2209,16 @@ class ModelStore:
                         resolved = None
                         if snapshot is not None and snapshot.digest:
                             resolved = _snapshot_to_resolved(snapshot)
-                        with net_scope:
+                        # pgw#1087: name this span as the parent for the
+                        # per-component rows opened inside the downloader.
+                        # `open_span` cannot push the nesting stack itself
+                        # (its close is in another frame), and a component row
+                        # that lands top-level is counted twice.
+                        with net_scope, (
+                            boot_mod.parent_scope(fetch_span.ordinal)
+                            if fetch_span is not None
+                            else contextlib.nullcontext()
+                        ):
                             path = await ensure_local(
                                 ref,
                                 provider=getattr(binding, "source", None),
@@ -5697,6 +5707,15 @@ class Executor:
             rec.transient_setup_failures = 0
             rec.instance = instance
             rec.ready = True
+            # pgw#1087: the FIRST user-visible timestamp. A ready record is an
+            # instance that can answer a request — armed or eager — and on the
+            # pgw#671 eager-first boot below it is reached long before any cell
+            # exists. Paired with `compiled_swap` it gives the eager-serving
+            # window, which is the interval the compiled-serving campaign is
+            # trying to shrink and which nothing measured. Distinct from
+            # `first_request_servable`, which additionally requires the hub to
+            # have been told (a worker the hub cannot reach is not servable).
+            boot_mod.mark_once(boot_mod.PHASE_EAGER_READY, function=spec.name)
             bg = rec.background_mint
             if bg is not None and bg.task is None:
                 # pgw#671 eager-first boot: READY is advertised now (eager

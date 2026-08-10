@@ -58,7 +58,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from . import guard_closure, host_isa, settings_authority, torch_capability
+from . import (
+    boot_phases, guard_closure, host_isa, settings_authority, torch_capability,
+)
 import importlib.util
 
 logger = logging.getLogger(__name__)
@@ -308,9 +310,27 @@ def _disk_memo() -> Dict[str, str]:
     return _DISK_MEMO
 
 
+#: pgw#1087: memo hits vs misses over this process's whole library pass.
+#: Counted here rather than derived, because a partial hit — a memo written by
+#: a sibling whose env has since moved — is the interesting case and is
+#: invisible in a boolean.
+_MEMO_HITS = 0
+_MEMO_MISSES = 0
+
+
+def memo_counts() -> Tuple[int, int]:
+    """(hits, misses) of the pgw#832 library-digest memo so far."""
+    return _MEMO_HITS, _MEMO_MISSES
+
+
 def _lib_digest_memoized(path: str, mtime_ns: int, size: int) -> str:
+    global _MEMO_HITS, _MEMO_MISSES
     got = _disk_memo().get(_memo_key(path, mtime_ns, size))
-    return got if got is not None else _lib_digest(path, mtime_ns, size)
+    if got is not None:
+        _MEMO_HITS += 1
+        return got
+    _MEMO_MISSES += 1
+    return _lib_digest(path, mtime_ns, size)
 
 
 def write_library_memo(path: Path) -> int:
@@ -509,7 +529,31 @@ def frozen_library_digests() -> Tuple[Tuple[str, str], ...]:
     global _LIB_SNAPSHOT, _LAST_LIBHASH_S
     if _LIB_SNAPSHOT is None:
         t0 = time.monotonic()
-        _LIB_SNAPSHOT = toolchain_library_digests()
+        # pgw#1087: THE memo phase. `_LAST_LIBHASH_S` has always measured this
+        # pass but was reported only into the seal dict, where no boot reader
+        # ever joined it to the rest of the boot. As a phase the hit and miss
+        # populations are two rows of the same table and the memo's saving is
+        # a subtraction, not an estimate.
+        with boot_phases.span(boot_phases.PHASE_LIB_MEMO) as sp:
+            _LIB_SNAPSHOT = toolchain_library_digests()
+            hits, misses = memo_counts()
+            # `hit`/`partial`/`miss`, never `refused` — all three are
+            # successful outcomes of the same phase and the token is what a
+            # hub-side count groups on.
+            if not _LIB_SNAPSHOT:
+                # No toolchain libraries enumerated at all (an env with no
+                # torch/triton/nvidia packages). "nothing to hash" and "the
+                # memo served everything" are different answers and must not
+                # share the token `hit`.
+                token = "no_libs"
+            elif not misses:
+                token = "hit"
+            elif not hits:
+                token = "miss"
+            else:
+                token = "partial"
+            sp.classify(
+                token, f"hits={hits} misses={misses} libs={len(_LIB_SNAPSHOT)}")
         _LAST_LIBHASH_S = round(time.monotonic() - t0, 3)
     return _LIB_SNAPSHOT
 
@@ -675,6 +719,22 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     not take effect, an undeclared knob, or an interpreter that booted
     outside the declared env (``settings_authority.ensure_interpreter_env``
     is the imposition for that one)."""
+    # pgw#1087: THE envelope/toolchain/sm derivation phase. The `spans` dict
+    # below has always measured this in detail, but it rode `LAST_ESTABLISH_SPANS`
+    # — a module global no boot reader ever joined to the rest of the ladder —
+    # so the derivation's cost was "expect ms; prove it" and unproven for a
+    # year. The span lives HERE, in the function being measured, so every
+    # caller produces it: the entrypoint, the mint child, and the in-process
+    # harness alike.
+    with boot_phases.span(boot_phases.PHASE_ENV_ESTABLISH) as _sp:
+        seal = _establish(overrides)
+        _sp.note(
+            f"digest={seal_digest(seal)} sm={seal.get('host_isa') or '-'} "
+            + " ".join(f"{k}={v}" for k, v in sorted(LAST_ESTABLISH_SPANS.items())))
+        return seal
+
+
+def _establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     global _BOOT_READBACK, _ESTABLISHED_OVERRIDES
 
     spans: Dict[str, float] = {}

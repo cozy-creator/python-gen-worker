@@ -15,12 +15,14 @@ fleet event is actionable.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any, Optional
 
 import requests
 
+from . import boot_phases
 from .api.errors import RetryableError
 from .bounded_stream import copy_bounded
 from .models.chunk_cas import (
@@ -59,6 +61,31 @@ def materialize_named_artifact(
     digest, so a re-dispatch of the same spec is a verify-and-return.
     ``what`` names the attempt + spec digest for every refusal.
     """
+    # pgw#1087: THE cell-download phase. `cell_fetch` has been a declared boot
+    # phase since pgw#764 with NO producer anywhere in the tree — so "the adopt
+    # leg took 6.2 min" could never be split into download vs admission, which
+    # is the first question anyone asks about an adopt. This is the one place
+    # cell bytes move, so it is the one place the span belongs.
+    with boot_phases.span(
+        boot_phases.PHASE_CELL_FETCH,
+        ref=cell_ref,
+        artifact_kind="aot-inductor",
+        artifact_key=str(content_digest or ""),
+    ) if boot_phases.in_boot() else contextlib.nullcontext() as fetch_span:
+        return _materialize_named_artifact(
+            cell_ref, content_digest, presigned,
+            cache_dir=cache_dir, what=what, span=fetch_span)
+
+
+def _materialize_named_artifact(
+    cell_ref: str,
+    content_digest: str,
+    presigned: Optional[Any],
+    *,
+    cache_dir: Optional[Path],
+    what: str,
+    span: Optional["boot_phases.BootSpan"] = None,
+) -> Path:
     digest = str(content_digest or "").strip()
     if not digest:
         raise NamedArtifactUnavailable(
@@ -78,6 +105,11 @@ def materialize_named_artifact(
             raise NamedArtifactUnavailable(
                 "artifact_unpinned", f"{what}: {exc}") from exc
         else:
+            # A cache hit is a real and countable outcome of this phase, not a
+            # zero-byte fetch: the verify pass still reads the whole tarball.
+            if span is not None:
+                span.classify("cached", f"ref={cell_ref}")
+                span.bytes_moved(dest.stat().st_size, boot_phases.SOURCE_LOCAL)
             return dest
 
     if presigned is None or not list(getattr(presigned, "files", ())):
@@ -147,6 +179,10 @@ def materialize_named_artifact(
             f"{what}: named cell {cell_ref!r} bytes refused against "
             f"{digest[:24]}…: {exc}") from exc
     tmp.replace(dest)
+    if span is not None:
+        span.classify("fetched", f"ref={cell_ref} chunks={len(chunks)}")
+        span.bytes_moved(declared_size or dest.stat().st_size,
+                         boot_phases.SOURCE_CAS)
     return dest
 
 

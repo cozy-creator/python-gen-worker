@@ -69,6 +69,7 @@ compile stack keeps ``import gen_worker`` off the torch/pb import graph.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import gzip
 import hashlib
@@ -90,6 +91,7 @@ from . import activity as activity_mod
 from . import aot_flatten
 from . import aot_identity
 from . import artifact_meta
+from . import boot_phases
 from . import cell_key as cell_key_mod
 from . import host_isa
 from .cell_adopt import AdoptOutcome
@@ -2557,8 +2559,18 @@ def load_and_wrap(
     settled while the artifact is still inert bytes.
     """
     family = str(getattr(cfg, "family", "") or "")
-    staged = stage_artifact(
-        Path(artifact), family, cache_dir=cache_dir, expected=expected)
+    # pgw#1087: admission splits in two and the halves have different owners.
+    # `cell_verify` is unpack + identity + contract verification on inert bytes
+    # (disk + hashing); `entry_admit` below is per-ENTRY dlopen, constant bind
+    # and ingress-assertion arming (device). Both were inside one `cell_arm`
+    # row, so an adopt that spent four minutes hashing a tarball and one
+    # second binding read identically to the reverse.
+    with boot_phases.span(
+        boot_phases.PHASE_CELL_VERIFY, ref=family,
+        artifact_kind="aot-inductor",
+    ) if boot_phases.in_boot() else contextlib.nullcontext():
+        staged = stage_artifact(
+            Path(artifact), family, cache_dir=cache_dir, expected=expected)
     try:
         meta = staged.metadata
         # pgw#1040: parsed and validated once, while staging.
@@ -2643,17 +2655,27 @@ def load_and_wrap(
             pools[target] = pool
             runners: List[Tuple[str, ArtifactRunner]] = []
             for name, contract, constants in parsed:
-                package = _load_package(staged.root / PACKAGE_NAME, name)
-                runner = ArtifactRunner(
-                    package=package, contract=contract, constants=constants,
-                    module_name=target, entry=name, family=family)
-                try:
-                    runner.bind(pool, literals_by_entry.get(name, {}),
-                                user_managed=True)
-                except ConstantsUnboundError as exc:
-                    raise AdoptError(
-                        f"constants_{exc.reason}",
-                        f"entry {name!r}: {exc}") from exc
+                # pgw#1087: ONE entry's admission — dlopen + bind. Per entry
+                # because that is the axis a 36-class cell varies on, and a
+                # roll-up cannot tell a uniformly slow admission from one
+                # pathological entry.
+                with boot_phases.span(
+                    boot_phases.PHASE_ENTRY_ADMIT, ref=family, function=name,
+                    artifact_kind="aot-inductor",
+                ) if boot_phases.in_boot() else contextlib.nullcontext() as sp:
+                    package = _load_package(staged.root / PACKAGE_NAME, name)
+                    runner = ArtifactRunner(
+                        package=package, contract=contract, constants=constants,
+                        module_name=target, entry=name, family=family)
+                    try:
+                        runner.bind(pool, literals_by_entry.get(name, {}),
+                                    user_managed=True)
+                    except ConstantsUnboundError as exc:
+                        raise AdoptError(
+                            f"constants_{exc.reason}",
+                            f"entry {name!r}: {exc}") from exc
+                    if sp is not None:
+                        sp.note(f"target={target} constants={len(constants)}")
                 total_constants += len(constants)
                 runners.append((name, runner))
             dispatches[target] = EntryDispatch(tuple(runners))

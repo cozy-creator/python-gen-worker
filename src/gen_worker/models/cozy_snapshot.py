@@ -32,6 +32,7 @@ from .errors import PickleWeightRefused
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
 from .. import activity as _activity
+from .. import boot_phases
 from ..capability import InsufficientDiskError
 from ..s3_transfer import S3TransferGrant, download_file_with_grant
 from .loading import safetensors_file_valid
@@ -150,6 +151,26 @@ def _blob_path(blobs_root: Path, ref: str) -> Path:
     """
     algo, hexpart = parse_cas_ref(ref)
     return blobs_root / algo / hexpart[:2] / hexpart[2:4] / hexpart
+
+
+def _component_of(path: str) -> str:
+    """The diffusers COMPONENT a snapshot file belongs to (pgw#1087).
+
+    The first path segment when the file sits in a subdirectory, ``(root)``
+    otherwise — model_index.json, a top-level scheduler config and the like.
+    Deliberately NOT validated against `component_vocab`: an unrecognized
+    directory is still a real slice of the download, and dropping it into an
+    "other" bucket would make the component rows stop summing to the fetch.
+    """
+    rel = _norm_rel_path(str(path or ""))
+    head, sep, _ = rel.partition("/")
+    return head if sep and head else "(root)"
+
+
+#: pgw#1087: the no-op source sink used when component spans are off (steady
+#: state). Named rather than an inline lambda so `_dl` has one shape.
+def _NO_SOURCE(_source: str) -> None:
+    return None
 
 
 _PART_FILE_RE = re.compile(r"\.part\d{4}$")
@@ -707,6 +728,25 @@ class CozySnapshotDownloader:
         # Sort largest first for better overlap, then download in parallel.
         unique.sort(key=lambda f: int(f.size_bytes or 0), reverse=True)
 
+        # pgw#1087: per-COMPONENT fetch spans. `weights_fetch` says how long
+        # the whole ref took and nothing about which of transformer / vae /
+        # text_encoder owned it, and — because these run four-wide — nothing
+        # about how much of the wall is genuinely serialized. Both are
+        # prerequisites for a trace-overlaps-download optimization, and neither
+        # was derivable from anything the platform stored. Boot only: a
+        # steady-state materialization hours later must not land in the ladder.
+        components: Dict[str, int] = {}
+        if boot_phases.in_boot():
+            for f in unique:
+                components[_component_of(f.path)] = (
+                    components.get(_component_of(f.path), 0) + 1)
+        # No `ref` here by design: `_ensure_blobs` is blob-level and the ref
+        # axis rides the enclosing `weights_fetch` row, which is this span's
+        # parent. Repeating it would be a second spelling that can drift.
+        comp_spans = (
+            boot_phases.ComponentSpans(components) if components else None
+        )
+
         max_conc = 4
         sem = asyncio.Semaphore(max_conc)
         blobs_root_id = str(blobs_root.resolve())
@@ -809,20 +849,46 @@ class CozySnapshotDownloader:
                 await asyncio.to_thread(_drop_chunks, digest)
 
         async def _dl(f: WorkerResolvedRepoFile) -> None:
+            # pgw#1087: the component span brackets THIS file's contribution
+            # and carries the source it actually came from — the same
+            # cached/volume/network distinction `weights_fetch` reports, one
+            # level finer, so "the vae was warm and the transformer was cold"
+            # is a row rather than an inference from the total.
+            if comp_spans is None:
+                await _dl_one(f, _NO_SOURCE)
+                return
+            component = _component_of(f.path)
+            comp_spans.start(component)
+            seen: List[str] = []
+            try:
+                await _dl_one(f, seen.append)
+            finally:
+                comp_spans.finish(
+                    component,
+                    bytes_moved=int(f.size_bytes or 0),
+                    source=seen[-1] if seen else "")
+
+        async def _dl_one(
+            f: WorkerResolvedRepoFile, note: Callable[[str], None],
+        ) -> None:
             digest = f.cas_ref()
             dst = _blob_path(blobs_root, digest)
             dst.parent.mkdir(parents=True, exist_ok=True)
             if await _blob_trusted(dst, f, digest):
                 _log.info("blob_cached path=%s digest=%s", f.path, digest[:16])
+                note(boot_phases.SOURCE_LOCAL)
                 return
             async with _inflight_blob_lock(digest):
                 if await _blob_trusted(dst, f, digest):
                     _log.info("blob_shared_inflight path=%s digest=%s (sibling ref downloaded it)",
                               f.path, digest[:16])
+                    note(boot_phases.SOURCE_INFLIGHT_SHARE)
                     return
                 if await _fill_from_volume(f, digest, dst):
+                    note(boot_phases.SOURCE_VOLUME)
                     return
                 teed = await _dl_locked(f, digest, dst)
+                note(boot_phases.SOURCE_R2)
             if fill_blobs_root is not None and not teed:
                 publishes.append(
                     asyncio.create_task(_fill_to_volume(f, digest, dst))
@@ -905,7 +971,13 @@ class CozySnapshotDownloader:
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:24])
             return teed
 
-        await asyncio.gather(*(_dl(f) for f in unique))
+        try:
+            await asyncio.gather(*(_dl(f) for f in unique))
+        finally:
+            # A fetch that raised leaves components mid-flight; close them
+            # NAMED rather than leaving open rows the hub cannot interpret.
+            if comp_spans is not None:
+                comp_spans.close_all("fetch_aborted")
         # th#850 managed-tier runtime-assertion signal: on a volume-attached
         # boot with blobs already warm, network_bytes should land near zero.
         # _on_bytes above already streamed this total into the caller's

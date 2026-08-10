@@ -12,11 +12,23 @@ per-REQUEST measurement spine, th#1111), and it deliberately copies that
 module's two trustworthiness properties:
 
 * **It reconciles.** Spans nest, and a nested span's time is charged to the
-  CHILD, never twice. So measured phases + ``residual`` == the whole boot
-  window. A boot instrument that reports 120s of phases inside a 190s boot
-  cannot answer the question it exists for.
+  CHILD, never twice. So measured phases + named segments + ``residual`` ==
+  the whole boot window. A boot instrument that reports 120s of phases inside
+  a 190s boot cannot answer the question it exists for.
+
+  pgw#1087 made that a UNION rather than a sum. Once phases decompose per
+  component they run concurrently, and a summing reconciliation "explains"
+  3,338 ms of a 909 ms fetch — closing the ladder by over-counting, which is
+  worse than visibly not closing it. ``measured_ms`` is the wall time covered
+  by at least one span; the gap between that and the exclusive sum is reported
+  as ``concurrency_ms``, because "how parallel was this boot" is the question
+  the per-component split exists to answer.
 * **It classifies.** Every phase is FETCH, COMPILE, LOAD or SETUP, so
   "this release's boots are network-bound" is a query, not a hunch.
+* **It NAMES its residual** (pgw#1087). Two windows no span can cover — the
+  interpreter+import wall before the recorder exists, and the hub handshake in
+  which the worker deliberately does no local work — are named segments, not
+  an unexplained lump. What survives both is the honest hole.
 
 ## Why it buffers
 
@@ -42,7 +54,10 @@ import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional
+from dataclasses import dataclass
+from typing import (
+    Any, Awaitable, Callable, Dict, Iterable, Iterator, List, Optional, Tuple,
+)
 
 from .pb import worker_scheduler_pb2 as pb
 
@@ -75,7 +90,6 @@ PHASE_PIPELINE_LOAD = "pipeline_load"
 #: A skipped warmup now emits no row, because "nobody warmed" and "warming was
 #: free" are different answers and only one of them was ever true.
 PHASE_WARMUP = "warmup"
-PHASE_CELL_DISCOVER = "cell_discover"
 PHASE_CELL_FETCH = "cell_fetch"
 #: pgw#923/#924: the arm of ONE delivered or discovered cell. Its duration is
 #: the same quantity the hub stores as the adoption's `duration_ms`, measured
@@ -83,9 +97,79 @@ PHASE_CELL_FETCH = "cell_fetch"
 PHASE_CELL_ARM = "cell_arm"
 PHASE_FIRST_REQUEST_SERVABLE = "first_request_servable"
 
+# --- pgw#1087: the per-COMPONENT decomposition -----------------------------
+# Paul, 2026-08-10: "you should be measuring per-component of cold-boot, not
+# just measuring a granular 'whole cold boot was 6.2 mins for some reason'."
+# The eight phases above are LEG-grade: they answer "fetch or compile" and
+# nothing finer, which is why "the adopt leg took 6.2 min" was the finest fact
+# the platform held. Each name below is one question that was asked this
+# session and could not be answered, and each has exactly one production
+# producer — the pgw#924 rule is not relaxed for being new.
+
+#: Process start -> the SDK is usable (interpreter + torch import + endpoint
+#: discovery + executor construction). CUMULATIVE. Names the window that
+#: previously arrived as an unexplained residual: no span could start before
+#: the code that opens spans had been imported.
+PHASE_SDK_READY = "sdk_ready"
+#: One component of one ref's weights. Child of `weights_fetch`, opened at the
+#: component's first byte and closed at its last, so CONCURRENCY IS VISIBLE:
+#: four components inside a 200 s `weights_fetch` that each measure 180 s were
+#: overlapped, and that is the fact an overlap optimization needs.
+PHASE_COMPONENT_FETCH = "component_fetch"
+#: `env_seal.establish` — the settings declaration digest, the boot-frozen
+#: loaded-library digest and the sm/host-ISA derivation that together make the
+#: `toolchain` and `sm` key axes. Guessed at "ms"; this proves it.
+PHASE_ENV_ESTABLISH = "env_establish"
+#: The library-digest MEMO path, hit or miss, inside `env_establish`. `reason`
+#: is `hit` or `miss` and `detail` carries the covered/total library counts, so
+#: the saving a memo buys is a subtraction between two real rows rather than an
+#: estimate.
+PHASE_LIB_MEMO = "lib_memo"
+#: Composing the export declaration a mint will trace against.
+PHASE_DECLARATION_COMPOSE = "declaration_compose"
+#: ONE graph CLASS traced for the key. `function` is the entry name and
+#: `detail` carries `nodes=` — a class's trace cost is meaningless without the
+#: graph size it paid for. Never a roll-up: 36 classes is 36 rows.
+PHASE_TRACE_FOR_KEY = "trace_for_key"
+#: Per-class hashing + the fold into `combined_graph_hash`.
+PHASE_KEY_FOLD = "key_fold"
+#: One worker->hub cell control-plane round trip (publish-intent /
+#: publish-complete). `function` names the leg. NOTE: there is no worker-side
+#: key LOOKUP to time — pgw#904 made the hub resolve the arm and pgw#1032
+#: deleted `StateDelta.cell_lookups` — so this is the whole of the hub RTT the
+#: cell path actually pays on a boot.
+PHASE_CELL_HUB_RTT = "cell_hub_rtt"
+#: Staging + contract verification of a downloaded cell, before the first
+#: dlopen. The first half of admission.
+PHASE_CELL_VERIFY = "cell_verify"
+#: ONE entry's admission: contract parse, constant bind, ingress-assertion
+#: arming and the admission-drift parity check against the artifact's own
+#: generated guards. The second half of admission, and the per-entry parity
+#: sweep, measured where it happens.
+PHASE_ENTRY_ADMIT = "entry_admit"
+#: CUMULATIVE. The first instant this worker could have served a request at
+#: all, compiled or not — the first of the two user-visible timestamps.
+PHASE_EAGER_READY = "eager_ready"
+#: CUMULATIVE. The instant a compiled cell became the served path. The second
+#: user-visible timestamp, and the only honest measure of how long a pod serves
+#: eager before its cell arrives. May land AFTER the boot closes, which is
+#: exactly the fact worth having.
+PHASE_COMPILED_SWAP = "compiled_swap"
+
 #: The boot's closing milestone: the phase whose completion means this worker
 #: can serve. Everything after it is optimization, not boot.
 SERVABLE_PHASES = frozenset({PHASE_FIRST_REQUEST_SERVABLE})
+
+#: Milestones measured from process start rather than spans of their own. They
+#: are excluded from the phase SUM (they cover wall clock the spans already
+#: account for) and reported beside it.
+CUMULATIVE_PHASES = frozenset({
+    PHASE_HELLO,
+    PHASE_SDK_READY,
+    PHASE_EAGER_READY,
+    PHASE_COMPILED_SWAP,
+    PHASE_FIRST_REQUEST_SERVABLE,
+})
 
 # Phase classification — which resource a phase spends. Mirrors
 # stage_timing's GPU_BUSY/SMALL_GPU/GPU_IDLE intent at boot scale.
@@ -97,7 +181,6 @@ CLASS_SETUP = "setup"      # probes, seals, manifests, handshake
 _CLASS_BY_PHASE: Dict[str, str] = {
     PHASE_HELLO: CLASS_SETUP,
     PHASE_WEIGHTS_FETCH: CLASS_FETCH,
-    PHASE_CELL_DISCOVER: CLASS_SETUP,
     PHASE_CELL_FETCH: CLASS_FETCH,
     PHASE_CELL_ARM: CLASS_LOAD,
     PHASE_PIPELINE_LOAD: CLASS_LOAD,
@@ -106,11 +189,32 @@ _CLASS_BY_PHASE: Dict[str, str] = {
     # per row, which is why classification is a lookup and not a constant.
     PHASE_WARMUP: CLASS_COMPILE,
     PHASE_FIRST_REQUEST_SERVABLE: CLASS_SETUP,
+    # pgw#1087
+    PHASE_SDK_READY: CLASS_SETUP,
+    PHASE_COMPONENT_FETCH: CLASS_FETCH,
+    PHASE_ENV_ESTABLISH: CLASS_SETUP,
+    PHASE_LIB_MEMO: CLASS_SETUP,
+    PHASE_DECLARATION_COMPOSE: CLASS_SETUP,
+    PHASE_TRACE_FOR_KEY: CLASS_COMPILE,
+    PHASE_KEY_FOLD: CLASS_SETUP,
+    PHASE_CELL_HUB_RTT: CLASS_SETUP,
+    PHASE_CELL_VERIFY: CLASS_LOAD,
+    PHASE_ENTRY_ADMIT: CLASS_LOAD,
+    PHASE_EAGER_READY: CLASS_SETUP,
+    PHASE_COMPILED_SWAP: CLASS_SETUP,
 }
 
 #: The complete vocabulary (pgw#924). Exported so a test can assert the
 #: declaration and the production producers are the SAME set — the property
 #: that failed here, silently, for seventeen names.
+#:
+#: pgw#1087 removed `cell_discover`. It was declared by pgw#924 as one of the
+#: "eight the shipping path PRODUCES", and it never had a producer: pgw#904
+#: replaced worker-side fetch-and-filter discovery with a hub-RESOLVED
+#: `Arm.artifact`, so there is nothing left to discover. Grep confirms it
+#: appeared only in this module and in tests. Same defect class pgw#924 was
+#: closing, missed once because the audit checked the COUNT and not the
+#: producers.
 PHASES: frozenset = frozenset(_CLASS_BY_PHASE)
 
 
@@ -171,6 +275,9 @@ _pending_servable: Optional[Dict[str, Any]] = None
 #: Per-ordinal classification override (pgw#797: an armed warm is LOAD, an
 #: unarmed one is COMPILE — same phase name, different resource).
 _class_override: Dict[int, str] = {}
+#: pgw#1087: every CUMULATIVE milestone's ms-from-process-start, first write
+#: wins. Read by :func:`reconciliation` and :func:`completeness`.
+_milestone_ms: Dict[str, int] = {}
 
 _process_start_unix: float = 0.0
 
@@ -328,6 +435,19 @@ class BootSpan:
         """Attach identifiers (ref=/key=/fn=/lane=) per the pgw#760 doctrine."""
         self._detail = detail[:2000]
 
+    def classify(self, reason: str, detail: str = "") -> None:
+        """Attach the countable reason token WITHOUT calling this a refusal.
+
+        pgw#1087: `memo hit` / `memo miss` and `cell cached` / `cell fetched`
+        are the two branches of a SUCCESSFUL phase, and both are the fact worth
+        counting. Before this the only way to put a token on a row was
+        :meth:`refused`, which sets ``outcome=refused`` — so a hub-side count of
+        refusals would have been polluted by every memo hit.
+        """
+        self._reason = reason[:300]
+        if detail:
+            self._detail = detail[:2000]
+
     def refused(self, reason: str, detail: str = "") -> None:
         """A TYPED refusal: this phase declined and the worker serves something
         else. Not an error — the reason token is the countable fact."""
@@ -453,6 +573,97 @@ def span(
         handle.close()
 
 
+class ComponentSpans:
+    """Per-component fetch spans that open on the first byte and close on the
+    last (pgw#1087).
+
+    Weights download is the biggest slice of most cold boots and the platform
+    could only ever say how long the WHOLE ref took. A per-component span is
+    not a finer roll-up of the same number: the components download
+    CONCURRENTLY, so four 180 s components inside a 200 s `weights_fetch` is a
+    completely different finding from four sequential 50 s ones, and only
+    start/end per component can tell them apart.
+
+    ``expected`` is {component: file count}. A component closes when its last
+    file is accounted, so a span never re-opens after closing — a refcount
+    that touched zero mid-fetch would otherwise split one component into two
+    rows and make the ladder stop reconciling.
+    """
+
+    __slots__ = ("_remaining", "_open", "_parent", "_ref", "_lock")
+
+    def __init__(
+        self,
+        expected: Dict[str, int],
+        *,
+        parent: Optional[int] = None,
+        ref: str = "",
+    ) -> None:
+        self._remaining = {k: int(v) for k, v in expected.items() if int(v) > 0}
+        self._open: Dict[str, BootSpan] = {}
+        self._parent = parent
+        self._ref = ref
+        self._lock = threading.Lock()
+
+    def start(self, component: str) -> None:
+        with self._lock:
+            if component in self._open or component not in self._remaining:
+                return
+            self._open[component] = open_span(
+                PHASE_COMPONENT_FETCH, ref=self._ref, function=component,
+                parent=self._parent)
+
+    def finish(
+        self, component: str, *, bytes_moved: int = 0, source: str = "",
+    ) -> None:
+        with self._lock:
+            left = self._remaining.get(component)
+            if left is None:
+                return
+            span_handle = self._open.get(component)
+            if span_handle is not None and (bytes_moved or source):
+                span_handle.bytes_moved(int(bytes_moved), source)
+            left -= 1
+            if left > 0:
+                self._remaining[component] = left
+                return
+            self._remaining.pop(component, None)
+            handle = self._open.pop(component, None)
+        if handle is not None:
+            handle.close()
+
+    def close_all(self, reason: str = "") -> None:
+        """Close every still-open component span (an aborted fetch)."""
+        with self._lock:
+            handles = list(self._open.items())
+            self._open.clear()
+            self._remaining.clear()
+        for name, handle in handles:
+            if reason:
+                handle.refused(reason, f"component={name}")
+            handle.close()
+
+
+@contextmanager
+def parent_scope(ordinal: int) -> Iterator[None]:
+    """Make ``ordinal`` the implicit parent for spans opened in this context.
+
+    :func:`open_span` (as opposed to :func:`span`) does NOT push onto the
+    nesting stack — it cannot, because its close happens in another frame. So
+    a decomposition opened deep inside such a span, across `await` boundaries
+    and module boundaries, has no way to find its parent and lands at the top
+    level, where its time is added to the ladder a second time and
+    `reconciliation` stops closing. Threading an ordinal through six call
+    frames is the alternative; a ContextVar scope is the same fact stated once
+    (and ContextVars copy per task, so concurrent fetches nest correctly).
+    """
+    token = _stack_var.set(_stack_var.get() + (int(ordinal),))
+    try:
+        yield
+    finally:
+        _stack_var.reset(token)
+
+
 def mark(
     phase: str,
     *,
@@ -486,6 +697,14 @@ def mark(
     is HELD, not emitted: see the ``_hello_seen`` note. It is released, with its
     time re-read at release, by :func:`note_hello`.
     """
+    # pgw#1087: a milestone is cumulative BY NAME, not by the caller passing
+    # the flag. `eager_ready` is marked from a setup task that runs inside the
+    # `pipeline_load` span, so a caller who forgot the flag would charge a
+    # whole-boot duration against a sub-second parent and drive its exclusive
+    # time to zero — the exact pgw#797 defect, one vocabulary later. Making it
+    # structural means the flag can only ever be redundant, never wrong.
+    if phase in CUMULATIVE_PHASES:
+        since_process_start = True
     if phase in SERVABLE_PHASES:
         with _lock:
             if not _hello_seen:
@@ -522,6 +741,14 @@ def mark(
             _class_override[ordinal] = klass
     if since_process_start:
         duration_ms = process_uptime_ms()
+    if since_process_start:
+        # pgw#1087: every cumulative milestone is remembered, not just the
+        # servable one. `eager_ready` and `compiled_swap` are the two
+        # user-visible timestamps and the interval between them is how long a
+        # pod served eager while its cell arrived — a subtraction nobody could
+        # do while only one milestone was retained.
+        with _lock:
+            _milestone_ms.setdefault(phase, duration_ms)
     if phase in SERVABLE_PHASES:
         global _servable_ms
         with _lock:
@@ -628,21 +855,64 @@ def in_boot() -> bool:
         return _servable_ms is None
 
 
-def reconciliation() -> Dict[str, int]:
+def _union_ms(intervals: List[Tuple[int, int]]) -> int:
+    """Total wall time covered by ``intervals``, overlaps counted ONCE."""
+    total = 0
+    end_so_far = -1
+    for start, end in sorted(intervals):
+        if end <= end_so_far:
+            continue
+        total += end - max(start, end_so_far if end_so_far >= 0 else start)
+        end_so_far = end
+    return max(0, total)
+
+
+def _deduped(rows: List[pb.BootPhase]) -> List[pb.BootPhase]:
+    """One row per (ordinal, terminal) — the hub's own upsert key.
+
+    A ladder read off the wire carries duplicates by design: `bind_sink`
+    re-flushes every buffered row on each RECONNECT so a boot that lost its
+    stream still delivers, and the hub upserts. A reader that does not dedupe
+    counts a reconnecting boot's phases twice, which is a measurement error
+    caused entirely by a delivery guarantee (observed on the first real
+    decomposition: `sdk_ready` and `hello` each appeared twice).
+    """
+    seen: Dict[Tuple[int, bool], pb.BootPhase] = {}
+    for row in rows:
+        seen.setdefault((row.ordinal, row.terminal), row)
+    return list(seen.values())
+
+
+def reconciliation(
+    rows: Optional[List[pb.BootPhase]] = None,
+) -> Dict[str, int]:
     """Boot totals, per the th#1111 rule that an instrument must close.
 
     ``residual`` is the boot window no phase explained. It is REPORTED, never
     smeared across the measured phases: "unmeasured" and "zero" are different
     answers, and the residual is the honest hint about where the next
     instrument belongs.
+
+    ``rows`` overrides this process's recorded ladder. It exists so a test can
+    ask the SAME arithmetic about a modified ladder — the RED proof for
+    pgw#1087 removes one phase's rows from a real boot and observes the verdict
+    go red, which is impossible if the only input is a module global.
     """
+    given = rows is not None
     with _lock:
-        rows = list(_rows)
+        if rows is None:
+            rows = list(_rows)
         truncated = _truncated
         total = _servable_ms
+    if given:
+        total = next(
+            (r.duration_ms for r in rows
+             if r.terminal and r.phase in SERVABLE_PHASES), None)
+    rows = _deduped(rows)
     exclusive = 0
     per_class: Dict[str, int] = {}
     children: Dict[int, int] = {}
+    intervals: List[Tuple[int, int]] = []
     for row in rows:
         if row.terminal and not row.cumulative and row.parent_ordinal:
             children[row.parent_ordinal] = children.get(row.parent_ordinal, 0) + row.duration_ms
@@ -654,18 +924,305 @@ def reconciliation() -> Dict[str, int]:
             continue
         own = max(0, row.duration_ms - children.get(row.ordinal, 0))
         exclusive += own
+        intervals.append(
+            (max(0, row.process_uptime_ms - row.duration_ms),
+             row.process_uptime_ms))
         kind = phase_class(row.phase, row.ordinal)
         per_class["class." + (kind or "unattributed")] = (
             per_class.get("class." + (kind or "unattributed"), 0) + own
         )
-    out: Dict[str, int] = {"measured_ms": exclusive}
+    # pgw#1087: `measured_ms` is the UNION of the span intervals, not the sum
+    # of their exclusive times. The two differ the moment anything runs
+    # concurrently, and per-component fetch made concurrency the normal case:
+    # on the first real decomposition four component spans totalling 3,338 ms
+    # sat inside a 909 ms `weights_fetch`, and a summing reconciliation
+    # "explained" 3.3 s of a 0.9 s window — a ladder that closes by
+    # over-counting is worse than one that visibly does not close. The
+    # difference is itself the answer to "how much of this boot was
+    # parallel", so it is reported rather than discarded.
+    measured = _union_ms(intervals)
+    out: Dict[str, int] = {"measured_ms": measured}
     out.update(per_class)
+    if exclusive > measured:
+        out["concurrency_ms"] = exclusive - measured
+    # pgw#1087: NAME the residual instead of reporting one lump. Two named
+    # segments cover what no span can: the interpreter+import window (no span
+    # can open before the module that opens spans is imported) and the
+    # post-servable tail a compiled swap lands in. What survives both is the
+    # only honest `residual_ms`, and it is now small enough to be a finding
+    # rather than the majority of the boot.
+    if given:
+        milestones = {
+            r.phase: r.duration_ms for r in rows
+            if r.terminal and r.cumulative}
+    else:
+        with _lock:
+            milestones = dict(_milestone_ms)
+    named = 0
+    sdk = milestones.get(PHASE_SDK_READY)
+    if sdk is not None:
+        # `sdk_ready` is cumulative, so it covers any span that closed inside
+        # it; only the part no span explained is named here.
+        pre_sdk_spans = _union_ms([
+            (max(0, r.process_uptime_ms - r.duration_ms), r.process_uptime_ms)
+            for r in rows
+            if r.terminal and not r.cumulative and r.process_uptime_ms <= sdk])
+        named_sdk = max(0, sdk - pre_sdk_spans)
+        out["named.sdk_import_ms"] = named_sdk
+        named += named_sdk
+        # The SECOND named window: SDK ready -> the first thing this worker was
+        # told to do. That is the gRPC dial, the Hello/HelloAck round trip and
+        # the wait for a DesiredResidency — real boot seconds in which the
+        # worker deliberately does no local work, so no span can cover them and
+        # leaving them in `residual_ms` reads as an instrument hole rather than
+        # as the hub round trip it is. Measured on a real in-process boot at
+        # 1,238 ms of a 23,208 ms boot — 5.3%, i.e. on its own enough to fail
+        # the ~5% acceptance while nothing was actually unmeasured.
+        starts = [
+            max(0, row.process_uptime_ms - row.duration_ms)
+            for row in rows
+            if row.terminal and not row.cumulative and not row.parent_ordinal
+            and row.process_uptime_ms - row.duration_ms >= sdk
+        ]
+        if starts:
+            handshake = max(0, min(starts) - sdk)
+            out["named.hub_handshake_ms"] = handshake
+            named += handshake
+    for phase in (PHASE_EAGER_READY, PHASE_COMPILED_SWAP):
+        if phase in milestones:
+            out["milestone." + phase + "_ms"] = milestones[phase]
+    if PHASE_EAGER_READY in milestones and PHASE_COMPILED_SWAP in milestones:
+        # The interval a pod served EAGER while its cell was being made or
+        # fetched. The single number the compiled-serving campaign is about.
+        out["eager_serving_ms"] = max(
+            0, milestones[PHASE_COMPILED_SWAP] - milestones[PHASE_EAGER_READY])
     if total is not None:
         out["total_ms"] = total
-        out["residual_ms"] = max(0, total - exclusive)
+        out["named_ms"] = named
+        out["residual_ms"] = max(0, total - measured - named)
+        out["accounted_pct"] = int(round(
+            100.0 * min(1.0, (measured + named) / total))) if total > 0 else 100
     if truncated:
         out["flag.rows_truncated"] = 1
     return out
+
+
+@dataclass(frozen=True)
+class PhaseRow:
+    """One line of the boot's phase table."""
+
+    phase: str
+    ordinal: int
+    parent_ordinal: int
+    klass: str
+    #: Wall time of the span, children included.
+    duration_ms: int
+    #: ``duration_ms`` minus the children's — what THIS phase itself spent.
+    exclusive_ms: int
+    #: ms from process start to the phase's OPEN and CLOSE. Both, because the
+    #: whole point of a per-component decomposition is telling four overlapping
+    #: 180 s fetches from four sequential 50 s ones, and only an interval can.
+    start_ms: int
+    end_ms: int
+    cumulative: bool
+    bytes: int
+    source: str
+    ref: str
+    function: str
+    outcome: str
+    reason: str
+    detail: str
+
+
+def phase_table(
+    rows: Optional[List[pb.BootPhase]] = None,
+) -> List[PhaseRow]:
+    """The boot decomposition, in emission order, with children subtracted.
+
+    The thing pgw#1087 exists to produce: one call, one readable table, no
+    log archaeology. Open (non-terminal) rows are EXCLUDED — a phase with no
+    close has no duration, and a table that silently rendered it as 0 would be
+    the "default read as a fact" defect this vocabulary keeps closing. The open
+    row itself still ships on the wire, where it is the finding.
+    """
+    if rows is None:
+        with _lock:
+            rows = list(_rows)
+    rows = _deduped(rows)
+    children: Dict[int, int] = {}
+    for row in rows:
+        if row.terminal and not row.cumulative and row.parent_ordinal:
+            children[row.parent_ordinal] = (
+                children.get(row.parent_ordinal, 0) + row.duration_ms)
+    out: List[PhaseRow] = []
+    for row in rows:
+        if not row.terminal:
+            continue
+        out.append(PhaseRow(
+            phase=row.phase,
+            ordinal=row.ordinal,
+            parent_ordinal=row.parent_ordinal,
+            klass=phase_class(row.phase, row.ordinal),
+            duration_ms=row.duration_ms,
+            exclusive_ms=(
+                row.duration_ms if row.cumulative
+                else max(0, row.duration_ms - children.get(row.ordinal, 0))),
+            # A cumulative milestone starts at process start by definition; a
+            # span's open is its close minus its own duration, both read off
+            # the one process clock.
+            start_ms=(
+                0 if row.cumulative
+                else max(0, row.process_uptime_ms - row.duration_ms)),
+            end_ms=row.process_uptime_ms,
+            cumulative=row.cumulative,
+            bytes=row.bytes,
+            source=row.source,
+            ref=row.ref,
+            function=row.function,
+            outcome=row.outcome,
+            reason=row.reason,
+            detail=row.detail,
+        ))
+    return out
+
+
+def render_phase_table(rows: Optional[List[pb.BootPhase]] = None) -> str:
+    """The phase table as fixed-width text — what a runbook pastes.
+
+    ``rows`` is a captured ladder (off the wire, or another process's), not a
+    pre-rendered table: the reconciliation footer must be computed from the
+    SAME rows as the body, and a signature that took a rendered table made it
+    possible — and, the first time it was used, actual — to print one boot's
+    phases under another boot's totals.
+    """
+    table = phase_table(rows)
+    lines = [
+        f"{'phase':<22} {'class':<8} {'start_ms':>9} {'end_ms':>9} "
+        f"{'dur_ms':>9} {'excl_ms':>9} {'bytes':>13}  what"
+    ]
+    for row in table:
+        lines.append(
+            f"{row.phase:<22} {row.klass:<8} {row.start_ms:>9} "
+            f"{row.end_ms:>9} {row.duration_ms:>9} {row.exclusive_ms:>9} "
+            f"{row.bytes:>13}  "
+            f"{(row.function or row.ref or row.reason or row.detail)[:70]}")
+    for key, value in sorted(reconciliation(rows).items()):
+        lines.append(f"{key:<22} {value:>9}")
+    return "\n".join(lines)
+
+
+#: The phases a boot of each SHAPE must produce. A boot's shape is what it
+#: DID, so there is no single "complete" set: a memo-hit adopt boot legitimately
+#: has no `trace_for_key` rows, and asserting otherwise would make the
+#: completeness check unusable exactly where it matters. Callers name the shape
+#: they drove; :func:`completeness` reports what that shape is missing.
+SHAPE_EAGER: frozenset = frozenset({
+    PHASE_SDK_READY, PHASE_HELLO,
+    PHASE_WEIGHTS_FETCH, PHASE_COMPONENT_FETCH, PHASE_PIPELINE_LOAD,
+    PHASE_EAGER_READY, PHASE_FIRST_REQUEST_SERVABLE,
+})
+#: A boot that came up through `python -m gen_worker.entrypoint` — i.e. every
+#: pod. `env_establish` and its nested `lib_memo` are produced by
+#: `env_seal.establish`, which the entrypoint, the mint child and the
+#: entry-compile child all call and an EMBEDDED worker (the in-process test
+#: harness, a library caller) does not. Kept as a separate shape rather than
+#: folded into SHAPE_EAGER so an embedded boot is not asked for a phase it
+#: legitimately cannot have — and so a POD boot still is.
+SHAPE_ENTRYPOINT: frozenset = SHAPE_EAGER | frozenset({
+    PHASE_ENV_ESTABLISH, PHASE_LIB_MEMO,
+})
+#: A boot that ADOPTED a cell the hub named: no trace, no fold — it pays a
+#: download and an admission instead.
+SHAPE_ADOPT: frozenset = SHAPE_ENTRYPOINT | frozenset({
+    PHASE_CELL_FETCH, PHASE_CELL_VERIFY, PHASE_ENTRY_ADMIT, PHASE_CELL_ARM,
+    PHASE_COMPILED_SWAP,
+})
+#: A boot that MINTED its own cell: declaration, per-class trace, fold, the
+#: publish round trips, then the same admission as an adopt.
+SHAPE_SELF_MINT: frozenset = SHAPE_ADOPT | frozenset({
+    PHASE_DECLARATION_COMPOSE, PHASE_TRACE_FOR_KEY, PHASE_KEY_FOLD,
+    PHASE_CELL_HUB_RTT,
+}) - frozenset({PHASE_CELL_FETCH})
+
+#: A boot whose phases explain less of the wall than this is not decomposed.
+#: pgw#1087's acceptance: "the phases sum to within ~5% of wall".
+DEFAULT_RESIDUAL_TOLERANCE_PCT = 5.0
+
+
+@dataclass(frozen=True)
+class BootCompleteness:
+    """Does this boot's phase table actually account for the boot?
+
+    Two independent failures, reported separately because they have different
+    fixes: a phase that never emitted (``missing`` — an instrument hole) and a
+    boot whose measured phases do not add up to its wall clock (``residual_pct``
+    — an unmeasured window). A table can be missing nothing and still explain
+    half the boot, which is exactly the state pgw#1087 was filed against.
+    """
+
+    shape: Tuple[str, ...]
+    missing: Tuple[str, ...]
+    total_ms: int
+    measured_ms: int
+    named_ms: int
+    residual_ms: int
+    residual_pct: float
+    tolerance_pct: float
+
+    @property
+    def reconciles(self) -> bool:
+        return self.residual_pct <= self.tolerance_pct
+
+    @property
+    def complete(self) -> bool:
+        return not self.missing and self.reconciles and self.total_ms > 0
+
+    def explain(self) -> str:
+        """One paragraph naming every reason this table is not complete."""
+        if self.total_ms <= 0:
+            return ("the boot never closed: no `first_request_servable` "
+                    "milestone, so there is no wall clock to reconcile against")
+        parts: List[str] = []
+        if self.missing:
+            parts.append(
+                "phases with NO row on this boot: " + ", ".join(self.missing))
+        if not self.reconciles:
+            parts.append(
+                f"{self.residual_ms} ms of {self.total_ms} ms "
+                f"({self.residual_pct:.1f}%) is explained by no phase and no "
+                f"named segment — tolerance is {self.tolerance_pct:.1f}%")
+        return "; ".join(parts) or "complete"
+
+
+def completeness(
+    shape: Iterable[str] = SHAPE_EAGER,
+    *,
+    rows: Optional[List[pb.BootPhase]] = None,
+    tolerance_pct: float = DEFAULT_RESIDUAL_TOLERANCE_PCT,
+) -> BootCompleteness:
+    """Verdict on this boot's decomposition against the shape it drove.
+
+    ``rows`` reads a ladder captured off the wire instead of this process's
+    own — which is how a test asserts the PRODUCTION boot's table rather than
+    the recorder's memory of it, and how the RED proof deletes a phase.
+    """
+    expect = tuple(sorted(shape))
+    seen = {row.phase for row in phase_table(rows)}
+    recon = reconciliation(rows)
+    total = int(recon.get("total_ms", 0))
+    measured = int(recon.get("measured_ms", 0))
+    named = int(recon.get("named_ms", 0))
+    residual = int(recon.get("residual_ms", max(0, total - measured - named)))
+    return BootCompleteness(
+        shape=expect,
+        missing=tuple(p for p in expect if p not in seen),
+        total_ms=total,
+        measured_ms=measured,
+        named_ms=named,
+        residual_ms=residual,
+        residual_pct=(100.0 * residual / total) if total > 0 else 100.0,
+        tolerance_pct=float(tolerance_pct),
+    )
 
 
 def recorded_rows() -> List[pb.BootPhase]:
@@ -687,6 +1244,7 @@ def reset_for_tests() -> None:
         _hello_seen = False
         _pending_servable = None
         _class_override.clear()
+        _milestone_ms.clear()
     _stack_var.set(())
 
 
@@ -701,6 +1259,7 @@ __all__ = [
     "mark",
     "mark_once",
     "note_hello",
+    "parent_scope",
     "phase_class",
     "process_start_unix",
     "process_uptime_ms",
@@ -708,15 +1267,38 @@ __all__ = [
     "recorded_rows",
     "reset_for_tests",
     "servable_ms",
+    "BootCompleteness",
+    "ComponentSpans",
+    "PhaseRow",
+    "completeness",
+    "phase_table",
+    "render_phase_table",
+    "CUMULATIVE_PHASES",
+    "DEFAULT_RESIDUAL_TOLERANCE_PCT",
+    "SHAPE_ADOPT",
+    "SHAPE_EAGER",
+    "SHAPE_ENTRYPOINT",
+    "SHAPE_SELF_MINT",
     "PHASES",
     "PHASE_HELLO",
     "PHASE_WEIGHTS_FETCH",
     "PHASE_PIPELINE_LOAD",
     "PHASE_WARMUP",
-    "PHASE_CELL_DISCOVER",
     "PHASE_CELL_FETCH",
     "PHASE_CELL_ARM",
     "PHASE_FIRST_REQUEST_SERVABLE",
+    "PHASE_SDK_READY",
+    "PHASE_COMPONENT_FETCH",
+    "PHASE_ENV_ESTABLISH",
+    "PHASE_LIB_MEMO",
+    "PHASE_DECLARATION_COMPOSE",
+    "PHASE_TRACE_FOR_KEY",
+    "PHASE_KEY_FOLD",
+    "PHASE_CELL_HUB_RTT",
+    "PHASE_CELL_VERIFY",
+    "PHASE_ENTRY_ADMIT",
+    "PHASE_EAGER_READY",
+    "PHASE_COMPILED_SWAP",
     "OUTCOME_OK",
     "OUTCOME_REFUSED",
     "OUTCOME_FAILED",

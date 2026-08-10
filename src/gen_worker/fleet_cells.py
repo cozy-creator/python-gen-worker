@@ -44,6 +44,7 @@ quantized (w8a8/w4a4) lanes keep their typed fail-closed refusal.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -536,14 +537,26 @@ class CellPublisher:
         # expiry we blame must be the same string, or a rotation landing
         # mid-call makes the diagnosis describe a token we never sent.
         bearer = self._worker_jwt()
-        resp = broker.request(
-            "POST",
-            path,
-            base_url=self.base_url,
-            bearer=bearer,
-            json=payload,
-            timeout=timeout,
-        )
+        # pgw#1087: the worker<->hub cell control-plane round trip, timed.
+        # There is NO worker-side key LOOKUP to measure — pgw#904 moved cell
+        # resolution to the hub (`Arm.artifact`) and pgw#1032 deleted
+        # `StateDelta.cell_lookups` — so these publish legs are the whole of
+        # the hub RTT a boot's cell path pays, and the issue's "hub key lookup
+        # round-trip" line is closed by naming that rather than by inventing a
+        # phase with no producer (the pgw#924 rule).
+        with boot_mod.span(
+            boot_mod.PHASE_CELL_HUB_RTT, function=path,
+        ) if boot_mod.in_boot() else contextlib.nullcontext() as sp:
+            resp = broker.request(
+                "POST",
+                path,
+                base_url=self.base_url,
+                bearer=bearer,
+                json=payload,
+                timeout=timeout,
+            )
+            if sp is not None:
+                sp.classify(f"http_{resp.status_code}")
         body: dict = {}
         try:
             body = resp.json() if resp.text else {}
@@ -1048,6 +1061,17 @@ def _arm_candidate(
         else:
             span.refused(outcome.reason or "no_cell", outcome.detail)
         span.close()
+    if outcome.armed:
+        # pgw#1087: the SECOND user-visible timestamp. Deliberately NOT gated
+        # on `in_boot()` — a self-minted cell routinely arms twenty minutes
+        # after the boot closed, and "how long did this pod serve eager before
+        # its cell arrived" is the question the compiled-serving campaign is
+        # about. Recorded once per process: the interval is measured from
+        # process start, so a re-arm hours later is not a second answer to it.
+        boot_mod.mark_once(
+            boot_mod.PHASE_COMPILED_SWAP,
+            ref=ref, artifact_kind=artifact_kind, artifact_key=snapshot_digest,
+            detail=outcome.identity)
     return outcome, CellAdoption(
         ref=ref,
         snapshot_digest=snapshot_digest,
@@ -2091,6 +2115,18 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
     # so this direction of the pair must stay deferred.
     from . import aot_mint
 
+    # pgw#1087: composing the declaration a mint will trace against. Expected
+    # to be trivial and never proven so — and if it is not (an endpoint whose
+    # `export_declaration()` does real work at compose time), that is exactly
+    # the finding, because it sits on the critical path before the first trace.
+    with boot_mod.span(
+        boot_mod.PHASE_DECLARATION_COMPOSE,
+        ref=str(getattr(cfg, "family", "") or ""),
+    ) if boot_mod.in_boot() else contextlib.nullcontext():
+        return _aot_export_spec(aot_mint, pipe, cfg)
+
+
+def _aot_export_spec(aot_mint: Any, pipe: Any, cfg: Any) -> "Any":
     execution_lane = loading.pipeline_weight_lane(pipe)
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     return aot_mint.ExportSpec(

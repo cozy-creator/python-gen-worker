@@ -52,7 +52,7 @@ def _phases(rows: List[pb.BootPhase]) -> List[str]:
 
 
 def test_boot_rows_are_ordered_and_carry_one_boot_id() -> None:
-    with boot_phases.span(boot_phases.PHASE_CELL_DISCOVER):
+    with boot_phases.span(boot_phases.PHASE_CELL_VERIFY):
         pass
     boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
     with boot_phases.span(boot_phases.PHASE_WEIGHTS_FETCH, ref="repo/sdxl") as fetch:
@@ -60,7 +60,7 @@ def test_boot_rows_are_ordered_and_carry_one_boot_id() -> None:
 
     rows = boot_phases.recorded_rows()
     assert _phases(rows) == [
-        boot_phases.PHASE_CELL_DISCOVER,
+        boot_phases.PHASE_CELL_VERIFY,
         boot_phases.PHASE_HELLO,
         boot_phases.PHASE_WEIGHTS_FETCH,
     ]
@@ -94,7 +94,7 @@ def test_a_span_opens_a_row_and_closes_the_same_ordinal() -> None:
 def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
     """The boot window IS the no-sink window. Everything before bind must
     arrive, in order, once the stream comes up."""
-    boot_phases.mark(boot_phases.PHASE_CELL_DISCOVER)
+    boot_phases.mark(boot_phases.PHASE_CELL_VERIFY)
     with boot_phases.span(boot_phases.PHASE_WEIGHTS_FETCH, ref="repo/a"):
         pass
 
@@ -121,7 +121,7 @@ def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
     assert all(m.WhichOneof("msg") == "boot_phase" for m in sent)
     shipped = [m.boot_phase for m in sent]
     # The pre-bind rows were flushed, and the post-bind row followed them.
-    assert boot_phases.PHASE_CELL_DISCOVER in _phases(shipped)
+    assert boot_phases.PHASE_CELL_VERIFY in _phases(shipped)
     assert boot_phases.PHASE_WEIGHTS_FETCH in _phases(shipped)
     assert _phases(shipped)[-1] == boot_phases.PHASE_FIRST_REQUEST_SERVABLE
 
@@ -185,7 +185,7 @@ def test_a_cumulative_milestone_is_not_summed_as_a_phase() -> None:
     already account for. Summing both double-counts the entire boot — and any
     hub-side SUM(duration_ms) would inherit the error, which is why
     `cumulative` is a wire field and not an SDK-local detail."""
-    with boot_phases.span(boot_phases.PHASE_CELL_DISCOVER):
+    with boot_phases.span(boot_phases.PHASE_CELL_VERIFY):
         pass
     boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
     boot_phases.mark(boot_phases.PHASE_FIRST_REQUEST_SERVABLE,
@@ -194,7 +194,7 @@ def test_a_cumulative_milestone_is_not_summed_as_a_phase() -> None:
     rows = {r.phase: r for r in boot_phases.recorded_rows() if r.terminal}
     assert rows[boot_phases.PHASE_HELLO].cumulative is True
     assert rows[boot_phases.PHASE_FIRST_REQUEST_SERVABLE].cumulative is True
-    assert rows[boot_phases.PHASE_CELL_DISCOVER].cumulative is False
+    assert rows[boot_phases.PHASE_CELL_VERIFY].cumulative is False
 
     recon = boot_phases.reconciliation()
     # measured_ms counts the env_seal span only; the two milestones are the
