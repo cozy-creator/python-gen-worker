@@ -262,6 +262,11 @@ EMERGENCY_NF4_VRAM_FACTOR = 0.45  # nf4 denoiser, encoders/VAE at compute dtype
 NF4_WEIGHT_BYTES_FACTOR = 0.30
 
 
+# th#1361/pgw#1065: the flavor-token parses (classify_flavor_token,
+# placement_for_flavor, pick_family_fp8_flavor) are package-internal choke
+# points, not public API — the hub unexported its twin under th#1433. They
+# die when th#1721 typed descriptors are backfilled; nothing new may grow
+# on them.
 __all__ = [
     "FP8_COMPUTE_MIN_SM",
     "CLASS_BASE",
@@ -274,12 +279,9 @@ __all__ = [
     "EMERGENCY_NF4_VRAM_FACTOR",
     "NF4_WEIGHT_BYTES_FACTOR",
     "Placement",
-    "classify_flavor_token",
     "default_placement",
     "family_root",
     "maybe_rebind_family_fp8",
-    "pick_family_fp8_flavor",
-    "placement_for_flavor",
     "placement_from_metadata",
     "placement_to_metadata",
     "w8a8_excluded_for_family",

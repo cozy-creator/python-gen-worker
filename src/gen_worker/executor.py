@@ -119,7 +119,7 @@ from .models.memory import (
 from .models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from .models.download import ensure_local, lookup_provider_for_ref
 from .models.errors import MissingSnapshotError, UrlExpiredError
-from .models.execution_lanes import ExecutionLaneUnavailableError
+from .models.execution_lanes import ExecutionLaneUnavailableError, mandatory_traced_lane_of
 from .models.residency import Residency
 from .topology import (
     ExecutionTopology,
@@ -692,7 +692,8 @@ _BG_THREAD_ADMIT_WAIT_S = 0.5
 
 def _ref_mandatory_execution_lane(ref: str) -> str:
     """The traced weight lane one canonical Tensorhub model ref MANDATES:
-    "w8a8" for `#fp8-w8a8` flavors, "w4a4" for `#nvfp4-w4a4`, "" otherwise."""
+    "w8a8" for `#fp8-w8a8` flavors, "w4a4" for `#nvfp4-w4a4`, "" otherwise.
+    The token parse itself lives in execution_lanes (one spelling, th#1361)."""
 
     try:
         parsed = parse_model_ref(ref).tensorhub
@@ -700,12 +701,7 @@ def _ref_mandatory_execution_lane(ref: str) -> str:
         return ""
     if parsed is None or parsed.owner == "root":
         return ""
-    flavor = parsed.flavor or ""
-    if flavor == "fp8-w8a8" or flavor.startswith("fp8-w8a8-"):
-        return "w8a8"
-    if flavor == "nvfp4-w4a4" or flavor.startswith("nvfp4-w4a4-"):
-        return "w4a4"
-    return ""
+    return mandatory_traced_lane_of(parsed.flavor or "")
 
 
 def _mandatory_execution_lane_of(refs: typing.Iterable[str]) -> str:

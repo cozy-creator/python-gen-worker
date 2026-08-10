@@ -210,6 +210,20 @@ def is_w8a8_flavor(token: str) -> bool:
     return t == "fp8-w8a8" or t.startswith("fp8-w8a8-")
 
 
+def mandatory_traced_lane_of(flavor: str) -> str:
+    """Traced weight lane a stored flavor MANDATES for fail-closed serving:
+    "w8a8" for `#fp8-w8a8` (gw#534), "w4a4" for `#nvfp4-w4a4` (gw#540), ""
+    otherwise. th#1059 twin of the hub's ``mandatoryTracedLane``; th#1361/
+    pgw#1065 choke point — replaced by the hub-resolved lane once th#1721
+    descriptors cover every ref."""
+    t = str(flavor or "").strip().lower()
+    if is_w8a8_flavor(t):
+        return "w8a8"
+    if t == "nvfp4-w4a4" or t.startswith("nvfp4-w4a4-"):
+        return "w4a4"
+    return ""
+
+
 def _with_supported_execution(execution_lane: ExecutionLane, compiled: bool) -> ExecutionLane:
     execution = EXEC_COMPILED if compiled else EXEC_EAGER
     body = _body_for_execution_lane(execution_lane)
@@ -287,7 +301,7 @@ __all__ = [
     "WEIGHTS_SVDQ_FP4",
     "WEIGHTS_SVDQ_INT4",
     "family_of",
-    "is_w8a8_flavor",
+    "mandatory_traced_lane_of",
     "known_execution_lane_bodies",
     "known_execution_lanes",
     "execution_lane_body_id",
