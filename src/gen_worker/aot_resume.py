@@ -139,16 +139,54 @@ def _dir_bytes(path: Path) -> int:
     return total
 
 
-def sweep(keep: Path, *, max_bytes: int = 0) -> int:
+def resume_area_cap_bytes(max_bytes: Optional[int] = None) -> int:
+    """The resume area's byte cap: caller, else env, else the stated default.
+
+    pgw#973 §4.24 item 4. This used to be
+    ``int(max_bytes or os.environ.get(ENV) or DEFAULT_MAX_BYTES)``, which
+    collapsed absence into a value TWICE and in opposite directions: a
+    caller-computed ``0`` fell through to the 4 GiB default (its limit ignored),
+    while ``GEN_WORKER_MINT_RESUME_MAX_BYTES=0`` produced ``cap = 0`` — the
+    string ``"0"`` is truthy — and :func:`sweep` then deleted every scope
+    except ``keep``, i.e. the limit INVERTED into a purge. Absence is now
+    ``None`` and only ``None``; any stated non-positive value is refused, on
+    the ``url_fetch.fetch_bytes`` / ``SilenceWindow`` shape.
+    """
+    if max_bytes is not None:
+        if int(max_bytes) <= 0:
+            raise ValueError("max_bytes must be positive")
+        return int(max_bytes)
+    raw = os.environ.get(ENV_MAX_BYTES, "").strip()
+    if not raw:
+        return DEFAULT_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"{ENV_MAX_BYTES}={raw!r} is not an integer byte count") from None
+    if value <= 0:
+        raise ValueError(f"{ENV_MAX_BYTES} must be positive, got {value}")
+    return value
+
+
+def sweep(keep: Path, *, max_bytes: Optional[int] = None) -> int:
     """Hold the resume area under its capacity bound, oldest scope first.
 
-    ``keep`` is never dropped. Everything else is ordered by mtime, newest
-    first, and whole scopes are removed from the tail until the total fits. An
-    actively-running mint's bank is the newest thing in the area (every banked
-    entry touches it), so the loser is an abandoned mint nobody came back for
-    — and the cost of getting that wrong is one recompile, never a wrong cell.
+    ``keep`` is never dropped. Everything else is ordered by mtime and whole
+    scopes are removed OLDEST FIRST until the total fits. An actively-running
+    mint's bank is the newest thing in the area (every banked entry touches
+    it), so the loser is an abandoned mint nobody came back for — and the cost
+    of getting that wrong is one recompile, never a wrong cell.
+
+    pgw#973: the sort was `reverse=True` and the loop consumed it from the
+    head, i.e. it evicted the NEWEST abandoned scope first — the exact
+    inversion of what this docstring, the comment and the intent all say, and
+    the one most likely to be resumed next. The pre-existing test could not
+    see it: both of its victims carried the same mtime.
+
+    ``max_bytes=None`` means "not stated" — see :func:`resume_area_cap_bytes`.
     """
-    cap = int(max_bytes or os.environ.get(ENV_MAX_BYTES, "") or DEFAULT_MAX_BYTES)
+    cap = resume_area_cap_bytes(max_bytes)
     area = keep.parent
     scopes: List[Tuple[float, Path, int]] = []
     try:
@@ -162,7 +200,7 @@ def sweep(keep: Path, *, max_bytes: int = 0) -> int:
             continue
     total = sum(size for _, _, size in scopes)
     dropped = 0
-    for _, path, size in sorted(scopes, reverse=True):
+    for _, path, size in sorted(scopes, key=lambda row: row[0]):
         if total <= cap:
             break
         if path == keep:
@@ -574,6 +612,7 @@ __all__ = [
     "context_facts",
     "discard",
     "open_bank",
+    "resume_area_cap_bytes",
     "root",
     "set_root",
     "sweep",

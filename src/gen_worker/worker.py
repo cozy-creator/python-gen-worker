@@ -18,7 +18,11 @@ from .lifecycle import Lifecycle
 from .pb import worker_scheduler_pb2 as pb
 from .registry import collect_endpoints
 from .topology import ExecutionTopology, delivered_topology
-from .transport import FatalTransportError, Transport
+from .transport import (
+    DEFAULT_QUEUE_MAXSIZE as _DEFAULT_QUEUE_MAXSIZE,
+    FatalTransportError,
+    Transport,
+)
 from .host_move_guard import install as _install_host_move_guard
 from .procsplit import is_compute_child
 
@@ -95,7 +99,7 @@ class Worker:
         manifest: Optional[Dict[str, Any]] = None,
         gpu_slots: Optional[int] = None,
         topology: Optional["ExecutionTopology"] = None,
-        queue_maxsize: int = 1024,
+        queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
         backoff_base_s: float = 1.0,
         backoff_cap_s: float = 30.0,
     ) -> None:

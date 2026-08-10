@@ -56,6 +56,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
+# Flat staging buffers above this size stay pageable — pinned host memory
+# is shared and non-swappable, and the cache holds up to _MAPCACHE_MAX.
+# ONE owner for the worker's whole pinned budget (pgw#973 §4.24).
+from ..media_transfer import PIN_MAX_BYTES as _PIN_MAX_BYTES
 from . import adapter_fidelity
 from .fp8_storage import structural_base
 from .w8a8 import fp8_scaled_linear_class
@@ -434,11 +438,6 @@ def _validated_pair(path: str, mod: Any, a: Any, b: Any, *, ref: str) -> Tuple[A
             int(b.shape[0]) != mod.out_features or int(b.shape[1]) != rank):
         raise bad(f"want down [r, {mod.in_features}] / up [{mod.out_features}, r]")
     return a, b
-
-
-# Flat staging buffers above this size stay pageable — pinned host memory is
-# a shared, non-swappable resource and the cache holds up to _MAPCACHE_MAX.
-_PIN_MAX_BYTES = 512 << 20
 
 
 def _stage_adapter(mapped: Dict[str, Tuple[Any, Any, float]]) -> Dict[str, Any]:

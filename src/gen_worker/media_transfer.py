@@ -27,9 +27,13 @@ from .api.errors import ValidationError
 
 logger = logging.getLogger(__name__)
 
-#: Staging buffers above this stay pageable — pinned host memory is a shared,
-#: non-swappable resource (same cap rationale as w8a8_lora's adapter staging).
-_PIN_MAX_BYTES = 512 << 20
+#: Staging buffers above this stay pageable. THE bound on how much pinned host
+#: memory this worker may hold: pinned pages are non-swappable and shared with
+#: every other process on the pod, so an unbounded pin is a host-RAM leak the
+#: OOM killer resolves. Owned here (pgw#973 §4.24) and imported by
+#: `models.w8a8_lora`, which stages LoRA adapters under the same rule — the two
+#: used to declare `512 << 20` separately and could drift apart silently.
+PIN_MAX_BYTES = 512 << 20
 
 
 def _as_torch_cuda(chunk: Any) -> Optional[Any]:
@@ -77,7 +81,7 @@ class _PinnedSlot:
     def ensure(self, nbytes: int, torch: Any) -> None:
         if self.buf is not None and self.buf.numel() >= nbytes:
             return
-        pin = nbytes <= _PIN_MAX_BYTES
+        pin = nbytes <= PIN_MAX_BYTES
         try:
             self.buf = torch.empty(nbytes, dtype=torch.uint8, pin_memory=pin)
             self.pinned = pin

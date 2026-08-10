@@ -33,17 +33,16 @@ import threading
 import weakref
 from typing import Any, Callable, Iterator, Optional
 
-from .memory import get_available_ram_gb, get_total_ram_gb
+from .memory import (
+    effective_ram_floor_gb,
+    get_available_ram_gb,
+    get_total_ram_gb,
+)
 
 logger = logging.getLogger(__name__)
 
 _GiB = 1024 ** 3
 
-# Mirrors residency's host-RAM floor policy (gw#407): the warm/pinned tiers
-# must never eat the host's working set. Kept numerically identical to
-# residency._RAM_FLOOR_GB / _RAM_FLOOR_FRACTION.
-_RAM_FLOOR_GB = 8.0
-_RAM_FLOOR_FRACTION = 0.2
 # Pinned memory is the harshest host allocation (unswappable): never let it
 # claim more than half of physical RAM even on an idle host.
 _PINNED_TOTAL_FRACTION = 0.5
@@ -63,10 +62,10 @@ def _current_group() -> int:
 
 
 def _floor_bytes() -> int:
-    total = get_total_ram_gb()
-    if total <= 0:
-        return int(_RAM_FLOOR_GB * _GiB)
-    return int(min(_RAM_FLOOR_GB, max(1.0, total * _RAM_FLOOR_FRACTION)) * _GiB)
+    """The host-RAM floor the warm/pinned tiers must leave alone, in bytes.
+    One owner (`memory.effective_ram_floor_gb`, pgw#973 §4.24) — this used to
+    restate residency's two constants AND its derivation."""
+    return int(effective_ram_floor_gb(get_total_ram_gb()) * _GiB)
 
 
 class PinnedPool:

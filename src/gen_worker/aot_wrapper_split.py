@@ -322,6 +322,18 @@ JOBS_ENV = "GEN_WORKER_AOT_HOST_COMPILE_JOBS"
 
 #: Left for serving even when nothing else has claimed the box. Matches
 #: pgw#809's `SERVING_HEADROOM_CPUS`; a mint never starves the tenant.
+#:
+#: pgw#973 (§4.24) censused this as a verbatim duplicate of
+#: `aot_compile_pool.SERVING_HEADROOM_CPUS` and DEFERRED the collapse
+#: deliberately, rather than leaving the question open. This module is an
+#: INDUCTOR HOOK — it is imported from inside torch's compile path and its only
+#: in-repo imports are `host_isa` and `aot_run_impl_split`. Importing the pool
+#: to share one number would drag `aot_resume`, `mint_budget`, `env_seal` and
+#: `worker_goals` — the whole mint driver — into that hook, which is a far
+#: worse defect than two copies of `2`. A third module owning the constant
+#: would be the clean answer and is not worth a new module for one integer.
+#: The duplication is therefore INTENTIONAL and stated; the numbers are pinned
+#: together by `test_serving_headroom_is_one_number_pgw973`.
 SERVING_HEADROOM_CPUS = 2
 
 _installed = False

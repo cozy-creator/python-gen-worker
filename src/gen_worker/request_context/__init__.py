@@ -233,11 +233,6 @@ logger = logging.getLogger(__name__)
 # call sites (worker.py, tests) keep working.
 from ._helpers import (
     _MAX_OUTPUT_FILE_BYTES,
-    _FILE_API_HTTP_TIMEOUT_S,
-    _FILE_API_STREAM_ABORT_TIMEOUT_S,
-    _FILE_API_STREAM_CHUNK_TIMEOUT_S,
-    _FILE_API_STREAM_FINALIZE_TIMEOUT_S,
-    _FILE_API_STREAM_REPLAY_TIMEOUT_S,
     _decode_unverified_jwt_claims,
     _enforce_output_file_size_limit,
     _infer_mime_type,

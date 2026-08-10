@@ -20,8 +20,20 @@ from .request_context import _decode_unverified_jwt_claims
 logger = logging.getLogger(__name__)
 
 RENEW_PATH = "/v1/worker/capability/renew"
+# pgw#973 (§4.24). Renew at 80% of the token's OWN lifetime, so the fraction is
+# a statement about the remaining budget rather than a duration anybody picked:
+# whatever TTL the hub issues, a fifth of it is left for the retries below.
+# The threat is a job losing its capability MID-FLIGHT — an in-flight upload or
+# hub call fails on an expired token with the work already done — and nothing
+# else prevents it: the token carries no refresh, and the hub does not push.
 RENEW_FRACTION = 0.8
+#: Floor on the sleep before a renewal attempt, so a token already past its
+#: renew point cannot spin this loop against the hub at full speed.
 _MIN_SLEEP_S = 1.0
+#: Attempts for a TRANSIENT failure only (a refusal is terminal on the first).
+#: Three x 5/10/15 s spans ~30 s of the 20% of TTL this loop has left, so a
+#: brief hub blip is ridden out and a real outage still surfaces while the
+#: token is valid — a fourth attempt would spend budget it cannot afford.
 _TRANSIENT_RETRIES = 3
 _TRANSIENT_BACKOFF_S = 5.0
 

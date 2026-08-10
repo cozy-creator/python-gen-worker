@@ -16,6 +16,16 @@ import msgspec
 
 CUDA_PROBE_FAILED_MARKER = "GEN_WORKER_CUDA_PROBE_FAILED"
 
+#: Wall budget for one `nvidia-smi` subprocess. The exact fault this module
+#: exists for — a wedged CUDA device — is also the fault that makes `nvidia-smi`
+#: hang indefinitely rather than answer, so a call with no timeout turns a
+#: diagnostic into the hang it was diagnosing. Exempt from gw#666 by shape:
+#: `nvidia-smi` emits nothing until it exits, so there is no progress signal to
+#: window over, and expiry kills no work — the caller degrades to an
+#: unmeasured field. One owner (pgw#973 §4.24): `host_canary` and
+#: `hardware_report` each used to declare their own `5.0`.
+NVIDIA_SMI_TIMEOUT_S = 5.0
+
 
 class CudaProbeResult(msgspec.Struct, frozen=True):
     ok: bool

@@ -70,8 +70,21 @@ from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
 
+# pgw#973 (§4.24), completing wave 2's KEEP-BUT-DOCUMENT verdict. These are
+# per-CALL socket budgets on the two hub round trips, not give-up decisions:
+# the give-up is `_COMPLETE_SILENCE_WINDOW_S` below, over the hub's own
+# answers (gw#666). Without them a hub that accepts a connection and never
+# replies wedges a publish forever. `/complete` gets ten times `/create`'s
+# budget because it VERIFIES the object synchronously (streams it back from R2
+# and hashes it) while `/create` only mints presigns — and it is the DERIVATION
+# BASIS for the silence window, which is two full finalize-length attempts.
+# Deleting it deletes that basis.
 _FINALIZE_TIMEOUT_S = 600
 _CREATE_TIMEOUT_S = 60
+#: Attempts at `/complete` for a NON-definite answer only (a definite hub
+#: refusal is terminal on the first). Bounded because every attempt makes the
+#: hub re-verify a multi-GB object; the 409 in-progress case is polled, not
+#: retried, so this budget is not spent on the common slow path.
 _FINALIZE_RETRY_ATTEMPTS = 5
 _FINALIZE_RETRY_BACKOFF_S = 0.5
 

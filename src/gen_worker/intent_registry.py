@@ -13,11 +13,27 @@ from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .pb import worker_scheduler_pb2 as pb
 
+# pgw#973 (§4.24). Both are retention bounds on hub-driven maps in a
+# long-lived worker process: the hub opens intents and the worker answers with
+# receipts, and neither side ever says "you may forget this one". Without a
+# bound the registry is a leak whose rate is set by hub traffic — a pod serving
+# for days accumulates every intent it has ever seen. Trimmed oldest-first, so
+# what is dropped is what no reconnect projection will be asked about.
 _MAX_INTENTS = 128
 _MAX_RECEIPTS = 32
+#: How long a caller waits for an intent's first report before proceeding
+#: without one. Not a kill: nothing is cancelled, the caller just stops
+#: blocking on a report that is a courtesy.
 _UNREPORTED_WAIT_TIMEOUT_S = 2.0
 # gw#640: fallback deadline for a WAITING state with no blocker and no retry
 # time. Mirrors the hub's shadow first-action budget (60s).
+#
+# pgw#973: NOT a gw#666 fixed-duration kill, and it was censused as one. It
+# ends nothing on this side — `deadline_at_unix_ms` is a required wire field
+# (the hub's shadow validator rejects a WAITING state carrying none of
+# blocker/retry/deadline), so this fills a protocol hole and the hub owns
+# whatever it decides at expiry. Changing it is a protocol change, not a
+# tuning; it belongs with the hub's budget or nowhere.
 _WAITING_DEADLINE_FALLBACK_MS = 60_000
 _ACTIVE_INTENT_STATES = {
     pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,

@@ -193,6 +193,37 @@ def get_total_ram_gb() -> float:
     return probe_host_ram().total_gb
 
 
+# pgw#973 (§4.24): ONE owner for the host-RAM floor. `residency` and `staging`
+# each declared `_RAM_FLOOR_GB = 8.0` / `_RAM_FLOOR_FRACTION = 0.2` AND
+# re-derived the same min/max expression, with staging's comment promising it
+# was "kept numerically identical" — a promise nothing enforced. They cannot
+# import each other (`residency -> pinned_swap -> staging` already exists, so
+# the reverse edge closes a cycle); both already import this module.
+#
+# The threat (gw#407): a warm/pinned host tier that eats the host's working set
+# pushes it into reclaim-thrash, and a thrashing host stalls the whole process
+# INCLUDING the gRPC keepalive acks — the hub then disconnects the worker,
+# which is the livelock. Nothing else prevents it: the tiers allocate against
+# free RAM, and free RAM is exactly what a page cache makes look available.
+_RAM_FLOOR_GB = 8.0
+#: Small hosts (dev boxes) would be gated out entirely by a flat 8 GiB, so the
+#: floor is adaptive below 40 GiB total.
+_RAM_FLOOR_FRACTION = 0.2
+
+
+def effective_ram_floor_gb(total_gb: Optional[float] = None) -> float:
+    """Host RAM this process must leave alone, in GiB.
+
+    ``total_gb`` is the caller's already-resolved host total; omit it to read
+    one here. Callers pass their own so a per-group RAM share (procsplit) or a
+    test's substitution is honoured by the ONE policy rather than by a copy.
+    """
+    total = get_total_ram_gb() if total_gb is None else float(total_gb)
+    if total <= 0:
+        return _RAM_FLOOR_GB
+    return min(_RAM_FLOOR_GB, max(1.0, total * _RAM_FLOOR_FRACTION))
+
+
 # ---------------------------------------------------------------------------
 # Cgroup-aware host-RAM probes (th#721): RunPod GPU pods land on lottery-RAM
 # hosts and the container is cgroup-limited below /proc/meminfo — psutil alone
@@ -1447,6 +1478,7 @@ __all__ = [
     "GPU_VRAM_OVERHEAD_GB",
     "effective_vram_requirement_gb",
     "get_available_ram_gb",
+    "effective_ram_floor_gb",
     "get_total_ram_gb",
     "aflush_memory",
     "flush_memory",

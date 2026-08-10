@@ -123,6 +123,16 @@ _EVIDENCE_EPS = 0.05
 #: Bytes of the child's stderr kept for the failure report.
 _STDERR_TAIL_BYTES = 8192
 
+#: How long to wait for the CORPSE after `_terminate_group` has already signaled
+#: the child's process group. pgw#973 (§4.24 / gw#666): an explicitly EXEMPT
+#: fixed duration, on `executor._CANCEL_UNWIND_GRACE_S`'s model — the kill
+#: decision was made upstream on `_EVIDENCE_WINDOW_S`, which IS a progress
+#: signal, so nothing here can end work that was advancing. What it bounds is
+#: the parent's own control loop: a child ignoring SIGTERM must not hold the
+#: serving process's teardown open. Expiry is not a failure — the reap future
+#: outlives it (`shield`), and the exit status is simply not waited for.
+_REAP_GRACE_S = 15.0
+
 #: One retry, and only for the classes that can plausibly differ next time
 #: (a resource shortfall the tenant's peak caused, a crash). A deterministic
 #: refusal is terminal on the first attempt: re-running it burns a pod.
@@ -219,7 +229,13 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: See ``MintSlot``: the three views this replaced could disagree.
     slots: Dict[str, MintSlot] = {}
     device: int = -1     # CUDA ordinal; -1 = leave the child's default
-    vram_cap_bytes: int = 0   # 0 = uncapped (see mint_budget.co_residency)
+    #: The child's device ceiling in bytes. 0 = NO CAP, which is the honest
+    #: value for an unprobeable card (`mint_budget.co_residency` reports
+    #: `probed=False`) and is stated rather than inferred: `mint_child.cap_vram`
+    #: returns a "vram cap NOT applied" note the child frames, so an uncapped
+    #: mint is distinguishable from a capped one in the phase table (pgw#973
+    #: §4.24 item 4 — it used to return "" and record nothing at all).
+    vram_cap_bytes: int = 0
     #: pgw#848: where the child rewrites its live phase table, so a mint the
     #: parent KILLS still leaves its measurements behind. Empty = no snapshot.
     phases_snapshot: str = ""
@@ -691,7 +707,8 @@ async def run_mint(
                 killed_reason = ABANDONED
             await asyncio.to_thread(_terminate_group, proc.pid)
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(reap), timeout=15.0)
+                await asyncio.wait_for(
+                    asyncio.shield(reap), timeout=_REAP_GRACE_S)
     except asyncio.CancelledError:
         await asyncio.to_thread(_terminate_group, proc.pid)
         raise

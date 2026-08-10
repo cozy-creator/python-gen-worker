@@ -91,6 +91,13 @@ JWKS_PATH = "/api/v1/artifacts/.well-known/jwks.json"
 RECEIPT_PATH = "/v1/worker/cells/receipt"
 REVOCATIONS_PATH = "/v1/worker/cells/revocations"
 
+# pgw#973 (§4.24): per-CALL socket budget on the three small control-plane
+# round trips this module makes (JWKS, receipt, revocations). Not a gw#666
+# kill — none of them can be "making progress" in any observable sense, and
+# expiry ends no work — but without it a hub that accepts a connection and
+# says nothing wedges the arm gate, which every cell adoption waits behind.
+# Shorter than `callout`'s 60 s because these are constant-size answers,
+# not a child request the hub may legitimately take time to admit.
 _HTTP_TIMEOUT_S = 30
 
 
