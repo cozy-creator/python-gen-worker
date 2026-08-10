@@ -621,6 +621,29 @@ def _is_tautology(expr: Any) -> bool:
         return False
 
 
+def _refuted(value: Any) -> bool:
+    """``True`` when a dict source records this relation as PROVEN FALSE.
+
+    ``ShapeEnv.axioms`` is a ``{relation: sympy.true | sympy.false}`` map, and
+    ``symbolic_shapes.get_implications`` deposits ``Eq(a, b) => false`` — plus
+    its commuted mirror — for every ``Ne(a, b)`` the graph PROVES. So a bare
+    KEY of that map is a refutation as often as a pin: pgw#1077 measured six
+    such keys (``Eq(Mod(1, s18*s57), 0)`` and friends) refusing a z-image mint
+    whose declared symbols nothing pinned.
+
+    Only a recognised false admits; an unrecognised value stays refused, the
+    same fail-closed direction :func:`_is_tautology` takes.
+    """
+    if isinstance(value, bool):
+        return value is False
+    try:
+        import sympy
+
+        return value is sympy.false
+    except Exception:  # noqa: BLE001 — an unreadable value stays refused
+        return False
+
+
 def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
     """Equality guards that pin a declared-dynamic symbol (ie#566 G3).
 
@@ -659,7 +682,10 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
     for source in ("guards", "axioms"):
         entries = getattr(env, source, None) or ()
         if isinstance(entries, dict):
-            entries = list(entries)
+            # The VALUE is the truth the graph proved — reading keys alone
+            # reports every proven inequality as a pin (pgw#1077).
+            entries = [key for key, value in entries.items()
+                       if not _refuted(value)]
         for entry in entries:
             expr = getattr(entry, "expr", entry)
             if expr is None:
@@ -686,9 +712,12 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
             if _is_tautology(expr):
                 continue
             text = str(expr)
-            if text in seen:
+            # ``Eq(a, b)`` and ``Eq(b, a)`` are one relation written twice —
+            # get_implications records both — so report it once (pgw#1077).
+            key = tuple(sorted(str(side) for side in sides))
+            if key in seen:
                 continue
-            seen.add(text)
+            seen.add(key)
             out.append(
                 f"the exported program carries the equality guard {text}, "
                 f"which PINS the declared dynamic symbol(s) {hit!r} — some "
