@@ -35,7 +35,6 @@ pytest.importorskip("accelerate")
 import torch
 from diffusers import DDPMPipeline, DDPMScheduler, UNet2DModel
 
-from gen_worker import cell_key as ck
 from gen_worker import compile_cache as cc
 from gen_worker.models import loading, memory
 from gen_worker.models.provision import load_slot
@@ -85,7 +84,7 @@ def _pin_free_vram(monkeypatch: pytest.MonkeyPatch, free_gb: float) -> None:
 
 def _load_and_key(
         root: Path, monkeypatch: pytest.MonkeyPatch, *, free_gb: float,
-) -> tuple[object, str, ck.CellKey]:
+) -> "tuple[object, str, object]":
     _pin_free_vram(monkeypatch, free_gb)
     sl = load_slot(
         DDPMPipeline, str(root), slot="pipeline", device="cpu",
@@ -93,11 +92,12 @@ def _load_and_key(
     )
     execution_lane = cc.cell_base_execution_lane(sl.obj)
     cfg = _ContractCfg()
-    key = ck.compute(
-        "sdxl", execution_lane, cfg.lora_bucket,
-        contract=ck.contract_digest(cc.declared_contract_facts(cfg)),
-    )
-    return sl.obj, execution_lane, key
+    # pgw#1059: the pre-trace surface is the obligation identity
+    # (fleet_cells.arm_identity), not a cell key.
+    from gen_worker import fleet_cells
+    identity = fleet_cells.arm_identity(
+        "sdxl", execution_lane, cfg.lora_bucket, cfg)
+    return sl.obj, execution_lane, identity
 
 
 def test_same_declared_config_same_key_across_free_vram(
@@ -117,12 +117,12 @@ def test_same_declared_config_same_key_across_free_vram(
         _, execution_lane_rich, key_rich = _load_and_key(root, monkeypatch, free_gb=999.0)
 
     assert execution_lane_tight == execution_lane_rich == "fp8-hooks"
-    # The issue's acceptance surface: the two computed axis dicts.
-    assert key_tight.axes_dict() == key_rich.axes_dict()
-    assert key_tight.digest == key_rich.digest
+    # The issue's acceptance surface: the two computed fact dicts.
+    assert key_tight.facts_dict() == key_rich.facts_dict()
+    assert key_tight.token == key_rich.token
     # And it is the MINTED lane token (w8a16 = fp8-hooks on the wire), not
     # the bare `lora64` orphan lane the probe used to fork onto.
-    assert key_tight.axes_dict()["lane"] == "w8a16-lora64"
+    assert key_tight.facts_dict()["lane"] == "w8a16-lora64"
 
 
 def test_involuntary_cant_fit_rung_still_engages(

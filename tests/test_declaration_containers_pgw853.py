@@ -383,12 +383,13 @@ def test_existing_declarations_are_byte_identical() -> None:
 
 
 def test_the_new_fields_are_absent_from_the_cell_key_contract() -> None:
-    """`declared_contract_facts` is what the ck2 `contract` axis digests. It
-    reads shapes/targets/text_lens/dynamic/regional/lora_bucket/guidance —
-    NOT input or arg rows — so expressing a container cannot re-key a cell."""
-    from gen_worker.compile_cache import declared_contract_facts
+    """`declared_compile_facts` is the local declared-compile-contract block
+    (pgw#1059: no longer a key-axis input). It reads shapes/targets/
+    text_lens/dynamic/regional/lora_bucket/guidance — NOT input or arg rows
+    — so expressing a container cannot churn the local store verdict."""
+    from gen_worker.compile_cache import declared_compile_facts
 
-    facts = declared_contract_facts(_list_declaration())
+    facts = declared_compile_facts(_list_declaration())
     assert "inputs" not in facts and "args" not in facts
 
 

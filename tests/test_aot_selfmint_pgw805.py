@@ -133,8 +133,10 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # No GPU on a dev box: the `sm` axis is a real-runtime fact, and this
     # test is about the RECIPE decision, not key computation.
     monkeypatch.setattr(
-        fleet_cells.cell_key, "compute",
-        lambda *a, **k: type("_K", (), {"digest": "ck1-" + "a" * 56})())
+        fleet_cells, "arm_identity",
+        lambda *a, **k: type("_A", (), {
+            "token": "arm1-" + "a" * 56,
+            "facts_dict": lambda self: {}})())
     # w8a8 is the migration's first lane (pgw#704 parity); its mandatory
     # serving refusal is a separate policy, exercised in its own test.
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
@@ -463,7 +465,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
 
     request = MintRequest(
         function="generate", modules=("sdxl.main",), family=FAMILY,
-        cell_key="ck1-parent", target=str(target),
+        arm_token="arm1-parent", target=str(target),
         work_root=str(tmp_path), report=str(tmp_path / "report.json"),
         cfg=cfg_spec(_Cfg()))
     report = mint_child._mint_aot(
@@ -498,7 +500,7 @@ def test_a_named_export_refusal_is_a_refusal_not_a_crash(
 
     request = MintRequest(
         function="generate", modules=("sdxl.main",), family=FAMILY,
-        cell_key="k", target=str(tmp_path / "cell.tar.gz"),
+        arm_token="k", target=str(tmp_path / "cell.tar.gz"),
         work_root=str(tmp_path), report=str(tmp_path / "r.json"),
         cfg=cfg_spec(_Cfg()))
     with pytest.raises(mint_child.MintChildRefused, match="lane held on dynamo"):
@@ -539,7 +541,7 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     artifact = tmp_path / "cell.tar.gz"
     artifact.write_bytes(b"cell")
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck1-handle", ref="root/family-sdxl#ck1-handle",
+        family=FAMILY, arm_token="ck1-handle", ref="root/family-sdxl#ck1-handle",
         cfg=_Cfg(), target=artifact,
         mint_root=tmp_path, publisher=None)
 

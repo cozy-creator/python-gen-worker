@@ -210,7 +210,7 @@ class _Harness:
                 reason="synthetic_child_failure",
                 detail="synthetic inductor failure")
         minted = fleet_cells.SelfMint(
-            family=pending.family, cell_key=pending.cell_key,
+            family=pending.family, cell_key=pending.arm_token,
             ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
             artifact=pending.target)
         pending._state["minted"] = minted
@@ -229,7 +229,7 @@ class _Harness:
         capture = mint_root / "capture"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
         pending = fleet_cells.PendingSelfMint(
-            family=FAMILY, cell_key="ck1-" + "a" * 56,
+            family=FAMILY, arm_token="ck1-" + "a" * 56,
             ref=f"{cc.system_repo(FAMILY)}#ck1-{'a' * 56}",
             cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,

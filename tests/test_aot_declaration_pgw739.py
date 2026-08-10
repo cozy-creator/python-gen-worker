@@ -656,7 +656,7 @@ def test_fork_and_row_reach_the_cell_identity() -> None:
             # pgw#1046: every key input is now a RECORDED block, so this
             # fixture states them rather than relying on an empty-dict digest.
             "env_seal": {"v": 1}, "toolchain": {"torch": "2.9.0"},
-            "declared_traffic": {"shapes": [], "text_lens": [], "guidance": []},
+            "declared_envelope": {"shapes": [], "text_lens": [], "guidance": []},
             "lora_bucket": 0, "strict_export": True,
         }
         return aot_mint.cell_identity(meta).digest

@@ -1,19 +1,18 @@
 """Recipe identity (Paul's exact-identity ruling) + kept trust pieces.
 
-The key IS the recipe: family + contract + sm + lane/mode + env_seal +
-toolchain CONTENT + static code-closure CONTENT. No version axes, no
-relaxable axes, no cross-key candidates — a recipe change strands old
-cells by design. Kept from the equivalence arc as TRUST (not versioning):
-pgw#711 publish digests, pgw#712 no-republish fence, pgw#710 toolchain
-digests. Plus the closure-completeness mint gate: executed ⊆ static,
-fail-loud naming the module.
+The key IS the recipe (pgw#1059): graph x envelope x sm x toolchain — the
+traced computation, its declared serving region, the GPU architecture, and
+the compiler stack as we configure it (binaries + settings declaration).
+No version axes, no relaxable axes, no cross-key candidates — a recipe
+change strands old cells by design. Kept from the equivalence arc as TRUST
+(not versioning): pgw#711 publish digests, pgw#712 no-republish fence,
+pgw#710 toolchain digests. Plus the closure-completeness mint gate:
+executed ⊆ static, fail-loud naming the module.
 """
 
 from __future__ import annotations
 
 import json
-import sys
-import types
 from pathlib import Path
 from typing import Any, Dict, Iterator
 
@@ -81,18 +80,17 @@ def test_static_closure_reaches_the_composition_code() -> None:
 
 def test_ck1_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
-    facts = cc.declared_contract_facts(_cfg())
-    key = ck.compute(FAMILY, contract=ck.contract_digest(facts))
+    meta = exported_cell_meta()
+    key = ck.from_exported_artifact_metadata(meta)
     assert key.digest.startswith("ck1-")
     axes = key.axes_dict()
-    assert set(axes) == {"format", "kind", "family", "sm", "contract",
-                         "env_seal", "toolchain"}
-    # Version axes are GONE from the key: a version-string bump alone can
-    # never re-key a cell (content digests decide).
-    monkeypatch.setattr(cc, "gen_worker_version", lambda: "99.0.0")
-    monkeypatch.setenv("WORKER_IMAGE_DIGEST", "sha256:other")
-    assert ck.compute(
-        FAMILY, contract=ck.contract_digest(facts)).digest == key.digest
+    assert set(axes) == {"graph", "envelope", "sm", "toolchain"}
+    # Version strings and image identity are GONE from the key: a
+    # version-string bump alone can never re-key a cell (content digests
+    # decide) — they are not even inputs to the derivation.
+    bumped = dict(meta, gen_worker="99.0.0", torch="9.9.9",
+                  image_digest="sha256:other")
+    assert ck.from_exported_artifact_metadata(bumped).digest == key.digest
     # Foreign schemes can never collide with a current key; they stay
     # key-SHAPED (pgw#990 — is_key mirrors tensorhub's scheme-agnostic
     # IsCellKey) and are ruled on by axes, not by their label.
@@ -104,48 +102,43 @@ def test_ck1_axes_are_the_recipe(pinned_runtime: None,
         ck.from_axes(dict(axes, torch="2.13.0"))
 
 
-def test_recipe_change_changes_the_key(pinned_runtime: None,
-                                       monkeypatch: pytest.MonkeyPatch) -> None:
-    facts = cc.declared_contract_facts(_cfg())
-    base = ck.compute(FAMILY, contract=ck.contract_digest(facts)).digest
+def test_recipe_change_changes_the_key(pinned_runtime: None) -> None:
+    meta = exported_cell_meta()
+    base = ck.from_exported_artifact_metadata(meta).digest
     # Toolchain content change -> new identity.
-    monkeypatch.setattr(
-        cc, "toolchain_digest", lambda: (("torch", "f" * 16),))
-    assert ck.compute(
-        FAMILY, contract=ck.contract_digest(facts)).digest != base
+    retooled = json.loads(json.dumps(meta))
+    retooled["toolchain"]["torch"] = "f" * 16
+    assert ck.from_exported_artifact_metadata(retooled).digest != base
+    # A deliberate settings-declaration change re-keys THROUGH toolchain
+    # (pgw#1059 amendment 4) — the axis it honestly belongs to.
+    reconfigured = json.loads(json.dumps(meta))
+    reconfigured["toolchain"]["settings_declaration"] = "e" * 16
+    assert ck.from_exported_artifact_metadata(reconfigured).digest != base
 
 
 def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
-    """Mint stamp == consumer request, from the recorded recipe blocks —
+    """Mint stamp == publish recompute, from the recorded recipe blocks —
     never trusted as a stamp."""
-    facts = cc.declared_contract_facts(_cfg())
-    meta = cc.artifact_metadata(
-        family=FAMILY, shapes=((64, 64),), targets=("transformer",),
-        shape_contract=facts,
-    )
-    want = ck.compute(FAMILY, contract=ck.contract_digest(facts))
+    meta = exported_cell_meta()
+    want = ck.from_exported_artifact_metadata(meta)
     assert meta["cell_key"] == want.digest
-    assert ck.mismatch(meta, want) == ""
-    # The version strings ride metadata for observability only.
-    assert meta["torch"] and meta["gen_worker"]
     # A cell with no toolchain block has no recipe identity.
     legacy = {k: v for k, v in meta.items() if k != "toolchain"}
     with pytest.raises(ck.CellKeyError, match="recipe"):
-        ck.from_artifact_metadata(legacy)
-    # pgw#990: `code_closure` is still RECORDED and still drives the local
-    # re-trace memo, but it is NOT identity — drifting it must leave the key
-    # alone. It used to re-key every cell in the fleet whenever an unrelated
-    # plumbing file moved, which is what a 147-file content hash does.
-    drifted = json.loads(json.dumps(meta))
-    assert drifted["code_closure"], "the closure is still recorded"
-    drifted["code_closure"]["gen_worker/compile_cache.py"] = "0" * 16
-    assert ck.from_artifact_metadata(drifted).digest == want.digest
-    assert ck.mismatch(drifted, want) == ""
-    # A TOOLCHAIN drift is identity, and mismatch names the axis.
+        ck.from_exported_artifact_metadata(legacy)
+    # pgw#990: `code_closure` is a MEMO, not identity — a local JIT
+    # artifact records it, and drifting it moves no key because the local
+    # kind has no key at all (pgw#1059).
+    local = cc.artifact_metadata(
+        family=FAMILY, shapes=((64, 64),), targets=("transformer",),
+        declared_compile_contract=cc.declared_compile_facts(_cfg()),
+    )
+    assert local["code_closure"], "the closure is still recorded"
+    assert "cell_key" not in local
+    # A TOOLCHAIN drift is identity on the exported kind.
     retooled = json.loads(json.dumps(meta))
     retooled["toolchain"]["torch"] = "0" * 16
-    assert ck.from_artifact_metadata(retooled).digest != want.digest
-    assert ck.mismatch(retooled, want).startswith("toolchain:")
+    assert ck.from_exported_artifact_metadata(retooled).digest != want.digest
 
 
 def test_toolchain_covers_the_model_libraries() -> None:

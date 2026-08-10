@@ -4,14 +4,15 @@ Attempt 28's 36/36 sdxl mint published nothing, behind two defects this file
 pins:
 
 1. The child's returned cell carried a key the parent could not relate to its
-   own (`ck1-8f498f43…` opened, `ck1-886ffbcc…` returned). The two keys live
-   in DISJOINT spaces by formula (pgw#1032/#1033) — but every axis they share
-   must be byte-identical across the process boundary, and one measurably was
-   not: `torch._inductor.aot_compile` mutates the global
-   `aot_inductor.metadata` config entry as a side effect, so a child that has
-   compiled seals a different `env_seal` than its own boot (and than every
-   other process on the pod). The seal digest now excludes that entry, and
-   `adopt_delegated_mint` refuses BY AXIS NAME when any shared axis diverges.
+   own (`ck1-8f498f43…` opened, `ck1-886ffbcc…` returned). Since pgw#1059 the
+   obligation identity is not a key at all (`arm1-…`, `fleet_cells.ArmIdentity`)
+   — but every pre-trace FACT the two sides share must be byte-identical
+   across the process boundary, and one measurably was not:
+   `torch._inductor.aot_compile` mutates the global `aot_inductor.metadata`
+   config entry as a side effect, so a child that has compiled seals a
+   different `env_seal` than its own boot (and than every other process on
+   the pod). The seal digest now excludes that entry, and
+   `adopt_delegated_mint` refuses BY FACT NAME when any shared fact diverges.
 
 2. The artifact failed `update_constant_buffer_func_(... ) API call failed at
    model_container_runner.cpp:289` on the parent runtime. Reproduced locally
@@ -43,17 +44,20 @@ def _seal_dict() -> Dict[str, Any]:
     }
 
 
-def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> cell_key.CellKey:
-    return cell_key.from_axes({
-        "format": "2",
-        "kind": "inductor",
+_DECLARED_ENVELOPE = {
+    "shapes": [[64, 64]], "text_lens": [7], "guidance": [1.0]}
+
+
+def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_cells.ArmIdentity:
+    return fleet_cells.ArmIdentity(facts=tuple(sorted({
         "family": "micro-diffusion",
+        "format": "2",
         "lane": "w8a8-lora64",
         "sm": "sm_89",
-        "contract": "1234567890abcdef",
+        "envelope": cell_key.envelope_digest(_DECLARED_ENVELOPE),
         "env_seal": env_seal.seal_digest(seal),
         "toolchain": cell_key.facts_digest(toolchain),
-    })
+    }.items())))
 
 
 def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]:
@@ -65,6 +69,7 @@ def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]
         "weight_lane": "w8a8",
         "lora_bucket": 64,
         "sm": "sm_89",
+        cell_key.EXPORT_ENVELOPE_KEY: dict(_DECLARED_ENVELOPE),
         env_seal.SEAL_KEY: dict(seal),
         "toolchain": dict(toolchain),
     }
@@ -95,6 +100,9 @@ def test_env_seal_divergence_is_named() -> None:
     ("family", "other-family", "family"),
     ("lora_bucket", 0, "lane"),
     ("format", "1", "format"),
+    (cell_key.EXPORT_ENVELOPE_KEY,
+     {"shapes": [[128, 128]], "text_lens": [7], "guidance": [1.0]},
+     "envelope"),
 ])
 def test_every_shared_axis_is_guarded(field: str, value: Any, axis: str) -> None:
     seal = _seal_dict()
@@ -130,8 +138,8 @@ def test_adopt_refuses_typed_before_any_arm(
     artifact.write_bytes(b"not-a-real-cell")
     arm = _arm_key(seal, TOOLCHAIN)
     pending = fleet_cells.PendingSelfMint(
-        family="micro-diffusion", cell_key=arm.digest,
-        ref=f"x#{arm.digest}", cfg=object(), target=tmp_path / "adopted.tar.gz",
+        family="micro-diffusion", arm_token=arm.token,
+        ref=f"x#{arm.token}", cfg=object(), target=tmp_path / "adopted.tar.gz",
         mint_root=mint_root, publisher=None, cache_dir=tmp_path / "cache",
         arm_key=arm)
 

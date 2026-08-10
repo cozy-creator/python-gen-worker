@@ -75,7 +75,7 @@ def pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     artifact = tmp_path / "cell.tar.gz"
     artifact.write_bytes(b"a sealed, finalized cell")
     return fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck1-sealed", ref=f"root/family-{FAMILY}#ck1-sealed",
+        family=FAMILY, arm_token="ck1-sealed", ref=f"root/family-{FAMILY}#ck1-sealed",
         cfg=_Cfg(), target=artifact, mint_root=tmp_path / "root", publisher=None, delegated=True,)
 
 
@@ -143,7 +143,7 @@ def test_every_classified_reason_survives_verbatim(
         artifact = tmp_path / f"cell-{i}.tar.gz"
         artifact.write_bytes(b"cell")
         p = fleet_cells.PendingSelfMint(
-            family=FAMILY, cell_key=f"ck1-{i}", ref=f"root/family-{FAMILY}#ck1-{i}",
+            family=FAMILY, arm_token=f"ck1-{i}", ref=f"root/family-{FAMILY}#ck1-{i}",
             cfg=_Cfg(), target=artifact, mint_root=tmp_path / f"root{i}", publisher=None, delegated=True,)
         assert fleet_cells.adopt_delegated_mint(_Pipe(), p, artifact) is None
         phase, _detail = _abort(seen)

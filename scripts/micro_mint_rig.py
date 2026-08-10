@@ -492,7 +492,6 @@ def run_cycle(
         import gc
 
         from gen_worker import aot_serve as _aserve
-        from gen_worker import cell_key as _ck
         from gen_worker import compile_cache as _cc
         from gen_worker import fleet_cells as _fc
         from gen_worker.models import loading as _loading
@@ -514,13 +513,12 @@ def run_cycle(
         pipe, hb_cfg = veh.parent_pipe(
             tree, "cuda" if dev["device_kind"] == "cuda" else "cpu")
         bucket = int(getattr(hb_cfg, "lora_bucket", 0) or 0)
-        arm = _ck.compute(
-            veh.family, _loading.pipeline_weight_lane(pipe), bucket,
-            contract=_ck.contract_digest(_cc.declared_contract_facts(hb_cfg)))
+        arm = _fc.arm_identity(
+            veh.family, _loading.pipeline_weight_lane(pipe), bucket, hb_cfg)
         (hb_root / "mint-root").mkdir(exist_ok=True)
         pending = _fc.PendingSelfMint(
-            family=veh.family, cell_key=arm.digest,
-            ref=f"{_cc.system_repo(veh.family)}#{arm.digest}",
+            family=veh.family, arm_token=arm.token,
+            ref=f"{_cc.system_repo(veh.family)}#{arm.token}",
             cfg=hb_cfg, target=hb_root / "adopted.tar.gz",
             mint_root=hb_root / "mint-root", publisher=None,
             cache_dir=hb_root / "cache", arm_key=arm)
@@ -529,14 +527,14 @@ def run_cycle(
         reason, why = _fc.adopt_refusal(pending)
         leg.ok = minted is not None
         leg.facts = {
-            "arm_key": arm.digest,
+            "arm_key": arm.token,
             "cell_key": str(getattr(minted, "cell_key", "") or ""),
             "arm_reason": reason,
             "detail": (why or "")[:400],
         }
         leg.detail = (
             f"parent adopted {leg.facts['cell_key'][:20]} "
-            f"(arm_key={arm.digest[:20]})" if leg.ok
+            f"(arm_key={arm.token[:20]})" if leg.ok
             else f"{reason}: {(why or '')[:200]}")
         # Return the VRAM before the publish/adopt legs need it.
         _aserve.unwrap(pipe)

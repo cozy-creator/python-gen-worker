@@ -34,7 +34,7 @@ from gen_worker.models import w8a8_lora
 # 9167d89b..., trimmed to the axes from_artifact_metadata consumes) ---------
 
 _SHAPE_CONTRACT: Dict[str, Any] = {
-    "v": 3,
+    "v": 1,
     "shapes": [
         [640, 1536], [768, 1344], [832, 1216], [896, 1152], [1024, 1024],
         [1152, 896], [1216, 832], [1344, 768], [1536, 640],
@@ -66,7 +66,7 @@ _BURST_META: Dict[str, Any] = {
     "gen_worker": "0.67.1",
     "image_digest": _IMAGE_DIGEST,
     "libs": {"diffusers": "0.39.0", "transformers": "5.13.1"},
-    "shape_contract": _SHAPE_CONTRACT,
+    "declared_compile_contract": _SHAPE_CONTRACT,
     # Reconstruction: the recorded burst pre-dates env sealing and recipe
     # identity; fixed representative blocks keep the lane-only-divergence
     # relations provable under exact identity (burst_runtime pins effective_seal /
@@ -120,11 +120,26 @@ def burst_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WORKER_IMAGE_DIGEST", _IMAGE_DIGEST)
 
 
-def _requested(weight_lane: str) -> str:
-    return ck.compute(
-        "sdxl", weight_lane, 64,
-        contract=ck.contract_digest(_SHAPE_CONTRACT),
-    ).digest
+class _BurstCfg:
+    """Duck of the burst release's declaration (registry.CompileCell)."""
+
+    shapes = tuple(tuple(r) for r in _SHAPE_CONTRACT["shapes"])
+    targets = ("unet",)
+    text_lens = (77,)
+    text_len = None
+    dynamic = ()
+    regional = False
+    lora_bucket = 64
+    guidance_scales = (0.0, 5.0)
+
+
+def _verdict(weight_lane: str) -> str:
+    """The one adoption verdict (pgw#1059: `cc.local_cell_mismatch`, the
+    fact-by-fact replacement for the retired computed key) at a given
+    resolved base lane."""
+    return cc.local_cell_mismatch(
+        dict(_BURST_META), family="sdxl", weight_lane=weight_lane,
+        cfg=_BurstCfg())
 
 
 class _Denoiser:
@@ -151,24 +166,24 @@ class _Pipe:
 
 
 def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) -> None:
-    """All three observed keys are ONE identity varying only the lane axis:
-    the advertised lanes name keys nobody publishes; the published lane
-    names a key nobody advertises. Adoption was structurally impossible."""
-    published = ck.from_artifact_metadata(_BURST_META).digest
-    assert _requested("w8a8") == published
-    assert _requested("w8a8-lora64") == published  # canonical-lane fold
-    assert _requested("") != published
-    assert _requested("fp8-hooks") != published
-    assert _requested("") != _requested("fp8-hooks")
-    # pgw#691: the recorded ck2 burst keys are dead post-bump — they can
-    # never collide with a current key, so an old cell can only MISS, never
-    # half-match. pgw#990: they stay key-SHAPED (is_key mirrors tensorhub's
-    # scheme-agnostic IsCellKey, th#1183), and it is the AXES that refuse
-    # them, not the label.
+    """All three observed identities were ONE identity varying only the
+    lane: the advertised lanes named cells nobody publishes; the published
+    lane named a cell nobody advertised. Adoption was structurally
+    impossible. Re-asserted post-pgw#1059 on the fact-by-fact verdict: the
+    lane fact alone flips the verdict, and the refusal NAMES the lane."""
+    assert _verdict("w8a8") == ""
+    assert _verdict("w8a8-lora64") == ""  # canonical-lane fold
+    for wrong in ("", "fp8-hooks"):
+        reason = _verdict(wrong)
+        assert reason.startswith("execution lane"), reason
+    # pgw#691/pgw#958: the recorded ck2 burst keys are dead — a
+    # torch-inductor-cache artifact has no key identity at all any more
+    # (pgw#1059), so an old key can only MISS. They stay key-SHAPED
+    # (is_key mirrors tensorhub's scheme-agnostic IsCellKey, th#1183).
     for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
         assert ck.is_key(old)
-        assert old != published
-        assert ck.mismatch(_BURST_META, old) != ""
+    with pytest.raises(ck.CellKeyError, match="has no cell-key identity"):
+        ck.from_exported_artifact_metadata(_BURST_META)
 
 
 # --- the fix: one base-lane resolution for every cell-identity surface -----
@@ -178,9 +193,9 @@ def test_cell_base_execution_lane_sees_w8a8_mode(burst_runtime: None) -> None:
     pipe = _Pipe()
     assert w8a8_lora.effective_base_execution_lane(pipe) == "w8a8"
     assert cc.cell_base_execution_lane(pipe) == "w8a8"
-    # An identical worker now requests exactly the key the mint published.
-    assert _requested(cc.cell_base_execution_lane(pipe)) \
-        == ck.from_artifact_metadata(_BURST_META).digest
+    # An identical worker's verdict now admits exactly the cell the mint
+    # published — one lane derivation on both sides.
+    assert _verdict(cc.cell_base_execution_lane(pipe)) == ""
 
 
 def test_cell_base_execution_lane_precedence() -> None:

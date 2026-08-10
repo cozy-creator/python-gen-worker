@@ -29,7 +29,6 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker import cell_key
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure
@@ -91,10 +90,13 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
                                 "entry": 0, "guards": []}],
             "verdicts": {}, "leaks": []})
 
-    class _Key:
-        digest = key
+    class _Arm:
+        token = key
 
-    monkeypatch.setattr(cell_key, "compute", lambda *a, **k: _Key())
+        def facts_dict(self):
+            return {}
+
+    monkeypatch.setattr(fc, "arm_identity", lambda *a, **k: _Arm())
     # A test box registers no export declarations, so the real `mint_recipe`
     # would decline every miss to JIT intake. The recipe DECISION is covered
     # elsewhere; what is under test here is what the policy does once the
@@ -216,7 +218,7 @@ def test_miss_opens_a_delegated_mint_without_packing_or_publishing(
     pending = outcome.self_mint
     assert isinstance(pending, fc.PendingSelfMint)
     assert pending.delegated is True
-    assert pending.cell_key == FAKE_KEY
+    assert pending.arm_token == FAKE_KEY
     assert pending.ref == f"root/family-fam#{FAKE_KEY}"
     assert not pending.target.exists(), "nothing packed before the child runs"
     assert calls == [], "nothing published before the cell adopts"

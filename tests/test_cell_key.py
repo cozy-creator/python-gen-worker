@@ -1,9 +1,15 @@
-"""gw#581/th#883: the ONE worker-owned cell-key brain + receipt invariants.
+"""gw#581/th#883 (redefined by pgw#1059): the ONE worker-owned cell-key
+brain + the local-cell verdict invariants.
 
-Outcome-level: a key is deterministic and axis-sensitive; mint metadata
-stamps exactly the key the same runtime would request; a SELF-REQUESTED cell
+Outcome-level: a key is deterministic and axis-sensitive on exactly the
+four ck1 axes; the local (torch-inductor-cache) store verdict compares
+recorded facts with the producer's own derivations; a SELF-VERIFIED cell
 that fails to arm surfaces as cell_selection_bug (never a silent eager
-fallback); foreign/pre-key cells keep the legacy verify/eager policy.
+fallback); foreign cells keep the compatibility-miss policy.
+
+The redefinition's own invariants (membership axiom, one-derivation fence,
+old/new non-collision, envelope canonicalization) live in
+``tests/test_cell_key_pgw1059.py``.
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from gen_worker import compile_cache as cc
 
 
 class _ContractCfg:
-    """Duck-typed declared-shape-contract source (registry.CompileCell shape)."""
+    """Duck-typed declared-compile-contract source (registry.CompileCell)."""
 
     def __init__(
         self, *, shapes=((768, 768),), targets=("transformer",), text_len=0,
@@ -31,16 +37,9 @@ class _ContractCfg:
         self.guidance_scales = guidance_scales
 
 
-_FACTS = cc.declared_contract_facts(_ContractCfg())
-_CONTRACT = ck.contract_digest(_FACTS)
-
-# Recipe axes: version strings and image identity live in METADATA only
-# (observability); content digests carry the identity. pgw#990 dropped
-# `code_closure` — a source-file content hash is a MEMO, never identity.
 _AXES = {
-    "format": "2", "kind": "inductor", "family": "ltx-2.3", "lane": "w8a8",
-    "sm": "sm_100", "contract": _CONTRACT,
-    "env_seal": "aa00bb11cc22dd33", "toolchain": "bb11cc22dd33ee44",
+    "graph": "0f0e0d0c0b0a0908", "envelope": "aa00bb11cc22dd33",
+    "sm": "sm_100", "toolchain": "bb11cc22dd33ee44",
 }
 
 _RT = {
@@ -52,7 +51,7 @@ _RT = {
 
 @pytest.fixture()
 def fixed_runtime(monkeypatch):
-    """Pin every probe the brain reads so keys are host-independent."""
+    """Pin every probe the verdicts read so outcomes are host-independent."""
     monkeypatch.setattr(cc, "runtime_key", lambda: dict(_RT))
     monkeypatch.setattr(cc, "gen_worker_version", lambda: "0.36.10")
     monkeypatch.setattr(
@@ -65,66 +64,31 @@ def test_key_deterministic_and_axis_sensitive():
     a = ck.from_axes(_AXES)
     assert a.digest == ck.from_axes(dict(_AXES)).digest
     assert ck.is_key(a.digest)
-    for axis in ("family", "lane", "sm", "contract", "env_seal",
-                 "toolchain"):
+    for axis in ("graph", "envelope", "sm", "toolchain"):
         bumped = dict(_AXES, **{axis: _AXES[axis] + "x"})
         assert ck.from_axes(bumped).digest != a.digest, axis
-
-
-def test_empty_optional_axis_equals_absent():
-    absent = {k: v for k, v in _AXES.items() if k != "lane"}
-    empty = dict(absent, lane="")
-    assert ck.from_axes(absent).digest == ck.from_axes(empty).digest
 
 
 def test_unknown_and_missing_axes_refuse():
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(_AXES, cuda_driver="13020"))  # host lottery axis
     with pytest.raises(ck.CellKeyError):
-        ck.from_axes(dict(_AXES, sku="b200"))  # demoted to metadata (pgw#691)
+        ck.from_axes(dict(_AXES, sku="b200"))  # observability, never identity
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(_AXES, torch="2.13.0"))  # version axes are gone
     with pytest.raises(ck.CellKeyError):
         ck.from_axes({k: v for k, v in _AXES.items() if k != "toolchain"})
 
 
-def test_sku_is_not_identity(fixed_runtime):
-    """pgw#691: the audited corpus held two byte-identical cell PAIRS split
-    only by sku (a40 vs rtx-3090 on sm_86; l4 vs rtx-4090 on sm_89) — 19%
-    redundant mints. No dynamo guard observes a SKU; sm + cuda + torch +
-    triton pin every hardware fact the guard set carries. Two artifacts
-    identical on every axis but sku share ONE identity; sm remains one."""
+def test_key_scheme_ck1_foreign_keys_are_key_shaped_but_distinct():
+    """pgw#958 (§1.27(g)) + pgw#1059 amendment 1: ck1 is the only scheme
+    this runtime mints — the redefinition kept the number (Paul: "stick
+    with version-1 for now since we're still pre-launch") and PURGES the
+    pre-redefinition corpus instead of minting ck2.
 
-    def _meta(sku, sm="sm_86"):
-        meta = cc.artifact_metadata(
-            family="sdxl", shapes=((768, 768),), targets=("transformer",),
-            shape_contract=_FACTS,
-        )
-        meta.update({"sku": sku, "sm": sm})
-        return ck.stamp(meta)
-
-    a40, rtx3090 = _meta("a40"), _meta("rtx-3090")
-    assert a40["cell_key"] == rtx3090["cell_key"]
-    # sku SURVIVES in metadata — the hub-side selection preference and the
-    # publish-intent anti-forgery attestation both read it from there.
-    assert a40["sku"] == "a40" and rtx3090["sku"] == "rtx-3090"
-    # sm stays identity: a different arch is a different cell.
-    assert _meta("a40", sm="sm_89")["cell_key"] != a40["cell_key"]
-
-
-def test_key_scheme_ck1_foreign_keys_never_half_match():
-    """pgw#958 (§1.27(g), Paul 2026-08-07 over pgw#990's ck6): ck1 is the only
-    scheme this runtime mints, and the pre-existing ck1..ck6 corpus was purged
-    (th#1636) so the token cannot mean two things. A digest under any other
-    scheme token can never collide with a current one — a clean MISS, never a
-    half-match.
-
-    pgw#990: shape stays scheme-AGNOSTIC, byte-identical to tensorhub's
-    `compilecache.IsCellKey`, for the reason th#1183 gives — pinning the
-    current scheme in the shape check turns every other-scheme cell into
-    `unreadable_cell_key`, which is a lie and a filter no axis justifies. A
-    foreign-scheme token IS key-shaped; it simply names no artifact this
-    runtime computes, and `mismatch` says so on the axes.
+    Shape stays scheme-AGNOSTIC, byte-identical to tensorhub's
+    `compilecache.IsCellKey` (th#1183): a foreign-scheme token IS
+    key-shaped; it simply names no artifact this runtime computes.
     """
     key = ck.from_axes(_AXES).digest
     assert key.startswith("ck1-")
@@ -132,97 +96,82 @@ def test_key_scheme_ck1_foreign_keys_never_half_match():
         token = dead + "a" * 56
         assert ck.is_key(token), "a foreign-scheme token is still key-SHAPED"
         assert token != key
-        # No artifact metadata => no computable key => a named miss, never ''.
-        assert ck.mismatch({}, token) != ""
     assert not ck.is_key("ck-" + "a" * 56)      # no scheme digits
     assert not ck.is_key("ck1-" + "a" * 55)     # wrong digest width
     assert not ck.is_key("ck1-" + "A" * 56)     # uppercase hex
 
 
-def test_compute_matches_artifact_metadata_stamp(fixed_runtime):
-    """Mint-side stamp == consumer-side request, by construction: the SAME
-    declared-contract facts feed compute() and the artifact's recorded
-    shape_contract block."""
-    want = ck.compute("ltx-2.3", "w8a8", contract=_CONTRACT).digest
+def test_execution_lane_canonicalization():
+    """fp8-hooks and w8a16 are one lane label; buckets fold into it. The
+    lane is store metadata + discovery scoping since pgw#1059 — the
+    one-derivation rule stands so a cell is scoped under the same spelling
+    it was stamped with."""
+    assert (cc.execution_lane_label("fp8-hooks")
+            == cc.execution_lane_label("w8a16"))
+    assert (cc.execution_lane_label("w8a8-lora128")
+            == cc.execution_lane_label("w8a8", 128))
+    assert cc.execution_lane_label("w8a8") != cc.execution_lane_label("")
+
+
+def test_local_cell_has_no_key_stamp(fixed_runtime):
+    """pgw#1059: a torch-inductor-cache artifact records facts, never a
+    cell key — the ck1 key names exported cells only."""
     meta = cc.artifact_metadata(
-        family="ltx-2.3", shapes=((768, 768),), targets=("transformer",),
-        weight_lane="w8a8", shape_contract=_FACTS,
+        family="sdxl", shapes=((768, 768),), targets=("transformer",),
+        declared_compile_contract=cc.declared_compile_facts(_ContractCfg()),
     )
-    assert meta["cell_key"] == want
-    assert ck.mismatch(meta, want) == ""
-    assert ck.from_artifact_metadata(meta).digest == want
+    assert "cell_key" not in meta
+    with pytest.raises(ck.CellKeyError, match="has no cell-key identity"):
+        ck.from_exported_artifact_metadata(meta)
 
 
-def test_execution_lane_canonicalization(fixed_runtime):
-    """fp8-hooks and w8a16 are one graph family; buckets fold into the lane."""
-    assert (ck.compute("f", "fp8-hooks", contract=_CONTRACT).digest
-            == ck.compute("f", "w8a16", contract=_CONTRACT).digest)
-    assert (ck.compute("f", "w8a8-lora128", contract=_CONTRACT).digest
-            == ck.compute("f", "w8a8", 128, contract=_CONTRACT).digest)
-    assert (ck.compute("f", "w8a8", contract=_CONTRACT).digest
-            != ck.compute("f", "", contract=_CONTRACT).digest)
-
-
-def test_mode_axis_is_deleted_and_regional_rides_the_contract(fixed_runtime):
-    """`mode` deleted per Paul 2026-08-09 (pgw#1049): pinned "" since
-    regional died, and empty optionals never entered the canonical form, so
-    the deletion moves ZERO digests. Regional discrimination was never lost
-    — `regional` is a declared-contract fact, so it rides the `contract`
-    axis. A stale caller shipping `mode` gets a TYPED refusal, never a
-    silent drop."""
-    with pytest.raises(ck.CellKeyError, match="unknown cell-key axis 'mode'"):
-        ck.from_axes(dict(_AXES, mode="regional"))
-    with pytest.raises(ck.CellKeyError, match="unknown cell-key axis 'mode'"):
-        ck.from_axes(dict(_AXES, mode=""))
-    plain = cc.declared_contract_facts(_ContractCfg(regional=False))
-    regional = cc.declared_contract_facts(_ContractCfg(regional=True))
-    assert (ck.compute("f", contract=ck.contract_digest(regional)).digest
-            != ck.compute("f", contract=ck.contract_digest(plain)).digest)
-    facts = cc.declared_contract_facts(_ContractCfg(regional=True))
+def test_local_verdict_ignores_sku_and_pins_sm(fixed_runtime):
+    """pgw#691's collapse survives the key's retirement: the local verdict
+    never rules on sku (two SKUs of one sm share cells), and sm stays a
+    refusing fact."""
+    facts = cc.declared_compile_facts(_ContractCfg())
     meta = cc.artifact_metadata(
-        family="f", shapes=((768, 768),), targets=("transformer",),
-        compile_mode="regional", shape_contract=facts,
+        family="sdxl", shapes=((768, 768),), targets=("transformer",),
+        declared_compile_contract=facts,
     )
-    assert meta["cell_key"] == ck.compute(
-        "f", contract=ck.contract_digest(facts)).digest
+    meta["sku"] = "a40"  # minted elsewhere, same sm
+    assert cc.local_cell_mismatch(
+        dict(meta), family="sdxl", weight_lane="",
+        cfg=_ContractCfg()) == ""
+    drifted = dict(meta, sm="sm_89")
+    reason = cc.local_cell_mismatch(
+        drifted, family="sdxl", weight_lane="", cfg=_ContractCfg())
+    assert reason.startswith("sm ")
 
 
-def test_contract_axis_fences_newer_contract(fixed_runtime):
-    """pgw#647: the declared shape contract is a key axis. Two artifacts
-    identical except for their shape_contract get DIFFERENT keys, and a
-    worker computing with contract A never matches a cell recorded with
-    contract B — a newer contract must not consume an older cell."""
-    facts_a = cc.declared_contract_facts(_ContractCfg(text_len=0))
-    facts_b = cc.declared_contract_facts(_ContractCfg(text_len=512))
+def test_declared_contract_fences_newer_contract(fixed_runtime):
+    """pgw#647's fence survives the key's retirement: a worker on a newer
+    declared contract never consumes an older cell, and the refusal NAMES
+    the first differing fact instead of a fused digest."""
+    facts_a = cc.declared_compile_facts(_ContractCfg(text_len=0))
+    facts_b = cc.declared_compile_facts(_ContractCfg(text_len=512))
     assert facts_a != facts_b
 
-    def _cell(facts):
-        return cc.artifact_metadata(
-            family="ltx-2.3", shapes=((768, 768),), targets=("transformer",),
-            shape_contract=facts,
-        )
+    meta = cc.artifact_metadata(
+        family="ltx-2.3", shapes=((768, 768),), targets=("transformer",),
+        declared_compile_contract=facts_a,
+    )
+    assert cc.local_cell_mismatch(
+        dict(meta), family="ltx-2.3", weight_lane="",
+        cfg=_ContractCfg(text_len=0)) == ""
+    reason = cc.local_cell_mismatch(
+        dict(meta), family="ltx-2.3", weight_lane="",
+        cfg=_ContractCfg(text_len=512))
+    assert "declared compile contract mismatch" in reason
 
-    meta_a, meta_b = _cell(facts_a), _cell(facts_b)
-    assert meta_a["cell_key"] != meta_b["cell_key"]
-
-    want_a = ck.compute("ltx-2.3", contract=ck.contract_digest(facts_a))
-    assert ck.mismatch(meta_a, want_a) == ""
-    reason = ck.mismatch(meta_b, want_a)
-    assert reason.startswith("contract:")  # the named-axis refusal
-
-    # Cells recording no shape_contract have deliberately NO identity —
-    # never a stamped key, never a self-requested match.
+    # A cell recording NO block is refused, never silently admitted
+    # (stricter than the old keyless fallback — pgw#950's posture).
     legacy = cc.artifact_metadata(
         family="ltx-2.3", shapes=((768, 768),), targets=("transformer",))
-    assert "cell_key" not in legacy
-    with pytest.raises(ck.CellKeyError):
-        ck.from_artifact_metadata(legacy)
-    assert "no computable key" in ck.mismatch(legacy, want_a)
-
-
-def test_trt_metadata_has_no_cell_key():
-    with pytest.raises(ck.CellKeyError):
-        ck.from_artifact_metadata(dict(_AXES, kind="trt-engine"))
+    reason = cc.local_cell_mismatch(
+        dict(legacy), family="ltx-2.3", weight_lane="",
+        cfg=_ContractCfg(text_len=0))
+    assert "declared_compile_contract" in reason
 
 
 class _Target:
@@ -236,7 +185,8 @@ class _Pipeline:
 
 
 def _self_cell(tmp_path, drift: str = ""):
-    """Pack a cell whose axes describe exactly this (pinned) runtime."""
+    """Pack a cell whose recorded facts describe exactly this (pinned)
+    runtime."""
     pipe = _Pipeline()
     cfg = Compile(
         shapes=((768, 768),), family="sd15", targets=("transformer",),
@@ -245,7 +195,7 @@ def _self_cell(tmp_path, drift: str = ""):
     meta = cc.artifact_metadata(
         family="sd15", shapes=cfg.shapes, targets=cfg.targets,
         graph_signature=signature, weight_contract=contract,
-        shape_contract=cc.declared_contract_facts(cfg),
+        declared_compile_contract=cc.declared_compile_facts(cfg),
     )
     if drift:
         meta["graph_signature"] = drift
@@ -260,8 +210,9 @@ def _self_cell(tmp_path, drift: str = ""):
 def test_self_requested_drift_is_selection_bug(
     tmp_path, monkeypatch, fixed_runtime,
 ):
-    """A cell whose axes ARE this runtime's own key must never silently
-    fall back to eager on parity drift — that's the bug class (th#883)."""
+    """A cell whose recorded facts ARE this runtime's own must never
+    silently fall back to eager on parity drift — that's the bug class
+    (th#883)."""
     pipe, cfg, artifact = _self_cell(tmp_path, drift="different-module-graph")
     monkeypatch.setattr(cc, "apply", lambda *a, **k: False)
     with pytest.raises(cc.CellSelectionBugError) as exc:
@@ -282,10 +233,10 @@ def test_self_requested_no_target_is_selection_bug(
 def test_foreign_cell_drift_stays_eager(
     tmp_path, monkeypatch, fixed_runtime,
 ):
-    """The identical drift on a NON-self-keyed cell keeps the legacy silent
+    """The identical drift on a NON-self cell keeps the legacy silent
     eager policy — compatibility outcomes are not bugs."""
     pipe, cfg, artifact = _self_cell(tmp_path, drift="different-module-graph")
     monkeypatch.setattr(cc, "apply", lambda *a, **k: False)
     monkeypatch.setattr(
-        cc, "gen_worker_version", lambda: "9.9.9")  # not my key anymore
+        cc, "gen_worker_version", lambda: "9.9.9")  # not my cell anymore
     assert cc.enable(pipe, cfg, tmp_path / "cache", artifact) is False

@@ -83,7 +83,7 @@ def _stub_child(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _pending(tmp_path: Path) -> Any:
     return fleet_cells.PendingSelfMint(
-        family="sdxl", cell_key="ck1-abc", ref="root/family-sdxl#ck1-abc",
+        family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#ck1-abc",
         cfg=_cfg(), target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
 
@@ -121,8 +121,9 @@ def test_the_arm_returns_armed_false_with_a_delegated_pending(
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
     monkeypatch.setattr(
-        fleet_cells.cell_key, "compute",
-        lambda *a, **k: SimpleNamespace(digest="ck1-wired"))
+        fleet_cells, "arm_identity",
+        lambda *a, **k: SimpleNamespace(
+            token="arm1-wired", facts_dict=lambda: {}))
     monkeypatch.setattr(
         fleet_cells, "mint_recipe", lambda *a, **k: fleet_cells.RECIPE_AOT)
 

@@ -238,7 +238,13 @@ def test_seal_digest_tracks_the_declaration_not_live_flags() -> None:
     assert _env_seal().seal_digest(knobbed) != baseline
 
 
-def test_ck1_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
+def test_seal_is_recorded_and_the_local_verdict_refuses_seal_drift(
+    monkeypatch: Any,
+) -> None:
+    """pgw#1059 re-cut of the ck1-requires-the-seal test: the seal is no
+    longer a KEY axis (its declaration folds into `toolchain`), but it is
+    still RECORDED verbatim on every artifact and the local verdict still
+    refuses a cell sealed under a different environment, BY NAME."""
     monkeypatch.setattr(cc, "runtime_key", lambda: {
         "sku": "l4", "sm": "sm_89", "cuda": "13.0", "cuda_driver": "13000",
         "torch": "2.13.0+cu130", "triton": "3.7.1", "image_digest": "",
@@ -247,35 +253,33 @@ def test_ck1_requires_and_recomputes_the_env_seal(monkeypatch: Any) -> None:
     monkeypatch.setattr(cc, "_lib_versions", lambda: {})
     monkeypatch.delenv("WORKER_IMAGE_DIGEST", raising=False)
 
-    facts = cc.declared_contract_facts(_cfg())
-    want = ck.compute("toyfam", contract=ck.contract_digest(facts))
-    assert want.digest.startswith("ck1-")
     # pgw#990: a foreign scheme is key-SHAPED and simply names nothing this
-    # runtime computes — refused on axes, not on its label.
+    # runtime computes — refused on facts, not on its label.
     assert ck.is_key("ck3-" + "a" * 56)
-    assert want.digest != "ck3-" + "a" * 56
 
+    facts = cc.declared_compile_facts(_cfg())
     meta = cc.artifact_metadata(
         family="toyfam", shapes=((64, 64),), targets=("transformer",),
-        shape_contract=facts,
+        declared_compile_contract=facts,
     )
-    # The metadata records the seal dict verbatim; the key axis is
-    # RECOMPUTED from it and matches the live compute.
+    # The metadata records the seal dict verbatim; the local kind carries
+    # no key stamp at all (pgw#1059).
     assert meta[_env_seal().SEAL_KEY]["seal_v"] == _env_seal().SEAL_VERSION
-    assert meta["cell_key"] == want.digest
-    assert ck.mismatch(meta, want) == ""
+    assert "cell_key" not in meta
+    assert cc.local_cell_mismatch(
+        dict(meta), family="toyfam", weight_lane="", cfg=_cfg()) == ""
 
-    # A cell sealed under a DIFFERENT environment gets a different key,
-    # and the mismatch names the env_seal axis.
+    # A cell sealed under a DIFFERENT environment is refused, named.
     drifted = json.loads(json.dumps(meta))
     drifted[_env_seal().SEAL_KEY]["config"]["cudnn_benchmark"] = "True"
-    assert ck.from_artifact_metadata(drifted).digest != want.digest
-    assert ck.mismatch(drifted, want).startswith("env_seal:")
+    reason = cc.local_cell_mismatch(
+        drifted, family="toyfam", weight_lane="", cfg=_cfg())
+    assert reason.startswith("env_seal")
 
-    # No env_seal block = no sealed environment = no identity.
+    # No env_seal block = no sealed environment = refused.
     unsealed = {k: v for k, v in meta.items() if k != _env_seal().SEAL_KEY}
-    with pytest.raises(ck.CellKeyError, match="env_seal"):
-        ck.from_artifact_metadata(unsealed)
+    assert "env_seal" in cc.local_cell_mismatch(
+        dict(unsealed), family="toyfam", weight_lane="", cfg=_cfg())
 
 
 def test_verify_no_longer_pins_sku(monkeypatch: Any) -> None:
@@ -327,7 +331,7 @@ def test_fingerprint_names_the_drifted_module_on_dtype_flip() -> None:
     meta = cc.artifact_metadata(
         family="toyfam", shapes=cfg.shapes, targets=cfg.targets,
         graph_signature=signature, weight_contract=contract,
-        shape_contract=cc.declared_contract_facts(cfg),
+        declared_compile_contract=cc.declared_compile_facts(cfg),
         composition=cc.composition_fingerprint(minted, cfg),
     )
 

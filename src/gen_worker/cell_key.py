@@ -85,7 +85,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, Mapping
 
 # pgw#958 (DESIGN-RULINGS §1.27(g)) and pgw#1059 amendment 1: the counter
 # stays at 1 — Paul 2026-08-09: "stick with version-1 for now since we're

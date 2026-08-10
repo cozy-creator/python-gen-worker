@@ -1,15 +1,16 @@
-"""pgw#1033 — the STAMPED key is the cell's identity; the COMPUTED key names
-an ARM. Three live protections were comparing one against the other.
+"""pgw#1033 (re-cut by pgw#1059) — the STAMPED key is the cell's identity;
+the ARM TOKEN names an obligation. Three live protections were comparing one
+against the other.
 
-A worker holds two key digests that look identical (``ck1-<56 hex>``) and are
-different spaces by construction:
+Since pgw#1059 the two spaces are disjoint BY SPELLING, not just by formula:
 
-* the **computed** key (``cell_key.compute``, ``kind="inductor"``) — what THIS
-  runtime's static axes ask for. It exists before anything is compiled, which
-  is exactly why it can name a pending mint;
-* the **stamped** key (``aot_mint.cell_identity``, ``kind="aot-inductor"``,
-  contract axis folding the combined graph hash) — what the exported cell
-  actually IS. It does not exist until the export finishes.
+* the **arm token** (``fleet_cells.arm_identity``, ``arm1-<56 hex>``) — the
+  pre-trace obligation identity. It exists before anything is compiled,
+  which is exactly why it can name a pending mint — and it is NOT a cell
+  key (``cell_key.is_key`` is False on it);
+* the **stamped** key (``aot_mint.cell_identity``, ``ck1-<56 hex>``, the
+  four-axis graph x envelope x sm x toolchain digest) — what the exported
+  cell actually IS. It does not exist until the export finishes.
 
 Every protection below was written on one side and fed from the other, so each
 one silently stopped firing. The three tests that matter are RED on
@@ -48,9 +49,9 @@ from gen_worker.api.export_contract import (
 from gen_worker.cell_adopt import AdoptOutcome, EagerPhase
 
 FAMILY = "sdxl"
-#: What this runtime's axes COMPUTE — the arm identity, known before any
-#: compile has run.
-ARM_KEY = "ck1-" + "a" * 56
+#: What this runtime's facts COMPUTE — the arm token, known before any
+#: compile has run. NOT ck-shaped (pgw#1059): an obligation is not a cell.
+ARM_KEY = "arm1-" + "a" * 56
 #: What the child's envelope is STAMPED with — the cell identity, unknowable
 #: until the export finishes. A different digest, always.
 STAMPED_KEY = "ck1-" + "b" * 56
@@ -131,10 +132,13 @@ def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
     # No GPU on a dev box: `sm` is a real-runtime fact and this suite is about
-    # key SPACES, not key computation.
+    # identity SPACES, not identity computation.
     monkeypatch.setattr(
-        fleet_cells.cell_key, "compute",
-        lambda *a, **k: type("_K", (), {"digest": ARM_KEY})())
+        fleet_cells, "arm_identity",
+        lambda *a, **k: fleet_cells.ArmIdentity(
+            facts=(("family", FAMILY), ("token_pin", ARM_KEY))))
+    monkeypatch.setattr(
+        fleet_cells.ArmIdentity, "token", property(lambda self: ARM_KEY))
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     register_export_declaration(_declaration())
@@ -177,7 +181,7 @@ def test_the_memo_is_keyed_on_the_arm_key_the_next_arm_can_look_up(
     """RED at HEAD: written under the STAMPED key, read under the COMPUTED
     one — two disjoint spaces, so the memo could never hit."""
     pending = _arm().self_mint
-    assert pending is not None and pending.cell_key == ARM_KEY
+    assert pending is not None and pending.arm_token == ARM_KEY
 
     minted = _adopt(monkeypatch, pending)
     assert minted is not None and minted.cell_key == STAMPED_KEY

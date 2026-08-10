@@ -161,8 +161,10 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
     monkeypatch.setattr(
-        fleet_cells.cell_key, "compute",
-        lambda *a, **k: type("_K", (), {"digest": "ck1-" + "a" * 56})())
+        fleet_cells, "arm_identity",
+        lambda *a, **k: type("_A", (), {
+            "token": "arm1-" + "a" * 56,
+            "facts_dict": lambda self: {}})())
     monkeypatch.setattr(
         fleet_cells.cc, "arm_jit_intake", lambda p, c: None)
     # THE lane: sdxl's mixed fp8 checkpoint stamps `w8a8-lora64` (pgw#686 cell
@@ -364,7 +366,7 @@ def test_eager_first_admits_a_DELEGATED_pending_with_no_router(
         "name": "generate",
     })()
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck1-" + "a" * 56, ref="r", cfg=cfg,
+        family=FAMILY, arm_token="ck1-" + "a" * 56, ref="r", cfg=cfg,
         target=tmp_path / "c.tar.gz", mint_root=tmp_path, publisher=None, delegated=True,)
     inj = _Inj(compile_objects=[_Candidate(pipe)],
                pending_self_mints={id(pipe): pending})
@@ -389,7 +391,7 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
         "name": "generate",
     })()
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck1-" + "b" * 56, ref="r", cfg=cfg,
+        family=FAMILY, arm_token="ck1-" + "b" * 56, ref="r", cfg=cfg,
         target=tmp_path / "c.tar.gz", mint_root=tmp_path, publisher=None, delegated=False)
     inj = _Inj(compile_objects=[_Candidate(pipe)],
                pending_self_mints={id(pipe): pending})
@@ -408,7 +410,7 @@ def _finalized_pending(tmp_path: Path, publisher: Any) -> Any:
     target = tmp_path / "cell.tar.gz"
     target.write_bytes(b"x" * 4096)
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key=key, ref=f"root/family-{FAMILY}#{key}",
+        family=FAMILY, arm_token=key, ref=f"root/family-{FAMILY}#{key}",
         cfg=_Cfg(), target=target, mint_root=tmp_path / "root", publisher=publisher)
     pending.mint_root.mkdir(parents=True, exist_ok=True)
     pending._state["minted"] = fleet_cells.SelfMint(
@@ -431,7 +433,7 @@ def test_a_SUCCESSFUL_publish_is_a_typed_event_and_reaches_the_store(
     fleet_cells.publish_self_mint(pending)
     _join_publishes()
 
-    assert pending.cell_key in publisher.store, "the cell never reached the store"
+    assert pending.arm_token in publisher.store, "the cell never reached the store"
     phases = _phases(_events, "self_mint_publish")
     assert "started" in phases, "an upload beginning must be on the wire"
     assert "published" in phases, "a successful publish must be on the wire"
@@ -450,10 +452,10 @@ def test_a_publish_in_flight_is_an_observable_fact(
 
     fleet_cells.publish_self_mint(pending)
     assert publisher.started.wait(timeout=10)
-    assert pending.cell_key in fleet_cells.publishes_in_flight()
+    assert pending.arm_token in fleet_cells.publishes_in_flight()
     publisher.release.set()
     _join_publishes()
-    assert pending.cell_key not in fleet_cells.publishes_in_flight()
+    assert pending.arm_token not in fleet_cells.publishes_in_flight()
 
 
 def test_a_publish_gate_with_nothing_packed_is_NAMED(
@@ -463,7 +465,7 @@ def test_a_publish_gate_with_nothing_packed_is_NAMED(
     pendings it believes it packed, so reaching it with nothing packed is a
     real defect and must not be a no-op."""
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck1-" + "d" * 56, ref="r", cfg=_Cfg(),
+        family=FAMILY, arm_token="ck1-" + "d" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root2", publisher=_Publisher())
 
     fleet_cells.publish_self_mint(pending)
@@ -476,7 +478,7 @@ def test_a_withhold_with_nothing_packed_is_NAMED(
     tmp_path: Path, _events: List[Tuple[str, str, str]],
 ) -> None:
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck1-" + "e" * 56, ref="r", cfg=_Cfg(),
+        family=FAMILY, arm_token="ck1-" + "e" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root3", publisher=_Publisher())
 
     fleet_cells.withhold_self_mint_publish(pending, "sibling never exercised")
@@ -496,8 +498,8 @@ def test_a_failed_publish_still_names_the_key(
     _join_publishes()
 
     failures = [d for k, p, d in _events if k == "self_mint_publish_failed"]
-    assert failures and pending.cell_key in failures[0]
-    assert pending.cell_key not in fleet_cells.publishes_in_flight()
+    assert failures and pending.arm_token in failures[0]
+    assert pending.arm_token not in fleet_cells.publishes_in_flight()
 
 
 def test_a_boot_that_resolves_NOTHING_confesses(
@@ -523,7 +525,7 @@ def test_a_boot_that_resolves_NOTHING_confesses(
     ex = _executor(tmp_path)
     spec = type("_S", (), {"name": "generate"})()
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, cell_key="ck1-" + "f" * 56, ref="r", cfg=_Cfg(),
+        family=FAMILY, arm_token="ck1-" + "f" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root4", publisher=_Publisher())
     pending.mint_root.mkdir(parents=True, exist_ok=True)
 

@@ -245,7 +245,7 @@ META = {
     "combined_graph_hash": GRAPH_CONTRACT,
     "env_seal": {"v": 1, "torch": "2.9.0"},
     "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
-    "declared_traffic": {
+    "declared_envelope": {
         "shapes": [[1024, 1024]], "text_lens": [77], "guidance": [7.5]},
 }
 CELL_KEY = cell_key.from_exported_artifact_metadata(META).digest
@@ -364,12 +364,18 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     assert axes["env_seal"] == env_seal.seal_digest(META["env_seal"])
     assert axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
 
-    # ...and the axes hash to the key the cell is published under, so the hub's
-    # row and its flavor cannot describe two different cells.
-    ck = {k: v for k, v in axes.items() if k != fc.GRAPH_CONTRACT_AXIS}
+    # ...and the KEY axes hash to the key the cell is published under, so
+    # the hub's row and its flavor cannot describe two different cells. The
+    # map also carries the wire facts (graph_contract, env_seal) and the
+    # demoted store metadata (family, lane) — pgw#1059: neither is identity.
+    ck = {k: v for k, v in axes.items()
+          if k in ("graph", "envelope", "sm", "toolchain")}
     assert cell_key.from_axes(ck).digest == intent["cell_key"] == CELL_KEY
-    assert set(ck) == {"format", "kind", "family", "lane", "sm",
-                       "contract", "env_seal", "toolchain"}
+    assert set(axes) == {"graph", "envelope", "sm", "toolchain",
+                         fc.GRAPH_CONTRACT_AXIS, fc.ENV_SEAL_AXIS,
+                         "family", "lane"}
+    assert axes["graph"] == axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
+    assert axes["lane"] == "w8a8-lora64"
 
 
 def test_the_pre_fix_fallback_row_shape_can_no_longer_be_published(hub, artifact):

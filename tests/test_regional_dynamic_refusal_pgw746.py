@@ -61,8 +61,8 @@ def test_the_digest_distinguishes_a_declared_dynamic_regional_config() -> None:
     identically carrying different keys. Under D4 it is the point: the export
     lane implements the marks, so the two configs genuinely produce different
     artifacts and MUST key differently."""
-    without = cc.declared_contract_facts(_ContractCfg(regional=True))
-    with_dyn = cc.declared_contract_facts(
+    without = cc.declared_compile_facts(_ContractCfg(regional=True))
+    with_dyn = cc.declared_compile_facts(
         _ContractCfg(regional=True, dynamic=(_SEQ,)))
 
     assert without["regional"] is True and with_dyn["regional"] is True
