@@ -133,6 +133,44 @@ def derive_once(
     return derived, wall
 
 
+def real_weight_class_hashes(veh: Any, tree: Path) -> Dict[str, str]:
+    """The class hashes a REAL-WEIGHT composition traces — the mint's own path,
+    stopped before the compile.
+
+    THE residual risk of the whole derivation, isolated. The boot path and the
+    mint path already call the identical functions (``aot_mint.keying_block`` ->
+    ``aot_serve.artifact_metadata`` -> ``cell_key.from_exported_artifact_metadata``),
+    so the ONLY thing a real mint can still disagree with a boot derivation
+    about is whether the STRUCTURE-ONLY composition traces the same graph as the
+    weight-bearing one. That question needs no compile: load the checkpoint for
+    real, run the same ``trace_for_key``, and compare.
+
+    A mismatch here would mean the derived key can never equal the stamped key,
+    and it would say so for **$0** instead of on a pod.
+    """
+    from gen_worker import aot_mint, boot_key, fleet_cells
+    from gen_worker.cli.run import run_setup
+    from gen_worker.mint_child import pick_compile_target
+    from gen_worker.registry import collect_endpoints
+
+    cfg = veh.compile_cell()
+    specs = collect_endpoints(list(veh.modules))
+    chosen = next(s for s in specs if s.name == veh.function)
+    instance = chosen.cls()
+    # NO `structure_only=`: this is the weight-bearing composition.
+    loaded = run_setup(
+        instance, {"pipeline": str(tree)}, arm_compile=False,
+        return_loaded=True) or {}
+    _slot, pipeline = pick_compile_target(loaded, cfg)
+    export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
+    decl = aot_mint.export_declaration(export_spec.family)
+    blocks: Dict[str, Any] = {}
+    for traced in aot_mint.trace_for_key(pipeline, export_spec, decl):
+        blocks[traced.name] = traced.block
+        traced.program = None
+    return boot_key.class_hashes_of(blocks)
+
+
 def _report(derived: Any, wall: float, label: str) -> Dict[str, Any]:
     per_class = sorted(derived.trace_ms.values()) or [0]
     return {
@@ -160,6 +198,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="K values to run, in order. Repeat. Default: 1 then auto.")
     ap.add_argument("--root", default="")
     ap.add_argument("--json", default="")
+    ap.add_argument(
+        "--skip-real-weights", action="store_true",
+        help="skip the structure-only-vs-real-weight graph comparison")
     args = ap.parse_args(argv)
 
     load = assert_load_gate()
@@ -238,6 +279,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  MEMO POISON: memo={poisoned.memo} key={poisoned.digest} "
           f"({'UNCHANGED — the fresh trace won' if poisoned.digest == distinct[0] else 'CHANGED — RED'})")
 
+    # THE residual risk, isolated and priced at $0 — see
+    # `real_weight_class_hashes`.
+    real: Dict[str, str] = {}
+    boot_hashes = dict(rows and keys and {}) or {}
+    same_graph: Optional[bool] = None
+    if not args.skip_real_weights:
+        try:
+            real = real_weight_class_hashes(veh, tree)
+        except Exception as exc:  # noqa: BLE001 — a leg, never the verdict
+            print(f"  REAL-WEIGHT COMPARE: could not run ({type(exc).__name__}: {exc})")
+        else:
+            boot_hashes = dict(hot.class_hashes)
+            same_graph = real == boot_hashes
+            differing = sorted(
+                n for n in set(real) | set(boot_hashes)
+                if real.get(n) != boot_hashes.get(n))
+            print(
+                f"  REAL-WEIGHT COMPARE: structure-only vs weight-bearing "
+                f"composition traced "
+                f"{'THE SAME GRAPHS' if same_graph else 'DIFFERENT graphs ' + repr(differing[:4])}"
+                f" ({len(real)} class(es))")
+
     out = {
         "vehicle": veh.name,
         "family": veh.family,
@@ -251,6 +314,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "memo_poison": {
             "state": poisoned.memo, "key": poisoned.digest,
             "held": poisoned.digest == distinct[0]},
+        "real_weight_compare": {
+            "ran": bool(real), "same_graph": same_graph,
+            "classes": len(real),
+            "boot": boot_hashes, "real": real},
     }
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=2))
@@ -259,7 +326,8 @@ def main(argv: Optional[List[str]] = None) -> int:
           and out["memo_poison"]["state"] == "invalidated"
           and out["memo_hit"]["state"] == "hit"
           and out["memo_hit"]["traced"] == 0
-          and out["memo_hit"]["same_key"])
+          and out["memo_hit"]["same_key"]
+          and (same_graph is not False))
     print(f"\nboot-key rig: {'GREEN' if ok else 'RED'}")
     return 0 if ok else 1
 
