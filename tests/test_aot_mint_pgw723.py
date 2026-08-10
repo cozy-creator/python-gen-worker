@@ -27,6 +27,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Tuple
 
+import logging
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -451,19 +453,51 @@ def test_mint_refuses_a_package_wanting_undeclared_constants(
     assert not list(tmp_path.glob("*.tar.gz"))
 
 
-def test_mint_records_fused_constants_without_refusing(
+def test_mint_reports_fused_constants_without_refusing_and_without_KEYING_them(
     tmp_path: Path, _gpu_runtime: None, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Compiler fusion must be observable but never fatal."""
+    """Compiler fusion must be observable, never fatal — and since pgw#1089,
+    never KEYED.
+
+    v2 folded ``fused_constants`` into the entry's ``class_hash``, which made
+    the compiler's folding decisions part of cell identity. Two consequences,
+    one of them already live: identity could not be stated before a compile (so
+    §4.27 step 1's boot-time derivation was impossible), and a weightless mint
+    keyed differently from a real-weight mint of the byte-identical graph,
+    because pgw#1080's mandatory ``use_runtime_constant_folding`` moves exactly
+    this set.
+
+    Which constants the compiler folds is a FUNCTION of (graph x toolchain x
+    sm) — all three already axes — so it carries no bits the key lacks. It is
+    demoted from KEYED to PROVEN: ``program_package_drift`` still refuses a
+    package whose constant set disagrees with its program, and the fusion is
+    still reported. This row pins all three halves.
+    """
     real = aot_package.program_constant_fqns
 
     monkeypatch.setattr(
         aot_package, "program_constant_fqns",
         lambda p: tuple(real(p)) + ("definitely.fused.away",))
-    result = _mint_cell(tmp_path)
+    with caplog.at_level(logging.INFO, logger="gen_worker.aot_mint"):
+        result = _mint_cell(tmp_path)
+
+    # 1. NEVER FATAL — the mint completed and produced an artifact.
     meta = aot_serve.unpack_metadata(result.artifact)
     entry = meta["entries"][CELL_ENTRY]
-    assert "definitely.fused.away" in entry["graph"]["fused_constants"]
+
+    # 2. NEVER KEYED — the graph block does not carry it at all, and the block
+    #    is v3 (program-only).
+    assert "fused_constants" not in entry["graph"]
+    assert entry["graph"]["v"] == 3
+
+    # 3. STILL OBSERVABLE — reported where a surprising jump in the count is
+    #    visible, rather than silently discarded.
+    assert any(
+        "fused away by the compiler" in rec.getMessage()
+        for rec in caplog.records), (
+        "compiler fusion stopped being observable when it stopped being keyed "
+        "— it must be one or the other, not neither")
 
 
 def test_minted_metadata_pins_the_trace_mode(cell: Dict[str, Any]) -> None:
