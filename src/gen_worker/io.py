@@ -21,6 +21,7 @@ from typing import IO, TYPE_CHECKING, Any, Optional
 
 from .api.errors import ValidationError
 from .api.types import Asset
+from .output_integrity import StreamCollector, enforce, guard_frames, guard_image
 from .stage_timing import stage_of as _stage
 import os
 import tempfile
@@ -231,6 +232,9 @@ def write_image(
 
     with finalize_permit():
         _release_gpu_slot_for_finalize(ctx)
+        # pgw#1094: look at the PIXELS before the encode. A rejected output
+        # raises and is never encoded, never uploaded, never banked.
+        guard_image(image, ref=ref)
         with _stage(ctx, "image_encode"):
             payload, ext = encode_image(
                 image, format=format, quality=quality, **encode_kwargs
@@ -354,9 +358,17 @@ def write_video(
                 # types pass through unchanged.
                 from .media_transfer import staged_uint8_chunks
 
+                # pgw#1094: each chunk is judged INSIDE the loop — the staged
+                # host buffer a chunk borrows is only valid until the next
+                # iteration step, and nothing here may rebuffer the clip.
+                integrity = StreamCollector()
                 for chunk in staged_uint8_chunks(frames):
+                    integrity.observe(chunk)
                     encoder.add(chunk)
                 _release_gpu_slot_for_finalize(ctx)
+                # Before the flush + upload tail: a rejected clip is never
+                # muxed and `ctx.save_video` below is never reached.
+                enforce(integrity.verdict(), ref=ref, kind="video")
                 encoder.finish(audio)
             else:
                 arr = frames_to_uint8(frames)
@@ -365,6 +377,7 @@ def write_video(
                 # frame buffers in host RAM (gw#516).
                 with finalize_permit():
                     _release_gpu_slot_for_finalize(ctx)
+                    guard_frames(arr, ref=ref)  # pgw#1094, before the encode
                     encoder.add(arr)
                     del arr
                     encoder.finish(audio)
