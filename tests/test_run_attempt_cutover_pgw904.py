@@ -81,7 +81,7 @@ def _spec(
     spec.release.image_digest = "sha256:" + "1" * 64
     spec.release.code_closure_id = "cc-1"
     spec.numerical_lane.weights = pb.WEIGHT_LANE_BF16
-    spec.arm.graph_contract_digest = "gc-1"
+    # No graph contract: an eager arm names no cell, so it has none.
     spec.arm.shape = pb.ARM_SHAPE_BRANCHLESS
     spec.arm.backend = pb.STEADY_BACKEND_EAGER_ONLY
     spec.topology.accelerator = "none"
