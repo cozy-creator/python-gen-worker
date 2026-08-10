@@ -48,12 +48,15 @@ class _Block(torch.nn.Module):
         self.lin = torch.nn.Linear(8, 8)
 
     def forward(self, hidden, index, rotary):
+        # The H3 block's modulation, in miniature: a per-row table gathered by
+        # an INTEGER index tensor of the sequence length, broadcast into the
+        # rank-3 activation. Marking only `hidden` leaves the gather static,
+        # which specializes the symbol and violates the mark.
         cos, sin = rotary
         out = self.lin(hidden)
-        # index_select by a same-length index tensor is what specialized the
-        # sequence symbol when only `hidden` was marked.
-        gathered = out.index_select(1, index)
-        return gathered + cos.unsqueeze(0) + sin.unsqueeze(0)
+        scale = cos.index_select(0, index)
+        shift = sin.index_select(0, index)
+        return out * (1.0 + scale) + shift
 """
 
 
