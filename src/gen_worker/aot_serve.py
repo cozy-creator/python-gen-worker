@@ -117,6 +117,11 @@ ARTIFACT_KIND = "aot-inductor"
 #: was indistinguishable from one that was not. Coalesced: once per
 #: (entry, input, reason).
 REALIGN_EVENT = "aot_input_realigned"
+#: pgw#1074: a rank-0 input arrived in an INTEGER dtype where the graph is
+#: specialized on float32/float64, and this ingress recast it. Same shape and
+#: same doctrine as :data:`REALIGN_EVENT` — the ingress normalizes the feed to
+#: the artifact's contract and SAYS so, once per (entry, input, dtype pair).
+RECAST_EVENT = "aot_input_recast"
 #: AOTInductor generates its aligned-input fast path at 16 bytes
 #: (``torch._inductor.codegen.aoti_runtime``'s ALIGNMENT). An input whose
 #: ``data_ptr()`` is not a multiple of this — diffusers hands the denoiser
@@ -1196,6 +1201,56 @@ def excluded_inputs_present(
     return tuple(found)
 
 
+#: pgw#1074: the ONLY dtype normalization this ingress performs. Integer ->
+#: float32/float64 on a rank-0 input, and nothing else.
+#:
+#: float32 represents every integer up to 2**24 exactly, so the recast is
+#: value-preserving over any diffusion timestep domain, and it is EXACTLY the
+#: op the traced graph's own first node performs on this input (diffusers
+#: ``get_timestep_embedding``: ``timesteps[:, None].float()``) — so a recast
+#: feed produces bit-identical output to the eager call that presented the
+#: integer. bfloat16 and float16 are deliberately NOT targets: bf16 has 8
+#: mantissa bits and would round timestep 999 to 1000, which is a numeric
+#: change, not a normalization.
+RECAST_TARGETS = ("float32", "float64")
+_INTEGER_DTYPES = ("int8", "int16", "int32", "int64", "uint8")
+
+
+def recast_gap(spec: InputContract, value: Any) -> str:
+    """The named dtype normalization this feed needs, or ``''`` (pgw#1074).
+
+    ``''`` means either "already in contract" or "must be REFUSED" — this
+    function never widens the contract, it only names the one normalization
+    the ingress is allowed to perform, and :func:`ingress_report` refuses
+    every other dtype disagreement exactly as before.
+
+    **Why this exists.** The dtype a diffusers denoiser is handed for its
+    scalar timestep is a per-request SAMPLER fact, not a family fact. Measured
+    over ``gen_worker.view.SAMPLERS`` on the fleet's own diffusers (pgw#1074):
+    ``euler``/``euler_a``/``euler_trailing``/``heun``/``flow_euler`` present
+    **float32**; ``ddim``/``ddim_trailing``/``ddpm``/``deis``/``dpmpp_2m*``/
+    ``lcm``/``unipc`` present **int64** (``set_timesteps`` ends in
+    ``.to(dtype=torch.int64)``). sdxl's cell was minted float32 (ie#627, and
+    correct — it is what the graph is specialized on), so its turbo arm
+    (``euler_trailing``) served from the cell and its base arm, on an int64
+    sampler, was refused ``no_entry_admits`` by an entry that covered it in
+    every other respect. No single declared dtype can be right for a family
+    whose sampler is per-request VIEW state, and the sampler is deliberately
+    not a compile axis — so the normalization belongs at the boundary that
+    knows the contract, once, named and counted.
+    """
+    if spec.shape:  # rank-0 only: the timestep class, not a tensor of values
+        return ""
+    if spec.dtype not in RECAST_TARGETS:
+        return ""
+    got = _dtype_name(value)
+    if got not in _INTEGER_DTYPES:
+        return ""
+    if getattr(value, "shape", None) is None or tuple(value.shape):
+        return ""
+    return f"{got}_to_{spec.dtype}"
+
+
 def alignment_gap(value: Any) -> str:
     """'' when a feed satisfies the artifact's aligned-input contract, else
     the named reason (pgw#791).
@@ -1242,16 +1297,23 @@ class FeedAligner:
     def __init__(self) -> None:
         self._buffers: Dict[str, Any] = {}
 
-    def staged(self, name: str, value: Any) -> Any:
-        """A 16-byte-aligned contiguous copy of ``value`` in an owned buffer."""
+    def staged(self, name: str, value: Any, dtype: str = "") -> Any:
+        """A 16-byte-aligned contiguous copy of ``value`` in an owned buffer.
+
+        ``dtype`` (pgw#1074) stages into the artifact's DECLARED dtype instead
+        of the feed's own. The conversion is ``Tensor.copy_``'s — one device
+        kernel into the buffer this ingress already had to write, so the
+        recast costs nothing beyond the staging copy and never synchronises.
+        """
         import torch
 
+        want = getattr(torch, dtype) if dtype else value.dtype
         buf = self._buffers.get(name)
-        if (buf is None or buf.dtype is not value.dtype
+        if (buf is None or buf.dtype is not want
                 or buf.device != value.device
                 or tuple(buf.shape) != tuple(value.shape)):
             buf = torch.empty(
-                tuple(value.shape), dtype=value.dtype, device=value.device)
+                tuple(value.shape), dtype=want, device=value.device)
             if int(buf.data_ptr()) % AOTI_ALIGNMENT:
                 # torch's caching allocator hands out 512-byte-aligned blocks
                 # (CPU: 64). If that ever stops being true, realigning by
@@ -1276,9 +1338,14 @@ def aligned_feeds(
     contract: ArtifactContract,
     feeds: Sequence[Any],
     aligner: FeedAligner,
-    report: Optional[Callable[[str, str], None]] = None,
+    report: Optional[Callable[[str, str, str], None]] = None,
 ) -> List[Any]:
-    """``feeds`` with every out-of-contract input realigned in place (pgw#791).
+    """``feeds`` normalized to the artifact's contract (pgw#791 + pgw#1074).
+
+    Two normalizations, one staging buffer: the declared dtype
+    (:func:`recast_gap`) and the declared 16-byte alignment
+    (:func:`alignment_gap`). A recast implies a staged copy, so it subsumes
+    the alignment pass rather than running after it.
 
     ``feeds`` is :func:`marshal_positional`'s output, so it is one value per
     declared input in ``position`` order — the same order this walks, which is
@@ -1293,13 +1360,170 @@ def aligned_feeds(
             f"would realign the wrong slot")
     out = list(feeds)
     for idx, (spec, value) in enumerate(zip(specs, feeds)):
-        reason = alignment_gap(value)
+        recast = recast_gap(spec, value)
+        reason = recast or alignment_gap(value)
         if not reason:
             continue
-        out[idx] = aligner.staged(spec.name, value)
+        out[idx] = aligner.staged(spec.name, value, spec.dtype if recast else "")
         if report is not None:
-            report(spec.name, reason)
+            report(spec.name, reason, RECAST_EVENT if recast else REALIGN_EVENT)
     return out
+
+
+#: pgw#1074: how far each refusal reason puts an entry from the call. Dims
+#: LAST, so an entry that matches every declared dimension sorts to the front
+#: of a refusal listing whatever its remaining complaint is. The rungs are
+#: ordinal only — nothing reads their absolute values.
+MISS_RUNGS: Mapping[str, int] = {
+    # The call fits this graph's shape and disagrees about one scalar fact.
+    "dtype_mismatch": 1,
+    "input_not_tensor": 2,
+    # A branch/adapter routing disagreement: same shape family, wrong class.
+    "input_excluded": 3,
+    # Shape disagreements — the call does not fit this graph at all.
+    "static_dim_mismatch": 4,
+    "range_violation": 4,
+    "symbol_inconsistent": 4,
+    "rank_mismatch": 5,
+    # The call does not even carry the input; nothing else was measurable.
+    "input_missing": 6,
+}
+_MISS_RUNG_DEFAULT = 9
+#: How many non-closest entries a refusal names individually before it
+#: switches to a per-reason count. The closest entry is ALWAYS named in full
+#: and always first: this detail is truncated by the hub at ~573 chars, and
+#: pgw#1074 is what happens when the one informative entry falls past that.
+_MISS_SAMPLE = 3
+
+
+@dataclass(frozen=True)
+class IngressMiss:
+    """ONE reason one entry refuses one call (pgw#1074).
+
+    :attr:`rung` is how FAR that reason puts the entry from the call, and it
+    exists because a refusal listing has to be ORDERED by something. The
+    ordering is dims-first: an entry the call matches in every declared
+    dimension and misses only on dtype is the entry a reader is looking for,
+    and listing entries in iteration order buried exactly that one (36 tried,
+    6 listed, the dims-matching one not among them — the pgw#1074 filing).
+    """
+
+    reason: str
+    detail: str
+    input: str = ""
+    rung: int = _MISS_RUNG_DEFAULT
+
+
+def _rung(reason: str) -> int:
+    return MISS_RUNGS.get(reason, _MISS_RUNG_DEFAULT)
+
+
+def miss_distance(misses: Sequence[IngressMiss]) -> Tuple[int, ...]:
+    """Sort key over one entry's misses — lower is CLOSER to the call.
+
+    The sorted rung tuple, so that (a) an entry whose only complaint is a
+    shallow one beats an entry with a deep one, and (b) among entries with
+    the same shallowest complaint, the one with FEWER complaints wins (a
+    prefix sorts before its extension). Deterministic and total.
+    """
+    return tuple(sorted(_rung(m.reason) for m in misses))
+
+
+def ingress_report(
+    contract: ArtifactContract,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+    *,
+    first_only: bool = False,
+) -> Tuple[Tuple[IngressMiss, ...], Dict[str, int]]:
+    """EVERY way this call misses this contract, plus the symbol bindings.
+
+    The one implementation of the pgw#704 B2 check. :func:`assert_ingress`
+    raises this function's FIRST miss and :meth:`EntryDispatch.select` ranks
+    whole entries by all of them, so an admission decision and the sentence
+    that explains it can never be computed by two different rules.
+
+    ``first_only`` returns as soon as one miss is found. It is an early EXIT
+    from this same walk, never a second rule — every ADMISSION decision takes
+    it (an admitted call has no misses, so the two are identical there), and
+    the exhaustive walk is paid only on the refusal path, which is already
+    falling back to eager. A 36-entry cell is asked this per denoise step.
+
+    Misses are collected in declaration order, per input in
+    dtype -> rank -> dims order, which is the order the raising check used
+    before this became a collecting one.
+    """
+    present = excluded_inputs_present(contract, kwargs)
+    if present:
+        return ((IngressMiss(
+            "input_excluded",
+            f"this graph class REFUSES input(s) {list(present)!r}: the call "
+            f"carries them, so it must be served by the class that declares "
+            f"them (pgw#790 — a branchless class fed an adapter would return "
+            f"the base model and look correct)",
+            str(present[0])),), {})
+    try:
+        bound = bind_call_inputs(contract, args, kwargs)
+    except IngressContractError as exc:
+        # An input the call does not carry at all: nothing further about this
+        # entry can be measured, so it is one miss and the deepest rung.
+        return ((IngressMiss(exc.reason, str(exc)),), {})
+    misses: List[IngressMiss] = []
+    symbols: Dict[str, int] = {}
+    owner: Dict[str, str] = {}
+    for spec in contract.inputs:
+        if first_only and misses:
+            break
+        if spec.name not in bound:
+            continue
+        value = bound[spec.name]
+        shape = getattr(value, "shape", None)
+        if shape is None:
+            misses.append(IngressMiss(
+                "input_not_tensor",
+                f"declared input {spec.name!r} is a "
+                f"{type(value).__name__} with no shape", spec.name))
+            continue
+        got_dtype = _dtype_name(value)
+        if got_dtype != spec.dtype and not recast_gap(spec, value):
+            misses.append(IngressMiss(
+                "dtype_mismatch",
+                f"input {spec.name!r} dtype {got_dtype or '<unknown>'} != "
+                f"declared {spec.dtype}", spec.name))
+        actual = tuple(int(d) for d in shape)
+        if len(actual) != len(spec.shape):
+            misses.append(IngressMiss(
+                "rank_mismatch",
+                f"input {spec.name!r} rank {len(actual)} != declared "
+                f"{len(spec.shape)} (declared shape {list(spec.shape)!r})",
+                spec.name))
+            continue
+        for pos, (declared, got) in enumerate(zip(spec.shape, actual)):
+            if isinstance(declared, int):
+                if got != declared:
+                    misses.append(IngressMiss(
+                        "static_dim_mismatch",
+                        f"input {spec.name!r} dim {pos} = {got} != "
+                        f"statically specialized {declared}", spec.name))
+                continue
+            lo, hi = contract.symbols[declared]
+            if not (lo <= got <= hi):
+                misses.append(IngressMiss(
+                    "range_violation",
+                    f"input {spec.name!r} dim {pos} (symbol {declared!r}) = "
+                    f"{got} outside declared range [{lo}, {hi}]", spec.name))
+                continue
+            prior = symbols.get(declared)
+            if prior is not None and prior != got:
+                misses.append(IngressMiss(
+                    "symbol_inconsistent",
+                    f"symbol {declared!r} = {got} on input {spec.name!r} dim "
+                    f"{pos} but {prior} on input {owner[declared]!r}",
+                    spec.name))
+                continue
+            symbols[declared] = got
+            owner.setdefault(declared, spec.name)
+    return (tuple(misses[:1]) if first_only else tuple(misses)), symbols
 
 
 def assert_ingress(
@@ -1311,10 +1535,12 @@ def assert_ingress(
 
     Returns the resolved symbol bindings on success; raises
     :class:`IngressContractError`, naming the input, the dim, the symbol,
-    the value and the bound, on any violation. Checks, per input:
+    the value and the bound, on the FIRST violation :func:`ingress_report`
+    finds. Checks, per input:
 
     * present (unless declared optional);
-    * dtype EXACT — an exported graph is specialized on dtype;
+    * dtype EXACT — an exported graph is specialized on dtype — except for
+      the one named normalization :func:`recast_gap` performs;
     * rank EXACT;
     * static dims EXACT — a specialized dim is not a range;
     * symbolic dims inside the declared inclusive range;
@@ -1323,61 +1549,9 @@ def assert_ingress(
       graph requires it, so a mismatch is out-of-contract even when both
       values are individually in range.
     """
-    present = excluded_inputs_present(contract, kwargs)
-    if present:
-        raise IngressContractError(
-            "input_excluded",
-            f"this graph class REFUSES input(s) {list(present)!r}: the call "
-            f"carries them, so it must be served by the class that declares "
-            f"them (pgw#790 — a branchless class fed an adapter would return "
-            f"the base model and look correct)")
-    bound = bind_call_inputs(contract, args, kwargs)
-    symbols: Dict[str, int] = {}
-    owner: Dict[str, str] = {}
-    for spec in contract.inputs:
-        if spec.name not in bound:
-            continue
-        value = bound[spec.name]
-        shape = getattr(value, "shape", None)
-        if shape is None:
-            raise IngressContractError(
-                "input_not_tensor",
-                f"declared input {spec.name!r} is a "
-                f"{type(value).__name__} with no shape")
-        got_dtype = _dtype_name(value)
-        if got_dtype != spec.dtype:
-            raise IngressContractError(
-                "dtype_mismatch",
-                f"input {spec.name!r} dtype {got_dtype or '<unknown>'} != "
-                f"declared {spec.dtype}")
-        actual = tuple(int(d) for d in shape)
-        if len(actual) != len(spec.shape):
-            raise IngressContractError(
-                "rank_mismatch",
-                f"input {spec.name!r} rank {len(actual)} != declared "
-                f"{len(spec.shape)} (declared shape {list(spec.shape)!r})")
-        for pos, (declared, got) in enumerate(zip(spec.shape, actual)):
-            if isinstance(declared, int):
-                if got != declared:
-                    raise IngressContractError(
-                        "static_dim_mismatch",
-                        f"input {spec.name!r} dim {pos} = {got} != "
-                        f"statically specialized {declared}")
-                continue
-            lo, hi = contract.symbols[declared]
-            if not (lo <= got <= hi):
-                raise IngressContractError(
-                    "range_violation",
-                    f"input {spec.name!r} dim {pos} (symbol {declared!r}) = "
-                    f"{got} outside declared range [{lo}, {hi}]")
-            prior = symbols.get(declared)
-            if prior is not None and prior != got:
-                raise IngressContractError(
-                    "symbol_inconsistent",
-                    f"symbol {declared!r} = {got} on input {spec.name!r} dim "
-                    f"{pos} but {prior} on input {owner[declared]!r}")
-            symbols[declared] = got
-            owner.setdefault(declared, spec.name)
+    misses, symbols = ingress_report(contract, args, kwargs, first_only=True)
+    if misses:
+        raise IngressContractError(misses[0].reason, misses[0].detail)
     return symbols
 
 
@@ -1597,8 +1771,10 @@ class ArtifactRunner:
     bound_fqns: Tuple[str, ...] = ()
     calls: int = 0
     refusals: Dict[str, int] = field(default_factory=dict)
-    #: pgw#791. ``"<input>/<reason>" -> count``; the typed event fires on the
-    #: first of each, the count keeps the whole tax countable afterwards.
+    #: pgw#791 + pgw#1074. ``"<input>/<reason>" -> count`` over every ingress
+    #: NORMALIZATION — realignment (``unaligned_16b``) and dtype recast
+    #: (``int64_to_float32``) alike; the typed event fires on the first of
+    #: each, the count keeps the whole tax countable afterwards.
     realigned: Dict[str, int] = field(default_factory=dict)
     aligner: FeedAligner = field(default_factory=FeedAligner)
     #: Set by :func:`load_and_wrap` so the typed realignment event can name
@@ -1723,9 +1899,9 @@ class ArtifactRunner:
                 f"{len(self.constants)} unbound constant(s): calling before "
                 f"load_constants segfaults the worker process")
 
-    def _report_realigned(self, name: str, reason: str) -> None:
+    def _report_normalized(self, name: str, reason: str, event: str) -> None:
         """First occurrence of an (input, reason) is a typed hub-visible
-        event; every occurrence is counted (pgw#791).
+        event; every occurrence is counted (pgw#791, pgw#1074).
 
         Coalesced deliberately: the defect fires 28+ times per request, and a
         per-call event would be the stderr spam it replaces, on a wire that
@@ -1736,19 +1912,31 @@ class ArtifactRunner:
         self.realigned[key] = seen + 1
         if seen:
             return
-        logger.warning(
-            "aot-serve: input %r arrived %s for entry %r; realigning into an "
-            "owned aligned buffer at ingress (the artifact would otherwise "
-            "copy it on every call and report only on stderr)",
-            name, reason, self.entry or self.module_name)
-        activity_mod.emit_event(
-            REALIGN_EVENT,
-            f"family={self.family} entry={self.entry or self.module_name} "
-            f"target={self.module_name} input={name}: {reason} — realigned at "
-            f"ingress into an owned {AOTI_ALIGNMENT}-byte aligned buffer "
-            f"(AOTInductor would otherwise copy it on every call)",
-            phase=reason,
-        )
+        entry = self.entry or self.module_name
+        if event == RECAST_EVENT:
+            logger.warning(
+                "aot-serve: input %r arrived %s for entry %r; recasting to "
+                "the declared dtype at ingress (the sampler, not the family, "
+                "decides this dtype)", name, reason, entry)
+            detail = (
+                f"family={self.family} entry={entry} "
+                f"target={self.module_name} input={name}: {reason} — recast "
+                f"at ingress to the dtype this graph is specialized on "
+                f"(pgw#1074: a scalar timestep's dtype is a per-request "
+                f"SAMPLER fact, not a family one)")
+        else:
+            logger.warning(
+                "aot-serve: input %r arrived %s for entry %r; realigning into "
+                "an owned aligned buffer at ingress (the artifact would "
+                "otherwise copy it on every call and report only on stderr)",
+                name, reason, entry)
+            detail = (
+                f"family={self.family} entry={entry} "
+                f"target={self.module_name} input={name}: {reason} — "
+                f"realigned at ingress into an owned {AOTI_ALIGNMENT}-byte "
+                f"aligned buffer (AOTInductor would otherwise copy it on "
+                f"every call)")
+        activity_mod.emit_event(event, detail, phase=reason)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self.assert_ready()
@@ -1758,13 +1946,61 @@ class ArtifactRunner:
             # pgw#791: satisfy the artifact's ALIGNED-input contract here,
             # once, instead of letting the runner discover it per call.
             feeds = aligned_feeds(
-                self.contract, feeds, self.aligner, self._report_realigned)
+                self.contract, feeds, self.aligner, self._report_normalized)
         except IngressContractError as exc:
             self.refusals[exc.reason] = self.refusals.get(exc.reason, 0) + 1
             raise
         out = self.package(*feeds)
         self.calls += 1
         return out
+
+
+def no_entry_detail(
+    tried: int,
+    missed: Sequence[Tuple[Tuple[int, ...], str, Tuple[IngressMiss, ...]]],
+) -> str:
+    """The ``no_entry_admits`` sentence, CLOSEST ENTRY FIRST (pgw#1074).
+
+    The refusal this replaces said "36 tried" and then listed six in iteration
+    order — and the one entry whose dims matched the call was not among them,
+    so diagnosing a live refusal meant pulling the published cell apart off-pod
+    to find out what the covering entry actually objected to. A refusal that
+    hides the one relevant miss is the pgw#1058 lesson repeating one layer up,
+    in the diagnostics.
+
+    So: rank by :func:`miss_distance`, name the closest entry and its FULL
+    reason first (it survives any downstream truncation), then account for
+    every other entry by reason COUNT rather than by naming an arbitrary few.
+    Nothing is silently dropped — ``tried`` and the counts always add up.
+    """
+    if not missed:
+        return f"no packaged entry admits this call ({tried} tried)"
+    ranked = sorted(missed, key=lambda row: (row[0], row[1]))
+    _distance, closest, misses = ranked[0]
+    dims_ok = all(_rung(m.reason) < MISS_RUNGS["static_dim_mismatch"]
+                  for m in misses)
+    head = (
+        f"no packaged entry admits this call ({tried} tried); CLOSEST entry "
+        f"{closest!r}"
+        f"{' — every declared dim MATCHES' if dims_ok else ''}: "
+        + "; ".join(f"{m.reason} ({m.detail})" for m in misses[:2]))
+    rest = ranked[1:]
+    if not rest:
+        return head
+    # ONE count per entry, under its own closest reason, so the counts sum to
+    # exactly the number of entries tried and "36 tried" can be checked
+    # against the sentence that follows it.
+    tally: Dict[str, int] = {}
+    for _d, _name, other in rest:
+        primary = min(other, key=lambda m: _rung(m.reason)).reason
+        tally[primary] = tally.get(primary, 0) + 1
+    named = "; ".join(
+        f"{name}: {min(misses_, key=lambda m: _rung(m.reason)).reason}"
+        for _d, name, misses_ in rest[:_MISS_SAMPLE])
+    counted = ", ".join(
+        f"{reason} x{count}" for reason, count in
+        sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))
+    return f"{head}. Other {len(rest)} entries [{counted}] — next: {named}"
 
 
 @dataclass
@@ -1829,19 +2065,24 @@ class EntryDispatch:
         self, args: Sequence[Any], kwargs: Mapping[str, Any],
     ) -> Tuple[str, ArtifactRunner]:
         admitted: List[Tuple[str, ArtifactRunner]] = []
-        reasons: List[str] = []
+        missed: List[Tuple[str, ArtifactRunner]] = []
         for name, runner in self.runners:
-            try:
-                assert_ingress(runner.contract, args, kwargs)
-            except IngressContractError as exc:
-                reasons.append(f"{name}: {exc.reason}")
+            misses, _symbols = ingress_report(
+                runner.contract, args, kwargs, first_only=True)
+            if misses:
+                missed.append((name, runner))
                 continue
             admitted.append((name, runner))
         if not admitted:
+            # Only now is the exhaustive walk worth its cost: the call is
+            # already headed for the eager fallback, and the sentence it
+            # leaves behind is the whole diagnosis anyone will ever get.
+            ranked = [
+                (miss_distance(rep), name, rep) for name, rep in (
+                    (name, ingress_report(runner.contract, args, kwargs)[0])
+                    for name, runner in missed)]
             raise IngressContractError(
-                "no_entry_admits",
-                f"no packaged entry admits this call "
-                f"({len(self.runners)} tried): {'; '.join(reasons[:6])}")
+                "no_entry_admits", no_entry_detail(len(self.runners), ranked))
         if len(admitted) > 1:
             names = sorted(name for name, _ in admitted)
             raise IngressContractError(
