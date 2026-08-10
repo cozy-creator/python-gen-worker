@@ -22,7 +22,19 @@ src/micro_diffusion/
   *_escape.py         micro-escape: author-defined ops (pgw#1062), GPU-only
   *_conv.py           micro-conv: STATIC-ROWS (sdxl's strategy) — conv-bearing,
                       4 static entries, int64 timestep, persistent named buffer (pgw#1073)
+  *_pad32.py          micro-pad32: ie#637's PAD-TO-32 shape — the token extent is
+                      `32*FloorDiv(H*W+31, 32)`, and one collapsed artifact serves
+                      three L values whose pads are 0, 16 and 28
 ```
+
+Two gauntlet members carry no module of their own because what they vary is the
+POD, not the graph: `micro-residency` and `micro-residency-serve` run the plain
+`micro` family with **two resident pipeline slots holding 3 GiB of ballast**
+(tiny weights, big residency — z-image's shape without z-image's weights) and
+differ only in the goal set. The mint-goal leg stages them out of VRAM around
+the export child, restores them and proves parity; the serve-goal leg keeps the
+tenant resident and the mint declines. That pair is ie#638's arithmetic at a
+size this box can hold — see `scripts/micro_mint_rig.py`'s `_Residency`.
 
 ## The three entries, and why exactly three
 

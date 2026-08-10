@@ -355,7 +355,7 @@ class _Poisoned:
 
 
 def test_serving_goal_keeps_eager_resident() -> None:
-    parked = mint_delegate.maybe_park_eager(
+    parked = mint_delegate.park_residents(
         _Poisoned(), goals=worker_goals.SERVE_ONLY)
     assert parked is None
 
@@ -363,7 +363,7 @@ def test_serving_goal_keeps_eager_resident() -> None:
 def test_dual_goal_pod_keeps_eager_resident() -> None:
     """Paul's serve+mint case: the tenant reserve is real and eager stays."""
     goals = worker_goals.WorkerGoals(serve=True, mint=True)
-    assert mint_delegate.maybe_park_eager(_Poisoned(), goals=goals) is None
+    assert mint_delegate.park_residents(_Poisoned(), goals=goals) is None
 
 
 def test_mint_only_goal_parks_cuda_modules_and_restores(monkeypatch) -> None:
@@ -389,7 +389,7 @@ def test_mint_only_goal_parks_cuda_modules_and_restores(monkeypatch) -> None:
 
     module = _FakeModule()
     pipe = types.SimpleNamespace(unet=module)
-    parked = mint_delegate.maybe_park_eager(
+    parked = mint_delegate.park_residents(
         pipe, goals=worker_goals.MINT_ONLY)
     assert parked is not None
     assert module.moves == ["cpu"]
@@ -399,7 +399,7 @@ def test_mint_only_goal_parks_cuda_modules_and_restores(monkeypatch) -> None:
 
 def test_mint_only_goal_with_nothing_on_device_is_a_noop() -> None:
     pipe = types.SimpleNamespace(unet=nn.Linear(4, 4))  # CPU weights
-    assert mint_delegate.maybe_park_eager(
+    assert mint_delegate.park_residents(
         pipe, goals=worker_goals.MINT_ONLY) is None
 
 
@@ -410,9 +410,122 @@ def test_park_and_restore_on_the_real_card() -> None:
     module = nn.Linear(256, 256).cuda()
     pipe = types.SimpleNamespace(unet=module)
     torch.cuda.synchronize()
-    parked = mint_delegate.maybe_park_eager(
+    parked = mint_delegate.park_residents(
         pipe, goals=worker_goals.MINT_ONLY)
     assert parked is not None
     assert all(p.device.type == "cpu" for p in module.parameters())
     assert mint_delegate.restore_eager_pipeline(parked) is True
     assert all(p.is_cuda for p in module.parameters())
+
+
+# ---------------------------------------------------------------------------
+# pgw#1079 — the release covers EVERY resident slot, not just the mint's own
+#
+# ie#638: z-image's endpoint is one class with two `ZImagePipeline` slots.
+# pgw#1053 released the pending's own pipe, the sibling rode the export
+# resident, and `co_residency`'s ceiling (`free - activation`) lost every one
+# of those bytes.
+# ---------------------------------------------------------------------------
+
+
+class _Recording(nn.Module):
+    """A module whose `.to` is observable without a card."""
+
+    def __init__(self, bytes_on_device: int = 0) -> None:
+        super().__init__()
+        self.moves: List[Any] = []
+        self._bytes = bytes_on_device
+
+    def parameters(self, recurse: bool = True):  # type: ignore[override]
+        yield types.SimpleNamespace(is_cuda=True, device="cuda:0")
+
+    def to(self, target: Any, *a: Any, **k: Any):  # type: ignore[override]
+        self.moves.append(target)
+        return self
+
+
+def test_both_slots_of_a_two_slot_family_are_staged() -> None:
+    """The ie#638 shape: two pipelines, one mint. Both come off the card."""
+    base, turbo = _Recording(), _Recording()
+    pipe_a = types.SimpleNamespace(transformer=base)
+    pipe_b = types.SimpleNamespace(transformer=turbo)
+
+    parked = mint_delegate.park_residents(
+        (pipe_a, pipe_b), goals=worker_goals.MINT_ONLY)
+
+    assert parked is not None
+    assert parked.slots == 2
+    assert base.moves == ["cpu"] and turbo.moves == ["cpu"]
+    assert mint_delegate.restore_eager_pipeline(parked) is True
+    assert base.moves == ["cpu", "cuda:0"] and turbo.moves == ["cpu", "cuda:0"]
+
+
+def test_a_component_shared_by_two_slots_is_staged_exactly_once() -> None:
+    """z-image's slots share components. Moving one twice would double-count
+    the released bytes the typed event reports, and the second `.to` would be
+    a move of something already on the CPU."""
+    shared = _Recording()
+    pipe_a = types.SimpleNamespace(text_encoder=shared, transformer=_Recording())
+    pipe_b = types.SimpleNamespace(text_encoder=shared, transformer=_Recording())
+
+    parked = mint_delegate.park_residents(
+        (pipe_a, pipe_b), goals=worker_goals.MINT_ONLY)
+
+    assert parked is not None
+    assert shared.moves == ["cpu"]
+    assert len(parked.modules) == 3          # two exclusive + one shared
+
+
+def test_a_single_pipe_is_still_accepted_unwrapped() -> None:
+    """pgw#1053's callers pass one object; that reading is unchanged."""
+    module = _Recording()
+    parked = mint_delegate.park_residents(
+        types.SimpleNamespace(unet=module), goals=worker_goals.MINT_ONLY)
+    assert parked is not None and parked.slots == 1
+
+
+def test_serving_goal_still_touches_nothing_when_given_many_slots() -> None:
+    assert mint_delegate.park_residents(
+        (_Poisoned(), _Poisoned()), goals=worker_goals.SERVE_ONLY) is None
+
+
+# ---------------------------------------------------------------------------
+# The typed accounting — the same three numbers on BOTH legs (ie#638)
+# ---------------------------------------------------------------------------
+
+
+def _budget(*, free: int, resident: int, cap: int) -> Any:
+    from gen_worker import mint_budget
+
+    return mint_budget.MintBudget(
+        fits=True, probed=True, measured=True, free_bytes=free,
+        need_bytes=0, resident_bytes=resident, activation_bytes=0,
+        cache_slack_bytes=0, cap_bytes=cap)
+
+
+def test_residency_line_reports_release_resident_and_ceiling() -> None:
+    parked = mint_delegate.ParkedEager(
+        modules=(), device="cuda:0", released_bytes=42 * (1 << 30), slots=2)
+    line = mint_delegate.residency_line(
+        parked, _budget(free=70 << 30, resident=1 << 30, cap=69 << 30),
+        family="z-image", goals=worker_goals.MINT_ONLY)
+    assert "released 42.00 GiB from 2 resident slot(s)" in line
+    assert "export child ceiling 69.00 GiB" in line
+
+
+def test_residency_line_names_why_a_serving_pod_released_nothing() -> None:
+    """The RED leg. A pod that OOMs in export must say in ONE event whether it
+    was holding a tenant or simply had nothing to give back."""
+    line = mint_delegate.residency_line(
+        None, _budget(free=8 << 30, resident=42 << 30, cap=7 << 30),
+        family="z-image", goals=worker_goals.SERVE_ONLY)
+    assert "serve goal held" in line
+    assert "parent still resident 42.00 GiB" in line
+    assert "export child ceiling 7.00 GiB" in line
+
+
+def test_residency_line_distinguishes_nothing_resident_from_a_held_tenant() -> None:
+    line = mint_delegate.residency_line(
+        None, _budget(free=8 << 30, resident=0, cap=8 << 30),
+        family="micro", goals=worker_goals.MINT_ONLY)
+    assert "no resident device modules" in line

@@ -84,6 +84,15 @@ class MintTask:
     # `_setup_locked_inner` and carried together from here to the child. See
     # `mint_process.MintSlot`.
     slots: Dict[str, mint_process.MintSlot] = field(default_factory=dict)
+    #: pgw#1079: EVERY pipeline this process holds resident for the record
+    #: under mint — `pipe` is only the one the adopt step arms. A family whose
+    #: endpoint declares two checkpoint slots (z-image: `pipeline` +
+    #: `turbo_dmd`, `main.py:515`) keeps the sibling resident through the whole
+    #: export unless the caller names it here, and every resident byte comes
+    #: straight off the child's ceiling (`mint_budget.co_residency`:
+    #: `cap = free - activation`). Empty means "just `pipe`", the correct
+    #: reading for a single-slot family and for every caller owning one.
+    pipes: Tuple[Any, ...] = ()
     weight_lane: str = ""
     execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -125,20 +134,42 @@ ABANDONED = mint_process.ABANDONED
 
 
 # ---------------------------------------------------------------------------
-# pgw#1053: the parked eager pipeline — a forge-goal pod's 9.54 GiB co-tenant
+# pgw#1053 + pgw#1079: SEQUENCED RESIDENCY RELEASE around the mint child.
+#
+# pgw#1053 released the mint's OWN pipeline; ie#638 measured what that leaves
+# behind. z-image's endpoint is one class with TWO `ZImagePipeline` slots, so
+# the sibling slot rode the whole export resident: 42.53 GiB of a 79.25 GiB
+# card, a 46.42 GiB child ceiling, and 7.38 MiB free when `torch.export` asked
+# for 76 MiB. `mint_budget.co_residency` computes that ceiling as
+# `free_bytes - activation`, so a resident byte in the parent is a byte the
+# child cannot have — one for one, with no width to fall back to (the pgw#992
+# census had already clamped K to its floor of 1).
+#
+# The release stays gated on the GOAL SET and on nothing else (§1.17: posture
+# is typed config, never an env switch). A serving pod keeps eager resident and
+# hot; the mint may then simply not fit, which is the existing, safe outcome.
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class ParkedEager:
-    """A serving-process pipeline moved to host RAM for the life of a mint.
+    """The serving process's pipelines, moved to host RAM for one mint.
 
-    Holds exactly what restoration needs: the modules that were moved, and
-    the device string they came from.
+    Holds exactly what restoration needs — the modules that were moved and the
+    device they came from — plus the MEASURED accounting the typed events
+    report, because "how much did this recover" is the question ie#638 is.
     """
 
     modules: Tuple[Any, ...]
     device: str
+    #: Bytes of parameters + buffers this park moved off the card. Summed over
+    #: the DISTINCT modules, so two slots sharing a text encoder count it once.
+    released_bytes: int = 0
+    #: Driver-reported free bytes either side of the move (0 when unreadable).
+    free_before_bytes: int = 0
+    free_after_bytes: int = 0
+    #: How many pipeline objects contributed modules.
+    slots: int = 0
 
 
 def _eager_modules(pipe: Any) -> Tuple[Any, ...]:
@@ -160,30 +191,73 @@ def _eager_modules(pipe: Any) -> Tuple[Any, ...]:
     return tuple(out)
 
 
-def maybe_park_eager(pipe: Any, goals: Any = None) -> Optional[ParkedEager]:
-    """Park the serving process's eager pipeline for the mint — IFF the goal
-    set says nobody is served by it (pgw#1053).
+def _device_bytes(module: Any) -> int:
+    """Parameter + buffer bytes this module holds off the CPU."""
+    total = 0
+    try:
+        for t in module.parameters(recurse=True):
+            if t.device.type != "cpu":
+                total += t.numel() * t.element_size()
+        for t in module.buffers(recurse=True):
+            if t.device.type != "cpu":
+                total += t.numel() * t.element_size()
+    except Exception:  # noqa: BLE001 — an unreadable module is not counted
+        return 0
+    return total
 
-    The parent's eager pipeline held **9.54 GiB** through attempt 30's whole
-    165-minute mint on a pod whose goal set admits no tenant dispatch — VRAM
-    serving nobody, priced straight out of the mint child's budget and the
-    compile pool's K. The GOALS machinery decides, never a mode probe
-    (pgw#930): a pod holding a serve goal keeps eager resident and hot — Paul
-    ruling 2, eager is minimally disrupted and the GPU stays warm — and this
-    function then does not touch it. Only a pod with no serve goal parks,
-    because there the "tenant" every reserve protects does not exist.
 
-    CPU-park rather than teardown, so the ADOPT step at the end of the mint
-    still has the real weights to bind and prove against —
-    :func:`restore_eager_pipeline` moves them back first. The pgw#763
-    host-move guard stays armed and is the budget check: a pipeline host RAM
-    cannot hold refuses typed, the park unwinds what it moved, and the mint
-    proceeds against the resident card exactly as today.
+def _free_device_bytes() -> int:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0
+        return int(torch.cuda.mem_get_info()[0])
+    except Exception:  # noqa: BLE001 — telemetry only
+        return 0
+
+
+def park_residents(
+    pipes: Any, goals: Any = None,
+) -> Optional[ParkedEager]:
+    """Stage every resident pipeline out of VRAM for the life of a mint — IFF
+    the goal set says nobody is served by them (pgw#1053, widened by pgw#1079).
+
+    ``pipes`` is one pipeline object or an iterable of them: EVERY slot this
+    process holds resident for the record under mint, not just the one the
+    adopt step will arm. A single-slot family passes one and gets pgw#1053's
+    behaviour unchanged; z-image passes two and the sibling stops eating the
+    export child's ceiling.
+
+    The GOALS machinery decides, never a mode probe (pgw#930): a pod holding a
+    serve goal keeps eager resident and hot — Paul ruling 2, eager is minimally
+    disrupted and the GPU stays warm — and this function then does not touch
+    it. Only a pod with no serve goal releases, because there the "tenant"
+    every reserve protects does not exist.
+
+    CPU-park rather than teardown, so the ADOPT and PARITY steps at the end of
+    the mint still have the real weights to bind and compare against —
+    :func:`restore_eager_pipeline` moves them back FIRST, which is why the
+    eager-serve posture objection to this remedy does not land: parity's oracle
+    is restored before parity runs. The pgw#763 host-move guard stays armed and
+    is the budget check: a pipeline host RAM cannot hold refuses typed, the
+    park unwinds what it moved, and the mint proceeds against the resident card
+    exactly as today.
     """
     goals = worker_goals.current() if goals is None else goals
-    if pipe is None or goals.tenant_reserve_applies():
+    if goals.tenant_reserve_applies():
         return None
-    modules = _eager_modules(pipe)
+    candidates = list(pipes) if isinstance(pipes, (list, tuple, set)) else [pipes]
+    modules: list = []
+    for pipe in candidates:
+        if pipe is None:
+            continue
+        for module in _eager_modules(pipe):
+            # Identity, not equality: two slots of one family SHARE components
+            # (z-image's text encoder), and a shared module moved twice would
+            # be double-counted in the released bytes this event reports.
+            if all(module is not seen for seen in modules):
+                modules.append(module)
     on_device = []
     device = ""
     for module in modules:
@@ -198,6 +272,8 @@ def maybe_park_eager(pipe: Any, goals: Any = None) -> Optional[ParkedEager]:
             device = device or str(param.device)
     if not on_device:
         return None
+    free_before = _free_device_bytes()
+    released = sum(_device_bytes(m) for m in on_device)
     moved: list = []
     try:
         for module in on_device:
@@ -209,36 +285,38 @@ def maybe_park_eager(pipe: Any, goals: Any = None) -> Optional[ParkedEager]:
                 module.to(device)
             except Exception:  # noqa: BLE001 — best-effort unwind
                 logger.exception(
-                    "mint-delegate: pgw#1053 park unwind failed; the "
+                    "mint-delegate: residency park unwind failed; the "
                     "pipeline may be split across devices")
         logger.warning(
-            "mint-delegate: pgw#1053 eager park refused (%s: %s) — the "
-            "pipeline stays resident and the mint budgets around it as "
+            "mint-delegate: residency release refused (%s: %s) — the "
+            "pipelines stay resident and the mint budgets around them as "
             "before", type(exc).__name__, exc)
         return None
-    freed = 0
     try:
         import torch
 
         torch.cuda.empty_cache()
-        free, total = torch.cuda.mem_get_info()
-        freed = int(free)
-        _ = total
     except Exception:  # noqa: BLE001 — telemetry only
         pass
+    free_after = _free_device_bytes()
     activity_mod.emit_event(
         activity_mod.KIND_AOT_MINT,
-        f"pgw#1053: no serve goal — parked the eager pipeline "
-        f"({len(moved)} module(s)) to host RAM for the mint; device free now "
-        f"{freed / 1024**3:.2f} GiB",
+        f"pgw#1079: no serve goal — staged {len(candidates)} resident "
+        f"pipeline slot(s), {len(moved)} module(s), "
+        f"{released / 1024**3:.2f} GiB, to host RAM for the mint; device free "
+        f"{free_before / 1024**3:.2f} -> {free_after / 1024**3:.2f} GiB",
         phase="residents",
     )
-    return ParkedEager(modules=tuple(moved), device=device or "cuda")
+    return ParkedEager(
+        modules=tuple(moved), device=device or "cuda",
+        released_bytes=int(released), free_before_bytes=int(free_before),
+        free_after_bytes=int(free_after), slots=len(candidates))
 
 
 def restore_eager_pipeline(parked: ParkedEager) -> bool:
-    """Move a parked pipeline back onto its card. False = it did not all come
-    back, and the caller must not adopt against a half-resident pipeline."""
+    """Move parked pipelines back onto their card. False = they did not all
+    come back, and the caller must not adopt against a half-resident
+    pipeline."""
     ok = True
     for module in parked.modules:
         try:
@@ -246,16 +324,48 @@ def restore_eager_pipeline(parked: ParkedEager) -> bool:
         except Exception:  # noqa: BLE001 — reported, never raised
             ok = False
             logger.exception(
-                "mint-delegate: pgw#1053 eager restore failed for %s",
+                "mint-delegate: residency restore failed for %s",
                 type(module).__name__)
-    if not ok:
-        activity_mod.emit_event(
-            activity_mod.KIND_AOT_MINT,
-            "pgw#1053: eager pipeline did NOT fully restore after the mint — "
-            "adoption is refused against a half-resident pipeline",
-            phase="residents",
-        )
+    activity_mod.emit_event(
+        activity_mod.KIND_AOT_MINT,
+        (f"pgw#1079: restored {len(parked.modules)} module(s) "
+         f"({parked.released_bytes / 1024**3:.2f} GiB) to {parked.device} "
+         f"after the mint")
+        if ok else
+        ("pgw#1079: eager pipelines did NOT fully restore after the mint — "
+         "adoption is refused against a half-resident pipeline"),
+        phase="residents",
+    )
     return ok
+
+
+def residency_line(
+    parked: Optional[ParkedEager], budget: mint_budget.MintBudget,
+    *, family: str, goals: Any = None,
+) -> str:
+    """The one typed line that carries the ie#638 arithmetic, on BOTH legs.
+
+    Emitted whether or not anything was released, because the number that
+    matters is the same either way: what the parent still holds, and what the
+    export child is therefore allowed. A leg with no release names WHY it had
+    none, so a pod that OOMs in `torch.export` says in one event whether it was
+    a serving pod holding its tenant or a forge pod with nothing to give back.
+    """
+    goals = worker_goals.current() if goals is None else goals
+    gib = 1024 ** 3
+    if parked is not None:
+        released = (
+            f"released {parked.released_bytes / gib:.2f} GiB from "
+            f"{parked.slots} resident slot(s)")
+    elif goals.tenant_reserve_applies():
+        released = "released nothing: serve goal held, the tenant keeps eager"
+    else:
+        released = "released nothing: no resident device modules to stage"
+    return (
+        f"family={family} residency: {released}; parent still resident "
+        f"{budget.resident_bytes / gib:.2f} GiB, card free "
+        f"{budget.free_bytes / gib:.2f} GiB, export child ceiling "
+        f"{budget.cap_bytes / gib:.2f} GiB")
 
 
 def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
@@ -400,12 +510,14 @@ async def build_cell(
     attempts = 0
     budget: Optional[mint_budget.MintBudget] = None
     last = ""
-    # pgw#1053: with no serve goal there is no tenant, and the eager pipeline
-    # is a 9.54 GiB co-tenant of its own mint. Parked BEFORE the first budget
-    # probe so `co_residency` prices the freed card; restored before ADOPT,
-    # which needs the real weights (and unconditionally in the `finally`, so
-    # this process is left as it was found whatever the outcome).
-    parked = maybe_park_eager(task.pipe)
+    # pgw#1053 + pgw#1079: with no serve goal there is no tenant, and the
+    # resident pipelines are co-tenants of their own mint. EVERY slot the
+    # record holds is staged (ie#638: z-image's sibling slot alone was worth
+    # tens of GiB of the export child's ceiling), BEFORE the first budget probe
+    # so `co_residency` prices the freed card; restored before ADOPT and
+    # PARITY, which need the real weights (and unconditionally in the
+    # `finally`, so this process is left as it was found whatever happens).
+    parked = park_residents(task.pipes or (task.pipe,))
     try:
         while attempts < max(1, max_attempts):
             attempts += 1
@@ -414,6 +526,15 @@ async def build_cell(
             # co-resident child, and that must decline rather than retry.
             budget = mint_budget.co_residency(
                 device, family=family, weight_lane=task.weight_lane)
+            # pgw#1079: the ie#638 arithmetic, typed, on BOTH legs — released,
+            # still-resident, and the ceiling the child will actually get. A
+            # mint that dies in `torch.export` for want of device memory must
+            # not require an operator to reconstruct these three numbers from
+            # an allocator message.
+            activity_mod.emit_event(
+                activity_mod.KIND_AOT_MINT,
+                residency_line(parked, budget, family=family),
+                phase="residents")
             if not budget.fits:
                 reason = (
                     "insufficient_vram" if attempts == 1
@@ -668,7 +789,8 @@ __all__ = [
     "build_cell",
     "build_request",
     "cfg_spec",
-    "maybe_park_eager",
+    "park_residents",
+    "residency_line",
     "restore_eager_pipeline",
     "scratch_root",
 ]

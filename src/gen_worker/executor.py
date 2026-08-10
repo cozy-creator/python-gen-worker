@@ -9221,6 +9221,12 @@ class Executor:
                 mint_delegate.MintTask(
                     pending=pending,
                     pipe=pipe,
+                    # pgw#1079: every pipeline this record holds resident, not
+                    # just the one the adopt step arms. One endpoint class with
+                    # two checkpoint slots (z-image) put its sibling slot on
+                    # the card for the whole export and took the bytes out of
+                    # the child's ceiling — ie#638.
+                    pipes=tuple(bg.pipes.values()),
                     function=spec.name,
                     modules=bg.modules or _mint_modules(spec),
                     slots=dict(bg.slots),
