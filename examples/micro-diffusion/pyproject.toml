@@ -11,9 +11,16 @@ dependencies = [
     # ⚠️ THIS FAMILY'S SERVE PATH REQUIRES pgw#994 (`2165c2d5`): it declares a
     # `repeat=` container input with a plain input after it, and on <0.93.4 the
     # cell MINTS and SEALS and then refuses at ingress on its first served
-    # call. Never pin below that. 0.96.1 also matches the ie `e7384fc`
-    # fleet cutover, so the micro family and the fleet share one wheel.
-    "gen-worker==0.96.1",
+    # call. Never pin below that.
+    #
+    # 0.97.0 (pgw#1084): the fleet hardcut to it in `inference-endpoints`
+    # `2440905` (ie#639/PR ie#298 — 28 pins, floor, and `[supported]` all moved,
+    # 0.96 DELETED with no transition window). This example is outside that
+    # train, so it is repinned here by hand to keep the micro gauntlet on the
+    # SAME wheel the fleet serves — which is the whole reason the gauntlet is a
+    # usable probe. 0.97.0 also carries pgw#1059's four-axis `ck1`, so every
+    # cell minted from this pin is a live-scheme cell.
+    "gen-worker==0.97.0",
     "msgspec>=0.18",
     "safetensors>=0.4",
     "pillow",
