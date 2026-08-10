@@ -1,6 +1,6 @@
 [project]
 name = "micro-diffusion"
-version = "0.1.0"
+version = "0.2.0"
 description = "The fleet's smallest REAL endpoint family — three export entries over a deterministically generated toy checkpoint, so a full AOT mint cycle costs minutes"
 requires-python = ">=3.12,<3.13"
 dependencies = [
