@@ -1433,6 +1433,8 @@ def ingress_report(
     contract: ArtifactContract,
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
+    *,
+    first_only: bool = False,
 ) -> Tuple[Tuple[IngressMiss, ...], Dict[str, int]]:
     """EVERY way this call misses this contract, plus the symbol bindings.
 
@@ -1440,6 +1442,12 @@ def ingress_report(
     raises this function's FIRST miss and :meth:`EntryDispatch.select` ranks
     whole entries by all of them, so an admission decision and the sentence
     that explains it can never be computed by two different rules.
+
+    ``first_only`` returns as soon as one miss is found. It is an early EXIT
+    from this same walk, never a second rule — every ADMISSION decision takes
+    it (an admitted call has no misses, so the two are identical there), and
+    the exhaustive walk is paid only on the refusal path, which is already
+    falling back to eager. A 36-entry cell is asked this per denoise step.
 
     Misses are collected in declaration order, per input in
     dtype -> rank -> dims order, which is the order the raising check used
@@ -1464,6 +1472,8 @@ def ingress_report(
     symbols: Dict[str, int] = {}
     owner: Dict[str, str] = {}
     for spec in contract.inputs:
+        if first_only and misses:
+            break
         if spec.name not in bound:
             continue
         value = bound[spec.name]
@@ -1513,7 +1523,7 @@ def ingress_report(
                 continue
             symbols[declared] = got
             owner.setdefault(declared, spec.name)
-    return tuple(misses), symbols
+    return (tuple(misses[:1]) if first_only else tuple(misses)), symbols
 
 
 def assert_ingress(
@@ -1539,7 +1549,7 @@ def assert_ingress(
       graph requires it, so a mismatch is out-of-contract even when both
       values are individually in range.
     """
-    misses, symbols = ingress_report(contract, args, kwargs)
+    misses, symbols = ingress_report(contract, args, kwargs, first_only=True)
     if misses:
         raise IngressContractError(misses[0].reason, misses[0].detail)
     return symbols
@@ -2055,16 +2065,24 @@ class EntryDispatch:
         self, args: Sequence[Any], kwargs: Mapping[str, Any],
     ) -> Tuple[str, ArtifactRunner]:
         admitted: List[Tuple[str, ArtifactRunner]] = []
-        missed: List[Tuple[Tuple[int, ...], str, Tuple[IngressMiss, ...]]] = []
+        missed: List[Tuple[str, ArtifactRunner]] = []
         for name, runner in self.runners:
-            misses, _symbols = ingress_report(runner.contract, args, kwargs)
+            misses, _symbols = ingress_report(
+                runner.contract, args, kwargs, first_only=True)
             if misses:
-                missed.append((miss_distance(misses), name, misses))
+                missed.append((name, runner))
                 continue
             admitted.append((name, runner))
         if not admitted:
+            # Only now is the exhaustive walk worth its cost: the call is
+            # already headed for the eager fallback, and the sentence it
+            # leaves behind is the whole diagnosis anyone will ever get.
+            ranked = [
+                (miss_distance(rep), name, rep) for name, rep in (
+                    (name, ingress_report(runner.contract, args, kwargs)[0])
+                    for name, runner in missed)]
             raise IngressContractError(
-                "no_entry_admits", no_entry_detail(len(self.runners), missed))
+                "no_entry_admits", no_entry_detail(len(self.runners), ranked))
         if len(admitted) > 1:
             names = sorted(name for name, _ in admitted)
             raise IngressContractError(

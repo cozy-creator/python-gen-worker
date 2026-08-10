@@ -409,6 +409,34 @@ def test_ingress_report_collects_every_miss_not_only_the_first() -> None:
     assert [m.input for m in misses] == ["sample", "timestep"]
 
 
+def test_the_short_circuit_never_changes_an_admission_decision() -> None:
+    """`select` walks 36 entries per denoise step, so the ADMISSION pass exits
+    at the first miss and only the refusal path pays the exhaustive walk. That
+    is an early exit from one walk, not a second rule — so admitted/refused
+    must agree exactly, over admitting and refusing calls alike."""
+    contracts = [
+        _contract(),
+        _contract(timestep_dtype="bfloat16"),
+        _contract(sample_dims=(1, 8)),
+        _contract(timestep_shape=[4]),
+    ]
+    calls = [
+        {"sample": torch.randn(2, 8), "timestep": torch.tensor(1.0)},
+        {"sample": torch.randn(2, 8), "timestep": torch.tensor(3,
+                                                               dtype=torch.int64)},
+        {"sample": torch.randn(1, 8), "timestep": torch.tensor(1.0)},
+        {"sample": torch.randn(2, 8)},
+    ]
+    for contract in contracts:
+        for call in calls:
+            full, _ = aot_serve.ingress_report(contract, (), call)
+            first, _ = aot_serve.ingress_report(
+                contract, (), call, first_only=True)
+            assert bool(full) == bool(first)
+            if full:
+                assert first == (full[0],)
+
+
 def test_assert_ingress_raises_ingress_reports_first_miss() -> None:
     """One implementation: what `select` ranks and what `assert_ingress`
     raises cannot drift, because there is only one rule."""
