@@ -140,10 +140,12 @@ Which is cheap, because the tree is generated, not downloaded — the whole
 python -m micro_diffusion.weights --out /tmp/micro-weights --seed 997 --verify
 ```
 
-Then the ordinary 3-step CAS publish v2 flow, as an operator
-(`POST /api/v1/password/login` → `access_token`):
+Create the repo first, then the ordinary 3-step CAS publish v2 flow, all as an
+operator (`POST /api/v1/password/login` → `access_token`):
 
 ```
+POST /api/v1/repos
+     {"org":"tensorhub","name":"micro-diffusion"}
 POST /api/v1/repos/tensorhub/micro-diffusion/publishes
      {"mode":"replace","files":[{path,size_bytes,digest:"sha256:<hex>"}...],
       "tags":[{"tag":"prod"}]}
@@ -153,12 +155,16 @@ POST /api/v1/repos/tensorhub/micro-diffusion/publishes/<id>/complete
 
 Two things that are easy to get wrong:
 
-- **The repo row must be in the `tensorhub` org.** `POST /api/v1/repos` with a
-  user JWT always creates in the caller's PERSONAL org (`createRepo` →
-  `authorizePersonalOrgPermissionGin`), so a plain operator cannot create a
-  root-org repo through the API at all. Use an org-bound service token, or the
-  same direct `INSERT INTO repos` the e2e harness uses for root-org fixtures
-  (`e2e/scenarios/publish_v2_test.go`, `newThrowawayRepo`).
+- **NAME the org — `"org":"tensorhub"` — or the repo lands in your personal
+  one.** Omitting it is not an error: a user token defaults to the caller's
+  personal org, which is how the first attempt at this runbook created
+  `cozy/micro-diffusion`. The operator's authority over a non-personal org is
+  the platform-admin role (th#1730, tensorhub `authorizeNamedOrgRepoWrite`); a
+  caller holding neither that nor `org:repo:write` in `tensorhub` is refused
+  with `403 org_repo_write_forbidden`. This step used to require the direct
+  `INSERT INTO repos` the e2e harness uses for root-org fixtures — it does not
+  any more, and a re-seed that still hand-INSERTs is working around a hub older
+  than th#1730.
 - **Stamp `model_family = micro-diffusion`.** The byte classifier answers
   `family_reason: "no architecture signature matched"` for a toy checkpoint, so
   the family comes from the repo row (it fills blanks) or from
