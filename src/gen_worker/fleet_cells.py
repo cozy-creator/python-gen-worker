@@ -1634,6 +1634,50 @@ def arm_axis_divergence(
     return ""
 
 
+#: pgw#1096: WHY a machine keeps the cell it just minted. Each is a fact about
+#: the SINK, and none of them is the worker deciding its own trust class —
+#: which stays what §4.28 makes it, the hub's call and only the hub's.
+KEEP_HUB_ASSERTED_UNTRUSTED = "hub_asserted_untrusted"
+KEEP_NO_PUBLISHER = "no_publish_sink"
+KEEP_PUBLISH_DISARMED = "publish_disarmed"
+
+
+def local_keep_reason(publisher: Optional[CellPublisher]) -> str:
+    """Why this machine keeps its own cell, "" when it has no reason to.
+
+    §4.28 says an untrusted machine mints for ITSELF. Three disjoint ways a
+    machine learns it has nowhere to ship — and NONE of them is a worker-side
+    trust self-declaration, which the ruling forbids:
+
+    * :data:`KEEP_HUB_ASSERTED_UNTRUSTED` — the HUB refused a publish from this
+      hardware (`cell_publish_untrusted_tier`; `cloudtier.PublishRefusal` on a
+      community/marketplace/unknown tier), recorded by `local_cell_store`. The
+      community-cloud case, and the only one that is about trust at all.
+    * :data:`KEEP_NO_PUBLISHER` — this process constructed no publisher. That
+      is **cozy-local**, which never has one (`fleet_cells` docstring) and never
+      reaches a hub to be refused BY — so a design that waited for a hub verdict
+      would leave the cozy-local half of §4.28 permanently unimplemented, which
+      is the whole product promise. The fleet's `SELF_MINT_WITHOUT_PUBLISH_SINK`
+      wiring alarm is unchanged and still fires: keeping the bytes does not make
+      a mis-wired fleet pod quiet, it just stops it burning the compute twice.
+    * :data:`KEEP_PUBLISH_DISARMED` — a pgw#980 probe, whose publish the control
+      PARENT removes from its hub-call allowlist. Read from the predicate that
+      owns that decision rather than sniffed off an exception.
+
+    Keeping bytes you already paid an hour of compute for, and cannot ship, is
+    not a claim about trust. It is the absence of a reason to delete them.
+    """
+    if local_cell_store.keeps_cells_locally():
+        return KEEP_HUB_ASSERTED_UNTRUSTED
+    if publisher is None or not publisher.enabled():
+        return KEEP_NO_PUBLISHER
+    from .procsplit import actions
+
+    if actions.publish_disarmed():
+        return KEEP_PUBLISH_DISARMED
+    return ""
+
+
 def _arm_exported_cell(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], bucket: int,
     artifact: Path, arm_key: Optional[ArmIdentity],
@@ -1878,15 +1922,24 @@ def adopt_delegated_mint(
         # unreadable by the only lookup there is, so every same-key re-arm in
         # this process paid a second full export.
         _FINALIZED[pending.arm_token] = minted
-    if local_cell_store.keeps_cells_locally():
-        # §4.28: this machine has ALREADY been told by the hub that it may not
-        # publish, so the cell is kept where its next boot can find it. Done
-        # HERE, not after the publish attempt, because a pod that dies between
-        # adopting and being refused would otherwise lose the whole mint —
-        # which is exactly the th#1643 SUNK case, one boot later.
-        local_cell_store.store(
+    keep = local_keep_reason(pending.publisher)
+    if keep:
+        # §4.28: a machine with nowhere to ship keeps its own cell, where its
+        # next boot can find it. Done HERE, not after the publish attempt,
+        # because a pod that dies between adopting and being refused would
+        # otherwise lose the whole mint — the th#1643 SUNK case, one boot later.
+        stored = local_cell_store.store(
             pending.target, key=minted.cell_key, family=pending.family,
             arm_token=pending.arm_token)
+        if stored is not None:
+            activity_mod.emit_event(
+                "local_cell_stored",
+                f"family={pending.family} arm_key={pending.arm_token} "
+                f"cell_key={minted.cell_key}: this machine cannot ship this "
+                f"cell ({keep}), so it keeps it — every later boot of this "
+                f"machine arms it from disk with no mint (§4.28)",
+                phase=keep,
+            )
     logger.info(
         "fleet-cells: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
         "worker served eager throughout and now serves compiled",
@@ -1961,8 +2014,11 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         activity_mod.emit_event(
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: no publish "
-            "sink (file_base_url/worker JWT absent at arming time); cell "
-            "stays local to this pod",
+            "sink (file_base_url/worker JWT absent at arming time); the cell "
+            "was kept in this machine's own store (§4.28/pgw#1096 — the "
+            "sentence 'stays local to this pod' is now TRUE; before it was "
+            "printed on the way to an rmtree) and this machine reuses it, but "
+            "the fleet store still gains nothing",
             phase="no_sink",
         )
         mark_terminus(pending, TERMINUS_WITHHELD)

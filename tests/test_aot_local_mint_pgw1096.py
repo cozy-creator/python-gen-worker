@@ -548,6 +548,72 @@ def test_a_transport_failure_is_not_a_trust_verdict(
 
 
 # ---------------------------------------------------------------------------
+# 7b. WHY a machine keeps its cell — three sink facts, and none is a trust claim
+# ---------------------------------------------------------------------------
+
+
+class _Sink:
+    def __init__(self, on: bool = True) -> None:
+        self._on = on
+
+    def enabled(self) -> bool:
+        return self._on
+
+
+def test_cozy_local_keeps_its_cell_without_ever_asking_a_hub(
+    store: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The §4.28 cozy-local promise, and the bug this test exists to stop.
+
+    cozy-local NEVER constructs a publisher and NEVER reaches a hub — so a
+    design that waited for a hub's typed refusal before keeping anything would
+    leave *"download model + code ONCE, compile ONCE, reuse forever"*
+    permanently unimplemented on the one product it was written about. The
+    reason must therefore be the ABSENCE OF A SINK, not a verdict that will
+    never arrive.
+    """
+    assert local_cell_store.trust_class() == "", "no hub has said anything"
+    assert fleet_cells.local_keep_reason(None) == fleet_cells.KEEP_NO_PUBLISHER
+    assert (fleet_cells.local_keep_reason(_Sink(on=False))  # type: ignore[arg-type]
+            == fleet_cells.KEEP_NO_PUBLISHER)
+
+
+def test_a_probe_pod_keeps_its_cell_because_its_publish_is_DISARMED(
+    store: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pgw#980 removes `cells.publish_intent` from the parent's allowlist, so a
+    probe's publish never reaches a hub and never produces a typed refusal.
+    Read the predicate that OWNS that decision rather than sniffing the
+    exception it raises."""
+    from gen_worker.procsplit import actions
+
+    monkeypatch.setattr(actions, "publish_disarmed", lambda: True)
+    assert (fleet_cells.local_keep_reason(_Sink())  # type: ignore[arg-type]
+            == fleet_cells.KEEP_PUBLISH_DISARMED)
+
+    monkeypatch.setattr(actions, "publish_disarmed", lambda: False)
+    assert fleet_cells.local_keep_reason(_Sink()) == ""  # type: ignore[arg-type]
+
+
+def test_a_trusted_fleet_pod_with_a_live_sink_keeps_NOTHING(
+    store: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The negative that keeps this from becoming "every pod hoards cells": a
+    pod that CAN publish ships the cell and keeps no local copy, so the fleet's
+    ephemeral disks are unchanged."""
+    from gen_worker.procsplit import actions
+
+    monkeypatch.setattr(actions, "publish_disarmed", lambda: False)
+    assert fleet_cells.local_keep_reason(_Sink()) == ""  # type: ignore[arg-type]
+
+    # ...until the hub says otherwise, which is the ONLY trust input.
+    local_cell_store.note_refusal(
+        local_cell_store.UNTRUSTED_REFUSAL_CODE, "community_tier")
+    assert (fleet_cells.local_keep_reason(_Sink())  # type: ignore[arg-type]
+            == fleet_cells.KEEP_HUB_ASSERTED_UNTRUSTED)
+
+
+# ---------------------------------------------------------------------------
 # 8. Accumulation — recorded, not swept (the follow-up this lane owes)
 # ---------------------------------------------------------------------------
 

@@ -321,3 +321,19 @@ def _postmortem_paths_off_the_host(_postmortem_root):
     _wipe()
     for name, path in saved.items():
         setattr(_pm, name, path)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_local_cell_store(tmp_path_factory, monkeypatch):
+    """pgw#1096: the local cell store defaults to ``~/.cache/cozy/compile-cells``.
+
+    A suite that exercises the AOT self-mint now legitimately WRITES there —
+    `local_keep_reason` keeps a cell whenever no publisher was wired, which is
+    every unit fixture in the tree. Redirect the root per test, so the suite
+    can never deposit fake cells in the developer's real store (or read one
+    left by a previous run and call it a hit). Also isolates
+    ``aot_resume.bank_root``, which is sited under the same root.
+    """
+    monkeypatch.setenv(
+        "GEN_WORKER_LOCAL_CELLS_DIR",
+        str(tmp_path_factory.mktemp("local-cell-store")))
