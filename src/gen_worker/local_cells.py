@@ -59,20 +59,17 @@ from typing import Any, Optional
 from . import activity as activity_mod
 from . import artifact_meta
 from . import compile_cache as cc
+# pgw#1096: the store ROOT (and, since §4.28, the AOT store that succeeds this
+# module) lives in `local_cell_store`. One derivation of the path, so the JIT
+# store, the AOT store and `aot_resume`'s bank cannot drift apart while this
+# module waits for pgw#1086 wave 1 to delete it.
+from .local_cell_store import ENV_STORE_DIR, store_root
 from .models.loading import pipeline_weight_lane
 from .models import provision
 logger = logging.getLogger(__name__)
 
-ENV_STORE_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"
 _MINT_DIR = ".mint"
 _STALE_MINT_S = 24 * 3600
-
-
-def store_root() -> Path:
-    env = os.environ.get(ENV_STORE_DIR, "").strip()
-    if env:
-        return Path(env).expanduser()
-    return Path.home() / ".cache" / "cozy" / "compile-cells"
 
 
 def cell_path(family: str, weight_lane: str = "", root: Optional[Path] = None) -> Path:

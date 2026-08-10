@@ -127,7 +127,7 @@ src/gen_worker/convert/clone.py::COZY_CONVERT_WORKDIR STANDALONE COZY_CONVERT_WO
 src/gen_worker/convert/ingest.py::COZY_CLONE_DOWNLOAD_ATTEMPTS STANDALONE COZY_CLONE_DOWNLOAD_ATTEMPTS, convert-tool retry count.
 src/gen_worker/models/download.py::COZY_CIVITAI_DOWNLOAD_ATTEMPTS STANDALONE COZY_CIVITAI_DOWNLOAD_ATTEMPTS, provider retry count.
 src/gen_worker/net.py::$name STANDALONE COZY_HTTP_*_TIMEOUT_S. Documented as "read from env on every call (test-tunable)" - i.e. env used as a TEST SEAM, which is what loader `init_kwargs` exists for. Worth fixing; it is the last piece of prose from the old 5-file exception list that is still true.
-src/gen_worker/local_cells.py::GEN_WORKER_LOCAL_CELLS_DIR STANDALONE GEN_WORKER_LOCAL_CELLS_DIR, local cell store for offline runs.
+src/gen_worker/local_cell_store.py::GEN_WORKER_LOCAL_CELLS_DIR STANDALONE GEN_WORKER_LOCAL_CELLS_DIR, the local cell store's ROOT (pgw#1096 moved the accessor here from local_cells): a path relocation like TENSORHUB_CACHE_DIR, never a behavior knob, and a cross-repo contract with cozy-local's paths.go.
 src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODER STANDALONE GEN_WORKER_VIDEO_ENCODER. pgw#929 rules this MEASURED-then-requested (th#1458-1460 store the evidence, pgw#891 carries the exact requested implementation). Env until then.
 src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODE_CONCURRENCY STANDALONE GEN_WORKER_VIDEO_ENCODE_CONCURRENCY, encode fan-out.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS STANDALONE GEN_WORKER_NATIVE_KERNELS, same measured-then-requested ruling as the video encoder.
