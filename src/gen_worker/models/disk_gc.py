@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import stat
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -45,11 +46,32 @@ class RefIndex:
             logger.warning("ref-index unreadable (%s); starting empty", exc)
 
     def _save_locked(self) -> None:
+        """Write the index through, atomically.
+
+        pgw#945: ``self._lock`` is a THREAD lock, so it orders the writers in
+        one process and says nothing about the others. The index lives in the
+        model cache dir — a path a mounted cache can share between processes
+        (procsplit members, a second container on the same volume) — and the
+        old temp name was derived from the destination, so every such writer
+        opened one file. Interleaved writes of two different index states
+        produce a torn document that the reader above logs as "unreadable" and
+        starts EMPTY from, losing the ref accounting GC and the boot rescan
+        reason in. A unique temp file per writer keeps the rename atomic and
+        makes the loser's outcome a whole valid index rather than a mixture.
+        """
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._data), encoding="utf-8")
-            tmp.replace(self._path)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self._path.parent), prefix=self._path.name + ".",
+                suffix=".tmp")
+            tmp = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(self._data))
+                tmp.replace(self._path)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
         except Exception as exc:
             logger.warning("ref-index write failed: %s", exc)
 

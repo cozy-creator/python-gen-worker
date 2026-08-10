@@ -25,6 +25,14 @@ Grammar (ASCII only; ``WS`` is space, tab, or newline)::
 
 There are no comments, calls, comparisons, Unicode identifiers, or numeric
 separators. Top-level ``+`` joins learned-coefficient terms.
+
+A COUNTABLE CONTAINER is a payload variable (pgw#1018, mirroring the hub's
+``internal/price`` th#833/ie#600 rule): an identifier naming a LIST or a MAP
+field binds to that container's ITEM COUNT. There is deliberately no ``len()``
+— the grammar is the wire contract, calls are excluded from it on both sides,
+and a term key the hub cannot canonicalize identically is not a term. One
+vocabulary: ``"a + b*num_inference_steps + c*references"`` prices and predicts
+the same reference-heavy request with the same string.
 """
 
 from __future__ import annotations
@@ -32,6 +40,8 @@ from __future__ import annotations
 import ast
 import math
 import re
+import types
+import typing
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
@@ -46,6 +56,11 @@ __all__ = [
 ]
 
 _NUMERIC_TYPES = (int, float, bool)
+#: The container kinds that carry an item count. Exactly the hub's
+#: ``price.numericValue`` set (a JSON array or object) — `str`/`bytes` are
+#: Sized and are NOT countable containers: a prompt's length is not a declared
+#: cost dimension on either side, and admitting it here would price one.
+_COUNTABLE_TYPES = (list, tuple, set, frozenset, dict)
 _FORMULA_SPACE = " \t\n"
 _RESERVED_IDENTIFIERS = frozenset({
     "False", "None", "True", "and", "as", "assert", "async", "await",
@@ -167,6 +182,12 @@ class RuntimeFormula:
                 raise ValueError(
                     f"{owner}: runtime formula field {name!r} is not a payload field"
                 )
+            if _is_countable_container(getattr(f, "type", None)):
+                # pgw#1018: a list/map field IS a numeric term — its item
+                # count. It needs no numeric default: an omitted or null
+                # container is zero items, which is a reading of the field
+                # rather than a guess about it.
+                continue
             default = f.default
             if default is msgspec.NODEFAULT and f.default_factory is not msgspec.NODEFAULT:
                 default = f.default_factory()
@@ -226,6 +247,7 @@ class RuntimeFormula:
         explicit payload value wins; a ``None``/missing wire field falls
         back to the same-named field of ``defaults`` (the catalog-resolved
         recipe object, ``ctx.defaults``)."""
+        containers: Optional[Set[str]] = None   # resolved only if a None shows up
         values: Dict[str, float] = {}
         for name in self.fields:
             raw = getattr(payload, name, None)
@@ -233,8 +255,21 @@ class RuntimeFormula:
                 raw = getattr(defaults, name, None)
             if isinstance(raw, bool):
                 values[name] = 1.0 if raw else 0.0
+            elif isinstance(raw, _COUNTABLE_TYPES):
+                # pgw#1018: the countable-container reading, identical to the
+                # hub's `price.PayloadVars`.
+                values[name] = float(len(raw))
             elif isinstance(raw, (int, float)):
                 values[name] = raw
+            elif raw is None:
+                # A DECLARED container that arrived null/absent is zero items.
+                # Only the declaration makes this safe: a missing NUMBER stays
+                # missing, so the formula still declines rather than reading a
+                # zero into a term the request never stated.
+                if containers is None:
+                    containers = _countable_fields(type(payload))
+                if name in containers:
+                    values[name] = 0.0
         return self.term_values(values)
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -363,6 +398,36 @@ def _parse_terms(source: str, limits: FormulaLimits) -> List[_Term]:
             )
         terms.append(_Term(constant, key, factor))
     return terms
+
+
+def _is_countable_container(annotation: Any) -> bool:
+    """Is this declared field type a countable container (pgw#1018)?
+
+    ``list[X]``, ``dict[K, V]``, ``tuple[...]``, ``set[X]`` and their
+    ``Optional``/union spellings. A union counts only when EVERY non-``None``
+    member is countable — ``Union[list[X], int]`` is two different readings of
+    one identifier and is refused as a plain non-numeric field would be.
+    """
+    if annotation is None:
+        return False
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        members = [a for a in typing.get_args(annotation) if a is not type(None)]
+        return bool(members) and all(_is_countable_container(a) for a in members)
+    target = origin if origin is not None else annotation
+    return isinstance(target, type) and issubclass(target, _COUNTABLE_TYPES)
+
+
+def _countable_fields(payload_type: Any) -> Set[str]:
+    """Names of the struct's countable-container fields; empty for anything
+    that is not a msgspec Struct (the value-shape reading still applies)."""
+    try:
+        return {
+            f.name for f in msgspec.structs.fields(payload_type)
+            if _is_countable_container(getattr(f, "type", None))
+        }
+    except Exception:
+        return set()
 
 
 def _check_nodes(node: ast.expr) -> None:

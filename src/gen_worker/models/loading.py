@@ -1058,8 +1058,20 @@ _INCOMPATIBLE_COMPUTE = ("float16", "bfloat16")
 def _gemm_param_dtypes(module: Any) -> Dict[str, str]:
     """``{parameter path: dtype name}`` for every GEMM input under ``module``
     — Linear/conv weights and biases, the tensors torch actually refuses to
-    mix. Norms/embeddings are excluded: they carry their own (legitimately
-    wider) precision and never meet a weight in one kernel."""
+    mix, plus every quantized leaf's DECLARED ``compute_dtype``. Norms and
+    embeddings are excluded: they carry their own (legitimately wider)
+    precision and never meet a weight in one kernel.
+
+    pgw#1020: the isinstance selector alone is BLIND to the quantized lanes.
+    All five quantized leaves (``_Fp8ScaledLinear``, ``_W4A4Linear``,
+    ``_SvdqLinear``, ``_SvdqFusedLinear``, ``_AwqPackedLinear``) subclass
+    ``nn.Module`` directly, so a w8a8 fp16 denoiser inside a bf16 composition
+    — the exact cross-composition aliasing shape pgw#683 exists to refuse —
+    read as ``{}`` here and PASSED the guard. Their upcast target is a fact
+    they state: ``self.compute_dtype`` is what every one of their forwards
+    computes in (and what its bias must match), so it is a GEMM input dtype
+    whether or not a bias tensor exists to carry it.
+    """
     import torch.nn as nn
 
     gemm_types = (
@@ -1068,7 +1080,14 @@ def _gemm_param_dtypes(module: Any) -> Dict[str, str]:
     )
     out: Dict[str, str] = {}
     for name, leaf in module.named_modules():
-        if not isinstance(leaf, gemm_types):
+        declared = getattr(leaf, "compute_dtype", None)
+        # An embedding declares one on the fp8-storage lane
+        # (`restructure_fp8_storage` stamps every covered leaf, embeddings
+        # included). It stays excluded — the exclusion is about the kernel it
+        # feeds, not about how it stores its rows.
+        if isinstance(leaf, nn.Embedding):
+            continue
+        if not isinstance(leaf, gemm_types) and declared is None:
             continue
         for attr in ("weight", "bias"):
             t = getattr(leaf, attr, None)
@@ -1078,6 +1097,12 @@ def _gemm_param_dtypes(module: Any) -> Dict[str, str]:
             dt_name = str(dt).rsplit(".", 1)[-1]
             if dt_name in _COMPUTE_DTYPE_NAMES:
                 out[f"{name}.{attr}" if name else attr] = dt_name
+        # Storage dtypes stay uncounted here too: a leaf declaring an fp8
+        # `compute_dtype` fails the membership test exactly as its fp8 weight
+        # does, so pgw#683's carve-out is unchanged.
+        dec_name = str(declared).rsplit(".", 1)[-1] if declared is not None else ""
+        if dec_name in _COMPUTE_DTYPE_NAMES:
+            out[f"{name}.compute_dtype" if name else "compute_dtype"] = dec_name
     return out
 
 

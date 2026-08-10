@@ -53,6 +53,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -317,10 +318,18 @@ def write_library_memo(path: Path) -> int:
 
     Cheap in a process that already sealed (the lru_cache is warm: the pass
     degenerates to stats); pays the full hash exactly once otherwise. The
-    write is atomic (tmp + rename) so a reader never sees a torn file.
-    Raises ``OSError`` on an unwritable destination — the CALLER decides
+    write is atomic (unique temp file + rename) so a reader never sees a torn
+    file. Raises ``OSError`` on an unwritable destination — the CALLER decides
     whether that is worth a typed event; children fall back to the full
-    rehash either way."""
+    rehash either way.
+
+    pgw#945 classification: today's only caller hands a PER-ATTEMPT path
+    (``aot_compile_pool`` seeds ``<mint workdir>/seal-lib-memo.json``, and the
+    workdir is ``<mint root>/child-<attempt>``), so no two writers meet. The
+    atomicity promise above is this FUNCTION's, though, not that caller's, and
+    a temp name derived from the destination silently makes it conditional on
+    a fact stated somewhere else. Unique per writer, so it holds for whatever
+    path arrives."""
     digests: Dict[str, str] = {}
     for _base, lib_paths in sorted(_toolchain_lib_paths().items()):
         for lib_path in lib_paths:
@@ -333,9 +342,15 @@ def write_library_memo(path: Path) -> int:
     encoded = json.dumps(
         {"memo_v": _MEMO_V, "digests": digests},
         sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(encoded)
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
+                                    prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(encoded)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
     return len(digests)
 
 
