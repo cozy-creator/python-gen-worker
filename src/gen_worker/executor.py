@@ -159,7 +159,11 @@ from .models.hub_client import WorkerResolvedChunk, WorkerResolvedRepo, WorkerRe
 from . import compile_cache
 from .models.config_identity import CANONICAL_JSON_MAX_BYTES, canonical_json_digest
 from .models.cozy_snapshot import _norm_rel_path
-from .models.loading import safetensors_file_valid
+from .models.loading import (
+    is_modular_pipeline_class,
+    plan_streamed_hydration,
+    safetensors_file_valid,
+)
 from .models.volume_verify import snapshot_verify_targets, verify_files
 from .models.cozy_snapshot import delete_blobs
 from .compile_cache import CompiledExecutionLaneUnavailableError
@@ -7504,24 +7508,29 @@ class Executor:
             res.touch(ref)
 
     @staticmethod
-    def _worker_loaded_slots(spec: EndpointSpec) -> set:
+    def _worker_loaded_slot_types(spec: EndpointSpec) -> Dict[str, type]:
         """Setup slots the WORKER materializes in host RAM (class-typed
-        annotations loaded via ``from_pretrained``). str/Path slots and
-        engine runtimes (vllm/llama-server) stream weights themselves and
-        must not be counted against the host-RAM admission gate."""
+        annotations loaded via ``from_pretrained``), with their annotated
+        classes. str/Path slots and engine runtimes (vllm/llama-server)
+        stream weights themselves and must not be counted against the
+        host-RAM admission gate."""
         if spec.cls is None or spec.runtime:
-            return set()
+            return {}
         setup = getattr(spec.cls, "setup", None)
         if setup is None:
-            return set()
+            return {}
         try:
             hints = typing.get_type_hints(setup)
         except Exception:
-            return set()
+            return {}
         return {
-            name for name, ann in hints.items()
+            name: ann for name, ann in hints.items()
             if isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None))
         }
+
+    @staticmethod
+    def _worker_loaded_slots(spec: EndpointSpec) -> set:
+        return set(Executor._worker_loaded_slot_types(spec))
 
     async def _record_host_ram_failure(
         self, refs: List[str],
@@ -7770,8 +7779,17 @@ class Executor:
         slot's weights move to VRAM (freeing host RAM) before the next slot
         loads — so the honest staging requirement is the LARGEST slot, not
         the sum (gw#479 live: two 28GiB fp8 lanes were refused as "56.2GiB
-        incoming" on a 61GiB host that stages at most 28GiB at once)."""
-        slots = self._worker_loaded_slots(spec)
+        incoming" on a 61GiB host that stages at most 28GiB at once).
+
+        pgw#1026 applies the SAME rule one level down for a modular slot the
+        loader will stage component-by-component onto the device: its
+        requirement is its largest COMPONENT, not its tree. That is the only
+        thing standing between a tree the card holds and a structural
+        `HostRamCapacityError` (ie#615's H3: 134.1 GiB tree, 116.4 GiB host).
+        The verdict comes from `plan_streamed_hydration`, which the loader
+        re-reads — one authority, and it engages only when the whole tree
+        does not fit while the card does."""
+        slots = self._worker_loaded_slot_types(spec)
         if not paths or not slots:
             return
         incoming = 0
@@ -7784,9 +7802,22 @@ class Executor:
                 # slot's true staging requirement is their sum. ie#615:
                 # counting only the base under-admitted by the override's
                 # 27.6 GB.
-                for comp_path in ((component_paths or {}).get(slot) or {}).values():
+                comp_paths = dict((component_paths or {}).get(slot) or {})
+                for comp_path in comp_paths.values():
                     slot_bytes += await asyncio.to_thread(
                         disk_gc.tree_bytes, Path(comp_path))
+                if is_modular_pipeline_class(slots[slot]):
+                    plan = await asyncio.to_thread(
+                        functools.partial(
+                            plan_streamed_hydration, Path(p),
+                            component_trees=comp_paths),
+                    )
+                    if plan.engaged:
+                        logger.info(
+                            "host-RAM admission charges %s slot %s its "
+                            "largest COMPONENT, not its tree: %s",
+                            spec.name, slot, plan.summary())
+                        slot_bytes = plan.largest_unit_bytes
                 ref = wire_ref(spec.models[slot])
                 if slot_bytes > incoming:
                     incoming = slot_bytes
