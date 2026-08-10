@@ -135,6 +135,27 @@ class EagerPhase(StrEnum):
     #: actually cost minimax-h3 its compiled wall.
     DECLARED_RANGE_EXCEEDED = "declared_range_exceeded"
 
+    #: pgw#1093: the target WAS installed and armed, and a served call then
+    #: failed permanently for a reason that is neither a graph break nor a
+    #: declared-range refusal — a kernel that refuses this shape, an OOM
+    #: inside the region, a module the endpoint mutated after the arm. Before
+    #: this token that degrade reached the wire as NOTHING, so it was
+    #: indistinguishable from "no target was ever installed" and both read
+    #: `uncompiled`. The distinction is the whole point: one is an execution
+    #: failure with a named exception, the other is a WIRING failure.
+    COMPILED_DEGRADED = "compiled_degraded"
+
+    #: pgw#1093: an arm SUCCEEDED inside `setup()` and `_install_compile_targets`
+    #: then resolved no declared target on the same object — the boot compiled
+    #: graphs it can never dispatch to. The pgw#1078 D2 class, one layer up,
+    #: and previously a bare `continue` with no note, no counter, no event.
+    ARMED_TARGET_UNRESOLVED = "armed_target_unresolved"
+
+    #: pgw#1093: the record ended setup owning ZERO compile-capable candidate
+    #: objects while its spec declares a compile family. The candidate loop
+    #: never ran, so not one of the per-candidate omission tokens could fire.
+    NO_COMPILE_CANDIDATES = "no_compile_candidates"
+
     #: `_fail_closed`'s default, for a caller that has not classified its exit.
     #: A new decline landing here rather than on its own member is the
     #: regression pgw#824 exists to catch.

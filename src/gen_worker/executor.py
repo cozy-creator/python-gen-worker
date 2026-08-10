@@ -2957,6 +2957,13 @@ class _InjectionResult:
     # resolve. Kept separately because shared-lane residency may replace the
     # bookkeeping object with a ModuleDict while setup receives the pipeline.
     compile_objects: List[_CompileObjectCandidate] = dc_field(default_factory=list)
+    # pgw#1093: the ARM FACT — every object an arm RETURNED TRUE for, on
+    # either scope (slot injection or `arm_compile()` inside setup()).
+    # Recorded before any later re-scan can drop it, and never re-derived
+    # from `is_compile_armed()`: a permanent degrade flips that probe to
+    # False, which would let the end-of-setup invariant excuse exactly the
+    # boot it exists to catch.
+    armed_objects: List[Any] = dc_field(default_factory=list)
     # id(pipeline) -> exact attached artifact that successfully armed it.
     # Installed only after the setup warmup completes.
     active_compile_artifacts: Dict[int, _CompileArtifactSelection] = dc_field(
@@ -4370,6 +4377,7 @@ class Executor:
 
     def _note_eager_posture(
         self, rec: _ClassRecord, token: str, detail: str = "",
+        *, override: bool = False,
     ) -> None:
         """pgw#824: record (and, once, confess) WHY this record has no cell.
 
@@ -4377,9 +4385,17 @@ class Executor:
         one. The typed event fires only on the transition, so a decline that
         happens per-object on a many-slot record coalesces to ONE row instead
         of N identical ones — counts, not silence, and not a flood.
+
+        pgw#1093 ``override``: for the ONE token that is never a competing
+        cause but the CAUSE OF the causes already recorded. "An arm returned
+        True and nothing owns it" makes "no compile candidates survived" a
+        consequence, not a rival — and first-token-wins would otherwise leave
+        the record naming its own symptom.
         """
         token = str(token or "").strip()
-        if not token or rec.eager_posture:
+        if not token or (rec.eager_posture and not override):
+            return
+        if override and rec.eager_posture == token:
             return
         rec.eager_posture = token
         activity_mod.emit_event(
@@ -4388,6 +4404,85 @@ class Executor:
             f"serves EAGER — {detail or token}. Every request it serves "
             f"reports fallback_reason={token}.",
             phase=token,
+        )
+
+    def _note_boot_degrade(self, rec: _ClassRecord, pipeline: Any) -> None:
+        """pgw#1093: confess a degrade that happened BEFORE any guard was bound.
+
+        `_bind_compile_guard` installs the revocation callback in
+        `_install_compile_targets`, which runs AFTER the boot warmup. So a
+        target that armed, compiled, and then broke DURING that warmup has no
+        callback to fire and no record to write on: pgw#1082's whole
+        confession path is unreachable for it, and every reader afterwards
+        falls through to the generic `uncompiled`. This reads the reason
+        straight off the pipeline's own failure signal instead.
+        """
+        broke = compile_cache.graph_break_reason(pipeline)
+        out_of_range = compile_cache.declared_range_refusal(pipeline)
+        reason = compile_cache.degrade_reason(pipeline)
+        if broke:
+            self._note_eager_posture(
+                rec, cell_adopt.EagerPhase.GRAPH_BREAK.value,
+                f"the declared regional target did not trace WHOLE under "
+                f"fullgraph during the boot warmup: {broke}")
+        elif out_of_range:
+            self._note_eager_posture(
+                rec, cell_adopt.EagerPhase.DECLARED_RANGE_EXCEEDED.value,
+                out_of_range)
+        elif reason:
+            self._note_eager_posture(
+                rec, cell_adopt.EagerPhase.COMPILED_DEGRADED.value,
+                f"the compiled target was ARMED and a call during the boot "
+                f"warmup failed permanently, so this instance is eager for "
+                f"the rest of its life: {reason}")
+
+    def _assert_armed_targets_installed(
+        self, rec: _ClassRecord, spec: EndpointSpec,
+        armed_objects: typing.Iterable[Any],
+    ) -> None:
+        """pgw#1093 THE INVARIANT: armed at setup => an installed target owns it.
+
+        "``compile_cache`` minted graphs into this object and nothing on this
+        record can dispatch to them" is not a degraded state — it is an
+        IMPOSSIBLE one, and it has now cost two releases (pgw#1078 D2, this
+        issue) because every route to it was a log line or a bare ``continue``.
+
+        Keyed on the ARM FACT — what ``arm_compile()``/the injection scan
+        RETURNED — never on a live ``is_compile_armed()`` probe. A permanent
+        degrade flips that probe to False, so probing would let the invariant
+        excuse exactly the boot it exists to catch.
+
+        Not fatal (pgw#672: a broken optimization never kills a serving
+        worker). It is a TYPED, wire-visible refusal with a named cause, which
+        is what the pod telemetry did not have.
+        """
+        owned = {id(t.pipeline) for t in rec.compile_targets.values()}
+        orphans = [p for p in armed_objects if id(p) not in owned]
+        if not orphans:
+            return
+        detail = "; ".join(
+            f"{type(p).__name__} armed={compile_cache.is_compile_armed(p)} "
+            f"targets_resolve="
+            f"{compile_cache.has_compile_target(p, spec.compile_cell())} "
+            f"degrade={compile_cache.degrade_reason(p) or '-'}"
+            for p in orphans
+        )
+        logger.error(
+            "%s: %d ARMED compile object(s) own NO installed target — this "
+            "boot compiled graphs nothing can dispatch to (%s)",
+            spec.name, len(orphans), detail)
+        self._note_eager_posture(
+            rec, cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value,
+            f"{len(orphans)} object(s) armed during setup own no installed "
+            f"compile target, so the compiled graphs this boot paid for are "
+            f"undispatchable: {detail}",
+            override=True)
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            detail=(
+                f"fn={spec.name}: {len(orphans)} ARMED compile object(s) own "
+                f"no installed target after setup — {detail}"),
+            phase=cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value,
         )
 
     def _install_compile_targets(
@@ -4427,6 +4522,25 @@ class Executor:
             else _CompileObjectCandidate(item, set(all_slots))
             for item in objects
         ]
+        # pgw#1093: a permanent degrade that happened during the BOOT WARMUP
+        # has no record to confess on — `_bind_compile_guard` installs the
+        # revocation callback HERE, after the warmup, so pgw#1082's whole
+        # confession path is structurally unreachable for a target that broke
+        # while it was being warmed. This is the late confession: read the
+        # reason off the pipeline's own failure signal, at the first moment a
+        # record exists to carry it.
+        for candidate in candidates:
+            self._note_boot_degrade(rec, candidate.pipeline)
+        if not candidates:
+            # The candidate loop below never runs, so not one of its omission
+            # tokens can fire — the exact shape that reached pgw#1093 as zero
+            # rows and a generic `uncompiled` on every request.
+            self._note_eager_posture(
+                rec, cell_adopt.EagerPhase.NO_COMPILE_CANDIDATES.value,
+                f"setup produced no compile-capable object for declared "
+                f"family {str(getattr(cfg, 'family', '') or '?')!r} "
+                f"targets={[str(t) for t in (getattr(cfg, 'targets', ()) or ())]} "
+                f"over held slots {sorted(all_slots)}")
         requested_execution_lane = self._mandatory_execution_lane_of_bound(
             wire_ref(spec.models[slot]) for slot in self._setup_slots(spec)
         )
@@ -4441,6 +4555,28 @@ class Executor:
                 continue
             seen.add(id(pipeline))
             if not compile_cache.has_compile_target(pipeline, cfg):
+                # pgw#1093: NOT a bare `continue` any more. An object reaches
+                # this list only because something already decided it was
+                # compile-capable — the injection scan or an `arm_compile()`
+                # that RETURNED TRUE. Resolving no target here therefore means
+                # the object changed under the arm (a lazily-hydrated
+                # component replaced after setup, a slot swapped by the
+                # endpoint), which is a WIRING fact and has to say so. It was
+                # one of exactly three exits from this method that emitted
+                # nothing at all, and this issue burned a $1.15 pod because of
+                # it.
+                self._note_eager_posture(
+                    rec, cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value
+                    if compile_cache.is_compile_armed(pipeline)
+                    else cell_adopt.EagerPhase.NO_COMPILE_TARGET.value,
+                    f"{type(pipeline).__name__} owning slots "
+                    f"{sorted(candidate.slots)} resolves none of the declared "
+                    f"targets "
+                    f"{[str(t) for t in (getattr(cfg, 'targets', ()) or ())]} "
+                    f"at install time"
+                    + (" — yet compile_cache reports it ARMED, so this boot "
+                       "compiled graphs it can never dispatch to"
+                       if compile_cache.is_compile_armed(pipeline) else ""))
                 continue
             bindings = tuple(sorted(
                 binding for binding in rec.held_bindings
@@ -5223,6 +5359,14 @@ class Executor:
         stored = str(rec.eager_posture or "")
         if stored:
             return stored
+        # pgw#1093: a target that ARMED and then degraded is not "uncompiled"
+        # — it is a named execution failure, and reporting it as the generic
+        # terminal token is what made an installed-then-degraded target read
+        # identically to a never-installed one. Live, because a degrade can
+        # land after boot on a target whose guard callback was never bound.
+        for target in rec.compile_targets.values():
+            if compile_cache.degrade_reason(target.pipeline):
+                return cell_adopt.EagerPhase.COMPILED_DEGRADED.value
         if not any(
             s.compile is not None and s.compile.family for s in rec.specs
         ):
@@ -6677,19 +6821,31 @@ class Executor:
                     await self._report_cell_selection_bug(
                         spec, compile_selection, bug)
                 for pipe, armed in arming_scope.objects:
+                    if armed:
+                        if not any(p is pipe for p in inj.armed_objects):
+                            # pgw#1093: BEFORE the re-scan below can drop it.
+                            # This object is armed compiled code; if nothing
+                            # ends up owning it, that is the impossible state
+                            # the end-of-setup invariant refuses — never a
+                            # silent skip.
+                            inj.armed_objects.append(pipe)
+                        # pgw#1078: this arm DISPROVES whatever the injection-
+                        # time attempt concluded about the same object — that
+                        # attempt ran before setup hydrated it.
+                        #
+                        # pgw#1093 moved the clear ABOVE the re-scan gate. It
+                        # used to sit after it, so an armed object that failed
+                        # the re-scan kept the stale injection-time
+                        # `no_compile_target` — and first-token-wins then let
+                        # that stale token outrank the REAL cause the install
+                        # was about to name. Same wrong-cause defect pgw#1078
+                        # fixed, on the one path its fix could not reach.
+                        inj.eager_postures.clear()
                     if not compile_cache.has_compile_target(pipe, spec.compile):
                         continue
                     owning = injected_slot_of.get(id(pipe))
                     inj.add_compile_object(
                         pipe, (owning,) if owning else self_loaded_slots)
-                    if armed:
-                        # pgw#1078: this arm DISPROVES whatever the injection
-                        # -time attempt concluded about the same object — that
-                        # attempt ran before setup hydrated it. First-token-
-                        # wins across the two scopes is what put
-                        # `no_compile_target` on every 0.4.2 request while the
-                        # target resolved fine.
-                        inj.eager_postures.clear()
                     mint = scope_mints.get(id(pipe))
                     selection = _selection_for(compile_selection, mint)
                     if getattr(mint, "delegated", False):
@@ -7386,6 +7542,11 @@ class Executor:
                 inj.active_compile_artifacts,
                 function_proofs,
             )
+            # pgw#1093: the terminus. Every route from "an arm returned True"
+            # to "no installed target owns it" now ends on ONE typed,
+            # wire-visible refusal instead of a log line nobody on a
+            # hub-spawned pod can read.
+            self._assert_armed_targets_installed(rec, spec, inj.armed_objects)
             rec.stale = False
             await self._clear_host_ram_capacity(list(slot_refs.values()))
         return instance
@@ -8557,6 +8718,11 @@ class Executor:
                                     spec, compile_selection, bug)
                             raise
                         armed = outcome.armed
+                        if armed and not any(
+                                p is pipe for p in result.armed_objects):
+                            # pgw#1093: the injection-scope half of the arm
+                            # fact (the scope half is in `_setup_instance`).
+                            result.armed_objects.append(pipe)
                         pipe_mint = outcome.self_mint
                         result.adoptions.extend(outcome.adoptions)
                         # pgw#824: the arming brain already classified WHY it
