@@ -232,7 +232,8 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
         # REAL production emitter).
         cc.emit_jit_compile_event(
             {"boot": 612.5}, family="sdxl", execution_lane="w8a8",
-            route="intake", n_graphs=8)
+            route="intake",
+            audit=cc.GraphAudit(unique_graphs=8, graph_breaks=0))
 
         aot = _wait_for_phases(
             conn, aot_mint.MINT_PHASES_KIND,
@@ -257,6 +258,11 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
 
     assert jit["shape:boot"].duration_ms == 612_500
     assert "route=intake" in jit["minted"].detail
+    # pgw#1082: `n_graphs` finally has a caller. It read 0 on every event on
+    # the platform because `emit_jit_compile_event`'s parameter was never
+    # populated — the blindness that made a graph-broken 20.1B denoiser
+    # indistinguishable from a healthy one for two releases.
+    assert "n_graphs=8 n_breaks=0" in jit["minted"].detail
 
     # Every timed event is COMPLETED, which is what makes it durable hub-side
     # (th#1250 records terminal updates unconditionally).
@@ -275,7 +281,8 @@ def test_the_producer_warm_loop_reports_its_per_shape_compile_time() -> None:
         conn = sched.wait_connection(0)
         cc.emit_jit_compile_event(
             {"1024x1024": 41.5, "768x768": 12.25},
-            family="sdxl", execution_lane="w8a8", route="compile_and_warm", n_graphs=6)
+            family="sdxl", execution_lane="w8a8", route="compile_and_warm",
+                audit=cc.GraphAudit(unique_graphs=6, graph_breaks=0))
         jit = _wait_for_phases(
             conn, activity_mod.KIND_JIT_COMPILE,
             {"minted", "shape:1024x1024", "shape:768x768"})
@@ -286,7 +293,7 @@ def test_the_producer_warm_loop_reports_its_per_shape_compile_time() -> None:
     # total also covers per-mint package/declare/pack work).
     assert jit["minted"].duration_ms == 53_750
     assert "route=compile_and_warm" in jit["minted"].detail
-    assert "n_graphs=6" in jit["minted"].detail
+    assert "n_graphs=6 n_breaks=0" in jit["minted"].detail
 
 
 

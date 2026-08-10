@@ -405,6 +405,73 @@ def _is_recompile_error(exc: BaseException) -> bool:
         return False
 
 
+#: pgw#1082: the token a graph-broken region reports, on the guard detail, on
+#: the `serve_eager_posture` phase, and on the request row's
+#: `fallback_reason`. One string, so "which releases are serving fragments"
+#: is a GROUP BY and never a log grep.
+GRAPH_BREAK_TOKEN = "graph_break"
+
+#: pgw#1082: the declaration named a dynamic range its own inputs leave.
+DECLARED_RANGE_TOKEN = "declared_range_exceeded"
+
+
+def _is_graph_break_error(exc: BaseException) -> bool:
+    """True for dynamo's fullgraph refusal — the region did NOT trace whole.
+
+    This is the ONLY honest signal that separates "compiled" from "compiled
+    into eager-glued fragments". Without ``fullgraph=True`` dynamo emits no
+    error at all for this case: it splits the region, reports a successful
+    arm, never guard-misses, and serves at eager speed (pgw#1078's measured
+    triple on a 20.1B denoiser). With it, the break RAISES and names itself.
+    """
+    try:
+        from torch._dynamo import exc as dexc
+
+        return isinstance(exc, (dexc.Unsupported, dexc.UserError))
+    except Exception:
+        return False
+
+
+def _emit_declared_range_event(label: str, exc: BaseException) -> None:
+    """Confess a declared-range refusal: the endpoint's `dynamic=(...)` names
+    a range its own inputs leave, so nothing can be marked and the target
+    degrades to eager. An authoring defect, named as one."""
+    try:
+        from . import activity as activity_mod
+
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            detail=f"target={label} lane=regional {DECLARED_RANGE_TOKEN}: "
+                   f"{_clip(str(exc), 600)}",
+            phase=DECLARED_RANGE_TOKEN,
+        )
+    except Exception:  # pragma: no cover — telemetry never fails the serve
+        logger.debug("compile-cache: declared-range event emission failed",
+                     exc_info=True)
+
+
+def _emit_graph_break_event(label: str, exc: BaseException) -> None:
+    """Confess a fullgraph refusal on the wire, once, at the moment it
+    happens. The `jit_compile` audit counts breaks over a whole window; this
+    names the target that lost its compiled lane because of them."""
+    try:
+        from . import activity as activity_mod
+
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            detail=(
+                f"target={label} lane=regional {GRAPH_BREAK_TOKEN}: the "
+                f"region did not trace whole under fullgraph, so this "
+                f"instance serves it EAGER and says so. "
+                f"{_clip(str(exc), 600)}"
+            ),
+            phase=GRAPH_BREAK_TOKEN,
+        )
+    except Exception:  # pragma: no cover — telemetry never fails the serve
+        logger.debug("compile-cache: graph-break event emission failed",
+                     exc_info=True)
+
+
 @dataclass(frozen=True)
 class GuardMiss:
     """One tenant request that hit fail-on-recompile on a compiled target.
@@ -1483,6 +1550,76 @@ def counters_delta(before: Dict[str, int], after: Dict[str, int]) -> Dict[str, i
     return {k: int(after.get(k, 0)) - int(before.get(k, 0)) for k in after}
 
 
+@dataclass(frozen=True)
+class GraphAudit:
+    """How many graphs a compile produced, and what split them (pgw#1082).
+
+    ``unique_graphs`` and ``graph_breaks`` are dynamo's own process-global
+    counters; ``reasons`` is the break-reason histogram, highest first. A
+    region that traced whole reads ``graph_breaks=0``; anything else names
+    the ops that cut it, which is the only way to tell an armed-and-fast
+    region from an armed-and-fragmented one (the pgw#1078 measurement:
+    armed + entered + zero guard misses + zero speedup)."""
+
+    unique_graphs: int = 0
+    graph_breaks: int = 0
+    reasons: Tuple[Tuple[str, int], ...] = ()
+
+    @property
+    def whole(self) -> bool:
+        return self.graph_breaks == 0
+
+    def summary(self, top: int = 4) -> str:
+        head = f"n_graphs={self.unique_graphs} n_breaks={self.graph_breaks}"
+        if not self.reasons:
+            return head
+        top_reasons = " ".join(
+            f"{_clip(reason, 90)}x{count}"
+            for reason, count in self.reasons[:top])
+        return f"{head} breaks=[{top_reasons}]"
+
+
+def graph_audit() -> GraphAudit:
+    """This process's cumulative dynamo graph/break counters (monotonic).
+
+    pgw#1082: ``emit_jit_compile_event`` has carried an ``n_graphs``
+    parameter since th#1322 that NO caller ever populated, so every
+    ``jit_compile`` event on the platform read ``n_graphs=0`` and a fully
+    graph-broken 20.1B denoiser was indistinguishable on the wire from a
+    healthy one. This is the read that answers it."""
+    try:
+        from torch._dynamo.utils import counters
+
+        reasons = tuple(sorted(
+            ((str(k), int(v)) for k, v in counters["graph_break"].items()),
+            key=lambda kv: (-kv[1], kv[0])))
+        return GraphAudit(
+            unique_graphs=int(counters["stats"].get("unique_graphs", 0)),
+            graph_breaks=sum(c for _, c in reasons),
+            reasons=reasons,
+        )
+    except Exception:
+        logger.debug("compile-cache: dynamo graph counters unavailable",
+                     exc_info=True)
+        return GraphAudit()
+
+
+def graph_audit_delta(before: GraphAudit) -> GraphAudit:
+    """The audit of ONE compile window: after minus before, per reason."""
+    after = graph_audit()
+    prior = dict(before.reasons)
+    reasons = tuple(sorted(
+        ((reason, count - prior.get(reason, 0))
+         for reason, count in after.reasons
+         if count - prior.get(reason, 0) > 0),
+        key=lambda kv: (-kv[1], kv[0])))
+    return GraphAudit(
+        unique_graphs=max(0, after.unique_graphs - before.unique_graphs),
+        graph_breaks=sum(c for _, c in reasons),
+        reasons=reasons,
+    )
+
+
 def compile_wall_seconds() -> float:
     """This process's cumulative torch.compile wall time (monotonic, seconds).
 
@@ -2370,47 +2507,116 @@ def _mark_regional_blocks(owner: Any, dynamic_dims: tuple) -> int:
     return marked
 
 
+class DeclaredRangeExceeded(RuntimeError):
+    """A declared dynamic axis met an extent OUTSIDE its declared range.
+
+    pgw#1082: this used to be a ``ConstraintViolationError`` raised from
+    inside dynamo, caught by the guard as "some compiled target failed", and
+    swallowed into a permanent eager degrade that the wire still reported as
+    ``jit_cell``. It is an ENDPOINT DECLARATION defect — the declaration
+    named a range its own inputs leave — and it now says so by name.
+    """
+
+
+#: Logical axis -> the tensor dim it is PRIMARILY read from. The extent found
+#: there is then propagated to every argument that carries it (see
+#: :func:`_with_declared_marks`), because a sequence axis is never carried by
+#: one tensor: H3's block takes ``hidden_states[B, S, H]``, ``adaln_indices[S]``
+#: and a ``(cos[S, D], sin[S, D])`` TUPLE, and leaving the last two static is
+#: what specialized the symbol and violated the mark.
+_AXIS_PRIMARY_DIM: Dict[str, int] = {"batch": 0, "sequence": 1}
+_AXIS_MIN_RANK: Dict[str, int] = {"batch": 1, "sequence": 3}
+
+
+def _iter_arg_tensors(obj: Any, depth: int = 0) -> Iterator[Any]:
+    """Every tensor in an argument tree, through tuples/lists/dicts."""
+    import torch
+
+    if isinstance(obj, torch.Tensor):
+        yield obj
+    elif depth < 3 and isinstance(obj, (tuple, list)):
+        for item in obj:
+            yield from _iter_arg_tensors(item, depth + 1)
+    elif depth < 3 and isinstance(obj, dict):
+        for item in obj.values():
+            yield from _iter_arg_tensors(item, depth + 1)
+
+
 def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callable[..., Any]:
     """Wrap a compiled callable so every call marks the DECLARED dynamic
-    dims on its tensor inputs before dynamo sees them.
+    axes COHERENTLY across its whole argument tree before dynamo sees them.
 
-    Mapping of logical axes to tensor dims: ``batch`` marks dim 0 of every
-    floating tensor argument; ``sequence`` marks dim 1 of rank-3 floating
-    tensors (the ``[B, seq, hidden]`` conditioning shape). A dim smaller
-    than the declared ``min`` is left unmarked — torch's 0/1 specialization
-    is not overridable (ie#543) and gets its own free specialized graph. A
-    mark torch cannot honor raises ``ConstraintViolationError`` at
-    compile/warm time — a LOUD build failure, never a silent fallback to
-    recompilation (the mint's warm calls do not guard)."""
+    pgw#1082 rewrote this. The old mapping marked one dim of one KIND of
+    tensor — dim 0 of every float for ``batch``, dim 1 of every rank-3 float
+    for ``sequence`` — and that is not what an axis is. Every sibling tensor
+    indexed by the same axis (integer index tensors, rotary tables inside a
+    tuple) stayed STATIC, so dynamo specialized the symbol on them and then
+    raised ``ConstraintViolationError`` against the mark on the float:
+
+        You marked L['hidden_states'].size()[1] as dynamic but your code
+        specialized it to be a constant
+
+    On minimax-h3 that fired on the FIRST call of every regional block, the
+    guard degraded the target to eager for the life of the pod, and (because
+    the regional guard forgot to raise the degraded flag) the wire still
+    reported ``serving_mode=jit_cell`` with an empty ``fallback_reason``. A
+    20.1B denoiser served 100% eager while every telemetry axis said
+    compiled — measured at 6.27 s/step against the rig's 4.31 (pgw#1078).
+
+    So: find the axis EXTENT at its primary dim, then mark that extent
+    wherever it appears in the argument tree, integer tensors included. An
+    extent outside the declared range is a typed :class:`DeclaredRangeExceeded`
+    — the declaration is wrong and the endpoint must fix it — never a
+    dynamo-internal error nobody can attribute.
+    """
 
     import torch
 
-    def _mark(t: Any) -> None:
-        if not isinstance(t, torch.Tensor) or not t.is_floating_point():
-            return
+    def _mark(tensors: List[Any]) -> None:
         for d in dynamic_dims:
-            # Only the two logical dynamo axes are markable here. A named
-            # declared Dim (pgw#739) carries (input, axis) bindings and is
-            # the EXPORT lane's business — marking it at axis 1 by the old
-            # sequence heuristic would mark the wrong axis silently.
-            if d.dim == "batch":
-                dim = 0
-            elif d.dim == "sequence" and t.dim() >= 3:
-                dim = 1
-            else:
+            primary = _AXIS_PRIMARY_DIM.get(str(d.dim), -1)
+            if primary < 0:
+                # A named declared Dim (pgw#739) carries (input, axis)
+                # bindings and is the EXPORT lane's business; marking it by
+                # a positional heuristic would mark the wrong axis silently.
                 continue
-            if t.dim() <= dim:
+            min_rank = _AXIS_MIN_RANK.get(str(d.dim), primary + 1)
+            extent = 0
+            for t in tensors:
+                if not t.is_floating_point() or t.dim() < min_rank:
+                    continue
+                size = int(t.shape[primary])
+                if size < int(d.min):
+                    # 0/1 (and sub-min) sizes keep their free static graph —
+                    # torch's 0/1 specialization is not overridable (ie#543).
+                    continue
+                if size > int(d.max):
+                    raise DeclaredRangeExceeded(
+                        f"declared dynamic axis {d.dim!r} has range "
+                        f"[{int(d.min)}, {int(d.max)}] but this call presents "
+                        f"{size} at dim {primary} of a {tuple(t.shape)} input. "
+                        f"The DECLARATION is wrong: widen it to the real "
+                        f"extent this target sees, or stop declaring the axis."
+                    )
+                extent = size
+                break
+            if not extent:
                 continue
-            if int(t.shape[dim]) < int(d.min):
-                continue  # 0/1 (and sub-min) sizes keep their free static graph
-            torch._dynamo.mark_dynamic(t, dim, min=int(d.min), max=int(d.max))
+            for t in tensors:
+                for dim in range(t.dim()):
+                    if int(t.shape[dim]) != extent:
+                        continue
+                    torch._dynamo.mark_dynamic(
+                        t, dim, min=int(d.min), max=int(d.max))
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        tensors: List[Any] = []
         for a in args:
-            _mark(a)
+            tensors.extend(_iter_arg_tensors(a))
         for v in kwargs.values():
-            _mark(v)
+            tensors.extend(_iter_arg_tensors(v))
+        _mark(tensors)
         return fn(*args, **kwargs)
 
     return wrapper
@@ -2794,11 +3000,37 @@ def _guarded_regional(
                         label, exc, args, kwargs, failure_signal, original)
                     return _eager_once(args, kwargs)
                 state["failed"] = True
+                broke = _is_graph_break_error(exc)
                 state["detail"] = (
-                    f"regional compiled {'W8A8 ' if fail_closed else ''}"
-                    f"target {label} failed: "
-                    f"{type(exc).__name__}: {exc}"
+                    (f"regional compiled target {label} GRAPH-BROKE under "
+                     f"fullgraph — this region did NOT trace whole and the "
+                     f"platform refuses to serve fragments as compiled "
+                     f"({GRAPH_BREAK_TOKEN}): {_clip(str(exc), 600)}")
+                    if broke else
+                    (f"regional compiled {'W8A8 ' if fail_closed else ''}"
+                     f"target {label} failed: "
+                     f"{type(exc).__name__}: {exc}")
                 )
+                # pgw#1082 — THE LIE. `_guarded` has always raised this
+                # flag on a permanent degrade; the REGIONAL twin never did,
+                # and `is_compile_armed` reads exactly it. So a regional
+                # target that degraded to eager on its very first call kept
+                # reporting `serving_mode=jit_cell`, `served_eager_fallback
+                # =false`, EMPTY `fallback_reason` — for the life of the pod,
+                # at eager speed. Every telemetry axis said compiled while
+                # 100% of the work ran eager (minimax-h3 0.4.3: 6.27 s/step
+                # against the rig's 4.31 for the identical recipe).
+                if isinstance(failure_signal, dict):
+                    failure_signal["degraded"] = True
+                    if broke:
+                        failure_signal["graph_break"] = _clip(str(exc), 600)
+                if broke:
+                    _emit_graph_break_event(label, exc)
+                elif isinstance(exc, DeclaredRangeExceeded):
+                    if isinstance(failure_signal, dict):
+                        failure_signal["declared_range_exceeded"] = _clip(
+                            str(exc), 600)
+                    _emit_declared_range_event(label, exc)
                 # Regional eager state is real only after the in-place block
                 # compilations are gone. Revoke proof after that mutation and
                 # before a state delta can be scheduled.
@@ -3069,7 +3301,20 @@ def apply(
             # place; the guard wrapper clears them on the first failure.
             #
             settings_authority.impose_dynamo()
-            owner.compile_repeated_blocks(dynamic=None)
+            # pgw#1082: FULLGRAPH IS THE REGIONAL LANE'S CONTRACT, not an
+            # option. A repeated block is by construction one traceable unit
+            # — that is the whole reason its author declared `regional=True`
+            # — so a break inside it is an AUTHORING DEFECT, and the only
+            # question is whether the platform says so. Without fullgraph
+            # dynamo splits the block into eager-glued fragments and reports
+            # a clean arm: armed, entered, zero guard misses, zero speedup
+            # (ie#632/pgw#1078, 6.27 s/step against the rig's 4.31 for the
+            # identical recipe). With it the break raises, `_guarded_regional`
+            # classifies it as `graph_break`, the wire flips to explicit
+            # eager, and the break reasons ride the `jit_compile` event.
+            # There is no configuration surface for this: a silently
+            # fragmented region must not be expressible.
+            owner.compile_repeated_blocks(dynamic=None, fullgraph=True)
             # pgw#1078: the declared marks are applied at the BLOCK ingress,
             # which is where this lane's graphs are traced. Without them
             # `regional=True` + `dynamic=(...)` used to DECLINE and send the
@@ -3213,6 +3458,29 @@ def is_compile_armed(pipeline: Any) -> bool:
     if isinstance(signal, dict) and signal.get("degraded"):
         return False
     return True
+
+
+def graph_break_reason(pipeline: Any) -> str:
+    """Torch's verbatim fullgraph refusal for this pipeline, or "".
+
+    Non-empty means the declared region did not trace whole and this process
+    permanently degraded it to eager. The executor turns it into the
+    ``graph_break`` eager posture, so every request the pod serves afterwards
+    names the real cause instead of an empty ``fallback_reason``."""
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
+    if isinstance(signal, dict):
+        return str(signal.get("graph_break") or "")
+    return ""
+
+
+def declared_range_refusal(pipeline: Any) -> str:
+    """The typed declared-range refusal for this pipeline, or ""."""
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
+    if isinstance(signal, dict):
+        return str(signal.get("declared_range_exceeded") or "")
+    return ""
 
 
 def unwrap(pipeline: Any) -> bool:
@@ -3574,7 +3842,7 @@ def emit_jit_compile_event(
     family: str,
     execution_lane: str = "",
     route: str = "",
-    n_graphs: int = 0,
+    audit: Optional[GraphAudit] = None,
 ) -> None:
     """th#1322: report a JIT (dynamo/inductor) compile as typed NUMERIC events.
 
@@ -3586,11 +3854,19 @@ def emit_jit_compile_event(
     a grep of the other side's pod log (which a serve pod does not even
     expose, pgw#760).
 
+    pgw#1082: ``audit`` carries dynamo's OWN graph/break counters for this
+    compile window. It replaces the ``n_graphs`` parameter that shipped with
+    no caller — the blindness that let a graph-broken region report a clean
+    arm for two releases. A window with breaks also emits its own
+    ``phase=graph_break`` event per reason, so "which op cut this region"
+    is a column, not a pod log nobody can reach.
+
     Telemetry must never fail the compile it reports on.
     """
     try:
         from . import activity as activity_mod
 
+        audit = audit if audit is not None else GraphAudit()
         total_s = sum(float(v or 0.0) for v in timings.values())
         head = f"family={family or '(unset)'}"
         if execution_lane:
@@ -3607,11 +3883,17 @@ def emit_jit_compile_event(
                 phase=f"shape:{key}",
                 duration_ms=int(round(value * 1000)),
             )
+        for reason, count in audit.reasons[:8]:
+            activity_mod.emit_event(
+                activity_mod.KIND_JIT_COMPILE,
+                f"{head} graph_break x{count}: {_clip(reason, 300)}",
+                phase="graph_break",
+            )
         if total_s <= 0:
             return
         activity_mod.emit_event(
             activity_mod.KIND_JIT_COMPILE,
-            f"{head} n_shapes={len(timings)} n_graphs={n_graphs} "
+            f"{head} n_shapes={len(timings)} {audit.summary()} "
             f"total_s={round(total_s, 2)} shapes={dict(timings)}",
             phase=activity_mod.PHASE_MINTED,
             duration_ms=int(round(total_s * 1000)),
@@ -3638,6 +3920,7 @@ def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -
 
     decode = any(t.startswith("vae") for t in cfg.targets)
     timings: Dict[str, float] = {}
+    audit_before = graph_audit()
     for shape in cfg.shapes:
         torch.cuda.synchronize()
         t0 = time.monotonic()
@@ -3657,9 +3940,12 @@ def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -
     # (compile_cache.py:3803, "compiled %s in %.0fs") — a log-only important
     # metric, which is a defect class, not a style choice. Now it is a number in
     # a column too.
+    audit = graph_audit_delta(audit_before)
+    _say(f"  {audit.summary()}")
     emit_jit_compile_event(
         timings, family=getattr(cfg, "family", "") or "",
-        execution_lane=pipeline_weight_lane(pipe), route="compile_and_warm")
+        execution_lane=pipeline_weight_lane(pipe), route="compile_and_warm",
+        audit=audit)
 
 
 def mint_artifact(

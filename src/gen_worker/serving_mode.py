@@ -79,6 +79,10 @@ POSTURE_MINT_IN_PROGRESS = EagerPhase.MINT_IN_PROGRESS.value
 POSTURE_NO_COMPILE_DECLARED = EagerPhase.NO_COMPILE_DECLARED.value
 #: Terminal fallback when a decline reached the request path unclassified.
 POSTURE_UNCOMPILED = EagerPhase.UNCOMPILED.value
+#: pgw#1082: the declared region did not trace whole under fullgraph.
+POSTURE_GRAPH_BREAK = EagerPhase.GRAPH_BREAK.value
+#: pgw#1082: the declaration named a dynamic range its own inputs leave.
+POSTURE_DECLARED_RANGE_EXCEEDED = EagerPhase.DECLARED_RANGE_EXCEEDED.value
 
 #: Step-count field names, in precedence order. Matches warmup._STEP_FIELDS so
 #: the boot warmup and the served request agree on what "steps" means.
