@@ -130,7 +130,7 @@ def _meta(**over: Any) -> Dict[str, Any]:
         # pgw#1097: no weight BYTES in the .so (above) and no weight VALUES in
         # its kernels (here). Both are declared axes; a cell silent on either
         # is refused before a byte moves.
-        "always_keep_tensor_constants": True,
+        "constant_folding_fenced": True,
         "source_ref": "", "source_digest": "",
         # pgw#950: every mint stamps a host-ISA requirement, and a cell that
         # stamps none is refused rather than sniffed from the .pt2. Satisfiable

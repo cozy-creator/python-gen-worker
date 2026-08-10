@@ -151,17 +151,32 @@ CODE_ONLY_CONFIGS: Dict[str, Any] = {
 #: one recorded real-weight elimination was — sdxl's ``unet.conv_out.bias``,
 #: 4 floats — which the tree had filed as routine conv-epilogue fusion.
 #:
-#: ``always_keep_tensor_constants`` rather than
-#: ``aot_inductor.use_runtime_constant_folding``: both restore bindability, but
-#: the runtime-folding split ALSO materializes a ``_FOLDED_CONST_*`` tensor per
-#: folded op at load — measured 106,496 extra bytes on a 1.1 MB micro decoder,
-#: which are permuted copies of its linear weights. At sdxl scale that is
-#: duplicated weight-sized VRAM on every serving pod, for a fence this flag
-#: gives for nothing. Weightless mints keep the runtime split as well: their
-#: values are FAKE, which is a different failure with a different fix
-#: (pgw#1080).
+#: **Why the RUNTIME-FOLDING split and not ``always_keep_tensor_constants``.**
+#: Both restore bindability, and the cheaper-looking flag is the wrong one —
+#: CI proved it. ``always_keep_tensor_constants`` also retains ANONYMOUS graph
+#: literals (``_tensor_constant0``) as ORDINARY constants, and a literal the
+#: recorded program never lifted is precisely the ``program_package_drift``
+#: refusal (pgw#704 B1): "the package declares a constant the program never
+#: lifted — nothing would bind it and the first call would segfault". Measured
+#: on a plain-attribute table built inside ``forward`` (the pgw#857 authoring
+#: violation, `test_aot_multigraph_pgw758.WarmSensitive`): every mint of that
+#: shape REFUSED. The runtime split has no such problem because its outputs are
+#: ``FoldedConstant``/``SOURCE_COMPUTED`` rows, which that gate ALREADY exempts
+#: — a carve-out pgw#1080 added for this exact flag, and which no equivalent
+#: exists for the other one.
+#:
+#: The price is honest and is paid on purpose: the split materializes a
+#: ``_FOLDED_CONST_*`` tensor per folded op at load — measured 106,496 bytes on
+#: a 1.1 MB micro decoder (permuted copies of its linear weights, ~10% of model
+#: size). **Unmeasured at sdxl scale and owed**; do not extrapolate the 10%,
+#: since which ops fold is graph-shaped. It buys the property that one cell may
+#: legally serve every fine-tune of a family, which is the whole cell economy.
+#:
+#: Weightless mints (pgw#1080) needed this same flag for a DIFFERENT reason —
+#: their values are fake — so the two motives now converge on one config and
+#: there is no longer a weightless special case.
 CONSTANT_BINDING_CONFIGS: Dict[str, Any] = {
-    "always_keep_tensor_constants": True,
+    "aot_inductor.use_runtime_constant_folding": True,
 }
 
 
@@ -797,19 +812,15 @@ def _entry_configs(
     # Emit loose files for package_aoti to combine, instead of a per-entry
     # archive: the multi-graph cell is ONE .pt2 (pgw#758).
     configs["aot_inductor.package"] = True
-    if weightless:
-        # pgw#1080, MEASURED and it is the difference between a cell and a
-        # ruined one. Inductor folds constants at COMPILE time by default,
-        # which BAKES THE VALUES IT SAW: on a structure-only mint those
-        # values are fake, and the artifact then declares fewer bindable
-        # constants than the module has — the micro decoder's
-        # `norm.weight`/`norm.bias` simply vanished, and the adopted cell
-        # scored cosine 0.13 against eager. Deferring the fold to RUNTIME
-        # keeps every parameter bindable (they reappear, plus explicit
-        # `_FOLDED_CONST_*` rows computed after binding), which is also what
-        # the pgw#1056 folding fence asks for: a rebindable weight must never
-        # have its value compiled in.
-        configs["aot_inductor.use_runtime_constant_folding"] = True
+    # pgw#1080's weightless motive and pgw#1097's real-weight motive converge
+    # on ONE config, so `weightless` no longer selects anything here. It stays
+    # in the signature because callers pass it and because the two motives are
+    # worth keeping distinct in the record: weightless mints must defer the
+    # fold because the values they would bake are FAKE (micro decoder's
+    # `norm.weight`/`norm.bias` vanished; the adopted cell scored cosine 0.13);
+    # real-weight mints must defer it because the values they would bake are
+    # one CHECKPOINT'S, which no other fine-tune could rebind.
+    del weightless
     return configs
 
 

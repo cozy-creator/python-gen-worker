@@ -669,7 +669,7 @@ def artifact_metadata(
         # refused pre-download when absent — a cell minted before the fence
         # may carry its minting checkpoint's copy of any 0-dim or <=8-element
         # weight, which is exactly the tensor a fine-tune changes.
-        "always_keep_tensor_constants": True,
+        "constant_folding_fenced": True,
         "source_ref": str(source_ref or ""),
         "source_digest": str(source_digest or ""),
         # pgw#754: the host-CPU execution requirement of the packaged host
@@ -699,7 +699,7 @@ def artifact_metadata(
 #: that nothing it strips appears here.
 DECLARED_AXES: Tuple[str, ...] = (
     "format", "kind", "package_constants_in_so",
-    "always_keep_tensor_constants", *IDENTITY_AXES,
+    "constant_folding_fenced", *IDENTITY_AXES,
     "host_isa", "family",
 )
 
@@ -740,10 +740,10 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
     # or <=8-element weight inductor inlined, so it is sound for exactly one
     # fine-tune and silently wrong for the rest. Absent flag = a pre-fence
     # mint; refused, not warned about, and re-minting is the remedy.
-    if meta.get("always_keep_tensor_constants") is not True:
+    if meta.get("constant_folding_fenced") is not True:
         return (
             "artifact was minted without the folding fence "
-            "(always_keep_tensor_constants != True; its weights may carry the "
+            "(constant_folding_fenced != True; its weights may carry the "
             "minting checkpoint's values — pgw#1097). Re-mint")
     here = runtime_key()
     if not here["torch"]:

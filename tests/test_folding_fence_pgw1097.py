@@ -2,7 +2,7 @@
 
 One cell serves every fine-tune of a family because weights rebind BY NAME at
 load (pgw#857). That is sound only while the compiled code holds no weight
-VALUE. With ``always_keep_tensor_constants`` off — torch's default, and what
+VALUE. With ``constant_folding_fenced`` off — torch's default, and what
 every real-weight mint ran under until this issue — ``GraphLowering.get_attr``
 renders a constant's values straight into the kernel source when its SHAPE
 meets either rule: 0-dim (via ``.item()``), or ``len(shape) == 1 and
@@ -176,23 +176,36 @@ def test_no_state_dict_means_no_verdict(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+FENCE_FLAG = "aot_inductor.use_runtime_constant_folding"
+
+
 def test_every_mint_compiles_with_the_fence_on() -> None:
     configs = aot_mint._entry_configs(None)
-    assert configs["always_keep_tensor_constants"] is True
+    assert configs[FENCE_FLAG] is True
     assert configs["aot_inductor.package_constants_in_so"] is False
 
 
-def test_weightless_keeps_its_own_runtime_fold_as_well() -> None:
-    """pgw#1080's fix is for FAKE values and is a different failure; the two
-    fences compose rather than replace each other."""
-    configs = aot_mint._entry_configs(None, weightless=True)
-    assert configs["always_keep_tensor_constants"] is True
-    assert configs["aot_inductor.use_runtime_constant_folding"] is True
+def test_weightless_and_real_weight_mints_share_one_config() -> None:
+    """pgw#1080 needed this flag because a weightless mint's values are FAKE;
+    pgw#1097 needs it because a real mint's values are one CHECKPOINT'S. Two
+    motives, one config — so `weightless` no longer selects anything."""
+    assert (aot_mint._entry_configs(None, weightless=True)
+            == aot_mint._entry_configs(None, weightless=False))
 
 
 def test_a_caller_cannot_turn_the_fence_off() -> None:
-    configs = aot_mint._entry_configs({"always_keep_tensor_constants": False})
-    assert configs["always_keep_tensor_constants"] is True
+    configs = aot_mint._entry_configs({FENCE_FLAG: False})
+    assert configs[FENCE_FLAG] is True
+
+
+def test_the_fence_does_not_use_always_keep_tensor_constants() -> None:
+    """The other flag restores bindability too and is NOT what ships: it also
+    retains anonymous graph literals as ORDINARY constants, and a literal the
+    recorded program never lifted is exactly the `program_package_drift`
+    refusal. Measured red in CI on `WarmSensitive` (a plain-attribute table
+    built inside `forward`). The runtime split's outputs are `FoldedConstant`
+    rows, which that gate already exempts."""
+    assert "always_keep_tensor_constants" not in aot_mint._entry_configs(None)
 
 
 # ---------------------------------------------------------------------------
@@ -219,8 +232,8 @@ def _meta(**over: object) -> dict:
 
 
 def test_a_fenced_mint_declares_it() -> None:
-    assert _meta()["always_keep_tensor_constants"] is True
-    assert "always_keep_tensor_constants" in aot_serve.DECLARED_AXES
+    assert _meta()["constant_folding_fenced"] is True
+    assert "constant_folding_fenced" in aot_serve.DECLARED_AXES
 
 
 def test_a_pre_fence_cell_is_refused_before_a_byte_moves() -> None:
@@ -229,7 +242,7 @@ def test_a_pre_fence_cell_is_refused_before_a_byte_moves() -> None:
     any inlined weight, so it is sound for exactly one fine-tune. Absent flag
     = a pre-fence mint."""
     stale = _meta()
-    stale.pop("always_keep_tensor_constants")
+    stale.pop("constant_folding_fenced")
     reason = aot_serve.verify_declared(stale)
     assert "folding fence" in reason and "pgw#1097" in reason
 
@@ -241,7 +254,7 @@ def test_a_fenced_cell_passes_the_declared_gate() -> None:
 @pytest.mark.parametrize("value", [False, "true", None, 1])
 def test_only_a_real_true_satisfies_the_gate(value: object) -> None:
     assert "folding fence" in aot_serve.verify_declared(
-        _meta(always_keep_tensor_constants=value))
+        _meta(constant_folding_fenced=value))
 
 
 # ---------------------------------------------------------------------------

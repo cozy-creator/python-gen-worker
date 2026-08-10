@@ -164,7 +164,7 @@ def _meta(**over):
         "package_constants_in_so": False,
         # pgw#1097: the folding fence, declared (see the fixture note in
         # test_aot_adopt_events_pgw733).
-        "always_keep_tensor_constants": True,
+        "constant_folding_fenced": True,
         "source_ref": "", "source_digest": "",
         "host_isa": dict(HOST_ISA),
     }

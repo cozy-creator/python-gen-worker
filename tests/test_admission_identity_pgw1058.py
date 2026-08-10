@@ -214,7 +214,17 @@ def real_package(tmp_path_factory):
     path = tmp_path_factory.mktemp("pgw1058") / "m.pt2"
     torch._inductor.aoti_compile_and_package(
         program, package_path=str(path),
-        inductor_configs={"aot_inductor.package_constants_in_so": False})
+        # pgw#1097: compile like a REAL mint does. Without the folding fence
+        # this module's `lin.bias` is 1-D with 8 elements, which meets
+        # `GraphLowering.can_inline_constant`, so inductor renders its values
+        # into the kernel and the weight leaves the artifact's constant table
+        # entirely — and the mint's folding fence then refuses this package
+        # BEFORE the admission gate this fixture exists to exercise. That
+        # refusal is correct (it is the pgw#1097 hazard, reproduced here by
+        # accident on an unrelated fixture); it is simply not what these tests
+        # are about.
+        inductor_configs={"aot_inductor.package_constants_in_so": False,
+                          "aot_inductor.use_runtime_constant_folding": True})
     return program, path
 
 

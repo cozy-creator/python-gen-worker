@@ -51,10 +51,10 @@ about the WEIGHTS, not about the compiled program:
   configures the compiler by how the code is written, never out of band.
   **Its DYNAMIC half has a named enforcement point since pgw#1097**: mints
   compile under `aot_mint.CONSTANT_BINDING_CONFIGS`
-  (`always_keep_tensor_constants=True`, which stops inductor inlining a 0-dim
-  or `<=8`-element tensor's values into the kernel) and
-  `aot_package.folded_weights` refuses, per entry, any lifted weight the
-  compiled artifact does not declare. `always_keep_tensor_constants` is a
+  (`aot_inductor.use_runtime_constant_folding=True`, which defers the fold to
+  load so inductor cannot inline a 0-dim or `<=8`-element tensor's values into
+  the kernel) and `aot_package.folded_weights` refuses, per entry, any lifted
+  weight the compiled artifact does not declare. `constant_folding_fenced` is a
   declared axis, so a pre-fence cell is refused before a byte moves.
   Authoring rules in `docs/endpoint-authoring.md`. (pgw#857; was
   "weight-binding".)
