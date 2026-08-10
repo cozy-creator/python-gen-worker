@@ -209,6 +209,13 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "NO_COMPILE_DECLARED": "no_compile_declared",
         "UNCOMPILED": "uncompiled",
         "BOOT_ENDED_UNCOMPILED": "boot_ended_uncompiled",
+        # pgw#1082: the two AUTHORING defects a compiled lane can die of, each
+        # named. Before them, a regional target that degraded on its first
+        # call recorded NOTHING (the guard-failure path returns early for a
+        # JIT intake arm, which names no artifact) and the pod served eager
+        # for its whole life reporting `serving_mode=jit_cell`.
+        "GRAPH_BREAK": "graph_break",
+        "DECLARED_RANGE_EXCEEDED": "declared_range_exceeded",
     }
     # The join the ArmOutcome docstring claims: a delegated mint's decline and
     # the serving posture that describes it are ONE token, not two that happen
@@ -217,6 +224,9 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
     assert EagerPhase.ARM_PENDING == serving_mode.POSTURE_ARM_PENDING
     assert EagerPhase.NO_COMPILE_DECLARED == serving_mode.POSTURE_NO_COMPILE_DECLARED
     assert EagerPhase.UNCOMPILED == serving_mode.POSTURE_UNCOMPILED
+    assert EagerPhase.GRAPH_BREAK == serving_mode.POSTURE_GRAPH_BREAK
+    assert (EagerPhase.DECLARED_RANGE_EXCEEDED
+            == serving_mode.POSTURE_DECLARED_RANGE_EXCEEDED)
 
 
 def test_the_posture_tokens_are_the_enum_and_not_a_second_spelling() -> None:

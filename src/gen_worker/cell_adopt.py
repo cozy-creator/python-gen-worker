@@ -122,6 +122,19 @@ class EagerPhase(StrEnum):
     #: and it must mean "nothing is dispatchable" (pgw#844), never "partial".
     BOOT_ENDED_UNCOMPILED = "boot_ended_uncompiled"
 
+    #: pgw#1082: the declared region did not trace WHOLE. Dynamo's fullgraph
+    #: refusal fired, the platform refused to serve eager-glued fragments as
+    #: compiled, and this instance degraded to explicit eager. An AUTHORING
+    #: defect in the endpoint's block, named as one — never a silent 1.0x
+    #: "compiled" lane (the ie#632/pgw#1078 failure class).
+    GRAPH_BREAK = "graph_break"
+
+    #: pgw#1082: the endpoint's `dynamic=(...)` declaration names a range its
+    #: own inputs leave, so the declared marks cannot be applied and the
+    #: target degraded to eager. Also an AUTHORING defect, and the one that
+    #: actually cost minimax-h3 its compiled wall.
+    DECLARED_RANGE_EXCEEDED = "declared_range_exceeded"
+
     #: `_fail_closed`'s default, for a caller that has not classified its exit.
     #: A new decline landing here rather than on its own member is the
     #: regression pgw#824 exists to catch.

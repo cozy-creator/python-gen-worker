@@ -4099,6 +4099,30 @@ class Executor:
         """
         if rec.compile_targets.get(target.incarnation_id) is not target:
             raise RuntimeError("compiled target is no longer live")
+        # pgw#1082: classify BEFORE the active-ref gate below. A JIT INTAKE
+        # arm names no artifact by construction (pgw#1010), so that gate
+        # returns early for exactly the lane this defect lives on — and the
+        # graph-broken pod would keep reporting an empty `fallback_reason`.
+        broke = compile_cache.graph_break_reason(target.pipeline)
+        out_of_range = compile_cache.declared_range_refusal(target.pipeline)
+        if broke:
+            self._note_eager_posture(
+                rec, cell_adopt.EagerPhase.GRAPH_BREAK.value,
+                f"the declared regional target did not trace WHOLE under "
+                f"fullgraph; serving eager rather than eager-glued fragments "
+                f"reported as compiled: {broke}")
+        elif out_of_range:
+            self._note_eager_posture(
+                rec, cell_adopt.EagerPhase.DECLARED_RANGE_EXCEEDED.value,
+                out_of_range)
+        elif detail:
+            # pgw#1082: ANY permanent guard degrade must reach the request
+            # row. The gate below returns early for a JIT INTAKE arm (it
+            # names no artifact by construction, pgw#1010) — which is the
+            # only JIT lane the fleet has — so before this, a degraded
+            # intake pod recorded nothing at all and served eager silently.
+            self._note_eager_posture(
+                rec, cell_adopt.EagerPhase.JIT_ARM_FAILED.value, detail)
         with target.state_lock:
             if not (
                 target.active_compile_ref
@@ -5244,12 +5268,18 @@ class Executor:
         Fixed-mode bodies override it; a declared (handles=) instruction owns
         the full lane outright."""
 
+        # pgw#1082: the SAME reading `serving_mode.classify_mode` takes. A
+        # ref-only test made `metrics.lane` report `+eager` while
+        # `serving_mode` correctly reported `jit_cell` on the same request —
+        # a contradiction `_served_identity`'s docstring says cannot happen,
+        # because a JIT INTAKE arm names no artifact by construction.
         compiled = False
         if spec.cls is not None:
             rec = self._classes.get(spec.instance_key)
             if rec is not None:
                 compiled = any(
                     getattr(t, "active_compile_ref", "")
+                    or compile_cache.is_compile_armed(t.pipeline)
                     for t in rec.compile_targets.values())
         handled = self._handled_execution_lane_body(spec, instructed)
         if handled:
@@ -5713,9 +5743,19 @@ class Executor:
         part that was always real: the mint-goal latch and the pgw#805 backstop
         below.
         """
+        # pgw#1082: "is this record serving compiled" is ONE question with
+        # ONE answer. Reading only `active_compile_ref` asks "does it serve a
+        # NAMED artifact", and a JIT INTAKE arm names none BY CONSTRUCTION
+        # (pgw#1010) — so this row could never clear for an intake pod even
+        # while it served compiled, and 0.4.3 emitted `boot_ended_uncompiled`
+        # on a healthy H100. `is_compile_armed` is the same reading
+        # `_served_identity` and `serving_mode` take.
         armed = next(
             (t.active_compile_ref for t in rec.compile_targets.values()
-             if t.active_compile_ref), "")
+             if t.active_compile_ref), "") or (
+            "jit_intake" if any(
+                compile_cache.is_compile_armed(t.pipeline)
+                for t in rec.compile_targets.values()) else "")
         # th#1359: reaching here means this boot's mint disposition is FINAL
         # on every path (inline setup, adopted cell, eager-without-mint, and
         # the background mint's own `finally`). The mint-goal driver waits on
@@ -6861,6 +6901,10 @@ class Executor:
             # remaining dynamo compile on the platform would have been the one
             # nobody timed. A counter read costs nothing.
             compile_seconds_before = compile_cache.compile_wall_seconds()
+            # pgw#1082: dynamo's own graph/break counters across the SAME
+            # window. "How many graphs did this arm produce, and what cut
+            # them" was unanswerable over our telemetry until this sample.
+            graph_audit_before = compile_cache.graph_audit()
             # pgw#797: THE warmup split. `pipeline_load` used to be
             # load+warmup as one number, so "what does a cell save on warmup"
             # was only ever an estimate (`pipeline_load` minus a guessed
@@ -6926,6 +6970,7 @@ class Executor:
                     family=str(getattr(spec.compile, "family", "") or ""),
                     execution_lane=self._served_execution_lane(spec),
                     route="intake",
+                    audit=compile_cache.graph_audit_delta(graph_audit_before),
                 )
             if proves_inductor or proves_exported:
                 # gw#595 per-object provability: the proof scopes to objects
