@@ -51,6 +51,10 @@ ORDER = (
     "micro-w8a8",
     "micro-w8a8-lora",
     "micro-lora-plain-parent",
+    # pgw#1079: last, and GPU-only — they hold 3 GiB of ballast on the card,
+    # so a cardless box reports them NOT-RUN rather than pretending.
+    "micro-residency",
+    "micro-residency-serve",
 )
 
 
