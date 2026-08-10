@@ -138,6 +138,48 @@ CODE_ONLY_CONFIGS: Dict[str, Any] = {
     "aot_inductor.package_constants_in_so": False,
 }
 
+#: The inductor config that keeps every lifted weight BINDABLE. Not a knob
+#: either, and for the same reason B1 is not one — this is what makes one cell
+#: legally serve every fine-tune of a family (pgw#1097, pgw#857).
+#:
+#: Off (the torch default), ``GraphLowering.get_attr`` inlines a constant whose
+#: SHAPE meets either of two rules — 0-dim, or ``len(shape) == 1 and
+#: shape[0] <= 8`` — by rendering its VALUES into the generated kernel. Those
+#: values are the minting checkpoint's, and the constant then appears in no
+#: table anyone could rebind. MEASURED on torch 2.13.0 (pgw#1097): a 4-element
+#: conv bias, an 8-element group-norm scale and a 0-dim learned scalar all left
+#: the bindable set; with this flag all three stay. It is also what the fleet's
+#: one recorded real-weight elimination was — sdxl's ``unet.conv_out.bias``,
+#: 4 floats — which the tree had filed as routine conv-epilogue fusion.
+#:
+#: **Why the RUNTIME-FOLDING split and not ``always_keep_tensor_constants``.**
+#: Both restore bindability, and the cheaper-looking flag is the wrong one —
+#: CI proved it. ``always_keep_tensor_constants`` also retains ANONYMOUS graph
+#: literals (``_tensor_constant0``) as ORDINARY constants, and a literal the
+#: recorded program never lifted is precisely the ``program_package_drift``
+#: refusal (pgw#704 B1): "the package declares a constant the program never
+#: lifted — nothing would bind it and the first call would segfault". Measured
+#: on a plain-attribute table built inside ``forward`` (the pgw#857 authoring
+#: violation, `test_aot_multigraph_pgw758.WarmSensitive`): every mint of that
+#: shape REFUSED. The runtime split has no such problem because its outputs are
+#: ``FoldedConstant``/``SOURCE_COMPUTED`` rows, which that gate ALREADY exempts
+#: — a carve-out pgw#1080 added for this exact flag, and which no equivalent
+#: exists for the other one.
+#:
+#: The price is honest and is paid on purpose: the split materializes a
+#: ``_FOLDED_CONST_*`` tensor per folded op at load — measured 106,496 bytes on
+#: a 1.1 MB micro decoder (permuted copies of its linear weights, ~10% of model
+#: size). **Unmeasured at sdxl scale and owed**; do not extrapolate the 10%,
+#: since which ops fold is graph-shaped. It buys the property that one cell may
+#: legally serve every fine-tune of a family, which is the whole cell economy.
+#:
+#: Weightless mints (pgw#1080) needed this same flag for a DIFFERENT reason —
+#: their values are fake — so the two motives now converge on one config and
+#: there is no longer a weightless special case.
+CONSTANT_BINDING_CONFIGS: Dict[str, Any] = {
+    "aot_inductor.use_runtime_constant_folding": True,
+}
+
 
 class MintResourceExhausted(RuntimeError):
     """This mint ran out of MEMORY. It is not a refusal, and the difference
@@ -752,36 +794,34 @@ def _entry_configs(
     inductor_configs: Optional[Mapping[str, Any]], *, weightless: bool = False,
 ) -> Dict[str, Any]:
     """The per-entry inductor config: caller options + the non-negotiable
-    packaging flags. ``CODE_ONLY_CONFIGS`` is applied LAST so no caller-
-    supplied config can re-enable constant baking — B1 is a fleet
-    correctness requirement, not a default a caller may override. One cell's
+    packaging flags. ``CODE_ONLY_CONFIGS`` and ``CONSTANT_BINDING_CONFIGS``
+    are applied LAST so no caller-supplied config can re-enable constant
+    baking or weight inlining — B1 and the folding fence are fleet
+    correctness requirements, not defaults a caller may override. One cell's
     entries ALL compile under this one dict (a per-entry config drift would
     be an identity fact nothing records), and the resolved dict is recorded
     in the mint-phase telemetry."""
     configs: Dict[str, Any] = dict(inductor_configs or {})
     configs.setdefault("compile_threads", MINT_COMPILE_THREADS)
-    overridden = sorted(set(configs) & set(CODE_ONLY_CONFIGS))
+    non_negotiable = {**CODE_ONLY_CONFIGS, **CONSTANT_BINDING_CONFIGS}
+    overridden = sorted(set(configs) & set(non_negotiable))
     if overridden:
         logger.warning(
-            "aot-mint: ignoring caller inductor config %s — code-only is B1, "
-            "not a knob", overridden)
-    configs.update(CODE_ONLY_CONFIGS)
+            "aot-mint: ignoring caller inductor config %s — code-only (B1) "
+            "and the folding fence (pgw#1097) are not knobs", overridden)
+    configs.update(non_negotiable)
     # Emit loose files for package_aoti to combine, instead of a per-entry
     # archive: the multi-graph cell is ONE .pt2 (pgw#758).
     configs["aot_inductor.package"] = True
-    if weightless:
-        # pgw#1080, MEASURED and it is the difference between a cell and a
-        # ruined one. Inductor folds constants at COMPILE time by default,
-        # which BAKES THE VALUES IT SAW: on a structure-only mint those
-        # values are fake, and the artifact then declares fewer bindable
-        # constants than the module has — the micro decoder's
-        # `norm.weight`/`norm.bias` simply vanished, and the adopted cell
-        # scored cosine 0.13 against eager. Deferring the fold to RUNTIME
-        # keeps every parameter bindable (they reappear, plus explicit
-        # `_FOLDED_CONST_*` rows computed after binding), which is also what
-        # the pgw#1056 folding fence asks for: a rebindable weight must never
-        # have its value compiled in.
-        configs["aot_inductor.use_runtime_constant_folding"] = True
+    # pgw#1080's weightless motive and pgw#1097's real-weight motive converge
+    # on ONE config, so `weightless` no longer selects anything here. It stays
+    # in the signature because callers pass it and because the two motives are
+    # worth keeping distinct in the record: weightless mints must defer the
+    # fold because the values they would bake are FAKE (micro decoder's
+    # `norm.weight`/`norm.bias` vanished; the adopted cell scored cosine 0.13);
+    # real-weight mints must defer it because the values they would bake are
+    # one CHECKPOINT'S, which no other fine-tune could rebind.
+    del weightless
     return configs
 
 
@@ -3135,7 +3175,18 @@ def _release_mint_residents(
 
 
 def _structure_only_drift_hint(row: _MintedEntry) -> str:
-    """Name the AUTHORING cause a structure-only mint's drift usually has.
+    """Name the AUTHORING cause a drift refusal usually has.
+
+    pgw#1097 WIDENED this from structure-only to EVERY mint, because the cause
+    stopped being structure-only. With the folding fence on, nothing is
+    inlined, so a plain-attribute table reaches the artifact's constant table
+    under AOTInductor's own name (``_tensor_constant0``) while the exported
+    program lifted it under its ATTRIBUTE PATH (``_table``) — measured — and
+    the two no longer reconcile. That was always fatal for a literal large
+    enough to be declared; the fence merely removes the size threshold
+    (0-dim, or 1-D with <=8 elements) that used to hide it by baking the
+    values instead. The fix is the same one the tensor-binding contract has
+    always asked for, so the message points at it.
 
     Measured (pgw#1080, micro-rope RED control): a table built lazily inside
     ``forward`` under ``with torch.device("cpu")`` is FAKE during a
@@ -3146,15 +3197,19 @@ def _structure_only_drift_hint(row: _MintedEntry) -> str:
     symptom. This names the class of cause, so the author gets a place to
     look instead of a compiler sentence.
     """
-    if not structure_only.is_structure_only(row.owner):
-        return ""
-    return (
-        ". This mint built its target from code + config (pgw#1080), and the "
-        "usual cause of drift there is a tensor BUILT INSIDE `forward` "
-        "instead of registered at __init__ — it is lifted as an anonymous "
-        "graph literal rather than as a bindable buffer. Register derived "
-        "tables with `register_buffer` and no device pin (ie#630's "
-        "`rope_buffers` is the worked example)")
+    hint = (
+        ". The usual cause is a tensor BUILT INSIDE `forward`, or held as a "
+        "PLAIN ATTRIBUTE, instead of registered at __init__: export lifts it "
+        "under its attribute path while the compiled artifact names it "
+        "`_tensor_constant0`, so nothing can reconcile the two and nothing "
+        "could bind it. Register derived tables with `register_buffer` and no "
+        "device pin (ie#630's `rope_buffers` is the worked example; pgw#857 "
+        "is the contract, pgw#1097 is why it is now load-bearing at every "
+        "size rather than only above the inlining threshold)")
+    if structure_only.is_structure_only(row.owner):
+        return (
+            ". This mint built its target from code + config (pgw#1080)" + hint)
+    return hint
 
 
 def _gate_and_declare_entry(
@@ -3182,13 +3237,26 @@ def _gate_and_declare_entry(
         raise MintRefused(
             f"entry {entry!r}: constant-set drift: " + "; ".join(drift)
             + _structure_only_drift_hint(row))
+    # pgw#1097, THE FOLDING FENCE. `CONSTANT_BINDING_CONFIGS` is what prevents
+    # a weight's values from being compiled in; this is what PROVES it, per
+    # entry, against the artifact's own table. Without the proof the setting is
+    # a hope: an inlining route torch adds tomorrow would ship a cell that
+    # serves the minting checkpoint's tensor to every other fine-tune, and the
+    # only thing to notice would be the adopt-side parity floor refusing that
+    # cell on every checkpoint but one — cell sharing dying quietly.
+    folded = aot_package.folded_weights(
+        row.program, package, _state_dict_keys(row.owner), entry)
+    if folded:
+        raise MintRefused(
+            f"entry {entry!r}: folding fence (pgw#1097): " + "; ".join(folded))
     fused = aot_package.eliminated_constants(row.program, package, entry)
     if fused:
-        # Routine compiler fusion (measured on real sdxl: conv_out.bias folded
-        # into the conv epilogue). Recorded, never fatal — but a surprising jump
-        # in the count should be visible rather than silently discarded.
+        # What is LEFT here is anonymous graph literals, never a weight — the
+        # fence above has already refused those. Recorded, never fatal, but a
+        # surprising jump in the count should be visible rather than silently
+        # discarded.
         logger.info(
-            "aot-mint: %s: %d lifted constant(s) fused away by the compiler "
+            "aot-mint: %s: %d lifted literal(s) folded away by the compiler "
             "(e.g. %s)", entry, len(fused), fused[:3])
     try:
         block = keying_block(row.program, row.flat_leaves, row.spec)

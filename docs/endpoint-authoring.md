@@ -134,6 +134,34 @@ number you probably meant to be a cache.
 
 A registered buffer costs nothing and stays a weight.
 
+### The DYNAMIC half is now ENFORCED at mint, not assumed (pgw#1097)
+
+"An opaque slot the compiler must never value-specialize" was, until this
+issue, a property nothing checked. Inductor does not read the contract: with
+constant folding left at torch's default, `GraphLowering.get_attr`
+renders a lifted tensor's VALUES straight into the kernel source whenever its
+**shape** meets either rule, 0-dim or `len(shape) == 1 and shape[0] <= 8`. The
+tensor then appears in no table anyone can rebind, so the cell carries the
+minting checkpoint's copy and every other fine-tune of the family silently gets
+the wrong numbers. It is a shape rule, not a value rule: small norms, group-norm
+scales, `logit_scale`-style learned scalars and short conv biases are the whole
+target set, and they are exactly the tensors a fine-tune changes.
+
+Two things close it, and you need neither in your model code:
+
+- every mint compiles under `aot_mint.CONSTANT_BINDING_CONFIGS`
+  (`aot_inductor.use_runtime_constant_folding=True`), which defers the fold to
+  load so nothing is inlined; and
+- `aot_package.folded_weights` PROVES it per entry against the artifact's own
+  constant table, and a mint that lifted a weight the package does not declare
+  is **refused by name**. A cell minted before the fence is refused at adoption
+  too — `constant_folding_fenced` is a declared axis, like
+  `package_constants_in_so`.
+
+What this means for you: the classification you choose by assignment style is
+now the classification you get. A `state_dict` tensor is DYNAMIC all the way to
+the kernel, whatever its shape.
+
 ### Corollary: a GB-scale derived tensor is a saved component, not a buffer (pgw#1056)
 
 The buffer rule above assumes the tensor is small enough that computing it at

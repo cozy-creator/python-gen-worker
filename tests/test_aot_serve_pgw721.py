@@ -162,6 +162,9 @@ def _meta(**over):
         "cell_key": "deadbeef", "entries": entries,
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
+        # pgw#1097: the folding fence, declared (see the fixture note in
+        # test_aot_adopt_events_pgw733).
+        "constant_folding_fenced": True,
         "source_ref": "", "source_digest": "",
         "host_isa": dict(HOST_ISA),
     }
