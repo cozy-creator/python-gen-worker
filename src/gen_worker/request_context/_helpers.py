@@ -25,11 +25,6 @@ logger = logging.getLogger(__name__)
 
 _PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 _MAX_OUTPUT_FILE_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB hard cap per file.
-_FILE_API_HTTP_TIMEOUT_S = 60
-_FILE_API_STREAM_CHUNK_TIMEOUT_S = 120
-_FILE_API_STREAM_FINALIZE_TIMEOUT_S = 600
-_FILE_API_STREAM_REPLAY_TIMEOUT_S = 600
-_FILE_API_STREAM_ABORT_TIMEOUT_S = 15
 
 
 def _infer_mime_type(ref: str, head: bytes) -> str:

@@ -42,9 +42,24 @@ logger = logging.getLogger(__name__)
 # and its byte cap"), so this path really does need its own enforcement —
 # it just must not re-decide the value.
 _DEFAULT_MAX_BYTES = DEFAULT_MAX_BYTES
+# pgw#973 (§4.24). Per-CALL socket budgets, not kill decisions: neither ends
+# work that is advancing (gw#666's target), and without them a hub or an origin
+# that accepts a connection and then says nothing pins a request thread for the
+# life of the pod. `_DOWNLOAD_TIMEOUT_S` is the read budget handed to
+# `url_fetch`, which owns the byte cap; `_RESOLVE_TIMEOUT_S` bounds one small
+# JSON round trip to the hub and is deliberately the shorter of the two.
 _DOWNLOAD_TIMEOUT_S = 120
 _RESOLVE_TIMEOUT_S = 30
+# The resolver's answer is read into memory whole, so its size is the bound.
+# The threat is the hub answering with an unbounded body (compromised, wedged,
+# or simply an origin that is not the hub — this is an HTTP response, and
+# nothing about it is verified before it is read). 8 MiB is orders above any
+# real manifest; `+ 1` at the read sites is how over-cap is DETECTED rather
+# than silently truncated into a parse error.
 _MAX_RESOLVE_BODY = 8 << 20
+# Recursion bound on the `Asset` walk, whose input is endpoint/tenant-supplied
+# and may nest arbitrarily. Without it a hostile or looping manifest exhausts
+# the interpreter stack, which is a process death, not an exception.
 _MAX_WALK_DEPTH = 32
 # Streaming read buffer, not a bound — it refuses nothing.
 _CHUNK = 1 << 20

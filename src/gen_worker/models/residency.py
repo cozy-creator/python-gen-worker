@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 from .. import activity as activity_mod
 from .memory import (
     device_mismatches,
+    effective_ram_floor_gb,
     estimate_cuda_resident_gb,
     estimate_pipeline_size_gb,
     flush_memory,
@@ -49,20 +50,11 @@ logger = logging.getLogger(__name__)
 _GiB = 1024 ** 3
 # Free-VRAM slack preserved beyond the requested headroom (activations).
 _VRAM_MARGIN_BYTES = 2 * _GiB
-# Host-RAM floor below which the warm RAM tier is refused (don't push the
-# host into reclaim-thrash: a thrashing host stalls the whole process incl.
-# gRPC keepalive acks -> hub disconnect livelock, gw#407); demote() then
-# fails and the owner tears down instead. Small hosts use an adaptive floor
-# (a fraction of total RAM) so dev boxes are not gated out entirely.
-_RAM_FLOOR_GB = 8.0
-_RAM_FLOOR_FRACTION = 0.2
-
-
+# Host-RAM floor below which the warm RAM tier is refused; demote() then fails
+# and the owner tears down instead. The floor and its rationale are owned by
+# `memory.effective_ram_floor_gb` (pgw#973 §4.24).
 def _effective_ram_floor_gb() -> float:
-    total = get_total_ram_gb()
-    if total <= 0:
-        return _RAM_FLOOR_GB
-    return min(_RAM_FLOOR_GB, max(1.0, total * _RAM_FLOOR_FRACTION))
+    return effective_ram_floor_gb(get_total_ram_gb())
 
 # Residency event states (mirrors the wire ModelEvent vocabulary).
 ON_DISK = "on_disk"

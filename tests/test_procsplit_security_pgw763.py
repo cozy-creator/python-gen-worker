@@ -226,6 +226,61 @@ def test_delta1_the_legitimate_mediated_call_still_works(credentialed_split, hub
     assert call["body"]["request_id"] == "r-live"
 
 
+def test_the_childs_timeout_may_only_lower_the_allowlists_own(
+    credentialed_split, hub_http, monkeypatch,
+):
+    """pgw#973 (§4.24): the child supplies `timeout`, so the ALLOWLIST's
+    `timeout_s` is what stops tenant code pinning a parent thread-pool slot.
+
+    That clamp is the load-bearing bound, which is why the separate
+    `_ACTION_HARD_TIMEOUT_S = 120.0` beside it was deleted: every declared
+    action is 30 s or 60 s, so a third `min()` term 60 s above the highest
+    declared value could only ever reject nothing.
+    """
+    from gen_worker.procsplit import actions, parent as parent_mod
+
+    assert max(a.timeout_s for a in actions.ACTIONS.values()) == 60.0, (
+        "an action now declares a longer budget than the deleted ceiling "
+        "assumed — re-derive it before trusting this clamp"
+    )
+    seen: List[float] = []
+    real = parent_mod._http_call
+
+    def spy(method, url, token, query, body, timeout):
+        seen.append(float(timeout))
+        return real(method, url, token, query, body, timeout)
+
+    monkeypatch.setattr(parent_mod, "_http_call", spy)
+
+    pc = credentialed_split.pc
+    conn = credentialed_split.scheduler.wait_connection(0)
+    conn.wait_for(is_ready)
+    pc._slots[0].in_flight[("r-live", 1)] = "echo"
+
+    status, _body = _ask(pc, {
+        "method": "POST",
+        "path": "/v1/worker/capability/renew",
+        "json": {"request_id": "r-live", "attempt": 1, "capability_token": "old"},
+        "timeout": 99999,
+    })
+    assert status == 200
+    action = actions.ACTIONS["capability.renew"]
+    assert seen == [action.timeout_s], (
+        f"the child's 99999 s reached the socket as {seen}"
+    )
+
+    # ... and a SMALLER number from the child is still honoured: the clamp is a
+    # ceiling, not an override.
+    seen.clear()
+    _ask(pc, {
+        "method": "POST",
+        "path": "/v1/worker/capability/renew",
+        "json": {"request_id": "r-live", "attempt": 1, "capability_token": "old"},
+        "timeout": 2,
+    })
+    assert seen == [2.0]
+
+
 def _ask(pc, req: Dict[str, Any]) -> Tuple[int, str]:
     """Drive one action through the parent's real authorization path."""
     import asyncio

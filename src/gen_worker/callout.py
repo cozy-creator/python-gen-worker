@@ -46,6 +46,11 @@ _REFUSAL_CODES = frozenset(
 _NOT_DECLARED_CODES = frozenset({"forbidden", "insufficient_scope", "unauthorized"})
 
 DEFAULT_POLL_INTERVAL_S = 2.0
+# pgw#973 (§4.24): per-CALL socket budget for the child-request control plane.
+# Same shape as `receipts._HTTP_TIMEOUT_S` and deliberately double it: these
+# calls ADMIT a child request hub-side, which can queue, whereas a JWKS fetch
+# cannot. Long-running child work is polled (`DEFAULT_POLL_INTERVAL_S`), so
+# this bounds a single unanswered socket and never the child's own runtime.
 _HTTP_TIMEOUT_S = 60.0
 
 

@@ -43,6 +43,7 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
+from .cuda_probe import NVIDIA_SMI_TIMEOUT_S as _NVIDIA_SMI_TIMEOUT_S
 from .postmortem import effective_cpu_count
 import tempfile
 
@@ -57,7 +58,6 @@ _CPU_SLICE_S = 0.25
 _HASH_BLOCK = 1 << 20
 # 2-GPU leg (pgw#748): same 256 MiB buffer, 3 timed peer copies.
 _PEER_REPS = 3
-_NVIDIA_SMI_TIMEOUT_S = 5.0
 
 # Measured interconnect classes, worst to best.
 INTERCONNECT_NONE = ""            # single GPU / not measurable

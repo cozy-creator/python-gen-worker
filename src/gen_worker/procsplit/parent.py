@@ -141,12 +141,33 @@ _EVIDENCE_EPS = 0.05
 # out of `/proc/<ppid>/environ` (WORKER_JWT) or `/proc/1/environ` (the RunPod
 # key). Both, and the strip, are guarded by test_pod_privilege_isolation_pgw858.
 _CHILD_FORBIDDEN_ENVS = ("WORKER_JWT", "RUNPOD_API_KEY", "PUBLIC_KEY")
-# A mediated hub call must not hold the parent's control loop open forever.
-_ACTION_HARD_TIMEOUT_S = 120.0
 _ACTION_REFUSAL_REPORT_MIN_INTERVAL_S = 300.0
+# A mediated hub call runs on a parent thread-pool slot, and the CHILD supplies
+# the request's `timeout` field — so without a ceiling tenant code pins slots
+# for as long as it likes and the mediation surface dies for everything else.
+# `HubAction.timeout_s` in the allowlist IS that ceiling (`_perform_action`
+# min()s the child's number against it), which is why pgw#973 deleted the
+# separate `_ACTION_HARD_TIMEOUT_S = 120.0` that sat beside it: every declared
+# action is 30 s or 60 s, so a third term 60 s above the highest declared value
+# could only ever reject nothing (§4.24 item 1 — say which bound is
+# load-bearing and delete the rest). The count axis is bounded here:
 _MAX_CONCURRENT_ACTIONS = 16
+# pgw#973 (§4.24 item 4): the parent beat's cadence when NOBODY declared one —
+# `beat_interval_s=0.0` means "adopt the child's" and every child Hello may
+# carry `heartbeat_interval_ms=0`. The fallback used to be a bare `10.0` at the
+# loop, i.e. a real bound reachable only by reading the loop body. It is the
+# hub's own liveness expectation (a worker silent for a multiple of this is
+# called dead), so it is a DECLARED default, not a guess.
+_BEAT_INTERVAL_FALLBACK_S = 10.0
 # The host canary is a real benchmark (memcpy/D2H/CPU); on a cold pod with a
-# large card it is seconds, not milliseconds. Generous, and bounded.
+# large card it is seconds, not milliseconds.
+#
+# gw#666 exemption, stated rather than assumed (§4.24): the measure subprocess
+# reports through `communicate()` — one write, at the end — so it emits NO
+# progress signal a SilenceWindow could key on, and giving up here KILLS NO
+# WORK: the Hello ships without parent-measured resources and the pod serves.
+# A progress signal would have to be invented in the canary's own protocol,
+# which is a change to it and not to this bound.
 _MEASURE_TIMEOUT_S = 180.0
 _MEASURE_BEFORE_SPAWN_S = 60.0
 _ATTESTATION_REPORT_MIN_INTERVAL_S = 300.0
@@ -2183,8 +2204,10 @@ class ParentControl:
         token = self.transport.current_worker_jwt
         if not token:
             raise actions.ActionRefused(f"{action.name}: this pod holds no worker JWT")
+        # The child's number is advisory and may only ever LOWER the call's
+        # budget; the allowlist's own `timeout_s` is the ceiling.
         timeout = min(float(req.get("timeout") or action.timeout_s),
-                      action.timeout_s, _ACTION_HARD_TIMEOUT_S)
+                      action.timeout_s)
         status, text = await asyncio.to_thread(
             _http_call, action.method, base + str(req.get("path") or ""),
             token, query, body, timeout,
@@ -2323,7 +2346,9 @@ class ParentControl:
         made by the control plane that nothing tenant-side can starve.
         """
         while not self._stopping.is_set():
-            interval = self._beat_interval if self._beat_interval > 0 else 10.0
+            interval = (
+                self._beat_interval if self._beat_interval > 0
+                else _BEAT_INTERVAL_FALLBACK_S)
             await self._sleep_or_stop(max(0.25, interval / 2.0))
             if self._stopping.is_set() or self._child_exited_clean:
                 return

@@ -12,8 +12,10 @@ The gate closes that hole at the shared machinery level: each lane pipeline's
 attributes all preserved) to first pin the lane and promote it if demoted,
 LRU-swapping the idle sibling out. Alternating t2i/edit traffic on one worker
 becomes swap-per-alternation: degraded-but-correct, logged loudly with timing.
-When VRAM truly cannot fit the lane it queues briefly, then raises the
-executor-injected retryable error — never executes a cpu-resident lane.
+When VRAM truly cannot fit, the lane waits for as long as the card keeps
+returning memory (a silence window over free VRAM, gw#666 — never a wall
+budget), then raises the executor-injected retryable error. It never executes
+a cpu-resident lane.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional, Type
 
 from .. import activity as activity_mod
+from ..stall import SilenceWindow
 from .memory import get_available_vram_gb
 from .residency import Residency, Tier, _obj_offload_hooked
 
@@ -35,10 +38,19 @@ _GATED_FLAG = "_cozy_lane_gated"
 
 _GiB = 1024 ** 3
 
-# How long a call waits for VRAM headroom before failing retryable: the idle
-# sibling's demote is seconds; anything longer means a genuinely stuck card.
-_DEFAULT_WAIT_S = 45.0
+# pgw#973 (gw#666 / §4.24): a SILENCE window over free VRAM, not a wall budget.
+# This loop polls `get_available_vram_gb()` four times a second, so free VRAM
+# IS the progress signal — a sibling demoting a large pipeline returns bytes in
+# visible steps, and the old flat 45 s deadline gave up on a card that was
+# still handing memory back. It gives up only when the card has stopped
+# MOVING for the window: a genuinely stuck card looks identical either way, and
+# a slow-but-working demote no longer fails a request that was about to serve.
+_HEADROOM_SILENCE_WINDOW_S = 45.0
 _POLL_S = 0.25
+# Free-VRAM quantum for "something moved" (64 MiB). Coarser than allocator
+# jitter and far finer than any component demote, so noise cannot keep the
+# window alive and a real demote cannot fail to register.
+_HEADROOM_STEP_GB = 1.0 / 16.0
 
 
 def _cuda_available() -> bool:
@@ -74,7 +86,7 @@ class ExecutionLaneGate:
         residency: Residency,
         label: str = "",
         retry_exc: Type[Exception] = RuntimeError,
-        wait_s: float = _DEFAULT_WAIT_S,
+        wait_s: float = _HEADROOM_SILENCE_WINDOW_S,
         on_swap: Optional[Callable[[str, int], None]] = None,
         offload_fallback: Optional[Callable[[], bool]] = None,
     ) -> None:
@@ -82,6 +94,8 @@ class ExecutionLaneGate:
         self.residency = residency
         self.label = label or ref
         self.retry_exc = retry_exc
+        #: The SILENCE window over free VRAM (see the module constant), not a
+        #: total wait. A card that keeps returning memory is never given up on.
         self.wait_s = wait_s
         self.on_swap = on_swap  # (ref, promote_ms) — degraded-serve reporting
         # When promote truly cannot fit: arm a coherent offload rung instead
@@ -123,7 +137,7 @@ class ExecutionLaneGate:
             if tier is not Tier.RAM:
                 return
             t0 = time.monotonic()
-            deadline = t0 + self.wait_s
+            headroom = SilenceWindow(self.wait_s)
             while True:
                 if res.promote(self.ref):
                     ms = int((time.monotonic() - t0) * 1000)
@@ -140,7 +154,9 @@ class ExecutionLaneGate:
                         except Exception:
                             logger.exception("lane-swap callback failed")
                     return
-                if time.monotonic() >= deadline:
+                headroom.touch_if_changed(
+                    round(get_available_vram_gb() / _HEADROOM_STEP_GB))
+                if headroom.stalled():
                     break
                 time.sleep(_POLL_S)
             if self.offload_fallback is not None:
@@ -157,7 +173,9 @@ class ExecutionLaneGate:
                             activity_mod.KIND_SERVE_DEGRADE,
                             f"ref={self.ref} label={self.label} "
                             f"free_gb={get_available_vram_gb():.1f}: promote "
-                            f"cannot fit after {self.wait_s:.0f}s; serving "
+                            f"cannot fit and free VRAM stopped moving for "
+                            f"{self.wait_s:.0f}s (waited "
+                            f"{time.monotonic() - t0:.0f}s); serving "
                             "CPU-offloaded",
                             phase="lane_offload_engaged",
                         )
@@ -166,8 +184,9 @@ class ExecutionLaneGate:
                     logger.exception(
                         "offload fallback failed for %s", self.label)
             raise self.retry_exc(
-                f"lane {self.label} cannot promote to VRAM (waited "
-                f"{self.wait_s:.0f}s for headroom; free "
+                f"lane {self.label} cannot promote to VRAM (free VRAM "
+                f"stopped moving for {self.wait_s:.0f}s after "
+                f"{time.monotonic() - t0:.0f}s; free "
                 f"{get_available_vram_gb():.1f} GiB); retrying"
             )
 

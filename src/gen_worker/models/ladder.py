@@ -41,7 +41,15 @@ _BASE_TOKENS = ("", "bf16", "fp16", "fp32")
 
 @dataclass(frozen=True)
 class Placement:
-    """Arch requirements for one flavor. Empty fields = unconstrained."""
+    """Arch requirements for one flavor. Empty fields = unconstrained.
+
+    pgw#973 censused ``sm_min = 0`` as a §4.24 item-4 absence collapse and it is
+    NOT one: "unconstrained" is this class's STATED meaning for every empty
+    field (`sm_allowed=()` says the same thing), the placement is the flavor's
+    own declaration rather than an operator knob, and a missing floor cannot
+    admit anything ``sm_allowed`` and the engine list do not already admit.
+    Kept as filed, verdict recorded so it is not re-opened.
+    """
 
     precision_class: str
     sm_allowed: tuple[int, ...] = ()  # discrete allow-list (gpu_sm as int, e.g. 89, 120)

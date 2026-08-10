@@ -36,9 +36,9 @@ pgw#803 — THE RECONNECT EPISODE IS A HUB ROW. Every duration in this module is
 retry PACING or an RPC deadline, never a kill decision, and none of them can
 produce th#1333's 15m36s reconnect gap: the backoff is `uniform(0, min(30 s,
 2**attempt))` with `attempt` reset after `_BACKOFF_RESET_AFTER_S` of
-connectedness, a dead peer is called by h2 keepalive within 20 s +
-`KEEPALIVE_TIMEOUT_S`, and a hung dial is cut at `_HELLO_ACK_TIMEOUT_S`. So the
-gap was time the reconnect loop was NOT RUNNING — and nothing recorded that,
+connectedness, a dead peer is called by h2 keepalive within
+`KEEPALIVE_INTERVAL_S` + `KEEPALIVE_TIMEOUT_S`, and a hung dial is cut at
+`_HELLO_ACK_TIMEOUT_S`. So the gap was time the reconnect loop was NOT RUNNING — and nothing recorded that,
 because the loop's narration was `logger.info` on RunPod stdout, which is
 unreadable (gw#640). Each episode now emits two evidence rows (`dropped`, then
 `reconnected`) partitioning the gap into scheduled backoff, slept wall time,
@@ -200,6 +200,16 @@ def _msg_kind(msg: pb.WorkerMessage) -> str:
 #: derives its bound from this rather than inventing one.
 KEEPALIVE_TIMEOUT_S = 10.0
 
+#: How often the channel pings an idle stream. pgw#973 (§4.24): the asymmetry
+#: this fixes is that the keepalive TIMEOUT was a named constant with reach
+#: while the INTERVAL beside it was a bare `20000` inside the options list —
+#: two halves of one liveness bound, only one of them findable. Together they
+#: are the worker's detection budget for a peer that has stopped reading:
+#: interval + timeout = 30 s, and everything downstream (the reconnect
+#: accounting at `RECONNECT_EVENT`, the send-loop wait) derives from that sum
+#: rather than restating either half.
+KEEPALIVE_INTERVAL_S = 20.0
+
 #: How long to wait for the peer to end a half-closed call before giving up on
 #: a graceful close. Unchanged value, named so both close paths share it.
 _PEER_CLOSE_WAIT_S = 5.0
@@ -215,7 +225,7 @@ _PEER_CLOSE_WAIT_S = 5.0
 #: is `uniform(0, min(30s, 2**attempt))` (full jitter, ceiling
 #: :attr:`Transport._backoff_cap` = 30 s), `attempt` resets to 0 after
 #: :data:`_BACKOFF_RESET_AFTER_S` of connectedness, a dead peer is called by
-#: h2 keepalive within `keepalive_time_ms` (20 s) + :data:`KEEPALIVE_TIMEOUT_S`,
+#: h2 keepalive within :data:`KEEPALIVE_INTERVAL_S` + :data:`KEEPALIVE_TIMEOUT_S`,
 #: and a dial that hangs is cut at :data:`_HELLO_ACK_TIMEOUT_S`. A 936 s gap is
 #: therefore time the reconnect loop WAS NOT RUNNING — a starved event loop, a
 #: frozen process, a drop the socket never surfaced — and the fix for that class
@@ -332,12 +342,30 @@ _SHED_KEY = ("shed",)
 #: between a duplicate and a hole, and a hole is not a choice.
 RESHIP_WINDOW = 256
 
+#: Largest single gRPC message, either direction. See `_channel_options`.
+_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+
+#: Outbound queue depth. Bounds the pod's send-side memory when the hub stops
+#: reading: progress is dropped, events block their producer, results are never
+#: shed. One number, stated once, so `Transport` and `worker` cannot drift.
+DEFAULT_QUEUE_MAXSIZE = 1024
+
 
 class SendQueue:
     """Bounded outbound queue with results-never-dropped semantics."""
 
-    def __init__(self, maxsize: int = 1024, evidence_max: int = EVIDENCE_MAX) -> None:
-        self._maxsize = maxsize
+    def __init__(
+        self, maxsize: int = DEFAULT_QUEUE_MAXSIZE, evidence_max: int = EVIDENCE_MAX,
+    ) -> None:
+        # pgw#973 §4.24 item 4: `maxsize <= 0` used to reach the enqueue path's
+        # `while self._maxsize > 0 and ...` and delete the bound outright — an
+        # unbounded outbound queue in a pod whose producer (progress, events)
+        # never blocks, i.e. the pod OOMs instead of shedding. `maxsize` is a
+        # public `Transport`/`worker` parameter, so that value is one caller
+        # away. Absence is the stated default; a stated non-positive is refused.
+        if int(maxsize) <= 0:
+            raise ValueError("maxsize must be positive")
+        self._maxsize = int(maxsize)
         # pgw#869: the durable evidence lane. Ordered (dict preserves insertion
         # order), so replay is FIFO. A coalescible beat REPLACES its slot in
         # place, which keeps a phase's beat where the phase began rather than
@@ -901,7 +929,7 @@ class Transport:
         settings: Settings,
         handlers: Any,
         *,
-        queue_maxsize: int = 1024,
+        queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
         backoff_base_s: float = 1.0,
         backoff_cap_s: float = 30.0,
     ) -> None:
@@ -990,12 +1018,22 @@ class Transport:
 
     def _channel_options(self) -> List[Tuple[str, int]]:
         return [
-            ("grpc.keepalive_time_ms", 20000),
+            ("grpc.keepalive_time_ms", int(KEEPALIVE_INTERVAL_S * 1000)),
             ("grpc.keepalive_timeout_ms", int(KEEPALIVE_TIMEOUT_S * 1000)),
             ("grpc.keepalive_permit_without_calls", 1),
             ("grpc.http2.max_pings_without_data", 0),
-            ("grpc.max_send_message_length", 64 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+            # pgw#973 (§4.24): the frame cap on ONE WorkerMessage, both
+            # directions. grpc-python's own default is 4 MiB receive, which
+            # this raises — the bound that matters is the one that must not be
+            # ABSENT. Nothing else bounds a single message: the queue caps the
+            # COUNT in flight (`DEFAULT_QUEUE_MAXSIZE`), never the size of one,
+            # and a peer sending an unbounded frame is a heap the worker cannot
+            # refuse otherwise. Generous relative to real traffic (control
+            # messages and metadata; artifact bytes travel over HTTP to the
+            # CAS, never on this stream) precisely so it never binds on
+            # legitimate traffic and only ever catches a runaway.
+            ("grpc.max_send_message_length", _MAX_MESSAGE_BYTES),
+            ("grpc.max_receive_message_length", _MAX_MESSAGE_BYTES),
         ]
 
     def _make_channel(self, target: str, use_tls: bool) -> grpc.aio.Channel:

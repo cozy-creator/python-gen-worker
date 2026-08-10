@@ -45,6 +45,13 @@ from .publish_journal import JOURNAL_NAME, JournalEntry, PublishJournal, artifac
 
 logger = logging.getLogger(__name__)
 
+# pgw#973 (§4.24): the retry loop's PACE, and deliberately not its end — the
+# give-up is `SilenceWindow(_SEND_SILENCE_WINDOW_S)` over definite hub answers
+# (gw#666), so these two decide only how often a hub that is down gets asked.
+# The threat is this worker: a publish riding out a hub rebuild for the better
+# part of an hour must not become a retry flood against it, and must not stall
+# an hour between attempts once it recovers. The ceiling also bounds a hostile
+# or buggy `Retry-After`, which `_retry_after_s` clamps to it (:157).
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
 

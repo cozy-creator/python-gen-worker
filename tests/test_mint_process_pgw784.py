@@ -333,4 +333,8 @@ def test_the_cap_is_bytes_expressed_as_the_cards_real_fraction(
     assert seen["frac"] == pytest.approx(0.5, rel=0.01)
     assert "12.00GiB" in note
     seen.clear()
-    assert mint_child.cap_vram(0, 0) == "" and not seen
+    # pgw#973 §4.24 item 4: no cap is applied, and the child SAYS it is
+    # running uncapped rather than returning an empty note the caller drops.
+    uncapped = mint_child.cap_vram(0, 0)
+    assert not seen
+    assert "NOT applied" in uncapped and "vram_cap_bytes=0" in uncapped

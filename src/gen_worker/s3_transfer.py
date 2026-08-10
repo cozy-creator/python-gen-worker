@@ -18,6 +18,16 @@ from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 import boto3
 
+# pgw#973 (§4.24). The three constants below are ONE bound with three terms:
+# `_SDK_UPLOAD_FILE_BUDGET x _MULTIPART_MAX_WORKERS x _MULTIPART_CHUNK_BYTES`
+# is the ceiling on bytes boto3 holds in this process's heap at once — 2 x 10 x
+# 64 MiB = 1.25 GiB. The threat is the SERVING process, not the hub: an upload
+# runs beside a resident pipeline on a pod sized for the model, so unbounded
+# in-flight parts meet the OOM killer and take the tenant with them. Nothing
+# else bounds it — boto3's `TransferConfig` has no global memory budget and
+# `max_concurrency` is per-call, so concurrent `upload_file` calls multiply.
+# The chunk size additionally sets the largest object this path can move at
+# all: S3 allows 10,000 parts, so 64 MiB x 10,000 = 640 GiB.
 _MULTIPART_CHUNK_BYTES = 64 * 1024 * 1024
 _MULTIPART_MAX_WORKERS = 10
 # pgw#1005 A: each OUTER attempt re-uploads every part from zero, on top of
@@ -26,7 +36,18 @@ _MULTIPART_MAX_WORKERS = 10
 # attempts still cover the case botocore cannot (a client whose credentials or
 # connection pool are the problem) without multiplying the transfer budget.
 _SDK_TRANSFER_ATTEMPTS = 2
+#: Concurrent SDK uploads from this process (the file axis of the ceiling
+#: above). Two, because a worker's outbound work is a publish, not a fan-out:
+#: the second slot exists so a small sibling artifact is not serialized behind
+#: a multi-GB one, and a third would buy throughput the uplink does not have
+#: at the cost of another 640 MiB of in-flight parts.
 _SDK_UPLOAD_FILE_BUDGET = 2
+#: The one pause between the two outer attempts. Was `min(2**(attempt-1), 4)`,
+#: an exponential ramp with a cap — dead arithmetic since pgw#1005 A cut
+#: `_SDK_TRANSFER_ATTEMPTS` to 2, because the loop breaks before the second
+#: sleep, so the expression could only ever evaluate to 1.0 (pgw#973 §4.24:
+#: a bound that cannot bind is not a bound).
+_SDK_RETRY_PAUSE_S = 1.0
 _sdk_upload_slots = threading.BoundedSemaphore(_SDK_UPLOAD_FILE_BUDGET)
 
 
@@ -195,7 +216,7 @@ def upload_file_with_grant(
             last_exc = exc
             if attempt >= _SDK_TRANSFER_ATTEMPTS:
                 break
-            time.sleep(min(2 ** (attempt - 1), 4))
+            time.sleep(_SDK_RETRY_PAUSE_S)
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -328,6 +349,13 @@ def _s3_client(grant: S3TransferGrant) -> Any:
         aws_session_token=grant.session_token or None,
         config=Config(
             signature_version="s3v4",
+            # botocore's own PER-PART retry budget: a multipart upload of a
+            # multi-GB artifact over a residential/pod uplink loses individual
+            # parts routinely, and re-sending one part is the cheap recovery
+            # this exists for. The outer loop above cannot substitute — it
+            # restarts the WHOLE object. 10 x `_SDK_TRANSFER_ATTEMPTS` (2) is
+            # the worst case per part, deliberately re-derived by pgw#1005 A
+            # after 10 x 4 = 40.
             retries={"mode": "standard", "max_attempts": 10},
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",

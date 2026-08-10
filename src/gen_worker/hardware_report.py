@@ -25,7 +25,11 @@ import msgspec
 
 from . import worker_credential
 from .config import Settings
-from .cuda_probe import CudaProbeResult, classify_probe_failure
+from .cuda_probe import (
+    NVIDIA_SMI_TIMEOUT_S as _NVIDIA_SMI_TIMEOUT_S,
+    CudaProbeResult,
+    classify_probe_failure,
+)
 from .pb import worker_scheduler_pb2 as pb
 from .pb import worker_scheduler_pb2_grpc as pb_grpc
 from .transport import normalize_grpc_addr
@@ -40,7 +44,6 @@ logger = logging.getLogger(__name__)
 _REPORT_RPC_TIMEOUT_S = 3.0
 _MAX_ATTEMPTS = 2
 _RETRY_BACKOFF_S = (1.0,)
-_NVIDIA_SMI_TIMEOUT_S = 5.0
 
 
 class HardwareReport(msgspec.Struct, frozen=True):
