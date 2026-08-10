@@ -269,13 +269,53 @@ def test_a_non_aot_arm_carrying_an_artifact_refuses() -> None:
     assert "dynamo" in exc.value.have
 
 
-def test_an_eager_only_arm_is_a_valid_plan_with_no_artifact() -> None:
-    p = _plan(arm=pb.Arm(
-        graph_contract_digest="gc_01",
-        shape=pb.ARM_SHAPE_BRANCHLESS,
-        backend=pb.STEADY_BACKEND_EAGER_ONLY))
-    assert p.arm.backend == "eager_only"
+@pytest.mark.parametrize(
+    "backend,token",
+    [
+        (pb.STEADY_BACKEND_EAGER_ONLY, "eager_only"),
+        (pb.STEADY_BACKEND_DYNAMO, "dynamo"),
+    ],
+)
+def test_a_non_cell_arm_is_a_valid_plan_with_no_artifact_and_no_graph_contract(
+    backend: int, token: str,
+) -> None:
+    """The shape most of the fleet's declared lanes need. `svdq-fp4-w4a4+eager`
+    is execution-eager-only in tensorhub's lane table — a lane that cannot be
+    compiled at all — so an EAGER_ONLY arm can never name a graph contract; a
+    DYNAMO arm compiles at serve time, so the hub cannot name one ahead of
+    dispatch either."""
+    p = _plan(arm=pb.Arm(shape=pb.ARM_SHAPE_BRANCHLESS, backend=backend))
+    assert p.arm.backend == token
     assert p.arm.artifact is None
+    assert p.arm.graph_contract_digest == ""
+
+
+@pytest.mark.parametrize(
+    "backend", [pb.STEADY_BACKEND_EAGER_ONLY, pb.STEADY_BACKEND_DYNAMO])
+def test_a_graph_contract_on_a_non_cell_arm_refuses(backend: int) -> None:
+    """Symmetric with the artifact rule: a graph contract on an arm that names
+    no cell is a value the hub cannot produce and this worker never verifies
+    (`aot_identity.expected_from_plan` returns None there), riding inside the
+    execution digest."""
+    with pytest.raises(PlanRefusal) as exc:
+        _plan(arm=pb.Arm(
+            graph_contract_digest="gc_01",
+            shape=pb.ARM_SHAPE_BRANCHLESS,
+            backend=backend))
+    assert exc.value.field == "spec.arm.graph_contract_digest"
+
+
+def test_an_aot_cell_arm_without_a_graph_contract_refuses() -> None:
+    """pgw#903's pre-dlopen fence compares exactly this value, so the arm that
+    HAS an artifact must still name it."""
+    with pytest.raises(PlanRefusal) as exc:
+        _plan(arm=pb.Arm(
+            shape=pb.ARM_SHAPE_BRANCHLESS,
+            backend=pb.STEADY_BACKEND_AOT_CELL,
+            artifact=pb.ArtifactIdentity(
+                cell_ref="r", content_digest="d", cell_key="k",
+                publisher_org="o", toolchain_digest="t", env_seal_digest="e")))
+    assert exc.value.field == "spec.arm.graph_contract_digest"
 
 
 def test_an_artifact_with_no_publisher_refuses() -> None:

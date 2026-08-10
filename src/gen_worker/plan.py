@@ -163,6 +163,14 @@ class ArmRef(msgspec.Struct, frozen=True):
     arm instead of being recovered from the adapter list. ``artifact`` is set
     iff ``backend == "aot_cell"``: since pgw#1010 dynamo cells are neither
     sealed nor published, so DYNAMO has no artifact to name.
+
+    ``graph_contract_digest`` follows the artifact exactly: it is the
+    ``combined_graph_hash`` of a compiled cell, so it is non-empty iff the arm
+    names one, and empty otherwise. An ``eager_only`` arm traces nothing and a
+    ``dynamo`` arm compiles at serve time, so neither has a graph contract the
+    hub could name ahead of dispatch — and :func:`aot_identity.expected_from_plan`
+    already returns ``None`` for both, so nothing on this side ever reads it
+    there.
     """
 
     graph_contract_digest: str
@@ -507,9 +515,22 @@ def _arm(spec: Any) -> ArmRef:
     elif backend == "aot_cell":
         raise PlanRefusal(
             "spec.arm.artifact", "exactly one ArtifactIdentity on an aot_cell arm", "absent")
+    graph_contract = str(arm.graph_contract_digest or "").strip()
+    # Required on the arm that has an artifact (pgw#903's pre-dlopen fence
+    # compares exactly this value), refused on every other — symmetrically with
+    # ``artifact`` above. A graph contract on an arm that names no cell is a
+    # value the hub cannot produce and this worker never verifies, riding inside
+    # the execution digest.
+    if artifact is not None:
+        graph_contract = _require(graph_contract, "spec.arm.graph_contract_digest")
+    elif graph_contract:
+        raise PlanRefusal(
+            "spec.arm.graph_contract_digest",
+            "absent unless backend is aot_cell",
+            f"present with backend {backend}",
+        )
     return ArmRef(
-        graph_contract_digest=_require(
-            arm.graph_contract_digest, "spec.arm.graph_contract_digest"),
+        graph_contract_digest=graph_contract,
         shape=shape,
         adapter_rank_bucket=bucket,
         backend=backend,

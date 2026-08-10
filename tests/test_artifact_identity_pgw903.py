@@ -173,11 +173,13 @@ def test_identity_is_never_confirmed_by_comparing_bytes() -> None:
 
 def _plan(backend: int = pb.STEADY_BACKEND_AOT_CELL) -> Any:
     arm = pb.Arm(
-        graph_contract_digest="gc_01",
         shape=pb.ARM_SHAPE_BRANCHLESS,
         backend=backend,
     )
     if backend == pb.STEADY_BACKEND_AOT_CELL:
+        # The graph contract follows the artifact — an arm that names no cell
+        # carries neither.
+        arm.graph_contract_digest = "gc_01"
         arm.artifact.CopyFrom(pb.ArtifactIdentity(
             cell_ref="cozy/cells-micro#k1",
             content_digest="sha256:" + "c" * 64,
