@@ -805,6 +805,10 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # resolves unmeasured (serves at base precision).
         if es.tasks is not None:
             fn["tasks"] = list(es.tasks)
+        # th#1757: the opt-in reference contract. Omitted = this function
+        # never sees the concept; the hub refuses a ref_text sent to it.
+        if es.accepts_references is not None:
+            fn["accepts_references"] = es.accepts_references.to_manifest()
         # th#1050: opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)
