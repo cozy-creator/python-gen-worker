@@ -168,18 +168,21 @@ ARM_FACTS = ("family", "format", "lane", "sm", "envelope", "env_seal",
 
 
 def declared_envelope_block(cfg: Any) -> Dict[str, Any]:
-    """The DECLARED-envelope block for ``cfg`` — the same shape the mint
-    records under ``cell_key.EXPORT_ENVELOPE_KEY``, built from the same
-    declaration fields, so the parent's pre-mint envelope digest and the
-    child's recorded one agree by construction (canonical form:
-    ``cell_key.envelope_facts``)."""
-    text_lens = tuple(getattr(cfg, "text_lens", ()) or ())
-    if not text_lens and getattr(cfg, "text_len", None) is not None:
-        text_lens = (int(cfg.text_len),)
+    """The DECLARED-envelope block for ``cfg`` — byte-for-byte the same
+    extraction :func:`aot_export_spec` performs (``shapes`` /
+    ``text_lens`` / ``guidance_scales``, no fallbacks: ``text_len`` was
+    dropped from the child handoff in pgw#1034), so the parent's pre-mint
+    envelope digest and the digest of the block the child RECORDS under
+    ``cell_key.EXPORT_ENVELOPE_KEY`` agree by construction (canonical form:
+    ``cell_key.envelope_facts``). GPU-gauntlet-proven: a fallback here that
+    the spec extraction does not share reds every handback as
+    ``envelope`` divergence."""
     return {
-        "shapes": [[int(v) for v in row] for row in getattr(cfg, "shapes", ())],
-        "text_lens": [int(v) for v in text_lens],
-        "guidance": [float(v) for v in getattr(cfg, "guidance_scales", ())],
+        "shapes": [
+            [int(v) for v in row] for row in (getattr(cfg, "shapes", ()) or ())],
+        "text_lens": [int(v) for v in (getattr(cfg, "text_lens", ()) or ())],
+        "guidance": [
+            float(v) for v in (getattr(cfg, "guidance_scales", ()) or ())],
     }
 
 
