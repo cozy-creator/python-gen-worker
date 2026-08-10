@@ -80,7 +80,11 @@ def test_the_verifier_itself_refuses_the_bomb_with_a_typed_reason(
 ):
     """The read that matters is the one INSIDE `verify_delivered_artifact`;
     it must surface as a named refusal, not as a dead pod."""
-    artifact = _cell(tmp_path, b"\0" * (64 << 20))
+    # pgw#1098 raised the bound from 16 MiB to 64 MiB (the 16 MiB one refused
+    # a REAL 36-entry sdxl envelope and cost a 92-minute mint). The bomb has
+    # to stay above the bound for this test to mean anything; its size was
+    # always incidental, the typed refusal is the point.
+    artifact = _cell(tmp_path, b"\0" * (128 << 20))
     with pytest.raises(receipts.ReceiptError) as exc:
         receipts._embedded_meta(artifact)
     assert exc.value.reason == "artifact_unreadable"

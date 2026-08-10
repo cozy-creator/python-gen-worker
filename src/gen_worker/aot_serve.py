@@ -1030,21 +1030,28 @@ def _unpack(
 #: module survives owns the shared one.
 #:
 #: pgw#1040 collapsed the OTHER seven envelope readers into
-#: :func:`artifact_meta.read_metadata` and left this one alone ON PURPOSE.
-#: Delegating it makes it a one-line alias, which the pgw#849 ratchet then
-#: reports as a STALE baseline entry — an edit to
-#: ``scripts/unreached_surface_baseline.txt``, which a live sibling lane is
-#: rewriting. It costs nothing to wait: this function and its baseline line die
-#: together in whichever cut settles the TRT ratification.
+#: :func:`artifact_meta.read_metadata` and left this one alone ON PURPOSE,
+#: reasoning that "it costs nothing to wait" for the TRT ratification.
+#:
+#: pgw#1098 PRICED THE WAIT: $1.584 and 92 minutes. pgw#1013 then bounded the
+#: collapsed reader and not this one, so two readers of one member disagreed
+#: about row 7's sdxl envelope — and the disagreement was silent in the exact
+#: direction that loses work. Delegated now. A second reader of a member is
+#: not duplication to be tidied later; it is a divergence waiting for the
+#: first caller who bounds one of them.
 def unpack_metadata(artifact: Path) -> Dict[str, Any]:
-    """Read ONLY metadata.json from an artifact (kind sniffing — cheap)."""
-    with tarfile.open(artifact, mode="r:*") as tar:
-        for member in tar:
-            if member.name == METADATA_NAME and member.isfile():
-                src = tar.extractfile(member)
-                assert src is not None
-                return json.loads(src.read().decode())
-    raise ValueError(f"artifact {artifact} has no {METADATA_NAME}")
+    """Read ONLY metadata.json from an artifact (kind sniffing — cheap).
+
+    pgw#1098: DELEGATES to ``artifact_meta``, which calls itself "the ONE
+    reader" and was not. This function kept its own unbounded scan, so the
+    two disagreed about the same bytes: on row 7's sdxl cell the bounded
+    reader refused the envelope and this one read it fine, which is what made
+    the failure asymmetric and invisible — ``arm_aot`` got ``meta=None`` and
+    silently skipped the lifted-binding install, then ``enable`` (reaching
+    the envelope through here) refused the artifact by a downstream name.
+    One reader, one bound, or the next divergence costs another mint.
+    """
+    return artifact_meta.read_metadata(artifact)
 
 
 @dataclass
