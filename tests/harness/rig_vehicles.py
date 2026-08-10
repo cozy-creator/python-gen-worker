@@ -623,6 +623,199 @@ MICRO_4D = Vehicle(
 
 
 # ---------------------------------------------------------------------------
+# micro-lora16 — pgw#1073: a SECOND rank bucket. The bucket is a KEY axis
+# (`<base>-lora<bucket>`), so two buckets are two lanes and two cells; a
+# single standing bucket (64) means the axis itself is never varied. This
+# member re-proves that the lane label, the branch allocation and the arm
+# gate all follow the NUMBER rather than merely following "lora on".
+#
+# 16, not 8: `RANK_BUCKETS = (16, 32, 64, 128)` — the bucket vocabulary is
+# quantized and 8 is NOT a member. The campaign's first cut used 8 and the
+# mint child died in `enable_lora_branches` — a correct, typed
+# ValidationError that surfaced as an UNCLASSIFIED child crash (the pgw#999
+# class one layer down; recorded in pgw#1073's ledger).
+# ---------------------------------------------------------------------------
+
+MICRO_LORA16_BUCKET = 16
+
+MICRO_LORA16 = Vehicle(
+    name="micro-lora16",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main"),
+    function="generate",
+    family="micro-diffusion",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=lambda: _micro_cell(MICRO_LORA16_BUCKET),
+    adopt_source=_micro_adopt_source_for(MICRO_LORA16_BUCKET),
+    parent_pipe=_micro_parent_for(MICRO_LORA16_BUCKET),
+    covers=(f"pgw#1073: everything `micro-lora` covers at a SECOND rank "
+            f"bucket (lora_bucket={MICRO_LORA16_BUCKET}) — the bucket is a "
+            f"key axis, so this cell's lane is `lora16`, disjoint from "
+            f"`lora64`'s, and the arm gate must follow the number"),
+)
+
+
+# ---------------------------------------------------------------------------
+# micro-conv — pgw#1073: the STATIC-ROWS class (sdxl's strategy) at micro
+# scale. Conv-bearing, 4 static entries (2 rows x cfg fork), an int64
+# timestep (mixed dtype, wan-2.2's shape), deeper module nesting, a named
+# persistent buffer (the H3 pattern).
+# ---------------------------------------------------------------------------
+
+
+def _micro_conv_cell() -> Any:
+    from gen_worker.registry import CompileCell
+
+    from micro_diffusion.aot_declaration_conv import COND_LEN, PIXEL_ROWS
+
+    return CompileCell(
+        shapes=PIXEL_ROWS, targets=("unet",), family="micro-conv",
+        regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+        guidance_scales=(), text_lens=())
+
+
+_MICRO_CONV_ADOPT = '''
+import json, logging, os, sys
+for p in %(paths)r:
+    sys.path.insert(0, p)
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+import harness.rig_runtime  # noqa: F401
+import torch
+from pathlib import Path
+from gen_worker import aot_serve
+from gen_worker.models import provision
+from gen_worker.registry import CompileCell
+from micro_diffusion.aot_declaration_conv import (
+    CFG_ARITY, COND_LEN, LATENT_ROWS, PIXEL_ROWS)
+from micro_diffusion.model_conv import NUM_TRAIN_TIMESTEPS
+from micro_diffusion.pipeline import MicroConvPipeline
+
+torch.set_num_threads(2)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+cfg = CompileCell(
+    shapes=PIXEL_ROWS, targets=("unet",), family="micro-conv",
+    regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+    guidance_scales=(), text_lens=())
+pipe = MicroConvPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+ref = MicroConvPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+config = pipe.config
+
+
+def _feed(batch, grid):
+    gen = torch.Generator().manual_seed(1073)
+    sample = torch.randn(
+        batch, config.in_channels, grid, grid, generator=gen).to(DEVICE)
+    timestep = torch.randint(
+        0, NUM_TRAIN_TIMESTEPS, (batch,), generator=gen).to(DEVICE)
+    cond = torch.randn(
+        batch, COND_LEN, config.cond_dim, generator=gen).to(DEVICE)
+    return sample, timestep, cond
+
+
+# THREE of the four static entries, spanning both declared axes (row and
+# fork). static-rows means each (row, cfg) coordinate is its own entry — the
+# serve side must land each call on ITS entry, which is exactly the
+# label-vs-ask identity pgw#1058 broke on.
+ARMS = [("unet/cfg=true@24", CFG_ARITY, LATENT_ROWS[0]),
+        ("unet/cfg=false@24", 1, LATENT_ROWS[0]),
+        ("unet/cfg=true@32", CFG_ARITY, LATENT_ROWS[1])]
+eager = {}
+with torch.no_grad():
+    for name, batch, grid in ARMS:
+        sample, timestep, cond = _feed(batch, grid)
+        eager[name] = ref.unet(sample, timestep, cond).clone()
+
+from harness.rig_fetch import fetch_named_cell as _fetch_cell
+from types import SimpleNamespace as _CellNS
+import hashlib as _hl
+from gen_worker import compile_cache as _syscc
+try:
+    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+except Exception as _exc:
+    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
+    cell = None
+else:
+    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    cell = _CellNS(
+        artifact=_art, cell_key=_key0, family=cfg.family,
+        ref=_syscc.system_repo(cfg.family) + "#" + _key0,
+        snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
+out = {"pid": os.getpid(), "ok": cell is not None}
+if cell is not None:
+    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+    out.update({
+        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "snapshot_digest": cell.snapshot_digest,
+        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "entries": sorted((meta.get("entries") or {})),
+    })
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), 0)
+    out["armed"] = bool(outcome)
+    out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
+    out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
+    if outcome:
+        deltas = {}
+        rel = {}
+        with torch.no_grad():
+            for name, batch, grid in ARMS:
+                sample, timestep, cond = _feed(batch, grid)
+                got = pipe.unet(sample, timestep, cond)
+                deltas[name] = float((got - eager[name]).abs().max())
+                rel[name] = float((got - eager[name]).norm()
+                                  / eager[name].norm().clamp_min(1e-12))
+        out["parity_max_abs"] = deltas
+        out["parity_rel_l2"] = rel
+        # THE BOUND, PER DEVICE — measured, not picked (pgw#1073 run 1).
+        # CPU: compiled conv matches eager to 3.3e-06, so 1e-4 abs holds.
+        # GPU: the SAME fp32 graph differs by 1.2-1.6e-3 max|delta| — the
+        # fp32-conv kernel-numerics class (TF32/algorithm choice diverging
+        # between inductor's triton convs and eager cudnn), which production
+        # gates with a COSINE floor, not max-abs. The GPU instrument here is
+        # relative L2: measured kernel noise ~1e-3; a real bf16 cast would
+        # be ~1e-2 and still fails.
+        if DEVICE == "cuda":
+            out["parity_ok"] = all(v <= 3e-3 for v in rel.values())
+        else:
+            out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
+        out["served_entry_calls"] = dict(aot_serve.served_entry_calls(pipe))
+        out["execution_count"] = int(aot_serve.execution_count(pipe))
+        out["ok"] = bool(out["parity_ok"]) and out["execution_count"] > 0
+    else:
+        out["ok"] = False
+print("RIG_ADOPT " + json.dumps(out))
+'''
+
+
+def _micro_conv_adopt_source(base: str, cache: Path, checkpoint: str) -> str:
+    return _MICRO_CONV_ADOPT % {
+        "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
+        "base": base, "cache": str(cache), "checkpoint": checkpoint}
+
+
+MICRO_CONV = Vehicle(
+    name="micro-conv",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main_conv"),
+    function="generate-conv",
+    family="micro-conv",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=_micro_conv_cell,
+    adopt_source=_micro_conv_adopt_source,
+    parent_pipe=_micro_parent_for(0, "MicroConvPipeline", _micro_conv_cell),
+    covers=("pgw#1073: the STATIC-ROWS class at micro scale — conv-bearing "
+            "(so #730 forces the strategy), 4 static entries (2 rows x cfg "
+            "fork, the sdxl generator), an INT64 timestep indexing an "
+            "embedding (mixed dtype, wan-2.2's shape), three-deep module "
+            "nesting, and a named PERSISTENT buffer (the H3 pattern, the "
+            "other half of pgw#857's literal seam)"),
+)
+
+
+# ---------------------------------------------------------------------------
 # micro-w8a8 [+lora] — attempt 26's lane string, on a model that mints in a
 # minute. GPU-only: `scaled_mm` is the point.
 # ---------------------------------------------------------------------------
@@ -941,8 +1134,9 @@ MICRO_ESCAPE = Vehicle(
 
 
 VEHICLES: Dict[str, Vehicle] = {
-    v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA_PLAIN_PARENT,
-                        MICRO_4D, MICRO_ESCAPE, MICRO_W8A8, MICRO_W8A8_LORA)}
+    v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA16,
+                        MICRO_LORA_PLAIN_PARENT, MICRO_4D, MICRO_CONV,
+                        MICRO_ESCAPE, MICRO_W8A8, MICRO_W8A8_LORA)}
 DEFAULT_VEHICLE = TINY.name
 
 
@@ -954,7 +1148,8 @@ def vehicle(name: str) -> Vehicle:
             f"unknown rig vehicle {name!r} (known: {sorted(VEHICLES)!r})")
 
 
-__all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_ESCAPE", "MICRO_LORA",
+__all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_CONV", "MICRO_ESCAPE",
+           "MICRO_LORA", "MICRO_LORA16", "MICRO_LORA16_BUCKET",
            "MICRO_LORA_BUCKET", "MICRO_4D", "MICRO_LORA_PLAIN_PARENT",
            "MICRO_W8A8", "MICRO_W8A8_LORA", "TINY", "VEHICLES", "Vehicle",
            "vehicle"]
