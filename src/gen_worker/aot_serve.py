@@ -151,6 +151,14 @@ SOURCE_STATE_DICT = "state_dict"
 #: literal). Tiny, so it ships inside the artifact rather than being
 #: reconstructed — nothing outside the artifact knows its value.
 SOURCE_LITERAL = "literal"
+#: pgw#1080: a constant AOTInductor COMPUTES for itself at load, from the
+#: constants that were bound (`_FOLDED_CONST_*`, produced by the runtime
+#: constant-folding pass). Nothing binds it and nothing ships its bytes — it
+#: is neither a weight nor a literal, and treating it as either is a refusal
+#: for a value that is not missing. Weightless mints (pgw#1080) defer folding
+#: to load precisely so a rebindable weight's VALUE is never compiled in, so
+#: this class exists wherever that fence is armed.
+SOURCE_COMPUTED = "computed"
 
 #: The hardware/toolchain axes an ``.pt2`` is genuinely pinned to (pgw#765).
 #: ``sm`` is the GPU identity: AOTInductor itself keys on
@@ -465,10 +473,11 @@ def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
         if not fqn:
             raise ValueError(f"constant {idx} has no fqn")
         source = str(row.get("source") or "").strip()
-        if source not in (SOURCE_STATE_DICT, SOURCE_LITERAL):
+        if source not in (SOURCE_STATE_DICT, SOURCE_LITERAL, SOURCE_COMPUTED):
             raise ValueError(
                 f"constant {fqn!r} has unknown source {source!r} "
-                f"(expected {SOURCE_STATE_DICT!r} or {SOURCE_LITERAL!r})")
+                f"(expected {SOURCE_STATE_DICT!r}, {SOURCE_LITERAL!r} or "
+                f"{SOURCE_COMPUTED!r})")
         shape = row.get("shape")
         if not isinstance(shape, list):
             raise ValueError(f"constant {fqn!r} has no shape list")
@@ -1680,6 +1689,12 @@ def resolve_constants(
     out: Dict[str, Any] = {}
     missing: List[str] = []
     for spec in specs:
+        if spec.source == SOURCE_COMPUTED:
+            # AOTInductor's own const-fold pass produces this one AFTER the
+            # bound constants land; handing it a value would be handing it a
+            # value it is about to overwrite, and demanding one would refuse a
+            # cell that is complete (pgw#1080).
+            continue
         table = state_dict if spec.source == SOURCE_STATE_DICT else literals
         if spec.fqn not in table:
             missing.append(f"{spec.fqn} (source={spec.source})")
@@ -2960,6 +2975,7 @@ __all__ = [
     "LITERALS_NAME",
     "METADATA_NAME",
     "PACKAGE_NAME",
+    "SOURCE_COMPUTED",
     "SOURCE_LITERAL",
     "SOURCE_STATE_DICT",
     "armed_metadata",
