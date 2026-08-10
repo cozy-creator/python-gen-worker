@@ -166,7 +166,12 @@ def _child_specs(request: mp.MintRequest) -> Tuple[Any, List[Any]]:
     specs = registry.collect_endpoints(list(request.modules))
     chosen, siblings = mint_child.select_specs(specs, request.function)
     mint_child.bind_slots(siblings, request.slots)
-    mint_child.assert_slots_resolvable(siblings, request)
+    # pgw#1089 took the whole request out of this signature: the boot-trace
+    # child resolves the same slots for the same reason and must get the same
+    # refusal, and a second copy of the check would be a second answer to "can
+    # this process trace the checkpoint the parent serves".
+    mint_child.assert_slots_resolvable(
+        siblings, request.slots, what=mint_child.mint_identity(request))
     return chosen, siblings
 
 

@@ -70,9 +70,13 @@ def _graph_block(program: _Program, *, with_fix: bool) -> Dict[str, Any]:
     """The entry graph block, with and without pgw#857's field — so the
     collision can be shown rather than asserted."""
     block: Dict[str, Any] = {
-        "v": 2,
+        # v3 (pgw#1089): program-only. `fused_constants` is gone from the block
+        # entirely — the compiler's folding decisions are a function of
+        # (graph x toolchain x sm) and carry no bits the key lacks. Kept in
+        # step with the real block so this collision demonstration keeps
+        # describing the shape the mint actually stamps.
+        "v": 3,
         "constant_fqns": sorted(program.constants),
-        "fused_constants": [],
         "lifted_inputs": [],
         "pytree": {"in": "x", "out": "y"},
         "specialization": {},

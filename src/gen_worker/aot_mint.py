@@ -103,7 +103,8 @@ from typing import (
 from . import activity as activity_mod
 from . import (
     aot_compile_pool, aot_package,
-    aot_serve, aot_wrapper_split, cell_key, graph_hash, kernel_path)
+    aot_serve, aot_wrapper_split, boot_phases, cell_key, graph_hash,
+    kernel_path)
 from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
     DynamicDim,
@@ -3190,8 +3191,7 @@ def _gate_and_declare_entry(
             "aot-mint: %s: %d lifted constant(s) fused away by the compiler "
             "(e.g. %s)", entry, len(fused), fused[:3])
     try:
-        inputs, symbols = aot_package.input_contract(
-            row.program, row.flat_leaves)
+        block = keying_block(row.program, row.flat_leaves, row.spec)
         constants = aot_package.constants_manifest(package, entry)
         # pgw#1058: the manifest rows this envelope will carry, proven against
         # the artifact's OWN generated input guards before anything can
@@ -3199,24 +3199,159 @@ def _gate_and_declare_entry(
         # readings (program vs generated wrapper) that must agree, so a label
         # that drifted from its artifact fails closed HERE, not as an opaque
         # 36/36 admission miss on every adopting pod.
-        admission = aot_package.admission_drift(package, entry, inputs)
+        admission = aot_package.admission_drift(package, entry, block["inputs"])
     except aot_package.PackageIntrospectionError as exc:
         raise MintRefused(f"entry {entry!r}: declaration: {exc}") from exc
     if admission:
         raise MintRefused(
             f"entry {entry!r}: admission drift (pgw#1058): "
             + "; ".join(admission[:6]))
+    # The manifest is RECORDED, never keyed (`aot_serve.class_hash` folds
+    # target/fork/class_dims/range_digest/graph/strict/lora_bucket and nothing
+    # else) — which is why the boot-side derivation can state an entry's
+    # identity while carrying an empty one.
+    block["constants"] = constants
+    return block
+
+
+@dataclass
+class TracedClass:
+    """One declared graph class, traced for its IDENTITY and nothing else."""
+
+    name: str
+    #: The entry-envelope fields that reach this class's ``class_hash``.
+    block: Dict[str, Any]
+    nodes: int
+    #: Held only for the caller's probe window; drop it before the next class.
+    program: Any
+    #: How many classes the WHOLE declaration produces on this pipeline —
+    #: carried on every row so a sharded caller can prove its shares are the
+    #: whole set without enumerating it itself.
+    declared: int = 0
+
+
+def declared_class_rows(pipeline: Any, spec: ExportSpec, decl: Any) -> List[Any]:
+    """The family's declared graph-class rows, adapter-forked, in the order the
+    mint exports them (adapter-bearing first, then the branchless group).
+
+    ONE enumeration. The fork depends on the COMPOSED pipeline
+    (``lora_lifted.branch_targets``), not on the declaration, which is why no
+    caller can enumerate this without a pipeline — and why the boot derivation
+    shards by INDEX rather than by name.
+    """
+    rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+    rows.sort(key=lambda row: (
+        row[1] is False, _decl.plan_entry_name(row[0])))
+    return rows
+
+
+def trace_for_key(
+    pipeline: Any,
+    spec: ExportSpec,
+    decl: Any,
+    *,
+    share_index: int = 0,
+    share_count: int = 1,
+) -> Iterator[TracedClass]:
+    """Export the named declared graph classes and yield each one's KEYING
+    facts — §4.27 step 1's unit of work (pgw#1089).
+
+    This is the mint's export loop with the compile, the packaging and every
+    package-side gate removed, and it lives HERE rather than in the boot module
+    for two reasons the boot module cannot satisfy on its own:
+
+    * the **branch-arm ordering rule** is pipeline state — adapter-bearing rows
+      first, ONE ``_disarm_branches`` for the whole branchless group. A caller
+      that ordered its rows differently would trace different graphs, and the
+      rule belongs beside the loop that made it;
+    * the trace itself is ``_export_entry``, whose refusals, fork gate,
+      declared-range gate and lifted-input gate are the mint's. A boot-side
+      re-implementation would be a second trace path, and the two would
+      eventually key differently — which is the whole failure this derivation
+      exists to make impossible.
+
+    ``share_index``/``share_count`` select one trace child's share by INDEX
+    into that order — ``rows[i::K]``, round-robin, so every child draws a mix
+    of the (few, expensive) denoiser rows and the (many, cheap) rest rather
+    than one child drawing the whole denoiser group. Sharding by index rather
+    than by NAME is not a convenience: the adapter fork is decided by the
+    COMPOSED pipeline, so no parent can enumerate the names to hand out.
+
+    The FULL row count is yielded on every ``TracedClass`` (``declared``), so
+    the parent can prove the shares reconstruct the whole class set without
+    ever having enumerated it — a stronger check than comparing against a
+    parent-side guess would have been.
+    """
+    ordered = declared_class_rows(pipeline, spec, decl)
+    declared = len(ordered)
+    count = max(1, int(share_count))
+    rows = ordered[max(0, int(share_index)) % count::count] if count > 1 \
+        else ordered
+    disarmed = False
+    try:
+        for plan, arm in rows:
+            entry = _decl.plan_entry_name(plan)
+            if arm is False and not disarmed:
+                _disarm_branches(pipeline)
+                disarmed = True
+            # pgw#1087's `trace_for_key` row is emitted HERE — around the
+            # export it measures — and never by the caller. A caller-side span
+            # around a generator brackets the loop body, not the trace, which
+            # is how a phase table ends up honest about its names and wrong
+            # about its numbers.
+            with boot_phases.span(
+                boot_phases.PHASE_TRACE_FOR_KEY, function=entry,
+            ) as span:
+                row = _export_entry(
+                    pipeline, spec, plan, decl, compile_now=False)
+                try:
+                    nodes = int(len(row.program.graph_module.graph.nodes))
+                except Exception:  # noqa: BLE001 — never fails a trace
+                    nodes = 0
+                # pgw#1087's owed item: a class's trace cost is meaningless
+                # without the graph size it paid for.
+                span.note(f"nodes={nodes}")
+            yield TracedClass(
+                name=entry,
+                block=keying_block(row.program, row.flat_leaves, row.spec),
+                nodes=nodes,
+                program=row.program,
+                declared=declared,
+            )
+    finally:
+        if disarmed:
+            _arm_branches(pipeline, int(spec.lora_bucket or 0))
+
+
+def keying_block(
+    program: Any, flat_leaves: Sequence[Any], spec: ExportSpec,
+) -> Dict[str, Any]:
+    """The entry-envelope fields that reach an entry's ``class_hash`` — built
+    from the EXPORTED PROGRAM and the declaration, and from nothing else.
+
+    ONE construction, shared by the mint (:func:`_entry_block`, which adds the
+    package-side ``constants`` manifest afterwards) and by the boot-side
+    derivation (``boot_key``, which has no package and carries the manifest
+    empty). Two constructions of the same block would be exactly the
+    attempt-28 phantom in a new hat: a declared-facts key beside a traced-facts
+    key under one axis name.
+
+    ``constants`` is present-but-empty rather than absent because
+    ``aot_serve.entries_from_meta`` validates every block as a full contract,
+    and an entry that cannot be parsed cannot be keyed.
+    """
+    inputs, symbols = aot_package.input_contract(program, flat_leaves)
     block: Dict[str, Any] = {
-        "target": row.spec.target,
-        "fork": [[str(n), v] for n, v in sorted(row.spec.fork)],
+        "target": spec.target,
+        "fork": [[str(n), v] for n, v in sorted(spec.fork)],
         "class_dims": [
-            [str(n), int(v)] for n, v in sorted(row.spec.class_dims)],
+            [str(n), int(v)] for n, v in sorted(spec.class_dims)],
         "inputs": inputs,
         "symbols": symbols,
-        "constants": constants,
-        "graph": entry_graph_block(row.program, package, row.name, row.spec),
+        "constants": [],
+        "graph": entry_graph_block(program, spec),
     }
-    if adapter_arm(row.spec.fork) is False:
+    if adapter_arm(spec.fork) is False:
         # pgw#790: the NEGATIVE half of this class's contract. Without it the
         # branchless entry silently ADMITS an adapter-bearing call (a
         # name-keyed bind ignores inputs it does not declare), the dispatch
@@ -3430,15 +3565,39 @@ def emit_phase_events(
         logger.debug("aot-mint: phase event emission failed", exc_info=True)
 
 
-def entry_graph_block(
-    program: Any, package: Path, entry: str, spec: ExportSpec,
-) -> Dict[str, Any]:
+def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
     """The per-entry graph-interface facts (fold into that entry's
-    ``class_hash``): the declared constant FQN set, the lifted inputs, the
+    ``class_hash``): the lifted constant FQN set, the lifted inputs, the
     pytree spec, and the python branches export FROZE at trace time.
     Constant BYTE SIZES are deliberately absent — they are a property of the
     resident weights, and a fine-tune of one family must keep sharing
     cells, which is the premise of family-scoped cells.
+
+    **v3 (pgw#1089): every fact here comes from the EXPORTED PROGRAM, never
+    from the compiled package.** v2 read ``constant_fqns`` off the packaged
+    artifact and carried ``fused_constants`` (the constants the compiler folded
+    away), so an entry's identity could not be stated until after its compile.
+    Two consequences, one of which was already live:
+
+    * **A weightless mint and a real-weight mint of the IDENTICAL graph keyed
+      differently.** pgw#1080 compiles structure-only entries with
+      ``aot_inductor.use_runtime_constant_folding`` (it must — a compile-time
+      fold bakes fake values), which keeps every parameter bindable and adds
+      ``_FOLDED_CONST_*`` rows. Both package-side sets therefore move, so the
+      same traced graph produced two different ``ck1`` keys depending on how
+      its mint happened to obtain its weights. That is precisely the fused-axis
+      failure the membership axiom forbids.
+    * **The key could not be derived before the artifact existed**, which makes
+      §4.27 step 1 (derive on boot, from code alone) impossible by
+      construction.
+
+    Both facts are a FUNCTION of (graph x toolchain x sm) — the same program
+    compiled by the same toolchain on the same architecture folds the same
+    constants — so they carry zero information the key does not already hold,
+    and the axiom admits nothing that does. They are not lost: the mint still
+    PROVES them (``aot_package.program_package_drift`` refuses a package whose
+    constant set disagrees with its program; ``eliminated_constants`` is still
+    logged per entry). Proven, not keyed.
 
     pgw#857: that exclusion is right for a WEIGHT and wrong for a LITERAL, and
     both were excluded. A weight is rebound from the resident ``state_dict``
@@ -3455,10 +3614,8 @@ def entry_graph_block(
     for ``excluded``, and for the same reason: a field that says "unchanged"
     must not strand already-published cells."""
     block: Dict[str, Any] = {
-        "v": 2,
-        "constant_fqns": sorted(aot_package.constant_names(package, entry)),
-        "fused_constants": sorted(
-            aot_package.eliminated_constants(program, package, entry)),
+        "v": 3,
+        "constant_fqns": sorted(aot_package.program_constant_fqns(program)),
         "lifted_inputs": sorted(str(n) for n in spec.lifted_inputs),
         "pytree": _pytree_facts(program),
         "specialization": _specialization_facts(spec),
@@ -4039,6 +4196,10 @@ __all__ = [
     "dynamic_shapes_spec",
     "emit_phase_events",
     "entry_graph_block",
+    "keying_block",
+    "trace_for_key",
+    "declared_class_rows",
+    "TracedClass",
     "export_program",
     "exported_input_names",
     "shared_identity_blocks",

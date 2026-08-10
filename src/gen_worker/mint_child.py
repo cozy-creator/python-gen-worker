@@ -313,9 +313,17 @@ def bind_slots(specs: Sequence[Any], resolved: Mapping[str, MintSlot]) -> None:
 
 
 def assert_slots_resolvable(
-    specs: Sequence[Any], request: MintRequest,
+    specs: Sequence[Any],
+    slots: Mapping[str, MintSlot],
+    *,
+    what: str = "",
 ) -> None:
     """pgw#969: refuse a request whose slots cannot resolve — before the load.
+
+    ``slots`` + ``what`` rather than the whole ``MintRequest`` (pgw#1089): the
+    boot-trace child resolves the same slots for the same reason and must get
+    the same refusal, and a second copy of this check would be a second answer
+    to "can this process trace the checkpoint the parent serves".
 
     Two distinct failures, both named rather than deferred to a handler's
     first dereference nine seconds later:
@@ -332,7 +340,7 @@ def assert_slots_resolvable(
     """
     from . import warmup as warmup_mod
 
-    bound = set(request.slots)
+    bound = set(slots)
     problems: List[str] = []
     for spec in specs:
         missing = sorted(
@@ -350,7 +358,7 @@ def assert_slots_resolvable(
                 f"{sorted(bound) or '(nothing)'})")
         errors = warmup_mod.resolved_slots_kwargs(spec, None)["slot_errors"]
         for name, why in sorted(errors.items()):
-            resolved = request.slots.get(name)
+            resolved = slots.get(name)
             if resolved is not None:
                 problems.append(
                     f"slot {name!r} of {spec.name!r}: the parent's binding "
@@ -359,7 +367,7 @@ def assert_slots_resolvable(
     if not problems:
         return
     raise MintChildRefused(
-        f"{mint_identity(request)}: cannot build the warmup request — "
+        f"{what or 'slot resolution'}: cannot build the warmup request — "
         + "; ".join(problems)
         + ". A mint cannot trace a graph for a pipeline it was never told "
           "to load.")
@@ -396,7 +404,12 @@ def assert_composable(resolved: Mapping[str, MintSlot]) -> None:
         + "; ".join(f"{slot}={resolved[slot].path}" for slot in bad))
 
 
-def _pick_compile_target(loaded: Dict[str, Any], cfg: Any) -> Tuple[str, Any]:
+def pick_compile_target(loaded: Dict[str, Any], cfg: Any) -> Tuple[str, Any]:
+    """The loaded slot that actually carries the declared compile target(s).
+
+    Public since pgw#1089: the boot-trace child must pick the SAME slot this
+    child picks, and two pickers would be two compile targets.
+    """
     from . import compile_cache as cc
 
     for slot, obj in loaded.items():
@@ -828,7 +841,8 @@ def mint(request: MintRequest) -> MintReport:
     # pgw#969: the parent's resolution, installed on the rediscovered specs
     # BEFORE anything is loaded — and the refusal, if it cannot be.
     bind_slots(siblings, request.slots)
-    assert_slots_resolvable(siblings, request)
+    assert_slots_resolvable(
+        siblings, request.slots, what=mint_identity(request))
     # pgw#1034: the wire struct IS the cfg. It used to be re-inflated into a
     # `registry.CompileCell` to keep `contract_facts()` byte-identical for a
     # key the child computed — the child has computed no key since pgw#758, so
@@ -871,7 +885,7 @@ def mint(request: MintRequest) -> MintReport:
             got = run_setup(
                 obj, dict(paths), arm_compile=False,
                 return_loaded=True, component_paths=overrides) or {}
-        _slot, loaded_pipe = _pick_compile_target(got, cfg)
+        _slot, loaded_pipe = pick_compile_target(got, cfg)
         frame(phase="load", note=f"compile target on slot {_slot!r}")
         if cfg.lora_bucket:
             cc.apply_lora_execution_lane(loaded_pipe, cfg.lora_bucket)
@@ -1174,5 +1188,6 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 __all__ = ["MintChildRefused", "assert_composable", "assert_slots_resolvable",
+           "pick_compile_target",
            "bind_slots", "cap_vram", "frame", "main",
            "mint_identity", "mint", "select_specs"]

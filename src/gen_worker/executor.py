@@ -33,7 +33,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 import msgspec
 
 from . import activity as activity_mod
-from . import aot_delivery, aot_identity
+from . import aot_declaration, aot_delivery, aot_identity, aot_mint
+from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import cell_adopt
 from . import dispatch
@@ -6677,6 +6678,34 @@ class Executor:
                 f"{eager_only}")
         compile_selection = arm.selection if arm is not None else None
         compile_artifact = compile_selection.path if compile_selection else None
+        # §4.27 steps 1-3 (pgw#1089/pgw#1090): with no Plan-named artifact, this
+        # pod derives its OWN cell key from code alone and asks the hub by that
+        # key BEFORE `setup()` puts a weight in this process. On a hit the
+        # answer becomes an ordinary `_ArmOrder`, so the adopted cell runs the
+        # Plan path's gates and not one gate fewer.
+        #
+        # This is what makes boot-time adoption possible at all: the hub's other
+        # resolver only VERIFIES a cell the worker already armed, so a cold pod
+        # advertises nothing, is named nothing, and never adopts.
+        #
+        # OWED (pgw#1091's overlap box): the derivation runs HERE, after
+        # `_materialize_local` finished the weights download, so it does not yet
+        # RACE the fetch the way §4.27 step 4 asks. It is already off the
+        # request path — no dispatch has occurred — and moving it earlier is a
+        # restructure of this method's await order, not of the derivation.
+        if arm is None and spec.compile is not None and not eager_only:
+            adopt = await asyncio.to_thread(
+                self._boot_adopt, spec, resolved_slots)
+            if adopt is not None and adopt.adoption is not None:
+                got = adopt.adoption
+                compile_selection = _CompileArtifactSelection(
+                    path=got.artifact, ref=got.ref,
+                    snapshot_digest=got.snapshot_digest)
+                compile_artifact = got.artifact
+                arm = _ArmOrder(
+                    backend="aot_cell", selection=compile_selection,
+                    expected=got.expected,
+                    publisher_org=got.cell.publisher_org)
         # pgw#947: the serving-kernel lane comes from the CELL, and it has to
         # be pinned BEFORE setup() — the linears are swapped at model load, so
         # a verdict read afterwards would arrive one whole pipeline too late.
@@ -9551,6 +9580,53 @@ class Executor:
                 error=f"cell_selection_bug: {str(exc)[:300]}",
             )
         ))
+
+    def _boot_adopt(
+        self, spec: EndpointSpec, slots: Dict[str, MintSlot],
+    ) -> "Optional[boot_adopt.BootAdoptOutcome]":
+        """§4.27 steps 1-3 for one boot, off the event loop.
+
+        Returns ``None`` when this pod cannot even ATTEMPT the derivation (no
+        declaration for the family, no hub credential yet) — which is not a
+        failure, it is the state every pod was in before this seam existed.
+        Everything past that point is a :class:`BootAdoptOutcome`, and every
+        one of its non-hit outcomes means "boot as this pod booted yesterday".
+        """
+        cfg = spec.compile_cell()
+        family = str(getattr(cfg, "family", "") or "")
+        decl = aot_mint.export_declaration(family)
+        if decl is None:
+            return None
+        try:
+            declared_hint = len(list(aot_declaration.cell_plans(decl)))
+        except Exception:  # noqa: BLE001 — never fatal
+            return None
+        base_url = str(self.file_base_url or "")
+        bearer = str(self.worker_jwt_provider() or "")
+        if not base_url or not bearer:
+            # Pre-Hello, or an embedded worker with no hub. There is nobody to
+            # ask, and deriving a key nobody will answer is pure boot latency.
+            return None
+        work_root = Path(
+            self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
+        ) / "boot-key" / (spec.name or "endpoint")
+        return boot_adopt.attempt(
+            function=spec.name,
+            modules=_mint_modules(spec),
+            cfg=cfg,
+            slots=slots,
+            declared_hint=declared_hint,
+            envelope=fleet_cells.declared_envelope_block(cfg),
+            work_root=work_root,
+            # The memo lives beside the cell cache and OUTLIVES one boot on a
+            # pod with a volume — which is the whole point (§4.28's
+            # compile-once-run-forever promise for cozy-local reads the same
+            # memo through the same closure digest).
+            memo_dir=Path(self.store._cache_dir) if self.store._cache_dir else None,
+            cache_dir=self.store._cache_dir,
+            base_url=base_url,
+            bearer=bearer,
+        )
 
     def _enable_compiled(
         self, pipe: Any, cfg: Any, artifact: Optional[Path],

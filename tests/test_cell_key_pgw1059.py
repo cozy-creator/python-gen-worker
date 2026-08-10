@@ -105,6 +105,18 @@ _DERIVATION_ALLOWLIST = {
         "aot_mint.py",    # cell_identity (the stamp)
         "fleet_cells.py",  # _recomputed_key (the publish recompute)
         "aot_serve.py",   # verify_contract (the admission proof)
+        # pgw#1089 (§4.27 step 1): the BOOT-side derivation. Added
+        # consciously, and it is the reason the fence is an allowlist rather
+        # than a ban: the boot key must be THE cell key, so the fourth site
+        # had to be this function and not a fourth arithmetic. `boot_key.fold`
+        # assembles the mint's own entry blocks, stamps them through
+        # `aot_serve.artifact_metadata` (which is where `combined_graph_hash`
+        # and every `class_hash` are computed — note `boot_key.py` is NOT in
+        # the `combined_graph_hash(` allowlist below, and must not be), and
+        # asks THIS function for the key. A boot derivation that computed the
+        # digest itself would be attempt 28 exactly: a declared-facts key
+        # beside a traced-facts key under one axis name.
+        "boot_key.py",
     },
     # the declared-envelope digest.
     "envelope_digest(": {
