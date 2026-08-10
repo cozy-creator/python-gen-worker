@@ -31,6 +31,17 @@ from typing import Any, Dict, Optional, Union
 #: The packed envelope's member name, at the tar root, for every artifact kind.
 METADATA_NAME = "metadata.json"
 
+#: THREAT (pgw#1013 §4.24): the tarball is gzipped, so a 50 GB zero-filled
+#: ``metadata.json`` costs a few MB on the wire and OOMs the pod INSIDE
+#: ``receipts.verify_delivered_artifact`` — this reader supplies the envelope
+#: that gate is about to verify, so the read precedes the digest check and no
+#: caller can bound it instead. 4x ``fleet_cells.CELL_DECLARE_MAX_BYTES``, the
+#: 4 MiB bound the hub enforces on the declare built from this envelope
+#: (a literal because this module stays stdlib-only). Enforced ONCE, on the tar
+#: header's declared size: ``tarfile`` stops the member reader there, so an
+#: under-declaring header cannot yield a larger ``.read()``.
+MAX_METADATA_BYTES = 16 << 20
+
 
 class ArtifactMetadataError(ValueError):
     """An artifact carries no readable :data:`METADATA_NAME`."""
@@ -44,7 +55,8 @@ def read_metadata(artifact: Union[str, Path]) -> Dict[str, Any]:
     pays for the multi-GiB payload beside it.
 
     Raises :class:`ArtifactMetadataError` naming the artifact when the member is
-    absent, the tar is unreadable, or the payload is not a JSON object.
+    absent, the tar is unreadable, larger than :data:`MAX_METADATA_BYTES`, or
+    the payload is not a JSON object.
     """
     path = Path(artifact)
     try:
@@ -52,6 +64,11 @@ def read_metadata(artifact: Union[str, Path]) -> Dict[str, Any]:
             for member in tar:
                 if member.name != METADATA_NAME or not member.isfile():
                     continue
+                if member.size > MAX_METADATA_BYTES:
+                    raise ArtifactMetadataError(
+                        f"artifact {path} declares a {member.size}-byte "
+                        f"{METADATA_NAME}, over the {MAX_METADATA_BYTES}-byte "
+                        f"bound; refused before decompressing it")
                 src = tar.extractfile(member)
                 if src is None:
                     break
@@ -82,6 +99,7 @@ def try_read_metadata(artifact: Union[str, Path]) -> Optional[Dict[str, Any]]:
 
 
 __all__ = [
+    "MAX_METADATA_BYTES",
     "METADATA_NAME",
     "ArtifactMetadataError",
     "read_metadata",

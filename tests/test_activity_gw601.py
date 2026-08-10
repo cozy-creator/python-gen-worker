@@ -80,7 +80,12 @@ def test_executor_setup_emits_monotonic_activity_phases():
 
     ups = _updates(sent)
     assert ups, "no activity envelopes emitted"
-    assert all(u.kind == activity.KIND_WARMUP for u in ups)
+    # pgw#1067: the boot-forward roll-up is a self-contained EVENT under its
+    # own kind, not part of this activity's phase envelope. This assertion
+    # read as "one activity" only because the two used to share a kind.
+    assert {u.kind for u in ups} <= {
+        activity.KIND_WARMUP, activity.KIND_WARMUP_SUMMARY}
+    ups = [u for u in ups if u.kind == activity.KIND_WARMUP]
     seqs = [u.seq for u in ups]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
     phases = [(u.phase, u.step, u.total_steps, u.state) for u in ups]
