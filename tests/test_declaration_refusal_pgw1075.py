@@ -86,7 +86,7 @@ def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
         regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=bucket,
         guidance_scales=(), text_lens=())
     pending = SimpleNamespace(
-        family=ep.FAMILY, cell_key="ck5-pgw1075", cfg=cfg,
+        family=ep.FAMILY, arm_token="arm1-pgw1075", cfg=cfg,
         target=workdir / "cell.tar.gz", mint_root=workdir)
     task = mint_delegate.MintTask(
         pending=pending, pipe=None, function=FUNCTION,
