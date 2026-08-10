@@ -63,13 +63,16 @@
 #       and `is_aot_ref`'s `aot-` label branch went with the label's only
 #       producer.
 #     aot_package.package_entry_names, guard_closure.manifest_digest.
-#     aot_serve.unpack_metadata — LISTED 2026-08-08 (pgw#1035). It became
-#       caller-less when `is_aot_artifact` was deleted, and is KEPT: it is the
-#       AOT lane's own reader of its own packed envelope, driven over real
-#       minted tarballs by the pgw#699 double-mint byte-compare proof.
-#       `trt_engine.unpack_metadata` is byte-identical; that dedup belongs to
-#       the TRT-engine ratification, because whichever module survives owns the
-#       one that is left.
+#     aot_serve.unpack_metadata — ✅ DELISTED 2026-08-10 (pgw#1098) by
+#       DELEGATION to `artifact_meta.read_metadata`. It was listed 2026-08-08
+#       (pgw#1035) as "the AOT lane's own reader of its own packed envelope",
+#       with the dedup deferred to the TRT-engine ratification on the reasoning
+#       that waiting cost nothing. It cost $1.584 and a 92-minute sdxl mint:
+#       pgw#1013 bounded the SHARED reader and not this one, so two readers of
+#       one `metadata.json` disagreed about row 7's envelope — the bounded one
+#       refused it, this one read it fine, and the asymmetry surfaced as a
+#       LoRA-contract refusal with no root. `trt_engine.unpack_metadata` had
+#       already been collapsed; this was the last of the eight.
 #     compile_cache.seed_artifact — LISTED 2026-08-08 (pgw#1035). It became
 #       caller-less when `prepare` was deleted, and it is deliberately NOT
 #       deleted with it: it is one entry point of the delivered-inductor-cache
@@ -143,7 +146,6 @@ gen_worker.aot_package.package_entry_names()
 gen_worker.aot_serve.EntryDispatch.refusal_counts()
 gen_worker.aot_serve.realigned_inputs()
 gen_worker.aot_serve.served_entry_calls()
-gen_worker.aot_serve.unpack_metadata()
 gen_worker.boot_phases.BootSpan.skipped()
 gen_worker.boot_phases.servable_ms()
 gen_worker.compile_cache.seed_artifact()
