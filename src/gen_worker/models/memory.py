@@ -79,6 +79,19 @@ _CPU_OFFLOAD_MODES = ("model_offload", "group_offload", "sequential")
 OFFLOAD_LADDER: tuple[str, ...] = _CPU_OFFLOAD_MODES
 
 
+def keeps_weights_in_host_ram(mode: Optional[str]) -> bool:
+    """True when this placement rung leaves the model's weights RESIDENT IN
+    HOST RAM (pgw#1063).
+
+    Every CPU-offload rung does: that is what offloading IS — the weights
+    live on the host and stream to the card per forward. So an offloaded
+    pipeline's host-RAM requirement is its WHOLE TREE, and any accounting
+    that charges it less (pgw#1026's per-component staging discount, which
+    is admissible only because each component LEAVES the host for the card)
+    is admitting a load the host cannot hold."""
+    return str(mode or "") in _CPU_OFFLOAD_MODES
+
+
 def next_offload_rung(mode: Optional[str]) -> Optional[str]:
     """The next rung down the offload ladder from ``mode``.
 
@@ -1434,6 +1447,7 @@ __all__ = [
     "place_pipeline",
     "next_offload_rung",
     "deeper_offload_mode",
+    "keeps_weights_in_host_ram",
     "is_cuda_oom",
     "degraded_log_line",
     "OFFLOAD_LADDER",

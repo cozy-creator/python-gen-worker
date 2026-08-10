@@ -61,9 +61,26 @@ EVENT_PHASE = "load_phase"
 #: A load phase FINISHED, carrying its measured span (th#1322: the number
 #: goes in the column, never interpolated into the detail).
 EVENT_PHASE_DONE = "load_phase_done"
+#: pgw#1063: this phase is RE-READING its own set instead of staging it —
+#: the direct-reclaim crawl, confessed while the worker is still alive.
+EVENT_PHASE_THRASH = "load_phase_thrash"
 
 _INTERVAL_S = 5.0
 _GIB = float(1 << 30)
+
+#: How many full passes over a phase's own bytes count as staging before the
+#: reads are re-reads (pgw#1063). THREAT (§4.24): a staging admitted against
+#: an estimate that turned out low crawls in direct reclaim — ie#615 read
+#: 1.578 TB for a 105 GB set (a 15x re-read) across 37 minutes of billed
+#: H100 before the kernel OOM-killed it. Derivation: a cold load reads each
+#: byte ONCE (1x) and a page-cache-warm load reads ~0; 3x is three full
+#: passes, which no legitimate staging shape reaches. Conjunctive with the
+#: ceiling fraction below, so a merely large load cannot trip it.
+_REREAD_MULTIPLE = 3.0
+#: Fraction of the cgroup limit anon RSS must occupy for the re-reads to be
+#: attributable to reclaim pressure rather than to a big tree. Measured at
+#: the incident: 232.9 GiB anon of a 233.76 GiB cgv1 ceiling = 99.6%.
+_CEILING_FRACTION = 0.9
 
 _lock = threading.Lock()
 _active: Optional["LoadProgressReporter"] = None
@@ -117,6 +134,13 @@ class LoadProgressReporter:
         self._phase_bytes = 0
         self._phase_started = time.monotonic()
         self._staged = 0
+        # pgw#1063 thrash detection: this phase's own read/anon baselines and
+        # the verdict once it has been reached (sticky — the regime does not
+        # un-happen, and the loader reads it between components).
+        self._phase_read0 = 0
+        self._phase_anon0 = 0
+        self._thrash = ""
+        self._cgroup_limit = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._io0: Optional[int] = None
@@ -134,6 +158,8 @@ class LoadProgressReporter:
         self._close_phase()
         self._phase, self._phase_bytes = phase, max(0, int(nbytes))
         self._phase_started = time.monotonic()
+        self._phase_read0 = _proc_read_bytes() or 0
+        self._phase_anon0 = (_proc_rss_anon_kb() or 0) * 1024
         self._announce_phase()
         self._tick()
 
@@ -212,6 +238,75 @@ class LoadProgressReporter:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.stop(clean=exc_type is None)
 
+    # -- the re-read (direct-reclaim) verdict (pgw#1063) ---------------------
+
+    @property
+    def thrash(self) -> str:
+        """This load's re-read verdict, or ``""``. Sticky once reached."""
+        return self._thrash
+
+    def _cgroup_limit_bytes(self) -> int:
+        if not self._cgroup_limit:
+            # CYCLE: memory imports nothing from here.
+            from .memory import cgroup_memory_limit_bytes
+
+            self._cgroup_limit = int(cgroup_memory_limit_bytes() or 0)
+        return self._cgroup_limit
+
+    def _check_thrash(self, read: Optional[int], anon: int) -> None:
+        """Decide whether this phase is STAGING or RE-READING.
+
+        THREAT (§4.25): a staging admitted against an estimate that turned
+        out low does not fail — it crawls. Every fault goes through direct
+        reclaim, the process reads its own set over and over, and the only
+        thing that ends it is the kernel's OOM killer, tens of minutes and
+        tens of dollars later (ie#615: 1.578 TB read for a 105 GB set, 37
+        minutes, rss_anon 232.9 GiB of a 233.76 GiB ceiling).
+
+        The observable that decides it correctly is a CONJUNCTION, because
+        each half alone has an innocent explanation: a big tree reads a lot,
+        and a load with room may sit high. Together — reads past several
+        full passes over this phase's OWN bytes, WHILE anon sits against the
+        cgroup limit — there is no innocent reading left: a healthy load
+        reads each byte about once and a page-cache-warm one reads ~none.
+
+        Anon GROWTH is deliberately not treated as proof of progress. In the
+        incident it grew the whole time (130 -> 232.9 GiB): the estimate was
+        simply wrong about what the set weighed, and "it is still staging"
+        is exactly the story that ran 37 minutes into a kernel kill.
+
+        The verdict is a confession, not a kill: the counter above already
+        stopped crediting re-reads, so the existing stall authority sees a
+        stalled load, and the loader refuses the next component with these
+        numbers instead of admitting one more into the crawl.
+        """
+        if self._thrash or self._phase_bytes <= 0 or read is None:
+            return
+        phase_read = max(0, read - self._phase_read0)
+        staged = max(0, anon - self._phase_anon0)
+        limit = self._cgroup_limit_bytes()
+        if phase_read <= _REREAD_MULTIPLE * self._phase_bytes:
+            return
+        if limit <= 0 or anon < _CEILING_FRACTION * limit:
+            return
+        self._thrash = (
+            f"{self._phase}: read {_gib(phase_read)} for a "
+            f"{_gib(self._phase_bytes)} set "
+            f"({phase_read / float(self._phase_bytes):.1f}x re-read) having "
+            f"staged {_gib(staged)}, with anon RSS "
+            f"{_gib(anon)} against a {_gib(limit)} cgroup limit — this load "
+            f"is re-reading its own bytes through direct reclaim, not "
+            f"staging them"
+        )
+        logger.error("load thrash (pgw#1063) %s: %s", self.label, self._thrash)
+        try:
+            activity_mod.emit_event(
+                EVENT_PHASE_THRASH, f"{self.label}: {self._thrash}",
+                phase=self._phase,
+            )
+        except Exception:  # noqa: BLE001 - reporting must never break a load
+            logger.debug("load-thrash event dropped", exc_info=True)
+
     # -- sampling -----------------------------------------------------------
 
     def _run(self) -> None:
@@ -228,8 +323,18 @@ class LoadProgressReporter:
             rss_anon_kb = _proc_rss_anon_kb() or 0
             # Bytes STAGED is evidenced by whichever is further along:
             # cold reads show in io, page-cache-warm loads show as anon RSS.
-            done = max(0, read, rss_anon_kb * 1024)
+            # pgw#1063: reads BEYOND the set's own size are re-reads, not
+            # progress — crediting them is what let a 37-minute direct-
+            # reclaim crawl report 1.578 TB of "advancement" for a 105 GB
+            # set, so the stall clock never saw a stalled load. Cap the
+            # read-derived credit at what there is to read; anon growth
+            # (real staged bytes) still advances it honestly.
+            readable = self.total_bytes or read
+            done = max(0, min(read, readable), rss_anon_kb * 1024)
             self._staged = done
+            # ABSOLUTE counters: the phase baselines are absolute too, and a
+            # delta-from-load-start would silently zero the comparison.
+            self._check_thrash(io_now, rss_anon_kb * 1024)
             c = progress_mod.counter(
                 COUNTER_NAME, "bytes",
                 max(self.total_bytes, done),
@@ -246,6 +351,7 @@ class LoadProgressReporter:
                 "started_unix": self._started_unix,
                 "ts_unix": time.time(),
                 "pid": os.getpid(),
+                "thrash": self._thrash,
             }, self.marker_path)
         except Exception:  # noqa: BLE001 - reporting must never break a load
             logger.debug("load-progress tick dropped", exc_info=True)
@@ -259,10 +365,23 @@ def set_phase(phase: str, nbytes: int = 0) -> None:
         rep.set_phase(phase, nbytes)
 
 
+def thrash_verdict() -> str:
+    """The active load's re-read verdict, or ``""`` (pgw#1063).
+
+    Non-empty means THIS process has been measured re-reading a set it
+    cannot hold instead of staging it. The loader refuses the next
+    component with it rather than admitting one more into the crawl."""
+    with _lock:
+        rep = _active
+    return rep.thrash if rep is not None else ""
+
+
 __all__ = [
     "COUNTER_NAME",
     "EVENT_PHASE",
     "EVENT_PHASE_DONE",
+    "EVENT_PHASE_THRASH",
     "LoadProgressReporter",
     "set_phase",
+    "thrash_verdict",
 ]

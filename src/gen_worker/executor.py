@@ -112,6 +112,7 @@ from .models.memory import (
     flush_memory,
     get_available_vram_gb,
     is_cuda_oom,
+    keeps_weights_in_host_ram,
     low_vram_mode,
     next_offload_rung,
     release_unused_pinned_host_cache,
@@ -7802,11 +7803,20 @@ class Executor:
                 for comp_path in comp_paths.values():
                     slot_bytes += await asyncio.to_thread(
                         disk_gc.tree_bytes, Path(comp_path))
+                ref = wire_ref(spec.models[slot])
                 if is_modular_pipeline_class(slots[slot]):
+                    # pgw#1063: the discount below is the loader's promise
+                    # that each component LEAVES the host for the card. The
+                    # rung decides whether that promise can be kept, so the
+                    # admission and the loader read the same one — a
+                    # CPU-offload rung (including the sticky floor an OOM
+                    # degrade learned) is charged its whole tree here and
+                    # stages whole-tree there.
                     plan = await asyncio.to_thread(
                         functools.partial(
                             plan_streamed_hydration, Path(p),
-                            component_trees=comp_paths),
+                            component_trees=comp_paths,
+                            placement_mode=self._placement_mode(spec, ref)),
                     )
                     if plan.engaged:
                         logger.info(
@@ -7814,7 +7824,6 @@ class Executor:
                             "largest COMPONENT, not its tree: %s",
                             spec.name, slot, plan.summary())
                         slot_bytes = plan.largest_unit_bytes
-                ref = wire_ref(spec.models[slot])
                 if slot_bytes > incoming:
                     incoming = slot_bytes
                     incoming_refs = [ref]
@@ -11539,6 +11548,9 @@ class Executor:
                 transitions.append(
                     (ref, before, after, estimate_pipeline_size_gb(obj))
                 )
+        refused = await self._refuse_unfittable_offload(spec, transitions)
+        if refused:
+            transitions = []
         for ref, from_mode, to_mode, needed_gb in transitions:
             self._record_demotion(
                 spec, ref=ref, phase="inference",
@@ -11551,6 +11563,19 @@ class Executor:
         rec = self._classes.get(spec.instance_key)
         if rec is not None and rec.ready:
             rec.stale = True
+        if refused:
+            try:
+                ctx.log(
+                    f"DEGRADED_MODE=refused fn={spec.name}: CUDA OOM, and the "
+                    f"offloaded reload the ladder would run does not fit this "
+                    f"pod's host RAM ({refused}). The function is disabled "
+                    f"here and the hub re-places it; this worker does not "
+                    f"attempt the reload.",
+                    level="error",
+                )
+            except Exception:
+                pass
+            return
         if not transitions:
             logger.warning(degraded_log_line(
                 event="engaged", fn=spec.name, phase="inference",
@@ -11565,6 +11590,106 @@ class Executor:
             )
         except Exception:
             pass
+
+    async def _refuse_unfittable_offload(
+        self, spec: EndpointSpec,
+        transitions: List[Tuple[str, str, str, float]],
+    ) -> str:
+        """pgw#1063: price the offloaded reload the ladder is about to
+        prescribe, and refuse the DEGRADE when the host cannot hold it.
+
+        THREAT (§4.25): an offload rung keeps the whole weight set in host
+        RAM. ie#615's H3 degrade re-staged a 105 GB set into a 233.76 GiB
+        cgroup that was already holding the previous staging's anon — every
+        fault went through direct reclaim, `read_bytes` reached 1.578 TB
+        (a 15x re-read of a 105 GB set) over 37 minutes of billed H100, and
+        the kernel OOM-killed the child. That death was arithmetically
+        certain at minute zero, off numbers this worker already had.
+
+        The observable is the same one pgw#752 refuses on: tree bytes on
+        disk plus the staging floor against the cgroup-aware host TOTAL. A
+        shortfall against the total is structural — no eviction, and no
+        identical pod, changes it (th#1228) — so it reports as a hardware
+        axis, the function self-disables here, and the hub places the work
+        somewhere that can hold it. A shortfall against what is available
+        RIGHT NOW keeps the rung but publishes the typed per-ref capacity
+        block, so the retry is not re-admitted onto this worker while the
+        quarantined instance's own staging is still resident — the window
+        attempt 5 sat in for the whole 37 minutes.
+
+        Returns the structural refusal summary, or "" when the ladder may
+        proceed."""
+        res = self.store.residency
+        worst: Tuple[int, str] = (0, "")
+        for ref, _from_mode, to_mode, _needed_gb in transitions:
+            if not keeps_weights_in_host_ram(to_mode):
+                continue
+            local = res.local_path(ref)
+            if local is None:
+                continue
+            tree = await asyncio.to_thread(disk_gc.tree_bytes, Path(local))
+            if tree > worst[0]:
+                worst = (tree, ref)
+        incoming, ref = worst
+        if incoming <= 0:
+            return ""
+        headroom = await asyncio.to_thread(res.host_ram_headroom, incoming)
+        if headroom.sufficient:
+            return ""
+        if not headroom.structural:
+            # It fits a host this size — just not this host RIGHT NOW, with
+            # the quarantined instance's own staging still resident. That is
+            # the ie#615 shape, and the thing that must not happen is the
+            # RE-ADMISSION landing back here mid-reload (attempt 5 sat in
+            # that window for the whole 37 minutes). Publishing the typed
+            # per-ref capacity block is how this worker says so; it clears
+            # itself the moment measured headroom covers the requirement.
+            await self._record_host_ram_failure([ref], InsufficientHostRamError(
+                spec.name,
+                incoming_bytes=incoming,
+                floor_bytes=headroom.floor_bytes,
+                required_bytes=headroom.required_bytes,
+                available_before_bytes=headroom.available_bytes,
+                available_after_bytes=headroom.available_bytes,
+                total_bytes=headroom.total_bytes,
+            ))
+            logger.warning(degraded_log_line(
+                event="engaged", fn=spec.name, model=ref, phase="inference",
+                from_rung="resident", to_rung="model_offload",
+                free_gb=get_available_vram_gb(),
+                detail="the offloaded reload does not fit this host's CURRENT "
+                       "headroom; the rung is learned but the ref is blocked "
+                       "here until measured headroom covers it, so the retry "
+                       "is not re-admitted into a reload that cannot fit "
+                       "(pgw#1063)",
+            ))
+            return ""
+        error = HostRamCapacityError(
+            spec.name,
+            incoming_bytes=incoming,
+            floor_bytes=headroom.floor_bytes,
+            required_bytes=headroom.required_bytes,
+            available_before_bytes=headroom.available_bytes,
+            available_after_bytes=headroom.available_bytes,
+            total_bytes=headroom.total_bytes,
+        )
+        summary = (
+            f"the {ref} weight set is "
+            f"{incoming / float(1 << 30):.1f}GiB and an offloaded pipeline "
+            f"keeps it in host RAM; required "
+            f"{headroom.required_bytes / float(1 << 30):.1f}GiB against a "
+            f"{headroom.total_bytes / float(1 << 30):.1f}GiB host total"
+        )
+        logger.error(degraded_log_line(
+            event="refused", fn=spec.name, model=ref, phase="inference",
+            from_rung="resident", to_rung="model_offload",
+            free_gb=get_available_vram_gb(),
+            detail=f"the offloaded reload cannot fit its own staging: "
+                   f"{summary}. Refusing the degrade instead of thrashing "
+                   f"the host to a kernel OOM (pgw#1063).",
+        ))
+        await self._record_host_ram_failure([ref], error)
+        return summary
 
     async def _execute(
         self,
