@@ -42,7 +42,7 @@ RIG = REPO / "scripts" / "micro_mint_rig.py"
 ORDER = (
     "micro",
     "micro-lora",
-    "micro-lora8",
+    "micro-lora16",
     "micro-4d",
     "micro-conv",
     "micro-escape",

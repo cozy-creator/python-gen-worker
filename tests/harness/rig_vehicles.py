@@ -623,17 +623,23 @@ MICRO_4D = Vehicle(
 
 
 # ---------------------------------------------------------------------------
-# micro-lora8 — pgw#1073: a SECOND rank bucket. The bucket is a KEY axis
+# micro-lora16 — pgw#1073: a SECOND rank bucket. The bucket is a KEY axis
 # (`<base>-lora<bucket>`), so two buckets are two lanes and two cells; a
 # single standing bucket (64) means the axis itself is never varied. This
 # member re-proves that the lane label, the branch allocation and the arm
 # gate all follow the NUMBER rather than merely following "lora on".
+#
+# 16, not 8: `RANK_BUCKETS = (16, 32, 64, 128)` — the bucket vocabulary is
+# quantized and 8 is NOT a member. The campaign's first cut used 8 and the
+# mint child died in `enable_lora_branches` — a correct, typed
+# ValidationError that surfaced as an UNCLASSIFIED child crash (the pgw#999
+# class one layer down; recorded in pgw#1073's ledger).
 # ---------------------------------------------------------------------------
 
-MICRO_LORA8_BUCKET = 8
+MICRO_LORA16_BUCKET = 16
 
-MICRO_LORA8 = Vehicle(
-    name="micro-lora8",
+MICRO_LORA16 = Vehicle(
+    name="micro-lora16",
     modules=(RUNTIME_HOOK, "micro_diffusion.main"),
     function="generate",
     family="micro-diffusion",
@@ -641,12 +647,12 @@ MICRO_LORA8 = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=lambda: _micro_cell(MICRO_LORA8_BUCKET),
-    adopt_source=_micro_adopt_source_for(MICRO_LORA8_BUCKET),
-    parent_pipe=_micro_parent_for(MICRO_LORA8_BUCKET),
+    compile_cell=lambda: _micro_cell(MICRO_LORA16_BUCKET),
+    adopt_source=_micro_adopt_source_for(MICRO_LORA16_BUCKET),
+    parent_pipe=_micro_parent_for(MICRO_LORA16_BUCKET),
     covers=(f"pgw#1073: everything `micro-lora` covers at a SECOND rank "
-            f"bucket (lora_bucket={MICRO_LORA8_BUCKET}) — the bucket is a "
-            f"key axis, so this cell's lane is `lora8`, disjoint from "
+            f"bucket (lora_bucket={MICRO_LORA16_BUCKET}) — the bucket is a "
+            f"key axis, so this cell's lane is `lora16`, disjoint from "
             f"`lora64`'s, and the arm gate must follow the number"),
 )
 
@@ -751,15 +757,30 @@ if cell is not None:
     out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
     if outcome:
         deltas = {}
+        rel = {}
         with torch.no_grad():
             for name, batch, grid in ARMS:
                 sample, timestep, cond = _feed(batch, grid)
-                deltas[name] = float(
-                    (pipe.unet(sample, timestep, cond) - eager[name]).abs().max())
+                got = pipe.unet(sample, timestep, cond)
+                deltas[name] = float((got - eager[name]).abs().max())
+                rel[name] = float((got - eager[name]).norm()
+                                  / eager[name].norm().clamp_min(1e-12))
         out["parity_max_abs"] = deltas
+        out["parity_rel_l2"] = rel
+        # THE BOUND, PER DEVICE — measured, not picked (pgw#1073 run 1).
+        # CPU: compiled conv matches eager to 3.3e-06, so 1e-4 abs holds.
+        # GPU: the SAME fp32 graph differs by 1.2-1.6e-3 max|delta| — the
+        # fp32-conv kernel-numerics class (TF32/algorithm choice diverging
+        # between inductor's triton convs and eager cudnn), which production
+        # gates with a COSINE floor, not max-abs. The GPU instrument here is
+        # relative L2: measured kernel noise ~1e-3; a real bf16 cast would
+        # be ~1e-2 and still fails.
+        if DEVICE == "cuda":
+            out["parity_ok"] = all(v <= 3e-3 for v in rel.values())
+        else:
+            out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
         out["served_entry_calls"] = dict(aot_serve.served_entry_calls(pipe))
         out["execution_count"] = int(aot_serve.execution_count(pipe))
-        out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
         out["ok"] = bool(out["parity_ok"]) and out["execution_count"] > 0
     else:
         out["ok"] = False
@@ -1113,7 +1134,7 @@ MICRO_ESCAPE = Vehicle(
 
 
 VEHICLES: Dict[str, Vehicle] = {
-    v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA8,
+    v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA16,
                         MICRO_LORA_PLAIN_PARENT, MICRO_4D, MICRO_CONV,
                         MICRO_ESCAPE, MICRO_W8A8, MICRO_W8A8_LORA)}
 DEFAULT_VEHICLE = TINY.name
@@ -1128,7 +1149,7 @@ def vehicle(name: str) -> Vehicle:
 
 
 __all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_CONV", "MICRO_ESCAPE",
-           "MICRO_LORA", "MICRO_LORA8", "MICRO_LORA8_BUCKET",
+           "MICRO_LORA", "MICRO_LORA16", "MICRO_LORA16_BUCKET",
            "MICRO_LORA_BUCKET", "MICRO_4D", "MICRO_LORA_PLAIN_PARENT",
            "MICRO_W8A8", "MICRO_W8A8_LORA", "TINY", "VEHICLES", "Vehicle",
            "vehicle"]

@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from harness.rig_vehicles import (
-    MICRO_LORA8_BUCKET,
+    MICRO_LORA16_BUCKET,
     MICRO_LORA_BUCKET,
     MICRO_SRC,
 )
@@ -129,11 +129,11 @@ def test_the_slot_is_a_catalog_slot_with_no_code_default() -> None:
 
 
 def test_two_buckets_are_two_lanes() -> None:
-    """The bucket is a KEY axis: lora8 and lora64 must be disjoint lanes, so
+    """The bucket is a KEY axis: lora16 and lora64 must be disjoint lanes, so
     a cell minted at one rank can never be armed at the other."""
-    assert MICRO_LORA8_BUCKET != MICRO_LORA_BUCKET
-    lane8 = cc.execution_lane_label("", MICRO_LORA8_BUCKET)
+    assert MICRO_LORA16_BUCKET != MICRO_LORA_BUCKET
+    lane16 = cc.execution_lane_label("", MICRO_LORA16_BUCKET)
     lane64 = cc.execution_lane_label("", MICRO_LORA_BUCKET)
-    assert lane8 != lane64
-    assert str(MICRO_LORA8_BUCKET) in lane8
+    assert lane16 != lane64
+    assert str(MICRO_LORA16_BUCKET) in lane16
     assert str(MICRO_LORA_BUCKET) in lane64
