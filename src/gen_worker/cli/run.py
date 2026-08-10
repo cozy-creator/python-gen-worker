@@ -739,6 +739,7 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
     slot_family = getattr(spec, "slot_family", {}) or {}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
+    declared: List[str] = []  # pgw#763: FIXED slots only (see warmup)
     for name, slot in selected.slots.items():
         try:
             resolved[name] = resolve_slot(
@@ -748,6 +749,8 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
             )
         except ValueError as exc:
             errors[name] = str(exc)
+            if not getattr(slot, "selected_by", ""):
+                declared.append(name)
     set_slots = getattr(ctx, "_set_resolved_slots", None)
     if callable(set_slots):
         root = ""
@@ -755,7 +758,9 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
             if getattr(slot, "root", False):
                 root = name
                 break
-        set_slots(resolved, errors, root_slot=root)
+        set_slots(
+            resolved, errors, root_slot=root,
+            declared_slot_errors=tuple(declared))
 
 
 def _local_executing_execution_lane(

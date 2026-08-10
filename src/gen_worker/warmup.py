@@ -818,7 +818,10 @@ def resolved_slots_kwargs(
     spec and no job.
     """
     if not spec.slots:
-        return {"resolved_slots": {}, "slot_errors": {}, "root_slot": ""}
+        return {
+            "resolved_slots": {}, "slot_errors": {},
+            "declared_slot_errors": (), "root_slot": "",
+        }
 
     slot_orders = dict(slots or {})
     raw_defaults = {
@@ -839,6 +842,10 @@ def resolved_slots_kwargs(
         name: so.distilled_status for name, so in slot_orders.items()}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
+    # pgw#763/th#1288: a FIXED slot's ref is the RELEASE's own declaration, so
+    # its resolution failure is version-independent origin evidence and gets a
+    # typed label. `selected_by` slots stay untyped — the payload picks there.
+    declared: list = []
     for name, slot in spec.slots.items():
         try:
             resolved[name] = resolve_slot(
@@ -856,9 +863,12 @@ def resolved_slots_kwargs(
             )
         except ValueError as exc:
             errors[name] = str(exc)
+            if not getattr(slot, "selected_by", ""):
+                declared.append(name)
     return {
         "resolved_slots": resolved,
         "slot_errors": errors,
+        "declared_slot_errors": tuple(declared),
         "root_slot": spec_root_slot(spec),
     }
 

@@ -248,6 +248,21 @@ class ComponentSubstitutionError(WorkerError):
         super().__init__(msg)
 
 
+class DeclaredSlotResolutionError(WorkerError, ValueError):
+    """A FIXED release-declared model slot failed to resolve (pgw#763/th#1288).
+
+    The failing ref is the RELEASE'S OWN declaration — no payload field
+    participates — so the label is the worker's origin claim and the hub
+    classifies it as `declared_ref_load` evidence at ANY worker version
+    (`declaredFaultLabels`, blame_ladder.go). A `Slot(selected_by=...)` slot
+    stays a bare `ValueError`: the payload picks there, so its failure is not
+    version-independent evidence about the release.
+
+    Subclasses `ValueError` because it replaces one at `ctx.slots[name]` —
+    handler code that already catches `ValueError` keeps working.
+    """
+
+
 class RefCompatibilitySurprise(ValidationError):
     """Post-download runtime mismatch on a caller-supplied PAYLOAD_REF.
 
