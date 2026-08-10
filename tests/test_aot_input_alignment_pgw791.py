@@ -189,11 +189,12 @@ def test_the_marshalled_feed_is_realigned_in_place() -> None:
     feeds = aot_serve.marshal_positional(
         contract, (torch.randn(2, 8), view), {})
     assert aot_serve.alignment_gap(feeds[1]) == "unaligned_16b"
-    seen: List[Tuple[str, str]] = []
+    seen: List[Tuple[str, str, str]] = []
     out = aot_serve.aligned_feeds(
         contract, feeds, aot_serve.FeedAligner(),
-        lambda name, reason: seen.append((name, reason)))
-    assert seen == [("timestep", "unaligned_16b")]
+        lambda name, reason, event: seen.append((name, reason, event)))
+    assert seen == [
+        ("timestep", "unaligned_16b", aot_serve.REALIGN_EVENT)]
     assert aot_serve.alignment_gap(out[1]) == ""
     assert torch.equal(out[1], view)
     assert out[0] is feeds[0]      # an in-contract input is never copied
