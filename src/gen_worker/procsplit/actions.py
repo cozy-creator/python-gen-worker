@@ -142,6 +142,20 @@ ACTIONS: Dict[str, HubAction] = {
                   "mint_duration_ms"),
             timeout_s=60.0,
         ),
+        # pgw#1090/th#1750 (§4.29): pull-by-key. The body carries the family
+        # and the derived cell key and NOTHING else — every entitlement input
+        # is resolved hub-side from the live session, and a body naming one is
+        # a named 400 (`cell_resolve_client_supplied_field`), not an ignored
+        # field. So this enumeration is not a convention, it is the request:
+        # an action table that admitted one more key would make the whole
+        # resolve refuse.
+        _a(
+            "cells.resolve",
+            "POST",
+            r"^/v1/worker/cells/resolve$",
+            body=("family", "cell_key"),
+            timeout_s=30.0,
+        ),
         _a(
             "cells.publish_complete",
             "POST",

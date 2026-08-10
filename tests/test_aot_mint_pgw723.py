@@ -891,7 +891,7 @@ def _meta_for(program: Any, package: Path, spec: aot_mint.ExportSpec) -> Dict[st
         "inputs": inputs,
         "symbols": symbols,
         "constants": aot_package.constants_manifest(package),
-        "graph": aot_mint.entry_graph_block(program, package, "", spec),
+        "graph": aot_mint.entry_graph_block(program, spec),
     }}
     meta = aot_serve.artifact_metadata(
         family="tiny", precision="bf16", cell_key="",
