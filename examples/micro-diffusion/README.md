@@ -25,7 +25,43 @@ src/micro_diffusion/
   *_pad32.py          micro-pad32: ie#637's PAD-TO-32 shape — the token extent is
                       `32*FloorDiv(H*W+31, 32)`, and one collapsed artifact serves
                       three L values whose pads are 0, 16 and 28
+  *_pad32_branchy.py  micro-pad32-branchy: the RED twin — branches on the pad, so
+                      the declared-range gate must REFUSE it (pgw#1079)
+  FAMILIES            the six families discovery finds here — half of the
+                      cross-repo fence below
 ```
+
+## Adding a member — FOUR steps, and three of them are outside this file
+
+**Discovery walks the WHOLE package** (`top_level = main.split(".")[0]`), so a
+member whose family is unregistered hub-side fails **every build that carries
+this example**, not just its own function. That has happened three times —
+`micro-escape` (pgw#1068), `micro-conv` (pgw#1073), `micro-pad32` +
+`micro-pad32-branchy` (pgw#1079, found mid-campaign by pgw#1084 §8.4.1, which
+could only proceed by excluding `*pad32*` from the proof tarball). The typed
+refusal is not the problem; it fires against a live hub with the tarball already
+uploaded, which is too late and costs a lane its leg.
+
+1. **The example** — `main_<x>.py` + `aot_declaration_<x>.py` + a pipeline class,
+   with its own `FAMILY = "micro-<x>"`.
+2. **`FAMILIES`** — add the name, sorted. `tests/test_micro_family_registration_pgw1084.py`
+   runs the REAL discovery scan and goes RED until you do; it also goes red on a
+   line here whose member is gone.
+3. **The tensorhub registration** — `internal/modelfamily/modelfamily.go`:
+   `canonicalFamilies`, plus a `rootOverrides` entry to `micro-diffusion` when
+   the member loads the base transformer's `state_dict` (all of them so far do,
+   which is why ONE seeded checkpoint satisfies every slot). Update the vendored
+   `internal/modelfamily/MICRO_EXAMPLE_FAMILIES` in the same commit — its
+   offline test is in the required `gates` check, and `scripts/micro-family-drift.sh`
+   diffs the vendored copy against THIS file on `python-gen-worker@master`.
+   There is no runtime registration path; it takes effect at the next hub deploy.
+   **pgw lands first** — the hub gate reads pgw's default branch.
+4. **The stack binding** — step 0 below. Registered-but-unbound is the *second*
+   failure, one layer deeper, and it is what still blocks `micro-conv`:
+   `declared slot has no binding: function "generate-conv" slot "pipeline" has no
+   code default and current prod release … has no matching family "micro-conv"`
+   (pgw#1084 §8.4.2). Bindings are stack state, not repo state — nothing in any
+   repository seeds them, so a fresh stack owes step 0 for every family here.
 
 ## The three entries, and why exactly three
 
@@ -175,9 +211,48 @@ Two things that are easy to get wrong:
   Without it the gate fails closed on `binding_incompatible`: *"slot declares
   family … but the artifact's family is undeterminable"*.
 
-One checkpoint serves all three families: `micro-4d` and `micro-escape` both
-root to `micro-diffusion` (they `load_state_dict(base.transformer.state_dict(),
-strict=True)`), so the seed-997 tree satisfies every slot the package declares.
+One checkpoint serves **all six** families: every variant either
+`load_state_dict(base.transformer.state_dict(), strict=True)` or (micro-conv)
+derives its weights from the same tree's declared seed, and all of them root to
+`micro-diffusion` in tensorhub's `rootOverrides` — so the seed-997 tree
+satisfies every slot the package declares.
+
+### 0b. One binding PER FUNCTION — the second failure, and what blocked micro-conv
+
+A checkpoint that resolves is not a binding. Every function here declares
+`Slot(..., selected_by="model")` with **no code default**, so each one needs its
+own entry, and the build refuses per function:
+
+```
+declared slot has no binding: function "generate-conv" slot "pipeline" has no
+code default and current prod release … has no matching family "micro-conv"
+```
+
+That is pgw#1084 §8.4.2 — `micro-conv` was registered in tensorhub and still
+unbuildable, so the campaign's gauntlet was 3 families, not 5. A new function
+inherits nothing, because there is no prior prod release declaring it; supply the
+binding **on the publish that first declares it**, with `?bindings=` (the tarball
+form of th#1087's payload — the JSON deploy form takes the same map as
+`{"bindings": …}`):
+
+```
+POST /api/v1/endpoints/tensorhub/micro-diffusion/releases?dev=true&skip_profiling=true
+     &bindings={"generate-conv":{"pipeline":{"ref":"tensorhub/micro-diffusion","tag":"prod"}}}
+```
+
+Function names are the NORMALIZED spellings (`generate_conv` → `generate-conv`).
+Thereafter the binding is config and is patchable without a rebuild:
+
+```
+PATCH /api/v1/endpoints/tensorhub/micro-diffusion/config?tag=prod
+      {"bindings":{"generate-conv":{"pipeline":{"ref":"tensorhub/micro-diffusion"}}}}
+```
+
+**Bindings are STACK state.** No repository holds them — grep for
+`micro-diffusion` across tensorhub, e2e and the gitops repo and you find the
+family registration and nothing else — so every fresh stack owes this step for
+all nine functions, and a family added to the package is unbuildable on an
+existing stack until its function is bound here.
 
 Verify before spending anything — the tag must resolve:
 
