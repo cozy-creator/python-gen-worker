@@ -371,6 +371,85 @@ def _validate_warmup_decl(owner: str, warmup: Optional[NoWarmup]) -> Optional[No
 WF_ATTR = "__gen_worker_function__"
 
 
+REFERENCE_MODALITIES = ("image", "video", "audio")
+
+
+class AcceptsReferences(msgspec.Struct, frozen=True, kw_only=True):
+    """th#1757: this handler OPTS IN to the platform reference layer.
+
+    A reference is a tenant-defined character/object/place/style that a user
+    writes as ``@handle`` in a prompt. The concept is PLATFORM-side: the hub
+    resolves the handle, rewrites the prompt into plain English and delivers
+    the reference's media onto an input this handler ALREADY declares. Nothing
+    here reaches the handler at runtime — a reference-bearing request arrives
+    as ordinary assets on ``delivery`` and a prompt with no ``@`` in it.
+
+    ``max`` — how many distinct references one request may name.
+    ``modalities`` — what this handler can absorb (image/video/audio).
+    ``per_ref_images`` — how many media items ONE reference contributes, as an
+    int (exactly n) or a ``(min, max)`` pair.
+    ``delivery`` — the declared media input the media lands on, in the
+    discovery contract's dotted path syntax (``references[].image``). The HUB
+    validates at publish that this names a real media field of this function;
+    declaring a path that does not exist fails the release, not a request.
+    """
+
+    max: int
+    modalities: Tuple[str, ...]
+    delivery: str
+    per_ref_images: Any = 1
+
+    def __post_init__(self) -> None:
+        force = msgspec.structs.force_setattr
+        if not isinstance(self.max, int) or self.max < 1:
+            raise ValueError(f"accepts_references: max must be a positive int, got {self.max!r}")
+        mods = tuple(str(m).strip().lower() for m in self.modalities)
+        if not mods:
+            raise ValueError("accepts_references: modalities is required")
+        for m in mods:
+            if m not in REFERENCE_MODALITIES:
+                raise ValueError(
+                    f"accepts_references: modality {m!r} is not one of "
+                    f"{'|'.join(REFERENCE_MODALITIES)}"
+                )
+        force(self, "modalities", mods)
+        delivery = str(self.delivery or "").strip()
+        if not delivery:
+            raise ValueError("accepts_references: delivery is required")
+        force(self, "delivery", delivery)
+        lo, hi = _per_ref_bounds(self.per_ref_images)
+        force(self, "per_ref_images", (lo, hi))
+
+    def to_manifest(self) -> Dict[str, Any]:
+        lo, hi = self.per_ref_images
+        return {
+            "max": int(self.max),
+            "modalities": list(self.modalities),
+            "per_ref_images": {"min": lo, "max": hi},
+            "delivery": self.delivery,
+        }
+
+
+def _per_ref_bounds(raw: Any) -> Tuple[int, int]:
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        lo = hi = int(raw)
+    elif isinstance(raw, (tuple, list)) and len(raw) == 2:
+        lo, hi = int(raw[0]), int(raw[1])
+    elif isinstance(raw, Mapping):
+        lo = int(raw.get("min", 1))
+        hi = int(raw.get("max", lo))
+    else:
+        raise ValueError(
+            "accepts_references: per_ref_images must be an int, a (min, max) pair "
+            f"or a mapping, got {raw!r}"
+        )
+    if lo < 1 or hi < lo:
+        raise ValueError(
+            f"accepts_references: per_ref_images must satisfy 1 <= min <= max, got {lo}..{hi}"
+        )
+    return lo, hi
+
+
 class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     """``@worker_function`` marker: this handler's own contract facts.
 
@@ -411,6 +490,9 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     text_len: Optional[int] = None
     warm: Optional[Dict[str, Any]] = None
     warm_reason: str = ""
+    # th#1757: the opt-in reference contract. None = this handler never sees
+    # the concept and a ref_text sent to it is refused hub-side.
+    accepts_references: Optional[AcceptsReferences] = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -477,6 +559,7 @@ def worker_function(
     text_len: Optional[int] = None,
     warm: Optional[Mapping[str, Any]] = None,
     warm_reason: str = "",
+    accepts_references: Optional[AcceptsReferences] = None,
 ) -> Callable[[T], T]:
     """Per-handler contract facts (pgw#654), declared AT the definition
     site — on class handler methods and on bare ``@endpoint`` functions::
@@ -495,6 +578,7 @@ def worker_function(
         text_len=text_len,
         warm=dict(warm) if warm is not None else None,
         warm_reason=warm_reason,
+        accepts_references=accepts_references,
     )
 
     def apply(fn: T) -> T:

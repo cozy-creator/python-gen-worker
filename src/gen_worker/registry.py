@@ -171,6 +171,9 @@ class EndpointSpec:
     # None = undeclared, which resolves NO quant approval hub-side.
     tasks: Optional[tuple] = None
     distilled: Optional[bool] = None
+    # th#1757: this handler's opt-in reference contract (@worker_function).
+    # None = it never participates in the platform reference layer.
+    accepts_references: Optional[Any] = None
     # pgw#654 gap #6: this handler's effective text pin
     # (@worker_function(text_len=) else the class Compile.text_len).
     text_len: Optional[int] = None
@@ -610,6 +613,7 @@ def _spec_for_handler(
         objectives=(tuple(wf.objectives) if wf is not None and wf.objectives is not None else None),
         tasks=(tuple(wf.tasks) if wf is not None and wf.tasks is not None else None),
         distilled=(wf.distilled if wf is not None else None),
+        accepts_references=(wf.accepts_references if wf is not None else None),
         text_len=(wf_text_len if wf_text_len is not None
                   else (decl.compile.text_len if decl.compile is not None else None)),
         warm_overrides=warm_overrides,

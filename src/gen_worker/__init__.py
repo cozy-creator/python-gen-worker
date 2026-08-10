@@ -25,6 +25,7 @@ from .api.decorators import (
     endpoint,
     variant_of,
     worker_function,
+    AcceptsReferences,
 )
 from .api.export_contract import (
     Arg,
@@ -112,6 +113,7 @@ __all__ = [
     "endpoint",
     "variant_of",
     "worker_function",
+    "AcceptsReferences",
     "Resources",
     "Compile",
     "CompileAxis",
