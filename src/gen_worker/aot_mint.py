@@ -3174,7 +3174,18 @@ def _release_mint_residents(
 
 
 def _structure_only_drift_hint(row: _MintedEntry) -> str:
-    """Name the AUTHORING cause a structure-only mint's drift usually has.
+    """Name the AUTHORING cause a drift refusal usually has.
+
+    pgw#1097 WIDENED this from structure-only to EVERY mint, because the cause
+    stopped being structure-only. With the folding fence on, nothing is
+    inlined, so a plain-attribute table reaches the artifact's constant table
+    under AOTInductor's own name (``_tensor_constant0``) while the exported
+    program lifted it under its ATTRIBUTE PATH (``_table``) — measured — and
+    the two no longer reconcile. That was always fatal for a literal large
+    enough to be declared; the fence merely removes the size threshold
+    (0-dim, or 1-D with <=8 elements) that used to hide it by baking the
+    values instead. The fix is the same one the tensor-binding contract has
+    always asked for, so the message points at it.
 
     Measured (pgw#1080, micro-rope RED control): a table built lazily inside
     ``forward`` under ``with torch.device("cpu")`` is FAKE during a
@@ -3185,15 +3196,19 @@ def _structure_only_drift_hint(row: _MintedEntry) -> str:
     symptom. This names the class of cause, so the author gets a place to
     look instead of a compiler sentence.
     """
-    if not structure_only.is_structure_only(row.owner):
-        return ""
-    return (
-        ". This mint built its target from code + config (pgw#1080), and the "
-        "usual cause of drift there is a tensor BUILT INSIDE `forward` "
-        "instead of registered at __init__ — it is lifted as an anonymous "
-        "graph literal rather than as a bindable buffer. Register derived "
-        "tables with `register_buffer` and no device pin (ie#630's "
-        "`rope_buffers` is the worked example)")
+    hint = (
+        ". The usual cause is a tensor BUILT INSIDE `forward`, or held as a "
+        "PLAIN ATTRIBUTE, instead of registered at __init__: export lifts it "
+        "under its attribute path while the compiled artifact names it "
+        "`_tensor_constant0`, so nothing can reconcile the two and nothing "
+        "could bind it. Register derived tables with `register_buffer` and no "
+        "device pin (ie#630's `rope_buffers` is the worked example; pgw#857 "
+        "is the contract, pgw#1097 is why it is now load-bearing at every "
+        "size rather than only above the inlining threshold)")
+    if structure_only.is_structure_only(row.owner):
+        return (
+            ". This mint built its target from code + config (pgw#1080)" + hint)
+    return hint
 
 
 def _gate_and_declare_entry(

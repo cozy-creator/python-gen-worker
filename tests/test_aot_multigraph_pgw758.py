@@ -271,13 +271,35 @@ def test_export_failure_names_the_entry(tmp_path, fake_sm) -> None:
 
 class WarmSensitive(nn.Module):
     """A z-image-shaped module: the first forward caches a table that the
-    exported graph then bakes."""
+    exported graph then bakes.
+
+    The cache is a REGISTERED BUFFER, per the pgw#857 tensor-binding contract,
+    and pgw#1097 is why that stopped being optional. As a plain attribute,
+    ``torch.export`` lifts the table under its ATTRIBUTE PATH (``_table``,
+    measured) while AOTInductor's own constant table names it
+    ``_tensor_constant0`` — and the mint reconciles the two by name. So a
+    declared plain-attribute literal fails ``program_package_drift`` ("declares
+    a constant the program never lifted") or, past it, ``_write_literals``
+    ("declared literal constant(s) have no value in their exported program").
+    **That is already true on master for any such literal big enough to be
+    declared**; this one survived only because ``arange(4)`` is 4 elements and
+    therefore met ``GraphLowering.can_inline_constant``, so inductor rendered
+    its values into the kernel and no row ever appeared. With the folding fence
+    on, nothing is inlined, and the contract violation surfaces as the typed
+    refusal it always was. A buffer's program name and package ``original_fqn``
+    agree, which is what makes a literal packable and bindable at all — and it
+    is why `micro-4d`, whose literal IS a buffer, has always been green.
+
+    Nothing about what this fixture TESTS changes: the first forward still
+    populates the table, still bumps ``warm_calls``, and still changes the
+    graph that gets exported.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.lin = nn.Linear(4, 4)
         self.warm_calls = 0
-        self._table: Any = None
+        self.register_buffer("_table", None, persistent=False)
 
     def forward(self, sample: Any) -> Any:
         if self._table is None:
