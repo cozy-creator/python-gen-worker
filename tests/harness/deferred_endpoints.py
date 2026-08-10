@@ -151,8 +151,14 @@ class DeferredImages:
         return GenOut(image=asset)
 
     def mutates_after_save(self, ctx: RequestContext, data: GenIn) -> GenOut:
-        """Saves a RED frame, then keeps painting on the same PIL object."""
-        img = Image.new("RGB", (32, 32), (255, 0, 0))
+        """Saves a RED-marked frame, then keeps painting on the same PIL object.
+
+        Real content, not a solid fill: pgw#1094's output-integrity floor
+        rejects a constant-fill render, and a fixture that a production gate
+        refuses is not a fixture.
+        """
+        img = gradient(32)
+        img.paste((255, 0, 0), (0, 0, 12, 12))  # the marker the test reads
         asset = ctx.save_image(img, "outputs/mutated", format="png")
         img.paste((0, 0, 255), (0, 0, 32, 32))
         mark("handler_end", ctx)

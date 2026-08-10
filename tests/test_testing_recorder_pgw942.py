@@ -57,7 +57,13 @@ class ExampleEndpoint:
     def generate(self, ctx: RequestContext[ExampleDefaults], payload: Render) -> Rendered:
         ctx.progress(0.5, "denoise", step=1, total=2)
         ctx.log("rendering", level="info", steps=ctx.defaults.steps)
-        image = Image.new("RGB", (payload.size, payload.size), (10, 120, 200))
+        # Real content, not a solid fill: pgw#1094's output-integrity floor
+        # rejects a constant-fill render.
+        image = Image.merge("RGB", (
+            Image.linear_gradient("L"),
+            Image.linear_gradient("L").rotate(90),
+            Image.radial_gradient("L"),
+        )).resize((payload.size, payload.size), Image.Resampling.BILINEAR)
         return Rendered(
             image=ctx.save_image(
                 image, payload.ref, format=payload.image_format, quality=80

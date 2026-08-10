@@ -82,6 +82,7 @@ from ..io import (
     encode_image,
     image_format,
 )
+from ..output_integrity import guard_image
 from ..stage_timing import StageTimer
 from ..api.types import (
     Asset,
@@ -1218,6 +1219,15 @@ class RequestContext(Generic[D]):
             ref = _normalize_output_ref(str(ref))
             if Path(ref).suffix == "":
                 ref += ext
+        # pgw#1094: the output-integrity floor, on the pixels, before anything
+        # is encoded or uploaded. Judged EAGERLY even on the deferred path: the
+        # check is sub-millisecond on one image and the handler is still on the
+        # stack here, so a rejected render raises where the request can see it
+        # instead of inside the post-handler finalize drain. Charged to
+        # its OWN stage so its wall is ATTRIBUTED (th#1111) without borrowing
+        # `image_encode`, which on the deferred path means the finalize tail.
+        with self._stages.stage("output_integrity"):
+            guard_image(image, ref=ref)
         if not self._deferred.armed:
             with self._stages.stage("image_encode"):
                 payload, _ext = encode_image(

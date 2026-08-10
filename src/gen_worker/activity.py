@@ -117,6 +117,15 @@ KIND_MODULAR_HYDRATION = "modular_hydration"
 # names neither the component nor the cause, and which pgw#1047 watched a pod
 # retry for 9 minutes.
 KIND_COMPONENT_MISS = "component_miss"
+# pgw#1094: the serve-path output-integrity floor's verdict on one output.
+# `phase` is the verdict token — `noise` / `blank` / `nonfinite` are fail-CLOSED
+# (the request also gets a typed `OutputIntegrityError` and nothing is
+# uploaded), `unmeasured` is the confession that the screen could not run and
+# the output served anyway. PASS emits nothing: one row per served render buys
+# no decision. `detail` carries the measured adjacent_frame_corr and
+# frame_std_min, so ie#634's "corr 0.29 was uploaded and billed" is countable
+# hub-side instead of invisible.
+KIND_OUTPUT_INTEGRITY = "output_integrity"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"

@@ -644,6 +644,21 @@ Raise `ValidationError` (bad input, don't retry), `RetryableError`,
 `CanceledError`, or `FatalError`. Anything else is reported as an internal
 error.
 
+## The output-integrity floor (pgw#1094)
+
+`ctx.save_image`, `io.write_image` and `io.write_video` look at the PIXELS
+before they encode anything. A render whose frames are NOISE (median
+adjacent-frame grey correlation below 0.6) or BLANK (a constant-fill frame), or
+that carries NaN/Inf pixels, raises `OutputIntegrityError` and is never
+uploaded — production once served VAE-decoded noise on billed, settled requests
+because nothing on this side had ever looked (ie#634). It costs ~3 ms on a
+121-frame 1344x768 clip and there is no way to turn it off.
+
+Two consequences for endpoint authors: a legitimately constant-fill output is
+not servable through these calls, and a green integrity result is **not** a
+quality signal — a melted or over-smoothed render scores HIGHER on this
+statistic than a clean one. See `gen_worker.output_integrity`.
+
 ## Local dev
 
 ```bash
