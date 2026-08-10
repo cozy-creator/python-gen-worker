@@ -70,6 +70,27 @@ def tiny_unet(fill: float) -> UNet2DConditionModel:
     return m
 
 
+class KeepFp32Unet(UNet2DConditionModel):
+    """A DiT-shaped component in miniature (pgw#1071): a stack that stores
+    bf16 plus heads the class declares must stay fp32 — H3's
+    ``_keep_in_fp32_modules`` (patch/timestep/output projections) at test
+    scale."""
+
+    _keep_in_fp32_modules = ["conv_in"]
+
+
+def tiny_keep_fp32_unet(fill: float) -> "KeepFp32Unet":
+    base = tiny_unet(fill)
+    m = KeepFp32Unet(**{
+        k: v for k, v in base.config.items() if not str(k).startswith("_")
+    })
+    m.load_state_dict(base.state_dict())
+    return m
+
+
+diffusers.KeepFp32Unet = KeepFp32Unet
+
+
 def tiny_vae(fill: float) -> AutoencoderKL:
     m = AutoencoderKL(
         in_channels=3, out_channels=3, latent_channels=4, sample_size=8,
@@ -126,6 +147,44 @@ def build_base_tree(root: Path, *, fill: float = 1.0) -> Path:
         "scheduler": ["diffusers", "DDPMScheduler"],
     }))
     return root
+
+
+def build_mixed_precision_tree(
+    root: Path, *, fill: float = 1.0, unet_dtype: str = "bf16",
+    vae_dtype: str = "fp32", extra_fp32_parts: int = 0,
+) -> Path:
+    """ie#615's minimax-h3 shape at test scale (pgw#1071): a big narrow
+    denoiser (bf16 stack, fp32 ``_keep_in_fp32_modules`` heads) beside a VAE
+    the checkpoint stores WIDE, which a pipeline-level bf16 must not
+    downcast.
+
+    ``extra_fp32_parts`` adds fp32 siblings until the snapshot-wide majority
+    vote flips — the condition under which the old tree-wide sniff produced
+    no dtype at all and diffusers' fp32 default upcast the bf16 stack."""
+    import torch
+
+    tree = build_base_tree(root, fill=fill)
+    unet = tiny_keep_fp32_unet(fill).to(getattr(torch, _TORCH_DTYPES[unet_dtype]))
+    unet.conv_in.to(torch.float32)  # the checkpoint's own wide heads
+    unet.save_pretrained(tree / "unet")
+    tiny_vae(fill).to(getattr(torch, _TORCH_DTYPES[vae_dtype])).save_pretrained(
+        tree / "vae")
+
+    index = json.loads((tree / "modular_model_index.json").read_text())
+    model_index = json.loads((tree / "model_index.json").read_text())
+    index["unet"] = _spec_entry("KeepFp32Unet", "unet")
+    model_index["unet"] = ["diffusers", "KeepFp32Unet"]
+    for i in range(extra_fp32_parts):
+        name = f"vae_x{i}"
+        tiny_vae(fill).to(torch.float32).save_pretrained(tree / name)
+        index[name] = _spec_entry("AutoencoderKL", name)
+        model_index[name] = ["diffusers", "AutoencoderKL"]
+    (tree / "modular_model_index.json").write_text(json.dumps(index))
+    (tree / "model_index.json").write_text(json.dumps(model_index))
+    return tree
+
+
+_TORCH_DTYPES = {"bf16": "bfloat16", "fp16": "float16", "fp32": "float32"}
 
 
 def build_override_vae_tree(root: Path, *, fill: float = 2.0,

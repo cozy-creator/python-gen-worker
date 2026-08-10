@@ -1191,6 +1191,86 @@ def _component_dtype_map(
     return out
 
 
+#: Load dtype a component asks for, keyed by what its OWN safetensors headers
+#: store (pgw#1071). fp8 is a STORAGE fact — the artifact carries its own
+#: quantization config and bf16 is the compute dtype over it, which is why it
+#: maps to :data:`QUANT_EXECUTION_LANE_COMPUTE_DEFAULT` rather than to itself.
+_CHECKPOINT_LOAD_DTYPE = {
+    "bf16": "bf16",
+    "fp16": "fp16",
+    "fp32": "fp32",
+    "fp8": QUANT_EXECUTION_LANE_COMPUTE_DEFAULT,
+}
+
+
+def checkpoint_load_dtype(source: str | Path) -> str:
+    """The dtype ONE component tree's own bytes ask to be loaded at, or ``""``
+    when its headers say nothing (pgw#1071).
+
+    Read per COMPONENT, never per snapshot: a majority vote over a whole
+    mixed-precision tree upcasts every narrow component when the vote lands
+    wide and truncates every wide one when it lands narrow. ie#615 measured
+    both halves on minimax-h3 — a 66.28 GB bf16 DiT hydrating at 74.9 GiB
+    (4 bytes/param) because the tree-wide vote fell outside the map and
+    diffusers' fp32 default took over."""
+    return _CHECKPOINT_LOAD_DTYPE.get(detect_on_disk_dtype(Path(source)), "")
+
+
+def _declared_component_dtype(name: str, declared: Any) -> Any:
+    """The dtype the CALLER declared for ``name`` — diffusers' own
+    ``{"default": ..., "<part>": ...}`` routing, or a scalar that governs
+    every component. None when nothing was declared for it."""
+    if isinstance(declared, dict):
+        if name in declared:
+            return declared[name]
+        return declared.get("default")
+    return declared
+
+
+def _modular_declared_dtypes(
+    cls: Any, path: str | Path, scalar_dtype: Any,
+) -> Any:
+    """Everything the modular lane DECLARES about component dtypes: the
+    binding's own dtype when it has one, plus pgw#667's per-part facts.
+
+    ``None`` when nothing is declared — the hydration loop then reads each
+    component's checkpoint (pgw#1071). With a declared composition dtype this
+    is exactly :func:`_component_dtype_map`; without one the facts stand
+    alone, because a ``"default"`` key would put every unlisted component
+    back under a guess."""
+    if scalar_dtype is not None:
+        return _component_dtype_map(cls, path, scalar_dtype) or scalar_dtype
+    out: Dict[str, Any] = {}
+    for part, fact in component_load_dtypes(cls, path).items():
+        try:
+            out[part] = get_torch_dtype(fact.dtype)
+        except ImportError:
+            return None
+        logger.info(
+            "COMPONENT_DTYPE model=%s: loading %r at %s (no composition "
+            "dtype declared; every other component loads at its own "
+            "checkpoint dtype) — %s", path, part, fact.dtype, fact.reason,
+        )
+    return out or None
+
+
+def _hydration_dtype(name: str, declared: Any, source: str | Path) -> Any:
+    """Load dtype for ONE modular component: what the caller declared, else
+    what the component's own checkpoint stores, else None (nothing is known,
+    so diffusers keeps its own default and the load stays as honest as the
+    bytes allow)."""
+    wanted = _declared_component_dtype(name, declared)
+    if wanted is not None:
+        return wanted
+    token = checkpoint_load_dtype(source)
+    if not token:
+        return None
+    try:
+        return get_torch_dtype(token)
+    except ImportError:
+        return None  # torch-less host: the loader fails on its own terms
+
+
 class ComponentExecutionLaneUnsupported(RuntimeError):
     """This flavor has no component-level loader, so no honest one exists.
 
@@ -1824,6 +1904,13 @@ def hydrate_modular_pipeline(
     warning, so every requested component is re-checked non-``None`` and a
     miss raises typed with the captured diffusers log text.
 
+    ``torch_dtype`` is what the caller DECLARED — a scalar governing every
+    component, or diffusers' ``{"default": ..., "<part>": ...}`` map. What it
+    does not name loads at that component's OWN checkpoint dtype
+    (:func:`checkpoint_load_dtype`), never at a snapshot-wide majority and
+    never at diffusers' fp32 default (pgw#1071). ``_keep_in_fp32_modules``
+    stays diffusers' business: naming a dtype is what lets it act at all.
+
     ``place_device`` (pgw#1026) moves each component onto that device as it
     lands and drops the host copy, so the host-RAM high-water mark is ONE
     component instead of the tree. Set it from
@@ -1907,6 +1994,7 @@ def hydrate_modular_pipeline(
                 f"(base tree {base} holds: {listing})")
 
     names = sorted(sources)
+    dtypes: Dict[str, str] = {}
     if names:
         # load_components swallows per-component load failures into a
         # diffusers logger warning and registers nothing — capture that text
@@ -1938,8 +2026,15 @@ def hydrate_modular_pipeline(
                     "pretrained_model_name_or_path": {n: sources[n]},
                     "subfolder": {n: ""},
                 }
-                if torch_dtype is not None:
-                    kwargs["torch_dtype"] = torch_dtype
+                # pgw#1071: this component's OWN checkpoint dtype when the
+                # caller declared none. Sniffed here rather than by the
+                # caller because this is the only place that knows each
+                # component's actual source dir — an override tree is a
+                # different artifact from the base dir it replaces.
+                dt = _hydration_dtype(n, torch_dtype, comp_src)
+                if dt is not None:
+                    kwargs["torch_dtype"] = dt
+                    dtypes[n] = str(dt).removeprefix("torch.")
                 pipe.load_components(names=[n], **kwargs)
                 # pgw#1026: place it now and drop the host copy, so the next
                 # component's admission above sees the host RAM this one
@@ -1972,13 +2067,20 @@ def hydrate_modular_pipeline(
     except Exception:  # noqa: BLE001
         pass
     detail = " ".join(f"{n}<-{sources[n]}" for n in sorted(sources))
-    logger.info("modular hydration (%s): %s; skipped partitions: %s%s",
-                type(pipe).__name__, detail, skipped or "none",
+    # pgw#1071: the dtype each component actually loaded at is the evidence
+    # the fp32-upcast wall was invisible for — it belongs in the hub-visible
+    # record, not only in a log line.
+    dtype_detail = " ".join(f"{n}={dtypes[n]}" for n in sorted(dtypes))
+    logger.info("modular hydration (%s): %s; dtypes: %s; skipped partitions: "
+                "%s%s",
+                type(pipe).__name__, detail, dtype_detail or "loader default",
+                skipped or "none",
                 f"; staged per component onto {place_device}" if place_device
                 else "")
     activity_mod.emit_event(
         activity_mod.KIND_MODULAR_HYDRATION,
         f"pipeline={type(pipe).__name__} base={base} {detail}"
+        + (f" dtypes=[{dtype_detail}]" if dtype_detail else "")
         + (f" skipped={','.join(skipped)}" if skipped else "")
         + (f" place_device={place_device}" if place_device else ""),
         phase="hydrated",
@@ -2224,21 +2326,23 @@ def _load_modular_pipeline(
         logger.warning(
             "storage_dtype=%s ignored on the modular lane (component "
             "precision is a per-component artifact fact)", storage_dtype)
+    # pgw#1071: DECLARED dtypes only. The snapshot-wide dtype sniff that used
+    # to stand in for a declaration was a majority vote over every safetensors
+    # header in the tree — it truncated a wide component when the vote fell
+    # narrow (an fp32 VAE loading bf16) and, when the vote fell outside the
+    # sniff's own vocabulary, produced NO dtype at all and let diffusers'
+    # fp32 default upcast the whole tree (ie#615: a 66.28 GB bf16 DiT
+    # hydrating at 74.9 GiB, 4 bytes/param, OOM on an 80 GB card and ~130 GB
+    # of host staging anon). Undeclared components now load at their OWN
+    # checkpoint dtype, decided inside the hydration loop from each
+    # component's real source dir.
     scalar_dtype: Any = None
-    wanted = dtype or {
-        "bf16": "bf16", "fp16": "fp16", "fp8": "bf16",
-    }.get(detect_on_disk_dtype(Path(path)), "")
-    if wanted:
+    if dtype:
         try:
-            scalar_dtype = get_torch_dtype(wanted)
+            scalar_dtype = get_torch_dtype(dtype)
         except ImportError:
             pass  # torch-less environment: loaders fail on their own terms
-    torch_dtype: Any = scalar_dtype
-    per_component = _component_dtype_map(cls, path, scalar_dtype)
-    if per_component:
-        # Same {"default": ..., part: ...} shape load_components' dict
-        # routing understands (pgw#667 widened parts included).
-        torch_dtype = per_component
+    torch_dtype: Any = _modular_declared_dtypes(cls, path, scalar_dtype)
     # pgw#1026: a tree the card holds but the host does not stages ONE
     # COMPONENT AT A TIME straight onto the device. Decided here, from the
     # same measurements the executor's admission gate reads, so the two
