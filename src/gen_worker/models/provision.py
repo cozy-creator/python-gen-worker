@@ -173,6 +173,10 @@ def load_slot(
             component_trees=component_trees or None,
             declared_vram_gb=declared_vram_gb,
             ref=ref,
+            # pgw#1063: the loader's own host-RAM decisions depend on where
+            # this pipeline will END UP. `place_pipeline(mode=...)` below is
+            # the same knowledge arriving too late to inform them.
+            placement_mode=mode,
         )
         out.obj = pipe
 

@@ -34,6 +34,7 @@ from .fp8_storage import restructure_fp8_storage
 from .memory import (
     flush_memory,
     get_available_vram_gb,
+    keeps_weights_in_host_ram,
     meta_tensors,
     probe_host_ram,
 )
@@ -1650,12 +1651,28 @@ def _admit_component_staging(component: str, nbytes: int) -> None:
     never blocks its own load. A component that cannot fit an EMPTY host is
     the structural pgw#752 verdict; one that cannot fit right now is the
     transient one. Both carry the measured numbers. An unreadable probe
-    fails open — no worse than the unchecked load it replaces."""
+    fails open — no worse than the unchecked load it replaces.
+
+    pgw#1063: the estimate can be wrong (an upcast, a quant unpack, an
+    allocator's own overhead), and when it is the load does not fail — it
+    crawls in direct reclaim until the kernel kills it. So a MEASURED
+    verdict outranks this arithmetic: a process the load dial has caught
+    re-reading its own set instead of staging it admits nothing further,
+    structurally, whatever the numbers below would have said."""
     if nbytes <= 0:
         return
     ram = probe_host_ram()
     total = int(ram.total_gb * _GIB)
     avail = int(ram.available_gb * _GIB)
+    thrash = load_progress.thrash_verdict()
+    if thrash:
+        raise HostRamCapacityError(
+            f"modular component {component!r} after a measured re-read "
+            f"crawl ({thrash})",
+            incoming_bytes=int(nbytes), floor_bytes=0,
+            required_bytes=int(nbytes), available_before_bytes=avail,
+            available_after_bytes=avail, total_bytes=total,
+        )
     if total <= 0:
         return
     floor = _staging_floor_bytes(total)
@@ -1740,6 +1757,9 @@ class StreamedHydrationPlan:
     unit_count: int
     host_total_bytes: int
     device_free_bytes: int
+    #: The rung the pipeline will be placed on (pgw#1063). An offload rung
+    #: keeps the weights in host RAM, so it never takes the discount.
+    placement_mode: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -1749,6 +1769,7 @@ class StreamedHydrationPlan:
             "unit_count": self.unit_count,
             "host_total_bytes": self.host_total_bytes,
             "device_free_bytes": self.device_free_bytes,
+            "placement_mode": self.placement_mode,
         }
 
     def summary(self) -> str:
@@ -1757,7 +1778,8 @@ class StreamedHydrationPlan:
             f"largest_component={self.largest_unit_bytes / _GIB:.1f}GiB "
             f"host_total={self.host_total_bytes / _GIB:.1f}GiB "
             f"device_free={self.device_free_bytes / _GIB:.1f}GiB "
-            f"({self.reason})"
+            + (f"rung={self.placement_mode} " if self.placement_mode else "")
+            + f"({self.reason})"
         )
 
 
@@ -1766,6 +1788,7 @@ def plan_streamed_hydration(
     *,
     component_trees: Optional[Mapping[str, str]] = None,
     device_free_bytes: Optional[int] = None,
+    placement_mode: str = "",
 ) -> StreamedHydrationPlan:
     """pgw#1026: decide whether this modular slot stages PER COMPONENT ONTO
     THE DEVICE instead of staging its whole tree in host RAM first.
@@ -1800,6 +1823,7 @@ def plan_streamed_hydration(
         unit_count=len(units),
         host_total_bytes=int(probe_host_ram().total_gb * _GIB),
         device_free_bytes=int(device_free_bytes),
+        placement_mode=placement_mode,
     )
 
 
@@ -1810,11 +1834,17 @@ def decide_streamed_hydration(
     unit_count: int,
     host_total_bytes: int,
     device_free_bytes: int,
+    placement_mode: str = "",
 ) -> StreamedHydrationPlan:
     """:func:`plan_streamed_hydration`'s decision, separated from its
     measurements so the rule can be read — and tested — at the byte counts
     that produced the issue rather than at whatever this host happens to
-    have."""
+    have.
+
+    ``placement_mode`` is the rung the pipeline will be PLACED on. A rung
+    that keeps weights in host RAM (any CPU-offload rung, including the
+    sticky floor an OOM degrade learned) cannot take this discount at all —
+    see the refusal below."""
     tree = int(tree_bytes)
     largest = int(largest_unit_bytes)
     host_total = int(host_total_bytes)
@@ -1822,7 +1852,21 @@ def decide_streamed_hydration(
         StreamedHydrationPlan, tree_bytes=tree, largest_unit_bytes=largest,
         unit_count=int(unit_count), host_total_bytes=host_total,
         device_free_bytes=int(device_free_bytes),
+        placement_mode=str(placement_mode or ""),
     )
+    if keeps_weights_in_host_ram(placement_mode):
+        # pgw#1063: the discount is admissible ONLY because each component
+        # leaves the host for the card. An offload rung puts it back — the
+        # weights live on the host by definition — so the honest requirement
+        # is the whole tree, and charging one component here is what admitted
+        # ie#615's 105 GB re-stage into a cgroup that could not hold it (37
+        # minutes of direct-reclaim crawl, 1.578 TB read for a 105 GB set,
+        # then an OOM kill that was arithmetically certain at minute zero).
+        return plan(
+            engaged=False,
+            reason=f"placement rung {placement_mode!r} keeps the weights in "
+                   f"host RAM: an offloaded pipeline is charged its whole "
+                   f"tree, never one component")
     if unit_count <= 0 or largest <= 0:
         return plan(engaged=False, reason="no per-component staging units")
     if host_total <= 0:
@@ -2312,6 +2356,7 @@ def _load_modular_pipeline(
     storage_dtype: str = "",
     components: Optional[Dict[str, Any]] = None,
     component_trees: Optional[Dict[str, str]] = None,
+    placement_mode: str = "",
 ) -> Any:
     """The modular lane of :func:`load_from_pretrained` (pgw#1036):
     ``cls.from_pretrained(path)`` builds a SHELL (every weight-bearing
@@ -2350,7 +2395,8 @@ def _load_modular_pipeline(
     # between them the per-component gate inside hydration still refuses
     # with the measured numbers rather than thrashing the host.
     plan = plan_streamed_hydration(
-        Path(path), component_trees=component_trees)
+        Path(path), component_trees=component_trees,
+        placement_mode=placement_mode)
     if plan.engaged:
         logger.info(
             "modular slot stages per component onto the device: %s",
@@ -2395,6 +2441,7 @@ def load_from_pretrained(
     component_trees: Optional[Dict[str, str]] = None,
     declared_vram_gb: float = 0.0,
     ref: str = "",
+    placement_mode: str = "",
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
@@ -2414,12 +2461,16 @@ def load_from_pretrained(
     component spec at the LOCAL tree, hydrate; ``component_trees`` routes
     th#980/pgw#617 component overrides to their own materialized trees on
     that lane (the ``components=`` kwarg is what ``ModularPipeline.__init__``
-    silently discards)."""
+    silently discards). ``placement_mode`` is the rung the worker will place
+    this pipeline on: an offload rung keeps the weights in host RAM, so the
+    modular lane must not stage them onto the card and must not take the
+    per-component host-RAM discount (pgw#1063)."""
     path = str(path)
     if is_modular_pipeline_class(cls):
         return _load_modular_pipeline(
             cls, path, dtype=dtype, storage_dtype=storage_dtype,
             components=components, component_trees=component_trees,
+            placement_mode=placement_mode,
         )
     if component_trees:
         raise ModularHydrationError(
