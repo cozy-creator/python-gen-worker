@@ -70,6 +70,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import msgspec
 
 from . import warm_spans, worker_goals
+from .api.errors import ValidationError
 from .config import load_settings
 from .mint_process import (
     EXIT_BAD_REQUEST,
@@ -106,6 +107,35 @@ class MintChildRefused(RuntimeError):
     ) -> None:
         super().__init__(*args)
         self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
+
+
+def _declaration_refusal(exc: ValidationError) -> MintChildRefused:
+    """pgw#1075: a declared value this SDK's own vocabulary rejects is a
+    REFUSAL, not a crash — and the author's fix is already in the message.
+
+    ``api.errors.ValidationError`` means, verbatim, "bad user input; do not
+    retry". Inside this process the "user input" IS the declaration: the
+    family's ``Compile`` block, the mint request's spec, the axis values the
+    endpoint declares. Every property the parent's retry policy reads off a
+    refusal already holds for it — deterministic, identical on the next card,
+    fixed by editing the declaration and by nothing else — so it took the one
+    exit that says none of that.
+
+    Measured on the rig 2026-08-09: a vehicle declaring ``lora_bucket=8``
+    (``RANK_BUCKETS = (16, 32, 64, 128)``) makes ``enable_lora_branches``
+    raise its typed ``ValidationError`` — the refusal is CORRECT — and the
+    child reported ``mint-child crashed: the mint process exited 1`` with a
+    truncated traceback tail. The sentence naming the fix, and the fact that
+    it was a refusal at all, both died at the process boundary. pgw#999's
+    rule: refusals carry a class.
+
+    The wrapper is the same shape ``aot_mint.export_program`` already applies
+    to a custom op with no fake kernel (pgw#1062) — the message is the
+    authoring contract, so it is carried whole and never summarised.
+    """
+    return MintChildRefused(
+        f"declaration refused: {type(exc).__name__}: {exc}",
+        mint_phases=getattr(exc, "mint_phases", None))
 
 
 # th#1322: per-phase spans, measured HERE because this process owns the clock
@@ -925,7 +955,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     report_path = Path(request.report)
     started = time.monotonic()
     try:
-        report = mint(request)
+        try:
+            report = mint(request)
+        except ValidationError as exc:
+            # pgw#1075: classified HERE and not deeper, because every path into
+            # this process — spec build, composition check, branch arm, export
+            # declaration — can raise it and they all mean the same thing.
+            raise _declaration_refusal(exc) from exc
     except MintChildRefused as exc:
         # th#1322: a refused mint's phase table is where it spent the time
         # BEFORE refusing — the most useful half of a failed mint. The OPEN
