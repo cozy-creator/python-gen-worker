@@ -183,7 +183,8 @@ def metadata(rows: Tuple[Tuple[int, int], ...] = ROWS) -> Dict[str, Any]:
         "format": aot.ARTIFACT_FORMAT, "kind": aot.ARTIFACT_KIND, **RUNTIME,
         "family": FAMILY, "precision": "w8a8", "cell_key": "cell868",
         "entries": entries, "strict_export": True, "lora_bucket": 0,
-        "package_constants_in_so": False, "source_ref": "", "source_digest": "",
+        "package_constants_in_so": False, "always_keep_tensor_constants": True,
+        "source_ref": "", "source_digest": "",
         # pgw#950: every mint stamps a host-ISA requirement, and a cell that
         # stamps none is refused rather than sniffed from the .pt2. Satisfiable
         # anywhere: this host's machine, no ISA level.

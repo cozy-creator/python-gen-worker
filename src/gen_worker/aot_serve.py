@@ -662,6 +662,14 @@ def artifact_metadata(
         "strict_export": bool(strict_export),
         "lora_bucket": int(lora_bucket or 0),
         "package_constants_in_so": False,
+        # pgw#1097: the folding fence, DECLARED. `package_constants_in_so`
+        # says no weight BYTES ship inside the cell; this says no weight
+        # VALUES were compiled into its kernels either. Both are what make
+        # one cell legally serve every fine-tune of a family, and both are
+        # refused pre-download when absent — a cell minted before the fence
+        # may carry its minting checkpoint's copy of any 0-dim or <=8-element
+        # weight, which is exactly the tensor a fine-tune changes.
+        "always_keep_tensor_constants": True,
         "source_ref": str(source_ref or ""),
         "source_digest": str(source_digest or ""),
         # pgw#754: the host-CPU execution requirement of the packaged host
@@ -690,7 +698,8 @@ def artifact_metadata(
 #: presented as cost, not as an error. ``fleet_cells`` now asserts at import
 #: that nothing it strips appears here.
 DECLARED_AXES: Tuple[str, ...] = (
-    "format", "kind", "package_constants_in_so", *IDENTITY_AXES,
+    "format", "kind", "package_constants_in_so",
+    "always_keep_tensor_constants", *IDENTITY_AXES,
     "host_isa", "family",
 )
 
@@ -726,6 +735,16 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
         return (
             "artifact was minted with package_constants_in_so != False "
             "(weights baked into the .so; breaks the CAS cell model)")
+    # pgw#1097: the same shape of refusal, one layer in. A cell minted before
+    # the folding fence carries the minting checkpoint's values for any 0-dim
+    # or <=8-element weight inductor inlined, so it is sound for exactly one
+    # fine-tune and silently wrong for the rest. Absent flag = a pre-fence
+    # mint; refused, not warned about, and re-minting is the remedy.
+    if meta.get("always_keep_tensor_constants") is not True:
+        return (
+            "artifact was minted without the folding fence "
+            "(always_keep_tensor_constants != True; its weights may carry the "
+            "minting checkpoint's values — pgw#1097). Re-mint")
     here = runtime_key()
     if not here["torch"]:
         return "torch not importable"
