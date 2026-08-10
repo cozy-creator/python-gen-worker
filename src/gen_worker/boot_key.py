@@ -55,18 +55,27 @@ construction rather than by care, and ``test_boot_key_pgw1089`` pins it.
 
 The memo, and what it may hold
 ------------------------------
-``closure digest -> per-class GRAPH HASHES``. **Never the folded key.** The
-other three axes (envelope, sm, toolchain) re-derive in milliseconds every boot
-and MUST: an sm that changed, a toolchain that changed or an envelope the
-author widened has to move the key on the very next boot, and a memoized key
-would answer with the previous pod's. Memoizing the graph hashes alone is
-sound because the graph is a pure function of the code closure the digest
-names.
+``closure digest -> the per-class KEYING BLOCKS`` — i.e. the GRAPH half of the
+identity, and **never the folded key.** The other three axes (envelope, sm,
+toolchain) re-derive in milliseconds every boot and MUST: an sm that changed, a
+toolchain that changed or an envelope the author widened has to move the key on
+the very next boot, and a memoized key would answer with the previous pod's.
+Memoizing the graph half is sound because the traced graph is a pure function
+of the code closure the digest names (pgw#990 demoted the closure to exactly
+this: *"a memo, never identity"*).
+
+**A memo hit SKIPS THE TRACES.** That is the point of having one — the memo
+path is milliseconds, and pgw#1089 says so. It stores the blocks rather than
+the finished class hashes for one reason: the hashes are stamped by
+``aot_serve.artifact_metadata``, and a memo that stored them would make this
+module recompute ``combined_graph_hash`` itself, which is the second derivation
+the whole design forbids. Stored blocks re-fold through the mint's own code.
 
 Honesty is enforced, not trusted: when this pod goes on to MINT, the freshly
 traced per-class hashes are compared against whatever the memo answered
 (:func:`assert_memo_honest`), and a mismatch invalidates the memo entry and
-re-traces. A wrong key is never produced — at worst a memo is thrown away.
+re-traces on the next boot. A wrong key is never produced — at worst a memo is
+thrown away, and the pod that threw it away is the pod that proved it wrong.
 """
 
 from __future__ import annotations
@@ -288,7 +297,7 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
 #: Memo file schema. Bumped when the MEANING of a stored hash changes; a
 #: reader that finds an older version treats the whole file as absent, which
 #: is a miss and a re-trace, never a wrong key.
-MEMO_VERSION = 1
+MEMO_VERSION = 2
 MEMO_FILENAME = "boot-key-graphs.json"
 
 
@@ -325,8 +334,10 @@ def _memo_path(memo_dir: Path) -> Path:
     return Path(memo_dir) / MEMO_FILENAME
 
 
-def read_memo(memo_dir: Optional[Path], digest: str) -> Dict[str, str]:
-    """The per-class graph hashes memoized under ``digest``, or ``{}``."""
+def read_memo(
+    memo_dir: Optional[Path], digest: str,
+) -> Dict[str, Dict[str, Any]]:
+    """The per-class KEYING BLOCKS memoized under ``digest``, or ``{}``."""
     if not memo_dir or not digest:
         return {}
     path = _memo_path(Path(memo_dir))
@@ -339,17 +350,29 @@ def read_memo(memo_dir: Optional[Path], digest: str) -> Dict[str, str]:
     row = (doc.get("closures") or {}).get(str(digest))
     if not isinstance(row, dict):
         return {}
-    hashes = row.get("class_hashes")
-    if not isinstance(hashes, dict) or not hashes:
+    blocks = row.get("blocks")
+    if not isinstance(blocks, dict) or not blocks:
         return {}
-    return {str(k): str(v) for k, v in hashes.items() if str(v)}
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, canon in blocks.items():
+        try:
+            parsed = json.loads(canon)
+        except (TypeError, ValueError):
+            # One unreadable block invalidates the WHOLE entry: a partial class
+            # set is not a narrower key, it is a wrong one (pgw#716).
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        out[str(name)] = parsed
+    return out
 
 
 def write_memo(
-    memo_dir: Optional[Path], digest: str, class_hashes: Mapping[str, str],
+    memo_dir: Optional[Path], digest: str,
+    blocks: Mapping[str, Mapping[str, Any]],
 ) -> bool:
-    """Memoize this closure's per-class graph hashes. Best effort."""
-    if not memo_dir or not digest or not class_hashes:
+    """Memoize this closure's per-class keying blocks. Best effort."""
+    if not memo_dir or not digest or not blocks:
         return False
     path = _memo_path(Path(memo_dir))
     try:
@@ -361,7 +384,10 @@ def write_memo(
         if not isinstance(doc, dict) or int(doc.get("v") or 0) != MEMO_VERSION:
             doc = {"v": MEMO_VERSION, "closures": {}}
         doc.setdefault("closures", {})[str(digest)] = {
-            "class_hashes": {str(k): str(v) for k, v in class_hashes.items()},
+            "blocks": {
+                str(k): json.dumps(
+                    dict(v), sort_keys=True, separators=(",", ":"))
+                for k, v in blocks.items()},
             "written_unix": int(time.time()),
         }
         tmp = path.with_suffix(".tmp")
@@ -414,14 +440,24 @@ def assert_memo_honest(
     memoized = read_memo(memo_dir, digest)
     if not memoized:
         return ""
+    # The memo holds BLOCKS, so the comparison stamps them through the same
+    # `artifact_metadata` the mint stamped its own with — two class hashes
+    # compared here were computed by one function, never by two.
+    try:
+        had_hashes = class_hashes_of(memoized)
+    except Exception as exc:  # noqa: BLE001 — an unstampable memo IS dishonest
+        invalidate_memo(memo_dir, digest)
+        return (
+            f"boot-key memo for closure {digest} could not be stamped "
+            f"({type(exc).__name__}: {exc}) and has been invalidated")
     disagreements: List[str] = []
     for name, block in sorted(minted_entries.items()):
         want = str((block or {}).get("class_hash") or "")
-        had = memoized.get(str(name))
+        had = had_hashes.get(str(name))
         if had and want and had != want:
             disagreements.append(f"{name}: memo {had} != traced {want}")
-    extra = sorted(set(memoized) - set(minted_entries))
-    missing = sorted(set(minted_entries) - set(memoized))
+    extra = sorted(set(had_hashes) - set(minted_entries))
+    missing = sorted(set(minted_entries) - set(had_hashes))
     if extra or missing:
         disagreements.append(
             f"class set differs (memo-only {extra[:3]!r}, "
@@ -437,6 +473,31 @@ def assert_memo_honest(
 # ---------------------------------------------------------------------------
 # The fold — the mint's OWN stamping code, called with the mint's own blocks
 # ---------------------------------------------------------------------------
+
+
+def class_hashes_of(
+    blocks: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, str]:
+    """``{entry: class_hash}`` for one set of keying blocks.
+
+    Stamped by ``aot_serve.artifact_metadata`` — the mint's own function — so a
+    hash computed here and a hash the mint stamped are the same computation.
+    The envelope/precision/strict arguments do not reach ``class_hash``
+    (it folds target/fork/class_dims/range_digest/graph/strict/lora_bucket),
+    which is why this can answer without them; ``strict``/``lora_bucket`` DO,
+    so they are read off the blocks' own ``graph.specialization``.
+    """
+    head = next(iter(blocks.values()), {}) if blocks else {}
+    spec = dict((head.get("graph") or {}).get("specialization") or {})
+    meta = aot_serve.artifact_metadata(
+        family="", precision="", cell_key="",
+        entries={str(k): dict(v) for k, v in blocks.items()},
+        strict_export=bool(spec.get("strict", True)),
+        lora_bucket=int(spec.get("lora_bucket", 0) or 0))
+    return {
+        str(name): str(row.get("class_hash") or "")
+        for name, row in (meta.get("entries") or {}).items()
+    }
 
 
 def fold(
@@ -596,8 +657,14 @@ def derive(
     device: int = -1,
     workers: int = 0,
     python: str = "",
+    trust_memo: bool = True,
+    precision: str = "",
+    strict: bool = True,
 ) -> DerivedKey:
     """Derive this boot's ``ck1`` key from code alone. §4.27 step 1.
+
+    ``trust_memo=False`` forces the traces even when a memo is present and then
+    RULES on what the memo held — the verify posture, never the boot default.
 
     ``declared_hint`` is the parent's read of the declaration's class-row count
     — ``len(aot_declaration.cell_plans(decl))``, which needs no pipeline. It
@@ -617,8 +684,31 @@ def derive(
             f"class set has no identity (pgw#716/#758)")
 
     digest = closure_digest(family, cfg, function=function)
-    memoized = read_memo(memo_dir, digest)
+    memoized = read_memo(memo_dir, digest) if trust_memo else {}
     memo_state = "miss"
+
+    # THE MEMO PATH — milliseconds, and no trace at all. The graph half of the
+    # identity is a pure function of the code closure this digest names, so a
+    # hit re-folds the stored blocks; the other three axes are restated FRESH
+    # inside `fold`, which is what makes it safe to skip the expensive half and
+    # still re-key on a toolchain upgrade, a different card or a widened
+    # envelope. Honesty is not assumed here — it is enforced at the next MINT
+    # by `assert_memo_honest`, which is the only moment this pod holds a traced
+    # truth to compare against.
+    if memoized:
+        key, class_hashes, combined = fold(
+            memoized, family=family,
+            precision=str(precision or ""), strict=strict,
+            lora_bucket=int(cfg.lora_bucket or 0), envelope=envelope)
+        wall_ms = int((time.monotonic() - t0) * 1000)
+        logger.info(
+            "boot-key: %s from MEMO in %d ms — %d class(es), no trace "
+            "(closure %s)", key.digest, wall_ms, len(class_hashes), digest)
+        return DerivedKey(
+            key=key, class_hashes=class_hashes, combined=combined,
+            workers=0,
+            width_reason="memo hit — no trace child was spawned",
+            traced=0, memo="hit", wall_ms=wall_ms)
 
     work = Path(work_root)
     work.mkdir(parents=True, exist_ok=True)
@@ -703,20 +793,28 @@ def derive(
         envelope=envelope,
     )
 
-    if memoized:
-        stale = {
-            name for name, value in class_hashes.items()
-            if memoized.get(name) and memoized[name] != value}
-        if stale or set(memoized) != set(class_hashes):
-            invalidate_memo(memo_dir, digest)
-            memo_state = "invalidated"
-            logger.warning(
-                "boot-key: memo for closure %s disagreed with the fresh trace "
-                "on %d class(es) — invalidated, and the FRESH hashes are what "
-                "this key names", digest, len(stale) or len(class_hashes))
-        else:
-            memo_state = "hit"
-    write_memo(memo_dir, digest, class_hashes)
+    # `trust_memo=False` is the VERIFY posture: trace anyway and rule on
+    # whatever the memo held. It is what the rig and the mint-adjacent honesty
+    # gate use, and it is the only way a stale memo is caught before a mint —
+    # so it exists, and it is never the boot default (a boot that re-traced to
+    # check its own memo would have no memo path at all).
+    if not trust_memo:
+        held = read_memo(memo_dir, digest)
+        if held:
+            try:
+                had = class_hashes_of(held)
+            except Exception:  # noqa: BLE001 — unstampable IS disagreement
+                had = {}
+            if had != class_hashes:
+                invalidate_memo(memo_dir, digest)
+                memo_state = "invalidated"
+                logger.warning(
+                    "boot-key: memo for closure %s disagreed with the fresh "
+                    "trace — invalidated, and the FRESH hashes are what this "
+                    "key names", digest)
+            else:
+                memo_state = "verified"
+    write_memo(memo_dir, digest, blocks)
 
     wall_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
@@ -776,6 +874,7 @@ __all__ = [
     "assert_memo_honest",
     "child_argv",
     "child_env",
+    "class_hashes_of",
     "closure_digest",
     "derive",
     "shares",

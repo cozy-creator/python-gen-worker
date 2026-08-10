@@ -234,39 +234,69 @@ def test_no_env_decides_the_width(monkeypatch) -> None:
 
 
 def test_the_memo_never_holds_the_folded_key(tmp_path: Path) -> None:
-    """The memo may hold per-class GRAPH HASHES and must not hold the key.
+    """The memo may hold the GRAPH half and must not hold the key.
 
     An sm that changed, a toolchain that changed or an envelope the author
     widened has to move the key on the very NEXT boot; a memoized key would
-    answer with the previous pod's. Read off the file, not off the API, so a
+    answer with the previous pod's. Read off the FILE, not off the API, so a
     future field cannot smuggle one in.
     """
     digest = "closure0123"
-    key, hashes, _combined = _fold({"a": _block(), "b": _block(dim=128)})
-    assert boot_key.write_memo(tmp_path, digest, hashes)
+    blocks = {"a": _block(), "b": _block(dim=128)}
+    key, _hashes, _combined = _fold(blocks)
+    assert boot_key.write_memo(tmp_path, digest, blocks)
 
     doc = json.loads((tmp_path / boot_key.MEMO_FILENAME).read_text())
     blob = json.dumps(doc)
     assert key.digest not in blob
     assert "ck1-" not in blob
-    assert set(doc["closures"][digest]["class_hashes"]) == {"a", "b"}
+    assert set(doc["closures"][digest]["blocks"]) == {"a", "b"}
+    # And not the axes that must re-derive every boot, either.
+    for axis in ("envelope", "toolchain", "sm_89"):
+        assert axis not in blob
+
+
+def test_a_memo_hit_re_folds_the_blocks_through_the_mints_own_stamp(
+    tmp_path: Path,
+) -> None:
+    """The memo stores BLOCKS rather than finished class hashes for one
+    reason: hashes are stamped by ``aot_serve.artifact_metadata``, and a memo
+    that stored them would make this module recompute
+    ``combined_graph_hash`` itself — the second derivation the design forbids.
+    """
+    blocks = {"a": _block(), "b": _block(dim=128)}
+    _key, hashes, _c = _fold(blocks)
+    assert boot_key.class_hashes_of(blocks) == hashes
 
 
 def test_the_memo_round_trips_and_a_foreign_closure_is_a_miss(
     tmp_path: Path,
 ) -> None:
-    _key, hashes, _c = _fold({"a": _block()})
-    boot_key.write_memo(tmp_path, "closureA", hashes)
-    assert boot_key.read_memo(tmp_path, "closureA") == hashes
+    blocks = {"a": _block()}
+    boot_key.write_memo(tmp_path, "closureA", blocks)
+    assert boot_key.read_memo(tmp_path, "closureA") == blocks
     assert boot_key.read_memo(tmp_path, "closureB") == {}
     assert boot_key.read_memo(None, "closureA") == {}
+
+
+def test_one_unreadable_block_invalidates_the_WHOLE_memo_entry(
+    tmp_path: Path,
+) -> None:
+    """A partial class set is not a narrower key, it is a wrong one
+    (pgw#716) — so a memo that can only answer for some of its classes must
+    answer for none."""
+    boot_key.write_memo(tmp_path, "closureA", {"a": _block(), "b": _block()})
+    path = tmp_path / boot_key.MEMO_FILENAME
+    doc = json.loads(path.read_text())
+    doc["closures"]["closureA"]["blocks"]["b"] = "{not json"
+    path.write_text(json.dumps(doc))
+    assert boot_key.read_memo(tmp_path, "closureA") == {}
 
 
 def test_a_version_bump_reads_as_absent_never_as_a_stale_hit(
     tmp_path: Path,
 ) -> None:
-    _key, hashes, _c = _fold({"a": _block()})
-    boot_key.write_memo(tmp_path, "closureA", hashes)
+    boot_key.write_memo(tmp_path, "closureA", {"a": _block()})
     path = tmp_path / boot_key.MEMO_FILENAME
     doc = json.loads(path.read_text())
     doc["v"] = boot_key.MEMO_VERSION + 1
@@ -325,8 +355,7 @@ def test_a_dishonest_memo_is_caught_at_mint_and_invalidated(
     this pod mints can only ever cost a re-trace."""
     digest = "closureA"
     blocks = {"a": _block(), "b": _block(dim=128)}
-    _key, hashes, _c = _fold(blocks)
-    boot_key.write_memo(tmp_path, digest, hashes)
+    boot_key.write_memo(tmp_path, digest, blocks)
 
     # A mint whose traced class hashes AGREE: silence.
     minted = aot_serve.artifact_metadata(
@@ -334,7 +363,7 @@ def test_a_dishonest_memo_is_caught_at_mint_and_invalidated(
         entries={k: dict(v) for k, v in blocks.items()},
         strict_export=True, lora_bucket=0)["entries"]
     assert boot_key.assert_memo_honest(tmp_path, digest, minted) == ""
-    assert boot_key.read_memo(tmp_path, digest) == hashes
+    assert boot_key.read_memo(tmp_path, digest) == blocks
 
     # A mint whose traced class hashes DISAGREE: named, and the entry is gone.
     lying = {name: dict(row) for name, row in minted.items()}
@@ -348,8 +377,7 @@ def test_a_memo_covering_a_different_class_set_is_dishonest(
     tmp_path: Path,
 ) -> None:
     digest = "closureA"
-    _key, hashes, _c = _fold({"a": _block(), "b": _block(dim=128)})
-    boot_key.write_memo(tmp_path, digest, hashes)
+    boot_key.write_memo(tmp_path, digest, {"a": _block(), "b": _block(dim=128)})
     minted = aot_serve.artifact_metadata(
         family="tiny", precision="bf16", cell_key="",
         entries={"a": _block()}, strict_export=True, lora_bucket=0)["entries"]
@@ -516,10 +544,14 @@ def test_children_that_enumerated_different_class_sets_refuse(
 def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """The parent's whole loop — assign, run, fold, memo — with the CHILDREN
-    stubbed and nothing else. Proves the memo transitions (miss -> hit) and
-    that a memo disagreement is reported as ``invalidated`` while the FRESH
-    hashes are what the key names."""
+    """The parent's whole loop — shard, run, fold, memo — with the CHILDREN
+    stubbed and nothing else.
+
+    Proves the three memo transitions AND the property that makes the memo
+    worth having: **a hit spawns no child at all.** The second derive below
+    would raise if it reached ``_run_children``, because the stub is replaced
+    with one that fails.
+    """
     monkeypatch.setattr(boot_key, "cpu_quota_cores", lambda: 4.0)
     blocks = {"a": _block(), "b": _block(dim=128)}
     canon = {k: json.dumps(v, sort_keys=True, separators=(",", ":"))
@@ -544,17 +576,33 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     assert first.nodes == {"a": 41, "b": 41}
     assert first.digest.startswith("ck1-")
 
+    # A HIT MUST NOT TRACE. Any child spawn now is a hard failure.
+    def _never(jobs, python=""):
+        raise AssertionError(
+            "a memo hit spawned a trace child — the memo path is supposed to "
+            "be milliseconds, and pgw#1089 says so")
+
+    monkeypatch.setattr(boot_key, "_run_children", _never)
     second = boot_key.derive(**kwargs)
     assert second.memo == "hit"
     assert second.digest == first.digest
+    assert second.traced == 0
+    assert second.workers == 0
+    assert "no trace child" in second.width_reason
 
-    # Now poison the memo and prove the FRESH trace wins.
-    boot_key.write_memo(
-        tmp_path, boot_key.closure_digest("tiny", kwargs["cfg"], function="fn"),
-        {"a": "0" * 16, "b": "0" * 16})
-    third = boot_key.derive(**kwargs)
-    assert third.memo == "invalidated"
-    assert third.digest == first.digest
+    # The VERIFY posture traces anyway and rules on what the memo held.
+    monkeypatch.setattr(boot_key, "_run_children", _children)
+    verified = boot_key.derive(**kwargs, trust_memo=False)
+    assert verified.memo == "verified"
+    assert verified.digest == first.digest
+
+    # Poison it, and the FRESH trace must win and say so.
+    closure = boot_key.closure_digest("tiny", kwargs["cfg"], function="fn")
+    poisoned_blocks = {"a": _block(dim=999), "b": _block(dim=998)}
+    boot_key.write_memo(tmp_path, closure, poisoned_blocks)
+    caught = boot_key.derive(**kwargs, trust_memo=False)
+    assert caught.memo == "invalidated"
+    assert caught.digest == first.digest
 
 
 # ---------------------------------------------------------------------------
