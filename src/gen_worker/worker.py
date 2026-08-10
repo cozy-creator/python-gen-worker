@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from . import boot_phases
 from .config import Settings
 from .executor import Executor, ModelStore
 from .lifecycle import Lifecycle
@@ -164,6 +165,16 @@ class Worker:
         # Capability renewal presents the freshest worker JWT (contract §1
         # rotation), not the boot-time settings token.
         self.executor.worker_jwt_provider = lambda: self.transport.current_worker_jwt
+        # pgw#1087: process start -> SDK ready. Everything before this line is
+        # interpreter startup, `import torch`, endpoint-module import and
+        # executor construction — a window NO span could ever have covered,
+        # because the recorder itself is part of what is being imported. It
+        # arrived as an unexplained residual on every boot; now it is named,
+        # and `reconciliation()` subtracts it from the residual rather than
+        # leaving the biggest unmeasured slice unattributed.
+        boot_phases.mark_once(
+            boot_phases.PHASE_SDK_READY,
+            detail=f"endpoints={len(specs)} modules={len(user_module_names)}")
 
     async def _send(self, msg: pb.WorkerMessage) -> None:
         await self.transport.send(msg)

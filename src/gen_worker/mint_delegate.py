@@ -33,10 +33,11 @@ import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from . import activity as activity_mod
 from . import aot_resume
+from . import boot_phases
 from . import mint_budget
 from . import mint_process
 from . import progress as progress_mod
@@ -559,6 +560,65 @@ async def build_cell(
             parked = None
 
 
+def _emit_boot_trace_rows(table: Mapping[str, Any], *, family: str) -> None:
+    """pgw#1087: the mint's PER-CLASS timings, as boot-phase rows.
+
+    The mint child holds no orchestrator session and its phase table has always
+    been a single blob event — readable by a human, joinable by nothing. The
+    per-class trace cost was the biggest thing pgw#1087 could not answer ("10-20
+    s/class, guessed, never measured"), and the number already exists: the child
+    measures `export_s` per entry and hands it back in the report. Re-emitting
+    it here — parent-side, where the stream is — puts one `trace_for_key` row
+    per graph CLASS in the same table as the fetch and admission phases, so a
+    boot's compile half and its I/O half are finally comparable.
+
+    Emitted whether or not the boot window is still open: a self-mint routinely
+    finishes after `first_request_servable`, and its per-class costs are the
+    point. They are spans (not cumulative milestones), so `reconciliation`
+    charges them honestly — a mint that ran after the boot closed makes
+    `measured_ms` exceed `total_ms`, which is a TRUE statement about a worker
+    that kept compiling after it went servable, not a broken ladder.
+
+    OWED (pgw#1087, deliberately not taken here): the node count per class. It
+    is one line in `aot_mint._export_entry` — `timings["nodes"] =
+    len(program.graph_module.graph.nodes)` — and that function is being edited
+    by the pgw#1080 lane in the same window, so this lane does not race it. The
+    row already carries the shape the count will ride (`nodes=` in `detail`).
+    """
+    entries = table.get("entries")
+    if not isinstance(entries, Mapping):
+        return
+    for name, timings in sorted(entries.items()):
+        if not isinstance(timings, Mapping):
+            continue
+        export_s = float(timings.get("export_s") or 0.0)
+        if export_s <= 0:
+            continue
+        nodes = timings.get("nodes")
+        boot_phases.mark(
+            boot_phases.PHASE_TRACE_FOR_KEY,
+            duration_ms=int(round(export_s * 1000.0)),
+            ref=family,
+            function=str(name),
+            detail=(
+                f"nodes={nodes} " if nodes is not None else ""
+            ) + f"compile_s={timings.get('compile_s') or 0} "
+                f"warm_s={timings.get('warm_s') or 0}",
+        )
+    totals = table.get("totals")
+    if isinstance(totals, Mapping):
+        # The fold: per-class hashing plus the combine into
+        # `combined_graph_hash`, which the mint measures as `declare_s`.
+        declare_s = float(totals.get("declare_s") or 0.0)
+        if declare_s > 0:
+            boot_phases.mark(
+                boot_phases.PHASE_KEY_FOLD,
+                duration_ms=int(round(declare_s * 1000.0)),
+                ref=family,
+                detail=f"classes={len(entries)}",
+            )
+
+
 def _emit_aot_phases(
     outcome: MintOutcome, *, family: str, execution_lane: str,
 ) -> None:
@@ -614,6 +674,7 @@ def _emit_aot_phases(
             table["terminus"] = terminus or table.get("terminus") or ""
             aot_mint.emit_phase_events(
                 family=family, execution_lane=execution_lane, table=table, terminus=terminus)
+            _emit_boot_trace_rows(table, family=family)
         if outcome.minted or table:
             return
         if total_s <= 0:

@@ -207,6 +207,33 @@ def test_real_entrypoint_seals_dials_and_dumps_stacks(tmp_path: Path) -> None:
             seal_phase = next(p for p in phases if p.get("phase") == "env_seal")
             assert seal_phase.get("digest"), "the seal phase must carry its digest"
 
+            # pgw#1087: the seal's COST, off the wire. The startup phase lines
+            # above prove the seal ran and in what order; they say nothing
+            # about what it cost, and "expect ms; prove it" was the issue's own
+            # instruction. The library-digest memo nests inside it, so the
+            # memo's saving is a subtraction between two real rows. This is the
+            # ONLY boot shape that produces these — `env_seal.establish` is an
+            # entrypoint/mint-child call, not something an embedded worker
+            # does, which is why `boot_phases.SHAPE_ENTRYPOINT` is a shape of
+            # its own.
+            conn.wait_for(
+                lambda m: m.WhichOneof("msg") == "boot_phase"
+                and m.boot_phase.phase == boot_phases.PHASE_ENV_ESTABLISH
+                and m.boot_phase.terminal)
+            rows = _boot_rows(conn)
+            est = next(r for r in rows
+                       if r.phase == boot_phases.PHASE_ENV_ESTABLISH and r.terminal)
+            memo = next(r for r in rows
+                        if r.phase == boot_phases.PHASE_LIB_MEMO and r.terminal)
+            assert memo.parent_ordinal == est.ordinal, (
+                "lib_memo must nest inside env_establish or the two "
+                "double-count the same seconds")
+            assert memo.reason in ("hit", "miss", "partial", "no_libs")
+            assert memo.outcome == boot_phases.OUTCOME_OK, (
+                "a memo MISS is the expensive branch of a successful phase, "
+                "never a refusal")
+            assert est.duration_ms >= memo.duration_ms
+
             # Discovery over the wire: the catalog module baked into the
             # manifest is what the worker advertises.
             ready = conn.wait_for(is_ready).state_delta
