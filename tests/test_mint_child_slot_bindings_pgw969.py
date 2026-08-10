@@ -137,7 +137,7 @@ def _request(
     the slot is ABSENT, which is the only shape a wiring gap can still take.
     """
     pending = SimpleNamespace(
-        family="pgw969", cell_key="ck1-catalog", recipe="dynamo",
+        family="pgw969", arm_token="ck1-catalog", recipe="dynamo",
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
                         family="pgw969", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),

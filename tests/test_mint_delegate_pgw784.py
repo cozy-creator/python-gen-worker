@@ -162,7 +162,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
     a child warming at different config traces different graphs and the
     parent's own proof then misses."""
     pending = SimpleNamespace(
-        family="sdxl", cell_key="ck1-abc", cfg=_cfg(),
+        family="sdxl", arm_token="ck1-abc", cfg=_cfg(),
         target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="gen",

@@ -45,7 +45,7 @@ def _request(tmp_path: Path, **over: Any) -> mp.MintRequest:
         function="gen",
         modules=("harness.toy_endpoints",),
         family="sdxl",
-        cell_key="ck1-deadbeef",
+        arm_token="arm1-deadbeef",
         target=str(tmp_path / "cell.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),

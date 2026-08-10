@@ -284,10 +284,10 @@ def _mint_request(
 
     cfg = veh.compile_cell()
     pending = SimpleNamespace(
-        family=veh.family, cell_key="", cfg=cfg,
+        family=veh.family, arm_token="", cfg=cfg,
         target=workdir / "cell.tar.gz", mint_root=workdir)
-    # The key is the REAL one, derived the way the arming brain derives it, so
-    # the child's own recomputation has something to agree with.
+    # The obligation token is inessential here — the child stamps the REAL
+    # cell key from the artifact's own recorded facts.
     task = MintTask(
         pending=pending, pipe=None,
         function=veh.function, modules=tuple(veh.modules),
@@ -398,7 +398,7 @@ def run_cycle(
     entries = _declared_entries(veh)
     leg.facts = {"family": request.family,
                  "slots": sorted(request.slots),
-                 "cell_key": request.cell_key,
+                 "arm_token": request.arm_token,
                  "vram_cap_bytes": request.vram_cap_bytes,
                  "declared_entries": entries}
     leg.detail = (f"family={request.family} "

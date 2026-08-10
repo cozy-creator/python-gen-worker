@@ -781,8 +781,12 @@ def verify_contract(
     # four-axis identity — so the recomputation raises rather than matching),
     # which is what makes the dev-corpus purge hygiene rather than a
     # correctness precondition.
+    # Gated on key SHAPE: a ck-shaped stamp is an identity claim and must
+    # restate; a non-key stamp (focused fixtures, torn metadata) is not a
+    # claim — and it can never match a hub row either (`IsCellKey` gates the
+    # store flavor), so nothing downstream can mistake it for identity.
     stamped_key = str(meta.get("cell_key") or "")
-    if stamped_key:
+    if stamped_key and cell_key_mod.is_key(stamped_key):
         try:
             recomputed = cell_key_mod.from_exported_artifact_metadata(meta)
         except cell_key_mod.CellKeyError as exc:

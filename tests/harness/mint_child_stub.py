@@ -48,7 +48,7 @@ def _mint(request: MintRequest) -> None:
     target.write_bytes(b"stub-cell-bytes")
     _report(request, MintReport(
         status="minted", artifact=str(target), digest="blake3:stub",
-        cell_key=request.cell_key, phase="finalize",
+        cell_key=request.arm_token, phase="finalize",
         peak_vram_bytes=int(os.environ.get("MINT_STUB_PEAK", "0") or 0),
         detail="stub mint"))
 

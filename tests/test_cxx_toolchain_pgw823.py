@@ -162,7 +162,7 @@ def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
         slots={},
         target="/tmp/x", work_root="/tmp/y", device=0, vram_cap_bytes=0,
         modules=[], function="generate", cfg=None, configs={}, execution_lane="",
-        report="/tmp/r", cell_key="")
+        report="/tmp/r", arm_token="")
     with pytest.raises(mint_child.MintChildRefused, match="no C\\+\\+ compiler"):
         mint_child.mint(req)
 
