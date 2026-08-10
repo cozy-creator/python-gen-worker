@@ -15,7 +15,6 @@ Three shapes are proven here, all on the real code paths:
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -218,11 +217,14 @@ def test_a_card_that_keeps_returning_memory_is_never_given_up_on(
         ref="lane", residency=res, wait_s=0.05,
         retry_exc=RuntimeError)     # type: ignore[arg-type]
 
-    started = time.monotonic()
     with gate.ensure_resident():
         pass
     assert res.attempts == 40
-    assert time.monotonic() - started > 0.05, (
+    # The property, not the runner's speed (pgw#795): at the loop's DECLARED
+    # cadence the window covers only a handful of polls, and the promote took
+    # far more — so a wall budget would have fired here. No clock is read.
+    polls_the_window_could_cover = gate.wait_s / gated._POLL_S
+    assert res.attempts > polls_the_window_could_cover, (
         "the test did not actually outlive the window it is testing"
     )
 
