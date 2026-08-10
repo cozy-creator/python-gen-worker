@@ -22,6 +22,9 @@ src/micro_diffusion/
   *_escape.py         micro-escape: author-defined ops (pgw#1062), GPU-only
   *_conv.py           micro-conv: STATIC-ROWS (sdxl's strategy) — conv-bearing,
                       4 static entries, int64 timestep, persistent named buffer (pgw#1073)
+  *_pad32.py          micro-pad32: ie#637's PAD-TO-32 shape — the token extent is
+                      `32*FloorDiv(H*W+31, 32)`, and one collapsed artifact serves
+                      three L values whose pads are 0, 16 and 28
 ```
 
 ## The three entries, and why exactly three

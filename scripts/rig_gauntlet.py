@@ -44,6 +44,8 @@ ORDER = (
     "micro-lora",
     "micro-lora16",
     "micro-4d",
+    "micro-pad32",
+    "micro-pad32-branchy",
     "micro-conv",
     "micro-escape",
     "micro-w8a8",

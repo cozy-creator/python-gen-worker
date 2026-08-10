@@ -136,7 +136,8 @@ class MicroPipeline:
 
 
 __all__ = ["MicroConfig", "MicroConvPipeline", "MicroEscapePipeline",
-           "MicroGridPipeline", "MicroPipeline", "MicroW8a8Pipeline"]
+           "MicroGridPipeline", "MicroPad32BranchyPipeline",
+           "MicroPad32Pipeline", "MicroPipeline", "MicroW8a8Pipeline"]
 
 
 class MicroGridPipeline(MicroPipeline):
@@ -153,6 +154,38 @@ class MicroGridPipeline(MicroPipeline):
         grid = MicroGridDenoiser(base.config)
         grid.load_state_dict(base.transformer.state_dict(), strict=True)
         return cls(grid.eval(), base.decoder, source=base.source)
+
+
+class MicroPad32Pipeline(MicroPipeline):
+    """ie#637's vehicle: same weights, PAD-TO-32 transformer.
+
+    Only `.transformer` differs — a :class:`MicroPad32Denoiser`, whose token
+    extent is `32*FloorDiv(H*W+31, 32)`. See `model_pad32`.
+    """
+
+    @classmethod
+    def from_pretrained(cls, path: str, **_kw: Any) -> "MicroPad32Pipeline":
+        from .model_pad32 import MicroPad32Denoiser
+
+        base = MicroPipeline.from_pretrained(path)
+        padded = MicroPad32Denoiser(base.config)
+        padded.load_state_dict(base.transformer.state_dict(), strict=True)
+        return cls(padded.eval(), base.decoder, source=base.source)
+
+
+class MicroPad32BranchyPipeline(MicroPipeline):
+    """The RED twin's pipeline: the UPSTREAM pad spelling, which branches."""
+
+    @classmethod
+    def from_pretrained(
+        cls, path: str, **_kw: Any,
+    ) -> "MicroPad32BranchyPipeline":
+        from .model_pad32 import MicroPad32Branchy
+
+        base = MicroPipeline.from_pretrained(path)
+        branchy = MicroPad32Branchy(base.config)
+        branchy.load_state_dict(base.transformer.state_dict(), strict=True)
+        return cls(branchy.eval(), base.decoder, source=base.source)
 
 
 class MicroW8a8Pipeline(MicroPipeline):

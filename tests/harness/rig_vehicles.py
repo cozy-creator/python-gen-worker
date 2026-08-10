@@ -1133,10 +1133,218 @@ MICRO_ESCAPE = Vehicle(
 )
 
 
+# ---------------------------------------------------------------------------
+# micro-pad32 — ie#637's SURVIVING WATCH ITEM, and the gate on the z-image buy.
+#
+# The token extent is `32*FloorDiv(H*W+31, 32)`: a pad-to-32 over a token count
+# that is itself a PRODUCT of two declared symbols. ie#637 proved off-GPU that
+# this spelling carries no pinning guard; what no run has ever reached is
+# whether AOTInductor CODEGENS it correctly through export -> compile -> load ->
+# serve. Two z-image pods died before that phase (the gate, then ie#638's VRAM),
+# so it costs a rented A100 to ask there and seconds to ask here.
+#
+# The RED twin is not decoration. Without it a green here would prove only that
+# this graph never reaches the declared-range gate.
+# ---------------------------------------------------------------------------
+
+
+def _micro_pad32_cell(family: str = "micro-pad32") -> Any:
+    """The cell, AND the declaration registration the parent needs.
+
+    Importing the family's declaration module is the registration (it calls
+    `register_export_declaration` at import), and the parent-side numerics gate
+    builds its probe feed from that contract. A variant that imported the OTHER
+    family's module minted fine and then refused to arm with
+    `no_input_contract` — measured, and the reason this takes a family rather
+    than reading one module.
+    """
+    from gen_worker.registry import CompileCell
+
+    if family == "micro-pad32-branchy":
+        from micro_diffusion.aot_declaration_pad32_branchy import (
+            COND_LEN, PIXEL_ROWS)
+    else:
+        from micro_diffusion.aot_declaration_pad32 import COND_LEN, PIXEL_ROWS
+
+    return CompileCell(
+        shapes=PIXEL_ROWS, targets=("transformer",), family=family,
+        regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+        guidance_scales=(), text_lens=())
+
+
+_MICRO_PAD32_ADOPT = '''
+import json, logging, os, sys
+for p in %(paths)r:
+    sys.path.insert(0, p)
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+import harness.rig_runtime  # noqa: F401
+import torch
+from pathlib import Path
+from gen_worker import aot_serve
+from gen_worker.models import provision
+from gen_worker.registry import CompileCell
+from %(decl)s import (
+    ARITY, COND_LEN, LATENT_ROWS, PIXEL_ROWS, UNDECLARED_ROW)
+from micro_diffusion.model_pad32 import SEQ_MULTIPLE_OF, padded_length
+from micro_diffusion.pipeline import %(cls)s
+
+torch.set_num_threads(2)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+cfg = CompileCell(
+    shapes=PIXEL_ROWS, targets=("transformer",), family=%(family)r,
+    regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+    guidance_scales=(), text_lens=())
+pipe = %(cls)s.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
+config = pipe.config
+
+
+def _feed(grid):
+    gen = torch.Generator().manual_seed(637)
+    x = [torch.randn(config.in_channels, grid, grid, generator=gen).to(DEVICE)
+         for _ in range(ARITY)]
+    t = torch.full((ARITY,), 100.0, device=DEVICE)
+    cond = [torch.randn(COND_LEN, config.cond_dim, generator=gen).to(DEVICE)
+            for _ in range(ARITY)]
+    return x, t, cond
+
+
+# THE POINT OF THIS MEMBER: three L values in one served artifact, whose pads
+# are 16, 28 and 0 — three DIFFERENT padded lengths. A graph that decided the
+# pad once at trace serves at most one of them, and the middle row is not even
+# a declared row, so it can only come from the derived range.
+ARMS = [("transformer", LATENT_ROWS[0]),
+        ("transformer-undeclared", UNDECLARED_ROW),
+        ("transformer-row2", LATENT_ROWS[1])]
+pads = {}
+for name, grid in ARMS:
+    tokens = grid * grid
+    pads[name] = {"grid": grid, "tokens": tokens,
+                  "padded": padded_length(tokens),
+                  "pad": padded_length(tokens) - tokens}
+eager = {}
+with torch.no_grad():
+    for name, grid in ARMS:
+        x, t, cond = _feed(grid)
+        eager[name] = pipe.transformer(x, t, cond).clone()
+
+from harness.rig_fetch import fetch_named_cell as _fetch_cell
+from types import SimpleNamespace as _CellNS
+import hashlib as _hl
+from gen_worker import compile_cache as _syscc
+try:
+    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+except Exception as _exc:
+    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
+    cell = None
+else:
+    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    cell = _CellNS(
+        artifact=_art, cell_key=_key0, family=cfg.family,
+        ref=_syscc.system_repo(cfg.family) + "#" + _key0,
+        snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
+out = {"pid": os.getpid(), "ok": cell is not None, "pad_classes": pads,
+       "distinct_pads": sorted({v["pad"] for v in pads.values()})}
+if cell is not None:
+    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+    out.update({
+        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "snapshot_digest": cell.snapshot_digest,
+        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "entries": sorted((meta.get("entries") or {})),
+    })
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), 0)
+    out["armed"] = bool(outcome)
+    out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
+    out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
+    if outcome:
+        deltas = {}
+        with torch.no_grad():
+            for name, grid in ARMS:
+                x, t, cond = _feed(grid)
+                deltas[name] = float(
+                    (pipe.transformer(x, t, cond) - eager[name]).abs().max())
+        out["parity_max_abs"] = deltas
+        out["execution_count"] = int(aot_serve.execution_count(pipe))
+        out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
+        # A cell that served only ONE of the three rows is not a pass, however
+        # small its delta on that row: the whole question is the OTHER rows.
+        out["ok"] = (bool(out["parity_ok"])
+                     and out["execution_count"] >= len(ARMS)
+                     and len(out["distinct_pads"]) >= 2)
+    else:
+        out["ok"] = False
+print("RIG_ADOPT " + json.dumps(out))
+'''
+
+
+def _micro_pad32_adopt_source_for(family: str) -> Any:
+    branchy = family == "micro-pad32-branchy"
+
+    def _source(base: str, cache: Path, checkpoint: str) -> str:
+        return _MICRO_PAD32_ADOPT % {
+            "paths": [str(REPO / "tests"), str(REPO / "src"), str(MICRO_SRC)],
+            "base": base, "cache": str(cache), "checkpoint": checkpoint,
+            "family": family,
+            "decl": ("micro_diffusion.aot_declaration_pad32_branchy" if branchy
+                     else "micro_diffusion.aot_declaration_pad32"),
+            "cls": ("MicroPad32BranchyPipeline" if branchy
+                    else "MicroPad32Pipeline"),
+        }
+
+    return _source
+
+
+MICRO_PAD32 = Vehicle(
+    name="micro-pad32",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main_pad32"),
+    function="generate-pad32",
+    family="micro-pad32",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=_micro_pad32_cell,
+    adopt_source=_micro_pad32_adopt_source_for("micro-pad32"),
+    parent_pipe=_micro_parent_for(0, "MicroPad32Pipeline", _micro_pad32_cell),
+    covers=("ie#637's surviving watch item — a dynamic dim carrying the exact "
+            "pad-expression class `32*FloorDiv(L+31,32)` over a token count "
+            "that is itself a product of two declared symbols, served at three "
+            "L values whose pads are 16, 28 and 0. Answers whether AOTI "
+            "CODEGENS that expression, which no z-image pod has reached"),
+)
+
+
+MICRO_PAD32_BRANCHY = Vehicle(
+    name="micro-pad32-branchy",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main_pad32_branchy"),
+    function="generate-pad32-branchy",
+    family="micro-pad32-branchy",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=lambda: _micro_pad32_cell("micro-pad32-branchy"),
+    adopt_source=_micro_pad32_adopt_source_for("micro-pad32-branchy"),
+    parent_pipe=_micro_parent_for(
+        0, "MicroPad32BranchyPipeline",
+        lambda: _micro_pad32_cell("micro-pad32-branchy")),
+    expect="green",
+    expect_note="",
+    covers=("the CONTROL for `micro-pad32` — same declaration, same rows, "
+            "upstream's `(-L) %% 32` + `if pad > 0` spelling. Measured "
+            "2026-08-10: it is NOT refused, and that is pgw#1077 working. "
+            "The `Eq(PythonMod(-L,32), 0)` axioms ie#637 was refused on are "
+            "all recorded REFUTED here (test_pad32_codegen_pgw1079), which is "
+            "exactly what pgw#1077 taught the gate to evaluate instead of "
+            "count. A RED here means the gate started over-refusing again"),
+)
+
+
 VEHICLES: Dict[str, Vehicle] = {
     v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA16,
                         MICRO_LORA_PLAIN_PARENT, MICRO_4D, MICRO_CONV,
-                        MICRO_ESCAPE, MICRO_W8A8, MICRO_W8A8_LORA)}
+                        MICRO_ESCAPE, MICRO_W8A8, MICRO_W8A8_LORA,
+                        MICRO_PAD32, MICRO_PAD32_BRANCHY)}
 DEFAULT_VEHICLE = TINY.name
 
 
@@ -1151,5 +1359,5 @@ def vehicle(name: str) -> Vehicle:
 __all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_CONV", "MICRO_ESCAPE",
            "MICRO_LORA", "MICRO_LORA16", "MICRO_LORA16_BUCKET",
            "MICRO_LORA_BUCKET", "MICRO_4D", "MICRO_LORA_PLAIN_PARENT",
-           "MICRO_W8A8", "MICRO_W8A8_LORA", "TINY", "VEHICLES", "Vehicle",
-           "vehicle"]
+           "MICRO_PAD32", "MICRO_PAD32_BRANCHY", "MICRO_W8A8",
+           "MICRO_W8A8_LORA", "TINY", "VEHICLES", "Vehicle", "vehicle"]
