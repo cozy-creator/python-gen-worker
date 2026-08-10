@@ -62,6 +62,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from . import activity as activity_mod
 from . import aot_identity, aot_serve, artifact_meta, cell_key, env_seal
 from . import boot_phases as boot_mod
+from . import local_cell_store
 from . import compile_cache as cc
 from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
 from .models.chunk_cas import sha256_file
@@ -898,6 +899,7 @@ def refused_publishes() -> Dict[str, str]:
 def _publish_async(
     publisher: CellPublisher, family: str, artifact: Path, meta: dict,
     cell_key_digest: str = "", mint_duration_ms: int = 0,
+    arm_token: str = "",
 ) -> threading.Thread:
     """Ship the cell in the background — readiness never waits on an upload.
 
@@ -931,6 +933,18 @@ def _publish_async(
                 family, artifact, meta, mint_duration_ms)
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
+            # pgw#1096/§4.28: the hub has just ASSERTED this hardware's trust
+            # class. Learn it (the worker never declares its own — the code is
+            # the only authority), and KEEP the cell: the `finally` below is
+            # about to rmtree the mint root, and this exact discard is what
+            # th#1643 books as SUNK ("a sealed cell was produced and thrown
+            # away"). An untrusted machine mints for ITSELF, so the bytes go
+            # to its own store and every later boot of it arms from disk.
+            if local_cell_store.note_refusal(
+                    str(getattr(exc, "code", "") or ""), str(exc)
+            ) and cell_key.is_key(key):
+                local_cell_store.store(
+                    artifact, key=key, family=family, arm_token=arm_token)
             with _IN_FLIGHT_LOCK:
                 _REFUSED[key] = "refused"
             activity_mod.emit_event(
@@ -1507,6 +1521,20 @@ def _arming_policy(
                 armed=True, self_mint=finalized_prior,
                 selection_bug=selection_bug)
 
+    # §4.28 / pgw#1096: THIS MACHINE's own store, before any mint is opened.
+    # Sited after the in-process ledgers (a cell already resident in this
+    # process costs no disk read) and after the quarantine gate (an identity
+    # this process disproved must not be re-armed from any source), and
+    # BEFORE the pending: compile-once-run-forever means the second boot never
+    # reaches the code below. Costs one memo read + one digest on a hit and a
+    # single missing-file stat on a miss, so the trusted-fleet path — which
+    # never stores anything locally — pays a stat and nothing else.
+    local_prior = arm_from_local_store(
+        pipe, cfg, cache_dir, bucket, arm_key, family)
+    if local_prior is not None:
+        return ArmOutcome(
+            armed=True, self_mint=local_prior, selection_bug=selection_bug)
+
     # Sibling pipes of one record whose axes compute the SAME key share one
     # child mint (the qwen edit shape: two lanes, one family cell) — the
     # first arm registers the pending and every sharer adopts its cell.
@@ -1606,6 +1634,138 @@ def arm_axis_divergence(
     return ""
 
 
+def _arm_exported_cell(
+    pipe: Any, cfg: Any, cache_dir: Optional[Path], bucket: int,
+    artifact: Path, arm_key: Optional[ArmIdentity],
+) -> Tuple[bool, Optional[Dict[str, Any]], Tuple[str, str]]:
+    """THE gate every cell this machine produced for itself must pass.
+
+    pgw#1096 extracted this from :func:`adopt_delegated_mint` so the two
+    self-produced sources — a child process's fresh mint, and this machine's
+    OWN local store (§4.28) — pass through ONE gate rather than two that agree
+    today. A cell out of the local store is neither newer nor more trusted
+    than the child's: it is the same bytes the same machine minted, and it
+    earns its arm the same way.
+
+    Two checks, in this order:
+
+    1. **key-axis divergence** (pgw#1042) — the cell's recorded metadata must
+       state THIS runtime on every pre-trace axis (:data:`ARM_FACTS`), refused
+       by fact name. This is what makes a toolchain/sm/envelope move an honest
+       refusal instead of a wrong arm;
+    2. **the AOT arm** (pgw#805) — ``provision.arm_aot``: lifted-binding
+       install, ``aot_serve.enable``, rollback on failure. Deliberately NOT
+       ``provision.enable_compiled``, whose pgw#709 receipts gate drops any
+       artifact the hub has not countersigned — which by construction is every
+       cell in this family.
+
+    Returns ``(armed, meta, (reason, detail))``. ``reason`` is initialized to a
+    NAMED unset rather than "" so a branch that forgets to classify shows up as
+    a gap in this function instead of as an empty string that reads like "no
+    reason exists" (pgw#999).
+    """
+    refusal: Tuple[str, str] = ("unclassified_arm_refusal", "")
+    meta = artifact_meta.try_read_metadata(artifact)
+    divergence = ""
+    if meta is not None and arm_key is not None:
+        divergence = arm_axis_divergence(arm_key, meta)
+    if divergence:
+        stamped = str(meta.get("cell_key") or "") if meta else "MISSING"
+        return False, meta, ("key_axis_divergence", (
+            f"the cell (stamped key {stamped}) does not describe this "
+            f"runtime: {divergence}"))
+    try:
+        outcome = provision.arm_aot(pipe, cfg, cache_dir, artifact, bucket, meta)
+        if outcome:
+            return True, meta, ("", "")
+        refusal = (outcome.reason or "unclassified_arm_refusal",
+                   outcome.detail or outcome.identity)
+    except cc.CellSelectionBugError as exc:
+        # th#883: a cell whose axes describe exactly this runtime refused to
+        # arm. Loud — a bug in the one selection brain, not a compat miss.
+        logger.error(
+            "fleet-cells: cell_selection_bug arming a self-produced cell "
+            "(%s): %s", artifact, exc)
+        refusal = ("cell_selection_bug", str(exc))
+    except Exception as exc:  # noqa: BLE001 — adoption failure => eager
+        logger.warning(
+            "fleet-cells: self-produced cell %s did not adopt (%s)",
+            artifact, exc)
+        # An `AdoptError` already carries the token; anything else is named by
+        # its type rather than flattened into one word nobody can count.
+        refusal = (str(getattr(exc, "reason", "") or "") or type(exc).__name__,
+                   str(exc))
+    return False, meta, refusal
+
+
+def arm_from_local_store(
+    pipe: Any, cfg: Any, cache_dir: Optional[Path], bucket: int,
+    arm_key: ArmIdentity, family: str,
+) -> Optional[SelfMint]:
+    """§4.28 step 3: arm from THIS MACHINE's own store, before minting anything.
+
+    Paul's compile-once-run-forever, at the one place a miss is decided. The
+    machine derives its pre-trace identity (milliseconds), the memo names the
+    ``ck1`` key its last mint of that identity produced, the store hands back
+    the digest-verified artifact, and :func:`_arm_exported_cell` — the SAME
+    gate the child's own cell passes — decides. No network is touched on this
+    path at all: a cozy-local box with no hub reachable arms exactly as well as
+    one online, which is what "fully offline-capable" means.
+
+    ``None`` = no usable local cell; the caller mints, honestly. Every refusal
+    is loud and DROPS the entry, so a corrupted or stale cell costs one re-mint
+    and never two.
+    """
+    try:
+        local = local_cell_store.lookup_for_arm(arm_key.token)
+    except Exception as exc:  # noqa: BLE001 — a cache read must never be fatal
+        logger.warning("fleet-cells: local cell store unreadable (%s)", exc)
+        return None
+    if local is None:
+        return None
+    armed, meta, (reason, detail) = _arm_exported_cell(
+        pipe, cfg, cache_dir, bucket, local.artifact, arm_key)
+    if not armed:
+        logger.warning(
+            "fleet-cells: the local store's cell for %s (key=%s) did not arm "
+            "(%s%s); dropping it and minting", family, local.key, reason,
+            f": {detail}" if detail else "")
+        local_cell_store.drop(local.key)
+        activity_mod.emit_event(
+            "local_cell_refused",
+            f"family={family} arm_key={arm_key.token} cell_key={local.key}: "
+            f"this machine's own stored cell did not arm "
+            f"({reason}{': ' + detail if detail else ''}); it has been dropped "
+            f"from the local store and this boot mints a fresh one",
+            phase=reason,
+        )
+        return None
+    key = str((meta or {}).get("cell_key") or "").strip() or local.key
+    aot_serve.note_aot_key(key)
+    minted = SelfMint(
+        family=family, cell_key=key,
+        ref=f"{cc.system_repo(family)}#{key}",
+        snapshot_digest=local.content_digest,
+        artifact=local.artifact,
+    )
+    with _PENDING_LOCK:
+        # Same in-process index a delegated adopt fills: a sibling pipe of the
+        # same record must re-arm these bytes rather than pay a second lookup.
+        _FINALIZED[arm_key.token] = minted
+    logger.info(
+        "fleet-cells: armed %s from THIS MACHINE's local cell store "
+        "(key=%s, %.1f MB) — no mint, no hub, no network (§4.28)",
+        family, key, local.bytes / 1e6)
+    activity_mod.emit_event(
+        "local_cell_armed",
+        f"family={family} arm_key={arm_key.token} cell_key={key}: this "
+        f"machine minted this cell on an earlier boot and stored it locally; "
+        f"it arms from disk with no mint and no publish route",
+        phase="local_store_hit",
+    )
+    return minted
+
+
 def adopt_delegated_mint(
     pipe: Any, pending: "PendingSelfMint", artifact: Path,
 ) -> Optional[SelfMint]:
@@ -1632,69 +1792,16 @@ def adopt_delegated_mint(
             os.replace(artifact, pending.target)
         except OSError:
             shutil.copy2(artifact, pending.target)
-    # pgw#999: (reason, detail) of the arm refusal, set by whichever branch
-    # refuses. Initialized to a NAMED unset rather than "" so a branch that
-    # forgets to classify is visible on the wire as a gap in this function
-    # instead of as an empty string that reads like "no reason exists".
-    refusal: Tuple[str, str] = ("unclassified_arm_refusal", "")
-    # pgw#1042: BEFORE any arm, the child's cell must state this parent's
-    # identity on every axis the two key spaces share. A malformed envelope
-    # is left to the arm's own classified refusal (artifact_invalid).
-    meta = artifact_meta.try_read_metadata(pending.target)
-    divergence = ""
-    if meta is not None and pending.arm_key is not None:
-        divergence = arm_axis_divergence(pending.arm_key, meta)
-    if divergence:
-        armed = False
-        refusal = ("key_axis_divergence", (
-            f"the child's cell (stamped key "
-            f"{str(meta.get('cell_key') or '') if meta else 'MISSING'}) does "
-            f"not describe this runtime: {divergence}"))
-    else:
-        try:
-            # pgw#805: an exported cell arms through the AOT gates
-            # (lifted-binding install -> aot_serve.enable -> rollback), not
-            # the inductor seed path. Same gates a hub-delivered `.pt2`
-            # passes; `provision.enable_compiled` itself is not reusable here
-            # because its pgw#709 receipts gate would drop a cell this pod
-            # minted seconds ago and the hub has not countersigned yet.
-            # pgw#999: the outcome is KEPT. `arm_aot` returns a classified
-            # `AdoptOutcome` (`contract_invalid`, `constants_unbound`,
-            # `no_arm_for_mode`, `numerics_refused`, …) and this call site
-            # used to spend it on `bool(...)`. That discard cost attempt 26
-            # 2 h 45 m and $2.72: a 36/36 mint sealed, finalized, and was then
-            # refused by three events that all said "could not adopt".
-            # pgw#1010: there is no second branch — a delegated mint is an AOT
-            # mint, and the inductor-seed adopt it used to fall back to armed
-            # an artifact class nothing publishes any more.
-            outcome = provision.arm_aot(
-                pipe, pending.cfg, pending.cache_dir, pending.target,
-                int(getattr(pending.cfg, "lora_bucket", 0) or 0), meta)
-            armed = bool(outcome)
-            if not armed:
-                refusal = (outcome.reason or "unclassified_arm_refusal",
-                           outcome.detail or outcome.identity)
-        except cc.CellSelectionBugError as exc:
-            # th#883, delegated edition: the child's own cell, whose axes
-            # describe exactly this runtime, refused to arm. Loud — it is a
-            # bug in the one selection brain, not a compatibility miss.
-            logger.error(
-                "fleet-cells: cell_selection_bug adopting this pod's "
-                "DELEGATED mint (family=%s arm_key=%s): %s",
-                pending.family, pending.arm_token, exc)
-            armed = False
-            refusal = ("cell_selection_bug", str(exc))
-        except Exception as exc:  # noqa: BLE001 — adoption failure => eager
-            logger.warning(
-                "fleet-cells: delegated mint for %s did not adopt (%s)",
-                pending.family, exc)
-            armed = False
-            # An `AdoptError` already carries the token; anything else is
-            # named by its type rather than flattened into one word nobody
-            # can count.
-            refusal = (
-                str(getattr(exc, "reason", "") or "") or type(exc).__name__,
-                str(exc))
+    # pgw#1096: ONE gate for every self-produced cell — the child's, and the
+    # local store's (§4.28). pgw#999's classification, pgw#1042's pre-arm axis
+    # divergence and pgw#805's AOT-only arm all live in `_arm_exported_cell`;
+    # the reasons this call site used to compute inline are unchanged, and the
+    # $2.72 lesson (attempt 26: a 36/36 mint refused by three events that all
+    # said "could not adopt") is kept there rather than repeated here.
+    armed, meta, refusal = _arm_exported_cell(
+        pipe, pending.cfg, pending.cache_dir,
+        int(getattr(pending.cfg, "lora_bucket", 0) or 0),
+        pending.target, pending.arm_key)
     if not armed:
         reason, detail = refusal
         # pgw#999: `phase` is the countable column, so it carries the CLASS —
@@ -1771,6 +1878,15 @@ def adopt_delegated_mint(
         # unreadable by the only lookup there is, so every same-key re-arm in
         # this process paid a second full export.
         _FINALIZED[pending.arm_token] = minted
+    if local_cell_store.keeps_cells_locally():
+        # §4.28: this machine has ALREADY been told by the hub that it may not
+        # publish, so the cell is kept where its next boot can find it. Done
+        # HERE, not after the publish attempt, because a pod that dies between
+        # adopting and being refused would otherwise lose the whole mint —
+        # which is exactly the th#1643 SUNK case, one boot later.
+        local_cell_store.store(
+            pending.target, key=minted.cell_key, family=pending.family,
+            arm_token=pending.arm_token)
     logger.info(
         "fleet-cells: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
         "worker served eager throughout and now serves compiled",
@@ -1827,7 +1943,11 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             cell_key_digest=str(
                 getattr(state.get("minted"), "cell_key", "")
                 or pending.arm_token),
-            mint_duration_ms=int(state.get("mint_duration_ms") or 0))
+            mint_duration_ms=int(state.get("mint_duration_ms") or 0),
+            # pgw#1096: the PRE-TRACE identity, carried so a hub refusal that
+            # teaches this machine it is untrusted can also write the memo
+            # that lets its next boot find the salvaged cell without tracing.
+            arm_token=pending.arm_token)
     else:
         # Runtime assertion (gw#587): every fleet cell miss must produce a
         # publish attempt. A fleet worker minting with no usable sink is a

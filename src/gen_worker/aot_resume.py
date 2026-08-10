@@ -59,7 +59,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-from . import local_cells
+from . import local_cell_store
 from . import graph_hash as graph_hash_mod
 
 logger = logging.getLogger(__name__)
@@ -94,9 +94,12 @@ REFUSE_FILE_CONTENT = "file_content"   # size or sha256 moved under us
 #: under the mint's own root. `fleet_cells.abandon_self_mint` rmtree's
 #: `mint_root`, and abandonment is exactly what a crashed mint ends in — a bank
 #: under that root would be deleted on its way out of the one case it exists
-#: for. Sited beside `local_cells`' own mint staging (`.mint`) because that is
-#: already the pod's compile-scratch neighbourhood, and NOT in the CAS
-#: (`cache_dir`), which `disk_gc` owns and sweeps by reference index.
+#: for. Sited beside the worker's own local cell store because that is already
+#: the pod's compile-scratch neighbourhood, and NOT in the CAS (`cache_dir`),
+#: which `disk_gc` owns and sweeps by reference index. pgw#1096 moved the root
+#: accessor from `local_cells` (which pgw#1086 wave 1 deletes as a JIT
+#: artifact) to `local_cell_store` — same env, same default, same directory, so
+#: no bank is orphaned by the move.
 RESUME_DIRNAME = ".mint-resume"
 
 #: A capacity bound on the whole resume area, enforced oldest-first at open.
@@ -125,7 +128,7 @@ def bank_root(scope: str) -> Path:
     safe = "".join(
         c if (c.isalnum() or c in "._-") else "_" for c in str(scope))[:48]
     digest = hashlib.sha256(str(scope).encode()).hexdigest()[:12]
-    return local_cells.store_root() / RESUME_DIRNAME / f"{safe or 'scope'}-{digest}"
+    return local_cell_store.store_root() / RESUME_DIRNAME / f"{safe or 'scope'}-{digest}"
 
 
 def _dir_bytes(path: Path) -> int:
