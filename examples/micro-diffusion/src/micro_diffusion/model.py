@@ -222,6 +222,23 @@ class MicroDecoder(nn.Module):
         h = torch.nn.functional.silu(self.proj_in(latent))
         return torch.tanh(self.proj_out(self.norm(h)))
 
+    # The same deliberate ConfigMixin surface the denoiser exposes, and for a
+    # second reason (pgw#1080): a compile target the forge must be able to
+    # build from CODE + CONFIG needs it, and `decoder` is one of this
+    # family's two targets. A target without it is stranded on the
+    # real-weight mint — honestly, by a typed refusal, but stranded.
+
+    @classmethod
+    def load_config(cls, directory: str, **_kw: Any) -> Dict[str, Any]:
+        return json.loads(
+            (Path(directory) / "config.json").read_text("utf-8"))
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], **_kw: Any) -> "MicroDecoder":
+        fields = set(MicroConfig().as_dict())
+        return cls(MicroConfig(
+            **{k: v for k, v in dict(config).items() if k in fields}))
+
 
 __all__ = ["MicroConfig", "MicroDecoder", "MicroDenoiser",
            "MicroGridDenoiser"]

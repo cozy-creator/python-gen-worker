@@ -122,7 +122,9 @@ from . import aot_flatten
 from . import aot_inputs
 from . import aot_declaration as _decl
 from .api.export_contract import export_declaration
+from . import meta_instantiation
 from .models import lora_lifted
+from .models import structure_only
 from . import compile_cache as cc
 from . import env_seal
 from . import config, worker_credential
@@ -745,7 +747,9 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
 MINT_COMPILE_THREADS = 4
 
 
-def _entry_configs(inductor_configs: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+def _entry_configs(
+    inductor_configs: Optional[Mapping[str, Any]], *, weightless: bool = False,
+) -> Dict[str, Any]:
     """The per-entry inductor config: caller options + the non-negotiable
     packaging flags. ``CODE_ONLY_CONFIGS`` is applied LAST so no caller-
     supplied config can re-enable constant baking — B1 is a fleet
@@ -764,6 +768,19 @@ def _entry_configs(inductor_configs: Optional[Mapping[str, Any]]) -> Dict[str, A
     # Emit loose files for package_aoti to combine, instead of a per-entry
     # archive: the multi-graph cell is ONE .pt2 (pgw#758).
     configs["aot_inductor.package"] = True
+    if weightless:
+        # pgw#1080, MEASURED and it is the difference between a cell and a
+        # ruined one. Inductor folds constants at COMPILE time by default,
+        # which BAKES THE VALUES IT SAW: on a structure-only mint those
+        # values are fake, and the artifact then declares fewer bindable
+        # constants than the module has — the micro decoder's
+        # `norm.weight`/`norm.bias` simply vanished, and the adopted cell
+        # scored cosine 0.13 against eager. Deferring the fold to RUNTIME
+        # keeps every parameter bindable (they reappear, plus explicit
+        # `_FOLDED_CONST_*` rows computed after binding), which is also what
+        # the pgw#1056 folding fence asks for: a rebindable weight must never
+        # have its value compiled in.
+        configs["aot_inductor.use_runtime_constant_folding"] = True
     return configs
 
 
@@ -796,9 +813,17 @@ def compile_entry_files(
     gm = program.module(check_guards=False)
     args, kwargs = program.example_inputs
     try:
-        files = aot_compile(
-            gm, tuple(args), dict(kwargs or {}),
-            options=_entry_configs(inductor_configs))
+        # pgw#1080: a program exported from a structure-only target carries
+        # fake parameters, and `aot_compile` asserts every input belongs to
+        # ONE fake mode — so it runs inside that program's own mode. Identity
+        # context for a real-weight program.
+        with structure_only.compiling_under(program):
+            files = aot_compile(
+                gm, tuple(args), dict(kwargs or {}),
+                options=_entry_configs(
+                    inductor_configs,
+                    weightless=structure_only.fake_mode_of_program(
+                        program) is not None))
     except Exception as exc:
         raise MintRefused(
             f"entry {entry!r}: aot_compile failed: "
@@ -1188,6 +1213,40 @@ def _export_entry(
                 f"not, so the module about to be exported cannot take the "
                 f"adapter (lora_lifted.arm_lifted_lora_lanes installs both)")
 
+    # pgw#1080: a structure-only target's tensors are FAKE and belong to ONE
+    # fake mode. Everything that produces a tensor for this export — the
+    # example feed, the declared warm, the export itself — has to happen
+    # inside that mode or the pieces belong to different modes and
+    # `aot_compile` refuses them. `None` on a real-weight mint, where this
+    # whole block is the identity context it has always been.
+    fake_mode = structure_only.fake_mode_of(owner)
+    with structure_only.under(fake_mode):
+        return _export_entry_body(
+            pipeline, espec, plan, decl, entry=entry, owner=owner, attr=attr,
+            module=module, timings=timings, fake_mode=fake_mode,
+            inductor_configs=inductor_configs, compile_now=compile_now)
+
+
+def _export_entry_body(
+    pipeline: Any,
+    espec: Any,
+    plan: Any,
+    decl: Any,
+    *,
+    entry: str,
+    owner: Any,
+    attr: str,
+    module: Any,
+    timings: Dict[str, Any],
+    fake_mode: Any = None,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+    compile_now: bool = True,
+) -> _MintedEntry:
+    """The body of :func:`_export_entry`, run inside the target's fake mode.
+
+    Split out rather than indented so the structure-only window is one
+    statement and the real-weight path reads exactly as it did.
+    """
     builder = aot_inputs.builder_for(espec.family, espec.target)
     args, kwargs = builder(owner, espec)
     if kwargs:
@@ -1230,7 +1289,27 @@ def _export_entry(
             raise MintRefused(f"entry {entry!r}: {exc}") from exc
 
     t0 = time.monotonic()
-    program = _full_export()
+    if fake_mode is None:
+        program = _full_export()
+    else:
+        # pgw#1080 / ie#628: the TRACE half of the meta-instantiation gate. A
+        # structure-only target allocates nothing, so any real tensor born in
+        # this window is a model that materializes weights at CALL time — the
+        # z-image rope class — and it is refused with the ENDPOINT's own
+        # file:line rather than discovered as a mysterious pod OOM.
+        try:
+            with meta_instantiation.guard(
+                    f"trace:{entry}", actionable_only=True) as census:
+                program = _full_export()
+            if not census.clean:
+                # Real, but unattributable — torch's own machinery inside the
+                # fake mode. Reported, never refused: see `guard`.
+                logger.info(
+                    "aot-mint: entry %s traced with %d unattributable real "
+                    "allocation(s) (%s)", entry, len(census.events),
+                    ", ".join(sorted({e.op for e in census.events})[:6]))
+        except meta_instantiation.MetaMaterializationError as exc:
+            raise MintRefused(f"entry {entry!r}: {exc}") from exc
     timings["export_s"] = round(time.monotonic() - t0, 2)
     # pgw#1000, telemetry only: the one number that sized "export once,
     # re-propagate per row". Kept after pgw#847 was deleted because it prices
@@ -2064,6 +2143,24 @@ def _mint_cell(
         # the constant, and keeps saying so.
         peak_rss_bytes=int(entry_peak_rss_bytes or 0))
     parallel = width.workers > 1
+    if parallel and structure_only.is_structure_only(pipeline):
+        # pgw#1080, MEASURED on the micro-lora gauntlet member: the pool hands
+        # each entry to a compile CHILD by saving the ExportedProgram to
+        # `program.pt2`. A program whose parameters are fake tensors has no
+        # storage to serialize, and the child dies deserializing it
+        # ("We ran into an error when deserializing the saved file"). So a
+        # weightless mint compiles SERIALLY, in this process, which is the
+        # pre-pgw#809 path and is correct — just narrower.
+        #
+        # OWED, not hidden (pgw#1080 follow-up): the pool could carry a
+        # weightless program by saving it with META parameters and
+        # re-virtualizing them onto the device inside the child. That is a
+        # real change to the pool's contract and it is not this slice.
+        logger.warning(
+            "aot-mint: structure-only mint compiles SERIALLY — the entry pool "
+            "serializes the exported program and a fake-parameter program "
+            "cannot round-trip (pgw#1080). Width %d discarded.", width.workers)
+        parallel = False
     logger.info("aot-mint: entry compile width — %s", width.reason)
     if width.underwidth:
         # pgw#842: a pool narrower than the cell could use is a COST, and it
@@ -3036,6 +3133,29 @@ def _release_mint_residents(
     return facts
 
 
+def _structure_only_drift_hint(row: _MintedEntry) -> str:
+    """Name the AUTHORING cause a structure-only mint's drift usually has.
+
+    Measured (pgw#1080, micro-rope RED control): a table built lazily inside
+    ``forward`` under ``with torch.device("cpu")`` is FAKE during a
+    fake-mode export — so the meta-instantiation gate cannot see it — and
+    lands as an anonymous ``_tensor_constant0`` the exported program never
+    lifted. The drift gate refuses it, correctly and deterministically, but
+    "the package declares a constant the program never lifted" names a
+    symptom. This names the class of cause, so the author gets a place to
+    look instead of a compiler sentence.
+    """
+    if not structure_only.is_structure_only(row.owner):
+        return ""
+    return (
+        ". This mint built its target from code + config (pgw#1080), and the "
+        "usual cause of drift there is a tensor BUILT INSIDE `forward` "
+        "instead of registered at __init__ — it is lifted as an anonymous "
+        "graph literal rather than as a bindable buffer. Register derived "
+        "tables with `register_buffer` and no device pin (ie#630's "
+        "`rope_buffers` is the worked example)")
+
+
 def _gate_and_declare_entry(
     row: _MintedEntry, package: Path,
 ) -> Dict[str, Any]:
@@ -3059,7 +3179,8 @@ def _gate_and_declare_entry(
     drift = aot_package.program_package_drift(row.program, package, entry)
     if drift:
         raise MintRefused(
-            f"entry {entry!r}: constant-set drift: " + "; ".join(drift))
+            f"entry {entry!r}: constant-set drift: " + "; ".join(drift)
+            + _structure_only_drift_hint(row))
     fused = aot_package.eliminated_constants(row.program, package, entry)
     if fused:
         # Routine compiler fusion (measured on real sdxl: conv_out.bias folded

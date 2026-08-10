@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from . import aot_flatten
-from .aot_serve import SOURCE_LITERAL, SOURCE_STATE_DICT
+from .aot_serve import SOURCE_COMPUTED, SOURCE_LITERAL, SOURCE_STATE_DICT
 import hashlib
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,11 @@ _MODEL_BASE = "AOTInductorModelBase("
 #: in ``aot_serve.LITERALS_NAME`` or it can never be bound.
 _STATE_DICT_TYPES = ("Parameter", "Buffer")
 
+#: ``ConstantType`` values AOTInductor COMPUTES at load from the constants that
+#: were bound — the runtime constant-folding pass's outputs. They are in the
+#: package's table and in no exported program, by construction.
+_COMPUTED_TYPES = ("FoldedConstant",)
+
 
 @dataclass(frozen=True)
 class DeclaredConstant:
@@ -97,7 +102,9 @@ class DeclaredConstant:
     @property
     def source(self) -> str:
         """``aot_serve`` source class: from the state_dict, or a packed literal."""
-        return SOURCE_STATE_DICT if self.kind in _STATE_DICT_TYPES \
+        if self.kind in _STATE_DICT_TYPES:
+            return SOURCE_STATE_DICT
+        return SOURCE_COMPUTED if self.kind in _COMPUTED_TYPES \
             else SOURCE_LITERAL
 
     def as_manifest_row(self) -> Dict[str, Any]:
@@ -548,7 +555,12 @@ def program_package_drift(
     the package would want constants the recorded program never lifted.
     """
     want = set(program_constant_fqns(program))
-    have = {c.fqn for c in declared_constants(Path(package), entry)}
+    have = {c.fqn for c in declared_constants(Path(package), entry)
+            if c.source != SOURCE_COMPUTED}
+    # pgw#1080: a COMPUTED constant is package-only by design — the runtime
+    # fold produces it from the bound constants at load, so "the program never
+    # lifted it" is the expected state and not the segfault precondition this
+    # gate exists for.
     package_only = sorted(have - want)
     if not package_only:
         return []

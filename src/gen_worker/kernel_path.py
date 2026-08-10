@@ -202,6 +202,8 @@ BIND_FIT = "fit"
 BIND_VRAM_TIEBREAK = "vram_tiebreak"
 BIND_SOLE_CANDIDATE = "sole_candidate"
 BIND_NO_FIT = "no_fit"
+#: pgw#1080: the mint held no weights, so no whole-model A/B was run.
+BIND_UNMEASURED = "unmeasured"
 
 
 class ExecutionLaneProbeError(RuntimeError):
@@ -376,6 +378,26 @@ def select(
             f"({best.ms_per_step:.1f}-{rival.ms_per_step:.1f} ms/step); "
             f"smaller peak wins ({winner.execution_lane}, {winner.peak_bytes} B)"),
         **common)
+
+
+def unmeasured(execution_lane: str, detail: str) -> Verdict:
+    """The verdict for a mint that COULD have benchmarked and deliberately did
+    not (pgw#1080).
+
+    The lane A/B is a whole-model benchmark: it loads one full pipeline per
+    candidate and times a real step, so it needs weight-scale residency —
+    which is exactly the property a structure-only mint exists to keep. A
+    cell with no verdict is the documented conservative-default case on the
+    serving side, and below Blackwell the A/B has no candidates to compare
+    anyway (`fused_candidate_gap`), so this costs nothing that has a consumer
+    today. Recorded as a TYPED verdict with its reason rather than as an
+    absence, so the choice is one lookup instead of a re-derivation.
+    """
+    total, name, sm = device_facts()
+    return Verdict(
+        winner=execution_lane, binding=BIND_UNMEASURED, detail=detail,
+        device_total_bytes=total, device_name=name, sm=sm,
+        measured_at=time.time())
 
 
 def sole(execution_lane: str, detail: str) -> Verdict:

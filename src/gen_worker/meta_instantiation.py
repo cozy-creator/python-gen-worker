@@ -143,6 +143,14 @@ def _endpoint_site(skip: int = 0) -> str:
         path = frame.filename.replace("\\", "/")
         if "/gen_worker/" in path or "/torch/" in path:
             continue
+        if path.startswith("<"):
+            # `<frozen runpy>`, `<frozen importlib._bootstrap>`, `<string>`:
+            # interpreter scaffolding, not a line anyone can edit. Treating
+            # one as the cause is how a torch-internal allocation gets
+            # reported as an authoring violation (measured on the micro rig:
+            # a 380-byte `empty` inside `torch.export` attributed to
+            # `<frozen runpy>:88`).
+            continue
         return f"{frame.filename}:{frame.lineno} in {frame.name}"
     return ""
 
@@ -180,17 +188,29 @@ def observe(phase: str, census: Optional[Census] = None) -> Iterator[Census]:
 
 
 @contextlib.contextmanager
-def guard(phase: str) -> Iterator[Census]:
+def guard(phase: str, *, actionable_only: bool = False) -> Iterator[Census]:
     """Refuse the FIRST real-device materialization in this block, typed.
 
     First rather than all: the census is for reporting, but a mint that has
     already allocated real weights has lost the property this gate exists to
     keep, and continuing would only produce a longer list of the same fact.
+
+    ``actionable_only`` refuses only an allocation this gate can NAME a
+    file:line for — i.e. one made by the endpoint's own code. It exists for
+    the TRACE window (pgw#1080), where ``torch.export`` legitimately allocates
+    small real tensors of its own inside the fake mode: measured on the micro
+    rig, a 380-byte ``empty`` with no endpoint frame anywhere on the stack.
+    Refusing that would fail every mint for something no author can fix,
+    while the class the gate exists for — a device pin inside model code —
+    always has a frame. Unattributable events stay in the census, so they are
+    reported rather than dropped.
     """
     with observe(phase) as census:
         yield census
-    if not census.clean:
-        first = census.events[0]
+    events = [e for e in census.events if e.site] if actionable_only \
+        else list(census.events)
+    if events:
+        first = events[0]
         raise MetaMaterializationError(
             phase=census.phase, op=first.op, device=first.device,
             shape=first.shape, dtype=first.dtype, site=first.site)

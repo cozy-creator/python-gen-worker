@@ -54,7 +54,19 @@ class MicroPipeline:
         self.config = transformer.config
 
     @classmethod
-    def from_pretrained(cls, path: str, **_kw: Any) -> "MicroPipeline":
+    def from_pretrained(
+        cls, path: str, *, transformer: Any = None, decoder: Any = None,
+        **_kw: Any,
+    ) -> "MicroPipeline":
+        """``transformer=`` / ``decoder=`` are PRELOADED components.
+
+        The SDK's ``components=`` seam (gw#479, and pgw#1080's structure-only
+        compile targets) hands a module in already built. Honoring it is the
+        contract, not an optimization: a class that quietly ignored the
+        keyword and loaded the checkpoint anyway would give a structure-only
+        mint every weight it exists to avoid — silently. Diffusers pipelines
+        take these by the same names.
+        """
         root = Path(path)
         if not (root / "config.json").is_file():
             # A pod whose binding resolved to an empty dir, or a boot before
@@ -62,9 +74,16 @@ class MicroPipeline:
             # the family's whole premise, so do it and say where.
             materialize(root, seed=SEED)
         config = load_config(root)
+        if transformer is not None and decoder is not None:
+            return cls(transformer.eval(), decoder.eval(), source=str(root))
         state = load_state(root)
-        transformer = MicroDenoiser(config)
-        decoder = MicroDecoder(config)
+        built = []
+        if transformer is None:
+            transformer = MicroDenoiser(config)
+            built.append(("transformer", transformer))
+        if decoder is None:
+            decoder = MicroDecoder(config)
+            built.append(("decoder", decoder))
         # STRICT, and it is load-bearing (pgw#999). With `strict=False` a
         # checkpoint written under a different prefix loads ZERO tensors and
         # leaves the module randomly initialized — silently. That is exactly
@@ -75,8 +94,8 @@ class MicroPipeline:
         # numerics gate, which was right all along.
         #
         # A loader that cannot find its weights must fail, not shrug.
-        _load_prefixed(transformer, state, "transformer")
-        _load_prefixed(decoder, state, "decoder")
+        for prefix, module in built:
+            _load_prefixed(module, state, prefix)
         return cls(transformer.eval(), decoder.eval(), source=str(root))
 
     def to(self, device: Any) -> "MicroPipeline":
@@ -137,7 +156,8 @@ class MicroPipeline:
 
 __all__ = ["MicroConfig", "MicroConvPipeline", "MicroEscapePipeline",
            "MicroGridPipeline", "MicroPad32BranchyPipeline",
-           "MicroPad32Pipeline", "MicroPipeline", "MicroW8a8Pipeline"]
+           "MicroPad32Pipeline", "MicroPipeline", "MicroRopePipeline",
+           "MicroW8a8Pipeline"]
 
 
 class MicroGridPipeline(MicroPipeline):
@@ -257,6 +277,44 @@ class MicroConvPipeline:
     @property
     def device(self) -> torch.device:
         return next(self.unet.parameters()).device
+
+
+class MicroRopePipeline(MicroPipeline):
+    """The pgw#1080 RED control's pipeline: same weights, PINNED-ROPE
+    transformer (:class:`~micro_diffusion.model_rope.MicroRopeDenoiser`).
+
+    Composed exactly like its siblings, so the gate's verdict is about the
+    denoiser's table and not about how the pipeline was built.
+    """
+
+    @classmethod
+    def from_pretrained(
+        cls, path: str, *, transformer: Any = None, decoder: Any = None,
+        **_kw: Any,
+    ) -> "MicroRopePipeline":
+        from gen_worker.models import structure_only
+
+        from .model_rope import MicroRopeDenoiser
+
+        base = MicroPipeline.from_pretrained(
+            path, transformer=transformer, decoder=decoder)
+        if transformer is not None and structure_only.is_structure_only(
+                transformer):
+            # This family's denoiser is a SUBCLASS of the class the tree's
+            # model_index names, so the injected structure is the wrong type.
+            # Rebuilding it structure-only — instead of loading the
+            # checkpoint into a real one — is the authoring answer to that,
+            # and it keeps the mint weightless (pgw#1080).
+            from accelerate import init_empty_weights
+
+            with init_empty_weights():
+                pinned = MicroRopeDenoiser(base.config)
+            structure_only.virtualize(
+                pinned, device=str(next(transformer.parameters()).device))
+            return cls(pinned.eval(), base.decoder, source=base.source)
+        pinned = MicroRopeDenoiser(base.config)
+        pinned.load_state_dict(base.transformer.state_dict(), strict=True)
+        return cls(pinned.eval(), base.decoder, source=base.source)
 
 
 class MicroEscapePipeline(MicroPipeline):

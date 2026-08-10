@@ -33,7 +33,10 @@ WEIGHTS_NAME = "micro_diffusion.safetensors"
 
 #: The state-dict LAYOUT. Part of the cached tree's identity, so a component
 #: rename invalidates the cache instead of leaving bytes no loader can read.
-LAYOUT_VERSION = 2
+#: 3 (pgw#1080): the flat tree also carries a `model_index.json` and a
+#: config-only dir per component, so the SDK can resolve each compile
+#: target's CLASS and build it from config alone. No weights move.
+LAYOUT_VERSION = 3
 
 #: The one seed the fleet's micro family is defined by. Changing it is a new
 #: checkpoint, not a new build of the same one.
@@ -93,6 +96,7 @@ def materialize(
     root.mkdir(parents=True, exist_ok=True)
     save_file(state_dict(cfg, seed=seed), str(root / WEIGHTS_NAME))
     cfg_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    write_component_index(root, cfg, seed=seed)
     size = tree_bytes(root)
     if size > MAX_TREE_BYTES:
         raise WeightsRefused(
@@ -100,6 +104,38 @@ def materialize(
             f"{MAX_TREE_BYTES / 1e6:.0f} MB ceiling this family exists to stay "
             f"under — shrink the config rather than raising the ceiling")
     return root
+
+
+#: ``component -> [library, class]``, the map every diffusers-layout tree
+#: carries and the ONLY thing that tells the SDK which class a compile target
+#: is. Without it a structure-only build has nothing to instantiate
+#: (pgw#1080); the weights themselves stay in the flat file.
+COMPONENT_CLASSES = {
+    "transformer": ["micro_diffusion.model", "MicroDenoiser"],
+    "decoder": ["micro_diffusion.model", "MicroDecoder"],
+}
+
+
+def write_component_index(
+    root: Path, config: MicroConfig, *, seed: int = SEED,
+) -> None:
+    """Name each component's CLASS and give it a config to be built from.
+
+    Config only — no weights are written here and none move. A component dir
+    holding just ``config.json`` is the SDK's recognised weightless shape
+    (``loading._weightless_model_dir``), so the real-weight load still reads
+    the flat checkpoint exactly as before.
+    """
+    root = Path(root)
+    payload = dict(config.as_dict(), _layout=LAYOUT_VERSION, seed=int(seed))
+    for component, (_library, class_name) in COMPONENT_CLASSES.items():
+        directory = root / component
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / CONFIG_NAME).write_text(json.dumps(
+            dict(payload, _class_name=class_name), indent=2, sort_keys=True))
+    (root / "model_index.json").write_text(json.dumps(
+        dict({"_class_name": "MicroPipeline"}, **COMPONENT_CLASSES),
+        indent=2, sort_keys=True))
 
 
 def tree_bytes(root: Path) -> int:
