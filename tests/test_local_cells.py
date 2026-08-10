@@ -55,6 +55,7 @@ def _make_cell(path: Path, **overrides) -> Path:
     meta = cc.artifact_metadata(
         family="fam", shapes=[(64, 64)], targets=["transformer"],
         low_vram_mode="off",
+        declared_compile_contract=cc.declared_compile_facts(_Cfg()),
     )
     meta.update(overrides)
     capture = path.parent / f".capture-{path.name}"
