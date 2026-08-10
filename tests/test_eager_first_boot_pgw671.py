@@ -335,7 +335,7 @@ def test_eager_first_boot_ready_before_compile_then_hot_swaps(
         # Targets are registered active-less while the mint builds, so the
         # incarnation is addressable for peer-cell adoption. (The requested
         # cell key itself is not computable on a CUDA-less test host —
-        # cell_key.compute needs the real runtime axes.)
+        # the obligation identity needs the real runtime axes.)
         (target,) = h.ex.compile_targets()
         assert target.incarnation_id
         assert list(target.function_names) == ["generate"]
