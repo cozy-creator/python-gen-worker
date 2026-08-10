@@ -1,35 +1,32 @@
-"""pgw#746 (OQ-7), as pgw#817/D4 RELOCATED it: the ``regional=True`` +
-``dynamic=(...)`` refusal moved off the DECLARATION and onto the one lane that
-cannot honour it.
+"""pgw#746 (OQ-7) -> pgw#817/D4 -> **pgw#1078, which closes it**: the
+``regional=True`` + ``dynamic=(...)`` combination is now SERVED by the dynamo
+regional branch instead of declined by it.
 
-pgw#746 refused the combination in ``Compile.__post_init__`` on two premises,
-both of which pgw#812 then measured away:
+pgw#746 refused the combination in ``Compile.__post_init__``; pgw#817/D4 moved
+the refusal onto the dynamo arm, which then sent such a target to the
+whole-forward branch. Both rested on one premise — *"the dynamo regional
+branch cannot apply the declared marks"* — and ie#632 measured what it costs:
+minimax-h3's 20.1B denoiser declares ``regional=True`` precisely because
+whole-graph inductor planning is unaffordable for its class (ie#381), and the
+decline compiled it whole-forward anyway. Its boot warmup compiled one shape;
+every real request presented a different packed sequence, guard-missed, and
+`_guarded` served eager for the life of the pod (`lane=bf16-w16a16+eager`,
+257.7 s against a 131.7 s measured compiled wall).
 
-* *"regional never applies the declared marks, so the declaration is inert
-  while the contract digest claims the dynamism"* — true of the DYNAMO branch
-  only. Regional has an EXPORT counterpart (a block is exported with
-  ``dynamic_shapes`` exactly like a whole graph), and the symbolic inner axis
-  measured FREE on a conv-free region: +0.2% bf16 / 0.0% w8a8, against
-  pgw#730's +7.2% for the same axis on sdxl's conv lane.
-* *"regional is retiring in favour of whole-transformer export
-  (LTX-AOT-DESIGN §3.2), so teaching a departing lane to mark is building on
-  sand"* — regional is now 14.2x the whole-graph mint on the real sdxl w8a8
-  cell with serve parity at +0.24%. It is not departing; it is the adoption.
+The premise was simply wrong. ``compile_repeated_blocks`` compiles each
+repeated BLOCK, so the block call is where this lane's graphs are traced and
+where the marks belong — ``_mark_regional_blocks`` wraps each block's
+``_compiled_call_impl`` with the same ``_with_declared_marks`` the
+whole-forward branch uses. One declaration, two lanes, one meaning.
 
-What pgw#746 was RIGHT about survives, and this file pins it: the dynamo
-regional branch still calls ``compile_repeated_blocks(dynamic=None)`` and
-still cannot apply the marks, so it must never arm a graph that does not
-implement the contract its cell key asserts (the pgw#716 failure class). It
-now DECLINES BY NAME and the target falls through to the whole-forward
-branch — which does mark — so the declaration is still served, just by the
-other lane. A decline that SKIPPED the target would be a silent regression
-(an uncompiled target), which is why the fall-through is asserted here.
-
-Tested in both directions: the combination is admitted at declaration and
-declined at the dynamo arm, and each half alone is untouched.
+What pgw#746 was right about is unchanged and still pinned below: the contract
+digest distinguishes the two configs, because they genuinely produce different
+artifacts.
 """
 
 from __future__ import annotations
+
+import torch
 
 from gen_worker import compile_cache as cc
 from gen_worker.api.decorators import Compile, DynamicDim
@@ -90,30 +87,73 @@ def test_several_declared_dims_are_admitted_alongside_regional() -> None:
 
 
 # ---------------------------------------------------------------------------
-# direction 2: the DYNAMO ARM declines it, by name, naming every dim
+# direction 2: the DYNAMO REGIONAL ARM honours the marks at the block ingress
 # ---------------------------------------------------------------------------
 
-def test_the_dynamo_regional_arm_declines_and_names_every_offending_dim() -> None:
-    dims = (DynamicDim(dim="batch", min=2, max=8), _SEQ)
-    cfg = Compile(shapes=((768, 768),), regional=True, dynamic=dims)
+class _Block(torch.nn.Module):
+    def forward(self, hidden_states):  # pragma: no cover - never called here
+        return hidden_states
 
-    reason = cc._regional_dynamic_decline(cfg, "transformer")
-    assert reason, "the dynamo regional branch cannot honour declared marks"
-    assert "transformer" in reason
-    assert "batch" in reason and "sequence" in reason
-    assert "compile_repeated_blocks" in reason, (
-        "the reason must name the mechanism, not just the verdict"
+
+class _Owner(torch.nn.Module):
+    _repeated_blocks = ["_Block"]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blocks = torch.nn.ModuleList([_Block(), _Block(), _Block()])
+
+
+def test_the_dynamo_regional_arm_marks_every_repeated_block() -> None:
+    """The fix, stated as the behaviour: after ``compile_repeated_blocks``
+    every repeated block's compiled call is wrapped so the DECLARED dims are
+    marked before dynamo sees the inputs."""
+    owner = _Owner()
+    for block in owner.blocks:
+        block._compiled_call_impl = block._call_impl
+
+    marked = cc._mark_regional_blocks(
+        owner, (DynamicDim(dim="batch", min=2, max=8), _SEQ))
+
+    assert marked == 3, "every repeated block carries the declaration"
+    for block in owner.blocks:
+        assert getattr(block._compiled_call_impl, "_gw_declared_marks", False)
+
+
+def test_marking_regional_blocks_is_idempotent() -> None:
+    """A second arm on the same object must not stack mark wrappers."""
+    owner = _Owner()
+    for block in owner.blocks:
+        block._compiled_call_impl = block._call_impl
+    assert cc._mark_regional_blocks(owner, (_SEQ,)) == 3
+    assert cc._mark_regional_blocks(owner, (_SEQ,)) == 0
+
+
+def test_an_uncompiled_block_is_never_wrapped() -> None:
+    """``compile_repeated_blocks`` is what installs ``_compiled_call_impl``;
+    a block it did not compile has no ingress to mark."""
+    owner = _Owner()
+    assert cc._mark_regional_blocks(owner, (_SEQ,)) == 0
+
+
+def test_the_declared_marks_reach_the_block_input() -> None:
+    """Not decoration: the wrapper must actually mark the declared dim on the
+    tensor the block is called with."""
+    owner = _Owner()
+    seen: list = []
+
+    def _impl(hidden_states):
+        seen.append(tuple(
+            getattr(hidden_states, "_dynamo_dynamic_indices", set()) or ()))
+        return hidden_states
+
+    owner.blocks[0]._compiled_call_impl = _impl
+    cc._mark_regional_blocks(owner, (_SEQ,))
+    owner.blocks[0]._compiled_call_impl(torch.zeros(1, 8, 4))
+
+    assert seen == [(1,)], (
+        "`sequence` marks dim 1 of a rank-3 float tensor, exactly as the "
+        "whole-forward branch marks it"
     )
-    assert "whole-forward" in reason, (
-        "and it must say where the target goes instead — a decline that read "
-        "as a skip would be an uncompiled target"
-    )
-
-
-def test_regional_without_declared_dynamic_does_not_decline() -> None:
-    """The half pgw#746 always allowed: nothing to honour, nothing to decline."""
-    cfg = Compile(shapes=((768, 768),), regional=True)
-    assert cc._regional_dynamic_decline(cfg, "transformer") == ""
 
 
 # ---------------------------------------------------------------------------

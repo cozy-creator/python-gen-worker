@@ -899,14 +899,12 @@ class Compile(msgspec.Struct, frozen=True):
         if len({d.dim for d in dyn}) != len(dyn):
             raise ValueError("Compile.dynamic repeats a dim")
         force(self, "dynamic", dyn)
-        # `regional=True` + `dynamic=(...)` is ADMITTED at declaration.
-        # `regional` is the dynamo/JIT per-block knob (ie#381) — the AOT
-        # export lane ignores it entirely since pgw#846 retired regional
-        # cells. The dynamo regional branch calls `compile_repeated_blocks(
-        # dynamic=None)` and cannot honour the marks, so it declines by name
-        # (`compile_cache._regional_dynamic_decline`) instead of arming a
-        # graph that does not implement the contract its key asserts. The
-        # declaration is legal; the lane that cannot serve it says so.
+        # `regional=True` + `dynamic=(...)` is ADMITTED and, since pgw#1078,
+        # SERVED by both lanes. `regional` is the dynamo/JIT per-block knob
+        # (ie#381) — the AOT export lane ignores it entirely since pgw#846
+        # retired regional cells; the dynamo regional branch applies the
+        # declared marks at the compiled-block ingress
+        # (`compile_cache._mark_regional_blocks`).
         for name, typ in (("dims", Dim), ("forks", Fork),
                           ("classes", GraphClass), ("inputs", Input),
                           ("args", Arg)):

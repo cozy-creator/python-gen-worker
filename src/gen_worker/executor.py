@@ -5145,14 +5145,24 @@ class Executor:
         if spec is not None and spec.cls is not None:
             rec = self._classes.get(spec.instance_key)
             if rec is not None:
+                armed_pipeline = None
                 for target in rec.compile_targets.values():
                     with target.state_lock:
                         active = str(target.active_compile_ref or "")
                     if active:
                         ref, pipeline = active, target.pipeline
                         break
+                    # pgw#1078: a JIT INTAKE arm names no artifact — that is
+                    # the whole point of pgw#1010's `is_compile_armed` — so a
+                    # ref-only scan reports every intake-served request as
+                    # eager. Carry the pipeline so `classify_mode` can ask it.
+                    if armed_pipeline is None and compile_cache.is_compile_armed(
+                            target.pipeline):
+                        armed_pipeline = target.pipeline
                 if not ref:
-                    posture = self._eager_posture(spec, rec)
+                    pipeline = armed_pipeline
+                    if pipeline is None:
+                        posture = self._eager_posture(spec, rec)
         return serving_mode_mod.resolve(
             active_compile_ref=ref,
             pipeline=pipeline,
@@ -6581,6 +6591,25 @@ class Executor:
                     slot for slot in setup_slots
                     if isinstance(inj.kwargs.get(slot), (str, Path))
                 )
+                # pgw#1078: …and a WORKER-loaded slot object that only became
+                # compile-capable DURING setup owns itself. A lazy loader (a
+                # `ModularPipeline` whose weight-bearing components hydrate
+                # inside setup) has no compile target at injection time, so the
+                # automatic branch skips it; the endpoint then hydrates and
+                # calls `arm_compile(pipeline)`, which lands here. Attributing
+                # that pipeline to `self_loaded_slots` — EMPTY for a
+                # class-annotated slot — gave `_install_compile_targets` a
+                # candidate with no owned slots, hence no bindings, hence
+                # `target_applicability_incomplete`: the arm succeeded and NO
+                # target was installed, so the guard was never bound, the
+                # hot-swap router was never enabled, and every request reported
+                # `+eager` (ie#632, minimax-h3 0.4.2).
+                injected_slot_of = {
+                    id(obj): slot
+                    for slot in setup_slots
+                    if (obj := inj.kwargs.get(slot)) is not None
+                    and not isinstance(obj, (str, Path))
+                }
                 scope_mints = arming_scope.self_mints
                 for bug in arming_scope.selection_bugs.values():
                     # th#1031: the fleet policy already self-minted a working
@@ -6591,7 +6620,17 @@ class Executor:
                 for pipe, armed in arming_scope.objects:
                     if not compile_cache.has_compile_target(pipe, spec.compile):
                         continue
-                    inj.add_compile_object(pipe, self_loaded_slots)
+                    owning = injected_slot_of.get(id(pipe))
+                    inj.add_compile_object(
+                        pipe, (owning,) if owning else self_loaded_slots)
+                    if armed:
+                        # pgw#1078: this arm DISPROVES whatever the injection
+                        # -time attempt concluded about the same object — that
+                        # attempt ran before setup hydrated it. First-token-
+                        # wins across the two scopes is what put
+                        # `no_compile_target` on every 0.4.2 request while the
+                        # target resolved fine.
+                        inj.eager_postures.clear()
                     mint = scope_mints.get(id(pipe))
                     selection = _selection_for(compile_selection, mint)
                     if getattr(mint, "delegated", False):
