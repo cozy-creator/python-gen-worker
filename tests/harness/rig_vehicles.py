@@ -71,18 +71,6 @@ class Vehicle:
     #: `w8a8_gemm_mode()` answers "" without CUDA — which the module class
     #: refuses — so a cardless run of these is NOT-RUN, never a red.
     gpu_only: bool = False
-    #: pgw#1079: the RESIDENCY arrangement. `residency_slots` pipeline objects
-    #: are built on the card before the mint and given `residency_bytes` of
-    #: ballast between them — tiny weights, big residency, which is z-image's
-    #: shape (two `ZImagePipeline` slots, 42.53 GiB, ie#638) at a size this box
-    #: can hold. 0 = no arrangement, which is every other member.
-    residency_slots: int = 0
-    residency_bytes: int = 0
-    #: Which POSTURE the arrangement installs. "mint" is a forge pod (no serve
-    #: goal): the sequenced release fires. "serve" is a serving pod: it does
-    #: not, and the mint is refused on the card the tenant is holding — the
-    #: existing, safe outcome the adjudication deliberately keeps.
-    residency_posture: str = ""
     #: pgw#1042: (tree, device) -> (pipe, cfg) for the PARENT-side handback —
     #: the rig process that opened the mint adopting its own child's cell
     #: through `fleet_cells.adopt_delegated_mint`, exactly as a pod does
@@ -1352,82 +1340,11 @@ MICRO_PAD32_BRANCHY = Vehicle(
 )
 
 
-# ---------------------------------------------------------------------------
-# micro-residency — ie#638, at a size this box can hold.
-#
-# TWO resident pipeline slots carrying 3 GiB of ballast between them (tiny
-# weights, big residency — z-image's shape without z-image's weights), and the
-# question the pod could not afford to ask: does the export child get a ceiling
-# it can work in?
-#
-# The pair differs in ONE thing, the POSTURE, and that is deliberate. The RED
-# twin is not a disabled release; it is the OTHER goal set — a serving pod,
-# where the tenant keeps eager resident and the mint is refused on the card it
-# is holding. That refusal is the existing, safe outcome the adjudication
-# keeps, so the pair proves the release AND the condition on it in one run.
-#
-# Deliberately built on the plain `micro` family, not on `micro-pad32`: a
-# residency proof must not go red because a shape question went red.
-# ---------------------------------------------------------------------------
-
-#: Ballast held across the two slots. Sized against the rig's OWN 4 GiB
-#: carve-out (the parent peaks at this plus its CUDA context), not against the
-#: physical card, so the split stays stated rather than assumed.
-MICRO_RESIDENCY_BYTES = 3 * (1 << 30)
-MICRO_RESIDENCY_SLOTS = 2
-
-
-def _residency_vehicle(name: str, posture: str, expect: str,
-                       expect_note: str, covers: str) -> Vehicle:
-    return Vehicle(
-        name=name,
-        modules=(RUNTIME_HOOK, "micro_diffusion.main"),
-        function="generate",
-        family="micro-diffusion",
-        ref_path="cozy/micro-diffusion",
-        syspath=(str(MICRO_SRC),),
-        build_checkpoint=_micro_checkpoint,
-        checkpoint_bytes=_micro_checkpoint_bytes,
-        compile_cell=lambda: _micro_cell(0),
-        adopt_source=_micro_adopt_source_for(0),
-        parent_pipe=_micro_parent_for(0),
-        residency_slots=MICRO_RESIDENCY_SLOTS,
-        residency_bytes=MICRO_RESIDENCY_BYTES,
-        residency_posture=posture,
-        gpu_only=True,
-        expect=expect,
-        expect_note=expect_note,
-        covers=covers,
-    )
-
-
-MICRO_RESIDENCY = _residency_vehicle(
-    "micro-residency", "mint", "green",
-    "",
-    ("ie#638's remedy: TWO resident pipeline slots staged out of VRAM around "
-     "the export child on a pod with no serve goal, then RESTORED and proven "
-     "by parity. The mint's ceiling is the production `co_residency` number "
-     "and the release is the production predicate"),
-)
-
-MICRO_RESIDENCY_SERVE = _residency_vehicle(
-    "micro-residency-serve", "serve", "red",
-    ("a serving pod keeps eager resident and hot (Paul ruling 2), so the mint "
-     "is refused on the card the tenant holds. A GREEN here would mean the "
-     "release started firing on serving pods, which is the one thing the "
-     "adjudication forbids"),
-    ("the RED twin of `micro-residency` — the same two resident slots under "
-     "the SERVE goal set, where the release must not fire and the mint must "
-     "decline on `insufficient_vram`"),
-)
-
-
 VEHICLES: Dict[str, Vehicle] = {
     v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA16,
                         MICRO_LORA_PLAIN_PARENT, MICRO_4D, MICRO_CONV,
                         MICRO_ESCAPE, MICRO_W8A8, MICRO_W8A8_LORA,
-                        MICRO_PAD32, MICRO_PAD32_BRANCHY,
-                        MICRO_RESIDENCY, MICRO_RESIDENCY_SERVE)}
+                        MICRO_PAD32, MICRO_PAD32_BRANCHY)}
 DEFAULT_VEHICLE = TINY.name
 
 

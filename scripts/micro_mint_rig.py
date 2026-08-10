@@ -263,120 +263,6 @@ def _mint_slot(tree: Path, ref_path: str) -> Any:
     )
 
 
-# ---------------------------------------------------------------------------
-# pgw#1079 — the RESIDENCY arrangement (ie#638, at a size this box can hold)
-# ---------------------------------------------------------------------------
-
-
-class _Residency:
-    """Two resident pipeline slots, and what the production release does.
-
-    ie#638's arithmetic, reproduced: z-image's endpoint holds TWO
-    `ZImagePipeline` slots, the forge exports with both of them on the card,
-    and `mint_budget.co_residency` prices the export child's ceiling as
-    `free - activation` — so every resident byte is a byte the child cannot
-    have. On the pod that was 42.53 GiB of 79.25 and a mint that died asking
-    for 76 MiB.
-
-    Here the slots carry BALLAST rather than real weight — tiny checkpoints,
-    big residency — so the same accounting runs inside the rig's 4 GiB
-    carve-out. Nothing about the DECISION is simulated: the goal set, the
-    release, the budget and the ceiling are the production functions.
-    """
-
-    def __init__(self, veh: Any, tree: Path, device_kind: str) -> None:
-        self.veh = veh
-        self.tree = tree
-        self.device_kind = device_kind
-        self.pipes: List[Any] = []
-        self.parked: Any = None
-        self.posture = str(veh.residency_posture or "mint")
-
-    def goals(self) -> Any:
-        from gen_worker import worker_goals
-
-        return (worker_goals.SERVE_ONLY if self.posture == "serve"
-                else worker_goals.MINT_ONLY)
-
-    def hold(self) -> Dict[str, Any]:
-        """Build the slots and put the ballast on the card."""
-        import torch
-        from gen_worker import worker_goals
-
-        # The goal set is INSTALLED, not passed: every production reader
-        # (`co_residency`, `park_residents`, the pool) reads
-        # `worker_goals.current()`, and a rig that passed it by hand would be
-        # testing an argument nobody uses.
-        worker_goals.install(self.goals())
-        per_slot = int(self.veh.residency_bytes // max(1, self.veh.residency_slots))
-        for _ in range(int(self.veh.residency_slots)):
-            pipe, _cfg = self.veh.parent_pipe(self.tree, "cuda")
-            module = getattr(pipe, "transformer", None) or getattr(pipe, "unet")
-            module.register_buffer(
-                "_pgw1079_ballast",
-                torch.empty(per_slot // 4, dtype=torch.float32, device="cuda"),
-                persistent=False)
-            self.pipes.append(pipe)
-        torch.cuda.synchronize()
-        free, total = torch.cuda.mem_get_info()
-        return {"slots": len(self.pipes), "ballast_bytes": per_slot * len(self.pipes),
-                "free_before_bytes": int(free), "card_bytes": int(total)}
-
-    def release(self) -> Dict[str, Any]:
-        """The production release, decided by the production predicate."""
-        from gen_worker import mint_delegate
-
-        self.parked = mint_delegate.park_residents(tuple(self.pipes))
-        return {
-            "released": self.parked is not None,
-            "released_bytes": int(getattr(self.parked, "released_bytes", 0)),
-            "free_after_bytes": int(getattr(self.parked, "free_after_bytes", 0)),
-        }
-
-    def budget(self, ordinal: int) -> Any:
-        from gen_worker import mint_budget
-
-        return mint_budget.co_residency(ordinal, family=self.veh.family)
-
-    def cap(self, budget: Any) -> int:
-        """The child's ceiling, inside the rig's stated split.
-
-        `co_residency` answers for the whole card; the carve-out says the rig
-        may use 4 GiB of it, split across every process it runs. What the
-        parent still holds is the parent's share, so what is left for the
-        child is the rest — the same `free - resident` shape the pod's
-        ceiling has, with the rig's budget standing in for the card.
-        """
-        parent_share = int(budget.resident_bytes)
-        return max(0, min(int(budget.cap_bytes), MINT_VRAM_BYTES,
-                          RIG_VRAM_BUDGET_BYTES - parent_share))
-
-    def restore(self) -> Dict[str, Any]:
-        from gen_worker import mint_delegate
-
-        if self.parked is None:
-            return {"restored": None}
-        ok = mint_delegate.restore_eager_pipeline(self.parked)
-        on_card = all(
-            all(p.is_cuda for p in
-                (getattr(pipe, "transformer", None)
-                 or getattr(pipe, "unet")).parameters())
-            for pipe in self.pipes)
-        return {"restored": bool(ok), "weights_back_on_card": bool(on_card)}
-
-    def drop(self) -> None:
-        """Hand the ballast back before the publish/adopt legs need the card."""
-        import gc
-
-        import torch
-
-        self.pipes.clear()
-        self.parked = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-
 def _mint_request(
     workdir: Path, tree: Path, veh: Any, *,
     ordinal: int = 0, cap_bytes: int = MINT_VRAM_BYTES,
@@ -497,53 +383,6 @@ def run_cycle(
     leg.facts = {"bytes": size, "tree": str(tree)}
     leg.detail = f"{size / 1e6:.1f} MB generated locally (no download)"
 
-    # -- residency (pgw#1079) ------------------------------------------------
-    # ie#638's wall, at micro scale: hold the slots, then let the PRODUCTION
-    # predicate decide whether they are released, and let the PRODUCTION
-    # budget say what the export child is therefore allowed. Both legs report
-    # the same three numbers, which is the whole point — an OOM in
-    # `torch.export` must never again require reconstructing them.
-    residency: Optional[_Residency] = None
-    cap_bytes = MINT_VRAM_BYTES if dev["device_kind"] == "cuda" else 0
-    if veh.residency_slots:
-        if dev["device_kind"] != "cuda":
-            raise RigRefused(
-                "the residency member is an accounting proof about VRAM; "
-                "cardless it would assert nothing")
-        from gen_worker import mint_delegate as _md
-
-        leg = result.add(Leg("residency"))
-        g0 = time.monotonic()
-        residency = _Residency(veh, tree, dev["device_kind"])
-        leg.facts = dict(residency.hold())
-        leg.facts["posture"] = residency.posture
-        leg.facts.update(residency.release())
-        budget = residency.budget(int(dev["device_ordinal"]))
-        cap_bytes = residency.cap(budget)
-        leg.facts.update({
-            "resident_bytes": int(budget.resident_bytes),
-            "card_free_bytes": int(budget.free_bytes),
-            "need_bytes": int(budget.need_bytes),
-            "fits": bool(budget.fits),
-            "child_ceiling_bytes": cap_bytes,
-            # The production line, verbatim — the same string a pod emits.
-            "residency_line": _md.residency_line(
-                residency.parked, budget, family=veh.family),
-        })
-        leg.seconds = time.monotonic() - g0
-        # The REFUSAL is a terminus, not a rig defect: a serving pod holding
-        # its tenant is exactly the case the adjudication keeps as-is.
-        leg.ok = bool(budget.fits) and cap_bytes > 0
-        leg.detail = leg.facts["residency_line"]
-        if not leg.ok:
-            leg.detail = (
-                f"{leg.facts['residency_line']} — the mint is DECLINED "
-                f"(insufficient_vram): free {budget.free_bytes / GIB:.2f} GiB "
-                f"< need {budget.need_bytes / GIB:.2f} GiB")
-            residency.drop()
-            result.total_s = time.monotonic() - t0
-            return result
-
     # -- the handoff ---------------------------------------------------------
     workdir = root / "mint"
     workdir.mkdir(parents=True, exist_ok=True)
@@ -552,7 +391,8 @@ def run_cycle(
     g0 = time.monotonic()
     request = _mint_request(workdir, tree, veh,
                             ordinal=int(dev["device_ordinal"]),
-                            cap_bytes=cap_bytes,
+                            cap_bytes=(MINT_VRAM_BYTES
+                                       if dev["device_kind"] == "cuda" else 0),
                             entry_device_peak_bytes=entry_device_peak_bytes)
     leg.ok, leg.seconds = True, time.monotonic() - g0
     entries = _declared_entries(veh)
@@ -610,21 +450,8 @@ def run_cycle(
         # artifact and must never reach a shared namespace.
         "synthetic_runtime": env.get(SYNTHETIC_RUNTIME_ENV) == "1",
     }
-    # pgw#1079: step 3 of the sequence. The pipelines come BACK before
-    # anything adopts or proves parity against them — which is why the
-    # eager-serve objection to this remedy does not land: parity's oracle is
-    # restored first, and a half-resident restore refuses adoption outright.
-    if residency is not None:
-        restored = residency.restore()
-        leg.facts.update(restored)
-        if not restored.get("restored") or not restored.get(
-                "weights_back_on_card"):
-            leg.ok = False
-            leg.detail = ("the staged pipelines did NOT fully return to the "
-                          "card after the mint")
-        residency.drop()
     if not leg.ok:
-        leg.detail = leg.detail or f"{outcome.status}: {outcome.detail[:220]}"
+        leg.detail = f"{outcome.status}: {outcome.detail[:220]}"
         result.total_s = time.monotonic() - t0
         return result
     warm = float((report.phases if report else {}).get("warmup_forward", 0.0))
