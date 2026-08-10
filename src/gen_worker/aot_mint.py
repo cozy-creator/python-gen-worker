@@ -1007,6 +1007,91 @@ def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
     return round(time.monotonic() - t0, 2)
 
 
+#: pgw#1076: the short spelling of a floating-point dtype, matching the
+#: vocabulary the weight-lane labels already use (`bf16`, `fp8-…`) so one cell's
+#: `precision` reads the same whether it came from the lane or from this
+#: measurement.
+_PRECISION_LABELS: Dict[str, str] = {
+    "torch.bfloat16": "bf16",
+    "torch.float16": "fp16",
+    "torch.float32": "fp32",
+    "torch.float64": "fp64",
+    "torch.float8_e4m3fn": "fp8-e4m3",
+    "torch.float8_e4m3fnuz": "fp8-e4m3",
+    "torch.float8_e5m2": "fp8-e5m2",
+    "torch.float8_e5m2fnuz": "fp8-e5m2",
+}
+
+
+def module_precision(module: Any) -> str:
+    """pgw#1076: what floating-point dtype a module ACTUALLY holds.
+
+    Weighted by element count over parameters and buffers, because a module is
+    "an fp32 module with one bf16 norm buffer" and not "half and half". More
+    than one float dtype is reported as ``mixed(a+b)``, dominant first — a
+    mixture is a fact worth naming, and naming it is strictly better than
+    picking a winner and calling the cell that.
+
+    ``""`` when nothing is measurable (no tensors, no torch, a callable
+    target that is not a module). An absent fact beats an invented one; that is
+    the whole issue.
+    """
+    counts: Dict[str, int] = {}
+    for attr in ("parameters", "buffers"):
+        get = getattr(module, attr, None)
+        if not callable(get):
+            continue
+        try:
+            tensors = list(get(recurse=True))
+        except Exception:  # noqa: BLE001 — a label never fails a mint
+            continue
+        for tensor in tensors:
+            try:
+                if not bool(tensor.is_floating_point()):
+                    continue
+                raw = str(tensor.dtype)
+                counts[_PRECISION_LABELS.get(raw, raw.replace("torch.", ""))] = (
+                    counts.get(
+                        _PRECISION_LABELS.get(raw, raw.replace("torch.", "")), 0)
+                    + int(tensor.numel()))
+            except Exception:  # noqa: BLE001
+                continue
+    if not counts:
+        return ""
+    if len(counts) == 1:
+        return next(iter(counts))
+    return "mixed(" + "+".join(
+        sorted(counts, key=lambda label: (-counts[label], label))) + ")"
+
+
+def _measured_precision(pipeline: Any, rows: Sequence[Tuple[Any, Any]]) -> str:
+    """The cell-wide precision stamp, measured over the modules this mint will
+    actually trace (pgw#1076).
+
+    Every distinct declared target contributes; disagreement between targets is
+    reported as a mixture rather than resolved, for the same reason a mixture
+    inside one module is. Unresolvable targets contribute nothing — this runs
+    BEFORE the export's own target gate, and a label must never be the thing
+    that refuses a mint.
+    """
+    labels: Dict[str, None] = {}
+    for plan, _arm in rows:
+        target = str(getattr(plan, "target", "") or "")
+        if not target:
+            continue
+        resolved = _resolve_target(pipeline, target)
+        if resolved is None:
+            continue
+        label = module_precision(resolved[0])
+        if label:
+            labels[label] = None
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return next(iter(labels))
+    return "mixed(" + "+".join(sorted(labels)) + ")"
+
+
 def _export_entry(
     pipeline: Any,
     spec: ExportSpec,
@@ -1911,6 +1996,22 @@ def _mint_cell(
     # `Compile(regional=True)` declaration keeps its dynamo/JIT meaning
     # (ie#381, compile_cache) and the AOT mint ignores it.
     rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+    # pgw#1076: the `precision` stamp is a MEASUREMENT, and until here nobody
+    # made it — `ExportSpec.precision` defaulted to "bf16", so a micro-conv
+    # cell with fp32 weights, fp32 inputs and an fp32 traced graph packaged
+    # `metadata.json precision: "bf16"` and every arm line printed
+    # `precision=bf16`. A reader debugging a 1.2e-3 GPU parity delta reads
+    # that as "the mint cast to bf16" and spends a cycle disproving it (the
+    # real cause was TF32 conv kernels). A caller that KNOWS the lane — every
+    # real family, via `weight_lane` — keeps its own word; only an ABSENT
+    # stamp is derived, and an underivable one stays absent.
+    if not str(spec.precision or "").strip():
+        measured = _measured_precision(pipeline, rows)
+        logger.info(
+            "aot-mint: pgw#1076 precision measured from the traced modules: "
+            "%r (no lane declared; %d declared class row(s))",
+            measured or "<unmeasurable>", len(rows))
+        spec = replace(spec, precision=measured)
     # pgw#809: how wide this pod may compile. Derived from the pod's REAL
     # budget (cgroup-aware vCPUs minus serving headroom, and available host
     # RAM over the measured per-entry peak) — never os.cpu_count, never a
@@ -3605,7 +3706,10 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
         family=str(body.get("family") or ""),
         target="",
         weight_lane=str(body.get("weight_lane") or ""),
-        precision=str(body.get("precision") or "bf16"),
+        # pgw#1076: NO default. An absent `precision` is derived from the
+        # modules the mint actually traces (`_measured_precision`); a
+        # fabricated "bf16" is a measurement nobody made.
+        precision=str(body.get("precision") or ""),
         lora_bucket=int(body.get("lora_bucket") or 0),
         shapes=tuple(tuple(int(v) for v in row) for row in body.get("shapes") or ()),
         text_lens=tuple(int(v) for v in body.get("text_lens") or ()),

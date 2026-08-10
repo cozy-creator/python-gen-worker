@@ -2097,7 +2097,11 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
         family=str(getattr(cfg, "family", "") or ""),
         target="",
         weight_lane=execution_lane,
-        precision=execution_lane or "bf16",
+        # pgw#1076: the lane when the pipeline HAS one, and otherwise absent —
+        # never "bf16". `aot_mint` derives the stamp from the modules it
+        # traces when this is empty, so an unlabelled fp32 pipeline records
+        # fp32 instead of a cast nobody performed.
+        precision=execution_lane,
         lora_bucket=bucket,
         shapes=tuple(
             tuple(int(v) for v in row) for row in (getattr(cfg, "shapes", ()) or ())),

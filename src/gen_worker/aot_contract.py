@@ -120,7 +120,15 @@ class ExportSpec:
     family: str
     target: str
     weight_lane: str = ""
-    precision: str = "bf16"
+    #: pgw#1076: EMPTY, not "bf16". This field is a MEASUREMENT — what the
+    #: traced modules actually compute in — and it is stamped into the cell's
+    #: `metadata.json` and printed on every arm line. Defaulting it made an
+    #: fp32 cell say `precision: bf16`, which cost a debugging cycle chasing a
+    #: cast that never happened (the real cause was TF32 conv kernels). A
+    #: caller that KNOWS the lane sets it; a caller that does not leaves it
+    #: absent and `aot_mint._mint_cell` derives it from the modules in hand.
+    #: Unmeasurable stays "" — an absent fact beats a plausible wrong one.
+    precision: str = ""
     lora_bucket: int = 0
     shapes: Tuple[Tuple[int, ...], ...] = ()
     # (pgw#1030: `batch` deleted — zero readers. The traced batch is a
