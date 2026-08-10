@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -284,8 +286,21 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
                            expected_size: Optional[int]) -> None:
     """Stream ``url`` → ``dest`` (1MiB chunks), verifying digest/size.
 
-    Writes to ``dest.tmp`` then renames, so a partial download can never be
-    mistaken for a complete shard.
+    Writes to a UNIQUE temp file in ``dest``'s directory then renames, so a
+    partial download can never be mistaken for a complete shard.
+
+    pgw#945: this site is RACY, and it was the one of pgw#938's three that
+    is. ``resolve_dataset`` materializes into a pod-wide content-keyed cache
+    (``/tmp/gen_worker_datasets/<owner>/<name>/<snapshot>``), so two requests
+    in one container asking for one dataset arrive at the SAME ``dest`` — and
+    the old name was derived from it (``dest.tmp``), so they arrived at the
+    same temp file too. The bytes are identical (same snapshot), which is what
+    made this look harmless; the destruction is in the LIFECYCLE, not the
+    content. One writer's failure path runs ``tmp.unlink()`` on the other's
+    in-flight download, and the victim then fails its own ``replace`` after
+    paying for every byte. A unique name per writer costs one ``mkstemp`` and
+    removes the shared object entirely; the rename stays atomic, and two
+    winners simply publish the same verified bytes.
 
     pgw#1013: the size comparison used to sit after the loop, where the bytes
     are already on disk and the only thing it can report is how far past the
@@ -294,7 +309,10 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     destination filesystem, which is what an unbounded shard exhausts.
     """
 
-    tmp = dest.with_name(dest.name + ".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=dest.name + ".",
+                                    suffix=".part")
+    os.close(fd)
+    tmp = Path(tmp_name)
     algo = expected_digest.partition(":")[0]
     # Not `.get(...) or None`: an unverifiable download must be unreachable,
     # and the way that guarantee dies is a hasher that is allowed to be absent.
