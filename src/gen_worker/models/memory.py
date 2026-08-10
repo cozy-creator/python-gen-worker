@@ -638,6 +638,8 @@ def repair_device_placement(obj: Any, device: str) -> List[tuple[str, str, str]]
 def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
     import torch
 
+    from ..meta_instantiation import is_virtual
+
     total = 0
     seen: set[int] = set()  # data_ptr dedupe: shared storages counted ONCE
     for obj in objs:
@@ -649,6 +651,13 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
                 tensors.extend(c.buffers())
             for t in tensors:
                 if not isinstance(t, torch.Tensor):
+                    continue
+                # pgw#1080: a VIRTUAL tensor (fake/meta) is a faithful
+                # shape+dtype+device with NO storage. Counting one as
+                # resident bytes would make a structure-only mint child look
+                # weight-scale to the offload ladder and to the co-residency
+                # census — the exact clamp this slice exists to remove.
+                if is_virtual(t):
                     continue
                 if cuda_only and t.device.type != "cuda":
                     continue

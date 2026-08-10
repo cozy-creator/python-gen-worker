@@ -48,6 +48,7 @@ ORDER = (
     "micro-pad32-branchy",
     "micro-conv",
     "micro-escape",
+    "micro-rope",
     "micro-w8a8",
     "micro-w8a8-lora",
     "micro-lora-plain-parent",

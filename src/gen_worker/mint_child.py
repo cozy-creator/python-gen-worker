@@ -561,7 +561,9 @@ def _measure_execution_lane(execution_lane: str, load: Any) -> Any:
             execution_lane=execution_lane, unavailable=f"build: {type(exc).__name__}: {exc}")
 
 
-def execution_lane_verdict_for(load: Any) -> Tuple[Any, Any, Any, Any]:
+def execution_lane_verdict_for(
+    load: Any, *, meta_mint: bool = False,
+) -> Tuple[Any, Any, Any, Any]:
     """MEASURE which serving-kernel lane wins on THIS card (pgw#947).
 
     Returns ``(verdict, endpoint instance, pipeline, spec)`` — the winning
@@ -596,6 +598,24 @@ def execution_lane_verdict_for(load: Any) -> Tuple[Any, Any, Any, Any]:
     from . import kernel_path
 
     candidates = kernel_path.candidates_here()
+    if meta_mint and len(candidates) >= 2:
+        # pgw#1080, coordinator ruling 2026-08-10: option (a). The A/B is a
+        # WHOLE-MODEL benchmark (`bench_step` times a real pipeline step), so
+        # running it would put weight-scale values back in the one process
+        # this slice exists to keep empty — to buy a verdict with no consumer
+        # below Blackwell, where `fused_candidate_gap` leaves one candidate
+        # and no A/B runs at all. Typed absence, with its reason.
+        verdict = kernel_path.unmeasured(
+            candidates[0],
+            "meta-mint: this child holds no weights (pgw#1080) and the lane "
+            "A/B is a whole-model benchmark; the serving side treats a cell "
+            "with no verdict as the documented conservative default")
+        kernel_path.pin(verdict.winner, f"meta-mint: {verdict.detail}")
+        frame(phase="load",
+              note=f"kernel lane {verdict.winner} (unmeasured, meta-mint)")
+        instance, pipe, spec = load(verdict.winner)
+        return verdict, instance, pipe, spec
+
     if len(candidates) < 2:
         _axes, gaps = kernel_path.candidate_axes()
         detail = "; ".join(
@@ -639,6 +659,7 @@ def _mint_aot(
     started: float, sha256_file: Any,
     execution_lane_verdict: Any = None,
     spec: Any = None,
+    footprint: Optional[Dict[str, Any]] = None,
 ) -> MintReport:
     """pgw#805: the AOT recipe — torch.export + AOTInductor over the family's
     whole declared graph-class set, packed as ONE multi-graph cell (pgw#758).
@@ -730,6 +751,12 @@ def _mint_aot(
     peak = max(
         _peak_vram(),
         int(result.timings.get("peak_vram_before_release_bytes", 0) or 0))
+    # pgw#1080: the EXPORT half of the footprint, measured from the peak reset
+    # that follows the warm proof. This is the ceiling the pgw#992 census must
+    # size the next export child against — the whole point of the slice is
+    # that it is autotune-scratch scale and not weight scale.
+    marks = dict(footprint or {})
+    marks.setdefault("export_peak_bytes", peak)
     return MintReport(
         status="minted",
         artifact=str(target),
@@ -739,10 +766,19 @@ def _mint_aot(
             f"exported {len((result.metadata.get('entries') or {}))} graph "
             f"class(es) for family {cfg.family!r} as one aot-inductor cell"),
         phase="finalize",
-        peak_vram_bytes=peak,
+        peak_vram_bytes=max(
+            peak, int(marks.get("warm_proof_peak_bytes", 0) or 0)),
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
         mint_phases=dict(result.metadata.get("mint_phases") or {}),
+        structure_only_components=tuple(
+            marks.get("structure_only_components") or ()),
+        structure_refusal=str(marks.get("structure_refusal") or ""),
+        virtual_param_bytes=int(marks.get("virtual_param_bytes", 0) or 0),
+        structure_real_bytes=int(marks.get("structure_real_bytes", 0) or 0),
+        warm_proof_peak_bytes=int(marks.get("warm_proof_peak_bytes", 0) or 0),
+        warm_proof_values=str(marks.get("warm_proof_values") or ""),
+        export_peak_bytes=int(marks.get("export_peak_bytes", 0) or 0),
     )
 
 
@@ -807,16 +843,34 @@ def mint(request: MintRequest) -> MintReport:
         + (f" (+{sum(len(c) for c in overrides.values())} component "
            f"override(s))" if overrides else "")))
 
+    # pgw#1080: the compile targets are built from CODE + CONFIG, so the
+    # process that exports and compiles never holds a checkpoint value. A
+    # component that cannot be built that way says so, typed, and that slot
+    # loads its weights the old way — the property is then reported as NOT
+    # held for this mint rather than silently assumed.
+    structure_targets = tuple(cfg.targets)
+    structure_refusals: List[str] = []
+
     def _load(_execution_lane: str) -> Tuple[Any, Any, Any]:
         """One full endpoint load on the currently pinned kernel lane: the
         endpoint instance, its compile-target pipeline, and that pipeline's
         export spec."""
         from . import fleet_cells
+        from .models.structure_only import StructureOnlyUnsupported
 
         obj = spec.cls()
-        got = run_setup(
-            obj, dict(paths), arm_compile=False,
-            return_loaded=True, component_paths=overrides) or {}
+        try:
+            got = run_setup(
+                obj, dict(paths), arm_compile=False,
+                return_loaded=True, component_paths=overrides,
+                structure_only=structure_targets) or {}
+        except StructureOnlyUnsupported as exc:
+            structure_refusals.append(str(exc))
+            frame(phase="load", note=f"structure-only declined: {exc}")
+            obj = spec.cls()
+            got = run_setup(
+                obj, dict(paths), arm_compile=False,
+                return_loaded=True, component_paths=overrides) or {}
         _slot, loaded_pipe = _pick_compile_target(got, cfg)
         frame(phase="load", note=f"compile target on slot {_slot!r}")
         if cfg.lora_bucket:
@@ -827,7 +881,26 @@ def mint(request: MintRequest) -> MintReport:
     # exported, so the cell can carry the verdict instead of the fleet
     # re-deriving it from a hand-maintained SM tuple. The probe loads once per
     # candidate; the winner's pipeline is what gets minted.
-    verdict, instance, pipe, aot_spec = execution_lane_verdict_for(_load)
+    verdict, instance, pipe, aot_spec = execution_lane_verdict_for(
+        _load, meta_mint=bool(structure_targets))
+    from .models import structure_only
+
+    facts = structure_only.facts_of(pipe)
+    virtual_modules = structure_only.modules_of(pipe)
+    footprint: Dict[str, Any] = {
+        "structure_only_components": tuple(name for name, _m in virtual_modules),
+        "virtual_param_bytes": sum(f.virtual_param_bytes for f in facts),
+        "structure_real_bytes": sum(f.real_buffer_bytes for f in facts),
+        "structure_refusal": "; ".join(structure_refusals)[:400],
+    }
+    if facts:
+        frame(phase="load", note=(
+            "structure-only "
+            + ", ".join(
+                f"{f.component}({f.cls_name}): "
+                f"{f.virtual_param_bytes / 2 ** 20:.1f} MiB virtual, "
+                f"{f.real_buffer_bytes / 2 ** 20:.1f} MiB real buffers"
+                for f in facts)))
     # pgw#984: PROVE the endpoint's own forward runs, before a byte is
     # exported. `torch.export` traces the declared graph classes off the
     # modules directly and never enters the handler, so an AOT mint's
@@ -841,7 +914,73 @@ def mint(request: MintRequest) -> MintReport:
     # a full eager pass would buy minutes and prove nothing more than the first
     # job does. Eager — nothing is armed here — so it specializes no graph the
     # export then has to trace around.
+    #
+    # pgw#1080 (coordinator ruling 2026-08-10): on a structure-only mint the
+    # proof runs on RANDOM values. It is a does-it-run proof, not a numerics
+    # one, and the ratified variability rule already forbids value-dependent
+    # program structure — so a handler whose control flow breaks under random
+    # weights is violating that rule and surfacing it here is the point.
+    # Random values are NOT checkpoint values, but they ARE weight-scale for
+    # the length of the proof, so the window is measured and reported
+    # separately from the export's, which is the number the pgw#992 census
+    # must size the next export child against.
+    device_label = _device_label(request)
+    if virtual_modules:
+        _reset_peak()
+        randomized = sum(
+            structure_only.materialize_random(module, device=device_label)
+            for _name, module in virtual_modules)
+        frame(phase="warmup_forward", note=(
+            f"values=random ({randomized / 2 ** 20:.1f} MiB) on "
+            f"{[name for name, _m in virtual_modules]}"))
+        # The BASELINE for the call-time check below. The lane installs real
+        # tensors of its own before any forward runs — LoRA branch containers
+        # are the standing example, and they are legitimate (a lifted adapter
+        # is a graph INPUT, not a baked constant). What the check is looking
+        # for is a tensor that APPEARS during the proof, so it compares
+        # against what was already there instead of hardcoding a vocabulary.
+        strays_before = {
+            f"{name}.{path}"
+            for name, module in virtual_modules
+            for path, _tensor in structure_only.stray_real_tensors(module)
+        }
     _drive_warm_plan(instance, _warm_jobs(siblings), request, proof_only=True)
+    if virtual_modules:
+        footprint["warm_proof_peak_bytes"] = _peak_vram()
+        footprint["warm_proof_values"] = "random"
+        for _name, module in virtual_modules:
+            structure_only.restore_virtual(module, device=device_label)
+        # ie#628's call-time class, caught where it CAN be caught on a
+        # weightless mint. Inside a fake-mode export every allocation is fake,
+        # so the mode-based gate cannot see a lazily-built pinned table — but
+        # the warm proof just ran the handler for real, so if one was built it
+        # is now cached on a plain attribute, still real, about to be traced.
+        strays = [
+            (f"{name}.{path}", tensor)
+            for name, module in virtual_modules
+            for path, tensor in structure_only.stray_real_tensors(module)
+            if f"{name}.{path}" not in strays_before
+        ]
+        if strays:
+            raise MintChildRefused(
+                "meta-instantiation gate (ie#628, call-time): after the warm "
+                "proof released its random values, "
+                + ", ".join(
+                    f"{path} still holds a REAL {tuple(t.shape)} "
+                    f"{t.dtype} tensor on {t.device}" for path, t in strays[:4])
+                + ". A weightless mint traces what the module holds, so this "
+                "tensor would be exported as an anonymous graph literal and "
+                "the cell would carry values no adopter can rebind. It is "
+                "built at CALL time instead of at __init__: register derived "
+                "tables with `register_buffer` and NO device pin (ie#630's "
+                "`rope_buffers` is the worked example); an explicit "
+                "`with torch.device(...)` inside model code is itself the "
+                "violation to remove.")
+        _release()
+        frame(phase="warmup_forward", note=(
+            f"random values released; warm-proof device peak "
+            f"{footprint['warm_proof_peak_bytes'] / 2 ** 20:.1f} MiB"))
+    _reset_peak()
     # Deliberately NOT `aot_mint.compose_for_mint` (which builds a pipeline
     # from a model ref for an operator's mint pod): the graphs this cell must
     # serve are the graphs the ENDPOINT's own composed pipeline runs, and
@@ -849,7 +988,40 @@ def mint(request: MintRequest) -> MintReport:
     # cannot adopt.
     return _mint_aot(
         request, pipe, cfg, target, started=started,
-        sha256_file=sha256_file, execution_lane_verdict=verdict, spec=aot_spec)
+        sha256_file=sha256_file, execution_lane_verdict=verdict, spec=aot_spec,
+        footprint=footprint)
+
+
+def _device_label(request: MintRequest) -> str:
+    """Where this child's tensors live — the ordinal the parent chose, or the
+    card this process defaults to. ``cpu`` on a cardless box, stated rather
+    than assumed: a structure built as "cpu" compiles a CPU cell."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return "cpu"
+    except Exception:  # noqa: BLE001 — torch-less: nothing to place
+        return "cpu"
+    ordinal = int(getattr(request, "device", -1) or -1)
+    return f"cuda:{ordinal}" if ordinal >= 0 else "cuda"
+
+
+def _reset_peak() -> None:
+    """Start a fresh device high-water window (pgw#1080).
+
+    The warm proof's random-value window and the export's window are two
+    different measurements, and reporting their max as one number is what let
+    weight residency size an export child that no longer needs it.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:  # noqa: BLE001 — a probe never fails a mint
+        logger.debug("mint-child: reset_peak_memory_stats failed",
+                     exc_info=True)
 
 
 def _peak_vram() -> int:

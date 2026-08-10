@@ -22,7 +22,7 @@ import types
 import typing
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import msgspec
 
@@ -549,6 +549,7 @@ def run_setup(
     instance: Any, resolved_models: Dict[str, str], *, device: str = "",
     arm_compile: bool = True, return_loaded: bool = False,
     component_paths: Optional[Dict[str, Dict[str, str]]] = None,
+    structure_only: Sequence[str] = (),
 ) -> Optional[Dict[str, Any]]:
     """Call ``instance.setup(...)`` once, passing exactly the resolved model
     slots its signature declares.
@@ -557,6 +558,17 @@ def run_setup(
     (pgw#784): the mint child drives its own cold arm + capture and must not
     have a cell armed under it. ``return_loaded=True`` returns the loaded slot
     objects so a caller can reach the pipeline it just built.
+
+    ``structure_only`` (pgw#1080) names the components every slot must build
+    from CODE + CONFIG instead of from the checkpoint — the mint child's
+    compile targets. They are constructed by
+    ``models.structure_only.build_component`` and injected through the same
+    ``components=`` seam a preloaded shared component uses, so the pipeline
+    the endpoint receives is composed by its own loader either way. A
+    component the slot's tree does not declare is skipped (a two-slot family's
+    auxiliary slot has no denoiser); a component that CANNOT be built from
+    config refuses typed (``StructureOnlyUnsupported``) rather than silently
+    loading its weights.
 
     ``component_paths`` (slot -> component -> local override tree, pgw#816)
     carries the caller's ALREADY-RESOLVED pgw#617 component overrides. The
@@ -622,7 +634,8 @@ def run_setup(
         k: _load_injected_model(
             hints.get(k), v, decl=decl, slot=k, device=device,
             arm_compile=arm_compile,
-            overrides=dict((component_paths or {}).get(k) or {}))
+            overrides=dict((component_paths or {}).get(k) or {}),
+            structure_only=tuple(structure_only))
         for k, v in resolved_models.items()
         if k in wanted
     }
@@ -638,10 +651,60 @@ _INJECTED_CACHE: Dict[Tuple[str, str], Any] = {}
 _ENDPOINT_ATTR = "__gen_worker_endpoint__"
 
 
+def _assert_structure_honored(
+    pipe: Any, injected: Dict[str, Any], *, slot: str = "",
+) -> None:
+    """The composed pipeline must actually CARRY the structure-only modules.
+
+    ``components=`` is a request, and a pipeline class is free to ignore an
+    unexpected keyword — ``**kwargs`` swallows it and the class loads the
+    checkpoint itself. That failure is SILENT and it is the exact failure this
+    slice cannot tolerate: the mint would hold every weight and still report a
+    weightless child. So it is checked, on the object that came back, and the
+    caller decides what to do about a refusal (the mint child falls back to a
+    real-weight load and records why).
+    """
+    from ..models.structure_only import STAMP, StructureOnlyUnsupported
+
+    for component, module in sorted(injected.items()):
+        got = getattr(pipe, component, None)
+        if got is module or getattr(got, STAMP, False):
+            continue
+        raise StructureOnlyUnsupported(
+            component=component,
+            cls_name=type(pipe).__name__,
+            lacks=(
+                f"the composed pipeline for slot {slot or '?'} does not carry "
+                f"the injected structure-only module — it built "
+                f"{type(got).__name__} instead, so this composition either "
+                f"ignores `components=` or rebuilds the target from the "
+                f"checkpoint"))
+
+
+def _structure_device(device: str) -> str:
+    """Where a structure-only component's VIRTUAL tensors claim to live.
+
+    Faithful device is the whole point (pgw#1080): AOTInductor codegens for
+    the device the traced tensors report, so a structure built as "cpu" on a
+    CUDA pod would compile a CPU cell. Fake tensors allocate nothing, so
+    claiming the card costs nothing.
+    """
+    want = (device or "").strip().lower()
+    if want:
+        return want
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:  # noqa: BLE001 — torch-less environment
+        return "cpu"
+
+
 def _load_injected_model(
     annotation: Any, local_path: str, *, decl: Any = None, slot: str = "",
     device: str = "", arm_compile: bool = True,
     overrides: Optional[Dict[str, str]] = None,
+    structure_only: Sequence[str] = (),
 ) -> Any:
     """Load one setup slot via the shared core, with a per-process warm cache
     (so ``serve`` and repeated local dispatches never reload weights).
@@ -655,12 +718,31 @@ def _load_injected_model(
     key = (
         str(annotation),
         str(local_path) + "".join(
-            f"|{c}={p}" for c, p in sorted((overrides or {}).items())),
+            f"|{c}={p}" for c, p in sorted((overrides or {}).items()))
+        # A structure-only composition is a DIFFERENT object from the
+        # real-weight one; sharing a cache entry between them would hand a
+        # weightless pipeline to a caller that asked for weights.
+        + ("|structure=" + ",".join(sorted(structure_only))
+           if structure_only else ""),
     )
     if key in _INJECTED_CACHE:
         return _INJECTED_CACHE[key]
     binding = (getattr(decl, "models", None) or {}).get(slot) if decl is not None else None
     injected: Dict[str, Any] = {}
+    if structure_only:
+        from ..models.loading import model_index_components
+        from ..models.structure_only import build_component
+
+        declared = model_index_components(local_path)
+        for comp in sorted(set(structure_only)):
+            if comp not in declared:
+                # An auxiliary slot of a multi-slot family (a refiner, a
+                # second pipeline) legitimately has no denoiser of this name.
+                continue
+            module, _facts = build_component(
+                local_path, comp, device=_structure_device(device),
+                dtype=str(getattr(binding, "dtype", "") or ""))
+            injected[comp] = module
     if overrides:
         from ..models.loading import load_component_override
 
@@ -674,6 +756,8 @@ def _load_injected_model(
     )
     if not sl.is_pipeline:
         return sl.obj
+    if structure_only:
+        _assert_structure_honored(sl.obj, injected, slot=slot)
     compile_cfg = getattr(decl, "compile", None) if decl is not None else None
     if compile_cfg is not None:
         # SDK v2: the compile machinery consumes the enriched CompileCell

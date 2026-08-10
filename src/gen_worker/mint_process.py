@@ -315,6 +315,28 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     #: measure pipe latency instead of work. Empty from a child that died before
     #: writing its report, which is honest: no measurement, not zero.
     phases: Dict[str, float] = msgspec.field(default_factory=dict)
+    #: pgw#1080 — the FAKE-EXPORT FOOTPRINT. The child builds its compile
+    #: targets from code + config, so the process that traces holds no
+    #: checkpoint values; these fields are how a reader knows that held, for
+    #: WHICH components, and what it cost instead.
+    #:
+    #: ``export_peak_bytes`` is the number the pgw#992 census must size the
+    #: next export child against: it is measured from a peak reset taken AFTER
+    #: the warm proof, so weight-scale random values cannot leak into it.
+    #: ``warm_proof_peak_bytes`` is the pgw#984 proof's own window, and
+    #: ``warm_proof_values`` records what it ran on (``random``) — a
+    #: numerics-adjacent surprise is then one lookup, not a re-derivation.
+    structure_only_components: Tuple[str, ...] = ()
+    #: Empty when the property held; the typed reason when a component could
+    #: not be built from config and that slot loaded its weights instead.
+    structure_refusal: str = ""
+    #: Checkpoint bytes the child would have held and did not.
+    virtual_param_bytes: int = 0
+    #: Config-derived tables it legitimately did hold (literals live here).
+    structure_real_bytes: int = 0
+    warm_proof_peak_bytes: int = 0
+    warm_proof_values: str = ""
+    export_peak_bytes: int = 0
     #: pgw#805: the AOT recipe's per-entry phase TABLE
     #: (``aot_mint._mint_phase_table``). The child emits it too, but a mint
     #: child holds no orchestrator session, so the child's events go nowhere —
@@ -383,6 +405,24 @@ class MintOutcome:
         if self.report is not None and self.report.peak_vram_bytes:
             parts.append(
                 f"child_peak_vram={self.report.peak_vram_bytes / (1 << 30):.2f}GiB")
+        # pgw#1080: the fake-export footprint travels on the SAME line the hub
+        # already reads, so "the child held no weights" is an observation
+        # anyone can make from the wire instead of a claim in a design doc.
+        if self.report is not None and self.report.structure_only_components:
+            parts.append(
+                "structure_only="
+                + ",".join(self.report.structure_only_components))
+            parts.append(
+                f"virtual_weights={self.report.virtual_param_bytes / (1 << 30):.2f}GiB")
+            parts.append(
+                f"export_peak={self.report.export_peak_bytes / (1 << 20):.1f}MiB")
+            if self.report.warm_proof_values:
+                parts.append(
+                    f"warm_proof_values={self.report.warm_proof_values} "
+                    f"peak={self.report.warm_proof_peak_bytes / (1 << 20):.1f}MiB")
+        if self.report is not None and self.report.structure_refusal:
+            parts.append(
+                f"structure_refusal={self.report.structure_refusal[:200]!r}")
         if self.detail:
             parts.append(f"detail={self.detail[:400]!r}")
         return " ".join(parts)

@@ -1340,11 +1340,74 @@ MICRO_PAD32_BRANCHY = Vehicle(
 )
 
 
+# ---------------------------------------------------------------------------
+# micro-rope — pgw#1080's RED CONTROL, and the reason ie#628 widened the
+# meta-instantiation gate from `__init__` to CALL time.
+#
+# The denoiser's frequency table is upstream z-image's shape: a plain object
+# holding None, built on first use inside `with torch.device("cpu")`. The base
+# `micro` vehicle is the GREEN twin — ie#630's registered buffer, no device
+# pin — and it mints green in the same gauntlet. The pair is the control: a
+# gate that only ever fires, or only ever stays silent, has proved nothing.
+# ---------------------------------------------------------------------------
+
+
+def _micro_rope_cell() -> Any:
+    from gen_worker.registry import CompileCell
+
+    from micro_diffusion.aot_declaration_rope import COND_LEN, PIXEL_ROWS
+
+    return CompileCell(
+        shapes=PIXEL_ROWS, targets=("transformer",), family="micro-rope",
+        regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+        guidance_scales=(), text_lens=())
+
+
+_MICRO_ROPE_ADOPT = """
+import json, os, sys
+out = {"pid": os.getpid(), "ok": False,
+       "detail": "micro-rope is a REFUSAL vehicle: the mint never publishes a "
+                 "cell, so there is nothing to adopt"}
+print("RIG_ADOPT " + json.dumps(out))
+"""
+
+
+def _micro_rope_adopt_source(base: str, cache: Path, checkpoint: str) -> str:
+    return _MICRO_ROPE_ADOPT
+
+
+MICRO_ROPE = Vehicle(
+    name="micro-rope",
+    modules=(RUNTIME_HOOK, "micro_diffusion.main_rope"),
+    function="generate-rope",
+    family="micro-rope",
+    ref_path="cozy/micro-diffusion",
+    syspath=(str(MICRO_SRC),),
+    build_checkpoint=_micro_checkpoint,
+    checkpoint_bytes=_micro_checkpoint_bytes,
+    compile_cell=_micro_rope_cell,
+    adopt_source=_micro_rope_adopt_source,
+    expect="red",
+    expect_note=(
+        "the denoiser builds its table lazily under `with torch.device('cpu')`"
+        ". MEASURED 2026-08-10: inside a fake-mode export that allocation is "
+        "itself FAKE, so the MODE-based half of the gate cannot see it — the "
+        "residue can. The warm proof runs the handler for real, the lazy "
+        "build fires, and the child refuses naming "
+        "`transformer.rope.freqs_cis` and the authoring fix. The base "
+        "`micro` row is the green half of the same control"),
+    covers=("pgw#1080 / ie#628 RED CONTROL: upstream z-image's lazy "
+            "CPU-pinned rope table, transcribed. Clean __init__, violation "
+            "mid-forward. Green twin: the `micro` row, whose table is a "
+            "registered buffer (ie#630)"),
+)
+
+
 VEHICLES: Dict[str, Vehicle] = {
     v.name: v for v in (TINY, MICRO, MICRO_LORA, MICRO_LORA16,
                         MICRO_LORA_PLAIN_PARENT, MICRO_4D, MICRO_CONV,
                         MICRO_ESCAPE, MICRO_W8A8, MICRO_W8A8_LORA,
-                        MICRO_PAD32, MICRO_PAD32_BRANCHY)}
+                        MICRO_PAD32, MICRO_PAD32_BRANCHY, MICRO_ROPE)}
 DEFAULT_VEHICLE = TINY.name
 
 
@@ -1359,5 +1422,6 @@ def vehicle(name: str) -> Vehicle:
 __all__ = ["DEFAULT_VEHICLE", "MICRO", "MICRO_CONV", "MICRO_ESCAPE",
            "MICRO_LORA", "MICRO_LORA16", "MICRO_LORA16_BUCKET",
            "MICRO_LORA_BUCKET", "MICRO_4D", "MICRO_LORA_PLAIN_PARENT",
-           "MICRO_PAD32", "MICRO_PAD32_BRANCHY", "MICRO_W8A8",
+           "MICRO_PAD32", "MICRO_PAD32_BRANCHY", "MICRO_ROPE",
+           "MICRO_W8A8",
            "MICRO_W8A8_LORA", "TINY", "VEHICLES", "Vehicle", "vehicle"]
