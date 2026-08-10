@@ -5,10 +5,12 @@ synthesis. There is no PipelineLoader — callers own ``from_pretrained``.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .. import activity as activity_mod
 from ..component_vocab import (
@@ -29,7 +31,12 @@ from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
 from .tensor_layout_contract import CONTRACT_PLAIN_BF16, implements_contract
 from .fp8_storage import restructure_fp8_storage
-from .memory import get_available_vram_gb, meta_tensors, probe_host_ram
+from .memory import (
+    flush_memory,
+    get_available_vram_gb,
+    meta_tensors,
+    probe_host_ram,
+)
 from .safetensors_header import header_len_ok
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
 from .w4a4 import (
@@ -1584,6 +1591,203 @@ def _admit_component_staging(component: str, nbytes: int) -> None:
         )
 
 
+def modular_staging_units(
+    base: Path,
+    component_trees: Optional[Mapping[str, str]] = None,
+) -> Dict[str, int]:
+    """Bytes per INDEPENDENTLY STAGED unit of a modular snapshot.
+
+    :func:`hydrate_modular_pipeline` loads one component at a time from that
+    component's own source dir, so the unit of host-RAM staging is a
+    component dir — never the tree. This reads the same sources the hydration
+    loop will: each ``modular_model_index.json`` entry's subfolder under
+    ``base`` (falling back to the component name), and each override tree in
+    ``component_trees`` in place of the base dir it replaces.
+
+    Empty when the index is absent or unreadable: callers treat that as "no
+    per-component knowledge" and keep whole-tree accounting."""
+    index = Path(base) / "modular_model_index.json"
+    try:
+        entries = json.loads(index.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(entries, dict):
+        return {}
+    trees = dict(component_trees or {})
+    units: Dict[str, int] = {}
+    for name, entry in entries.items():
+        if str(name).startswith("_") or name in trees:
+            continue
+        sub = ""
+        if isinstance(entry, list) and len(entry) >= 3 and isinstance(entry[2], dict):
+            sub = str(entry[2].get("subfolder") or "")
+        src = None
+        for cand in (sub, str(name)):
+            if cand and (Path(base) / cand).is_dir():
+                src = Path(base) / cand
+                break
+        if src is None:
+            continue
+        units[str(name)] = disk_gc.tree_bytes(src)
+    for name, tree in trees.items():
+        root = Path(tree)
+        if not root.is_dir():
+            continue
+        units[f"{name} (override)"] = disk_gc.tree_bytes(
+            _resolve_override_tree(root, str(name)))
+    return units
+
+
+# The card must hold the tree with room to spare before hydration is allowed
+# to place components as they land. THREAT (§4.24): free VRAM is read once,
+# before the first component loads, and another tenant can take some of it
+# before the last one is placed — a `.to(device)` that OOMs mid-hydration
+# leaves a half-placed pipeline. This is the same 2 GB the placement ladder
+# holds back (`memory._DEFAULT_SAFETY_MARGIN_GB`); it is not a fudge factor
+# for estimate error, since these bytes are measured on disk, not estimated.
+_STREAMED_HYDRATION_VRAM_MARGIN_GB = 2.0
+
+
+@dataclass(frozen=True)
+class StreamedHydrationPlan:
+    """Whether a modular slot may hydrate component-by-component ONTO THE
+    DEVICE, so host RAM never holds more than one component at a time."""
+
+    engaged: bool
+    reason: str
+    tree_bytes: int
+    largest_unit_bytes: int
+    unit_count: int
+    host_total_bytes: int
+    device_free_bytes: int
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "engaged": self.engaged, "reason": self.reason,
+            "tree_bytes": self.tree_bytes,
+            "largest_unit_bytes": self.largest_unit_bytes,
+            "unit_count": self.unit_count,
+            "host_total_bytes": self.host_total_bytes,
+            "device_free_bytes": self.device_free_bytes,
+        }
+
+    def summary(self) -> str:
+        return (
+            f"tree={self.tree_bytes / _GIB:.1f}GiB "
+            f"largest_component={self.largest_unit_bytes / _GIB:.1f}GiB "
+            f"host_total={self.host_total_bytes / _GIB:.1f}GiB "
+            f"device_free={self.device_free_bytes / _GIB:.1f}GiB "
+            f"({self.reason})"
+        )
+
+
+def plan_streamed_hydration(
+    base: Path,
+    *,
+    component_trees: Optional[Mapping[str, str]] = None,
+    device_free_bytes: Optional[int] = None,
+) -> StreamedHydrationPlan:
+    """pgw#1026: decide whether this modular slot stages PER COMPONENT ONTO
+    THE DEVICE instead of staging its whole tree in host RAM first.
+
+    THREAT (§4.25): a tree the CARD holds but the HOST does not is refused
+    structurally at boot and no pod size fixes it — measured on ie#615's H3
+    bring-up, 134.1 GiB tree + the 8 GiB staging floor against 116.4 GiB of
+    host RAM on a 1x H100-80 pod, `HostRamCapacityError`. Host RAM binds
+    ~26 GiB tighter than VRAM there purely because staging is all-or-nothing
+    while the load is already component-sequential (pgw#1041).
+
+    THE OBSERVABLES, all measured rather than estimated:
+
+    1. the whole tree does NOT fit host RAM (bytes on disk vs
+       :func:`probe_host_ram`'s cgroup-aware total plus the gw#407 floor) —
+       otherwise nothing is wrong and the whole-tree path stands;
+    2. the LARGEST single component DOES fit host RAM — otherwise the
+       structural refusal is honest and must survive (no amount of
+       sequencing places a component that cannot be staged at all);
+    3. free VRAM holds the whole tree with :data:`
+       _STREAMED_HYDRATION_VRAM_MARGIN_GB` to spare — the components have to
+       go somewhere, and on this path that somewhere is the card.
+
+    Engaged only on all three. Every other answer keeps today's behaviour,
+    including the refusal, so this can only turn a refusal into a boot."""
+    units = modular_staging_units(Path(base), component_trees)
+    if device_free_bytes is None:
+        device_free_bytes = int(get_available_vram_gb() * _GIB)
+    return decide_streamed_hydration(
+        tree_bytes=sum(units.values()),
+        largest_unit_bytes=max(units.values(), default=0),
+        unit_count=len(units),
+        host_total_bytes=int(probe_host_ram().total_gb * _GIB),
+        device_free_bytes=int(device_free_bytes),
+    )
+
+
+def decide_streamed_hydration(
+    *,
+    tree_bytes: int,
+    largest_unit_bytes: int,
+    unit_count: int,
+    host_total_bytes: int,
+    device_free_bytes: int,
+) -> StreamedHydrationPlan:
+    """:func:`plan_streamed_hydration`'s decision, separated from its
+    measurements so the rule can be read — and tested — at the byte counts
+    that produced the issue rather than at whatever this host happens to
+    have."""
+    tree = int(tree_bytes)
+    largest = int(largest_unit_bytes)
+    host_total = int(host_total_bytes)
+    plan = functools.partial(
+        StreamedHydrationPlan, tree_bytes=tree, largest_unit_bytes=largest,
+        unit_count=int(unit_count), host_total_bytes=host_total,
+        device_free_bytes=int(device_free_bytes),
+    )
+    if unit_count <= 0 or largest <= 0:
+        return plan(engaged=False, reason="no per-component staging units")
+    if host_total <= 0:
+        return plan(engaged=False, reason="host RAM total unreadable")
+    floor = _staging_floor_bytes(host_total)
+    if tree + floor <= host_total:
+        return plan(engaged=False, reason="the whole tree fits host RAM")
+    if largest + floor > host_total:
+        return plan(
+            engaged=False,
+            reason="the largest component alone exceeds host RAM")
+    need = tree + int(_STREAMED_HYDRATION_VRAM_MARGIN_GB * _GIB)
+    if int(device_free_bytes) < need:
+        return plan(
+            engaged=False, reason="the device does not hold the whole tree")
+    return plan(
+        engaged=True,
+        reason="tree exceeds host RAM, largest component fits, device holds "
+               "the tree")
+
+
+def _place_and_release(pipe: Any, name: str, device: str) -> None:
+    """Move one just-hydrated component to ``device`` and drop the host copy.
+
+    This is what makes the per-component staging loop a per-component HIGH
+    WATER MARK rather than just an ordering: without it every hydrated
+    component stays in host RAM until placement, so the tree is resident on
+    the host by the last component either way."""
+    comp = getattr(pipe, name, None)
+    to = getattr(comp, "to", None)
+    if comp is None or not callable(to):
+        return
+    try:
+        to(device)
+    except Exception as exc:
+        raise ModularHydrationError(
+            f"per-component staging could not place component {name!r} on "
+            f"{device!r}: {type(exc).__name__}: {exc}. The tree does not fit "
+            f"host RAM, so there is no whole-tree path to fall back to — the "
+            f"device has to hold it."
+        ) from exc
+    del comp, to
+    flush_memory()
+
+
 def hydrate_modular_pipeline(
     pipe: Any,
     path: str | Path,
@@ -1591,6 +1795,7 @@ def hydrate_modular_pipeline(
     torch_dtype: Any = None,
     component_trees: Optional[Dict[str, str]] = None,
     preloaded: Optional[Dict[str, Any]] = None,
+    place_device: str = "",
 ) -> Dict[str, str]:
     """Hydrate a freshly constructed ``ModularPipeline`` from the LOCAL
     snapshot tree (pgw#1036).
@@ -1617,7 +1822,15 @@ def hydrate_modular_pipeline(
     Returns ``{component: source_path}`` for everything hydrated. The result
     is verified: ``load_components`` swallows load errors into a logger
     warning, so every requested component is re-checked non-``None`` and a
-    miss raises typed with the captured diffusers log text."""
+    miss raises typed with the captured diffusers log text.
+
+    ``place_device`` (pgw#1026) moves each component onto that device as it
+    lands and drops the host copy, so the host-RAM high-water mark is ONE
+    component instead of the tree. Set it from
+    :func:`plan_streamed_hydration`, never by hand: it is admissible only
+    when the card holds the whole tree, and a mid-hydration placement
+    failure is a typed refusal with no whole-tree path left to fall back
+    to."""
     base = Path(path)
     specs = dict(getattr(pipe, "_component_specs", None) or {})
     trees = dict(component_trees or {})
@@ -1728,6 +1941,11 @@ def hydrate_modular_pipeline(
                 if torch_dtype is not None:
                     kwargs["torch_dtype"] = torch_dtype
                 pipe.load_components(names=[n], **kwargs)
+                # pgw#1026: place it now and drop the host copy, so the next
+                # component's admission above sees the host RAM this one
+                # gave back rather than the tree accumulating behind it.
+                if place_device:
+                    _place_and_release(pipe, n, place_device)
                 disk_gc.reclaim_file_cache(comp_src)
         finally:
             dlog.removeHandler(handler)
@@ -1754,12 +1972,15 @@ def hydrate_modular_pipeline(
     except Exception:  # noqa: BLE001
         pass
     detail = " ".join(f"{n}<-{sources[n]}" for n in sorted(sources))
-    logger.info("modular hydration (%s): %s; skipped partitions: %s",
-                type(pipe).__name__, detail, skipped or "none")
+    logger.info("modular hydration (%s): %s; skipped partitions: %s%s",
+                type(pipe).__name__, detail, skipped or "none",
+                f"; staged per component onto {place_device}" if place_device
+                else "")
     activity_mod.emit_event(
         activity_mod.KIND_MODULAR_HYDRATION,
         f"pipeline={type(pipe).__name__} base={base} {detail}"
-        + (f" skipped={','.join(skipped)}" if skipped else ""),
+        + (f" skipped={','.join(skipped)}" if skipped else "")
+        + (f" place_device={place_device}" if place_device else ""),
         phase="hydrated",
     )
     return sources
@@ -2018,6 +2239,18 @@ def _load_modular_pipeline(
         # Same {"default": ..., part: ...} shape load_components' dict
         # routing understands (pgw#667 widened parts included).
         torch_dtype = per_component
+    # pgw#1026: a tree the card holds but the host does not stages ONE
+    # COMPONENT AT A TIME straight onto the device. Decided here, from the
+    # same measurements the executor's admission gate reads, so the two
+    # cannot disagree about which shape the load takes; if free VRAM moved
+    # between them the per-component gate inside hydration still refuses
+    # with the measured numbers rather than thrashing the host.
+    plan = plan_streamed_hydration(
+        Path(path), component_trees=component_trees)
+    if plan.engaged:
+        logger.info(
+            "modular slot stages per component onto the device: %s",
+            plan.summary())
     pipe = cls.from_pretrained(path)
     if not _is_modular_pipeline(pipe):
         raise ModularHydrationError(
@@ -2027,6 +2260,7 @@ def _load_modular_pipeline(
     hydrate_modular_pipeline(
         pipe, Path(path), torch_dtype=torch_dtype,
         component_trees=component_trees, preloaded=components,
+        place_device="cuda" if plan.engaged else "",
     )
     unmaterialized = meta_tensors(pipe)
     if unmaterialized:
@@ -2362,6 +2596,10 @@ __all__ = [
     "load_from_pretrained",
     "is_modular_pipeline_class",
     "hydrate_modular_pipeline",
+    "modular_staging_units",
+    "decide_streamed_hydration",
+    "plan_streamed_hydration",
+    "StreamedHydrationPlan",
     "ModularHydrationError",
     "ComponentSubstitutionError",
     "assert_composition_satisfiable",

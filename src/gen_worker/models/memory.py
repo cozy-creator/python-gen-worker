@@ -763,6 +763,15 @@ def select_auto_mode(
     ``peak_vram_gb`` is the endpoint's DECLARED per-request peak
     (``Resources.peak_vram_per_request_gb``, #339); when provided the fit
     requirement becomes ``max(model_gb, peak_vram_gb)``.
+
+    pgw#1025: every comparison against LIVE FREE VRAM uses the requirement
+    NET of what this pipeline already holds on the card. ``avail`` has
+    already been reduced by the gw#479 shared components resident on CUDA,
+    so comparing it against the pipeline's TOTAL weight bytes counts those
+    bytes twice — measured at ~7.85 GB for z-image and ~15.5 GB for
+    qwen-image, enough to push a second shared lane off the resident rung
+    entirely (and, under th#1107's ``strict_vram``, into a hard refusal).
+    The per-SKU refinement below keeps the GROSS requirement on purpose.
     """
     avail = available_vram_gb if available_vram_gb is not None else get_available_vram_gb()
     if avail <= 0.0:
@@ -773,6 +782,9 @@ def select_auto_mode(
     if peak_vram_gb is not None and peak_vram_gb > 0.0:
         requirement = max(model_gb, float(peak_vram_gb))
     margin = _DEFAULT_SAFETY_MARGIN_GB
+    # What is already ON the card: free VRAM has paid for it, so the
+    # incremental cost of placing this pipeline is the rest.
+    fit_requirement = max(0.0, requirement - estimate_cuda_resident_gb(pipeline))
 
     if requirement > 0.0:
         usable = max(0.0, avail - margin)
@@ -781,7 +793,7 @@ def select_auto_mode(
         # absolute low-free-VRAM rule group-offloaded pipelines the emergency
         # rung had just shrunk to fit, making the rung pointless on exactly
         # the cards it exists for.
-        if requirement <= usable:
+        if fit_requirement <= usable:
             # pgw#750: BOTH branches are RESIDENT — this refinement only
             # toggles VAE slicing, which changes the traced decode graph
             # class and hence the compiled object set a mint proves. Key it
@@ -792,7 +804,10 @@ def select_auto_mode(
             # FIT decisions above/below stay free-VRAM-based (safety); a
             # card that later runs tight degrades reactively down
             # OFFLOAD_LADDER instead of choosing a nondeterministic mint
-            # posture up front.
+            # posture up front. pgw#1025 does NOT touch this comparison: it
+            # is the GROSS requirement against a per-SKU constant, and
+            # netting out live residency here would restore exactly the
+            # nondeterminism pgw#750 removed.
             total = total_vram_gb if total_vram_gb is not None \
                 else get_total_vram_gb()
             if total > 0.0:
@@ -801,7 +816,9 @@ def select_auto_mode(
                 if (sku_usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
                     return "off"
                 return "vae_only"
-            if (usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
+            # No total-capacity probe: the only input left is live free VRAM,
+            # so this one takes the NET requirement like the fit test above.
+            if (usable - fit_requirement) >= _DEFAULT_OFF_HEADROOM_GB:
                 return "off"
             return "vae_only"
         # Doesn't fit: very low free VRAM needs the aggressive rung.
