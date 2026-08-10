@@ -42,9 +42,10 @@ re-arm publishing.** That is the guarantee: it is structural, not procedural.
 Why it matters: a probe runs code that is, by construction, not any released
 version and not any built image. Its mints are stamped with a `gen_worker`
 version read from dist-info — which rsync does not move, so it *lies* — and a
-`code_closure` cell-key axis no other pod can reproduce. A cell published from a
-probe into the shared family namespace is a cell that every later pod may adopt
-and none can explain.
+`code_closure` metadata memo no other pod can reproduce (pgw#990 took the
+closure out of the key; the honesty problem is unchanged). A cell published
+from a probe into the shared family namespace is a cell that every later pod
+may adopt and none can explain.
 
 Arming it is a second, separate decision:
 
@@ -106,10 +107,11 @@ running what it booted with. So edits to any of:
 need a **pod restart**, not a sync. The script says so on the way out rather
 than letting you chase a change that never loaded.
 
-One more consequence worth knowing: the `code_closure` cell-key axis is
-`lru_cache`d over source content, so within a live process your swap does not
-move any cell key — after the respawn it does. Two mints across a sync are two
-different cells by design.
+One more consequence worth knowing: the `code_closure` memo is `lru_cache`d
+over source content, so within a live process your swap does not move the
+recorded closure — after the respawn it does. (Since pgw#990/pgw#1059 the
+closure is a memo, never identity: a code edit changes the cell key only
+through the traced graph.)
 
 ## Terminating
 
