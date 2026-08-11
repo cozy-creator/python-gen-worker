@@ -30,8 +30,10 @@ from .registry import (
 from .repack_spec import ComponentRepack, DtypePolicy, RepackageFamily
 from .writer import (
     NEVER_SHARD_MAX_SIZE,
+    PICKLE_CACHE_DIR,
     ConversionImplementationError,
     assert_one_file_per_component,
+    materialize_pickle_to_safetensors,
 )
 
 if TYPE_CHECKING:
@@ -104,7 +106,7 @@ def _load_component_state_dict(
       downloads keep the suffix — e.g. diffusion_pytorch_model.fp16.safetensors
       in repo-cas mirrors cloned with a dtype preference)
 
-    Optional legacy fallback (unsafe for untrusted repos):
+    Legacy pickle fallback, through the package's ONE pickle reader:
     - <bin_base>.bin
     """
     for raw_base in safetensors_bases:
@@ -136,8 +138,19 @@ def _load_component_state_dict(
     if bin_base:
         bin_path = component_dir / f"{bin_base}.bin"
         if bin_path.exists():
-            torch_mod = _torch()
-            return cast(dict[str, Any], torch_mod.load(str(bin_path), map_location="cpu"))
+            # pgw#498: the clone lane feeds this ARBITRARY tenant-submitted
+            # repos, so a `.bin` here is an untrusted pickle and unpickling it
+            # is arbitrary code execution inside a pod holding hub credentials
+            # and other tenants' work (cozy_snapshot.py:285-292). This used to
+            # be a bare `torch.load(path, map_location="cpu")`. Its safety then
+            # rested entirely on torch's 2.6 `weights_only` DEFAULT, which
+            # `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` in the pod env flips back
+            # for exactly the call sites that did not pass the argument
+            # (torch/serialization.py:1496 — "can only override if callsite did
+            # not explicitly set weights_only"). One pickle reader, one
+            # implementation, and it passes `weights_only=True` explicitly.
+            return _st_load(materialize_pickle_to_safetensors(
+                bin_path, component_dir / PICKLE_CACHE_DIR))
     raise FileNotFoundError(f"missing weights for {component_dir.name}")
 
 

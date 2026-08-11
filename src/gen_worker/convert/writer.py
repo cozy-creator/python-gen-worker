@@ -249,14 +249,37 @@ def _weight_component_dirs() -> frozenset[str]:
     return frozenset(weight_components())
 
 
+#: Where a converted pickle is staged, beside the component it came from.
+#: One spelling, because there is one pickle reader (pgw#498).
+PICKLE_CACHE_DIR = ".__pickle_cache__"
+
+
 def materialize_pickle_to_safetensors(pickle_path: Path, work_dir: Path) -> Path:
-    """Convert a pickle weight file to safetensors (``weights_only=True``)."""
+    """Convert a pickle weight file to safetensors (``weights_only=True``).
+
+    **The only pickle reader in this package** (pgw#498). Conversion ingests
+    ARBITRARY tenant-submitted repos, so every ``.bin``/``.ckpt`` reaching this
+    process is untrusted bytes; ``weights_only=True`` is passed EXPLICITLY and
+    never left to torch's default, which ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD``
+    in the pod environment silently flips back for any call site that omitted
+    the argument.
+    """
     import torch
     from safetensors.torch import save_file
 
     try:
         state = torch.load(str(pickle_path), map_location="cpu", weights_only=True)
     except Exception as exc:
+        # A checkpoint the SAFE unpickler cannot read is a checkpoint whose
+        # bytes ask to construct something other than tensors. That is the
+        # refusal this vocabulary exists for; there is no permissive retry.
+        if "weights only" in str(exc).lower() or type(exc).__name__ == "UnpicklingError":
+            raise ConversionImplementationError(
+                f"unsafe_weight_format:{pickle_path.name}: the file only loads "
+                f"with unpickling enabled, which executes arbitrary code in "
+                f"this pod. Republish it as safetensors. "
+                f"({type(exc).__name__}: {str(exc)[:200]})"
+            ) from exc
         raise ConversionImplementationError(
             f"pickle_load_failed: {type(exc).__name__}: {str(exc)[:200]}"
         ) from exc
@@ -301,7 +324,7 @@ def iter_component_tensors(component_dir: Path) -> Iterator[tuple[str, "torch.Te
             found = sorted(component_dir.glob(f"*{ext}"))
             if found:
                 entry = materialize_pickle_to_safetensors(
-                    found[0], component_dir / ".__pickle_cache__")
+                    found[0], component_dir / PICKLE_CACHE_DIR)
                 break
     if entry is None:
         return

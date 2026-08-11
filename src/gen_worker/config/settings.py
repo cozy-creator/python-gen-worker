@@ -159,7 +159,12 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # mounts) — and takes precedence over *_PATH. Chain = leaf first.
     # th#1307: there is NO key field. The PRIVATE KEY never reaches a pod;
     # the hub signs claims over POST /v1/worker/c2pa/sign. A pod that finds
-    # GEN_WORKER_C2PA_KEY_PEM/_KEY_PATH in its env refuses to start.
+    # GEN_WORKER_C2PA_KEY_PEM/_KEY_PATH in ANY config source refuses to start
+    # — env via content_credentials._refuse_pod_private_key_material (a
+    # ratchet, re-checked at every read of the signing state), and .env /
+    # /run/secrets / yaml via loader.REFUSED_KEY_MATERIAL (pgw#884: this
+    # sentence used to say "in its env", and a PEM mounted at
+    # /run/secrets/GEN_WORKER_C2PA_KEY_PEM booted green).
     c2pa_cert_pem: str = ""   # GEN_WORKER_C2PA_CERT_PEM (inline PEM chain)
     c2pa_cert_path: str = ""  # GEN_WORKER_C2PA_CERT_PATH
     c2pa_alg: str = "es256"   # GEN_WORKER_C2PA_ALG (COSE alg matching the cert key)
