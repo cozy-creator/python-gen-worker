@@ -93,7 +93,7 @@ class StageTimer:
     """
 
     __slots__ = (
-        "_lock", "_local", "_totals", "_intervals", "_pre",
+        "_lock", "_local", "_totals", "_intervals", "_pre", "_phases",
         "_steps", "_handler_start", "_handler_end", "_truncated",
     )
 
@@ -103,6 +103,9 @@ class StageTimer:
         self._totals: Dict[str, float] = {}
         self._intervals: List[Tuple[str, float, float]] = []
         self._pre: Dict[str, float] = {}
+        # (stage, phase) -> seconds. Reported as `stage.phase`, NEVER part of
+        # the exclusive-accounting sum — see :meth:`record_phase`.
+        self._phases: Dict[Tuple[str, str], float] = {}
         # stage name -> [(step_index, monotonic_at_step_end), ...]
         self._steps: Dict[str, List[Tuple[int, float]]] = {}
         self._handler_start: Optional[float] = None
@@ -128,6 +131,31 @@ class StageTimer:
             return
         with self._lock:
             self._pre[name] = self._pre.get(name, 0.0) + float(seconds)
+
+    def record_phase(self, stage: str, phase: str, seconds: float) -> None:
+        """Record a SUB-PHASE of ``stage``, reported as ``stage.phase``.
+
+        pgw#1125 / th#1795: ``upload`` is one bracket around a three-leg
+        protocol (create session -> PUT parts to the object store -> complete),
+        and it is the largest measured term in a fast request's round trip
+        (2587 ms of a 2623 ms finalize tail). Which leg owns it decides which
+        fix is worth building, and today that split is inference.
+
+        Sub-phases are reported in the DOTTED namespace deliberately. Stage
+        totals are exclusive and reconcile against ``total.handler``; nesting
+        real stages inside ``upload`` would keep that invariant but would also
+        redefine ``upload`` itself to mean "upload minus its legs", silently
+        breaking continuity with every number already measured against it.
+        A dotted key is a rollup like ``denoise.step_mean``: reported, never
+        summed, and skipped by :func:`reconciliation`.
+        """
+        stage = _stage_name(stage)
+        phase = _stage_name(phase)
+        if not stage or not phase or seconds <= 0:
+            return
+        key = (stage, phase)
+        with self._lock:
+            self._phases[key] = self._phases.get(key, 0.0) + float(seconds)
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
@@ -185,6 +213,7 @@ class StageTimer:
             totals = dict(self._totals)
             intervals = list(self._intervals)
             pre = dict(self._pre)
+            phases = dict(self._phases)
             steps = {k: list(v) for k, v in self._steps.items()}
             start = handler_start if handler_start is not None else self._handler_start
             end = handler_end if handler_end is not None else self._handler_end
@@ -193,6 +222,8 @@ class StageTimer:
         out: Dict[str, int] = {}
         for name, seconds in pre.items():
             out[name] = _ms(seconds)
+        for (stage, phase), seconds in phases.items():
+            out[stage + "." + phase] = _ms(seconds)
         if start is None:
             return out
         if end is None:
@@ -368,6 +399,15 @@ def stage_of(ctx: object, name: str) -> Iterator[None]:
         yield
 
 
+def record_phase_of(ctx: object, stage: str, phase: str, seconds: float) -> None:
+    """Record a sub-phase on ``ctx``'s timer; a no-op for contexts that carry
+    none (CLI dispatch, endpoint unit tests with a stub context)."""
+    timer = getattr(ctx, "_stages", None)
+    if not isinstance(timer, StageTimer):
+        return
+    timer.record_phase(stage, phase, seconds)
+
+
 def _stage_name(name: str) -> str:
     """Endpoint-supplied stage names share one flat map with the derived
     rollups, so ``.`` (the namespace separator for ``total.``/``class.``/
@@ -382,6 +422,7 @@ def _ms(seconds: float) -> int:
 __all__ = [
     "StageTimer",
     "stage_of",
+    "record_phase_of",
     "stage_ms_for_metrics",
     "reconciliation",
     "PRE_HANDLER_STAGES",

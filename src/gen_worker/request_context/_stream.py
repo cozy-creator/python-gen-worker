@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 from ..api.errors import CanceledError
 from ..api.types import Asset, Tensors
-from ..stage_timing import stage_of
+from ..stage_timing import record_phase_of, stage_of
 from ._helpers import _enforce_output_file_size_limit, _infer_mime_type, _infer_tensors_format, _normalize_output_ref
 
 if TYPE_CHECKING:
@@ -442,6 +442,12 @@ class _RequestOutputStream:
                 self._chunks_uploaded = parts_done
             self._maybe_emit_progress(stage="stream_upload")
 
+        def _phase_cb(phase: str, seconds: float) -> None:
+            # th#1795: `upload` is one bracket around create -> PUT ->
+            # complete and it is 98.6% of the finalize tail. Report the legs
+            # separately so the fix is aimed by measurement.
+            record_phase_of(self._ctx, "upload", phase, seconds)
+
         result = presigned_upload_file(
             file_path=self._tmp_path,
             base_url=base,
@@ -453,6 +459,7 @@ class _RequestOutputStream:
             on_progress=_progress_cb,
             cancel_check=lambda: self._ctx.cancelled,
             complete_extra=None,
+            on_phase=_phase_cb,
         )
 
         # Issue #269: sample peak RSS to verify the streaming refactor is

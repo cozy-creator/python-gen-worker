@@ -213,6 +213,27 @@ def blake3_hash_file(path: str | Path, chunk_size: int = STREAM_CHUNK_BYTES) -> 
     return h.hexdigest()
 
 
+@contextmanager
+def _phase(on_phase: Optional[Any], name: str) -> Iterator[None]:
+    """Time one leg of the three-leg protocol and hand it to ``on_phase``.
+
+    pgw#1125 / th#1795: ``stage_ms.upload`` is ONE bracket around create ->
+    PUT -> complete, and it is 98.6% of a fast request's finalize tail. The
+    split across the three legs decides which fix is worth building, so it has
+    to be measured rather than budgeted. The callback fires on the way out of
+    the leg, failure included — a leg that raised still cost its time.
+    """
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        if on_phase is not None:
+            try:
+                on_phase(name, max(0.0, time.monotonic() - started))
+            except Exception:  # a metric may never break an upload
+                logger.debug("upload phase callback failed for %s", name, exc_info=True)
+
+
 class PresignedUploadResult:
     """Result of a presigned upload."""
 
@@ -235,6 +256,7 @@ def presigned_upload_file(
     on_progress: Optional[Any] = None,
     cancel_check: Optional[Any] = None,
     complete_extra: Optional[Dict[str, Any]] = None,
+    on_phase: Optional[Any] = None,
 ) -> PresignedUploadResult:
     """Upload a file to TensorHub.
 
@@ -248,6 +270,10 @@ def presigned_upload_file(
         size_bytes: File size in bytes.
         on_progress: Optional callback(parts_done, total_parts, bytes_uploaded).
         cancel_check: Optional callable that returns True if canceled.
+        on_phase: Optional callback(phase_name, seconds) invoked as each leg
+            of the protocol finishes — "create", "put", "complete". th#1795:
+            without it ``stage_ms.upload`` is one opaque number and every
+            attribution inside it is a guess.
         complete_extra: Optional extra fields merged into the /complete POST
             body (after the `parts` array). NOTE (gw#401/th#606): tensorhub's
             per-file /complete is parts-only and does NOT persist lineage
@@ -269,6 +295,7 @@ def presigned_upload_file(
             on_progress=on_progress,
             cancel_check=cancel_check,
             complete_extra=complete_extra,
+            on_phase=on_phase,
             session=session,
             put_pool=put_pool,
         )
@@ -288,6 +315,7 @@ def _presigned_upload_file_scoped(
     complete_extra: Optional[Dict[str, Any]],
     session: requests.Session,
     put_pool: PutPool,
+    on_phase: Optional[Any] = None,
 ) -> PresignedUploadResult:
     url = f"{base_url}{endpoint_path}"
 
@@ -300,7 +328,8 @@ def _presigned_upload_file_scoped(
     create_headers["Content-Type"] = "application/json"
 
     try:
-        resp = session.post(url, headers=create_headers, data=json.dumps(payload), timeout=_CREATE_TIMEOUT_S)
+        with _phase(on_phase, "create"):
+            resp = session.post(url, headers=create_headers, data=json.dumps(payload), timeout=_CREATE_TIMEOUT_S)
     except requests.RequestException as e:
         raise ArtifactTransferError(
             f"tensorhub upload create request failed: {e}",
@@ -366,13 +395,14 @@ def _presigned_upload_file_scoped(
         from .s3_transfer import S3TransferGrant, upload_file_with_grant
 
         grant = S3TransferGrant.from_mapping(transfer_grant)
-        sdk_result = upload_file_with_grant(
-            file_path=file_path,
-            grant=grant,
-            blake3_hex=blake3_hex,
-            size_bytes=size_bytes,
-            on_progress=on_progress,
-        )
+        with _phase(on_phase, "put"):
+            sdk_result = upload_file_with_grant(
+                file_path=file_path,
+                grant=grant,
+                blake3_hex=blake3_hex,
+                size_bytes=size_bytes,
+                on_progress=on_progress,
+            )
         complete_payload: Dict[str, Any] = {
             "transfer": {
                 "mode": "s3_sdk",
@@ -387,13 +417,14 @@ def _presigned_upload_file_scoped(
             for k, v in complete_extra.items():
                 if v is not None and k != "transfer":
                     complete_payload[k] = v
-        result_meta = _complete_upload_session(
-            complete_url=f"{url}/{upload_id}/complete",
-            headers=headers,
-            payload=complete_payload,
-            cancel_check=cancel_check,
-            session=session,
-        )
+        with _phase(on_phase, "complete"):
+            result_meta = _complete_upload_session(
+                complete_url=f"{url}/{upload_id}/complete",
+                headers=headers,
+                payload=complete_payload,
+                cancel_check=cancel_check,
+                session=session,
+            )
         return PresignedUploadResult(meta=result_meta, dedup=False)
 
     if _is_tensorhub_model_weight_upload(endpoint_path):
@@ -421,15 +452,16 @@ def _presigned_upload_file_scoped(
     abort_url = f"{url}/{session_id}"
 
     try:
-        etags = _upload_parts_to_s3(
-            file_path=str(file_path),
-            part_urls=part_urls,
-            part_size=part_size,
-            total_parts=total_parts,
-            on_progress=on_progress,
-            cancel_check=cancel_check,
-            put_pool=put_pool,
-        )
+        with _phase(on_phase, "put"):
+            etags = _upload_parts_to_s3(
+                file_path=str(file_path),
+                part_urls=part_urls,
+                part_size=part_size,
+                total_parts=total_parts,
+                on_progress=on_progress,
+                cancel_check=cancel_check,
+                put_pool=put_pool,
+            )
     except BaseException:
         # Abort the multipart upload on failure.
         try:
@@ -452,13 +484,14 @@ def _presigned_upload_file_scoped(
             if k == "parts":
                 continue
             complete_payload[k] = v
-    result_meta = _complete_upload_session(
-        complete_url=complete_url,
-        headers=headers,
-        payload=complete_payload,
-        cancel_check=cancel_check,
-        session=session,
-    )
+    with _phase(on_phase, "complete"):
+        result_meta = _complete_upload_session(
+            complete_url=complete_url,
+            headers=headers,
+            payload=complete_payload,
+            cancel_check=cancel_check,
+            session=session,
+        )
     return PresignedUploadResult(meta=result_meta, dedup=False)
 
 
