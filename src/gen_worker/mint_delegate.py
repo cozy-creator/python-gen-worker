@@ -33,11 +33,12 @@ import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from . import activity as activity_mod
 from . import aot_resume
 from . import boot_phases
+from . import compile_posture
 from . import mint_budget
 from . import mint_process
 from . import progress as progress_mod
@@ -89,6 +90,11 @@ class MintTask:
     execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     device: Optional[int] = None
+    #: §4.30 / pgw#1137: whose machine this mint will run on. DECLARED here by
+    #: the caller rather than read off a process global, so the one entry that
+    #: knows (``local_serve``) states it and every other caller gets ``FLEET``
+    #: by construction — there is no ambient value to forget to set.
+    posture: compile_posture.CompilePosture = compile_posture.FLEET
 
 
 @dataclass(frozen=True)
@@ -316,6 +322,7 @@ def build_request(
         vram_cap_bytes=int(cap_bytes),
         execution_lane=task.execution_lane,
         configs={k: dict(v) for k, v in task.configs.items()},
+        posture=task.posture,
     )
 
 
@@ -335,7 +342,7 @@ def _pool_stat(phases: Any, key: str) -> int:
         return 0
 
 
-def _on_frame(act: Any) -> Any:
+def _on_frame(act: Any, watch: Optional[Watcher] = None) -> Any:
     def _apply(frame: mint_process.MintFrame) -> None:
         # No new protocol: the child's phase lands on the SAME
         # self_mint_compile activity the hub already reads, and ships on the
@@ -345,6 +352,12 @@ def _on_frame(act: Any) -> Any:
             act.phase(frame.phase, frame.step, frame.total)
         if frame.note:
             act.note(frame.note[:200])
+        # pgw#1137: ...and, on a machine with a person at it, onto that
+        # person's terminal. The activity above is addressed to the HUB, and
+        # cozy-local has no hub — so on a desktop every frame of a 20-minute
+        # compile went nowhere a user could see it.
+        if watch is not None:
+            watch(frame)
 
     return _apply
 
@@ -382,12 +395,20 @@ def _on_evidence(act: Any) -> Any:
     return _apply
 
 
+#: pgw#1137: a sink for the child's progress frames that is NOT the hub. The
+#: fleet passes nothing and behaves exactly as before; ``local_serve`` passes a
+#: terminal renderer, because a 20-minute compile a user cannot see is a
+#: support ticket regardless of how correct it is.
+Watcher = Callable[[mint_process.MintFrame], None]
+
+
 async def build_cell(
     task: MintTask,
     *,
     act: Any,
     abandon: Any = None,
     max_attempts: int = mint_process.MAX_ATTEMPTS,
+    watch: Optional[Watcher] = None,
 ) -> DelegatedResult:
     """Build and adopt one cell in a child process. Never raises for a mint
     failure — the worker must never die with its mint."""
@@ -444,7 +465,7 @@ async def build_cell(
                     family, task.weight_lane))
             act.phase(activity_mod.PHASE_LOAD)
             outcome = await mint_process.run_mint(
-                request, workdir=workdir, on_frame=_on_frame(act),
+                request, workdir=workdir, on_frame=_on_frame(act, watch),
                 on_evidence=_on_evidence(act), abandon=abandon)
             last = outcome.detail
 

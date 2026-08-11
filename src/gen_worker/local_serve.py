@@ -38,16 +38,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from . import activity as activity_mod
+from . import aot_compile_pool
 from . import compile_cache as cc
-from . import fleet_cells, mint_delegate
-from .mint_process import MintSlot
+from . import compile_posture, fleet_cells, local_cell_store, mint_delegate
+from .mint_process import MintFrame, MintSlot
 
 logger = logging.getLogger(__name__)
+
+#: Seconds between progress lines while a compile runs. A mint is minutes-to-
+#: an-hour of work, so a line a second would be noise and a line a minute
+#: would read as a hang. Ten is the same cadence the fleet's own beat uses.
+NOTICE_INTERVAL_S = 10.0
 
 
 @dataclass(frozen=True)
@@ -123,6 +131,95 @@ def enable_compiled(
     return _mint_here(pipe, pending, mint)
 
 
+def _say(line: str) -> None:
+    """One line to the person at the keyboard.
+
+    ``print`` to stderr and not ``logger``: the CLI configures logging for the
+    endpoint's own output, a mint runs before any of that matters, and every
+    existing progress signal on this path already goes somewhere a user does
+    not look (an activity addressed to a hub that cozy-local does not have, or
+    a ``logger.info`` inside a subprocess).
+    """
+    print(f"cozy: {line}", file=sys.stderr, flush=True)
+
+
+def compile_notice(
+    family: str, posture: compile_posture.CompilePosture,
+    *, cpu: Optional[aot_compile_pool.CpuFacts] = None,
+    store_root: Optional[Path] = None,
+) -> str:
+    """What a user is told BEFORE a compile starts — §4.30's honesty half.
+
+    It has to answer four questions a support ticket would otherwise ask:
+    *what is happening*, *will it happen again*, *what is it costing me right
+    now*, and *may I stop it*. The cost figures are this machine's own
+    (``cpu_facts`` reads the same cgroup/affinity/host triple the pool does),
+    and they are stated as a CEILING because the mint child narrows further on
+    memory and VRAM — overstating what we took would be the same defect as
+    saying nothing.
+    """
+    facts = cpu if cpu is not None else aot_compile_pool.cpu_facts()
+    vcpus = max(1, int(facts.vcpus))
+    cores = max(
+        1, posture.cpu_budget_cores(
+            vcpus, headroom=aot_compile_pool.SERVING_HEADROOM_CPUS))
+    workers = posture.entry_ceiling(aot_compile_pool.MAX_ENTRY_WORKERS)
+    root = store_root if store_root is not None else local_cell_store.store_root()
+    reserve = posture.rss_reserve_bytes(
+        aot_compile_pool.ENTRY_RSS_RESERVE_BYTES) // 1024**3
+    return (
+        f"compiling {family} for this machine — this happens ONCE; every "
+        f"later run of this endpoint arms from {root} with no compile and no "
+        f"network. It takes a while.\n"
+        f"      This is your machine, so the compile is polite: lowest CPU "
+        f"priority (nice {posture.nice_level()}), at most {workers} parallel "
+        f"worker(s) sized against {cores} of your {vcpus} cores, and "
+        f"{reserve} GiB of RAM left alone.\n"
+        f"      Ctrl-C is safe — finished work is kept and the next run "
+        f"picks up where this one stopped."
+    )
+
+
+class _Progress:
+    """Renders the child's frames onto the user's terminal, throttled.
+
+    Deliberately a throttle on TIME and not on frame count: the frames arrive
+    at wildly different rates (one per export, one per compiled entry, then
+    silence through a single long link step), and a user watching a machine
+    they can no longer type on needs a steady "still working" cadence, not a
+    burst followed by nothing.
+    """
+
+    def __init__(
+        self, family: str, *, say: Any = _say,
+        interval_s: float = NOTICE_INTERVAL_S, clock: Any = time.monotonic,
+    ) -> None:
+        self.family = family
+        self.say = say
+        self.interval_s = float(interval_s)
+        self.clock = clock
+        self.started = clock()
+        self._last: Optional[float] = None
+        self.lines = 0
+
+    def elapsed(self) -> str:
+        secs = int(max(0.0, self.clock() - self.started))
+        return f"{secs // 60}m{secs % 60:02d}s"
+
+    def __call__(self, frame: MintFrame) -> None:
+        now = self.clock()
+        if self._last is not None and now - self._last < self.interval_s:
+            return
+        self._last = now
+        step = (
+            f" {frame.step}/{frame.total}"
+            if frame.total > 0 else "")
+        self.say(
+            f"[{self.family}] {frame.phase or 'compiling'}{step} — "
+            f"{self.elapsed()} elapsed")
+        self.lines += 1
+
+
 def _mint_here(
     pipe: Any, pending: "fleet_cells.PendingSelfMint", mint: LocalMintContext,
 ) -> bool:
@@ -130,12 +227,22 @@ def _mint_here(
 
     Identical to the executor's ``_delegated_mint_run`` in everything that
     decides correctness — same ``build_cell``, same child, same
-    ``adopt_delegated_mint`` gate — and different in the two things a desktop
+    ``adopt_delegated_mint`` gate — and different in the three things a desktop
     does not have: there is no serving loop to keep beating (this call is the
-    boot, and it blocks), and there is nowhere to publish, so the obligation
-    ends at ``keep_self_mint_local`` instead of at the publish gate.
+    boot, and it blocks), there is nowhere to publish, so the obligation ends
+    at ``keep_self_mint_local`` instead of at the publish gate, and there is a
+    PERSON on the machine — so §4.30's posture is declared here, and what the
+    compile is doing to their computer is said out loud (pgw#1137).
     """
     result: Optional[mint_delegate.DelegatedResult] = None
+    family = str(pending.family)
+    # §4.30 / pgw#1137: the ONE site in the tree that declares a user-machine
+    # posture. It is stated here, not derived from `publisher is None` or from
+    # `local_cell_store.trust_class()` — both are facts about the SINK, and a
+    # community-cloud pod matches them while having no human on it.
+    posture = compile_posture.USER_MACHINE
+    _say(compile_notice(family, posture))
+    watch = _Progress(family)
     with activity_mod.running(activity_mod.KIND_SELF_MINT_COMPILE) as act:
         try:
             result = _drive(mint_delegate.build_cell(
@@ -150,12 +257,22 @@ def _mint_here(
                     # its next boot is what this mint stamps (pgw#686).
                     weight_lane=cc.cell_base_execution_lane(pipe),
                     device=mint.device,
+                    posture=posture,
                 ),
-                act=act))
+                act=act, watch=watch))
         except Exception as exc:  # noqa: BLE001 — a mint must never kill a serve
             logger.warning(
                 "local-serve: the mint for %s failed (%s: %s); serving eager "
                 "and keeping nothing", pending.family, type(exc).__name__, exc)
+    if result is not None and result.ok:
+        _say(
+            f"compiled {family} in {watch.elapsed()} — kept at "
+            f"{local_cell_store.store_root()}; later runs arm from it.")
+    else:
+        _say(
+            f"{family} is not compiled on this machine ({watch.elapsed()} "
+            f"spent); serving eager. Finished compile work, if any, is kept "
+            f"for the next run.")
     if result is not None and result.ok:
         # The cell is ALREADY in this machine's store — `adopt_delegated_mint`
         # put it there before any publish could be attempted, which is what
@@ -239,5 +356,6 @@ def slot_map(
 
 
 __all__ = [
-    "LocalMintContext", "enable_compiled", "mint_context", "slot_map",
+    "LocalMintContext", "compile_notice", "enable_compiled", "mint_context",
+    "slot_map",
 ]

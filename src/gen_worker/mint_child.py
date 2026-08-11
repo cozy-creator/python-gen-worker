@@ -69,7 +69,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import warm_spans, worker_goals
+from . import compile_posture, warm_spans, worker_goals
 from .api.errors import ValidationError
 from .api.export_contract import (
     blocker_refusal, export_declaration, open_blockers)
@@ -1182,6 +1182,69 @@ def _install_goals() -> None:
         goals.serve, goals.mint, goals.declared, goals.declaration_understood)
 
 
+def _install_posture(request: MintRequest) -> None:
+    """Adopt the posture the parent DECLARED, and act on it — §4.30.
+
+    Three things happen here and they all belong at this one point, before a
+    single graph is exported:
+
+    **1. Publish it**, so ``aot_compile_pool.entry_workers`` — three frames
+    down, in this process — sizes K against it. Same carrier and same single
+    moment as :func:`_install_goals`.
+
+    **2. Drop this process's scheduling priority**, which is the whole of the
+    CPU half of politeness. It is done HERE, by the child to itself, and NOT
+    with a ``preexec_fn`` on the spawn, for the reason
+    ``aot_compile_pool.arm_parent_death_signal`` already writes down: a
+    ``preexec_fn`` forces ``fork()`` instead of ``posix_spawn()`` for a process
+    that has live gRPC threads with ``pthread_atfork`` handlers, which is a
+    large blast radius for a one-line guarantee.
+
+    Doing it here also covers strictly more ground than nicing the entry-pool
+    spawns would. Since pgw#1080 every production mint is weight-free, and
+    ``aot_mint._mint_cell`` forces ``parallel=False`` for a weight-free mint —
+    so the pool spawns NO children at all today and the compile runs in THIS
+    process. Nice is inherited across ``fork``/``exec``, so this one call
+    covers the serial compile, the entry children when parallelism returns
+    (pgw#1111), inductor's own compile workers, and every ``cc1plus`` under
+    them.
+
+    **3. Arm ``PR_SET_PDEATHSIG``** on a user's machine. ``mint_process`` spawns
+    this child with ``start_new_session=True``, so it holds its OWN session and
+    a terminal's Ctrl-C or SIGHUP never reaches it. On a pod that is correct —
+    the parent reaps the group deliberately when it abandons a mint. On a
+    desktop the "parent" is a CLI that a human closes, and without this a
+    closed terminal leaves a full-speed compile tree running with nobody left
+    to reap it: the exact "my machine is at a crawl and I don't know why"
+    support ticket politeness exists to prevent. Nothing is lost by dying —
+    ``MintRequest.resume`` points at ``aot_resume``'s cross-attempt bank, which
+    lives outside the per-attempt workdir precisely so finished entries survive
+    into the next run.
+
+    Never fatal. A kernel that refuses either call leaves a mint that is rude
+    rather than no mint at all, and says so.
+    """
+    posture = request.posture
+    compile_posture.install(posture)
+    if not posture.user_machine:
+        return
+    from .aot_compile_pool import arm_parent_death_signal
+
+    level = posture.nice_level()
+    applied = -1
+    try:
+        applied = os.nice(level)
+    except (OSError, AttributeError):
+        logger.warning(
+            "mint-child: could not lower this mint's scheduling priority "
+            "(nice %d) — it will compile at ordinary priority on a machine "
+            "someone is using", level, exc_info=True)
+    reaped = arm_parent_death_signal()
+    logger.info(
+        "mint-child: §4.30 user-machine posture — nice %d (now %d), "
+        "dies-with-parent=%s", level, applied, reaped)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(
@@ -1200,6 +1263,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_BAD_REQUEST
 
     _install_goals()
+    _install_posture(request)
     report_path = Path(request.report)
     started = time.monotonic()
     try:

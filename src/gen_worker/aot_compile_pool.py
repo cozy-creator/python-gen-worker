@@ -67,7 +67,9 @@ import msgspec
 from . import aot_shape_hints
 
 from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
-from . import mint_budget, worker_goals
+from . import compile_posture, mint_budget, worker_goals
+from .compile_posture import (
+    USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
 from .worker_goals import WorkerGoals
 from .postmortem import cpu_quota_cores
 import hashlib
@@ -481,6 +483,11 @@ class PoolWidth:
     #: exact case Paul's ruling requires to work.
     serve_goal: bool = True
     mint_goal: bool = False
+    #: §4.30 / pgw#1137: whose MACHINE this is. Distinct from the goals above,
+    #: which say what the pod was bought to do — a K held down for a human at
+    #: a keyboard and a K held down for a tenant are different decisions and a
+    #: reader must be able to tell them apart. ``FLEET`` on every pod.
+    posture: CompilePosture = compile_posture.FLEET
 
     @property
     def underwidth(self) -> int:
@@ -510,6 +517,7 @@ class PoolWidth:
             "serve_goal": bool(self.serve_goal),
             "mint_goal": bool(self.mint_goal),
             "width_reason": self.reason,
+            **self.posture.facts(),
         }
         for block in (self.cpu, self.memory, self.device):
             if block is not None:
@@ -716,6 +724,7 @@ def entry_workers(
     limit: int = 0,
     device_lock: Optional[bool] = None,
     goals: Optional[WorkerGoals] = None,
+    posture: Optional[CompilePosture] = None,
 ) -> PoolWidth:
     """How many entries this pod may compile at once.
 
@@ -746,10 +755,22 @@ def entry_workers(
     the constraint that actually bound. K is the mint's only multiplicative
     lever — two mints of one cell differed 5-vs-3 with nothing recorded to
     say why — so an unexplained K is a defect in itself.
+
+    §4.30 / pgw#1137: two of the three bounds are ALSO posture-aware. The
+    ``goals`` above answer *"is there a tenant"*; ``posture`` answers *"is
+    there a human"*, and on a user's own desktop the CPU budget is halved and
+    the host-RAM reserve is doubled (:mod:`gen_worker.compile_posture` holds
+    the derivation for both). The DEVICE bound is untouched — a desktop GPU is
+    not shared with anyone the way its CPU and RAM are, and narrowing a bound
+    that already refuses to guess would only make first mints serial. The
+    default posture is ``FLEET``, so a pod's width is byte-identical to what it
+    was before this parameter existed.
     """
     entries = max(0, int(entries))
     if goals is None:
         goals = worker_goals.current()
+    if posture is None:
+        posture = compile_posture.current()
     # pgw#930 (§1.17): THREE of this policy's terms are tenant reserves, and a
     # pod with no SERVE goal has no tenant. `SERVING_HEADROOM_CPUS` keeps cores
     # for an eager forward and a heartbeat; `DEVICE_RESERVE_BYTES` keeps VRAM
@@ -770,7 +791,8 @@ def entry_workers(
     reserve = goals.tenant_reserve_applies()
     cpu_headroom = SERVING_HEADROOM_CPUS if reserve else 0
     device_reserve = DEVICE_RESERVE_BYTES if reserve else 0
-    rss_reserve = ENTRY_RSS_RESERVE_BYTES if reserve else FORGE_RSS_RESERVE_BYTES
+    rss_reserve = posture.rss_reserve_bytes(
+        ENTRY_RSS_RESERVE_BYTES if reserve else FORGE_RSS_RESERVE_BYTES)
     locked = aot_device_lock.supported() if device_lock is None \
         else bool(device_lock)
     if entries <= 1:
@@ -787,7 +809,7 @@ def entry_workers(
             per_entry_rss_basis="not-read", per_entry_device_basis="not-read",
             device_lock=locked, binding="entries", ceiling=1,
             limit=max(0, int(limit)),
-            serve_goal=goals.serve, mint_goal=goals.mint,
+            serve_goal=goals.serve, mint_goal=goals.mint, posture=posture,
             reason=(
                 f"{entries} entr{'y' if entries == 1 else 'ies'}: serial "
                 f"(no cpu/memory/device bound was read — the entry count "
@@ -798,7 +820,7 @@ def entry_workers(
     else:
         cpu = cpu_facts()
     vcpus = cpu.vcpus
-    budget = vcpus - cpu_headroom
+    budget = posture.cpu_budget_cores(vcpus, headroom=cpu_headroom)
     cpu_workers = max(1, budget // CPUS_PER_ENTRY_WORKER)
 
     if available_bytes >= 0:
@@ -853,8 +875,11 @@ def entry_workers(
 
     # A caller cap NARROWS. `limit` above MAX_ENTRY_WORKERS is a caller
     # asking for more than the ceiling allows, and the ceiling wins.
-    ceiling = min(MAX_ENTRY_WORKERS, int(limit)) if limit > 0 \
-        else MAX_ENTRY_WORKERS
+    # ...and so does the POSTURE (§4.30): a user's machine caps at half the
+    # fleet ceiling, and a caller cap below that still wins. Both narrow;
+    # neither can widen.
+    ceiling = posture.entry_ceiling(
+        min(MAX_ENTRY_WORKERS, int(limit)) if limit > 0 else MAX_ENTRY_WORKERS)
     # pgw#877: ONE definition of each basis. It was written twice — once for
     # the row, once for the reason string — which is how the reason could
     # have drifted from the field it explains.
@@ -884,7 +909,7 @@ def entry_workers(
             per_entry_device_basis=device_basis,
             per_entry_rss_basis=rss_basis,
             limit=max(0, int(limit)),
-            serve_goal=goals.serve, mint_goal=goals.mint)
+            serve_goal=goals.serve, mint_goal=goals.mint, posture=posture)
 
     workers = max(
         1, min(cpu_workers, mem_workers, device_workers, ceiling, entries))
@@ -900,8 +925,13 @@ def entry_workers(
         (cpu_workers, "cpu"), (mem_workers, "host-memory"),
         (device_workers, "vram"), (ceiling, "ceiling"),
         (entries, "entries"))[1]
+    polite = (
+        " [§4.30 user-machine: half the cores, "
+        f"{USER_MACHINE_RSS_RESERVE_BYTES // 1024**3} GiB RAM left alone, "
+        f"ceiling {ceiling}, nice {posture.nice_level()}]"
+        if posture.user_machine else "")
     reason = (
-        f"K={workers} ({binding}-bound, goals="
+        f"K={workers} ({binding}-bound{polite}, goals="
         f"{'serve+mint' if goals.serve and goals.mint else 'serve' if goals.serve else 'mint' if goals.mint else 'none'}): "
         f"{vcpus} vCPU ({cpu.basis}) -> "
         f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) -> "
@@ -2213,6 +2243,10 @@ class EntryCompilePool:
                 # not whatever a later `install()` published.
                 goals=WorkerGoals(
                     serve=base.serve_goal, mint=base.mint_goal),
+                # ...and the same rule for the posture: a mid-mint widen must
+                # not quietly stop being polite on a machine that was polite
+                # when the pool was built.
+                posture=base.posture,
             )
         except Exception:  # noqa: BLE001 — a re-derivation never fails a mint
             logger.debug("aot-pool: width re-derivation failed", exc_info=True)
