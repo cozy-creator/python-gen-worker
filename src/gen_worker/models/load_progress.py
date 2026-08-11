@@ -47,7 +47,6 @@ from typing import Optional
 
 from .. import activity as activity_mod
 from .. import postmortem
-from .. import progress as progress_mod
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +223,8 @@ class LoadProgressReporter:
         # skips this — that one is the breadcrumb's job.
         self._close_phase()
         try:
-            c = progress_mod.counter(COUNTER_NAME, "bytes", self.total_bytes)
+            c = activity_mod.scoped_counter(
+                COUNTER_NAME, "bytes", self.total_bytes)
             c.finish()
         except Exception:  # noqa: BLE001 - reporting must never break a load
             pass
@@ -335,7 +335,9 @@ class LoadProgressReporter:
             # ABSOLUTE counters: the phase baselines are absolute too, and a
             # delta-from-load-start would silently zero the comparison.
             self._check_thrash(io_now, rss_anon_kb * 1024)
-            c = progress_mod.counter(
+            # pgw#894: activity-owned, so a load advances the clock of the
+            # phase doing it and not whatever else is open on this pod.
+            c = activity_mod.scoped_counter(
                 COUNTER_NAME, "bytes",
                 max(self.total_bytes, done),
             )
