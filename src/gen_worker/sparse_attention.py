@@ -33,6 +33,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from . import settings_authority
+
 logger = logging.getLogger(__name__)
 
 #: The block granularity the H3 probe settled on (block 64 buys 6% of budget for
@@ -82,8 +84,10 @@ def _bits() -> dict:
         from torch.nn.attention.flex_attention import BlockMask, flex_attention
     except Exception as exc:  # noqa: BLE001
         raise SparseUnavailable(f"flex_attention unimportable: {exc}") from exc
-    torch._dynamo.config.cache_size_limit = max(
-        64, int(getattr(torch._dynamo.config, "cache_size_limit", 8)))
+    # The recompile ceiling is the SETTINGS AUTHORITY's to raise, never a second
+    # writer's (pgw#1049). Sparse adds one compiled flex callable per distinct
+    # kernel_options set, so it declares the shape count and asks.
+    settings_authority.raise_dynamo_cache_limits(64)
     _FLEX["BlockMask"] = BlockMask
     _FLEX["compiled"] = torch.compile(flex_attention, dynamic=False)
     return _FLEX
