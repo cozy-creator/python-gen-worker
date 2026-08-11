@@ -23,6 +23,7 @@ from gen_worker.transport import SendQueue
 from harness.hub_double import is_accept_for, is_model_event, is_ready, is_result_for
 
 from tests_v2 import catalog
+from tests_v2.conftest import MEDIA_UPLOADS_PATH
 
 ORG = "00000000-0000-0000-0000-000000000042"
 
@@ -161,9 +162,16 @@ def test_dispatch_load_serve_and_upload_walk(hub, blob_host, upload_sink) -> Non
         assert res.blob_ref and not res.inline
         assert (res.metrics.input_tokens, res.metrics.input_cached_tokens,
                 res.metrics.output_tokens) == (4000, 100, 9000)
+        assert not upload_sink.rejected, (
+            "the client addressed a route tensorhub does not serve: "
+            f"{upload_sink.rejected}"
+        )
         assert upload_sink.requests, "the real upload sink was never hit"
         path, body = upload_sink.requests[-1]
-        assert path.startswith(f"/api/v1/media/{ORG}/uploads")
+        # th#1722 §C / pgw#1138: the org rides the CREDENTIAL, not the path —
+        # ORG is dispatched on the job and must not appear in the URL.
+        assert path == MEDIA_UPLOADS_PATH
+        assert ORG not in path
         assert body["size_bytes"] > 64 * 1024
 
         # Retransmitted live attempt: re-acked, never re-executed — the

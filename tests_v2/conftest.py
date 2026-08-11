@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -268,16 +269,44 @@ def blob_host(tmp_path: Path) -> Iterator[BlobHost]:
 # ---------------------------------------------------------------------------
 
 
+#: The canonical org-less create route (th#1722 §C / pgw#1138). The org is
+#: derived from the CREDENTIAL and is never a path segment.
+MEDIA_UPLOADS_PATH = "/api/v1/media/uploads"
+
+#: tensorhub's org-less media-upload family, mirroring
+#: `registerMediaUploadRoutes(v1, "/media")` in `internal/api/files.go`.
+#: Patterns, not prefixes, so `/api/v1/media/<org>/uploads` — the transitional
+#: alias th#1799 deletes — cannot match. Deliberately duplicated from
+#: `tests/harness/upload_sink.py` rather than imported: a cross-suite import
+#: would make the v1 harness load-bearing for v2.
+_ORG_LESS_UPLOAD_ROUTES = tuple(
+    re.compile(p)
+    for p in (
+        r"^/api/v1/media/uploads$",
+        r"^/api/v1/media/uploads/batch$",
+        r"^/api/v1/media/uploads/batch/complete$",
+        r"^/api/v1/media/uploads/[^/]+$",
+        r"^/api/v1/media/uploads/[^/]+/parts$",
+        r"^/api/v1/media/uploads/[^/]+/complete$",
+    )
+)
+
+
 class UploadSink:
     """Real HTTP sink for the worker's result-blob upload path.
 
     ``status=200`` answers a dedup create (no S3 part scripting needed);
     any other status is returned verbatim — the refusal rows. Records every
     POST as ``(path, decoded_json_body)`` in ``self.requests``.
+
+    It ROUTES: a path outside tensorhub's org-less upload family 404s exactly
+    as gin does, so a client's URL construction is testable end to end rather
+    than assumed by an assertion the sink itself could not contradict.
     """
 
     def __init__(self, status: int = 200) -> None:
         self.requests: List[Tuple[str, Dict[str, Any]]] = []
+        self.rejected: List[str] = []
         sink = self
 
         class _Handler(BaseHTTPRequestHandler):
@@ -286,7 +315,18 @@ class UploadSink:
 
             def do_POST(self) -> None:  # noqa: N802
                 length = int(self.headers.get("Content-Length", "0"))
-                body = json.loads(self.rfile.read(length) or b"{}")
+                raw = self.rfile.read(length)
+                bare = self.path.split("?", 1)[0]
+                if not any(rx.match(bare) for rx in _ORG_LESS_UPLOAD_ROUTES):
+                    sink.rejected.append(self.path)
+                    payload = json.dumps({"error": "not_found"}).encode()
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                body = json.loads(raw or b"{}")
                 sink.requests.append((self.path, body))
                 if sink.status != 200:
                     payload = json.dumps({"error": "refused by test sink"}).encode()

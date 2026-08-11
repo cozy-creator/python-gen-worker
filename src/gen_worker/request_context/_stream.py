@@ -14,7 +14,6 @@ import resource
 import threading
 import time
 import tempfile
-import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -425,25 +424,17 @@ class _RequestOutputStream:
         # /complete measured at 1060 ms server-side per image.
         create_payload["sha256"] = self._sha.hexdigest()
 
-        # Media upload. The URL owner segment MUST be the owner the
-        # capability token's upload_media grant is bound to (the token's
-        # `tenant` claim: the canonical invoking-org uuid). The
-        # dispatch-stamped ctx.owner can be a slug or a destination-repo
-        # owner resolving to a DIFFERENT org — tensorhub then finds no
-        # matching grant and 403s (J19 run34 sample images). Inference
-        # outputs work exactly because URL owner == token-bound owner.
+        # Media upload. th#1722 §C / pgw#1138: an upload addresses the
+        # CALLER'S OWN namespace, so the hub derives the org from the
+        # credential and the path never names one. The client cannot get the
+        # org wrong because it no longer supplies it — which retires the J19
+        # run34 403 class (dispatch-stamped ctx.owner was a slug resolving to
+        # a different org than the capability grant's).
         create_payload["ref"] = self._ref
         job_id = str(self._ctx._job_id or "").strip()
         if job_id:
             create_payload["job_id"] = job_id
-        owner = self._ctx._media_upload_owner()
-        if not owner:
-            raise RuntimeError(
-                "file save failed (missing owner): media uploads require ctx.owner"
-            )
-        headers["X-Cozy-Owner"] = owner
-        owner_seg = urllib.parse.quote(owner, safe="")
-        endpoint_path = f"/api/v1/media/{owner_seg}/uploads"
+        endpoint_path = "/api/v1/media/uploads"
 
         def _progress_cb(parts_done: int, total_parts: int, bytes_up: int) -> None:
             with self._progress_lock:

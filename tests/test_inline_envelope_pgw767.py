@@ -22,7 +22,12 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.hub_double import hub_double, is_ready, is_result_for
 from harness.toy_endpoints import EchoIn
-from harness.upload_sink import DedupUploadSink, serve_upload_sink
+from harness.upload_sink import (
+    MEDIA_UPLOADS_PATH,
+    DedupUploadSink,
+    reset_upload_sink,
+    serve_upload_sink,
+)
 
 
 def test_inline_dispatch_over_the_envelope_ceiling_still_really_uploads() -> None:
@@ -49,11 +54,11 @@ def test_inline_dispatch_over_the_envelope_ceiling_still_really_uploads() -> Non
                 "the inline media hint must not reach the result envelope"
             )
             path, body = DedupUploadSink.requests_seen[-1]
-            assert path.startswith(f"/api/v1/media/{org_id}/uploads")
+            assert path == MEDIA_UPLOADS_PATH
             assert body["size_bytes"] > 64 * 1024
     finally:
         httpd.shutdown()
-        DedupUploadSink.requests_seen = []
+        reset_upload_sink()
 
 
 def test_save_bytes_still_inlines_media_for_the_client() -> None:
