@@ -238,11 +238,11 @@ class DerivedKey:
     trace_ms: Mapping[str, int] = field(default_factory=dict)
     nodes: Mapping[str, int] = field(default_factory=dict)
     #: pgw#1031: entry name -> the NODE-level digest of the graph this boot
-    #: traced (``aot_mint.keying_block``'s ``graph_witness``). Not a key axis
-    #: and never folded into one — it is what the adopt path compares against
-    #: the cell's own record, because the key provably cannot separate two
-    #: bodies behind one declaration. Rides the keying blocks, so a memo hit
-    #: carries it exactly as a cold trace does.
+    #: traced (``aot_mint.keying_block``'s ``graph_witness``). Since option a it
+    #: is FOLDED into ``class_hash`` (so the key now separates two bodies behind
+    #: one declaration) AND kept here for the adopt backstop, which compares it
+    #: against the cell's own record (defense-in-depth). Rides the keying
+    #: blocks, so a memo hit carries it exactly as a cold trace does.
     graph_witnesses: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -521,10 +521,11 @@ def class_hashes_of(
 
     Stamped by ``aot_serve.artifact_metadata`` — the mint's own function — so a
     hash computed here and a hash the mint stamped are the same computation.
-    The envelope/precision/strict arguments do not reach ``class_hash``
-    (it folds target/fork/class_dims/range_digest/graph/strict/lora_bucket),
-    which is why this can answer without them; ``strict``/``lora_bucket`` DO,
-    so they are read off the blocks' own ``graph.specialization``.
+    The envelope/precision/strict arguments do not reach ``class_hash`` (it
+    folds target/fork/class_dims/range_digest/graph/graph_witness/strict/
+    lora_bucket), which is why this can answer without them; ``strict``/
+    ``lora_bucket`` DO, so they are read off the blocks' own
+    ``graph.specialization``.
     """
     head = next(iter(blocks.values()), {}) if blocks else {}
     spec = dict((head.get("graph") or {}).get("specialization") or {})

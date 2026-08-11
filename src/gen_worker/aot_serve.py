@@ -558,18 +558,36 @@ def class_hash(
     Folds the entry's coordinate (target, fork, class dims), its
     ``range_digest`` (the MEASURED node-only-collision fix: three exports
     differing only in declared range hashed identically), its graph
-    interface block, and the trace-mode/lora facts. 16-hex, recomputable
-    from the entry block alone — so a consumer can prove the stamp and a
-    mismatch NAMES the class (the receipts principle).
+    interface block, the node-level ``graph_witness`` body digest, and the
+    trace-mode/lora facts. 16-hex, recomputable from the entry block alone —
+    so a consumer can prove the stamp and a mismatch NAMES the class (the
+    receipts principle).
+
+    ``graph_witness`` (v3, pgw#1031): the node-level digest of the traced
+    program (``graph_hash.graph_hash``, recorded on every keying block by
+    ``aot_mint.keying_block``). Before v3 this axis folded only the graph
+    INTERFACE (``graph``) — the traced ingress identity — so two endpoints
+    whose declarations agreed while their bodies differed shared a key
+    (measured 2026-08-10: ``micro-pad32`` 112 nodes vs ``micro-pad32-branchy``
+    102 nodes, byte-identical keying block, one key, two artifacts). Folding
+    the witness here makes the key sound BY CONSTRUCTION: two different bodies
+    key apart, a collision becomes a MISS (eager + mint), which is the cheap
+    outcome. The witness stays recorded as a top-level sibling for the adopt
+    backstop (``aot_identity.verify_graph_witness``) — defense-in-depth. The
+    fold is tolerant of a missing witness (folds ``""``) so a pre-witness
+    entry is body-blind rather than unhashable; production entries always
+    carry it (``keying_block``), and such stale cells are refused by the
+    envelope/structure gates and the witness backstop regardless.
     """
     facts = {
-        "v": 2,
+        "v": 3,
         "target": str(entry.get("target") or ""),
         "fork": [[str(n), v] for n, v in (entry.get("fork") or [])],
         "class_dims": [
             [str(n), int(v)] for n, v in (entry.get("class_dims") or [])],
         "range_digest": str(entry.get("range_digest") or ""),
         "graph": dict(entry.get("graph") or {}),
+        "graph_witness": str(entry.get("graph_witness") or ""),
         "strict": bool(strict),
         "lora_bucket": int(lora_bucket or 0),
     }

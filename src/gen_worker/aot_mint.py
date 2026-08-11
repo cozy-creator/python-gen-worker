@@ -3408,19 +3408,19 @@ def keying_block(
     ``aot_serve.entries_from_meta`` validates every block as a full contract,
     and an entry that cannot be parsed cannot be keyed.
 
-    ``graph_witness`` (pgw#1031) is a SIBLING of ``graph``, deliberately
-    OUTSIDE it: ``aot_serve.class_hash`` folds ``target``/``fork``/
-    ``class_dims``/``range_digest``/``graph``/``strict``/``lora_bucket`` and
-    nothing else, so a top-level field is recorded on every cell without
-    moving one key. It is the node-level digest of the traced program
-    (``graph_hash.graph_hash``) — the fact the key axes provably do NOT hold:
-    measured 2026-08-10, ``micro-pad32`` and ``micro-pad32-branchy`` produce a
-    byte-identical keying block (identical signature, symbol ranges, pytree
-    spec, constant FQNs and declared envelope) from 112- and 102-node graphs.
-    The key cannot separate them; this witness can, and the adopt path refuses
-    on it (``aot_identity.verify_graph_witness``) so a collision degrades to
-    eager instead of serving another endpoint's kernels. Whether the witness
-    should BECOME a key axis is pgw#1031's depth question and Paul's to rule.
+    ``graph_witness`` (pgw#1031) is the node-level digest of the traced
+    program (``graph_hash.graph_hash``). It is recorded as a top-level SIBLING
+    of ``graph`` AND folded into the key: since pgw#1031 (option a, Paul-ruled)
+    ``aot_serve.class_hash`` (facts v3) folds it, so the ``graph`` axis is the
+    traced COMPUTATION, not merely the traced ingress. It was measured that the
+    interface alone could not separate two bodies — 2026-08-10, ``micro-pad32``
+    and ``micro-pad32-branchy`` produced a byte-identical keying block
+    (identical signature, symbol ranges, pytree spec, constant FQNs and
+    declared envelope) from 112- and 102-node graphs, one key, two artifacts.
+    The witness closes that at the key: two bodies key apart, a collision is a
+    MISS (eager + mint). It stays a top-level field for the adopt backstop
+    (``aot_identity.verify_graph_witness``, defense-in-depth), which refuses a
+    materialized cell whose recorded witness is not this pod's graph.
     """
     inputs, symbols = aot_package.input_contract(program, flat_leaves)
     block: Dict[str, Any] = {

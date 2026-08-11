@@ -16,24 +16,25 @@ test admits four axes and no more:
                   newline-joined SORTED per-entry ``class_hash`` values
                   (pgw#716). Each class hash folds the entry's target, fork
                   coordinate, class dims, declared-range digest,
-                  graph-INTERFACE block, trace mode and lora bucket
-                  (``aot_serve.class_hash`` / ``aot_serve.combined_graph_hash``
-                  — stamped by ``aot_serve.artifact_metadata``, proven at
-                  admission by ``aot_serve.verify_contract``, READ — never
-                  re-derived — here).
+                  graph-INTERFACE block, the node-level ``graph_witness`` body
+                  digest, trace mode and lora bucket (``aot_serve.class_hash``
+                  / ``aot_serve.combined_graph_hash`` — stamped by
+                  ``aot_serve.artifact_metadata``, proven at admission by
+                  ``aot_serve.verify_contract``, READ — never re-derived —
+                  here).
 
-                  **Read the name precisely: this axis is the traced INGRESS
-                  identity, not the traced computation.** No graph-NODE digest
-                  reaches it, so two endpoints whose declarations agree while
-                  their bodies differ collide — measured 2026-08-10,
-                  ``micro-pad32`` vs ``micro-pad32-branchy``: 112- and 102-node
-                  graphs, byte-identical keying block, one key, two artifacts.
-                  Whether the nodes SHOULD be keyed (a deliberate fleet-wide
-                  re-key) is pgw#1031 and is Paul's to rule. Until then the
-                  hole is not merely noted: every entry records a
-                  ``graph_witness`` (``graph_hash.graph_hash``, metadata — see
-                  ``aot_mint.keying_block``) and the adopt path refuses a cell
-                  whose witness is not the graph this pod traced
+                  **This axis is the traced COMPUTATION** (pgw#1031, option a,
+                  Paul-ruled): since class_hash facts v3 the per-node digest
+                  (``graph_hash.graph_hash``) folds in, so two endpoints whose
+                  declarations agree while their bodies differ key APART. Before
+                  v3 the axis folded the graph INTERFACE only and they collided
+                  — measured 2026-08-10, ``micro-pad32`` vs
+                  ``micro-pad32-branchy``: 112- and 102-node graphs,
+                  byte-identical keying block, one key, two artifacts; post-fix
+                  two keys. A residual collision (a witness-blind or hash-broken
+                  entry) is still caught belt-and-braces: every entry records a
+                  ``graph_witness`` top-level sibling and the adopt path refuses
+                  a cell whose witness is not the graph this pod traced
                   (``aot_identity.verify_graph_witness``).
     envelope      the DECLARED serving region (flight-envelope sense): the
                   shape ladder x text lens x guidance classes the author

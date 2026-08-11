@@ -1,23 +1,28 @@
-"""pgw#1031 — the cell key is an INGRESS identity, and two different
-computations behind one declaration collide inside it.
+"""pgw#1031 — the cell key is the traced COMPUTATION, and two different
+computations behind one declaration now key APART (option a, Paul-ruled).
 
 The LIVE SIGHTING this file pins, measured 2026-08-10 during pgw#1079: the
-gauntlet's ``micro-pad32`` and ``micro-pad32-branchy`` members mint two
-different artifacts (``sha256:aeedeba3…`` / ``sha256:1613596c…``) under ONE
-``ck1`` key. They are the same model with two spellings of the same pad, so
-every DECLARED fact agrees — signature, symbol ranges, pytree spec, constant
-FQNs, declared envelope — while the traced bodies do not (112 nodes vs 102).
-``class_hash`` folds only the declared facts, so the key cannot see it.
+gauntlet's ``micro-pad32`` and ``micro-pad32-branchy`` members are the same
+model with two spellings of the same pad, so every DECLARED fact agrees —
+signature, symbol ranges, pytree spec, constant FQNs, declared envelope —
+while the traced bodies do not (112 nodes vs 102). Before pgw#1031's depth fix
+``class_hash`` folded only the declared/interface facts, so the key could not
+see the body and both minted under ONE ``ck1`` key. The fix folds the
+node-level ``graph_witness`` into ``class_hash`` (facts v3), so the ``graph``
+axis is now the computation: the two members derive DIFFERENT keys and a
+collision is a MISS (eager + mint), the cheap outcome.
 
-Two rows, and they are the whole issue:
+The rows:
 
-* :func:`test_the_collision_is_real` traces both families through the mint's
-  OWN ``trace_for_key`` and asserts the keying blocks are byte-identical while
-  the graph witnesses differ. It is the RED half — pre-mitigation, pull-by-key
-  hands ``micro-pad32-branchy`` the ``micro-pad32`` cell and nothing refuses.
-* :func:`test_the_witness_refuses_the_collision` runs the mitigation over the
-  same two traced blocks: the matching pod admits, the colliding pod is
-  REFUSED by a reason naming both digests.
+* :func:`test_the_bodies_now_key_apart` traces both families through the mint's
+  OWN ``trace_for_key`` and asserts the keying blocks are byte-identical on the
+  INTERFACE half while the graph witnesses differ — AND the derived keys now
+  differ. It is the RED→GREEN proof: pre-fix one key, post-fix two.
+* :func:`test_the_witness_backstops_a_residual_collision` runs the
+  defense-in-depth backstop over the same two traced blocks: even given a cell
+  built from one member's blocks, the matching pod admits and the colliding pod
+  is REFUSED by a reason naming both digests. The witness stays as belt-and-
+  braces beneath the now-sound key.
 
 **No compile anywhere.** ``trace_for_key`` is ``torch.export`` and stops there
 (Paul 2026-08-10: tracing for key derivation is explicitly permitted locally;
@@ -120,31 +125,48 @@ def _canon(block: Any) -> str:
     return json.dumps(block, sort_keys=True, separators=(",", ":"))
 
 
-def test_the_collision_is_real(traced_pair: Dict[str, Any]) -> None:
-    """RED: one key, two computations — and every keyed fact agrees."""
+def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
+    """GREEN (was RED): the INTERFACE half is identical, the bodies differ,
+    and the depth fix makes the two members derive DIFFERENT keys.
+
+    Pre-pgw#1031 this asserted ONE shared key (the collision). The fix folds
+    ``graph_witness`` into ``class_hash``, so the same identical-declaration /
+    different-body pair keys apart — a collision is now a MISS, not a wrong hit.
+    """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
     assert set(fixed["blocks"]) == set(branchy["blocks"]) == {"transformer"}
 
     a, b = fixed["blocks"]["transformer"], branchy["blocks"]["transformer"]
-    keyed = {k: v for k, v in a.items() if k != "graph_witness"}
-    other = {k: v for k, v in b.items() if k != "graph_witness"}
-    assert _canon(keyed) == _canon(other), (
-        "the keyed half of the block is expected to be IDENTICAL — if this "
-        "fails the collision has been closed by some other axis and pgw#1031's "
-        "sighting needs re-stating")
-    assert fixed["key"].digest == branchy["key"].digest, (
-        "THE DEFECT: two different graphs under one ck1 key. A red here means "
-        "identity gained graph depth — update pgw#1031, do not weaken this")
+    interface_a = {k: v for k, v in a.items() if k != "graph_witness"}
+    interface_b = {k: v for k, v in b.items() if k != "graph_witness"}
+    assert _canon(interface_a) == _canon(interface_b), (
+        "the INTERFACE half of the block is expected to be IDENTICAL — the two "
+        "members declare the same ingress; if this fails the pair no longer "
+        "isolates the body axis and pgw#1031's sighting needs re-stating")
 
-    # …and the two graphs really are different computations.
+    # The two graphs really are different computations…
     assert a["graph_witness"] and b["graph_witness"]
     assert a["graph_witness"] != b["graph_witness"], (
-        "the witness must separate what the key cannot; equal digests here "
-        "would mean the witness is as blind as the key")
+        "the witness must separate the bodies; equal digests here would mean "
+        "the pair no longer differs in its computation")
+
+    # …and THE FIX: the key now sees the body, so the members key apart.
+    assert fixed["key"].digest != branchy["key"].digest, (
+        "THE FIX (pgw#1031 option a): identical ingress, different bodies must "
+        "derive DIFFERENT keys. A red here means the graph axis went body-blind "
+        "again — class_hash must fold graph_witness")
 
 
-def test_the_witness_refuses_the_collision(traced_pair: Dict[str, Any]) -> None:
-    """GREEN: the matching pod adopts; the colliding pod is refused by name."""
+def test_the_witness_backstops_a_residual_collision(
+    traced_pair: Dict[str, Any],
+) -> None:
+    """Defense-in-depth: given a cell built from one member's blocks, the
+    matching pod adopts and the colliding pod is refused by name.
+
+    The key now separates the two members (``test_the_bodies_now_key_apart``),
+    so pull-by-key never hands the wrong cell over in the first place. This
+    proves the backstop still holds beneath the sound key: were a witness-blind
+    cell ever handed over, the adopt path still refuses on the witness."""
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
     cell = aot_serve.artifact_metadata(
         family=PAIR[0], precision="", cell_key=fixed["key"].digest,
@@ -202,17 +224,23 @@ def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
     return meta
 
 
-def test_every_landed_gate_admits_the_wrong_cell(
+def test_the_key_now_separates_what_the_gates_could_not(
     traced_pair: Dict[str, Any],
 ) -> None:
-    """RED: nothing that shipped before pgw#1031 separates these two cells.
+    """GREEN (was RED): the depth fix separates the two cells AT THE KEY.
 
-    Pod ``micro-pad32-branchy`` derives a key, the hub answers it with the
-    ``micro-pad32`` cell — correctly, they ARE one key — and then every
-    admission gate the tree has agrees: the declared identity matches on all
-    four compared axes (``combined_graph_hash`` included, because that is the
-    same collided digest), and the contract is self-consistent. The wrong
-    kernels arm, and the only thing left is the arm-time numerics tolerance.
+    Before pgw#1031 nothing that shipped separated these cells: pod
+    ``micro-pad32-branchy`` derived the SAME key as ``micro-pad32``, the hub
+    answered its pull with the wrong cell, and every admission gate agreed
+    (``verify_declared_identity`` clean on all four axes, ``verify_contract``
+    self-consistent) — only the arm-time numerics tolerance stood between that
+    and wrong output. The fix folds the body into ``graph``, so:
+
+    * the two members derive DIFFERENT keys — pull-by-key never even offers
+      cell A to pod B; the collision is a MISS, not a wrong hit;
+    * were the wrong cell forced across anyway, ``verify_declared_identity``
+      now REFUSES on the ``graph`` axis (``combined_graph_hash`` differs); and
+    * the witness backstop still refuses beneath both.
     """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
     cell_a = _meta(fixed, PAIR[0])
@@ -220,13 +248,18 @@ def test_every_landed_gate_admits_the_wrong_cell(
     # The expectation pod B states from its OWN traced facts and its OWN
     # runtime — nothing borrowed from the cell it is about to be handed.
     expected_b = aot_identity.artifact_identity(_meta(branchy, PAIR[1]))
-    assert expected_b.cell_key == cell_a["cell_key"]
-    assert aot_identity.verify_declared_identity(cell_a, expected_b) == "", (
-        "pgw#903's identity gate admits the wrong cell — that is the defect, "
-        "not a bug in this test")
-    assert aot_serve.verify_contract(cell_a) == ""
+    assert expected_b.cell_key != cell_a["cell_key"], (
+        "THE FIX: pod B must derive a different key from cell A's, so the hub "
+        "never answers B's pull with A. A red here means the key went body-"
+        "blind — class_hash must fold graph_witness")
 
-    # …and the ONE thing that refuses it.
+    # Cell A is still self-consistent (its own stamp verifies)…
+    assert aot_serve.verify_contract(cell_a) == ""
+    # …but the identity gate now REFUSES the cross, naming the graph axis.
+    refusal = aot_identity.verify_declared_identity(cell_a, expected_b)
+    assert refusal, "the identity gate must refuse the wrong cell post-fix"
+
+    # …and the witness backstop refuses it too (defense-in-depth).
     assert aot_identity.verify_graph_witness(
         cell_a, boot_key.graph_witnesses_of(branchy["blocks"]))
 
@@ -306,14 +339,16 @@ def test_the_adopt_path_refuses_the_colliding_pod(
     traced_pair: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """THE mitigation: same key, other graph — refused, and it says which.
-
-    Without the floor this returns ``hit`` and the pod arms ``micro-pad32``'s
-    kernels for ``micro-pad32-branchy``'s computation, with only the arm-time
-    numerics tolerance between that and served output.
+    """THE backstop: a FORCED cross — pod B handed cell A — is refused, and it
+    says which. Post-fix the keys differ, so pull-by-key never offers this cross
+    on its own; the monkeypatched ``derive`` forces it to prove the backstop
+    still refuses beneath the sound key. Without it this returns ``hit`` and the
+    pod arms ``micro-pad32``'s kernels for ``micro-pad32-branchy``'s
+    computation, with only the arm-time numerics tolerance between that and
+    served output.
     """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    assert fixed["key"].digest == branchy["key"].digest  # the collision
+    assert fixed["key"].digest != branchy["key"].digest  # the fix: keys differ
     meta = aot_serve.artifact_metadata(
         family=PAIR[0], precision="", cell_key=fixed["key"].digest,
         entries=fixed["blocks"], strict_export=True, lora_bucket=0)
