@@ -2,6 +2,14 @@
 
 from .binding import Binding, Civitai, HF, Hub, ModelRef, ModelScope
 from .decorators import ConfigParam, Resources, endpoint
+from .derive import (
+    DeclarationMismatch,
+    assert_faithful,
+    cfg_image_classes,
+    class_set_delta,
+    contract_delta,
+    override_delta,
+)
 from .slot import ResolvedSlot, Slot, resolve_slot
 from .errors import (
     AuthError,
@@ -46,6 +54,12 @@ __all__ = [
     "Hub",
     "ModelRef",
     "ModelScope",
+    "DeclarationMismatch",
+    "assert_faithful",
+    "cfg_image_classes",
+    "class_set_delta",
+    "contract_delta",
+    "override_delta",
     "ResolvedSlot",
     "Resources",
     "Slot",

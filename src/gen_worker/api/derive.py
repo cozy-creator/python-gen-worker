@@ -1,0 +1,224 @@
+"""Declaration inference + the migration safety gate (pgw#1107).
+
+pgw#1107 collapses ``aot_declaration.py`` and the inline ``@endpoint(
+compile=Compile(...))`` into ONE declaration on the class decorator. Two
+pieces of that live here — both pure Python, no model, no trace, no inductor,
+so they run anywhere including this box:
+
+1. :func:`cfg_image_classes` — the MECHANICAL half of "the SDK derives
+   ``classes``". For a CFG-batched image UNet/DiT whose legal request set is
+   ``aspect rows x the two CFG regimes`` (sdxl, z-image), the graph-class
+   cross-product is a pure function of the author's kept ``shapes`` + the
+   latent scale + ``text_len``. The author stops hand-writing the
+   ``_..._graph_classes()`` helper; the loop, the ``//vae_scale`` latent math
+   and the ``dict.fromkeys`` transposed-row dedupe move here, byte-identical.
+
+   It is deliberately NOT a universal deriver. qwen (ceil-div token grid),
+   flux2 (token-COUNT collapse), wan (3-D latent + relational ``N_tok``) and
+   ltx (audio-token formula x two-stage x keyframe axis x frame-legality x
+   H100/B200 tier) embed model-specific token math that IS the endpoint's own
+   legality oracle (pgw#669). For those the class SET is family-declared; only
+   the collapse-onto-the-decorator and the gate below apply.
+
+2. :func:`contract_delta` / :func:`assert_faithful` — the MIGRATION SAFETY
+   GATE. ``Compile.contract_axes()`` is exactly what feeds the cell key's
+   contract digest (pgw#647), so two declarations with an identical
+   ``contract_axes()`` produce an identical contract digest and — the traced
+   graph being a pure function of the same declaration under fixed model code
+   and toolchain — an identical ``combined_graph_hash``. Deleting the standing
+   ``aot_declaration.py`` in favour of a minimal decorator is therefore safe
+   iff the two declarations' contract axes match. A non-empty delta is a STOP,
+   not a merge: it is the surprise re-key (or the silently-lost hard-won fact)
+   the gate exists to catch before a family being minted RIGHT NOW is disturbed.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List, Sequence, Tuple
+
+from .decorators import Compile
+from .export_contract import GraphClass
+
+__all__ = [
+    "DeclarationMismatch",
+    "assert_faithful",
+    "cfg_image_classes",
+    "class_set_delta",
+    "contract_delta",
+]
+
+#: The sdxl/z-image regime table: CFG on traces ONE batch-2 forward, turbo /
+#: no-CFG pins the batch-1 graph. Each arm is its own graph class of one cell
+#: (ie#345, gw#627). ``(fork_value, traced_batch)`` — the two families that
+#: batch CFG into a single forward share this exact pair.
+CFG_BATCH_REGIMES: Tuple[Tuple[bool, int], ...] = ((True, 2), (False, 1))
+
+
+def cfg_image_classes(
+    *,
+    shapes: Sequence[Sequence[int]],
+    latent_scale: int,
+    text_len: int,
+    batch_dim: str = "B",
+    height_dim: str = "H_lat",
+    width_dim: str = "W_lat",
+    text_dim: str = "T_txt",
+    cfg_fork: str = "cfg",
+    regimes: Sequence[Tuple[bool, int]] = CFG_BATCH_REGIMES,
+) -> Tuple[GraphClass, ...]:
+    """The ``aspect rows x CFG regimes`` graph-class cross-product.
+
+    Reproduces sdxl's ``_sdxl_graph_classes`` and z-image's
+    ``_z_image_graph_classes`` byte-identically (same iteration order, same
+    ``//latent_scale`` latent math, same ``dict.fromkeys`` dedupe of
+    transposed rows). ``shapes`` is the author's kept ``(w, h)`` aspect table
+    — single-sourced from the payload preset enum, never re-declared.
+
+    The dim NAMES differ per family (sdxl ``B``/``T_txt`` vs z-image
+    ``N``/``T_cap``) and are parameters, not literals, so one deriver serves
+    both. The fork→batch effect is the ``regimes`` pair: it is CFG-specific
+    (only these two families batch CFG into one forward — qwen/flux2/wan run
+    CFG as two sequential batch-1 calls, so they do NOT use this deriver).
+    """
+    if latent_scale <= 0:
+        raise ValueError(f"latent_scale must be positive, got {latent_scale!r}")
+    if int(text_len) <= 0:
+        raise ValueError(
+            f"cfg_image_classes needs a positive text_len, got {text_len!r}")
+    out: List[GraphClass] = []
+    for row in shapes:
+        w, h = int(row[0]), int(row[1])
+        for cfg, batch in regimes:
+            out.append(GraphClass(
+                dims={
+                    batch_dim: batch,
+                    height_dim: h // latent_scale,
+                    width_dim: w // latent_scale,
+                    text_dim: int(text_len),
+                },
+                fork={cfg_fork: cfg},
+            ))
+    return tuple(dict.fromkeys(out))
+
+
+# ---------------------------------------------------------------------------
+# The migration safety gate
+# ---------------------------------------------------------------------------
+
+class DeclarationMismatch(AssertionError):
+    """A migrated declaration's cell-key contract differs from the standing
+    one — deleting the standing file would re-key or drop a fact. STOP."""
+
+
+def _canonical(value: Any) -> str:
+    """Order-stable JSON for a ``contract_axes()`` value, so the comparison
+    sees a byte difference, never a dict-ordering artefact."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+
+
+def contract_delta(standing: Compile, migrated: Compile) -> Dict[str, Tuple[Any, Any]]:
+    """``{axis: (standing_value, migrated_value)}`` for every cell-key contract
+    axis the two declarations disagree on; ``{}`` iff identical.
+
+    ``{}`` is the migration's green light: identical ``contract_axes()`` ⟹
+    identical contract digest ⟹ identical ``combined_graph_hash`` (the trace
+    is a pure function of the declaration under fixed code + toolchain), so
+    the standing ``aot_declaration.py`` can be deleted with no re-key. Any
+    entry is a STOP.
+    """
+    a = standing.contract_axes()
+    b = migrated.contract_axes()
+    delta: Dict[str, Tuple[Any, Any]] = {}
+    for key in sorted(set(a) | set(b)):
+        av, bv = a.get(key, _MISSING), b.get(key, _MISSING)
+        if _canonical(_repr(av)) != _canonical(_repr(bv)):
+            delta[key] = (av, bv)
+    return delta
+
+
+class _Missing:
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic only
+        return "<absent>"
+
+
+_MISSING = _Missing()
+
+
+def _repr(value: Any) -> Any:
+    """``contract_axes()`` values are already JSON-able except the sentinel."""
+    return None if value is _MISSING else value
+
+
+#: Must-survive facts that are NOT part of ``contract_axes()`` (so a change
+#: does not re-key) but ARE hard-won measured decisions the migration must not
+#: drop: the numerics ADOPT band (pgw#812/#814). ``shape_strategy``,
+#: ``warm_changes_key`` and ``eager`` are already contract axes and covered by
+#: :func:`contract_delta`; these two are the gap.
+OVERRIDE_FACTS: Tuple[str, ...] = ("numerics_floor", "numerics_warn")
+
+
+def override_delta(standing: Compile, migrated: Compile) -> Dict[str, Tuple[Any, Any]]:
+    """``{field: (standing, migrated)}`` for must-survive overrides that live
+    OUTSIDE ``contract_axes()`` — dropping one loosens the adopt gate without
+    re-keying, so :func:`contract_delta` alone would wave it through. ``{}`` iff
+    every such fact is preserved."""
+    delta: Dict[str, Tuple[Any, Any]] = {}
+    for field in OVERRIDE_FACTS:
+        av, bv = getattr(standing, field), getattr(migrated, field)
+        if av != bv:
+            delta[field] = (av, bv)
+    return delta
+
+
+def class_set_delta(
+    standing: Sequence[GraphClass], migrated: Sequence[GraphClass],
+) -> Dict[str, Any]:
+    """A focused diff of just the graph-class tuples — order-sensitive, since
+    ``contract_axes()`` serialises ``classes`` as an ordered list. ``{}`` iff
+    the derived class tuple is byte-identical to the standing one.
+    """
+    sa = [c.as_row() for c in standing]
+    sb = [c.as_row() for c in migrated]
+    if _canonical(sa) == _canonical(sb):
+        return {}
+    out: Dict[str, Any] = {"count": (len(sa), len(sb))}
+    if len(sa) == len(sb):
+        out["rows"] = [
+            {"index": i, "standing": x, "migrated": y}
+            for i, (x, y) in enumerate(zip(sa, sb))
+            if _canonical(x) != _canonical(y)
+        ]
+    else:
+        out["standing_only"] = [x for x in sa if x not in sb]
+        out["migrated_only"] = [y for y in sb if y not in sa]
+    return out
+
+
+def assert_faithful(
+    standing: Compile, migrated: Compile, *, family: str = "",
+) -> None:
+    """Raise :class:`DeclarationMismatch` unless the migrated declaration's
+    cell-key contract is byte-identical to the standing one. The reusable
+    per-family migration gate: run it in the endpoint's test with the standing
+    ``aot_declaration`` Compile and the new decorator's ``compile`` BEFORE the
+    file is deleted.
+    """
+    cdelta = contract_delta(standing, migrated)
+    odelta = override_delta(standing, migrated)
+    if not cdelta and not odelta:
+        return
+    who = f" for {family!r}" if family else ""
+    lines = [f"migrated declaration{who} is not faithful to the standing one:"]
+    if cdelta:
+        lines.append(
+            f"  cell-key contract re-keys ({len(cdelta)} axis(es) differ):")
+        for axis, (av, bv) in cdelta.items():
+            lines.append(f"    - {axis}: standing={av!r} migrated={bv!r}")
+    if odelta:
+        lines.append(
+            f"  must-survive override dropped ({len(odelta)} field(s)):")
+        for field, (av, bv) in odelta.items():
+            lines.append(f"    - {field}: standing={av!r} migrated={bv!r}")
+    raise DeclarationMismatch("\n".join(lines))
