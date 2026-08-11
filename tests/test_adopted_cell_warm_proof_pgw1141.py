@@ -1,39 +1,53 @@
-"""pgw#1141: a boot-ADOPTED cell carries its own proof, and the setup warmup
-proof gate must READ it instead of destroying the artifact that holds it.
+"""pgw#1141 (DESIGN-RULINGS §4.31 + §4.32): a boot-ADOPTED cell materializes,
+arms and SERVES. No warmup barrier, and no quality gate at adoption.
 
 MEASURED, twice, on two real pods (RTX 4000 Ada, gen-worker 0.106.0, hub
 `7ae35d54a2`): `boot_adopt=hit` -> materialize -> `cell_numerics cos=1.00000
-ret=1.0000 rel_l2=0.0000` on 3/3 axes -> and then the setup warmup scored the
+ret=1.0000 rel_l2=0.0000` on 3/3 axes -> and then the setup warmup scored that
 same artifact `unexercised` (it dispatched nothing through it — the adopt arms
-BEFORE setup, so by construction nothing has), folded it into `unproven`,
-`function_proofs[id]=set()`, `aot_serve.unwrap`, `compile_cache.unwrap`. The
-pod served eager for life and published nothing. The self-mint arm on the SAME
-wheel, card and release served `+compiled` with an empty `fallback_reason`,
-because it reaches its proof through a warm dispatch.
+BEFORE setup, so by construction nothing has), folded it into `unproven`, wrote
+`function_proofs[id]=set()` and unwrapped it. `functions=()` then made the
+target omission (`target_applicability_incomplete`) and the orphan report
+(`armed_target_unresolved`) inevitable, and the pod served eager for life. The
+SELF-MINT arm was healthy on the same wheel, card and release, because a mint's
+warmup DRIVES its own capture and therefore dispatches.
 
-So the gate was destroying evidence STRONGER than the evidence it demands. The
-pgw#868 numerics gate runs every packaged entry through its own runner against
-the eager forward it replaces — that is "it executed and is still armed"
-(`proven_since`'s whole test) plus the accuracy a dispatch counter cannot see.
-Both arms take that measurement in `provision.arm_aot`, so banking it on the
-arm makes adopted and self-minted cells symmetrical rather than special-casing
-either.
+§4.31 deleted the barrier: *"skip the warmup / arm check, so we can serve right
+away … try to serve, if an error is encountered, and it's the cause of the
+cell, de-arm the cell, and serve eager instead."*
 
-Two directions, and both must hold:
+§4.32 then deleted the adopt-side numerics re-check too, and moved the quality
+question to where the defect is: every failure that gate ever caught (a baked
+`conv_out.bias`, timestep dtype scars) was an AUTHOR defect in endpoint code or
+config. Re-measuring on every adopter taxes the fleet forever for one author's
+one-time mistake. Adoption is materialize -> arm -> serve; the gate runs ONCE,
+on the pod that minted the bytes, before they are published, and it is STRICT.
 
-* an adopted cell with a standing parity verdict is PROVEN — armed, target
-  installed, serving compiled, and the pass is announced
-  (`cell_numerics phase=serving_proof`);
-* a cell with no verdict, or one whose artifact REVOKED after it was measured,
-  is still disarmed — and says which half was missing
-  (`cell_numerics phase=proof_absent`). A cell that fails numerics never
-  reaches this gate at all: `arm_aot` unwraps it.
+Safety without re-measurement comes from CONSTRUCTION, not from checkpoint
+identity (a `ck1` key is graph x envelope x sm x toolchain and carries no
+checkpoint hash — one cell serves every checkpoint of the architecture, which
+is the whole point of reuse): the cell is compiled CODE and weights flow
+through it as data, so a mint-time parity proof proves the FUNCTION; a weight
+value baked into the artifact is fenced fail-closed by the constant-folding
+fence; and a checkpoint that changes the COMPUTATION hashes to a different
+graph, hence a different key, hence no match.
 
-The gate itself is never stubbed. Part A drives the REAL `provision.arm_aot`
-against a real packed artifact (the pgw#868 rig, whose ONE substitution is the
-AOTI `.so`); part B drives the REAL `ensure_setup` warmup proof, faking only
-the download and the arming policy — the same seam `test_aot_boot_proof_gap_
-pgw735.py` uses.
+What this file pins, in four parts:
+
+A. the MINT gate — strict, identical-or-refuse, and it is the thing that
+   decides whether bytes ship;
+B. ADOPTION — a cell that would FAIL that gate still arms and serves, and no
+   quality row is emitted at all, because nobody measured it;
+C. the executor's setup warmup — an armed cell with no dispatch keeps its arm,
+   its target and its aliases;
+D. try-serve — a cell-attributable failure answers the request eager and
+   de-arms sticky; a transient OOM does neither.
+
+Nothing is stubbed. Parts A and B drive the REAL `provision.arm_aot` against a
+real packed artifact (the pgw#868 rig, whose ONE substitution is the AOTI
+`.so`); part C drives the REAL `ensure_setup`, faking only the download and the
+arming policy (the seam `test_aot_boot_proof_gap_pgw735.py` uses); part D
+drives the real serving wrapper.
 """
 
 from __future__ import annotations
@@ -70,78 +84,106 @@ FAMILY = "micro-diffusion"
 
 
 # ---------------------------------------------------------------------------
-# PART A — the parity verdict is BANKED on the arm that earned it
+# PART A — the MINT gate: strict, and it decides whether bytes ship
 # ---------------------------------------------------------------------------
 
 
-def test_a_faithful_arm_banks_its_parity_verdict(
+def test_the_MINTING_pod_proves_its_own_bytes_before_they_ship(
         tmp_path, monkeypatch, declared, events):
-    """The measurement the pod already paid for survives the function that
-    took it. Pre-fix it was announced and dropped, which is why the warmup
-    gate had nothing to read."""
+    """§4.32 item 2. The pod that compiled the artifact runs it against the
+    eager forward it was traced from, on the same feed, and only then does the
+    arm succeed — which is what `adopt_delegated_mint` needs to be true before
+    `publish_self_mint` can ship anything."""
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcome = arm(
+        tmp_path, monkeypatch, declared, packages, verify_numerics=True)
 
     assert outcome.armed is True
-    proof = aot_serve.numerics_proof(pipeline)
-    assert proof is not None, "the arm banked no parity verdict"
-    assert proof.axes == len(ROWS)
-    assert proof.cell_key == "cell868"
-    assert proof.verdict == numerics_ladder.VERDICT_HEALTHY
-    assert proof.worst_cosine == pytest.approx(1.0, abs=1e-6)
-    assert proof.worst_entry in {entry_name(h, w) for h, w in ROWS}
+    assert aot_serve.is_armed(pipeline) is True
+    rows = [(p, d) for k, d, p in events if k == activity.KIND_CELL_NUMERICS]
+    assert [p for p, _d in rows] == ["checked"], rows
+    assert "axes=2/2" in rows[0][1]
 
 
-def test_a_gray_band_arm_banks_its_verdict_as_degraded(
+def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
         tmp_path, monkeypatch, declared, events):
-    """A cell inside the declared gray band ARMS and confesses. It therefore
-    serves, so it must carry a proof too — with the rung it actually reached,
-    not a rounded-up one."""
+    """§4.32: identical or refuse, no DEGRADED-publish band. An adopter runs no
+    gate that could re-check what ships, so a gray-band publish would export an
+    unmeasured degradation to every pod that pulls the key."""
     packages = {entry_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
-    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcome = arm(
+        tmp_path, monkeypatch, declared, packages, verify_numerics=True)
 
-    assert outcome.armed is True
-    proof = aot_serve.numerics_proof(pipeline)
-    assert proof is not None
-    assert proof.verdict == numerics_ladder.VERDICT_DEGRADED
-    assert proof.worst_cosine == pytest.approx(0.997, abs=1e-3)
+    assert outcome.armed is False, "a gray-band cell was published to the fleet"
+    assert aot_serve.is_armed(pipeline) is False
+    assert outcome.reason == "numerics_refused"
+    assert "nothing is published" in outcome.detail
+    # It still CONFESSES — a fleet-wide rate is only countable from rows.
+    assert [p for k, _d, p in events
+            if k == activity.KIND_CELL_NUMERICS] == ["degraded"]
 
 
-def test_a_refused_cell_banks_nothing(tmp_path, monkeypatch, declared, events):
-    """THE fail-closed half: a cell below its floor does not arm, so there is
-    no marker, no proof, and nothing downstream can be carried by one."""
+def test_the_MINT_gate_refuses_a_cell_below_its_floor(
+        tmp_path, monkeypatch, declared, events):
+    """Unchanged by both rulings, and the reason the gate still exists at all:
+    try-serve catches ERRORS, never wrong OUTPUT. A cell that runs cleanly and
+    renders a bad image raises nothing."""
     packages = {entry_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
-    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcome = arm(
+        tmp_path, monkeypatch, declared, packages, verify_numerics=True)
 
     assert outcome.armed is False
     assert aot_serve.is_armed(pipeline) is False
-    assert aot_serve.numerics_proof(pipeline) is None
-    assert aot_serve.numerics_measured(pipeline) is False
-
-
-def test_the_proof_cannot_outlive_the_arm_it_is_about(
-        tmp_path, monkeypatch, declared, events):
-    """Scoped to the exact wrap that earned it: unwrap drops the marker, and a
-    revoked target keeps the record while withdrawing the PROOF — the two are
-    different facts and the disarm names which one it saw."""
-    packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
-    assert outcome.armed is True
-
-    # A revoked target: measured, but no longer serving anything.
-    for row in aot_serve.armed_targets(pipeline).values():
-        row["state"]["failed"] = True
-    assert aot_serve.numerics_proof(pipeline) is None
-    assert aot_serve.numerics_measured(pipeline) is True
-
-    aot_serve.unwrap(pipeline)
-    assert aot_serve.numerics_measured(pipeline) is False
-    assert aot_serve.record_numerics_proof(
-        pipeline, aot_serve.NumericsProof("k", 1, "e", 1.0, "healthy")) is False
+    assert [p for k, _d, p in events
+            if k == activity.KIND_CELL_NUMERICS] == ["refused"]
 
 
 # ---------------------------------------------------------------------------
-# PART B — the boot warmup proof gate, through the real `ensure_setup`
+# PART B — ADOPTION runs no quality gate at all
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cosine,label", [
+    (0.99, "below the floor"),
+    (0.997, "inside the gray band"),
+])
+def test_ADOPTION_arms_a_cell_the_mint_gate_would_have_REFUSED(
+        tmp_path, monkeypatch, declared, events, cosine, label):
+    """THE §4.32 RED, and it fails on master twice over: the adopt path used to
+    run this gate and would have unwrapped both of these cells.
+
+    Adoption is materialize -> arm -> serve. The bytes were proven once, at
+    their mint; re-proving them on every adopter taxes the fleet forever for an
+    author's one-time mistake, and it is the tax that made a pod throw away a
+    cell it had just verified at `cos=1.00000`. Deliberately parametrized over
+    a cell that would FAIL: the point is not that adoption is lucky, it is that
+    adoption does not ASK."""
+    packages = {entry_name(h, w): ProbePackage(cosine=cosine) for h, w in ROWS}
+    pipeline, _module, outcome = arm(
+        tmp_path, monkeypatch, declared, packages, verify_numerics=False)
+
+    assert outcome.armed is True, f"an adopting pod re-judged a cell {label}"
+    assert aot_serve.is_armed(pipeline) is True
+    assert [k for k, _d, _p in events if k == activity.KIND_CELL_NUMERICS] == [], (
+        "adoption emitted a quality verdict, so it ran a quality gate")
+
+
+def test_ADOPTION_is_the_default_so_a_new_arm_path_cannot_inherit_the_tax(
+        tmp_path, monkeypatch, declared, events):
+    """`verify_numerics` defaults to False, and that direction is deliberate:
+    the ONE caller that measures is the mint. A future arm path that forgets
+    the flag adopts (correct); one that forgets it in the other direction would
+    have silently re-imposed the per-adopter cost this issue deleted."""
+    import inspect
+
+    from gen_worker.models import provision
+
+    sig = inspect.signature(provision.arm_aot)
+    assert sig.parameters["verify_numerics"].default is False
+
+
+# ---------------------------------------------------------------------------
+# PART C — the setup warmup, through the real `ensure_setup`
 # ---------------------------------------------------------------------------
 
 
@@ -198,16 +240,16 @@ class AdoptedFamily:
         return Out()
 
 
-#: The three dispatches the pgw#868 gate itself made at arm time. `aot_proof_
-#: before` is snapshotted AFTER the arm, so these prove nothing to a gate that
-#: only counts — which is exactly the pod's reading.
+#: Calls the artifact had already served before setup opened. Non-zero because
+#: `aot_proof_before` is snapshotted AFTER the arm, so a counter-only gate can
+#: never see them — which is exactly the pod's reading.
 PROBE_CALLS = 3
 
 
-def _fake_adopt_arm(key: str, ref: str, *, bank: bool, revoke: bool = False):
+def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
     """A fleet policy standing in for §4.27 boot-adopt: arm the resolved cell
-    on the unet, run the parity gate (or not), and hand back the adopted
-    identity. Everything from `ArmOutcome` to the boot proof runs REAL."""
+    on the unet and hand back the adopted identity. Everything from
+    `ArmOutcome` to the setup warmup runs REAL."""
 
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
                 publisher: Any = None, **_kw: Any) -> "fleet_cells.ArmOutcome":
@@ -218,11 +260,6 @@ def _fake_adopt_arm(key: str, ref: str, *, bank: bool, revoke: bool = False):
         setattr(unet, aot_serve._MARKER_ATTR, marker)
         setattr(pipe, aot_serve._MARKER_ATTR, marker)
         aot_serve.note_aot_key(key)
-        if bank:
-            assert aot_serve.record_numerics_proof(pipe, aot_serve.NumericsProof(
-                cell_key=key, axes=3, worst_entry="unet/h=256,w=256",
-                worst_cosine=1.0, verdict=numerics_ladder.VERDICT_HEALTHY,
-                elapsed_ms=158))
         if revoke:
             state["failed"] = True
         adopted = fleet_cells.SelfMint(
@@ -234,7 +271,7 @@ def _fake_adopt_arm(key: str, ref: str, *, bank: bool, revoke: bool = False):
     return _enable
 
 
-def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str, bank: bool,
+def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str,
          revoke: bool = False, dispatch: bool = False) -> Tuple[str, str]:
     RIG.clear()
     RIG["dispatch"] = dispatch
@@ -242,7 +279,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str, bank: bool,
     ref = f"root/family-{FAMILY}#{key}"
     monkeypatch.setattr(
         fleet_cells, "enable_compiled",
-        _fake_adopt_arm(key, ref, bank=bank, revoke=revoke))
+        _fake_adopt_arm(key, ref, revoke=revoke))
     return key, ref
 
 
@@ -298,26 +335,31 @@ def _phases(said: List[Tuple[str, str, str]], kind: str) -> List[str]:
     return [phase for k, phase, _d in said if k == kind]
 
 
-def test_an_adopted_cell_with_a_standing_parity_proof_STAYS_ARMED(
+def test_an_ADOPTED_cell_serves_COMPILED_immediately_after_materialize(
         tmp_path, monkeypatch, spy):
-    """THE RED. Pre-fix: `unexercised` -> `unproven` -> unwrap -> quarantine,
-    `functions=()`, `target_applicability_incomplete`, eager for life. The
-    artifact was verified at cos=1.00000 on this very pod first."""
-    _key, ref = _rig(monkeypatch, seed="a", bank=True)
+    """THE HEADLINE RED, and on master it fails twice over — once for the
+    warmup barrier (§4.31) and once for the adopt-side gate (§4.32).
+
+    The pod's own reading, reproduced: the cell arms before setup, the boot
+    warmup dispatches nothing through it, and pre-fix that made it
+    `unexercised` -> `unproven` -> unwrap -> quarantine, `functions=()`,
+    `target_applicability_incomplete`, `armed_target_unresolved`, eager for
+    life. Now: armed, dispatchable, serving compiled, with NO quality
+    measurement taken anywhere on this pod."""
+    _key, ref = _rig(monkeypatch, seed="a")
     ex, eff = _boot(tmp_path, monkeypatch)
     pipe = RIG["pipe"]
 
     assert aot_serve.is_armed(pipe) is True, (
-        "the pod threw away a cell it had just verified against eager")
+        "the pod threw away the cell it had just materialized")
     assert getattr(pipe.unet, aot_serve._MARKER_ATTR, None) is not None
-    assert compile_cache.cell_proven_in_process(ref)
     assert not compile_cache.cell_quarantined_in_process(ref)
 
     # ...and the arm is DISPATCHABLE, which is the half the pod actually lost:
-    # a proof that leaves `function_proofs` empty installs no target and the
-    # boot still ends `boot_ended_uncompiled`.
+    # an empty `function_proofs` installs no target and the boot still ends
+    # `boot_ended_uncompiled` however armed the object is.
     rec = ex._classes[eff.instance_key]
-    assert rec.compile_targets, "proven and still no installed compile target"
+    assert rec.compile_targets, "armed and still no installed compile target"
     target = next(iter(rec.compile_targets.values()))
     assert "generate" in target.function_names
     assert rec.eager_posture == ""
@@ -327,66 +369,43 @@ def test_an_adopted_cell_with_a_standing_parity_proof_STAYS_ARMED(
         spy, "serve_eager_posture")
     assert ex._served_execution_lane(eff).endswith("+compiled")
 
-    # An unannounced pass is indistinguishable from a gate that never ran.
+    # §4.32: adoption measured nothing. The only cell_numerics row a boot like
+    # this may emit is the posture one — never a verdict.
     rows = [(phase, detail) for kind, phase, detail in spy
             if kind == activity.KIND_CELL_NUMERICS]
-    assert [p for p, _d in rows] == [numerics_ladder.PHASE_SERVING_PROOF], rows
-    assert "cos=1.00000" in rows[0][1]
-    assert "axes=3" in rows[0][1]
-
-
-def test_an_arm_with_NO_warm_dispatch_STILL_SERVES_and_withholds_its_publish(
-        tmp_path, monkeypatch, spy):
-    """THE DELETED BARRIER, in the direction that used to be its whole point.
-
-    Nothing dispatched through this artifact and nothing measured it, so this
-    pod holds no evidence either way — and under the serve-first ruling that is
-    NOT a verdict. The cell serves; the first real request is the proof; a
-    cell-attributable failure revokes it in-request. What absence of evidence
-    still decides is PUBLISHING: serving optimistically costs this pod one
-    eager fallback, publishing an unverified cell costs every pod that adopts
-    it."""
-    _key, ref = _rig(monkeypatch, seed="b", bank=False)
-    ex, eff = _boot(tmp_path, monkeypatch)
-    pipe = RIG["pipe"]
-
-    assert aot_serve.is_armed(pipe) is True
-    assert getattr(pipe.unet, aot_serve._MARKER_ATTR, None) is not None
-    assert not compile_cache.cell_quarantined_in_process(ref)
-    # ...but nothing proved it either: the publish gate reads this.
-    assert not compile_cache.cell_proven_in_process(ref)
-    rec = ex._classes[eff.instance_key]
-    assert rec.compile_targets, "the arm stands, so its target must be installed"
-
-    # LOUD, at the decision point — an unannounced posture is indistinguishable
-    # from a gate that never ran.
-    rows = [(phase, detail) for kind, phase, detail in spy
-            if kind == activity.KIND_CELL_NUMERICS]
-    assert [p for p, _d in rows] == [numerics_ladder.PHASE_PROOF_ABSENT], rows
+    assert [p for p, _d in rows] == [
+        numerics_ladder.PHASE_ARMED_UNDISPATCHED], rows
     assert "STAYS ARMED" in rows[0][1]
-    assert "no parity verdict was banked" in rows[0][1]
+    assert "adoption runs no quality gate" in rows[0][1]
 
 
-def test_a_REVOKED_artifact_is_not_carried_by_the_verdict_it_once_passed(
+def test_a_REVOKED_artifact_is_not_re_armed_by_the_setup_pass(
         tmp_path, monkeypatch, spy):
-    """`proven_since`'s second half, applied to the parity proof: an artifact
-    that was measured and then revoked has proven nothing. The arm is already
-    gone (the wrapper revoked it), so what this pins is that the stale verdict
-    does not vouch for it — the publish stays withheld."""
-    _key, ref = _rig(monkeypatch, seed="c", bank=True, revoke=True)
+    """The de-arm is STICKY (§4.31). An artifact the wrapper already revoked —
+    it ran and failed — is not resurrected by anything downstream, and the boot
+    lands on eager with its target omitted rather than advertising a lane that
+    cannot serve."""
+    _key, ref = _rig(monkeypatch, seed="c", revoke=True)
     ex, eff = _boot(tmp_path, monkeypatch)
     pipe = RIG["pipe"]
 
     assert aot_serve.is_armed(pipe) is False
     assert not compile_cache.cell_proven_in_process(ref)
-    rows = [(phase, detail) for kind, phase, detail in spy
-            if kind == activity.KIND_CELL_NUMERICS]
-    assert [p for p, _d in rows] == [numerics_ladder.PHASE_PROOF_ABSENT], rows
-    assert "revoked since it was measured" in rows[0][1]
+    rec = ex._classes[eff.instance_key]
+    assert not rec.compile_targets, (
+        "a revoked artifact kept an installed target, so the wire would say "
+        "aot_cell on a pipeline whose every call runs eager")
+    # The revocation is NAMED on the wire, at the install that refused it.
+    # (`rec.eager_posture` settles on the terminal `armed_target_unresolved`
+    # from `_assert_armed_targets_installed`, which is the orphan report for
+    # the same object; both rows are emitted and neither is silence.)
+    assert cell_adopt.EagerPhase.COMPILED_DEGRADED.value in _phases(
+        spy, "serve_eager_posture")
+    assert rec.eager_posture
 
 
 # ---------------------------------------------------------------------------
-# PART C — try-serve: the first real request is the proof, and what it blames
+# PART D — try-serve: the first real request is the proof, and what it blames
 # ---------------------------------------------------------------------------
 
 
@@ -467,10 +486,10 @@ def test_a_TRANSIENT_OOM_is_not_the_cells_fault_and_does_not_disarm_it(
 
 def test_a_warm_DISPATCH_still_proves_first_and_says_nothing_extra(
         tmp_path, monkeypatch, spy):
-    """Symmetry, from the other side. The self-mint arm reaches its proof by a
-    warm dispatch and is untouched by this issue: when a dispatch lands, it is
-    the proof, and no parity row is emitted."""
-    _key, ref = _rig(monkeypatch, seed="d", bank=True, dispatch=True)
+    """Symmetry, from the other side. A warm dispatch that DOES land still
+    records the cell proven in-process (the pgw#637 registry the dynamo lane
+    reads), and emits no posture row — there is nothing to explain."""
+    _key, ref = _rig(monkeypatch, seed="d", dispatch=True)
     ex, eff = _boot(tmp_path, monkeypatch)
     pipe = RIG["pipe"]
 

@@ -309,9 +309,16 @@ def arm_aot(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], artifact: Path,
     bucket: int, meta: Optional[Dict[str, Any]] = None,
     *, expected: "Optional[ExpectedIdentity]" = None,
+    verify_numerics: bool = False,
 ) -> AdoptOutcome:
     """Arm ONE exported ``.pt2`` cell on ``pipe``. The whole AOT arm, in one
     place, for every source of such an artifact.
+
+    ``verify_numerics`` (DESIGN-RULINGS §4.32, pgw#1141) runs the parity gate,
+    and exactly ONE caller sets it: the pod that MINTED these bytes, before it
+    publishes them. Adoption runs no quality gate at all — see
+    :func:`gate_cell_numerics` for why re-measuring an adopted cell was taxing
+    every adopter forever for an author's one-time mistake.
 
     pgw#805 extracted this from :func:`enable_compiled`'s kind dispatch: a
     cell this pod MINTED ITSELF has to arm through exactly the same gates a
@@ -435,7 +442,9 @@ def arm_aot(
             + f" — {lifted_install_error}]".strip(),
             outcome.identity)
     if outcome.armed:
-        if gate_cell_numerics(pipe, cfg):
+        # §4.32: quality is proven at MINT and in author CI, never at adoption.
+        # An adopting pod materializes, arms and serves.
+        if not verify_numerics or gate_cell_numerics(pipe, cfg, strict=True):
             return outcome
         # A refused cell is UNARMED, not merely reported: the whole point is
         # that it must not serve. Staying eager is the ordinary miss policy
@@ -451,9 +460,10 @@ def arm_aot(
         aot_serve.unwrap(pipe)
         outcome = AdoptOutcome.miss(
             "numerics_refused",
-            f"family={meta.get('family')} key={meta.get('cell_key')}: armed, "
-            f"then UNARMED by the numerics gate — this pod serves eager "
-            f"(pgw#868)",
+            f"family={meta.get('family')} key={meta.get('cell_key')}: this pod "
+            f"MINTED these bytes and they do not reproduce the eager forward "
+            f"they were traced from — nothing is published and this pod serves "
+            f"eager (pgw#868, §4.32)",
             outcome.identity)
     if lifted_installed:
         from . import lora_lifted
@@ -462,26 +472,47 @@ def arm_aot(
     return outcome
 
 
-def gate_cell_numerics(pipe: Any, cfg: Any) -> bool:
+def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
     """THE numerics gate (pgw#868): does this cell reproduce the eager forward
-    it is about to replace? Returns False when it must not serve.
+    it replaces? Returns False when it must not serve — and, on the only path
+    that runs it, when it must not be PUBLISHED.
 
-    Placed at ADOPT time because a hub-delivered cell never re-enters mint —
-    the arm is the only point every cell passes through, and it is the point
-    that decides whether the artifact serves. `numerics_probe.measure_axis`
-    takes callables rather than a pipeline precisely so the same measurement
-    can also run mint-side later as a cheaper early catch; what must not exist
-    is a mint-only gate, which cannot protect an adopting pod whose weights,
-    lane and card differ.
+    **It runs on the MINTING pod, and nowhere else (DESIGN-RULINGS §4.32).**
+    It used to run at every ADOPT, on the reasoning that a mint-only gate
+    "cannot protect an adopting pod whose weights, lane and card differ". Paul
+    overruled that: every failure this gate has ever caught (a baked
+    `conv_out.bias`, timestep dtype scars) was an AUTHOR defect in endpoint
+    code or config, and re-measuring on every adopter taxes the whole fleet
+    forever for one author's one-time mistake. It is not the consumer's job to
+    catch the author's bugs.
 
-    Three outcomes, all of them typed rows on the wire:
+    What makes adoption safe without re-measuring is CONSTRUCTION, not identity
+    — a ck1 key is graph x envelope x sm x toolchain and carries NO checkpoint
+    hash, deliberately, so one cell serves every checkpoint of the
+    architecture:
 
-    * HEALTHY -> `cell_numerics phase=checked`, arms silently-but-recorded.
+    * the cell is compiled CODE; weights flow through it as data (call inputs
+      and arm-time-bound constants), so a mint-time parity proof proves the
+      FUNCTION and transfers to any checkpoint that function accepts;
+    * the one way that breaks — a weight VALUE baked into the artifact — is
+      structurally fenced fail-closed by the constant-folding fence (0.100.0),
+      not policed by measurement;
+    * a checkpoint that changes the COMPUTATION (a config flag that alters the
+      traced graph) hashes to a different graph, hence a different key, hence
+      no match at all. The graph axis protects there, not a checkpoint digest.
+
+    ``strict`` is what the mint path passes, and §4.32 requires it: identical
+    or refuse, with no DEGRADED-publish band. A cell that lands in the gray
+    band is one an ADOPTER can never re-check, so shipping it would export an
+    unmeasured degradation to every pod that pulls it.
+
+    Outcomes, all typed rows on the wire:
+
+    * HEALTHY -> `cell_numerics phase=checked`; the mint arms and publishes.
       The pass is announced deliberately: an unannounced pass is
       indistinguishable from a gate that never ran, which is this program's
       signature failure.
-    * DEGRADED -> the ladder's `phase=degraded` row; the cell ARMS and
-      confesses.
+    * DEGRADED -> `phase=degraded`, and under ``strict`` it REFUSES.
     * DESTROYED / unmeasurable -> refuse. `numerics_ladder.gate` raises the
       typed refusal below the floor; a probe that could not be TAKEN is
       refused on its own `phase=unmeasurable`, because "nobody could ask" is
@@ -513,7 +544,6 @@ def gate_cell_numerics(pipe: Any, cfg: Any) -> bool:
                      else "no_axis_measured"),
             f"{report.context()} | unmeasured: {rows}")
     comparison = report.comparison()
-    worst = report.worst()
     try:
         numerics_ladder.gate(
             comparison,
@@ -521,19 +551,15 @@ def gate_cell_numerics(pipe: Any, cfg: Any) -> bool:
             refuse=lambda detail, worst_row: numerics_probe.CellNumericsRefused(
                 detail, worst_row),
             context=report.context())
-        # pgw#1141: the verdict is BANKED on the arm, not merely announced.
-        # This measurement executed every packaged entry through its own
-        # runner and matched eager — so the setup warmup, which scores an
-        # exported arm by "did a dispatch land during MY window", has a proof
-        # to read instead of destroying the artifact that carries it.
-        aot_serve.record_numerics_proof(pipe, aot_serve.NumericsProof(
-            cell_key=str(report.cell_key or ""),
-            axes=len(report.verdicts),
-            worst_entry=(worst.axis.name if worst is not None else ""),
-            worst_cosine=(comparison.cosine if comparison is not None else 0.0),
-            verdict=(comparison.verdict if comparison is not None else ""),
-            elapsed_ms=report.elapsed_ms,
-        ))
+        if strict and comparison is not None and not comparison.healthy:
+            # §4.32: identical or refuse. The ladder already emitted the
+            # `degraded` row above, so the confession is on the wire; what
+            # changes here is that the bytes do not ship.
+            logger.error(
+                "aot mint: REFUSING to publish %s — the cell it just compiled "
+                "lands in the gray band (%s), and an adopter runs no gate that "
+                "could re-check it (§4.32)", family or "cell", comparison.verdict)
+            return False
         if comparison is not None and comparison.healthy:
             activity_mod.emit_event(
                 activity_mod.KIND_CELL_NUMERICS,

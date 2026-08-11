@@ -4713,6 +4713,26 @@ class Executor:
             exported_arm = bool(
                 active_selection is not None
                 and aot_serve.is_aot_ref(active_selection.ref))
+            if exported_arm and not aot_serve.is_armed(pipeline):
+                # pgw#1141: the sticky de-arm reaches the INSTALL. The artifact
+                # revoked itself (a failed target, a constants fault) before
+                # any guard was bound to hear it, so installing its target
+                # would advertise `serving_mode=aot_cell` on a pipeline whose
+                # every call now runs eager — the wire lie pgw#1082/#1093 spent
+                # two pods closing. Under the old barrier the disarm sweep hid
+                # this case by unwrapping first; serve-first reaches it, so it
+                # is named here.
+                detail = (
+                    f"{type(pipeline).__name__} owning slots "
+                    f"{sorted(candidate.slots)} holds a REVOKED exported cell "
+                    f"({active_selection.ref if active_selection else '?'}): "
+                    f"the artifact de-armed itself during boot, so every call "
+                    f"serves eager and no compiled target may advertise it")
+                logger.warning("compile target omitted for %s: %s",
+                               spec.name, detail)
+                self._note_eager_posture(
+                    rec, cell_adopt.EagerPhase.COMPILED_DEGRADED.value, detail)
+                continue
             permitted_names = (
                 contract_names if exported_arm
                 else function_proofs[id(pipeline)]
@@ -7514,56 +7534,18 @@ class Executor:
                             if proved_sel is not None:
                                 compile_cache.record_cell_proven(proved_sel.ref)
                             continue
-                        # pgw#1141: THE second proof, and on a boot-ADOPTED
-                        # cell it is the only one that can exist. The arm
-                        # happens before setup, so nothing has dispatched yet
-                        # by construction — but the pgw#868 gate has already
-                        # run EVERY packaged entry through its own runner
-                        # against the eager forward it replaces, on this pod,
-                        # on these weights, on this card. That is a superset of
-                        # what `proven_since` asks (it executed, and it is
-                        # still armed) plus the accuracy the dispatch counter
-                        # cannot see. Scoring it `unexercised` destroyed
-                        # artifacts verified at cos=1.00000 on two real pods,
-                        # and left the SELF-MINT arm — which reaches its proof
-                        # by a warm dispatch — as the only way to serve
-                        # compiled. Both arms take the same measurement in
-                        # `provision.arm_aot`, so reading it here is what makes
-                        # adopted and self-minted cells symmetrical rather
-                        # than a special case for one of them.
-                        parity = aot_serve.numerics_proof(pipe)
-                        if parity is None:
-                            arm_without_dispatch[id(pipe)] = (
-                                "artifact revoked since it was measured"
-                                if aot_serve.numerics_measured(pipe)
-                                else "no parity verdict was banked on this arm")
-                            unexercised.append(candidate)
-                            continue
-                        proven += 1
-                        # `function_proofs` is deliberately NOT narrowed to
-                        # `spec.name` here: the parity verdict covers every
-                        # entry the cell PACKAGES, i.e. the whole contract its
-                        # key advertises, so the install falls through to
-                        # `contract_names`. A class the cell does not carry is
-                        # refused BY NAME at ingress and served eager per
-                        # request (pgw#844), which is the backstop that lets
-                        # this attribution be contract-wide.
-                        proved_sel = inj.active_compile_artifacts.get(id(pipe))
-                        if proved_sel is not None:
-                            compile_cache.record_cell_proven(proved_sel.ref)
-                        logger.info(
-                            "compile object (slots=%s) proven by its own "
-                            "numerics parity (%s); the boot warmup landed no "
-                            "dispatch on it (pgw#1141)",
-                            sorted(candidate.slots), parity)
-                        activity_mod.emit_event(
-                            activity_mod.KIND_CELL_NUMERICS,
-                            f"{spec.name}: the boot warmup dispatched no call "
-                            f"through this armed cell, and its own parity "
-                            f"measurement on THIS pod carries the proof "
-                            f"instead — {parity}",
-                            phase=numerics_ladder.PHASE_SERVING_PROOF,
-                        )
+                        # pgw#1141 / §4.31 + §4.32: an adopted cell arms BEFORE
+                        # setup, so no dispatch can have landed by now, and
+                        # nothing measures it here either — quality was proven
+                        # once, on the pod that MINTED it, and adoption runs no
+                        # quality gate. The absence of a dispatch is therefore
+                        # not a verdict: the arm stands, the first real request
+                        # is the proof, and a cell-attributable failure de-arms
+                        # it in-request.
+                        arm_without_dispatch[id(pipe)] = (
+                            "adoption runs no quality gate (§4.32) — this cell "
+                            "was proven at its mint")
+                        unexercised.append(candidate)
                         continue
                     before = proof_before.get(id(pipe))
                     if before is None:
@@ -7643,11 +7625,10 @@ class Executor:
                     activity_mod.emit_event(
                         activity_mod.KIND_CELL_NUMERICS,
                         f"{spec.name}: the exported cell on slots "
-                        f"{sorted(candidate.slots)} took no warm dispatch and "
-                        f"{reason} — it STAYS ARMED and serves; a "
-                        f"cell-attributable failure revokes it in-request, and "
-                        f"it publishes nothing to the fleet",
-                        phase=numerics_ladder.PHASE_PROOF_ABSENT,
+                        f"{sorted(candidate.slots)} took no warm dispatch — "
+                        f"{reason}. It STAYS ARMED and serves; a "
+                        f"cell-attributable failure revokes it in-request",
+                        phase=numerics_ladder.PHASE_ARMED_UNDISPATCHED,
                     )
 
                 # pgw#1141 (Paul's ruling, 2026-08-11), and it is a DELETION:
@@ -7837,12 +7818,14 @@ class Executor:
                             "cell-attributable failure revokes it in-request "
                             "(pgw#1141)", sorted(candidate.slots))
                         _confess_arm_without_dispatch(candidate)
-                        if aot_serve.numerics_proof(pipe) is None:
-                            # Nothing on this pod has evidence this artifact
-                            # works: it may serve (try-serve decides), but it
-                            # must not be PUBLISHED to pods that cannot
-                            # re-derive that verdict.
-                            self._abandon_pending_mint(inj, pipe)
+                        # NOTE the publish is NOT withheld here any more. §4.32
+                        # moves that authority to the mint-time gate on this
+                        # same pod (`fleet_cells.adopt_delegated_mint` ->
+                        # `provision.arm_aot(verify_numerics=True)`), which runs
+                        # the freshly compiled artifact against the eager
+                        # forward it was traced from and refuses to publish
+                        # anything that is not identical. A warm dispatch count
+                        # decides nothing at either end.
                         continue
                     mandatory = pipeline_weight_lane(pipe).startswith(
                         _MANDATORY_EXECUTION_LANES)
