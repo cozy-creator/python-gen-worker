@@ -18,7 +18,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 UNIT_BYTES = "bytes"
 UNIT_STEPS = "steps"
@@ -42,13 +42,28 @@ DEFAULT_STALL_WINDOW_S = 300.0
 _now = time.monotonic
 
 _lock = threading.Lock()
-_counters: Dict[str, "Counter"] = {}
+
+#: ``(owner, name) -> Counter``. pgw#894: the key used to be the NAME alone, so
+#: one process-global namespace held every phase's counters and `freshest()`
+#: returned whichever of them advanced most recently — regardless of which work
+#: it described. A serving request's `infer:steps` therefore refreshed a
+#: background mint's stall clock: measured on the standing chaos hub, 28 log
+#: lines reporting `infer:steps` under `self_mint_compile`, one of which
+#: declined a condemnation because that mint activity was "0s ago".
+#:
+#: The OWNER is the scope the counter belongs to (an activity id, a request
+#: id). Registry-wide queries still exist and still mean what they meant — "is
+#: this process doing anything at all" — but a scope's stall verdict is now
+#: computed from that scope's own counters.
+_counters: Dict[Tuple[str, str], "Counter"] = {}
 
 
 @dataclass(frozen=True)
 class Snapshot:
     name: str
     unit: str
+    #: The scope that owns this counter ("" = unowned/process-wide).
+    owner: str
     done: float
     total: float  # 0 = unknown
     rate_per_s: float
@@ -64,8 +79,10 @@ def window_for(name: str) -> float:
 class Counter:
     """One named monotonic counter; open until finish()."""
 
-    def __init__(self, name: str, unit: str, total: float = 0.0) -> None:
-        self.name, self.unit = name, unit
+    def __init__(
+        self, name: str, unit: str, total: float = 0.0, owner: str = "",
+    ) -> None:
+        self.name, self.unit, self.owner = name, unit, owner
         now = _now()
         self._done = 0.0
         self._total = max(0.0, float(total))
@@ -95,8 +112,8 @@ class Counter:
 
     def finish(self) -> None:
         with _lock:
-            if _counters.get(self.name) is self:
-                del _counters[self.name]
+            if _counters.get((self.owner, self.name)) is self:
+                del _counters[(self.owner, self.name)]
 
     def _snapshot_locked(self, now: float) -> Snapshot:
         dt = now - self._rate_t
@@ -104,63 +121,93 @@ class Counter:
             self._rate = max(0.0, (self._done - self._rate_v) / dt)
             self._rate_t, self._rate_v = now, self._done
         return Snapshot(
-            name=self.name, unit=self.unit, done=self._done, total=self._total,
+            name=self.name, unit=self.unit, owner=self.owner,
+            done=self._done, total=self._total,
             rate_per_s=self._rate, age_s=max(0.0, now - self._advanced),
             window_s=window_for(self.name), elapsed_s=max(0.0, now - self._started),
         )
 
 
-def counter(name: str, unit: str, total: float = 0.0) -> Counter:
-    """Register-or-get the open counter `name` (idempotent)."""
+def counter(
+    name: str, unit: str, total: float = 0.0, *, owner: str = "",
+) -> Counter:
+    """Register-or-get the open counter `name` within `owner` (idempotent).
+
+    ``owner`` scopes the counter to the work it describes (pgw#894). Two
+    scopes may use the same NAME — two concurrent requests both counting
+    ``infer:steps`` is the ordinary case — and neither can advance the
+    other's clock.
+    """
+    key = (owner, name)
     with _lock:
-        existing = _counters.get(name)
+        existing = _counters.get(key)
         if existing is not None:
             if total > 0:
                 existing._total = float(total)
             return existing
-        c = Counter(name, unit, total)
-        _counters[name] = c
+        c = Counter(name, unit, total, owner)
+        _counters[key] = c
         return c
 
 
 class tracking:
     """Context manager: register on enter, finish on exit."""
 
-    def __init__(self, name: str, unit: str, total: float = 0.0) -> None:
+    def __init__(
+        self, name: str, unit: str, total: float = 0.0, *, owner: str = "",
+    ) -> None:
         self._args = (name, unit, total)
+        self._owner = owner
 
     def __enter__(self) -> Counter:
-        self._counter = counter(*self._args)
+        self._counter = counter(*self._args, owner=self._owner)
         return self._counter
 
     def __exit__(self, *exc: object) -> None:
         self._counter.finish()
 
 
-def snapshot() -> List[Snapshot]:
+def snapshot(owner: Optional[str] = None) -> List[Snapshot]:
+    """Every open counter, or only ``owner``'s when one is named."""
     now = _now()
     with _lock:
-        return [c._snapshot_locked(now) for c in _counters.values()]
+        return [
+            c._snapshot_locked(now) for c in _counters.values()
+            if owner is None or c.owner == owner
+        ]
 
 
-def freshest() -> Optional[Snapshot]:
-    """The most recently advanced open counter — the liveness view. ANY
-    advancing counter proves the process is doing real work."""
-    snaps = snapshot()
+def freshest(owner: Optional[str] = None) -> Optional[Snapshot]:
+    """The most recently advanced open counter.
+
+    ``owner=None`` is the PROCESS liveness view and is unchanged: any
+    advancing counter proves the process is doing real work, which is exactly
+    what a "did this pod wedge" question wants.
+
+    ``owner="..."`` is the SCOPE view, and it is the one a stall verdict must
+    use (pgw#894). A mint asking "am I still advancing" must not be answered
+    by a request that happens to be running beside it.
+    """
+    snaps = snapshot(owner)
     return min(snaps, key=lambda s: s.age_s) if snaps else None
 
 
-def self_diagnosis() -> Optional[Snapshot]:
+def self_diagnosis(owner: Optional[str] = None) -> Optional[Snapshot]:
     """Non-None when even the FRESHEST open counter is stale past its own
     window — the typed self_stalled confession the beat reports so the hub
     kills on fact, not inference.
 
-    Registry-wide by design (any advancing counter proves the process is
-    alive), which is why counter LIFETIME has to be honest: a counter left
+    Scoped to ``owner`` when one is named, registry-wide otherwise. pgw#894:
+    registry-wide was the ONLY form, and it is the right answer to "is this
+    process alive" and the wrong one to "is this mint stalled" — a request
+    running beside a wedged mint answered for it. `Activity.on_beat` passes
+    the activity's own id.
+
+    Counter LIFETIME still has to be honest within a scope: a counter left
     open after its producer's phase ended is the min-age counter of a phase it
     knows nothing about, and confesses for it. `Activity.counter()` scopes
     them to the phase for that reason (pgw#962)."""
-    fresh = freshest()
+    fresh = freshest(owner)
     if fresh is not None and fresh.age_s > fresh.window_s:
         return fresh
     return None

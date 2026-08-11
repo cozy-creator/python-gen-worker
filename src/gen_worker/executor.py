@@ -2151,7 +2151,9 @@ class ModelStore:
             # total known up front, so the wire never shows total=0 for
             # tensorhub refs.
             known_total = sum(int(f.size_bytes) for f in fetch_files)
-            dl_counter = progress_mod.counter(
+            # pgw#894: owned by the activity this download is FOR when there
+            # is one, so it advances that scope's clock and no other.
+            dl_counter = activity_mod.scoped_counter(
                 f"download:{ref}", progress_mod.UNIT_BYTES, total=known_total)
 
             def _progress(done: int, total: Optional[int]) -> None:
@@ -12159,15 +12161,32 @@ class Executor:
             except Exception:
                 logger.debug("ctx event send failed for %s", job.request_id, exc_info=True)
 
+        # pgw#894: THIS REQUEST'S counter, registered under this request's own
+        # scope. It used to be `activity.current().counter("infer:steps", ...)`
+        # — a serving request feeding whatever activity happened to be current,
+        # which on a pod running a background mint is the MINT. The hub
+        # advances an activity's `UpdatedAt` from a counter-name change or
+        # value increase (`worker_activity.go:323-338`), and that timestamp is
+        # what its stall/condemnation path reads: measured on the standing
+        # chaos hub, 28 lines reported `infer:steps` under `self_mint_compile`
+        # and line 4542 declined a condemnation because that mint activity was
+        # "0s ago". The counter still proves the PROCESS is alive — a
+        # registry-wide `progress.freshest()` sees it, which is what the
+        # in-call stall loop and the drain use — it just no longer answers a
+        # question about work it is not doing.
+        #
+        # The old comment justified the credit with "warmup forwards run
+        # GPU-bound with a quiet CPU". Warmup does not reach here: it builds
+        # its context through `warmup.warm_context`, which passes no emitter
+        # at all, and reports its own activity-owned `warmup:jobs` counter.
+        steps = progress_mod.counter(
+            "infer:steps", progress_mod.UNIT_STEPS,
+            owner=f"request:{job.request_id}")
+
         def _emit(event: Dict[str, Any]) -> None:
             if job.finished:
                 return
-            # gw#621: a ctx event is real forward progress — feed the open
-            # activity's step counter (warmup forwards run GPU-bound with a
-            # quiet CPU; watchdog evidence alone would read stalled).
-            act = activity_mod.current()
-            if act is not None:
-                act.counter("infer:steps", progress_mod.UNIT_STEPS).add(1)
+            steps.add(1)
             try:
                 data = msgspec.json.encode(event)
             except Exception:
@@ -12340,6 +12359,12 @@ class Executor:
         if job.finished:
             return
         job.finished = True
+        # pgw#894/pgw#962: a request's scope dies with the request. A counter
+        # left open after its producer stopped is the min-age counter of work
+        # nobody is doing, and it confesses for whoever asks next.
+        progress_mod.counter(
+            "infer:steps", progress_mod.UNIT_STEPS,
+            owner=f"request:{job.request_id}").finish()
         # th#1111: stamp the per-stage breakdown on EVERY terminal path (ok,
         # deadline, cancel, error) — a slow request's stages are exactly the
         # ones worth seeing.

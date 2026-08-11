@@ -248,6 +248,13 @@ class Activity:
 
     def __init__(self, kind: str) -> None:
         self.kind = kind
+        #: This activity's own scope (pgw#894). Process-local and stable for
+        #: the activity's life: it keys the progress registry so a counter fed
+        #: by unrelated work can never answer THIS activity's stall question.
+        #: Not on the wire — the hub still identifies an activity by
+        #: (worker, kind, phase) — so it costs no protocol change; what it
+        #: buys is that the number the beat CARRIES describes this activity.
+        self.id = f"{kind}:{_next_seq()}"
         self._phase = ""
         self._step = 0
         self._total = 0
@@ -271,7 +278,7 @@ class Activity:
         without waiting out its own window. Producers re-acquire per tick, so a
         counter that is still being fed is simply re-registered under the new
         phase."""
-        c = progress_mod.counter(name, unit, total)
+        c = progress_mod.counter(name, unit, total, owner=self.id)
         self._counters[name] = (self._phase, c)
         return c
 
@@ -439,6 +446,23 @@ def current() -> Optional[Activity]:
     return act if act is not None and not act._done else None
 
 
+def scoped_counter(
+    name: str, unit: str, total: float = 0.0,
+) -> "progress_mod.Counter":
+    """The counter for ``name`` owned by the CURRENT activity, or an unowned
+    process counter when none is open (pgw#894).
+
+    For producers that are not themselves inside an activity method: a model
+    download or a weight load belongs to whatever phase asked for it, and the
+    fallback keeps library / CLI use — where no activity exists — working
+    exactly as before.
+    """
+    act = current()
+    if act is not None:
+        return act.counter(name, unit, total)
+    return progress_mod.counter(name, unit, total)
+
+
 def on_beat() -> None:
     """Ride the 10s app heartbeat (lifecycle._heartbeat_loop, gw#621): while
     an activity is open and the progress registry has counters, emit one
@@ -450,11 +474,21 @@ def on_beat() -> None:
         act = current()
         if act is None:
             return
-        snap = progress_mod.freshest()
+        # pgw#894: THIS activity's counters, not the registry's. The beat used
+        # to attach `progress.freshest()` — the min-age counter anywhere in
+        # the process — to whatever activity happened to be current, and the
+        # hub advances an activity's `UpdatedAt` from a counter-name change or
+        # value increase (`worker_activity.go:323-338`), which is the
+        # timestamp its stall/condemnation path reads. So a serving request
+        # deferred a background mint's stall verdict: 28 lines on the standing
+        # chaos hub reported `infer:steps` under `self_mint_compile`, and line
+        # 4542 declined a condemnation because that mint activity was "0s ago".
+        snap = progress_mod.freshest(act.id)
         if snap is None:
             return
         act.progress_beat(
-            snap, self_stalled=progress_mod.self_diagnosis() is not None)
+            snap,
+            self_stalled=progress_mod.self_diagnosis(act.id) is not None)
     except Exception:
         logger.debug("progress beat dropped", exc_info=True)
 
