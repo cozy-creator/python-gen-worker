@@ -390,7 +390,14 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
     seen: List[Path] = []
 
     def _arm(pipe: Any, cfg: Any, cache_dir: Any, artifact: Path,
-             bucket: int, expected: Any = None) -> AdoptOutcome:
+             bucket: int, expected: Any = None, *,
+             verify_numerics: bool = False, **_kw: Any) -> AdoptOutcome:
+        # pgw#1141 / §4.32: the local store's route is an ADOPTION — these
+        # bytes were proven at their own mint — so it must not ask for the
+        # mint-time gate. Asserted rather than absorbed: a bare `**kwargs`
+        # shim would keep this file green if the per-adopter tax came back.
+        assert verify_numerics is False, (
+            "the local store's ADOPT path asked for the mint-time gate")
         seen.append(Path(artifact))
         return AdoptOutcome.hit(KEY_A)
 

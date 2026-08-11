@@ -513,8 +513,13 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
     cfg = type("Cfg", (), {"family": "sdxl", "numerics_floor": 0.995,
                            "numerics_warn": 0.999, "lora_bucket": 0,
                            "targets": ()})()
+    # pgw#1141 / §4.32: the gate runs on the MINT arm now (adoption runs no
+    # quality gate at all), so this is the flag the minting pod passes. What
+    # this test is about is unchanged: an arm that could not be MEASURED is a
+    # refusal, never a silent `unchecked` announcement.
     assert provision.arm_aot(
-        object(), cfg, None, Path("cell.pt2"), 0).armed is False
+        object(), cfg, None, Path("cell.pt2"), 0,
+        verify_numerics=True).armed is False
     rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_CELL_NUMERICS]
     assert rows, "an arm that could not be measured said nothing"
     detail, phase = rows[-1]

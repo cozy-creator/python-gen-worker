@@ -6405,24 +6405,23 @@ class Executor:
         memory = self._warm_contract_runs.setdefault(
             self._warm_contract_key(spec), set())
         armed_refs = tuple(armed_cell_refs)
-        # pgw#1141: TRACING is what makes the full class x bucket cross-product
-        # worth its wall time — a capture being DRIVEN (every declared graph
-        # must trace into it), or a DYNAMO arm, whose only detector of a
-        # non-serving cell is the per-class cache-hit ledger this plan feeds.
+        # Tracing == some artifact is armed or minting on this setup; only
+        # then does the full class x bucket cross-product buy anything (each
+        # graph must trace into the capture / prove against the cell).
         #
-        # It used to mean "some artifact is armed", which charged a boot
-        # ADOPTING AN EXPORTED CELL the whole cross-product (sdxl: 9 aspect
-        # buckets x 2 guidance classes = 18 full generates per handler) for a
-        # proof that no longer gates anything on that lane. An AOTI cell is
-        # ahead-of-time machine code for this exact sm/toolchain: the first
-        # call is full speed, so re-running every declared class before READY
-        # buys nothing the numerics gate and the in-request fallback do not
-        # already buy — it is pure boot latency the tenant waits through. Such
-        # a boot now runs the EAGER plan (one collapsed run per (function,
-        # guidance class)), which is the allocator/kernel warm the eager
-        # fallback path needs anyway.
-        tracing = bool(cold_proof_ids) or any(
-            not aot_serve.is_aot_ref(ref) for ref in armed_refs)
+        # pgw#1141 DELIBERATELY LEAVES THIS ALONE, and the omission is the
+        # decision. §4.31 deletes the warm plan as a PREREQUISITE TO ARMING —
+        # which is this issue — and notes that the per-class cost then buys
+        # nothing on an exported adopt. Collapsing it to the eager plan is a
+        # real saving (sdxl: 18 full generates per handler -> 2) but it is not
+        # free: this plan is also what produces pgw#844's BOOT-TIME coverage
+        # census (`compiled_shape_coverage`, which names the declared classes a
+        # cell does not carry before any tenant meets one) and what feeds the
+        # dynamo lane's per-class cache-hit ledger, its only detector of a
+        # silent recompile. Both deserve an answer of their own rather than a
+        # rider on a P0 arm fix, so the collapse is filed as its own change
+        # with its own red tests. Nothing about the ARM depends on it.
+        tracing = bool(objects)
         skip_ok = (
             allow_contract_skip
             and not cold_proof_ids
