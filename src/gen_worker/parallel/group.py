@@ -51,25 +51,58 @@ from datetime import timedelta
 from typing import Any, Callable, List, Optional, Sequence, Tuple, cast
 import multiprocessing as mp
 
-from .. import settings_authority
+from .. import proc_evidence, settings_authority
+from ..stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
 
-# A follower that has not reached the store rendezvous by this deadline is
-# dead weight: the group cannot form and the request must fail loudly rather
-# than park on a rendezvous that will never complete. A constant, not an env
-# knob (DPA-22: the old GEN_WORKER_SP_RENDEZVOUS_S changed nothing and is
-# gone).
-_RENDEZVOUS_TIMEOUT_S = 180.0
+# pgw#892 / gw#666 / §4.24. Both group-formation bounds below used to be flat
+# WALL CLOCKS that condemned WORK: 180 s for a follower to reach the store
+# rendezvous and 1800 s for it to finish arming, where arming "covers a
+# follower's full pipeline materialization (a cold model load)". The first
+# self-mint measured ~28 min (ie#546) and pgw#846 projects 47 min - 6.26 h for
+# sdxl, so `_ARM_TIMEOUT_S` was a mint-killer of exactly the shape
+# `runtimes/server.py` already rejects by name — and a follower wedged in a
+# cold `import torch` at 181 s failed the group under the other one.
+#
+# What actually distinguishes a wedged follower from a slow one is whether it
+# is still doing work, and `check_alive()` already covers the DEAD case
+# typed-and-immediately. So both are now SILENCE windows over
+# `proc_evidence.tree_evidence` — the follower's own kernel-accounted CPU and
+# I/O, which needs no cooperation from a process that has no protocol between
+# spawn and ready. A follower that keeps advancing runs as long as its work
+# does; one that stops advancing is condemned by name, at any elapsed time.
+#
+# The window is a statement about the CHANNEL, not a budget for the job: how
+# long a materializing process may plausibly show neither a CPU tick nor a
+# byte. Sized at 4x `progress.STALL_WINDOW_S["load"]` (240 s), the window the
+# in-process load phase is already judged by, because /proc sampling is
+# coarser and a follower that is genuinely blocked on a slow remote read shows
+# nothing until the read returns.
+_STAGING_SILENCE_WINDOW_S = 4.0 * 240.0
+
+# How often the two loops re-ask. A cadence, never a verdict: it bounds
+# latency-to-notice, and lengthening it cannot condemn anything.
+_STAGING_POLL_S = 1.0
 
 # Ceiling on any single in-call collective wait: legitimate skew between
 # ranks executing the same denoise step is seconds; a peer that raised (or
 # died) mid-call leaves this as the unwedging mechanism.
 _COLLECTIVE_TIMEOUT_S = 300.0
 
-# Arming covers a follower's full pipeline materialization (a cold model
-# load), so its budget is the staging budget, not the collective one.
-_ARM_TIMEOUT_S = 1800.0
+# A follower's wait for rank 0's FIRST command. Rank 0 sends `arm` within
+# milliseconds of `form()` returning, so this bounds nothing anyone does; the
+# threat it names is a follower parked forever because rank 0 died in a way
+# `_die_with_rank0`'s PR_SET_PDEATHSIG could not cover (non-Linux hosts, and
+# the pre-prctl spawn window). It bounds a WAIT ON A PEER, never work.
+_FIRST_COMMAND_WAIT_S = 1800.0
+
+# The TCPStore's own socket-connect budget. This bounds a CONNECT to a
+# localhost port whose listener already exists (rank 0 owns the master socket
+# before any follower spawns), so it either succeeds in milliseconds or the
+# port is wrong — it can never be the thing a slow load runs out of, and it
+# is not the store-arrival wait, which is `_await_arrivals` above.
+_STORE_CONNECT_TIMEOUT_S = 180.0
 
 _OP_RUN = "run"
 _OP_CLOSE = "close"
@@ -221,7 +254,7 @@ def init_rank(spec: RankSpec, store: Any = None) -> Any:
             spec.master_port,
             spec.world_size,
             is_master=False,
-            timeout=timedelta(seconds=_RENDEZVOUS_TIMEOUT_S),
+            timeout=timedelta(seconds=_STORE_CONNECT_TIMEOUT_S),
         )
         # Announce arrival BEFORE the backend rendezvous, so rank 0 knows
         # this rank is real and about to join.
@@ -317,6 +350,8 @@ class RankGroup:
         self._entry = entry
         self._collective_timeout_s = float(collective_timeout_s)
         self._procs: List[Any] = []
+        #: pid -> high-water evidence mark (pgw#892).
+        self._staging_peaks: dict[int, float] = {}
         self._channels: List[FollowerChannel] = []
         self._error_q: Any = None
         self._ready_q: Any = None
@@ -361,7 +396,7 @@ class RankGroup:
             0,
             self.degree,
             is_master=True,
-            timeout=timedelta(seconds=_RENDEZVOUS_TIMEOUT_S),
+            timeout=timedelta(seconds=_STORE_CONNECT_TIMEOUT_S),
             wait_for_workers=False,
         )
         port = int(self._store.port)
@@ -416,21 +451,25 @@ class RankGroup:
         TYPED failure that names the dead rank.
         """
         keys = [arrive_key(s) for s in specs[1:]]
-        deadline = time.monotonic() + _RENDEZVOUS_TIMEOUT_S
+        silence = self._staging_silence()
         while True:
             self.check_alive()
             if self._store.check(keys):
                 return
-            if time.monotonic() >= deadline:
+            if self._followers_advanced():
+                silence.touch()
+            elif silence.stalled():
                 missing = [
                     s.rank for s in specs[1:]
                     if not self._store.check([arrive_key(s)])
                 ]
                 raise RankGroupError(
-                    f"followers {missing} never reached the rendezvous within "
-                    f"{_RENDEZVOUS_TIMEOUT_S:.0f}s — the group cannot form"
+                    f"followers {missing} have not reached the rendezvous and "
+                    f"have shown no CPU or I/O for {silence.silent_for():.0f}s "
+                    f"— the group cannot form. A follower still importing torch "
+                    f"is not condemned by this; one that stopped working is."
                 )
-            time.sleep(0.05)
+            time.sleep(_STAGING_POLL_S)
 
     # ---- command plane (never a collective) --------------------------------
 
@@ -453,26 +492,69 @@ class RankGroup:
         for channel in self._channels:
             channel.commands.put(raw)
 
-    def wait_armed(self, timeout_s: float = _ARM_TIMEOUT_S) -> None:
+    def _staging_silence(self) -> SilenceWindow:
+        """A fresh silence window over follower work, with the high-water
+        marks it compares against reset (pgw#892)."""
+        self._staging_peaks = {}
+        return SilenceWindow(_STAGING_SILENCE_WINDOW_S)
+
+    def _followers_advanced(self) -> bool:
+        """Whether ANY follower's process tree has done measurable work since
+        the last sample.
+
+        High-water marks, not deltas: a descendant's CPU migrates into its
+        parent's ``cutime``/``cstime`` on reap, so a live-only sum falls when
+        a subprocess finishes. A follower whose evidence cannot be read at all
+        contributes nothing here and is left to ``check_alive()``, which is
+        the honest split — an unreadable process is not a stalled one, and it
+        is not this method's job to condemn it.
+        """
+        advanced = False
+        for proc in self._procs:
+            pid = int(getattr(proc, "pid", 0) or 0)
+            if pid <= 0:
+                continue
+            evidence = proc_evidence.tree_evidence(pid)
+            if evidence is None:
+                continue
+            if evidence > self._staging_peaks.get(pid, -1.0):
+                self._staging_peaks[pid] = evidence
+                advanced = True
+        return advanced
+
+    def wait_armed(self) -> None:
         """Block until every follower reported ready, failing loudly on a
-        dead or overdue follower. Queue-based — never a collective, so a
-        follower that dies mid-materialization cannot park us."""
+        dead or SILENT follower. Queue-based — never a collective, so a
+        follower that dies mid-materialization cannot park us.
+
+        pgw#892: this took a `timeout_s=1800.0` and raised "followers not
+        armed after 1800s" at 30:01 for a follower that was still legitimately
+        loading. `check_alive()` already fails a DEAD follower typed and
+        immediately, so the duration added nothing death detection did not
+        give and subtracted every slow cold load.
+        """
         if self.degree == 1:
             return
-        deadline = time.monotonic() + float(timeout_s)
         ready: set = set()
+        silence = self._staging_silence()
         while len(ready) < self.degree - 1:
             self.check_alive()
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RankGroupError(
-                    f"followers not armed after {timeout_s:.0f}s "
-                    f"(ready={sorted(ready)} of ranks 1..{self.degree - 1})"
-                )
             try:
-                ready.add(int(self._ready_q.get(timeout=min(1.0, remaining))))
-            except queue_mod.Empty:
+                ready.add(int(self._ready_q.get(timeout=_STAGING_POLL_S)))
+                silence.touch()
                 continue
+            except queue_mod.Empty:
+                pass
+            if self._followers_advanced():
+                silence.touch()
+            elif silence.stalled():
+                raise RankGroupError(
+                    f"followers have shown no CPU or I/O for "
+                    f"{silence.silent_for():.0f}s while arming "
+                    f"(ready={sorted(ready)} of ranks 1..{self.degree - 1}) — "
+                    f"a cold materialization that is still working is not "
+                    f"condemned by this"
+                )
 
     def check_alive(self) -> None:
         """A dead follower must fail the request LOUDLY and immediately —

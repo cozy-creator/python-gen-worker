@@ -142,12 +142,14 @@ def _rig_entry_skips_collectives(spec: RankSpec, chan: FollowerChannel) -> None:
 
 def _armed_runtime(
     devices: tuple, entry: Any = _rig_entry, timeout_s: float = 60.0,
-    arm_timeout_s: float = 120.0,
 ) -> tuple:
     pipe = _make_toy_pipe()
+    # pgw#892: arming no longer takes a duration at all — a follower that
+    # keeps working arms for as long as its work takes, and one that stops
+    # working is condemned by silence.
     rt = SequenceRuntime(
         devices, entry=entry, backend="gloo",
-        collective_timeout_s=timeout_s, arm_timeout_s=arm_timeout_s,
+        collective_timeout_s=timeout_s,
     )
     installed = rt.arm(pipe, BootPlan(degree=len(devices)),
                        GroupPlan(sp_degree=len(devices)))
@@ -287,17 +289,30 @@ def test_an_unpicklable_argument_is_typed_and_does_not_condemn() -> None:
         rt.close()
 
 
-def test_arming_a_group_whose_follower_never_readies_fails_bounded() -> None:
+def test_arming_a_group_whose_follower_goes_silent_fails_typed(
+    monkeypatch: Any,
+) -> None:
+    """RE-CUT for pgw#892. This used to assert that a never-ready follower
+    failed within a multiple of `_ARM_TIMEOUT_S = 1800`, which is the flat
+    wall clock that issue deletes: arming "covers a follower's full pipeline
+    materialization (a cold model load)", the first self-mint measured ~28 min
+    and pgw#846 projects 47 min - 6.26 h for sdxl, so the bound condemned
+    healthy work and the RIGHT never-readies test is this one.
+
+    The follower here parks in `time.sleep(600)` — alive, and doing nothing at
+    all — so it produces no CPU and no I/O and the silence window fires. The
+    window is shortened for the test because it is a window over a REAL
+    signal, not a budget for the job."""
+    from gen_worker.parallel import group as group_mod
+
+    monkeypatch.setattr(group_mod, "_STAGING_SILENCE_WINDOW_S", 3.0)
     pipe = _make_toy_pipe()
-    arm_timeout_s = 3.0
     rt = SequenceRuntime(
         (0, 1), entry=_rig_entry_never_ready, backend="gloo",
-        collective_timeout_s=30.0, arm_timeout_s=arm_timeout_s,
+        collective_timeout_s=30.0,
     )
-    start = time.monotonic()
-    with pytest.raises(RankGroupError, match="not armed"):
+    with pytest.raises(RankGroupError, match="no CPU or I/O"):
         rt.arm(pipe, BootPlan(degree=2), GroupPlan(sp_degree=2))
-    assert time.monotonic() - start < arm_timeout_s * 6
     rt.close()
 
 

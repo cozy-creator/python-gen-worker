@@ -52,7 +52,7 @@ from .group import (
     RankGroup,
     RankGroupError,
     RankSpec,
-    _ARM_TIMEOUT_S,
+    _FIRST_COMMAND_WAIT_S,
     _OP_CLOSE,
     _OP_RUN,
     init_rank,
@@ -199,7 +199,7 @@ def sequence_rank_main(spec: RankSpec, channel: FollowerChannel) -> None:  # pra
     if spec.backend == "nccl":
         torch.cuda.set_device(spec.device)
 
-    first = channel.next_command(timeout=_ARM_TIMEOUT_S)
+    first = channel.next_command(timeout=_FIRST_COMMAND_WAIT_S)
     if not isinstance(first, dict) or first.get("op") != "arm":
         raise RankGroupError(
             f"rank {spec.rank}: expected the arm command first, got {first!r}")
@@ -287,7 +287,6 @@ class SequenceRuntime:
         self, devices: Tuple[int, ...], *, entry: Optional[Any] = None,
         backend: str = "nccl",
         collective_timeout_s: Optional[float] = None,
-        arm_timeout_s: float = _ARM_TIMEOUT_S,
     ) -> None:
         self.devices = tuple(int(d) for d in devices)
         self.degree = len(self.devices)
@@ -298,7 +297,6 @@ class SequenceRuntime:
         self._entry = entry or sequence_rank_main
         self._backend = backend
         self._collective_timeout_s = collective_timeout_s
-        self._arm_timeout_s = float(arm_timeout_s)
         self._group: Optional[RankGroup] = None
         self._pipe: Any = None
         self._armed = False
@@ -348,7 +346,7 @@ class SequenceRuntime:
             # Queue-based readiness: a follower still materializing its
             # pipeline parks nobody on a collective, and one that died is a
             # loud typed failure here.
-            self._group.wait_armed(self._arm_timeout_s)
+            self._group.wait_armed()
         except BaseException:
             group, self._group = self._group, None
             if group is not None:
