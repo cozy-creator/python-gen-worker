@@ -262,9 +262,21 @@ the denoiser VRAM on any card, no fp8 silicon required. Snapshots whose
 weights are already fp8-stored (an `#fp8` flavor) get the same treatment
 automatically; endpoint code stays precision-agnostic and
 `ModelEvent.vram_bytes` reports the measured resident size. Quantized
-formats are platform-produced stored flavors (`#fp8`, `#nvfp4` on Blackwell)
-— there is no runtime "quantize my model" kwarg, and which flavor a component
-serves is deploy CONFIG, not a literal you pick here (th#980, th#1803). The one exception is the
+formats are platform-produced stored artifacts (`#fp8`, `#nvfp4` on Blackwell)
+— there is no runtime "quantize my model" kwarg, and which one a component
+serves is deploy CONFIG, not a literal you pick here (th#980, th#1803).
+
+> **`flavor` is being deleted (th#1803, DESIGN-RULINGS §1.33).** Paul: the
+> flavor system was *"an arbitrary-string sub-selector within a tag-group…
+> too imprecise."* Selection within a tag group becomes tensor-layout-contract
+> compatibility — the endpoint declares a per-slot SET of accepted layouts and
+> the platform grades each candidate COMPATIBLE / CONVERTIBLE / PRODUCIBLE /
+> INCOMPATIBLE ahead of time. `#flavor` refs, flavored tag rows and the flavor
+> columns go away with no alias. The replacement surfaces are being designed in
+> th#1809 (hub) and pgw#1143 (SDK); the `flavor=`/`#fp8` spellings in this
+> document describe what exists today, not what to build against.
+
+The one exception is the
 EMERGENCY rung (automatic on CUDA hosts): when
 even the downloaded flavor cannot fit free VRAM, the loading layer
 runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
@@ -703,6 +715,14 @@ Write `setup()` **quant-generically**: declare the tensor layout you execute
 and serve whatever satisfies it. A `serve_recipe` that casts bf16 weights on
 every cold boot, switchable only by shipping a new endpoint version, is the
 rejected pattern (DESIGN-RULINGS §1.32).
+
+**No inference-time quantization at all.** Quantization happens ahead of time —
+a conversion endpoint produces the artifact — for two measured reasons: it
+lengthens every cold boot, and it wastes transfer (download 30 GB of bf16 and
+immediately discard 15 GB). So the recipe LOADS the bound pre-quantized
+artifact; the boot-quant path is deleted, not kept as a fallback. (The fit
+ladder's emergency nf4 rung below is a different thing — a last-resort OOM
+degradation, not a selection mechanism.)
 
 What stays in code: kernel selection, compile scope, allocator settings, the
 warmup obligation. What leaves: the choice of which weights to run.
