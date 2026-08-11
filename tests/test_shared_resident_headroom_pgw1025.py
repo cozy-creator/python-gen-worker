@@ -9,45 +9,29 @@ already been reduced by those bytes, and the requirement estimate
 resident rung entirely; under th#1107's ``strict_vram`` that is not a slower
 placement but a hard refusal (th#1043, the live failure).
 
-Sizes are declared through tensor SHAPE, not allocation: the exclusive
-component is a 1-element storage expanded to the weight count (a real CPU
-tensor with a real, distinct ``data_ptr`` so the storage dedupe behaves), and
-the already-resident component is a fake CUDA tensor. That is the only way to
-put a 15.5 GB CUDA-resident component in front of this arithmetic on a host
-with no CUDA device — and the arithmetic, which is what the issue is about,
-runs for real.
+Sizes are declared through tensor SHAPE, not allocation: a 1-element storage
+expanded to the weight count, a real tensor with a real, distinct ``data_ptr``
+so the storage dedupe behaves. The already-resident component additionally
+declares its DEVICE, which is the one fact a host with no CUDA device cannot
+produce — and the arithmetic, which is what the issue is about, runs for real.
+
+pgw#1128 moved the resident stand-in off a FAKE tensor. It was one only because
+``_sum_tensor_bytes`` counted a fake tensor's declared bytes as occupied VRAM,
+which is the defect pgw#1128 fixes: a structure-only pipeline's virtual weights
+are not on any card. ``tests/_declared_residency`` keeps this test's ability to
+put 15.5 GB in front of the arithmetic WITHOUT depending on the production path
+mis-measuring anything — see that module for what is declared and what is real.
 """
 
 from __future__ import annotations
 
 import pytest
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
 
 from gen_worker.models import memory
 
-_GIB = 1024 ** 3
-
-
-def _bf16_count(gb: float) -> int:
-    return int(gb * _GIB / 2)
-
-
-def _resident_component(gb: float) -> torch.nn.Module:
-    """A component whose weights are already on CUDA."""
-    m = torch.nn.Module()
-    with FakeTensorMode():
-        m._parameters["weight"] = torch.empty(
-            _bf16_count(gb), dtype=torch.bfloat16, device="cuda")
-    return m
-
-
-def _exclusive_component(gb: float) -> torch.nn.Module:
-    """A component still on the host, waiting to be placed."""
-    m = torch.nn.Module()
-    m._parameters["weight"] = torch.empty(
-        1, dtype=torch.bfloat16).expand(_bf16_count(gb))
-    return m
+from _declared_residency import host_component as _exclusive_component
+from _declared_residency import resident_component as _resident_component
 
 
 class _SharedLanePipeline:

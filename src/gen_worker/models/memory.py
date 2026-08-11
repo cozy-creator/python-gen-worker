@@ -694,10 +694,37 @@ def repair_device_placement(obj: Any, device: str) -> List[tuple[str, str, str]]
 
 
 def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
+    """Weight bytes across ``objs``' components, each storage counted once.
+
+    A VIRTUAL tensor (pgw#1080's fake parameters) declares a shape and a device
+    and holds no storage, and this walk treats it as such in two places
+    (pgw#1128):
+
+    * it is never ``data_ptr()``-ed. Every FakeTensor answers ``0``, so the
+      storage dedupe collapsed a whole structure-only tree into its first
+      tensor and understated the rest; and torch deprecated the call outright
+      (*"Accessing the data pointer of FakeTensor is deprecated and will
+      error"*), so the walk that measures a virtual structure would eventually
+      raise inside the ``except`` that hides every failure as ``0.0``.
+    * it is never RESIDENT. ``cuda_only`` asks what occupies the card right
+      now, and a fake parameter occupies nothing, whatever device it claims.
+      Booking it made a structure-only pipeline look like its own weights were
+      already paid for (``select_auto_mode``'s net requirement fell to zero,
+      so every rung read "off").
+
+    It still COUNTS toward the requirement (``cuda_only=False``): the shape and
+    dtype it declares are the bytes a real load — or ``materialize_random`` in
+    the mint child — will go on to allocate. The two estimates below are the
+    two questions, and virtuality answers them differently.
+    """
     import torch
+    from torch._subclasses.fake_tensor import FakeTensor
 
     total = 0
-    seen: set[int] = set()  # data_ptr dedupe: shared storages counted ONCE
+    #: ``("ptr", data_ptr)`` for a tensor with storage — shared storages are
+    #: counted ONCE — and ``("obj", id)`` for one without, which has no storage
+    #: identity to share.
+    seen: set[tuple[str, int]] = set()
     for obj in objs:
         for c in _iter_components(obj):
             if c is None or not hasattr(c, "parameters"):
@@ -708,12 +735,17 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
             for t in tensors:
                 if not isinstance(t, torch.Tensor):
                     continue
-                if cuda_only and t.device.type != "cuda":
+                virtual = isinstance(t, FakeTensor)
+                if cuda_only and (virtual or t.device.type != "cuda"):
                     continue
-                try:
-                    key = t.data_ptr()
-                except Exception:
-                    key = id(t)
+                key: tuple[str, int]
+                if virtual:
+                    key = ("obj", id(t))
+                else:
+                    try:
+                        key = ("ptr", t.data_ptr())
+                    except Exception:
+                        key = ("obj", id(t))
                 if key in seen:
                     continue
                 seen.add(key)
@@ -724,7 +756,9 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
 def estimate_pipeline_size_gb(pipeline: Any) -> float:
     """Total weight bytes of a pipeline regardless of device — the *requirement*
     estimate the offload ladder compares against free VRAM. Tensors that share
-    storage (shared components) are counted once. 0.0 without torch."""
+    storage (shared components) are counted once, and a virtual (fake)
+    parameter counts for the bytes it declares, because that is what a real
+    load will allocate. 0.0 without torch."""
     try:
         return float(_sum_tensor_bytes([pipeline], cuda_only=False)) / float(1024**3)
     except Exception:
@@ -734,7 +768,13 @@ def estimate_pipeline_size_gb(pipeline: Any) -> float:
 def estimate_cuda_resident_gb(*objects: Any) -> float:
     """CUDA-resident bytes across the given pipelines/modules, shared storages
     counted once — the *residency accounting* estimate (#358: CPU-offloaded
-    pipelines must not be booked as full VRAM; shared components once)."""
+    pipelines must not be booked as full VRAM; shared components once).
+
+    pgw#1128: a VIRTUAL tensor is not resident. A pgw#1080 structure-only
+    component's parameters are fake ON the compute device by construction, and
+    booking their declared bytes as occupied VRAM is the same category error
+    pgw#1124 fixed in ``device_mismatches`` — a structure that allocates
+    nothing read as a card that was already full of it."""
     try:
         return float(_sum_tensor_bytes(objects, cuda_only=True)) / float(1024**3)
     except Exception:
