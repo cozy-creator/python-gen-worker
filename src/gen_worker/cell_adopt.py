@@ -166,6 +166,15 @@ class EagerPhase(StrEnum):
     #: `state_blocked_idle`, two replacements bought.
     ADOPTED_CELL_REFUSED = "adopted_cell_refused"
 
+    #: pgw#1142 / §4.32 item 4: an OPERATOR ordered this worker to serve eager
+    #: only, over the scheduler's control channel or the cozy-local CLI. It is
+    #: neither a defect nor a degradation — it is the answer, and it is
+    #: reversible — so it must never be counted with the failure classes above
+    #: or with `hub_ordered_eager` (which is one PLAN's backend, not a standing
+    #: order about this pod). A worker holding this token has cells it could be
+    #: serving from, still armed, deliberately not called.
+    OPERATOR_EAGER_ONLY = "operator_eager_only"
+
     #: `_fail_closed`'s default, for a caller that has not classified its exit.
     #: A new decline landing here rather than on its own member is the
     #: regression pgw#824 exists to catch.

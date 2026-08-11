@@ -1686,8 +1686,11 @@ class ParentControl:
             if not any_link:
                 asyncio.create_task(self._drain_without_child(), name="drain-no-child")
             return
-        # hello_ack handled above; everything else (model_op, token_refresh, …)
-        # is worker-wide desired state: broadcast to every group.
+        # hello_ack handled above; everything else (model_op, token_refresh,
+        # serve_posture, …) is worker-wide desired state: broadcast to every
+        # group. pgw#1142's eager-only order is worker-wide by definition —
+        # the compiled serving it suppresses lives in the CHILDREN, and every
+        # one of them has to hear it, so it takes this path unchanged.
         payload = msg.SerializeToString()
         delivered = False
         for slot in self._slots:

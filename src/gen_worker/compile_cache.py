@@ -73,7 +73,7 @@ import sys
 
 from . import (
     cell_key, dist_records, env_seal, guard_closure, hot_swap,
-    settings_authority,
+    serve_posture, settings_authority,
 )
 from .api.errors import RetryableError
 from .models import w8a8_lora
@@ -2328,6 +2328,18 @@ def arming_block(
     Deliberately side-effect free — :func:`apply` still owns the arming
     mutations; this only names.
     """
+    # pgw#1142 / §4.32 item 4, and it is FIRST because it is the cheapest and
+    # the most authoritative: an operator has said this worker serves eager.
+    # Routing the command through the one precondition authority is what makes
+    # it suppress adoption, JIT intake, cold compile and every self-mint
+    # without a check per call site. Unlike every other reason here it is not
+    # deterministic for the life of the process — it can be released — which is
+    # sound for the callers that classify: a mint refused under the order is
+    # refused because the operator does not want one, and if that changes the
+    # next arming pass mints normally.
+    ordered_eager = serve_posture.block()
+    if ordered_eager:
+        return ordered_eager
     if _PROCESS_COMPILES_DISABLED:
         return f"process compiles are disabled: {_PROCESS_COMPILES_DISABLED}"
     if operator_eager_pin(pipeline):

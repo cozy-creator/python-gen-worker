@@ -394,7 +394,7 @@ class WorkerMessage(_message.Message):
     def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ..., activity_update: _Optional[_Union[ActivityUpdate, _Mapping]] = ..., hardware_unsuitable: _Optional[_Union[HardwareUnsuitable, _Mapping]] = ..., goal_receipt: _Optional[_Union[GoalReceipt, _Mapping]] = ..., lifecycle_snapshot: _Optional[_Union[LifecycleSnapshot, _Mapping]] = ..., boot_phase: _Optional[_Union[BootPhase, _Mapping]] = ...) -> None: ...
 
 class SchedulerMessage(_message.Message):
-    __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh", "run_attempt")
+    __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh", "run_attempt", "serve_posture")
     HELLO_ACK_FIELD_NUMBER: _ClassVar[int]
     RUN_JOB_FIELD_NUMBER: _ClassVar[int]
     CANCEL_JOB_FIELD_NUMBER: _ClassVar[int]
@@ -402,6 +402,7 @@ class SchedulerMessage(_message.Message):
     DRAIN_FIELD_NUMBER: _ClassVar[int]
     TOKEN_REFRESH_FIELD_NUMBER: _ClassVar[int]
     RUN_ATTEMPT_FIELD_NUMBER: _ClassVar[int]
+    SERVE_POSTURE_FIELD_NUMBER: _ClassVar[int]
     hello_ack: HelloAck
     run_job: RunJob
     cancel_job: CancelJob
@@ -409,7 +410,8 @@ class SchedulerMessage(_message.Message):
     drain: Drain
     token_refresh: TokenRefresh
     run_attempt: RunAttempt
-    def __init__(self, hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., run_job: _Optional[_Union[RunJob, _Mapping]] = ..., cancel_job: _Optional[_Union[CancelJob, _Mapping]] = ..., model_op: _Optional[_Union[ModelOp, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., token_refresh: _Optional[_Union[TokenRefresh, _Mapping]] = ..., run_attempt: _Optional[_Union[RunAttempt, _Mapping]] = ...) -> None: ...
+    serve_posture: ServePosture
+    def __init__(self, hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., run_job: _Optional[_Union[RunJob, _Mapping]] = ..., cancel_job: _Optional[_Union[CancelJob, _Mapping]] = ..., model_op: _Optional[_Union[ModelOp, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., token_refresh: _Optional[_Union[TokenRefresh, _Mapping]] = ..., run_attempt: _Optional[_Union[RunAttempt, _Mapping]] = ..., serve_posture: _Optional[_Union[ServePosture, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("protocol_version", "worker_id", "release_id", "resources", "state", "models", "in_flight", "heartbeat_interval_ms", "worker_session_id", "lifecycle_snapshot")
@@ -1694,3 +1696,13 @@ class TokenRefresh(_message.Message):
     token: str
     expires_at_unix: int
     def __init__(self, token: _Optional[str] = ..., expires_at_unix: _Optional[int] = ...) -> None: ...
+
+class ServePosture(_message.Message):
+    __slots__ = ("eager_only", "reason", "actor")
+    EAGER_ONLY_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_FIELD_NUMBER: _ClassVar[int]
+    eager_only: bool
+    reason: str
+    actor: str
+    def __init__(self, eager_only: _Optional[bool] = ..., reason: _Optional[str] = ..., actor: _Optional[str] = ...) -> None: ...

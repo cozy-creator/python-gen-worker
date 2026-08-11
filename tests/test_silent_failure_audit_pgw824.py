@@ -234,6 +234,13 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         # as `worker_function_unavailable reason=compile_cell_failed` and the
         # pod was reaped and replaced (three pods, 2026-08-11).
         "ADOPTED_CELL_REFUSED": "adopted_cell_refused",
+        # pgw#1142 / §4.32 item 4: an OPERATOR ordered this worker eager-only.
+        # The only member of this vocabulary that is a reversible DECISION
+        # rather than a condition, and the reason it needs its own value:
+        # counting it with `hub_ordered_eager` would merge a standing order
+        # about a pod with one dispatch's backend, and counting it with any
+        # token above would put a supported control into a defect population.
+        "OPERATOR_EAGER_ONLY": "operator_eager_only",
     }
     # The join the ArmOutcome docstring claims: a delegated mint's decline and
     # the serving posture that describes it are ONE token, not two that happen
@@ -245,6 +252,8 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
     assert EagerPhase.GRAPH_BREAK == serving_mode.POSTURE_GRAPH_BREAK
     assert (EagerPhase.DECLARED_RANGE_EXCEEDED
             == serving_mode.POSTURE_DECLARED_RANGE_EXCEEDED)
+    assert (EagerPhase.OPERATOR_EAGER_ONLY
+            == serving_mode.POSTURE_OPERATOR_EAGER_ONLY)
 
 
 def test_the_posture_tokens_are_the_enum_and_not_a_second_spelling() -> None:

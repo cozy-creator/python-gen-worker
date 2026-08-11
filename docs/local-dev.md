@@ -258,6 +258,23 @@ uses):
   If launching `serve` in the background, pass `--no-stdin` so it doesn't
   consume the parent shell's stdin.
 
+  **Turning compiled serving off** (DESIGN-RULINGS §4.32 item 4). Start with
+  `--eager-only` and the serve arms no compiled cell and mints none — for a
+  cell that turns out to be broken, or simply to skip a mint you do not want
+  to spend your machine's minutes on. On an already-running serve, send the
+  posture control frame; it is reversible, and the reverse costs nothing
+  because the artifact is never unwrapped, only bypassed:
+
+  ```bash
+  $ printf '{"posture":{"eager_only":true,"reason":"the cell crashes"}}\n' \
+      | nc -U .gen-worker.sock
+  {"ok":true,"eager_only":true,"changed":true,"posture":"compiled serving suppressed by cozy-local-cli"}
+  ```
+
+  (`cozy serve --eager-only` and `cozy eager-only <owner>/<ep> [on|off]` are
+  the cozy-local spellings of the same two calls.) Not to be confused with
+  `--eager`, which decides when `setup()` runs, not how forwards execute.
+
 - **stdin/stdout NDJSON (default, single process):** pipe a batch of
   newline-delimited JSON requests in; get one NDJSON response line each. Logs
   go to stderr. The process exits when stdin closes.

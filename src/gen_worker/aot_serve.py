@@ -95,6 +95,7 @@ from . import boot_phases
 from . import cell_key as cell_key_mod
 from . import host_isa
 from .cell_adopt import AdoptOutcome
+from . import serve_posture
 from . import shape_growth
 from .compile_cache import (
     AdoptError,
@@ -2452,6 +2453,19 @@ def wrap_module(
         artifact_lora, eager_lora = adapter_call_kwargs(module, runner)
         eager_kwargs = {**kwargs, **eager_lora}
         kwargs = {**kwargs, **artifact_lora}
+        if serve_posture.eager_only():
+            # pgw#1142 / §4.32 item 4: an operator ordered eager. This is THE
+            # reversibility seam — the artifact is not unwrapped and `state`
+            # is not touched, so releasing the order resumes compiled serving
+            # on the very next call with no re-arm, no re-materialize and no
+            # re-mint. Unwrapping here would have been the same posture for
+            # one boot and a lie afterwards.
+            #
+            # Ordered BEFORE the `failed` check only for cost; the two are
+            # independent and stay independent — releasing the order never
+            # resurrects a cell de-armed for cause (§4.31), because that
+            # de-arm is evidence and this is policy.
+            return original(*args, **eager_kwargs)
         if state["failed"]:
             return original(*args, **eager_kwargs)
         try:
