@@ -18,7 +18,7 @@ dependencies = [
     # wheel the fleet serves — which is the whole reason the gauntlet is a
     # usable probe. Floor facts still in force: pgw#1059's four-axis `ck1`
     # (0.97.0), so every cell minted from this pin is a live-scheme cell.
-    "gen-worker==0.106.0",
+    "gen-worker==0.111.0",
     "msgspec>=0.18",
     "safetensors>=0.4",
     "pillow",
@@ -28,7 +28,7 @@ dependencies = [
 # is that its image is small and its boot is short; a dependency it does not
 # use would cost both on every cycle.
 #
-# The pin is 0.106.0 BECAUSE of pgw#1123: on 0.97.0-0.105.0
+# The FLOOR is 0.106.0 BECAUSE of pgw#1123: on 0.97.0-0.105.0
 # `models/structure_only` imported `accelerate`, so on THIS image the boot-key
 # derivation refused, no `/v1/worker/cells/resolve` was ever issued, and the pod
 # self-minted forever — measured on pods `ykwoaiqub6ktt3` and `3o09rf9ehnc4ym`,
@@ -36,6 +36,12 @@ dependencies = [
 # meta-init (`gen_worker.models.meta_init`), which `pipeline.py` uses. Adding
 # `accelerate` here instead would have fixed this one image and left the SDK
 # defect in place for every other family, which is why it is NOT here.
+#
+# The pin is 0.111.0 because the reuse circle cannot close below it: pgw#1141
+# (`0dbf68e5`) deletes the warmup barrier that DISARMED every boot-adopted cell
+# on 0.106.0 (POD PROOF #3, twice, identically), and pgw#1132 (`8867baac`) arms
+# the lifted forward in the boot-key loop. Below 0.111.0 an adopting pod resolves,
+# materializes and then throws the cell away.
 
 [dependency-groups]
 local = [
