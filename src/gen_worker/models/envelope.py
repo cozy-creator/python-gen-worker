@@ -280,7 +280,6 @@ def estimate_resident_bytes(
             0, 0, "", "", False, "no safetensors weights in the snapshot")
 
     by_dtype: Dict[str, int] = {}
-    counts: Dict[str, int] = {}
     for p in files:
         per_file = _tensor_bytes_by_dtype(p)
         if per_file is None:
@@ -289,7 +288,6 @@ def estimate_resident_bytes(
                 f"unreadable safetensors header in {p.name}")
         for token, nbytes in per_file.items():
             by_dtype[token] = by_dtype.get(token, 0) + nbytes
-            counts[token] = counts.get(token, 0) + 1
 
     unknown = sorted(t for t in by_dtype if t not in _ELEMENT_BYTES)
     if unknown:
@@ -298,6 +296,10 @@ def estimate_resident_bytes(
             f"unweighable safetensors dtype(s) {unknown}")
 
     disk_bytes = sum(by_dtype.values())
+    # Majority by BYTES, not by tensor count (which is what
+    # `loading.detect_on_disk_dtype` reports): this label describes what the
+    # artifact WEIGHS, and a thousand tiny fp32 norm tensors do not make a
+    # bf16 transformer an fp32 tree.
     top = max(by_dtype, key=lambda k: by_dtype[k]) if by_dtype else ""
     on_disk = {"BF16": "bf16", "F16": "fp16", "F32": "fp32",
                "F8_E4M3": "fp8"}.get(top, top.lower())
