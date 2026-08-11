@@ -627,6 +627,17 @@ def cpu_facts() -> CpuFacts:
     return CpuFacts(max(1, vcpus), basis, os_count, affinity, quota_cores)
 
 
+class DeviceProbeError(RuntimeError):
+    """The card could not be read (pgw#940).
+
+    Distinct from "there is no card", which is a 0 return. Collapsing the two
+    is the whole defect: `except Exception: return 0` made a transient
+    `mem_get_info` failure, a post-fork CUDA-context error and a flapping
+    `is_available()` indistinguishable from a CPU-only pod — and every caller
+    read that shared zero as the permissive case.
+    """
+
+
 def _probe_free_device_bytes(device: int = -1) -> int:
     """One reading of free VRAM on the mint's card, 0 when there is no card.
 
@@ -634,19 +645,26 @@ def _probe_free_device_bytes(device: int = -1) -> int:
     but not allocated, exactly as ``mint_budget`` does — a cached block the
     tenant is not using is free to nobody but this process, and pretending
     otherwise is how a mint OOMs a live request.
+
+    Raises :class:`DeviceProbeError` when a card is present but unreadable.
     """
     try:
         import torch
 
         if not torch.cuda.is_available():
             return 0
+    except Exception as exc:  # noqa: BLE001
+        # Even "is there a card" did not answer. That is unreadable, not
+        # absent: a pod with no torch at all fails at import long before here.
+        raise DeviceProbeError(f"cuda availability unreadable: {exc}") from exc
+    try:
         dev = torch.cuda.current_device() if device < 0 else int(device)
         free, _total = torch.cuda.mem_get_info(dev)
         reserved = int(torch.cuda.memory_reserved(dev))
         allocated = int(torch.cuda.memory_allocated(dev))
         return int(free) + max(0, reserved - allocated)
-    except Exception:  # noqa: BLE001
-        return 0
+    except Exception as exc:  # noqa: BLE001
+        raise DeviceProbeError(f"free VRAM unreadable: {exc}") from exc
 
 
 def device_facts(
@@ -670,10 +688,18 @@ def device_facts(
     for i in range(max(1, int(samples))):
         if i and gap_s > 0:
             time.sleep(gap_s)
-        value = int(read(device))
+        try:
+            value = int(read(device))
+        except DeviceProbeError as exc:
+            # pgw#940: "no card" and "unreadable card" are different facts and
+            # the pool must decide them differently. Only the caught type is
+            # narrowed here — anything else still propagates, because a probe
+            # that raises something unexpected is not a measurement outcome.
+            logger.warning("free-VRAM probe failed: %s", exc)
+            return DeviceFacts(0, "unreadable", tuple(taken))
         taken.append(value)
         if value <= 0:
-            # No card, or no reading — sampling an absence is not evidence.
+            # No card. Sampling an absence is not evidence of a size.
             return DeviceFacts(0, "absent", tuple(taken))
     return DeviceFacts(max(taken), "sampled", tuple(taken))
 
@@ -799,15 +825,20 @@ def entry_workers(
         device = device_facts()
     free_vram = device.free_bytes
     per_device = max(0, int(device_bytes))
-    if free_vram <= 0:
-        # No card, or no reading: the device bound is DROPPED and K falls to
-        # whichever of cpu/mem/ceiling binds. Right for a CPU-only cell, which
-        # is not device-bound at all — and deliberately stated as "dropped"
-        # rather than the "does not get to license concurrency" this comment
-        # used to claim, which is the opposite of what the line does. A GPU pod
-        # whose card reads 0 therefore compiles device-UNBOUNDED; that it has
-        # never happened is a property of `_probe_free_device_bytes` failing
-        # only when there is no card, not of this branch.
+    if free_vram <= 0 and device.basis == "unreadable":
+        # pgw#940. This branch used to be shared with "no card" and yielded
+        # MAX_ENTRY_WORKERS for both, so a GPU pod whose probe raised compiled
+        # eight children device-UNBOUNDED. The old comment defended it by
+        # asserting `_probe_free_device_bytes` fails only when there is no
+        # card — which was false, and is now true by construction: an
+        # unreadable card raises `DeviceProbeError` and lands HERE, closed,
+        # beside its two sibling branches. The stake is stated at :192-201 —
+        # "the failure mode of guessing here is an OOM on paid work."
+        device_workers = 1
+    elif free_vram <= 0:
+        # No card at all: the device bound is DROPPED and K falls to whichever
+        # of cpu/mem/ceiling binds. Right for a CPU-only cell, which is not
+        # device-bound at all.
         device_workers = MAX_ENTRY_WORKERS
     elif per_device <= 0:
         # pgw#877 #5: a card we CAN read but have no per-entry footprint for.

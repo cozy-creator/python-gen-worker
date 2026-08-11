@@ -3845,7 +3845,18 @@ class Executor:
         self._gate_owned = set()
 
         total_vram_gb = float(gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
-        free_vram_gb = float(gpu_info.get("gpu_free_mem") or gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
+        # pgw#940: no substitution. `or gpu_total_mem` treated a legitimate 0
+        # as "absent" and replaced it with the largest plausible number — and
+        # `gpu_free_mem` is genuinely 0 on a SATURATED card, which is exactly
+        # the state where the native/fp8/4-bit/offload/CPU ladder must engage
+        # and exactly the state that then read as "all of VRAM is free". This
+        # figure feeds `plan_serve`/`variant_fit` and what the pod advertises
+        # to the hub, so an unmeasured card must present as no room, not as an
+        # empty one. `lifecycle.probe_hardware` initialises the key to 0 and
+        # wraps its whole CUDA probe in `except Exception: pass`, so "the
+        # probe raised" arrives here indistinguishable from "the card is
+        # full" — both are non-permissive now, which is the point.
+        free_vram_gb = float(gpu_info.get("gpu_free_mem") or 0) / (1024 ** 3)
         detected_sm = str(gpu_info.get("gpu_sm") or "")
         libs = {str(x) for x in (gpu_info.get("installed_libs") or [])}
         caps = TensorhubWorkerCapabilities(

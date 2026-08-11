@@ -894,7 +894,7 @@ def _civitai_stream_one(
     expected_size: int,
     expected_sha256: str,
     on_bytes: Callable[[int], None],
-) -> int:
+) -> tuple[int, str]:
 
     import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
@@ -944,11 +944,79 @@ def _civitai_stream_one(
     if expected_size and abs(written - expected_size) > _CIVITAI_SIZE_SLACK:
         tmp.unlink(missing_ok=True)
         raise ValueError(f"civitai size mismatch for {dst.name}: expected {expected_size}, got {written}")
-    if expected_sha256 and h.hexdigest().lower() != expected_sha256:
+    observed = h.hexdigest().lower()
+    if expected_sha256 and observed != expected_sha256:
         tmp.unlink(missing_ok=True)
         raise ValueError(f"civitai sha256 mismatch for {dst.name}")
     tmp.replace(dst)
-    return written
+    # pgw#939: the OBSERVED digest travels back whether or not civitai
+    # published one to check it against. Refusing an unhashed file is not
+    # available — civitai routinely omits SHA256 for large/GGUF files and this
+    # lane exists to ingest them — so the fix is that the manifest can no
+    # longer say the same thing about a verified and an unverified download.
+    return written, observed
+
+
+def _civitai_prior_manifest(manifest_path: Path) -> dict[str, dict[str, Any]]:
+    """This directory's own record of what a previous run actually landed,
+    keyed by file name. ``{}`` when there is none or it does not parse."""
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    rows = raw.get("files") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return {}
+    return {
+        str(r["name"]): dict(r) for r in rows
+        if isinstance(r, Mapping) and str(r.get("name") or "")
+    }
+
+
+def _civitai_adoptable(
+    dst: Path, declared: Mapping[str, Any], prior: Optional[Mapping[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """The manifest row for an existing file that is provably complete, or
+    ``None`` to (re)download it.
+
+    pgw#939: this was ``dst.exists() and (not size or st_size == size)`` — the
+    left half of an ``or`` whose short-circuit meant that when civitai
+    declared no size, **any** file already occupying that path was adopted as
+    a finished download. No size, no hash, no read. A truncated prior attempt
+    is exactly the state that produces no declared size and an existing file
+    at once.
+
+    With nothing declared, the only evidence available is this directory's own
+    manifest from a run that COMPLETED — so that is what is required, and its
+    absence means "download it", never "assume it".
+    """
+    if not dst.exists():
+        return None
+    try:
+        on_disk = dst.stat().st_size
+    except OSError:
+        return None
+    size = int(declared.get("size_bytes") or 0)
+    declared_sha = str(declared.get("sha256") or "")
+    if size:
+        if on_disk != size:
+            return None
+        return {
+            "name": str(declared["name"]), "size_bytes": size,
+            "sha256": declared_sha or str((prior or {}).get("sha256") or ""),
+            "sha256_source": "civitai" if declared_sha else (
+                str((prior or {}).get("sha256_source") or "") or "unverified"),
+        }
+    if not prior:
+        return None
+    prior_size = int(prior.get("size_bytes") or 0)
+    if not prior_size or prior_size != on_disk:
+        return None
+    return {
+        "name": str(declared["name"]), "size_bytes": on_disk,
+        "sha256": str(prior.get("sha256") or ""),
+        "sha256_source": str(prior.get("sha256_source") or "") or "unverified",
+    }
 
 
 def download_civitai(
@@ -986,24 +1054,34 @@ def download_civitai(
 
     import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
+    prior = _civitai_prior_manifest(manifest_path)
+    landed: dict[str, dict[str, Any]] = {}
     local_paths: list[Path] = []
     for f in files:
         dst = out_dir / f["name"]
         local_paths.append(dst)
-        if dst.exists() and (not f["size_bytes"] or dst.stat().st_size == f["size_bytes"]):
+        adopted = _civitai_adoptable(dst, f, prior.get(f["name"]))
+        if adopted is not None:
             done += f["size_bytes"]
+            landed[f["name"]] = adopted
             continue
         attempts = _civitai_attempts()
         file_start = done
         for attempt in range(1, attempts + 1):
             try:
-                _civitai_stream_one(
+                written, observed = _civitai_stream_one(
                     f["url"], dst,
                     api_key=api_key,
                     expected_size=f["size_bytes"],
                     expected_sha256=f["sha256"],
                     on_bytes=_on_bytes,
                 )
+                landed[f["name"]] = {
+                    "name": f["name"],
+                    "size_bytes": int(written),
+                    "sha256": observed,
+                    "sha256_source": "civitai" if f["sha256"] else "observed",
+                }
                 break
             except (requests.RequestException, OSError) as exc:
                 done = file_start  # rewind progress from the failed partial
@@ -1017,7 +1095,7 @@ def download_civitai(
                 time.sleep(min(10.0, 2.0 * attempt))
     manifest_path.write_text(json.dumps(
         {"model_version_id": int(version_id),
-         "files": [{"name": f["name"], "size_bytes": f["size_bytes"], "sha256": f["sha256"]} for f in files]},
+         "files": [landed[f["name"]] for f in files]},
         indent=2,
     ), encoding="utf-8")
     if progress is not None and total:

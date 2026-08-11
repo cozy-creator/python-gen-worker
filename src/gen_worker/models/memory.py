@@ -23,6 +23,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -169,17 +170,55 @@ def degraded_log_line(
 # ---------------------------------------------------------------------------
 
 
-def get_available_vram_gb(device_index: int = 0) -> float:
-    """Currently-free VRAM on the selected CUDA device. 0.0 if no CUDA."""
+#: Why a free-VRAM reading is zero. pgw#940: `except Exception: return 0.0`
+#: made "this host has no CUDA" and "the probe raised on a host that does"
+#: the same value, and every caller that had to DECIDE something read the
+#: shared zero as the permissive case.
+VRAM_NO_CUDA = "no_cuda"
+VRAM_UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True)
+class VramReading:
+    """Free VRAM, and — when there is none to report — why."""
+
+    gb: float
+    #: "" when `gb` is a real measurement, else VRAM_NO_CUDA / VRAM_UNREADABLE.
+    reason: str = ""
+
+    @property
+    def measured(self) -> bool:
+        return not self.reason
+
+
+def available_vram(device_index: int = 0) -> VramReading:
+    """Currently-free VRAM on the selected CUDA device, with its zero-cause.
+
+    The one probe every free-VRAM question in this module is answered from.
+    A caller that only wants the number keeps calling
+    :func:`get_available_vram_gb`; a caller that must DECIDE with it reads
+    ``reason`` and says out loud what it does when the card is unreadable.
+    """
     try:
         import torch
 
         if not torch.cuda.is_available():
-            return 0.0
+            return VramReading(0.0, VRAM_NO_CUDA)
         free, _total = torch.cuda.mem_get_info(device_index)
-        return float(free) / float(1024**3)
-    except Exception:
-        return 0.0
+    except Exception as exc:
+        _LOG.warning("free-VRAM probe failed: %s: %s", type(exc).__name__, exc)
+        return VramReading(0.0, VRAM_UNREADABLE)
+    return VramReading(float(free) / float(1024**3))
+
+
+def get_available_vram_gb(device_index: int = 0) -> float:
+    """Currently-free VRAM on the selected CUDA device. 0.0 if no CUDA.
+
+    Reporting shape: it deliberately collapses "no card" and "unreadable"
+    into one number, which is right for a log line and wrong for a decision.
+    Anything that PLACES a model reads :func:`available_vram` instead.
+    """
+    return available_vram(device_index).gb
 
 
 def get_total_vram_gb(device_index: int = 0) -> float:
@@ -818,7 +857,30 @@ def select_auto_mode(
     The per-SKU refinement below keeps the GROSS requirement on purpose.
     """
     avail = available_vram_gb if available_vram_gb is not None else get_available_vram_gb()
+    # "How much is free" and "why is it zero" are two questions, and the
+    # second is only worth asking when the first answers zero — which also
+    # keeps a caller-supplied or stubbed figure authoritative all the way
+    # through, exactly as before.
+    zero_cause = "" if avail > 0.0 else available_vram().reason
     if avail <= 0.0:
+        # pgw#940. `return "off"` for BOTH zero-causes: "off" means fully
+        # resident, no offload at all — the single most memory-hungry rung on
+        # the ladder — so a GPU host whose probe raised loaded a pipeline that
+        # needed `group_offload` fully resident and OOMed during load. The two
+        # causes are different facts and get different answers.
+        #
+        # No CUDA: "off" is still correct and is not a placement claim at all
+        # — there is no card to offload FROM, and the CPU path ignores the
+        # rung. Unreadable: the deepest rung this ladder has, matching the
+        # unknown-model-size branch below, which has always descended to
+        # `group_offload` rather than up to `off`. A rung of performance is
+        # the price; an OOM on paid tenant work is what it buys off.
+        if zero_cause == VRAM_UNREADABLE:
+            _LOG.warning(
+                "free VRAM unreadable; selecting %s rather than the resident "
+                "rung — an unmeasured card does not license full residency "
+                "(pgw#940)", "group_offload")
+            return "group_offload"
         return "off"
 
     model_gb = model_size_gb if model_size_gb is not None else estimate_pipeline_size_gb(pipeline)

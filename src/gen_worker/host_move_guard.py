@@ -62,9 +62,21 @@ def _target_is_cpu(args: tuple, kwargs: dict) -> bool:
             return False
 
 
+class _Unmeasurable(RuntimeError):
+    """This module's incoming byte count could not be computed (pgw#940)."""
+
+
 def _incoming_bytes(module: Any) -> int:
     """Bytes this module would newly land in host RAM: parameters + buffers
-    not already CPU-resident."""
+    not already CPU-resident.
+
+    Raises :class:`_Unmeasurable` rather than returning 0 (pgw#940). The 0
+    flowed straight into ``incoming < _MIN_GUARDED_GIB`` and returned, so the
+    guard silently no-opped — on precisely the shapes most likely to be huge,
+    since ``module.parameters()`` raises on meta-device modules, on
+    accelerate-hooked modules mid-dispatch, and on custom ``nn.Module``
+    subclasses that override ``parameters``.
+    """
     total = 0
     try:
         for t in module.parameters(recurse=True):
@@ -73,8 +85,11 @@ def _incoming_bytes(module: Any) -> int:
         for t in module.buffers(recurse=True):
             if t.device.type != "cpu":
                 total += t.numel() * t.element_size()
-    except Exception:
-        return 0
+    except Exception as exc:
+        raise _Unmeasurable(
+            f"cannot size {type(module).__name__} for a host move: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     return total
 
 
@@ -106,7 +121,22 @@ def _refuse_if_over_budget(incoming: int, **probe_kwargs: Any) -> None:
 def check_host_ram_move(module: Any) -> None:
     """Raise :class:`HostRamMoveRefusedError` when moving ``module`` to CPU
     cannot fit ``available - floor``. Shared by both patched entry points."""
-    incoming = _incoming_bytes(module)
+    try:
+        incoming = _incoming_bytes(module)
+    except _Unmeasurable as exc:
+        # pgw#940, §1.22: the guard's whole reason to exist is that the
+        # failure it prevents is UNCATCHABLE — "no exception, no finally,
+        # process gone mid-instruction" (module docstring). A move it cannot
+        # size is therefore the one it must not wave through; it is checked
+        # against the host's own headroom instead, which is the conservative
+        # reading of an unknown size that still lets a small move on a roomy
+        # host proceed.
+        logger.warning("host-RAM move guard: %s — checking the floor anyway", exc)
+        kwargs = {}
+        if _probe_root is not None and _probe_self is not None:
+            kwargs = {"root": _probe_root, "proc_self_cgroup": _probe_self}
+        _refuse_if_over_budget(int(_MIN_GUARDED_GIB * _GIB), **kwargs)
+        return
     if incoming < _MIN_GUARDED_GIB * _GIB:
         return
     kwargs = {}
