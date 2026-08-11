@@ -1,12 +1,13 @@
 """An endpoint that carries a REFUSING export declaration and serves anyway.
 
-pgw#853's invariant, as an endpoint module: this is what the five unwired
-families must be able to look like. Two mechanisms, both exercised here:
+pgw#853's invariant, as an endpoint module. Two mechanisms, both exercised:
 
-- ``register_export_declaration(thunk, family=...)`` — the blockers evaluate
-  when the MINT asks, not when python imports;
-- ``import_export_declaration(...)`` — the backstop, for module-scope work
-  that raises anyway (``harness.blocked_declaration`` does exactly that).
+- ``Compile(blockers=...)`` — the family declares WHY it may not mint yet, as
+  data the mint gate reads (pgw#1115; it replaced pgw#853's thunk, which
+  pgw#1107 retired because ``@endpoint(compile=)`` cannot carry a callable);
+- ``import_export_declaration(...)`` — the backstop, for module-scope work in
+  a declaration file that raises anyway (``harness.blocked_declaration`` does
+  exactly that).
 
 If either one leaked, importing this module would raise and the worker would
 never collect an endpoint — no serving, for a compile feature.
@@ -22,24 +23,18 @@ from gen_worker import (
 )
 from gen_worker.families.base import GenerationDefaults, family as family_vocab
 
-#: (3) the belt-and-braces backstop: this import RAISES, and must not escape.
+from .blocked_declaration_parts import BLOCKER, build_declaration
+
+#: (2) the belt-and-braces backstop: this import RAISES, and must not escape.
 DECLARATION_IMPORTED = import_export_declaration(
     "harness.blocked_declaration")
 
-#: (1) the primary fix: a thunk whose blockers evaluate at mint time.
-THUNK_FAMILY = "harness-thunk-family"
+#: (1) the primary fix: a declaration whose blockers are VALUES.
+BLOCKED_FAMILY = "harness-blocked-declared"
+BLOCKED_DECLARATION = build_declaration(
+    family=BLOCKED_FAMILY, blockers=(BLOCKER,))
 
-
-def _blocked_thunk():
-    from gen_worker.aot_mint import MintRefused
-
-    from .blocked_declaration_parts import BLOCKER_TEXT
-
-    raise MintRefused(BLOCKER_TEXT)
-
-
-register_export_declaration(_blocked_thunk, family=THUNK_FAMILY)
-
+register_export_declaration(BLOCKED_DECLARATION)
 
 @family_vocab("harness-blocked-family")
 class _BlockedDefaults(GenerationDefaults, frozen=True):

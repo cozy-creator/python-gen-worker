@@ -23,12 +23,10 @@ Four verdicts, and the difference between the last three is the whole point:
 
 ``ok``         the precondition holds on this image.
 ``refused``    it does not, and nothing on a pod can fix it — FAIL THE BUILD.
-``blocked``    the declaration refused: either it carries unresolved
-               ``Compile.blockers`` (pgw#1115 — the declared form) or it
-               raised typed ``MintRefused`` (pgw#853's thunk, which the
-               pgw#1107 fold retires). The family said why; it is a DECLARED
-               block, not a broken image, and it does not need a pod to
-               repeat the sentence.
+``blocked``    the declaration carries unresolved ``Compile.blockers``
+               (pgw#1115). The family said why; it is a DECLARED block, not a
+               broken image, and it does not need a pod to repeat the
+               sentence.
 ``abstained``  this environment cannot decide (a torch-less manifest build).
                Recorded, never silent — an unrecorded abstention is how a gate
                becomes decorative.
@@ -177,31 +175,9 @@ def static_mint_preconditions(
                          verdict=ABSTAINED, detail=detail, family=f)
             for f in families)
 
-    from .aot_contract import MintRefused
-
     aot_declaring: list[str] = []
     for family in families:
-        try:
-            decl = export_declaration(family)
-        except MintRefused as exc:
-            # The family REFUSED, in the vocabulary built for refusing. That
-            # is a declared block (ltx-2.3's open MINT_BLOCKERS), not a broken
-            # image — and it is now said at build time instead of being
-            # rediscovered by every pod that rents a GPU to hear it.
-            rows.append(Precondition(
-                check=CHECK_DECLARATION_EVALUATES, verdict=BLOCKED,
-                family=family, detail=str(exc)))
-            continue
-        except Exception as exc:  # noqa: BLE001 — everything else is a defect
-            rows.append(Precondition(
-                check=CHECK_DECLARATION_EVALUATES, verdict=REFUSED,
-                family=family, detail=(
-                    f"the export declaration raised "
-                    f"{type(exc).__name__}: {exc}. A family that cannot mint "
-                    f"YET says so with MintRefused and carries its blockers; "
-                    f"any other exception is a broken declaration, and every "
-                    f"pod running this image would pay to rediscover it")))
-            continue
+        decl = export_declaration(family)
         if decl is None:
             rows.append(Precondition(
                 check=CHECK_DECLARATION_EVALUATES, verdict=REFUSED,
@@ -209,10 +185,8 @@ def static_mint_preconditions(
                     "the registered export declaration evaluated to None — "
                     "there is no Compile to derive graph classes from")))
             continue
-        # pgw#1115: the SAME declared block, read as DATA. The `MintRefused`
-        # branch above is the thunk saying it; a folded declaration says it
-        # with `blockers=`, and the build gate must recognise both or the
-        # pgw#1107 fold turns a build-time `blocked` verdict into silence.
+        # pgw#1115: the declared block, read as DATA — the one form since
+        # pgw#1107 retired the thunk that used to say it by raising.
         blocked = open_blockers(decl)
         if blocked:
             rows.append(Precondition(

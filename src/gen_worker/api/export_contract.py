@@ -975,73 +975,40 @@ _declared: Dict[str, Any] = {}
 _import_failures: List[Tuple[str, str]] = []
 
 
-class _Thunk:
-    """A registered declaration that has not been built yet (pgw#853).
+#: The export-contract vocabulary (pgw#1107). A ``Compile`` that carries ANY of
+#: these fields is DECLARING AN AOT EXPORT CONTRACT and is registered as one; a
+#: ``Compile`` that carries NONE of them is a dynamo-lane compile block and
+#: declares no export intent at all. That distinction is the tightening: the
+#: gate used to filter on `classes` alone, which silently swallowed a
+#: declaration that named dims/forks/inputs and simply FORGOT its classes —
+#: registered nothing, minted nothing, and read on a pod exactly like an
+#: endpoint that never declared AOT. Six inference endpoints (`ernie`,
+#: `flux.1-dev`, `flux.1-schnell`, `krea-2`, `minimax-h3`, `sd15`) legitimately
+#: ship a thin class-less `compile=`; a classes-required invariant over every
+#: `compile=` would red-line all six, so intent — not the payload — is what
+#: decides.
+EXPORT_CONTRACT_FIELDS: Tuple[str, ...] = (
+    "classes", "dims", "forks", "inputs", "args", "blockers",
+    "shape_strategy", "warm_changes_key",
+)
 
-    A family whose declaration REFUSES TO MINT (open blockers, an unresolved
-    config width, a shape it cannot legally export) used to express that by
-    raising at module scope — which made registering it equivalent to taking
-    the endpoint down at boot. A refusal to mint and a refusal to import are
-    different events with different blast radii; conflating them is the bug.
-    The thunk moves the evaluation to :func:`export_declaration`, i.e. to the
-    moment the MINT asks, where ``fleet_cells.mint_recipe`` already turns a
-    refusal into a typed ``self_mint_skipped`` carrying the blocker text.
+
+def declares_export_contract(decl: Any) -> bool:
+    """Whether this ``Compile`` declares an AOT export contract (pgw#1107).
+
+    False for a dynamo-only `compile=` block (shapes/targets/text_len/dynamic/
+    regional and nothing else) — legitimate, and registered nowhere. True the
+    moment the author reaches for the pgw#739 export vocabulary, which is when
+    :func:`register_export_declaration`'s classes-and-family invariant applies.
     """
-
-    __slots__ = ("family", "factory", "_built")
-
-    def __init__(self, family: str, factory: Any) -> None:
-        self.family = family
-        self.factory = factory
-        self._built: Any = None
-
-    def build(self) -> Any:
-        """Evaluate (once on success) and validate. Lets the factory's own
-        exception out — the blocker text IS the diagnostic."""
-        if self._built is not None:
-            return self._built
-        decl = self.factory()
-        got = str(getattr(decl, "family", "") or "").strip()
-        if got != self.family:
-            raise DeclarationError(
-                f"export declaration thunk registered for family "
-                f"{self.family!r} built a Compile for {got!r}")
-        if not getattr(decl, "classes", ()):
-            raise DeclarationError(
-                f"export declaration for {self.family!r} carries no graph "
-                f"classes — there is nothing to derive from")
-        self._built = decl
-        return decl
-
-    def _identity(self) -> Tuple[Any, ...]:
-        """SOURCE identity, deliberately not object identity.
-
-        A ``Compile`` re-registered from a second execution of the same file
-        is VALUE-equal (msgspec Struct), so registration was idempotent. Two
-        thunks are two distinct function objects, so a naive ``==`` made it
-        NOT idempotent — and that regression was not academic: the endpoint
-        walker (``discovery/walk.py``) imports EVERY submodule of an endpoint
-        package, so a declaration module reachable under two module names
-        registered twice, the second raised ``DeclarationError``, and the
-        walk died with ``EndpointImportError``. I.e. the compile feature broke
-        serving again, through a different door. Measured on qwen-image.
-
-        Same function, same source file => same declaration, whatever module
-        name it was loaded under. A genuinely different declaration still
-        conflicts by name.
-        """
-        fn = self.factory
-        code = getattr(fn, "__code__", None)
-        if code is None:  # a callable object, not a function
-            return (self.family, id(fn))
-        return (self.family, getattr(fn, "__qualname__", ""),
-                getattr(code, "co_filename", ""))
-
-    def __eq__(self, other: Any) -> bool:
-        return isinstance(other, _Thunk) and other._identity() == self._identity()
-
-    def __hash__(self) -> int:
-        return hash(self._identity())
+    if decl is None:
+        return False
+    for name in EXPORT_CONTRACT_FIELDS:
+        value = getattr(decl, name, None)
+        if value is None or value == () or value == "":
+            continue
+        return True
+    return False
 
 
 def register_export_declaration(
@@ -1049,35 +1016,39 @@ def register_export_declaration(
 ) -> Any:
     """Register one family's export declaration.
 
-    ``compile_decl`` is either a ``Compile`` carrying classes, or a ZERO-ARG
-    CALLABLE returning one (pgw#853), in which case ``family=`` is required
-    because there is nothing to read the name off yet. Idempotent for an
-    identical declaration; refuses a conflicting one by name.
+    ``compile_decl`` is a ``Compile`` carrying graph classes, and nothing
+    else. Idempotent for an identical declaration (msgspec Structs are
+    value-equal); refuses a conflicting one by name.
 
-    Prefer the callable form for any family that can REFUSE — the refusal
-    then reaches the mint gate as a typed event instead of killing the import
-    that registers it.
+    pgw#1107 retired the CALLABLE form (pgw#853's thunk). Its job — letting a
+    family that may not mint yet say so without taking the endpoint down at
+    import — is done by ``Compile(blockers=...)`` (pgw#1115), which the
+    ``@endpoint(compile=)`` fold can actually carry. A callable cannot survive
+    that fold at all, so it is refused here rather than silently dropped.
     """
     if callable(compile_decl) and not hasattr(compile_decl, "classes"):
-        fam = str(family or "").strip()
-        if not fam:
-            raise DeclarationError(
-                "a callable export declaration must be registered with an "
-                "explicit family= (the Compile does not exist yet)")
-        entry: Any = _Thunk(fam, compile_decl)
-    else:
-        fam = str(getattr(compile_decl, "family", "") or "").strip()
-        if not fam:
-            raise DeclarationError(
-                "cannot register an export declaration with no Compile.family")
-        if family is not None and str(family).strip() != fam:
-            raise DeclarationError(
-                f"family= {family!r} does not match Compile.family {fam!r}")
-        if not getattr(compile_decl, "classes", ()):
-            raise DeclarationError(
-                f"export declaration for {fam!r} carries no graph classes — "
-                f"there is nothing to derive from")
-        entry = compile_decl
+        raise DeclarationError(
+            "an export declaration is a Compile, never a callable (pgw#1107 "
+            "retired the pgw#853 thunk). A family that may not mint yet "
+            "declares that as DATA — `Compile(blockers=(MintBlocker(...),))` "
+            "— which `@endpoint(compile=)` can carry and a factory cannot")
+    fam = str(getattr(compile_decl, "family", "") or "").strip()
+    if not fam:
+        raise DeclarationError(
+            "cannot register an export declaration with no Compile.family")
+    if family is not None and str(family).strip() != fam:
+        raise DeclarationError(
+            f"family= {family!r} does not match Compile.family {fam!r}")
+    # THE INVARIANT CARRIED OVER FROM `_Thunk.build()` (pgw#1107): a
+    # declaration in the export vocabulary that names no graph classes has
+    # nothing to derive from. Before the tightening this could not fire from
+    # the decorator at all — the gate filtered on `classes` and dropped such a
+    # declaration on the floor — so it was reachable only through a thunk.
+    if not getattr(compile_decl, "classes", ()):
+        raise DeclarationError(
+            f"export declaration for {fam!r} carries no graph classes — "
+            f"there is nothing to derive from")
+    entry: Any = compile_decl
     with _lock:
         existing = _declared.get(fam)
         if existing is not None and existing != entry and not replace:
@@ -1091,15 +1062,13 @@ def register_export_declaration(
 def export_declaration(family: str) -> Optional[Any]:
     """The family's ``Compile``, or ``None`` if none is registered.
 
-    pgw#853: a THUNK registration is evaluated HERE, and its exception is let
-    out HERE — this is "the mint asking", and every caller on the mint path
-    turns that into a typed refusal that keeps the blocker text. Callers that
-    only need to know whether a declaration EXISTS must use
-    :func:`has_export_declaration`, which never evaluates anything.
+    A plain registry read since pgw#1107 retired the thunk: nothing is
+    evaluated here and nothing raises. A family that refuses to mint says so
+    in the returned value (``Compile.open_blockers``), so every caller reads
+    the refusal instead of catching it.
     """
     with _lock:
-        entry = _declared.get(str(family or "").strip())
-    return entry.build() if isinstance(entry, _Thunk) else entry
+        return _declared.get(str(family or "").strip())
 
 
 def weak_arms(decl: Any) -> Tuple[Any, ...]:
@@ -1121,16 +1090,13 @@ def weak_arms(decl: Any) -> Tuple[Any, ...]:
 def weak_arms_by_family() -> Dict[str, Tuple[Any, ...]]:
     """:func:`weak_arms` across every registered family, for a fleet sweep.
 
-    Skips families whose declaration REFUSES (a blocked family is not a
-    silent one — its refusal is the pgw#853 typed event, and it should not
-    take a fleet query down).
+    A BLOCKED family still answers (pgw#1107): its refusal is data on the
+    declaration, not an exception thrown by reading it, so a fleet query no
+    longer has to choose between skipping the family and falling over.
     """
     out: Dict[str, Tuple[Any, ...]] = {}
     for family in registered_export_families():
-        try:
-            decl = export_declaration(family)
-        except Exception:  # noqa: BLE001 — a blocked family is not a query error
-            continue
+        decl = export_declaration(family)
         if decl is None:
             continue
         arms = weak_arms(decl)
@@ -1140,18 +1106,19 @@ def weak_arms_by_family() -> Dict[str, Tuple[Any, ...]]:
 
 
 def registered_entry(family: str) -> Optional[Any]:
-    """The RAW registry entry — a ``Compile`` or an unevaluated thunk.
+    """The registry entry as stored — a ``Compile`` or ``None``.
 
-    For callers that need registration IDENTITY (has this exact declaration
-    already been registered?) without triggering a blocked family's refusal.
+    Identical to :func:`export_declaration` since pgw#1107 retired the thunk;
+    kept as the name for callers asking about registration IDENTITY (has this
+    exact declaration already been registered?) rather than about content.
     """
     with _lock:
         return _declared.get(str(family or "").strip())
 
 
 def has_export_declaration(family: str) -> bool:
-    """Whether a declaration is registered — never evaluates a thunk, so a
-    blocked family still reads as DECLARED (it is; it just refuses to mint)."""
+    """Whether a declaration is registered. A blocked family reads as
+    DECLARED (it is; it just refuses to mint)."""
     with _lock:
         return str(family or "").strip() in _declared
 
@@ -1187,9 +1154,10 @@ def import_export_declaration(
     """Import a module whose only job is to register a declaration, and NEVER
     let its failure past this call (pgw#853, backstop (3)).
 
-    ``register_export_declaration``'s thunk form fixes declarations that opt
-    into it; any other module-scope work in a declaration file can still
-    throw. A compile feature must never be able to break serving, so this
+    ``Compile(blockers=...)`` covers a family that refuses to MINT; any other
+    module-scope work in a declaration file can still throw at IMPORT, and the
+    two have different blast radii. A compile feature must never be able to
+    break serving, so this
     reports the failure as a typed ``aot_declaration_import_failed`` activity
     event carrying the exception and returns ``False`` — the pod serves
     eager, uncompiled, and says why.
@@ -1239,7 +1207,9 @@ __all__ = [
     "WEAK_FORK_REASONS",
     "blocker_refusal",
     "blocker_rows",
+    "EXPORT_CONTRACT_FIELDS",
     "declaration_import_failures",
+    "declares_export_contract",
     "export_declaration",
     "has_export_declaration",
     "registered_entry",
