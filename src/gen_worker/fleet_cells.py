@@ -1709,7 +1709,30 @@ def _arm_exported_cell(
     reason exists" (pgw#999).
     """
     refusal: Tuple[str, str] = ("unclassified_arm_refusal", "")
-    meta = artifact_meta.try_read_metadata(artifact)
+    # pgw#1098: UNREADABLE IS NOT ABSENT, and this is check 0.
+    #
+    # `try_read_metadata` answers None for both "this cell has no envelope" and
+    # "I refused to read the envelope it has", and every consumer here spent
+    # that distinction on `meta is not None`. Measured on row 7: a 16 MiB bound
+    # refused a 36-entry sdxl envelope, so check 1 below SILENTLY DID NOT RUN,
+    # `arm_aot` was handed None and skipped the lifted-binding install, and the
+    # refusal that reached the wire named a downstream contract gate
+    # (`lifted_inputs_unbindable`) with no root. 36/36 entries, 92 minutes and
+    # $1.584 discarded; the only trace of the cause was the word `unreadable`
+    # in one event's `cell_key=` field.
+    #
+    # An envelope this runtime cannot READ is refused here, by name, before any
+    # arm — the same class as a cell that does not describe us. It belongs in
+    # THIS function rather than at either call site, because pgw#1096's whole
+    # point is that the child's cell and the local store's earn their arm the
+    # same way, and a store whose envelope cannot be read is exactly as
+    # unarmable as a child's.
+    try:
+        meta: Optional[Dict[str, Any]] = artifact_meta.read_metadata(artifact)
+    except artifact_meta.ArtifactMetadataError as exc:
+        return False, None, ("cell_envelope_unreadable", (
+            f"the cell's {artifact_meta.METADATA_NAME} could not be read, so "
+            f"no gate that reads it could run: {exc}"))
     divergence = ""
     if meta is not None and arm_key is not None:
         divergence = arm_axis_divergence(arm_key, meta)

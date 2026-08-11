@@ -124,8 +124,12 @@ def test_adopt_refuses_typed_before_any_arm(
     from gen_worker import artifact_meta
     from gen_worker.models import provision
 
+    # pgw#1098: the adopt reads through `read_metadata` now — an envelope it
+    # CANNOT read is its own refusal (`cell_envelope_unreadable`) rather than
+    # a `None` that flows on into a gate it silently disables. This test is
+    # about the DIVERGENCE verdict, so it supplies a readable envelope.
     monkeypatch.setattr(
-        artifact_meta, "try_read_metadata", lambda _p: dict(meta))
+        artifact_meta, "read_metadata", lambda _p: dict(meta))
 
     def _no_arm(*_a: Any, **_k: Any) -> Any:
         raise AssertionError("arm_aot must not run on a diverged cell")

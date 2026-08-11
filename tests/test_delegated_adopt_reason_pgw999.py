@@ -62,18 +62,42 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     return seen
 
 
+def _sealed_cell(path: Path, **over: Any) -> Path:
+    """A REAL sealed cell: a tarball carrying a readable `metadata.json`.
+
+    pgw#1098: these fixtures used to write raw bytes (`b"cell"`) and rely on
+    `try_read_metadata` swallowing the resulting error into `None`. That made
+    every test here silently exercise the UNREADABLE-envelope path while
+    claiming to test the arm's refusal classification — the same
+    absence-vs-refusal conflation that cost row 7 a 92-minute mint. An
+    envelope that cannot be read is now its own refusal, before the arm, so
+    a test about the ARM has to hand the adopt a cell it can actually read.
+    """
+    import io as _io
+    import json as _json
+    import tarfile as _tarfile
+
+    meta = {"format": 2, "kind": "aot-inductor", "family": FAMILY,
+            "cell_key": "ck1-" + "e" * 56, "entries": {}, **over}
+    payload = _json.dumps(meta).encode()
+    with _tarfile.open(path, mode="w:gz") as tar:
+        info = _tarfile.TarInfo("metadata.json")
+        info.size = len(payload)
+        tar.addfile(info, _io.BytesIO(payload))
+    return path
+
+
 @pytest.fixture()
 def pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     """A pending whose cell EXISTS — the pgw#999 shape exactly.
 
     The mint succeeded (36/36 sealed and finalized on the pod that found
-    this); the artifact is real bytes on disk and the only open question is
-    whether the runtime that built it will arm it.
+    this); the artifact is a real readable cell on disk and the only open
+    question is whether the runtime that built it will arm it.
     """
     monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
     monkeypatch.setattr(fleet_cells, "mark_terminus", lambda p, t: None)
-    artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"a sealed, finalized cell")
+    artifact = _sealed_cell(tmp_path / "cell.tar.gz")
     return fleet_cells.PendingSelfMint(
         family=FAMILY, arm_token="ck1-sealed", ref=f"root/family-{FAMILY}#ck1-sealed",
         cfg=_Cfg(), target=artifact, mint_root=tmp_path / "root", publisher=None, delegated=True,)
@@ -140,8 +164,7 @@ def test_every_classified_reason_survives_verbatim(
             lambda kind, detail, phase="", duration_ms=0: seen.append(
                 (kind, phase, detail)))
         _arm_returns(monkeypatch, AdoptOutcome.miss(reason, f"detail for {reason}"))
-        artifact = tmp_path / f"cell-{i}.tar.gz"
-        artifact.write_bytes(b"cell")
+        artifact = _sealed_cell(tmp_path / f"cell-{i}.tar.gz")
         p = fleet_cells.PendingSelfMint(
             family=FAMILY, arm_token=f"ck1-{i}", ref=f"root/family-{FAMILY}#ck1-{i}",
             cfg=_Cfg(), target=artifact, mint_root=tmp_path / f"root{i}", publisher=None, delegated=True,)

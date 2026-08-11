@@ -538,8 +538,21 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
     monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
 
+    # pgw#1098: a READABLE envelope. This used to be `b"cell"` and worked only
+    # because `try_read_metadata` swallowed the error into `None`; an
+    # unreadable envelope is now its own refusal before the arm, so a test
+    # about the ARM has to supply one the adopt can read.
+    import io as _io
+    import json as _json
+    import tarfile as _tarfile
+
     artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"cell")
+    _payload = _json.dumps(
+        {"cell_key": "ck1-real", "kind": "aot-inductor"}).encode()
+    with _tarfile.open(artifact, mode="w:gz") as _tar:
+        _info = _tarfile.TarInfo("metadata.json")
+        _info.size = len(_payload)
+        _tar.addfile(_info, _io.BytesIO(_payload))
     pending = fleet_cells.PendingSelfMint(
         family=FAMILY, arm_token="ck1-handle", ref="root/family-sdxl#ck1-handle",
         cfg=_Cfg(), target=artifact,

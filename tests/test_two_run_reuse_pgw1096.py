@@ -40,7 +40,7 @@ REPO = Path(__file__).resolve().parent.parent
 #: under test is that the second run of one program behaves differently only
 #: because the first run left something on disk.
 _PROGRAM = r'''
-import json, os, sys
+import io, json, os, sys, tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -98,12 +98,22 @@ fleet_cells.PendingSelfMint = _spy           # type: ignore[assignment]
 
 if MODE == "mint":
     # Stand in for the child's packed cell. On a pod this is a real .pt2
-    # tarball out of a real AOTI link; here it is bytes, because the store
-    # does not care what the cell IS and the digest proves only that the bytes
-    # came back unchanged.
+    # tarball out of a real AOTI link. The store itself does not care what the
+    # cell IS — but run 2 ARMS this cell, and since pgw#1098 the arm refuses
+    # `cell_envelope_unreadable` before any other gate, so the stand-in has to
+    # carry a readable `metadata.json` exactly as the real thing does.
     art = Path(os.environ["PGW1096_ARTIFACT"])
     art.parent.mkdir(parents=True, exist_ok=True)
-    art.write_bytes(b"a-real-cell-would-be-here" * 40)
+    _meta = json.dumps(
+        {"kind": "aot-inductor", "cell_key": KEY, "family": FAMILY}).encode()
+    _body = b"a-real-cell-would-be-here" * 40
+    with tarfile.open(art, mode="w:gz") as _tar:
+        _mi = tarfile.TarInfo("metadata.json")
+        _mi.size = len(_meta)
+        _tar.addfile(_mi, io.BytesIO(_meta))
+        _bi = tarfile.TarInfo("payload.bin")
+        _bi.size = len(_body)
+        _tar.addfile(_bi, io.BytesIO(_body))
     reason = fleet_cells.local_keep_reason(None)
     stored = local_cell_store.store(
         art, key=KEY, family=FAMILY, arm_token=ARM)

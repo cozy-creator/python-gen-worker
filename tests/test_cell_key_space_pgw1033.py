@@ -156,16 +156,29 @@ def _adopt(
 ) -> Any:
     """Run the real ``adopt_delegated_mint`` over a child cell stamped with a
     key of the cell's OWN space — the production shape, in one line."""
+    # pgw#1098: a REAL readable envelope carrying the stamp. This used to be
+    # `b"packed-cell"` plus a `_packed_metadata` patch, which worked only
+    # because the pre-arm read swallowed its own failure into `None`. An
+    # unreadable envelope is now refused before the arm, so the cell has to
+    # actually carry the key this test is about.
+    import io as _io
+    import json as _json
+    import tarfile as _tarfile
+
     pending.target.parent.mkdir(parents=True, exist_ok=True)
-    pending.target.write_bytes(b"packed-cell")
+    payload = _json.dumps(
+        {"kind": "aot-inductor", "cell_key": stamped, "family": FAMILY}).encode()
+    with _tarfile.open(pending.target, mode="w:gz") as tar:
+        info = _tarfile.TarInfo("metadata.json")
+        info.size = len(payload)
+        tar.addfile(info, _io.BytesIO(payload))
     monkeypatch.setattr(
         fleet_cells.provision, "arm_aot",
         lambda *a, **k: AdoptOutcome.hit(f"key={stamped}"))
-    monkeypatch.setattr(
-        fleet_cells, "_packed_metadata",
-        lambda artifact: {
-            "kind": "aot-inductor", "cell_key": stamped, "family": FAMILY,
-        })
+    # The pgw#1042 divergence gate now genuinely runs on this fixture (it was
+    # silently skipped while `meta` was `None`). Its verdict is
+    # `test_handback_key_axes_pgw1042`'s subject, not this file's.
+    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m: "")
     return fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target)
 
 

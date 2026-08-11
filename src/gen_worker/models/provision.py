@@ -347,8 +347,28 @@ def arm_aot(
                 targets[0] if targets else "")
         lifted_target = (
             getattr(pipe, module_name, None) if module_name else None)
-        if (lifted_target is not None
-                and lora_lifted.lifted_binding(lifted_target) is None):
+        if lifted_target is None:
+            # pgw#1098: a declared bucket whose lifted target cannot be
+            # RESOLVED is a refusal, never a skip. Falling through leaves the
+            # module unlifted and hands `assert_lifted_contract` a guaranteed
+            # `lifted_inputs_unbindable` — the gate then names itself and the
+            # real cause (an envelope with no readable targets, a pipeline
+            # missing the named component) is nowhere on the wire. That is
+            # exactly how row 7 read as a LoRA-contract defect when the
+            # envelope had simply not been read. pgw#1001 closed this hole for
+            # its two known causes; this closes it for every future one, by
+            # refusing to leave the branch silently.
+            lifted_install_error = (
+                f"no lifted target resolved: metadata names module="
+                f"{str((meta or {}).get('module') or '') or '<absent>'} "
+                f"targets={targets or '<absent>'}, branch-capable="
+                f"{sorted(branch_capable) or '<none>'}"
+                + ("; the cell envelope was unreadable" if meta is None else ""))
+            logger.warning(
+                "aot arm: bucket=%d declared but no lifted target resolved "
+                "(%s); a lifted artifact will refuse at "
+                "assert_lifted_contract", bucket, lifted_install_error)
+        elif lora_lifted.lifted_binding(lifted_target) is None:
             try:
                 lora_lifted.install_lifted_lora_forward(lifted_target, bucket)
                 lifted_installed = True
@@ -371,8 +391,9 @@ def arm_aot(
         # reader needs them: what refused, and what made it refuse.
         outcome = AdoptOutcome.miss(
             outcome.reason or "lifted_install_failed",
-            f"{outcome.detail} [root: lifted-binding install failed on "
-            f"{module_name!r} — {lifted_install_error}]".strip(),
+            f"{outcome.detail} [root: the lifted binding was never installed"
+            + (f" on {module_name!r}" if module_name else "")
+            + f" — {lifted_install_error}]".strip(),
             outcome.identity)
     if outcome.armed:
         if gate_cell_numerics(pipe, cfg):

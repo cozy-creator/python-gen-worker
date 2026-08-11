@@ -48,9 +48,37 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _artifact(tmp_path: Path, body: bytes = b"packed-cell-bytes") -> Path:
+    """Opaque bytes. The STORE does not care what a cell is — these tests are
+    about addressing, digests and rot, and they assert the bytes round-trip
+    unchanged, so this deliberately stays raw."""
     p = tmp_path / "mint" / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(body)
+    return p
+
+
+def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
+    """A cell with a READABLE envelope — for the tests that reach the ARM.
+
+    pgw#1098: `_arm_exported_cell` refuses `cell_envelope_unreadable` before
+    any other gate, for the local store exactly as for a child's fresh mint —
+    which is precisely pgw#1096's "one gate, two sources" intent. Opaque bytes
+    used to reach the arm only because the metadata read swallowed its own
+    failure into `None`, so a test that ARMS has to supply a real envelope
+    while a test that only STORES does not.
+    """
+    import io as _io
+    import tarfile as _tarfile
+
+    p = tmp_path / "mint" / "cell.tar.gz"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion"}
+    ).encode()
+    with _tarfile.open(p, mode="w:gz") as tar:
+        info = _tarfile.TarInfo("metadata.json")
+        info.size = len(payload)
+        tar.addfile(info, _io.BytesIO(payload))
     return p
 
 
@@ -372,7 +400,8 @@ def test_a_second_boot_arms_from_this_machines_own_store_with_no_mint(
     forever. RED before: no lookup existed, so boot 2 opened a pending and paid
     the whole export again."""
     local_cell_store.store(
-        _artifact(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
+        _armable_artifact(tmp_path), key=KEY_A, family="micro-diffusion",
+        arm_token=ARM_A)
 
     minted = fleet_cells.arm_from_local_store(
         _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion")  # type: ignore[arg-type]
@@ -400,7 +429,7 @@ def test_a_local_cell_that_cannot_arm_is_dropped_not_retried_forever(
         fleet_cells.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0: events.append((kind, phase)))
     local_cell_store.store(
-        _artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A)
+        _armable_artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A)
 
     assert fleet_cells.arm_from_local_store(
         _Pipe(), _Cfg(), None, 0, _Arm(), "f") is None  # type: ignore[arg-type]
@@ -422,7 +451,7 @@ def test_a_local_cell_that_does_not_describe_this_runtime_is_refused_by_FACT(
         fleet_cells.provision, "arm_aot",
         lambda *a, **k: pytest.fail("a diverging cell must never reach the arm"))
     monkeypatch.setattr(
-        fleet_cells.artifact_meta, "try_read_metadata",
+        fleet_cells.artifact_meta, "read_metadata",
         lambda p: {"cell_key": KEY_A, "family": "micro-diffusion",
                    "sm": "sm_120", "format": 2})
     events: List[Tuple[str, str]] = []
