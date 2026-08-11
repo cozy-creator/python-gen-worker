@@ -415,6 +415,15 @@ class _RequestOutputStream:
         content_type = self._infer_content_type()
         if content_type and content_type != "application/octet-stream":
             create_payload["content_type"] = content_type
+        # th#1795 / pgw#1125: DECLARE the sha256. It has been computed during
+        # the writes (`self._sha`, :138) and thrown away ever since, and that
+        # one omission is why the hub cannot presign into the final
+        # content-addressed key: without the digest it does not know where the
+        # bytes belong, so every save was staged, then copied, then deleted.
+        # Declaring it lets the hub mint a store-enforced PUT straight to the
+        # final key and drop five serialized object-store round trips from a
+        # /complete measured at 1060 ms server-side per image.
+        create_payload["sha256"] = self._sha.hexdigest()
 
         # Media upload. The URL owner segment MUST be the owner the
         # capability token's upload_media grant is bound to (the token's

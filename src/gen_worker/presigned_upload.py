@@ -435,6 +435,38 @@ def _presigned_upload_file_scoped(
             retryable=False,
         )
 
+    # th#1795: a store-enforced single PUT straight into the FINAL
+    # content-addressed key. The hub can only mint this when the create
+    # declared `sha256` — given the digest it knows where the bytes belong, so
+    # there is nothing to assemble and nothing to promote, and it drops five
+    # serialized object-store round trips from a path measured at 1060 ms
+    # server-side per image. The headers carry `x-amz-checksum-sha256` INSIDE
+    # the signature: sent verbatim or the store answers 403.
+    put_url = str(parsed.get("put_url") or "").strip()
+    if put_url:
+        put_headers = parsed.get("put_headers") or {}
+        with _phase(on_phase, "put"):
+            _put_whole_object(
+                url=put_url,
+                file_path=str(file_path),
+                size_bytes=size_bytes,
+                extra_headers={str(k): str(v) for k, v in dict(put_headers).items()},
+                on_progress=on_progress,
+                cancel_check=cancel_check,
+                put_pool=put_pool,
+            )
+        complete_payload = dict(complete_extra or {})
+        complete_payload.pop("parts", None)
+        with _phase(on_phase, "complete"):
+            result_meta = _complete_upload_session(
+                complete_url=f"{url}/{upload_id}/complete",
+                headers=headers,
+                payload=complete_payload,
+                cancel_check=cancel_check,
+                session=session,
+            )
+        return PresignedUploadResult(meta=result_meta, dedup=False)
+
     part_urls: List[str] = parsed.get("part_urls") or []
     part_size: int = int(parsed.get("part_size") or _FALLBACK_PART_SIZE)
     total_parts: int = int(parsed.get("total_parts") or len(part_urls))
@@ -635,6 +667,39 @@ def _complete_upload_session(
     if last_exc:
         raise last_exc
     raise ArtifactTransferError("tensorhub upload failed", provider="tensorhub", retryable=False)
+
+
+def _put_whole_object(
+    *,
+    url: str,
+    file_path: str,
+    size_bytes: int,
+    extra_headers: Dict[str, str],
+    on_progress: Optional[Any],
+    cancel_check: Optional[Any],
+    put_pool: Optional[PutPool],
+) -> None:
+    """PUT the whole object to one presigned URL (th#1795 direct-to-final).
+
+    Shares the part transport — the same retry classification, the same
+    stale-socket isolation on retry — because a single-shot PUT is a part
+    upload with one part and no ETag ceremony, not a new transport.
+    """
+    with _presigned_put_slot():
+        upload_part_to_presigned_url(
+            url=url,
+            file_path=file_path,
+            offset=0,
+            length=int(size_bytes),
+            cancel_check=cancel_check,
+            pool=put_pool,
+            extra_headers=extra_headers,
+        )
+    if on_progress is not None:
+        try:
+            on_progress(1, 1, int(size_bytes))
+        except Exception:
+            logger.debug("upload progress callback failed", exc_info=True)
 
 
 def _upload_parts_to_s3(

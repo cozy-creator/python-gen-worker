@@ -49,7 +49,7 @@ import random
 import socket
 import ssl
 import time
-from typing import IO, Any, Optional, cast
+from typing import IO, Any, Mapping, Optional, cast
 
 import urllib3
 from urllib3.exceptions import HTTPError, MaxRetryError, ProtocolError, SSLError, TimeoutError as Urllib3TimeoutError
@@ -163,13 +163,17 @@ class PutPool:
             timeout=urllib3.Timeout(connect=_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S),
         )
 
-    def put(self, url: str, *, body: Any, length: int) -> Any:
+    def put(self, url: str, *, body: Any, length: int,
+            extra_headers: Optional[Mapping[str, str]] = None) -> Any:
         # No ``Connection: close`` — keepalive within the save is the point.
+        headers = {"Content-Length": str(length)}
+        if extra_headers:
+            headers.update(extra_headers)
         return self._pool.request(
             "PUT",
             url,
             body=body,
-            headers={"Content-Length": str(length)},
+            headers=headers,
             preload_content=True,
             decode_content=False,
         )
@@ -273,8 +277,13 @@ def upload_part_to_presigned_url(
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     cancel_check: Optional[Any] = None,
     pool: Optional[PutPool] = None,
+    extra_headers: Optional[Mapping[str, str]] = None,
 ) -> str:
-    """PUT one multipart part to a presigned S3 URL, return the ETag.
+    """PUT one presigned object (or multipart part) to S3, return the ETag.
+
+    ``extra_headers`` are sent VERBATIM. th#1795: a store-enforced grant signs
+    ``x-amz-checksum-sha256`` as a header, so dropping or editing it is a 403,
+    never a weaker upload — the headers are part of the grant, not decoration.
 
     With ``pool`` given, the FIRST attempt goes through that save-scoped
     keepalive pool (issue #385). Every retry attempt — and every attempt
@@ -304,7 +313,8 @@ def upload_part_to_presigned_url(
         try:
             with _BoundedFileReader(file_path, offset, length) as body:
                 if pool is not None and use_shared_pool:
-                    resp = pool.put(url, body=body, length=length)
+                    resp = pool.put(url, body=body, length=length,
+                                    extra_headers=extra_headers)
                 else:
                     # Fresh pool per attempt. ``maxsize=1`` keeps the pool's
                     # connection set tiny — there's only one in-flight request,
@@ -337,6 +347,7 @@ def upload_part_to_presigned_url(
                                 # the socket in its keep-alive table waiting
                                 # for a follow-up request.
                                 "Connection": "close",
+                                **(dict(extra_headers) if extra_headers else {}),
                             },
                             preload_content=True,
                             decode_content=False,
