@@ -136,6 +136,15 @@ KIND_RESIDENCY_FAULT = "residency_fault"
 # serve a lane their checkpoint does not name" is one query, not an inference
 # from allocated-bytes rows.
 KIND_APPLIED_LANE = "applied_lane"
+# pgw#1116: the boot-time adopt decision (§4.27 steps 1-3). EVERY boot of a
+# compiled family emits exactly one of these — hit, miss, and each named
+# refusal — because the alternative is what pgw#1108's pod proof measured: a
+# merged fix and a published wheel both sailed past a boot-adopt that never
+# called the hub, since all of `BootAdoptOutcome`'s eight refusals presented
+# identically as "a pod that quietly self-minted". `phase` is the gate token
+# (`boot_adopt.REASONS`, countable hub-side); `detail` names family, function,
+# derived key and the sentence; `duration_ms` is the derivation's own wall.
+KIND_BOOT_ADOPT = "boot_adopt"
 # th#1322: JIT (dynamo/inductor) compile duration, as a typed numeric event.
 # It used to be `logger.info("compiled %s in %.0fs")` and nothing else, so on a
 # hub-spawned pod (no stdout, pgw#760) the one number an AOT-vs-JIT comparison

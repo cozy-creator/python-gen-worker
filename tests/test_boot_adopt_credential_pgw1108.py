@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 
@@ -78,7 +78,7 @@ def wired(monkeypatch, tmp_path):
     return ex, calls
 
 
-def _run_boot_adopt(ex: Any) -> Optional[Any]:
+def _run_boot_adopt(ex: Any) -> Any:
     return ex._boot_adopt(_Spec(), {})
 
 
@@ -99,10 +99,17 @@ def test_split_child_with_seam_up_resolves_though_it_holds_no_jwt(wired):
 
 def test_no_bearer_and_no_seam_degrades_without_deriving(wired):
     """The gate must STILL protect the genuinely-no-hub case: no local bearer
-    and no seam means nobody to ask, so no derive/resolve, no attempt."""
+    and no seam means nobody to ask, so no derive/resolve, no attempt.
+
+    pgw#1116: it degrades by NAMING itself (`no_hub`), never by returning a
+    bare None — a refusal that carries no reason is how three pods refused
+    unattributably.
+    """
     ex, calls = wired
     # broker._broker is None (fixture); seam is down.
-    assert _run_boot_adopt(ex) is None
+    out = _run_boot_adopt(ex)
+    assert out is not None and out.reason == "no_hub"
+    assert not out.adopted
     assert calls == []
 
 
@@ -111,5 +118,8 @@ def test_single_process_bearer_still_resolves_with_no_seam(wired):
     JWT locally. Unchanged — boot-adopt proceeds."""
     ex, calls = wired
     ex.worker_jwt_provider = lambda: "real-jwt"
-    assert _run_boot_adopt(ex) is not None or calls  # attempt ran
-    assert len(calls) == 1
+    out = _run_boot_adopt(ex)
+    # NOT `x is not None or calls` — that disjunction could never fail on the
+    # old code either, which is the tautology class pgw#1113 is fixing.
+    assert len(calls) == 1, "boot-adopt did not attempt derive/resolve"
+    assert out.reason == "miss"
