@@ -101,7 +101,7 @@ def test_rank_zero_decides_and_every_rank_obeys() -> None:
             loras=(("style", 0.8),),
         )
         group.send({"op": "arm", "plan": plan})
-        group.wait_armed(timeout_s=60)
+        group.wait_armed()
         group.barrier()
     finally:
         group.close()
@@ -304,7 +304,7 @@ def test_degree_four_group_forms_and_every_rank_obeys_rank_zero() -> None:
             compile_armed=False, loras=(("style", 0.8),),
         )
         group.send({"op": "arm", "plan": plan})
-        group.wait_armed(timeout_s=120)
+        group.wait_armed()
         group.barrier()   # all four ranks reached it
     finally:
         group.close()

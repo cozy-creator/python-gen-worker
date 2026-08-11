@@ -29,6 +29,13 @@ from .procsplit import is_compute_child
 
 logger = logging.getLogger(__name__)
 
+# pgw#887: what this bounds CHANGED, and the number stayed. It used to be the
+# budget for all in-flight tenant work — SIGTERM, then 30 s, then `abort_all()`
+# regardless of what any job or mint was doing. Tenant work is now bounded by
+# progress (`lifecycle._await_tenant_idle`), and this bounds only the SHUTDOWN
+# half: the floor under the result FLUSH, and the deadline the worker reports
+# to the hub so the two agree about when the pod stops answering. A drain is a
+# command and a command may carry a deadline; the work underneath may not.
 _SIGNAL_DRAIN_DEADLINE_MS = 30_000
 
 

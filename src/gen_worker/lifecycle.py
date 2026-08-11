@@ -17,6 +17,7 @@ from . import boot_phases as boot_mod
 from . import content_credentials
 from . import receipts
 from . import mint_goal as mint_goal_mod
+from . import progress as progress_mod
 from . import worker_goals
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
@@ -38,6 +39,12 @@ from .topology import delivered_topology
 logger = logging.getLogger(__name__)
 
 _VRAM_QUANTUM_FRACTION = 0.05  # quantize free-VRAM deltas to 5% of total
+
+# pgw#887: how often the drain re-asks the progress registry while it waits
+# for in-flight work. A CADENCE, not a verdict — it bounds latency-to-notice
+# and can never end anything; the give-up test is `progress.self_diagnosis()`,
+# which is silence-keyed and per-phase.
+_DRAIN_PROGRESS_POLL_S = 1.0
 
 # gw#591 boot-setup watcher: poll cadence for hub-delivered snapshots of
 # functions the startup scan left awaiting (store lookups are local + cheap).
@@ -304,6 +311,7 @@ class Lifecycle:
         self._disk_report_at = 0.0
         self._disk_report_refresh_task: Optional[asyncio.Task] = None
         self._drain_deadline_at: Optional[float] = None
+        self._drain_work_deadline_at: Optional[float] = None
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
         self._observed_residency_generation = 0
@@ -1025,7 +1033,10 @@ class Lifecycle:
                 "adoption is gone; a cell arrives only as a Plan's exact "
                 "Arm.artifact (pgw#904) — the hub never pushes one")
         elif which == "drain":
-            self.start_drain(int(msg.drain.deadline_ms or 0))
+            # The hub asked, explicitly, for this budget on this drain — an
+            # operator budget on a command, which pgw#887 keeps.
+            self.start_drain(
+                int(msg.drain.deadline_ms or 0), work_deadline=True)
         elif which is None:
             raise FatalTransportError("scheduler sent an unknown mandatory command")
         else:
@@ -1471,22 +1482,27 @@ class Lifecycle:
 
     # ---- drain -------------------------------------------------------------------
 
-    def start_drain(self, deadline_ms: int) -> None:
+    def start_drain(self, deadline_ms: int, *, work_deadline: bool = False) -> None:
         if self.draining:
             return
-        self._begin_drain(deadline_ms)
+        self._begin_drain(deadline_ms, work_deadline=work_deadline)
         self._drain_task = asyncio.create_task(self._finish_drain(), name="drain")
 
-    async def drain(self, deadline_ms: int = 0) -> None:
+    async def drain(self, deadline_ms: int = 0, *, work_deadline: bool = True) -> None:
         """stop admitting -> finish in-flight -> ship buffered results ->
         close the stream -> signal exit 0. Zero waits without a cutoff."""
         if self.draining:
             return
-        self._begin_drain(deadline_ms)
+        self._begin_drain(deadline_ms, work_deadline=work_deadline)
         await self._finish_drain()
 
-    def _begin_drain(self, deadline_ms: int) -> None:
-        """Synchronously stop admission and anchor the deadline at receipt."""
+    def _begin_drain(self, deadline_ms: int, *, work_deadline: bool = False) -> None:
+        """Synchronously stop admission and anchor the deadline(s) at receipt.
+
+        ``work_deadline`` says whether the caller's budget may bound TENANT
+        WORK as well as the shutdown around it — true only for a `Drain` that
+        arrived on the wire carrying one (pgw#887).
+        """
         self.draining = True
         self.executor.draining = True
         self._cancel_residency_reconcile()
@@ -1498,10 +1514,98 @@ class Lifecycle:
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()
         self._drain_deadline_at = loop.time() + deadline_s if deadline_s is not None else None
+        # pgw#887: two deadlines, because they bound two different things and
+        # collapsing them is the defect. `_drain_deadline_at` bounds the
+        # SHUTDOWN — the result flush (pgw#845) and the stop time this worker
+        # reports to the hub — and every drain has one. `_drain_work_deadline_at`
+        # bounds the TENANT WORK, and only a caller that explicitly asked for
+        # one gets it: a `Drain` carrying `deadline_ms` is an operator budget
+        # on a command (th#1235), while the SIGTERM handler's fleet default is
+        # exactly what abandoned a 29-minute mint as `abandoned_shutdown`.
+        self._drain_work_deadline_at = (
+            self._drain_deadline_at if work_deadline else None)
         self.intent_registry.set_drain(
             pb.DRAIN_LIFECYCLE_STATUS_DRAINING,
             deadline_at_unix_ms=(int(time.time() * 1000) + deadline_ms if deadline_ms > 0 else 0),
         )
+
+    async def _await_tenant_idle(self) -> bool:
+        """True when every in-flight job finished; False when the work STOPPED
+        ADVANCING (or an EXPLICIT operator budget ran out) and the drain gave
+        up on the remainder.
+
+        pgw#887 / gw#666 / DESIGN-RULINGS §2. This was
+        ``wait_idle(timeout=deadline_at - now)``, so at 30 s (SIGTERM) or 60 s
+        (the hub's cluster drain, which is what BOTH standing stacks run) the
+        drain logged "drain deadline expired" and called ``abort_all()``.
+        Nothing consulted progress: a render at step 30/50 and a render at
+        step 1/50 were aborted identically, and a MINT — which has no partial
+        result to requeue — was abandoned outright. ``self_mint_abort`` has 52
+        rows on chaos and 64 on master; ``forge.py:14`` recorded one verbatim:
+        *"attempt sixteen ran 29 minutes and died
+        ``self_mint_abort/abandoned_shutdown``"*.
+
+        A drain is a COMMAND, so a deadline on it is legitimate — but the
+        deadline must bound acknowledgement and shutdown, not the tenant work
+        underneath. Admission already stopped in ``_begin_drain``; what ends
+        this wait is the work ceasing to advance, which
+        ``progress.self_diagnosis()`` already answers and the 10 s beat
+        already reports to the hub. Nothing new is invented here.
+
+        What stayed, and why. A ``Drain`` that arrives on the wire carrying
+        ``deadline_ms`` IS the "explicit operator budget on a specific command"
+        the ruling allows (th#1235) — the caller chose it, for this drain. What
+        is deleted is the worker INVENTING one: the SIGTERM handler's
+        `_SIGNAL_DRAIN_DEADLINE_MS` is no longer a work budget, so a pod
+        stopping on a signal no longer abandons a mint at 30 s. The hub's own
+        60 s cluster window is a hub-side default and is routed to tensorhub
+        rather than reinterpreted here. Even under an explicit budget the
+        progress test still applies and fires FIRST: a wedged job is given up
+        on when it wedges, not when the clock happens to run out.
+
+        Two properties worth stating because they are deliberate:
+
+        * **No counters open at all is NOT a stall.** It is the same "keep
+          waiting" the in-call stall loop takes (``executor``'s
+          ``_STALL_POLL_S`` arm: *"advancing (or evidence-free): keep
+          waiting"*), and the outer authority — the hub's terminate, or the
+          container runtime's SIGKILL — is what bounds the pathological case.
+          The worker's job is to not throw away work that was about to finish.
+        * ``self_diagnosis()`` is registry-wide, so a background mint's
+          advancing counter can currently defer this verdict for a wedged
+          tenant job. That cross-talk is pgw#894's, is named there, and is
+          strictly better than the wall clock this replaces.
+        """
+        loop = asyncio.get_running_loop()
+        budget_at = self._drain_work_deadline_at
+        idle = asyncio.ensure_future(self.executor.wait_idle())
+        try:
+            while True:
+                poll = _DRAIN_PROGRESS_POLL_S
+                if budget_at is not None:
+                    remaining = budget_at - loop.time()
+                    if remaining <= 0:
+                        logger.warning(
+                            "drain: the caller's explicit deadline_ms budget "
+                            "ran out with work still in flight")
+                        return False
+                    poll = min(poll, remaining)
+                try:
+                    await asyncio.wait_for(asyncio.shield(idle), poll)
+                    return True
+                except asyncio.TimeoutError:
+                    stalled = progress_mod.self_diagnosis()
+                    if stalled is None:
+                        continue
+                    logger.warning(
+                        "drain: counter %r (%s) has not advanced for %.0fs "
+                        "(window %.0fs) — the remaining work is not making "
+                        "progress", stalled.name, stalled.unit,
+                        stalled.age_s, stalled.window_s)
+                    return False
+        finally:
+            if not idle.done():
+                idle.cancel()
 
     async def _finish_drain(self) -> None:
         deadline_at = self._drain_deadline_at
@@ -1509,17 +1613,18 @@ class Lifecycle:
         await self.maybe_send_state_delta()
         drain_intent = self.intent_registry.intent_id(pb.DESIRED_INTENT_KIND_DRAIN)
         try:
-            wait_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
             finished = await self.intent_registry.reported_await(
                 drain_intent,
-                self.executor.wait_idle(timeout=wait_timeout),
+                self._await_tenant_idle(),
                 operation="drain tenant-idle wait",
                 status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
                 stage=pb.LIFECYCLE_INTENT_STAGE_DRAINING,
                 reason=pb.LIFECYCLE_WAIT_REASON_TENANT_WORK,
             )
             if not finished:
-                logger.warning("drain deadline expired; aborting remaining jobs as RETRYABLE")
+                logger.warning(
+                    "in-flight work stopped advancing during drain; aborting "
+                    "the remainder as RETRYABLE")
                 await self.intent_registry.guard_await(
                     drain_intent,
                     self.executor.abort_all(safe_message="worker draining"),
