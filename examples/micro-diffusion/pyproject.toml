@@ -13,14 +13,12 @@ dependencies = [
     # cell MINTS and SEALS and then refuses at ingress on its first served
     # call. Never pin below that.
     #
-    # 0.97.0 (pgw#1084): the fleet hardcut to it in `inference-endpoints`
-    # `2440905` (ie#639/PR ie#298 — 28 pins, floor, and `[supported]` all moved,
-    # 0.96 DELETED with no transition window). This example is outside that
-    # train, so it is repinned here by hand to keep the micro gauntlet on the
-    # SAME wheel the fleet serves — which is the whole reason the gauntlet is a
-    # usable probe. 0.97.0 also carries pgw#1059's four-axis `ck1`, so every
-    # cell minted from this pin is a live-scheme cell.
-    "gen-worker==0.97.0",
+    # This example is outside the `inference-endpoints` relock train, so the pin
+    # is moved here by hand at each cut to keep the micro gauntlet on the SAME
+    # wheel the fleet serves — which is the whole reason the gauntlet is a
+    # usable probe. Floor facts still in force: pgw#1059's four-axis `ck1`
+    # (0.97.0), so every cell minted from this pin is a live-scheme cell.
+    "gen-worker==0.106.0",
     "msgspec>=0.18",
     "safetensors>=0.4",
     "pillow",
@@ -30,14 +28,14 @@ dependencies = [
 # is that its image is small and its boot is short; a dependency it does not
 # use would cost both on every cycle.
 #
-# ⚠️ THE PIN ABOVE MUST MOVE TO >=0.106.0 AT THE NEXT RELOCK (pgw#1123).
-# On 0.97.0-0.105.0 `models/structure_only` imports `accelerate`, so on THIS
-# image the boot-key derivation refuses and the pod self-mints forever —
-# measured on pods `ykwoaiqub6ktt3` and `3o09rf9ehnc4ym`, and it is what
-# silenced the first paid reuse-circle proof. 0.106.0 owns the meta-init
-# (`gen_worker.models.meta_init`), which `pipeline.py` now uses; adding
-# `accelerate` here instead would fix this one image and leave the SDK defect
-# in place for every other family, which is why it is deliberately NOT here.
+# The pin is 0.106.0 BECAUSE of pgw#1123: on 0.97.0-0.105.0
+# `models/structure_only` imported `accelerate`, so on THIS image the boot-key
+# derivation refused, no `/v1/worker/cells/resolve` was ever issued, and the pod
+# self-minted forever — measured on pods `ykwoaiqub6ktt3` and `3o09rf9ehnc4ym`,
+# and it is what silenced the first paid reuse-circle proof. 0.106.0 owns the
+# meta-init (`gen_worker.models.meta_init`), which `pipeline.py` uses. Adding
+# `accelerate` here instead would have fixed this one image and left the SDK
+# defect in place for every other family, which is why it is NOT here.
 
 [dependency-groups]
 local = [

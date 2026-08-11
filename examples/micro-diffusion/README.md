@@ -268,15 +268,19 @@ GET /api/v1/repos/tensorhub/micro-diffusion/checkpoints     # model_family stamp
 **ESTIMATE: < 1 min.** No commit to `inference-endpoints` is wanted — this is a
 proof artifact, not a fleet pin.
 
-> ⚠️ **Pin at 0.100.0 (current), never below the 0.97.0 fleet floor.** This
-> family declares a container input with a plain input after it — the shape
-> pgw#994 (`2165c2d5`, 0.93.4) fixed; below it the cell mints and seals and then
-> **refuses at ingress on its first served call**, burning a pod to rediscover a
-> fixed defect. 0.97.0 is the fleet floor (pgw#1084, four-axis `ck1`); 0.100.0
-> additionally carries the AOT re-key — boot-derived cell key (pgw#1089/1090),
-> the folding fence (pgw#1097) and AOT-local mint (pgw#1096). Keep this pin on
-> the SAME wheel the fleet serves (the example's `pyproject.toml` pin is the
-> source of truth) so the gauntlet stays a usable probe.
+> ⚠️ **Pin at 0.106.0 (current), never below it on THIS family.** Below
+> 0.106.0 the boot-key derivation refuses outright: `models/structure_only`
+> imported `accelerate`, which this image deliberately does not ship, so no key
+> exists, no `/v1/worker/cells/resolve` is ever issued and the pod self-mints
+> forever — measured on `ykwoaiqub6ktt3` and `3o09rf9ehnc4ym`, and it is what
+> silenced the first paid reuse-circle proof (pgw#1123). Older floors still
+> apply and are all below it: pgw#994 (`2165c2d5`, 0.93.4) for the container
+> input followed by a plain input — below it the cell mints and seals and then
+> **refuses at ingress on its first served call**; 0.97.0 for pgw#1084's
+> four-axis `ck1`; 0.100.0 for the AOT re-key (pgw#1089/1090), the folding fence
+> (pgw#1097) and AOT-local mint (pgw#1096). Keep this pin on the SAME wheel the
+> fleet serves (the example's `pyproject.toml` pin is the source of truth) so
+> the gauntlet stays a usable probe.
 
 ### 2. Publish the release
 
