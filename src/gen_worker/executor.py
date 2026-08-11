@@ -184,6 +184,7 @@ from .models.serve_fit import demoted
 from .models.serve_fit import load_rung_engaged
 from .models.serve_fit import cast_dropped
 from .models.loading import pipeline_weight_lane
+from .models import attention_modes as attnspec
 from .models import execution_lanes as lanespec
 from . import warmup as warmup_mod
 from .api.decorators import ATTR as _DECL_ATTR
@@ -2864,6 +2865,10 @@ class _ClassRecord:
     # and `_served_execution_lane` must report the lane that RUNS. Dies with
     # the instance — a new setup re-reports or the lane reverts to the binding.
     applied_lanes: List[lanespec.AppliedLane] = dc_field(default_factory=list)
+    # pgw#1043 §PRODUCTIZATION: the attention path this record's setup()
+    # INSTALLED (`gen_worker.report_applied_attention`). Empty == dense, which
+    # is why no endpoint is obliged to report. Dies with the instance.
+    applied_attention: List[Any] = dc_field(default_factory=list)
     # gw#661: consecutive will-retry setup losses; reset by any success.
     transient_setup_failures: int = 0
     # pgw#748 phase 1: the armed degree-D rank group serving THIS record, or
@@ -5551,6 +5556,42 @@ class Executor:
                 detail=f"{entry.detail()} bound={bound}",
                 phase=entry.component)
 
+    def _record_applied_attention(
+        self, rec: _ClassRecord, applied: Tuple[Any, ...],
+    ) -> None:
+        """pgw#1043: bank the attention path setup() installed, one wire row
+        per component. Reporting nothing is dense — the absence is the default,
+        not a gap, so silence emits nothing."""
+        rec.applied_attention = list(applied)
+        for entry in applied:
+            activity_mod.emit_event(
+                activity_mod.KIND_APPLIED_ATTENTION,
+                detail=entry.detail(),
+                phase=entry.component)
+
+    def _served_attention_mode(self, spec: EndpointSpec) -> str:
+        """The attention mode `metrics.attention_mode` reports for a request on
+        this spec. Never guessed: it is what the installing code reported, and
+        the ABSENCE of a report is dense — so an endpoint with no sparse path
+        reports "" and nothing downstream has to learn a new default."""
+        if spec.cls is None:
+            return ""
+        rec = self._classes.get(spec.instance_key)
+        entries = list(getattr(rec, "applied_attention", []) or []) if rec else []
+        if not entries:
+            return ""
+        return attnspec.most_sparse_mode([e.mode for e in entries])
+
+    def _served_attention_detail(self, spec: EndpointSpec) -> str:
+        """The full applied-attention row for this instance (k, block, measured
+        density, selector, index artifact) — what `attention_mode` alone cannot
+        carry. One line per component, joined."""
+        if spec.cls is None:
+            return ""
+        rec = self._classes.get(spec.instance_key)
+        entries = list(getattr(rec, "applied_attention", []) or []) if rec else []
+        return "; ".join(e.detail() for e in entries)
+
     def _bound_execution_lane(
         self, spec: EndpointSpec, compiled: bool,
     ) -> lanespec.ExecutionLane:
@@ -7033,12 +7074,14 @@ class Executor:
                 # quantizes whether or not this release compiles, and the lane
                 # it applied is what every request then executes.
                 applied_lane_scope = provision.AppliedLaneScope()
-                with arming_scope, applied_lane_scope:
+                applied_attn_scope = provision.AppliedAttentionScope()
+                with arming_scope, applied_lane_scope, applied_attn_scope:
                     if asyncio.iscoroutinefunction(setup):
                         await setup(**inj.kwargs)
                     else:
                         await _to_thread_complete(setup, **inj.kwargs)
                 self._record_applied_lanes(spec, rec, applied_lane_scope.applied)
+                self._record_applied_attention(rec, applied_attn_scope.applied)
                 # arm_compile() is the sole unambiguous ownership seam for a
                 # self-loaded pipeline. Such a pipeline may be built from any
                 # path-valued setup input, so freeze every self-loaded slot

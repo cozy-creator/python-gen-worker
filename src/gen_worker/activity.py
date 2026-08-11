@@ -144,6 +144,15 @@ KIND_RESIDENCY_FAULT = "residency_fault"
 # serve a lane their checkpoint does not name" is one query, not an inference
 # from allocated-bytes rows.
 KIND_APPLIED_LANE = "applied_lane"
+# pgw#1043 §PRODUCTIZATION: the ATTENTION path setup() actually installed
+# (`gen_worker.report_applied_attention`). A third axis beside `lane` and
+# `serving_mode`, for the same reason those two are separate: the lane string
+# is a numerics descriptor and cannot say which key blocks were read, nor carry
+# the MEASURED density the wall is a function of. `phase` is the component;
+# `detail` carries mode, k, block size, density, selector and the bound index
+# artifact — so "which pods served sparse, at what density, off which head" is
+# one query.
+KIND_APPLIED_ATTENTION = "applied_attention"
 # pgw#1116: the boot-time adopt decision (§4.27 steps 1-3). EVERY boot of a
 # compiled family emits exactly one of these — hit, miss, and each named
 # refusal — because the alternative is what pgw#1108's pod proof measured: a

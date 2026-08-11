@@ -883,6 +883,100 @@ def report_applied_lane(
 
 
 # ---------------------------------------------------------------------------
+# The attention axis (pgw#1043 §PRODUCTIZATION) — same shape as the lane report
+# above, deliberately: only the code that INSTALLED the attention path can prove
+# what it installed, and a static declaration would over-claim on a card whose
+# kernel gate refused (the exact reason pgw#1104 rejected position 2).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _AppliedAttentionContext:
+    applied: list[Any]  # list[attention_modes.AppliedAttention]
+
+
+_APPLIED_ATTENTION_CTX: (
+    "contextvars.ContextVar[Optional[_AppliedAttentionContext]]"
+) = contextvars.ContextVar("gen_worker_applied_attention_ctx", default=None)
+
+
+class AppliedAttentionScope:
+    """Held open by the executor around one ``setup()`` so a report lands on
+    that instance and cannot be forged from a handler or a background thread."""
+
+    def __init__(self) -> None:
+        self._applied: list[Any] = []
+        self._value = _AppliedAttentionContext(applied=self._applied)
+        self._token: Optional[
+            "contextvars.Token[Optional[_AppliedAttentionContext]]"] = None
+
+    def __enter__(self) -> "AppliedAttentionScope":
+        self._token = _APPLIED_ATTENTION_CTX.set(self._value)
+        return self
+
+    def __exit__(self, *_exc_info: Any) -> None:
+        if self._token is not None:
+            _APPLIED_ATTENTION_CTX.reset(self._token)
+            self._token = None
+
+    @property
+    def applied(self) -> tuple[Any, ...]:
+        return tuple(self._applied)
+
+
+def report_applied_attention(
+    component: str,
+    mode: str,
+    *,
+    k_blocks: int = 0,
+    block_size: int = 0,
+    density: float = 0.0,
+    selector: str = "",
+    index_ref: str = "",
+) -> bool:
+    """Report the attention path that was actually INSTALLED on ``component``.
+
+    Call it from ``setup()`` right after the processor/dispatch is patched —
+    the way ``report_applied_lane()`` is called after ``quantize_()`` returns.
+    ``mode`` is ``"dense"`` or ``"sparse-k<N>"``; an ungrammatical token raises
+    ``ValueError``. Reporting nothing means dense, so no endpoint is obliged to
+    call this.
+
+    ``density`` is the MEASURED kept fraction, not the budget: ``k`` is what was
+    asked for and the density is what the geometry produced, and the wall is a
+    function of the second. Returns whether the report was recorded; outside a
+    setup scope it logs once and returns False rather than raising."""
+    from . import attention_modes
+
+    tok = str(mode or "").strip().lower()
+    if not attention_modes.valid_attention_mode(tok):
+        raise ValueError(
+            f"report_applied_attention({component!r}, {mode!r}): not a valid "
+            "attention mode (expected 'dense' or 'sparse-k<N>')")
+    k = attention_modes.sparse_k_of(tok)
+    if k is not None and k_blocks and int(k_blocks) != k:
+        raise ValueError(
+            f"report_applied_attention({component!r}, {mode!r}): k_blocks="
+            f"{k_blocks} contradicts the mode token")
+    ctx = _APPLIED_ATTENTION_CTX.get()
+    if ctx is None:
+        logger.info(
+            "gen_worker.report_applied_attention(): no active setup scope; "
+            "%s applied %s is not attributed to an instance", component, tok)
+        return False
+    ctx.applied.append(attention_modes.AppliedAttention(
+        component=str(component or "").strip() or "instance",
+        mode=tok,
+        k_blocks=int(k_blocks or k or 0),
+        block_size=max(0, int(block_size)),
+        density=max(0.0, float(density)),
+        selector=str(selector or "").strip(),
+        index_ref=str(index_ref or "").strip(),
+    ))
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Standalone (hub-less) resolution — the CLI's half. The executor's bytes
 # come from orchestrator-resolved snapshots via ModelStore.ensure_local.
 # ---------------------------------------------------------------------------
