@@ -70,8 +70,9 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import cell_key
+from . import cell_key, compile_posture
 from .api.binding import ModelRef, binding_wire_refs, wire_ref
+from .compile_posture import CompilePosture
 from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
@@ -297,6 +298,16 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: different config traces different graphs and the parent's proof misses.
     execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = {}
+    #: §4.30 / pgw#1137: WHOSE MACHINE this mint runs on, declared by the
+    #: process entry that knows (``local_serve`` says user-machine; nothing
+    #: else says anything, so every fleet mint gets the ``FLEET`` default).
+    #:
+    #: It has to travel on the request for the same reason ``vram_cap_bytes``
+    #: does — the pool's width is computed INSIDE this child — and it travels
+    #: as a typed value rather than an env because §1.17 says an env may carry
+    #: a VALUE and may not carry a DECISION. Politeness is a decision: it
+    #: changes the nice level of every process in the mint tree and halves K.
+    posture: CompilePosture = compile_posture.FLEET
 
 
 class MintFrame(msgspec.Struct, frozen=True, kw_only=True):
