@@ -313,30 +313,37 @@ the delta is the dependency install).
 PUT /api/v1/endpoints/tensorhub/micro-diffusion/tags/prod  {"release_id": …}
 ```
 
-`compile-cells` reads the orchestrator's in-memory `LoadRelease` cache and
-answers `409 no_compile_declaration` for a release the runtime has not loaded.
-That 409 has twice been misread as a missing declaration; it is a cold cache.
-**ESTIMATE: seconds.**
+Demand is tag-only (th#1315), and the worker bindings written in step 0b point
+at `tensorhub/micro-diffusion@prod` — an untagged release is a release nothing
+can invoke. **ESTIMATE: seconds.**
 
-### 4. Arm mint boots
+### 4. Buy a SERVING pod
 
-`TENSORHUB_COMPILE_OBLIGATION_MINT_BOOTS=true`, restart the hub **process
-alone**. Confirm from the LOG, not the API:
-`[cell-obligation] loop started mint_boots=true`. The `"armed"` field in the
-`compile-cells` 202 reads current config, not the running loop's snapshot, and
-will lie to you. **ESTIMATE: < 1 min.**
-
-### 5. Buy
+**There is no mint-only pod class and no `POST /v1/admin/compile-cells` route.**
+DESIGN-RULINGS §4.28 retired both: a serving pod boots, tries to adopt a cell
+by its own derived `ck1` key, and self-mints in the BACKGROUND on a miss while
+it serves eager. Nothing has to be armed, un-parked or bought as forge.
 
 ```
-POST /v1/admin/compile-cells  {"release_id":…, "gpu_model":"L40S", "coverage":"warmup"}
+POST /v1/admin/releases/<release_id>/workers?count=1&compute_class=gpu
 ```
 
-Required, not optional: micro-diffusion is not a flagship family, so a
-publish-seeded obligation is `tier=lazy` and is never bought. The same call
-un-parks (its `ON CONFLICT (release_id, sku) DO UPDATE` resets `status`,
-`attempts`, `discharged_at`, `not_before`). **Buy it as FORGE** — 12 h worker
-JWT instead of 30 min, plus the activity-backstop and idle-turnover exemptions.
+**ESTIMATE: < 1 min to `running`.**
+
+### 5. Drive one request
+
+```
+POST /tensorhub/micro-diffusion/generate
+{"prompt": "a tiny test", "size": "256x256", "steps": 2}
+```
+
+`size` is an **ENUM** (`"256x256"` / `"384x384"`), not a `{"width":…,"height":…}`
+object — the object form is a `400`, and it cost a pod leg. The rows are an enum
+on purpose: a free width/height int would be a shape-affecting payload field,
+which is the thing every fleet endpoint is linted against.
+
+The request is served EAGER (the pod missed and is minting). The mint runs
+behind it; watch for the mint-parent parity verdict and the publish.
 
 ### 6. Watch
 
@@ -358,8 +365,23 @@ GET /v1/admin/fleet-status | .compile_cells
 
 ### 7. Adopt
 
-Drive demand so a SECOND pod boots cold and adopts the published cell from the
-hub. Bank the eager arm on a pod that is NOT concurrently minting.
+Retire the minting pod, buy a SECOND one the same way, and drive the same
+request. It must boot cold and adopt the cell the first one published. Read the
+verdict off the pod's own typed rows, never off a log:
+
+```
+GET /v1/admin/worker-activity-events?release=…&kind=boot_adopt
+GET /v1/admin/worker-activity-events?release=…&kind=cell_numerics
+GET /v1/admin/worker-activity-events?release=…&kind=serve_eager_posture
+GET /v1/admin/worker-activity-events?release=…&kind=serve_degrade
+```
+
+GREEN is `boot_adopt=hit`, `cell_numerics=armed_undispatched`, `lane=…+compiled`
+/ `serving_mode=aot_cell`, and **no `serve_degrade` row at all**. A
+`target_applicability_incomplete` or `armed_target_unresolved` row is pgw#1141b
+(POD PROOF #4) recurring — that boot adopted a cell and then threw it away.
+
+Bank the eager arm on a pod that is NOT concurrently minting.
 
 ### 8. Safety half
 

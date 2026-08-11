@@ -502,6 +502,28 @@ def _snapshot_without_components(
     )
 
 
+def _exported_arm(pipeline: Any, ref: str = "") -> bool:
+    """Is THIS object serving on the EXPORTED (AOTI) lane?
+
+    pgw#1141b, and it is the whole issue: the answer decides which failure
+    detector applies. The dynamo lane keeps a per-class cache-hit ledger with
+    teeth (§4.31 — a dynamo arm that misses RECOMPILES silently, so the ledger
+    is its only detector); the exported lane has none, because an AOTI cell
+    that cannot serve RAISES and the wrapper answers eager in-request. Score an
+    exported cell on the dynamo ledger and it is disproven by construction: an
+    artifact performs no FX lookup, so its hit count is permanently zero.
+
+    That is exactly what happened on a real pod. The question used to be asked
+    of the ref STRING through ``aot_serve.is_aot_ref``, which consults keys
+    this process was TOLD about — and the ordered/boot-adopt arm route told it
+    nothing. The object is asked first now: a wrapped cell is a fact about the
+    object, not about who announced it. The ref remains a second route in
+    (a cell whose wrap this frame cannot see still names itself).
+    """
+    return aot_serve.holds_exported_cell(pipeline) or (
+        bool(ref) and aot_serve.is_aot_ref(ref))
+
+
 def _alias_binding_matches(alias: "EndpointSpec", slot_key: str, ref: str) -> bool:
     """Does ``alias`` hold this load-time binding fact? ``slot_key`` is a
     slot name or ``<slot>.<component>`` override key (pgw#617)."""
@@ -4711,9 +4733,8 @@ class Executor:
             # lane at all. Its per-class cache-hit ledger is the only detector
             # that exists, so deleting it would remove a detector with no
             # replacement.
-            exported_arm = bool(
-                active_selection is not None
-                and aot_serve.is_aot_ref(active_selection.ref))
+            exported_arm = _exported_arm(
+                pipeline, active_selection.ref if active_selection else "")
             if exported_arm and not aot_serve.is_armed(pipeline):
                 # pgw#1141: the sticky de-arm reaches the INSTALL. The artifact
                 # revoked itself (a failed target, a constants fault) before
@@ -7324,35 +7345,42 @@ class Executor:
             # pgw#735: TRT engines and EXPORTED artifacts both prove
             # themselves by executing, not by an FX cache hit — only the
             # dynamo lane is scored by hits below.
-            def _proves_by_fx(ref: str) -> bool:
+            # pgw#1141b: the lane split is decided per OBJECT (`_exported_arm`),
+            # never off the ref string alone. A boot-adopted cell wraps a live
+            # pipeline through the ordered arm, which taught `is_aot_ref`
+            # nothing — so on a real pod every adopted artifact landed in
+            # `proof_before` (the DYNAMO ledger), scored calls=0 against
+            # counters an AOTI artifact cannot move, and was folded into
+            # `unproven` and unwrapped. `aot_proof_before` was empty, so §4.31's
+            # keep-the-arm branch below could not fire for the one object it
+            # exists for.
+            def _proves_by_fx(pipeline: Any, ref: str) -> bool:
                 return not trt_engine.is_engine_ref(ref) and not \
-                    aot_serve.is_aot_ref(ref)
+                    _exported_arm(pipeline, ref)
 
-            proves_inductor = any(
-                _proves_by_fx(sel.ref)
-                for sel in inj.active_compile_artifacts.values()
-            )
-            proof_before = {
-                id(candidate.pipeline): (
-                    compile_cache.execution_count(candidate.pipeline),
-                    compile_cache.cache_miss_count(candidate.pipeline),
-                    aot_serve.execution_count(candidate.pipeline),
-                )
+            _armed_now = [
+                (candidate.pipeline, sel)
                 for candidate in inj.compile_objects
-                if proves_inductor
-                and id(candidate.pipeline) in inj.active_compile_artifacts
-                and _proves_by_fx(
-                    inj.active_compile_artifacts[id(candidate.pipeline)].ref)
+                if (sel := inj.active_compile_artifacts.get(
+                    id(candidate.pipeline))) is not None
+            ]
+            proves_inductor = any(
+                _proves_by_fx(pipe, sel.ref) for pipe, sel in _armed_now)
+            proof_before = {
+                id(pipe): (
+                    compile_cache.execution_count(pipe),
+                    compile_cache.cache_miss_count(pipe),
+                    aot_serve.execution_count(pipe),
+                )
+                for pipe, sel in _armed_now
+                if proves_inductor and _proves_by_fx(pipe, sel.ref)
             }
             # Exported arms are proven separately: same fail-closed rule, its
             # own counter.
             aot_proof_before = {
-                id(candidate.pipeline): aot_serve.execution_count(
-                    candidate.pipeline)
-                for candidate in inj.compile_objects
-                if id(candidate.pipeline) in inj.active_compile_artifacts
-                and aot_serve.is_aot_ref(
-                    inj.active_compile_artifacts[id(candidate.pipeline)].ref)
+                id(pipe): aot_serve.execution_count(pipe)
+                for pipe, sel in _armed_now
+                if _exported_arm(pipe, sel.ref)
             }
             # pgw#722 finding 2 (the #735 boot-proof gap): the proof loop
             # below used to run only under `proves_inductor`, so a worker
@@ -7697,7 +7725,7 @@ class Executor:
                 # are scored above and keep their arm either way.
                 dynamo_unexercised = [
                     candidate for candidate in unexercised
-                    if id(candidate.pipeline) not in aot_proof_before
+                    if not _exported_arm(candidate.pipeline)
                 ]
                 if not proven and dynamo_unexercised:
                     unproven.extend(dynamo_unexercised)
@@ -7825,7 +7853,7 @@ class Executor:
                         logger.warning("%s; serving eager", detail)
                 for candidate in unexercised:
                     pipe = candidate.pipeline
-                    if id(pipe) in aot_proof_before:
+                    if _exported_arm(pipe):
                         # THE DELETED BARRIER (pgw#1141). This branch used to
                         # unwrap the artifact, drop the lifted lanes, pop the
                         # active selection and abandon the mint — for an object

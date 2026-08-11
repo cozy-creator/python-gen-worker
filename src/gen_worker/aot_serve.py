@@ -257,6 +257,19 @@ def runtime_key() -> Dict[str, str]:
 # ``fleet_cells.adopt_delegated_mint`` (this pod's OWN mint). Only the first
 # registered, so a self-minted cell — the one artifact this process is
 # certain is exported — was the one ref ``is_aot_ref`` did not recognize.
+#
+# pgw#1141b: that rule was a CONVENTION, and the ORDERED arm route — the one
+# §4.27 boot-adopt and every hub Plan take — never kept it. `arm_ordered`
+# verifies the receipt and calls `provision.arm_aot` directly, so a
+# boot-adopted cell wrapped itself onto a live pipeline while `is_aot_ref`
+# still answered False for its ref, and every reader asking "is this the
+# exported lane?" scored it on the DYNAMO lane's cache-hit ledger, which no
+# AOTI artifact can move. Measured on a real pod (0.111.0, POD PROOF #4):
+# `functions=()` -> `target_applicability_incomplete` ->
+# `armed_target_unresolved` -> eager for life. The registration is now made
+# by :func:`load_and_wrap` at the wrap itself — the one place every route
+# passes and the moment the fact becomes true — so no future arm route can
+# forget it.
 _KNOWN_AOT_KEYS: set[str] = set()
 _KNOWN_AOT_KEYS_LOCK = threading.Lock()
 
@@ -2830,6 +2843,11 @@ def load_and_wrap(
             "bound_constants": {
                 "pools": pools, "literals": literals_by_entry},
         })
+        # pgw#1141b: THE registration, at the one seam every arm route passes.
+        # An exported cell is now live on this object, so its key names an
+        # aot-inductor artifact as a matter of fact rather than of whether the
+        # caller remembered to say so.
+        note_aot_key(str(meta.get("cell_key") or ""))
         logger.info(
             "aot-serve: loaded+bound %d entr%s across %d target(s) in %.1fs "
             "(%d declared constants, combined_graph_hash=%s)",
@@ -3023,6 +3041,25 @@ def is_armed(pipeline: Any) -> bool:
     return bool(states) and not any(s.get("failed", False) for s in states)
 
 
+def holds_exported_cell(pipeline: Any) -> bool:
+    """Whether an AOTI cell is WRAPPED onto this object — armed or revoked.
+
+    pgw#1141b: the LANE question, asked of the object instead of a ref string.
+    "Is this the exported lane?" decides which failure detector applies — the
+    dynamo lane's per-class cache-hit ledger (which an AOTI artifact can never
+    move, so it reads every honest adoption as a disproof) or §4.31's
+    serve-first rule. Answering it through :func:`is_aot_ref` made the answer
+    depend on whether some earlier caller had announced the key to this
+    process; the wrap is the fact itself.
+
+    Distinct from :func:`is_armed` on purpose: a cell whose guard revoked it
+    still HOLDS this pipeline's eager originals, and the install path has to
+    tell "revoked exported cell" (never advertise it) apart from "no cell here
+    at all" (an ordinary dynamo/eager object).
+    """
+    return bool(_marker_states(pipeline))
+
+
 def set_guard_failure_callback(pipeline: Any, callback: Any) -> bool:
     """Bind scheduler-state revocation to every wrapped target's guard."""
     states = _marker_states(pipeline)
@@ -3104,6 +3141,7 @@ __all__ = [
     "entries_from_meta",
     "execution_count",
     "proven_since",
+    "holds_exported_cell",
     "host_isa_reason",
     "NO_HOST_ISA_STAMP",
     "ingress_class_name",
