@@ -447,6 +447,11 @@ def ensure_cuda_line(
         "driver_floor": floor,
         "gpus": list(probe.gpus),
         "native_ok": supported,
+        # The FLEET question, answered per host in a stable field: a serving pod
+        # on this host would need the same forward-compat libcuda. `hardware_report`
+        # already ships `driver_version` for every worker, so the same predicate
+        # (`driver_supports_cuda`) classifies the whole deployed fleet off-pod.
+        "needs_compat": supported is False,
     }
 
     existing = _existing_compat_dir(cuda)
