@@ -237,6 +237,13 @@ class DerivedKey:
     wall_ms: int
     trace_ms: Mapping[str, int] = field(default_factory=dict)
     nodes: Mapping[str, int] = field(default_factory=dict)
+    #: pgw#1031: entry name -> the NODE-level digest of the graph this boot
+    #: traced (``aot_mint.keying_block``'s ``graph_witness``). Not a key axis
+    #: and never folded into one — it is what the adopt path compares against
+    #: the cell's own record, because the key provably cannot separate two
+    #: bodies behind one declaration. Rides the keying blocks, so a memo hit
+    #: carries it exactly as a cold trace does.
+    graph_witnesses: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def digest(self) -> str:
@@ -297,7 +304,11 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
 #: Memo file schema. Bumped when the MEANING of a stored hash changes; a
 #: reader that finds an older version treats the whole file as absent, which
 #: is a miss and a re-trace, never a wrong key.
-MEMO_VERSION = 2
+#: v3 (pgw#1031): the stored blocks now carry ``graph_witness``, and a v2 entry
+#: has none — which the adopt-side floor reads as "this pod cannot state its
+#: own graph" and refuses. Bumped so a stale memo is a re-trace rather than a
+#: refusal nobody can explain.
+MEMO_VERSION = 3
 MEMO_FILENAME = "boot-key-graphs.json"
 
 
@@ -450,12 +461,23 @@ def assert_memo_honest(
         return (
             f"boot-key memo for closure {digest} could not be stamped "
             f"({type(exc).__name__}: {exc}) and has been invalidated")
+    had_witnesses = graph_witnesses_of(memoized)
     disagreements: List[str] = []
     for name, block in sorted(minted_entries.items()):
         want = str((block or {}).get("class_hash") or "")
         had = had_hashes.get(str(name))
         if had and want and had != want:
             disagreements.append(f"{name}: memo {had} != traced {want}")
+        # pgw#1031: the memo now also answers the ADOPT-side witness, so a
+        # memo whose class hash is right and whose witness is stale would
+        # admit a colliding cell on the very axis the witness exists to
+        # separate. Checked here for the same reason the hash is.
+        want_w = str((block or {}).get("graph_witness") or "")
+        had_w = had_witnesses.get(str(name)) or ""
+        if want_w and had_w != want_w:
+            disagreements.append(
+                f"{name}: memo graph_witness {had_w or '<absent>'} != traced "
+                f"{want_w}")
     extra = sorted(set(had_hashes) - set(minted_entries))
     missing = sorted(set(minted_entries) - set(had_hashes))
     if extra or missing:
@@ -473,6 +495,23 @@ def assert_memo_honest(
 # ---------------------------------------------------------------------------
 # The fold — the mint's OWN stamping code, called with the mint's own blocks
 # ---------------------------------------------------------------------------
+
+
+def graph_witnesses_of(
+    blocks: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, str]:
+    """``{entry: graph_witness}`` for one set of keying blocks (pgw#1031).
+
+    Read off the blocks rather than recomputed: the witness is stamped where
+    the program is, by ``aot_mint.keying_block``, and a second derivation here
+    would be the same two-implementations hazard :func:`fold` refuses for the
+    key itself. A block that carries none yields ``""`` — and an empty witness
+    is what ``aot_identity.verify_graph_witness`` refuses on, never skips.
+    """
+    return {
+        str(name): str((block or {}).get("graph_witness") or "")
+        for name, block in blocks.items()
+    }
 
 
 def class_hashes_of(
@@ -708,7 +747,8 @@ def derive(
             key=key, class_hashes=class_hashes, combined=combined,
             workers=0,
             width_reason="memo hit — no trace child was spawned",
-            traced=0, memo="hit", wall_ms=wall_ms)
+            traced=0, memo="hit", wall_ms=wall_ms,
+            graph_witnesses=graph_witnesses_of(memoized))
 
     work = Path(work_root)
     work.mkdir(parents=True, exist_ok=True)
@@ -832,6 +872,7 @@ def derive(
         wall_ms=wall_ms,
         trace_ms=trace_ms,
         nodes=nodes,
+        graph_witnesses=graph_witnesses_of(blocks),
     )
 
 
@@ -877,6 +918,7 @@ __all__ = [
     "class_hashes_of",
     "closure_digest",
     "derive",
+    "graph_witnesses_of",
     "shares",
     "fold",
     "invalidate_memo",
