@@ -371,7 +371,11 @@ def test_arm_token_never_passes_is_key(monkeypatch):
         fleet_cells.cc, "toolchain_digest", lambda: (("torch", "x" * 16),))
     identity = fleet_cells.arm_identity("fam", "", 0, _Cfg())
     token = identity.token
-    assert token.startswith("arm1-")
+    # pgw#1113: the scheme digit is the token's FACT SET, and the fact set
+    # gained the compile SUBJECT — so the prefix moved with it, which is what
+    # makes a predecessor memo row unaddressable rather than misreadable.
+    assert token.startswith(fleet_cells.ARM_SCHEME + "-")
+    assert not token.startswith("ck")
     assert not cell_key.is_key(token)
     # the compared facts are exactly the pre-trace set — graph is absent
     assert set(identity.facts_dict()) == set(fleet_cells.ARM_FACTS)

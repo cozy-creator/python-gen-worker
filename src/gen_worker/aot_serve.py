@@ -578,6 +578,9 @@ def class_hash(
     entry is body-blind rather than unhashable; production entries always
     carry it (``keying_block``), and such stale cells are refused by the
     envelope/structure gates and the witness backstop regardless.
+
+    ``placement`` (pgw#1113) folds in only when the entry states MORE THAN ONE
+    distinct device — see the comment at the fold.
     """
     facts = {
         "v": 3,
@@ -591,6 +594,19 @@ def class_hash(
         "strict": bool(strict),
         "lora_bucket": int(lora_bucket or 0),
     }
+    placement = sorted({str(d) for d in (entry.get("placement") or ()) if d})
+    if len(placement) > 1:
+        # pgw#1113, closing pgw#819 at the key: a program whose own device map
+        # spans several cards has that placement baked into its kernels, and
+        # the canonical graph form scrubs the device INDEX by deliberate
+        # design (`graph_hash._render_scalar`) so it cannot ride `graph`.
+        # Keyed only when non-trivial — the `excluded` / `param` / `overlay`
+        # precedent — because a single-device placement is what every cell the
+        # fleet has published states, and a field that says "unchanged" would
+        # strand all of them. No `v` bump for the same reason: the fact is
+        # absent from every existing entry and its absence must stay the
+        # canonical form.
+        facts["placement"] = placement
     blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
 

@@ -35,8 +35,10 @@ from gen_worker.cell_adopt import AdoptOutcome
 
 KEY_A = "ck1-" + "a" * 56
 KEY_B = "ck1-" + "b" * 56
-ARM_A = "arm1-" + "1" * 56
-ARM_B = "arm1-" + "2" * 56
+# pgw#1113: spelled in the CURRENT token scheme — a predecessor-scheme memo
+# is swept by `fleet_cells._sweep_superseded_memos_once`, which is the point.
+ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
+ARM_B = fleet_cells.ARM_SCHEME + "-" + "2" * 56
 
 
 @pytest.fixture()

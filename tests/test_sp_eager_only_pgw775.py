@@ -137,8 +137,33 @@ def test_degree_one_is_unchanged() -> None:
     assert _executor_at(dp)._eager_only_reason() == ""
 
 
-def test_internal_parallelism_is_not_context_parallelism() -> None:
-    # `parallel="internal"` means the MODEL spans the cards by its own
-    # arrangement — no CP hooks, so compile is still legal.
-    topo = ExecutionTopology(gpu_count=2, gpus_per_execution_group=2, parallel="internal")
-    assert _executor_at(topo)._eager_only_reason() == ""
+def test_every_degree_above_one_is_eager_only() -> None:
+    """pgw#1113/pgw#819 FLIPS this assertion, deliberately.
+
+    It used to read: *"`parallel="internal"` means the MODEL spans the cards
+    by its own arrangement — no CP hooks, so compile is still legal."* The
+    premise is true and the conclusion did not follow. "No CP hooks" answers
+    the HANG question (nothing forwards outside a collective gate) and says
+    nothing about the IDENTITY question: a model whose own device map splits
+    its modules across `cuda:0`/`cuda:1` has inductor bake that placement into
+    the artifact, while the cell key scrubs the device index by design — so
+    the 2-card cell and the 1-card cell published under one key and each pod
+    adopted the other's, silently, in both directions (pgw#819, measured).
+
+    The gate was an allowlist by mode NAME, so `cfg` — declared at
+    `topology.PARALLEL_CFG` and platform-installed like `sequence` — was
+    uncovered too, latent only because it has no serve-side implementation
+    yet. The rule is `degree > 1`; a gate that must be widened once per new
+    mode is not a rule.
+    """
+    # `parallel=""` is not in this list because it cannot be: a group wider
+    # than one card with no parallel mechanism is refused by the topology
+    # decoder itself (`topology_parallel_required`), so `degree > 1` and "some
+    # mode is declared" are the same statement.
+    for parallel in ("internal", "sequence", "cfg"):
+        topo = ExecutionTopology(
+            gpu_count=2, gpus_per_execution_group=2, parallel=parallel)
+        assert topo.degree == 2
+        assert _executor_at(topo)._eager_only_reason(), (
+            f"degree-2 pod with parallel={parallel!r} must refuse to arm a "
+            "compile cell: no cell can state the placement it was baked for")

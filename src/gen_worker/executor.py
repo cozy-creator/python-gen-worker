@@ -65,7 +65,8 @@ from .api.binding import (
     wire_ref,
 )
 from .convert.hub import HubPublishError
-from .mint_process import MintSlot
+from . import cell_key
+from .mint_process import MintSlot, slot_subjects
 from .api.errors import (
     ArtifactTransferError,
     CanceledError,
@@ -5163,14 +5164,34 @@ class Executor:
         only at degree>1" is therefore enforced by construction: no compile
         selection is fetched, no arming scope opens, no targets install, no
         cell adopts. This is the code the a08a3bd commit message claimed.
+
+        pgw#1113/pgw#819: the condition is ``degree > 1``, FULL STOP — it used
+        to be ``degree > 1 and parallel == "sequence"``, an allowlist by mode
+        NAME, and every mode not on the list inherited a hole. ``internal``
+        was the measured one (a model that spans its cards by its own device
+        map bakes that placement into its kernels, so its cell keyed
+        byte-identically to the single-GPU one, in both directions), and
+        ``cfg`` — the platform's next declared sharding mode
+        (``topology.PARALLEL_CFG``) — would have inherited the same hole the
+        day it got a serve-side implementation. A gate that has to be widened
+        once per new mode is not a rule; ``degree > 1`` is.
+
+        This costs nothing today (no ``internal``-parallel release compiles)
+        and it is SUPERSEDED, not contradicted, by the ``placement`` keying
+        fact (``aot_serve.class_hash``): once a cell can state which cards it
+        was baked for, cells at degree>1 become servable and this gate can
+        narrow again to the modes whose collectives genuinely forbid an
+        ungated forward.
         """
         topo = self.topology
-        if topo.degree > 1 and topo.parallel == "sequence":
+        if topo.degree > 1:
             return (
                 f"eager only at {topo}: compile/hot-swap/self-mint are "
-                "disabled under context parallelism (pgw#775) — any forward "
-                "outside the sequence gate would hang the degree-"
-                f"{topo.degree} group"
+                f"disabled at degree>1 (pgw#775/pgw#819) — under "
+                f"{topo.parallel or 'internal placement'} a compile cell "
+                f"cannot state the {topo.degree}-card placement it would be "
+                f"baked for, and under platform sharding any forward outside "
+                f"the parallelism gate would hang the group"
             )
         return ""
 
@@ -6904,7 +6925,12 @@ class Executor:
                     # on a context-parallel pod.
                     None if eager_only else spec.compile_cell(),
                     self.store._cache_dir, compile_artifact,
-                    enable=self._arming_enable,
+                    enable=functools.partial(
+                        self._arming_enable,
+                        subject=slot_subjects(
+                            resolved_slots,
+                            {name: ident[0]
+                             for name, ident in slot_identities.items()})),
                 )
                 # pgw#1104: NOT gated on spec.compile — a serve-time recipe
                 # quantizes whether or not this release compiles, and the lane
@@ -8812,6 +8838,16 @@ class Executor:
                         # read the ONE serveability brain
                         # (compile_cache.mandatory_serving) instead of the
                         # weight-lane prefix. Never overwritten once set.
+                        # pgw#1113: and stamp WHAT this pipe was resolved
+                        # from, for the same reason and at the same seam. The
+                        # arm token is an obligation, and an obligation that
+                        # cannot name its subject dedups two checkpoints into
+                        # one pending, one child and one memo row.
+                        if binding is not None:
+                            fleet_cells.stamp_arm_subject(
+                                pipe, slot, binding_wire_refs(binding),
+                                (slot_identities or {}).get(slot, ("", 0))[0],
+                            )
                         exec_execution_lane, lane_pinned = (
                             self._execution_lane_pick_for_ref(ref))
                         if exec_execution_lane and not getattr(
@@ -9508,6 +9544,12 @@ class Executor:
         next capability projection — and pgw#622 stays alive for post-mint
         novel shapes. Shared by the in-process and delegated routes (pgw#784):
         the artifact SOURCE differs, what it means to advertise one does not.
+
+        pgw#1113: ``finalized`` holds exactly the pipes that ARMED the cell.
+        The caller no longer expands it across every pid that happened to hold
+        the same pending — an advertisement is a claim about what a target
+        serves, and a pipe that never had the bytes installed serves eager
+        whatever this map says.
         """
 
         act.phase(activity_mod.PHASE_FINALIZE)
@@ -9560,21 +9602,35 @@ class Executor:
         """
 
         spec = bg.spec
-        # One child per DISTINCT pending: sibling pipes of one record whose
-        # axes compute the same key share ONE cell (the qwen edit shape), and
-        # the child mints their union exactly once.
-        sharers: Dict[int, List[int]] = {}
+        # One child per DISTINCT pending. Pipes whose obligation identity is
+        # the same token share one pending and therefore one child mint —
+        # since pgw#1113 that identity names the SUBJECT (which slot, resolved
+        # to which checkpoint), so a shared pending means one thing to
+        # compile rather than one family on one card.
+        holders: Dict[int, List[int]] = {}
         for pid, pending in bg.pendings.items():
-            sharers.setdefault(id(pending), []).append(pid)
-        if not sharers:
+            holders.setdefault(id(pending), []).append(pid)
+        if not holders:
             raise RuntimeError("delegated mint has no pending cell to build")
 
+        #: id(pipeline) -> the cell its OWN pipeline armed. pgw#1113 deleted
+        #: the "sharers" fiction that used to fill this for every pid holding
+        #: the pending: exactly one pipe is handed to `build_cell` and exactly
+        #: one pipe is passed to `adopt_delegated_mint`, so exactly one pipe
+        #: ever had those bytes installed on it. Advertising the other pids'
+        #: targets as compiled was a wire lie that only
+        #: `_bind_compile_guard`'s incidental `False` ("advertising eager")
+        #: stopped from reaching the hub.
         finalized: Dict[int, Any] = {}
+        #: id(pending) -> the cell that discharged it. The publish-coverage
+        #: rule (gw#612) is about the OBLIGATION, not about how many pipes
+        #: hold it, so it reads this rather than `finalized`.
+        discharged: Dict[int, Any] = {}
         declined: Optional[_MintDeclined] = None
         # pgw#999: every classified refusal this run saw, so the terminal
         # RuntimeError names them instead of restating "no advertisable cell".
         declined_reasons: List[str] = []
-        for pids in sharers.values():
+        for pids in holders.values():
             pending = bg.pendings[pids[0]]
             pipe = bg.pipes[pids[0]]
             result = await mint_delegate.build_cell(
@@ -9623,8 +9679,23 @@ class Executor:
                 )
                 declined_reasons.append(result.reason or result.status)
                 continue
-            for pid in pids:
-                finalized[pid] = minted
+            # pgw#1113: the ARMED pipe, and only it. `build_cell` handed the
+            # child this one pipeline and `adopt_delegated_mint` installed the
+            # cell on this one pipeline; the other pids holding this pending
+            # were never armed with these bytes and must not advertise them.
+            finalized[pids[0]] = minted
+            discharged[id(pending)] = minted
+            if len(pids) > 1:
+                activity_mod.emit_event(
+                    "self_mint_unarmed_holder",
+                    f"family={pending.family} key={pending.arm_token}: "
+                    f"{len(pids) - 1} further compile object(s) hold this "
+                    f"obligation and were NOT armed with its cell — one pipe "
+                    f"is armed per delegated mint, so they serve eager until "
+                    f"their own arm. They are not advertised as compiled "
+                    f"(pgw#1113)",
+                    phase="unarmed_obligation_holder",
+                )
             compile_cache.record_cell_proven(str(minted.ref))
 
         if not finalized:
@@ -9636,17 +9707,19 @@ class Executor:
                 + (f" (refused: {', '.join(sorted(set(declined_reasons)))})"
                    if declined_reasons else ""))
 
-        # Publish per shared cell on gw#612's rule: a family cell ships only
-        # when EVERY sharer is covered by it — a partial pack bricks every
-        # adopting boot at the gw#607 per-object proof.
-        for pids in sharers.values():
+        # Publish per OBLIGATION on gw#612's rule: a cell ships only when the
+        # obligation it was built for was actually discharged — a partial pack
+        # bricks every adopting boot at the gw#607 per-object proof. pgw#1113
+        # re-aims the rule from the sharers map (pid membership, which said
+        # nothing about what armed) to the pending itself, which is the thing
+        # the child was given and the thing it either produced a cell for or
+        # did not.
+        for pids in holders.values():
             pending = bg.pendings[pids[0]]
-            gap = [pid for pid in pids if pid not in finalized]
-            if gap:
+            if id(pending) not in discharged:
                 fleet_cells_mod.withhold_self_mint_publish(
                     pending,
-                    f"{len(gap)}/{len(pids)} cell-sharing compile object(s) "
-                    "were not covered by the delegated mint")
+                    "the delegated mint produced no cell for this obligation")
             else:
                 fleet_cells_mod.publish_self_mint(pending)
 
@@ -9794,12 +9867,23 @@ class Executor:
     def _arming_enable(
         self, pipe: Any, cfg: Any, cache_dir: Optional[Path],
         artifact: Optional[Path],
+        subject: Tuple[cell_key.SlotSubject, ...] = (),
     ) -> "fleet_cells.ArmOutcome":
         """ArmingScope adapter: a self-loaded pipeline's ``arm_compile()``
         gets the same fleet policy (delivered cell first, self-mint on miss)
         as a worker-loaded slot. ``cache_dir`` comes from the scope, which
-        the executor constructed with its own store cache dir."""
+        the executor constructed with its own store cache dir.
 
+        pgw#1113: this pipeline was built by the ENDPOINT, out of path-valued
+        slots, so nothing here can say which of them it read. The obligation
+        therefore names EVERY slot this setup resolved. That over-splits when
+        the endpoint used only one of them — which costs one re-mint — and
+        the alternative under-splits, which binds a pipeline to a cell nobody
+        proved is its computation.
+        """
+        for sub in subject:
+            fleet_cells.stamp_arm_subject(
+                pipe, sub.slot, sub.refs, sub.snapshot_digest)
         return fleet_cells.enable_compiled(
             pipe, cfg, cache_dir, artifact,
             publisher=self._cell_publisher(),

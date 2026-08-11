@@ -270,11 +270,20 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     assert "finalize" in act.phases
 
 
-def test_shared_sharers_mint_one_cell_between_them(
+def test_shared_holders_mint_one_cell_between_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two pipes, one pending, ONE child — and both objects advertise it.
-    A per-pipe child would compile the same cell twice on one card."""
+    """Two pipes, one pending, ONE child — and only the ARMED pipe advertises.
+
+    pgw#1113 flips the second half of this assertion. One child is still the
+    point and still holds: a per-pipe child would compile the same cell twice
+    on one card. But `build_cell` is handed ONE pipeline and
+    `adopt_delegated_mint` installs the cell on that ONE pipeline, so the
+    sibling target never had those bytes — advertising a compiled ref for it
+    was a claim about what it serves that was false at the moment it was made,
+    and only `_bind_compile_guard`'s incidental `False` ("advertising eager")
+    kept it off the wire.
+    """
     spawns: List[Any] = []
     real = mint_delegate.build_cell
 
@@ -295,8 +304,17 @@ def test_shared_sharers_mint_one_cell_between_them(
 
     asyncio.run(ex._delegated_mint_run(rec, bg, _Act()))
     assert len(spawns) == 1, "one shared cell must mean one child process"
-    assert all(
-        t.active_compile_ref == "r" for t in rec.compile_targets.values())
+    armed_pipe = spawns[0].pipe
+    advertised = {
+        name: t.active_compile_ref for name, t in rec.compile_targets.items()}
+    assert [
+        ref for name, ref in advertised.items()
+        if rec.compile_targets[name].pipeline is armed_pipe] == ["r"]
+    assert [
+        ref for name, ref in advertised.items()
+        if rec.compile_targets[name].pipeline is not armed_pipe] == [""], (
+        "a pipe the mint never armed must advertise nothing: the cell was "
+        "installed on one pipeline and only that pipeline serves it")
 
 
 def test_a_decline_raises_MintDeclined_so_the_tier_stays_eager(

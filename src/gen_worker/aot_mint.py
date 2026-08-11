@@ -3434,6 +3434,15 @@ def keying_block(
         "graph": entry_graph_block(program, spec),
         "graph_witness": graph_hash.graph_hash(program),
     }
+    placement = graph_hash.device_placement(program)
+    if len(placement) > 1:
+        # pgw#1113 / pgw#819: the program's own device map put its modules on
+        # more than one card, and inductor bakes that placement into the
+        # artifact. Recorded — and keyed, in `aot_serve.class_hash` — ONLY
+        # here, on the `excluded_inputs` precedent above: a single-device
+        # program states nothing, so no published cell's block moves and no
+        # published cell re-keys.
+        block["placement"] = list(placement)
     if adapter_arm(spec.fork) is False:
         # pgw#790: the NEGATIVE half of this class's contract. Without it the
         # branchless entry silently ADMITS an adapter-bearing call (a

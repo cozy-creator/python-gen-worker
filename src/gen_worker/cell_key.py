@@ -98,7 +98,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Iterable, Mapping, Tuple
 
 # pgw#958 (DESIGN-RULINGS §1.27(g)) and pgw#1059 amendment 1: the counter
 # stays at 1 — Paul 2026-08-09: "stick with version-1 for now since we're
@@ -271,6 +271,69 @@ def envelope_digest(block: Mapping[str, Any]) -> str:
     return facts_digest(envelope_facts(block))
 
 
+# --- the SUBJECT: what an obligation is FOR (pgw#1113) ---------------------
+#
+# THE ASYMMETRY, stated once, here, because both consumers below depend on it:
+#
+#   The CELL KEY is the computation and must not OVER-split (the membership
+#   axiom at the top of this module).  The ARM TOKEN and the boot-key memo are
+#   an OBLIGATION and a CACHE LOOKUP, and must not UNDER-split.  Over-splitting
+#   an obligation costs one re-mint; under-splitting one binds a pipeline to a
+#   cell nobody proved is its computation.
+#
+# So the subject is deliberately NOT a key axis and must never become one: one
+# cell legally serves every checkpoint whose graph it is (weight VALUES are
+# never hashed — see graph_hash's module docstring), and keying on the
+# checkpoint would put every fine-tune in its own key space.  What the subject
+# does is stop two DIFFERENT checkpoints sharing one pending mint, one
+# local-store memo entry or one boot-key memo row on the strength of an
+# assumption nothing checked.
+
+
+@dataclass(frozen=True)
+class SlotSubject:
+    """WHICH checkpoint one setup slot resolved to.
+
+    ``refs`` is the base wire ref plus every pgw#617 component-override ref,
+    in the order ``api.binding.binding_wire_refs`` produces them;
+    ``snapshot_digest`` is the materialized tree's content digest when the
+    resolver stated one (it is "" for a slot resolved without one, which is a
+    narrower statement, never a different subject).
+    """
+
+    slot: str
+    refs: Tuple[str, ...] = ()
+    snapshot_digest: str = ""
+
+
+def subject_facts(subjects: Iterable[SlotSubject]) -> Dict[str, Any]:
+    """The canonical SUBJECT block for one arm/trace — sorted by slot, so two
+    callers that resolved the same slots in different orders state one fact."""
+    return {
+        "v": 1,
+        "slots": [
+            [sub.slot, list(sub.refs), sub.snapshot_digest]
+            for sub in sorted(tuple(subjects), key=lambda s: s.slot)
+        ],
+    }
+
+
+def subject_digest(subjects: Iterable[SlotSubject]) -> str:
+    """16-hex digest of the resolved subject, or ``""`` when the caller could
+    state none.
+
+    ``""`` is the honest answer for a pipeline whose slot resolution this
+    process never saw (an endpoint that builds its own pipeline out of a
+    path-valued slot, reached through ``arm_compile()``); it is exactly the
+    pre-pgw#1113 posture for that path and it under-splits, so every caller
+    that CAN state a subject states one.
+    """
+    subs = tuple(subjects)
+    if not subs:
+        return ""
+    return facts_digest(subject_facts(subs))
+
+
 def from_exported_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
     """The key an EXPORTED (``aot-inductor``) cell's OWN recorded facts
     describe — THE single implementation of the cell key: ``aot_mint``
@@ -348,6 +411,9 @@ __all__ = [
     "EXPORT_ENVELOPE_KEY",
     "CellKey",
     "CellKeyError",
+    "SlotSubject",
+    "subject_digest",
+    "subject_facts",
     "envelope_digest",
     "envelope_facts",
     "facts_digest",

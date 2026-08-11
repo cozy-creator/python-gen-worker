@@ -286,6 +286,46 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCell]:
     )
 
 
+def sweep_superseded_memos(
+    scheme: str, root: Optional[Path] = None,
+) -> int:
+    """Delete every memo entry written under a SUPERSEDED token scheme.
+
+    pgw#1113: the arm token's scheme digit is its fact-set schema, so when
+    the fact set gains an axis (``arm1`` -> ``arm2``, which added the compile
+    SUBJECT) every stored ``arm1-`` row becomes an answer to a question
+    nothing asks any more. That is already safe — no reader can address them
+    — but "safe because unreachable" is how a store accumulates files whose
+    meaning nobody can reconstruct, so the invalidation is EXPLICIT and
+    counted rather than implicit and silent.
+
+    Only the memo is swept. The CELLS keep their ``ck1`` keys, which did not
+    move: an arm-token change re-derives the shortcut, never the identity.
+    Returns the number of entries removed.
+    """
+    prefix = str(scheme or "").strip() + "-"
+    memo_dir = cells_root(root) / MEMO_DIRNAME
+    if len(prefix) < 2 or not memo_dir.is_dir():
+        return 0
+    removed = 0
+    for entry in sorted(memo_dir.glob("*.json")):
+        if entry.name.startswith(prefix):
+            continue
+        try:
+            entry.unlink()
+            removed += 1
+        except OSError:
+            logger.debug("local-cell-store: could not drop %s", entry,
+                         exc_info=True)
+    if removed:
+        logger.info(
+            "local-cell-store: dropped %d memo entry/entries written under a "
+            "superseded arm-token schema (current %s) — this machine re-mints "
+            "each affected family ONCE and memoizes the answer again",
+            removed, prefix.rstrip("-"))
+    return removed
+
+
 def lookup_for_arm(
     arm_token: str, root: Optional[Path] = None,
 ) -> Optional[LocalCell]:
@@ -430,5 +470,6 @@ __all__ = [
     "store",
     "store_root",
     "stored_cells",
+    "sweep_superseded_memos",
     "trust_class",
 ]

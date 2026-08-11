@@ -56,7 +56,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple)
 
 
 from . import activity as activity_mod
@@ -117,7 +118,14 @@ class SelfMint:
 #: arm token must never pass ``cell_key.is_key`` / the hub's
 #: ``compilecache.IsCellKey``, because it is NOT a cell key — see
 #: :class:`ArmIdentity`.
-ARM_SCHEME = "arm1"
+#:
+#: The digit is the token's FACT-SET SCHEMA, and it is the memo-invalidation
+#: mechanism (pgw#1113): ``arm2`` states the compile SUBJECT, ``arm1`` did
+#: not, so an ``arm1-`` memo answers a question no ``arm2`` reader is asking.
+#: A stale-schema entry is therefore unaddressable by construction rather
+#: than misreadable, and :func:`arm_from_local_store` sweeps the predecessor
+#: files once per process instead of leaving them to accumulate silently.
+ARM_SCHEME = "arm2"
 
 
 @dataclass(frozen=True)
@@ -156,17 +164,76 @@ class ArmIdentity:
         return f"{ARM_SCHEME}-{digest[:56]}"
 
 
-#: The facts an :class:`ArmIdentity` states, in report order. ``envelope``
-#: and ``toolchain`` use the exported key's own derivations
+#: The ENVIRONMENT half of an :class:`ArmIdentity` — the facts a delegated
+#: child re-derives in its own process and RECORDS on the cell it hands back.
+#: ``envelope`` and ``toolchain`` use the exported key's own derivations
 #: (``cell_key.envelope_digest`` / ``cell_key.facts_digest``), ``lane`` the
-#: one lane label (``cc.execution_lane_label``) — the pgw#1042 divergence
-#: check compares exactly these, so an axis that fails to survive the
-#: parent->child boundary is refused BY NAME at the handback seam.
+#: one lane label (``cc.execution_lane_label``) — :func:`arm_axis_divergence`
+#: compares exactly these, so an axis that fails to survive the parent->child
+#: boundary is refused BY NAME at the handback seam.
 #: ``graph`` is deliberately absent: it exists only after the export, and
 #: comparing a declared-facts stand-in against the traced fact is the
 #: phantom divergence this type retires.
-ARM_FACTS = ("family", "format", "lane", "sm", "envelope", "env_seal",
-             "toolchain")
+ARM_ENVIRONMENT_FACTS = ("family", "format", "lane", "sm", "envelope",
+                         "env_seal", "toolchain")
+
+#: The SUBJECT half (pgw#1113): WHAT this obligation compiles, as opposed to
+#: what runtime it compiles on. ``subject`` is the resolved slot identity
+#: (:func:`cell_key.subject_digest` — which slot, which checkpoint refs,
+#: which snapshot digest); ``targets``/``dynamic``/``regional`` are the rest
+#: of ``cc.declared_compile_facts`` the token could not previously see.
+#:
+#: These are NOT compared at the handback seam, and that is the asymmetry
+#: this issue is about rather than an omission: a cell records no subject and
+#: must not, because one cell legally serves every checkpoint whose graph it
+#: is. The subject splits the OBLIGATION — which pipe owes which mint, which
+#: pending they may share, which memo row answers them — and the cell's own
+#: key, which is the traced computation, is what says the computation matches.
+ARM_SUBJECT_FACTS = ("subject", "targets", "dynamic", "regional")
+
+#: Every fact in the token, in report order.
+ARM_FACTS = ARM_ENVIRONMENT_FACTS + ARM_SUBJECT_FACTS
+
+#: The pipeline attribute carrying the resolved :class:`cell_key.SlotSubject`
+#: set the executor built this object from (pgw#1113). Stamped beside the
+#: execution lane, read here for the same reason the lane is read here rather
+#: than threaded through six call sites: the pipe is the one handle every arm
+#: site holds. A pipeline the worker did not resolve carries none, and
+#: :func:`cell_key.subject_digest` answers "" for it — honestly narrower, not
+#: silently equal to some other subject.
+ARM_SUBJECT_ATTR = "_cozy_arm_subject"
+
+
+def stamp_arm_subject(
+    pipe: Any, slot: str, refs: Sequence[str], snapshot_digest: str = "",
+) -> None:
+    """Record that ``pipe`` was resolved from ``slot`` at ``refs``.
+
+    Additive per slot: a shared-component pipeline serving two slots ends up
+    stating both. Best effort — a pipeline object that refuses attributes
+    leaves the subject unstated, which is the pre-pgw#1113 posture and never
+    an exception on a serving path.
+    """
+    subject = cell_key.SlotSubject(
+        slot=str(slot or ""),
+        refs=tuple(str(ref) for ref in refs if str(ref or "")),
+        snapshot_digest=str(snapshot_digest or ""),
+    )
+    known = {sub.slot: sub for sub in pipeline_arm_subject(pipe)}
+    known[subject.slot] = subject
+    try:
+        setattr(pipe, ARM_SUBJECT_ATTR,
+                tuple(sorted(known.values(), key=lambda s: s.slot)))
+    except Exception:  # noqa: BLE001 — a stamp is never worth a failed boot
+        logger.debug("fleet-cells: pipeline refused the arm subject stamp",
+                     exc_info=True)
+
+
+def pipeline_arm_subject(pipe: Any) -> Tuple[cell_key.SlotSubject, ...]:
+    """The resolved subject stamped on ``pipe``, or ``()``."""
+    stamped = getattr(pipe, ARM_SUBJECT_ATTR, None) or ()
+    return tuple(
+        sub for sub in stamped if isinstance(sub, cell_key.SlotSubject))
 
 
 def declared_envelope_block(cfg: Any) -> Dict[str, Any]:
@@ -188,8 +255,18 @@ def declared_envelope_block(cfg: Any) -> Dict[str, Any]:
     }
 
 
-def arm_identity(family: str, weight_lane: str, lora_bucket: int, cfg: Any) -> ArmIdentity:
-    """This runtime's :class:`ArmIdentity` for one owed (family, lane) mint.
+def arm_identity(
+    family: str, weight_lane: str, lora_bucket: int, cfg: Any,
+    subject: Iterable[cell_key.SlotSubject] = (),
+) -> ArmIdentity:
+    """This runtime's :class:`ArmIdentity` for one owed mint.
+
+    ``subject`` is WHAT is being compiled (pgw#1113): the resolved slots of
+    the pipeline this obligation is for. Without it the token named a
+    (family, lane) pair and nothing else, so two `@endpoint` classes sharing
+    one ``Compile``, or two slots of one class bound to different
+    checkpoints, computed ONE token — one pending, one child, one local-store
+    memo row — and the first of them to arm handed its cell to the others.
 
     Raises :class:`ValueError` when the runtime cannot state a fact (no
     CUDA => no ``sm``): a worker that cannot state its obligation identity
@@ -200,6 +277,14 @@ def arm_identity(family: str, weight_lane: str, lora_bucket: int, cfg: Any) -> A
         raise ValueError(
             "cannot state the compute capability (sm) of this runtime; no "
             "mint obligation can be opened without it")
+    # ONE derivation of the declaration's facts (``cc.declared_compile_facts``
+    # is the canonical form the cozy-local store verdict and the JIT semantic
+    # tag already read), so the obligation and the contract cannot disagree
+    # about what was declared. ``targets`` keeps DECLARATION ORDER: the child
+    # picks its compile target first-match (``mint_child.pick_compile_target``),
+    # so the order is meaning, not presentation.
+    declared = cc.declared_compile_facts(
+        cfg, lora_bucket_override=int(lora_bucket or 0))
     facts = {
         "family": str(family or ""),
         "format": str(cc.ARTIFACT_FORMAT),
@@ -209,6 +294,11 @@ def arm_identity(family: str, weight_lane: str, lora_bucket: int, cfg: Any) -> A
         "envelope": cell_key.envelope_digest(declared_envelope_block(cfg)),
         "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
         "toolchain": cell_key.facts_digest(dict(cc.toolchain_digest())),
+        "subject": cell_key.subject_digest(subject),
+        "targets": ",".join(str(t) for t in declared["targets"]),
+        "dynamic": json.dumps(
+            declared["dynamic"], sort_keys=True, separators=(",", ":")),
+        "regional": "1" if declared["regional"] else "0",
     }
     return ArmIdentity(facts=tuple(sorted(facts.items())))
 
@@ -223,9 +313,11 @@ class PendingSelfMint:
     delivered-cell path once the child's cell earns adoption.
 
     One instance may be SHARED by several pipelines of one record whose
-    facts compute the same obligation identity (the qwen edit shape: two
-    lanes, one family cell). ``_state`` memoizes the adopt outcome so
-    sibling candidates converge on one publish.
+    facts compute the same obligation identity — which since pgw#1113
+    includes the SUBJECT (which slot, resolved to which checkpoint), so
+    sharing means "provably the same thing to compile", not "the same family
+    on the same card". ``_state`` memoizes the adopt outcome so sibling
+    candidates converge on one publish.
 
     pgw#1010: a DYNAMO miss no longer builds one of these. The JIT recipe
     keeps its serving role (intake, ``compile_cache.arm_jit_intake``) and
@@ -1440,7 +1532,8 @@ def _arming_policy(
 
     try:
         arm_key = arm_identity(
-            family, loading.pipeline_weight_lane(pipe), bucket, cfg)
+            family, loading.pipeline_weight_lane(pipe), bucket, cfg,
+            subject=pipeline_arm_subject(pipe))
         key = arm_key.token
     except Exception as exc:  # noqa: BLE001 — obligation facts must be statable
         logger.warning("fleet-cells: self-mint identity computation failed (%s)", exc)
@@ -1505,9 +1598,26 @@ def _arming_policy(
         # This process already minted and ADOPTED this exact cell — re-arm
         # the same artifact through the same AOT gates instead of paying a
         # second export for bytes that are already on this disk.
+        #
+        # pgw#1113: through `_arm_exported_cell`, which is THE gate every cell
+        # this machine produced for itself passes, and not the bare
+        # `provision.arm_aot` that stood here. This was the one branch that
+        # armed a pipe from another pipe's artifact while skipping
+        # `arm_axis_divergence` entirely — and since the arm token is what
+        # decides "this exact cell", a token that could not name its subject
+        # made "another pipe" and "this pipe" the same sentence. The token now
+        # names the subject, so the branch is reached far less often; when it
+        # is reached it now earns the arm the same way every other
+        # self-produced cell does.
         try:
-            armed_ready = bool(provision.arm_aot(
-                pipe, cfg, cache_dir, Path(finalized_prior.artifact), bucket))
+            armed_ready, _meta, refusal = _arm_exported_cell(
+                pipe, cfg, cache_dir, bucket,
+                Path(finalized_prior.artifact), arm_key)
+            if not armed_ready:
+                logger.warning(
+                    "fleet-cells: the in-process finalized cell for key=%s "
+                    "did not re-arm (%s%s); falling through to a fresh mint",
+                    key, refusal[0], f": {refusal[1]}" if refusal[1] else "")
         except Exception as exc:  # noqa: BLE001 — fall back to a fresh mint
             logger.warning(
                 "fleet-cells: re-arm from the in-process finalized cell "
@@ -1535,9 +1645,13 @@ def _arming_policy(
         return ArmOutcome(
             armed=True, self_mint=local_prior, selection_bug=selection_bug)
 
-    # Sibling pipes of one record whose axes compute the SAME key share one
-    # child mint (the qwen edit shape: two lanes, one family cell) — the
-    # first arm registers the pending and every sharer adopts its cell.
+    # Pipes whose obligation identity is the SAME token share one child mint:
+    # same runtime, same declaration AND same subject — the same slot resolved
+    # to the same checkpoint — so there is one computation to buy and one
+    # pending to open. pgw#1113 deleted the premise this comment used to
+    # state ("the qwen edit shape: two lanes, one family cell"): two lanes are
+    # one cell only when the graph says so, and the graph does not exist yet
+    # here. The obligation names its subject instead of assuming one.
     with _PENDING_LOCK:
         existing = _PENDING.get(key)
     if existing is not None:
@@ -1598,8 +1712,8 @@ def arm_axis_divergence(
     arm_key: ArmIdentity, meta: Mapping[str, Any],
 ) -> str:
     """'' when the child's cell-metadata states the parent's obligation
-    identity on every pre-trace fact (:data:`ARM_FACTS`), else the FIRST
-    diverging fact with both values (pgw#1042).
+    identity on every ENVIRONMENT fact (:data:`ARM_ENVIRONMENT_FACTS`), else
+    the FIRST diverging fact with both values (pgw#1042).
 
     A delegated child re-derives every environment-shaped fact in its own
     process, so a fact that fails to survive the boundary (the measured
@@ -1610,6 +1724,14 @@ def arm_axis_divergence(
     it exists only post-trace, and comparing a declared-facts stand-in
     against the traced fact was the attempt-28 phantom divergence
     (pgw#1059). Every compared fact uses the SAME derivation on both sides.
+
+    :data:`ARM_SUBJECT_FACTS` are equally deliberately NOT compared
+    (pgw#1113). A cell records no subject and must not: the key is the traced
+    computation, so one cell legally serves every checkpoint whose graph it
+    is, and demanding the cell restate the checkpoint it was minted from
+    would refuse exactly the reuse the membership axiom exists to allow. The
+    subject splits the obligation on THIS side of the boundary; what crosses
+    it is compared here.
     """
     envelope_block = meta.get(cell_key.EXPORT_ENVELOPE_KEY)
     child: Dict[str, str] = {
@@ -1627,7 +1749,7 @@ def arm_axis_divergence(
         "toolchain": cell_key.facts_digest(dict(meta.get("toolchain") or {})),
     }
     parent = arm_key.facts_dict()
-    for fact in ARM_FACTS:
+    for fact in ARM_ENVIRONMENT_FACTS:
         if parent.get(fact, "") != child.get(fact, ""):
             return (f"{fact}: child cell states {child.get(fact, '')!r}, "
                     f"this runtime computed {parent.get(fact, '')!r}")
@@ -1694,7 +1816,8 @@ def _arm_exported_cell(
     Two checks, in this order:
 
     1. **key-axis divergence** (pgw#1042) — the cell's recorded metadata must
-       state THIS runtime on every pre-trace axis (:data:`ARM_FACTS`), refused
+       state THIS runtime on every pre-trace environment axis
+       (:data:`ARM_ENVIRONMENT_FACTS`), refused
        by fact name. This is what makes a toolchain/sm/envelope move an honest
        refusal instead of a wrong arm;
     2. **the AOT arm** (pgw#805) — ``provision.arm_aot``: lifted-binding
@@ -1765,6 +1888,31 @@ def _arm_exported_cell(
     return False, meta, refusal
 
 
+#: One sweep per process: the store is this machine's, the predecessor
+#: entries are finite, and re-listing a directory on every arm buys nothing.
+_MEMO_SWEPT = False
+
+
+def _sweep_superseded_memos_once() -> None:
+    """Discard memo rows written under a superseded arm-token schema.
+
+    pgw#1113 states the cost up front: the subject facts change every token,
+    so every machine with a local store pays ONE re-mint per family, once.
+    That cost is the point — an entry keyed by a token that could not state
+    what it was compiling is exactly the row that could hand this pipeline
+    another checkpoint's cell — but it must be spent EXPLICITLY, in a counted
+    line, not discovered later as a store full of unreadable files.
+    """
+    global _MEMO_SWEPT
+    if _MEMO_SWEPT:
+        return
+    _MEMO_SWEPT = True
+    try:
+        local_cell_store.sweep_superseded_memos(ARM_SCHEME)
+    except Exception:  # noqa: BLE001 — a cache sweep is never fatal
+        logger.debug("fleet-cells: memo sweep failed", exc_info=True)
+
+
 def arm_from_local_store(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], bucket: int,
     arm_key: ArmIdentity, family: str,
@@ -1783,6 +1931,7 @@ def arm_from_local_store(
     is loud and DROPS the entry, so a corrupted or stale cell costs one re-mint
     and never two.
     """
+    _sweep_superseded_memos_once()
     try:
         local = local_cell_store.lookup_for_arm(arm_key.token)
     except Exception as exc:  # noqa: BLE001 — a cache read must never be fatal
