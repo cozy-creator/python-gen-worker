@@ -163,8 +163,8 @@ def build_block_mask(scores: Any, k_blocks: int, geom: BlockGeometry,
 
     seq_len = geom.seq_len
 
-    def pad_mask_mod(b, h, qi, ki):               # pad keys carry no mass
-        return ki < seq_len
+    def pad_mask_mod(b: Any, h: Any, qi: Any, ki: Any) -> Any:
+        return ki < seq_len   # pad keys carry no mass
 
     return bits["BlockMask"].from_kv_blocks(
         part_num[None], part_idx[None], full_num[None], full_idx[None],
@@ -205,7 +205,7 @@ def _tuned(opts_items: tuple) -> Any:
         from torch.nn.attention.flex_attention import flex_attention
         opts = dict(opts_items)
 
-        def _call(q, k, v, block_mask=None):
+        def _call(q: Any, k: Any, v: Any, block_mask: Any = None) -> Any:
             return flex_attention(q, k, v, block_mask=block_mask,
                                   kernel_options=opts)
 
