@@ -47,7 +47,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence, TextIO
 
 __all__ = [
     "DriverTooOld",
@@ -241,7 +241,7 @@ def _existing_compat_dir(cuda: str) -> Optional[str]:
     return None
 
 
-def _install_compat(cuda: str, log) -> Optional[str]:
+def _install_compat(cuda: str, log: TextIO) -> Optional[str]:
     """Install NVIDIA's forward-compat libcuda. Returns its directory, or None.
 
     The fleet base image (``pytorch/pytorch:*-cuda13.0-*``) descends from
@@ -290,7 +290,7 @@ def _install_compat(cuda: str, log) -> Optional[str]:
     return _existing_compat_dir(cuda)
 
 
-def _download_compat_deb(package: str, log) -> Optional[str]:
+def _download_compat_deb(package: str, log: TextIO) -> Optional[str]:
     """Newest ``<package>_*.deb`` from NVIDIA's repo, fetched with the stdlib."""
     import urllib.request
 
@@ -347,7 +347,7 @@ def _distro_tag() -> str:
     return f"{name}{version}"
 
 
-def _persist_ld_path(directory: str, log) -> None:
+def _persist_ld_path(directory: str, log: TextIO) -> None:
     """Make the compat libcuda win for every LATER process on this pod."""
     line = f'export LD_LIBRARY_PATH="{directory}:${{LD_LIBRARY_PATH:-}}"\n'
     try:
@@ -385,7 +385,7 @@ _ALLOC_SNIPPET = (
 )
 
 
-def verify_allocation() -> dict:
+def verify_allocation() -> dict[str, Any]:
     """Run a REAL tiny allocation in a FRESH interpreter and return the verdict.
 
     Fresh, because a loader path repaired inside this process cannot change the
@@ -401,7 +401,9 @@ def verify_allocation() -> dict:
     return {"ok": False, "error": f"probe produced no JSON (rc={code}): {out[-300:]}"}
 
 
-def ensure_cuda_line(cuda: str, *, log=None, allow_compat: bool = True) -> dict:
+def ensure_cuda_line(
+    cuda: str, *, log: Optional[TextIO] = None, allow_compat: bool = True
+) -> dict[str, Any]:
     """Make this host able to run ``cuda``, or say it must be re-rolled.
 
     Returns a record carrying ``path`` — ``native`` (host driver is new enough),
@@ -430,7 +432,7 @@ def ensure_cuda_line(cuda: str, *, log=None, allow_compat: bool = True) -> dict:
         flush=True,
     )
 
-    record = {
+    record: dict[str, Any] = {
         "cuda_line": cuda,
         "driver": probe.driver,
         "driver_cuda": probe.driver_cuda,
@@ -493,7 +495,7 @@ def ensure_cuda_line(cuda: str, *, log=None, allow_compat: bool = True) -> dict:
     return record
 
 
-def assert_cuda_usable(cuda: str, *, log=None) -> dict:
+def assert_cuda_usable(cuda: str, *, log: Optional[TextIO] = None) -> dict[str, Any]:
     """:func:`ensure_cuda_line`, but a re-roll verdict is a typed exception.
 
     For rigs that want the abort rather than the record. :class:`DriverTooOld`
