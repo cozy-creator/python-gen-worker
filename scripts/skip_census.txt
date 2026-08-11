@@ -144,6 +144,14 @@ LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (pac
 LOCAL-ONLY tests/test_chunk_cas_parallel_th1362.py|multi-gb throughput measurement; set chunk_cas_bench=#
 LOCAL-ONLY tests/test_aot_run_impl_split_pgw811.py|banked pgw#793 wrapper not present
 LOCAL-ONLY tests/test_topology_fuzz_pgw867.py|tensorhub checkout not present
+# pgw#1150. Four rows put the author-CI harness's emitted `author-ci.toml`
+# record through `inference-endpoints/scripts/lint_author_ci.py` ITSELF —
+# that script is the AUTHORITY on the record's schema and must never be
+# re-stated here, so where the sibling repo is absent (every CI runner) the
+# round trip cannot run. The schema half IS measured, in that repo's own
+# `lint_author_ci.py --selftest` (23 cases, red on 20), which its CI gates
+# on. Set AUTHOR_CI_LINT=<path to lint_author_ci.py> to run them anywhere.
+LOCAL-ONLY tests/test_author_ci_harness_pgw1150.py|inference-endpoints is not checked out beside this repo
 # pgw#978. The full local mint cycle: a real child spawn, a real torch.export +
 # AOTInductor compile, a real publish over the wire and a real second-process
 # adopt. It is opt-in EVERYWHERE, CI included — not because CI could run it and
