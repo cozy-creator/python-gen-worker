@@ -245,6 +245,25 @@ def test_variant_twins_are_counted_once(tmp_path: Path) -> None:
     assert estimate_resident_bytes([root], variant="fp16").disk_bytes == 4 * 1024 * 1024
 
 
+def test_sharded_variant_twins_are_counted_once(tmp_path: Path) -> None:
+    """The twin marker sits INSIDE a shard name
+    (`diffusion_pytorch_model.fp16-00001-of-00002.safetensors`), not at the
+    end of it. A suffix-only match would miss every sharded twin and double
+    the estimate for the biggest models — the exact class of artifact this
+    precondition is aimed at."""
+    root = tmp_path / "sharded-twins"
+    for i in (1, 2):
+        write_safetensors(
+            root / "transformer" / f"diffusion_pytorch_model-0000{i}-of-00002.safetensors",
+            [(f"w{i}", "F32", 8 * 1024 * 1024)])
+        write_safetensors(
+            root / "transformer" / f"diffusion_pytorch_model.fp16-0000{i}-of-00002.safetensors",
+            [(f"w{i}", "F16", 4 * 1024 * 1024)])
+
+    assert estimate_resident_bytes([root]).disk_bytes == 16 * 1024 * 1024
+    assert estimate_resident_bytes([root], variant="fp16").disk_bytes == 8 * 1024 * 1024
+
+
 def test_an_unweighable_dtype_abstains_instead_of_guessing(tmp_path: Path) -> None:
     root = tmp_path / "exotic"
     write_safetensors(root / "w.safetensors", [("w", "F32", 4096)])

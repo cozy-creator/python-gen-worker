@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,10 +100,13 @@ _CAST_ELEMENT_BYTES: Dict[str, int] = {
     "fp32": 4, "float32": 4,
 }
 
-#: Variant infixes diffusers uses to publish twins of the same tensor set
-#: (``diffusion_pytorch_model.fp16.safetensors``). Counting both twins would
-#: inflate the estimate, which is the one direction it must never err in.
-_VARIANT_INFIXES = ("fp16", "bf16", "fp8", "fp32")
+#: Variant infixes diffusers uses to publish twins of the same tensor set.
+#: They appear both as a suffix (``diffusion_pytorch_model.fp16.safetensors``)
+#: and INSIDE a shard name (``diffusion_pytorch_model.fp16-00001-of-00002``),
+#: so the match is delimiter-anchored rather than a plain endswith — a missed
+#: shard twin would double-count a set and inflate the estimate, which is the
+#: one direction a refusal-grade number must never err in.
+_VARIANT_RE = re.compile(r"\.(fp16|bf16|fp8|fp32)(?=$|[.\-_])")
 
 
 class ArtifactEnvelopeExceeded(RuntimeError):
@@ -223,11 +227,10 @@ def _loaded_files(root: Path, variant: str) -> List[Path]:
     groups: Dict[Tuple[str, str], Dict[str, Path]] = {}
     for p in sorted(root.rglob("*.safetensors")):
         stem = p.name[: -len(".safetensors")]
-        var = ""
-        for candidate in _VARIANT_INFIXES:
-            if stem.lower().endswith("." + candidate):
-                var, stem = candidate, stem[: -(len(candidate) + 1)]
-                break
+        match = _VARIANT_RE.search(stem.lower())
+        var = match.group(1) if match else ""
+        if match:
+            stem = stem[: match.start()] + stem[match.end():]
         groups.setdefault((str(p.parent), stem), {})[var] = p
     out: List[Path] = []
     for by_variant in groups.values():
