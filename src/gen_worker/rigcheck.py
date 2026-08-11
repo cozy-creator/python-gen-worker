@@ -33,6 +33,16 @@ measure.
 
 There is deliberately no override and no "warn" mode. A missing wheel for the
 fleet line is a FINDING to report, never permission to measure on an old one.
+
+VERSION STRINGS ARE NOT USABILITY (pgw#1120). Matching ``torch.version.cuda``
+proves the WHEEL is right and says nothing about the HOST. RunPod's driver is
+per-host: on ``570.211.01`` (CUDA 12.8) a cu130 torch imports fine, prints every
+version correctly, and then cannot allocate — a failure that surfaces ~20 minutes
+in, after the weight fetch, and reads as a torch bug. So the assertion also
+performs a REAL tiny allocation and raises :class:`CudaUnusable` when a card is
+present and it fails. Repair it at bring-up with
+``python3 -m gen_worker.rigboot`` (forward-compat libcuda, or a re-roll verdict)
+BEFORE anything is downloaded.
 """
 
 from __future__ import annotations
@@ -46,6 +56,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 __all__ = [
+    "CudaUnusable",
     "FleetLine",
     "FleetLineMismatch",
     "FleetLineUnknown",
@@ -89,6 +100,15 @@ class FleetLineMismatch(RuntimeError):
 
 class FleetLineUnknown(RuntimeError):
     """No authority declared a fleet line. Nothing to assert against."""
+
+
+class CudaUnusable(FleetLineMismatch):
+    """The wheel is on the fleet line but the HOST cannot run it (pgw#1120).
+
+    A subclass of :class:`FleetLineMismatch` so every existing rig handler still
+    aborts, and a distinct type so the caller can tell "rebuild the environment"
+    (wrong wheel) from "repair or re-roll the host" (wrong driver).
+    """
 
 
 @dataclass(frozen=True)
@@ -403,7 +423,44 @@ def resolve_environment() -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             pass
     env["driver"] = _driver_version()
+    env.update(_usability(env))
     return env
+
+
+def _usability(env: Mapping[str, Any]) -> dict[str, Any]:
+    """Can this interpreter actually ALLOCATE on the card (pgw#1120)?
+
+    ``torch.version.cuda`` matching the fleet line proves the WHEEL is right and
+    nothing about the HOST. RunPod's driver is per-host: on a 570.211.01 host
+    (CUDA 12.8) a cu130 torch imports fine, reports every version string
+    correctly, and then dies on the first allocation ~20 minutes later — which is
+    why two lanes read it as a torch bug. So the check is a real allocation, and
+    the result is part of the environment table.
+    """
+    from gen_worker.cuda_probe import classify_probe_failure, probe_cuda
+
+    out: dict[str, Any] = {}
+    if env.get("torch") is None:
+        return out
+    result = probe_cuda()
+    out["cuda_usable"] = result.ok
+    if not result.ok:
+        out["cuda_unusable_reason"] = result.reason
+        out["cuda_unusable_class"] = classify_probe_failure(result.reason)
+    return out
+
+
+def _usability_text(env: Mapping[str, Any]) -> str:
+    """One line: a real allocation either worked, or why it did not."""
+    usable = env.get("cuda_usable")
+    if usable is None:
+        return "not probed"
+    if usable:
+        return "yes (real allocation)"
+    return (
+        f"NO — {env.get('cuda_unusable_class', 'unknown')}: "
+        f"{env.get('cuda_unusable_reason', '')}"
+    )
 
 
 def format_report(env: Mapping[str, Any], line: FleetLine) -> str:
@@ -413,6 +470,7 @@ def format_report(env: Mapping[str, Any], line: FleetLine) -> str:
         ("torch CUDA", f"{env.get('cuda')}  (fleet floor {line.cuda_text})"),
         ("cudnn", str(env.get("cudnn"))),
         ("driver", str(env.get("driver"))),
+        ("cuda usable", _usability_text(env)),
         ("device", f"{env.get('device', 'none')}  sm{env.get('sm', '-')}  "
                    f"{env.get('vram_gib', '-')} GiB"),
         ("python", str(env.get("python"))),
@@ -473,6 +531,26 @@ def assert_fleet_line(
                 f"{line.cuda_text}"
             )
 
+    # A HOST fault is reported before a WHEEL fault even when both are present:
+    # on a too-old driver every version string above can be perfect while nothing
+    # allocates, and "rebuild the environment" is then the wrong instruction.
+    if env.get("driver") and env.get("cuda_usable") is False:
+        raise CudaUnusable(
+            f"{what}: REFUSING TO MEASURE — the wheel is on the fleet line but "
+            f"this HOST cannot run it.\n"
+            f"  * driver {env.get('driver')} / torch CUDA {env.get('cuda')}: "
+            f"{env.get('cuda_unusable_class')} — {env.get('cuda_unusable_reason')}\n\n"
+            + report
+            + "\n\nThis is a DRIVER fact, not a torch defect (pgw#1120). RunPod's "
+            "driver version is PER-HOST: 570.211.01 is CUDA 12.8 and cannot run a "
+            "cu130 build, while other hosts of the same GPU type draw 580.x.\n"
+            "Fix it before the fetch, not after: `python3 -m gen_worker.rigboot "
+            "--cuda <line>` installs NVIDIA's forward-compat libcuda "
+            "(cuda-compat-13-0) and re-verifies with a real allocation, and exits "
+            "91 when the host must be re-rolled instead. See research/RIG-ENV.md "
+            "§3c."
+        )
+
     if problems:
         raise FleetLineMismatch(
             f"{what}: REFUSING TO MEASURE — this environment is not the fleet's.\n"
@@ -489,11 +567,15 @@ def assert_fleet_line(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """``python -m gen_worker.rigcheck`` — exit 0 on the line, 90 off it."""
+    """``python -m gen_worker.rigcheck`` — 0 on the line, 90 off it, 91 when the
+    line is installed but the HOST cannot run it (repair or re-roll, pgw#1120)."""
     args = list(sys.argv[1:] if argv is None else argv)
     start = args[0] if args else None
     try:
         assert_fleet_line("rigcheck", start=start, stream=sys.stdout)
+    except CudaUnusable as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        return 91
     except (FleetLineMismatch, FleetLineUnknown) as exc:
         print(str(exc), file=sys.stderr, flush=True)
         return 90
