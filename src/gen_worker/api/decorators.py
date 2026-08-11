@@ -46,7 +46,7 @@ import msgspec
 from .binding import BINDING_TYPES, Binding
 from .export_contract import (
     Arg, Dim, Fork, GraphClass, Input, MintBlocker, open_blockers,
-    validate_contract,
+    validate_contract, validate_speed_bar,
 )
 from .formula import RuntimeFormula
 from .slot import OBJECTIVES, TASKS, Slot
@@ -952,6 +952,19 @@ class Compile(msgspec.Struct, frozen=True):
     # conv-bearing UNet.
     numerics_floor: Optional[float] = None
     numerics_warn: Optional[float] = None
+    # pgw#1149 / th#1811 (ie#664 §6): this family's own compile-vs-eager SPEED
+    # bar — the stage it is read off and the minimum speedup the compiled arm
+    # must clear. Declared here, beside the numerics band, because the hub's
+    # publish-time validation session judges a release against the AUTHOR's bar
+    # and holds none of its own: "responsibility is the author's, verification
+    # is the platform's" is unbuildable if the platform supplies the number it
+    # verifies. Undeclared (the default) resolves `bar_undeclared` at publish —
+    # a named refusal, never a default number. A PAIR: see `validate_speed_bar`.
+    # Deliberately NOT a contract axis — declaring or raising a bar must not
+    # re-key a cell — but it IS a `derive.OVERRIDE_FACTS` entry, so a migration
+    # cannot drop it silently.
+    speed_metric: str = ""
+    min_speedup: Optional[float] = None
     # pgw#1115: DECLARED mint blockers. A family that may not mint yet says so
     # as DATA here — never as a thunk that raises, which the pgw#1107 fold onto
     # this decorator cannot carry (`compile=` takes a Compile, never a
@@ -1028,6 +1041,9 @@ class Compile(msgspec.Struct, frozen=True):
                 f"Compile.numerics_floor ({self.numerics_floor}) must not "
                 f"exceed numerics_warn ({self.numerics_warn}): the floor "
                 f"refuses, the warn only confesses")
+        metric, bar = validate_speed_bar(self.speed_metric, self.min_speedup)
+        force(self, "speed_metric", metric)
+        force(self, "min_speedup", bar)
         validate_contract(self)
 
     @property

@@ -162,10 +162,17 @@ def _repr(value: Any) -> Any:
 
 #: Must-survive facts that are NOT part of ``contract_axes()`` (so a change
 #: does not re-key) but ARE hard-won measured decisions the migration must not
-#: drop: the numerics ADOPT band (pgw#812/#814). ``shape_strategy``,
-#: ``warm_changes_key`` and ``eager`` are already contract axes and covered by
-#: :func:`contract_delta`; these two are the gap.
-OVERRIDE_FACTS: Tuple[str, ...] = ("numerics_floor", "numerics_warn")
+#: drop: the numerics ADOPT band (pgw#812/#814) and the compile-vs-eager SPEED
+#: bar the hub's publish-time validation gate judges against (pgw#1149 /
+#: th#1811). ``shape_strategy``, ``warm_changes_key`` and ``eager`` are already
+#: contract axes and covered by :func:`contract_delta`; these four are the gap.
+#:
+#: The speed pair is here for the same reason the floor is: dropping it loosens
+#: a gate without re-keying anything, so :func:`contract_delta` alone waves it
+#: through — and a release that arrives at the hub with no bar is not refused,
+#: it is judged `bar_undeclared` and simply stops being promotable.
+OVERRIDE_FACTS: Tuple[str, ...] = (
+    "numerics_floor", "numerics_warn", "speed_metric", "min_speedup")
 
 
 def override_delta(standing: Compile, migrated: Compile) -> Dict[str, Tuple[Any, Any]]:
