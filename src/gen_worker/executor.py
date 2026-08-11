@@ -3105,9 +3105,13 @@ class _Job:
     # gw#516: True while the job is past the decode->finalize handoff (GPU
     # slot terminally released, encode/upload tail running, result unshipped).
     finalizing: bool = False
-    # th#913/gw#596: the CONCRETE lane serving this job (stamped post-setup,
-    # reported on JobMetrics.lane). "" = not yet determined.
+    # th#913/gw#596: the CONCRETE lane serving this job (stamped post-setup as
+    # a forecast for ctx.lane, RE-composed at the terminal from the served
+    # identity — ie#655). "" = not yet determined.
     execution_lane: str = ""
+    # ie#655: the hub's lane instruction, kept so the terminal composition can
+    # honor a declared (handles=) body without re-reading the dispatch order.
+    lane_report: str = ""
     # pgw#789 (th#1293 dimensions): this request was served EAGER by a compiled
     # lane — a pgw#680 guard miss, a router heal/volatile verdict, or an
     # aot_serve ingress refusal. Set from the guard-miss callback, which fires
@@ -5548,8 +5552,7 @@ class Executor:
         rec.applied_lanes = list(applied)
         if not applied:
             return
-        bound = lanespec.execution_lane_body_id(
-            self._bound_execution_lane(spec, compiled=False))
+        bound = self._bound_execution_body(spec)
         for entry in applied:
             activity_mod.emit_event(
                 activity_mod.KIND_APPLIED_LANE,
@@ -5592,49 +5595,22 @@ class Executor:
         entries = list(getattr(rec, "applied_attention", []) or []) if rec else []
         return "; ".join(e.detail() for e in entries)
 
-    def _bound_execution_lane(
-        self, spec: EndpointSpec, compiled: bool,
-    ) -> lanespec.ExecutionLane:
-        """The most-quantized lane this spec's BINDINGS resolve to — what the
-        hub handed the worker, before any serve-time recipe."""
-        return self._most_quantized_lane(
-            [
-                lanespec.execution_lane_of_binding(
-                    getattr(binding, "flavor", "") or "",
-                    getattr(binding, "storage_dtype", "") or "",
-                    compiled)
-                for binding in spec.models.values()
-            ],
-            compiled)
+    def _bound_execution_body(self, spec: EndpointSpec) -> str:
+        """The most-quantized lane BODY this spec's BINDINGS resolve to — what
+        the hub handed the worker, before any serve-time recipe."""
+        return lanespec.most_quantized_body(
+            lanespec.execution_lane_body_of_binding(
+                getattr(binding, "flavor", "") or "",
+                getattr(binding, "storage_dtype", "") or "")
+            for binding in spec.models.values())
 
-    @staticmethod
-    def _most_quantized_lane(
-        candidates: List[lanespec.ExecutionLane], compiled: bool,
-    ) -> lanespec.ExecutionLane:
-        """Quantized lanes always outrank bf16 (a bf16 VAE riding a w8a16
-        pipeline is still the w8a16 lane), ties by lane-table rank. Empty
-        candidates are the plain bf16 lane at the live compile posture."""
-        ranked = {body: i for i, body in enumerate(lanespec.known_execution_lanes())}
-        best = None
-        best_key: Tuple[int, int] = (2, len(ranked) + 1)
-        for execution_lane in candidates:
-            quant = 1 if lanespec.family_of(execution_lane) == lanespec.FAMILY_BF16 else 0
-            key = (quant, ranked.get(lanespec.execution_lane_id(execution_lane), len(ranked)))
-            if best is None or key < best_key:
-                best, best_key = execution_lane, key
-        if best is None:
-            best = lanespec.ExecutionLane(
-                weights=lanespec.WEIGHTS_BF16, activation=lanespec.ACT_W16A16,
-                execution=lanespec.EXEC_COMPILED if compiled else lanespec.EXEC_EAGER)
-        return best
-
-    def _served_execution_lane(self, spec: EndpointSpec, instructed: str = "") -> str:
-        """The CONCRETE lane this spec's instance executes as, for
-        JobMetrics.lane and ctx.lane reporting: the most-quantized lane over
-        the pipeline bindings AND whatever this instance's ``setup()``
-        reported it APPLIED to the weights (table rank), with live compile
-        state as a preference. Fixed-mode bodies override it; a declared
-        (handles=) instruction owns the full lane outright.
+    def _served_execution_body(
+        self, spec: EndpointSpec, instructed: str = "",
+    ) -> str:
+        """The WEIGHTS half of the lane this instance executes: the
+        most-quantized body over the pipeline bindings AND whatever this
+        instance's ``setup()`` reported it APPLIED to them. A declared
+        (handles=) instruction owns the body outright.
 
         pgw#1104: the applied half is not decoration. minimax-h3 binds a bare
         tag (empty flavor) and quantizes 300 Linears to w8a8 fp8 inside
@@ -5643,40 +5619,53 @@ class Executor:
         The lane id is a KEY (th#935 verdicts, compile cells, floors,
         pricing), so it follows the WEIGHTS AS EXECUTED — reported by the
         recipe that converted them, never sniffed off tensor subclasses."""
-
-        # pgw#1082: the SAME reading `serving_mode.classify_mode` takes. A
-        # ref-only test made `metrics.lane` report `+eager` while
-        # `serving_mode` correctly reported `jit_cell` on the same request —
-        # a contradiction `_served_identity`'s docstring says cannot happen,
-        # because a JIT INTAKE arm names no artifact by construction.
-        compiled = False
+        handled = self._handled_execution_lane_body(spec, instructed)
+        if handled:
+            return handled
         applied: Tuple[lanespec.AppliedLane, ...] = ()
         if spec.cls is not None:
             rec = self._classes.get(spec.instance_key)
             if rec is not None:
-                compiled = any(
-                    getattr(t, "active_compile_ref", "")
-                    or compile_cache.is_compile_armed(t.pipeline)
-                    for t in rec.compile_targets.values())
                 applied = tuple(rec.applied_lanes)
-        handled = self._handled_execution_lane_body(spec, instructed)
-        if handled:
-            return lanespec.execution_lane_id(lanespec.parse_execution_lane(instructed))
-        candidates = [
-            lanespec.execution_lane_of_binding(
+        bodies = [
+            lanespec.execution_lane_body_of_binding(
                 getattr(binding, "flavor", "") or "",
-                getattr(binding, "storage_dtype", "") or "",
-                compiled)
+                getattr(binding, "storage_dtype", "") or "")
             for binding in spec.models.values()
         ]
         # The applied report is validated against the lane table at report
-        # time (`report_applied_lane`), so it can only name a real lane body;
-        # the execution axis stays the platform's.
-        candidates.extend(
-            lanespec.execution_lane_of_body(entry.body, compiled)
-            for entry in applied)
+        # time (`report_applied_lane`), so it can only name a real lane body.
+        bodies.extend(entry.body for entry in applied)
+        return lanespec.most_quantized_body(bodies)
+
+    def _served_execution_lane(
+        self,
+        spec: EndpointSpec,
+        instructed: str = "",
+        served: Optional[serving_mode_mod.ServedIdentity] = None,
+    ) -> str:
+        """The CONCRETE lane this spec's instance executes as, for
+        JobMetrics.lane and ctx.lane reporting: the executed WEIGHTS body at
+        the OBSERVED execution posture.
+
+        ie#655: there is exactly ONE reading of the execution axis on this
+        worker, and it is ``ServedIdentity.serving_mode`` — the same value
+        stamped on ``metrics.serving_mode``. The lane cannot contradict the
+        serving mode because it is COMPOSED from it, not derived beside it.
+        Two separate derivations is how a wan-2.2 H100 that declined its own
+        mint for `insufficient_vram`, served eager, and said so three times in
+        its own boot rows still reported `fp8-w8a8-dynamic+compiled` on both
+        billed requests: the second reading ran the lane table's PLANNING
+        coercion (`fp8-w8a8-dynamic` is a compiled-only CHOICE) over an
+        observed eager posture and rewrote the fact. A declared instruction
+        owns the body, never the execution axis: what the hub asked for is not
+        evidence of what ran."""
+        if served is None:
+            served = self._served_identity(spec)
+        compiled = served.serving_mode != serving_mode_mod.MODE_EAGER
         return lanespec.execution_lane_id(
-            self._most_quantized_lane(candidates, compiled))
+            lanespec.observed_execution_lane(
+                self._served_execution_body(spec, instructed), compiled))
 
     async def ensure_desired_instance(
         self,
@@ -11637,8 +11626,9 @@ class Executor:
             # th#913/gw#596: the concrete lane actually serving this job.
             # th#1050: ctx.lane exposes the same post-degrade truth to the
             # handler (declared-lane endpoints branch on it).
+            job.lane_report = order.lane_report
             job.execution_lane = self._served_execution_lane(
-                spec, instructed=order.lane_report)
+                spec, instructed=job.lane_report)
             # pgw#789: the shape coordinate, taken from the EXECUTED payload
             # with endpoint defaults applied. runtime_terms carries these only
             # when the endpoint declares a runtime formula (and the hub drops
@@ -12849,6 +12839,17 @@ class Executor:
             metrics.fallback_reason = served.fallback_reason
             metrics.sm = served.sm
             metrics.steps, metrics.width, metrics.height = job.shape
+            # ie#655: the lane is composed from the SAME ServedIdentity these
+            # five fields come from, at the SAME instant — so `metrics.lane`
+            # and `metrics.serving_mode` cannot disagree about eager. The
+            # dispatch-time stamp below is a forecast for `ctx.lane` (the
+            # handler needs a lane before it runs); the REPORT is here, where
+            # a per-request eager fallback that happened DURING the handler is
+            # finally knowable.
+            if job.spec is not None:
+                metrics.lane = self._served_execution_lane(
+                    job.spec, instructed=job.lane_report, served=served)
+                job.execution_lane = metrics.lane
         terminal_status = (
             pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
             if job.superseded
