@@ -203,11 +203,14 @@ def _tuned(opts_items: tuple) -> Any:
     if key not in bits:
         import torch
         from torch.nn.attention.flex_attention import flex_attention
+
         opts = dict(opts_items)
+        # Through an Any-typed local: torch's overloads do not admit an untyped
+        # kernel_options mapping, and the values are the measured per-mode tile.
+        flex: Any = flex_attention
 
         def _call(q: Any, k: Any, v: Any, block_mask: Any = None) -> Any:
-            return flex_attention(q, k, v, block_mask=block_mask,
-                                  kernel_options=opts)
+            return flex(q, k, v, block_mask=block_mask, kernel_options=opts)
 
         bits[key] = torch.compile(_call, dynamic=False)
     return bits[key]
