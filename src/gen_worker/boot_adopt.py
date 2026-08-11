@@ -89,6 +89,9 @@ DERIVE_REASONS: Tuple[str, ...] = (
     "trace_failed", "bad_report", "child_died", "refused", "child_error",
     "slots_unresolvable", "structure_unsupported", "no_compile_target",
     "structure_not_honored", "no_declaration", "trace_refused", "empty_share",
+    # pgw#1124: the child's composition put REAL tensors off the host, so it
+    # would be competing for VRAM with the parent that spawned it.
+    "real_weights_resident",
     # The derivation raised something that is not a typed BootKeyUnavailable.
     "derive_failed",
 )

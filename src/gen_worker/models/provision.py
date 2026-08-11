@@ -110,6 +110,7 @@ def load_slot(
     components: Optional[Dict[str, Any]] = None,
     component_trees: Optional[Dict[str, str]] = None,
     device: str = "",
+    place: bool = True,
     declared_vram_gb: float = 0.0,
     force_storage_dtype: str = "",
     strict_vram: bool = False,
@@ -125,6 +126,12 @@ def load_slot(
     ``mode`` is the placement mode (plan-time offload verdicts / learned
     degraded floors — the executor's knowledge; the CLI passes ``auto``).
     ``device="cpu"`` (CLI ``--device cpu``) skips placement entirely.
+    ``place=False`` (pgw#1124) skips it too, WITHOUT claiming the composition
+    is a CPU one: a boot-trace child builds its compile target virtually on
+    the compute device and never runs a forward, so it needs the serving
+    placement ladder for nothing — and running it there put a slot's real
+    non-target weights (qwen-image's 15.5 GiB text encoder) onto the card the
+    serving parent already occupies.
     ``components`` are preloaded shared modules (gw#479) forwarded to
     ``from_pretrained``. ``force_storage_dtype`` overrides the binding's own
     storage_dtype (th#1043): a joint multi-lane fit decision made BEFORE any
@@ -266,7 +273,7 @@ def load_slot(
         # Worker-owned placement/offload policy: one decider for the whole
         # worker; endpoints never write device/offload code. A CUDA OOM inside
         # is a ladder transition, not a failure.
-        if device.strip().lower() != "cpu":
+        if place and device.strip().lower() != "cpu":
             reporter.set_phase("place")
             out.placed = place_pipeline(
                 pipe, mode=mode, ref=ref, strict_vram=strict_vram)
