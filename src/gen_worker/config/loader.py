@@ -90,16 +90,38 @@ _DOTENV_PATH = "./.env"
 #: variable — see :func:`_normalize_key`.
 _OWNED_PREFIXES = ("GEN_WORKER_", "TENSORHUB_", "WORKER_", "COZY_")
 
+#: Owned-namespace names carrying SECRET MATERIAL this program refuses to
+#: hold at all — name -> why it is refused. Unlike the rest of
+#: :data:`_OWNED_NON_SETTINGS`, these are not "read by somebody else": NOBODY
+#: may read them, and their PRESENCE in any config source is a boot refusal.
+#:
+#: pgw#884: the th#1307 refusal read `os.environ` alone. A PEM delivered as
+#: `/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, a `.env` line or a yaml entry was
+#: therefore neither LOADED (the name is not a Settings field, so
+#: `_normalize_key` dropped it) NOR REFUSED — the pod booted green with a
+#: private key sitting world-readable to tenant code at a mounted path, which
+#: is the precise scenario th#1307 exists to make impossible. The file sources
+#: are hand-authored and pass through `_normalize_key(strict=True)` already,
+#: so the refusal belongs exactly there: it costs one dict lookup per key, it
+#: never reads the VALUE (presence is the fact), and it kills the boot.
+REFUSED_KEY_MATERIAL: Dict[str, str] = {
+    "GEN_WORKER_C2PA_KEY_PEM": (
+        "a C2PA PRIVATE KEY must never be delivered to a pod (th#1307 — tenant "
+        "code runs in this process and can read it). Signing is hub-side: the "
+        "hub holds the key and signs claims over POST /v1/worker/c2pa/sign"
+    ),
+    "GEN_WORKER_C2PA_KEY_PATH": (
+        "a C2PA PRIVATE KEY must never be delivered to a pod (th#1307 — tenant "
+        "code runs in this process and can read it). Signing is hub-side: the "
+        "hub holds the key and signs claims over POST /v1/worker/c2pa/sign"
+    ),
+}
+
 #: Owned-namespace names that are deliberately NOT Settings fields. Each one
 #: is read by a named mechanism other than this loader, and listing it here is
 #: what keeps :func:`_normalize_key`'s refusal from firing on a legitimate
 #: value. Anything not here and not in `_ENV_TO_FIELD` is a typo.
-_OWNED_NON_SETTINGS: frozenset[str] = frozenset({
-    # th#1307: refused at boot by content_credentials.configure(); deliberately
-    # never bound to a field, because a private key must not be readable by
-    # tenant code in this process.
-    "GEN_WORKER_C2PA_KEY_PEM",
-    "GEN_WORKER_C2PA_KEY_PATH",
+_OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozenset({
     # pgw#929 CHILD IPC HANDOFF: parent-minted, per-child, no config origin.
     "GEN_WORKER_COMPUTE_CHILD",
     "GEN_WORKER_COMPUTE_UID",
@@ -151,6 +173,15 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset({
 })
 
 
+class RefusedKeyMaterialError(ValueError):
+    """A config source delivered secret material this pod refuses to hold.
+
+    pgw#884. Terminal at boot by design: the material is already on the box
+    when this raises, so the only honest outcome is that nothing tenant-facing
+    starts beside it.
+    """
+
+
 class UnknownSettingError(ValueError):
     """A key inside an owned namespace matches no Settings field.
 
@@ -172,13 +203,22 @@ def _normalize_key(raw: str, *, strict: bool = False) -> str | None:
 
     Returns None for a key that is not ours. When `strict`, an unrecognised key
     inside an owned namespace raises `UnknownSettingError` instead of being
-    silently dropped.
+    silently dropped, and a key naming REFUSED secret material raises
+    `RefusedKeyMaterialError` (pgw#884) instead of being dropped as "not a
+    Settings field".
     """
     key = raw.strip()
     if key in _ENV_TO_FIELD:
         return _ENV_TO_FIELD[key]
     if key in _FIELD_NAMES:
         return key
+    # Before the _OWNED_NON_SETTINGS drop, never after: these names are in
+    # that set (so the process-env census knows them), and reaching the drop
+    # first is exactly how a mounted secret booted green.
+    if strict and (why := REFUSED_KEY_MATERIAL.get(key.upper())):
+        raise RefusedKeyMaterialError(
+            f"{key} was delivered to this pod through a config source: {why}"
+        )
     if strict and key.upper() in _OWNED_NON_SETTINGS:
         return None
     if strict and any(key.upper().startswith(p) for p in _OWNED_PREFIXES):

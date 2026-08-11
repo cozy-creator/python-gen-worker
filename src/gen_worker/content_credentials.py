@@ -356,6 +356,15 @@ def _refuse_pod_private_key_material(settings: Any = None) -> None:
 
     ``settings`` is checked too when supplied, so a field smuggled back into
     Settings is refused on the same breath as the env.
+
+    **This arm covers the ENV only, and that is deliberate** (pgw#884). The
+    other delivery vectors — ``.env``, ``/run/secrets``, yaml — never reach
+    ``os.environ``, and until pgw#884 nothing refused them either: the loader
+    dropped the names as "not a Settings field" and the pod booted green with
+    a private key mounted where tenant code could read it. They are refused
+    where they are READ, in ``config.loader.REFUSED_KEY_MATERIAL``, which is
+    the one component that sees every source and does so once per boot rather
+    than once per signed asset.
     """
     for env_name in _REFUSED_KEY_ENVS:
         if str(os.environ.get(env_name, "") or "").strip() or str(
