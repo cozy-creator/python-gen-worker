@@ -27,9 +27,9 @@ Usage:
 
     python scripts/lint_layout_declarations.py [PATH ...]
 
-Defaults to this repository's `src/` and `tests/`. An ENDPOINT repo runs the
-same script against its own tree — the constraint is on the declaration, not
-on where it lives.
+Defaults to this repository's `src/`. An ENDPOINT repo runs the same script
+against its own tree — the constraint is on the declaration, not on where it
+lives.
 """
 
 from __future__ import annotations
@@ -40,7 +40,14 @@ from pathlib import Path
 from typing import Iterator, List, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
-DEFAULT_ROOTS = (REPO / "src", REPO / "tests")
+
+#: `src/` only, deliberately. The subject is a declaration that gets
+#: PUBLISHED — an endpoint's `Slot(layouts=...)` reaching a release manifest.
+#: `tests/` holds the opposite by construction: a test proving the constructor
+#: refuses a computed declaration has to WRITE one, and sweeping it would make
+#: this fence and its own negative test mutually exclusive. An endpoint repo
+#: runs this against its own tree, where every declaration is a real one.
+DEFAULT_ROOTS = (REPO / "src",)
 
 #: The module whose module-level constants may stand in for a handle literal.
 #: It is the SDK's transcription of tensorhub's registry, so a name imported
