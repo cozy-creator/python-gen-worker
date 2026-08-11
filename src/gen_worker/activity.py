@@ -179,7 +179,7 @@ HEARTBEAT_INTERVAL_S = 60.0
 # Minimum evidence advance (process CPU seconds) per interval for a heartbeat:
 # a hung (blocked/deadlocked) call stops accruing CPU and the beat stops with
 # it, which is exactly the silence the hub enforces on.
-_EVIDENCE_EPS = 0.05
+EVIDENCE_EPS = 0.05
 
 _lock = threading.Lock()
 _seq = 0
@@ -616,7 +616,7 @@ def _process_io_evidence() -> float:
     return (io.read_bytes + io.write_bytes) / (1 << 20)
 
 
-def _default_evidence() -> float:
+def default_evidence() -> float:
     """Combined default watchdog evidence: process+live-children CPU
     seconds PLUS process disk I/O megabytes. Either source alone advancing
     proves genuine life: a network download followed by on-disk model load
@@ -635,7 +635,7 @@ class watchdog:
     hub's stall rule takes it from there.
 
     Default evidence is process+children CPU seconds plus process disk I/O
-    (see _default_evidence); pass a monotonic callable (e.g.
+    (see default_evidence); pass a monotonic callable (e.g.
     compile-wall-seconds) for calls with a better signal."""
 
     def __init__(
@@ -647,7 +647,7 @@ class watchdog:
     ) -> None:
         self._act = act
         self._interval = interval_s
-        self._evidence = evidence or _default_evidence
+        self._evidence = evidence or default_evidence
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="activity-watchdog", daemon=True,
@@ -663,7 +663,7 @@ class watchdog:
                 now = self._evidence()
             except Exception:
                 continue
-            if now - last >= _EVIDENCE_EPS:
+            if now - last >= EVIDENCE_EPS:
                 last = now
                 # gw#621: evidence advance is ALSO a registry counter, so the
                 # 10s beat reports it and the hub sees a moving number

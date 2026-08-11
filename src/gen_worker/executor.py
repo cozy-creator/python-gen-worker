@@ -261,6 +261,12 @@ EVENT_CONTENT_TYPE = "application/x-request-event+json"
 # `progress.STALL_WINDOW_S`).
 _STALL_POLL_S = 5.0
 _STUCK_THREAD_RECYCLE_S = 30.0
+# How often the reaper re-asks whether the abandoned handler thread has ended.
+_STUCK_THREAD_POLL_S = 0.5
+# th#1779: how often the request's evidence sampler re-reads process CPU+I/O.
+# Same cadence as the stall poll, so the freshest sample is never older than
+# one poll when the diagnosis is taken.
+_HANDLER_EVIDENCE_INTERVAL_S = _STALL_POLL_S
 # pgw#687: a cancel that never unwinds. Cancellation of a SYNC handler is
 # cooperative — the thread cannot be killed — so a handler that never polls
 # ctx.cancelled (observed: a modelopt calibration loop) keeps the GPU permit
@@ -3049,6 +3055,11 @@ class _Job:
     # where the resolved payload is in scope; 0 means "not applicable"
     # (non-spatial function), never "zero".
     shape: Tuple[int, int, int] = (0, 0, 0)
+    # th#1779: set by the handler THREAD itself when it returns. A sync
+    # handler cannot be killed and its asyncio wrapper task says nothing about
+    # it once cancelled, so this event is the only truthful answer to "is the
+    # abandoned handler still on the card".
+    handler_thread_done: threading.Event = dc_field(default_factory=threading.Event)
     admitted_at: float = dc_field(default_factory=time.monotonic)
     # One JobProgress seq space per job, shared by stream chunks and ctx
     # events so interleaved sends stay monotonic. itertools.count.__next__
@@ -12163,10 +12174,26 @@ class Executor:
         ``progress.self_diagnosis()`` — non-None only when even the FRESHEST
         open counter is stale past its own per-phase window, the same typed
         ``self_stalled`` confession the activity beat reports to the hub.
+
+        th#1779: the gate is given a source of evidence the handler cannot
+        silence by saying nothing.
+        Before, the only counter a serving request opened was ``infer:steps``,
+        which advances only when the handler emits a ctx event — so an endpoint
+        whose render is one long silent library call had a counter frozen at
+        its opening log line, and the "no magic timeouts" gate degenerated into
+        exactly the 300 s wall clock this docstring disclaims. Measured:
+        minimax-h3 `reference-to-video` died `worker_retryable` at exactly
+        300 s on four consecutive attempts while `generate` (126-229 s)
+        squeaked under the same window. ``_HandlerEvidence`` samples the same
+        process CPU + disk I/O signal ``activity.watchdog`` already trusts for
+        wire-silent compiles, so a silent-but-working handler PROVES it is
+        working and a genuinely wedged one still confesses on fact. The
+        diagnosis itself stays registry-wide, as pgw#894 pinned it.
         """
         bound = spec.method if instance is None else getattr(instance, spec.attr_name)
         call_kwargs = {spec.ctx_param: ctx, spec.payload_param: payload, **kwargs}
 
+        owner = f"request:{job.request_id}"
         loop = asyncio.get_running_loop()
         if spec.is_async_gen:
             coro = self._pump_async_gen(job, bound(**call_kwargs))
@@ -12175,30 +12202,34 @@ class Executor:
         elif spec.output_mode == "stream":
             coro = asyncio.to_thread(self._pump_sync_gen, job, bound, call_kwargs, gpu_index, loop)
         else:
-            coro = asyncio.to_thread(self._call_sync, bound, call_kwargs, gpu_index)
+            coro = asyncio.to_thread(self._call_sync, job, bound, call_kwargs, gpu_index)
 
         job.exec_task = asyncio.ensure_future(coro)
         # th#1111: the handler window stage_ms reconciles against (the same
         # interval runtime_ms measures).
         ctx._stages.handler_open()
         try:
-            while True:
-                try:
-                    return await asyncio.wait_for(
-                        asyncio.shield(job.exec_task), _STALL_POLL_S)
-                except asyncio.TimeoutError:
-                    stalled = progress_mod.self_diagnosis()
-                    if stalled is None:
-                        continue  # advancing (or evidence-free): keep waiting
-                    ctx._cancel()
-                    job.exec_task.cancel()
-                    if not spec.is_async:
-                        self._reap_stuck_thread(job)
-                    raise _ExecutionStalled(
-                        f"self_stalled: counter {stalled.name!r} "
-                        f"({stalled.unit}) has not advanced for "
-                        f"{stalled.age_s:.0f}s (window {stalled.window_s:.0f}s)"
-                    ) from None
+            with _HandlerEvidence(owner):
+                while True:
+                    try:
+                        return await asyncio.wait_for(
+                            asyncio.shield(job.exec_task), _STALL_POLL_S)
+                    except asyncio.TimeoutError:
+                        # pgw#894 pins this UNSCOPED on purpose: the loop's
+                        # question is "is this process wedged", and many
+                        # handlers register no counter of their own.
+                        stalled = progress_mod.self_diagnosis()
+                        if stalled is None:
+                            continue  # advancing (or evidence-free): keep waiting
+                        ctx._cancel()
+                        job.exec_task.cancel()
+                        if not spec.is_async:
+                            self._reap_stuck_thread(job)
+                        raise _ExecutionStalled(
+                            f"self_stalled: counter {stalled.name!r} "
+                            f"({stalled.unit}) has not advanced for "
+                            f"{stalled.age_s:.0f}s (window {stalled.window_s:.0f}s)"
+                        ) from None
         except asyncio.CancelledError:
             # CancelJob path: the exec task was cancelled underneath us.
             raise CanceledError("canceled")
@@ -12206,30 +12237,49 @@ class Executor:
             ctx._stages.handler_close()
 
     @staticmethod
-    def _call_sync(bound: Callable[..., Any], call_kwargs: Dict[str, Any], gpu_index: int) -> Any:
+    def _call_sync(
+        job: _Job, bound: Callable[..., Any], call_kwargs: Dict[str, Any], gpu_index: int,
+    ) -> Any:
         if torch is not None and torch.cuda.is_available():
             try:
                 torch.cuda.set_device(gpu_index)
             except Exception:
                 pass
-        return bound(**call_kwargs)
+        try:
+            return bound(**call_kwargs)
+        finally:
+            # th#1779: the ONLY honest report that the handler THREAD is gone.
+            job.handler_thread_done.set()
 
     def _reap_stuck_thread(self, job: _Job) -> None:
         """Deadline fired but the sync handler thread may not die. If it's
-        still running after the recycle grace, exit so the pod is recycled."""
+        still running after the recycle grace, exit so the pod is recycled.
+
+        th#1779: this watched ``job.exec_task`` — the task the caller had just
+        CANCELLED one line earlier — so ``shield(...)`` re-raised that
+        cancellation immediately, the ``except BaseException`` arm read it as
+        "thread finished" and the reaper never fired once. A sync handler
+        cannot be killed, so the abandoned thread kept denoising on the card
+        while the hub re-dispatched the same request onto the same pod:
+        measured across four attempts on one H100, reserved VRAM ratcheted
+        59.0 -> 75.1 -> 75.8 -> 76.7 GiB with concurrent renders stacking up.
+        The thread's own completion event is the only thing that can answer
+        the question the reaper asks.
+        """
 
         async def _watch() -> None:
-            assert job.exec_task is not None
-            try:
-                await asyncio.wait_for(asyncio.shield(job.exec_task), _STUCK_THREAD_RECYCLE_S)
-            except asyncio.TimeoutError:
-                logger.critical(
-                    "handler thread for %s ignored deadline+cancel for %.0fs; "
-                    "recycling worker process", job.request_id, _STUCK_THREAD_RECYCLE_S,
-                )
-                self._process_exit(70)
-            except BaseException:
-                pass  # thread finished (with error) — no recycle needed
+            done = job.handler_thread_done
+            deadline = time.monotonic() + _STUCK_THREAD_RECYCLE_S
+            while not done.is_set():
+                if time.monotonic() >= deadline:
+                    logger.critical(
+                        "handler thread for %s ignored deadline+cancel for %.0fs; "
+                        "recycling worker process", job.request_id, _STUCK_THREAD_RECYCLE_S,
+                    )
+                    self._process_exit(70)
+                    return
+                await asyncio.sleep(_STUCK_THREAD_POLL_S)
+            # Thread finished (with error or otherwise) — no recycle needed.
 
         asyncio.create_task(_watch(), name=f"reap-{job.request_id}")
 
@@ -12331,17 +12381,20 @@ class Executor:
             except Exception:
                 pass
         acc = StreamAccumulator()
-        for item in bound(**call_kwargs):
-            if job.ctx is not None:
-                job.ctx.raise_if_cancelled()
-            enc = self._encode_chunk(item)
-            if enc is None:
-                break
-            acc.add(item)
-            fut = asyncio.run_coroutine_threadsafe(
-                self._emit_progress(job, next(job.seq), enc[0], enc[1]), loop
-            )
-            fut.result()  # backpressure: block the producer on queue overflow
+        try:
+            for item in bound(**call_kwargs):
+                if job.ctx is not None:
+                    job.ctx.raise_if_cancelled()
+                enc = self._encode_chunk(item)
+                if enc is None:
+                    break
+                acc.add(item)
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._emit_progress(job, next(job.seq), enc[0], enc[1]), loop
+                )
+                fut.result()  # backpressure: block the producer on queue overflow
+        finally:
+            job.handler_thread_done.set()  # th#1779, same contract as _call_sync
         return acc.result()
 
     # ---- results -----------------------------------------------------------
@@ -12549,6 +12602,76 @@ class Executor:
         if not self.in_flight_keys():
             self._idle.set()
             self._bg_quiet.set()
+
+
+class _HandlerEvidence:
+    """th#1779: loop-independent proof that a SERVING handler is working.
+
+    ``activity.watchdog`` has done exactly this for wire-silent load/compile
+    phases since gw#621; a serving request had no equivalent, so the only
+    counter open under it was ``infer:steps`` — which advances on ctx events
+    and therefore measures how CHATTY the endpoint is, not whether it is
+    working. An endpoint whose render is one long silent library call froze
+    that counter at its opening log line and was condemned at the family's
+    300 s window: measured, minimax-h3 `reference-to-video` died
+    `worker_retryable` at exactly 300 s on four consecutive attempts, while
+    `generate` (126-229 s of the same silence) fit under the window and
+    passed. That is a wall clock wearing a progress counter's name.
+
+    The evidence is process+children CPU seconds plus process disk I/O MB —
+    ``activity_mod.default_evidence``, unchanged. A GPU render burns CPU issuing
+    and synchronising kernels; a deadlocked or wedged process burns neither,
+    which is the distinction the gate is supposed to make. Registered under
+    the REQUEST's scope so ``self_diagnosis(owner)`` answers about this
+    request, so the counter dies with the handler (pgw#962) and cannot answer
+    for work it is not doing (pgw#894). The in-call diagnosis stays
+    registry-wide, which pgw#894 pinned deliberately.
+    """
+
+    def __init__(
+        self,
+        owner: str,
+        *,
+        interval_s: float = _HANDLER_EVIDENCE_INTERVAL_S,
+        evidence: Optional[Callable[[], float]] = None,
+    ) -> None:
+        self._owner = owner
+        self._interval = interval_s
+        self._evidence = evidence or activity_mod.default_evidence
+        self._stop = threading.Event()
+        self._counter: Optional[progress_mod.Counter] = None
+        self._thread: Optional[threading.Thread] = None
+
+    def _run(self) -> None:
+        try:
+            base = last = self._evidence()
+        except Exception:
+            base = last = 0.0
+        while not self._stop.wait(self._interval):
+            try:
+                now = self._evidence()
+            except Exception:
+                continue
+            if now - last >= activity_mod.EVIDENCE_EPS and self._counter is not None:
+                last = now
+                self._counter.set_done(now - base)
+
+    def __enter__(self) -> "_HandlerEvidence":
+        self._counter = progress_mod.counter(
+            "evidence:handler", progress_mod.UNIT_EVIDENCE, owner=self._owner)
+        self._thread = threading.Thread(
+            target=self._run, name="handler-evidence", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        if self._counter is not None:
+            # A counter left open after its producer stopped is the min-age
+            # counter of work nobody is doing (pgw#962).
+            self._counter.finish()
 
 
 class _ExecutionStalled(Exception):
