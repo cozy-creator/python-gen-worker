@@ -24,37 +24,64 @@ from the credential; th#1722 §C). Repo checkpoints do NOT use
 this client anymore — they publish via the /commits API (gw#471,
 gen_worker.convert.hub).
 
-# HTTP stack (issues #13 / #385)
+# HTTP stack (issues #13 / #385 / pgw#1125)
 
-Connections are scoped to ONE save (``presigned_upload_file`` call) and
-torn down with it — never shared across saves:
+The two planes have DIFFERENT connection scopes, and the boundary is a
+ratified safety property — do not blur it:
 
-  * control plane (create / complete / abort) — one ``requests.Session``
-    per save, so create -> complete reuses the tensorhub connection
-    instead of paying a fresh TCP+TLS handshake per POST (bare
-    ``requests.post`` builds a new Session per call). Auth headers are
-    passed per-request, so worker JWT rotation never forces a new
-    connection.
-  * data plane (part PUTs) — one ``_upload_transport.PutPool`` per save,
-    shared by first attempts so consecutive parts reuse the R2
-    connection. Retry attempts always get a fresh ``urllib3.PoolManager``
-    — the structural guard against the stale-socket
-    ``SSLV3_ALERT_BAD_RECORD_MAC`` R2 incident (see ``_upload_transport``).
+  * control plane (create / complete / abort, worker -> tensorhub) — one
+    PROCESS-scoped ``requests.Session`` per hub origin, reused across
+    saves (th#1795 candidate 3). Measured 2026-08-11 on the standing
+    stack: ``upload.create`` is 589 ms worker-side against a 4.5 ms hub
+    handler, i.e. ~584 ms of pure control-plane network, of which one
+    fresh TCP+TLS handshake through the tunnel is 109-155 ms — paid on
+    every single save because the session used to die with it. Auth
+    headers are passed per-request, so worker JWT rotation never forces a
+    new connection, and the session carries SOCKETS ONLY: cookies are
+    refused so no server state crosses saves.
+    Reuse buys a new failure mode — a socket the peer closed while the
+    pod was denoising — so a control-plane POST that fails to CONNECT on
+    a REUSED session evicts it and retries once on a fresh one. On a
+    session this call just built there is no retry: that error is the hub
+    being down, not staleness, and inventing a retry there would change a
+    behaviour nobody measured.
+  * data plane (part PUTs, worker -> R2) — one
+    ``_upload_transport.PutPool`` per save, torn down with it, NEVER
+    process-scoped. Retry attempts always get a fresh
+    ``urllib3.PoolManager`` — the structural guard against the
+    stale-socket ``SSLV3_ALERT_BAD_RECORD_MAC`` R2 incident (see
+    ``_upload_transport``). That incident is why per-save scoping exists
+    at all; it was an R2 edge behaviour, and the control plane is a
+    different peer with a different failure history.
+
+**What the saving is CONDITIONAL on, so the next pod leg measures the
+right thing.** A handshake is only avoided when the hub (and anything
+between, ngrok included) still holds the socket open across the gap
+between two saves — a gap that is one whole generation long. If the peer
+drops it every time, urllib3's dropped-connection check replaces it
+silently, this costs nothing and buys nothing, and THAT is the finding:
+it would mean create's remaining ~430 ms is one tunnel round trip that
+only topology (th#1795 candidate 6) can remove. Read `upload.create` on
+saves 2..N of a pod's life, never on the first — the first save of a
+process builds the session and pays the handshake exactly as before.
 """
 
 from __future__ import annotations
 
+import http.cookiejar
 import json
 import logging
 import os
 import threading
 import time
+import urllib.parse
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
 from blake3 import blake3
 
 from ._upload_transport import (
@@ -145,8 +172,108 @@ __all__ = [
     "STREAM_CHUNK_BYTES",
     "PresignedUploadResult",
     "blake3_hash_file",
+    "control_plane_session",
     "presigned_upload_file",
+    "reset_control_plane_sessions",
 ]
+
+
+# --------------------------------------------------------------------------
+# Control-plane keepalive (th#1795 candidate 3) — see the module docstring for
+# the boundary this must not cross. One session per HUB ORIGIN, not one
+# global: an eviction then drops the poisoned peer's pool and leaves every
+# other peer's connections alone.
+# --------------------------------------------------------------------------
+#: Matches ``_PRESIGNED_PUT_BUDGET``: an endpoint author saving from N threads
+#: can have at most that many control-plane POSTs in flight beside each other.
+_CONTROL_POOL_MAXSIZE = _PRESIGNED_PUT_BUDGET
+#: A worker talks to exactly one hub. The bound only exists so a caller that
+#: rotates base URLs cannot grow this map without limit.
+_MAX_CONTROL_ORIGINS = 8
+
+_control_sessions: Dict[str, requests.Session] = {}
+_control_sessions_lock = threading.Lock()
+
+
+def _control_origin(base_url: str) -> str:
+    parts = urllib.parse.urlsplit(str(base_url or ""))
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _new_control_session() -> requests.Session:
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=2,
+        pool_maxsize=_CONTROL_POOL_MAXSIZE,
+        # This module owns retry classification (create: once, on a reused
+        # socket only; complete: `_FINALIZE_RETRY_ATTEMPTS`). A second,
+        # invisible budget inside urllib3 would replay a POST we decided was
+        # terminal.
+        max_retries=0,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    # SOCKETS ONLY, never state. A process-scoped session that accumulated
+    # cookies would carry one save's server state into the next one — auth is
+    # per-request headers and nothing else may persist.
+    session.cookies.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
+    return session
+
+
+def control_plane_session(base_url: str) -> Tuple[requests.Session, bool]:
+    """The process-scoped hub session for ``base_url``.
+
+    Returns ``(session, fresh)``. ``fresh`` is True when this call built the
+    session — the caller uses it to tell "the hub refused the connection"
+    (fresh) apart from "the pooled socket was dead" (reused), which is the
+    only difference that justifies a retry.
+    """
+    origin = _control_origin(base_url)
+    with _control_sessions_lock:
+        existing = _control_sessions.get(origin)
+        if existing is not None:
+            return existing, False
+        if len(_control_sessions) >= _MAX_CONTROL_ORIGINS:
+            _control_sessions.clear()
+        session = _new_control_session()
+        _control_sessions[origin] = session
+        return session, True
+
+
+def _evict_control_session(base_url: str, session: requests.Session) -> None:
+    """Drop a session whose pooled socket proved dead, by IDENTITY.
+
+    Compare-and-swap: a sibling thread may already have replaced it, and
+    dropping the replacement would make the next save pay a handshake for
+    nothing. The evicted session is NOT closed — another thread may be
+    mid-request on it, and its own connections close when the last reference
+    goes.
+    """
+    origin = _control_origin(base_url)
+    with _control_sessions_lock:
+        if _control_sessions.get(origin) is session:
+            _control_sessions.pop(origin, None)
+
+
+def reset_control_plane_sessions() -> None:
+    """Close and forget every control-plane session (tests, teardown)."""
+    with _control_sessions_lock:
+        sessions = list(_control_sessions.values())
+        _control_sessions.clear()
+    for session in sessions:
+        try:
+            session.close()
+        except Exception:
+            logger.debug("control-plane session close failed", exc_info=True)
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """True for "the socket was dead", false for "the hub answered slowly".
+
+    A timeout is deliberately NOT in here: it means the request may be live on
+    the server, and the stale-socket case this covers cannot present as one.
+    """
+    return isinstance(exc, requests.ConnectionError) and not isinstance(exc, requests.Timeout)
 
 
 def _response_body_sample(resp: requests.Response, limit: int = 300) -> str:
@@ -282,9 +409,11 @@ def presigned_upload_file(
             commit body's `provenance` object (worker-addable stamp fields),
             not through this seam.
     """
-    # Per-save connection scope (issue #385): one hub Session + one R2 PUT
-    # pool live exactly as long as this save, then close. Never cross-request.
-    with requests.Session() as session, PutPool() as put_pool:
+    # Two scopes, deliberately different (see the module docstring): the R2
+    # PUT pool lives exactly as long as this save and then closes, while the
+    # hub control-plane session is process-scoped and survives it.
+    session, session_is_fresh = control_plane_session(base_url)
+    with PutPool() as put_pool:
         return _presigned_upload_file_scoped(
             file_path=file_path,
             base_url=base_url,
@@ -298,8 +427,61 @@ def presigned_upload_file(
             complete_extra=complete_extra,
             on_phase=on_phase,
             session=session,
+            session_is_fresh=session_is_fresh,
             put_pool=put_pool,
         )
+
+
+def _post_create(
+    *,
+    session: requests.Session,
+    session_is_fresh: bool,
+    base_url: str,
+    url: str,
+    headers: Dict[str, str],
+    body: str,
+) -> Tuple[requests.Response, requests.Session]:
+    """POST the create leg, retrying ONCE if a REUSED socket was already dead.
+
+    Returns the response and the session it came from — the caller rebinds to
+    it so this save's ``/complete`` reuses the connection create just opened
+    rather than paying a second handshake behind the eviction.
+
+    **Why this retry is safe, i.e. what a duplicate create costs.** The create
+    leg opens an upload session and mints presigns; it writes no media row and
+    publishes nothing — the object only exists once ``/complete`` runs, and
+    this save completes exactly one of the two sessions. A duplicate is an
+    unfinished session the hub GCs, and the direct-final path (th#1795) makes
+    it emptier still: the bytes go straight to the content-addressed key the
+    digest names, so two sessions for the same save even name the same key.
+    The one real charge is the capability grant's budget, which tensorhub
+    debits AT CREATE (`media_presigned.go` `enforceCapabilityGrantBudget(…, 1,
+    size)`): a duplicate spends 1 of the request's `upload_media` `max_count`,
+    minted at 64 (`scheduler_dispatch.go:3003`) against the 1-4 assets a
+    request actually saves. That is what bounds this to ONE retry.
+    ``/complete`` is a different question and is handled where it lives —
+    ``_complete_upload_session`` already retries it, on the hub contract that
+    a finalized session answers the same payload again.
+
+    **Why only on a REUSED session.** Process-scoped keepalive is what
+    introduced the dead-socket case; a session this call just built has no
+    pooled socket to be stale, so a connection error on it is the hub being
+    unreachable. Retrying that would be a behaviour change nobody measured —
+    create had no retry before this, and still has none for that case.
+    """
+    try:
+        return session.post(url, headers=headers, data=body, timeout=_CREATE_TIMEOUT_S), session
+    except requests.RequestException as exc:
+        if session_is_fresh or not _is_connection_error(exc):
+            raise
+        _evict_control_session(base_url, session)
+        logger.info(
+            "control-plane keepalive socket was dead on upload create (%s) — "
+            "retrying once on a fresh connection",
+            type(exc).__name__,
+        )
+    retry_session, _ = control_plane_session(base_url)
+    return retry_session.post(url, headers=headers, data=body, timeout=_CREATE_TIMEOUT_S), retry_session
 
 
 def _presigned_upload_file_scoped(
@@ -317,6 +499,7 @@ def _presigned_upload_file_scoped(
     session: requests.Session,
     put_pool: PutPool,
     on_phase: Optional[Any] = None,
+    session_is_fresh: bool = True,
 ) -> PresignedUploadResult:
     url = f"{base_url}{endpoint_path}"
 
@@ -330,7 +513,14 @@ def _presigned_upload_file_scoped(
 
     try:
         with _phase(on_phase, "create"):
-            resp = session.post(url, headers=create_headers, data=json.dumps(payload), timeout=_CREATE_TIMEOUT_S)
+            resp, session = _post_create(
+                session=session,
+                session_is_fresh=session_is_fresh,
+                base_url=base_url,
+                url=url,
+                headers=create_headers,
+                body=json.dumps(payload),
+            )
     except requests.RequestException as e:
         raise ArtifactTransferError(
             f"tensorhub upload create request failed: {e}",
@@ -583,8 +773,14 @@ def _poll_until_finalized(
                 complete_url, headers=complete_headers, data=json.dumps(payload),
                 timeout=_FINALIZE_TIMEOUT_S,
             )
-        except requests.RequestException:
-            continue  # no answer: the silence window is the only give-up
+        except requests.RequestException as exc:
+            # No answer: the silence window is the only give-up. Drop the
+            # keepalive session first if the socket itself died, so the next
+            # poll does not replay a dead connection.
+            if _is_connection_error(exc):
+                _evict_control_session(complete_url, session)
+                session, _ = control_plane_session(complete_url)
+            continue
         code = resp.status_code
         if code in (401, 403):
             raise AuthError(f"file save unauthorized ({code})")
@@ -632,6 +828,16 @@ def _complete_upload_session(
                 retryable=True,
                 cause_type=type(e).__name__,
             )
+            # pgw#1125: `/complete` was ALREADY retried here on a connection
+            # failure, and the hub contract that makes that safe is unchanged
+            # (a finalized session answers the same success payload again —
+            # `_poll_until_finalized`). What keepalive adds is a pool that can
+            # hand the retry the same dead socket, so evict it by identity and
+            # take a fresh session for the next attempt. No new retry, no new
+            # idempotency assumption.
+            if _is_connection_error(e):
+                _evict_control_session(complete_url, session)
+                session, _ = control_plane_session(complete_url)
         else:
             code = resp.status_code
             if code in (401, 403):
