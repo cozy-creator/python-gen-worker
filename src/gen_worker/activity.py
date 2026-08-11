@@ -179,6 +179,15 @@ KIND_JIT_COMPILE = "jit_compile"
 # imported it. `phase=minted` carries the roll-up, `phase=entry:<name>` one
 # declared graph class, `phase=stage:<name>` a mint-wide span (package/seal).
 KIND_AOT_MINT = "aot_mint_phases"
+# pgw#1134: a MEASURE-ONLY run (`gen_worker.measure_child`) — an operator
+# exporting and compiling a declared class set to find out what it costs, so a
+# declared mint blocker whose exit criterion is a number can be closed with
+# one. Deliberately NOT `aot_mint_phases`: nothing was minted, nothing was
+# published, and a measurement counted as a mint would be the first row of a
+# lie. `phase` is the outcome (`measured` / `measured_export` / a
+# `measure_child.REASONS` token), `duration_ms` the run's wall, `detail` the
+# peaks in the mint's own vocabulary.
+KIND_MEASURE_ONLY = "measure_only"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.

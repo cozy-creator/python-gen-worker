@@ -156,6 +156,20 @@ class MintBlocker(msgspec.Struct, frozen=True):
     Blockers gate MINTING ONLY. A blocked family serves eagerly, exactly as it
     does today, and blockers are deliberately NOT a contract axis — resolving
     one must not re-key a cell.
+
+    When ``resolves_when`` is a MEASUREMENT (pgw#1134)
+    -------------------------------------------------
+    The mint gate is closed while the blocker is open, so the run that would
+    answer it cannot be a mint. Take the measurement with the measure-only
+    child, which is gated by nothing and can publish nothing::
+
+        python -m gen_worker.measure_child <request>.mint.json <report>.json
+
+    It exports (and, unless ``--export-only``, AOT-compiles) the declared class
+    set and writes ``export_peak_device_bytes`` /
+    ``export_peak_device_reserved_bytes`` and a per-entry outcome. Cite that
+    report in ``resolution=`` — measuring resolves nothing by itself, and a
+    ``resolved=True`` with no citation is refused here.
     """
 
     id: str
