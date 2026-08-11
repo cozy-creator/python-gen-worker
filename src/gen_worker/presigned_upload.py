@@ -19,7 +19,8 @@ This is the standard tensorhub upload client. The same control-plane shape is
 used at different route prefixes for datasets
 (/api/v1/datasets/:dataset_id/upload-sessions/:session_id/uploads),
 endpoint source (/api/v1/endpoints/:owner/:endpoint/releases/uploads),
-and user media (/api/v1/media/:owner/uploads). Repo checkpoints do NOT use
+and user media (/api/v1/media/uploads — org-less, the hub derives the org
+from the credential; th#1722 §C). Repo checkpoints do NOT use
 this client anymore — they publish via the /commits API (gw#471,
 gen_worker.convert.hub).
 
@@ -263,8 +264,8 @@ def presigned_upload_file(
     Args:
         file_path: Local path to the file.
         base_url: TensorHub base URL.
-        endpoint_path: e.g. "/api/v1/media/:owner/uploads" or "/api/v1/repos/.../uploads".
-        headers: Auth headers (Authorization, X-Cozy-Owner).
+        endpoint_path: e.g. "/api/v1/media/uploads" or "/api/v1/repos/.../uploads".
+        headers: Auth headers (Authorization).
         create_payload: Additional fields for the create POST (ref, path, request_id, etc.).
         blake3_hex: Pre-computed BLAKE3 hash of the file.
         size_bytes: File size in bytes.

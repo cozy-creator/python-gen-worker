@@ -91,7 +91,7 @@ def test_the_three_legs_are_attributed_separately(tmp_path) -> None:
         result = presigned_upload_file(
             file_path=str(src),
             base_url=base,
-            endpoint_path="/api/v1/media/o/uploads",
+            endpoint_path="/api/v1/media/uploads",
             headers={"Authorization": "Bearer t"},
             create_payload={"ref": "out.webp"},
             blake3_hex="0" * 64,
@@ -136,7 +136,7 @@ def test_a_failed_leg_still_reports_its_cost(tmp_path) -> None:
             presigned_upload_file(
                 file_path=str(src),
                 base_url=base,
-                endpoint_path="/api/v1/media/o/uploads",
+                endpoint_path="/api/v1/media/uploads",
                 headers={"Authorization": "Bearer t"},
                 create_payload={"ref": "out.webp"},
                 blake3_hex="0" * 64,
@@ -256,7 +256,7 @@ def test_a_direct_final_grant_is_put_once_with_the_signed_headers_verbatim(tmp_p
         result = presigned_upload_file(
             file_path=str(src),
             base_url=base,
-            endpoint_path="/api/v1/media/o/uploads",
+            endpoint_path="/api/v1/media/uploads",
             headers={"Authorization": "Bearer t"},
             create_payload={"ref": "out.webp", "sha256": "a" * 64},
             blake3_hex="0" * 64,
