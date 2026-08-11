@@ -166,8 +166,10 @@ def verify_declared_identity(
 
 
 #: The entry-block field carrying the node-level digest of the traced program
-#: (``graph_hash.graph_hash``), stamped by ``aot_mint.keying_block``. METADATA,
-#: never a key axis — see :func:`verify_graph_witness`.
+#: (``graph_hash.graph_hash``), stamped by ``aot_mint.keying_block``. Since
+#: pgw#1031 (option a) it is FOLDED into ``class_hash`` (the key), and it also
+#: stays recorded here as a top-level sibling for the adopt backstop — see
+#: :func:`verify_graph_witness`.
 GRAPH_WITNESS_FIELD = "graph_witness"
 
 
@@ -175,25 +177,26 @@ def verify_graph_witness(
     meta: Mapping[str, Any], witnesses: Mapping[str, str],
 ) -> str:
     """``''`` when the cell's recorded graph witnesses equal the ones this pod
-    traced, else the reason. pgw#1031's fail-closed floor.
+    traced, else the reason. pgw#1031's fail-closed backstop.
 
-    The cell key is an INGRESS identity: ``class_hash`` folds target, fork,
-    class dims, declared ranges, the graph-interface block (constant FQNs,
-    lifted inputs, pytree spec, specialization) and the declared envelope —
-    everything about how a graph is CALLED and nothing about what it COMPUTES.
-    Two endpoints whose bodies differ while their declarations agree therefore
-    mint under one ``ck1`` key: measured 2026-08-10 on ``micro-pad32`` vs
-    ``micro-pad32-branchy`` (112 vs 102 nodes, byte-identical keying block,
-    identical key). Pull-by-key adoption (§4.27/pgw#1090) then hands one
-    endpoint the other's kernels, and only the arm-time numerics gate — a
-    tolerance test, not identity — stands between that and served output.
+    Since pgw#1031 (option a) the cell key IS the traced computation:
+    ``class_hash`` folds ``graph_witness`` (the node-level body digest) beside
+    target, fork, class dims, declared ranges, the graph-interface block and
+    the declared envelope, so two endpoints whose bodies differ while their
+    declarations agree now key APART — a collision is a MISS, not a wrong hit.
+    Before the fold they minted under one ``ck1`` key (measured 2026-08-10 on
+    ``micro-pad32`` vs ``micro-pad32-branchy``: 112 vs 102 nodes, byte-identical
+    keying block, identical key), and pull-by-key adoption (§4.27/pgw#1090)
+    would hand one endpoint the other's kernels with only the arm-time numerics
+    tolerance between that and served output.
 
-    This closes it WITHOUT re-keying the fleet: the mint records
-    ``graph_witness`` per entry, the adopter derives its own from the same
-    traced programs its key came from (``boot_key``), and a disagreement is a
-    typed refusal naming both digests. The pod then boots exactly as it booted
-    before pull-by-key existed — eager, then mint — which is the correct
-    outcome for "this cell is not my computation".
+    This function is the belt-and-braces beneath the now-sound key: the mint
+    records ``graph_witness`` per entry, the adopter derives its own from the
+    same traced programs its key came from (``boot_key``), and a disagreement —
+    a witness-blind cell, a hash-broken entry, a cross forced by any non-key
+    path — is a typed refusal naming both digests. The pod then boots exactly
+    as it booted before pull-by-key existed — eager, then mint — which is the
+    correct outcome for "this cell is not my computation".
 
     Fail-closed in both directions, the doctrine
     :func:`verify_declared_identity` already keeps: a cell that is SILENT on an
