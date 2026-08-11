@@ -49,7 +49,8 @@ from .api.derive import (
 from .api.formula import RuntimeFormula
 from .api.slot import OBJECTIVES, ObjectiveMismatchError, ResolvedSlot, Slot
 from .families import GenerationDefaults
-from .models.provision import arm_compile, report_applied_lane
+from .models.provision import (arm_compile, report_applied_attention,
+                               report_applied_lane)
 from .text_pin import TextLengthExceededError, pad_text_sequence
 from .geometry import (
     FamilyGeometry,
@@ -151,6 +152,7 @@ __all__ = [
     "NoWarmup",
     "arm_compile",
     # pgw#1104: the serve-time recipe reports the lane it APPLIED.
+    "report_applied_attention",
     "report_applied_lane",
     # SDK v2 per-request views + text pinning.
     "for_request",
