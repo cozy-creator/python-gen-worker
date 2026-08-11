@@ -934,24 +934,24 @@ def _local_executing_execution_lane(
     (author kernels execute it); otherwise the most-quantized binding's lane
     (the local twin of Executor._served_lane, eager execution)."""
 
+    body = ""
     if execution_lane_str and handles:
         try:
             req = lanespec.parse_execution_lane_spec(execution_lane_str)
             if req.execution_lane is not None and lanespec.execution_lane_body_id(req.execution_lane) in handles:
-                return lanespec.execution_lane_id(req.execution_lane)
+                body = lanespec.execution_lane_body_id(req.execution_lane)
         except ValueError:
             pass
-    ranked = {b: i for i, b in enumerate(lanespec.known_execution_lanes())}
-    best, best_key = None, (2, len(ranked) + 1)
-    for b in (bindings or {}).values():
-        execution_lane = lanespec.execution_lane_of_binding(
-            getattr(b, "flavor", "") or "",
-            getattr(b, "storage_dtype", "") or "", False)
-        quant = 1 if lanespec.family_of(execution_lane) == lanespec.FAMILY_BF16 else 0
-        key = (quant, ranked.get(lanespec.execution_lane_id(execution_lane), len(ranked)))
-        if best is None or key < best_key:
-            best, best_key = execution_lane, key
-    return lanespec.execution_lane_id(best) if best is not None else "bf16-w16a16+eager"
+    if not body:
+        body = lanespec.most_quantized_body(
+            lanespec.execution_lane_body_of_binding(
+                getattr(b, "flavor", "") or "",
+                getattr(b, "storage_dtype", "") or "")
+            for b in (bindings or {}).values())
+    # ie#655: a local run compiles nothing, so the execution axis is eager —
+    # including for a compiled-only body, whose PLAN is not what happened here.
+    return lanespec.execution_lane_id(
+        lanespec.observed_execution_lane(body, False))
 
 
 def _apply_execution_lane_to_bindings(bindings: Dict[str, Any], execution_lane_str: str) -> Dict[str, Any]:

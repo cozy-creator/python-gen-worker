@@ -157,9 +157,12 @@ def test_a_serve_time_recipe_moves_the_reported_lane(boot) -> None:
         assert [a.body for a in rec.applied_lanes] == ["fp8-w8a8-dynamic"]
         # The binding on its own still says bf16 — the divergence is real,
         # not a mis-resolved binding.
-        assert lanespec.execution_lane_body_id(
-            ex._bound_execution_lane(eff, compiled=False)) == "bf16-w16a16"
-        assert ex._served_execution_lane(eff) == "fp8-w8a8-dynamic+compiled"
+        assert ex._bound_execution_body(eff) == "bf16-w16a16"
+        # ie#655: this rig has no compiled cell, so the honest execution axis
+        # is `+eager`. Until ie#655 this line read `+compiled` — the lane
+        # table's compiled-only PLAN for the w8a8 body coerced an observed
+        # eager posture, and the test encoded the over-claim.
+        assert ex._served_execution_lane(eff) == "fp8-w8a8-dynamic+eager"
 
     asyncio.run(_go())
 
@@ -233,15 +236,24 @@ def test_an_unknown_lane_body_is_refused_at_report_time() -> None:
         gen_worker.report_applied_lane("transformer", "fp8-w8a8-dynamic+compiled")
 
 
-def test_every_reportable_body_composes_into_a_known_lane_id() -> None:
-    """Whatever an endpoint may report must land inside `known_execution_lanes()`
-    — the byte-identical twin of the hub's `precision.KnownExecutionLanes()`,
-    which every verdict, cell and price joins on."""
-    known = set(lanespec.known_execution_lanes())
+def test_every_reportable_body_composes_at_either_observed_posture() -> None:
+    """Whatever an endpoint may report must compose into a lane whose BODY is
+    the platform vocabulary (`known_execution_lane_bodies()`, the byte-identical
+    twin of the hub's `precision.KnownExecutionLaneBodies()` — what verdicts
+    key on) at WHICHEVER posture was observed.
+
+    ie#655: the reported set is deliberately WIDER than
+    `known_execution_lanes()`. That list is the lanes the platform CHOOSES —
+    an owner ladder, an admin override, a resolution — and `fp8-w8a8-dynamic`
+    is compiled-only there because eager w8a8 is unmeasured, not because it
+    cannot happen. It happens: a serve-time recipe quantizes and the self-mint
+    then declines (wan-2.2, `insufficient_vram` on an H100). Naming that state
+    is the whole point; coercing it into the choosable set is the defect."""
     for body in lanespec.known_execution_lane_bodies():
         for compiled in (True, False):
-            lane = lanespec.execution_lane_of_body(body, compiled)
-            assert lanespec.execution_lane_id(lane) in known
+            lane = lanespec.observed_execution_lane(body, compiled)
+            assert lane.execution == ("compiled" if compiled else "eager")
+            assert lanespec.execution_lane_body_id(lane) == body
 
 
 def test_a_report_outside_setup_is_not_attributed_and_never_raises() -> None:
