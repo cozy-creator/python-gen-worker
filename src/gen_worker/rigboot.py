@@ -94,7 +94,15 @@ class NoDriver(RuntimeError):
 
 
 class DriverTooOld(RuntimeError):
-    """The host driver cannot run the required CUDA line, and no repair worked."""
+    """The host driver cannot run the required CUDA line, and no repair worked.
+
+    Carries the full :func:`ensure_cuda_line` record on ``.record`` so a caller
+    that wants to bank the evidence does not have to re-run the probe.
+    """
+
+    def __init__(self, message: str, record: Optional[dict[str, Any]] = None) -> None:
+        super().__init__(message)
+        self.record: dict[str, Any] = record or {}
 
 
 class CudaUnusable(RuntimeError):
@@ -511,7 +519,8 @@ def assert_cuda_usable(cuda: str, *, log: Optional[TextIO] = None) -> dict[str, 
             f"libcuda did not repair it: {record.get('reason')}\n"
             "RE-ROLL THE HOST. RunPod's driver is per-host; creating another pod "
             "of the same GPU type in the same datacenter can and does draw a "
-            "different one. This is NOT a torch defect (research/RIG-ENV.md §3c)."
+            "different one. This is NOT a torch defect (research/RIG-ENV.md §3c).",
+            record,
         )
     return record
 
@@ -558,12 +567,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 2
 
+    reroll = ""
     try:
-        record = ensure_cuda_line(cuda)
+        record = assert_cuda_usable(cuda)
     except NoDriver as exc:
         print(json.dumps({"path": "no_driver", "error": str(exc)}), flush=True)
         print(str(exc), file=sys.stderr)
         return 92
+    except DriverTooOld as exc:
+        # The CLI and the library agree by construction: one decision path, the
+        # exception carries the diagnosis, the exit code carries the verdict.
+        reroll = str(exc)
+        record = exc.record
 
     print(json.dumps(record, indent=1, default=str), flush=True)
     if args.json:
@@ -573,15 +588,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except OSError as exc:  # noqa: BLE001
             print(f"[rigboot] could not write {args.json}: {exc}", file=sys.stderr)
 
-    if record.get("path") == "reroll":
-        print(
-            "RIGBOOT_REROLL — this host cannot run CUDA "
-            f"{cuda} (driver {record.get('driver')}). Kill the pod and create "
-            "another; do NOT fetch weights, and do NOT diagnose the later "
-            "allocation failure as a torch problem (research/RIG-ENV.md §3c).",
-            file=sys.stderr,
-            flush=True,
-        )
+    if reroll:
+        print(f"RIGBOOT_REROLL — {reroll}", file=sys.stderr, flush=True)
         return 91
     return 0
 

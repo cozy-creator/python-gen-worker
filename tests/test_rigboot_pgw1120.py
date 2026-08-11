@@ -227,13 +227,18 @@ def test_no_gpu_at_all_is_a_different_mistake(monkeypatch) -> None:
 
 
 def test_cli_exit_91_means_reroll(monkeypatch, capsys) -> None:
+    """The CLI and the typed API share ONE decision path."""
     monkeypatch.setattr(
         rigboot,
         "ensure_cuda_line",
         lambda cuda, **k: {"path": "reroll", "driver": "570.211.01", "reason": "x"},
     )
     assert rigboot.main(["--cuda", "13.0"]) == 91
-    assert "RIGBOOT_REROLL" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "RIGBOOT_REROLL" in captured.err
+    assert "RE-ROLL THE HOST" in captured.err
+    # the record still reaches stdout, so a re-rolled attempt banks its evidence
+    assert '"reroll"' in captured.out
 
 
 def test_cli_exit_92_means_no_gpu(monkeypatch) -> None:
@@ -242,6 +247,18 @@ def test_cli_exit_92_means_no_gpu(monkeypatch) -> None:
 
     monkeypatch.setattr(rigboot, "ensure_cuda_line", boom)
     assert rigboot.main(["--cuda", "13.0"]) == 92
+
+
+def test_the_typed_failure_carries_the_record(monkeypatch) -> None:
+    """So a re-roll can bank its evidence without re-probing the dead host."""
+    _host(monkeypatch, "570.211.01")
+    _allocations(monkeypatch, TOO_OLD)
+    monkeypatch.setattr(rigboot, "_install_compat", lambda cuda, log: None)
+    monkeypatch.setattr(rigboot, "_existing_compat_dir", lambda cuda: None)
+    with pytest.raises(rigboot.DriverTooOld) as caught:
+        rigboot.assert_cuda_usable("13.0")
+    assert caught.value.record["driver"] == "570.211.01"
+    assert caught.value.record["path"] == "reroll"
 
 
 def test_cli_exit_0_on_a_usable_host(monkeypatch, tmp_path) -> None:
