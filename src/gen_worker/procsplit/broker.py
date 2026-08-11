@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 import json as _json
 import requests
+from . import actions
 from . import is_compute_child
 from . import frames
 
@@ -105,6 +106,31 @@ def request(
     else:
         resp = requests.request(verb, url, json=json, **kwargs)
     return HubResponse(status_code=resp.status_code, text=resp.text)
+
+
+def viewer_identity() -> Dict[str, str]:
+    """Ask the parent WHO THIS POD IS (pgw#1122).
+
+    Returns ``{"endpoint_id": ..., "org_id": ...}`` — the two hub-stamped
+    viewer claims, decoded by the parent out of the credential it holds. The
+    token itself never crosses the seam: a claim is not a credential, and the
+    whole point of delta 1 is that this process never holds one.
+
+    Raises :class:`BrokerError` when there is no parent or the parent will not
+    answer. It does NOT return an empty identity in that case — "the hub
+    stamped nothing" and "nobody could be asked" are different facts, and
+    collapsing them is the pgw#1122 defect.
+    """
+    b = _broker
+    if b is None:
+        raise BrokerError(
+            "no control seam: this process holds no worker credential and has "
+            "no parent to ask who it is")
+    result = b.call_action(actions.ACTION_VIEWER_IDENTITY, {})
+    return {
+        "endpoint_id": str(result.get("endpoint_id") or ""),
+        "org_id": str(result.get("org_id") or ""),
+    }
 
 
 def report_detail(detail: str) -> bool:

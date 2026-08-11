@@ -228,6 +228,12 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "COMPILED_DEGRADED": "compiled_degraded",
         "ARMED_TARGET_UNRESOLVED": "armed_target_unresolved",
         "NO_COMPILE_CANDIDATES": "no_compile_candidates",
+        # pgw#1122: a cell this pod resolved BY ITS OWN derived key (§4.27
+        # boot-adopt) would not arm. Nothing ordered it, so the pod boots as it
+        # booted yesterday — where before this token the refusal escaped setup
+        # as `worker_function_unavailable reason=compile_cell_failed` and the
+        # pod was reaped and replaced (three pods, 2026-08-11).
+        "ADOPTED_CELL_REFUSED": "adopted_cell_refused",
     }
     # The join the ArmOutcome docstring claims: a delegated mint's decline and
     # the serving posture that describes it are ONE token, not two that happen

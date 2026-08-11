@@ -106,6 +106,25 @@ class SplitProbe:
             return ProbeOut(response=f"refused:{exc}")
         return ProbeOut(response=f"signed:{sig.decode(errors='replace')}")
 
+    def who_am_i(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
+        """pgw#1122: resolve THIS POD's identity from inside the compute child.
+
+        The child holds no worker credential by construction, so this is the
+        exact shape that failed on three real pods: a gate in this process
+        asking who it is. It must come back with the endpoint and the org the
+        hub stamped on the PARENT's credential — relayed as claims, never as a
+        token — and it must never come back with two empty strings, which the
+        arm gate reads as "adopt platform-tier only".
+        """
+        from gen_worker import worker_identity
+
+        try:
+            me = worker_identity.viewer()
+        except Exception as exc:
+            return ProbeOut(response=f"refused:{type(exc).__name__}:{exc}")
+        return ProbeOut(
+            response=f"endpoint={me.endpoint_id} org={me.org_id}")
+
     def forge_capability_renew(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
         """Renew a capability for a request this worker was never given.
 

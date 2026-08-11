@@ -188,6 +188,21 @@ ACTIONS: Dict[str, HubAction] = {
 # worth strictly more coming from the process that does not run tenant code.
 ACTION_REPORT_DETAIL = "report.detail"
 
+# Non-HTTP action: the child asks the parent WHO THIS POD IS (pgw#1122). The
+# parent decodes the two hub-stamped viewer claims (`cell_read_endpoint_id`,
+# `cell_read_org_id`) out of the credential it holds and returns THEM — never
+# the token. A claim is not a credential, so this widens nothing: the child
+# already learns its worker id and release id as plain env values at spawn, and
+# these two are the same shape of fact.
+#
+# It exists because the alternative was measured twice, on the same seam, one
+# gate apart: a process that holds no credential BY CONSTRUCTION cannot answer a
+# question about its own identity by reading one, and every gate that tried
+# refused on 100% of real serving pods while looking like a security decision
+# (pgw#1108, then pgw#1122). There is now ONE resolver — `gen_worker.
+# worker_identity` — and under the split it ends here.
+ACTION_VIEWER_IDENTITY = "identity.viewer"
+
 _MAX_STR = 8192
 # Repeats per query key. No action sends a repeated key today (pgw#1034 made
 # the receipt fetch's ``artifact_digest`` a scalar); this bounds the shape the

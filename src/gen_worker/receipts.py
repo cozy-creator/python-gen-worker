@@ -59,6 +59,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from . import activity as activity_mod
 from . import artifact_meta
+from . import worker_identity
 from .procsplit import broker
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,10 @@ class Receipt:
 @dataclass
 class _Config:
     base_url: str
+    #: A BEARER, and nothing else (pgw#1122). Under the split the parent
+    #: supplies the real credential and ignores this one; it is used only by
+    #: the single-process path's direct fetches. WHO THIS POD IS comes from
+    #: ``worker_identity``, never from decoding this.
     worker_jwt: Callable[[], str]
     # kid -> RSA public key, lazily fetched from the hub JWKS.
     jwks: Dict[str, rsa.RSAPublicKey] = field(default_factory=dict)
@@ -209,50 +214,37 @@ def _normalize_publisher_tier(raw: object) -> str:
     return CELL_PUBLISHER_TIER_ORG
 
 
-def _self_grant_claim(cfg: "_Config", name: str) -> str:
-    """One hub-stamped cell-read grant claim, read out of our OWN worker JWT.
+def _self_viewer() -> "worker_identity.ViewerIdentity":
+    """WHO THIS POD IS, from the one resolver that can answer (pgw#1122).
 
-    The hub stamps ``cell_read_endpoint_id`` on the cell-read grant (th#1335 +
-    th#1657) precisely so both ends of the exchange can name the viewer. Reading
-    it here means the pod's identity comes from the credential the hub issued
-    for this pod — not from config, not from an env var, and not from anything
-    the cell being adopted can influence.
+    This used to decode ``cell_read_endpoint_id``/``cell_read_org_id`` out of
+    ``cfg.worker_jwt()`` — *this process's* credential. The gate is armed at
+    HelloAck inside the COMPUTE CHILD, which holds no credential by
+    construction (pgw#763 delta 1), so both claims were ``""`` on every real
+    serving pod and every org-tier cell was refused ``publisher_untrusted``
+    after a successful resolve and materialize. Measured on three pods,
+    2026-08-11; the pod then failed its function, was reaped
+    ``state_blocked_idle``, and a replacement was bought twice.
 
-    The payload is decoded WITHOUT verifying the signature, and that is correct:
-    this is our OWN bearer token, not an input. A worker that forged its own
-    credential would be attacking itself, and the hub verifies it on every call
-    anyway. What must not be trusted is the RECEIPT, and that one is
-    signature-verified before it reaches the comparison.
+    ``worker_identity.viewer`` asks this process's own credential when it has
+    one and the control PARENT when it does not — the same seam pgw#1108 made
+    the resolve itself use. Its refusal is typed, so "the hub stamped no
+    claims" (a legal narrowing) never again wears the same face as "nobody
+    could be asked".
     """
-    try:
-        token = str(cfg.worker_jwt() or "").strip()
-    except Exception:  # noqa: BLE001 — a credential provider that raises is not an identity
-        return ""
-    parts = token.split(".")
-    if len(parts) != 3:
-        return ""
-    try:
-        payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
-    except (ReceiptError, ValueError, UnicodeDecodeError):
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    return str(payload.get(name) or "").strip()
+    return worker_identity.viewer()
 
 
-def _self_endpoint_id(cfg: "_Config") -> str:
-    """The endpoint this pod serves (th#1657)."""
-    return _self_grant_claim(cfg, "cell_read_endpoint_id")
+def needs_viewer_identity(receipt: Receipt) -> bool:
+    """Whether the trust rule will consult WHO THIS POD IS.
 
-
-def _self_org_id(cfg: "_Config") -> str:
-    """The ORG that owns this pod's endpoint (th#1680).
-
-    Absent on a hub older than th#1680, and absent when the hub could not
-    resolve the org — both of which fall back to endpoint-only matching, i.e.
-    exactly pgw#1008's behaviour. Never wider.
+    One spelling, two readers: :func:`refuse_untrusted_publisher` opens with
+    it, and the caller asks it BEFORE resolving an identity — a platform-tier
+    cell is adoptable by any pod, so demanding an identity to arm one would
+    turn a resolver outage into a refusal of the one cell class that never
+    needed a resolver.
     """
-    return _self_grant_claim(cfg, "cell_read_org_id")
+    return receipt.publisher_tier != CELL_PUBLISHER_TIER_PLATFORM
 
 
 def refuse_untrusted_publisher(
@@ -289,7 +281,7 @@ def refuse_untrusted_publisher(
     and armed on whatever pod happened to fetch it. We were paying for the
     attestation and discarding the field that made it a trust decision.
     """
-    if receipt.publisher_tier == CELL_PUBLISHER_TIER_PLATFORM:
+    if not needs_viewer_identity(receipt):
         return
     owner = str(receipt.owning_endpoint_id or "").strip()
     mine = str(self_endpoint_id or "").strip()
@@ -652,7 +644,26 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     # the signature — the tier is only meaningful once the claims are proven —
     # and deliberately before the return, because the caller's next act is to
     # arm the cell and dlopen it.
-    refuse_untrusted_publisher(receipt, _self_endpoint_id(cfg), _self_org_id(cfg))
+    if not needs_viewer_identity(receipt):
+        # A platform-tier cell is adoptable by every pod, so nothing here has
+        # to know who we are — and asking anyway would make a seam hiccup
+        # refuse the one class that never needed an identity.
+        refuse_untrusted_publisher(receipt, "", "")
+        return receipt
+    try:
+        viewer = _self_viewer()
+    except worker_identity.IdentityUnavailable as exc:
+        # pgw#1122: fail CLOSED, and say which failure this is. An unnamed pod
+        # may adopt platform-tier cells only — same outcome as before — but the
+        # reason is now `identity_unavailable` (nobody could be asked) rather
+        # than `publisher_untrusted` (we asked and the answer refuses). One is a
+        # wiring defect on our side, the other is a trust decision; three pods'
+        # worth of archaeology went into telling them apart once.
+        raise ReceiptError(
+            "identity_unavailable",
+            f"this pod cannot be named by anything in reach ({exc}), so no "
+            f"org-tier cell can be shown to be adoptable here") from exc
+    refuse_untrusted_publisher(receipt, viewer.endpoint_id, viewer.org_id)
 
     return receipt
 
@@ -708,6 +719,7 @@ __all__ = [
     "configure",
     "configured",
     "gate_delivered_artifact",
+    "needs_viewer_identity",
     "refuse_untrusted_publisher",
     "reset",
     "verify_delivered_artifact",

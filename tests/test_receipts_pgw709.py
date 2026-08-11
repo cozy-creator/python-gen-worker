@@ -23,7 +23,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from gen_worker import receipts
+from gen_worker import receipts, worker_credential, worker_identity
 
 KID = "test-kid-1"
 FAMILY = "sdxl"
@@ -285,6 +285,10 @@ def hub(rsa_key: rsa.RSAPrivateKey) -> Iterator[HubStub]:
     yield stub
     stub.close()
     receipts.reset()
+    # pgw#1122: identity is a PROCESS fact now, so the fixture must unwind it
+    # too or the next test inherits this one's pod.
+    worker_identity.reset()
+    worker_credential.reset()
 
 
 def worker_jwt_for(endpoint_id: str, org_id: str = "") -> str:
@@ -305,9 +309,26 @@ def worker_jwt_for(endpoint_id: str, org_id: str = "") -> str:
     return header + "." + payload + ".not-checked-here"
 
 
+def _identify(token: str) -> None:
+    """Give this process the credential a single-process worker holds.
+
+    pgw#1122: the gate no longer decodes its OWN bearer for identity — the
+    compute child holds none by construction, so the process-wide credential
+    (``worker_credential``, pgw#848's single source) is what
+    ``worker_identity.viewer`` reads, exactly as production does after the
+    transport installs a rotation. Installing it here is what production
+    writes; passing a token to ``receipts.configure`` was only ever a bearer.
+    """
+    worker_identity.reset()
+    worker_credential.reset()
+    if token:
+        worker_credential.install(token)
+
+
 def _configure(stub: HubStub, *, endpoint_id: str = SELF_ENDPOINT) -> None:
-    receipts.configure(
-        base_url=stub.base_url, worker_jwt=lambda: worker_jwt_for(endpoint_id))
+    token = worker_jwt_for(endpoint_id)
+    _identify(token)
+    receipts.configure(base_url=stub.base_url, worker_jwt=lambda: token)
 
 
 class TestGateDeliveredArtifact:
@@ -650,6 +671,7 @@ class TestPublisherTrustTh1657:
         artifact = make_artifact(tmp_path)
         hub.serve_receipt_for(
             artifact, owning_endpoint_id=SELF_ENDPOINT, publisher_tier="org")
+        _identify("not-a-jwt")
         receipts.configure(base_url=hub.base_url, worker_jwt=lambda: "not-a-jwt")
 
         with pytest.raises(receipts.ReceiptError) as excinfo:
@@ -802,6 +824,7 @@ class TestOrgWideningTh1680:
         hub.serve_receipt_for(
             artifact, owning_endpoint_id=OTHER_ENDPOINT,
             publisher_tier="org", publisher_org_id=SELF_ORG)
+        _identify(worker_jwt_for(SELF_ENDPOINT, org_id=SELF_ORG))
         receipts.configure(
             base_url=hub.base_url,
             worker_jwt=lambda: worker_jwt_for(SELF_ENDPOINT, org_id=SELF_ORG))
@@ -816,6 +839,7 @@ class TestOrgWideningTh1680:
         hub.serve_receipt_for(
             artifact, owning_endpoint_id=OTHER_ENDPOINT,
             publisher_tier="org", publisher_org_id="99999999-0000-0000-0000-000000000000")
+        _identify(worker_jwt_for(SELF_ENDPOINT, org_id=SELF_ORG))
         receipts.configure(
             base_url=hub.base_url,
             worker_jwt=lambda: worker_jwt_for(SELF_ENDPOINT, org_id=SELF_ORG))

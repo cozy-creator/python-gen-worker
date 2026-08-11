@@ -100,6 +100,13 @@ ASK_REASONS: Tuple[str, ...] = (
     "invalid_request", "cell_resolve_key_mismatch", "resolve_unreachable",
     "miss", "materialize_failed", "witness_unreadable",
     "graph_witness_mismatch", "hit",
+    # pgw#1122 — the LAST terminus, and the one the journey previously ran off
+    # the end of. `hit` was reported at resolve+materialize, and everything
+    # after it (the receipt gate, the publisher check, the arm itself) was
+    # somebody else's exception. So three pods emitted `boot_adopt=hit` and
+    # then failed their function, and the event that promised to name the gate
+    # named the gate BEFORE the one that refused.
+    "arm_refused",
 ) + tuple(cell_resolve.REFUSAL_CODES)
 
 #: The COMPLETE boot-adopt vocabulary. A path that can produce a token missing
@@ -202,6 +209,39 @@ def refused(
     return report(BootAdoptOutcome(
         reason=str(reason), detail=str(detail),
         family=str(family), function=str(function)))
+
+
+def arm_refused(
+    outcome: BootAdoptOutcome, *, cause: str, detail: str,
+) -> BootAdoptOutcome:
+    """The adopted cell would not ARM (pgw#1122) — degrade, don't die.
+
+    ``outcome`` is the ``hit`` this journey already reported, so the event
+    carries the same family/function/key and joins to it on one query; ``cause``
+    is the arm's own typed token (``OrderedArmError.reason``:
+    ``artifact_receipt_refused``, ``publisher_mismatch``, …) and leads the
+    detail so ``?kind=boot_adopt&phase=arm_refused`` answers *which gate*
+    without a second lookup.
+
+    Why this is a boot-adopt terminus and not the arm's business: nothing but
+    this pod named the cell. A Plan-ordered arm is terminal by design (pgw#904 —
+    the hub named one exact artifact and a substitute would not be it), but a
+    cell this pod pulled by its OWN derived key has no order behind it, so its
+    refusal means "boot as this pod booted yesterday" like every other refusal
+    in this module.
+    """
+    return report(BootAdoptOutcome(
+        adoption=None,
+        reason="arm_refused",
+        detail=(
+            f"cause={cause}: {detail} — this pod resolved the cell by its own "
+            f"derived key, so nothing ordered this arm; serving EAGER and "
+            f"minting its own instead of failing the function"),
+        derived_key=outcome.derived_key,
+        derive_ms=outcome.derive_ms,
+        family=outcome.family,
+        function=outcome.function,
+    ))
 
 
 def attempt(
@@ -365,5 +405,6 @@ def attempt(
 
 __all__ = [
     "ASK_REASONS", "BootAdoptOutcome", "BootAdoption", "DERIVE_REASONS",
-    "GATE_REASONS", "HIT", "REASONS", "attempt", "refused", "report",
+    "GATE_REASONS", "HIT", "REASONS", "arm_refused", "attempt", "refused",
+    "report",
 ]
