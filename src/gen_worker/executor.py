@@ -2790,6 +2790,12 @@ class _ClassRecord:
     # IDs are minted after successful setup and cleared before vacate; they do
     # not derive from mutable refs, authored specs, or object memory addresses.
     compile_targets: Dict[str, _CompileTargetRecord] = dc_field(default_factory=dict)
+    # pgw#1104: lanes this record's setup() APPLIED to its own weights
+    # (`gen_worker.report_applied_lane`). The binding names the checkpoint the
+    # hub resolved; a serve-time recipe moves the executed lane away from it,
+    # and `_served_execution_lane` must report the lane that RUNS. Dies with
+    # the instance — a new setup re-reports or the lane reverts to the binding.
+    applied_lanes: List[lanespec.AppliedLane] = dc_field(default_factory=list)
     # gw#661: consecutive will-retry setup losses; reset by any success.
     transient_setup_failures: int = 0
     # pgw#748 phase 1: the armed degree-D rank group serving THIS record, or
@@ -5429,40 +5435,55 @@ class Executor:
         body = lanespec.execution_lane_body_id(req.execution_lane)
         return body if body in spec.handles else ""
 
-    def _served_execution_lane(self, spec: EndpointSpec, instructed: str = "") -> str:
-        """The CONCRETE lane this spec's instance executes as, for
-        JobMetrics.lane and ctx.lane reporting: the most-quantized pipeline
-        binding's lane (table rank), with live compile state as a preference.
-        Fixed-mode bodies override it; a declared (handles=) instruction owns
-        the full lane outright."""
+    def _record_applied_lanes(
+        self,
+        spec: EndpointSpec,
+        rec: _ClassRecord,
+        applied: Tuple[lanespec.AppliedLane, ...],
+    ) -> None:
+        """pgw#1104: bank what ``setup()`` reported it did to the weights.
 
-        # pgw#1082: the SAME reading `serving_mode.classify_mode` takes. A
-        # ref-only test made `metrics.lane` report `+eager` while
-        # `serving_mode` correctly reported `jit_cell` on the same request —
-        # a contradiction `_served_identity`'s docstring says cannot happen,
-        # because a JIT INTAKE arm names no artifact by construction.
-        compiled = False
-        if spec.cls is not None:
-            rec = self._classes.get(spec.instance_key)
-            if rec is not None:
-                compiled = any(
-                    getattr(t, "active_compile_ref", "")
-                    or compile_cache.is_compile_armed(t.pipeline)
-                    for t in rec.compile_targets.values())
-        handled = self._handled_execution_lane_body(spec, instructed)
-        if handled:
-            return lanespec.execution_lane_id(lanespec.parse_execution_lane(instructed))
-        # Report the most-quantized binding's lane: quantized lanes always
-        # outrank bf16 (a bf16 VAE riding a w8a16 pipeline is still the
-        # w8a16 lane), ties by table rank.
+        A report that DIVERGES from the binding is the whole point of the
+        mechanism, so it is a wire row and not a log line: the reader must be
+        able to see, from the events alone, that this instance stopped
+        executing the checkpoint's lane and which lane it executes instead."""
+        rec.applied_lanes = list(applied)
+        if not applied:
+            return
+        bound = lanespec.execution_lane_body_id(
+            self._bound_execution_lane(spec, compiled=False))
+        for entry in applied:
+            activity_mod.emit_event(
+                activity_mod.KIND_APPLIED_LANE,
+                detail=f"{entry.detail()} bound={bound}",
+                phase=entry.component)
+
+    def _bound_execution_lane(
+        self, spec: EndpointSpec, compiled: bool,
+    ) -> lanespec.ExecutionLane:
+        """The most-quantized lane this spec's BINDINGS resolve to — what the
+        hub handed the worker, before any serve-time recipe."""
+        return self._most_quantized_lane(
+            [
+                lanespec.execution_lane_of_binding(
+                    getattr(binding, "flavor", "") or "",
+                    getattr(binding, "storage_dtype", "") or "",
+                    compiled)
+                for binding in spec.models.values()
+            ],
+            compiled)
+
+    @staticmethod
+    def _most_quantized_lane(
+        candidates: List[lanespec.ExecutionLane], compiled: bool,
+    ) -> lanespec.ExecutionLane:
+        """Quantized lanes always outrank bf16 (a bf16 VAE riding a w8a16
+        pipeline is still the w8a16 lane), ties by lane-table rank. Empty
+        candidates are the plain bf16 lane at the live compile posture."""
         ranked = {body: i for i, body in enumerate(lanespec.known_execution_lanes())}
         best = None
         best_key: Tuple[int, int] = (2, len(ranked) + 1)
-        for binding in spec.models.values():
-            execution_lane = lanespec.execution_lane_of_binding(
-                getattr(binding, "flavor", "") or "",
-                getattr(binding, "storage_dtype", "") or "",
-                compiled)
+        for execution_lane in candidates:
             quant = 1 if lanespec.family_of(execution_lane) == lanespec.FAMILY_BF16 else 0
             key = (quant, ranked.get(lanespec.execution_lane_id(execution_lane), len(ranked)))
             if best is None or key < best_key:
@@ -5471,7 +5492,57 @@ class Executor:
             best = lanespec.ExecutionLane(
                 weights=lanespec.WEIGHTS_BF16, activation=lanespec.ACT_W16A16,
                 execution=lanespec.EXEC_COMPILED if compiled else lanespec.EXEC_EAGER)
-        return lanespec.execution_lane_id(best)
+        return best
+
+    def _served_execution_lane(self, spec: EndpointSpec, instructed: str = "") -> str:
+        """The CONCRETE lane this spec's instance executes as, for
+        JobMetrics.lane and ctx.lane reporting: the most-quantized lane over
+        the pipeline bindings AND whatever this instance's ``setup()``
+        reported it APPLIED to the weights (table rank), with live compile
+        state as a preference. Fixed-mode bodies override it; a declared
+        (handles=) instruction owns the full lane outright.
+
+        pgw#1104: the applied half is not decoration. minimax-h3 binds a bare
+        tag (empty flavor) and quantizes 300 Linears to w8a8 fp8 inside
+        setup(), so a binding-only derivation priced, verdicted and "proved" a
+        37.4 GiB bf16 lane against a 21.7 GiB fp8 one that was really running.
+        The lane id is a KEY (th#935 verdicts, compile cells, floors,
+        pricing), so it follows the WEIGHTS AS EXECUTED — reported by the
+        recipe that converted them, never sniffed off tensor subclasses."""
+
+        # pgw#1082: the SAME reading `serving_mode.classify_mode` takes. A
+        # ref-only test made `metrics.lane` report `+eager` while
+        # `serving_mode` correctly reported `jit_cell` on the same request —
+        # a contradiction `_served_identity`'s docstring says cannot happen,
+        # because a JIT INTAKE arm names no artifact by construction.
+        compiled = False
+        applied: Tuple[lanespec.AppliedLane, ...] = ()
+        if spec.cls is not None:
+            rec = self._classes.get(spec.instance_key)
+            if rec is not None:
+                compiled = any(
+                    getattr(t, "active_compile_ref", "")
+                    or compile_cache.is_compile_armed(t.pipeline)
+                    for t in rec.compile_targets.values())
+                applied = tuple(rec.applied_lanes)
+        handled = self._handled_execution_lane_body(spec, instructed)
+        if handled:
+            return lanespec.execution_lane_id(lanespec.parse_execution_lane(instructed))
+        candidates = [
+            lanespec.execution_lane_of_binding(
+                getattr(binding, "flavor", "") or "",
+                getattr(binding, "storage_dtype", "") or "",
+                compiled)
+            for binding in spec.models.values()
+        ]
+        # The applied report is validated against the lane table at report
+        # time (`report_applied_lane`), so it can only name a real lane body;
+        # the execution axis stays the platform's.
+        candidates.extend(
+            lanespec.execution_lane_of_body(entry.body, compiled)
+            for entry in applied)
+        return lanespec.execution_lane_id(
+            self._most_quantized_lane(candidates, compiled))
 
     async def ensure_desired_instance(
         self,
@@ -6823,11 +6894,16 @@ class Executor:
                     self.store._cache_dir, compile_artifact,
                     enable=self._arming_enable,
                 )
-                with arming_scope:
+                # pgw#1104: NOT gated on spec.compile — a serve-time recipe
+                # quantizes whether or not this release compiles, and the lane
+                # it applied is what every request then executes.
+                applied_lane_scope = provision.AppliedLaneScope()
+                with arming_scope, applied_lane_scope:
                     if asyncio.iscoroutinefunction(setup):
                         await setup(**inj.kwargs)
                     else:
                         await _to_thread_complete(setup, **inj.kwargs)
+                self._record_applied_lanes(spec, rec, applied_lane_scope.applied)
                 # arm_compile() is the sole unambiguous ownership seam for a
                 # self-loaded pipeline. Such a pipeline may be built from any
                 # path-valued setup input, so freeze every self-loaded slot
@@ -9748,6 +9824,7 @@ class Executor:
                 rec, reason="worker shutdown", code="shutdown")
             inst, rec.instance, rec.ready = rec.instance, None, False
             rec.compile_targets.clear()
+            rec.applied_lanes.clear()
             shutdown = getattr(inst, "shutdown", None)
             if inst is not None and callable(shutdown):
                 try:
@@ -9894,6 +9971,9 @@ class Executor:
         old_obj: Any = None
         inst, rec.instance, rec.ready = rec.instance, None, False
         rec.compile_targets.clear()
+        # pgw#1104: the applied lane belonged to THESE weights; the next setup
+        # re-reports it or the lane honestly reverts to the binding's.
+        rec.applied_lanes.clear()
         # The next full StateDelta must remove the old address before any
         # replacement can become READY. Do this synchronously before teardown
         # awaits; adoption's second validation then rejects the stale ID.

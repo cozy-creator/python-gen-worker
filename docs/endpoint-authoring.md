@@ -687,6 +687,36 @@ not servable through these calls, and a green integrity result is **not** a
 quality signal — a melted or over-smoothed render scores HIGHER on this
 statistic than a clean one. See `gen_worker.output_integrity`.
 
+## If `setup()` quantizes, report the lane it applied (pgw#1104)
+
+A serve-time recipe — torchao `quantize_()`, an fp8 cast, anything that
+converts the weights inside `setup()` — moves the lane the endpoint EXECUTES
+away from the checkpoint the hub bound. The worker cannot see that (sniffing
+tensor subclasses is deliberately not done), so the recipe says so:
+
+```python
+def setup(self, pipeline: Pipe) -> None:
+    if not w8a8_capable():          # runtime gate: report only what APPLIED
+        return
+    quantize_(pipeline.transformer, _w8a8_config(), filter_fn=...)
+    gen_worker.report_applied_lane(
+        "transformer", "fp8-w8a8-dynamic", modules=300, kept_bf16=70)
+```
+
+`metrics.lane` / `ctx.lane` then report `fp8-w8a8-dynamic+compiled` instead of
+the binding's `bf16-w16a16`. This matters because the lane id is a KEY: quality
+verdicts, compile cells, serving floors and pricing all join on it, and
+minimax-h3 spent four issues being priced as bf16 while serving a 21.7 GiB fp8
+DiT.
+
+Rules: the second argument must be one of
+`gen_worker.models.execution_lanes.known_execution_lane_bodies()` (the same
+vocabulary `handles=` uses) — anything else raises `ValueError`, because the
+lane vocabulary is shared with the hub. Never name the execution axis
+(`+compiled` / `+eager`): the platform owns it. Call it AFTER the conversion
+returns, never on the strength of an intention — outside a `setup()` scope it
+logs and returns `False` instead of raising, so it is safe under `cozy run`.
+
 ## Local dev
 
 ```bash
