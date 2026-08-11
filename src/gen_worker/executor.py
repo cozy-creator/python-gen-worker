@@ -123,6 +123,7 @@ from .models.memory import (
 )
 from .models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from .models.download import ensure_local, lookup_provider_for_ref
+from .models.envelope import ArtifactEnvelopeExceeded
 from .models.errors import MissingSnapshotError, UrlExpiredError
 from .models.execution_lanes import ExecutionLaneUnavailableError, mandatory_traced_lane_of
 from .models.residency import Residency
@@ -353,6 +354,17 @@ def _sanitize(message: str) -> str:
     for pat in _REDACTIONS:
         out = pat.sub("[redacted]", out)
     return out[:1024]
+
+
+def _snapshot_digest(snapshots: Any, ref: str) -> str:
+    """The resolved snapshot's own digest for ``ref``, or ``""``.
+
+    pgw#1117 names it in the envelope refusal: "the binding resolved to THIS
+    artifact" is the fact an operator needs, and a ref alone does not carry it
+    — the whole ie#642 shape is a mutable bare tag head pointing somewhere
+    new."""
+    snap = (snapshots or {}).get(ref) if snapshots else None
+    return str(getattr(snap, "snapshot_digest", "") or "")
 
 
 def _reserved_repo_info(payload: Any, field_name: str) -> Dict[str, Any]:
@@ -6585,6 +6597,16 @@ class Executor:
             # every attempt is this function's terminal truth (th#1159's
             # genuinely-unfittable VRAM lane is the case this exists for).
             reason, axes = "retry_exhausted", {}
+        elif isinstance(exc, ArtifactEnvelopeExceeded):
+            # pgw#1117 / th#1777: a RELEASE/BINDING verdict, reported under
+            # its own token so the hub can tell it apart from the OOM it
+            # replaces. Deliberately ahead of nothing and behind nothing
+            # meaningful — it is not a HardwareUnmetError (no machine was
+            # consulted, and routing it there would teach the buy-floor
+            # learner to shop for a card big enough to serve an archive
+            # clone) and not a bare setup_failed (which the hub reads as
+            # "the pod could not boot" and feeds to the breaker).
+            reason, axes = exc.reason, exc.axes()
         elif isinstance(exc, HardwareUnmetError):
             reason = getattr(exc, "reason", "hardware_unmet")
             axes = {str(k): str(v) for k, v in (exc.axes() or {}).items()}
@@ -8757,6 +8779,7 @@ class Executor:
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
                             strict_vram=bool(spec.resources.strict_vram),
+                            artifact_digest=_snapshot_digest(snapshots, ref),
                         )
                     except Exception as exc:
                         # Corruption-shaped load failure (gw#408): digest-verify
@@ -8785,6 +8808,7 @@ class Executor:
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
                             strict_vram=bool(spec.resources.strict_vram),
+                            artifact_digest=_snapshot_digest(snapshots, ref),
                         )
                     pipe = sl.obj
                     # pgw#678: record the PIPELINE identity for this slot

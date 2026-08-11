@@ -2191,6 +2191,31 @@ def snapshot_component_weight_bytes(model_path: Path) -> Dict[str, int]:
     return {k: v for k, v in out.items() if v > 0}
 
 
+def specialized_weight_layout(model_path: str | Path) -> str:
+    """The non-plain lane :func:`load_from_pretrained` would take for this
+    snapshot (``"quantized"``/``"svdq"``/``"w8a8"``/``"w4a4"``/``"gguf"``), or
+    ``""`` for the plain dense-safetensors path.
+
+    pgw#1117 asks exactly one question of it: is this tree's resident size
+    computable from safetensors headers? On every lane named here it is not —
+    packed 4-bit weights, fp8 GEMM scale tables and GGUF blocks all have a
+    header story that differs from their in-memory story — so the envelope
+    precondition abstains instead of guessing. Same detectors, same ORDER as
+    the loader, so the answer cannot drift from the lane actually taken."""
+    p = Path(model_path)
+    if read_on_disk_quant_config(p):
+        return "quantized"
+    if detect_svdq_artifact(p) is not None:
+        return "svdq"
+    if detect_w8a8_artifact(p) is not None:
+        return "w8a8"
+    if detect_w4a4_artifact(p) is not None:
+        return "w4a4"
+    if detect_gguf_snapshot(p) is not None:
+        return "gguf"
+    return ""
+
+
 def bitsandbytes_available() -> bool:
     """Importability gate for the bnb-nf4 rung (gw#469): the quant config
     constructs fine without bitsandbytes and the load then dies deep in
@@ -2773,6 +2798,7 @@ __all__ = [
     "model_index_components",
     "model_index_component_classes",
     "snapshot_component_weight_bytes",
+    "specialized_weight_layout",
     "load_from_pretrained",
     "is_modular_pipeline_class",
     "hydrate_modular_pipeline",
