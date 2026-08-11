@@ -395,6 +395,24 @@ _DTYPE_STORAGE_BITS = {
     "q3_k_m": 3, "q3_k_s": 3,
     "q2_k": 2,
 }
+# pgw#1121. The source's dtype is READ at plan time from the safetensors
+# headers (`ingest.stamp_plan_source_dtype`), so this fires only when no
+# header could be read at all. It is 32 — the widest DENSE width — and the
+# choice is deliberate, because the two ways to be wrong do not cost the same:
+#
+#   * too NARROW (the old default, 4) makes the estimate 4-8x the truth and
+#     REFUSES the job at plan time, before a byte moves. Nothing recovers
+#     that: the conversion surface has one pod shape, and you cannot rent
+#     268 GiB for an 82 GiB clone. It also fired on essentially every real
+#     source, since a genuinely packed 4-bit tree is always tagged, gguf, or
+#     routed through a quant strategy — never an unreadable dense header.
+#   * too WIDE under-estimates the output and can hit ENOSPC mid-clone. That
+#     costs one pod-hour, says exactly what happened, and is retryable on a
+#     bigger disk.
+#
+# A loud, late, recoverable failure on the rare unreadable source beats a
+# silent, early, permanent refusal on the common one.
+_UNRESOLVED_SOURCE_BITS = 32
 
 
 def _plan_has_no_repackager(plan: Any) -> bool:
@@ -417,6 +435,22 @@ def _plan_has_no_repackager(plan: Any) -> bool:
         declared = repackage_family(canonical_model_family_from_variant(variant))
         return declared is None or not declared.supports_singlefile_to_diffusers
     return False
+
+
+def _output_tree_bytes(
+    spec: OutputSpec, source_bytes: int, source_bits: int, measured_bits: int,
+) -> int:
+    """How big one materialized output tree will be, in bytes.
+
+    A NARROWING cast is only known to shrink when the source width was
+    measured; on a guessed width the old, deliberately loose bound stands —
+    an output tree is never bigger than the source it was cast from."""
+    out_bits = _DTYPE_STORAGE_BITS.get(spec.dtype)
+    if out_bits is None:  # "source", or a container we cannot size
+        return source_bytes
+    if not measured_bits and out_bits <= source_bits:
+        return source_bytes
+    return (source_bytes * out_bits + source_bits - 1) // source_bits
 
 
 def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
@@ -491,14 +525,15 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             if m:
                 shard_groups[m.group("group")] = shard_groups.get(m.group("group"), 0) + size
         deshard_bytes = len(passthrough) * max(shard_groups.values(), default=0)
-        # Untagged safetensors may still be a packed 4-bit tree. Mirrors do
-        # not use this estimate; explicit widening conversions do.
-        source_bits = _DTYPE_STORAGE_BITS.get(source_dtype, 4)
+        # pgw#1121: bits per stored parameter, MEASURED at plan time off the
+        # source's safetensors headers. An output tree is
+        # ``params * out_bits / 8``, so scaling the source bytes by
+        # ``out_bits / measured_bits`` is exact even for a mixed-dtype tree.
+        measured_bits = int(getattr(plan, "source_storage_bits", 0) or 0)
+        source_bits = measured_bits or _DTYPE_STORAGE_BITS.get(
+            source_dtype, _UNRESOLVED_SOURCE_BITS)
         output_sizes = [
-            source_bytes if _DTYPE_STORAGE_BITS.get(spec.dtype, source_bits) <= source_bits
-            else (
-                source_bytes * _DTYPE_STORAGE_BITS[spec.dtype] + source_bits - 1
-            ) // source_bits
+            _output_tree_bytes(spec, source_bytes, source_bits, measured_bits)
             for spec in materialized
         ]
         gguf_intermediate = max(
@@ -533,6 +568,11 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             parts.append("one intermediate F16 GGUF tree")
         if repack:
             parts.append("one layout-repack tree")
+        if (materialized and not measured_bits
+                and source_dtype not in _DTYPE_STORAGE_BITS):
+            parts.append(
+                "source dtype unreadable, assumed "
+                f"{_UNRESOLVED_SOURCE_BITS}-bit")
         operation = ", ".join(parts) or "source tree"
 
     free = shutil.disk_usage(workdir).free
