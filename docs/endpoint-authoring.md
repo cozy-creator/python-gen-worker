@@ -368,6 +368,34 @@ class Generate:
   components (the qwen text encoder, a shared VAE) load once and are
   refcounted across checkpoint picks; there is nothing to declare
   (`share_components=` is deleted).
+- **`layouts=` declares WHAT BYTES THIS SLOT'S CODE CAN EXECUTE** (§1.33,
+  pgw#1143) — the DEMAND half of the tensor-layout contract, per component
+  path, ordered by preference:
+
+  ```python
+  from gen_worker.models.tensor_layout_contract import (
+      CONTRACT_HF_FP8_BLOCKWISE, CONTRACT_PLAIN_BF16)
+
+  Slot(StableDiffusionXLPipeline, selected_by="model", layouts={
+      "*":            (CONTRACT_PLAIN_BF16,),
+      "text_encoder": (CONTRACT_HF_FP8_BLOCKWISE, CONTRACT_PLAIN_BF16),
+  })
+  ```
+
+  `"*"` is the whole-tree default; a component key overrides it for that
+  component. The hub compares an artifact's PROVEN layout against this set at
+  rebind and refuses a mismatch with both sides named, before any pod is
+  bought. **Omitting `layouts=` leaves the slot UNDECLARED** — the gate then
+  falls back to the image-wide decoder census, and absence is never read as
+  "accepts everything"; an empty mapping or an empty tuple is a
+  decoration-time error. Handles must be registered
+  (`KNOWN_CONTRACTS`, transcribed from tensorhub's `internal/tensorlayout`)
+  and written as LITERALS or as constants imported from that module —
+  `scripts/lint_layout_declarations.py` refuses anything the AST sweep cannot
+  read. Declaring a handle no decoder in the image backs is NOT an error: it
+  lands in the build log as `layouts_census_unbacked`, because plenty of
+  layouts are decoded natively by `transformers`/`diffusers` with no cozy
+  marker.
 
 **Per-family defaults vocabulary**: a typed, versioned,
 JSON-Schema-exportable struct per architecture — the shape tensorhub validates
