@@ -494,7 +494,7 @@ def test_mint_reports_fused_constants_without_refusing_and_without_KEYING_them(
     # 3. STILL OBSERVABLE — reported where a surprising jump in the count is
     #    visible, rather than silently discarded.
     assert any(
-        "fused away by the compiler" in rec.getMessage()
+        "folded away by the compiler" in rec.getMessage()
         for rec in caplog.records), (
         "compiler fusion stopped being observable when it stopped being keyed "
         "— it must be one or the other, not neither")
