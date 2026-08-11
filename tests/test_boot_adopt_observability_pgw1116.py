@@ -64,6 +64,21 @@ KEY = "ck1-" + "3f" * 28
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _empty_local_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """pgw#1127: the pre-derive gate asks whether ANYBODY could answer, and this
+    machine's own cell store is one of the two answerers. Pin it to an empty
+    root so every row here reads a fact about the test rather than about
+    whatever `~/.cache/cozy/compile-cells` happens to hold on the box."""
+    from gen_worker import local_cell_store
+
+    monkeypatch.setenv(
+        local_cell_store.ENV_STORE_DIR,
+        str(tmp_path_factory.mktemp("empty-cells")))
+
+
 @pytest.fixture
 def events(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     seen: List[Any] = []

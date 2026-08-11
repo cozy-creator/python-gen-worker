@@ -54,6 +54,16 @@ def wired(monkeypatch, tmp_path):
     whether the gate let the derive/resolve leg run — no trace child, no mint."""
     calls: list[Dict[str, Any]] = []
 
+    # pgw#1127: the pre-derive gate now asks whether ANYBODY could answer, and
+    # this machine's own cell store is one of the two answerers. Pin it to an
+    # empty tmp root so the gate under test reads a fact about the test and not
+    # about whatever the developer's `~/.cache/cozy/compile-cells` happens to
+    # hold — the ambient-input class of flake this repo has been bitten by.
+    from gen_worker import local_cell_store
+
+    monkeypatch.setenv(
+        local_cell_store.ENV_STORE_DIR, str(tmp_path / "empty-cells"))
+
     def _attempt(**kw: Any) -> Any:
         calls.append(kw)
         return executor_mod.boot_adopt.BootAdoptOutcome(reason="miss")
@@ -98,17 +108,24 @@ def test_split_child_with_seam_up_resolves_though_it_holds_no_jwt(wired):
 
 
 def test_no_bearer_and_no_seam_degrades_without_deriving(wired):
-    """The gate must STILL protect the genuinely-no-hub case: no local bearer
-    and no seam means nobody to ask, so no derive/resolve, no attempt.
+    """The gate must STILL protect the genuinely-nobody case: no local bearer,
+    no seam AND an empty local cell store means nobody to ask, so no
+    derive/resolve, no attempt.
 
-    pgw#1116: it degrades by NAMING itself (`no_hub`), never by returning a
-    bare None — a refusal that carries no reason is how three pods refused
-    unattributably.
+    pgw#1116: it degrades by NAMING itself, never by returning a bare None — a
+    refusal that carries no reason is how three pods refused unattributably.
+
+    pgw#1127 narrowed the token from `no_hub` to `no_cell_source`, and the
+    narrowing is the point: the hub is only ONE of the two things that can
+    answer a derived ck1 key, and this pod's own store is the other. The
+    tmp-path store this suite runs against is empty, so the fast path is
+    unchanged here — see `test_boot_adopt_local_first_pgw1127` for the case
+    where it is not.
     """
     ex, calls = wired
     # broker._broker is None (fixture); seam is down.
     out = _run_boot_adopt(ex)
-    assert out is not None and out.reason == "no_hub"
+    assert out is not None and out.reason == "no_cell_source"
     assert not out.adopted
     assert calls == []
 
