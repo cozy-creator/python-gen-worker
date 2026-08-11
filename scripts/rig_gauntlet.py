@@ -194,6 +194,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    # pgw#1114: carry the resolved environment, but do NOT assert the fleet line
+    # here. This gauntlet's product is a plumbing verdict (did the machinery
+    # agree with its expectation), never a number, and the box cannot run a
+    # cu130 build against its card at all — `scripts/rig_gpu_env.sh` builds the
+    # fleet's torch on cu126 deliberately. Any rig that produces a NUMBER calls
+    # `assert_fleet_line()` instead and aborts; see research/RIG-ENV.md §3b.
+    from gen_worker import rigcheck
+
+    try:
+        env = rigcheck.resolve_environment()
+        print(rigcheck.format_report(env, rigcheck.resolve_fleet_line()),
+              file=sys.stderr, flush=True)
+    except rigcheck.FleetLineUnknown as exc:
+        print(f"rig_gauntlet: fleet line unresolved ({exc})", file=sys.stderr)
+    print("rig_gauntlet: PLUMBING VERDICT ONLY — these variants report machinery "
+          "agreement, not measurements. No number from this rig is quotable.",
+          file=sys.stderr, flush=True)
+
     from harness import rig_vehicles
 
     names = [n.strip() for n in args.only.split(",") if n.strip()] or list(ORDER)

@@ -170,6 +170,9 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     "COZY_CONVERT_SCRATCH_TTL_S",
     "COZY_CLONE_DOWNLOAD_ATTEMPTS",
     "COZY_CIVITAI_DOWNLOAD_ATTEMPTS",
+    # pgw#1114: rig-side only. A path to the fleet-line authority; a worker
+    # process never reads it and it has no Settings field by design.
+    "GEN_WORKER_FLEET_LINE_FILE",
 })
 
 
