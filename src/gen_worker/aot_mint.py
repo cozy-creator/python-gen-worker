@@ -3296,6 +3296,14 @@ class TracedClass:
     #: carried on every row so a sharded caller can prove its shares are the
     #: whole set without enumerating it itself.
     declared: int = 0
+    #: This row's own ``export_s`` / ``compile_s``, straight off
+    #: ``_export_entry``. The key path ignores them; the pgw#1134 measure-only
+    #: child is here for exactly these numbers.
+    timings: Dict[str, Any] = field(default_factory=dict)
+    #: Loose inductor files, when the caller asked for the compile. The caller
+    #: owns them — the measure-only child counts and deletes them, and the key
+    #: path never asks for a compile so it never sees any.
+    files: Tuple[str, ...] = ()
 
 
 def declared_class_rows(pipeline: Any, spec: ExportSpec, decl: Any) -> List[Any]:
@@ -3320,6 +3328,8 @@ def trace_for_key(
     *,
     share_index: int = 0,
     share_count: int = 1,
+    compile_now: bool = False,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
 ) -> Iterator[TracedClass]:
     """Export the named declared graph classes and yield each one's KEYING
     facts — §4.27 step 1's unit of work (pgw#1089).
@@ -3349,6 +3359,17 @@ def trace_for_key(
     the parent can prove the shares reconstruct the whole class set without
     ever having enumerated it — a stronger check than comparing against a
     parent-side guess would have been.
+
+    ``compile_now`` (pgw#1134) runs the INDUCTOR half of each row as well —
+    ``_export_entry``'s own compile, the one a mint runs — and is what the
+    measure-only child needs: an export-only trace never exercises the
+    whole-graph planner an OOM blocker is about, so a measurement taken
+    without it answers a different question than the one asked. It rides THIS
+    loop rather than a second one for the reason the docstring above gives:
+    two loops trace two graphs, and a measurement of a graph the mint does not
+    export is worth nothing. The key path never passes it, and a compiled row
+    hands its loose files to the caller (``TracedClass.files``) — this
+    function keeps none of them, and nothing here packages anything.
     """
     ordered = declared_class_rows(pipeline, spec, decl)
     declared = len(ordered)
@@ -3378,7 +3399,8 @@ def trace_for_key(
                 boot_phases.PHASE_TRACE_FOR_KEY, function=entry,
             ) as span:
                 row = _export_entry(
-                    pipeline, spec, plan, decl, compile_now=False)
+                    pipeline, spec, plan, decl, compile_now=bool(compile_now),
+                    inductor_configs=inductor_configs)
                 try:
                     nodes = int(len(row.program.graph_module.graph.nodes))
                 except Exception:  # noqa: BLE001 — never fails a trace
@@ -3392,6 +3414,8 @@ def trace_for_key(
                 nodes=nodes,
                 program=row.program,
                 declared=declared,
+                timings=dict(row.timings or {}),
+                files=tuple(str(f) for f in (row.files or ())),
             )
     finally:
         if disarmed:
