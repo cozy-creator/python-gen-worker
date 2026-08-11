@@ -13,6 +13,18 @@ load path: the boot derivation runs the mint child's own load
 loads would be two compositions, and two compositions trace two graphs — which
 is exactly the divergence a derived key exists to rule out.
 
+It holds no card either (pgw#1124)
+----------------------------------
+The child loads with ``place=False``: the worker's serving placement ladder is
+for a pipeline that will run a forward, and this one never will. Running it
+here moved every REAL non-target component of the slot — qwen-image's 15.5 GiB
+Qwen2.5-VL text encoder, its VAE — onto the card the serving parent is already
+resident on, and the CUDA OOM that followed was reported as a rollback failure
+rather than as the placement nobody needed. The compile target still claims the
+compute device, because a virtual structure allocates nothing and the device it
+claims is part of the graph's identity. :func:`off_host_tensors` then proves the
+property instead of assuming it.
+
 The structure refusal is a REFUSAL here, not a fallback
 -------------------------------------------------------
 ``mint_child`` falls back to real weights when a component cannot be built from
@@ -91,6 +103,26 @@ def _probe_prop_ms(program: Any) -> int:
         return 0
 
 
+def off_host_tensors(pipeline: Any) -> List[tuple[str, str, str]]:
+    """REAL tensors of ``pipeline`` that are not on the host, as
+    ``(component, tensor, device)``. Empty is the property holding.
+
+    The pgw#1124 invariant, ENFORCED rather than hoped for: a boot trace needs
+    shapes and a graph, so nothing it composes may occupy the card its serving
+    parent is resident on. The compile target's virtual parameters claim that
+    card and allocate nothing, which is the whole of pgw#1080 — so this is
+    exactly ``device_mismatches``, whose walk already excludes what is virtual
+    by design. A hit means the composition placed real weights: the child
+    refuses by name and the pod mints the ordinary way, instead of OOMing the
+    card and reporting it as a rollback failure (which is what the fleet
+    census caught it doing on 14/14 qwen-image and 9/9 flux2-klein-9b
+    children).
+    """
+    from .models.memory import device_mismatches
+
+    return device_mismatches(pipeline, "cpu")
+
+
 def run(job: TraceJob) -> int:
     """Trace this child's share and write its report. Never raises."""
     report_path = Path(job.report)
@@ -132,6 +164,8 @@ def run(job: TraceJob) -> int:
         loaded = run_setup(
             instance, dict(paths), arm_compile=False, return_loaded=True,
             component_paths=overrides,
+            # pgw#1124: no serving placement, ever — see `off_host_tensors`.
+            place=False,
             structure_only=tuple(cfg.targets)) or {}
     except structure_only.StructureOnlyUnsupported as exc:
         # NOT a fallback — see the module docstring.
@@ -141,6 +175,15 @@ def run(job: TraceJob) -> int:
         _slot, pipeline = pick_compile_target(loaded, cfg)
     except MintChildRefused as exc:
         return _fail(report_path, "no_compile_target", str(exc))
+
+    resident = off_host_tensors(pipeline)
+    if resident:
+        return _fail(
+            report_path, "real_weights_resident",
+            f"{type(pipeline).__name__} composed {len(resident)} REAL "
+            f"tensor(s) off the host (e.g. {resident[:3]!r}) — a boot trace "
+            f"holds no card, so this composition would be competing for VRAM "
+            f"with the serving parent that spawned it")
 
     virtual = structure_only.structure_only_components(pipeline)
     if not virtual:

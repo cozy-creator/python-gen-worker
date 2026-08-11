@@ -549,7 +549,7 @@ def run_setup(
     instance: Any, resolved_models: Dict[str, str], *, device: str = "",
     arm_compile: bool = True, return_loaded: bool = False,
     component_paths: Optional[Dict[str, Dict[str, str]]] = None,
-    structure_only: Sequence[str] = (),
+    structure_only: Sequence[str] = (), place: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Call ``instance.setup(...)`` once, passing exactly the resolved model
     slots its signature declares.
@@ -558,6 +558,13 @@ def run_setup(
     (pgw#784): the mint child drives its own cold arm + capture and must not
     have a cell armed under it. ``return_loaded=True`` returns the loaded slot
     objects so a caller can reach the pipeline it just built.
+
+    ``place=False`` (pgw#1124) loads the slots without running the worker's
+    serving placement ladder at all, while ``device`` still says which device
+    the virtual structure is BUILT on — the two are one knob only for a load
+    that intends to serve. The boot-trace child sets it: it needs shapes and a
+    graph, never a servable pipeline, and the ladder it was running moved the
+    slot's REAL non-target components onto the card its serving parent owns.
 
     ``structure_only`` (pgw#1080) names the components every slot must build
     from CODE + CONFIG instead of from the checkpoint — the mint child's
@@ -633,7 +640,7 @@ def run_setup(
     loaded = {
         k: _load_injected_model(
             hints.get(k), v, decl=decl, slot=k, device=device,
-            arm_compile=arm_compile,
+            arm_compile=arm_compile, place=place,
             overrides=dict((component_paths or {}).get(k) or {}),
             structure_only=tuple(structure_only))
         for k, v in resolved_models.items()
@@ -704,7 +711,7 @@ def _structure_device(device: str) -> str:
 
 def _load_injected_model(
     annotation: Any, local_path: str, *, decl: Any = None, slot: str = "",
-    device: str = "", arm_compile: bool = True,
+    device: str = "", arm_compile: bool = True, place: bool = True,
     overrides: Optional[Dict[str, str]] = None,
     structure_only: Sequence[str] = (),
 ) -> Any:
@@ -725,7 +732,11 @@ def _load_injected_model(
         # real-weight one; sharing a cache entry between them would hand a
         # weightless pipeline to a caller that asked for weights.
         + ("|structure=" + ",".join(sorted(structure_only))
-           if structure_only else ""),
+           if structure_only else "")
+        # ...and an UNPLACED composition is a different object again: handing
+        # it to a caller that asked for a servable one would serve from host
+        # memory (pgw#1124).
+        + ("" if place else "|unplaced"),
     )
     if key in _INJECTED_CACHE:
         return _INJECTED_CACHE[key]
@@ -754,7 +765,7 @@ def _load_injected_model(
                 dtype=str(getattr(binding, "dtype", "") or ""))
     sl = provision.load_slot(
         annotation, local_path, binding=binding, slot=slot, device=device,
-        components=injected or None,
+        place=place, components=injected or None,
     )
     if not sl.is_pipeline:
         return sl.obj

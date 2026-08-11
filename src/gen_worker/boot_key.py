@@ -276,6 +276,12 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
     is 9.8 MiB (pgw#1080) and its RSS is an import closure. CPU is the only
     real bound, and one core is reserved for the serving parent that is
     concurrently fetching and loading weights.
+
+    That premise was FALSE until pgw#1124 and this sizing was the multiplier:
+    the child ran the serving placement ladder, so each of K children pushed
+    the slot's real non-target components onto the parent's card. The child
+    now loads ``place=False`` and proves it (``boot_trace_child``), which is
+    what makes the paragraph above a fact rather than an intention.
     """
     classes = max(1, int(classes))
     quota = cpu_quota_cores()

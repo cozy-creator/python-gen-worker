@@ -30,6 +30,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import msgspec
 
 from ..component_vocab import component_vocabulary
+from .structure_only import STAMP as _STRUCTURE_ONLY
 import asyncio
 
 _LOG = logging.getLogger(__name__)
@@ -625,9 +626,23 @@ def device_mismatches(obj: Any, device: str) -> List[tuple[str, str, str]]:
     The paranoid post-move walk (gw#409): a pipeline ``.to()`` that raises or
     skips mid-way leaves a mixed-device pipeline that fatals mid-denoise
     ("Expected all tensors to be on the same device"); this surfaces the miss
-    at move time instead. [] without torch / for tensor-less objects."""
+    at move time instead. [] without torch / for tensor-less objects.
+
+    VIRTUAL-BY-DESIGN TENSORS ARE NOT MISPLACED (pgw#1124). A pgw#1080
+    structure-only component is composed ON the compute device with fake
+    parameters and declines ``_apply`` outright (``_freeze_placement``), so
+    counting it here made a CPU rollback impossible to satisfy — and
+    ``place_pipeline``'s OOM demotion turned a recoverable ladder step into
+    the fatal ``CUDA OOM left the pipeline mixed-device``, deterministically,
+    on every boot-trace child of two live families. Such a component is
+    skipped whole: its fake parameters allocate nothing and its real buffers
+    are part of the graph being traced, so MOVING them would be the defect.
+    A fake tensor is exempt wherever it is found, for the same reason. A META
+    tensor is exempt only inside a structure-only component — elsewhere it is
+    an unmaterialized load, which :func:`meta_tensors` exists to report."""
     try:
         import torch
+        from torch._subclasses.fake_tensor import FakeTensor
 
         target = torch.device(device).type
     except Exception:
@@ -636,6 +651,8 @@ def device_mismatches(obj: Any, device: str) -> List[tuple[str, str, str]]:
     for cname, comp in _named_components(obj):
         if comp is None or not hasattr(comp, "named_parameters"):
             continue
+        if getattr(comp, _STRUCTURE_ONLY, False):
+            continue
         try:
             named = list(comp.named_parameters())
             if hasattr(comp, "named_buffers"):
@@ -643,7 +660,9 @@ def device_mismatches(obj: Any, device: str) -> List[tuple[str, str, str]]:
         except Exception:
             continue
         for tname, t in named:
-            if isinstance(t, torch.Tensor) and t.device.type != target:
+            if not isinstance(t, torch.Tensor) or isinstance(t, FakeTensor):
+                continue
+            if t.device.type != target:
                 out.append((cname, tname, str(t.device)))
     return out
 
