@@ -29,6 +29,23 @@ branch is how the reason ends up being `logger.debug`.
 
 **Never fatal.** A cold boot that cannot adopt is the boot every pod did before
 this existed. The one thing this must never do is prevent a pod from serving.
+
+Never SILENT either (pgw#1116)
+------------------------------
+"Never fatal" was implemented as "never observed". ``reason``/``detail``/
+``derived_key``/``derive_ms`` had zero readers outside this module — the
+executor consumed only ``adoption`` — and the executor's own pre-attempt gates
+returned a bare ``None`` that carried no reason at all. So all of the refusals
+above, plus three gates that never even built an outcome, presented identically
+as "a pod that quietly self-minted". A merged fix (pgw#1108) and a published
+wheel (0.103.0) both shipped over a boot-adopt that called the hub ZERO times
+on three real pods, because off-pod there was nothing to read: hub-spawned pods
+expose no stdout (pgw#760), so a `logger.info` is not observability.
+
+Every terminus therefore emits ONE typed :data:`~gen_worker.activity.
+KIND_BOOT_ADOPT` event whose ``phase`` is the gate's own token — see
+:data:`REASONS`, which is exhaustive and fenced by test. "adopt failed" is not
+an answer this module is able to give.
 """
 
 from __future__ import annotations
@@ -36,12 +53,64 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
-from . import aot_identity, artifact_meta, boot_key, cell_resolve
+from . import activity, aot_identity, artifact_meta, boot_key, cell_resolve
 from .mint_process import CompileCellSpec, MintSlot
 
 logger = logging.getLogger(__name__)
+
+#: Gates that refuse BEFORE :func:`attempt` is entered — the executor's own
+#: preconditions. These are the ones that used to be a bare ``return None``.
+GATE_REASONS: Tuple[str, ...] = (
+    # `aot_mint.export_declaration(family)` answered None: this family ships no
+    # export declaration, so no key can name its class set.
+    "no_export_declaration",
+    # A pgw#853 THUNK declaration REFUSED to build (open mint blockers). It used
+    # to escape `_boot_adopt` uncaught and take the whole model setup down.
+    "declaration_refused",
+    # The declaration exists but `aot_declaration.cell_plans` will not enumerate
+    # it (colliding entry names, no targets).
+    "declaration_unreadable",
+    # No hub to ask: no HelloAck base URL yet, or an embedded single-process
+    # worker with neither a local bearer nor a control seam (pgw#1108).
+    "no_hub",
+    # The pod's topology forbids arming at all (pgw#775), so a compiled family
+    # boots without asking. Correct, and previously indistinguishable from a
+    # boot-adopt that asked and was refused.
+    "eager_only",
+)
+
+#: Step 1 — the derivation. ``boot_key.BootKeyUnavailable.reason`` tokens,
+#: including the ones a trace child names in its own report
+#: (``boot_trace_child._fail``), which ``boot_key.derive`` re-raises verbatim.
+DERIVE_REASONS: Tuple[str, ...] = (
+    "no_classes", "code_drift", "class_set_disagreement", "class_set_gap",
+    "trace_failed", "bad_report", "child_died", "refused", "child_error",
+    "slots_unresolvable", "structure_unsupported", "no_compile_target",
+    "structure_not_honored", "no_declaration", "trace_refused", "empty_share",
+    # The derivation raised something that is not a typed BootKeyUnavailable.
+    "derive_failed",
+)
+
+#: Steps 2-3 — asking the hub, materializing, and the pgw#1031 witness floor.
+#: The hub's own typed refusal codes ride through verbatim, which is the point
+#: of them being typed.
+ASK_REASONS: Tuple[str, ...] = (
+    "invalid_request", "cell_resolve_key_mismatch", "resolve_unreachable",
+    "miss", "materialize_failed", "witness_unreadable",
+    "graph_witness_mismatch", "hit",
+) + tuple(cell_resolve.REFUSAL_CODES)
+
+#: The COMPLETE boot-adopt vocabulary. A path that can produce a token missing
+#: from here is a path that can be silent again, so
+#: ``tests/test_boot_adopt_observability_pgw1116.py`` reads the refusal sites
+#: out of the tree and fails on any token this tuple does not carry.
+REASONS: Tuple[str, ...] = GATE_REASONS + DERIVE_REASONS + ASK_REASONS
+
+#: The one outcome that armed something. Everything else means "boot as this pod
+#: booted yesterday", and each of those means it for a DIFFERENT reason.
+HIT = "hit"
 
 
 @dataclass(frozen=True)
@@ -79,10 +148,60 @@ class BootAdoptOutcome:
     detail: str = ""
     derived_key: str = ""
     derive_ms: int = 0
+    #: Which family and which routable function this decision was about. Carried
+    #: on the outcome rather than interpolated at the emit site so a reader of
+    #: the event never has to join it back to anything (pgw#1116).
+    family: str = ""
+    function: str = ""
 
     @property
     def adopted(self) -> bool:
         return self.adoption is not None
+
+
+def report(outcome: BootAdoptOutcome) -> BootAdoptOutcome:
+    """Emit this decision as ONE typed event, and return it unchanged.
+
+    The whole of pgw#1116: on a hub-spawned pod stdout goes nowhere, so a
+    boot-adopt outcome that is only logged is a boot-adopt outcome nobody can
+    read. ``phase`` is the gate token — never a summary — because the question
+    the fleet asks is *which* gate, and "adopt failed" makes eight different
+    bugs look like one.
+
+    Returns the outcome so every terminus can be ``return report(...)`` and the
+    "exactly one event per decision" property is structural rather than
+    remembered.
+    """
+    detail = (
+        f"family={outcome.family or '?'} function={outcome.function or '?'} "
+        f"key={outcome.derived_key or '-'}"
+        + (f" — {outcome.detail}" if outcome.detail else "")
+    )
+    activity.emit_event(
+        activity.KIND_BOOT_ADOPT, detail, phase=outcome.reason or "unreported",
+        duration_ms=outcome.derive_ms)
+    if outcome.reason == HIT:
+        logger.info("boot-adopt[%s]: %s", outcome.reason, detail)
+    else:
+        # A refusal is a confession, and a pod's own boot log is where an
+        # operator with a shell reads it. The EVENT is what everyone else reads.
+        logger.warning("boot-adopt[%s]: %s", outcome.reason, detail)
+    return outcome
+
+
+def refused(
+    reason: str, detail: str, *, family: str = "", function: str = "",
+) -> BootAdoptOutcome:
+    """A gate that refuses BEFORE :func:`attempt` — reported, never a bare None.
+
+    The executor's three pre-attempt gates used to ``return None``, which is
+    the one shape that cannot say anything: no reason, no detail, no event, and
+    a caller that could not tell "this pod had nobody to ask" from "this pod
+    asked and was told no".
+    """
+    return report(BootAdoptOutcome(
+        reason=str(reason), detail=str(detail),
+        family=str(family), function=str(function)))
 
 
 def attempt(
@@ -106,8 +225,12 @@ def attempt(
     the trace pool and nothing else. ``envelope`` is
     ``fleet_cells.declared_envelope_block(cfg)``, i.e. the same extraction the
     publish path recomputes the envelope axis from.
+
+    Exactly ONE :data:`~gen_worker.activity.KIND_BOOT_ADOPT` event is emitted
+    per call, on every terminus including the hit — see :func:`report`.
     """
     family = str(getattr(cfg, "family", "") or "")
+    fn = str(function)
     spec = CompileCellSpec(
         shapes=tuple(
             tuple(int(v) for v in row)
@@ -134,14 +257,19 @@ def attempt(
             device=int(device),
         )
     except boot_key.BootKeyUnavailable as exc:
-        logger.info(
-            "boot-adopt: no derived key for %s (%s) — this pod adopts nothing "
-            "and mints the ordinary way: %s", family, exc.reason, exc.detail)
-        return BootAdoptOutcome(reason=exc.reason, detail=exc.detail)
+        # The reason is a trace child's own token when a child refused
+        # (`boot_trace_child._fail`) — `structure_unsupported` and
+        # `slots_unresolvable` are the two that name a family the boot path
+        # cannot key at all, and they are the whole point of not collapsing
+        # this to "derive failed".
+        return report(BootAdoptOutcome(
+            reason=exc.reason, detail=exc.detail,
+            family=family, function=fn))
     except Exception as exc:  # noqa: BLE001 — never fatal, see the docstring
-        logger.warning("boot-adopt: key derivation failed", exc_info=True)
-        return BootAdoptOutcome(
-            reason="derive_failed", detail=f"{type(exc).__name__}: {exc}")
+        logger.debug("boot-adopt: key derivation failed", exc_info=True)
+        return report(BootAdoptOutcome(
+            reason="derive_failed", detail=f"{type(exc).__name__}: {exc}",
+            family=family, function=fn))
 
     key = derived.digest
     logger.info(
@@ -157,32 +285,37 @@ def attempt(
         # a full cold mint believing the hub holds nothing, which is false and
         # expensive. It still degrades to the old boot; it is the SENTENCE
         # that differs, and that sentence is what gets the hub fixed.
-        logger.warning(
-            "boot-adopt: the hub REFUSED to resolve %s: %s", key, exc)
-        return BootAdoptOutcome(
-            reason=exc.code, detail=exc.detail,
-            derived_key=key, derive_ms=derived.wall_ms)
+        return report(BootAdoptOutcome(
+            reason=exc.code or "resolve_unreachable", detail=exc.detail,
+            derived_key=key, derive_ms=derived.wall_ms,
+            family=family, function=fn))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("boot-adopt: resolve call failed", exc_info=True)
-        return BootAdoptOutcome(
+        logger.debug("boot-adopt: resolve call failed", exc_info=True)
+        return report(BootAdoptOutcome(
             reason="resolve_unreachable", detail=f"{type(exc).__name__}: {exc}",
-            derived_key=key, derive_ms=derived.wall_ms)
+            derived_key=key, derive_ms=derived.wall_ms,
+            family=family, function=fn))
 
     if cell is None:
-        return BootAdoptOutcome(
+        # A pod that DERIVED a key and was told MISS is a different fact from a
+        # pod that never derived one — `derived_key` is what tells them apart,
+        # and it is on the event.
+        return report(BootAdoptOutcome(
             reason="miss",
             detail=f"the hub holds no entitled cell for {key}",
-            derived_key=key, derive_ms=derived.wall_ms)
+            derived_key=key, derive_ms=derived.wall_ms,
+            family=family, function=fn))
 
     try:
         artifact = cell_resolve.materialize(
             cell, cache_dir=Path(cache_dir) if cache_dir else None,
             what=f"boot adopt of {key} (family {family})")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("boot-adopt: materialize failed", exc_info=True)
-        return BootAdoptOutcome(
+        logger.debug("boot-adopt: materialize failed", exc_info=True)
+        return report(BootAdoptOutcome(
             reason="materialize_failed", detail=f"{type(exc).__name__}: {exc}",
-            derived_key=key, derive_ms=derived.wall_ms)
+            derived_key=key, derive_ms=derived.wall_ms,
+            family=family, function=fn))
 
     # pgw#1031, THE GRAPH-WITNESS FLOOR. Everything above this line agreed on
     # the KEY, and the key is an ingress identity: two endpoints whose declared
@@ -199,32 +332,38 @@ def attempt(
         # only one of them.
         meta = artifact_meta.read_metadata(Path(artifact))
     except Exception as exc:  # noqa: BLE001 — unreadable IS unproven
-        logger.warning("boot-adopt: metadata unreadable", exc_info=True)
-        return BootAdoptOutcome(
+        logger.debug("boot-adopt: metadata unreadable", exc_info=True)
+        return report(BootAdoptOutcome(
             reason="witness_unreadable",
             detail=(
                 f"the materialized cell for {key} would not state its "
                 f"metadata ({type(exc).__name__}: {exc}), so its graphs cannot "
                 f"be shown to be this pod's graphs"),
-            derived_key=key, derive_ms=derived.wall_ms)
+            derived_key=key, derive_ms=derived.wall_ms,
+            family=family, function=fn))
     mismatch = aot_identity.verify_graph_witness(
         meta, derived.graph_witnesses)
     if mismatch:
-        logger.error(
-            "boot-adopt: REFUSING %s (%s) — the key matched and the graph did "
-            "not: %s. This pod serves eager and mints its own.",
-            key, cell.cell_ref, mismatch)
-        return BootAdoptOutcome(
-            reason="graph_witness_mismatch", detail=mismatch,
-            derived_key=key, derive_ms=derived.wall_ms)
+        return report(BootAdoptOutcome(
+            reason="graph_witness_mismatch",
+            detail=(
+                f"the key matched {cell.cell_ref} and the graph did not: "
+                f"{mismatch}. This pod serves eager and mints its own."),
+            derived_key=key, derive_ms=derived.wall_ms,
+            family=family, function=fn))
 
-    logger.info(
-        "boot-adopt: %s resolved to %s (%s tier) and materialized at %s — "
-        "arming with ZERO dispatches having occurred",
-        key, cell.cell_ref, cell.publisher_tier, artifact)
-    return BootAdoptOutcome(
+    return report(BootAdoptOutcome(
         adoption=BootAdoption(derived=derived, cell=cell, artifact=artifact),
-        reason="hit", derived_key=key, derive_ms=derived.wall_ms)
+        reason=HIT,
+        detail=(
+            f"resolved to {cell.cell_ref} ({cell.publisher_tier} tier), "
+            f"materialized at {artifact} — arming with ZERO dispatches having "
+            f"occurred"),
+        derived_key=key, derive_ms=derived.wall_ms,
+        family=family, function=fn))
 
 
-__all__ = ["BootAdoptOutcome", "BootAdoption", "attempt"]
+__all__ = [
+    "ASK_REASONS", "BootAdoptOutcome", "BootAdoption", "DERIVE_REASONS",
+    "GATE_REASONS", "HIT", "REASONS", "attempt", "refused", "report",
+]

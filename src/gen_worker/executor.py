@@ -6813,7 +6813,7 @@ class Executor:
         if arm is None and spec.compile is not None and not eager_only:
             adopt = await asyncio.to_thread(
                 self._boot_adopt, spec, resolved_slots)
-            if adopt is not None and adopt.adoption is not None:
+            if adopt.adoption is not None:
                 got = adopt.adoption
                 compile_selection = _CompileArtifactSelection(
                     path=got.artifact, ref=got.ref,
@@ -6823,6 +6823,16 @@ class Executor:
                     backend="aot_cell", selection=compile_selection,
                     expected=got.expected,
                     publisher_org=got.cell.publisher_org)
+        elif arm is None and spec.compile is not None:
+            # pgw#1116: a compiled family that boots WITHOUT asking is a fact
+            # somebody has to be able to read. This is the only branch where
+            # that is correct by design (pgw#775 forbids arming here at all) —
+            # so it says so, rather than being the ninth way to look like a pod
+            # that quietly self-minted.
+            boot_adopt.refused(
+                "eager_only", eager_only,
+                family=str(getattr(spec.compile, "family", "") or ""),
+                function=str(spec.name or ""))
         # pgw#947: the serving-kernel lane comes from the CELL, and it has to
         # be pinned BEFORE setup() — the linears are swapped at model load, so
         # a verdict read afterwards would arrive one whole pipeline too late.
@@ -9757,24 +9767,49 @@ class Executor:
 
     def _boot_adopt(
         self, spec: EndpointSpec, slots: Dict[str, MintSlot],
-    ) -> "Optional[boot_adopt.BootAdoptOutcome]":
+    ) -> "boot_adopt.BootAdoptOutcome":
         """§4.27 steps 1-3 for one boot, off the event loop.
 
-        Returns ``None`` when this pod cannot even ATTEMPT the derivation (no
-        declaration for the family, no hub credential yet) — which is not a
-        failure, it is the state every pod was in before this seam existed.
-        Everything past that point is a :class:`BootAdoptOutcome`, and every
-        one of its non-hit outcomes means "boot as this pod booted yesterday".
+        ALWAYS an outcome, never ``None`` (pgw#1116). The three gates below
+        used to return a bare ``None`` — "this pod cannot even attempt the
+        derivation" — which is a true statement that names nothing: no family,
+        no gate, no event, and a caller unable to tell it from a pod that asked
+        the hub and was told no. Three real pods on 0.103.0 called
+        ``/v1/worker/cells/resolve`` ZERO times and no artifact anywhere said
+        which of these gates did it. Each one now names itself and emits.
+
+        None of them is fatal, and none of them is new behaviour: every non-hit
+        outcome still means "boot as this pod booted yesterday".
         """
         cfg = spec.compile_cell()
         family = str(getattr(cfg, "family", "") or "")
-        decl = aot_mint.export_declaration(family)
+        fn = str(spec.name or "")
+        try:
+            decl = aot_mint.export_declaration(family)
+        except Exception as exc:  # noqa: BLE001
+            # pgw#853: a THUNK declaration is EVALUATED by this accessor and
+            # its exception is let out here. Uncaught, it left `_boot_adopt`,
+            # left `asyncio.to_thread`, and failed the model setup — a blocked
+            # family's mint refusal taking serving down, which is the exact
+            # blast radius pgw#853 exists to prevent.
+            return boot_adopt.refused(
+                "declaration_refused",
+                f"family {family!r} declares a mint refusal: "
+                f"{type(exc).__name__}: {exc}", family=family, function=fn)
         if decl is None:
-            return None
+            return boot_adopt.refused(
+                "no_export_declaration",
+                f"family {family!r} has no registered export declaration, so "
+                f"this boot cannot state the class set a cell key names",
+                family=family, function=fn)
         try:
             declared_hint = len(list(aot_declaration.cell_plans(decl)))
-        except Exception:  # noqa: BLE001 — never fatal
-            return None
+        except Exception as exc:  # noqa: BLE001 — never fatal
+            return boot_adopt.refused(
+                "declaration_unreadable",
+                f"family {family!r} has a declaration this boot cannot "
+                f"enumerate: {type(exc).__name__}: {exc}",
+                family=family, function=fn)
         base_url = str(self.file_base_url or "")
         bearer = str(self.worker_jwt_provider() or "")
         # pgw#1108: the credential lives in the PARENT under the split (pgw#783),
@@ -9792,7 +9827,12 @@ class Executor:
             # Genuinely nobody to ask: pre-Hello (no base_url yet), or an embedded
             # single-process worker with no hub and no seam. Deriving a key nobody
             # will answer is pure boot latency.
-            return None
+            return boot_adopt.refused(
+                "no_hub",
+                "nobody to ask: base_url={} bearer={} seam={}".format(
+                    base_url or "<unset>", "set" if bearer else "<unset>",
+                    "up" if procsplit_broker.active() else "down"),
+                family=family, function=fn)
         work_root = Path(
             self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
         ) / "boot-key" / (spec.name or "endpoint")
