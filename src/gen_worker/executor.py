@@ -38,6 +38,7 @@ from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import cell_adopt
 from . import dispatch
+from .procsplit import broker as procsplit_broker
 from .plan import (
     InputAssetRef,
     Plan,
@@ -9692,9 +9693,21 @@ class Executor:
             return None
         base_url = str(self.file_base_url or "")
         bearer = str(self.worker_jwt_provider() or "")
-        if not base_url or not bearer:
-            # Pre-Hello, or an embedded worker with no hub. There is nobody to
-            # ask, and deriving a key nobody will answer is pure boot latency.
+        # pgw#1108: the credential lives in the PARENT under the split (pgw#783),
+        # which is the only execution model. This executor runs in the compute
+        # child, whose `worker_jwt_provider` returns "" BY CONSTRUCTION (it holds
+        # no credential — pgw#763 delta 1), so a `not bearer` gate here refused
+        # boot-adopt on EVERY real serving pod: derive never ran, resolve never
+        # fired, and the pod fell straight through to self-mint — the whole reuse
+        # circle stayed open. The seam being up (`broker.active()`) is the child's
+        # honest "there is somebody to ask": the resolve is a parent-mediated
+        # action (`cells.resolve`), so the parent supplies base_url + bearer and
+        # ignores what the child passes. Mirrors `fleet_cells.CellPublisher`'s
+        # own readiness (base_url AND (local bearer OR broker.active())).
+        if not base_url or (not bearer and not procsplit_broker.active()):
+            # Genuinely nobody to ask: pre-Hello (no base_url yet), or an embedded
+            # single-process worker with no hub and no seam. Deriving a key nobody
+            # will answer is pure boot latency.
             return None
         work_root = Path(
             self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
