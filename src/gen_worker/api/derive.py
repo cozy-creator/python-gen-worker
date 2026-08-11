@@ -33,10 +33,10 @@ so they run anywhere including this box:
 
 3. :func:`blocker_delta` / :func:`assert_blockers` — the REFUSAL half of that
    gate (pgw#1115). The one fact a fold can drop that neither of the above
-   sees is a family's declared mint blockers, because the family that has them
-   keeps them outside its ``Compile`` today (a module-level table read by a
-   refusing thunk). Dropping one does not re-key anything; it simply starts
-   minting against an open design question.
+   sees is a family's declared mint blockers, because before the fold the
+   family that had them kept them OUTSIDE its ``Compile`` (a module-level
+   table read by a refusing thunk, retired in pgw#1107). Dropping one does not
+   re-key anything; it simply starts minting against an open design question.
 """
 
 from __future__ import annotations
@@ -205,9 +205,9 @@ def assert_blockers(
 
     :func:`blocker_delta` can only compare two declarations, so it is blind
     where the standing declaration kept its blockers OUTSIDE the ``Compile``
-    (a module-level table read by a refusing thunk — ltx-video-2.3's shape,
-    and precisely the shape the fold has to carry across). This states the
-    expectation in the family's OWN test instead, so the assertion survives
+    (a module-level table read by a refusing thunk — ltx-video-2.3's pre-fold
+    shape, and precisely the shape the fold had to carry across). This states
+    the expectation in the family's OWN test instead, so the assertion survives
     the file the blockers used to live in.
 
     ``ids=()`` asserts the family is mintable, and is just as load-bearing:

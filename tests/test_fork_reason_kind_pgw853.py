@@ -41,10 +41,11 @@ from gen_worker.api.export_contract import (
 )
 
 
-def _decl(*forks: Fork, family: str = "harness-fork-family") -> Compile:
+def _decl(*forks: Fork, family: str = "harness-fork-family",
+          blockers: tuple = ()) -> Compile:
     fork_names = {f.name for f in forks}
     return Compile(
-        family=family, targets=("transformer",), text_len=0,
+        family=family, targets=("transformer",), text_len=0, blockers=blockers,
         shapes=((64, 64),),
         dims=(Dim("B", carried_by=(("hidden_states", 0),)),),
         forks=forks,
@@ -129,30 +130,38 @@ def test_a_served_only_fork_is_never_weak() -> None:
     assert weak_arms(decl) == ()
 
 
-def test_the_fleet_query_skips_a_family_whose_declaration_REFUSES() -> None:
-    """A blocked family (ltx/qwen/z-image register thunks that raise) must not
-    take a fleet-wide query down — pgw#853's whole point is that a refusal to
-    MINT is not a refusal to everything else."""
-    from gen_worker.aot_mint import MintRefused
+def test_the_fleet_query_ANSWERS_for_a_family_whose_declaration_REFUSES() -> None:
+    """A blocked family must not take a fleet-wide query down — pgw#853's
+    whole point is that a refusal to MINT is not a refusal to everything else.
 
-    def _blocked():
-        raise MintRefused("family 'harness-blocked' has 1 UNRESOLVED blocker")
+    pgw#1107 makes that strictly better than "skipped": the refusal is DATA on
+    the declaration, so a blocked family's weak arms are still readable. A
+    sweep asking "which families are one payload field from an unserved arm?"
+    used to answer with a hole exactly where the answer mattered most.
+    """
+    from gen_worker.api.export_contract import MintBlocker
+
+    blocker = MintBlocker(
+        id="B1-harness", what="one open question",
+        evidence="harness fixture", resolves_when="it is measured")
 
     reset_export_declarations()
     try:
-        register_export_declaration(_blocked, family="harness-blocked")
+        register_export_declaration(_decl(
+            Fork("cfg", served=(False,), unserved=(True,),
+                 reason="default_value"),
+            family="harness-blocked", blockers=(blocker,)))
         register_export_declaration(_decl(
             Fork("cfg", served=(False,), unserved=(True,),
                  reason="default_value"), family="harness-weak"))
 
         found = weak_arms_by_family()
 
-        assert "harness-weak" in found
         assert [f.name for f in found["harness-weak"]] == ["cfg"]
-        assert "harness-blocked" not in found
-        # ...and the blocked family still refuses when asked directly.
-        with pytest.raises(MintRefused):
-            export_declaration("harness-blocked")
+        assert [f.name for f in found["harness-blocked"]] == ["cfg"]
+        decl = export_declaration("harness-blocked")
+        assert decl is not None
+        assert [b.id for b in decl.open_blockers] == ["B1-harness"]
     finally:
         reset_export_declarations()
 

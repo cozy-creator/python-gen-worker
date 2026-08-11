@@ -9864,18 +9864,11 @@ class Executor:
         cfg = spec.compile_cell()
         family = str(getattr(cfg, "family", "") or "")
         fn = str(spec.name or "")
-        try:
-            decl = aot_mint.export_declaration(family)
-        except Exception as exc:  # noqa: BLE001
-            # pgw#853: a THUNK declaration is EVALUATED by this accessor and
-            # its exception is let out here. Uncaught, it left `_boot_adopt`,
-            # left `asyncio.to_thread`, and failed the model setup — a blocked
-            # family's mint refusal taking serving down, which is the exact
-            # blast radius pgw#853 exists to prevent.
-            return boot_adopt.refused(
-                "declaration_refused",
-                f"family {family!r} declares a mint refusal: "
-                f"{type(exc).__name__}: {exc}", family=family, function=fn)
+        # pgw#1107: a registry read, not an evaluation. The pgw#853 thunk that
+        # could raise out of here (and, uncaught, failed the whole model setup)
+        # is retired; a blocked family carries its refusal as
+        # `Compile.blockers` and the mint gate reads it.
+        decl = aot_mint.export_declaration(family)
         if decl is None:
             return boot_adopt.refused(
                 "no_export_declaration",

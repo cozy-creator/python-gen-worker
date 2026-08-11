@@ -2375,31 +2375,13 @@ def mint_recipe(
                 "out-of-process minting is unavailable and an AOTI export "
                 "has no eager tier to serve from while it compiles"))
 
-    # pgw#853: THIS is where a declaration is allowed to refuse. A family with
-    # open mint blockers (ltx/qwen/z-image) registers a THUNK, so its refusal
-    # arrives here — as a typed `self_mint_skipped` carrying every word of the
-    # blocker text — instead of as an ImportError that takes the endpoint
-    # down at boot. A refusal to MINT is not a refusal to IMPORT.
-    #
-    # pgw#996: the STATIC half of this refusal (unresolved MINT_BLOCKERS) is
-    # already recorded by the build gate, so no pod discovers it for the first
-    # time. The branch survives because the other half is genuinely a pod
-    # fact: ltx-2.3's thunk reads `LTX_SERVING_TIER` off the environment, and
-    # an unknown tier there is a MintRefused the image could not have known.
-    try:
-        decl = export_declaration(family)
-    except Exception as exc:  # noqa: BLE001 — serving outranks compiling
-        # Deliberately `Exception`, not `BaseException`: this runs INSIDE the
-        # serving process, where swallowing a KeyboardInterrupt/cancellation
-        # would be its own defect. Every refusal shape the declarations
-        # actually raise (MintRefused, DeclarationError, ImportError) is an
-        # Exception. The import boundary is the other way round — see
-        # `import_export_declaration`, which runs at BOOT and catches
-        # everything, because there nothing outranks the endpoint coming up.
-        return _decline(
-            "declaration_refused",
-            f"family {family!r}'s export declaration refuses to mint "
-            f"({type(exc).__name__}): {exc}")
+    # pgw#853 put the refusal HERE rather than at import, because a refusal to
+    # MINT is not a refusal to IMPORT. pgw#1107 retired the thunk that carried
+    # it: the accessor is now a registry read that cannot raise, and the
+    # refusal arrives below as DATA (`open_blockers`) under its own phase. The
+    # `try/except` that used to wrap this call went with it — a gate that can
+    # no longer fire is a decorative one.
+    decl = export_declaration(family)
 
     if decl is None:
         return _decline(
@@ -2408,11 +2390,11 @@ def mint_recipe(
             f"`compile=` block carrying graph classes, pgw#739/#758) — the "
             f"class set a multi-graph cell covers is undeclared")
 
-    # pgw#1115: the same refusal, now as DATA. A `Compile` carrying unresolved
-    # `blockers=` declines here under its own phase, naming the ids — the
-    # thunk's raise (above) and this branch are the same event said two ways,
-    # and the fold onto `@endpoint(compile=)` can only carry the second.
-    # Serving is untouched: this pod serves eager exactly as it did.
+    # pgw#1115: the refusal, as DATA. A `Compile` carrying unresolved
+    # `blockers=` declines here under its own phase, naming the ids — the one
+    # form the fold onto `@endpoint(compile=)` can carry, and since pgw#1107
+    # the only one. Serving is untouched: this pod serves eager exactly as it
+    # did.
     blocked = open_blockers(decl)
     if blocked:
         return _decline("declaration_blocked", blocker_refusal(family, blocked))

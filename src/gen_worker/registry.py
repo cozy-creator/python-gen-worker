@@ -32,7 +32,9 @@ from .warmup import validate_class_warmup
 import dataclasses
 from .api.compile_axis import warm_guidance_values
 from .cell_key import facts_digest
-from .api.export_contract import register_export_declaration, registered_entry
+from .api.export_contract import (
+    declares_export_contract, register_export_declaration, registered_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -701,7 +703,7 @@ def _apply_class_unions(specs: List[EndpointSpec]) -> List[EndpointSpec]:
 
 
 def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
-    """pgw#805: a ``compile=`` block that carries graph CLASSES *is* its
+    """pgw#805: a ``compile=`` block that declares an EXPORT CONTRACT *is* its
     family's export declaration — register it at collection time.
 
     Without this, ``export_declaration(family)`` resolves only when somebody
@@ -728,12 +730,12 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
             continue
         seen.add(id(compile_decl))
         family = str(getattr(compile_decl, "family", "") or "").strip()
-        if not family or not getattr(compile_decl, "classes", ()):
+        # pgw#1107: the same INTENT question the decorator asks — a dynamo-only
+        # `compile=` block declares no export contract and is registered
+        # nowhere; anything reaching for the export vocabulary is held to
+        # carrying classes by `register_export_declaration`.
+        if not family or not declares_export_contract(compile_decl):
             continue
-        # pgw#853: `registered_entry`, NOT `export_declaration` — reading the
-        # registry back through the evaluating accessor would detonate a
-        # blocked family's thunk inside endpoint COLLECTION, which is the
-        # exact blast radius this issue exists to remove.
         if registered_entry(family) is compile_decl:
             continue
         try:

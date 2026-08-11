@@ -277,54 +277,18 @@ def test_an_endpoint_that_declares_NO_export_owes_the_AOT_lane_nothing(
 # ---------------------------------------------------------------------------
 
 
-def test_a_declared_MintRefused_is_a_BLOCKED_family_not_a_broken_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_registry, toolchain,
-) -> None:
-    """ltx-2.3's shape: a THUNK with open MINT_BLOCKERS. The family refused in
-    the vocabulary built for refusing, so the image is fine and the sentence
-    is said HERE — instead of on every pod that rents a GPU to hear it."""
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    manifest, result = _build(tmp_path, "ep996_blocked", """
-        from gen_worker import Compile, register_export_declaration
-        from gen_worker.aot_contract import MintRefused
-
-        def _thunk() -> Compile:
-            raise MintRefused("2 UNRESOLVED mint blocker(s): OQ-2, OQ-4")
-
-        register_export_declaration(_thunk, family="ep996")
-    """)
-
-    assert result.ok is True, result.errors
-    (warn,) = [w for w in result.warnings if "blocked" in w]
-    assert "UNRESOLVED mint blocker" in warn
-    (row,) = manifest["aot_preconditions"]
-    assert row["verdict"] == pre.BLOCKED and row["family"] == "ep996"
-    # A blocked family never runs an AOTI export, so the image owes no
-    # toolchain — the gate must not manufacture a second refusal from it.
-    assert row["check"] == pre.CHECK_DECLARATION_EVALUATES
-
-
-def test_any_OTHER_declaration_exception_is_a_broken_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_registry, toolchain,
-) -> None:
-    """The distinction is the whole point: MintRefused is a family SAYING no;
-    a TypeError is a declaration nobody has run since it was written."""
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    _manifest, result = _build(tmp_path, "ep996_broken", """
-        from gen_worker import Compile, register_export_declaration
-
-        def _thunk() -> Compile:
-            raise TypeError("Dim() got an unexpected keyword 'carried'")
-
-        register_export_declaration(_thunk, family="ep996")
-    """)
-
-    assert result.ok is False
-    (err,) = [e for e in result.errors
-              if pre.CHECK_DECLARATION_EVALUATES in e]
-    assert "TypeError" in err and "MintRefused" in err
+# pgw#1107 retired the thunk, and with it the two cases that lived here:
+#
+# * a declaration that says "blocked" — a THUNK raising `MintRefused` became
+#   `Compile(blockers=...)`, and the BLOCKED verdict off that declared form is
+#   `test_declared_blockers_pgw1115.py`
+#   (`test_the_image_BUILD_says_a_family_is_blocked_without_renting_a_pod`);
+# * a declaration that is simply BROKEN — with no factory to evaluate, a
+#   declaration module that throws fails at IMPORT, which is
+#   `test_a_declaration_module_that_cannot_IMPORT_fails_the_build` above.
+#
+# `static_mint_preconditions` no longer catches anything around the registry
+# read, because the read cannot raise.
 
 
 def test_a_torchless_discovery_ABSTAINS_out_loud(clean_registry) -> None:

@@ -1,27 +1,18 @@
-"""A PACKAGE-resident declaration that refuses — the shape ltx/qwen/z-image
-now ship. The endpoint walker imports every submodule of an endpoint package,
-so this module is imported whether or not ``main`` asks for it.
+"""A PACKAGE-resident declaration that refuses to MINT.
+
+The endpoint walker imports every submodule of an endpoint package, so this
+module is imported whether or not ``main`` asks for it — which is why the
+refusal must be data (``Compile.blockers``, pgw#1115) and not an exception.
 """
 
 from __future__ import annotations
 
-from gen_worker import Compile, register_export_declaration
-from gen_worker.aot_mint import MintRefused
+from gen_worker import register_export_declaration
 
-from ..blocked_declaration_parts import BLOCKER_TEXT, FAMILY, build_declaration
+from ..blocked_declaration_parts import BLOCKER, FAMILY, build_declaration
 
 _FAMILY = FAMILY
 
+DECLARATION = build_declaration(blockers=(BLOCKER,))
 
-def _refuse_if_blocked() -> None:
-    raise MintRefused(BLOCKER_TEXT)
-
-
-def _declaration() -> Compile:
-    """Mirrors the endpoints' own shape exactly: build, then blocker-check."""
-    decl = build_declaration()
-    _refuse_if_blocked()
-    return decl
-
-
-register_export_declaration(_declaration, family=_FAMILY)
+register_export_declaration(DECLARATION)

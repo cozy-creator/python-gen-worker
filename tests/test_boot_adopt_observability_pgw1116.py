@@ -179,10 +179,6 @@ def _executor(tmp_path: Path) -> Any:
     return ex
 
 
-class _Blocked:
-    """A pgw#853 thunk-shaped declaration that REFUSES when asked."""
-
-
 @pytest.mark.parametrize(
     "gate,wire,expect",
     [
@@ -192,13 +188,12 @@ class _Blocked:
                 executor_mod.aot_mint, "export_declaration", lambda f: None),
             "no registered export declaration",
         ),
-        (
-            "declaration_refused",
-            lambda mp: mp.setattr(
-                executor_mod.aot_mint, "export_declaration",
-                _raise(RuntimeError("OQ-2 audio_timestep rank unresolved"))),
-            "audio_timestep",
-        ),
+        # pgw#1107: there is no `declaration_refused` row any more. The gate
+        # existed because a pgw#853 THUNK could raise out of
+        # `export_declaration`; the accessor is a registry read now, so the
+        # gate could only ever have fired for a stubbed function — and a gate
+        # only its own test can trigger proves nothing. A blocked family is
+        # `Compile.blockers`, refused at the mint gate (pgw#1115).
         (
             "declaration_unreadable",
             lambda mp: mp.setattr(

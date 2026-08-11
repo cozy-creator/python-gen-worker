@@ -1735,13 +1735,27 @@ def endpoint(
             "unconditioned model, or a dynamic range via "
             "Compile(dynamic=(DynamicDim('sequence', min=.., max=..),))."
         )
-    if compile is not None and compile.classes and compile.family:
-        # pgw#739: a class-bearing declaration is the family's export
-        # contract; registering at decoration is what lets the mint derive
-        # export inputs with zero per-family SDK code.
-        from .export_contract import register_export_declaration
+    if compile is not None:
+        # pgw#739: an export declaration is the family's export contract;
+        # registering at decoration is what lets the mint derive export inputs
+        # with zero per-family SDK code.
+        #
+        # pgw#1107: the gate asks about INTENT, not about the payload. It used
+        # to read `compile.classes and compile.family`, so a declaration that
+        # named dims/forks/inputs and forgot its classes (or its family) was
+        # dropped on the floor — registered nothing, minted nothing, and on a
+        # pod was indistinguishable from an endpoint that never declared AOT.
+        # Flipping it to "classes required for every compile=" was the other
+        # wrong answer: six endpoints ship a thin class-less `compile=` for the
+        # dynamo lane only and declare no export contract at all. So the
+        # question is whether the author reached for the export vocabulary; if
+        # they did, `register_export_declaration` holds them to it.
+        from .export_contract import (
+            declares_export_contract, register_export_declaration,
+        )
 
-        register_export_declaration(compile)
+        if declares_export_contract(compile):
+            register_export_declaration(compile)
     bucket = int(lora_bucket or 0)
     if bucket:
         from ..models.w8a8_lora import RANK_BUCKETS

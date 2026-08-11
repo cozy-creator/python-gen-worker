@@ -66,9 +66,6 @@ GATE_REASONS: Tuple[str, ...] = (
     # `aot_mint.export_declaration(family)` answered None: this family ships no
     # export declaration, so no key can name its class set.
     "no_export_declaration",
-    # A pgw#853 THUNK declaration REFUSED to build (open mint blockers). It used
-    # to escape `_boot_adopt` uncaught and take the whole model setup down.
-    "declaration_refused",
     # The declaration exists but `aot_declaration.cell_plans` will not enumerate
     # it (colliding entry names, no targets).
     "declaration_unreadable",
