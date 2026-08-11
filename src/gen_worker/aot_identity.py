@@ -165,9 +165,86 @@ def verify_declared_identity(
     return ""
 
 
+#: The entry-block field carrying the node-level digest of the traced program
+#: (``graph_hash.graph_hash``), stamped by ``aot_mint.keying_block``. METADATA,
+#: never a key axis — see :func:`verify_graph_witness`.
+GRAPH_WITNESS_FIELD = "graph_witness"
+
+
+def verify_graph_witness(
+    meta: Mapping[str, Any], witnesses: Mapping[str, str],
+) -> str:
+    """``''`` when the cell's recorded graph witnesses equal the ones this pod
+    traced, else the reason. pgw#1031's fail-closed floor.
+
+    The cell key is an INGRESS identity: ``class_hash`` folds target, fork,
+    class dims, declared ranges, the graph-interface block (constant FQNs,
+    lifted inputs, pytree spec, specialization) and the declared envelope —
+    everything about how a graph is CALLED and nothing about what it COMPUTES.
+    Two endpoints whose bodies differ while their declarations agree therefore
+    mint under one ``ck1`` key: measured 2026-08-10 on ``micro-pad32`` vs
+    ``micro-pad32-branchy`` (112 vs 102 nodes, byte-identical keying block,
+    identical key). Pull-by-key adoption (§4.27/pgw#1090) then hands one
+    endpoint the other's kernels, and only the arm-time numerics gate — a
+    tolerance test, not identity — stands between that and served output.
+
+    This closes it WITHOUT re-keying the fleet: the mint records
+    ``graph_witness`` per entry, the adopter derives its own from the same
+    traced programs its key came from (``boot_key``), and a disagreement is a
+    typed refusal naming both digests. The pod then boots exactly as it booted
+    before pull-by-key existed — eager, then mint — which is the correct
+    outcome for "this cell is not my computation".
+
+    Fail-closed in both directions, the doctrine
+    :func:`verify_declared_identity` already keeps: a cell that is SILENT on an
+    entry's witness cannot be shown to compute this pod's graph, and "cannot be
+    shown to match" is what a refusal means. A witness set that does not cover
+    the same entries is the same failure — a partial agreement is not a
+    narrower match, it is an unproven one (pgw#716).
+
+    ``witnesses`` is ``{entry: digest}`` as
+    ``boot_key.DerivedKey.graph_witnesses`` reports it. An empty mapping is a
+    caller error, not a pass.
+    """
+    if not witnesses:
+        return (
+            "this pod derived no graph witnesses, so the cell's compiled "
+            "graphs cannot be shown to be the graphs it traced (pgw#1031)")
+    entries = meta.get("entries")
+    if not isinstance(entries, Mapping) or not entries:
+        return "artifact records no entries map; it has no graph witness"
+    recorded = {
+        str(name): str((block or {}).get(GRAPH_WITNESS_FIELD) or "")
+        for name, block in entries.items()
+    }
+    silent = sorted(name for name, value in recorded.items() if not value)
+    if silent:
+        return (
+            f"entries {silent[:4]!r} record no {GRAPH_WITNESS_FIELD!r}: this "
+            f"cell predates pgw#1031 and cannot state which graph it compiled")
+    extra = sorted(set(recorded) - set(witnesses))
+    missing = sorted(set(witnesses) - set(recorded))
+    if extra or missing:
+        return (
+            f"graph witness class set differs (cell-only {extra[:3]!r}, "
+            f"traced-only {missing[:3]!r}): the cell was compiled from a "
+            f"different class set than this pod traced")
+    for name in sorted(recorded):
+        want, have = recorded[name], str(witnesses[name] or "")
+        if want != have:
+            return (
+                f"entry {name!r}: graph witness {want} on the cell, {have} "
+                f"traced here — the cell key matched but the COMPUTATION did "
+                f"not (pgw#1031: the key folds the ingress contract, not the "
+                f"graph nodes). Refusing to arm another graph's kernels")
+    return ""
+
+
 __all__ = [
+    "GRAPH_WITNESS_FIELD",
     "ExpectedIdentity",
     "artifact_identity",
     "expected_from_plan",
     "verify_declared_identity",
+    "verify_graph_witness",
 ]

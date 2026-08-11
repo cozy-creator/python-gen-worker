@@ -1,4 +1,15 @@
-"""Canonical GRAPH identity — the cell-key input (pgw#716).
+"""Canonical GRAPH identity (pgw#716).
+
+**What this digest is USED for today (pgw#1031, read this before the ruling
+below):** it is the pgw#917 same-class comparator and the per-entry
+``graph_witness`` — recorded on every cell by ``aot_mint.keying_block`` and
+compared at adopt time by ``aot_identity.verify_graph_witness``. It is **not**
+folded into ``cell_key``: the ``graph`` axis is ``combined_graph_hash`` over
+``class_hash``, which folds the graph INTERFACE and no node digest, so two
+different computations behind one declaration share a key (measured
+2026-08-10). Whether this digest should BECOME the key is pgw#1031's depth
+question and Paul's to rule; the witness is the fail-closed floor that holds
+either way.
 
 Paul's ruling: "I'd rather key on the graph that is changed, not hash on code
 changes... look at some code and be like 'oh this is graph-ABC' and that is the

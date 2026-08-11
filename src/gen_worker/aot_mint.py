@@ -3407,6 +3407,20 @@ def keying_block(
     ``constants`` is present-but-empty rather than absent because
     ``aot_serve.entries_from_meta`` validates every block as a full contract,
     and an entry that cannot be parsed cannot be keyed.
+
+    ``graph_witness`` (pgw#1031) is a SIBLING of ``graph``, deliberately
+    OUTSIDE it: ``aot_serve.class_hash`` folds ``target``/``fork``/
+    ``class_dims``/``range_digest``/``graph``/``strict``/``lora_bucket`` and
+    nothing else, so a top-level field is recorded on every cell without
+    moving one key. It is the node-level digest of the traced program
+    (``graph_hash.graph_hash``) — the fact the key axes provably do NOT hold:
+    measured 2026-08-10, ``micro-pad32`` and ``micro-pad32-branchy`` produce a
+    byte-identical keying block (identical signature, symbol ranges, pytree
+    spec, constant FQNs and declared envelope) from 112- and 102-node graphs.
+    The key cannot separate them; this witness can, and the adopt path refuses
+    on it (``aot_identity.verify_graph_witness``) so a collision degrades to
+    eager instead of serving another endpoint's kernels. Whether the witness
+    should BECOME a key axis is pgw#1031's depth question and Paul's to rule.
     """
     inputs, symbols = aot_package.input_contract(program, flat_leaves)
     block: Dict[str, Any] = {
@@ -3418,6 +3432,7 @@ def keying_block(
         "symbols": symbols,
         "constants": [],
         "graph": entry_graph_block(program, spec),
+        "graph_witness": graph_hash.graph_hash(program),
     }
     if adapter_arm(spec.fork) is False:
         # pgw#790: the NEGATIVE half of this class's contract. Without it the
