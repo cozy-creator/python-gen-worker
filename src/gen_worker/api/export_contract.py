@@ -258,6 +258,67 @@ def blocker_refusal(family: str, blockers: Sequence[MintBlocker]) -> str:
         f"what settled it (pgw#1115).")
 
 
+#: The stage vocabulary a speed bar may name (th#1795). A bar declared against
+#: `total_round_trip_ms` measures the network and the queue and calls it the
+#: model — that is the "10.9x" which corrected to 1.3x.
+SPEED_STAGE_PREFIX = "stage_ms."
+
+
+def validate_speed_bar(metric: str, min_speedup: Optional[float]) -> Tuple[str, Optional[float]]:
+    """Normalize + refuse the family's declared compile-vs-eager bar (pgw#1149).
+
+    Called from ``Compile.__post_init__`` so the refusal lands at endpoint
+    import. The rules are the hub's own (th#1811 `parseManifestCompileBlock`):
+    the metric names a STAGE, the bar is ``>= 1.0``, and the two are a PAIR —
+    the hub's ``Bar.Declared`` is ``metric != "" and min_speedup >= 1.0``, so
+    half a declaration is ``bar_undeclared`` with extra steps.
+    """
+    name = str(metric or "").strip()
+    if name:
+        if (name.lower() == "total_round_trip_ms"
+                or name.lower().endswith(".total_round_trip_ms")):
+            raise DeclarationError(
+                f"Compile.speed_metric {name!r} is the round trip, not a "
+                f"stage — declare {SPEED_STAGE_PREFIX}<stage> (th#1795)")
+        if not name.startswith(SPEED_STAGE_PREFIX) or name == SPEED_STAGE_PREFIX:
+            raise DeclarationError(
+                f"Compile.speed_metric {name!r} must name a worker stage as "
+                f"{SPEED_STAGE_PREFIX}<stage> — the compute stage the family "
+                f"reads, never the round trip (th#1795)")
+    bar: Optional[float] = None
+    if min_speedup is not None:
+        bar = float(min_speedup)
+        if bar != bar or bar in (float("inf"), float("-inf")) or bar < 1.0:
+            raise DeclarationError(
+                f"Compile.min_speedup must be a finite value >= 1.0 (a bar "
+                f"below 1.0 asks the platform to certify a slowdown), got "
+                f"{min_speedup!r}")
+    if bool(name) != (bar is not None):
+        raise DeclarationError(
+            f"Compile.speed_metric and min_speedup: a bar is a PAIR "
+            f"(got metric={name!r}, min_speedup={min_speedup!r}). A stage with "
+            f"no floor judges nothing and a floor with no stage names nothing; "
+            f"the publish-time validation session reads both or neither "
+            f"(th#1811 `bar_undeclared`)")
+    return name, bar
+
+
+def speed_bar(decl: Any) -> Optional[Dict[str, Any]]:
+    """The declaration's speed bar as a JSON-able row, or ``None`` when the
+    family declares none (pgw#1149).
+
+    The counterpart of :func:`blocker_rows`: ONE readable shape, so the endpoint
+    repo's torch-free ``scripts/lint_author_ci.py`` reads the author's bar off
+    the declaration the hub reads instead of re-deriving it from a second file.
+    """
+    metric = str(getattr(decl, "speed_metric", "") or "").strip()
+    bar = getattr(decl, "min_speedup", None)
+    if not metric or bar is None:
+        return None
+    return {"family": str(getattr(decl, "family", "") or ""),
+            "metric": metric, "min_speedup": float(bar)}
+
+
 def _identifier(kind: str, name: Any) -> str:
     text = str(name or "").strip()
     if not text or not text.replace(".", "_").isidentifier():
@@ -1216,6 +1277,7 @@ __all__ = [
     "Input",
     "MintBlocker",
     "SHAPE_STRATEGIES",
+    "SPEED_STAGE_PREFIX",
     "STATIC_ROWS",
     "FORK_REASONS",
     "WEAK_FORK_REASONS",
@@ -1232,7 +1294,9 @@ __all__ = [
     "register_export_declaration",
     "registered_export_families",
     "reset_export_declarations",
+    "speed_bar",
     "validate_contract",
+    "validate_speed_bar",
     "weak_arms",
     "weak_arms_by_family",
 ]

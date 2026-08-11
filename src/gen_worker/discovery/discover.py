@@ -889,6 +889,24 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             # SDK v2: declared at the decorator (`@endpoint(lora_bucket=)`).
             if es.lora_bucket:
                 fn["compile"]["lora_bucket"] = int(es.lora_bucket)
+            # pgw#1149 / th#1811 (ie#664 §6): the AUTHOR's declared bar and
+            # refusals, so the hub's publish-time validation session judges a
+            # release against a DECLARATION instead of a number the platform
+            # picked. Absent when undeclared — the hub reports `bar_undeclared`
+            # by name, and a default emitted here would make the SDK the author
+            # of the bar the platform verifies.
+            if es.compile.speed_metric:
+                fn["compile"]["speed_metric"] = es.compile.speed_metric
+            if es.compile.min_speedup is not None:
+                fn["compile"]["min_speedup"] = float(es.compile.min_speedup)
+            # OPEN blockers only (pgw#1115): the hub reads a non-empty list as
+            # "the author refuses to mint" and marks the mint check
+            # blocked-by-declaration, so a RESOLVED id would park the family in
+            # that state forever. Ids, not prose — open-vs-resolved is the
+            # whole of what the hub decides on.
+            open_ids = [b.id for b in es.compile.open_blockers]
+            if open_ids:
+                fn["compile"]["blockers"] = open_ids
         out.append(fn)
 
     return out
