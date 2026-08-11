@@ -179,9 +179,12 @@ def load_slot(
     )
     if refusal is not None:
         logger.error("pre-load envelope refusal: %s", refusal)
-        activity_mod.emit_event(
-            activity_mod.KIND_ENVELOPE_REFUSAL, str(refusal), phase="refused",
-        )
+        try:
+            activity_mod.emit_event(
+                activity_mod.KIND_ENVELOPE_REFUSAL, str(refusal),
+                phase="refused")
+        except Exception:  # noqa: BLE001 - the refusal outranks its telemetry
+            logger.debug("envelope-refusal event dropped", exc_info=True)
         raise refusal
 
     # pgw#1041: byte-level staging progress + death breadcrumb for the whole
