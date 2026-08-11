@@ -23,10 +23,12 @@ Four verdicts, and the difference between the last three is the whole point:
 
 ``ok``         the precondition holds on this image.
 ``refused``    it does not, and nothing on a pod can fix it — FAIL THE BUILD.
-``blocked``    the declaration itself refused, in typed ``MintRefused``
-               vocabulary (ltx-2.3's open ``MINT_BLOCKERS``). The family said
-               why; it is a DECLARED block, not a broken image, and it does
-               not need a pod to repeat the sentence.
+``blocked``    the declaration refused: either it carries unresolved
+               ``Compile.blockers`` (pgw#1115 — the declared form) or it
+               raised typed ``MintRefused`` (pgw#853's thunk, which the
+               pgw#1107 fold retires). The family said why; it is a DECLARED
+               block, not a broken image, and it does not need a pod to
+               repeat the sentence.
 ``abstained``  this environment cannot decide (a torch-less manifest build).
                Recorded, never silent — an unrecorded abstention is how a gate
                becomes decorative.
@@ -39,9 +41,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .api.export_contract import (
+    blocker_refusal,
     declaration_import_failures,
     export_declaration,
     has_export_declaration,
+    open_blockers,
 )
 
 # Every heavier import in this module is DEFERRED into the function that needs
@@ -204,6 +208,16 @@ def static_mint_preconditions(
                 family=family, detail=(
                     "the registered export declaration evaluated to None — "
                     "there is no Compile to derive graph classes from")))
+            continue
+        # pgw#1115: the SAME declared block, read as DATA. The `MintRefused`
+        # branch above is the thunk saying it; a folded declaration says it
+        # with `blockers=`, and the build gate must recognise both or the
+        # pgw#1107 fold turns a build-time `blocked` verdict into silence.
+        blocked = open_blockers(decl)
+        if blocked:
+            rows.append(Precondition(
+                check=CHECK_DECLARATION_EVALUATES, verdict=BLOCKED,
+                family=family, detail=blocker_refusal(family, blocked)))
             continue
         rows.append(Precondition(
             check=CHECK_DECLARATION_EVALUATES, verdict=OK, family=family,

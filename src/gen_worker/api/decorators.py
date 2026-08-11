@@ -44,7 +44,10 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, Type
 import msgspec
 
 from .binding import BINDING_TYPES, Binding
-from .export_contract import Arg, Dim, Fork, GraphClass, Input, validate_contract
+from .export_contract import (
+    Arg, Dim, Fork, GraphClass, Input, MintBlocker, open_blockers,
+    validate_contract,
+)
 from .formula import RuntimeFormula
 from .slot import OBJECTIVES, TASKS, Slot
 from ..models import execution_lanes as lanespec
@@ -949,6 +952,14 @@ class Compile(msgspec.Struct, frozen=True):
     # conv-bearing UNet.
     numerics_floor: Optional[float] = None
     numerics_warn: Optional[float] = None
+    # pgw#1115: DECLARED mint blockers. A family that may not mint yet says so
+    # as DATA here — never as a thunk that raises, which the pgw#1107 fold onto
+    # this decorator cannot carry (`compile=` takes a Compile, never a
+    # callable, so a folded refusal would simply vanish). While any blocker is
+    # unresolved the mint fails CLOSED and names the ids; serving is untouched.
+    # Deliberately NOT a contract axis (`contract_axes()`): resolving a blocker
+    # must not re-key a cell.
+    blockers: tuple[MintBlocker, ...] = ()
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -991,7 +1002,7 @@ class Compile(msgspec.Struct, frozen=True):
         # (`compile_cache._mark_regional_blocks`).
         for name, typ in (("dims", Dim), ("forks", Fork),
                           ("classes", GraphClass), ("inputs", Input),
-                          ("args", Arg)):
+                          ("args", Arg), ("blockers", MintBlocker)):
             rows = tuple(getattr(self, name))
             if any(not isinstance(r, typ) for r in rows):
                 raise TypeError(
@@ -1018,6 +1029,12 @@ class Compile(msgspec.Struct, frozen=True):
                 f"exceed numerics_warn ({self.numerics_warn}): the floor "
                 f"refuses, the warn only confesses")
         validate_contract(self)
+
+    @property
+    def open_blockers(self) -> tuple[MintBlocker, ...]:
+        """The UNRESOLVED blockers (pgw#1115). Non-empty ⟹ this family refuses
+        to mint, by declaration, and every mint site fails closed on it."""
+        return open_blockers(self)
 
     @property
     def sequence_dynamic(self) -> Optional[DynamicDim]:
