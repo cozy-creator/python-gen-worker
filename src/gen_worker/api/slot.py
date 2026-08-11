@@ -35,12 +35,13 @@ values are gone, and component sharing is automatic by content address.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generic, Optional, Sequence, Type, TypeVar
+from typing import Any, Dict, Generic, Mapping, Optional, Sequence, Type, TypeVar
 
 import msgspec
 
 from .binding import ModelRef
 from ..families.base import KIND_LORA, GenerationDefaults, family_for
+from ..models.tensor_layout_contract import normalize_layout_demand
 
 D = TypeVar("D", bound=GenerationDefaults)
 
@@ -125,6 +126,32 @@ class Slot(Generic[D]):
     multi-slot shape must mark exactly one root — ambiguity is a
     decoration-time error, never a silent fallback.
 
+    ``layouts`` is the slot's per-component DEMAND (§1.33, pgw#1143): a
+    mapping from component path to the ORDERED tuple of tensor-layout
+    contract handles this slot's code can execute. ``"*"`` is the whole-tree
+    default; a component key overrides it for that component only::
+
+        Slot(StableDiffusionXLPipeline, selected_by="model", layouts={
+            "*":            (CONTRACT_PLAIN_BF16,),
+            "text_encoder": (CONTRACT_HF_FP8_BLOCKWISE, CONTRACT_PLAIN_BF16),
+        })
+
+    Order IS preference. The handles are validated here against the SDK's
+    transcribed ``KNOWN_CONTRACTS``; the KEYS are validated at decoration
+    against the slot's DERIVED component tree, so a key that would silently
+    match nothing is a build error naming the tree. **Absent is UNDECLARED**
+    — a tri-state, neither "accepts everything" nor "accepts nothing": the
+    hub's gate has no teeth on a slot that declares nothing and falls back to
+    the image-wide decoder census. An empty mapping or an empty tuple is a
+    decoration-time error, because collapsing the tri-state is th#1580's
+    fail-open defect wearing a new name.
+
+    This lives on ``Slot`` and NOT on ``Compile``: ``Compile``'s fields feed
+    ``contract_axes()``, a cell-key input, and §1.33 point 5 is that
+    conversion is upstream of compute and invisible to cell identity. A
+    layout declaration there would either re-key every cell in the fleet or
+    sit inside the key struct while deliberately not participating.
+
     ``optional`` is DERIVED, never passed: a slot is optional exactly when
     its ``setup()`` parameter carries a default (``edit: Pipe | None =
     None``). The signature is the single source of truth, so the two can
@@ -135,7 +162,7 @@ class Slot(Generic[D]):
 
     __slots__ = (
         "pipeline_cls", "selected_by", "family", "default_checkpoint", "root",
-        "optional",
+        "optional", "layouts",
     )
 
     def __init__(
@@ -146,6 +173,7 @@ class Slot(Generic[D]):
         family: Optional[str] = None,
         default_checkpoint: Optional[ModelRef] = None,
         root: bool = False,
+        layouts: Optional[Mapping[str, Sequence[str]]] = None,
     ) -> None:
         if not isinstance(pipeline_cls, type):
             raise TypeError(
@@ -163,12 +191,21 @@ class Slot(Generic[D]):
         self.default_checkpoint = default_checkpoint
         self.root = bool(root)
         self.optional = False  # derived at decoration from setup()'s default
+        # None is UNDECLARED and stays None; anything else normalizes now, at
+        # the declaration site, so the traceback names the Slot the author
+        # wrote rather than a manifest key.
+        self.layouts: Optional[Dict[str, tuple[str, ...]]] = (
+            None if layouts is None
+            else normalize_layout_demand(
+                layouts, where=f"Slot({pipeline_cls.__name__})")
+        )
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"Slot({self.pipeline_cls.__name__}, selected_by={self.selected_by!r}, "
             f"family={self.family!r}, default_checkpoint={self.default_checkpoint!r}, "
-            f"root={self.root!r}, optional={self.optional!r})"
+            f"root={self.root!r}, optional={self.optional!r}, "
+            f"layouts={self.layouts!r})"
         )
 
 

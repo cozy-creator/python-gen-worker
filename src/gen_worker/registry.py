@@ -28,6 +28,7 @@ from .api.tree import derive_components, validate_no_sibling_parts
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
 from .families.base import GenerationDefaults
+from .models.tensor_layout_contract import LAYOUT_KEY_ANY_COMPONENT
 from .warmup import validate_class_warmup
 import dataclasses
 from .api.compile_axis import warm_guidance_values
@@ -411,6 +412,44 @@ def _validate_compile_arms(
     )
 
 
+def _validate_slot_layout_keys(
+    owner: str,
+    slots: Dict[str, Slot],
+    slot_components: Dict[str, Dict[str, str]],
+) -> None:
+    """Every `Slot(layouts=...)` key is `"*"` or a real component path.
+
+    §1.33 pins the DEMAND per (slot, component path), and the path vocabulary
+    is the DERIVED tree the manifest already publishes — so a key that matches
+    no component is not a stricter declaration, it is a silently absent one.
+    The handles themselves were validated at the Slot constructor; only the
+    keys need the tree, and the tree only exists here.
+    """
+    for name, slot in slots.items():
+        declared = getattr(slot, "layouts", None)
+        if not declared:
+            continue
+        tree = slot_components.get(name) or {}
+        for key in declared:
+            if key == LAYOUT_KEY_ANY_COMPONENT:
+                continue
+            if key in tree:
+                continue
+            if not tree:
+                raise ValueError(
+                    f"{owner}: slot {name!r} declares layouts[{key!r}] but "
+                    f"{slot.pipeline_cls.__name__} is not introspectable, so "
+                    "no component tree is derived — a self-loading slot can "
+                    f"only declare {LAYOUT_KEY_ANY_COMPONENT!r}."
+                )
+            raise ValueError(
+                f"{owner}: slot {name!r} declares layouts[{key!r}], which is "
+                f"not a component of {slot.pipeline_cls.__name__}. Its derived "
+                f"tree is: {', '.join(sorted(tree))} (or "
+                f"{LAYOUT_KEY_ANY_COMPONENT!r} for the whole tree)."
+            )
+
+
 def _slot_is_family_agnostic(
     name: str, slot: Slot, slots: Dict[str, Slot],
 ) -> bool:
@@ -515,6 +554,10 @@ def _spec_for_handler(
             for name, slot in slots.items()
         ) if tree
     }
+    # §1.33 / pgw#1143: the DEMAND's component keys are checked against the
+    # tree that was just derived. A key matching nothing is the failure mode
+    # to prevent — it reads as a declaration and gates nothing.
+    _validate_slot_layout_keys(owner, slots, slot_components)
     payload_axes = extract_payload_axes(owner, payload_type)
     ret = hints.get("return")
     if ret is None:

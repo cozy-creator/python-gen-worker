@@ -220,6 +220,14 @@ jobs:
       - name: pgw#1049 guard - torch-settings writes outside the authority
         run: uv run python scripts/lint_settings_writers.py
 
+      # GATING (pgw#1143, §1.33): `Slot(layouts=...)` is the per-slot layout
+      # DEMAND the hub's gate reads. It must be readable by the AST sweep as
+      # well as by the import, so a computed declaration is refused where it
+      # is written — otherwise the published manifest becomes the only place
+      # the demand can be read, which is the dual-declaration hazard.
+      - name: pgw#1143 guard - Slot(layouts=) declarations are literals
+        run: uv run python scripts/lint_layout_declarations.py
+
       # GATING (pgw#1122): the compute child holds no worker credential BY
       # CONSTRUCTION, so a gate that reads one to answer "who am I?" or "is
       # there a hub?" refuses on every real serving pod (pgw#1108, then

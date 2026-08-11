@@ -147,3 +147,120 @@ def contract_decoders_of(obj: Any) -> tuple[ContractDecoder, ...]:
     if not isinstance(marked, tuple):
         return ()
     return tuple(d for d in marked if isinstance(d, ContractDecoder))
+
+
+# ── §1.33 / pgw#1143: the DEMAND side of the same vocabulary ──────────────────
+#
+# `@implements_contract` above is the SUPPLY-adjacent census — "which decoders
+# does this IMAGE contain". The DEMAND is what `Slot(layouts=...)` declares:
+# "what does this slot's code need in order to run". Two facts, one vocabulary,
+# so the handle grammar and the registration refusal are shared verbatim rather
+# than transcribed twice.
+#
+# The SDK emits HANDLES and never digests: descriptors are Go, in tensorhub
+# (th#1580 A2). The hub resolves handle -> `Contract.Digest()` at MANIFEST
+# INGEST against its own registry and stores both; a handle its registry does
+# not know fails the manifest there, not at rebind. So `KNOWN_CONTRACTS` is
+# honestly what it is — a transcription that is allowed to be stale and is
+# CHECKED, never authoritative.
+
+#: The whole-tree key: this slot's demand for every component that has no
+#: more specific declaration.
+LAYOUT_KEY_ANY_COMPONENT = "*"
+
+
+class LayoutDeclarationError(ValueError):
+    """A `Slot(layouts=...)` declaration the SDK refuses where it is written."""
+
+
+def validate_layout_handle(handle: object, *, where: str) -> str:
+    """One declared handle, normalized, or a decoration-time refusal.
+
+    The quant axis only. §1.33's rendered `"<topology>+<quant>"` pair needs a
+    topology REGISTRY to compare against (th#1809 T3); until that exists a
+    composite is a handle naming a vocabulary the platform cannot resolve, and
+    exact-or-refused means refusing it rather than storing half a pair.
+    """
+    if not isinstance(handle, str):
+        raise LayoutDeclarationError(
+            f"{where}: layout handle must be a string, got "
+            f"{type(handle).__name__}"
+        )
+    text = handle.strip()
+    if "+" in text:
+        raise LayoutDeclarationError(
+            f"{where}: {text!r} names a <topology>+<quant> pair. The topology "
+            "axis has no registry yet (th#1809 T3) — declare the quant handle "
+            "alone until it does; a pair the hub cannot resolve field-wise is "
+            "not exact."
+        )
+    if not _HANDLE_RE.match(text):
+        raise LayoutDeclarationError(
+            f"{where}: {text!r} is not a contract handle (want ns.name@N)"
+        )
+    if text not in KNOWN_CONTRACTS:
+        raise LayoutDeclarationError(
+            f"{where}: contract {text!r} is not registered. "
+            "Contracts are CODE (th#1580 A2): register it in tensorhub's "
+            "internal/tensorlayout with a descriptor and a probe set "
+            f"before a slot may demand it. Known: {', '.join(KNOWN_CONTRACTS)}"
+        )
+    return text
+
+
+def normalize_layout_demand(
+    layouts: object, *, where: str,
+) -> dict[str, tuple[str, ...]]:
+    """`Slot(layouts=...)` -> `{component_path: ordered handles}`.
+
+    Ordering IS preference (§1.33 point 2), so the tuple is kept as written
+    and never sorted. Component-path keys are validated against the DERIVED
+    component tree separately, at decoration time, by the registry — this
+    function owns only the shape and the vocabulary.
+    """
+    if not isinstance(layouts, dict):
+        raise LayoutDeclarationError(
+            f"{where}: layouts= must be a mapping of component path -> ordered "
+            f"handles, got {type(layouts).__name__}"
+        )
+    if not layouts:
+        raise LayoutDeclarationError(
+            f"{where}: layouts={{}} declares nothing. Omit layouts= to leave "
+            "this slot UNDECLARED; an empty declaration is neither 'accepts "
+            "everything' nor 'accepts nothing' and the platform will not "
+            "guess which."
+        )
+    out: dict[str, tuple[str, ...]] = {}
+    for raw_key, raw_value in layouts.items():
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            raise LayoutDeclarationError(
+                f"{where}: layouts= key {raw_key!r} must be a non-empty "
+                f"component path or {LAYOUT_KEY_ANY_COMPONENT!r}"
+            )
+        key = raw_key.strip()
+        if isinstance(raw_value, (str, bytes)) or not isinstance(
+                raw_value, (tuple, list)):
+            raise LayoutDeclarationError(
+                f"{where}: layouts[{key!r}] must be an ORDERED tuple of "
+                f"handles (order is preference), got "
+                f"{type(raw_value).__name__}"
+            )
+        if not raw_value:
+            raise LayoutDeclarationError(
+                f"{where}: layouts[{key!r}] is empty. A component that "
+                "accepts no layout cannot be bound at all; omit the key to "
+                "fall back to the whole-tree declaration, or omit layouts= "
+                "entirely to leave the slot UNDECLARED."
+            )
+        handles: list[str] = []
+        for item in raw_value:
+            handle = validate_layout_handle(
+                item, where=f"{where}: layouts[{key!r}]")
+            if handle in handles:
+                raise LayoutDeclarationError(
+                    f"{where}: layouts[{key!r}] repeats {handle!r}; the "
+                    "second position is unreachable"
+                )
+            handles.append(handle)
+        out[key] = tuple(handles)
+    return out
