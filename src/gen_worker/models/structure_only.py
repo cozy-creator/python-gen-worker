@@ -104,6 +104,23 @@ class StructureOnlyUnsupported(WorkerError):
         )
 
 
+class StructureNotHonored(StructureOnlyUnsupported):
+    """A component that WAS built weight-free was not carried by the pipeline.
+
+    Distinct from its parent on purpose. ``StructureOnlyUnsupported`` means the
+    component could not be built from code+config at all (a genuinely stranded
+    family: no config surface, a quantized artifact lane, an unnamed class) —
+    for which loading real weights is the CORRECT outcome and the mint child
+    legitimately falls back. This subclass means the opposite: ``build_component``
+    SUCCEEDED (the module's parameters are fake, zero storage) and the composed
+    pipeline then IGNORED the injected module and rebuilt the target from the
+    checkpoint. Falling back there would export ~weight-scale REAL tensors while
+    still reporting a weightless child — the exact silent failure this slice
+    exists to prevent (measured on z-image: a ~40 GiB `torch.export` OOM
+    misclassified `retryable`, ie#638). So it must FAIL CLOSED, not fall back.
+    """
+
+
 @dataclass(frozen=True)
 class StructureFacts:
     """What one structure-only component costs, and what it did NOT cost."""
@@ -648,6 +665,7 @@ __all__ = [
     "RANDOM_STD",
     "STAMP",
     "StructureFacts",
+    "StructureNotHonored",
     "StructureOnlyUnsupported",
     "build_component",
     "compiling_under",

@@ -660,17 +660,19 @@ def _assert_structure_honored(
     unexpected keyword — ``**kwargs`` swallows it and the class loads the
     checkpoint itself. That failure is SILENT and it is the exact failure this
     slice cannot tolerate: the mint would hold every weight and still report a
-    weightless child. So it is checked, on the object that came back, and the
-    caller decides what to do about a refusal (the mint child falls back to a
-    real-weight load and records why).
+    weightless child. So it is checked, on the object that came back, and a
+    miss raises ``StructureNotHonored`` — a DISTINCT type from the buildable
+    strand, because the component WAS built weight-free and the pipeline threw
+    it away. The mint child FAILS CLOSED on it (it does not fall back to a
+    real-weight export, which is how z-image OOM'd ~40 GiB as `retryable`).
     """
-    from ..models.structure_only import STAMP, StructureOnlyUnsupported
+    from ..models.structure_only import STAMP, StructureNotHonored
 
     for component, module in sorted(injected.items()):
         got = getattr(pipe, component, None)
         if got is module or getattr(got, STAMP, False):
             continue
-        raise StructureOnlyUnsupported(
+        raise StructureNotHonored(
             component=component,
             cls_name=type(pipe).__name__,
             lacks=(
