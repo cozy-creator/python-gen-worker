@@ -72,7 +72,8 @@ from .procsplit import broker
 from .models import loading, provision
 from .request_context._helpers import _decode_unverified_jwt_claims
 from .convert.hub import HubPublishError
-from .api.export_contract import export_declaration
+from .api.export_contract import (
+    blocker_refusal, export_declaration, open_blockers)
 from .models import lora_lifted
 
 logger = logging.getLogger(__name__)
@@ -2257,6 +2258,15 @@ def mint_recipe(
             f"family {family!r} registered no export declaration (a "
             f"`compile=` block carrying graph classes, pgw#739/#758) — the "
             f"class set a multi-graph cell covers is undeclared")
+
+    # pgw#1115: the same refusal, now as DATA. A `Compile` carrying unresolved
+    # `blockers=` declines here under its own phase, naming the ids — the
+    # thunk's raise (above) and this branch are the same event said two ways,
+    # and the fold onto `@endpoint(compile=)` can only carry the second.
+    # Serving is untouched: this pod serves eager exactly as it did.
+    blocked = open_blockers(decl)
+    if blocked:
+        return _decline("declaration_blocked", blocker_refusal(family, blocked))
 
     # CYCLE: aot_mint imports CellPublisher from this module at module scope,
     # so this direction of the pair must stay deferred.

@@ -126,6 +126,124 @@ class DeclarationError(ValueError):
     import / ``Compile`` construction), never at mint time."""
 
 
+class MintBlocker(msgspec.Struct, frozen=True):
+    """A named, evidence-carrying reason this family may not MINT yet
+    (pgw#1115).
+
+    A refusal is DATA on the declaration, not code that raises. Before this,
+    a family with open questions expressed them by registering a THUNK that
+    raised ``MintRefused`` when the mint asked (pgw#853) — which the pgw#1107
+    fold cannot carry: ``@endpoint(compile=)`` takes a ``Compile``, never a
+    callable, so folding a refusing thunk onto the decorator would silently
+    DELETE the refusal and let the family mint against its own open questions.
+
+    So the refusal moves into the vocabulary. Every field is a literal; there
+    is no callable, no torch, no runtime state and nothing to evaluate — which
+    is what lets the endpoint repo's torch-free declaration lint READ a
+    family's open blockers out of an AST-extracted ``compile=`` expression
+    without a GPU, a pod or a mint.
+
+    * ``what`` — the claim the declaration cannot yet make.
+    * ``evidence`` — the citations. A blocker with no evidence is an opinion.
+    * ``resolves_when`` — the EXIT criterion, so the block is a question with
+      an answer rather than a permanent stall.
+    * ``resolved`` + ``resolution`` — an open blocker closes by a REVIEWABLE
+      edit that cites what settled it (a measurement, a merged change). The
+      citation is required, not conventional: a bare bool flip is exactly the
+      silent unblock this vocabulary exists to prevent. Deleting the row
+      outright is equally valid once nobody needs the record.
+
+    Blockers gate MINTING ONLY. A blocked family serves eagerly, exactly as it
+    does today, and blockers are deliberately NOT a contract axis — resolving
+    one must not re-key a cell.
+    """
+
+    id: str
+    what: str
+    evidence: str
+    resolves_when: str
+    resolved: bool = False
+    resolution: str = ""
+
+    def __post_init__(self) -> None:
+        force = msgspec.structs.force_setattr
+        ident = str(self.id or "").strip()
+        if not ident or ident.split() != [ident]:
+            raise DeclarationError(
+                f"MintBlocker id {self.id!r} must be a single whitespace-free "
+                f"token — it is printed in the refusal's id list and is how a "
+                f"human names the blocker they are resolving")
+        force(self, "id", ident)
+        for field in ("what", "evidence", "resolves_when"):
+            text = str(getattr(self, field) or "").strip()
+            if not text:
+                raise DeclarationError(
+                    f"MintBlocker {ident!r} states no {field} — a blocker "
+                    f"carries the claim it blocks, the evidence for it and "
+                    f"the exit criterion, or it is not reviewable")
+            force(self, field, text)
+        force(self, "resolved", bool(self.resolved))
+        resolution = str(self.resolution or "").strip()
+        if self.resolved and not resolution:
+            raise DeclarationError(
+                f"MintBlocker {ident!r} is marked resolved with no resolution "
+                f"citation — closing a blocker is a reviewable edit that must "
+                f"name what settled it (a measurement, a merged change); a "
+                f"bare bool flip is a silent unblock. Delete the row instead "
+                f"if nobody needs the record")
+        force(self, "resolution", resolution)
+
+    def as_row(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "what": self.what,
+            "evidence": self.evidence,
+            "resolves_when": self.resolves_when,
+            "resolved": self.resolved,
+            "resolution": self.resolution,
+        }
+
+
+def open_blockers(decl: Any) -> Tuple[MintBlocker, ...]:
+    """Every UNRESOLVED :class:`MintBlocker` a declaration carries.
+
+    Takes any object with a ``blockers`` attribute (a ``Compile``), so the
+    mint path, the build gate and the endpoint repo's lint all read the same
+    answer. Empty for a declaration that carries none — the normal case, and
+    the only state in which a family mints.
+    """
+    return tuple(
+        b for b in getattr(decl, "blockers", ()) if not getattr(b, "resolved", False))
+
+
+def blocker_rows(decl: Any) -> List[Dict[str, Any]]:
+    """The declaration's blockers as JSON-able rows, for a lint or a manifest.
+
+    The endpoint repo's ``scripts/lint_declarations.py`` evaluates a family's
+    ``compile=`` expression in an SDK-only namespace with no torch installed
+    and reports what it finds; this is the one shape it reads, so the report
+    cannot drift from the vocabulary.
+    """
+    return [b.as_row() for b in getattr(decl, "blockers", ())]
+
+
+def blocker_refusal(family: str, blockers: Sequence[MintBlocker]) -> str:
+    """The ONE refusal sentence, so every site that fails closed on an open
+    blocker says the same thing and names the same ids."""
+    ids = ", ".join(b.id for b in blockers)
+    detail = "\n".join(
+        f"  - {b.id}: {b.what}\n    EVIDENCE: {b.evidence}"
+        f"\n    RESOLVES WHEN: {b.resolves_when}"
+        for b in blockers)
+    return (
+        f"family {family!r} declares {len(blockers)} UNRESOLVED mint "
+        f"blocker(s) [{ids}] and REFUSES TO MINT. The declaration is otherwise "
+        f"complete — this is a declared gate, not a malformed declaration, and "
+        f"the family serves eagerly meanwhile:\n{detail}\n"
+        f"Resolving one is a reviewable edit to the declaration that cites "
+        f"what settled it (pgw#1115).")
+
+
 def _identifier(kind: str, name: Any) -> str:
     text = str(name or "").strip()
     if not text or not text.replace(".", "_").isidentifier():
@@ -775,6 +893,13 @@ def validate_contract(compile_decl: Any) -> None:
                     f"graph class #{i}: fork {name}={value!r} is not a "
                     f"declared arm (served: {sorted(map(repr, served_by_fork.get(name, set())))})")
 
+    blockers: Tuple[MintBlocker, ...] = compile_decl.blockers
+    blocker_ids = [b.id for b in blockers]
+    if len(set(blocker_ids)) != len(blocker_ids):
+        raise DeclarationError(
+            "Compile.blockers repeats a blocker id — an id is how a refusal "
+            "is named, cited and resolved")
+
     strategy = str(compile_decl.shape_strategy or "")
     if strategy and strategy not in SHAPE_STRATEGIES:
         raise DeclarationError(
@@ -1107,15 +1232,19 @@ __all__ = [
     "ForkValue",
     "GraphClass",
     "Input",
+    "MintBlocker",
     "SHAPE_STRATEGIES",
     "STATIC_ROWS",
     "FORK_REASONS",
     "WEAK_FORK_REASONS",
+    "blocker_refusal",
+    "blocker_rows",
     "declaration_import_failures",
     "export_declaration",
     "has_export_declaration",
     "registered_entry",
     "import_export_declaration",
+    "open_blockers",
     "register_export_declaration",
     "registered_export_families",
     "reset_export_declarations",

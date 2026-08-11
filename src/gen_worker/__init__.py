@@ -33,11 +33,13 @@ from .api.export_contract import (
     Fork,
     GraphClass,
     Input,
+    MintBlocker,
     import_export_declaration,
     register_export_declaration,
 )
 from .api.derive import (
     DeclarationMismatch,
+    assert_blockers,
     assert_faithful,
     cfg_image_classes,
     class_set_delta,
@@ -134,8 +136,11 @@ __all__ = [
     "GraphClass",
     "Input",
     "Arg",
+    # pgw#1115: a mint refusal is DATA on the declaration.
+    "MintBlocker",
     "register_export_declaration",
     "DeclarationMismatch",
+    "assert_blockers",
     "assert_faithful",
     "cfg_image_classes",
     "class_set_delta",

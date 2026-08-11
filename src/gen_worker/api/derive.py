@@ -30,6 +30,13 @@ so they run anywhere including this box:
    iff the two declarations' contract axes match. A non-empty delta is a STOP,
    not a merge: it is the surprise re-key (or the silently-lost hard-won fact)
    the gate exists to catch before a family being minted RIGHT NOW is disturbed.
+
+3. :func:`blocker_delta` / :func:`assert_blockers` — the REFUSAL half of that
+   gate (pgw#1115). The one fact a fold can drop that neither of the above
+   sees is a family's declared mint blockers, because the family that has them
+   keeps them outside its ``Compile`` today (a module-level table read by a
+   refusing thunk). Dropping one does not re-key anything; it simply starts
+   minting against an open design question.
 """
 
 from __future__ import annotations
@@ -38,11 +45,13 @@ import json
 from typing import Any, Dict, List, Sequence, Tuple
 
 from .decorators import Compile
-from .export_contract import GraphClass
+from .export_contract import GraphClass, open_blockers
 
 __all__ = [
     "DeclarationMismatch",
+    "assert_blockers",
     "assert_faithful",
+    "blocker_delta",
     "cfg_image_classes",
     "class_set_delta",
     "contract_delta",
@@ -172,6 +181,59 @@ def override_delta(standing: Compile, migrated: Compile) -> Dict[str, Tuple[Any,
     return delta
 
 
+def blocker_delta(standing: Compile, migrated: Compile) -> Tuple[str, ...]:
+    """The OPEN blocker ids the standing declaration carries and the migrated
+    one does not (pgw#1115). ``()`` iff no refusal was lost.
+
+    Deliberately DIRECTIONAL, unlike every other delta here. A fold may ADD a
+    blocker — that is a family recording a question it had not written down —
+    but it may never drop one, because a dropped blocker is a family that
+    starts minting against an open design question and says nothing. A
+    RESOLVED-in-the-migrated-declaration id counts as dropped: resolving is a
+    reviewable edit to the standing declaration, not a side effect of a move.
+    """
+    before = {b.id for b in open_blockers(standing)}
+    after = {b.id for b in open_blockers(migrated)}
+    return tuple(sorted(before - after))
+
+
+def assert_blockers(
+    decl: Compile, *, ids: Sequence[str], family: str = "",
+) -> None:
+    """Raise :class:`DeclarationMismatch` unless ``decl``'s OPEN blocker ids
+    are EXACTLY ``ids`` (pgw#1115) — the per-family testable guard.
+
+    :func:`blocker_delta` can only compare two declarations, so it is blind
+    where the standing declaration kept its blockers OUTSIDE the ``Compile``
+    (a module-level table read by a refusing thunk — ltx-video-2.3's shape,
+    and precisely the shape the fold has to carry across). This states the
+    expectation in the family's OWN test instead, so the assertion survives
+    the file the blockers used to live in.
+
+    ``ids=()`` asserts the family is mintable, and is just as load-bearing:
+    it goes red the day somebody adds a blocker without telling the family's
+    tests.
+    """
+    want = tuple(sorted(str(i).strip() for i in ids))
+    got = tuple(sorted(b.id for b in open_blockers(decl)))
+    if want == got:
+        return
+    who = f" for {family!r}" if family else ""
+    missing = sorted(set(want) - set(got))
+    extra = sorted(set(got) - set(want))
+    lines = [f"declared mint blockers{who} are not the asserted set:"]
+    if missing:
+        lines.append(
+            f"  MISSING (the declaration no longer refuses on): {missing} — a "
+            f"refusal that disappeared without being resolved lets this family "
+            f"mint against an open design question")
+    if extra:
+        lines.append(
+            f"  UNEXPECTED (the declaration now refuses on): {extra} — the "
+            f"family's tests have not been told")
+    raise DeclarationMismatch("\n".join(lines))
+
+
 def class_set_delta(
     standing: Sequence[GraphClass], migrated: Sequence[GraphClass],
 ) -> Dict[str, Any]:
@@ -207,10 +269,16 @@ def assert_faithful(
     """
     cdelta = contract_delta(standing, migrated)
     odelta = override_delta(standing, migrated)
-    if not cdelta and not odelta:
+    bdelta = blocker_delta(standing, migrated)
+    if not cdelta and not odelta and not bdelta:
         return
     who = f" for {family!r}" if family else ""
     lines = [f"migrated declaration{who} is not faithful to the standing one:"]
+    if bdelta:
+        lines.append(
+            f"  mint REFUSAL dropped ({len(bdelta)} blocker(s)): {list(bdelta)} "
+            f"— the migrated declaration would mint against open design "
+            f"question(s) the standing one refuses on (pgw#1115)")
     if cdelta:
         lines.append(
             f"  cell-key contract re-keys ({len(cdelta)} axis(es) differ):")

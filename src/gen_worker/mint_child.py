@@ -71,6 +71,8 @@ import msgspec
 
 from . import warm_spans, worker_goals
 from .api.errors import ValidationError
+from .api.export_contract import (
+    blocker_refusal, export_declaration, open_blockers)
 from .config import load_settings
 from .mint_process import (
     EXIT_BAD_REQUEST,
@@ -107,6 +109,31 @@ class MintChildRefused(RuntimeError):
     ) -> None:
         super().__init__(*args)
         self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
+
+
+def _assert_family_mintable(family: str) -> None:
+    """Refuse the mint outright while the family declares an open blocker
+    (pgw#1115).
+
+    The pattern is pgw#1080's: split the refusal by TYPE and fail closed
+    rather than degrading. A blocked family has exactly one legal outcome —
+    it serves eager and mints nothing — so there is no fallback to take, and
+    a mint that started anyway would publish a cell for a class set the
+    declaration says it cannot yet claim.
+    """
+    if not family:
+        return
+    try:
+        decl = export_declaration(family)
+    except Exception as exc:  # noqa: BLE001 — a refusing declaration is a refusal
+        raise MintChildRefused(
+            f"family {family!r}'s export declaration refuses to build "
+            f"({type(exc).__name__}): {exc}") from exc
+    if decl is None:
+        return
+    blocked = open_blockers(decl)
+    if blocked:
+        raise MintChildRefused(blocker_refusal(family, blocked))
 
 
 def _declaration_refusal(exc: ValidationError) -> MintChildRefused:
@@ -851,6 +878,15 @@ def mint(request: MintRequest) -> MintReport:
     # declared facts by name (family, targets, shapes, text_lens, guidance,
     # lora_bucket) and the spec carries exactly those.
     cfg = request.cfg
+
+    # pgw#1115: FAIL CLOSED on a declared mint blocker, here — after discovery
+    # has registered the declaration and before one weight is read. The parent
+    # declines a blocked family in `fleet_cells.mint_recipe`, so a request that
+    # reaches a child came from somewhere else (an operator CLI, a delegated
+    # request built against a stale declaration). Serving a blocked family
+    # eagerly is the declared outcome; minting it is not available at all, and
+    # a refusal that only one of the two paths honours is not a refusal.
+    _assert_family_mintable(str(getattr(cfg, "family", "") or ""))
 
     frame(phase="load", note=(
         f"setup {spec.cls.__name__}"
