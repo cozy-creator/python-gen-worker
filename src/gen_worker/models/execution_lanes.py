@@ -144,6 +144,55 @@ def known_execution_lane_bodies() -> list[str]:
     ]
 
 
+def _body_for_token(token: str) -> Optional[_ExecutionLaneBody]:
+    tok = str(token or "").strip().lower()
+    for body in _KNOWN_BODIES:
+        if execution_lane_body_id(_execution_lane_for_body(body, EXEC_EAGER)) == tok:
+            return body
+    return None
+
+
+def valid_execution_lane_body(token: str) -> bool:
+    """Twin of the hub's ``precision.ValidExecutionLaneBody``."""
+    return _body_for_token(token) is not None
+
+
+def execution_lane_of_body(token: str, compiled: bool) -> ExecutionLane:
+    """The concrete lane a known BODY token executes as under live compile
+    state. Raises ValueError on a token outside the table: the lane
+    vocabulary is platform-wide (the hub joins verdicts, cells and pricing on
+    it) and no caller extends it."""
+    body = _body_for_token(token)
+    if body is None:
+        raise ValueError(
+            f"lane body {token!r} is not a known lane body "
+            f"(known: {', '.join(known_execution_lane_bodies())})")
+    return _with_supported_execution(
+        _execution_lane_for_body(body, EXEC_EAGER), compiled)
+
+
+class AppliedLane(msgspec.Struct, frozen=True, kw_only=True):
+    """What a SERVE-TIME recipe actually did to the weights (pgw#1104).
+
+    The lane a request reports must be the lane its weights execute. A
+    binding names the CHECKPOINT the hub resolved; an endpoint that quantizes
+    inside ``setup()`` (torchao ``quantize_``, wan-2.2's ``_quantize_fp8``,
+    minimax-h3's ``serve_recipe.quantize_dit``) moves the executed lane away
+    from it, and only the code that did the conversion can say so provably.
+    ``body`` is a ``known_execution_lane_bodies()`` token — the same th#1050
+    vocabulary ``handles=`` uses; eager/compiled stays the platform's axis."""
+
+    component: str
+    body: str
+    modules: int = 0
+    kept_bf16: int = 0
+
+    def detail(self) -> str:
+        return (
+            f"component={self.component} applied={self.body} "
+            f"modules={self.modules} kept_bf16={self.kept_bf16}")
+
+
 def valid_execution_lane(execution_lane: ExecutionLane) -> bool:
     if execution_lane.execution not in (EXEC_EAGER, EXEC_COMPILED):
         return False
@@ -281,6 +330,7 @@ class ExecutionLaneUnavailableError(ValueError):
 
 __all__ = [
     "ACT_W16A16",
+    "AppliedLane",
     "ACT_W4A4",
     "ACT_W8A16",
     "ACT_W8A8",
@@ -307,6 +357,8 @@ __all__ = [
     "execution_lane_body_id",
     "execution_lane_id",
     "execution_lane_of_binding",
+    "execution_lane_of_body",
+    "valid_execution_lane_body",
     "parse_execution_lane",
     "parse_execution_lane_spec",
     "valid_execution_lane",

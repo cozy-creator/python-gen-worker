@@ -129,6 +129,13 @@ KIND_OUTPUT_INTEGRITY = "output_integrity"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"
+# pgw#1104: a serve-time recipe reported the lane it APPLIED to the weights
+# (`gen_worker.report_applied_lane`), and `metrics.lane` now follows it instead
+# of the binding. `phase` is the component, `detail` carries the applied lane
+# body, the module counts and the BOUND lane it diverged from — so "which pods
+# serve a lane their checkpoint does not name" is one query, not an inference
+# from allocated-bytes rows.
+KIND_APPLIED_LANE = "applied_lane"
 # th#1322: JIT (dynamo/inductor) compile duration, as a typed numeric event.
 # It used to be `logger.info("compiled %s in %.0fs")` and nothing else, so on a
 # hub-spawned pod (no stdout, pgw#760) the one number an AOT-vs-JIT comparison

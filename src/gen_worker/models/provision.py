@@ -754,6 +754,96 @@ def arm_compile(pipe: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# pgw#1104: the APPLIED-LANE report. `metrics.lane` used to be a pure function
+# of the binding, so a recipe that quantized in setup() served fp8 under a
+# bf16 label — and the lane id is a KEY (th#935 verdicts, compile cells,
+# pricing, the executed-lane proof). A static `handles=`-style declaration
+# cannot fix it: the recipe is runtime-gated (sm89 for w8a8, the compile
+# preflight), so a declaration would over-claim on the card that skips it.
+# Only the code that converted the weights can report provably, so it does —
+# through the same contextvar scope `arm_compile` uses, so the report is
+# attributed to exactly the setup() that made it and cannot be forged later.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _AppliedLaneContext:
+    applied: list[Any]  # list[execution_lanes.AppliedLane]; owned by the scope
+
+
+_APPLIED_LANE_CTX: "contextvars.ContextVar[Optional[_AppliedLaneContext]]" = (
+    contextvars.ContextVar("gen_worker_applied_lane_ctx", default=None)
+)
+
+
+class AppliedLaneScope:
+    """Context manager the executor/CLI holds open around one ``setup()`` call
+    so ``report_applied_lane()`` lands on that instance. Re-entrant-safe."""
+
+    def __init__(self) -> None:
+        self._applied: list[Any] = []
+        self._value = _AppliedLaneContext(applied=self._applied)
+        self._token: Optional["contextvars.Token[Optional[_AppliedLaneContext]]"] = None
+
+    def __enter__(self) -> "AppliedLaneScope":
+        self._token = _APPLIED_LANE_CTX.set(self._value)
+        return self
+
+    def __exit__(self, *_exc_info: Any) -> None:
+        if self._token is not None:
+            _APPLIED_LANE_CTX.reset(self._token)
+            self._token = None
+
+    @property
+    def applied(self) -> tuple[Any, ...]:
+        """Every ``AppliedLane`` reported inside this setup scope, in order."""
+        return tuple(self._applied)
+
+
+def report_applied_lane(
+    component: str,
+    lane_body: str,
+    *,
+    modules: int = 0,
+    kept_bf16: int = 0,
+) -> bool:
+    """Report the lane a serve-time recipe just APPLIED to ``component``'s
+    weights. Call it from ``setup()`` immediately after the conversion
+    returns — the way ``arm_compile()`` is called after placement.
+
+    ``lane_body`` is one of ``known_execution_lane_bodies()`` (the th#1050
+    vocabulary, e.g. ``"fp8-w8a8-dynamic"``); an unknown token raises
+    ``ValueError`` — the lane vocabulary is shared with the hub and is never
+    extended from an endpoint. The execution axis is NOT the author's: the
+    worker composes ``+compiled``/``+eager`` from live compile state.
+
+    Returns whether the report was recorded. Outside a setup scope (hub-less
+    ``cozy run``, a unit rig) it logs once and returns False — never raises,
+    so every endpoint can call it unconditionally."""
+    from . import execution_lanes
+
+    body = str(lane_body or "").strip().lower()
+    if not execution_lanes.valid_execution_lane_body(body):
+        raise ValueError(
+            f"report_applied_lane({component!r}, {lane_body!r}): not a known "
+            "lane body (known: "
+            f"{', '.join(execution_lanes.known_execution_lane_bodies())})")
+    ctx = _APPLIED_LANE_CTX.get()
+    if ctx is None:
+        logger.info(
+            "gen_worker.report_applied_lane(): no active setup scope; "
+            "%s applied %s is not attributed to an instance", component, body)
+        return False
+    ctx.applied.append(execution_lanes.AppliedLane(
+        component=str(component or "").strip() or "instance",
+        body=body,
+        modules=max(0, int(modules)),
+        kept_bf16=max(0, int(kept_bf16)),
+    ))
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Standalone (hub-less) resolution — the CLI's half. The executor's bytes
 # come from orchestrator-resolved snapshots via ModelStore.ensure_local.
 # ---------------------------------------------------------------------------
