@@ -422,6 +422,109 @@ def test_flow_objective_refuses_a_diffusion_sampler() -> None:
         clone_scheduler(_StubPipe(_StubScheduler()), sampler="euler_a", objective="flow")
 
 
+# ---------------------------------------------------------------------------
+# pgw#1139 / ie#657: the flow gate reads CAPABILITY, not the class NAME.
+#
+# `WAN_SCHEDULER_CONFIG` is verbatim
+# `Wan-AI/Wan2.2-TI2V-5B-Diffusers@b8fff731:scheduler/scheduler_config.json` —
+# the official Wan solver, which our mirrors ship byte-identically. It is a
+# UniPC, so a `cls.__name__.startswith("FlowMatch")` test refused every
+# `objective="flow"` request against it (three wan-2.2 functions, zero renders
+# ever).
+# ---------------------------------------------------------------------------
+
+WAN_SCHEDULER_CONFIG = {
+    "_class_name": "UniPCMultistepScheduler",
+    "beta_end": 0.02, "beta_schedule": "linear", "beta_start": 0.0001,
+    "disable_corrector": [], "dynamic_thresholding_ratio": 0.995,
+    "final_sigmas_type": "zero", "flow_shift": 5.0, "lower_order_final": True,
+    "num_train_timesteps": 1000, "predict_x0": True,
+    "prediction_type": "flow_prediction", "rescale_betas_zero_snr": False,
+    "sample_max_value": 1.0, "solver_order": 2, "solver_p": None,
+    "solver_type": "bh2", "steps_offset": 0, "thresholding": False,
+    "time_shift_type": "exponential", "timestep_spacing": "linspace",
+    "trained_betas": None, "use_beta_sigmas": False,
+    "use_dynamic_shifting": False, "use_exponential_sigmas": False,
+    "use_flow_sigmas": True, "use_karras_sigmas": False,
+}
+
+
+def _wan_pipe():
+    from diffusers import UniPCMultistepScheduler
+
+    return _StubPipe(UniPCMultistepScheduler.from_config(WAN_SCHEDULER_CONFIG))
+
+
+def test_flow_objective_accepts_a_config_declared_unipc() -> None:
+    """The official Wan solver SERVES: flow by config, not by class name."""
+    pytest.importorskip("diffusers")
+    from diffusers import UniPCMultistepScheduler
+    from gen_worker.view import clone_scheduler
+
+    fresh = clone_scheduler(_wan_pipe(), objective="flow")
+    assert isinstance(fresh, UniPCMultistepScheduler)
+    assert fresh.config.use_flow_sigmas is True
+    assert fresh.config.prediction_type == "flow_prediction"
+
+
+def test_flow_objective_still_refuses_a_diffusion_sampler_on_that_tree() -> None:
+    """The other direction, on the SAME flow checkpoint: euler_a integrates no
+    flow sigmas, so the gate must still refuse it."""
+    pytest.importorskip("diffusers")
+    from gen_worker.view import clone_scheduler
+
+    with pytest.raises(ValueError, match="flow"):
+        clone_scheduler(_wan_pipe(), sampler="euler_a", objective="flow")
+
+
+def test_flow_objective_refuses_a_flow_capable_class_left_undeclared() -> None:
+    """UniPC is flow-CAPABLE but not flow by construction: on a checkpoint whose
+    config never declares it, plain UniPC is a diffusion sampler and is refused
+    — the capability test is not a blanket pass for the class."""
+    pytest.importorskip("diffusers")
+    from diffusers import UniPCMultistepScheduler
+    from gen_worker.view import clone_scheduler
+
+    diffusion = dict(WAN_SCHEDULER_CONFIG,
+                     prediction_type="epsilon", use_flow_sigmas=False)
+    pipe = _StubPipe(UniPCMultistepScheduler.from_config(diffusion))
+    with pytest.raises(ValueError, match="flow"):
+        clone_scheduler(pipe, objective="flow")
+
+
+def test_flow_capable_is_not_satisfied_by_prediction_type_alone() -> None:
+    """Every diffusers scheduler ACCEPTS `prediction_type`, so a declaration
+    carried onto a diffusion class must not read as flow."""
+    pytest.importorskip("diffusers")
+    from diffusers import (EulerAncestralDiscreteScheduler,
+                           FlowMatchEulerDiscreteScheduler,
+                           UniPCMultistepScheduler)
+    from gen_worker.view import flow_capable
+
+    declared = {"prediction_type": "flow_prediction", "use_flow_sigmas": True}
+    assert flow_capable(EulerAncestralDiscreteScheduler, declared) is False
+    assert flow_capable(UniPCMultistepScheduler, declared) is True
+    assert flow_capable(FlowMatchEulerDiscreteScheduler, {}) is True
+
+
+def test_declared_flow_shift_reaches_the_field_the_class_honours() -> None:
+    """ie#535's second half: `{"shift": …}` on a UniPC mirror was DROPPED by
+    from_config — a published shift ignored rather than applied."""
+    pytest.importorskip("diffusers")
+    from diffusers import FlowMatchEulerDiscreteScheduler
+    from gen_worker.view import clone_scheduler
+
+    fresh = clone_scheduler(_wan_pipe(), objective="flow",
+                            config_overrides={"shift": 3.0})
+    assert fresh.config.flow_shift == 3.0
+
+    # and the reverse spelling, on a class whose field is `shift`
+    fm = _StubPipe(FlowMatchEulerDiscreteScheduler())
+    back = clone_scheduler(fm, objective="flow",
+                           config_overrides={"flow_shift": 7.0})
+    assert back.config.shift == 7.0
+
+
 def test_sampler_table_defines_euler_trailing_and_dpmpp_completely() -> None:
     # pgw#647 gap #2 absorbed: the SDK table is the ONE definition of each
     # named sampler; endpoints delete their private maps.

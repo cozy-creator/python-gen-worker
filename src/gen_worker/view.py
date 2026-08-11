@@ -47,6 +47,7 @@ checkpoint facts the composer applies, never payload logic) or directly::
 from __future__ import annotations
 
 import copy
+import inspect
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Friendly sampler name -> (diffusers scheduler class name, extra config).
@@ -96,14 +97,76 @@ SAMPLERS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "unipc": ("UniPCMultistepScheduler", {}),
 }
 
-# Scheduler classes that integrate a FLOW-MATCHING objective. A checkpoint
-# stamped objective="flow" must never be driven by a diffusion (eps/v-pred)
-# scheduler — the sigma schedules are different math, not a preference.
+# A checkpoint stamped objective="flow" must never be driven by a diffusion
+# (eps/v-pred) sampler — the sigma schedules are different math, not a
+# preference. What makes a scheduler flow-match is CAPABILITY, not spelling:
+# the `FlowMatch*` family is flow by construction, and the multistep solvers
+# (UniPC, DPMSolver, DEIS) are flow when their config says so. UniPC with
+# `use_flow_sigmas` IS the official Wan solver (pgw#1139/ie#657).
 _FLOW_CLASS_PREFIX = "FlowMatch"
+# The __init__ field that only a flow-capable non-FlowMatch class has.
+_FLOW_SIGMAS_FIELD = "use_flow_sigmas"
+_FLOW_PREDICTION_TYPE = "flow_prediction"
+# The same flow-sigma knob under two upstream spellings: `FlowMatch*` calls it
+# `shift`, the multistep solvers call it `flow_shift`.
+_FLOW_SHIFT_ALIASES = ("shift", "flow_shift")
 
 
 class UnknownSamplerError(ValueError):
     """The requested sampler name is not in the SDK sampler table."""
+
+
+def _init_fields(cls: Any) -> frozenset:
+    """The config fields ``cls`` actually accepts. ``from_config`` silently
+    DROPS everything else, so this is the only honest "does it honour it"."""
+    if not isinstance(cls, type):
+        return frozenset()
+    try:
+        return frozenset(inspect.signature(cls).parameters)
+    except (TypeError, ValueError):  # pragma: no cover - exotic callable
+        return frozenset()
+
+
+def _as_dict(config: Any) -> Dict[str, Any]:
+    """A diffusers ``FrozenDict`` as a plain dict; anything unreadable as {}."""
+    try:
+        return dict(config or {})
+    except (TypeError, ValueError):
+        return {}
+
+
+def flow_capable(cls: Any, config: Optional[Dict[str, Any]] = None) -> bool:
+    """Does the scheduler this class+config BUILDS integrate flow-match sigmas?
+
+    Two honest signals, and a class name is only one of them:
+
+    * flow BY CONSTRUCTION — the ``FlowMatch*`` family has no other mode;
+    * flow BY DECLARATION — the resolved config says
+      ``use_flow_sigmas`` / ``prediction_type="flow_prediction"``, AND the
+      class takes ``use_flow_sigmas`` at all. The second half is the whole
+      check: every diffusers scheduler accepts ``prediction_type``, so a flow
+      config carried onto a diffusion class would otherwise read as flow while
+      producing a scheduler that merely looked flow-shaped in a dict.
+    """
+    name = cls.__name__ if isinstance(cls, type) else str(cls)
+    if name.startswith(_FLOW_CLASS_PREFIX):
+        return True
+    if _FLOW_SIGMAS_FIELD not in _init_fields(cls):
+        return False
+    cfg = config or {}
+    return bool(cfg.get(_FLOW_SIGMAS_FIELD)) or \
+        cfg.get("prediction_type") == _FLOW_PREDICTION_TYPE
+
+
+def _alias_flow_shift(cls: Any, overrides: Dict[str, Any]) -> None:
+    """Rename a declared flow shift to the field ``cls`` honours (ie#535's
+    second half): a published ``{"shift": …}`` on a UniPC mirror is dropped by
+    ``from_config`` — ignored rather than refused. Only renames when the class
+    takes exactly one of the two spellings; never invents a value."""
+    fields = _init_fields(cls)
+    for key, other in (_FLOW_SHIFT_ALIASES, _FLOW_SHIFT_ALIASES[::-1]):
+        if key in overrides and key not in fields and other in fields:
+            overrides[other] = overrides.pop(key)
 
 
 def _scheduler_class(sampler: str) -> Tuple[Any, Dict[str, Any]]:
@@ -211,10 +274,17 @@ def clone_scheduler(
       v-prediction ALSO sets ``rescale_betas_zero_snr=True`` (th#1017's
       zero-terminal-SNR contract — folded in here so no endpoint can
       forget it and wash out).
-    - ``"flow"``: requires a flow-match scheduler class — a diffusion
+    - ``"flow"``: requires a scheduler that INTEGRATES flow-match sigmas
+      (:func:`flow_capable` — flow by construction, or a class that takes
+      ``use_flow_sigmas`` under a config that declares it); a diffusion
       sampler selection raises instead of silently integrating the wrong
-      math; the sigma schedule rides the instance scheduler's config.
+      math, and the sigma schedule rides the instance scheduler's config.
     - ``""`` (unstamped): applies nothing.
+
+    A declared flow ``shift`` is renamed to whichever of
+    ``shift``/``flow_shift`` the target class honours — ``from_config`` drops
+    the other spelling, so a published shift would be ignored rather than
+    applied (ie#535).
 
     ``attr`` names which scheduler attribute to clone (default the primary
     ``scheduler``); :func:`for_request` uses it for secondary samplers.
@@ -236,15 +306,18 @@ def clone_scheduler(
         overrides = {**extra, **overrides}
     else:
         cls = type(base)
-    if obj == "flow":
+    _alias_flow_shift(cls, overrides)
+    resolved = {**_as_dict(base_config), **overrides}
+    if obj == "flow" and not flow_capable(cls, resolved):
         cls_name = cls.__name__ if isinstance(cls, type) else str(cls)
-        if not cls_name.startswith(_FLOW_CLASS_PREFIX):
-            raise ValueError(
-                f"objective='flow' checkpoint cannot run under sampler "
-                f"{sampler or cls_name!r} ({cls_name} is not a flow-match "
-                "scheduler); flow sigma schedules are different math, not a "
-                "preference"
-            )
+        raise ValueError(
+            f"objective='flow' checkpoint cannot run under sampler "
+            f"{sampler or cls_name!r} ({cls_name} integrates no flow-match "
+            f"sigmas: not a {_FLOW_CLASS_PREFIX}* class, and the resolved "
+            f"scheduler config declares no {_FLOW_SIGMAS_FIELD} / "
+            f"prediction_type={_FLOW_PREDICTION_TYPE!r} that it accepts); "
+            "flow sigma schedules are different math, not a preference"
+        )
     if base_config is None or not hasattr(cls, "from_config"):
         # Non-diffusers scheduler shape: fall back to a deepcopy (still a
         # private per-request object; state never shared).
