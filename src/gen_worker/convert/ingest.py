@@ -14,7 +14,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, NoReturn, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, NoReturn, Optional, Sequence
 
 import hashlib
 import re
@@ -79,6 +79,68 @@ _SAFETENSORS_DTYPE_NAMES = {
     "F32": "fp32", "F16": "fp16", "BF16": "bf16",
     "F8_E4M3": "fp8", "F8_E5M2": "fp8:e5m2",
 }
+# pgw#1121: bits per stored element, for weighing a mixed header by BYTES.
+_SAFETENSORS_DTYPE_BITS = {
+    "F64": 64, "I64": 64, "U64": 64,
+    "F32": 32, "I32": 32, "U32": 32,
+    "F16": 16, "BF16": 16, "I16": 16, "U16": 16,
+    "F8_E4M3": 8, "F8_E5M2": 8, "I8": 8, "U8": 8, "BOOL": 8,
+}
+# pgw#1121: how many of the selected weight files' headers we range-read to
+# resolve an untagged source's real dtype. Shards of one set share a dtype,
+# so the largest few are representative; the cap keeps a 100-shard listing
+# from turning plan time into 100 round-trips.
+_MAX_DTYPE_HEADER_READS = 3
+
+
+def _remote_safetensors_width(
+    repo_id: str,
+    revision: str | None,
+    filenames: Sequence[str],
+    hf_token: str | None,
+) -> tuple[str, int]:
+    """``(dominant dtype, bits per stored parameter)`` of a REMOTE safetensors
+    set, read from the files' HEADERS (pgw#1121). ``("", 0)`` when no header
+    could be read.
+
+    ``parse_safetensors_file_metadata`` range-reads the header and nothing
+    else — no tensor data — so this is a plan-time metadata call like every
+    other one on this path, not a download.
+
+    Both numbers are BYTE-weighted, because the caller is sizing a disk budget
+    and a tree's scale factor is set by where its bytes are. Bits-per-parameter
+    is the exact conversion factor even for a MIXED tree: an output tree's size
+    is ``params * out_bits / 8``, so ``source_bytes * out_bits / bits_per_param``
+    holds whatever the mix is — where "the source is fp32" would be a lie that
+    happens to be close.
+    """
+    api = hf().HfApi(token=(hf_token or None))
+    bytes_by_dtype: dict[str, int] = {}
+    total_params = 0
+    read = 0
+    for name in filenames:
+        if read >= _MAX_DTYPE_HEADER_READS:
+            break
+        try:
+            meta = api.parse_safetensors_file_metadata(
+                repo_id, name, revision=revision)
+        except Exception:  # noqa: BLE001 — any unreadable header just abstains
+            continue
+        read += 1
+        for raw_dtype, params in (getattr(meta, "parameter_count", None) or {}).items():
+            bits = _SAFETENSORS_DTYPE_BITS.get(str(raw_dtype).upper())
+            if not bits:
+                continue
+            key = str(raw_dtype).upper()
+            bytes_by_dtype[key] = bytes_by_dtype.get(key, 0) + bits * int(params)
+            total_params += int(params)
+    if not bytes_by_dtype or total_params <= 0:
+        return "", 0
+    top = max(bytes_by_dtype, key=lambda k: bytes_by_dtype[k])
+    # Floor: a narrower assumed width over-provisions, which is the harmless
+    # direction for a rounding error.
+    bits_per_param = max(1, sum(bytes_by_dtype.values()) // total_params)
+    return _SAFETENSORS_DTYPE_NAMES.get(top, ""), bits_per_param
 
 
 def _detect_snapshot_dtype(root: Path) -> str:
@@ -243,6 +305,11 @@ class HFSourcePlan:
     side: dict[str, Any]
     classification: RepoClassification
     content_ids: dict[str, str]        # path -> "sha256:<hex>" | "git:<oid>"
+    # pgw#1121: MEASURED bits per stored parameter, off the selected weight
+    # set's safetensors headers. 0 when no header could be read. Lives on the
+    # plan, not in ``classification.attrs``, because it is a sizing fact for
+    # the disk preflight — not a checkpoint attribute anyone publishes.
+    source_storage_bits: int = 0
 
     @property
     def provider(self) -> str:
@@ -340,10 +407,57 @@ def plan_huggingface(
         dtype_pref=tuple(dtype_preference or ("bf16", "fp16", "fp32")),
         gguf_quant=gguf_quant,
     )
+    bits = resolve_plan_source_width(classification, repo_id, rev, sizes, hf_token)
     return HFSourcePlan(
         repo_id=repo_id, revision=sha, paths=paths, sizes=sizes, side=side,
         classification=classification, content_ids=content_ids,
+        source_storage_bits=bits,
     )
+
+
+def resolve_plan_source_width(
+    classification: RepoClassification,
+    repo_id: str,
+    revision: str | None,
+    sizes: Mapping[str, int],
+    hf_token: str | None,
+) -> int:
+    """Read the selected weight set's real storage width off its safetensors
+    headers; stamp the dtype when the filename heuristic came up empty, and
+    return bits-per-parameter for the disk estimate (pgw#1121). 0 = unreadable.
+
+    The variant-tag heuristic can only read a dtype off a FILENAME
+    (``model.fp16.safetensors``), and upstream diffusers repos are untagged —
+    ``Wan-AI/Wan2.2-T2V-A14B-Diffusers`` ships plain
+    ``transformer_2/diffusion_pytorch_model-00001-of-00012.safetensors``. It
+    answered ``""``, and everything downstream had to guess: the clone disk
+    preflight modelled a 53.2 GiB fp32 tree as packed 4-bit and refused a bf16
+    cast that needed 82 GiB by asking for 268.1 GiB.
+
+    The width is IN the file — every tensor's dtype sits in the safetensors
+    header, which is a range read, not a download. Reading it here also makes
+    ``dtype: "source"`` honest BEFORE the transfer rather than after it
+    (``_detect_snapshot_dtype`` only runs post-ingest).
+
+    The dtype stamp defers to a tag that already resolved (a variant suffix is
+    the publisher's own declaration); the WIDTH does not, because it is a
+    measurement and the estimate wants the measured one.
+    """
+    selected = sorted(
+        (p for p in classification.allow_patterns
+         if p.lower().endswith(".safetensors")),
+        key=lambda p: int(sizes.get(p, 0)), reverse=True,
+    )
+    if not selected:
+        return 0
+    try:
+        dtype, bits = _remote_safetensors_width(
+            repo_id, revision, selected, hf_token)
+    except Exception:  # noqa: BLE001 — an unresolvable width is not a refusal
+        return 0
+    if dtype and not str(classification.attrs.get("dtype") or "").strip():
+        classification.attrs["dtype"] = dtype
+    return bits
 
 
 def plan_civitai(
