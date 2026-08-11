@@ -196,11 +196,65 @@ def test_a_pipeline_that_IGNORES_the_injection_is_refused_not_trusted(
     class Ignores:
         transformer = "a real module, loaded from the checkpoint"
 
-    with pytest.raises(so.StructureOnlyUnsupported) as caught:
+    with pytest.raises(so.StructureNotHonored) as caught:
         run_mod._assert_structure_honored(
             Ignores(), {"transformer": object()}, slot="pipeline")
     assert "does not carry the injected structure-only module" in str(
         caught.value)
+
+
+def test_not_honored_is_a_DISTINCT_type_from_the_buildable_strand() -> None:
+    """pgw#1080 z-image tail — the two refusals must NOT be conflated.
+
+    A buildable strand (no config surface, an artifact lane) raises
+    ``StructureOnlyUnsupported`` and the mint child CORRECTLY falls back to a
+    real-weight mint. A composition that discarded a target that DID build
+    weight-free raises ``StructureNotHonored``; falling back there would export
+    ~weight-scale real tensors while reporting weightless — the silent z-image
+    40 GiB `retryable` OOM (ie#638). The mint child tells them apart by TYPE, so
+    the subclass relationship (broad ``except`` still sees "unsupported") must
+    hold WHILE the concrete type stays distinguishable."""
+    assert issubclass(so.StructureNotHonored, so.StructureOnlyUnsupported)
+    assert so.StructureNotHonored is not so.StructureOnlyUnsupported
+    # A plain buildable strand is NOT a not-honored miss.
+    strand = so.StructureOnlyUnsupported(
+        component="transformer", cls_name="Fp8Denoiser",
+        lacks="this tree is a w8a8 artifact")
+    assert not isinstance(strand, so.StructureNotHonored)
+
+
+def test_the_real_load_seam_raises_NOT_HONORED_on_a_swallowed_injection(
+    tree: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production seam the mint child fails closed on. ``build_component``
+    succeeds (the micro transformer builds weight-free), then the composed
+    pipeline drops the injection and carries a real module — so
+    ``_load_injected_model`` raises ``StructureNotHonored`` (NOT the buildable
+    strand). The mint child's three-line handler turns exactly this type into a
+    ``MintChildRefused`` so the real-weight export never starts; conflating it
+    with the strand is what let z-image OOM ~40 GiB as `retryable` (ie#638)."""
+    from gen_worker.cli import run as run_mod
+    from gen_worker.models import provision
+
+    class _Rebuilt:
+        transformer = "reloaded from the checkpoint, not the injected fake"
+
+    def _swallows(annotation: object, path: object, **_k: object
+                  ) -> provision.SlotLoad:
+        return provision.SlotLoad(obj=_Rebuilt(), is_pipeline=True)
+
+    monkeypatch.setattr(provision, "load_slot", _swallows)
+    monkeypatch.setattr(run_mod.provision, "load_slot", _swallows)
+
+    cls = so._component_class(tree, "transformer")
+    with pytest.raises(so.StructureNotHonored) as caught:
+        run_mod._load_injected_model(
+            cls, str(tree), slot="pipeline", device="cpu",
+            arm_compile=False, structure_only=("transformer",))
+    assert "does not carry the injected structure-only module" in str(
+        caught.value)
+    # And it must NOT be swallowed as a buildable strand.
+    assert isinstance(caught.value, so.StructureOnlyUnsupported)
 
 
 def test_the_micro_tree_names_its_component_classes(tree: Path) -> None:

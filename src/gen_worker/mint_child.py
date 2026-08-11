@@ -870,7 +870,8 @@ def mint(request: MintRequest) -> MintReport:
         endpoint instance, its compile-target pipeline, and that pipeline's
         export spec."""
         from . import fleet_cells
-        from .models.structure_only import StructureOnlyUnsupported
+        from .models.structure_only import (
+            StructureNotHonored, StructureOnlyUnsupported)
 
         obj = spec.cls()
         try:
@@ -878,6 +879,18 @@ def mint(request: MintRequest) -> MintReport:
                 obj, dict(paths), arm_compile=False,
                 return_loaded=True, component_paths=overrides,
                 structure_only=structure_targets) or {}
+        except StructureNotHonored as exc:
+            # pgw#1080 z-image tail: the target WAS built weight-free and the
+            # pipeline discarded it and rebuilt from the checkpoint. Falling
+            # back here (below) would export ~weight-scale REAL tensors while
+            # the child reports weightless — the silent 40 GiB `retryable` OOM
+            # (ie#638). This is buildable-but-not-honored, NOT a stranded
+            # family, so it FAILS CLOSED with the authoring cause named rather
+            # than degrading to a real-weight export the meta gate never sees.
+            raise MintChildRefused(
+                f"structure-only was requested for {mint_identity(request)} "
+                f"and the target built weight-free, but the composed pipeline "
+                f"did not carry it: {exc}") from exc
         except StructureOnlyUnsupported as exc:
             structure_refusals.append(str(exc))
             frame(phase="load", note=f"structure-only declined: {exc}")
