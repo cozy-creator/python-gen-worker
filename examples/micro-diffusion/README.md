@@ -268,7 +268,12 @@ GET /api/v1/repos/tensorhub/micro-diffusion/checkpoints     # model_family stamp
 **ESTIMATE: < 1 min.** No commit to `inference-endpoints` is wanted — this is a
 proof artifact, not a fleet pin.
 
-> ⚠️ **Pin at 0.106.0 (current), never below it on THIS family.** Below
+> ⚠️ **Pin at 0.111.0 (current), never below it on THIS family.** Below
+> 0.111.0 the reuse circle cannot close: pgw#1141 (`0dbf68e5`) deletes the setup
+> warmup barrier that DISARMED every boot-adopted cell — measured twice,
+> identically, in POD PROOF #3 — and pgw#1132 (`8867baac`) arms the lifted
+> forward in the boot-key loop so a `lora_bucket`-bearing family can derive a key
+> at all. Below
 > 0.106.0 the boot-key derivation refuses outright: `models/structure_only`
 > imported `accelerate`, which this image deliberately does not ship, so no key
 > exists, no `/v1/worker/cells/resolve` is ever issued and the pod self-mints
