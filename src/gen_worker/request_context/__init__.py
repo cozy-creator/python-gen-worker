@@ -82,7 +82,7 @@ from ..io import (
     encode_image,
     image_format,
 )
-from ..output_integrity import guard_image
+from ..output_integrity import guard_image, judged
 from ..stage_timing import StageTimer
 from ..api.types import (
     Asset,
@@ -1226,8 +1226,9 @@ class RequestContext(Generic[D]):
         # instead of inside the post-handler finalize drain. Charged to
         # its OWN stage so its wall is ATTRIBUTED (th#1111) without borrowing
         # `image_encode`, which on the deferred path means the finalize tail.
-        with self._stages.stage("output_integrity"):
-            guard_image(image, ref=ref)
+        if judged(self):
+            with self._stages.stage("output_integrity"):
+                guard_image(image, ref=ref)
         if not self._deferred.armed:
             with self._stages.stage("image_encode"):
                 payload, _ext = encode_image(

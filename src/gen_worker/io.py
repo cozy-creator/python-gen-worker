@@ -21,7 +21,9 @@ from typing import IO, TYPE_CHECKING, Any, Optional
 
 from .api.errors import ValidationError
 from .api.types import Asset
-from .output_integrity import StreamCollector, enforce, guard_frames, guard_image
+from .output_integrity import (
+    StreamCollector, enforce, guard_frames, guard_image, judged,
+)
 from .stage_timing import stage_of as _stage
 import os
 import tempfile
@@ -235,8 +237,9 @@ def write_image(
         # pgw#1094: look at the PIXELS before the encode. A rejected output
         # raises and is never encoded, never uploaded, never banked. Its own
         # stage so the floor's wall is ATTRIBUTED, never residual (th#1111).
-        with _stage(ctx, "output_integrity"):
-            guard_image(image, ref=ref)
+        if judged(ctx):
+            with _stage(ctx, "output_integrity"):
+                guard_image(image, ref=ref)
         with _stage(ctx, "image_encode"):
             payload, ext = encode_image(
                 image, format=format, quality=quality, **encode_kwargs
@@ -374,8 +377,9 @@ def write_video(
                 _release_gpu_slot_for_finalize(ctx)
                 # Before the flush + upload tail: a rejected clip is never
                 # muxed and `ctx.save_video` below is never reached.
-                with _stage(ctx, "output_integrity"):
-                    enforce(integrity.verdict(), ref=ref, kind="video")
+                if judged(ctx):
+                    with _stage(ctx, "output_integrity"):
+                        enforce(integrity.verdict(), ref=ref, kind="video")
                 encoder.finish(audio)
             else:
                 arr = frames_to_uint8(frames)
@@ -384,8 +388,9 @@ def write_video(
                 # frame buffers in host RAM (gw#516).
                 with finalize_permit():
                     _release_gpu_slot_for_finalize(ctx)
-                    with _stage(ctx, "output_integrity"):
-                        guard_frames(arr, ref=ref)  # pgw#1094, before the encode
+                    if judged(ctx):
+                        with _stage(ctx, "output_integrity"):
+                            guard_frames(arr, ref=ref)  # pgw#1094, pre-encode
                     encoder.add(arr)
                     del arr
                     encoder.finish(audio)

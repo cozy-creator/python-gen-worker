@@ -39,6 +39,11 @@ render scores HIGHER here than a clean one (cozy-eval measured 0.956 melted vs
 0.916 clean). ``tests/test_output_integrity_pgw1094.py`` pins that inversion as
 an executable assertion so nobody re-reads this gate as a quality verdict.
 
+WHO IT JUDGES (th#1771). SERVED outputs, and only those — see :func:`judged`.
+A boot-warmup / mint warm forward uploads nothing and banks nothing, and its
+input is the derived warm payload (``WARMUP_TEXT`` + a flat mid-gray 128px
+PNG), so a flat output there is the expected answer to a flat question.
+
 REFERENCE IMPLEMENTATION. ``cozy_eval.integrity`` / ``cozy_eval.metrics.temporal``
 (ce#10). The numbers, the floors and the decimation are shared with it
 deliberately: the eval half judges candidates offline, this half refuses them
@@ -442,6 +447,21 @@ def enforce(result: OutputIntegrity, *, ref: str, kind: str) -> None:
                                    summary=result.summary())
 
 
+def judged(ctx: Any) -> bool:
+    """Whether this context's outputs are subject to the floor.
+
+    th#1771: this is the SERVE-path floor — its whole contract is that nothing
+    is UPLOADED unlooked-at and that a bad render cannot BANK as a success. A
+    boot-warmup / mint warm forward uploads nothing and banks nothing: its
+    output is discarded by construction, and its INPUT is the derived warm
+    payload — `WARMUP_TEXT` and a flat mid-gray 128px PNG. A degenerate output
+    from a degenerate input is the expected result there, not a defect, and
+    refusing it turned a valid warm into a FATAL on the paying request that
+    happened to wake the pod (minimax-h3 `reference-to-video`, measured).
+    """
+    return not bool(getattr(ctx, "boot_warmup", False))
+
+
 def guard_frames(frames: Any, *, ref: str) -> OutputIntegrity:
     """:func:`check_frames` + :func:`enforce` — the video save-path one-liner."""
     result = check_frames(frames)
@@ -475,4 +495,5 @@ __all__ = [
     "enforce",
     "guard_frames",
     "guard_image",
+    "judged",
 ]
