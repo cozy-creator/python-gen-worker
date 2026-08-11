@@ -305,7 +305,11 @@ class MicroRopePipeline(MicroPipeline):
             # Rebuilding it structure-only — instead of loading the
             # checkpoint into a real one — is the authoring answer to that,
             # and it keeps the mint weightless (pgw#1080).
-            from accelerate import init_empty_weights
+            # The SDK's own meta-init seam, not `accelerate`: this family
+            # ships no diffusers stack, and importing one here would put the
+            # boot-key derivation back behind a dependency the image does not
+            # have (pgw#1123 — it is what silenced two paid pods).
+            from gen_worker.models.meta_init import init_empty_weights
 
             with init_empty_weights():
                 pinned = MicroRopeDenoiser(base.config)

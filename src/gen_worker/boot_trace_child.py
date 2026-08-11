@@ -168,8 +168,13 @@ def run(job: TraceJob) -> int:
             place=False,
             structure_only=tuple(cfg.targets)) or {}
     except structure_only.StructureOnlyUnsupported as exc:
-        # NOT a fallback — see the module docstring.
-        return _fail(report_path, "structure_unsupported", str(exc))
+        # NOT a fallback — see the module docstring. Two tokens, because a
+        # stranded FAMILY and an image that cannot meta-instantiate AT ALL are
+        # opposite findings that were reported identically (pgw#1123).
+        token = structure_only.refusal_token(exc)
+        if token == structure_only.TOKEN_CAPABILITY_MISSING:
+            logger.error("boot key cannot be derived in this image: %s", exc)
+        return _fail(report_path, token, str(exc))
 
     try:
         _slot, pipeline = pick_compile_target(loaded, cfg)
