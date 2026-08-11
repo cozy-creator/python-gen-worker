@@ -27,7 +27,7 @@ src/micro_diffusion/
                       three L values whose pads are 0, 16 and 28
   *_pad32_branchy.py  micro-pad32-branchy: the RED twin — branches on the pad, so
                       the declared-range gate must REFUSE it (pgw#1079)
-  FAMILIES            the six families discovery finds here — half of the
+  FAMILIES            the seven families discovery finds here — half of the
                       cross-repo fence below
 ```
 
@@ -211,7 +211,7 @@ Two things that are easy to get wrong:
   Without it the gate fails closed on `binding_incompatible`: *"slot declares
   family … but the artifact's family is undeterminable"*.
 
-One checkpoint serves **all six** families: every variant either
+One checkpoint serves **all seven** families: every variant either
 `load_state_dict(base.transformer.state_dict(), strict=True)` or (micro-conv)
 derives its weights from the same tree's declared seed, and all of them root to
 `micro-diffusion` in tensorhub's `rootOverrides` — so the seed-997 tree

@@ -638,6 +638,7 @@ signing = [
     { name = "c2pa-python" },
 ]
 torch = [
+    { name = "accelerate" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "safetensors" },
     { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
@@ -655,6 +656,7 @@ vision = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'dev'", specifier = ">=1.9" },
+    { name = "accelerate", marker = "extra == 'torch'", specifier = ">=1.9" },
     { name = "av", marker = "extra == 'dev'", specifier = ">=12" },
     { name = "av", marker = "extra == 'video'", specifier = ">=12" },
     { name = "bitsandbytes", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=0.45.0" },

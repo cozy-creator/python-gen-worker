@@ -57,6 +57,14 @@ torch = [
     "safetensors>=0.8.0",
     # Emergency nf4 fit rung (gw#420) — automatic on CUDA hosts, needs bnb.
     "bitsandbytes>=0.45.0; sys_platform == 'linux' or sys_platform == 'win32'",
+    # pgw#1123: the real-weight quantized loaders (models/w8a8, models/w4a4,
+    # models/svdq_native) build their skeletons with
+    # `accelerate.init_empty_weights`. It was an undeclared import on those
+    # paths; declared here and NOT in `dependencies`, because accelerate
+    # hard-requires torch>=2.0.0 and the base wheel deliberately carries none.
+    # The BOOT-KEY path no longer imports it at all — `models/meta_init` owns
+    # that context manager, so a family without accelerate still derives a key.
+    "accelerate>=1.9",
 ]
 vision = [
     "torchvision>=0.28.0",

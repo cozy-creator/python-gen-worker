@@ -906,8 +906,10 @@ def mint(request: MintRequest) -> MintReport:
         endpoint instance, its compile-target pipeline, and that pipeline's
         export spec."""
         from . import fleet_cells
+        from .models import structure_only
         from .models.structure_only import (
-            StructureNotHonored, StructureOnlyUnsupported)
+            StructureCapabilityMissing, StructureNotHonored,
+            StructureOnlyUnsupported)
 
         obj = spec.cls()
         try:
@@ -929,7 +931,18 @@ def mint(request: MintRequest) -> MintReport:
                 f"did not carry it: {exc}") from exc
         except StructureOnlyUnsupported as exc:
             structure_refusals.append(str(exc))
-            frame(phase="load", note=f"structure-only declined: {exc}")
+            # pgw#1123: still never fatal — a real-weight mint is a correct,
+            # more expensive mint. But a CAPABILITY refusal is not this
+            # family declining, it is this image being unable to, and the two
+            # were one note. Say which, and say it at ERROR: the same image
+            # derives no boot key either, so every pod running it re-mints.
+            if isinstance(exc, StructureCapabilityMissing):
+                logger.error(
+                    "the weight-free mint is unavailable in this image, so "
+                    "this mint loads real weights and every boot in it will "
+                    "self-mint: %s", exc)
+            frame(phase="load", note=(
+                f"structure-only {structure_only.refusal_token(exc)}: {exc}"))
             obj = spec.cls()
             got = run_setup(
                 obj, dict(paths), arm_compile=False,

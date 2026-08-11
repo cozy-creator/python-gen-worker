@@ -88,6 +88,13 @@ DERIVE_REASONS: Tuple[str, ...] = (
     "no_classes", "code_drift", "class_set_disagreement", "class_set_gap",
     "trace_failed", "bad_report", "child_died", "refused", "child_error",
     "slots_unresolvable", "structure_unsupported", "no_compile_target",
+    # pgw#1123 — the OPPOSITE finding to `structure_unsupported`, and until
+    # this token existed they were the same word. `structure_unsupported` says
+    # ONE FAMILY is stranded (permanent and correct on the quantized artifact
+    # lanes); this says THIS IMAGE cannot meta-instantiate at all, so every
+    # family it serves derives no key, asks for no cell, and self-mints
+    # forever — which is what two paid pods spent an evening looking like.
+    "structure_capability_missing",
     "structure_not_honored", "no_declaration", "trace_refused", "empty_share",
     # pgw#1124: the child's composition put REAL tensors off the host, so it
     # would be competing for VRAM with the parent that spawned it.

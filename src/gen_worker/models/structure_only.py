@@ -16,7 +16,10 @@ refuses or copies real data in). The pattern that actually skips the state dict
 is ``init_empty_weights()`` + ``from_config`` — which is a per-CLASS capability
 (diffusers' ``ConfigMixin``), and which every quantized loader in this tree
 already uses to build its denoiser (:mod:`.w8a8` , :mod:`.w4a4`,
-:mod:`.svdq_native`). A PIPELINE's config is its component CLASS MAP
+:mod:`.svdq_native`). The context manager itself is :mod:`.meta_init`, owned
+here rather than imported from ``accelerate``: see that module for the pods
+that measured what an undeclared import on this path costs (pgw#1123). A
+PIPELINE's config is its component CLASS MAP
 (``model_index.json``), not a weights layout, so ``from_config`` on a pipeline
 builds nothing the export traces. Hence: build the COMPONENT, inject it through
 the ``components=`` seam the loader already has, and let the pipeline class
@@ -55,12 +58,15 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from ..api.errors import WorkerError
 from .. import meta_instantiation as mi
+
+logger = logging.getLogger(__name__)
 
 #: Stamped on a structure-only module and on the pipeline composed around it.
 STAMP = "_cozy_structure_only"
@@ -91,17 +97,73 @@ class StructureOnlyUnsupported(WorkerError):
         self.cls_name = str(cls_name or "")
         self.lacks = str(lacks or "")
         self.tree = str(tree or "")
-        super().__init__(
+        super().__init__(self._sentence())
+
+    def _sentence(self) -> str:
+        return (
             f"structure-only build of component {self.component!r} "
             f"({self.cls_name or 'unknown class'}) is not possible: "
             f"{self.lacks}. The zero-download forge instantiates a compile "
             f"target from CODE + CONFIG (`load_config` + `from_config` under "
-            f"`accelerate.init_empty_weights()` — the shape "
+            f"`meta_init.init_empty_weights()` — the shape "
             f"`models/w8a8.py` already uses), so a class without that surface "
             f"has no structure-only path and this family is stranded on the "
             f"real-weight mint until it grows one"
             + (f" (tree: {self.tree})" if self.tree else "")
         )
+
+
+class StructureCapabilityMissing(StructureOnlyUnsupported):
+    """The PROCESS cannot meta-instantiate — nothing about this family is wrong.
+
+    A subclass so every existing ``except StructureOnlyUnsupported`` keeps its
+    never-fatal degradation, and a distinct type because the two mean opposite
+    things to whoever reads the boot-adopt event. Its parent is a permanent,
+    correct property of some trees (a quantized artifact lane has no
+    config-only structure and never will); this one is a broken install, is
+    never normal, and strands EVERY family in the image rather than one — which
+    is exactly how it went unnoticed on two paid pods (pgw#1123).
+    """
+
+    def __init__(self, *, component: str, cls_name: str, lacks: str,
+                 capability: str, tree: str = "") -> None:
+        self.capability = str(capability or "")
+        super().__init__(component=component, cls_name=cls_name, lacks=lacks,
+                         tree=tree)
+
+    def _sentence(self) -> str:
+        return (
+            f"structure-only build of component {self.component!r} is "
+            f"impossible in THIS PROCESS, for every family it serves: "
+            f"{self.lacks}. Missing capability: {self.capability}. This is an "
+            f"IMAGE defect, not an authoring one — no boot key can be derived "
+            f"here, so this pod can never ask the hub for a cell and will "
+            f"self-mint on every boot"
+            + (f" (tree: {self.tree})" if self.tree else "")
+        )
+
+
+#: The ``boot_adopt`` phase token for each kind of structure-only refusal.
+#: Read out of this source by
+#: ``tests/test_boot_adopt_observability_pgw1116.py``'s vocabulary fence.
+TOKEN_UNSUPPORTED = "structure_unsupported"
+TOKEN_CAPABILITY_MISSING = "structure_capability_missing"
+
+
+def refusal_token(exc: StructureOnlyUnsupported) -> str:
+    """Which boot-adopt token a structure-only refusal reports under.
+
+    The distinction is the whole of pgw#1123: ``structure_unsupported`` is a
+    family that is stranded (correct, expected forever on the quantized
+    artifact lanes, and a reason to look at the FAMILY);
+    ``structure_capability_missing`` is an image that cannot do the thing at
+    all (a reason to look at the IMAGE). Reported under one token they are
+    indistinguishable, and the second one looks exactly like a pod that chose
+    to self-mint.
+    """
+    return (TOKEN_CAPABILITY_MISSING
+            if isinstance(exc, StructureCapabilityMissing)
+            else TOKEN_UNSUPPORTED)
 
 
 class StructureNotHonored(StructureOnlyUnsupported):
@@ -239,16 +301,26 @@ def _refuse_artifact_lanes(root: Path, component: str, cls: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _init_empty_weights() -> Any:
+def _init_empty_weights(component: str = "") -> Any:
+    """The meta-init seam, PROVEN on this process before it is used.
+
+    pgw#1123: this used to import ``accelerate`` — undeclared, absent from the
+    fleet's own probe image, and refusing under the same token a stranded
+    family refuses under. Both halves are fixed: the mechanism is owned
+    (:mod:`.meta_init`), and if it is ever unavailable anyway the refusal names
+    the missing CAPABILITY under its own token.
+    """
+    from . import meta_init
+
     try:
-        from accelerate import init_empty_weights
-    except Exception as exc:  # noqa: BLE001
-        raise StructureOnlyUnsupported(
-            component="", cls_name="", lacks=(
-                f"`accelerate` is not importable ({exc}), and "
-                f"`init_empty_weights` is the mechanism that skips the state "
-                f"dict")) from exc
-    return init_empty_weights
+        meta_init.require_meta_init()
+    except meta_init.MetaInitUnavailable as exc:
+        logger.error(
+            "structure-only build is impossible in this process: %s", exc)
+        raise StructureCapabilityMissing(
+            component=component, cls_name="", capability=exc.capability,
+            lacks=exc.lacks) from exc
+    return meta_init.init_empty_weights
 
 
 def build_component(
@@ -263,6 +335,12 @@ def build_component(
     """
     import torch
 
+    # FIRST, before anything about this family is inspected: a process that
+    # cannot meta-instantiate refuses about ITSELF, not about the tree it was
+    # handed (pgw#1123 — the pod message named component '' and 'unknown
+    # class', which read as a family problem and was an image problem).
+    init_empty_weights = _init_empty_weights(component)
+
     root = Path(tree)
     cls = _component_class(root, component)
     _refuse_artifact_lanes(root, component, cls)
@@ -275,7 +353,6 @@ def build_component(
     # refuse (pgw#689 defect 1).
     config.pop("quantization_config", None)
 
-    init_empty_weights = _init_empty_weights()
     with mi.observe(f"structure:{component}") as census:
         with init_empty_weights():
             module = cls.from_config(config)
@@ -664,6 +741,9 @@ __all__ = [
     "RANDOM_SEED",
     "RANDOM_STD",
     "STAMP",
+    "TOKEN_CAPABILITY_MISSING",
+    "TOKEN_UNSUPPORTED",
+    "StructureCapabilityMissing",
     "StructureFacts",
     "StructureNotHonored",
     "StructureOnlyUnsupported",
@@ -676,6 +756,7 @@ __all__ = [
     "materialize_random",
     "modules_of",
     "program_shape_env",
+    "refusal_token",
     "restore_virtual",
     "stray_real_tensors",
     "structure_only_components",

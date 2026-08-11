@@ -119,6 +119,13 @@ def test_every_refusal_token_in_the_tree_is_in_the_vocabulary() -> None:
         src / "boot_adopt.py", r"reason=\"([a-z_]+)\"",
     ):
         found[token] = "boot_adopt.attempt"
+    # pgw#1123: `boot_trace_child` now reports the structure-only refusal under
+    # whichever of these two `structure_only.refusal_token` picks, so the
+    # tokens themselves live there and must still be read out of the tree.
+    for token in _tokens(
+        src / "models" / "structure_only.py", r"TOKEN_[A-Z_]+ = \"([a-z_]+)\"",
+    ):
+        found[token] = "structure_only.refusal_token"
 
     assert found, "the scan found no refusal sites at all — the patterns rotted"
     missing = sorted(
@@ -442,7 +449,8 @@ def hub() -> Iterator[Any]:
 @pytest.fixture(scope="module")
 def micro_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     pytest.importorskip("torch")
-    pytest.importorskip("accelerate")
+    # No `importorskip("accelerate")`: pgw#1123 removed it from this path, and
+    # the row below proves the derivation completes when it is unimportable.
     if str(MICRO_SRC) not in sys.path:
         sys.path.insert(0, str(MICRO_SRC))
     from micro_diffusion.weights import SEED, materialize
@@ -545,3 +553,62 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
     assert row.duration_ms > 0, (
         "the derivation was measured and the measurement must reach the hub — "
         "otherwise 'the boot derive costs seconds' stays an anecdote")
+
+
+def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, events: List[Any],
+    hub: Any, micro_tree: Path, micro_declaration: None, sm_runtime: None,
+) -> None:
+    """pgw#1123, end to end on the vehicle the pods ran.
+
+    The row above with ONE difference: the trace children run with
+    ``accelerate`` shadowed by a module that refuses to import — which is what
+    ``examples/micro-diffusion``'s image is, and what a family shading the
+    package would be. On 0.104.0 all three children died
+    ``structure_unsupported``, no key existed and the hub was never called;
+    the pods' GIN log counted zero resolves and nothing said why.
+
+    The shading is in the ENVIRONMENT, not in the code under test: every seam
+    from ``_boot_adopt`` down to the child's structure build is the real one.
+    """
+    from gen_worker.api.binding import ModelRef
+    from gen_worker.mint_process import MintSlot
+    from gen_worker.procsplit import broker
+    from gen_worker.registry import collect_endpoints
+
+    shade = tmp_path / "shade"
+    (shade / "accelerate").mkdir(parents=True)
+    (shade / "accelerate" / "__init__.py").write_text(
+        "raise ImportError(\"No module named 'accelerate'\")\n")
+
+    if str(MICRO_SRC) not in sys.path:
+        sys.path.insert(0, str(MICRO_SRC))
+    monkeypatch.syspath_prepend(str(REPO / "tests"))
+    monkeypatch.setenv(
+        "PYTHONPATH", ":".join([
+            str(shade), str(REPO / "src"), str(REPO / "tests"),
+            str(MICRO_SRC)]))
+    monkeypatch.setattr(broker, "_broker", None, raising=False)
+
+    specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main"])
+    spec = next(s for s in specs if s.name == "generate")
+
+    ex = _executor(tmp_path)
+    ex.file_base_url = f"http://127.0.0.1:{hub.server_address[1]}"
+    slots = {"pipeline": MintSlot(
+        ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
+                     tag="prod"),
+        path=str(micro_tree))}
+
+    out = ex._boot_adopt(spec, slots)
+
+    assert out.reason != "structure_unsupported", (
+        "the trace children still cannot build a structure without "
+        f"`accelerate`: {out.detail}")
+    assert out.reason == "miss", out.detail
+    assert out.derived_key.startswith("ck1-")
+    resolves = [c for c in hub.calls if c[0] == cell_resolve.RESOLVE_PATH]
+    assert len(resolves) == 1, (
+        "an image without `accelerate` must still ASK — this is the pgw#1123 "
+        f"pod defect, reproduced off-pod. Hub saw: {hub.calls}")
+    assert _one(events).phase == "miss"
