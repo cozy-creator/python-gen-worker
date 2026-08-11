@@ -143,7 +143,7 @@ def _remote_safetensors_width(
     return _SAFETENSORS_DTYPE_NAMES.get(top, ""), bits_per_param
 
 
-def _detect_snapshot_dtype(root: Path) -> str:
+def detect_snapshot_dtype(root: Path) -> str:
     """Majority weight dtype across a snapshot's safetensors headers
     ('bf16' / 'fp16' / 'fp32' / 'fp8', '' when undetectable). Civitai
     version metadata is unreliable (fp labels routinely contradict the
@@ -437,7 +437,7 @@ def resolve_plan_source_width(
     The width is IN the file — every tensor's dtype sits in the safetensors
     header, which is a range read, not a download. Reading it here also makes
     ``dtype: "source"`` honest BEFORE the transfer rather than after it
-    (``_detect_snapshot_dtype`` only runs post-ingest).
+    (``detect_snapshot_dtype`` only runs post-ingest).
 
     The dtype stamp defers to a tag that already resolved (a variant suffix is
     the publisher's own declaration); the WIDTH does not, because it is a
@@ -594,7 +594,7 @@ def ingest_huggingface(
         "class_name": str(classification.attrs.get("architecture") or ""),
     }
     attrs = dict(classification.attrs)
-    on_disk_dtype = _detect_snapshot_dtype(dest_dir)
+    on_disk_dtype = detect_snapshot_dtype(dest_dir)
     if on_disk_dtype:
         attrs["dtype"] = on_disk_dtype
     attrs.setdefault("runtime_library", library)
@@ -750,7 +750,7 @@ def ingest_civitai(
         "lineage_source": "civitai_baseModel" if base_model_raw else "unknown",
         "file_layout": layout_info.source_layout if layout_info.source_layout != "unknown" else "singlefile",
     }
-    on_disk_dtype = _detect_snapshot_dtype(dest_dir)
+    on_disk_dtype = detect_snapshot_dtype(dest_dir)
     if on_disk_dtype:
         attrs["dtype"] = on_disk_dtype
     model_kind = str((payload.get("model") or {}).get("type") or "").strip().lower() \

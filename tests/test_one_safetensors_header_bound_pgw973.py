@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker.convert.ingest import _detect_snapshot_dtype
+from gen_worker.convert.ingest import detect_snapshot_dtype
 from gen_worker.convert.writer import _read_safetensors_header, component_stored_tensor_names
 from gen_worker.models.loading import safetensors_file_valid
 from gen_worker.models.safetensors_header import MAX_HEADER_BYTES, header_len_ok
@@ -116,7 +116,7 @@ def test_ingest_refuses(tmp_path: Path):
     snapshot.mkdir()
     _write_safetensors(snapshot / "m.safetensors", declared_len=2**63 - 1)
     # No parseable header anywhere => no dtype could be detected.
-    assert _detect_snapshot_dtype(snapshot) in (None, "")
+    assert detect_snapshot_dtype(snapshot) in (None, "")
 
 
 def test_a_legitimate_file_still_parses_everywhere(tmp_path: Path):

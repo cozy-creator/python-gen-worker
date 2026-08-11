@@ -23,6 +23,7 @@ from ..models.ladder import (
     default_placement,
     placement_to_metadata,
 )
+from .dtype_pins import verify_produced_tree
 from .hub import CommitFile, CommitResult, HubClient, files_from_tree
 from .publish_journal import JOURNAL_NAME
 from .produced import ProducedFlavor
@@ -195,6 +196,12 @@ def publish_flavors(
         # its own.
         assert_one_file_per_component(
             Path(flavor.path), producer=f"publish_flavors[{dest}]")
+        # pgw#1133, the same seam and the same argument: our producers do not
+        # get to publish a component NARROWER than its families.facts pin.
+        # Here there is no source tree to compare against — this path is our
+        # own output, not a mirror — so the pin is enforced outright, and the
+        # per-component precision is published either way.
+        produced_dtypes = verify_produced_tree(Path(flavor.path))
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
         label = str(flavor.flavor or attrs.get("flavor") or attrs.get("dtype") or "").strip()
         # th#606: worker-addable provenance stamp fields. Producers declare
@@ -212,6 +219,8 @@ def publish_flavors(
             meta.pop(k, None)
         if placement:
             meta["placement"] = placement
+        if produced_dtypes:
+            meta["component_dtypes"] = dict(produced_dtypes)
         # th#1303 phase 3, producer class 2 of N: the CONVERSION producer.
         # `publish_flavors` is what every quantize / fuse / cast / distil job
         # calls, so it is the highest-volume publisher after the mirror — and
