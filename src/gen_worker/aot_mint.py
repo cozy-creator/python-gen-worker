@@ -3328,10 +3328,10 @@ def trace_for_key(
     package-side gate removed, and it lives HERE rather than in the boot module
     for two reasons the boot module cannot satisfy on its own:
 
-    * the **branch-arm ordering rule** is pipeline state — adapter-bearing rows
-      first, ONE ``_disarm_branches`` for the whole branchless group. A caller
-      that ordered its rows differently would trace different graphs, and the
-      rule belongs beside the loop that made it;
+    * the **branch-arm ordering rule** is pipeline state — the arm itself,
+      adapter-bearing rows first, ONE ``_disarm_branches`` for the whole
+      branchless group. A caller that ordered its rows differently would trace
+      different graphs, and the rule belongs beside the loop that made it;
     * the trace itself is ``_export_entry``, whose refusals, fork gate,
       declared-range gate and lifted-input gate are the mint's. A boot-side
       re-implementation would be a second trace path, and the two would
@@ -3355,6 +3355,13 @@ def trace_for_key(
     count = max(1, int(share_count))
     rows = ordered[max(0, int(share_index)) % count::count] if count > 1 \
         else ordered
+    # pgw#1132: the adapter-BEARING rows export from the LIFTED forward, and
+    # arming it is this loop's job exactly as it is `mint_targets`' — the
+    # callers of both (`boot_trace_child`, `mint_child`) arm the CONTAINER
+    # half only, which is pgw#822 verbatim. Held only in the `finally` below,
+    # the first adapter-bearing row of every bucket-bearing family refused and
+    # the whole derivation died before a resolve was possible.
+    _arm_branches(pipeline, int(spec.lora_bucket or 0))
     disarmed = False
     try:
         for plan, arm in rows:

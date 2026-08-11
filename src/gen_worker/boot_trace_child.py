@@ -205,6 +205,10 @@ def run(job: TraceJob) -> int:
     if cfg.lora_bucket:
         from . import compile_cache as cc
 
+        # The CONTAINER half and the lane stamp, exactly as `mint_child` arms
+        # the pipeline it hands the mint. The LIFTED half belongs to the loop
+        # that needs it — `aot_mint.trace_for_key` arms it itself (pgw#1132);
+        # a second arm site here is how the two halves drifted apart.
         cc.apply_lora_execution_lane(pipeline, int(cfg.lora_bucket))
     export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
     setup_ms = int((time.monotonic() - t_setup) * 1000)
