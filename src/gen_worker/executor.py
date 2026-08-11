@@ -6886,9 +6886,18 @@ class Executor:
         # RACE the fetch the way §4.27 step 4 asks. It is already off the
         # request path — no dispatch has occurred — and moving it earlier is a
         # restructure of this method's await order, not of the derivation.
+        # pgw#1127 S2: the `ck1` key THIS MACHINE's own store answered on. Not
+        # an `_ArmOrder`: a self-minted cell carries no hub receipt and no
+        # publisher org, so `arm_ordered` would refuse it
+        # `receipt_gate_unconfigured`. It is an ADDRESS, handed to the arming
+        # brain as a second lookup route into the same CAS the arm-token memo
+        # addresses — one key, two routes, and `_arm_exported_cell` is the one
+        # gate at the end of both.
+        boot_local_key = ""
         if arm is None and spec.compile is not None and not eager_only:
             adopt = await asyncio.to_thread(
                 self._boot_adopt, spec, resolved_slots)
+            boot_local_key = adopt.local_key
             if adopt.adoption is not None:
                 got = adopt.adoption
                 compile_selection = _CompileArtifactSelection(
@@ -6997,7 +7006,7 @@ class Executor:
                     snapshots=snapshots,
                     slot_identities=slot_identities,
                     component_paths=component_paths,
-                    arm=arm)
+                    arm=arm, boot_local_key=boot_local_key)
                 rec.shared_keys.extend(inj.shared_keys)
                 # pgw#517: a self-loading (str/Path-slot) endpoint builds its
                 # own pipeline inside setup() and the executor never sees it
@@ -8696,6 +8705,7 @@ class Executor:
         slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
         component_paths: Optional[Dict[str, Dict[str, str]]] = None,
         arm: Optional[_ArmOrder] = None,
+        boot_local_key: str = "",
     ) -> "_InjectionResult":
         """Typed injection: each slot receives exactly what its ``setup``
         annotation says — a ``str``/``Path`` local path, or a constructed
@@ -8959,7 +8969,7 @@ class Executor:
                             outcome = await _to_thread_complete(
                                 self._enable_compiled,
                                 pipe, spec.compile_cell(), compile_artifact,
-                                compile_selection, arm,
+                                compile_selection, arm, boot_local_key,
                             )
                         except compile_cache.CompiledExecutionLaneUnavailableError as exc:
                             # Mandatory (w8a8/w4a4) lane: self-mint also hit a
@@ -9896,15 +9906,23 @@ class Executor:
         # action (`cells.resolve`), so the parent supplies base_url + bearer and
         # ignores what the child passes. Mirrors `fleet_cells.CellPublisher`'s
         # own readiness (base_url AND (local bearer OR broker.active())).
+        hub_absent = ""
         if not base_url or (not bearer and not procsplit_broker.active()):
-            # Genuinely nobody to ask: pre-Hello (no base_url yet), or an embedded
-            # single-process worker with no hub and no seam. Deriving a key nobody
-            # will answer is pure boot latency.
+            hub_absent = "nobody to ask: base_url={} bearer={} seam={}".format(
+                base_url or "<unset>", "set" if bearer else "<unset>",
+                "up" if procsplit_broker.active() else "down")
+        # pgw#1127 S2: this used to RETURN here, before the derivation, on the
+        # premise that "deriving a key nobody will answer is pure boot latency".
+        # The premise is false on exactly the machines §4.28 is about: the
+        # derived `ck1` key IS `local_cell_store`'s own address, so an offline
+        # box holding the exact cell it needs was being told there was nobody
+        # to ask. The gate survives in its honest form — refuse only when BOTH
+        # answerers are absent — and `attempt` decides the rest, after the
+        # local store has been asked.
+        if boot_adopt.no_cell_source(hub_absent):
             return boot_adopt.refused(
-                "no_hub",
-                "nobody to ask: base_url={} bearer={} seam={}".format(
-                    base_url or "<unset>", "set" if bearer else "<unset>",
-                    "up" if procsplit_broker.active() else "down"),
+                "no_cell_source",
+                f"{hub_absent}, and this machine's own cell store is empty",
                 family=family, function=fn)
         work_root = Path(
             self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
@@ -9925,12 +9943,14 @@ class Executor:
             cache_dir=self.store._cache_dir,
             base_url=base_url,
             bearer=bearer,
+            hub_absent=hub_absent,
         )
 
     def _enable_compiled(
         self, pipe: Any, cfg: Any, artifact: Optional[Path],
         delivered: Optional["_CompileArtifactSelection"] = None,
         arm: Optional[_ArmOrder] = None,
+        boot_local_key: str = "",
     ) -> "fleet_cells.ArmOutcome":
         """Arm the best available compiled path for a freshly loaded pipeline.
 
@@ -10004,7 +10024,8 @@ class Executor:
                 # when boot-adopt returns a MISS, which is the boot every pod
                 # did before §4.27 existed. The refused cell is not retried: it
                 # is not passed back in.
-                outcome = self._enable_compiled(pipe, cfg, None)
+                outcome = self._enable_compiled(
+                    pipe, cfg, None, boot_local_key=boot_local_key)
                 if outcome.armed or outcome.eager_reason:
                     return outcome
                 return dc_replace(
@@ -10015,6 +10036,10 @@ class Executor:
             publisher=self._cell_publisher(),
             delivered_ref=delivered.ref if delivered else "",
             delivered_digest=delivered.snapshot_digest if delivered else "",
+            # pgw#1127 S2: the boot's own derived `ck1`, when THIS MACHINE's
+            # store answered on it. Empty on the fleet path, where the store is
+            # empty and the lookup is one stat.
+            boot_local_key=boot_local_key,
         )
 
     def _arming_enable(

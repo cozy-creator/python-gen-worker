@@ -1205,6 +1205,7 @@ def enable_compiled(
     delegate: Optional[bool] = None,
     delivered_ref: str = "",
     delivered_digest: str = "",
+    boot_local_key: str = "",
 ) -> ArmOutcome:
     """Fleet arming policy, plus the adoption ledger every exit shares.
 
@@ -1220,7 +1221,7 @@ def enable_compiled(
         pipe, cfg, cache_dir, artifact,
         publisher=publisher, delegate=delegate,
         delivered_ref=delivered_ref, delivered_digest=delivered_digest,
-        adoptions=adoptions,
+        adoptions=adoptions, boot_local_key=boot_local_key,
     )
     if not adoptions:
         return outcome
@@ -1369,6 +1370,7 @@ def _arming_policy(
     delivered_ref: str,
     delivered_digest: str,
     adoptions: List[CellAdoption],
+    boot_local_key: str = "",
 ) -> ArmOutcome:
     """Fleet arming policy (gw#587): delivered cell first, self-mint on miss.
 
@@ -1646,7 +1648,8 @@ def _arming_policy(
     # single missing-file stat on a miss, so the trusted-fleet path — which
     # never stores anything locally — pays a stat and nothing else.
     local_prior = arm_from_local_store(
-        pipe, cfg, cache_dir, bucket, arm_key, family)
+        pipe, cfg, cache_dir, bucket, arm_key, family,
+        boot_local_key=boot_local_key)
     if local_prior is not None:
         return ArmOutcome(
             armed=True, self_mint=local_prior, selection_bug=selection_bug)
@@ -1919,27 +1922,54 @@ def _sweep_superseded_memos_once() -> None:
         logger.debug("fleet-cells: memo sweep failed", exc_info=True)
 
 
+#: pgw#1127: how this machine ADDRESSED the cell it armed. Two routes into one
+#: CAS, and the difference is what a refusal is allowed to do about it.
+ROUTE_MEMO = "memo"
+ROUTE_BOOT_KEY = "boot_key"
+
+
 def arm_from_local_store(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], bucket: int,
-    arm_key: ArmIdentity, family: str,
+    arm_key: ArmIdentity, family: str, boot_local_key: str = "",
 ) -> Optional[SelfMint]:
     """§4.28 step 3: arm from THIS MACHINE's own store, before minting anything.
 
-    Paul's compile-once-run-forever, at the one place a miss is decided. The
-    machine derives its pre-trace identity (milliseconds), the memo names the
-    ``ck1`` key its last mint of that identity produced, the store hands back
-    the digest-verified artifact, and :func:`_arm_exported_cell` — the SAME
-    gate the child's own cell passes — decides. No network is touched on this
-    path at all: a cozy-local box with no hub reachable arms exactly as well as
-    one online, which is what "fully offline-capable" means.
+    Paul's compile-once-run-forever, at the one place a miss is decided. No
+    network is touched on this path at all: a box with no hub reachable arms
+    exactly as well as one online, which is what "fully offline-capable" means.
 
-    ``None`` = no usable local cell; the caller mints, honestly. Every refusal
-    is loud and DROPS the entry, so a corrupted or stale cell costs one re-mint
-    and never two.
+    TWO ROUTES, ONE CAS, ONE GATE (pgw#1127 S2). Both end at
+    :func:`_arm_exported_cell`, the gate a child's fresh mint also passes, so a
+    stored cell is never more trusted than a freshly minted one and never less.
+
+    * :data:`ROUTE_MEMO` — the pre-trace ``ArmIdentity`` (milliseconds), through
+      the memo this machine's own mint wrote for that exact token. The fast
+      path, and the only one before pgw#1127.
+    * :data:`ROUTE_BOOT_KEY` — the ``ck1`` key §4.27's boot derivation produced
+      and ``local_cell_store`` answered on. This is what makes an arm-token
+      SCHEME BUMP cost a trace instead of a mint: `sweep_superseded_memos`
+      deletes the shortcut and leaves the CELLS under their own keys, so after
+      the sweep the memo misses and the derived key still addresses the cell it
+      used to name. On a fleet pod both routes are one stat on an empty store.
+
+    A refusal on the memo route DROPS the entry — this machine wrote that memo
+    for this exact identity, so a cell that will not arm under it is stale.
+    A refusal on the boot-key route does NOT: that hit is an inference about
+    which pipe owns the bytes, and destroying another pipe's cell to punish a
+    wrong guess would turn one honest re-mint into two.
+
+    ``None`` = no usable local cell; the caller mints, honestly.
     """
     _sweep_superseded_memos_once()
+    route = ROUTE_MEMO
     try:
         local = local_cell_store.lookup_for_arm(arm_key.token)
+        if local is None and boot_local_key:
+            # The memo is a SHORTCUT, never an authority (§4.28) — so when it
+            # has nothing to say, the address the boot derived is asked
+            # directly. Same store, same key space, same gate below.
+            route = ROUTE_BOOT_KEY
+            local = local_cell_store.lookup(boot_local_key)
     except Exception as exc:  # noqa: BLE001 — a cache read must never be fatal
         logger.warning("fleet-cells: local cell store unreadable (%s)", exc)
         return None
@@ -1948,21 +1978,36 @@ def arm_from_local_store(
     armed, meta, (reason, detail) = _arm_exported_cell(
         pipe, cfg, cache_dir, bucket, local.artifact, arm_key)
     if not armed:
+        dropped = route == ROUTE_MEMO
         logger.warning(
-            "fleet-cells: the local store's cell for %s (key=%s) did not arm "
-            "(%s%s); dropping it and minting", family, local.key, reason,
-            f": {detail}" if detail else "")
-        local_cell_store.drop(local.key)
+            "fleet-cells: the local store's cell for %s (key=%s, route=%s) did "
+            "not arm (%s%s); %s and minting", family, local.key, route, reason,
+            f": {detail}" if detail else "",
+            "dropping it" if dropped else "leaving it in place")
+        if dropped:
+            local_cell_store.drop(local.key)
         activity_mod.emit_event(
             "local_cell_refused",
-            f"family={family} arm_key={arm_key.token} cell_key={local.key}: "
-            f"this machine's own stored cell did not arm "
-            f"({reason}{': ' + detail if detail else ''}); it has been dropped "
-            f"from the local store and this boot mints a fresh one",
+            f"family={family} arm_key={arm_key.token} cell_key={local.key} "
+            f"route={route}: this machine's own stored cell did not arm "
+            f"({reason}{': ' + detail if detail else ''}); it has been "
+            + ("dropped from the local store" if dropped else
+               "LEFT in the local store — a boot-key hit is an inference "
+               "about which pipe owns the bytes, not a memo this machine "
+               "wrote for this arm")
+            + " and this boot mints a fresh one",
             phase=reason,
         )
         return None
     key = str((meta or {}).get("cell_key") or "").strip() or local.key
+    if route == ROUTE_BOOT_KEY:
+        # The shortcut, REPAIRED. The cell just proved it arms under this arm
+        # token, so the memo the sweep deleted (or that a re-keyed graph left
+        # pointing elsewhere) can be rewritten from evidence instead of from a
+        # mint. This is the whole cost argument for the derived-key route: with
+        # it an arm-scheme bump costs one TRACE per family per machine; without
+        # it, one MINT.
+        local_cell_store.note_memo(arm_key.token, local.key)
     aot_serve.note_aot_key(key)
     minted = SelfMint(
         family=family, cell_key=key,
@@ -1976,13 +2021,17 @@ def arm_from_local_store(
         _FINALIZED[arm_key.token] = minted
     logger.info(
         "fleet-cells: armed %s from THIS MACHINE's local cell store "
-        "(key=%s, %.1f MB) — no mint, no hub, no network (§4.28)",
-        family, key, local.bytes / 1e6)
+        "(key=%s, %.1f MB, route=%s) — no mint, no hub, no network (§4.28)",
+        family, key, local.bytes / 1e6, route)
     activity_mod.emit_event(
         "local_cell_armed",
-        f"family={family} arm_key={arm_key.token} cell_key={key}: this "
-        f"machine minted this cell on an earlier boot and stored it locally; "
-        f"it arms from disk with no mint and no publish route",
+        f"family={family} arm_key={arm_key.token} cell_key={key} "
+        f"route={route}: this machine minted this cell on an earlier boot and "
+        f"stored it locally; it arms from disk with no mint and no publish "
+        f"route"
+        + (" — addressed by the key THIS BOOT derived, so the arm-token memo "
+           "was not needed and has been rewritten from the proven arm"
+           if route == ROUTE_BOOT_KEY else ""),
         phase="local_store_hit",
     )
     return minted

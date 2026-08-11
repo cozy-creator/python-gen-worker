@@ -280,7 +280,8 @@ class _Rig:
         for spec in specs:
             monkeypatch.setattr(
                 self.ex, "_enable_compiled",
-                lambda p, cfg, artifact, delivered=None, arm=None:
+                lambda p, cfg, artifact, delivered=None, arm=None,
+                       boot_local_key="":
                     fleet_cells.enable_compiled(
                         p, cfg, self.ex.store._cache_dir, artifact,
                         publisher=None))
