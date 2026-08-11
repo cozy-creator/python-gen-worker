@@ -22,9 +22,16 @@ import types
 import typing
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple,
+)
 
 import msgspec
+
+if TYPE_CHECKING:  # pgw#1127: the arming import stays deferred at runtime —
+    # `gen_worker.local_serve` pulls the whole compile stack, and `cozy run`
+    # on a payload-only endpoint must not pay for it.
+    from .. import local_serve
 
 from ..api.errors import CanceledError
 from ..models import provision
@@ -550,6 +557,7 @@ def run_setup(
     arm_compile: bool = True, return_loaded: bool = False,
     component_paths: Optional[Dict[str, Dict[str, str]]] = None,
     structure_only: Sequence[str] = (), place: bool = True,
+    selected: Optional["_SelectedFunction"] = None,
 ) -> Optional[Dict[str, Any]]:
     """Call ``instance.setup(...)`` once, passing exactly the resolved model
     slots its signature declares.
@@ -558,6 +566,12 @@ def run_setup(
     (pgw#784): the mint child drives its own cold arm + capture and must not
     have a cell armed under it. ``return_loaded=True`` returns the loaded slot
     objects so a caller can reach the pipeline it just built.
+
+    ``selected`` (pgw#1127) is the routable function these slots belong to. It
+    is what makes ``arm_compile=True`` able to MINT: a delegated child
+    rediscovers the endpoint from its declaring module and re-resolves the
+    parent's slots, so without it this path can only adopt a cell that already
+    exists. Absent, the arm is adopt-only and says so.
 
     ``place=False`` (pgw#1124) loads the slots without running the worker's
     serving placement ladder at all, while ``device`` still says which device
@@ -637,12 +651,20 @@ def run_setup(
     except (TypeError, ValueError, NameError):
         hints = {}
     decl = getattr(type(instance), _ENDPOINT_ATTR, None)
+    # pgw#1127: the mint context is built from the WHOLE resolution, once,
+    # before any slot loads — the child re-runs setup, so it needs every slot
+    # this endpoint declares and not just the one whose load happens to reach
+    # the arm. Built even when `arm_compile` is False (it costs a dict) so the
+    # two paths cannot drift into resolving slots differently.
+    mint = _local_mint_context(
+        instance, resolved_models, wanted,
+        component_paths=component_paths, selected=selected)
     loaded = {
         k: _load_injected_model(
             hints.get(k), v, decl=decl, slot=k, device=device,
             arm_compile=arm_compile, place=place,
             overrides=dict((component_paths or {}).get(k) or {}),
-            structure_only=tuple(structure_only))
+            structure_only=tuple(structure_only), mint=mint)
         for k, v in resolved_models.items()
         if k in wanted
     }
@@ -656,6 +678,44 @@ def run_setup(
 
 _INJECTED_CACHE: Dict[Tuple[str, str], Any] = {}
 _ENDPOINT_ATTR = "__gen_worker_endpoint__"
+
+
+def _local_mint_context(
+    instance: Any,
+    resolved_models: Dict[str, str],
+    wanted: Any,
+    *,
+    component_paths: Optional[Dict[str, Dict[str, str]]],
+    selected: Optional[_SelectedFunction],
+) -> Optional["local_serve.LocalMintContext"]:
+    """This run's resolution, in the shape a delegated mint child reads.
+
+    ``None`` when the caller did not name the function (``mint_child`` and
+    ``boot_trace_child`` both call ``run_setup`` without one, and both pass
+    ``arm_compile=False`` — a child that opened its own mint would be the
+    recursion this must not have).
+    """
+    if selected is None:
+        return None
+    from .. import local_serve
+
+    module = str(getattr(selected.spec, "module", "") or "").strip()
+    if not module:
+        # The endpoint was discovered from a file path or an interactive
+        # namespace, so no importable module name exists for a child to
+        # rediscover it in. Adopt-only, honestly.
+        module = str(getattr(selected.cls, "__module__", "") or "").strip()
+        if module in ("", "__main__"):
+            module = ""
+    return local_serve.mint_context(
+        function=selected.fn_name,
+        module=module,
+        slots=local_serve.slot_map(
+            {k: v for k, v in resolved_models.items() if k in wanted},
+            selected.bindings,
+            component_paths,
+        ),
+    )
 
 
 def _assert_structure_honored(
@@ -714,6 +774,7 @@ def _load_injected_model(
     device: str = "", arm_compile: bool = True, place: bool = True,
     overrides: Optional[Dict[str, str]] = None,
     structure_only: Sequence[str] = (),
+    mint: Optional["local_serve.LocalMintContext"] = None,
 ) -> Any:
     """Load one setup slot via the shared core, with a per-process warm cache
     (so ``serve`` and repeated local dispatches never reload weights).
@@ -796,14 +857,20 @@ def _load_injected_model(
         and compile_cfg is not None
         and device.strip().lower() != "cpu"
     ):
-        from ..local_cells import enable_compiled as enable_compiled_local
+        from .. import local_serve
         from ..models.cache_paths import tensorhub_cas_dir
 
-        # Local runtime (gw#555): delivered/env artifacts first, then the
-        # user's local cell store — adopt a stored self-minted cell or mint
-        # one. This call-site is the ONLY entry to local minting; the
-        # production executor arms compile via hub-delivered cells only.
-        enable_compiled_local(sl.obj, compile_cfg, Path(tensorhub_cas_dir()))
+        # §4.28 / pgw#1127: the ONE arming brain, with NO sink. Delivered
+        # artifact, then THIS MACHINE's own ck1-keyed cell store, then a
+        # delegated AOT mint whose result lands in that store — so the second
+        # run of this endpoint on this machine arms from disk with no mint, no
+        # hub and no network. Before pgw#1127 this line called
+        # `local_cells.enable_compiled`, the JIT path, which meant the store
+        # pgw#1096 built for exactly this machine was unreachable from it and
+        # pgw#1086 wave 1's deletion of that module would have taken compiled
+        # serving off cozy-local outright.
+        local_serve.enable_compiled(
+            sl.obj, compile_cfg, Path(tensorhub_cas_dir()), mint=mint)
     _INJECTED_CACHE[key] = sl.obj
     return sl.obj
 
@@ -1200,7 +1267,8 @@ def _run_inner(args: argparse.Namespace) -> int:
             emit=_stderr_emitter,
             write_event=_write_event,
             on_resolved=lambda resolved: _discard(
-                run_setup(instance, resolved, device=device)),
+                run_setup(
+                    instance, resolved, device=device, selected=selected)),
         )
     except CanceledError:
         raise

@@ -480,11 +480,15 @@ def test_local_cells_has_no_publish_path():
         assert not bad, f"local_cells code references {bad}"
 
 
-def test_local_cli_is_the_only_mint_caller():
-    # The mint entry is the local CLI only: the production executor and
-    # lifecycle must never import or call local_cells (fetch-only stays
-    # fetch-only). AST-level: imports plus any code identifier naming the
-    # module count; prose mentions in docstrings do not.
+def test_nothing_calls_this_module_any_more():
+    # pgw#1127: the local CLI was this module's LAST reader, and it is gone —
+    # `cli/run.py` arms through `local_serve` (the AOT sink) since S1. So the
+    # assertion flips from "exactly the local CLI" to "nobody", and that is the
+    # whole safety argument for pgw#1086 wave 1's deletion of it: no serve path
+    # can break, because no serve path reaches it.
+    #
+    # AST-level: imports plus any code identifier naming the module count;
+    # prose mentions in docstrings do not.
     root = Path(lc.__file__).parent
     callers = set()
     for p in root.rglob("*.py"):
@@ -504,10 +508,12 @@ def test_local_cli_is_the_only_mint_caller():
                 callers.add(p)
             elif isinstance(node, ast.Attribute) and "local_cells" in node.attr:
                 callers.add(p)
-    # pgw#1096: `aot_resume` (pgw#848 item 5) used to reach in here for
-    # `store_root()` — the PRODUCTION resume bank routed through a module
-    # pgw#1086 wave 1 deletes (pgw#1092 §4 landmine 1). The accessor moved to
-    # `local_cell_store` with its value unchanged, so this module is now
-    # reached from the local CLI and NOTHING else, and its deletion breaks no
-    # serve path. `test_aot_local_mint_pgw1096` holds the other half.
-    assert {p.relative_to(root).as_posix() for p in callers} == {"cli/run.py"}
+    # pgw#1096 moved `aot_resume`'s bank accessor out of here (landmine 1);
+    # pgw#1127 re-pointed the local CLI (landmine 2, and the live defect). Both
+    # readers are gone, so this module is dead code awaiting its owner's
+    # deletion — pgw#1086 wave 1, which `scripts/lint_unreached_surface.py`
+    # names as the owner of the one `EXEMPT_TARGETS` row keeping the
+    # unreached-surface guard green until then.
+    assert {p.relative_to(root).as_posix() for p in callers} == set(), (
+        "the JIT local-cell module must have no readers left — a new one puts "
+        "cozy-local back on pgw#1086 wave 1's critical path")

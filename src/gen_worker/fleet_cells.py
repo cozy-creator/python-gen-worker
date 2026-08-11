@@ -34,9 +34,14 @@ every claimed key axis against its own records and pins the token to
 exactly this cell key; the endpoint-scoped ``cell_store`` row is stamped
 hub-side from the token claim, never from anything this module sends.
 
-cozy-local NEVER uses this module (its self-mint stays local-store-only in
-the cozy-local cell store module — user-controlled hardware is untrusted tier by
-definition); the local CLI path does not construct a publisher.
+cozy-local USES this module since pgw#1127, through ``local_serve``, with
+``publisher=None`` — one arming brain, two sinks. What it never has is a
+PUBLISHER: user-controlled hardware is untrusted tier by definition, so its
+cells land in ``local_cell_store`` (``local_keep_reason`` -> ``no_publish_sink``)
+and its obligation ends at :func:`keep_self_mint_local`. That absence is
+pinned structurally by ``tests/test_local_serve_no_publisher_pgw1127.py``,
+not by this paragraph: before pgw#1127 the local CLI armed JIT through
+``local_cells`` and never reached the local store at all.
 
 Mint failures keep the pre-self-mint miss policy: plain lanes serve eager,
 quantized (w8a8/w4a4) lanes keep their typed fail-closed refusal.
@@ -2178,8 +2183,11 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         # Runtime assertion (gw#587): every fleet cell miss must produce a
         # publish attempt. A fleet worker minting with no usable sink is a
         # wiring defect (file_base_url/worker JWT absent at arming time),
-        # not a policy choice — loud, greppable, alarm-adjacent. (cozy-local
-        # legitimately has no publisher, but it never enters this module.)
+        # not a policy choice — loud, greppable, alarm-adjacent. cozy-local
+        # DOES enter this module since pgw#1127, and it must never enter
+        # HERE: it ends its obligation at :func:`keep_self_mint_local`, whose
+        # whole point is that a machine with no sink by design is not a
+        # machine that lost its sink by accident.
         logger.warning(
             "fleet-cells: SELF_MINT_WITHOUT_PUBLISH_SINK family=%s — cell "
             "stays local to this pod; the fleet store gains nothing",
@@ -2196,6 +2204,55 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         )
         mark_terminus(pending, TERMINUS_WITHHELD)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
+
+
+def keep_self_mint_local(pending: "PendingSelfMint") -> None:
+    """§4.28 terminus for a machine that has NO sink by design (cozy-local).
+
+    The cell is already in this machine's own store — ``adopt_delegated_mint``
+    put it there under its stamped ``ck1`` key before any publish could be
+    attempted — so all that is left is to END the obligation (pgw#815: a
+    pending that reaches the end of a boot carrying no terminus VANISHED) and
+    drop the capture directory.
+
+    Deliberately NOT :func:`publish_self_mint`. That function's sinkless branch
+    is a WIRING ALARM — a fleet pod whose ``file_base_url``/JWT went missing —
+    and firing it on cozy-local would make the one machine §4.28 was written
+    about permanently indistinguishable from a broken pod. It also takes a
+    publisher, and this one cannot: the local serve entry's never-publish
+    property is pinned structurally by
+    ``tests/test_local_serve_no_publisher_pgw1127.py``, and a terminus that
+    accepted a sink would be the hole that fence exists to close.
+    """
+    state = pending._state
+    if state.get("publish_resolved"):
+        return
+    state["publish_resolved"] = True
+    if state.get("minted") is None:
+        activity_mod.emit_event(
+            "self_mint_publish_withheld",
+            f"family={pending.family} key={pending.arm_token}: this machine "
+            f"has no publish sink and nothing was packed for this pending, so "
+            f"there is no cell to keep either",
+            phase="nothing_to_publish",
+        )
+        mark_terminus(pending, TERMINUS_ABANDONED)
+        shutil.rmtree(pending.mint_root, ignore_errors=True)
+        return
+    logger.info(
+        "fleet-cells: %s stays on THIS MACHINE (key=%s) — it has no publish "
+        "sink by design, and its own store is where every later run finds it "
+        "(§4.28)", pending.family, pending.arm_token)
+    activity_mod.emit_event(
+        "self_mint_publish_withheld",
+        f"family={pending.family} key={pending.arm_token}: this machine mints "
+        f"for ITSELF (§4.28) — the cell is in its own store, addressed by the "
+        f"same ck1 key the hub store would use, and no publish was attempted "
+        f"because no sink exists to attempt one against",
+        phase=KEEP_NO_PUBLISHER,
+    )
+    mark_terminus(pending, TERMINUS_WITHHELD)
+    shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
 def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:

@@ -406,7 +406,13 @@ class _Endpoint:
                     served.selected.bindings, offline=self.offline,
                 )
                 before = memory.cuda_allocated_bytes()
-                run_mod.run_setup(inst, resolved, device=self.device)
+                run_mod.run_setup(
+                    inst, resolved, device=self.device,
+                    # pgw#1127: `cozy serve` is the machine §4.28 was written
+                    # about. Naming the function here is what lets its first
+                    # run mint an AOT cell into this machine's own store and
+                    # every later run arm it from disk.
+                    selected=served.selected)
                 measured = max(0, memory.cuda_allocated_bytes() - before)
                 self._setup_done.add(iid)
 
