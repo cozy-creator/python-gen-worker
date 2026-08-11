@@ -375,7 +375,14 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
     seen: List[Path] = []
 
     def _arm(pipe: Any, cfg: Any, cache_dir: Any, artifact: Path,
-             bucket: int, meta: Any = None) -> AdoptOutcome:
+             bucket: int, meta: Any = None, *,
+             verify_numerics: bool = False, **_kw: Any) -> AdoptOutcome:
+        # pgw#1141 / §4.32: this is an ADOPTION — the bytes were proven at
+        # their own mint — so it must NOT ask for the quality gate. Asserted
+        # rather than absorbed: a `**kwargs` stub would have swallowed the
+        # difference and this file would still read green if the tax came back.
+        assert verify_numerics is False, (
+            "the local store's ADOPT path asked for the mint-time gate")
         seen.append(Path(artifact))
         return AdoptOutcome.hit(str((meta or {}).get("cell_key") or ""))
 

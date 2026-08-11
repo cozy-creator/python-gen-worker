@@ -53,6 +53,14 @@ _ORDER = {VERDICT_HEALTHY: 0, VERDICT_DEGRADED: 1, VERDICT_DESTROYED: 2}
 PHASE_DEGRADED = "degraded"
 PHASE_REFUSED = "refused"
 
+#: pgw#1141 (§4.31/§4.32) — an armed exported cell took no warm dispatch this
+#: boot, which is the NORMAL state of every adopted cell (the arm precedes
+#: setup) and is no longer a verdict about it. Carried on this kind so one
+#: query (`?kind=cell_numerics`) still answers what happened to every cell that
+#: armed on a pod, and emitted because an unannounced posture is
+#: indistinguishable from a gate that never ran.
+PHASE_ARMED_UNDISPATCHED = "armed_undispatched"
+
 
 def worst_of(*verdicts: str) -> str:
     """The worst rung among ``verdicts`` (unknown values read as HEALTHY)."""
@@ -438,7 +446,7 @@ def declared_thresholds(cfg: Any) -> Thresholds:
 __all__ = [
     "DEFAULT_THRESHOLDS",
     "NUMERICS_FLOOR", "NUMERICS_RETENTION_FLOOR", "NUMERICS_WARN",
-    "PHASE_DEGRADED", "PHASE_REFUSED",
+    "PHASE_ARMED_UNDISPATCHED", "PHASE_DEGRADED", "PHASE_REFUSED",
     "VERDICT_DEGRADED", "VERDICT_DESTROYED", "VERDICT_HEALTHY",
     "Comparison", "RowStat", "Thresholds",
     "compare_outputs", "declared_thresholds", "flatten_outputs", "gate",

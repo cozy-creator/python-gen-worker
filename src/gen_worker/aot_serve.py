@@ -105,6 +105,7 @@ from .compile_cache import (
     sku_slug,
 )
 from .models import lora_lifted
+from .models.memory import is_cuda_oom
 
 logger = logging.getLogger(__name__)
 
@@ -2512,6 +2513,26 @@ def wrap_module(
             _revoke(state, f"constants unbound: {exc}")
             return original(*args, **eager_kwargs)
         except Exception as exc:  # noqa: BLE001 — ANY artifact problem => eager
+            if is_cuda_oom(exc):
+                # pgw#1141: ATTRIBUTION. The serve-first doctrine makes the
+                # first real request the proof, so what that request blames
+                # decides whether a good cell survives — and allocator
+                # exhaustion is a fact about the CARD at this instant (a
+                # sibling load, a concurrent rotation), not about the artifact.
+                # Condemning the cell for it would retire a correct one on the
+                # first busy moment and re-mint it on the replacement pod.
+                # Serve THIS request eager, stay armed, say so.
+                logger.warning(
+                    "aot-serve: %s hit CUDA OOM (%s); serving this request "
+                    "eager, artifact stays armed — allocator pressure is not "
+                    "the cell's fault", label, exc)
+                activity_mod.emit_event(
+                    "aot_serve_oom",
+                    f"family={meta.get('family')} target={label}: "
+                    f"{type(exc).__name__}: {exc}",
+                    phase="cuda_oom",
+                )
+                return original(*args, **eager_kwargs)
             state["failed"] = True
             detail = (
                 f"AOTI artifact {label} failed: "

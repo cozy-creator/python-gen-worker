@@ -1812,8 +1812,16 @@ def local_keep_reason(publisher: Optional[CellPublisher]) -> str:
 def _arm_exported_cell(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], bucket: int,
     artifact: Path, arm_key: Optional[ArmIdentity],
+    *, verify_numerics: bool = False,
 ) -> Tuple[bool, Optional[Dict[str, Any]], Tuple[str, str]]:
     """THE gate every cell this machine produced for itself must pass.
+
+    ``verify_numerics`` (§4.32) is set by ONE caller —
+    :func:`adopt_delegated_mint`, the pod that just minted these bytes and is
+    about to publish them. The other three routes here are ADOPTIONS of bytes
+    already proven at their own mint (an in-process finalized cell, the local
+    store's, a fresh child mint being re-armed), and adoption runs no quality
+    gate.
 
     pgw#1096 extracted this from :func:`adopt_delegated_mint` so the two
     self-produced sources — a child process's fresh mint, and this machine's
@@ -1874,7 +1882,9 @@ def _arm_exported_cell(
             f"the cell (stamped key {stamped}) does not describe this "
             f"runtime: {divergence}"))
     try:
-        outcome = provision.arm_aot(pipe, cfg, cache_dir, artifact, bucket, meta)
+        outcome = provision.arm_aot(
+            pipe, cfg, cache_dir, artifact, bucket, meta,
+            verify_numerics=verify_numerics)
         if outcome:
             return True, meta, ("", "")
         refusal = (outcome.reason or "unclassified_arm_refusal",
@@ -2069,10 +2079,17 @@ def adopt_delegated_mint(
     # the reasons this call site used to compute inline are unchanged, and the
     # $2.72 lesson (attempt 26: a 36/36 mint refused by three events that all
     # said "could not adopt") is kept there rather than repeated here.
+    # §4.32 THE MINT-TIME GATE, and this is the only site that arms it: this
+    # process compiled these bytes and is about to publish them to every pod
+    # that will ever adopt this key. It runs the freshly compiled artifact and
+    # the eager forward it was traced from on the same feed, and it is STRICT —
+    # identical or refuse, no gray band — because an adopter runs no gate that
+    # could re-check what ships. A refusal below unwraps, serves eager, emits
+    # `self_mint_abort` to the hub and publishes nothing.
     armed, meta, refusal = _arm_exported_cell(
         pipe, pending.cfg, pending.cache_dir,
         int(getattr(pending.cfg, "lora_bucket", 0) or 0),
-        pending.target, pending.arm_key)
+        pending.target, pending.arm_key, verify_numerics=True)
     if not armed:
         reason, detail = refusal
         # pgw#999: `phase` is the countable column, so it carries the CLASS —

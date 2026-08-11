@@ -226,8 +226,14 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 
 def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
         packages: Dict[str, ProbePackage],
-        meta: Dict[str, Any] | None = None) -> Tuple[Any, Any, Any]:
+        meta: Dict[str, Any] | None = None,
+        verify_numerics: bool = True) -> Tuple[Any, Any, Any]:
     """Drive the REAL arm path and return ``(pipeline, module, outcome)``.
+
+    ``verify_numerics=True`` is the MINT arm (pgw#1141 / DESIGN-RULINGS §4.32):
+    since this issue the gate runs on the pod that minted the bytes, before it
+    publishes them, and nowhere else. Adoption passes False and runs no gate —
+    `test_adopted_cell_warm_proof_pgw1141.py` owns that direction.
 
     pgw#923: the arm returns a typed :class:`AdoptOutcome` rather than a bool,
     so its verdict — armed, or refused with the classified reason — is a value
@@ -244,7 +250,8 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
     module = ProbeDenoiser()
     pipeline = ProbePipeline(module)
     outcome = provision.arm_aot(
-        pipeline, decl, tmp_path / "cache", artifact(tmp_path, meta), 0)
+        pipeline, decl, tmp_path / "cache", artifact(tmp_path, meta), 0,
+        verify_numerics=verify_numerics)
     return pipeline, module, outcome
 
 
@@ -285,7 +292,7 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     # numerics refusal and a second "retraction" row existed only to correct
     # the first. The arm returns ONE outcome, with the gate's verdict in it.
     assert outcome.reason == "numerics_refused"
-    assert "UNARMED by the numerics gate" in outcome.detail
+    assert "nothing is published" in outcome.detail
 
     rows = numerics_rows(events)
     assert rows, "a refused cell said nothing on the wire"
@@ -298,15 +305,21 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     assert "0.99" in detail
 
 
-def test_between_floor_and_warn_it_ARMS_and_records_the_warning(
+def test_the_gray_band_CONFESSES_AND_REFUSES_TO_PUBLISH(
         tmp_path, monkeypatch, declared, events):
-    """The gray band is not a refusal and not a silence. It serves, and it
-    confesses — a fleet-wide rate is only countable from activity records."""
+    """The gray band still confesses — a fleet-wide rate is only countable from
+    activity records — but since §4.32 it does not SHIP.
+
+    pgw#1141 moved this gate to the minting pod and made it strict: identical
+    or refuse. A degraded cell is one an adopter can never re-check (adoption
+    runs no quality gate at all), so publishing it would export an unmeasured
+    degradation to every pod that pulls the key. Before that ruling this exact
+    cell armed and shipped."""
     packages = {entry_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
     pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert outcome.armed is True, "a cell inside the declared gray band failed to arm"
-    assert aot.is_armed(pipeline) is True
+    assert outcome.armed is False, "a gray-band cell was published to the fleet"
+    assert aot.is_armed(pipeline) is False
     rows = numerics_rows(events)
     assert [p for _d, p in rows] == ["degraded"], rows
     detail = rows[0][0]
