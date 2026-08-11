@@ -295,3 +295,28 @@ def test_the_census_is_silent_for_an_undeclared_slot() -> None:
             components=_components())],
     }
     assert _census_unbacked_layouts(fn, derived) == []
+
+
+# ── 5. the wire the hub actually reads ───────────────────────────────────────
+
+
+def test_the_demand_survives_the_endpoint_lock_toml_round_trip() -> None:
+    """endpoint.lock is TOML and the hub parses JSON, so the declaration
+    crosses two encoders before any gate sees it. A nested table inside an
+    array-of-tables is exactly where a TOML encoder's key ordering can bite —
+    and the hub's `manifestSlotLayoutDoc` decodes `map[string][]string`, so a
+    shape change here is a silent UNDECLARED on the other side."""
+    block = _slot_to_manifest(
+        "pipeline",
+        Slot(FakePipeline, selected_by="model", layouts={
+            "*": (CONTRACT_PLAIN_BF16,),
+            "text_encoder": (CONTRACT_HF_FP8_BLOCKWISE, CONTRACT_PLAIN_BF16),
+        }),
+        family="sdxl", components=_components(),
+    )
+    doc = {"functions": [{"name": "generate", "slots": [block]}]}
+    decoded = msgspec.toml.decode(msgspec.toml.encode(doc))
+    assert decoded["functions"][0]["slots"][0]["layouts"] == {
+        "*": ["plain.bf16@1"],
+        "text_encoder": ["hf.fp8-blockwise@1", "plain.bf16@1"],
+    }
