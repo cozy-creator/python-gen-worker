@@ -114,7 +114,7 @@ from .aot_contract import (  # re-exported: the declaration layer's vocabulary
 from .aot_preconditions import LIFTED_LORA_TORCH_FLOOR, torch_version_gap
 from .compile_cache import (
     _resolve_target,
-    toolchain_present,
+    cxx_toolchain_present,
 )
 from dataclasses import replace
 import inspect
@@ -4140,7 +4140,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="publish through the fleet CellPublisher")
     parser.add_argument("--require-toolchain", action="store_true",
                         default=True,
-                        help="refuse without a C toolchain (default on)")
+                        help="refuse without a C++ AOTI toolchain (default on)")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -4160,10 +4160,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except MintRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
-    if args.require_toolchain and not toolchain_present():
+    if args.require_toolchain and not cxx_toolchain_present():
+        # pgw#900: an AOTI mint links a real `.so` through inductor's C++
+        # wrapper, so a C-only image (`cc`/`gcc` but no working C++) passes
+        # `toolchain_present()` yet dies 336 s later at the linker
+        # (`InvalidCxxCompiler`, measured on L4 0.84.0). Gate on the SAME
+        # predicate the mint child uses (`cxx_toolchain_present`), not the
+        # dynamo-lane `toolchain_present`, so the CLI refuses at second zero.
         print(
-            "REFUSED: no C toolchain (cc/gcc) — an AOTI mint needs the "
-            "compile-job image, not a prod worker image", file=sys.stderr)
+            "REFUSED: no C++ AOTI toolchain — inductor cannot link a kernel "
+            "on this image. An AOTI mint needs the compile-job image, not a "
+            "prod worker image", file=sys.stderr)
         return 2
 
     model = args.model or spec.source_ref
