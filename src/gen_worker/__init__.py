@@ -95,6 +95,7 @@ from .api.types import (
     AudioAsset,
     ExpectedOutput,
     ImageAsset,
+    PromptRole,
     StringEnum,
     VideoAsset,
 )
@@ -209,6 +210,7 @@ __all__ = [
     "AudioAsset",
     "ExpectedOutput",
     "ImageAsset",
+    "PromptRole",
     "StringEnum",
     "VideoAsset",
     "io",
