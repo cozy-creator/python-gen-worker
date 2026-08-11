@@ -91,6 +91,25 @@ GUARDED = re.compile(
 # wheel; this tree is not their call site and never will be.
 EXEMPT_PACKAGES = ("gen_worker.api",)
 
+# target -> why it is unreached AND who deletes it. Each row is a DELETION
+# THAT IS OWED, never a permanent pardon: the only legitimate reason to be in
+# here is that something outside this lane's scope owns the removal, so every
+# row names that owner. A row whose target no longer exists is RED (see
+# `stale_exemptions`) — the same rule the config-reads and settings-writers
+# allowlists follow, and what stops this table becoming the place dead code
+# goes to be forgotten.
+EXEMPT_TARGETS = {
+    "gen_worker.local_cells.enable_compiled": (
+        "the JIT local-serve entry, dead since pgw#1127 re-pointed "
+        "`cli/run.py` at `local_serve.enable_compiled` (the AOT sink). The "
+        "MODULE's deletion is pgw#1086 wave 1's inventory item and pgw#1127 "
+        "§6 puts it explicitly out of that lane's scope — so this row exists "
+        "for exactly as long as `local_cells.py` does. OWNER: pgw#1086 "
+        "wave 1. EXPIRY: that module's deletion, which this row then fails "
+        "until it is removed with it."
+    ),
+}
+
 # Decorators meaning "something else calls this, by table not by name".
 DYNAMIC_DECORATORS = {
     "endpoint", "worker_function", "property", "cached_property", "setter",
@@ -412,7 +431,20 @@ class Finding:
     note: str = ""
 
 
+def stale_exemptions(defs: List[Definition]) -> List[str]:
+    """Rows in :data:`EXEMPT_TARGETS` naming something that no longer exists.
+
+    An exemption is a deletion somebody OWES. Once the owner lands it the row
+    is a pardon for nothing, and a pardon for nothing is how the next dead
+    symbol gets waved through under a comment about a different one.
+    """
+    have = {d.target for d in defs}
+    return sorted(t for t in EXEMPT_TARGETS if t not in have)
+
+
 def exempt(d: Definition, published: Set[str], reach: Reach) -> Optional[str]:
+    if d.target in EXEMPT_TARGETS:
+        return EXEMPT_TARGETS[d.target]
     if any(d.module == p or d.module.startswith(p + ".") for p in EXEMPT_PACKAGES):
         return "authored-worker API (consumers are endpoint repos)"
     if d.name in published:
@@ -460,6 +492,11 @@ def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
     published = published_names()
 
     findings: List[Finding] = []
+    for target in stale_exemptions(defs):
+        findings.append(Finding(
+            "stale-exemption", target, SELF, 0,
+            "EXEMPT_TARGETS names a symbol this tree no longer defines — the "
+            "deletion it was waiting for has landed; drop the row"))
     for d in defs:
         why = exempt(d, published, reach)
         if why:
