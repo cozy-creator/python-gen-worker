@@ -70,7 +70,8 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from .api.binding import ModelRef, wire_ref
+from . import cell_key
+from .api.binding import ModelRef, binding_wire_refs, wire_ref
 from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
@@ -208,6 +209,30 @@ class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
             raise ValueError(
                 f"a resolved slot must name the tree its bytes are in; got an "
                 f"empty path for {wire_ref(self.ref)!r}")
+
+
+def slot_subjects(
+    slots: Mapping[str, MintSlot],
+    digests: Optional[Mapping[str, str]] = None,
+) -> Tuple[cell_key.SlotSubject, ...]:
+    """The resolved SUBJECT of one arm or one boot trace (pgw#1113).
+
+    THE single derivation, so the arm token, the local-store memo and the
+    boot-key memo cannot disagree about which checkpoint a pipeline is bound
+    to. ``path`` is deliberately excluded — where the bytes were materialized
+    is a location on this machine, never an identity — and so is
+    ``component_paths``, whose identity half is already in the ref's
+    ``component_overrides`` (``binding_wire_refs``).
+    """
+    have = dict(digests or {})
+    return tuple(
+        cell_key.SlotSubject(
+            slot=str(name),
+            refs=tuple(binding_wire_refs(slot.ref)),
+            snapshot_digest=str(have.get(str(name), "") or ""),
+        )
+        for name, slot in sorted(slots.items())
+    )
 
 
 class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
