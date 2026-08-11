@@ -5,11 +5,26 @@ pod:
 
 1. **Derive** the ``ck1`` key from code alone — ``boot_key.derive``, process-
    parallel structure-only traces, no weight resident anywhere.
-2. **Ask** the hub by that key — ``cell_resolve.resolve``, ONE artifact or a
+2. **Ask THIS MACHINE first** (pgw#1127 S2, §4.28) — ``local_cell_store.
+   lookup(key)``. The derived key is the local store's own address, so an
+   offline machine holding the exact cell it needs answers here and no hub is
+   asked at all. ONE key, TWO lookup routes, the same CAS.
+3. **Ask the hub** by that key — ``cell_resolve.resolve``, ONE artifact or a
    MISS, never a listing.
-3. **Materialize** a hit through the EXISTING delivery path and hand the
+4. **Materialize** a hit through the EXISTING delivery path and hand the
    caller an admission expectation, so the arm runs the gates the Plan path
    runs and not one gate fewer.
+
+Why the local step is BEFORE the hub and not beside it: §4.28 says *"local
+cell, local repo-CAS… never requested"*. A local-second ordering would ask for
+what the machine already holds, and on a community-cloud pod that is a request
+the hub can only answer by shipping bytes back to the machine that minted them.
+
+Why the derivation now runs with NO hub, which it refused to do before: the old
+gate reasoned that *"deriving a key nobody will answer is pure boot latency"*.
+That is false on exactly the machines §4.28 is about. It survives in the
+honest form — :data:`GATE_REASONS`' ``no_cell_source``, which refuses only when
+BOTH answerers are absent (no hub AND an empty local store).
 
 A MISS returns ``None`` and that is a complete answer: the pod serves eager,
 mints in the background (§4.28: trusted hardware publishes, untrusted keeps it
@@ -55,7 +70,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
-from . import activity, aot_identity, artifact_meta, boot_key, cell_resolve
+from . import (
+    activity, aot_identity, artifact_meta, boot_key, cell_resolve,
+    local_cell_store,
+)
 from .mint_process import CompileCellSpec, MintSlot
 
 logger = logging.getLogger(__name__)
@@ -69,13 +87,39 @@ GATE_REASONS: Tuple[str, ...] = (
     # The declaration exists but `aot_declaration.cell_plans` will not enumerate
     # it (colliding entry names, no targets).
     "declaration_unreadable",
-    # No hub to ask: no HelloAck base URL yet, or an embedded single-process
-    # worker with neither a local bearer nor a control seam (pgw#1108).
-    "no_hub",
+    # pgw#1127: NOBODY could answer this key — no hub (no HelloAck base URL
+    # yet, or an embedded single-process worker with neither a local bearer nor
+    # a control seam, pgw#1108) AND this machine's own store holds no cell at
+    # all. Only then is deriving pure boot latency. This REPLACES `no_hub`,
+    # which asked about one of the two answerers and refused on behalf of both:
+    # on exactly the machines §4.28 is about, the derived ck1 key IS the local
+    # store's address, so "nobody will answer" was false there.
+    "no_cell_source",
     # The pod's topology forbids arming at all (pgw#775), so a compiled family
     # boots without asking. Correct, and previously indistinguishable from a
     # boot-adopt that asked and was refused.
     "eager_only",
+)
+
+#: Step 1.5 (pgw#1127 S2) — THIS MACHINE's own store, addressed by the DERIVED
+#: key, before the hub is asked at all. §4.28: *"local cell, local repo-CAS,
+#: reused across its own boots — never uploaded, never requested."*
+LOCAL_REASONS: Tuple[str, ...] = (
+    # The machine holds this exact cell. No hub was asked, and on an offline
+    # box no hub COULD be — which is the difference between fully-offline-
+    # capable as a property and as an accident of the arm-token memo.
+    "local_hit",
+    # Derived, asked this machine's own store, and it does not hold this key —
+    # and there is no hub to ask either. The honest successor to a `no_hub`
+    # that used to fire BEFORE the derivation and therefore before the local
+    # store had an address to be asked at.
+    "local_miss_no_hub",
+    # The local store answered with bytes whose recorded graphs are not the
+    # graphs this pod traced (the pgw#1031 floor, applied to route B). NOT a
+    # drop: unlike the memo — which this machine's own mint wrote for this
+    # exact arm token — a derived-key hit is an inference, so it refuses
+    # without destroying a cell some other pipe may legitimately own.
+    "local_graph_witness_mismatch",
 )
 
 #: Step 1 — the derivation. ``boot_key.BootKeyUnavailable.reason`` tokens,
@@ -120,11 +164,18 @@ ASK_REASONS: Tuple[str, ...] = (
 #: from here is a path that can be silent again, so
 #: ``tests/test_boot_adopt_observability_pgw1116.py`` reads the refusal sites
 #: out of the tree and fails on any token this tuple does not carry.
-REASONS: Tuple[str, ...] = GATE_REASONS + DERIVE_REASONS + ASK_REASONS
+REASONS: Tuple[str, ...] = (
+    GATE_REASONS + DERIVE_REASONS + LOCAL_REASONS + ASK_REASONS)
 
-#: The one outcome that armed something. Everything else means "boot as this pod
-#: booted yesterday", and each of those means it for a DIFFERENT reason.
+#: The hub answered and the pod will arm what it named. Everything except this
+#: and :data:`LOCAL_HIT` means "boot as this pod booted yesterday", and each of
+#: those means it for a DIFFERENT reason.
 HIT = "hit"
+
+#: THIS MACHINE answered, by the derived key, with no hub involved (pgw#1127).
+#: The second outcome that leads to a compiled boot — and the only one that
+#: does so on a box with no network at all.
+LOCAL_HIT = "local_hit"
 
 
 @dataclass(frozen=True)
@@ -155,6 +206,15 @@ class BootAdoptOutcome:
     ``adoption`` set means arm it. ``adoption`` None with a ``reason`` means
     boot exactly as this pod booted before the seam existed, and the reason is
     the countable token for why.
+
+    ``local_key`` (pgw#1127) is the one exception to that second sentence, and
+    it is deliberately NOT an ``adoption``: a cell out of THIS MACHINE's own
+    store carries no hub receipt and no publisher org, so it must not ride the
+    ``arm_ordered`` path a hub-resolved cell rides — it arms through
+    ``fleet_cells._arm_exported_cell``, the gate every cell this machine
+    produced for itself passes. What the boot hands the arming brain is the
+    ADDRESS, and the arming brain does the lookup on the same terms it does a
+    memo lookup. Two routes, one CAS, one gate.
     """
 
     adoption: Optional[BootAdoption] = None
@@ -162,6 +222,11 @@ class BootAdoptOutcome:
     detail: str = ""
     derived_key: str = ""
     derive_ms: int = 0
+    #: The ``ck1`` key THIS MACHINE's own store answered on (pgw#1127). "" on
+    #: every other terminus. Equal to ``derived_key`` when set — carried
+    #: separately so a reader never has to infer "and the local store had it"
+    #: from a key that is also present on a miss.
+    local_key: str = ""
     #: Which family and which routable function this decision was about. Carried
     #: on the outcome rather than interpolated at the emit site so a reader of
     #: the event never has to join it back to anything (pgw#1116).
@@ -194,7 +259,7 @@ def report(outcome: BootAdoptOutcome) -> BootAdoptOutcome:
     activity.emit_event(
         activity.KIND_BOOT_ADOPT, detail, phase=outcome.reason or "unreported",
         duration_ms=outcome.derive_ms)
-    if outcome.reason == HIT:
+    if outcome.reason in (HIT, LOCAL_HIT):
         logger.info("boot-adopt[%s]: %s", outcome.reason, detail)
     else:
         # A refusal is a confession, and a pod's own boot log is where an
@@ -251,6 +316,77 @@ def arm_refused(
     ))
 
 
+def no_cell_source(hub_absent: str) -> bool:
+    """True when NOBODY could answer a derived key, so deriving is pure latency.
+
+    The honest form of the gate pgw#1127 §1b found. The old one asked *"is
+    there a hub"* and refused on behalf of both answerers; this asks whether
+    EITHER exists. ``stored_cells`` is a listdir with no digest recomputation
+    (pgw#1096), so the fleet path — whose store is always empty — pays exactly
+    what the old early return paid, and the machines §4.28 is about stop being
+    told there is nobody to ask when they are holding the answer.
+    """
+    if not hub_absent:
+        return False
+    try:
+        return not local_cell_store.stored_cells()
+    except Exception:  # noqa: BLE001 — an unreadable store is an absent one
+        logger.debug("boot-adopt: local store unreadable", exc_info=True)
+        return True
+
+
+def _local_answer(
+    key: str, derived: "boot_key.DerivedKey", *, family: str, fn: str,
+) -> Optional[BootAdoptOutcome]:
+    """This machine's own store, asked by the derived key. ``None`` = ask on.
+
+    A hit is NOT returned as an ``adoption``: a self-minted cell carries no hub
+    receipt and no publisher org, so the ``arm_ordered`` path a hub-resolved
+    cell rides would refuse it ``receipt_gate_unconfigured``. What is returned
+    is the ADDRESS, on ``local_key``, for ``fleet_cells.arm_from_local_store``
+    to arm through the same gate a child's fresh mint passes.
+
+    The pgw#1031 graph-witness floor applies here exactly as it does to a hub
+    hit, and for the same reason: ``ck1`` is an ingress identity, so two
+    endpoints whose declared contracts match can share one key while their
+    bodies differ. It refuses WITHOUT dropping, though — the memo route is
+    written by this machine's own mint for one exact arm token, while a
+    derived-key hit is an inference about which pipe owns the bytes.
+    """
+    try:
+        cell = local_cell_store.lookup(key)
+    except Exception as exc:  # noqa: BLE001 — a cache read is never fatal
+        logger.debug("boot-adopt: local store lookup failed", exc_info=True)
+        logger.warning("boot-adopt: local store unreadable (%s)", exc)
+        return None
+    if cell is None:
+        return None
+    try:
+        meta = artifact_meta.read_metadata(Path(cell.artifact))
+        mismatch = aot_identity.verify_graph_witness(
+            meta, derived.graph_witnesses)
+    except Exception as exc:  # noqa: BLE001 — unreadable IS unproven
+        mismatch = f"unreadable ({type(exc).__name__}: {exc})"
+    if mismatch:
+        return report(BootAdoptOutcome(
+            reason="local_graph_witness_mismatch",
+            detail=(
+                f"this machine's own store holds {key} and its graphs are not "
+                f"this pod's graphs: {mismatch}. The cell is LEFT in place — a "
+                f"derived-key hit is an inference, not the memo this machine "
+                f"wrote for its own arm — and this pod asks the hub instead"),
+            derived_key=key, derive_ms=derived.wall_ms,
+            family=family, function=fn))
+    return report(BootAdoptOutcome(
+        reason="local_hit",
+        detail=(
+            f"THIS MACHINE minted {key} on an earlier boot and kept it "
+            f"({cell.bytes / 1e6:.1f} MB); it arms from disk with no mint, no "
+            f"hub and no network (§4.28)"),
+        derived_key=key, local_key=key, derive_ms=derived.wall_ms,
+        family=family, function=fn))
+
+
 def attempt(
     *,
     function: str,
@@ -265,16 +401,22 @@ def attempt(
     base_url: str = "",
     bearer: str = "",
     device: int = -1,
+    hub_absent: str = "",
 ) -> BootAdoptOutcome:
-    """Derive, ask, materialize. Never raises — every failure is an outcome.
+    """Derive, ask THIS MACHINE, ask the hub, materialize. Never raises.
 
     ``declared_hint`` is ``len(aot_declaration.cell_plans(decl))`` — it sizes
     the trace pool and nothing else. ``envelope`` is
     ``fleet_cells.declared_envelope_block(cfg)``, i.e. the same extraction the
     publish path recomputes the envelope axis from.
 
+    ``hub_absent`` (pgw#1127) is the caller's own sentence for why there is
+    nobody to ask over the wire, "" when there is. It is a DETAIL, not a
+    decision: the decision is made here, after the local store has been asked,
+    because the derived key is an address this machine can answer at.
+
     Exactly ONE :data:`~gen_worker.activity.KIND_BOOT_ADOPT` event is emitted
-    per call, on every terminus including the hit — see :func:`report`.
+    per call, on every terminus including both hits — see :func:`report`.
     """
     family = str(getattr(cfg, "family", "") or "")
     fn = str(function)
@@ -323,6 +465,25 @@ def attempt(
         "boot-adopt: %s derived %s in %d ms (%d class(es), K=%d, memo=%s)",
         family, key, derived.wall_ms, derived.traced, derived.workers,
         derived.memo)
+
+    # ── §4.28 / pgw#1127: THIS MACHINE, before the wire ────────────────────
+    # The derived key is the local store's own address. A machine that minted
+    # this cell on an earlier boot answers here, and the hub is not asked at
+    # all — which is what "never requested" means and what makes an offline
+    # box arm exactly as well as an online one. Costs one stat on the fleet
+    # path, where the store is always empty.
+    local = _local_answer(key, derived, family=family, fn=fn)
+    if local is not None:
+        return local
+    if hub_absent:
+        # Derived, asked this machine, and there is nobody else. A DIFFERENT
+        # fact from `no_cell_source` (which never derived) and from `miss`
+        # (which asked a hub): this one says the key exists and nothing here
+        # holds it.
+        return report(BootAdoptOutcome(
+            reason="local_miss_no_hub", detail=hub_absent,
+            derived_key=key, derive_ms=derived.wall_ms,
+            family=family, function=fn))
 
     try:
         cell = cell_resolve.resolve(
@@ -412,6 +573,6 @@ def attempt(
 
 __all__ = [
     "ASK_REASONS", "BootAdoptOutcome", "BootAdoption", "DERIVE_REASONS",
-    "GATE_REASONS", "HIT", "REASONS", "arm_refused", "attempt", "refused",
-    "report",
+    "GATE_REASONS", "HIT", "LOCAL_HIT", "LOCAL_REASONS", "REASONS",
+    "arm_refused", "attempt", "no_cell_source", "refused", "report",
 ]

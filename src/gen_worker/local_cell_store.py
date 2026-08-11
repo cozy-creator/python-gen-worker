@@ -286,6 +286,36 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCell]:
     )
 
 
+def note_memo(
+    arm_token: str, key: str, root: Optional[Path] = None,
+) -> bool:
+    """Bind a pre-trace ``arm_token`` to a ``ck1`` key that PROVED it arms.
+
+    pgw#1127. :func:`store` writes this at mint time; this writes it when the
+    cell was found by another route and then passed the arm gate — which is the
+    only other moment the binding is known to be true. It is what makes an
+    arm-token scheme bump (:func:`sweep_superseded_memos`) cost a trace instead
+    of a mint: the sweep deletes the shortcut and leaves the CELLS under their
+    own keys, so the next boot's derived key re-finds the cell and re-writes
+    the shortcut from evidence.
+
+    Never fatal, and never a substitute for the arm: a memo is a shortcut, so
+    failing to write one costs a lookup and nothing else.
+    """
+    if not arm_token or not key:
+        return False
+    try:
+        _write_json_atomic(
+            memo_path(arm_token, root),
+            {"cell_key": key, "noted_at": time.time()})
+        return True
+    except Exception as exc:  # noqa: BLE001 — a shortcut is never load-bearing
+        logger.debug(
+            "local-cell-store: could not memo %s -> %s (%s)",
+            arm_token, key, exc)
+        return False
+
+
 def sweep_superseded_memos(
     scheme: str, root: Optional[Path] = None,
 ) -> int:
@@ -466,6 +496,7 @@ __all__ = [
     "lookup",
     "lookup_for_arm",
     "memo_path",
+    "note_memo",
     "note_refusal",
     "store",
     "store_root",

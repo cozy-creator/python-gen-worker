@@ -140,8 +140,17 @@ def test_the_vocabulary_names_the_gates_that_used_to_return_a_bare_none() -> Non
     """The three executor pre-attempt gates are the ones that produced NOTHING
     — not even a discarded reason. They are the reason one pod could not name
     its own refusal."""
-    for token in ("no_export_declaration", "declaration_unreadable", "no_hub"):
+    # pgw#1127 replaced `no_hub` with `no_cell_source`: the gate now refuses
+    # only when BOTH answerers are absent (no hub AND an empty local store),
+    # because the derived ck1 key is `local_cell_store`'s own address.
+    for token in ("no_export_declaration", "declaration_unreadable",
+                  "no_cell_source"):
         assert token in boot_adopt.GATE_REASONS
+    assert "no_hub" not in boot_adopt.REASONS, (
+        "a token nothing can emit is a query nobody can write — pgw#1127 "
+        "split it into `no_cell_source` (pre-derive, nobody at all) and "
+        "`local_miss_no_hub` (derived, this machine does not hold it, and "
+        "there is no hub either)")
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +241,7 @@ def test_each_pre_attempt_gate_names_itself_on_the_wire(
     assert expect in row.detail
 
 
-def test_no_hub_names_which_half_of_the_readiness_was_missing(
+def test_no_cell_source_names_which_half_of_the_readiness_was_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, events: List[Any],
 ) -> None:
     from gen_worker.procsplit import broker
@@ -248,10 +257,13 @@ def test_no_hub_names_which_half_of_the_readiness_was_missing(
     ex.worker_jwt_provider = lambda: ""
 
     out = ex._boot_adopt(_Spec(), {})
-    assert out.reason == "no_hub"
+    # pgw#1127: the same sentence, under the token that is now true — the
+    # detail is what an operator greps, so it is deliberately unchanged.
+    assert out.reason == "no_cell_source"
     row = _one(events)
-    assert row.phase == "no_hub"
+    assert row.phase == "no_cell_source"
     assert "base_url=<unset>" in row.detail and "seam=down" in row.detail
+    assert "own cell store is empty" in row.detail
 
 
 def test_the_gates_are_pairwise_distinguishable(
