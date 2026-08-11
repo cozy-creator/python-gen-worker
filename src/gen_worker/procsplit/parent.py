@@ -1506,6 +1506,10 @@ class ParentControl:
             gpu_name=str(hw.get("gpu_name") or ""),
             gpu_sm=str(hw.get("gpu_sm") or ""),
             torch_version=str(hw.get("torch_version") or ""),
+            # pgw#1129/th#1798: the host driver, so the hub can answer
+            # "can the host we landed on run this pod's CUDA line?" from a
+            # SUCCESSFUL boot instead of only from a corpse.
+            driver_version=str(hw.get("driver_version") or ""),
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=str(m.get("gen_worker_version") or ""),
             image_digest=self._settings.worker_image_digest,

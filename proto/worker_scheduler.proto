@@ -179,6 +179,15 @@ message WorkerResources {
   // the worker did not recognise is visible at the hub as a disagreement
   // rather than a silent demotion to serving.
   string worker_mode = 12;
+  // th#1798: the HOST's NVIDIA driver version (nvidia-smi/NVML), e.g.
+  // "580.159.04". The one fact that decides whether this pod's CUDA line can
+  // run at all, and until now the hub only ever saw it on the FAILURE carrier
+  // (HardwareUnsuitable) — so a fleet that is fine and a fleet that is one
+  // placement-filter bug away from burning launches looked identical from the
+  // hub's own data. Read from NVML, not torch: it must be readable exactly
+  // when the CUDA runtime is not. Additive: old workers send it unset and the
+  // hub records the census verdict as "unknown", never as "fine".
+  string driver_version = 13;
 }
 
 // Worker -> orchestrator: this worker's boot-time hardware suitability probe

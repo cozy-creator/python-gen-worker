@@ -92,7 +92,23 @@ def probe_hardware() -> Dict[str, Any]:
         "gpu_sm": "",
         "torch_version": "",
         "installed_libs": [],
+        "driver_version": "",
     }
+    # pgw#1129/th#1798: the HOST driver, read from NVML rather than torch —
+    # the whole point of this fact is that it stays readable when the CUDA
+    # runtime is not. A cu130 build on a 570.x host imports fine, reports every
+    # version string correctly, and dies on its first allocation, so the driver
+    # is the only field in this dict that can tell the hub which hosts its
+    # placement filter actually landed on.
+    try:
+        from .hardware_report import _nvidia_smi_driver_and_gpu
+
+        driver, gpu = _nvidia_smi_driver_and_gpu()
+        info["driver_version"] = driver
+        if gpu and not info["gpu_name"]:
+            info["gpu_name"] = gpu
+    except Exception:
+        pass
     try:
         import torch
 
@@ -433,6 +449,10 @@ class Lifecycle:
             gpu_name=str(hw.get("gpu_name") or ""),
             gpu_sm=str(hw.get("gpu_sm") or ""),
             torch_version=str(hw.get("torch_version") or ""),
+            # pgw#1129/th#1798: the host driver, so the hub can answer
+            # "can the host we landed on run this pod's CUDA line?" from a
+            # SUCCESSFUL boot instead of only from a corpse.
+            driver_version=str(hw.get("driver_version") or ""),
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=gw_version,
             image_digest=self._settings.worker_image_digest,
