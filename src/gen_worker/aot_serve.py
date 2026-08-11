@@ -105,6 +105,7 @@ from .compile_cache import (
     sku_slug,
 )
 from .models import lora_lifted
+from .models.memory import is_cuda_oom
 
 logger = logging.getLogger(__name__)
 
@@ -2512,6 +2513,26 @@ def wrap_module(
             _revoke(state, f"constants unbound: {exc}")
             return original(*args, **eager_kwargs)
         except Exception as exc:  # noqa: BLE001 — ANY artifact problem => eager
+            if is_cuda_oom(exc):
+                # pgw#1141: ATTRIBUTION. The serve-first doctrine makes the
+                # first real request the proof, so what that request blames
+                # decides whether a good cell survives — and allocator
+                # exhaustion is a fact about the CARD at this instant (a
+                # sibling load, a concurrent rotation), not about the artifact.
+                # Condemning the cell for it would retire a correct one on the
+                # first busy moment and re-mint it on the replacement pod.
+                # Serve THIS request eager, stay armed, say so.
+                logger.warning(
+                    "aot-serve: %s hit CUDA OOM (%s); serving this request "
+                    "eager, artifact stays armed — allocator pressure is not "
+                    "the cell's fault", label, exc)
+                activity_mod.emit_event(
+                    "aot_serve_oom",
+                    f"family={meta.get('family')} target={label}: "
+                    f"{type(exc).__name__}: {exc}",
+                    phase="cuda_oom",
+                )
+                return original(*args, **eager_kwargs)
             state["failed"] = True
             detail = (
                 f"AOTI artifact {label} failed: "
@@ -2937,6 +2958,67 @@ def served_entry_calls(pipeline: Any) -> Dict[str, int]:
     return out
 
 
+@dataclass(frozen=True)
+class NumericsProof:
+    """What the pgw#868 gate MEASURED on THIS arm, on THIS pod (pgw#1141).
+
+    The gate already runs the artifact — every packaged entry, through its own
+    runner, on the entry's own declared feed — against the eager forward it
+    replaces. That is an execution proof and an accuracy proof in one, and it
+    was discarded the moment it was announced, so the setup warmup then scored
+    the same artifact ``unexercised`` (no dispatch during ITS window) and
+    destroyed it: two real pods resolved, materialized and verified a cell at
+    ``cos=1.00000`` on 3/3 axes and served eager for life.
+
+    Kept on the arm's own marker, so it is scoped to exactly the wrap that
+    earned it: :func:`unwrap` drops the marker and a re-arm replaces it, which
+    means a proof can never outlive the artifact it is about.
+    """
+
+    cell_key: str
+    axes: int
+    worst_entry: str
+    worst_cosine: float
+    verdict: str
+    elapsed_ms: int = 0
+
+    def __str__(self) -> str:
+        return (f"cell_numerics axes={self.axes} worst={self.worst_entry} "
+                f"cos={self.worst_cosine:.5f} {self.verdict} "
+                f"key={self.cell_key or '?'} took={self.elapsed_ms}ms")
+
+
+def record_numerics_proof(pipeline: Any, proof: NumericsProof) -> bool:
+    """Bank the parity verdict on the live arm. False when nothing is armed."""
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    if not isinstance(marker, dict) or not is_armed(pipeline):
+        return False
+    marker["numerics"] = proof
+    return True
+
+
+def numerics_measured(pipeline: Any) -> bool:
+    """A parity verdict was banked on this marker, whether or not the cell is
+    still armed — the discriminator between "nobody measured it" and "it was
+    measured and then revoked", which are different defects."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    return isinstance(marker.get("numerics"), NumericsProof)
+
+
+def numerics_proof(pipeline: Any) -> Optional[NumericsProof]:
+    """The parity proof this pod took on the CURRENTLY armed artifact.
+
+    ``None`` unless a proof was banked AND the cell is still armed — the same
+    two-halves rule as :func:`proven_since`, for the same reason: an artifact
+    that ran and then revoked has not proven anything.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    proof = marker.get("numerics")
+    if not isinstance(proof, NumericsProof) or not is_armed(pipeline):
+        return None
+    return proof
+
+
 def proven_since(pipeline: Any, before: int) -> bool:
     """The exported lane's ADOPTION PROOF (pgw#735).
 
@@ -3079,6 +3161,10 @@ __all__ = [
     "load_and_wrap",
     "marshal_positional",
     "note_aot_key",
+    "NumericsProof",
+    "numerics_measured",
+    "numerics_proof",
+    "record_numerics_proof",
     "pack",
     "range_digest",
     "resident_constants",

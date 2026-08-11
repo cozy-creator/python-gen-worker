@@ -12,11 +12,19 @@ download + arming boundaries):
 
   1. an exercised pure-AOT arm is PROVEN — stays armed, cell recorded
      proven in-process (the pgw#637 registry);
-  2. an unexercised pure-AOT arm is DISARMED to true eager — artifact
-     unwrapped (original forward restored), identity quarantined, no
-     active selection kept;
-  3. the same disarm on the MANDATORY (w8a8) lane rides the pgw#672
-     degrade-to-eager posture without killing the boot.
+  2. an unexercised pure-AOT arm KEEPS SERVING and banks no proof;
+  3. the same on the MANDATORY (w8a8) lane does not kill the boot.
+
+**Rows 2 and 3 were the opposite assertion until pgw#1141** (Paul's ruling,
+2026-08-11): an unexercised arm was unwrapped, quarantined and dropped. That
+barrier is deleted — an ADOPTED cell arms before setup, so nothing has
+dispatched through it by construction, and two real pods threw away artifacts
+they had just verified at `cos=1.00000` because of it. The fail-closed property
+this file was written to defend now lives where it belongs: the pgw#868
+numerics gate refuses a cell that does not reproduce eager, and a
+cell-attributable failure at SERVE time revokes the arm in-request. What an
+absent measurement still decides is the PUBLISH — which is what rows 2 and 3
+now pin.
 """
 
 from __future__ import annotations
@@ -194,28 +202,29 @@ def test_exercised_pure_aot_arm_is_proven_at_boot(
     assert not compile_cache.cell_quarantined_in_process(ref)
 
 
-def test_unexercised_pure_aot_arm_disarms_to_true_eager(
+def test_unexercised_pure_aot_arm_keeps_serving_and_banks_no_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """pgw#1141: absence of a dispatch is not a verdict about the artifact.
+    The arm stands and the first real request is the proof; the cell is not
+    recorded proven, which is what the publish gate reads."""
     _key, ref = _rig(monkeypatch, seed="b", exercise=False)
     ex = _executor(tmp_path, monkeypatch)
     _boot(ex)
     pipe = RIG["pipe"]
-    # The gap's fail-open half: pre-fix the arm stayed installed unproven.
-    assert not aot_serve.is_armed(pipe)
-    assert getattr(pipe.unet, aot_serve._MARKER_ATTR, None) is None
-    assert pipe.unet.forward.__func__ is _Unet.forward
-    assert compile_cache.cell_quarantined_in_process(ref)
+    assert aot_serve.is_armed(pipe)
+    assert getattr(pipe.unet, aot_serve._MARKER_ATTR, None) is not None
+    assert not compile_cache.cell_quarantined_in_process(ref)
     assert not compile_cache.cell_proven_in_process(ref)
 
 
-def test_mandatory_execution_lane_disarm_degrades_without_killing_the_boot(
+def test_mandatory_execution_lane_without_a_dispatch_does_not_kill_the_boot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _key, ref = _rig(monkeypatch, seed="c", exercise=False,
                      weight_lane="w8a8-lora64")
     ex = _executor(tmp_path, monkeypatch)
-    _boot(ex)  # pgw#672: degrade, never a load failure
+    _boot(ex)  # pgw#672: never a load failure
     pipe = RIG["pipe"]
-    assert not aot_serve.is_armed(pipe)
-    assert compile_cache.cell_quarantined_in_process(ref)
+    assert aot_serve.is_armed(pipe)
+    assert not compile_cache.cell_proven_in_process(ref)

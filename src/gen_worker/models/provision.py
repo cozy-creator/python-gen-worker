@@ -513,13 +513,27 @@ def gate_cell_numerics(pipe: Any, cfg: Any) -> bool:
                      else "no_axis_measured"),
             f"{report.context()} | unmeasured: {rows}")
     comparison = report.comparison()
+    worst = report.worst()
     try:
         numerics_ladder.gate(
             comparison,
             kind=activity_mod.KIND_CELL_NUMERICS,
-            refuse=lambda detail, worst: numerics_probe.CellNumericsRefused(
-                detail, worst),
+            refuse=lambda detail, worst_row: numerics_probe.CellNumericsRefused(
+                detail, worst_row),
             context=report.context())
+        # pgw#1141: the verdict is BANKED on the arm, not merely announced.
+        # This measurement executed every packaged entry through its own
+        # runner and matched eager — so the setup warmup, which scores an
+        # exported arm by "did a dispatch land during MY window", has a proof
+        # to read instead of destroying the artifact that carries it.
+        aot_serve.record_numerics_proof(pipe, aot_serve.NumericsProof(
+            cell_key=str(report.cell_key or ""),
+            axes=len(report.verdicts),
+            worst_entry=(worst.axis.name if worst is not None else ""),
+            worst_cosine=(comparison.cosine if comparison is not None else 0.0),
+            verdict=(comparison.verdict if comparison is not None else ""),
+            elapsed_ms=report.elapsed_ms,
+        ))
         if comparison is not None and comparison.healthy:
             activity_mod.emit_event(
                 activity_mod.KIND_CELL_NUMERICS,

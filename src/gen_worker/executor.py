@@ -199,7 +199,7 @@ from .runtimes.server import ServerHandle
 from .models.execution_lane_gate import ExecutionLaneGate, arm_execution_lane_gate
 from .models.memory import rearm_offload
 from . import fleet_cells
-from . import aot_serve, shape_growth, trt_engine
+from . import aot_serve, numerics_ladder, shape_growth, trt_engine
 from . import fleet_cells as fleet_cells_mod
 from . import hot_swap
 from . import mint_delegate
@@ -4689,13 +4689,39 @@ class Executor:
                 for slot, ref, digest in bindings
             ) and len({slot for slot, _ref, _digest in bindings}) == len(bindings)
             active_selection = active_artifacts.get(id(pipeline))
+            # pgw#1141 (Paul's ruling, 2026-08-11): on the EXPORTED lane the
+            # warm ledger GATES NOTHING. It used to decide which aliases an
+            # installed target may serve, so an object the boot warmup happened
+            # not to dispatch through was handed `permitted_names=set()` ->
+            # `function_names=()` -> `target_applicability_incomplete` -> a pod
+            # that had just verified its cell at `cos=1.00000` served eager for
+            # life. An AOTI artifact is ahead-of-time machine code for this
+            # exact sm/toolchain: the first call is full speed, and the warm
+            # pass never made it faster — it only checked it. What the cell
+            # advertises is what it may serve; a class it does not carry is
+            # refused BY NAME at ingress and served eager per request
+            # (pgw#844), and a cell-attributable failure revokes the arm
+            # in-request through the wrapper's own fallback.
+            #
+            # The DYNAMO lane keeps the ledger, and the difference is the
+            # failure MODE, not the vintage: a dynamo arm that does not serve
+            # its cell RECOMPILES — correct output, silently slower, no
+            # exception for try-serve to catch and no numerics gate on that
+            # lane at all. Its per-class cache-hit ledger is the only detector
+            # that exists, so deleting it would remove a detector with no
+            # replacement.
+            exported_arm = bool(
+                active_selection is not None
+                and aot_serve.is_aot_ref(active_selection.ref))
             permitted_names = (
-                function_proofs[id(pipeline)]
+                contract_names if exported_arm
+                else function_proofs[id(pipeline)]
                 if id(pipeline) in function_proofs
                 else contract_names
             )
             object_proven_by_custom_warmup = bool(
-                spec.cls is not None
+                not exported_arm
+                and spec.cls is not None
                 and callable(getattr(spec.cls, "warmup", None))
                 and function_proofs.get(id(pipeline))
             )
@@ -6317,7 +6343,7 @@ class Executor:
         snapshots: Optional[Dict[str, pb.Snapshot]],
         *,
         proof_objects: typing.Iterable[Any] = (),
-        cold_proof_ids: typing.Container[int] = (),
+        cold_proof_ids: typing.Collection[int] = (),
         allow_contract_skip: bool = False,
         armed_cell_refs: typing.Iterable[str] = (),
     ) -> _WarmupEvidence:
@@ -6356,13 +6382,27 @@ class Executor:
                 logger.info("boot warmup skipped for %s: %s",
                             skip.spec.name, skip.reason)
         objects = tuple({id(obj): obj for obj in proof_objects}.values())
-        # Tracing == some artifact is armed or minting on this setup; only
-        # then does the full class x bucket cross-product buy anything (each
-        # graph must trace into the capture / prove against the cell).
-        tracing = bool(objects)
         memory = self._warm_contract_runs.setdefault(
             self._warm_contract_key(spec), set())
         armed_refs = tuple(armed_cell_refs)
+        # pgw#1141: TRACING is what makes the full class x bucket cross-product
+        # worth its wall time — a capture being DRIVEN (every declared graph
+        # must trace into it), or a DYNAMO arm, whose only detector of a
+        # non-serving cell is the per-class cache-hit ledger this plan feeds.
+        #
+        # It used to mean "some artifact is armed", which charged a boot
+        # ADOPTING AN EXPORTED CELL the whole cross-product (sdxl: 9 aspect
+        # buckets x 2 guidance classes = 18 full generates per handler) for a
+        # proof that no longer gates anything on that lane. An AOTI cell is
+        # ahead-of-time machine code for this exact sm/toolchain: the first
+        # call is full speed, so re-running every declared class before READY
+        # buys nothing the numerics gate and the in-request fallback do not
+        # already buy — it is pure boot latency the tenant waits through. Such
+        # a boot now runs the EAGER plan (one collapsed run per (function,
+        # guidance class)), which is the allocator/kernel warm the eager
+        # fallback path needs anyway.
+        tracing = bool(cold_proof_ids) or any(
+            not aot_serve.is_aot_ref(ref) for ref in armed_refs)
         skip_ok = (
             allow_contract_skip
             and not cold_proof_ids
@@ -7442,6 +7482,12 @@ class Executor:
                 # adoption. Zero proven objects still fails closed (gw#586).
                 disproven: list[_CompileObjectCandidate] = []
                 unexercised: list[_CompileObjectCandidate] = []
+                #: pgw#1141: per object, why the boot warmup landed no dispatch
+                #: on an ARMED artifact — the posture that follows is a row on
+                #: the wire, not something a reader has to infer from the two
+                #: later events that only describe its consequences
+                #: (`target_applicability_incomplete`, `armed_target_unresolved`).
+                arm_without_dispatch: Dict[int, str] = {}
                 proven = 0
                 hits = 0
                 misses = 0
@@ -7467,8 +7513,57 @@ class Executor:
                             proved_sel = inj.active_compile_artifacts.get(id(pipe))
                             if proved_sel is not None:
                                 compile_cache.record_cell_proven(proved_sel.ref)
-                        else:
+                            continue
+                        # pgw#1141: THE second proof, and on a boot-ADOPTED
+                        # cell it is the only one that can exist. The arm
+                        # happens before setup, so nothing has dispatched yet
+                        # by construction — but the pgw#868 gate has already
+                        # run EVERY packaged entry through its own runner
+                        # against the eager forward it replaces, on this pod,
+                        # on these weights, on this card. That is a superset of
+                        # what `proven_since` asks (it executed, and it is
+                        # still armed) plus the accuracy the dispatch counter
+                        # cannot see. Scoring it `unexercised` destroyed
+                        # artifacts verified at cos=1.00000 on two real pods,
+                        # and left the SELF-MINT arm — which reaches its proof
+                        # by a warm dispatch — as the only way to serve
+                        # compiled. Both arms take the same measurement in
+                        # `provision.arm_aot`, so reading it here is what makes
+                        # adopted and self-minted cells symmetrical rather
+                        # than a special case for one of them.
+                        parity = aot_serve.numerics_proof(pipe)
+                        if parity is None:
+                            arm_without_dispatch[id(pipe)] = (
+                                "artifact revoked since it was measured"
+                                if aot_serve.numerics_measured(pipe)
+                                else "no parity verdict was banked on this arm")
                             unexercised.append(candidate)
+                            continue
+                        proven += 1
+                        # `function_proofs` is deliberately NOT narrowed to
+                        # `spec.name` here: the parity verdict covers every
+                        # entry the cell PACKAGES, i.e. the whole contract its
+                        # key advertises, so the install falls through to
+                        # `contract_names`. A class the cell does not carry is
+                        # refused BY NAME at ingress and served eager per
+                        # request (pgw#844), which is the backstop that lets
+                        # this attribution be contract-wide.
+                        proved_sel = inj.active_compile_artifacts.get(id(pipe))
+                        if proved_sel is not None:
+                            compile_cache.record_cell_proven(proved_sel.ref)
+                        logger.info(
+                            "compile object (slots=%s) proven by its own "
+                            "numerics parity (%s); the boot warmup landed no "
+                            "dispatch on it (pgw#1141)",
+                            sorted(candidate.slots), parity)
+                        activity_mod.emit_event(
+                            activity_mod.KIND_CELL_NUMERICS,
+                            f"{spec.name}: the boot warmup dispatched no call "
+                            f"through this armed cell, and its own parity "
+                            f"measurement on THIS pod carries the proof "
+                            f"instead — {parity}",
+                            phase=numerics_ladder.PHASE_SERVING_PROOF,
+                        )
                         continue
                     before = proof_before.get(id(pipe))
                     if before is None:
@@ -7481,6 +7576,9 @@ class Executor:
                     hits += max(0, pipe_hits)
                     misses += max(0, pipe_misses)
                     if not warmed or calls <= 0:
+                        arm_without_dispatch[id(pipe)] = (
+                            "the dynamo lane takes no parity measurement, so "
+                            "this boot holds no evidence either way")
                         unexercised.append(candidate)
                     elif pipe_hits > 0:
                         proven += 1
@@ -7526,10 +7624,85 @@ class Executor:
                 # the bookkeeping down to readiness — reports an honest
                 # phase instead of a stale seal_publish.
                 activity_mod.current_phase(activity_mod.PHASE_FINALIZE)
+
+                def _confess_arm_without_dispatch(
+                    candidate: "_CompileObjectCandidate",
+                ) -> None:
+                    """pgw#1141: name the DECISION, at the decision point.
+
+                    Every emission the old disarm produced described its
+                    wreckage two frames later (`target_applicability_
+                    incomplete`, then `armed_target_unresolved`), so a reader
+                    had to infer that an armed, resolvable cell had been thrown
+                    away. The decision is the opposite one now — the arm STANDS
+                    — and it is still a row, because an unannounced posture is
+                    indistinguishable from a gate that never ran."""
+                    reason = arm_without_dispatch.get(id(candidate.pipeline), "")
+                    if not reason:
+                        return
+                    activity_mod.emit_event(
+                        activity_mod.KIND_CELL_NUMERICS,
+                        f"{spec.name}: the exported cell on slots "
+                        f"{sorted(candidate.slots)} took no warm dispatch and "
+                        f"{reason} — it STAYS ARMED and serves; a "
+                        f"cell-attributable failure revokes it in-request, and "
+                        f"it publishes nothing to the fleet",
+                        phase=numerics_ladder.PHASE_PROOF_ABSENT,
+                    )
+
+                # pgw#1141 (Paul's ruling, 2026-08-11), and it is a DELETION:
+                # *"skip the warmup/arm check, so we can serve right away; try
+                # to serve, and if an error is encountered and it is the cell's
+                # fault, de-arm the cell and serve eager instead. If our cell is
+                # correct this adds zero cost."* An ABSENCE of warm evidence is
+                # no longer a verdict about the artifact — an adopted cell arms
+                # before setup, so nothing has dispatched through it BY
+                # CONSTRUCTION, and disarming on that destroyed cells verified
+                # at cos=1.00000 on two real pods while the self-mint arm (which
+                # gets its dispatch from the warmup that drives its own capture)
+                # sailed through. The two arms are symmetrical now: neither is
+                # disarmed for want of a dispatch.
+                #
+                # SCOPED TO THE EXPORTED LANE, because the difference is the
+                # failure MODE. An AOTI cell that cannot serve RAISES, and the
+                # wrapper answers that request eager; a DYNAMO arm that does not
+                # serve its cell RECOMPILES — correct output, silently slower,
+                # no exception for try-serve to catch and no numerics gate on
+                # that lane at all — so its per-class cache-hit ledger is the
+                # only detector in existence and keeps its teeth.
+                #
+                # What still has teeth, unchanged:
+                #   * the pgw#868 numerics gate REFUSES a cell that does not
+                #     reproduce eager — the only detector for a cell that runs
+                #     cleanly and returns a WRONG image, which try-serve cannot
+                #     see;
+                #   * EVIDENCE AGAINST still disarms (`disproven`: the object was
+                #     exercised and demonstrably did not serve its own graph —
+                #     a measured fault, not a missing measurement);
+                #   * a cell-attributable failure at serve time revokes the arm
+                #     IN-REQUEST (`aot_serve.wrap_module` / the pgw#680
+                #     guard-miss doctrine): the tenant still gets a correct eager
+                #     answer, the disarm is sticky for the process, and it is
+                #     typed on the wire.
+                #   * PUBLISHING to the fleet stays evidence-gated below —
+                #     serving optimistically costs this pod one eager fallback,
+                #     publishing an unverified cell costs every pod that adopts
+                #     it.
                 unproven = list(disproven)
-                if not proven:
-                    unproven.extend(unexercised)
-                    unexercised = []
+                # The DYNAMO lane's silent-recompile detector, unchanged: with
+                # nothing proven, an unexercised dynamo object is still folded
+                # in and disarmed. Exported candidates never reach here — they
+                # are scored above and keep their arm either way.
+                dynamo_unexercised = [
+                    candidate for candidate in unexercised
+                    if id(candidate.pipeline) not in aot_proof_before
+                ]
+                if not proven and dynamo_unexercised:
+                    unproven.extend(dynamo_unexercised)
+                    unexercised = [
+                        candidate for candidate in unexercised
+                        if candidate not in dynamo_unexercised
+                    ]
                 if unproven:
 
                     quant_execution_lane = any(
@@ -7540,6 +7713,7 @@ class Executor:
                     for candidate in unproven:
                         pipe = candidate.pipeline
                         function_proofs[id(pipe)] = set()
+                        _confess_arm_without_dispatch(candidate)
                         # pgw#722 finding 2: an exported arm disarms through
                         # its own lane — aot_serve.unwrap restores the
                         # forward it captured (under the F2 flip that is the
@@ -7649,6 +7823,27 @@ class Executor:
                         logger.warning("%s; serving eager", detail)
                 for candidate in unexercised:
                     pipe = candidate.pipeline
+                    if id(pipe) in aot_proof_before:
+                        # THE DELETED BARRIER (pgw#1141). This branch used to
+                        # unwrap the artifact, drop the lifted lanes, pop the
+                        # active selection and abandon the mint — for an object
+                        # the warm plan simply never dispatched through, which
+                        # is EVERY boot-adopted cell by construction. It keeps
+                        # the arm now and says so; the publish half is the only
+                        # decision an absent measurement may still make.
+                        logger.warning(
+                            "compile object (slots=%s) armed with no warm "
+                            "dispatch (calls=0); it SERVES, and a "
+                            "cell-attributable failure revokes it in-request "
+                            "(pgw#1141)", sorted(candidate.slots))
+                        _confess_arm_without_dispatch(candidate)
+                        if aot_serve.numerics_proof(pipe) is None:
+                            # Nothing on this pod has evidence this artifact
+                            # works: it may serve (try-serve decides), but it
+                            # must not be PUBLISHED to pods that cannot
+                            # re-derive that verdict.
+                            self._abandon_pending_mint(inj, pipe)
+                        continue
                     mandatory = pipeline_weight_lane(pipe).startswith(
                         _MANDATORY_EXECUTION_LANES)
                     if mandatory:
@@ -7662,17 +7857,15 @@ class Executor:
                             "proof covers only its exercised siblings",
                             sorted(candidate.slots))
                         continue
+                    # The dynamo lane keeps its disarm: an unexercised dynamo
+                    # object that starts serving RECOMPILES silently, and no
+                    # detector downstream would ever say so.
                     logger.warning(
                         "compile object (slots=%s) unproven (no warmup "
                         "modality, calls=0); serving eager",
                         sorted(candidate.slots))
+                    _confess_arm_without_dispatch(candidate)
                     function_proofs[id(pipe)] = set()
-                    # pgw#722 finding 2: same exported-lane disarm as the
-                    # unproven loop above.
-                    if aot_serve.unwrap(pipe):
-                        from .models import lora_lifted
-
-                        lora_lifted.remove_lifted_lora_execution_lanes(pipe)
                     compile_cache.unwrap(pipe)
                     if spec.lora_bucket:
                         compile_cache.drop_lora_execution_lane(pipe)

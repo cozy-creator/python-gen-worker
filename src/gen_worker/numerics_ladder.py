@@ -53,6 +53,17 @@ _ORDER = {VERDICT_HEALTHY: 0, VERDICT_DEGRADED: 1, VERDICT_DESTROYED: 2}
 PHASE_DEGRADED = "degraded"
 PHASE_REFUSED = "refused"
 
+#: pgw#1141 — the two phases the BOOT WARMUP proof gate reports against a
+#: parity verdict, on this same kind so one query (`?kind=cell_numerics`)
+#: answers what happened to every cell that armed on a pod.
+#: ``serving_proof``: the boot warmup landed no dispatch on an armed exported
+#: cell and the pod's OWN parity measurement carried the proof instead (an
+#: unannounced pass is indistinguishable from a gate that never ran).
+#: ``proof_absent``: no dispatch AND no standing parity verdict — the artifact
+#: is disarmed, and this row says which half was missing.
+PHASE_SERVING_PROOF = "serving_proof"
+PHASE_PROOF_ABSENT = "proof_absent"
+
 
 def worst_of(*verdicts: str) -> str:
     """The worst rung among ``verdicts`` (unknown values read as HEALTHY)."""
@@ -438,7 +449,8 @@ def declared_thresholds(cfg: Any) -> Thresholds:
 __all__ = [
     "DEFAULT_THRESHOLDS",
     "NUMERICS_FLOOR", "NUMERICS_RETENTION_FLOOR", "NUMERICS_WARN",
-    "PHASE_DEGRADED", "PHASE_REFUSED",
+    "PHASE_DEGRADED", "PHASE_PROOF_ABSENT", "PHASE_REFUSED",
+    "PHASE_SERVING_PROOF",
     "VERDICT_DEGRADED", "VERDICT_DESTROYED", "VERDICT_HEALTHY",
     "Comparison", "RowStat", "Thresholds",
     "compare_outputs", "declared_thresholds", "flatten_outputs", "gate",
