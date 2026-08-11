@@ -41,7 +41,10 @@ about the WEIGHTS, not about the compiled program:
   handles it implements with `@implements_contract`
   (`gen_worker.models.tensor_layout_contract`), and the vocabulary itself lives
   in tensorhub. It says what the bytes ARE and nothing about compilation.
-  (th#1580 / th#1721; was called "the artifact contract".)
+  (th#1580 / th#1721; was called "the artifact contract".) **th#1803 makes this
+  a core platform feature:** code is quant-generic over a declared layout, and
+  the platform answers compatibility ahead of time — at rebind and at request
+  time — never by loading and running on a rented pod.
 - **The tensor-binding contract** — the artifact's LINKING rule for tensors:
   bound by name at load (DYNAMIC — an opaque slot the compiler must never
   value-specialize, which is what makes a cell checkpoint-agnostic) versus a

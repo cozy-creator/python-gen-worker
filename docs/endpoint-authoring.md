@@ -96,6 +96,11 @@ key-naming convention, file topology), named by a descriptor handle
 `<producer>.<format>@<major>`. Layout says what the bytes ARE; binding says how
 they are ADDRESSED at load.
 
+**Declare the layout you execute, not a quant** (th#1803). Your code should be
+quant-generic over its declared layout, so the platform can answer "will this
+checkpoint work with this code?" before renting a pod — and so the owner can
+rebind fp8↔bf16 as config. See "Do NOT quantize weights in `setup()`" below.
+
 **You configure the compiler by how you write the code.** The classification is
 not a setting supplied out of band — it derives from `state_dict` membership at
 trace time. The code IS the configuration, and the assignment style below is the
@@ -257,8 +262,21 @@ the denoiser VRAM on any card, no fp8 silicon required. Snapshots whose
 weights are already fp8-stored (an `#fp8` flavor) get the same treatment
 automatically; endpoint code stays precision-agnostic and
 `ModelEvent.vram_bytes` reports the measured resident size. Quantized
-formats are platform-produced stored flavors (`#fp8`, `#nvfp4` on Blackwell)
-— there is no runtime "quantize my model" kwarg. The one exception is the
+formats are platform-produced stored artifacts (`#fp8`, `#nvfp4` on Blackwell)
+— there is no runtime "quantize my model" kwarg, and which one a component
+serves is deploy CONFIG, not a literal you pick here (th#980, th#1803).
+
+> **`flavor` is being deleted (th#1803, DESIGN-RULINGS §1.33).** Paul: the
+> flavor system was *"an arbitrary-string sub-selector within a tag-group…
+> too imprecise."* Selection within a tag group becomes tensor-layout-contract
+> compatibility — the endpoint declares a per-slot SET of accepted layouts and
+> the platform grades each candidate COMPATIBLE / CONVERTIBLE / PRODUCIBLE /
+> INCOMPATIBLE ahead of time. `#flavor` refs, flavored tag rows and the flavor
+> columns go away with no alias. The replacement surfaces are being designed in
+> th#1809 (hub) and pgw#1143 (SDK); the `flavor=`/`#fp8` spellings in this
+> document describe what exists today, not what to build against.
+
+The one exception is the
 EMERGENCY rung (automatic on CUDA hosts): when
 even the downloaded flavor cannot fit free VRAM, the loading layer
 runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
@@ -687,7 +705,34 @@ not servable through these calls, and a green integrity result is **not** a
 quality signal — a melted or over-smoothed render scores HIGHER on this
 statistic than a clean one. See `gen_worker.output_integrity`.
 
-## If `setup()` quantizes, report the lane it applied (pgw#1104)
+## Do NOT quantize weights in `setup()` (th#1803)
+
+**Component quant selection is BINDING CONFIG, not endpoint code.** fp8 vs
+bf16 for a text encoder or a denoiser is a config record change — point the
+component ref at the fp8 artifact — with no code change, no rebuild and no
+redeploy, and it is overridable per request where the endpoint allows it.
+Write `setup()` **quant-generically**: declare the tensor layout you execute
+and serve whatever satisfies it. A `serve_recipe` that casts bf16 weights on
+every cold boot, switchable only by shipping a new endpoint version, is the
+rejected pattern (DESIGN-RULINGS §1.32).
+
+**No inference-time quantization at all.** Quantization happens ahead of time —
+a conversion endpoint produces the artifact — for two measured reasons: it
+lengthens every cold boot, and it wastes transfer (download 30 GB of bf16 and
+immediately discard 15 GB). So the recipe LOADS the bound pre-quantized
+artifact; the boot-quant path is deleted, not kept as a fallback. (The fit
+ladder's emergency nf4 rung below is a different thing — a last-resort OOM
+degradation, not a selection mechanism.)
+
+What stays in code: kernel selection, compile scope, allocator settings, the
+warmup obligation. What leaves: the choice of which weights to run.
+
+### If a recipe still converts weights, report the lane it applied (pgw#1104)
+
+Two shipped endpoints predate the ruling. Until they are converted, the
+reporting call below is mandatory for them — and it stays in the SDK
+regardless, because runtime-gated *engagement* (a kernel or compile arm that
+may or may not apply on this card) still has to be reported honestly.
 
 A serve-time recipe — torchao `quantize_()`, an fp8 cast, anything that
 converts the weights inside `setup()` — moves the lane the endpoint EXECUTES

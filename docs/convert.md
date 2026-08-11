@@ -2,6 +2,17 @@
 
 Cozy Creator's model ETL: hub ingest (HF + Civitai), dtype cast / quantization, repackage, and Tensorhub publish.
 
+> **This is where quantization happens — the only place (th#1803).** Paul, 2026-08-11: no
+> inference-time quantization. Serving loads a pre-quantized artifact produced here; quantizing
+> inside an endpoint's `setup()` is deleted, not kept as a fallback (it lengthens every cold boot
+> and wastes transfer — fetch 30 GB of bf16, discard 15 GB).
+>
+> **`flavor` as a selector is dead** (DESIGN-RULINGS §1.33): what a producer emits is an artifact
+> carrying a tensor-layout contract, and consumers select within a tag group by contract
+> compatibility, not by an arbitrary `#flavor` string. The `ProducedFlavor` / `publish_flavors` /
+> `#fp8` spellings below are the current API, not the target one — th#1809 (hub) and pgw#1143 (SDK)
+> own the replacement.
+
 - **Ingest**: HuggingFace (`HfApi.list_repo_files` + classifier + `snapshot_download(allow_patterns=…)`) and Civitai (bounded provider API).
 - **Convert**: streaming dtype cast + fp8-E4M3 storage cast (`#fp8` flavor), bitsandbytes nf4/fp4, GGUF (llama.cpp toolchain), singlefile↔diffusers repackage.
 - **Publish**: one commit call against Tensorhub's HF-shaped `/commits` write API. `mode` defaults to `replace` (th#1400 — a checkpoint is complete in itself); pass `mode="merge"` explicitly, and only when adding to an existing snapshot.

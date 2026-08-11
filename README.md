@@ -88,7 +88,12 @@ Bindings: `HF(id, revision=, dtype=, subfolder=, files=, storage_dtype=)`,
 The slot name comes from the `models={}` key or the `setup()` parameter —
 never a constructor argument. `storage_dtype="fp8"` keeps denoiser weights in
 fp8-E4M3 storage with per-layer upcast to the compute `dtype` (half the VRAM
-on any card); fp8-stored `#fp8` flavors get the same treatment automatically.
+on any card); fp8-stored `#fp8` artifacts get the same treatment automatically.
+Quantization itself is ahead-of-time only — a conversion endpoint produces the
+artifact, never `setup()` (th#1803) — and `flavor=` is a dying axis: selection
+within a tag group becomes tensor-layout-contract compatibility
+(DESIGN-RULINGS §1.33, pgw#1143). See
+[docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 
 Curated checkpoint selection is a runtime payload argument: a handler declares
 `model: SomeModelChoice` (a `ModelChoice` enum of `Model` rows, each carrying a
