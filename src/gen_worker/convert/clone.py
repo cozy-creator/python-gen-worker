@@ -46,6 +46,11 @@ from .writer import (
     snapshot_weight_groups,
 )
 from .convert import run_inline_conversion
+from .dtype_pins import (
+    cast_exempt_components,
+    check_explicit_pin_conflict,
+    verify_produced_tree,
+)
 from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
 from .registry import repackage_family
 from ..api.slot import OBJECTIVES
@@ -323,6 +328,15 @@ def build_flavor_tree(
     else:
         target_names = set(_default_quant_components())
     is_quant = spec.dtype not in {"bf16", "fp16", "fp32", "f16", "f32"}
+    # pgw#1133: a cast is TREE-wide, a precision pin is PER-COMPONENT. The
+    # tree's own model_index.json classes decide, via families.facts — the
+    # same table the loader honours. An EXPLICIT request to convert a pinned
+    # component is refused by name (it has a repair); the tree-wide cast
+    # skips it and says so (it does not).
+    check_explicit_pin_conflict(
+        work_root, spec.dtype, quantize_components if is_quant else None)
+    pin_exempt = cast_exempt_components(work_root, spec.dtype)
+    skipped_pins: dict[str, str] = {}
     converted: set[str] = set()
     for comp, entry in groups:
         comp_dir = (work_root / comp) if comp else work_root
@@ -331,6 +345,16 @@ def build_flavor_tree(
         if is_quant and comp and comp not in target_names:
             continue
         if size < _MIN_CONVERT_BYTES and is_quant:
+            continue
+        # ...EXCEPT a component whose class pins a wider load dtype: it passes
+        # through at source precision (copy_non_weight_files carries it).
+        # Checked here, after the scope rules, so the report names only the
+        # components this conversion would ACTUALLY have narrowed.
+        fact = pin_exempt.get(comp)
+        if fact is not None:
+            skipped_pins[comp] = fact.dtype
+            logger.info("clone.cast.pin_skip component=%s pin=%s requested=%s reason=%s",
+                        comp, fact.dtype, spec.dtype, fact.reason)
             continue
         dest = (out_dir / comp) if comp else out_dir
         stem = entry.name
@@ -353,6 +377,11 @@ def build_flavor_tree(
     if spec.dtype in _CAST_NORMALIZE_DTYPES:
         _normalize_variant_filenames(out_dir)
     apply_objective_scheduler_config(out_dir, objective, distilled)
+    if skipped_pins:
+        # Reported, never silent: the flavor says bf16 and one component is
+        # not, so the checkpoint carries WHICH and WHY.
+        attrs["dtype_pinned_components"] = ",".join(
+            f"{c}:{d}" for c, d in sorted(skipped_pins.items()))
     if work_root is not source_dir:
         shutil.rmtree(work_root, ignore_errors=True)
     return out_dir, attrs
@@ -1000,6 +1029,23 @@ def run_clone(
                 })
                 continue
 
+            # pgw#1133 GATE. The last thing before bytes leave: no component
+            # this producer NARROWED below its families.facts pin is
+            # publishable, on ANY lane — cast, quant, publish-as-is or a
+            # reused tree. A source that already ships the component narrow is
+            # still mirrorable (the fact is about the architecture, not a
+            # licence to refuse upstream's bytes); only OUR truncation fails.
+            try:
+                produced_dtypes = verify_produced_tree(
+                    tree, source_dir=Path(source.dir))
+            except Exception as exc:  # noqa: BLE001 — one flavor, not the run
+                result.failed_flavors.append({
+                    "spec_label": spec.label, "dtype": spec.dtype,
+                    "file_type": spec.file_type, "reason": str(exc),
+                    "component_dtype_pin_violation": True,
+                })
+                continue
+
             # size facts for VRAM-aware placement (advisory).
             metadata: dict[str, Any] = {k: v for k, v in source.metadata.items()}
             try:
@@ -1010,6 +1056,12 @@ def run_clone(
                     metadata["size_facts"] = facts
             except Exception:
                 pass
+            # pgw#1133 VISIBILITY: the flavor's scalar dtype describes the
+            # tree, not every part of it. Publish the per-component precision
+            # so a downcast is a queryable fact instead of a byte count
+            # someone has to notice.
+            if produced_dtypes:
+                metadata["component_dtypes"] = dict(produced_dtypes)
             for k, v in attrs.items():
                 metadata.setdefault(f"attr_{k}", str(v))
 
