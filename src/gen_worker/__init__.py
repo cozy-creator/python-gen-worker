@@ -36,6 +36,14 @@ from .api.export_contract import (
     import_export_declaration,
     register_export_declaration,
 )
+from .api.derive import (
+    DeclarationMismatch,
+    assert_faithful,
+    cfg_image_classes,
+    class_set_delta,
+    contract_delta,
+    override_delta,
+)
 from .api.formula import RuntimeFormula
 from .api.slot import OBJECTIVES, ObjectiveMismatchError, ResolvedSlot, Slot
 from .families import GenerationDefaults
@@ -127,6 +135,12 @@ __all__ = [
     "Input",
     "Arg",
     "register_export_declaration",
+    "DeclarationMismatch",
+    "assert_faithful",
+    "cfg_image_classes",
+    "class_set_delta",
+    "contract_delta",
+    "override_delta",
     "import_export_declaration",
     "ConfigParam",
     "NoWarmup",
