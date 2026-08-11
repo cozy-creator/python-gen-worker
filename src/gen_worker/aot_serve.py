@@ -756,7 +756,13 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
     if isa_reason:
         return isa_reason
     want_fam = str(meta.get("family") or "")
-    if family and want_fam and want_fam != family:
+    # pgw#939: STRICTLY, like every axis above it and like this function's own
+    # docstring already promised. `want_fam and ...` meant an UNSTAMPED cell
+    # matched every family it was ever offered to — a wrong cache HIT, not a
+    # miss, on the axis that decides which pipeline the .so is dlopen'd into.
+    # The mint stamps this from one place (`artifact_metadata`), so a silent
+    # cell is a malformed one; when no caller names a family nothing changes.
+    if family and want_fam != family:
         return f"family {want_fam!r} != {family!r}"
     return ""
 
@@ -789,8 +795,16 @@ def verify_contract(
     bucket = int(meta.get("lora_bucket") or 0)
     hashes: List[str] = []
     for name, block in entries.items():
+        # pgw#939: absence is a verdict, not a skipped check. `class_hash`
+        # below was already written this way and is the model the other two
+        # axes are brought to — `compile_cache.verify` is strict on every
+        # IDENTITY_AXES field for the same reason, and `compile_cache.py`
+        # names this exact `if want and want != have` shape as JAX PR #27814's
+        # one documented wrong-cache-hit.
         stamped = str(block.get("range_digest") or "")
-        if stamped and stamped != range_digest(block):
+        if not stamped:
+            return f"entry {name!r}: no range_digest stamped"
+        if stamped != range_digest(block):
             return f"entry {name!r}: range_digest does not match its contract"
         stamped_hash = str(block.get("class_hash") or "")
         if not stamped_hash:
@@ -800,7 +814,9 @@ def verify_contract(
             return f"entry {name!r}: class_hash does not match its recorded facts"
         hashes.append(stamped_hash)
     stamped_combined = str(meta.get("combined_graph_hash") or "")
-    if stamped_combined and stamped_combined != combined_graph_hash(hashes):
+    if not stamped_combined:
+        return "no combined_graph_hash stamped"
+    if stamped_combined != combined_graph_hash(hashes):
         return "combined_graph_hash does not match the per-entry class hashes"
     # pgw#1059: the stamped key must be exactly the key the artifact's OWN
     # recorded facts describe — the same recomputation the mint stamped and

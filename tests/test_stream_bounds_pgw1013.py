@@ -403,10 +403,13 @@ WEIGHTS_SHA = hashlib.sha256(WEIGHTS).hexdigest()
 def _civitai(url: str, dst: Path, *, expected_size: int, sha: str = "") -> int:
     from gen_worker.models.download import _civitai_stream_one
 
-    return _civitai_stream_one(
+    # pgw#939: the observed digest now rides back beside the byte count so the
+    # manifest can distinguish a verified download from an unverified one.
+    written, _observed = _civitai_stream_one(
         url, dst, api_key="", expected_size=expected_size,
         expected_sha256=sha or WEIGHTS_SHA, on_bytes=lambda _n: None,
     )
+    return written
 
 
 def test_civitai_legitimate_transfer_is_unaffected(rig: _Rig, tmp_path: Path) -> None:

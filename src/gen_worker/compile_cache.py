@@ -1264,16 +1264,25 @@ def _clean_tarinfo(ti: tarfile.TarInfo, executable: bool = False) -> tarfile.Tar
 _ELF_MAGIC = b"\x7fELF"
 
 
+class _UnreadableCubin(ValueError):
+    """A packed cubin whose architecture cannot be determined (pgw#939)."""
+
+
 def _cubin_arch(path: Path) -> int:
     """The SM arch a cubin was compiled for (nvidia ELF ``e_flags`` low
-    byte), 0 when the file is unreadable or not ELF."""
+    byte). Raises :class:`_UnreadableCubin` when the file cannot be read or
+    is not an ELF — pgw#939: it used to return ``0`` for that, which the
+    caller's ``if cubin is not None and want_arch:`` then read as "no arch to
+    compare", so an unreadable kernel SKIPPED the gate that exists to catch
+    it. Absence of evidence is the finding here, not the absence of a
+    finding."""
     try:
         with open(path, "rb") as f:
             header = f.read(0x34)
-    except OSError:
-        return 0
+    except OSError as exc:
+        raise _UnreadableCubin(f"unreadable ({type(exc).__name__})") from exc
     if len(header) < 0x34 or not header.startswith(_ELF_MAGIC):
-        return 0
+        raise _UnreadableCubin("not an ELF object")
     # EI_CLASS: 2 = ELF64 (e_flags at 0x30), 1 = ELF32 (e_flags at 0x24).
     offset = 0x30 if header[4] == 2 else 0x24
     flags = int.from_bytes(header[offset:offset + 4], "little")
@@ -1287,8 +1296,14 @@ def _ptx_jit_gaps(
     form is PTX makes the HOST DRIVER's JIT compile it at load time — the
     one path where the deliberately-unkeyed driver version (gw#577) can
     re-enter compiled-kernel behavior. Every ``.ptx`` must ship a sibling
-    ``.cubin``, and when the artifact declares its sm the cubin arch must
-    match it exactly."""
+    ``.cubin``, and the cubin arch must match the artifact's sm exactly.
+
+    pgw#939: both halves of that comparison used to VANISH on an unreadable
+    input. A malformed ``metadata["sm"]`` set ``want_arch = 0`` and an
+    unreadable cubin returned ``0``, and either one made
+    ``if cubin is not None and want_arch:`` skip — so pgw#698's gate
+    disappeared per kernel exactly when the evidence for it was missing.
+    An `sm` this function cannot parse is now a gap in its own right."""
     want_arch = 0
     if sm.startswith("sm_"):
         try:
@@ -1299,22 +1314,49 @@ def _ptx_jit_gaps(
     for p in files:
         if p.suffix in (".ptx", ".cubin"):
             kernels.setdefault((p.parent, p.stem), {})[p.suffix] = p
+    # Scope, stated because pgw#939 narrowed it deliberately: this gate is
+    # about PTX JIT, so it rules on kernels that HAVE a `.ptx`. A `.cubin`
+    # with no PTX sibling cannot be JIT-compiled by the driver — there is
+    # nothing to compile — and whether it is the right architecture is the
+    # cell IDENTITY gate's question (`sm` is a strict `IDENTITY_AXES` field),
+    # not this one's.
+    exposed = {k: v for k, v in kernels.items() if ".ptx" in v}
+    if not exposed:
+        return []
     gaps: list[str] = []
+    if not want_arch:
+        # pgw#939: this used to set `want_arch = 0` and silently skip every
+        # comparison below, so a malformed `sm` deleted the gate wholesale.
+        gaps.append(
+            f"artifact declares sm={sm!r}, which names no comparable "
+            f"architecture while carrying {len(exposed)} PTX-exposed "
+            "kernel(s) — the arch gate cannot run, so the pack is refused "
+            "rather than packed unchecked (pgw#698/pgw#939)")
     for (_parent, _stem), forms in sorted(
-        kernels.items(), key=lambda kv: str(kv[0][0] / kv[0][1]),
+        exposed.items(), key=lambda kv: str(kv[0][0] / kv[0][1]),
     ):
-        ptx, cubin = forms.get(".ptx"), forms.get(".cubin")
-        if ptx is not None and cubin is None:
+        ptx, cubin = forms[".ptx"], forms.get(".cubin")
+        if cubin is None:
             gaps.append(
                 f"{ptx.relative_to(cache_root)}: PTX only — no cubin, the "
                 "driver JIT would compile it")
             continue
-        if cubin is not None and want_arch:
+        if not want_arch:
+            continue  # already refused above; do not repeat it per kernel
+        try:
             arch = _cubin_arch(cubin)
-            if arch and arch != want_arch:
-                gaps.append(
-                    f"{cubin.relative_to(cache_root)}: cubin arch sm_{arch} "
-                    f"!= artifact sm_{want_arch}")
+        except _UnreadableCubin as exc:
+            # pgw#939: `_cubin_arch` returned 0 here and `and want_arch`
+            # then skipped the comparison, so the gate disappeared for
+            # exactly the kernel whose evidence could not be read.
+            gaps.append(
+                f"{cubin.relative_to(cache_root)}: {exc} — its "
+                "architecture cannot be compared to the artifact's")
+            continue
+        if arch != want_arch:
+            gaps.append(
+                f"{cubin.relative_to(cache_root)}: cubin arch sm_{arch} "
+                f"!= artifact sm_{want_arch}")
     return gaps
 
 
