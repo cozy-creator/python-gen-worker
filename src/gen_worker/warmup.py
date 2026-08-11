@@ -220,10 +220,40 @@ def _field_factory(t: Any, depth: int) -> Tuple[Optional[_Factory], str]:
     return None, f"required field type {t!r} is not synthesizable"
 
 
+def _present_factory(t: Any, depth: int) -> Optional[_Factory]:
+    """A factory that POPULATES a field — never the `None` arm of an option.
+
+    `_field_factory` answers `None` for any optional type, which is right for
+    a neutral default and useless for repairing a one-of (th#1771).
+    """
+    t = _unwrap(t)
+    if depth > _MAX_DEPTH:
+        return None
+    origin = typing.get_origin(t)
+    if origin in (typing.Union, py_types.UnionType):
+        for arm in typing.get_args(t):
+            if arm is type(None):
+                continue
+            factory = _present_factory(arm, depth + 1)
+            if factory is not None:
+                return factory
+        return None
+    factory, _ = _field_factory(t, depth)
+    return factory
+
+
 def _struct_factory(payload_type: type, depth: int = 0) -> Tuple[Optional[_Factory], str]:
     field_factories: List[Tuple[str, _Factory]] = []
+    # th#1771: the one-of repair set. A struct whose fields are ALL optional
+    # but which asserts "exactly one of these is set" (the standard one-of
+    # media shape) is not sparse — it is unconditionally illegal empty, and
+    # required-only synthesis built exactly that.
+    optional_factories: List[Tuple[str, _Factory]] = []
     for f in msgspec.structs.fields(payload_type):
         if not f.required:
+            factory = _present_factory(f.type, depth)
+            if factory is not None:
+                optional_factories.append((f.name, factory))
             continue
         factory, reason = _field_factory(f.type, depth)
         if factory is None:
@@ -234,7 +264,25 @@ def _struct_factory(payload_type: type, depth: int = 0) -> Tuple[Optional[_Facto
         field_factories.append((f.name, factory))
 
     def build(dir_path: str) -> Any:
-        return payload_type(**{name: fac(dir_path) for name, fac in field_factories})
+        required = {name: fac(dir_path) for name, fac in field_factories}
+        try:
+            return payload_type(**required)
+        except IllegalCombination:
+            # A declared sparse legal set — the plan's own signal. Never a
+            # shape this repair may paper over.
+            raise
+        except (ValueError, TypeError):
+            # Populate one optional field at a time, in declaration order,
+            # until the struct accepts itself. Re-raise the ORIGINAL refusal
+            # when nothing satisfies it, so the reason stays the schema's.
+            for name, fac in optional_factories:
+                try:
+                    return payload_type(**required, **{name: fac(dir_path)})
+                except IllegalCombination:
+                    raise
+                except (ValueError, TypeError):
+                    continue
+            raise
 
     return build, ""
 
