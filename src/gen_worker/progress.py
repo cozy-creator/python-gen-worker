@@ -62,14 +62,17 @@ _counters: Dict[Tuple[str, str], "Counter"] = {}
 class Snapshot:
     name: str
     unit: str
-    #: The scope that owns this counter ("" = unowned/process-wide).
-    owner: str
     done: float
     total: float  # 0 = unknown
     rate_per_s: float
     age_s: float  # since last advance
     window_s: float
     elapsed_s: float
+    #: The scope that owns this counter ("" = unowned/process-wide). LAST and
+    #: defaulted on purpose: a Snapshot is constructed by hand in tests and by
+    #: readers that do not care whose counter it is, and a new field must be
+    #: additive rather than a positional break (pgw#894).
+    owner: str = ""
 
 
 def window_for(name: str) -> float:
