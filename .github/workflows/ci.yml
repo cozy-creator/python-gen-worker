@@ -220,6 +220,16 @@ jobs:
       - name: pgw#1049 guard - torch-settings writes outside the authority
         run: uv run python scripts/lint_settings_writers.py
 
+      # GATING (pgw#1122): the compute child holds no worker credential BY
+      # CONSTRUCTION, so a gate that reads one to answer "who am I?" or "is
+      # there a hub?" refuses on every real serving pod (pgw#1108, then
+      # pgw#1122 — a dead function, three pods reaped, two replacements
+      # bought). Every credential read needs a CLASSIFIED line in
+      # scripts/credential_identity_allowlist.txt, and there is no IDENTITY
+      # class: identity comes from gen_worker.worker_identity.viewer().
+      - name: pgw#1122 guard - worker-credential reads outside the resolver
+        run: uv run python scripts/lint_credential_identity.py
+
       # GATING (pgw#1049): the ambient-input census's structural claims —
       # IMPOSED rows exist in DECLARED_ENV, NEUTRALIZED rows are actually
       # scrub-covered, watched env literals in the tree are classified. The

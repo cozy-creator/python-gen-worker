@@ -2613,12 +2613,20 @@ class _ArmOrder:
     (already materialized and content-digest-verified), ``dynamo`` arms JIT
     intake, ``eager_only`` arms nothing. No discovery, ranking or self-mint
     fallback exists on this path — a failed exact arm is a typed refusal.
+
+    ``adopt`` (pgw#1122) marks the ONE order the hub did not give: §4.27
+    boot-adopt builds an identical order out of a cell this pod resolved by its
+    OWN derived key. Nothing named that arm, so its refusal is a degrade to
+    eager with a typed event, not a dead function — carrying the journey's
+    ``BootAdoptOutcome`` here is what lets the degrade report itself under the
+    same family/function/key the ``hit`` was reported under.
     """
 
     backend: str
     selection: Optional["_CompileArtifactSelection"] = None
     expected: Optional["aot_identity.ExpectedIdentity"] = None
     publisher_org: str = ""
+    adopt: Optional["boot_adopt.BootAdoptOutcome"] = None
 
 
 @dataclass(frozen=True)
@@ -6890,7 +6898,9 @@ class Executor:
                 arm = _ArmOrder(
                     backend="aot_cell", selection=compile_selection,
                     expected=got.expected,
-                    publisher_org=got.cell.publisher_org)
+                    publisher_org=got.cell.publisher_org,
+                    # pgw#1122: this order is the POD's, not the hub's.
+                    adopt=adopt)
         elif arm is None and spec.compile is not None:
             # pgw#1116: a compiled family that boots WITHOUT asking is a fact
             # somebody has to be able to read. This is the only branch where
@@ -9955,18 +9965,58 @@ class Executor:
         pgw#904: with an ``_ArmOrder`` (a Plan dispatch) the fleet POLICY does
         not run at all. The hub already decided: ``aot_cell`` arms exactly the
         named artifact or refuses typed, ``dynamo`` arms JIT intake,
-        ``eager_only`` arms nothing."""
+        ``eager_only`` arms nothing.
+
+        pgw#1122: with ONE exception, and it is the exception that keeps a
+        refusal from costing a pod. §4.27 boot-adopt builds the same
+        ``_ArmOrder`` shape out of a cell this pod resolved by its own derived
+        key — the hub ordered nothing — so a typed refusal there drops the
+        order and runs the ordinary policy, instead of failing the function and
+        leaving the pod to be reaped and replaced."""
 
         if arm is not None:
-            return fleet_cells.arm_ordered(
-                pipe, cfg, self.store._cache_dir,
-                backend=arm.backend,
-                artifact=artifact,
-                delivered_ref=delivered.ref if delivered else "",
-                delivered_digest=delivered.snapshot_digest if delivered else "",
-                expected=arm.expected,
-                publisher_org=arm.publisher_org,
-            )
+            try:
+                return fleet_cells.arm_ordered(
+                    pipe, cfg, self.store._cache_dir,
+                    backend=arm.backend,
+                    artifact=artifact,
+                    delivered_ref=delivered.ref if delivered else "",
+                    delivered_digest=(
+                        delivered.snapshot_digest if delivered else ""),
+                    expected=arm.expected,
+                    publisher_org=arm.publisher_org,
+                )
+            except fleet_cells.OrderedArmError as exc:
+                # pgw#1122: a HUB-ordered arm stays terminal (pgw#904 — the hub
+                # named one exact artifact and a substitute would not be it).
+                # A BOOT-ADOPTED one was ordered by nobody: this pod derived the
+                # key, asked, and was answered, so a refusal here means what
+                # every other boot-adopt refusal means — boot as this pod booted
+                # yesterday. Measured cost of not distinguishing them: three
+                # pods that resolved and materialized a cell correctly, then
+                # reported `worker_function_unavailable reason=compile_cell_
+                # failed`, never served, were reaped `state_blocked_idle`, and
+                # had replacements bought.
+                if arm.adopt is None:
+                    raise
+                if compile_cache.mandatory_serving(pipe):
+                    # A mandatory (w8a8/w4a4) lane serves ONLY from a cell
+                    # (pgw#1010), so "boot as yesterday" is not available here
+                    # and the refusal is genuinely terminal. Fail closed, named.
+                    raise
+                boot_adopt.arm_refused(
+                    arm.adopt, cause=exc.reason, detail=str(exc))
+                # Drop the order and run the ORDINARY fleet policy with no
+                # delivered artifact — bit for bit the call this method makes
+                # when boot-adopt returns a MISS, which is the boot every pod
+                # did before §4.27 existed. The refused cell is not retried: it
+                # is not passed back in.
+                outcome = self._enable_compiled(pipe, cfg, None)
+                if outcome.armed or outcome.eager_reason:
+                    return outcome
+                return dc_replace(
+                    outcome,
+                    eager_reason=cell_adopt.EagerPhase.ADOPTED_CELL_REFUSED)
         return fleet_cells.enable_compiled(
             pipe, cfg, self.store._cache_dir, artifact,
             publisher=self._cell_publisher(),

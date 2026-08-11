@@ -66,7 +66,7 @@ from ..transport import FatalTransportError, Transport
 from ..topology import ExecutionTopology
 from .. import postmortem
 from .. import proc_evidence
-from .. import config, worker_credential, worker_goals
+from .. import config, worker_credential, worker_goals, worker_identity
 from .. import worker_fatal
 from . import (
     ENV_CHILD,
@@ -2151,6 +2151,8 @@ class ParentControl:
     async def _perform_action(self, req: Dict[str, Any]) -> Dict[str, Any]:
         named = str(req.get("action") or "")
         if named:
+            if named == actions.ACTION_VIEWER_IDENTITY:
+                return {"result": self._viewer_identity()}
             if named != actions.ACTION_REPORT_DETAIL:
                 raise actions.ActionRefused(f"unknown action {named!r}")
             detail = str(req.get("detail") or "")[:8000]
@@ -2184,6 +2186,30 @@ class ParentControl:
             "parent-mediated %s -> %d (child holds no credential)", action.name, status
         )
         return self._post_action(action, status, text)
+
+    def _viewer_identity(self) -> Dict[str, str]:
+        """pgw#1122: name this pod for the child — the CLAIMS, not the token.
+
+        The compute child holds no credential by construction, so it cannot
+        decode its own identity; the receipt trust gate that tried refused
+        every org-tier cell on every real serving pod. The parent holds the
+        credential and answers from it, exactly as it does for the resolve and
+        the publish. Nothing in the request is read: the child names no field
+        here, so it cannot ask to be somebody else.
+        """
+        token = (self.transport.current_worker_jwt or "").strip()
+        if not token:
+            token = (self._settings.bootstrap_worker_jwt or "").strip()
+        if not token:
+            raise actions.ActionRefused(
+                f"{actions.ACTION_VIEWER_IDENTITY}: this pod holds no worker "
+                "credential, so nothing here can name the endpoint or org it "
+                "serves")
+        identity = worker_identity.from_token(token)
+        return {
+            "endpoint_id": identity.endpoint_id,
+            "org_id": identity.org_id,
+        }
 
     def _narrow_job_scoped_action(
         self, action: "actions.HubAction", body: Dict[str, Any],
