@@ -198,6 +198,47 @@ class DatasetNotFoundError(PayloadRefError):
         )
 
 
+class EndpointSetupFailed(WorkerError):
+    """The pod's OWN warm / compile pass failed. No request participates.
+
+    pgw#1118 / th#1773. A warm forward runs a payload the WORKER synthesized
+    from the endpoint's own schema and calls the endpoint's own handler with
+    it; the same is true of the trace and inductor passes. Nothing about any
+    caller reaches those boundaries — which is exactly what the untyped
+    version of this failure hid.
+
+    Measured (th#1771's tape, request 3d1b9c6a on minimax-h3 0.4.6): the
+    synthesizer raised a bare ``ValueError`` about ``references[]`` 3 ms into
+    ``self_mint_compile phase=warmup_forward``, the setup boundary re-raised it
+    verbatim, the job path mapped it through the generic FATAL tail, and the
+    hub booked ``error_type='fatal'`` with that exception against the paying
+    request that happened to wake the pod — whose own ``references[]`` were
+    perfectly formed. It read as a payload verdict to every human and every
+    machine downstream and cost hours of investigation in the dispatch path.
+
+    The label is the whole point: it is the worker's ORIGIN claim, made at the
+    boundary that knows it, so the hub can route the blame to the RELEASE at
+    any hub version instead of guessing from an exception class it cannot
+    attribute. The ``phase=`` token is the same one on the activity row, so
+    ``worker_activity_events`` and the request row read one vocabulary.
+
+    Deliberately NOT raised for the LOAD phase (a caller-routed slot can fail
+    there), for anything already typed (``WorkerError`` and its subclasses
+    carry their own origin), or for anything that maps to a non-FATAL status
+    (a warm-phase OOM is still an OOM).
+    """
+
+    def __init__(self, function: str, phase: str, cause: BaseException) -> None:
+        self.function = str(function or "")
+        self.phase = str(phase or "")
+        self.cause = cause
+        detail = str(cause).splitlines()[0] if str(cause) else ""
+        super().__init__(
+            f"phase={self.phase} function={self.function}: "
+            f"{type(cause).__name__}: {detail}".rstrip(": ")
+        )
+
+
 class ModelSlotIdentityError(WorkerError):
     """Dispatched model slot's repo differs from the function's declared ref
     (gw#583, the ie#518 silence).

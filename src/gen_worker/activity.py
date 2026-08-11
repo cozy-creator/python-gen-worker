@@ -322,6 +322,13 @@ class Activity:
             updated_at_unix_ms=int(time.time() * 1000),
         ))
 
+    @property
+    def phase_name(self) -> str:
+        """The phase this activity is reporting right now (pgw#1118). Read by
+        the setup boundary to name WHICH pass failed, so a warm/compile fault
+        can be typed as the release's instead of the caller's."""
+        return self._phase
+
     def phase(self, phase: str, step: int = 0, total: int = 0) -> None:
         self._phase, self._step, self._total = phase, step, total
         self._finish_counters(keep_phase=phase)

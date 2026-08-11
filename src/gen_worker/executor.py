@@ -71,11 +71,13 @@ from .api.errors import (
     ArtifactTransferError,
     CanceledError,
     ComponentSubstitutionError,
+    EndpointSetupFailed,
     GpuSlotUnreachable,
     IllegalCombination,
     ModelSlotIdentityError,
     RetryableError,
     ValidationError,
+    WorkerError,
 )
 from .api.streaming import (
     BatchItemDelta,
@@ -560,6 +562,44 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     detail = _sanitize(str(exc).splitlines()[0] if str(exc) else "")
     label = type(exc).__name__
     return pb.JOB_STATUS_FATAL, f"{label}: {detail}"[:512] if detail else label
+
+
+#: Setup phases in which the worker drives its OWN synthetic forwards. No
+#: request payload reaches any of them — that is the entry condition, and the
+#: reason a fault raised here is the RELEASE's whoever reads it. ``load`` is
+#: deliberately absent: a caller-routed slot can fail to resolve there, and
+#: th#1259's rule is that nothing a payload participates in producing may be
+#: labelled release-owned.
+_WORKER_OWNED_SETUP_PHASES = frozenset({
+    activity_mod.PHASE_TRACE_GRAPH,
+    activity_mod.PHASE_INDUCTOR_COMPILE,
+    activity_mod.PHASE_WARMUP_FORWARD,
+})
+
+
+def _typed_setup_fault(
+    function: str, phase: str, exc: BaseException,
+) -> "Optional[EndpointSetupFailed]":
+    """pgw#1118/th#1773 -> the typed release fault, or None to re-raise as-is.
+
+    Three exclusions, each load-bearing:
+
+    * a phase outside ``_WORKER_OWNED_SETUP_PHASES`` — a payload may
+      participate there, so the origin is not ours to claim;
+    * an exception that already maps to a non-FATAL status — a warm-phase OOM
+      is still an OOM, and re-typing it would fatal a job a bigger card serves;
+    * anything already a ``WorkerError`` — those carry their own origin claim
+      (``ModelSlotIdentityError``, ``ComponentSubstitutionError``, ... are
+      exactly the labels the hub routes on), and wrapping would erase it.
+    """
+    if phase not in _WORKER_OWNED_SETUP_PHASES:
+        return None
+    if isinstance(exc, WorkerError) or not isinstance(exc, Exception):
+        return None
+    status, _ = _map_exception(exc)
+    if status != pb.JOB_STATUS_FATAL:
+        return None
+    return EndpointSetupFailed(function, phase, exc)
 
 
 def _runtime_term_values(
@@ -5971,6 +6011,12 @@ class Executor:
                     self._mark_compile_setup_unavailable(rec, spec, str(exc))
                     self._on_state_change()
                 self._mark_setup_failed(rec, exc, exhausted=exhausted)
+                # pgw#1118/th#1773: name the pod's OWN warm/compile fault
+                # before it leaves this boundary — the job path cannot tell
+                # afterwards, and untyped it becomes the caller's `fatal`.
+                typed = _typed_setup_fault(spec.name, act.phase_name, exc)
+                if typed is not None:
+                    raise typed from exc
                 raise
             if rec.failed is not None:
                 # Recovery (desired-state retry succeeded): lift the
