@@ -138,6 +138,81 @@ def test_the_MINT_gate_refuses_a_cell_below_its_floor(
             if k == activity.KIND_CELL_NUMERICS] == ["refused"]
 
 
+def _pending(tmp_path: Path, decl: Any, publisher: Any = None):
+    """A real `PendingSelfMint` pointing at a real packed cell."""
+    target = tmp_path / "mint" / "cell.tar.gz"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return fleet_cells.PendingSelfMint(
+        family=rig868.FAMILY, arm_token="arm1-" + "a" * 24,
+        ref=f"root/family-{rig868.FAMILY}#cell868",
+        cfg=decl, target=target, mint_root=tmp_path / "mint",
+        publisher=publisher, cache_dir=tmp_path / "cache")
+
+
+def _delegated_mint(tmp_path, monkeypatch, decl, packages, events):
+    """Drive the REAL `adopt_delegated_mint` — the mint's publish gate — with
+    the REAL `arm_aot` and the REAL numerics gate underneath it."""
+    from gen_worker import aot_serve as aot
+
+    monkeypatch.setattr(aot, "runtime_key", lambda: dict(rig868.RUNTIME))
+    monkeypatch.setattr(aot, "_entry_admission_drift", lambda *a, **k: None)
+    monkeypatch.setattr(aot, "_load_package", lambda path, entry="model": packages[entry])
+    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m: "")
+    monkeypatch.setattr(fleet_cells.activity_mod, "emit_event",
+                        lambda kind, detail="", **kw: events.append(
+                            (kind, detail, str(kw.get("phase", "")))))
+    pending = _pending(tmp_path, decl)
+    built = rig868.artifact(tmp_path)
+    pending.target.write_bytes(Path(built).read_bytes())
+    module = rig868.ProbeDenoiser()
+    pipeline = rig868.ProbePipeline(module)
+    return fleet_cells.adopt_delegated_mint(pipeline, pending, pending.target)
+
+
+def test_a_DIVERGENT_cell_is_not_published_by_the_pod_that_minted_it(
+        tmp_path, monkeypatch, declared, events):
+    """§4.32 item 2, end to end through the REAL publish gate.
+
+    `publish_self_mint` can only ship what `adopt_delegated_mint` marked
+    minted, so a refusal here IS the publish refusal.
+
+    HONEST STATUS: this row is GREEN on master too, and that is the point of
+    writing it. The move is a MOVE — the property "a divergent cell does not
+    publish" must survive it unbroken, because §4.32's sequencing rule is that
+    at no commit may zero parity gates exist. Master satisfied it by accident
+    of placement (the gate lived in `arm_aot`, and a mint arms too, so the
+    mint path inherited a check that was really aimed at adopters); this commit
+    satisfies it on purpose, with the check aimed at the mint and nothing left
+    on the adopt path. The rows that go RED are the ones that distinguish those
+    two worlds: the gray band (master ships it), and every adopt row."""
+    packages = {rig868.entry_name(h, w): ProbePackage(cosine=0.99)
+                for h, w in ROWS}
+    minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
+
+    assert minted is None, "a cell that does not reproduce eager was published"
+    # Typed, and the hub can count it: the ladder's own refusal plus the mint's
+    # abort, which is the row that says nothing shipped.
+    assert ("refused" in [p for k, _d, p in events
+                          if k == activity.KIND_CELL_NUMERICS])
+    aborts = [(d, p) for k, d, p in events if k == "self_mint_abort"]
+    assert aborts, "the mint published nothing and said nothing"
+    assert aborts[-1][1] == "numerics_refused"
+    assert "nothing is published" in aborts[-1][0]
+
+
+def test_a_FAITHFUL_cell_passes_the_mint_gate_and_is_publishable(
+        tmp_path, monkeypatch, declared, events):
+    """The control, without which the row above could pass for the wrong
+    reason (an unreadable envelope, a divergence gate, a missing stamp)."""
+    packages = {rig868.entry_name(h, w): ProbePackage() for h, w in ROWS}
+    minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
+
+    assert minted is not None, "a faithful cell was refused by the mint gate"
+    assert minted.cell_key == "cell868"
+    assert [p for k, _d, p in events
+            if k == activity.KIND_CELL_NUMERICS] == ["checked"]
+
+
 # ---------------------------------------------------------------------------
 # PART B — ADOPTION runs no quality gate at all
 # ---------------------------------------------------------------------------
