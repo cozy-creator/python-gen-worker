@@ -38,6 +38,12 @@ _PROTO = _ROOT / "proto" / "worker_scheduler.proto"
 _SOURCES = (
     _ROOT / "src" / "gen_worker" / "executor.py",
     _ROOT / "src" / "gen_worker" / "capability.py",
+    # pgw#1117: the third file declaring a reason token on an exception class.
+    # `_mark_setup_failed` writes `exc.reason` for it exactly the way it does
+    # for the capability gates, so leaving this file out would have made the
+    # NEW token the one case the contract test cannot see — which is precisely
+    # the blindness th#1562/th#1563 wrote this test to end.
+    _ROOT / "src" / "gen_worker" / "models" / "envelope.py",
 )
 
 _FunctionNode = (ast.FunctionDef, ast.AsyncFunctionDef)

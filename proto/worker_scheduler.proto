@@ -1718,6 +1718,21 @@ message FnUnavailable {
   // (pgw#676). It carries axes{streak, last_signal, last_kind}, and O
   // condemns the WORKER on it (th#1205) — the pod is recycled, so the
   // recovery from this one disable is the pod going away, not a re-probe.
+  //
+  // RELEASE/BINDING facts — the declaration and the artifact it is bound to
+  // disagree, identically on every pod. Nothing about the machine, the place
+  // or the payload participates, so O neither re-probes them nor charges
+  // them to host/datacenter health:
+  //   artifact_envelope_exceeded.
+  // `artifact_envelope_exceeded` (th#1777/pgw#1117) is W's PRE-STAGE
+  // precondition: the bound artifact, weighed as it will load, is clearly
+  // larger than the release's declared `vram_gb`. It carries
+  // axes{estimated_vram_gb, declared_vram_gb, artifact_digest, ref,
+  // on_disk_dtype, load_dtype}. It replaces a paid setup OOM with a $0
+  // refusal, so it must NOT be laundered into the fast-failure streak the
+  // OOM fed (th#1259's allowlist): it is ground truth on first sight, and O
+  // marks the function broken directly instead of buying two more pods to
+  // re-derive a deterministic fact.
   string reason = 2;
   string detail = 3; // human-readable elaboration for the admin availability view
   map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}

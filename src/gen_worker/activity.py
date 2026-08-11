@@ -126,6 +126,14 @@ KIND_COMPONENT_MISS = "component_miss"
 # frame_std_min, so ie#634's "corr 0.29 was uploaded and billed" is countable
 # hub-side instead of invisible.
 KIND_OUTPUT_INTEGRITY = "output_integrity"
+# pgw#1117 / th#1777: the pre-stage envelope precondition refused a slot load.
+# `phase=refused` — deterministic and fail-CLOSED: the bound artifact weighs
+# more, as it will load, than the release's declared `vram_gb` envelope, so
+# nothing was staged and no GPU time was spent. `detail` carries BOTH numbers
+# and the artifact digest, which is the whole point: ie#642's OOM banked
+# `CUDA out of memory` and sent an operator measuring the model, when the fact
+# that mattered was that the binding pointed at an fp32 archive clone.
+KIND_ENVELOPE_REFUSAL = "artifact_envelope_exceeded"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"
