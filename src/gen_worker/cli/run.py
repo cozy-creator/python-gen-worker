@@ -34,6 +34,7 @@ if TYPE_CHECKING:  # pgw#1127: the arming import stays deferred at runtime —
     from .. import local_serve
 
 from ..api.errors import CanceledError
+from .. import serve_posture
 from ..models import provision
 from .local_context import build_local_context
 from ..discovery.project import load_project_config
@@ -101,6 +102,14 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         help=(
             "Use only the local CAS — fail with exit 3 instead of fetching "
             "missing model weights from tensorhub / huggingface."
+        ),
+    )
+    p.add_argument(
+        "--eager-only", dest="eager_only", action="store_true",
+        help=(
+            "Serve EAGER ONLY: never arm a compiled cell and never mint one "
+            "(DESIGN-RULINGS §4.32). One invocation is where a cold machine "
+            "would otherwise spend minutes minting."
         ),
     )
     p.add_argument(
@@ -1068,6 +1077,11 @@ def dispatch_request(
 # --------------------------------------------------------------------------
 
 def _handle_run(args: argparse.Namespace) -> int:
+    # pgw#1142 / §4.32 item 4: before anything can arm or mint. `run` does its
+    # setup() per invocation, so the order has to stand before the first one.
+    if bool(getattr(args, "eager_only", False)):
+        serve_posture.apply_command(
+            True, actor="cozy-local-cli", reason="--eager-only")
     try:
         return _run_inner(args)
     except _UsageError as e:

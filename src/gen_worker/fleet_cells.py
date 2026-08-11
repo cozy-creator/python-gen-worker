@@ -69,6 +69,7 @@ from . import activity as activity_mod
 from . import aot_identity, aot_serve, artifact_meta, cell_key, env_seal
 from . import boot_phases as boot_mod
 from . import local_cell_store
+from . import serve_posture
 from . import compile_cache as cc
 from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
 from .models.chunk_cas import sha256_file
@@ -1216,6 +1217,16 @@ def enable_compiled(
     frame that made it, which is why the successful ones were narrated and the
     measured ones never sent.
     """
+    if serve_posture.eager_only():
+        # pgw#1142 / §4.32 item 4. `arming_block` would refuse every arm below
+        # anyway, but the policy would first resolve, download and materialize
+        # a cell to hand to a gate that has already decided — and on a MISS it
+        # would open a self-mint whose child re-derives the refusal minutes and
+        # a full compile later. The order is answered where it costs nothing,
+        # and it is answered with a token, not a bare False.
+        logger.info("fleet-cells: %s", serve_posture.block())
+        return ArmOutcome(
+            armed=False, eager_reason=EagerPhase.OPERATOR_EAGER_ONLY)
     adoptions: List[CellAdoption] = []
     outcome = _arming_policy(
         pipe, cfg, cache_dir, artifact,
@@ -1265,6 +1276,18 @@ def arm_ordered(
     ``stage_artifact`` via ``expected``. ``dynamo`` arms JIT intake.
     ``eager_only`` arms nothing, by order.
     """
+    if serve_posture.eager_only():
+        # pgw#1142 / §4.32 item 4: the operator's order outranks the hub's
+        # Plan, and this is the only place in the ORDERED path where that is
+        # true. It is not a refusal — `OrderedArmError` would fail the attempt
+        # typed, and the operator asked for eager service, not for the function
+        # to go down — so the order is obeyed the way `eager_only` below is
+        # obeyed: arm nothing, serve eager, say which of the two eager orders
+        # it was.
+        logger.info("arm-ordered: %s", serve_posture.block())
+        return ArmOutcome(
+            armed=False, eager_reason=EagerPhase.OPERATOR_EAGER_ONLY)
+
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if bucket and not cc.has_compile_target(pipe, cfg):
         bucket = 0  # bare component slot (gw#627): branchless-eager, not an error

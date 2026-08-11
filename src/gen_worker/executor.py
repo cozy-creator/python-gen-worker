@@ -53,6 +53,7 @@ from . import kernel_path
 from . import mint_budget
 from . import settings_authority
 from . import progress as progress_mod
+from . import serve_posture
 from . import serving_mode as serving_mode_mod
 from . import warmup
 from . import worker_credential
@@ -6946,7 +6947,22 @@ class Executor:
         component_paths: Dict[str, Dict[str, str]] = {
             slot: dict(res.component_paths)
             for slot, res in resolved_slots.items() if res.component_paths}
-        eager_only = self._eager_only_reason()
+        topology_eager = self._eager_only_reason()
+        # pgw#1142 / §4.32 item 4. The order joins the topology reason for
+        # every "do not go looking for a cell" decision below — this is the
+        # gate that runs BEFORE the hub round trip and the materialize, so an
+        # operator who says "stop compiling" is obeyed at the first boot phase
+        # rather than at the arm, having paid for a download in between.
+        #
+        # It deliberately does NOT join the REFUSAL two blocks down. The two
+        # are different in kind: a degree>1 topology CANNOT run the named cell
+        # (the collectives would hang), so a spec naming one is unsatisfiable
+        # and must fail typed; an operator order is a decision that the pod
+        # serve eager, and `arm_ordered` obeys it by arming nothing and
+        # serving — killing the function instead would be the opposite of what
+        # was asked for, and it would not be reversible.
+        ordered_eager = serve_posture.block()
+        eager_only = topology_eager or ordered_eager
         if eager_only and spec.compile is not None:
             logger.info("%s: %s", spec.name, eager_only)
         # pgw#904: the ONLY source of a pre-materialized artifact is a Plan's
@@ -6954,10 +6970,10 @@ class Executor:
         # digest-verified it). The connected snapshot scan that used to run
         # here is deleted — the hub no longer attaches cells to snapshots, and
         # a worker that could pick one would be a second resolver.
-        if arm is not None and arm.backend == "aot_cell" and eager_only:
+        if arm is not None and arm.backend == "aot_cell" and topology_eager:
             raise compile_cache.CompiledExecutionLaneUnavailableError(
                 f"the spec names an exact cell but this pod cannot arm one: "
-                f"{eager_only}")
+                f"{topology_eager}")
         compile_selection = arm.selection if arm is not None else None
         compile_artifact = compile_selection.path if compile_selection else None
         # §4.27 steps 1-3 (pgw#1089/pgw#1090): with no Plan-named artifact, this
@@ -7006,7 +7022,13 @@ class Executor:
             # so it says so, rather than being the ninth way to look like a pod
             # that quietly self-minted.
             boot_adopt.refused(
-                "eager_only", eager_only,
+                # pgw#1142: WHICH eager, named. A pod that never asked because
+                # its topology forbids arming and a pod that never asked
+                # because an operator said so are two different boots, and the
+                # second one can be undone.
+                boot_adopt.OPERATOR_EAGER_ONLY if not topology_eager
+                else "eager_only",
+                eager_only,
                 family=str(getattr(spec.compile, "family", "") or ""),
                 function=str(spec.name or ""))
         # pgw#947: the serving-kernel lane comes from the CELL, and it has to

@@ -114,6 +114,8 @@ message SchedulerMessage {
     // behaves exactly as before. At the coordinated cutover RunJob is deleted
     // and field 2 + the name "run_job" become `reserved` (§1.27(f)).
     RunAttempt   run_attempt   = 7;
+    // §4.32 item 4 / th#1808 / pgw#1142: the operator's eager-only command.
+    ServePosture serve_posture = 8;
   }
 }
 
@@ -1781,4 +1783,39 @@ message Drain {
 message TokenRefresh {
   string token = 1;           // replacement worker JWT
   int64  expires_at_unix = 2; // exp claim of the replacement (observability)
+}
+
+// ---------------------------------------------------------------------------
+// Serve posture (DESIGN-RULINGS §4.32 item 4)
+// ---------------------------------------------------------------------------
+
+// Orchestrator -> worker: the OPERATOR's eager-only command. Paul, §4.32 item
+// 4: *"The consumer should have the ability to turn off compile entirely, and
+// serve-eager only, if the compile is broken or they just don't care."*
+//
+// It is a COMMAND, not config and not an env var (§1.17): whole-worker,
+// runtime, and REVERSIBLE in both directions on a live stream — "the compile is
+// broken" is discovered while serving, and so is "it was not the compile".
+//
+// Distinct from the two eager postures that already exist, deliberately:
+//   * `ExecutionSpec`'s `STEADY_BACKEND_EAGER_ONLY` is PLAN-carried — chosen
+//     per dispatch, before the pod is serving, and reports
+//     `hub_ordered_eager`;
+//   * §4.31's sticky de-arm is AUTOMATIC and per-cell — a cell-attributable
+//     failure, evidence, irreversible for the boot.
+// This one is operator-explicit, whole-worker and reversible, and it reports
+// its own token (`operator_eager_only`) so a suppressed pod's telemetry is
+// never mistakable for a broken adopt path.
+//
+// No reply message; the worker emits a typed activity event on each transition.
+// Additive proto3 oneof field: a worker that predates it ignores it.
+message ServePosture {
+  // true  = serve eager only: arm nothing, mint nothing, and answer every
+  //         request from the eager forward even where a cell is already armed
+  //         (the arm is NOT unwrapped, which is what makes false reversible).
+  // false = release the suppression; already-armed cells serve compiled again
+  //         on the next request, and later arming decisions run normally.
+  bool   eager_only = 1;
+  string reason     = 2; // operator's words, carried into the worker's event
+  string actor      = 3; // who ordered it (admin principal / "cozy-local")
 }

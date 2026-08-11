@@ -31,6 +31,7 @@ from typing import Any, Optional, Tuple
 
 from . import aot_serve
 from . import compile_cache
+from . import serve_posture
 from .cell_adopt import EagerPhase
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,11 @@ POSTURE_UNCOMPILED = EagerPhase.UNCOMPILED.value
 POSTURE_GRAPH_BREAK = EagerPhase.GRAPH_BREAK.value
 #: pgw#1082: the declaration named a dynamic range its own inputs leave.
 POSTURE_DECLARED_RANGE_EXCEEDED = EagerPhase.DECLARED_RANGE_EXCEEDED.value
+#: pgw#1142 / §4.32 item 4: an operator ordered this worker eager-only. The one
+#: posture in this list that is a DECISION rather than a condition, and the one
+#: that can be taken back — a request row carrying it says the platform was
+#: asked for eager, not that anything failed to arm.
+POSTURE_OPERATOR_EAGER_ONLY = EagerPhase.OPERATOR_EAGER_ONLY.value
 
 #: Step-count field names, in precedence order. Matches warmup._STEP_FIELDS so
 #: the boot warmup and the served request agree on what "steps" means.
@@ -236,6 +242,22 @@ def resolve(
     fell_back = bool(reason)
     if not reason and mode == MODE_EAGER:
         reason = str(eager_posture or "").strip()
+    if serve_posture.eager_only():
+        # pgw#1142 / §4.32 item 4: an operator ordered eager. The cell may
+        # still be ARMED — deliberately, so the order can be taken back
+        # without a re-arm — and `classify_mode` reads exactly that armed
+        # artifact, so without this the request would report `aot_cell` for a
+        # forward the artifact never ran. That is the wire lie pgw#1082/#1093
+        # spent two pods closing, arriving from the opposite direction.
+        #
+        # It outranks the per-request fallback classes because it PRECEDES
+        # them: nothing was dispatched to a compiled callable, so no guard
+        # could miss and no ingress could refuse. And it is not a fallback —
+        # nothing fell back, there was nothing to fall back FROM — so the
+        # compiled-vs-eager comparison keeps its meaning.
+        mode = MODE_EAGER
+        reason = POSTURE_OPERATOR_EAGER_ONLY
+        fell_back = False
     return ServedIdentity(
         serving_mode=mode,
         served_cell_ref=str(active_compile_ref or "").strip(),

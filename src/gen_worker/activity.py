@@ -87,6 +87,14 @@ KIND_SHAPE_GAP = "shape_gap"
 # ``detail`` naming the identifiers (ref/function/label/request) + the
 # exception. Fail-soft BEHAVIOR is unchanged — these are confessions.
 KIND_SERVE_DEGRADE = "serve_degrade"
+# pgw#1142 / §4.32 item 4: the OPERATOR's eager-only order changed state on this
+# worker. Two phases, both transitions and neither a degradation:
+# `eager_only_engaged` (compiled serving suppressed — armed cells stay armed and
+# are not called) and `eager_only_released`. Deliberately its own kind rather
+# than a `serve_degrade` phase: every other member of that kind is something
+# that went wrong, and an operator exercising a supported control must not land
+# in a defect population the fleet reads as breakage.
+KIND_SERVE_POSTURE = "serve_posture"
 KIND_LORA_HYGIENE = "lora_hygiene"
 # pgw#794: the serve-side adapter-fidelity gate. `phase=refused` is a
 # fail-CLOSED decision (the request also gets a typed error); `phase=degraded`

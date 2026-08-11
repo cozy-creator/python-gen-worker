@@ -99,7 +99,18 @@ GATE_REASONS: Tuple[str, ...] = (
     # boots without asking. Correct, and previously indistinguishable from a
     # boot-adopt that asked and was refused.
     "eager_only",
+    # pgw#1142 / §4.32 item 4: an OPERATOR ordered this worker eager-only, so
+    # the boot did not ask for a cell it is forbidden to call. Distinct from
+    # `eager_only` above because that one is a property of the pod that no
+    # command can lift, and this one is a decision that can be taken back —
+    # the same pod, re-asked after the order is released, adopts normally.
+    "operator_eager_only",
 )
+
+#: The reason token for :data:`GATE_REASONS`' operator entry. Named so the
+#: executor references the vocabulary instead of re-typing the literal — the
+#: drift channel `EagerPhase` was created to close, one module over.
+OPERATOR_EAGER_ONLY = "operator_eager_only"
 
 #: Step 1.5 (pgw#1127 S2) — THIS MACHINE's own store, addressed by the DERIVED
 #: key, before the hub is asked at all. §4.28: *"local cell, local repo-CAS,

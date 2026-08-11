@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Optional
 import msgspec
 
 from ..api.errors import CanceledError
+from .. import serve_posture
 from ..discovery.names import slugify_name
 from ..models import memory
 from ..models.residency import Residency, Tier
@@ -160,6 +161,17 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
             "Run setup() for every booted class at startup (load all their "
             "models up front) instead of lazily on first invoke. Useful for "
             "fail-fast / pre-warming; default is lazy per-function loading."
+        ),
+    )
+    p.add_argument(
+        "--eager-only", dest="eager_only", action="store_true",
+        help=(
+            "Serve EAGER ONLY: never arm a compiled cell and never mint one "
+            "(DESIGN-RULINGS §4.32). For a broken compile, or a machine whose "
+            "owner does not want minutes of it spent compiling. Reversible "
+            "while the serve runs — send {\"posture\":{\"eager_only\":false}} "
+            "on the socket. NOTE: unrelated to --eager, which is about when "
+            "setup() runs, not about how forwards execute."
         ),
     )
     p.add_argument(
@@ -682,6 +694,8 @@ def _parse_frame(line: bytes) -> Dict[str, Any]:
     Kinds:
       - ``{"kind":"request","function","payload","request_id"}``
       - ``{"kind":"cancel","request_id"}``  (control frame: ``{"cancel":{...}}``)
+      - ``{"kind":"posture","eager_only","reason"}``
+        (control frame: ``{"posture":{"eager_only":true,"reason":"..."}}``)
       - ``{"kind":"error","message"}``
     """
     try:
@@ -690,6 +704,22 @@ def _parse_frame(line: bytes) -> Dict[str, Any]:
         return {"kind": "error", "message": f"request is not valid JSON: {e}"}
     if not isinstance(obj, dict):
         return {"kind": "error", "message": "request must be a JSON object"}
+    if "posture" in obj:
+        # pgw#1142 / §4.32 item 4: the cozy-local half of the eager-only
+        # command. It rides the control-frame shape `cancel` already
+        # established rather than opening a second channel — one socket, one
+        # protocol, and `cozy` learns one more frame instead of a new client.
+        p = obj.get("posture") or {}
+        if not isinstance(p, dict) or not isinstance(p.get("eager_only"), bool):
+            return {
+                "kind": "error",
+                "message": "posture.eager_only (boolean) is required",
+            }
+        return {
+            "kind": "posture",
+            "eager_only": bool(p["eager_only"]),
+            "reason": str(p.get("reason") or ""),
+        }
     if "cancel" in obj:
         c = obj.get("cancel") or {}
         rid = c.get("request_id") if isinstance(c, dict) else None
@@ -735,6 +765,18 @@ def _serve_stdin(endpoint: _Endpoint, stop: threading.Event) -> None:
             # stdin requests are sequential — nothing is in-flight to cancel.
             found = endpoint.interrupt_request(frame.get("request_id"))
             _write_response_line(_emit_stdout, {"ok": True, "canceled": found})
+            continue
+        if frame["kind"] == "posture":
+            changed = serve_posture.apply_command(
+                bool(frame["eager_only"]),
+                actor="cozy-local-cli",
+                reason=str(frame.get("reason") or ""),
+            )
+            current = serve_posture.order()
+            _write_response_line(_emit_stdout, {
+                "ok": True, "eager_only": current.active, "changed": changed,
+                "posture": current.describe(),
+            })
             continue
         rid = frame.get("request_id")
         if frame.get("stream"):
@@ -875,6 +917,27 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
         except OSError:
             pass
         return
+    if frame["kind"] == "posture":
+        # pgw#1142 / §4.32 item 4, the RUNTIME half: a warm serve holding a
+        # broken cell can be told to stop using it without being restarted,
+        # and told to use it again afterwards. The reply reports the posture
+        # that now stands, so a client never has to infer it.
+        changed = serve_posture.apply_command(
+            bool(frame["eager_only"]),
+            actor="cozy-local-cli",
+            reason=str(frame.get("reason") or ""),
+        )
+        current = serve_posture.order()
+        try:
+            _send({
+                "ok": True,
+                "eager_only": current.active,
+                "changed": changed,
+                "posture": current.describe(),
+            })
+        except OSError:
+            pass
+        return
     if frame["kind"] == "error":
         try:
             _send(_error_envelope("usage", frame["message"]))
@@ -987,6 +1050,14 @@ def _serve_inner(args: argparse.Namespace) -> int:
     candidates = _filter_candidates_by_function(
         candidates, getattr(args, "functions", None),
     )
+
+    # pgw#1142 / §4.32 item 4: the order is installed BEFORE setup(), because
+    # setup() is where a cozy-local serve arms and (on a miss) mints. A flag
+    # that only took effect afterwards would still have spent the compile the
+    # operator asked us not to spend.
+    if bool(getattr(args, "eager_only", False)):
+        serve_posture.apply_command(
+            True, actor="cozy-local-cli", reason="--eager-only")
 
     # 2. Boot the endpoint — setup() once per class, hold instances warm.
     endpoint = _Endpoint(

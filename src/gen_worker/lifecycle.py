@@ -16,6 +16,7 @@ from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import content_credentials
 from . import receipts
+from . import serve_posture
 from . import mint_goal as mint_goal_mod
 from . import progress as progress_mod
 from . import worker_goals
@@ -1052,6 +1053,18 @@ class Lifecycle:
                 "ignoring retired ModelOp (pgw#1032): hot compile-cache "
                 "adoption is gone; a cell arrives only as a Plan's exact "
                 "Arm.artifact (pgw#904) — the hub never pushes one")
+        elif which == "serve_posture":
+            # pgw#1142 / §4.32 item 4: the operator's eager-only command.
+            # Applied SYNCHRONOUSLY and unconditionally — it touches one
+            # process-global order and never blocks, so there is no state in
+            # which a worker is "too busy" to stop using a broken cell, and
+            # in-flight requests pick it up at their next compiled call.
+            # Idempotent, so the hub replaying it on reconnect is free.
+            serve_posture.apply_command(
+                bool(msg.serve_posture.eager_only),
+                actor=str(msg.serve_posture.actor or ""),
+                reason=str(msg.serve_posture.reason or ""),
+            )
         elif which == "drain":
             # The hub asked, explicitly, for this budget on this drain — an
             # operator budget on a command, which pgw#887 keeps.
