@@ -84,11 +84,8 @@ _EVIDENCE = "evidence"
 _EVIDENCE_MSGS = ("activity_update", "boot_phase")
 
 _MAX_REDIRECT_HOPS = 3
-# UNAUTHENTICATED can be transient hub-side (duplicate stream teardown, pg
-# blip): exit only when failures persist across a real time window.
-#
 # pgw#869 — WHAT THIS LADDER MAY AND MAY NOT JUDGE. A rejected credential is a
-# verdict about US; an ABSENT hub is a verdict about nothing. Before this
+# verdict about US; an ABSENT hub is a verdict about nothing. Before that
 # change the ladder could not tell them apart, and the difference is the whole
 # outbox: a worker that outlives a hub outage ages past its 30 min JWT, redials,
 # is refused because its token expired, and DIES WITH A FULL QUEUE — every
@@ -96,11 +93,28 @@ _MAX_REDIRECT_HOPS = 3
 # `_auth_rejection_is_fatal`: an expired presented credential never reaches this
 # ladder.
 #
-# The 3/60 s pair is a magic number and is left ONLY because it now governs the
-# genuinely-about-us case that #372's tests pin. Replacing it with an
-# evidence-keyed rule is filed separately (pgw#873), not smuggled in here.
-_AUTH_FAILURE_EXIT_THRESHOLD = 3
-_AUTH_FAILURE_EXIT_WINDOW_S = 60.0
+# pgw#873 — AND THE SURVIVING RULE IS EVIDENCE-KEYED, NOT COUNT-KEYED. The old
+# `3 consecutive over 60 s` pair was the last magic number in the reconnect
+# path, and both premises under it were measured false:
+#
+#   * the "pg blip" it was patient for is unreachable through this code. The
+#     hub returns `codes.Unavailable` for every transient store error and
+#     reserves `Unauthenticated` for genuine credential verdicts
+#     (`connect_worker.go:341-349`, #539). Waiting out a window here only
+#     delays a verdict that cannot change.
+#   * on a POD the worker is not the actuator at all. `worker_wedge.go`
+#     terminates the pod on repeated auth rejects from the side that can see
+#     it — it revokes the token and closes the pod-hour ledger, neither of
+#     which a worker can do for itself, and a worker that cannot reach the hub
+#     cannot reap itself anyway. A worker-side exit there is a duplicate that
+#     can only fire EARLIER than the authority, and under th#1384 a MINTING pod
+#     that exits takes its mint with it.
+#
+# So: a pod NEVER self-terminates on auth. A pod-less worker (`worker_wedge.go`
+# returns immediately on an empty `RunpodPodID`, so it has no hub-side actuator
+# at all) escalates on EVIDENCE — the identical verdict on the identical
+# credential, seen twice — which is decidable from the `jti` and the rejection
+# details, with nothing counted and no window waited.
 
 #: pgw#848: how long before its own expiry a worker starts SAYING SO. Wider
 #: than the hub's ~80%-of-TTL rotation point (24 min of a 30 min TTL, i.e.
@@ -942,11 +956,12 @@ class Transport:
         self._connected = asyncio.Event()
         self._clean_close = False
         self.reconnect_delays: List[float] = []  # observability + tests
-        self._consecutive_auth_failures = 0
-        self._first_auth_failure_at: Optional[float] = None
-        #: pgw#869: the `jti` the streak above is about. A rotation makes the
-        #: accumulated evidence stale, so the streak restarts.
-        self._auth_credential_id = ""
+        #: pgw#873: the (jti, details) verdicts this worker has already been
+        #: handed. A pod-less worker escalates when one REPEATS — same
+        #: credential, same answer — because that is the evidence that the
+        #: verdict cannot change. A rotation retires the old key with the old
+        #: credential, so nothing has to be reset by hand.
+        self._auth_verdicts: set = set()
         #: Credentials whose expired-rejection has already been confessed.
         self._expired_rejection_reported: set = set()
         #: pgw#848: the last remaining-lifetime this worker reported, so a
@@ -960,11 +975,6 @@ class Transport:
         self._dial_started: float = 0.0
         # gw#640: (message kind, exception class) already dialed to the hub.
         self._reported_handler_failures: set = set()
-        # Latest hub-pushed worker JWT (TokenRefresh, contract §1 rotation).
-        # Used by the live connection's successor dials: reconnects always
-        # present the newest credential; the boot-time settings token is only
-        # the pre-rotation fallback.
-        self._worker_jwt: Optional[str] = None
         # pgw#763: a supervisor-requested stream cycle (compute child respawn
         # needs a fresh Hello). Cleared at the start of each connection, so a
         # request set BEFORE a connection is satisfied by that connection's
@@ -985,11 +995,18 @@ class Transport:
 
     @property
     def current_worker_jwt(self) -> str:
-        """Newest worker credential: hub-rotated token, else the boot token."""
-        # pgw#848: ONE source. `_worker_jwt` is this stream's rotation cache;
-        # `worker_credential` is the process-wide truth every hub dial reads.
+        """Newest worker credential: hub-rotated token, else the boot token.
 
-        return (self._worker_jwt or worker_credential.current() or "").strip()
+        pgw#893 §2 / pgw#881 A: ONE source, and it is the process-wide one.
+        This stream used to keep its own `_worker_jwt` cache and read it
+        FIRST, which inverted the precedence pgw#848 exists to establish: the
+        rotation handler assigned the cache and only then published to
+        `worker_credential` — inside a swallowing `except` — so a publish
+        that failed left this stream authenticating happily with a token no
+        other dial in the process could see. That is precisely the split that
+        wedged attempts 16 and 17, restored one level down.
+        """
+        return (worker_credential.current() or "").strip()
 
     # ---- drain / shutdown --------------------------------------------------
 
@@ -1049,7 +1066,7 @@ class Transport:
 
     def _metadata(self) -> Optional[List[Tuple[str, str]]]:
 
-        token = (self._worker_jwt or worker_credential.current() or "").strip()
+        token = self.current_worker_jwt
         if not token:
             return None
         self._report_credential_age(token)
@@ -1059,7 +1076,7 @@ class Transport:
 
     def _presented_credential(self) -> str:
 
-        return (self._worker_jwt or worker_credential.current() or "").strip()
+        return self.current_worker_jwt
 
     @staticmethod
     def _credential_claims(token: str) -> dict:
@@ -1107,41 +1124,61 @@ class Transport:
         the hub, and it does not have to.
 
         A LIVE (or absent) credential refused by an answering hub IS about us —
-        revoked, superseded, misconfigured — and keeps the existing ladder. The
-        streak resets whenever the presented credential CHANGES, because a
-        rotation means the next attempt genuinely differs.
+        revoked, superseded, misconfigured.
+
+        **pgw#873: what happens then depends on whether anyone ELSE can act.**
+        On a pod, `worker_wedge.go` is the actuator and this worker is not: it
+        revokes and terminates from the side that can see the pod, so the
+        worker keeps retrying and lets the authority decide (a minting pod that
+        exits early takes its mint with it). A pod-less worker has no such
+        authority — `noteWedgeStreak` returns immediately on an empty
+        `RunpodPodID` — so it is the only actuator there is, and it escalates
+        on EVIDENCE rather than on a count: the same `jti` handed the same
+        verdict twice cannot be waited out. There is no threshold and no
+        window; a rotation retires the evidence with the credential it was
+        about.
         """
         token = self._presented_credential()
         exp = float(self._credential_claims(token).get("exp") or 0.0)
         if exp > 0 and exp <= time.time():
-            self._consecutive_auth_failures = 0
-            self._first_auth_failure_at = None
             self._report_expired_rejection(token, details, exp)
             return False
 
         cred = self._credential_id(token)
-        if cred != self._auth_credential_id:
-            # A different credential is a different attempt: the evidence the
-            # streak had accumulated was about the old one.
-            self._auth_credential_id = cred
-            self._consecutive_auth_failures = 0
-            self._first_auth_failure_at = None
-
-        now = time.monotonic()
-        if self._first_auth_failure_at is None:
-            self._first_auth_failure_at = now
-        self._consecutive_auth_failures += 1
+        verdict = (cred, details)
+        repeated = verdict in self._auth_verdicts
+        self._auth_verdicts.add(verdict)
+        pod = str(getattr(self._settings, "runpod_pod_id", "") or "").strip()
         logger.error(
-            "stream rejected UNAUTHENTICATED (%d consecutive over %.0fs) while "
-            "presenting a LIVE credential — this is a verdict about this "
-            "worker, not about the hub's availability: %s",
-            self._consecutive_auth_failures,
-            now - self._first_auth_failure_at, details,
+            "stream rejected UNAUTHENTICATED while presenting a LIVE "
+            "credential (jti=%s%s) — this is a verdict about this worker, not "
+            "about the hub's availability: %s",
+            cred or "<undecodable>", ", REPEATED" if repeated else "", details,
         )
-        return (
-            self._consecutive_auth_failures >= _AUTH_FAILURE_EXIT_THRESHOLD
-            and now - self._first_auth_failure_at >= _AUTH_FAILURE_EXIT_WINDOW_S
-        )
+        if pod:
+            # The hub owns the actuator for a pod. Say so once per verdict so
+            # the silence is attributable off-pod (pgw#824).
+            if not repeated:
+                self._report_auth_verdict_deferred(cred, details, pod)
+            return False
+        return repeated
+
+    def _report_auth_verdict_deferred(
+        self, cred: str, details: str, pod: str,
+    ) -> None:
+        """A refusal this worker deliberately does NOT act on is still a fact
+        the hub should hold — a swallowed one is pgw#824's defect class."""
+        try:
+            activity_mod.emit_event(
+                "worker_credential",
+                f"live credential refused by the hub (jti={cred or '<undecodable>'}"
+                f"): {details} — NOT self-terminating: pod {pod} is wedge-reaped "
+                f"by the hub, which can revoke the token and close the pod-hour "
+                f"ledger. Retrying (pgw#873).",
+                phase="auth_verdict_deferred_to_hub",
+            )
+        except Exception:  # noqa: BLE001 — telemetry never breaks a connect
+            logger.debug("auth-verdict event failed", exc_info=True)
 
     def _report_expired_rejection(
         self, token: str, details: str, exp: float,
@@ -1404,9 +1441,10 @@ class Transport:
                 if code == grpc.StatusCode.UNAUTHENTICATED:
                     if self._auth_rejection_is_fatal(details):
                         raise FatalTransportError(
-                            f"authentication rejected {self._consecutive_auth_failures} times "
-                            f"over {time.monotonic() - (self._first_auth_failure_at or 0):.0f}s "
-                            f"while presenting a live credential: {details}"
+                            f"the same live credential was handed the same "
+                            f"authentication verdict twice, and this worker "
+                            f"runs on no pod, so no hub-side wedge can act for "
+                            f"it (pgw#873): {details}"
                         ) from e
                 elif code == grpc.StatusCode.FAILED_PRECONDITION:
                     if details.startswith("not_leader:"):
@@ -1552,9 +1590,7 @@ class Transport:
             self._connected_at = time.monotonic()
             self._last_send_at = self._connected_at
             self._note_connected(self._connected_at)
-            self._consecutive_auth_failures = 0
-            self._first_auth_failure_at = None
-            self._auth_credential_id = ""
+            self._auth_verdicts.clear()               # pgw#873: healed
             self._expired_rejection_reported.clear()   # pgw#869: healed
             self._connected.set()
             logger.info("connected to %s (HelloAck ok)", target)
@@ -1711,20 +1747,23 @@ class Transport:
                 # rotation also clears any stale-token auth strikes.
                 token = (msg.token_refresh.token or "").strip()
                 if token:
-                    self._worker_jwt = token
-                    # pgw#848: publish it where EVERY hub dial reads, not just
-                    # this stream. The attestation carrier opens its own
-                    # Connect and used to authenticate with the frozen boot
-                    # token — which is what wedged attempts 16 and 17.
-                    try:
-
-                        worker_credential.install(
-                            token, float(msg.token_refresh.expires_at_unix or 0))
-                    except Exception:  # noqa: BLE001 — never break a rotation
-                        logger.debug("credential publish failed", exc_info=True)
-                    self._consecutive_auth_failures = 0
-                    self._first_auth_failure_at = None
-                    self._auth_credential_id = ""
+                    # pgw#848: publish where EVERY hub dial reads. The
+                    # attestation carrier opens its own Connect and used to
+                    # authenticate with the frozen boot token — which is what
+                    # wedged attempts 16 and 17.
+                    #
+                    # pgw#893 §2: this is the ONLY place the rotation lands.
+                    # It used to be preceded by a stream-local assignment and
+                    # wrapped in `except Exception: pass`, so a failed publish
+                    # was invisible AND survivable — this stream would carry
+                    # on with a credential nothing else in the process held.
+                    # `install` is an assignment under a lock and cannot fail;
+                    # if it ever does, the rotation genuinely did not happen
+                    # and the transport's own error path is the honest place
+                    # to learn it.
+                    worker_credential.install(
+                        token, float(msg.token_refresh.expires_at_unix or 0))
+                    self._auth_verdicts.clear()
                     self._expired_rejection_reported.clear()
                     logger.info(
                         "worker JWT rotated by hub (exp=%d)",

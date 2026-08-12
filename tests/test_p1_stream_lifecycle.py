@@ -301,35 +301,38 @@ def test_protocol_mismatch_is_failed_precondition() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_auth_rejection_exits_instead_of_spinning(monkeypatch) -> None:
-    # UNAUTHENTICATED can be transient hub-side; the fatal exit is gated on
-    # BOTH a failure count and an elapsed window (#372). Shrink the window
-    # so the test observes the exit quickly.
-    import gen_worker.transport as transport_mod
-
-    monkeypatch.setattr(transport_mod, "_AUTH_FAILURE_EXIT_WINDOW_S", 0.3)
+def test_auth_rejection_exits_a_POD_LESS_worker_instead_of_spinning() -> None:
+    """A pod-less worker is the only actuator there is (`worker_wedge.go`
+    returns immediately on an empty `RunpodPodID`), so the same verdict on the
+    same credential twice is terminal. pgw#873 deleted the count-and-window
+    gate this test used to shrink — there is no clock left to monkeypatch."""
     with custom_scheduler_server(
         lambda: FakeScheduler(reject_unauthenticated=True),
     ) as (_scheduler, harness, _port):
         assert harness.join(timeout=_TIMEOUT) == 1
 
 
-def test_auth_rejection_within_window_keeps_retrying() -> None:
-    """3 quick UNAUTHENTICATED strikes must NOT kill the worker while the
-    exit window has not elapsed — a hub pg blip is survivable (#372)."""
+def test_auth_rejection_NEVER_exits_a_POD(monkeypatch) -> None:
+    """pgw#873 RED, replacing `..._within_window_keeps_retrying`. That test's
+    premise — "a hub pg blip is survivable" (#372) — is measured DEAD: the
+    hub returns `Unavailable` for every transient store error and reserves
+    `Unauthenticated` for genuine verdicts (#539). What survives is a
+    different and stronger rule: on a POD the hub owns the actuator, so the
+    worker retries indefinitely no matter how many rejections it collects, and
+    a minting pod is never killed by its own reconnect loop."""
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod-p1-auth")
     with custom_scheduler_server(
         lambda: FakeScheduler(reject_unauthenticated=True),
     ) as (_scheduler, harness, _port):
-        # pgw#795: retries are counted as PROGRESS, not raced against a 3s
-        # clock. The worker exiting is the definitive failure (and needs no
-        # clock); a worker that is alive but has stopped retrying stalls out.
+        # pgw#795: retries are counted as PROGRESS, not raced against a clock.
         await_count(
             lambda: len(harness.worker.transport.reconnect_delays),
-            4,
-            what="reconnect attempts inside the auth window",
+            6,
+            what="reconnect attempts by a pod the hub will reap",
             cadence=Cadence(),
             gone=lambda: (
-                None if harness.alive else "the worker exited inside the auth window"
+                None if harness.alive
+                else "the pod self-terminated on auth — that is the hub's job"
             ),
         )
         assert harness.exit_code is None

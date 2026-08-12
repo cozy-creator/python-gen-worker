@@ -45,17 +45,14 @@ import base64
 import hashlib
 import json
 import time
+from pathlib import Path
 from typing import List, Tuple
 
 from gen_worker import activity as activity_mod
 from gen_worker import worker_credential
 from gen_worker.config import load_settings
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.transport import (
-    _AUTH_FAILURE_EXIT_WINDOW_S,
-    SendQueue,
-    Transport,
-)
+from gen_worker.transport import SendQueue, Transport
 
 from harness.hub_double import hub_double, is_ready
 
@@ -394,8 +391,12 @@ def _jwt(exp_unix: float, jti: str = "jti-1") -> str:
     return f"{seg({'alg': 'none'})}.{seg({'exp': exp_unix, 'jti': jti})}.sig"
 
 
-def _transport() -> Transport:
-    return Transport(load_settings(worker_id="auth-probe"), object())
+def _transport(pod: str = "") -> Transport:
+    """pgw#873: `runpod_pod_id` decides who the actuator is, so it is the axis
+    every auth-ladder row below varies. Empty = a pod-less worker, which is the
+    only shape with no hub-side wedge behind it."""
+    return Transport(
+        load_settings(worker_id="auth-probe", runpod_pod_id=pod), object())
 
 
 def test_an_expired_credential_refused_by_the_hub_is_never_fatal() -> None:
@@ -420,8 +421,9 @@ def test_an_expired_credential_refused_by_the_hub_is_never_fatal() -> None:
         t = _transport()
         for _ in range(50):
             assert t._auth_rejection_is_fatal("invalid worker token state") is False
-        # and the ladder is not merely out-run — it is UNREACHABLE.
-        assert t._consecutive_auth_failures == 0
+        # and the ladder is not merely out-run — it is UNREACHABLE: an
+        # expired credential never even records a verdict (pgw#873).
+        assert t._auth_verdicts == set()
     finally:
         worker_credential.reset()
 
@@ -451,41 +453,77 @@ def test_an_expired_rejection_confesses_once_per_credential() -> None:
     assert "jti-A" in rows[0].detail and "jti-B" in rows[1].detail
 
 
-def test_a_LIVE_credential_refused_by_an_answering_hub_still_escalates() -> None:
-    """The other half must not regress: revoked/superseded/misconfigured is a
-    verdict about this worker, and a pod that can never re-join must not spin
-    forever. Only the expired case was exempted."""
+def test_a_LIVE_credential_refused_TWICE_escalates_on_a_POD_LESS_worker() -> None:
+    """pgw#873 RED: the other half must not regress — revoked/superseded/
+    misconfigured is a verdict about this worker, and a worker that can never
+    re-join must not spin forever. But it escalates on EVIDENCE, not on a
+    count over a window: the SAME verdict on the SAME credential is the proof
+    that waiting cannot change it, and the first one is not."""
     worker_credential.reset()
     try:
         worker_credential.install(_jwt(time.time() + 3600.0), 0.0)
         t = _transport()
-        t._auth_rejection_is_fatal("invalid worker token state")
-        assert t._consecutive_auth_failures == 1
-        t._auth_rejection_is_fatal("invalid worker token state")
-        assert t._consecutive_auth_failures == 2
-        # the window is what the third strike is measured against; backdate it
-        # rather than sleeping 60s for a clock this issue does not own.
-        t._first_auth_failure_at -= _AUTH_FAILURE_EXIT_WINDOW_S + 1.0
+        assert t._auth_rejection_is_fatal("invalid worker token state") is False
+        # a DIFFERENT verdict on the same credential is new evidence, not a
+        # repeat — it is not what this rule escalates on.
+        assert t._auth_rejection_is_fatal("worker not expected") is False
         assert t._auth_rejection_is_fatal("invalid worker token state") is True
     finally:
         worker_credential.reset()
 
 
-def test_a_rotation_restarts_the_evidence() -> None:
-    """The streak is about a credential. A different one is a different
-    attempt, so the evidence accumulated against the old one is stale."""
+def test_a_POD_never_self_terminates_on_auth_and_says_why() -> None:
+    """pgw#873 RED: `worker_wedge.go` is the actuator for a pod — it revokes
+    the token and closes the pod-hour ledger from the side that can see the
+    pod. A worker-side exit can only fire EARLIER than the authority, and a
+    minting pod that exits takes its mint with it. The refusal is still a hub
+    ROW, because a refusal nobody acts on is not a refusal nobody records
+    (pgw#824)."""
+    worker_credential.reset()
+    captured: List[pb.ActivityUpdate] = []
+    prior = activity_mod._sink
+    activity_mod._sink = captured.append
+    try:
+        worker_credential.install(_jwt(time.time() + 3600.0, "jti-pod"), 0.0)
+        t = _transport(pod="pod-abc123")
+        for _ in range(20):
+            assert t._auth_rejection_is_fatal("invalid worker token state") is False
+    finally:
+        activity_mod._sink = prior
+        worker_credential.reset()
+
+    rows = [u for u in captured
+            if u.phase == "auth_verdict_deferred_to_hub"]
+    assert len(rows) == 1, f"once per verdict, got {len(rows)}"
+    assert "jti-pod" in rows[0].detail and "pod-abc123" in rows[0].detail
+
+
+def test_a_rotation_retires_the_evidence() -> None:
+    """The evidence is about a credential. A different one is a different
+    attempt, so what accumulated against the old one cannot condemn it."""
     worker_credential.reset()
     try:
         worker_credential.install(_jwt(time.time() + 3600.0, "jti-old"), 0.0)
         t = _transport()
-        t._auth_rejection_is_fatal("invalid worker token state")
-        t._auth_rejection_is_fatal("invalid worker token state")
-        assert t._consecutive_auth_failures == 2
+        assert t._auth_rejection_is_fatal("invalid worker token state") is False
         worker_credential.install(_jwt(time.time() + 3600.0, "jti-new"), 0.0)
-        t._auth_rejection_is_fatal("invalid worker token state")
-        assert t._consecutive_auth_failures == 1
+        # would have been the fatal repeat under the old credential
+        assert t._auth_rejection_is_fatal("invalid worker token state") is False
+        assert t._auth_rejection_is_fatal("invalid worker token state") is True
     finally:
         worker_credential.reset()
+
+
+def test_the_last_magic_number_in_the_reconnect_path_is_gone() -> None:
+    """pgw#873: nothing measured said 3, and nothing said 60 s. A kill decision
+    keyed on a fixed duration is the no-magic-timeouts doctrine's defect class,
+    and this was the last one on this path."""
+    from gen_worker import transport as transport_mod
+
+    assert not hasattr(transport_mod, "_AUTH_FAILURE_EXIT_THRESHOLD")
+    assert not hasattr(transport_mod, "_AUTH_FAILURE_EXIT_WINDOW_S")
+    source = Path(transport_mod.__file__).read_text()
+    assert "_consecutive_auth_failures" not in source
 
 
 def test_shedding_is_bounded_and_reports_itself() -> None:

@@ -4,7 +4,9 @@ The defect this exists to delete is a SPLIT, not a value. The worker held two
 credentials with different lifetimes:
 
 * ``transport._worker_jwt`` — rotated by the hub at ~80 % of TTL over the
-  scheduler stream, and therefore current;
+  scheduler stream, and therefore current (that stream-local cache is DELETED
+  as of pgw#893 §2: the transport now reads and writes this module only, so
+  there is no second home left to diverge);
 * ``Settings.bootstrap_worker_jwt`` — the boot token, **frozen at pod create and never
   updated by anything**, and reachable from a code path that runs forever.
 
