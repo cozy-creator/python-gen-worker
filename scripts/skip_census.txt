@@ -121,14 +121,6 @@ CI-SKIPPED tests/test_adapter_fidelity_pgw794.py|local hf cache carries no model
 # measured on a box whose cgroup enforces.
 CI-SKIPPED tests/test_mint_oom_classification_pgw848.py|the memory cap did not oom-kill the child: this box has a delegated cgroup v# memory controller but it did not enforce m
 
-# ─── CI-SKIPPED: an empty set that is empty on purpose ────────────────────────
-# `divergent` is a DEFECT LEDGER and it is empty as of 2026-08-02 — th#1385 and
-# pgw#870 closed all nine recorded classes and their witnesses moved into
-# `agreed` (53 vectors, which DO run). An empty parametrize is pytest's own
-# version of the `go test -run` filter that matches nothing and prints `ok`, so
-# it is counted here rather than left to look like a passing row.
-CI-SKIPPED tests/test_topology_fuzz_pgw867.py|got empty parameter set for (vector)
-
 # pgw#1013 wave 2. `test_rule_2_fires_on_all_four_filed_sites_as_they_were`
 # re-reads all four defective downloaders from `d7881b40` and asserts the guard
 # fires on each — `actions/checkout@v4` is shallow, so the commit is not in the
@@ -156,7 +148,6 @@ CI-SKIPPED tests/test_flavor_deletion_pgw1148.py|no origin/master to diff agains
 LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (packs a real .pt#; needs g++)
 LOCAL-ONLY tests/test_chunk_cas_parallel_th1362.py|multi-gb throughput measurement; set chunk_cas_bench=#
 LOCAL-ONLY tests/test_aot_run_impl_split_pgw811.py|banked pgw#793 wrapper not present
-LOCAL-ONLY tests/test_topology_fuzz_pgw867.py|tensorhub checkout not present
 # pgw#1150. Four rows put the author-CI harness's emitted `author-ci.toml`
 # record through `inference-endpoints/scripts/lint_author_ci.py` ITSELF —
 # that script is the AUTHORITY on the record's schema and must never be
@@ -176,7 +167,12 @@ LOCAL-ONLY tests/test_author_ci_harness_pgw1150.py|inference-endpoints is not ch
 LOCAL-ONLY tests/test_micro_mint_rig_pgw978.py|the pgw#978 micro-mint rig is opt-in: it runs a full local mint cycle (set pgw#_rig=#)
 
 # ─── STAGED ───────────────────────────────────────────────────────────────────
-STAGED tests/test_p1_stream_lifecycle.py|pgw#605 open: hello.idle_heartbeat_interval_ms / workermessage.heartbeat proto fields are not generated in this tree yet
-STAGED tests/test_boot_phases_arm_pgw764.py|pgw#764 staged: the cell_arm boot-phase hook in aot_serve.py has not landed yet (sibling wip). the refusal contract is c
-STAGED tests/convert/test_publish_transport_pgw738.py|pgw#738 staged: publish-progress observability (_throttled_part_progress) has not landed in convert/publish.py
+# pgw#1179 (§4.34) DELETED four of the five entries that were here, plus the two
+# topology rows above. A skip conditioned on work that never landed is not a
+# gate: the pgw#605 row raised `unreachable` under a hard `@skip`, pgw#764's and
+# pgw#738's rows waited on a "sibling lane's uncommitted WIP" that has not
+# existed since, the tensorhub byte-identity row probed `~/cozy/tensorhub-chaos`
+# (a read-only leftover the workspace policy forbids pointing at), and the
+# divergence ledger parametrized over a list that has been empty since
+# 2026-08-02. None of them had ever run anywhere.
 STAGED tests/convert/test_p8_convert_publish_contract.py|pgw#566 open: normalize_adapter_state_dict only passes unet_config to converters with a named unet_config parameter (ins

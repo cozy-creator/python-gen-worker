@@ -28,6 +28,12 @@ weights — the whole point here is that they differ).
 Policy mirrors compile_cache: an optional plain lane stays eager when no exact
 artifact is available. A failing optional engine call permanently routes to
 the eager module and revokes its compiled-state proof before that fallback.
+
+**THERE IS NO PRODUCER IN THIS REPOSITORY.** ``build`` (ONNX export + engine
+build) and ``find_artifact`` were deleted 2026-08-12 under §4.34: nothing on
+the pod, in any script, or in any test ever called them. What survives is the
+CONSUMER half — stage, verify, refit, wrap, revoke — which reads artifacts some
+other producer must write, exactly the shape pgw#1178 found on the adopt lane.
 """
 
 from __future__ import annotations
@@ -268,14 +274,6 @@ def unpack_metadata(artifact: Path) -> Dict[str, Any]:
     :class:`ValueError` subclass, which is what every caller classifies on.
     """
     return artifact_meta.read_metadata(artifact)
-
-
-def find_artifact(root: Path) -> Optional[Path]:
-    """The engine tarball inside a downloaded snapshot dir (or the file)."""
-    root = Path(root)
-    if root.is_file():
-        return root
-    return next(iter(sorted(root.rglob("*.tar.gz"))), None)
 
 
 # ---------------------------------------------------------------------------
@@ -716,244 +714,13 @@ def unwrap(pipeline: Any) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Build (the produce-trt-engine conversion job)
-# ---------------------------------------------------------------------------
-
-
-_SDXL_UNET_INPUTS = ("sample", "timestep", "encoder_hidden_states", "text_embeds", "time_ids")
-
-
-def _export_unet_onnx(pipe: Any, onnx_path: Path, *, batch: int, shape: Tuple[int, int]) -> List[Dict[str, Any]]:
-    """Export the pipeline's UNet to ONNX with the SDXL conditioning contract.
-    Returns the input contract (names + per-shape dims recorded later)."""
-    import torch
-
-    unet = pipe.unet
-    dtype = next(unet.parameters()).dtype
-    device = next(unet.parameters()).device
-    w, h = shape
-    lh, lw = h // pipe.vae_scale_factor, w // pipe.vae_scale_factor
-    ehs_dim = int(unet.config.cross_attention_dim)
-    ehs_len = 77
-    add_dim = 1280  # SDXL pooled text embeds
-
-    class _Export(torch.nn.Module):
-        def __init__(self, unet: Any) -> None:
-            super().__init__()
-            self.unet = unet
-
-        def forward(self, sample: Any, timestep: Any, encoder_hidden_states: Any, text_embeds: Any, time_ids: Any) -> Any:
-            return self.unet(
-                sample, timestep, encoder_hidden_states=encoder_hidden_states,
-                added_cond_kwargs={"text_embeds": text_embeds, "time_ids": time_ids},
-                return_dict=False,
-            )[0]
-
-    sample = torch.randn(batch, unet.config.in_channels, lh, lw, dtype=dtype, device=device)
-    timestep = torch.ones(batch, dtype=dtype, device=device)
-    ehs = torch.randn(batch, ehs_len, ehs_dim, dtype=dtype, device=device)
-    text_embeds = torch.randn(batch, add_dim, dtype=dtype, device=device)
-    time_ids = torch.randn(batch, 6, dtype=dtype, device=device)
-
-    dyn = {"sample": {2: "lh", 3: "lw"}}
-    torch.onnx.export(
-        _Export(unet), (sample, timestep, ehs, text_embeds, time_ids), str(onnx_path),
-        input_names=list(_SDXL_UNET_INPUTS), output_names=["out_sample"],
-        dynamic_axes=dyn, opset_version=18, do_constant_folding=True, dynamo=False,
-    )
-    return [{"name": n} for n in _SDXL_UNET_INPUTS]
-
-
-def _onnx_constant_outputs(onnx_path: Path) -> Dict[str, Any]:
-    """Constant-node output name -> numpy value. TRT counts folded Constant
-    outputs among a stripped engine's refittable weights; their values live
-    in the graph, not the state_dict."""
-    import onnx
-    from onnx import numpy_helper
-
-    model = onnx.load(str(onnx_path), load_external_data=True)
-    out: Dict[str, Any] = {}
-    for node in model.graph.node:
-        if node.op_type != "Constant" or not node.output:
-            continue
-        for attr in node.attribute:
-            if attr.name == "value":
-                out[node.output[0]] = numpy_helper.to_array(attr.t)
-    return out
-
-
-def _onnx_initializers(onnx_path: Path) -> Dict[str, Any]:
-    import onnx
-    from onnx import numpy_helper
-
-    model = onnx.load(str(onnx_path), load_external_data=True)
-    return {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
-
-
-def build(
-    model_path: str | Path,
-    out_dir: str | Path,
-    *,
-    shapes: Iterable[Tuple[int, int]],
-    module: str = "unet",
-    batch: int = 2,
-    precision: str = "fp16",
-    family: str = "",
-    source_ref: str = "",
-    source_digest: str = "",
-    pipeline_cls: Any = None,
-) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
-    """Build a weight-stripped TRT engine for one family on THIS GPU SKU.
-
-    ``batch`` is the CFG graph class (ie#345): CFG variants run batch-2
-    graphs, distilled variants batch-1 — one class per artifact, never both.
-    ``shapes`` should derive from the family's payload preset enum; every
-    shape becomes one static optimization profile in the ONE engine.
-    """
-    import tensorrt as trt
-    import torch
-    from diffusers import DiffusionPipeline
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("trt-engine build requires CUDA")
-    if precision not in ("fp16", "bf16"):
-        raise ValueError(f"unsupported precision {precision!r}")
-
-    out_dir = Path(out_dir)
-    work = out_dir / "work"
-    work.mkdir(parents=True, exist_ok=True)
-    timings: Dict[str, float] = {}
-    shapes = [(int(w), int(h)) for w, h in shapes]
-
-    t0 = time.monotonic()
-    pipe = load_from_pretrained(
-        pipeline_cls or DiffusionPipeline, str(model_path), dtype=precision
-    )
-    pipe.to("cuda")
-    mod = getattr(pipe, module)
-    timings["load_s"] = round(time.monotonic() - t0, 1)
-
-    t0 = time.monotonic()
-    onnx_path = work / "model.onnx"
-    if module != "unet":
-        raise NotImplementedError(f"pilot exports unet only, got module={module!r}")
-    inputs = _export_unet_onnx(pipe, onnx_path, batch=batch, shape=shapes[0])
-    timings["onnx_export_s"] = round(time.monotonic() - t0, 1)
-
-    # The builder needs the GPU to itself: tactic timing allocates multi-GB
-    # scratch regions, and a resident fp16 pipeline starves it ("region
-    # allocation failed" tactic skips => worse engines or a failed build).
-    # Everything after export (refit map, self-check) reads CPU tensors.
-    pipe.to("cpu")
-    mod = getattr(pipe, module)
-    torch.cuda.empty_cache()
-
-    t0 = time.monotonic()
-    trt_logger = trt.Logger(trt.Logger.WARNING)
-    builder = trt.Builder(trt_logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
-    parser = trt.OnnxParser(network, trt_logger)
-    if not parser.parse_from_file(str(onnx_path)):
-        errs = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
-        raise RuntimeError(f"ONNX parse failed: {errs}")
-    config = builder.create_builder_config()
-    config.set_flag(trt.BuilderFlag.STRIP_PLAN)
-    config.set_flag(trt.BuilderFlag.REFIT)
-    if precision == "fp16":
-        config.set_flag(trt.BuilderFlag.FP16)
-    elif precision == "bf16":
-        config.set_flag(trt.BuilderFlag.BF16)
-
-    scale = pipe.vae_scale_factor
-    in_ch = int(mod.config.in_channels)
-    for w, h in shapes:
-        profile = builder.create_optimization_profile()
-        lat = (batch, in_ch, h // scale, w // scale)
-        profile.set_shape("sample", lat, lat, lat)
-        for i in range(network.num_inputs):
-            name = network.get_input(i).name
-            if name == "sample":
-                continue
-            dims = tuple(network.get_input(i).shape)
-            fixed = tuple(batch if d == -1 else d for d in dims)
-            profile.set_shape(name, fixed, fixed, fixed)
-        config.add_optimization_profile(profile)
-
-    plan = builder.build_serialized_network(network, config)
-    if plan is None:
-        raise RuntimeError("TRT engine build failed (see TRT log)")
-    (work / ENGINE_NAME).write_bytes(bytes(plan))
-    timings["engine_build_s"] = round(time.monotonic() - t0, 1)
-
-    # Refit map: engine weight names <-> torch keys by value identity, then
-    # PROVE completeness against the engine's own refittable-weight list.
-    t0 = time.monotonic()
-    entries, unmatched = build_refit_map(_onnx_initializers(onnx_path), dict(mod.state_dict()))
-    engine = _load_engine(work / ENGINE_NAME)
-    import tensorrt as _trt
-
-    refitter = _trt.Refitter(engine, trt_logger)
-    needed = set(refitter.get_all_weights())
-    mapped = {e["name"] for e in entries}
-    missing = sorted(needed - mapped)
-    if missing:
-        # Engine weights with no state_dict counterpart: ONNX Constant-node
-        # outputs and non-weight initializers (shape vectors, norm epsilons,
-        # sinusoidal tables). Fine-tune-invariant — bake their VALUES into
-        # the map as const entries (gw#390 pilot find: 693/2281 on SDXL UNet).
-        const_src = _onnx_initializers(onnx_path)
-        const_src.update(_onnx_constant_outputs(onnx_path))
-        still: List[str] = []
-        baked = 0
-        import numpy as _np
-
-        for name in missing:
-            arr = const_src.get(name)
-            if arr is None:
-                still.append(name)
-                continue
-            arr = _np.ascontiguousarray(arr)
-            entries.append({
-                "name": name, "key": "", "transform": "const",
-                "dtype": str(arr.dtype), "shape": list(arr.shape),
-                "data_b64": base64.b64encode(arr.tobytes()).decode(),
-            })
-            baked += 1
-        if still:
-            raise RuntimeError(
-                f"refit map incomplete: {len(still)}/{len(needed)} engine weights unmapped "
-                f"(e.g. {still[:5]}); unmatched initializers={len(unmatched)}, baked const={baked}"
-            )
-        logger.info("refit map: %d state_dict entries + %d baked constants", len(entries) - baked, baked)
-    entries = [e for e in entries if e["name"] in needed]
-    (work / REFIT_MAP_NAME).write_text(json.dumps(entries, sort_keys=True, indent=0))
-    timings["refit_map_s"] = round(time.monotonic() - t0, 1)
-
-    meta = artifact_metadata(
-        family=family, module=module, precision=precision, batch=batch,
-        shapes=shapes, inputs=inputs, source_ref=source_ref, source_digest=source_digest,
-    )
-    label = flavor_label(meta["sku"], meta["trt"], precision)
-    artifact = pack(work, out_dir / f"{label}.tar.gz", meta)
-    logger.info(
-        "trt-engine build: %s (%.1fMB plan, %d refit weights) in %s",
-        label, (work / ENGINE_NAME).stat().st_size / 1e6, len(entries), timings,
-    )
-    return artifact, meta, timings
-
-
 __all__ = [
     "ARTIFACT_FORMAT",
     "TrtModuleRunner",
     "artifact_metadata",
-    "build",
     "build_refit_map",
     "enable",
     "execution_count",
-    "find_artifact",
     "flavor_label",
     "is_engine_ref",
     "load_and_wrap",
