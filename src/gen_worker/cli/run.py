@@ -728,7 +728,8 @@ def _local_mint_context(
 
 
 def _assert_structure_honored(
-    pipe: Any, injected: Dict[str, Any], *, slot: str = "",
+    pipe: Any, injected: Dict[str, Any], *,
+    requested: Sequence[str] = (), slot: str = "",
 ) -> None:
     """The composed pipeline must actually CARRY the structure-only modules.
 
@@ -741,8 +742,41 @@ def _assert_structure_honored(
     strand, because the component WAS built weight-free and the pipeline threw
     it away. The mint child FAILS CLOSED on it (it does not fall back to a
     real-weight export, which is how z-image OOM'd ~40 GiB as `retryable`).
+
+    ``requested`` is what the CALLER asked to be weight-free, and it is checked
+    separately because the loop below could only ever see components that were
+    BUILT (pgw#1173). A target the builder skipped — ``model_index.json`` does
+    not name it, or the tree has no readable index at all, in which case
+    ``model_index_components`` returns the empty set and EVERY target is
+    skipped — never enters ``injected``, so this guard iterated nothing and
+    passed while the pipeline loaded that target's checkpoint. A guard that
+    cannot fire for the case it is named for is worse than no guard, because
+    its silence is read as proof. Such a target is the buildable-strand
+    refusal (``StructureOnlyUnsupported``), NOT the swallowed one: the mint
+    child's fallback to a real-weight export stays correct and stays RECORDED,
+    and the boot trace — which may not fall back at all — refuses.
     """
-    from ..models.structure_only import STAMP, StructureNotHonored
+    from ..models.structure_only import (
+        STAMP, StructureNotHonored, StructureOnlyUnsupported, target_module,
+    )
+
+    for component in sorted({str(c).strip() for c in requested if str(c).strip()}):
+        # A target is an attribute PATH: `vae.decode`'s weights live in the
+        # `vae` the builder injected, so the root is what `injected` is keyed
+        # on and what decides whether this target was covered.
+        if component in injected or component.split(".")[0] in injected:
+            continue
+        module = target_module(pipe, component)
+        if module is None:
+            continue  # this slot does not carry it — legitimately absent
+        raise StructureOnlyUnsupported(
+            component=component, cls_name=type(module).__name__,
+            lacks=(
+                f"the pipeline for slot {slot or '?'} DOES carry this "
+                f"component and no structure-only module was built for it, so "
+                f"it was composed from the checkpoint — the tree's "
+                f"model_index.json does not name it (or has none), which is "
+                f"what the builder skips on"))
 
     for component, module in sorted(injected.items()):
         got = getattr(pipe, component, None)
@@ -840,7 +874,8 @@ def _load_injected_model(
     if not sl.is_pipeline:
         return sl.obj
     if structure_only:
-        _assert_structure_honored(sl.obj, injected, slot=slot)
+        _assert_structure_honored(
+            sl.obj, injected, requested=structure_only, slot=slot)
     compile_cfg = getattr(decl, "compile", None) if decl is not None else None
     if compile_cfg is not None:
         # SDK v2: the compile machinery consumes the enriched CompileCell

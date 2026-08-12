@@ -514,6 +514,151 @@ def structure_only_components(pipe: Any) -> Tuple[str, ...]:
     return tuple(sorted(set(out)))
 
 
+def target_module(pipe: Any, target: str) -> Any:
+    """The module holding the WEIGHTS of declared compile target ``target``.
+
+    ``None`` when the pipeline does not carry it, which is the legitimate case
+    a multi-slot family produces (a refiner slot has no denoiser of the
+    primary's name).
+
+    Resolution is delegated to ``compile_cache.resolve_targets`` — the ONE
+    target authority (§1.29) — rather than re-walked here, because a target is
+    an ATTRIBUTE PATH and not a component name: ``transformer.denoise`` and
+    ``vae.decode`` are both declared on the fleet, and a second walk that only
+    understood ``getattr(pipe, name)`` would read every dotted target as "not
+    carried" and skip the fence for exactly the families whose targets are
+    nested. A guard with its own weaker resolver is a guard that cannot fire.
+    """
+    import types
+
+    from .. import compile_cache as cc
+
+    name = str(target or "").strip()
+    if not name:
+        return None
+    for _declared, owner, _attr, _fn in cc.resolve_targets(
+            pipe, types.SimpleNamespace(targets=(name,))):
+        if owner is not None and hasattr(owner, "named_parameters"):
+            return owner
+    return None
+
+
+@dataclass(frozen=True)
+class WeightFreeBreach:
+    """One declared compile target that is NOT weight-free, and why."""
+
+    component: str
+    cls_name: str
+    #: ``not_structure_only`` — carried, but never built from code+config;
+    #: ``real_parameters`` — stamped structure-only and holding real storage.
+    reason: str
+    real_param_bytes: int = 0
+    devices: Tuple[str, ...] = ()
+
+    def sentence(self) -> str:
+        where = f" on {', '.join(self.devices)}" if self.devices else ""
+        if self.reason == "not_structure_only":
+            return (
+                f"{self.component} ({self.cls_name}) carries "
+                f"{self.real_param_bytes} byte(s) of REAL parameters{where} "
+                f"— it was never built from code + config")
+        return (
+            f"{self.component} ({self.cls_name}) is stamped structure-only "
+            f"and still holds {self.real_param_bytes} byte(s) of REAL "
+            f"parameters{where}")
+
+
+def weight_free_breaches(
+    pipe: Any, targets: Any,
+) -> Tuple[WeightFreeBreach, ...]:
+    """Every declared compile target ``pipe`` carries that holds real weights.
+
+    Empty is the premise holding. **This is an ALL-of check over the declared
+    targets, deliberately.** ``structure_only_components`` answers "is anything
+    here virtual", which a two-target family satisfies with ONE target virtual
+    while the other traces ~weight-scale real tensors — and on a
+    ``place=False`` load that second target sits on the HOST, so the
+    off-host walk (:func:`gen_worker.boot_trace_child.off_host_tensors`) reads
+    clean too. Both guards can be green while the weight-free premise every
+    VRAM conclusion downstream rests on is false (pgw#1173).
+
+    BUFFERS ARE NOT COUNTED. A structure-only component's buffers stay real by
+    construction — they are config-derived tables and a literal-bearing family
+    ships them inside the cell (see this module's header). Parameters are the
+    checkpoint, and the checkpoint is the thing that must not be here.
+    """
+    import torch
+
+    out: List[WeightFreeBreach] = []
+    for name in sorted({str(t).strip() for t in (targets or ()) if str(t).strip()}):
+        module = target_module(pipe, name)
+        if module is None:
+            continue  # not carried by THIS slot — legitimately absent
+        real_bytes = 0
+        devices: List[str] = []
+        try:
+            params = list(module.named_parameters())
+        except Exception:  # noqa: BLE001 — an unwalkable target is reported below
+            params = []
+        for _pname, tensor in params:
+            if not isinstance(tensor, torch.Tensor) or mi.is_virtual(tensor):
+                continue
+            real_bytes += int(tensor.numel()) * int(tensor.element_size())
+            devices.append(str(tensor.device))
+        stamped = bool(getattr(module, STAMP, False))
+        if stamped and not real_bytes:
+            continue
+        if not stamped and not real_bytes and params:
+            # Not stamped, and every parameter is already virtual: some other
+            # mechanism (an author-side meta build) delivered the property.
+            # The premise is what is fenced, not the stamp.
+            continue
+        out.append(WeightFreeBreach(
+            component=name,
+            cls_name=type(module).__name__,
+            reason="real_parameters" if stamped else "not_structure_only",
+            real_param_bytes=real_bytes,
+            devices=tuple(sorted(set(devices))[:4]),
+        ))
+    return tuple(out)
+
+
+def assert_weight_free(pipe: Any, targets: Any, *, what: str = "") -> None:
+    """Fail closed unless every compile target ``pipe`` carries is weight-free.
+
+    The typed fence pgw#1173 asked for. It raises :class:`StructureNotHonored`
+    — the type that ALREADY means "this composition is holding weights it must
+    not" and that every caller of the structure-only path is required to treat
+    as fatal rather than as a reason to fall back.
+
+    Raises when the pipeline carries NONE of its declared targets too: a trace
+    with no target is not a weight-free trace, it is a trace of nothing, and
+    reporting it as success is how a derivation can look clean and mean
+    nothing.
+    """
+    names = sorted({str(t).strip() for t in (targets or ()) if str(t).strip()})
+    carried = [n for n in names if target_module(pipe, n) is not None]
+    cls_name = type(pipe).__name__
+    if names and not carried:
+        raise StructureNotHonored(
+            component=",".join(names), cls_name=cls_name,
+            lacks=(
+                f"{cls_name} carries none of the declared compile target(s) "
+                f"{names!r}{' for ' + what if what else ''}, so there is "
+                f"nothing here whose weight-freedom could be proven"))
+    breaches = weight_free_breaches(pipe, names)
+    if not breaches:
+        return
+    total = sum(b.real_param_bytes for b in breaches)
+    raise StructureNotHonored(
+        component=",".join(b.component for b in breaches), cls_name=cls_name,
+        lacks=(
+            f"{len(breaches)} of {len(carried)} declared compile target(s) "
+            f"on {cls_name}{' for ' + what if what else ''} hold REAL "
+            f"parameters totalling {total} bytes — "
+            + "; ".join(b.sentence() for b in breaches)))
+
+
 def modules_of(pipe: Any) -> Tuple[Tuple[str, Any], ...]:
     """``(attribute, module)`` for every structure-only component of ``pipe``."""
     out: List[Tuple[str, Any]] = []
@@ -892,6 +1037,8 @@ __all__ = [
     "StructureFacts",
     "StructureNotHonored",
     "StructureOnlyUnsupported",
+    "WeightFreeBreach",
+    "assert_weight_free",
     "build_component",
     "compiling_under",
     "facts_of",
@@ -907,7 +1054,9 @@ __all__ = [
     "revirtualize_from_meta",
     "stray_real_tensors",
     "structure_only_components",
+    "target_module",
     "to_meta_for_save",
     "virtualize",
+    "weight_free_breaches",
     "under",
 ]
