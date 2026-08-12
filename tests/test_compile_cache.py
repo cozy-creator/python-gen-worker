@@ -367,23 +367,6 @@ def test_system_repo():
 # ---------------------------------------------------------------------------
 
 
-def _capture_tree(root):
-    (root / "inductor" / "ab").mkdir(parents=True)
-    (root / "inductor" / "ab" / "graph.py").write_text("code")
-    (root / "inductor" / "stale.lock").write_text("")  # junk: excluded
-    (root / "triton" / "kern").mkdir(parents=True)
-    (root / "triton" / "kern" / "kernel.cubin").write_bytes(b"\x00\x01")
-    return root
-
-
-def _tree_snapshot(root):
-    root = root.resolve()
-    return {
-        str(path.relative_to(root)): path.read_bytes()
-        for path in sorted(root.rglob("*")) if path.is_file()
-    }
-
-
 # ---------------------------------------------------------------------------
 # gw#577: fleet delivery axes + named refusal reasons
 # ---------------------------------------------------------------------------
@@ -548,6 +531,10 @@ def test_guidance_regimes_are_an_envelope_axis():
     assert cc.declared_compile_facts(cfg)["guidance"] == [0.0, 5.0]
 
 
+class In(msgspec.Struct):
+    prompt: str = ""
+
+
 class Out(msgspec.Struct):
     ok: bool = True
 
@@ -646,67 +633,6 @@ def test_resolve_pipeline_class_gw586() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resident_pipe(mode: str):
-    """A pipeline with the three resident flag groups and a compile target.
-    Flags start matching ``mode`` ('vae_only' = all on, 'off'/other = off)."""
-    torch = pytest.importorskip("torch")
-
-    class _Pipe:
-        def __init__(self):
-            self.transformer = torch.nn.Sequential(
-                torch.nn.Linear(16, 16), torch.nn.SiLU(),
-            )
-            on = mode == "vae_only"
-            self.flags = {
-                "vae_slicing": on, "vae_tiling": on, "attention_slicing": on,
-            }
-            if mode:
-                self._cozy_low_vram_mode = mode
-
-        def enable_vae_slicing(self):
-            self.flags["vae_slicing"] = True
-
-        def disable_vae_slicing(self):
-            self.flags["vae_slicing"] = False
-
-        def enable_vae_tiling(self):
-            self.flags["vae_tiling"] = True
-
-        def disable_vae_tiling(self):
-            self.flags["vae_tiling"] = False
-
-        def enable_attention_slicing(self):
-            self.flags["attention_slicing"] = True
-
-        def disable_attention_slicing(self):
-            self.flags["attention_slicing"] = False
-
-    return _Pipe()
-
-
-def _resident_cell(tmp_path, pipe, cfg, *, low_vram_mode, weight_lane=""):
-    sig, wc = cc.execution_contract(pipe, cfg)
-    meta = cc.artifact_metadata(
-        family=cfg.family, shapes=cfg.shapes, targets=cfg.targets,
-        weight_lane=weight_lane, low_vram_mode=low_vram_mode,
-        graph_signature=sig, weight_contract=wc)
-    source = _capture_tree(tmp_path / "cand")
-    return cc.pack(source, tmp_path / "cell.tar.gz", meta)
-
-
-def _pin_w8a8_identity(monkeypatch):
-    """W8A8 contract requires sm/cuda/image_digest; pin fakes on a GPU-less
-    test host (both mint and verify see the same monkeypatched key)."""
-    real_key = cc.runtime_key
-
-    def prod_key():
-        key = dict(real_key())
-        key.update(sm="sm_90", cuda="12.8", image_digest="sha256:gw588")
-        return key
-
-    monkeypatch.setattr(cc, "runtime_key", prod_key)
-
-
 # pgw#1032: `test_arm_staged_artifact_reconciles_resident_drift` is deleted with
 # `arm_staged_artifact` itself — the STRICT arm entry point existed only for
 # hub-commanded hot adoption, which nothing has ever dispatched. The resident
@@ -721,7 +647,6 @@ def _pin_w8a8_identity(monkeypatch):
 # The mode is still READ as a fact — `execution_contract_digest` folds it into
 # the contract — but nothing reconciles a pipeline to a cell's recorded mode,
 # because no cell records one.
-
 
 
 def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
