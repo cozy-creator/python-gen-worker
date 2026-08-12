@@ -2395,6 +2395,10 @@ def _mint_cell(
         try:
             by_entry = _drive_pool(
                 pool, source, expected_total=len(rows), progress=progress,
+                # pgw#1189: `kept` is the live list the producer appends to,
+                # so an entry that exports after this closure is built is
+                # still folded. This is the ONLY path a fleet mint takes.
+                on_entry_complete=_entry_timing_folder(kept, pool),
                 on_entry=lambda name, done, total: progress.beat(
                     PHASE_INDUCTOR_COMPILE, done, total, name))
         finally:
@@ -2537,6 +2541,7 @@ def _drive_pool(
     *,
     expected_total: int = 0,
     on_entry: Optional[Callable[[str, int, int], None]] = None,
+    on_entry_complete: Optional[Callable[[str], None]] = None,
     progress: Optional["MintProgress"] = None,
 ) -> Dict[str, List[str]]:
     """Run one :class:`~gen_worker.aot_compile_pool.EntryCompilePool` and map
@@ -2544,9 +2549,25 @@ def _drive_pool(
 
     ``entries`` is either the fully-exported list (the serial-export shape the
     pgw#848 tests drive) or pgw#1052's live producer iterator.
+
+    ``on_entry_complete`` (pgw#1189) folds one finished entry's measurement
+    onto the row that will be reported — see :func:`_entry_timing_folder`. It
+    fires per entry rather than at the end, so an abandoned mint keeps the
+    numbers of every entry that finished.
     """
 
     def _tick(name: str, done: int, total: int) -> None:
+        # pgw#1189: fold THIS entry's spans FIRST, for the reason pgw#848
+        # wrote one line below and applied only to the ledger. An entry that
+        # has finished has really spent its seconds, and until this ran the
+        # per-entry partition was assembled only by `_fold_pool_results` —
+        # which is reached only if `pool.compile` RETURNS. Every sdxl mint on
+        # record was abandoned mid-pool, so the child spans and pgw#832's seal
+        # split have never reached a reader; th#1834's P0-E answered "what is
+        # the ~39 s residual" by inference against rows that structurally
+        # could not carry the answer.
+        if on_entry_complete is not None:
+            on_entry_complete(name)
         # pgw#848: refresh the ledger BEFORE the beat, so the snapshot the
         # beat writes carries this entry's numbers. A mint killed at entry 30
         # of 36 then leaves 30 entries' worth of measurement on disk instead
@@ -2599,21 +2620,56 @@ def _fold_pool_results(
             f"cell whose declared class set is a lie")
     for row in minted:
         row.files = list(by_entry[row.name])
-        row.timings["compile_s"] = pool.entry_seconds.get(row.name, 0.0)
-        # Measured in the child; folded in here so the roll-up reads the same
-        # whether a cell was minted serially or K-wide.
-        phases = pool.entry_phases.get(row.name) or {}
-        if phases:
-            row.timings["phases"] = dict(phases)
-        # pgw#842: the overlays travel too. `child_seal_s` is a partition
-        # member and its SPLIT is an overlay — and the split is the whole
-        # answer to "what is the seal still costing": pgw#832 cut the library
-        # hash to ~0.07 s (measured), while the child's `import torch`, which
-        # the torch imposition owns, is the rest. Without the overlay a reader
-        # sees only the sum and re-opens a closed question.
-        overlays = pool.entry_overlays.get(row.name) or {}
-        if overlays:
-            row.timings["overlays"] = dict(overlays)
+        _fold_entry_timings(row, pool)
+
+
+def _fold_entry_timings(
+    row: "_MintedEntry", pool: aot_compile_pool.EntryCompilePool,
+) -> bool:
+    """Fold ONE finished entry's measurement onto the row a reader will see.
+
+    ``True`` when the pool had anything for this entry. Assignments only, never
+    accumulations, so the per-entry pass (pgw#1189) and the final
+    :func:`_fold_pool_results` pass can both run over the same row.
+
+    Measured in the child; folded here so the roll-up reads the same whether a
+    cell was minted serially or K-wide. pgw#842: the OVERLAYS travel too —
+    ``child_seal_s`` is a partition member and its SPLIT is an overlay, and the
+    split is the whole answer to "what is the seal still costing" (pgw#832 cut
+    the library hash to ~0.07 s measured; the child's ``import torch``, which
+    the torch imposition owns, is the rest). Without it a reader sees only the
+    sum and re-opens a closed question — which is exactly what happened.
+    """
+    phases = pool.entry_phases.get(row.name) or {}
+    overlays = pool.entry_overlays.get(row.name) or {}
+    if not phases and not overlays and row.name not in pool.entry_seconds:
+        # Nothing finished for this entry. Absence stays absence: a fold that
+        # wrote zeros here would invent a measurement for a compile that never
+        # ran, which is the failure mode this issue exists to end.
+        return False
+    row.timings["compile_s"] = pool.entry_seconds.get(row.name, 0.0)
+    if phases:
+        row.timings["phases"] = dict(phases)
+    if overlays:
+        row.timings["overlays"] = dict(overlays)
+    return True
+
+
+def _entry_timing_folder(
+    rows: Sequence["_MintedEntry"], pool: aot_compile_pool.EntryCompilePool,
+) -> Callable[[str], None]:
+    """A per-entry fold bound to ``rows`` (pgw#1189), for ``_drive_pool``.
+
+    ``rows`` is read live — under pgw#1052's overlapped shape it is the list
+    the producer is still appending to, so an entry that exports and compiles
+    after this is built is still found.
+    """
+    def _fold(name: str) -> None:
+        for row in rows:
+            if row.name == name:
+                _fold_entry_timings(row, pool)
+                return
+    return _fold
 
 
 def _compile_entries_parallel(
@@ -2641,7 +2697,8 @@ def _compile_entries_parallel(
     t0 = time.monotonic()
     by_entry = _drive_pool(
         pool, [(row.name, row.program) for row in minted],
-        on_entry=on_entry, progress=progress)
+        on_entry=on_entry, progress=progress,
+        on_entry_complete=_entry_timing_folder(minted, pool))
     wall = time.monotonic() - t0
     _fold_pool_results(minted, pool, by_entry)
     logger.info(

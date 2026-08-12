@@ -77,6 +77,17 @@ SPANS_V = 2
 
 #: Disjoint ``compilation_time_metrics`` leaves. These partition the inside of
 #: ``aot_compile`` together with the ``compile_other_s`` residual.
+#:
+#: ⚠️ THEY PARTITION ``compile_wall_s``, **NOT** the mint's ``compile_s``, and
+#: reading them against ``compile_s`` is the trap this program fell into twice.
+#: ``compile_s`` is the parent's Popen-to-reap wall, which also contains the
+#: child's interpreter boot, seal, program load and reap lag. MEASURED on the
+#: standing hub over 20 recorded sdxl entries (pgw#1189, 2026-08-12):
+#: ``compile_s - sum(leaves)`` has median 37.7 s and **minimum −2.9 s**. A
+#: NEGATIVE residual is proof the leaves also OVERLAP each other, so their sum
+#: is not a breakdown of anything and "the unattributed remainder" is not a
+#: quantity. th#1834's P0-E read a ~39 s residual that way and attributed it,
+#: by inference, to a cost on a path it had not established was taken.
 PARTITION_KEYS: Dict[str, Tuple[str, ...]] = {
     "lowering_s": ("GraphLowering.run",),
     "codegen_s": ("GraphLowering.codegen",),
