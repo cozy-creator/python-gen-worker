@@ -52,41 +52,26 @@ jobs:
       # STRICT, and deliberately so: an unproven tree REFUSES to publish. It
       # never silently skips testing, because a publish that skips both the
       # suite and the proof is worse than the duplication it replaced.
-      - name: Assert this exact tree passed CI
+      #
+      # pgw#1191: the matching rule lives in scripts/assert_ci_proof.py, under
+      # test, because the version inlined here was SATISFIABLE BY THE WRONG
+      # EVIDENCE. It matched on a run's `head_sha`, and a `pull_request` run
+      # names the PR branch head while building `refs/pull/<n>/merge` — the head
+      # merged with whatever master is at that moment. So a green PR run
+      # certified a tree it never built whenever master moved under a cut, which
+      # is pgw#795's own hole through a different door. Only `workflow_dispatch`
+      # and `push` runs check out the ref they name, so only those prove a tree.
+      - name: Assert this exact tree was BUILT by CI (pgw#795, pgw#1191)
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          tag_sha=$(git rev-parse HEAD)
-          tag_tree=$(git rev-parse "HEAD^{tree}")
-          echo "publishing $tag_sha (tree $tag_tree)"
           # Trees, not commit SHAs: a release branch, a squash merge and a
           # cherry-pick all produce different commits for identical content, and
           # what CI proved is the CONTENT.
-          for sha in $(gh api "repos/$REPO/actions/workflows/ci.yml/runs?per_page=100" \
-                        --jq '.workflow_runs[] | select(.conclusion=="success") | .head_sha' \
-                       | awk '!seen[$0]++'); do
-            tree=$(gh api "repos/$REPO/commits/$sha" --jq '.commit.tree.sha' 2>/dev/null) || continue
-            if [ "$tree" = "$tag_tree" ]; then
-              echo "PROVEN: green CI run on $sha carries this exact tree"
-              exit 0
-            fi
-          done
-          cat >&2 <<EOF
-          ::error::No successful CI run carries this tree ($tag_tree).
-          This tag's content has never been tested AS TAGGED, so it will not be
-          published. Two ways to satisfy it, both one CI run:
-            * before tagging: gh workflow run ci.yml --ref <branch-you-will-tag>
-              and tag that exact commit once it is green; or
-            * after tagging:  gh workflow run ci.yml --ref <this-tag>
-              and re-run this publish job once it is green.
-          Do NOT relax this check to unblock a release: pgw#795 found that
-          v0.78.0 was published from a chaos commit whose tree no CI run had
-          ever seen -- the promotion PR tested master plus cherry-picks, which
-          is a different tree. That gap is what this step closes.
-          EOF
-          exit 1
+          echo "publishing $(git rev-parse HEAD) (tree $(git rev-parse 'HEAD^{tree}'))"
+          python3 scripts/assert_ci_proof.py --tag-tree "$(git rev-parse 'HEAD^{tree}')"
 
       - name: Build package
         run: uv build
