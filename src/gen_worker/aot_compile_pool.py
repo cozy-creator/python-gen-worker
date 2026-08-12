@@ -67,10 +67,9 @@ import msgspec
 from . import aot_shape_hints
 
 from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
-from . import compile_posture, mint_budget, worker_goals
+from . import compile_posture, mint_budget
 from .compile_posture import (
     USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
-from .worker_goals import WorkerGoals
 from .postmortem import cpu_quota_cores
 import hashlib
 
@@ -209,11 +208,6 @@ ENTRY_RSS_RESERVE_BYTES = 4 * 1024**3
 #: Banked per (family, lane) once measured, exactly like
 #: ``mint_budget.record_child_peak`` banks the device peak.
 DEFAULT_ENTRY_PEAK_RSS_BYTES = 3 * 1024**3
-
-#: Host RAM a FORGE pod leaves alone (th#1359). Not a tenant reserve — there
-#: is no tenant — but the OS, the page cache and the mint child's own
-#: supervisor are real on any pod. A quarter of the serving reserve.
-FORGE_RSS_RESERVE_BYTES = 1 * 1024**3
 
 #: VRAM the pool must leave to the tenant. The mint's whole premise is that
 #: the worker keeps serving (pgw#784), so the eager forward's weights AND its
@@ -476,13 +470,6 @@ class PoolWidth:
     #: summed over its real descendant tree (``_peak_rss_bytes``), banked by
     #: the serving parent (``mint_budget.record_entry_peak_rss``).
     per_entry_rss_basis: str = "default"
-    #: pgw#930 (§1.17): the two goals, reported INDEPENDENTLY. A K of 1 on a
-    #: pod holding a serve goal and a K of 1 on a mint-only pod are different
-    #: defects, and the row has to say which one it is. This was one boolean
-    #: named `forge`, which could not describe a pod holding both goals — the
-    #: exact case Paul's ruling requires to work.
-    serve_goal: bool = True
-    mint_goal: bool = False
     #: §4.30 / pgw#1137: whose MACHINE this is. Distinct from the goals above,
     #: which say what the pod was bought to do — a K held down for a human at
     #: a keyboard and a K held down for a tenant are different decisions and a
@@ -514,8 +501,6 @@ class PoolWidth:
             "underwidth": int(self.underwidth),
             "per_entry_device_basis": self.per_entry_device_basis,
             "per_entry_rss_basis": self.per_entry_rss_basis,
-            "serve_goal": bool(self.serve_goal),
-            "mint_goal": bool(self.mint_goal),
             "width_reason": self.reason,
             **self.posture.facts(),
         }
@@ -723,7 +708,6 @@ def entry_workers(
     device_basis: str = "",
     limit: int = 0,
     device_lock: Optional[bool] = None,
-    goals: Optional[WorkerGoals] = None,
     posture: Optional[CompilePosture] = None,
 ) -> PoolWidth:
     """How many entries this pod may compile at once.
@@ -767,32 +751,20 @@ def entry_workers(
     was before this parameter existed.
     """
     entries = max(0, int(entries))
-    if goals is None:
-        goals = worker_goals.current()
     if posture is None:
         posture = compile_posture.current()
-    # pgw#930 (§1.17): THREE of this policy's terms are tenant reserves, and a
-    # pod with no SERVE goal has no tenant. `SERVING_HEADROOM_CPUS` keeps cores
-    # for an eager forward and a heartbeat; `DEVICE_RESERVE_BYTES` keeps VRAM
-    # for the tenant's peak; `ENTRY_RSS_RESERVE_BYTES` keeps host RAM so a
-    # request arriving mid-mint does not meet the OOM killer. A pod holding no
-    # serve goal receives no tenant dispatch, so all three protect nobody — and
-    # on pgw#846's attempts fourteen and fifteen the VRAM reserve alone held
-    # the pool at K=1 on a host that could have run it 127 CPU-side.
-    #
-    # These three used to be `0 if forge else X` — strictly two-valued, keyed
-    # on an exclusive mode. Keyed on the SERVE GOAL they compose: a pod serving
-    # one small model while driving a scheduled mint keeps every reserve, which
-    # is the case the mode could not express.
-    #
-    # A SMALL host-RAM reserve survives regardless: the OS, the page cache and
-    # the mint child's own supervisor are real on a mint-only pod too. It is
-    # the TENANT's share that goes, not prudence.
-    reserve = goals.tenant_reserve_applies()
-    cpu_headroom = SERVING_HEADROOM_CPUS if reserve else 0
-    device_reserve = DEVICE_RESERVE_BYTES if reserve else 0
-    rss_reserve = posture.rss_reserve_bytes(
-        ENTRY_RSS_RESERVE_BYTES if reserve else FORGE_RSS_RESERVE_BYTES)
+    # §4.28 / pgw#1092: THREE of this policy's terms are tenant reserves and
+    # all three are now UNCONDITIONAL. They used to be relaxed to zero on a pod
+    # holding no serve goal, and §4.28 deleted that pod class: the only mint
+    # left is the one a SERVING pod runs in the background on a cell miss
+    # (pgw#784), so there is always a tenant to protect.
+    # `SERVING_HEADROOM_CPUS` keeps cores for an eager forward and a heartbeat;
+    # `DEVICE_RESERVE_BYTES` keeps VRAM for the tenant's peak;
+    # `ENTRY_RSS_RESERVE_BYTES` keeps host RAM so a request arriving mid-mint
+    # does not meet the OOM killer.
+    cpu_headroom = SERVING_HEADROOM_CPUS
+    device_reserve = DEVICE_RESERVE_BYTES
+    rss_reserve = posture.rss_reserve_bytes(ENTRY_RSS_RESERVE_BYTES)
     locked = aot_device_lock.supported() if device_lock is None \
         else bool(device_lock)
     if entries <= 1:
@@ -808,8 +780,7 @@ def entry_workers(
             per_entry_rss_bytes=0, per_entry_device_bytes=0,
             per_entry_rss_basis="not-read", per_entry_device_basis="not-read",
             device_lock=locked, binding="entries", ceiling=1,
-            limit=max(0, int(limit)),
-            serve_goal=goals.serve, mint_goal=goals.mint, posture=posture,
+            limit=max(0, int(limit)), posture=posture,
             reason=(
                 f"{entries} entr{'y' if entries == 1 else 'ies'}: serial "
                 f"(no cpu/memory/device bound was read — the entry count "
@@ -908,8 +879,7 @@ def entry_workers(
             memory=memory, device=device,
             per_entry_device_basis=device_basis,
             per_entry_rss_basis=rss_basis,
-            limit=max(0, int(limit)),
-            serve_goal=goals.serve, mint_goal=goals.mint, posture=posture)
+            limit=max(0, int(limit)), posture=posture)
 
     workers = max(
         1, min(cpu_workers, mem_workers, device_workers, ceiling, entries))
@@ -931,8 +901,7 @@ def entry_workers(
         f"ceiling {ceiling}, nice {posture.nice_level()}]"
         if posture.user_machine else "")
     reason = (
-        f"K={workers} ({binding}-bound{polite}, goals="
-        f"{'serve+mint' if goals.serve and goals.mint else 'serve' if goals.serve else 'mint' if goals.mint else 'none'}): "
+        f"K={workers} ({binding}-bound{polite}): "
         f"{vcpus} vCPU ({cpu.basis}) -> "
         f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) -> "
         f"{mem_workers}, {free_vram / 1024**3:.1f} GiB VRAM ({device.basis}) "
@@ -2002,10 +1971,8 @@ class EntryCompilePool:
             # pgw#1053: the release rides every later decision row — a widen
             # or a hold after it must say the budget it ran against moved.
             terms["residents_released_bytes"] = int(self._free_gain_bytes)
-        reserve = DEVICE_RESERVE_BYTES \
-            if WorkerGoals(serve=self.width.serve_goal,
-                           mint=self.width.mint_goal).tenant_reserve_applies() \
-            else 0
+        # §4.28: unconditional, exactly like `entry_workers`' device reserve.
+        reserve = DEVICE_RESERVE_BYTES
         budget = (self.census.total_bytes - self.census.resident_other_bytes
                   - own_peak - reserve)
         terms.update({
@@ -2238,14 +2205,9 @@ class EntryCompilePool:
                 vcpus=int(base.vcpus),
                 peak_rss_bytes=int(self.peak_rss_bytes or 0),
                 device_lock=base.device_lock,
-                # Reconstructed from the record rather than re-read: the
-                # re-derivation must run the policy the pool was BUILT under,
-                # not whatever a later `install()` published.
-                goals=WorkerGoals(
-                    serve=base.serve_goal, mint=base.mint_goal),
-                # ...and the same rule for the posture: a mid-mint widen must
-                # not quietly stop being polite on a machine that was polite
-                # when the pool was built.
+                # Reconstructed from the record rather than re-read: a mid-mint
+                # widen must not quietly stop being polite on a machine that
+                # was polite when the pool was built.
                 posture=base.posture,
             )
         except Exception:  # noqa: BLE001 — a re-derivation never fails a mint
@@ -2521,7 +2483,6 @@ __all__ = [
     "ENTRY_CHILD_MODULE",
     "ENTRY_REPORT_NAME",
     "ENTRY_RSS_RESERVE_BYTES",
-    "FORGE_RSS_RESERVE_BYTES",
     "EXIT_BAD_JOB",
     "EXIT_COMPILED",
     "EXIT_REFUSED",

@@ -3,8 +3,8 @@ through the 97-minute compile phase.
 
 The two residents, measured (attempts 24/26/30):
 
-* the serving PARENT's eager pipeline — 9.54 GiB on a pod whose goal set
-  admits no tenant dispatch (it serves nobody; the heartbeat needs no VRAM);
+* the serving PARENT's eager pipeline — 9.54 GiB, now always a live tenant's
+  and therefore never parked (see the last section);
 * the MINT CHILD's own pipeline plus the retained programs' weight aliases —
   16.2 GiB of dead weight from the moment the last row exports.
 
@@ -20,17 +20,15 @@ What is asserted here:
   pgw#992-bounded arithmetic, never past the card's simultaneous budget, and
   never touching the co-tenant term (the census predates every child and the
   release re-baselines only the OWN floor);
-* the PARENT-side park is decided by the GOALS machinery (pgw#930): a pod
-  holding a serve goal keeps eager resident and hot (Paul ruling 2 — this is
-  the serving-pod half of the asymmetry), a pod with no serve goal parks to
-  host RAM for the mint and restores before ADOPT.
+* the PARENT-side park is DELETED (§4.28 / pgw#1092): it was reachable only
+  on a pod holding no serve goal, and that pod class no longer exists.
 """
 
 from __future__ import annotations
 
 import types
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 import pytest
 
@@ -41,7 +39,7 @@ import torch.nn as nn  # noqa: E402
 from gen_worker import aot_compile_pool as pool_mod  # noqa: E402
 from gen_worker import (  # noqa: E402
     aot_flatten, aot_mint, aot_package, aot_serve, compile_cache, graph_hash,
-    mint_delegate, worker_goals)
+    mint_delegate)
 from gen_worker.api.decorators import Compile  # noqa: E402
 from gen_worker.api.export_contract import (  # noqa: E402
     Dim,
@@ -237,9 +235,9 @@ def _census() -> pool_mod.CardCensus:
 def _width() -> pool_mod.PoolWidth:
     return pool_mod.entry_workers(
         36, vcpus=256, available_bytes=116 * _GIB, peak_rss_bytes=3 * _GIB,
-        free_vram_bytes=FREE_AT_OPEN, device_bytes=int(9.9 * _GIB),
-        device_basis="estimated", device_lock=True,
-        goals=worker_goals.MINT_ONLY)
+        free_vram_bytes=FREE_AT_OPEN + pool_mod.DEVICE_RESERVE_BYTES,
+        device_bytes=int(9.9 * _GIB),
+        device_basis="estimated", device_lock=True)
 
 
 def _pool(tmp_path: Path, monkeypatch, *, own_peak: int) -> pool_mod.EntryCompilePool:
@@ -343,76 +341,20 @@ def test_live_spawn_admission_holds_a_spawn_the_budget_cannot(
 
 
 # ---------------------------------------------------------------------------
-# The PARENT half: goals decide, serving pods keep eager hot
+# The PARENT half is GONE (§4.28 / pgw#1092)
 # ---------------------------------------------------------------------------
 
 
-class _Poisoned:
-    """An object no park may touch when the goals say serve."""
+def test_the_parent_never_parks_its_eager_pipeline_any_more() -> None:
+    """pgw#1053's park was reachable ONLY on a pod holding no serve goal — a
+    forge pod. §4.28 deleted that pod class, so the park is unreachable code
+    and is deleted with it: every mint now runs beside a live tenant whose
+    eager pipeline stays resident and hot (Paul ruling 2).
 
-    def __getattr__(self, name: str) -> Any:  # pragma: no cover — the trap
-        raise AssertionError(f"a serving pod's pipeline was touched ({name})")
-
-
-def test_serving_goal_keeps_eager_resident() -> None:
-    parked = mint_delegate.maybe_park_eager(
-        _Poisoned(), goals=worker_goals.SERVE_ONLY)
-    assert parked is None
-
-
-def test_dual_goal_pod_keeps_eager_resident() -> None:
-    """Paul's serve+mint case: the tenant reserve is real and eager stays."""
-    goals = worker_goals.WorkerGoals(serve=True, mint=True)
-    assert mint_delegate.maybe_park_eager(_Poisoned(), goals=goals) is None
-
-
-def test_mint_only_goal_parks_cuda_modules_and_restores(monkeypatch) -> None:
-    """The decision seam, cardless: a mint-only pod PARKS what is on the
-    device and restores it on demand. The move itself is recorded through
-    the module's own `.to`, so this passes on the real GPU leg unchanged."""
-
-    class _FakeParam:
-        is_cuda = True
-        device = "cuda:0"
-
-    class _FakeModule(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.moves: List[Any] = []
-
-        def parameters(self, recurse: bool = True):  # type: ignore[override]
-            yield _FakeParam()
-
-        def to(self, target: Any, *a: Any, **k: Any):  # type: ignore[override]
-            self.moves.append(target)
-            return self
-
-    module = _FakeModule()
-    pipe = types.SimpleNamespace(unet=module)
-    parked = mint_delegate.maybe_park_eager(
-        pipe, goals=worker_goals.MINT_ONLY)
-    assert parked is not None
-    assert module.moves == ["cpu"]
-    assert mint_delegate.restore_eager_pipeline(parked) is True
-    assert module.moves == ["cpu", "cuda:0"]
-
-
-def test_mint_only_goal_with_nothing_on_device_is_a_noop() -> None:
-    pipe = types.SimpleNamespace(unet=nn.Linear(4, 4))  # CPU weights
-    assert mint_delegate.maybe_park_eager(
-        pipe, goals=worker_goals.MINT_ONLY) is None
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a real card")
-def test_park_and_restore_on_the_real_card() -> None:
-    """The GPU leg (rig box / GPU CI lane): park frees reserved bytes, the
-    weights land in host RAM, restore puts them back."""
-    module = nn.Linear(256, 256).cuda()
-    pipe = types.SimpleNamespace(unet=module)
-    torch.cuda.synchronize()
-    parked = mint_delegate.maybe_park_eager(
-        pipe, goals=worker_goals.MINT_ONLY)
-    assert parked is not None
-    assert all(p.device.type == "cpu" for p in module.parameters())
-    assert mint_delegate.restore_eager_pipeline(parked) is True
-    assert all(p.is_cuda for p in module.parameters())
+    RED before this change: `mint_delegate.maybe_park_eager` existed and
+    `build_cell` called it before the first budget probe.
+    """
+    for gone in ("ParkedEager", "maybe_park_eager", "restore_eager_pipeline",
+                 "_eager_modules"):
+        assert not hasattr(mint_delegate, gone), gone
+    assert "park" not in mint_delegate.__all__

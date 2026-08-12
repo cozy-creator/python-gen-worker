@@ -75,7 +75,6 @@ import msgspec
 
 from . import config
 from . import worker_credential
-from . import worker_goals
 from .cuda_probe import CUDA_PROBE_FAILED_MARKER, probe_cuda, should_probe_cuda
 from .hardware_report import report_hardware_unsuitable
 from .models.cache_paths import tensorhub_cas_dir
@@ -383,7 +382,6 @@ def _bootstrap_configuration() -> config.Settings:
         logger.warning(
             "unknown_owned_env %s: set in a gen-worker-owned namespace but no "
             "reader exists in this build — it is INERT, not applied", name)
-    worker_goals.install(worker_goals.from_settings(settings))
     worker_credential.install_bootstrap(settings)
     return settings
 

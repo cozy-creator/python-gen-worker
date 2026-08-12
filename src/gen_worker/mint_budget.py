@@ -37,8 +37,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-from . import worker_goals
-from .worker_goals import WorkerGoals
 
 _GIB = 1 << 30
 
@@ -327,7 +325,6 @@ def co_residency(
     *,
     family: str = "",
     weight_lane: str = "",
-    goals: Optional[WorkerGoals] = None,
 ) -> MintBudget:
     """pgw#784: can a MINT CHILD live on this card next to the eager server?
 
@@ -423,8 +420,6 @@ def co_residency(
     never the child, and the child's measured peak is banked
     (``record_child_peak``) so the second ask on a pod is a fact.
     """
-    if goals is None:
-        goals = worker_goals.current()
     read = _read_device(device)
     if read is None:
         return _UNPROBEABLE
@@ -432,25 +427,6 @@ def co_residency(
     allocated = read.allocated
     measured_activation = read.measured_activation
     activation = read.activation
-    if not goals.tenant_reserve_applies():
-        # pgw#930 (§1.17): with no SERVE goal there is no tenant, so there is
-        # nothing to reserve for one. Every term in this module exists to
-        # protect a co-resident serving process; with none, the whole premise
-        # collapses and the mint gets the card.
-        #
-        # This used to ask `is_forge()`, which was a proxy for the question and
-        # the wrong one the moment serve and mint compose: a pod holding BOTH
-        # goals is not a forge pod, and it needs its reserve. The reserve now
-        # follows the serve goal directly, so the dual-goal case gets a real
-        # one and the mint-only case gets zero for the true reason.
-        #
-        # Explicit rather than emergent. Once the serving instance is released
-        # `allocated` tends to 0 and the arithmetic mostly falls out on its
-        # own — but "mostly" is how the 11.09 GiB ceiling survived fifteen
-        # attempts. A mint-only pod that probes a millisecond before the
-        # release completes must not inherit a tenant reserve computed off a
-        # model that is on its way out.
-        activation = 0
     # pgw#877 #4 — A MEASUREMENT REPLACES THE GUESSES IT MEASURED.
     #
     # This was `max(banked + ctx, allocated + activation + workspace + ctx)`,

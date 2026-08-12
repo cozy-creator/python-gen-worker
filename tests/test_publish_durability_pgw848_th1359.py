@@ -56,11 +56,16 @@ def test_a_retry_of_the_SAME_key_is_not_progress() -> None:
 
 
 def test_failure_is_not_durable_progress() -> None:
+    """A refusal is a typed activity event, never a durable transition.
+
+    §4.28 / pgw#1092 deleted the in-process `_REFUSED` ledger the mint-goal
+    driver read; the counter never consulted it, which is exactly what this
+    row asserts — a failed publish leaves durable progress where it was.
+    """
     _reset()
     fleet_cells._note_durable("ck1-a", "started")
     baseline = fleet_cells.publish_durable_progress()
-    with fleet_cells._IN_FLIGHT_LOCK:
-        fleet_cells._REFUSED["ck1-a"] = "cell_publish_untrusted_compute"
+    assert not hasattr(fleet_cells, "_REFUSED")
     assert fleet_cells.publish_durable_progress() == baseline
 
 

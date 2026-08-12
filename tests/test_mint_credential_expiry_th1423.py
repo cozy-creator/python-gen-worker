@@ -230,7 +230,6 @@ def test_the_background_publish_reports_the_grouped_phase(hub, artifact,
     thread.join()  # the publish thread itself is the bound — no clock
 
     assert ("self_mint_publish_failed", "worker_credential_expired") in seen
-    assert fc.refused_publishes()[CELL_KEY] == "worker_credential_expired"
 
 
 # --- the mint publisher must read the credential at USE time ----------------

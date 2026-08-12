@@ -23,14 +23,16 @@ almost every plumbing defect dies to the rig.
 
 ## Bringing one up
 
-Two environment variables, both required, and the sync script refuses a pod
-without the first:
+One environment variable, required, and the sync script refuses a pod without
+it:
 
 ```bash
 GEN_WORKER_PROBE=1      # marks the pod a probe; DISARMS cell publish
-WORKER_MODE=forge       # serve=False -> the hub excludes it from dispatch and
-                        # the worker itself refuses tenant jobs
 ```
+
+There is no longer a mode that keeps the hub from dispatching to a probe:
+§4.28 deleted the forge and `WORKER_MODE` with it (pgw#1092). Buy the probe pod
+against a release nothing is routing traffic to.
 
 `GEN_WORKER_PROBE=1` is not advisory. It is read by the **control parent**, in
 `procsplit/actions.py`, and it removes `cells.publish_intent` /

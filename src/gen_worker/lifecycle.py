@@ -17,9 +17,7 @@ from . import boot_phases as boot_mod
 from . import content_credentials
 from . import receipts
 from . import serve_posture
-from . import mint_goal as mint_goal_mod
 from . import progress as progress_mod
-from . import worker_goals
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
@@ -320,10 +318,6 @@ class Lifecycle:
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
         self._boot_setup_watch: Optional[asyncio.Task] = None
-        # pgw#930: the scheduled-mint goal driver. None on a pod that was
-        # given no mint goal — which is every ordinary serving pod, and is a
-        # different fact from "this pod may not compile".
-        self._mint_goal_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._disk_report_at = 0.0
         self._disk_report_refresh_task: Optional[asyncio.Task] = None
@@ -457,13 +451,6 @@ class Lifecycle:
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=gw_version,
             image_digest=self._settings.worker_image_digest,
-            # pgw#930: the goal set projected onto the wire field the hub
-            # still keys dispatch exclusion and drain immunity on. It ships the
-            # RAW declaration when there was one, so a spelling this image does
-            # not understand is VISIBLE at the hub as a disagreement rather
-            # than silently read as a serving pod. Replaced by th#1488's
-            # `repeated Goal goals`, which reports each goal independently.
-            worker_mode=worker_goals.current().wire_declaration(),
             # git_commit intentionally unpopulated (pgw#514/P4): no launcher
             # ever set WORKER_GIT_COMMIT and Go never read WorkerResources
             # .git_commit — dead on both ends. Field stays on the wire
@@ -1430,17 +1417,6 @@ class Lifecycle:
         # milestone, and that is the finding (same doctrine as an open span).
         await self.set_phase(pb.WORKER_PHASE_READY)
 
-        # pgw#930 (§1.17): a SCHEDULED MINT goal's boot is not the end of the
-        # pod's story — it is the start of work it was bought for. The driver
-        # waits for the mint disposition to be final, joins the publish, states
-        # a typed terminal, and retires the pod ONLY if no serve goal is also
-        # held. Started AFTER READY so the mint's setup path is byte-identical
-        # whether or not a serve goal is present: goals compose, and a goal
-        # that boots differently is a fork.
-        if worker_goals.current().drives_mint():
-            self._mint_goal_task = asyncio.create_task(
-                mint_goal_mod.run(self), name="mint-goal-driver")
-
     def _mark_servable(self) -> None:
         """Close the boot: mark first-request-servable from process start.
 
@@ -1574,7 +1550,7 @@ class Lifecycle:
         Nothing consulted progress: a render at step 30/50 and a render at
         step 1/50 were aborted identically, and a MINT — which has no partial
         result to requeue — was abandoned outright. ``self_mint_abort`` has 52
-        rows on chaos and 64 on master; ``forge.py:14`` recorded one verbatim:
+        rows on chaos and 64 on master; one was recorded verbatim:
         *"attempt sixteen ran 29 minutes and died
         ``self_mint_abort/abandoned_shutdown``"*.
 
