@@ -1351,14 +1351,8 @@ class EntryCompilePool:
         inductor_configs: Optional[Mapping[str, Any]] = None,
         cache_dir: str = "",
         python: str = "",
-        nice_children: bool = False,
     ) -> None:
         self.workdir = Path(workdir)
-        #: pgw#1111 / §4.30: on the untrusted tier (cozy-local — the user's own
-        #: machine, hub-asserted, never an env flag) the compile children run
-        #: niced so a background mint never saturates the machine the user is
-        #: also serving on. A dedicated serving pod leaves it False (aggressive).
-        self.nice_children = bool(nice_children)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.width = width
         #: pgw#842/th#1359: the width facts as last EMITTED, so a re-emit
@@ -1453,6 +1447,10 @@ class EntryCompilePool:
         # other children run, so summing it into the compile total would
         # invent seconds nobody spent compiling.
         self.entry_stage_seconds: Dict[str, float] = {}
+        #: pgw#1111: how many entries crossed the process boundary as META
+        #: (a weight-free mint). A pool that ran a structure-only cell and
+        #: reports 0 here staged real weights and the round-trip never fired.
+        self.meta_staged_entries = 0
         self.entry_spawn_seconds: Dict[str, float] = {}
         self.entry_overlays: Dict[str, Dict[str, float]] = {}
         self.entry_metrics_raw: Dict[str, Dict[str, float]] = {}
@@ -1470,12 +1468,17 @@ class EntryCompilePool:
         slot.mkdir(parents=True, exist_ok=True)
         program_path = slot / "program.pt2"
         t0 = time.monotonic()
-        # pgw#1111: a weight-free program's params are FAKE (no storage to
-        # serialize). Re-cast them to META so the save succeeds; the child
-        # re-virtualizes META -> FAKE after load. Real-weight programs (and the
-        # example inputs of both) are untouched — a no-op returning 0.
-        meta_params = structure_only.to_meta_for_save(program)
-        torch.export.save(program, program_path)
+        # pgw#1111: a weight-free program's params are FAKE, and a fake tensor
+        # has no storage to serialize — the child died deserializing it, which
+        # is why every structure-only mint ran SERIALLY. META tensors carry the
+        # same shape/dtype and DO serialize, so the save crosses the process
+        # boundary on metadata and `aot_compile_child` re-virtualizes
+        # META -> FAKE inside the load's own mode. Real-weight programs are
+        # untouched (the cast moves nothing and the context is a no-op).
+        with structure_only.as_meta_for_save(program) as meta_params:
+            torch.export.save(program, program_path)
+        if meta_params:
+            self.meta_staged_entries += 1
         self.entry_stage_seconds[entry] = round(time.monotonic() - t0, 3)
         self.ledger.stage_total_s = round(
             self.ledger.stage_total_s + self.entry_stage_seconds[entry], 3)
@@ -1496,38 +1499,17 @@ class EntryCompilePool:
         job_path.write_bytes(msgspec.json.encode(job))
         return job, job_path
 
-    def _child_preexec(self) -> Optional[Callable[[], None]]:
-        """pgw#1111 / §4.30: on the untrusted tier, drop each child to the
-        lowest scheduling priority so a background mint yields to the user's own
-        work. ``start_new_session`` already runs here, so the two compose in one
-        ``preexec_fn``. Returns ``None`` on a trusted pod — aggressive, unniced.
-        """
-        if not self.nice_children:
-            return None
-
-        def _pre() -> None:
-            os.setsid()
-            try:
-                os.nice(19)
-            except OSError:
-                pass
-        return _pre
-
     def _spawn(self, job: EntryJob, job_path: Path, program_path: Path) -> _Running:
         stderr_path = job_path.parent / "stderr.log"
         handle = stderr_path.open("wb")
         t0 = time.monotonic()
-        preexec = self._child_preexec()
         try:
             proc = subprocess.Popen(
                 child_argv(job_path, python=self.python),
                 stdout=subprocess.DEVNULL,
                 stderr=handle,
                 env=child_env(self.cache_dir, seal_memo=self.seal_memo),
-                # `start_new_session` and the nice drop compose in preexec when
-                # the pod is untrusted; otherwise the flag gives the own group.
-                start_new_session=preexec is None,   # own group -> reaping
-                preexec_fn=preexec,
+                start_new_session=True,   # own group -> group-wide reaping
             )
         finally:
             handle.close()

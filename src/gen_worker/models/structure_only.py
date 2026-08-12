@@ -703,6 +703,33 @@ def to_meta_for_save(program: Any) -> int:
     return moved
 
 
+@contextlib.contextmanager
+def as_meta_for_save(program: Any) -> Iterator[int]:
+    """:func:`to_meta_for_save` for the duration of a save, then EXACTLY the
+    original tensor objects back.
+
+    The parent keeps using its programs after staging them (class
+    canonicalization, the resident release's weight aliases), so the cast must
+    not outlive the ``torch.export.save`` it exists for. Restoring the original
+    objects — not equivalent new fakes — keeps tensor IDENTITY, which is what
+    an alias map compares.
+    """
+    before: List[Tuple[Any, Dict[str, Any]]] = []
+    seen: List[int] = []
+    for table, _name, _tensor in _program_tensor_tables(program):
+        if id(table) not in seen:
+            seen.append(id(table))
+            before.append((table, dict(table)))
+    moved = to_meta_for_save(program)
+    try:
+        yield moved
+    finally:
+        if moved:
+            for table, original in before:
+                table.clear()
+                table.update(original)
+
+
 def has_meta_params(program: Any) -> bool:
     """Whether this loaded program carries META params — the signal that it was
     saved by :func:`to_meta_for_save` and must be re-virtualized before compile.

@@ -2163,25 +2163,20 @@ def _mint_cell(
         # has run and `per_entry_rss_basis` said "default" forever. 0 keeps
         # the constant, and keeps saying so.
         peak_rss_bytes=int(entry_peak_rss_bytes or 0))
+    # pgw#1111: a structure-only mint used to DISCARD this width and run K=1.
+    # `fc77b923` made every production mint weight-free, so that override made
+    # the pool dead code fleet-wide — and because `progress.width` is recorded
+    # below either way, the hub's `pool` row went on reporting the width that
+    # was thrown away. That is how the sdxl A40 mint (release
+    # 6ee9b4d4df2697a53da6f43a, pod bgmdxhazxsugmk) came to be read as
+    # "entry_workers=3" when it ran serially: its `pool` block carries the
+    # width facts and NO ledger, and export_s + compile_s summed to within
+    # 0.6 % of total_s, which is what zero overlap looks like.
+    # The pool now carries a weight-free program as META
+    # (`structure_only.as_meta_for_save` in the parent's stage,
+    # `revirtualize_from_meta` in `aot_compile_child.load_program`), so the
+    # width this pod computed is the width it runs.
     parallel = width.workers > 1
-    if parallel and structure_only.is_structure_only(pipeline):
-        # pgw#1080, MEASURED on the micro-lora gauntlet member: the pool hands
-        # each entry to a compile CHILD by saving the ExportedProgram to
-        # `program.pt2`. A program whose parameters are fake tensors has no
-        # storage to serialize, and the child dies deserializing it
-        # ("We ran into an error when deserializing the saved file"). So a
-        # weightless mint compiles SERIALLY, in this process, which is the
-        # pre-pgw#809 path and is correct — just narrower.
-        #
-        # OWED, not hidden (pgw#1080 follow-up): the pool could carry a
-        # weightless program by saving it with META parameters and
-        # re-virtualizing them onto the device inside the child. That is a
-        # real change to the pool's contract and it is not this slice.
-        logger.warning(
-            "aot-mint: structure-only mint compiles SERIALLY — the entry pool "
-            "serializes the exported program and a fake-parameter program "
-            "cannot round-trip (pgw#1080). Width %d discarded.", width.workers)
-        parallel = False
     logger.info("aot-mint: entry compile width — %s", width.reason)
     if width.underwidth:
         # pgw#842: a pool narrower than the cell could use is a COST, and it
