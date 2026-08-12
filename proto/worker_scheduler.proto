@@ -1608,6 +1608,26 @@ message ActivityUpdate {
   // their own `phase` (per graph-class entry, per warm shape), so the
   // breakdown is groupable too.
   int64 duration_ms = 17;
+
+  // pgw#1176 / th#1839: cell identity as TYPED FIELDS, so the hub's existing
+  // `worker_activity_events.family` / `.cell_key` columns are populated from
+  // the wire instead of regex-scraped out of `detail`. The measured cost of
+  // the prose form: `detail LIKE 'ref=%#'||cell_key||' %'` matched one of
+  // three rows correctly, because four emitters spelled identity four ways.
+  //
+  // `graph_class` is the pgw#1176 atom's unit — one artifact is ONE graph
+  // class, so the class name is what makes a per-entry event bisectable to
+  // the thing that failed. It has no column yet; carrying it on the wire is
+  // what lets the hub add one without a second proto cut.
+  //
+  // Additive: old readers ignore all three, and an emitter that states none
+  // sends empty strings, which is the honest "this event is not about a
+  // cell". Never derived by the hub from `detail` — a field that can be
+  // reconstructed by parsing prose is a field that silently returns NULL the
+  // first time the formatting changes.
+  string family      = 18;
+  string cell_key    = 19; // the `ek1` ENTRY key (pgw#1176), not a cell key
+  string graph_class = 20; // the entry/class name inside the declaration
 }
 
 enum ActivityState {
