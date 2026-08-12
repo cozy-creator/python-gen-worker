@@ -4,11 +4,10 @@ across reconnects; drain = finish in-flight + close; protocol mismatch =
 FAILED_PRECONDITION exits.
 
 Absorbed from ``tests/test_worker_grpc_e2e.py`` (#365), consolidated onto
-``tests/harness/hub_double.py`` per the design's extraction plan. The
-pgw#605 idle-heartbeat row is a documented skip: the proto fields
-(``Hello.idle_heartbeat_interval_ms`` / ``WorkerMessage.heartbeat``) do not
-exist in this tree yet (pgw#605 is unimplemented) — nothing real to assert
-against until they land.
+``tests/harness/hub_double.py`` per the design's extraction plan.
+
+No idle-heartbeat row: pgw#605's proto fields do not exist, so the row that
+named them asserted nothing and never ran (§4.34).
 """
 
 from __future__ import annotations
@@ -448,17 +447,6 @@ def test_worker_survives_hub_restart_and_reconnects(tmp_path, monkeypatch) -> No
         server.stop(grace=0)
         if replacement is not None:
             replacement.stop(grace=0)
-
-
-@pytest.mark.skip(
-    reason="pgw#605 open: Hello.idle_heartbeat_interval_ms / WorkerMessage.heartbeat "
-           "proto fields are not generated in this tree yet (verified: hasattr checks "
-           "fail on worker_scheduler_pb2). Add the proto fields first (mirrored "
-           "byte-identical from tensorhub per the pgw#605 tracker task list), then "
-           "flip this to a real outbound-silence-produces-heartbeats assertion."
-)
-def test_outbound_silence_produces_periodic_heartbeats() -> None:
-    raise AssertionError("unreachable: proto fields for pgw#605 do not exist yet")
 
 
 def test_a_drain_that_runs_out_of_time_still_ships_its_typed_abort() -> None:

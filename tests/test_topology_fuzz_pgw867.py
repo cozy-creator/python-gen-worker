@@ -21,10 +21,16 @@ properties here are:
       execution_groups × gpus_per_execution_group, with the parallel/degree
       coherence rules. This is what makes "silently served the wrong packing"
       unreachable rather than merely unobserved.
-  P4  differential agreement with the Go decoder, via the byte-identical
-      ``testdata/topology_wire_vectors.json`` fixture (the merge-path half; the
-      random cross-language search lives in
-      ``scripts/topology_differential_pgw867.py`` and is deliberately not a test).
+  P4  the Python side answers every vector in ``testdata/topology_wire_vectors
+      .json`` as recorded (the merge-path half; the random cross-language search
+      lives in ``scripts/topology_differential_pgw867.py``, not here).
+
+§4.34 deletions: the row asserting the fixture is byte-identical with
+tensorhub's copy probed ``~/cozy/tensorhub-chaos``, a path the workspace policy
+declares a read-only leftover — it has skipped everywhere, always, so the
+cross-repo identity claim above is UNVERIFIED by anything. And the
+``divergent`` ledger row parametrized over a list the fixture records as empty
+since 2026-08-02, so it ran zero cases.
 
 hypothesis over atheris: these decoders are shallow, so libFuzzer's coverage
 feedback buys little, and ``@example`` puts each historical defect in the source
@@ -126,22 +132,6 @@ def _fixture() -> dict[str, Any]:
     return json.loads(VECTORS.read_text())
 
 
-def test_fixture_is_byte_identical_with_tensorhub() -> None:
-    """The fixture is only a contract if both repos read the SAME bytes.
-
-    Checked against the sibling checkout when it is present, skipped otherwise —
-    a developer without tensorhub on disk still runs everything else.
-    """
-    twin = pathlib.Path.home() / "cozy" / "tensorhub-chaos" / "internal" / "orchestrator" \
-        / "topology" / "testdata" / "topology_wire_vectors.json"
-    if not twin.exists():
-        pytest.skip("tensorhub checkout not present")
-    assert twin.read_bytes() == VECTORS.read_bytes(), (
-        "topology_wire_vectors.json has drifted between the repos; it is vendored "
-        "byte-identically on purpose, exactly like ref_grammar_vectors.json"
-    )
-
-
 @pytest.mark.parametrize("vector", _fixture()["agreed"], ids=lambda v: v["wire"] or "<empty>")
 def test_agreed_wire_vectors(vector: dict[str, Any]) -> None:
     """Every vector both decoders must agree on, asserted against this one."""
@@ -163,35 +153,6 @@ def test_agreed_wire_vectors(vector: dict[str, Any]) -> None:
     assert topo.execution_groups == vector["execution_groups"], note
     assert topo.parallel == vector.get("parallel", ""), note
     _assert_partition(topo, wire)
-
-
-@pytest.mark.parametrize("vector", _fixture()["divergent"], ids=lambda v: v["wire"][:60])
-def test_known_divergences_ledger(vector: dict[str, Any]) -> None:
-    """A LEDGER, not a specification.
-
-    Each entry is an input on which this decoder and tensorhub's disagree today.
-    The assertion is only that the PYTHON side still behaves as recorded, so the
-    day the owning issue is fixed this test goes red and says to move the vector
-    into ``agreed`` — rather than the divergence quietly changing shape.
-    """
-    wire, want, defect = vector["wire"], vector["python"], vector["defect"]
-    if not want["accept"]:
-        with pytest.raises(Exception) as excinfo:  # noqa: B017 - untyped IS the defect
-            ExecutionTopology.decode(wire)
-        recorded = want["code"]
-        if recorded.startswith("UNTYPED:"):
-            assert not isinstance(excinfo.value, TopologyError), (
-                f"{defect} appears fixed: {wire!r} now raises a TYPED refusal. "
-                "Move this vector to `agreed`."
-            )
-        else:
-            assert isinstance(excinfo.value, TopologyError)
-            assert excinfo.value.code == recorded
-        return
-    topo = ExecutionTopology.decode(wire)
-    assert topo.gpu_count == want["gpu_count"], f"{defect} ledger drifted for {wire!r}"
-    assert topo.gpus_per_execution_group == want["gpus_per_execution_group"]
-    assert topo.execution_groups == want["execution_groups"]
 
 
 # --------------------------------------------------------------------------

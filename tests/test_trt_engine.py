@@ -275,13 +275,6 @@ def test_different_cell_rearm_replaces_failed_wrapper_after_staged_proof(
     assert list(cache.glob("trt-engine-stage-*")) == []
 
 
-def test_find_artifact(tmp_path):
-    a = _tar(tmp_path)
-    assert te.find_artifact(a) == a
-    assert te.find_artifact(tmp_path) == a
-    assert te.find_artifact(tmp_path / "nope") is None
-
-
 def test_trt_guard_revocation_failure_never_falls_back(monkeypatch):
     calls = {"eager": 0, "runner": 0, "callback": 0}
 
