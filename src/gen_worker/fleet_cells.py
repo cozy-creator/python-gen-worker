@@ -1509,11 +1509,24 @@ def _arming_policy(
         if cc.mandatory_serving(pipe):
             if bucket:
                 cc.drop_lora_execution_lane(pipe)
+            # pgw#888: this exit is reached whenever the recipe is not AOT,
+            # and only ONE of its causes is permanent. A family that declares
+            # no export can never have a cell on any pod, so a retry re-derives
+            # one answer at full cost. The other causes — a delegation refusal,
+            # a caller-forced in-process decline — can differ on the next
+            # attempt, so they stay retryable. Asked of the DECLARATION rather
+            # than assumed from the code path: the two disagree, which is what
+            # the hardcoded reason string below used to hide.
+            declares_export = export_declaration(family) is not None
             return _fail_closed(
                 pipe,
-                "this lane serves only from a cell and this family declares "
-                "no export, so no cell can be minted for it (pgw#1010)",
-                selection_bug, phase=EagerPhase.MANDATORY_LANE_NEEDS_A_CELL)
+                ("this lane serves only from a cell and the mint recipe is "
+                 f"{recipe!r}, not aot, so no cell can be minted for it here "
+                 "(pgw#1010)") if declares_export else
+                ("this lane serves only from a cell and this family declares "
+                 "no export, so no cell can be minted for it (pgw#1010)"),
+                selection_bug, phase=EagerPhase.MANDATORY_LANE_NEEDS_A_CELL,
+                permanent=not declares_export)
         # INTAKE. Arm the declared targets and let this pod's own warmup
         # compile them — nothing is captured, keyed, packed, published or
         # owed. There is no capture dir, so gw#608's process-global cache
@@ -2629,6 +2642,7 @@ def _fail_closed(
     pipe: Any, reason: str,
     selection_bug: Optional["cc.CellSelectionBugError"] = None,
     *, phase: EagerPhase = EagerPhase.MINT_UNAVAILABLE,
+    permanent: bool = False,
 ) -> ArmOutcome:
     """The quantized-lane policy at every exit that cannot produce a cell:
     plain lanes serve eager (never-raise miss policy), w8a8/w4a4 keep the
@@ -2643,9 +2657,26 @@ def _fail_closed(
     # eager-serveable mixed lane (sdxl #fp8-w8a8 storage on fp8-w8a16
     # execution) degrades to eager here instead of a typed refusal.
     if cc.mandatory_serving(pipe):
-        refusal = cc.CompiledExecutionLaneUnavailableError(
-            f"{execution_lane[:4].upper()} requires a compile cell and the self-mint "
-            f"is unavailable ({reason})")
+        # The lane can be unknown here (an unclassifiable pipe); "the mandatory
+        # lane" still reads as a sentence, where a bare empty prefix did not —
+        # and this string is the whole explanation the hub receives.
+        lane = execution_lane[:4].upper() or "MANDATORY"
+        if permanent:
+            # pgw#888: the cause cannot change, so a retry re-derives one
+            # answer at full cost (11 requests x 5 attempts, measured). The
+            # message names why EAGER was not the answer either — the author
+            # declared this lane mandatory, so eager is not a posture they
+            # sanctioned (see CompiledExecutionLaneImpossibleError).
+            refusal: Exception = cc.CompiledExecutionLaneImpossibleError(
+                f"{lane} requires a compile cell and no cell can EVER exist for "
+                f"this family ({reason}). Not retryable: no pod can hold a cell "
+                f"the family declares no export for. Not served eager either: "
+                f"the {lane} lane is declared mandatory, so eager would serve "
+                f"numerics this endpoint never sanctioned")
+        else:
+            refusal = cc.CompiledExecutionLaneUnavailableError(
+                f"{lane} requires a compile cell and the self-mint "
+                f"is unavailable ({reason})")
         if selection_bug is not None:
             raise refusal from selection_bug
         raise refusal
