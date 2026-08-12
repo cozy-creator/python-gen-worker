@@ -24,7 +24,10 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence,
+    Tuple,
+)
 
 from .. import artifact_meta
 from .. import cell_key
@@ -311,9 +314,15 @@ def arm_aot(
     bucket: int, meta: Optional[Dict[str, Any]] = None,
     *, expected: "Optional[ExpectedIdentity]" = None,
     verify_numerics: bool = False,
+    declared: Sequence[str] = (),
 ) -> AdoptOutcome:
-    """Arm ONE exported ``.pt2`` cell on ``pipe``. The whole AOT arm, in one
+    """Arm ONE exported ``.pt2`` ENTRY on ``pipe``. The whole AOT arm, in one
     place, for every source of such an artifact.
+
+    pgw#1176: the unit is one graph class. ``declared`` is every class name
+    this pod's declaration traces to, threaded to the dispatch so a call no
+    ARMED entry admits reads as "declared, pending compile" (silent eager)
+    rather than as an undeclared shape.
 
     ``verify_numerics`` (DESIGN-RULINGS §4.32, pgw#1141) runs the parity gate,
     and exactly ONE caller sets it: the pod that MINTED these bytes, before it
@@ -503,7 +512,8 @@ def arm_aot(
     #
     # pgw#1176 makes that refusal cheaper still: the attempt is ONE graph
     # class, so a card that cannot hold it costs that class and no other.
-    outcome = aot_serve.enable(pipe, cfg, cache_dir, artifact, expected=expected)
+    outcome = aot_serve.enable(
+        pipe, cfg, cache_dir, artifact, expected=expected, declared=declared)
     _, _peak_after_load = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = max(0, _peak_after_load - _resident_before)
     if not outcome.armed and lifted_install_error:

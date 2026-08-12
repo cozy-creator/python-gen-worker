@@ -66,12 +66,16 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     returns True and the 0.99-cosine cell serves every subsequent request.
     """
     packages = {entry_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
-    pipeline, module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert outcome.armed is False, "a cell that lost 1% of the output's direction armed"
-    # Refused means UNARMED, not merely reported: the module must be eager.
+    # pgw#1176: one verdict PER GRAPH CLASS. Every class here is 1% off, so
+    # every class refuses — and the pipeline serves nothing compiled, which is
+    # now a CONSEQUENCE of every entry refusing rather than a rule that one
+    # refusal condemns the rest.
+    assert [o.armed for o in outcomes] == [False, False], (
+        "a cell that lost 1% of the output's direction armed")
     assert aot.is_armed(pipeline) is False
-    assert aot.armed_targets(pipeline) == {}
+    assert aot.armed_entries(pipeline) == {}
     assert isinstance(module.forward(torch.zeros(8, 8), torch.tensor(1.0)),
                       torch.Tensor)
 
@@ -80,8 +84,8 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     # this gate ran, so a reader counting armed adoptions over-counted every
     # numerics refusal and a second "retraction" row existed only to correct
     # the first. The arm returns ONE outcome, with the gate's verdict in it.
-    assert outcome.reason == "numerics_refused"
-    assert "nothing is published" in outcome.detail
+    assert outcomes[0].reason == "numerics_refused"
+    assert "is not published" in outcomes[0].detail
 
     rows = numerics_rows(events)
     assert rows, "a refused cell said nothing on the wire"
@@ -105,15 +109,18 @@ def test_the_gray_band_CONFESSES_AND_REFUSES_TO_PUBLISH(
     degradation to every pod that pulls the key. Before that ruling this exact
     cell armed and shipped."""
     packages = {entry_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
-    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert outcome.armed is False, "a gray-band cell was published to the fleet"
+    assert not any(o.armed for o in outcomes), (
+        "a gray-band cell was published to the fleet")
     assert aot.is_armed(pipeline) is False
     rows = numerics_rows(events)
-    assert [p for _d, p in rows] == ["degraded"], rows
+    # One row per ENTRY, each on its own single axis: the gate runs at the
+    # moment that entry exists, never "after all 36" (pgw#1176 / §4.32).
+    assert [p for _d, p in rows] == ["degraded", "degraded"], rows
     detail = rows[0][0]
     assert "cosine=0.997" in detail
-    assert "axes=2/2" in detail
+    assert "axes=1/1" in detail
 
 
 def test_a_faithful_cell_arms_AND_THE_PASS_IS_ANNOUNCED(
@@ -122,19 +129,21 @@ def test_a_faithful_cell_arms_AND_THE_PASS_IS_ANNOUNCED(
     this program's signature failure. So the pass is a hub row too, carrying
     every axis it was taken on."""
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert outcome.armed is True
+    assert all(o.armed for o in outcomes)
     assert aot.is_armed(pipeline) is True
+    assert set(aot.armed_entries(pipeline)) == {
+        entry_name(h, w) for h, w in ROWS}
     rows = numerics_rows(events)
-    assert [p for _d, p in rows] == ["checked"], rows
-    detail = rows[0][0]
-    assert "axes=2/2" in detail
-    assert f"family={FAMILY}" in detail and "key=cell868" in detail
-    # Per-axis readings, named — the PoolWidth discipline.
-    for h, w in ROWS:
+    assert [p for _d, p in rows] == ["checked", "checked"], rows
+    # Per-axis readings, named — the PoolWidth discipline. One row per class,
+    # each naming its own class and carrying its own key.
+    for (detail, _phase), (h, w) in zip(rows, ROWS):
+        assert "axes=1/1" in detail
+        assert f"family={FAMILY}" in detail and "key=ek1-" in detail
         assert entry_name(h, w) in detail
-    assert "cos=1.00000" in detail
+        assert "cos=1.00000" in detail
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +161,9 @@ def test_a_cell_that_cannot_be_MEASURED_does_not_arm(
     is the ordinary miss policy of every other adopt gate, so the cost of a
     probe defect is an un-armed cell — never a silently degraded one."""
     packages = {entry_name(h, w): package for h, w in ROWS}
-    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert outcome.armed is False
+    assert not any(o.armed for o in outcomes)
     assert aot.is_armed(pipeline) is False
     detail, phase = numerics_rows(events)[-1]
     assert phase == "unmeasurable"
@@ -168,10 +177,10 @@ def test_an_undeclared_family_cannot_be_probed_AND_THEREFORE_CANNOT_ARM(
     state the whole fleet was in, and it must read as a refusal."""
     reset_export_declarations()
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    _pipeline, _module, outcome = arm(
+    _pipeline, _module, outcomes = arm(
         tmp_path, monkeypatch, declaration(), packages)
 
-    assert outcome.armed is False
+    assert not any(o.armed for o in outcomes)
     detail, phase = numerics_rows(events)[-1]
     assert phase == "unmeasurable"
     assert "no_input_contract" in detail
@@ -185,6 +194,11 @@ def test_the_report_cannot_report_a_pass_it_did_not_take():
     report, a report short of its own axis count, and a report whose axes
     errored. If this ever returns True for one of these, the gate is passing
     cells nobody measured.
+
+    pgw#1176 KEPT this row and narrowed what it guards. The all-axes-of-the-
+    CELL rule is gone (one unmeasurable class must not condemn 35 measured
+    ones); "absent evidence is never a pass" is the part that was always the
+    point, and it is what these three shapes assert.
     """
     from gen_worker.numerics_probe import AxisVerdict, CellNumerics, ProbeAxis
 
@@ -208,47 +222,38 @@ def test_the_report_cannot_report_a_pass_it_did_not_take():
 
 def test_the_verdict_is_bisectable_to_ONE_named_axis(
         tmp_path, monkeypatch, declared, events):
-    """A whole-cell "fail" that cannot be split is the artifact that produced
-    three wrong confident diagnoses here. So: two shape rows, ONE of them bad,
-    and the refusal must NAME it — then that one axis must be re-runnable on
-    its own, from the name in the row, with nothing edited.
+    """A verdict that cannot be split is the artifact that produced three
+    wrong confident diagnoses here. pgw#1176 makes the split STRUCTURAL rather
+    than a reporting convention: two shape rows, ONE of them bad, and the bad
+    one refuses ALONE while the good one arms and serves. The refusal still
+    names the class, because a verdict that did not would be unbisectable
+    however small its subject.
     """
-    from gen_worker.models import provision
-
     good, bad = entry_name(*ROWS[0]), entry_name(*ROWS[1])
     packages = {good: ProbePackage(), bad: ProbePackage(cosine=0.90)}
-    pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
+    pipeline, module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
-    assert outcome.armed is False
-    detail, phase = numerics_rows(events)[-1]
-    assert phase == "refused"
-    # The whole-cell verdict names the class that parted from eager, and the
-    # healthy one is still on the record with its own reading.
+    # THE point of the whole change: one bad class costs itself.
+    assert outcomes[0].armed is True
+    assert outcomes[1].armed is False
+    assert set(aot.armed_entries(pipeline)) == {good}
+    assert aot.entry_states(pipeline)[bad]["state"] == "de_armed"
+    assert aot.entry_states(pipeline)[bad]["reason"] == "numerics_refused"
+
+    rows = numerics_rows(events)
+    assert [p for _d, p in rows] == ["checked", "refused"], rows
+    detail = rows[-1][0]
     assert f"worst axis: entry={bad}" in detail
-    assert f"row={'h=16,w=16'}" in detail
-    assert f"{good}[h=8,w=8]: cos=1.00000" in detail
+    assert "row=h=16,w=16" in detail
+    assert "cosine=0.90" in detail
+    # The healthy class's reading is on the record too, in its OWN row.
+    assert f"{good}[h=8,w=8]: cos=1.00000" in detail.replace(rows[-1][0], "") \
+        or f"{good}[h=8,w=8]: cos=1.00000" in rows[0][0]
 
-    # And now the bisection itself: re-arm and probe ONLY the named axis.
-    monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
-    monkeypatch.setattr(
-        aot, "_entry_admission_drift", lambda *a, **k: None)
-    monkeypatch.setattr(
-        aot, "_load_package", lambda path, entry="model": packages[entry])
-    module = ProbeDenoiser()
-    pipeline = ProbePipeline(module)
-    assert aot.enable(pipeline, declared, tmp_path / "c2",
-                      artifact(tmp_path)).armed is True
-    one = numerics_probe.probe_cell(
-        pipeline, declared, aot.armed_metadata(pipeline), only=bad)
-    assert [v.axis.name for v in one.verdicts] == [bad]
-    assert one.measured is True
-    assert one.comparison().cosine == pytest.approx(0.90, abs=5e-4)
-    assert one.comparison().verdict == "destroyed"
-    # The same call against the healthy row is healthy — one variable moved.
-    other = numerics_probe.probe_cell(
-        pipeline, declared, aot.armed_metadata(pipeline), only=good)
-    assert other.comparison().verdict == "healthy"
-    del provision  # imported for the arm path above; nothing else needs it
+    # And the healthy class still SERVES compiled, which is the property the
+    # old all-or-nothing arm made impossible to have.
+    module(torch.zeros(ROWS[0]), torch.tensor(1.0))
+    assert packages[good].invocations == 2  # the gate's forward, then a serve
 
 
 def test_an_axis_names_its_entry_row_execution_lane_and_seed_and_reproduces():
@@ -257,9 +262,12 @@ def test_an_axis_names_its_entry_row_execution_lane_and_seed_and_reproduces():
     rebuild the exact feed."""
     from gen_worker.numerics_probe import ProbeAxis, axes_from_meta
 
-    axes = axes_from_meta(metadata())
-    assert [a.name for a in axes] == sorted(entry_name(h, w) for h, w in ROWS)
-    a, b = axes
+    # pgw#1176: ONE artifact, ONE axis. The seed's independence across CLASSES
+    # is the property that matters and it is unchanged — it is derived from
+    # the axis, so two artifacts of one declaration still never share a feed.
+    (a,) = axes_from_meta(metadata(ROWS[0]))
+    (b,) = axes_from_meta(metadata(ROWS[1]))
+    assert [a.name, b.name] == [entry_name(*ROWS[0]), entry_name(*ROWS[1])]
     assert a.execution_lane == "w8a8" and a.target == TARGET
     assert {a.shape_row, b.shape_row} == {"h=8,w=8", "h=16,w=16"}
     assert a.seed != b.seed, "two axes share a seed; a shape-independent bug " \
@@ -277,8 +285,8 @@ def test_the_probe_does_not_disturb_the_serving_RNG(
     torch.manual_seed(4242)
     before = torch.get_rng_state().clone()
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    _pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
-    assert outcome.armed is True
+    _pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
+    assert all(o.armed for o in outcomes)
     assert torch.equal(torch.get_rng_state(), before)
 
 
@@ -297,8 +305,8 @@ def test_a_REAL_arm_reaches_the_gate(tmp_path, monkeypatch, declared, events):
     `invocations` stays 0 and `armed` is True.
     """
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    _pipeline, _module, outcome = arm(tmp_path, monkeypatch, declared, packages)
-    assert outcome.armed is True
+    _pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
+    assert all(o.armed for o in outcomes)
     assert all(p.invocations == 1 for p in packages.values()), (
         "a REAL arm did not run the cell against its eager reference: "
         f"{ {k: p.invocations for k, p in packages.items()} }")
