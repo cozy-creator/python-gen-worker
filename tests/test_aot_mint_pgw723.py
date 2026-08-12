@@ -11,7 +11,7 @@ an ``sm``, this box has no usable GPU, and no test design changes that.
 ``_gpu_runtime`` patches the PROBES and nothing else — every gate, digest, and
 pack path exercised below is the production one.
 
-Envelope ownership: ``aot_serve`` owns ``artifact_metadata``/``pack``/``verify``
+Envelope ownership: ``aot_serve`` owns ``entry_metadata``/``pack``/``verify``
 (#721 S1) and this lane imports it. ``aot_package`` owns the mint-side ``.pt2``
 introspection and the B1 gate. ``lora_lifted`` owns the no-baked-adapter gate,
 which must run on the ExportedProgram — see the test that proves the
@@ -219,6 +219,18 @@ class CellModule(torch.nn.Module):
 
 
 CELL_ENTRY = "unet/B=4"
+
+
+def _only(result):
+    """The ONE entry a single-class mint produced.
+
+    pgw#1176: a mint returns a SET of independently keyed artifacts. These
+    vehicles declare one class, so unpacking asserts that arity instead of
+    indexing past a set nobody checked.
+    """
+    (row,) = result.entries
+    return row
+
 
 
 def _cell_decl(family: str = CELL_FAMILY) -> Compile:
@@ -483,8 +495,8 @@ def test_mint_reports_fused_constants_without_refusing_and_without_KEYING_them(
         result = _mint_cell(tmp_path)
 
     # 1. NEVER FATAL — the mint completed and produced an artifact.
-    meta = aot_serve.unpack_metadata(result.artifact)
-    entry = meta["entries"][CELL_ENTRY]
+    meta = aot_serve.unpack_metadata(_only(result).artifact)
+    entry = meta[cell_key.ENTRY_BLOCK_KEY]
 
     # 2. NEVER KEYED — the graph block does not carry it at all, and the block
     #    is v3 (program-only).
@@ -511,7 +523,7 @@ def test_minted_metadata_pins_the_trace_mode(cell: Dict[str, Any]) -> None:
     same question asked where the answer can be no: on FOREIGN bytes, after the
     download, by the consumer that has to run them.
     """
-    meta = aot_serve.unpack_metadata(cell["result"].artifact)
+    meta = aot_serve.unpack_metadata(_only(cell["result"]).artifact)
     assert meta["strict_export"] is True
     assert aot_serve.verify_contract(meta) == ""
 
@@ -753,25 +765,28 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     ep gates -> code-only AOTI -> package_aoti -> B1 gate per entry ->
     declared contract per entry -> keyed pack."""
     result = cell["result"]
-    assert result.artifact.exists()
-    assert result.artifact.name == f"{result.cell_key}.tar.gz"
-    assert cell_key.is_key(result.cell_key)
+    row = _only(result)
+    assert row.artifact.exists()
+    assert row.artifact.name == f"{row.key}.tar.gz"
+    assert cell_key.is_key(row.key)
     assert result.timings["total_s"] > 0
 
-    meta = aot_serve.unpack_metadata(result.artifact)
+    meta = aot_serve.unpack_metadata(row.artifact)
     assert meta["kind"] == aot_serve.ARTIFACT_KIND
-    assert meta["format"] == 2
+    assert meta["format"] == 3
     assert meta["package_constants_in_so"] is False
     assert meta["strict_export"] is True
     assert meta["weight_lane"] == "w8a8"
-    assert meta["cell_key"] == result.cell_key
-    assert sorted(meta["entries"]) == [CELL_ENTRY]
-    assert meta["combined_graph_hash"]
+    assert meta["cell_key"] == row.key
+    assert meta[cell_key.ENTRY_BLOCK_KEY]["name"] == CELL_ENTRY
+    # pgw#1176: the manifest label rides the artifact as telemetry; identity
+    # is `cell_key`, which is this ONE class's.
+    assert meta["manifest_digest"]
 
     # The envelope's own parsers accept what the producer wrote — the two lanes
     # agree about the bytes, verified rather than assumed.
     assert aot_serve.verify(meta, family=CELL_FAMILY) == ""
-    entry = meta["entries"][CELL_ENTRY]
+    entry = meta[cell_key.ENTRY_BLOCK_KEY]
     contract = aot_serve.contract_from_meta(entry)
     assert [s.name for s in contract.inputs] == ["x"]
     assert contract.inputs[0].shape == (4, WIDTH)  # static row: exact dims
@@ -787,13 +802,16 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     assert meta["toolchain"] and meta["sm"] == "sm_89"
     # pgw#1034: the envelope records NO `code_closure` — nothing ever read it.
     assert "code_closure" not in meta
-    assert aot_mint.cell_identity(meta).digest == result.cell_key
+    assert aot_mint.cell_identity(meta).digest == row.key
 
     # The mint-phase table (#757): the class count and the phases are data —
     # on the RESULT/published metadata, never in the packed envelope (the
     # tar must stay byte-deterministic for the #699 double-mint compare).
     assert "mint_phases" not in meta
-    table = result.metadata["mint_phases"]
+    # pgw#1176: the phase table is a property of the MINT RUN, so every
+    # entry's metadata carries the same one — it is the run's record, not an
+    # artifact's identity.
+    table = _only(result).metadata["mint_phases"]
     assert table["n_entries"] == 1
     assert table["entries"][CELL_ENTRY]["compile_s"] > 0
 
@@ -805,9 +823,9 @@ def test_minted_artifact_stages_on_the_consumer_side(
     accepts the artifact this lane packed."""
     result = cell["result"]
     staged = aot_serve.stage_artifact(
-        result.artifact, CELL_FAMILY, cache_dir=tmp_path / "cache")
+        _only(result).artifact, CELL_FAMILY, cache_dir=tmp_path / "cache")
     try:
-        assert staged.metadata["cell_key"] == result.cell_key
+        assert staged.metadata["cell_key"] == _only(result).key
         assert (staged.root / aot_serve.PACKAGE_NAME).exists()
         assert aot_package.constants_in_so(
             staged.root / aot_serve.PACKAGE_NAME, CELL_ENTRY) is False
@@ -824,7 +842,7 @@ def test_mint_cannot_be_talked_out_of_code_only(
         tmp_path,
         inductor_configs={"aot_inductor.package_constants_in_so": True})
     dest = tmp_path / "dest"
-    aot_serve.unpack(result.artifact, dest)
+    aot_serve.unpack(_only(result).artifact, dest)
     assert aot_package.constants_in_so(
         dest / aot_serve.PACKAGE_NAME, CELL_ENTRY) is False
 
@@ -840,19 +858,19 @@ def test_mint_metadata_is_byte_deterministic(
     a = _mint_cell(tmp_path / "a")
     reset_export_declarations()
     b = _mint_cell(tmp_path / "b")
-    assert a.cell_key == b.cell_key
+    assert _only(a).key == _only(b).key
     # Telemetry is on the RESULT metadata...
-    assert a.metadata["mint_phases"]["n_entries"] >= 1
+    assert _only(a).metadata["mint_phases"]["n_entries"] >= 1
 
-    meta_a = aot_serve.unpack_metadata(a.artifact)
-    meta_b = aot_serve.unpack_metadata(b.artifact)
+    meta_a = aot_serve.unpack_metadata(_only(a).artifact)
+    meta_b = aot_serve.unpack_metadata(_only(b).artifact)
     # ...and absent from the packed envelope, which is byte-identical.
     assert "mint_phases" not in meta_a
     assert json.dumps(meta_a, sort_keys=True) == json.dumps(meta_b, sort_keys=True)
     # Weights differ between the two module instances, so the PACKAGE bytes may
     # differ; the recorded contract and identity must not.
     for field_name in (
-        "entries", "combined_graph_hash", "toolchain",
+        "entry", "manifest_digest", "toolchain",
         "cell_key", "package_constants_in_so",
     ):
         assert meta_a[field_name] == meta_b[field_name], field_name
@@ -914,11 +932,12 @@ ENTRY = "forward/x"
 
 
 def _meta_for(program: Any, package: Path, spec: aot_mint.ExportSpec) -> Dict[str, Any]:
-    """A format-2 envelope around ONE compiled program — the session
-    packages are single-model archives, read with ``entry=""``."""
+    """A format-3 envelope around ONE compiled program — the session
+    packages are single-model archives, read with ``entry=""``, which is
+    exactly the shape pgw#1176 made the only shape."""
     inputs, symbols = aot_package.input_contract(
         program, _leaves("x", "lora_a", "lora_b"))
-    entries = {ENTRY: {
+    entry = {
         "target": "forward",
         "fork": [[str(n), v] for n, v in sorted(spec.fork)],
         "class_dims": [[str(n), int(v)] for n, v in sorted(spec.class_dims)],
@@ -926,10 +945,10 @@ def _meta_for(program: Any, package: Path, spec: aot_mint.ExportSpec) -> Dict[st
         "symbols": symbols,
         "constants": aot_package.constants_manifest(package),
         "graph": aot_mint.entry_graph_block(program, spec),
-    }}
-    meta = aot_serve.artifact_metadata(
+    }
+    meta = aot_serve.entry_metadata(
         family="tiny", precision="bf16", cell_key="",
-        entries=entries, strict_export=spec.strict,
+        name=ENTRY, entry=entry, strict_export=spec.strict,
         lora_bucket=spec.lora_bucket,
     )
     meta.update(aot_mint.shared_identity_blocks(spec))
@@ -951,13 +970,15 @@ def test_cell_key_differs_when_ONLY_the_declared_range_differs(
     spec = _spec()
     narrow = _meta_for(_export_lifted(lo=8, hi=16), packages["code_only"], spec)
     wide = _meta_for(_export_lifted(lo=8, hi=32), packages["code_only"], spec)
-    assert (narrow["entries"][ENTRY]["range_digest"]
-            != wide["entries"][ENTRY]["range_digest"])
+    assert (narrow[cell_key.ENTRY_BLOCK_KEY]["range_digest"]
+            != wide[cell_key.ENTRY_BLOCK_KEY]["range_digest"])
     # The range digest folds into the per-class hash, the class hash into the
     # combined hash, the combined hash into the key (pgw#716/#758).
-    assert (narrow["entries"][ENTRY]["class_hash"]
-            != wide["entries"][ENTRY]["class_hash"])
-    assert narrow["combined_graph_hash"] != wide["combined_graph_hash"]
+    assert (narrow[cell_key.ENTRY_BLOCK_KEY]["class_hash"]
+            != wide[cell_key.ENTRY_BLOCK_KEY]["class_hash"])
+    # pgw#1176: the graph axis IS this class's hash, so a declared-range
+    # change moves the key directly rather than through a combined digest.
+    assert narrow["cell_key"] != wide["cell_key"]
     assert narrow["cell_key"] != wide["cell_key"], (
         "an artifact admitting 8..16 must not share a key with one admitting "
         "8..32")
@@ -996,20 +1017,19 @@ def test_cell_key_differs_between_strict_and_non_strict(
     assert a["cell_key"] != b["cell_key"]
 
 
-def test_cell_identity_refuses_an_artifact_with_no_class_set(
+def test_entry_identity_refuses_an_artifact_that_cannot_name_its_class(
     _gpu_runtime: None, packages: Dict[str, Path],
 ) -> None:
-    """An exported cell must not be keyable without its class set — and an
-    entry with no class hash is a class a mismatch could never name."""
+    """An exported entry must not be keyable without its class — and an entry
+    with no class hash is a class a mismatch could never name."""
     spec = _spec()
     meta = _meta_for(_export_lifted(), packages["code_only"], spec)
     hollow = dict(meta)
-    hollow["entries"] = {}
-    hollow["combined_graph_hash"] = ""
-    with pytest.raises(aot_mint.MintRefused, match="entries"):
+    hollow[cell_key.ENTRY_BLOCK_KEY] = {}
+    with pytest.raises(aot_mint.MintRefused, match="entry"):
         aot_mint.cell_identity(hollow)
     unhashed = json.loads(json.dumps(meta))
-    unhashed["entries"][ENTRY]["class_hash"] = ""
+    unhashed[cell_key.ENTRY_BLOCK_KEY]["class_hash"] = ""
     with pytest.raises(aot_mint.MintRefused, match="class_hash"):
         aot_mint.cell_identity(unhashed)
 
@@ -1024,19 +1044,21 @@ def test_cell_identity_refuses_an_artifact_with_no_sm(
         aot_mint.cell_identity(meta)
 
 
-def test_key_scheme_is_ck1_and_the_axes_are_the_four(
+def test_key_scheme_is_ek1_and_the_axes_are_the_three(
     _gpu_runtime: None, packages: Dict[str, Path],
 ) -> None:
-    """pgw#1059: the exported cell keys on exactly graph x envelope x sm x
-    toolchain under the (redefined) ck1 scheme — `kind` is a metadata fact
-    the compat gates read, never an axis."""
+    """pgw#1176: the exported ENTRY keys on exactly graph x sm x toolchain
+    under the ek1 scheme — `kind` is a metadata fact the compat gates read,
+    never an axis, and `envelope` is a manifest fact for the same reason."""
     spec = _spec()
     meta = _meta_for(_export_lifted(), packages["code_only"], spec)
     key = aot_mint.cell_identity(meta)
-    assert set(key.axes_dict()) == {"graph", "envelope", "sm", "toolchain"}
-    assert key.axes_dict()["graph"] == meta["combined_graph_hash"]
+    assert set(key.axes_dict()) == {"graph", "sm", "toolchain"}
+    # The graph axis is THIS class's hash, not a digest over a collection.
+    assert (key.axes_dict()["graph"]
+            == meta[cell_key.ENTRY_BLOCK_KEY]["class_hash"])
     assert key.digest.startswith(cell_key.KEY_SCHEME + "-")
-    assert cell_key.KEY_SCHEME == "ck1"
+    assert cell_key.KEY_SCHEME == "ek1"
     assert cell_key.is_key(key.digest)
 
 
@@ -1062,19 +1084,27 @@ def test_publish_passes_the_keyed_metadata_through(
     obligation is a keyed ``metadata.json`` in the tar."""
     meta = _meta_for(_export_lifted(), packages["code_only"], _spec())
     result = aot_mint.MintResult(
-        artifact=tmp_path / "cell.tar.gz", metadata=meta, timings={})
+        entries=(aot_mint.MintedArtifact(
+            key=meta["cell_key"], entry=ENTRY,
+            artifact=tmp_path / "cell.tar.gz", metadata=meta),),
+        manifest="m0", timings={})
     publisher = _RecordingPublisher()
-    assert aot_mint.publish(result, publisher) == "checkpoint-1"
+    # pgw#1176: publish is PER ENTRY and answers {key -> checkpoint}.
+    assert aot_mint.publish(result, publisher) == {
+        meta["cell_key"]: "checkpoint-1"}
     family, _artifact, sent = publisher.calls[0]
     assert family == "tiny"
     assert sent["cell_key"] == meta["cell_key"]
 
 
 def test_publish_refuses_an_unkeyed_artifact(tmp_path: Path) -> None:
-    """An unaddressable cell would be stored under a flavor nothing requests."""
+    """An unaddressable entry would be stored under a flavor nothing
+    requests."""
     result = aot_mint.MintResult(
-        artifact=tmp_path / "cell.tar.gz",
-        metadata={"family": "tiny"}, timings={})
+        entries=(aot_mint.MintedArtifact(
+            key="", entry=ENTRY, artifact=tmp_path / "cell.tar.gz",
+            metadata={"family": "tiny"}),),
+        manifest="m0", timings={})
     with pytest.raises(aot_mint.MintRefused, match="cell_key"):
         aot_mint.publish(result, _RecordingPublisher())
 
