@@ -539,6 +539,13 @@ def discover_functions(
         sys.path.insert(0, src_str)
 
     top_level = main_module.split(".", 1)[0]
+    # pgw#1163: the audit below is about what THE WALK imported, so the set it
+    # compares against has to be taken before the walk runs. Scanning all of
+    # `sys.modules` instead attributes the CALLER's imports to discovery — and
+    # when the caller is pytest, that is its own `conftest` and test modules,
+    # which live under `root` and are not in the wheel, so they read as
+    # offenders. A pod never imports them.
+    preloaded = frozenset(sys.modules)
     with stub_missing_heavy_deps(extra_heavy_deps):
         try:
             found = find_endpoints([top_level])
@@ -567,7 +574,8 @@ def discover_functions(
 
     _assert_unique_function_names(functions)
     _validate_variant_targets(functions)
-    _audit_source_only_imports(root=root, top_level=top_level)
+    _audit_source_only_imports(
+        root=root, top_level=top_level, preloaded=preloaded)
     return functions
 
 
@@ -586,7 +594,9 @@ class SourceOnlyModuleError(ValueError):
     """
 
 
-def _audit_source_only_imports(*, root: Path, top_level: str) -> None:
+def _audit_source_only_imports(
+    *, root: Path, top_level: str, preloaded: frozenset = frozenset(),
+) -> None:
     """Fail the bake when the walk leaned on source-tree-only modules.
 
     Applies only when the walked project is INSTALLED (its top-level package
@@ -596,6 +606,15 @@ def _audit_source_only_imports(*, root: Path, top_level: str) -> None:
     from under ``root`` must also resolve from the installed environment;
     ``cwd`` is deliberately not honoured (the worker's import set must not
     depend on the directory it happens to start in).
+
+    ``preloaded`` is ``sys.modules`` as it stood BEFORE the walk, and the scan
+    considers only what the walk ADDED (pgw#1163). Without it the audit reports
+    on its CALLER's imports: run from inside pytest it flagged the runner's own
+    ``conftest`` and test modules, which sit under ``root``, are absent from the
+    wheel, and are imported by no pod that ever exists. Excluding by
+    already-loaded rather than by name keeps this free of any knowledge of the
+    test runner — a scan that has to recognise pytest would have to recognise
+    the next tool too.
     """
 
     root_str = str(root)
@@ -631,6 +650,8 @@ def _audit_source_only_imports(*, root: Path, top_level: str) -> None:
 
     offenders: List[str] = []
     for name, mod in list(sys.modules.items()):
+        if name in preloaded:
+            continue  # the caller's import, not the walk's (pgw#1163)
         if "." in name:
             continue  # submodules resolve with their package
         filename = getattr(mod, "__file__", None)
@@ -647,9 +668,13 @@ def _audit_source_only_imports(*, root: Path, top_level: str) -> None:
             "them and every pod of this release will die at boot with "
             "ModuleNotFoundError (pgw#833):\n  "
             + "\n  ".join(sorted(offenders))
-            + "\nFix: include the module in the built package (e.g. hatch "
-            "[tool.hatch.build.targets.wheel] only-include / py-modules), or "
-            "drop the import."
+            + "\nFix: DROP THE IMPORT if the module is not runtime code — a "
+            "test, a conftest, a dev script and anything else a pod never "
+            "imports must not be reachable from the endpoint's import graph, "
+            "and must NEVER be packaged to satisfy this gate. Only if the "
+            "module genuinely runs on the pod, add it to the built package "
+            "(e.g. hatch [tool.hatch.build.targets.wheel] only-include / "
+            "py-modules)."
         )
 
 

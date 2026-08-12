@@ -187,7 +187,12 @@ def test_a_target_with_no_class_row_is_refused_by_name() -> None:
         shapes=((1024, 1024),),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 2}, targets=("unet",)),),
-        inputs=(Input("sample", shape=("B", 4, 128, 128), targets=("unet",), dtype="model"),),
+        inputs=(Input("sample", shape=("B", 4, 128, 128), targets=("unet",), dtype="model"),
+                # pgw#1158: vae.decode needs a row of its own, or the
+                # DECLARATION is refused first and this row would stop
+                # measuring the missing CLASS it is named for.
+                Input("z", shape=("B", 4, 128, 128), targets=("vae.decode",),
+                      dtype="model"),),
         shape_strategy="static-rows",
         warm_changes_key=False,
     )

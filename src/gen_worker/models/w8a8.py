@@ -344,11 +344,92 @@ def w8a8_gemm_mode() -> str:
     return _choose_gemm_mode(major * 10 + minor)
 
 
+def _build_quantizer(torch: Any) -> Any:
+    """The dynamic activation quantize, and the reason it must not run op-by-op.
+
+    Eager, the chain is six full passes over the [M, K] activation (abs, amax,
+    reciprocal, mul, clamp, cast). Its cost scales with M*K while the GEMM
+    scales with M*K*N, so the overhead fraction goes as 1/N and on a thin-N
+    projection it eats the entire fp8 win. Measured on H100 at H3's shapes
+    (pgw#1156): `attn.to_out.0` and `ff.net.2` served 0.82-0.93x bf16 — the fp8
+    lane LOSING to the precision it replaces, at every duration — while their
+    bare GEMMs won 1.48x and 1.30x. One inductor-fused kernel pair closes it
+    (0.82x -> 1.21x, within 0.1% of the fully-compiled arm) and helps the wide
+    classes too.
+
+    Inside a compiled region the enclosing graph already fuses this, so the
+    helper hands back the eager source and nests nothing. Where inductor is
+    unavailable it degrades to the eager chain once, loudly, and keeps serving:
+    the lane stays correct, only slow."""
+
+    def _quant_src(x2: Any, pertensor: bool, static: Any) -> tuple:
+        if static is not None:
+            # Static scales are per-tensor scalars already — the pertensor GEMM
+            # consumes [1,1] directly.
+            sa = (static if pertensor
+                  else static.expand(x2.shape[0], 1).contiguous())
+        elif pertensor:
+            sa = (x2.abs().amax().float()
+                  / _FP8_MAX).clamp(min=1e-12).reshape(1, 1)
+        else:
+            sa = (x2.abs().amax(dim=-1, keepdim=True).float()
+                  / _FP8_MAX).clamp(min=1e-12)
+        # Quantize in the COMPUTE dtype (reciprocal multiply) — fp32
+        # intermediates here doubled the eager activation traffic and made eager
+        # w8a8 as slow as the cast hooks it replaces (H100 measured; bf16
+        # mantissa loss is irrelevant next to the fp8 target).
+        xq = (x2 * (1.0 / sa).to(x2.dtype)).clamp(
+            -_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
+        return xq, sa
+
+    state: dict[str, Any] = {"fused": None, "off": False}
+
+    def quantize(x2: Any, pertensor: bool, static: Any) -> tuple:
+        if state["off"] or torch.compiler.is_compiling():
+            return _quant_src(x2, pertensor, static)
+        fused = state["fused"]
+        if fused is None:
+            try:
+                fused = torch.compile(_quant_src, dynamic=False, fullgraph=True)
+            except Exception as exc:  # noqa: BLE001 — no inductor => eager, not a refusal
+                _quant_degrade(exc)
+                state["off"] = True
+                return _quant_src(x2, pertensor, static)
+            state["fused"] = fused
+        try:
+            return fused(x2, pertensor, static)
+        except Exception as exc:  # noqa: BLE001
+            _quant_degrade(exc)
+            state["off"] = True
+            return _quant_src(x2, pertensor, static)
+
+    quantize.eager_source = _quant_src  # type: ignore[attr-defined]
+    return quantize
+
+
+def _quant_degrade(exc: BaseException) -> None:
+    """Once per process. A pod that quantizes op-by-op keeps the fp8 memory
+    saving and loses most of the speed — and on the thin-N classes it is slower
+    than bf16 — so it must not be silent (the pgw#824 shape)."""
+    logger.warning(
+        "w8a8: the fused activation-quantize did not build (%s); this process "
+        "quantizes op-by-op", exc)
+    activity_mod.emit_event(
+        activity_mod.KIND_SERVE_DEGRADE,
+        f"the fp8 activation quantize could not be fused ({type(exc).__name__}: "
+        f"{exc}), so it runs as six separate passes over every activation — on "
+        f"narrow-output projections that is SLOWER than bf16 (pgw#1156)",
+        phase="w8a8_quant_unfused",
+    )
+
+
 def _build_module_class() -> type:
     """Define the nn.Module lazily so importing this module never needs
     torch (discovery/CPU tools)."""
     import torch
     import torch.nn as nn
+
+    quantize = _build_quantizer(torch)
 
     class _Fp8ScaledLinear(nn.Module):
         """fp8 weights RESIDENT; y = scaled_mm(quant(x), W^T) + bias.
@@ -442,23 +523,7 @@ def _build_module_class() -> type:
             shape = x.shape
             x2 = x.reshape(-1, self.in_features).contiguous()
             pertensor = self.gemm_mode == "pertensor"
-            if self.input_scale is not None:
-                # Static scales are per-tensor scalars already — the
-                # pertensor GEMM consumes [1,1] directly.
-                sa = (self.input_scale if pertensor else
-                      self.input_scale.expand(x2.shape[0], 1).contiguous())
-            elif pertensor:
-                sa = (x2.abs().amax().float()
-                      / _FP8_MAX).clamp(min=1e-12).reshape(1, 1)
-            else:
-                sa = (x2.abs().amax(dim=-1, keepdim=True).float()
-                      / _FP8_MAX).clamp(min=1e-12)
-            # Quantize in the COMPUTE dtype (reciprocal multiply) — fp32
-            # intermediates here doubled the eager activation traffic and made
-            # eager w8a8 as slow as the cast hooks it replaces (H100 measured;
-            # bf16 mantissa loss is irrelevant next to the fp8 target).
-            xq = (x2 * (1.0 / sa).to(x2.dtype)).clamp(
-                -_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
+            xq, sa = quantize(x2, pertensor, self.input_scale)
             scaled_mm: Any = torch._scaled_mm
             if pertensor:
                 # Scalar-scaled GEMM (cuBLASLt's Ada fast path, gw#564); the
