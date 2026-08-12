@@ -468,9 +468,10 @@ def test_the_bank_outlives_an_abandoned_mint(
     """
     from types import SimpleNamespace
 
-    from gen_worker import fleet_cells, local_cells, mint_delegate
+    from gen_worker import fleet_cells, local_cell_store, mint_delegate
 
-    monkeypatch.setenv(local_cells.ENV_STORE_DIR, str(tmp_path / "store"))
+    monkeypatch.setenv(
+        local_cell_store.ENV_STORE_DIR, str(tmp_path / "store"))
     mint_root = tmp_path / "selfmint-abc"
     (mint_root / "capture").mkdir(parents=True)
     key = "ck1:sdxl:deadbeef"
@@ -540,9 +541,9 @@ def test_the_resume_area_is_capacity_bounded(
 
 
 def local_cells_env() -> str:
-    from gen_worker import local_cells
+    from gen_worker import local_cell_store
 
-    return local_cells.ENV_STORE_DIR
+    return local_cell_store.ENV_STORE_DIR
 
 
 def test_no_resume_root_means_no_bank_and_no_behaviour_change() -> None:

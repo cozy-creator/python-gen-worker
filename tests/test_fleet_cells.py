@@ -232,10 +232,10 @@ def test_miss_opens_a_delegated_mint_without_packing_or_publishing(
     the child's cell adopts reverts this test red."""
     calls: list = []
     _mintable(monkeypatch)
-    monkeypatch.setattr(
-        cc, "mint_artifact",
-        lambda *a, **k: pytest.fail(
-            "the fleet miss path must never run the producer warm loop"))
+    # pgw#1178 deleted `compile_cache.mint_artifact`, the producer warm loop
+    # this used to fence against by name. The property is now structural —
+    # there is no producer on this path to run — and the assertions below
+    # (nothing packed, nothing published) are what state it.
 
     outcome = fc.enable_compiled(
         _Pipe(), _Cfg(), tmp_path, None, publisher=_publisher(calls))
