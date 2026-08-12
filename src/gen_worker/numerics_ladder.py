@@ -93,6 +93,18 @@ class Thresholds:
     #: Where these numbers came from. Carried into every refusal so the
     #: reader can argue with the calibration instead of guessing at it.
     label: str = ""
+    #: The PROVENANCE of the band, in the closed vocabulary below, set by
+    #: whoever resolved it — :data:`SOURCE_DECLARED` when a family's own
+    #: declaration supplied a number, :data:`SOURCE_SDK_DEFAULT` when it did
+    #: not. It rides the object rather than being re-derived at the reader,
+    #: because a second reader of the declaration is exactly the defect this
+    #: field closes: `numerics_probe` used to answer the question again from
+    #: `cfg.numerics_floor` alone, so a family declaring only `numerics_warn`
+    #: was judged at its DECLARED band while every wire row, every
+    #: `author-ci.toml` `[proof]` record and `Parity.floor_source` said
+    #: `sdk-default`. "" for populations that are not family-declared at all
+    #: (the pgw#800 adapter ladder).
+    source: str = ""
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.floor <= self.warn <= 1.0:
@@ -417,10 +429,18 @@ NUMERICS_WARN = 0.999
 #: retention outside [0.95, 1.0526] is at least DEGRADED.
 NUMERICS_RETENTION_FLOOR = 0.95
 
+#: :attr:`Thresholds.source` when a family's own declaration supplied at least
+#: one of the two bounds.
+SOURCE_DECLARED = "declared"
+#: :attr:`Thresholds.source` when the family declared neither bound and the
+#: measured SDK band above decided.
+SOURCE_SDK_DEFAULT = "sdk-default"
+
 DEFAULT_THRESHOLDS = Thresholds(
     floor=NUMERICS_FLOOR, warn=NUMERICS_WARN,
     retention_floor=NUMERICS_RETENTION_FLOOR,
-    label="assembled-vs-eager (pgw#814 §VERDICT)")
+    label="assembled-vs-eager (pgw#814 §VERDICT)",
+    source=SOURCE_SDK_DEFAULT)
 
 
 def declared_thresholds(cfg: Any) -> Thresholds:
@@ -431,6 +451,16 @@ def declared_thresholds(cfg: Any) -> Thresholds:
     a 25-block fp8 DiT and a conv-bearing UNet. A family that declares
     nothing gets :data:`DEFAULT_THRESHOLDS`, whose derivation is the measured
     band above — a default with evidence, not a guess.
+
+    THE ONE PLACE that decides declared-vs-default, and it stamps its own
+    answer onto :attr:`Thresholds.source`. Nobody may re-derive it: the whole
+    class of defect here is a declaration read by a second party that drifts
+    from the authority, which is how ``Compile.numerics_floor`` spent its
+    first 300 commits reaching no gate at all (pgw#1150).
+
+    ``cfg`` is duck-typed on purpose — it is a raw ``Compile`` on the author-CI
+    path and a ``registry.CompileCell`` on every fleet path, and both carry the
+    two fields (``CompileCell.from_declaration`` is what keeps that true).
     """
     floor = getattr(cfg, "numerics_floor", None)
     warn = getattr(cfg, "numerics_warn", None)
@@ -440,13 +470,15 @@ def declared_thresholds(cfg: Any) -> Thresholds:
         floor=float(NUMERICS_FLOOR if floor is None else floor),
         warn=float(NUMERICS_WARN if warn is None else warn),
         retention_floor=NUMERICS_RETENTION_FLOOR,
-        label=f"assembled-vs-eager (declared by {getattr(cfg, 'family', '?')})")
+        label=f"assembled-vs-eager (declared by {getattr(cfg, 'family', '?')})",
+        source=SOURCE_DECLARED)
 
 
 __all__ = [
     "DEFAULT_THRESHOLDS",
     "NUMERICS_FLOOR", "NUMERICS_RETENTION_FLOOR", "NUMERICS_WARN",
     "PHASE_ARMED_UNDISPATCHED", "PHASE_DEGRADED", "PHASE_REFUSED",
+    "SOURCE_DECLARED", "SOURCE_SDK_DEFAULT",
     "VERDICT_DEGRADED", "VERDICT_DESTROYED", "VERDICT_HEALTHY",
     "Comparison", "RowStat", "Thresholds",
     "compare_outputs", "declared_thresholds", "flatten_outputs", "gate",

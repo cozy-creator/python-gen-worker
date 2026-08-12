@@ -849,22 +849,12 @@ def _load_injected_model(
         # is self-consistent.
         from ..registry import CompileCell
 
-        compile_cfg = CompileCell(
-            shapes=tuple(compile_cfg.shapes),
-            targets=tuple(compile_cfg.targets),
-            family=str(compile_cfg.family or ""),
-            regional=bool(compile_cfg.regional),
-            text_len=compile_cfg.text_len,
-            dynamic=tuple(compile_cfg.dynamic),
-            lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0),
-            guidance_scales=(),
-            text_lens=(),
-            # pgw#1150: the declared band travels with the declaration here
-            # too, or a locally minted cell would be gated at the SDK default
-            # while the family declares its own.
-            numerics_floor=compile_cfg.numerics_floor,
-            numerics_warn=compile_cfg.numerics_warn,
-        )
+        # ONE constructor with the registry's path (pgw#1150): a must-survive
+        # field this site forgot to copy — the declared numerics band was
+        # exactly that — silently judges every locally minted cell at a default
+        # nobody chose.
+        compile_cfg = CompileCell.from_declaration(
+            compile_cfg, lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0))
     if (
         arm_compile
         and compile_cfg is not None

@@ -90,6 +90,37 @@ class CompileCell:
     numerics_floor: Optional[float] = None
     numerics_warn: Optional[float] = None
 
+    @classmethod
+    def from_declaration(
+        cls, cfg: Any, *, lora_bucket: int = 0, text_len: Optional[int] = None,
+        guidance_scales: tuple = (), text_lens: tuple = (),
+    ) -> "CompileCell":
+        """THE ``Compile`` -> ``CompileCell`` map, in one place.
+
+        Two call sites build this object — the registry's per-spec
+        :meth:`EndpointSpec.compile_cell` and the local CLI's §4.28 desktop arm
+        — and they differ only in the four enrichments above, which are
+        spec-scoped facts the raw declaration cannot know. Everything else is a
+        straight carry, so a field ADDED to ``Compile`` that one site copied and
+        the other forgot is a whole path silently judged at a default nobody
+        chose. That is not hypothetical: it is exactly what
+        ``numerics_floor``/``numerics_warn`` were before pgw#1150, and one
+        constructor is the fence that keeps the next one from repeating it.
+        """
+        return cls(
+            shapes=tuple(cfg.shapes),
+            targets=tuple(cfg.targets),
+            family=str(cfg.family or ""),
+            regional=bool(cfg.regional),
+            text_len=text_len if text_len is not None else cfg.text_len,
+            dynamic=tuple(cfg.dynamic),
+            lora_bucket=int(lora_bucket or 0),
+            guidance_scales=guidance_scales,
+            text_lens=text_lens,
+            numerics_floor=cfg.numerics_floor,
+            numerics_warn=cfg.numerics_warn,
+        )
+
     def contract_text_lens(self) -> tuple:
         if self.text_lens:
             return tuple(sorted({int(v) for v in self.text_lens}))
@@ -232,23 +263,16 @@ class EndpointSpec:
         if cfg is None:
             return None
 
-        effective_text_len = self.text_len if self.text_len is not None else cfg.text_len
-        return CompileCell(
-            shapes=tuple(cfg.shapes),
-            targets=tuple(cfg.targets),
-            family=str(cfg.family or ""),
-            regional=bool(cfg.regional),
-            text_len=effective_text_len,
-            dynamic=tuple(cfg.dynamic),
+        return CompileCell.from_declaration(
+            cfg,
             lora_bucket=int(self.lora_bucket or 0),
+            text_len=self.text_len,
             guidance_scales=(
                 self.guidance_union
                 if self.guidance_union
                 else warm_guidance_values(self.payload_axes)
             ),
             text_lens=self.text_lens,
-            numerics_floor=cfg.numerics_floor,
-            numerics_warn=cfg.numerics_warn,
         )
 
     @property

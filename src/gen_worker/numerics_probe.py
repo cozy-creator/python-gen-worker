@@ -433,8 +433,12 @@ def probe_cell(
 
     family = str(getattr(cfg, "family", "") or meta.get("family") or "")
     thresholds = numerics_ladder.declared_thresholds(cfg)
-    source = ("declared" if getattr(cfg, "numerics_floor", None) is not None
-              else "sdk-default")
+    # READ, never re-derive. This used to ask `cfg.numerics_floor` again and
+    # so could disagree with the band it was reporting on: a family declaring
+    # only `numerics_warn` was judged at its DECLARED band while this said
+    # `sdk-default`. `declared_thresholds` is the one authority and stamps its
+    # own answer (pgw#1150).
+    source = thresholds.source
     targets = aot_serve.armed_targets(pipeline)
     if not targets:
         raise ProbeUnavailable(
