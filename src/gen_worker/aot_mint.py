@@ -111,7 +111,7 @@ from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ExportSpec,
     MintRefused,
 )
-from .aot_preconditions import LIFTED_LORA_TORCH_FLOOR, torch_version_gap
+from .aot_preconditions import LIFTED_LORA_TORCH_FLOOR
 from .compile_cache import (
     _resolve_target,
     cxx_toolchain_present,
@@ -246,23 +246,6 @@ def raise_if_device_oom(exc: BaseException, where: str) -> None:
 # ---------------------------------------------------------------------------
 # The declared export contract
 # ---------------------------------------------------------------------------
-
-
-def lifted_torch_gap(spec: ExportSpec) -> str:
-    """'' when torch meets the lifted-LoRA floor (or the spec has no lifted
-    fork declared), else the named refusal reason.
-
-    pgw#996: the floor arithmetic lives in ``aot_preconditions`` because the
-    BUILD gate asks the same question of the same image — a second spelling
-    here is how a build proves one thing and a pod discovers another. This
-    wrapper survives for the mint-request CLI, which can be handed a spec the
-    build gate never saw.
-    """
-    if not (spec.lora_bucket or spec.lifted_inputs or spec.lora_fqns):
-        return ""
-    import torch
-
-    return torch_version_gap(str(getattr(torch, "__version__", "") or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -2113,9 +2096,6 @@ def _mint_cell(
     hub credentials.
     """
 
-    refusal = lifted_torch_gap(spec)
-    if refusal:
-        raise MintRefused(refusal)
     decl = export_declaration(spec.family)
     if decl is None:
         raise MintRefused(
@@ -4335,7 +4315,6 @@ __all__ = [
     "shared_identity_blocks",
     "LIFTED_LORA_TORCH_FLOOR",
     "lifted_input_gaps",
-    "lifted_torch_gap",
     "main",
     "mint",
     "package_cell",

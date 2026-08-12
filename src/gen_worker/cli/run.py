@@ -403,8 +403,13 @@ def _inject_default_source(
 def _decode_payload(
     payload_bytes: bytes, payload_type: type,
 ) -> Any:
-    """Decode the JSON payload into the typed msgspec.Struct, then apply
-    any post-decode Clamp constraints exactly the way the live worker does.
+    """Decode the JSON payload into the typed msgspec.Struct.
+
+    The decode IS the whole contract: msgspec's own validation is what the
+    live worker runs (`executor` decodes with the same `payload_type`). The
+    old `Clamp` post-decode pass claimed to mirror the worker and did not —
+    it had no serve-path call site at all, and its result was discarded here
+    inside a bare `except`. Deleted with the module (pgw#941 A).
     """
     try:
         decoded: Any = msgspec.json.decode(payload_bytes, type=payload_type)
@@ -414,12 +419,6 @@ def _decode_payload(
         raise _UsageError(f"payload validation failed: {e}") from e
     except msgspec.DecodeError as e:
         raise _UsageError(f"payload is not valid JSON: {e}") from e
-    try:
-        from ..api.payload_constraints import apply_payload_constraints
-        _ = apply_payload_constraints(decoded)
-    except Exception:
-        # Best-effort; failure here is non-fatal (matches live worker).
-        pass
     return decoded
 
 

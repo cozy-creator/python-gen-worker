@@ -1357,10 +1357,11 @@ def cpu_offload_forbidden() -> bool:
     ``GEN_WORKER_FORBID_CPU_OFFLOAD`` *"makes gen-worker raise on any
     CPU-touching placement"*, and the box exports it for that reason. Measured
     2026-08-03: it had exactly ONE reader in the tree,
-    ``benchmarks/swap_latency.py``, where it refused the swap-latency benchmark
-    and nothing else. The real CPU-offload ladder below never consulted it, so
-    the guard operators believed they had did not exist — stale prose reaching
-    people as fact (C3).
+    ``benchmarks/swap_latency.py`` (deleted by pgw#883), where it refused the
+    swap-latency benchmark and nothing else. The real CPU-offload ladder below
+    never consulted it, so the guard operators believed they had did not
+    exist — stale prose reaching people as fact (C3). This function is now its
+    only reader, and it is the placement boundary.
 
     It is a TRIPWIRE, not configuration: it carries no behaviour of its own and
     exists only to fire on a host that must never touch weights. Same shape as

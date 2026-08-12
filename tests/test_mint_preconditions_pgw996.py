@@ -369,10 +369,6 @@ def test_the_mint_no_longer_declines_below_the_lifted_lora_torch_floor(
     """RED before pgw#996: ``aot_lifted_torch_gap``. The torch wheel is baked
     into the image the build gate cleared."""
     monkeypatch.setattr(pre, "torch_version_gap", lambda _v: "torch is ancient")
-    from gen_worker import aot_mint
-
-    monkeypatch.setattr(aot_mint, "torch_version_gap",
-                        lambda _v: "torch is ancient")
 
     recipe, events = _mint_recipe_on(monkeypatch, bucket=64)
 
@@ -411,19 +407,27 @@ def test_the_CHILD_still_refuses_a_toolchainless_AOT_mint(
         mint_child.mint(req)
 
 
-def test_ONE_floor_for_the_build_gate_and_the_mint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two spellings of a precondition is how a build proves one thing and a
-    pod discovers another."""
+def test_ONE_floor_AND_THE_MINT_NO_LONGER_SPELLS_IT(clean_registry) -> None:
+    """pgw#914 RED: two spellings of a precondition is how a build proves one
+    thing and a pod discovers another, so the mint keeps NONE. The floor is an
+    image fact, decided once by the build gate that ships `endpoint.lock`; a
+    per-mint re-decision could only ever disagree with it, and the wrapper's
+    stated reason to exist (the mint-request CLI) died with the forge
+    (DESIGN-RULINGS §4.28)."""
     from gen_worker import aot_mint
-    from gen_worker.aot_contract import ExportSpec
 
     assert aot_mint.LIFTED_LORA_TORCH_FLOOR is pre.LIFTED_LORA_TORCH_FLOOR
-    seen: list[str] = []
-    monkeypatch.setattr(
-        aot_mint, "torch_version_gap",
-        lambda v: seen.append(v) or "")
-    aot_mint.lifted_torch_gap(ExportSpec(family="f", target="unet",
-                                         lora_bucket=64))
-    assert seen and seen[0].startswith("2.")
+    assert not hasattr(aot_mint, "lifted_torch_gap")
+    assert not hasattr(aot_mint, "torch_version_gap")
+    source = Path(aot_mint.__file__).read_text()
+    assert "__version__" not in source
+
+    # ...and the ONE surviving spelling still refuses below the floor.
+    ec.register_export_declaration(_example_declaration())
+    rows = pre.static_mint_preconditions(
+        {"ep996-abstain": 64}, torch_available=True,
+        torch_version="2.9.1+cu126")
+    floor = [r for r in rows
+             if r.check == pre.CHECK_LIFTED_LORA_TORCH_FLOOR]
+    assert floor and floor[0].verdict == pre.REFUSED
+    assert "2.13" in floor[0].detail and "bind_views" in floor[0].detail

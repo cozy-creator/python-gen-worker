@@ -513,25 +513,24 @@ def test_positionalize_refuses_keyword_only_declared_inputs() -> None:
         aot_declaration.declared_inputs(KwOnly(), spec, _ti2v_shaped_decl())
 
 
-def test_lifted_lora_mint_requires_the_torch_213_floor(monkeypatch) -> None:
+def test_lifted_lora_mint_requires_the_torch_213_floor() -> None:
     """Pod 8 (pgw#723 residuals): torch 2.9 strict export refuses
     bind_views' in-trace setattr ('Mutating module attribute lora_a during
-    export') that 2.13 traces fine — a mint PRECONDITION when the lifted
-    fork is declared, recorded as a named refusal instead of a deep-trace
-    AssertionError."""
-    lifted = ExportSpec(family="f", target="t", lora_bucket=64)
-    plain = ExportSpec(family="f", target="t")
+    export') that 2.13 traces fine — a named refusal instead of a deep-trace
+    AssertionError.
 
-    assert aot_mint.lifted_torch_gap(plain) == ""
-    # This box runs the 2.13 prod floor, so the lifted spec passes here...
-    assert aot_mint.lifted_torch_gap(lifted) == ""
-    # ...and refuses by name on the measured pod-8 version.
-    monkeypatch.setattr(torch, "__version__", "2.9.1+cu126")
-    gap = aot_mint.lifted_torch_gap(lifted)
+    pgw#914 moved WHERE it is decided: the torch wheel is baked into the
+    image, so the floor is an image fact the build gate settles once into
+    `endpoint.lock`. The mint re-decided it per spec against the same wheel
+    the gate already cleared, which can only ever agree — or disagree, which
+    is the whole defect class. The verdict itself is unchanged and is pinned
+    here on the one surviving spelling."""
+    from gen_worker import aot_preconditions as pre
+
+    assert pre.torch_version_gap("2.13.0+cu130") == ""
+    gap = pre.torch_version_gap("2.9.1+cu126")
     assert "2.13" in gap and "bind_views" in gap
-    assert aot_mint.lifted_torch_gap(plain) == ""
-    monkeypatch.setattr(torch, "__version__", "nonsense")
-    assert "cannot parse" in aot_mint.lifted_torch_gap(lifted)
+    assert "cannot parse" in pre.torch_version_gap("nonsense")
 
 
 # ---------------------------------------------------------------------------

@@ -127,13 +127,14 @@ compile evidence.
   nightly `TestJ6` cloud journey, not a gen-worker-repo GPU lane.
 - `GEN_WORKER_FORBID_CPU_OFFLOAD` — a DEV-BOX tripwire. **pgw#929 made the
   documented contract true.** It previously had exactly one read site,
-  `benchmarks/swap_latency.py::check_on_pod()`, and affected nothing else —
-  while the workspace `CLAUDE.md` told operators it "makes gen-worker raise on
-  any CPU-touching placement". It now also refuses at the real placement
-  boundary: `models/memory.py` raises `CpuOffloadForbidden` before
+  `benchmarks/swap_latency.py::check_on_pod()` (that benchmark was deleted by
+  pgw#883), and affected nothing else — while the workspace `CLAUDE.md` told
+  operators it "makes gen-worker raise on any CPU-touching placement". It now
+  refuses at the real placement boundary, which is its only read site:
+  `models/memory.py` raises `CpuOffloadForbidden` before
   `enable_model_cpu_offload` and `enable_sequential_cpu_offload`. Set it on a
-  control-plane box and both the swap-latency benchmark and any CPU-offloading
-  placement refuse. It is a tripwire, not configuration — it carries no
+  control-plane box and any CPU-offloading
+  placement refuses. It is a tripwire, not configuration — it carries no
   behaviour of its own. `GEN_WORKER_HOST_MOVE_GUARD` (above) remains the
   separate, always-on `Module.to`/`.cpu` guard.
 
