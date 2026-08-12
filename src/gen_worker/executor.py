@@ -2646,6 +2646,9 @@ class _ArmOrder:
         expected: Optional["aot_identity.ExpectedIdentity"],
         publisher_org: str,
         adopt: Optional["boot_adopt.BootAdoptOutcome"] = None,
+        extra: Tuple[
+            Tuple[Path, Optional["aot_identity.ExpectedIdentity"], str], ...
+        ] = (),
     ) -> "_ArmOrder":
         """THE artifact -> arming-order map, in one place (pgw#1152).
 
@@ -2668,6 +2671,7 @@ class _ArmOrder:
             expected=expected,
             publisher_org=publisher_org,
             adopt=adopt,
+            extra=extra,
         )
 
 
@@ -7020,8 +7024,8 @@ class Executor:
             # arms each into the same registry after the pipeline is up, which
             # is what `aot_serve.arm_entry` already supports. A silent subset
             # here would be the exact defect this whole change deletes.
-            hits = [o for o in adopts if o.adoption is not None]
-            adopt = hits[0] if hits else (
+            resolved = [o for o in adopts if o.adoption is not None]
+            adopt = resolved[0] if resolved else (
                 adopts[0] if adopts else boot_adopt.BootAdoptOutcome())
             boot_local_key = adopt.local_key
             if adopt.adoption is not None:
@@ -7037,9 +7041,11 @@ class Executor:
                     # pgw#1176: every OTHER class this boot resolved, armed
                     # into the same registry after this one.
                     extra=tuple(
-                        (o.adoption.artifact, o.adoption.expected,
-                         o.adoption.cell.publisher_org)
-                        for o in hits[1:]))
+                        (got_other.artifact, got_other.expected,
+                         got_other.cell.publisher_org)
+                        for got_other in (
+                            o.adoption for o in resolved[1:]
+                            if o.adoption is not None)))
                 compile_selection = arm.selection
         elif arm is None and spec.compile is not None:
             # pgw#1116: a compiled family that boots WITHOUT asking is a fact
@@ -10032,19 +10038,19 @@ class Executor:
         # `Compile.blockers` and the mint gate reads it.
         decl = aot_mint.export_declaration(family)
         if decl is None:
-            return boot_adopt.refused(
+            return (boot_adopt.refused(
                 "no_export_declaration",
                 f"family {family!r} has no registered export declaration, so "
                 f"this boot cannot state the class set a cell key names",
-                family=family, function=fn)
+                family=family, function=fn),)
         try:
             declared_hint = len(list(aot_declaration.cell_plans(decl)))
         except Exception as exc:  # noqa: BLE001 — never fatal
-            return boot_adopt.refused(
+            return (boot_adopt.refused(
                 "declaration_unreadable",
                 f"family {family!r} has a declaration this boot cannot "
                 f"enumerate: {type(exc).__name__}: {exc}",
-                family=family, function=fn)
+                family=family, function=fn),)
         base_url = str(self.file_base_url or "")
         bearer = str(self.worker_jwt_provider() or "")
         # pgw#1108: the credential lives in the PARENT under the split (pgw#783),

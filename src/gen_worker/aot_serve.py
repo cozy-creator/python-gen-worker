@@ -2585,12 +2585,12 @@ def wrap_module(
                 cell_key=str(meta.get("cell_key") or ""),
                 graph_class=name,
             )
-            if getattr(runner, "runners", ()):  # siblings still serve
+            siblings = tuple(getattr(runner, "runners", ()) or ())
+            if siblings:  # siblings still serve
                 logger.warning(
                     "aot-serve: %s de-armed entry %s (%s); %d sibling "
-                    "entr%s still armed", label, name, reason,
-                    len(runner.runners),
-                    "y" if len(runner.runners) == 1 else "ies")
+                    "entr%s still armed", label, name, reason, len(siblings),
+                    "y" if len(siblings) == 1 else "ies")
                 return
         state["failed"] = True
         _revoke(state, detail)
