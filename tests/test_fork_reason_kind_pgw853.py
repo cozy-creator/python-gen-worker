@@ -116,13 +116,14 @@ def test_weak_arms_finds_exactly_the_value_closed_ones() -> None:
     assert set(WEAK_FORK_REASONS) == {"unpassed_arg", "default_value"}
 
 
-def test_an_UNANSWERED_reason_does_not_read_as_weak() -> None:
-    """`None` means the question has not been answered. Reading that as
-    evidence of a weak guarantee would be a guess; phase 2 (making the field
-    required) is what removes the ambiguity."""
-    decl = _decl(Fork("mystery", served=(False,), unserved=(True,)))
-    assert weak_arms(decl) == ()
-    assert decl.forks[0].weak is False
+def test_the_UNANSWERED_state_is_now_UNCONSTRUCTIBLE() -> None:
+    """`None` used to mean "the question has not been answered", and reading
+    that as evidence of a weak guarantee would have been a guess. pgw#1157
+    removes the ambiguity at its source instead of interpreting it: an
+    unserved arm cannot be declared without saying what closes it, so
+    `weak_arms` never sees an unanswered fork again."""
+    with pytest.raises(DeclarationError, match="declares no reason"):
+        _decl(Fork("mystery", served=(False,), unserved=(True,)))
 
 
 def test_a_served_only_fork_is_never_weak() -> None:
@@ -177,7 +178,10 @@ def test_an_unannotated_fork_serialises_exactly_as_before() -> None:
     every pre-existing declaration byte-identical. Verified across the real
     fleet too: flux2 4b/9b, wan x3, ltx, qwen, z-image and sdxl all
     fingerprinted identical before and after this field existed."""
-    row = Fork("kv_cache", served=(False,), unserved=(True,)).as_row()
+    # Since pgw#1157 only a SERVED-ONLY fork may omit `reason` — it closes
+    # nothing, so it has nothing to justify. That is the shape whose row must
+    # stay byte-identical.
+    row = Fork("kv_cache", served=(False,)).as_row()
     assert "reason" not in row
     assert set(row) == {"name", "served", "unserved", "source", "targets"}
 
@@ -189,9 +193,10 @@ def test_annotating_changes_neither_the_entries_nor_the_cell_contract() -> None:
     from gen_worker.aot_declaration import cell_plans, plan_entry_name
     from gen_worker.compile_cache import declared_compile_facts
 
-    plain = _decl(Fork("kv_cache", served=(False,), unserved=(True,)))
+    plain = _decl(Fork("kv_cache", served=(False,), unserved=(True,),
+                       reason="absent_path"))
     annotated = _decl(Fork("kv_cache", served=(False,), unserved=(True,),
-                           reason="absent_path", why="prose"))
+                           reason="unpassed_arg", why="prose"))
 
     assert [plan_entry_name(p) for p in cell_plans(plain)] == \
         [plan_entry_name(p) for p in cell_plans(annotated)]
@@ -203,12 +208,22 @@ def test_annotating_changes_neither_the_entries_nor_the_cell_contract() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_phase_2_is_not_here_yet_and_that_is_deliberate() -> None:
-    """Today an unserved arm may omit `reason` — every fleet declaration
-    predates the field, so requiring it would break them all at import.
+def test_phase_2_IS_HERE_an_unserved_arm_must_name_what_closes_it() -> None:
+    """The reminder this replaces said it "will need deleting when that lands
+    — which is the point". pgw#1157 landed it.
 
-    PHASE 2, filed in the same issue: once every arm carries one, make it
-    REQUIRED whenever `unserved` is non-empty. This test is the reminder, and
-    it will need deleting when that lands — which is the point.
+    An unserved arm is a CLOSED arm, and a declaration that cannot say what
+    closes it has not made the guarantee it appears to make. Refused where it
+    is written, so it costs nothing at serve time.
     """
-    assert _decl(Fork("mystery", served=(False,), unserved=(True,))) is not None
+    with pytest.raises(DeclarationError, match="declares no reason"):
+        _decl(Fork("mystery", served=(False,), unserved=(True,)))
+
+    # ...and the refusal NAMES the arm and the vocabulary that would close it.
+    with pytest.raises(DeclarationError) as err:
+        Fork("mystery", served=(False,), unserved=(True,))
+    assert "'True'" in str(err.value)
+    assert "unpassed_arg" in str(err.value)
+
+    # A served-only fork closes nothing and still needs no reason.
+    assert _decl(Fork("edit", served=(0,))) is not None
