@@ -118,12 +118,13 @@ def _w8a8_tree(tmp_path: Path) -> Path:
     return root
 
 
-#: A hub-resolved binding: NO declared dtype (the production shape), and
-#: flavor-unpinned or flavor-pinned depending on how the pick resolved.
-def _binding(path: str, flavor: str = "") -> Any:
+#: A hub-resolved binding: NO declared dtype (the production shape). pgw#1148
+#: deleted the flavor axis, so the two "lanes" this file contrasts are two
+#: distinct REPOS/checkpoints, which is what §1.32(d) makes them.
+def _binding(path: str) -> Any:
     from gen_worker.api.binding import ModelRef
 
-    return ModelRef(source="tensorhub", path=path, tag="prod", flavor=flavor)
+    return ModelRef(source="tensorhub", path=path, tag="prod")
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +209,7 @@ def test_the_share_plan_itself_keys_on_the_effective_dtype(
         name = "sdxl"
         slots = {"plain": object(), "quant": object()}
         models = {"plain": _binding("tensorhub/cyberrealistic-xl"),
-                  "quant": _binding("tensorhub/wai-illustrious", "fp8-w8a8")}
+                  "quant": _binding("tensorhub/wai-illustrious")}
 
     ex = _Exec()
     paths = {"plain": str(plain), "quant": str(w8a8)}

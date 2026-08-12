@@ -36,7 +36,7 @@ import hashlib
 import msgspec
 import pytest
 
-from gen_worker import RequestContext, Slot, endpoint, worker_function
+from gen_worker import Hub, RequestContext, Slot, endpoint, worker_function
 from gen_worker.executor import Executor, _Job
 from gen_worker.models import staging as staging_mod
 from gen_worker.models.pinned_swap import prestage_module
@@ -109,6 +109,20 @@ class ToyStagePipeline:
 
 @endpoint(models={"pipeline": Slot(ToyStagePipeline, selected_by="model")})
 class ComposedFamily:
+    def setup(self, pipeline: ToyStagePipeline) -> None:
+        self.pipe = pipeline
+
+    @worker_function()
+    def render(self, ctx: RequestContext, p: GenIn) -> Out:
+        return Out(y=f"injected={self.pipe.denoiser_injected}")
+
+
+#: pgw#1148: a QUANTIZED lane is declared as a CAST on the binding now — the
+#: `#fp8` ref that used to say it is deleted (§1.32(d)), and a dispatch-named
+#: ref carries no precision at all. So the staging skip is exercised through
+#: a DECLARED cast binding, which is the shape that can still state one.
+@endpoint(models={"pipeline": Hub("acme/qwen-finetune", storage_dtype="fp8")})
+class ComposedCastFamily:
     def setup(self, pipeline: ToyStagePipeline) -> None:
         self.pipe = pipeline
 
@@ -404,19 +418,24 @@ def test_preload_component_staging_feeds_injection(
 def test_preload_component_staging_skips_quantized_execution_lanes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Quantized/flavored bindings load through special lanes a vanilla
-    component load cannot reproduce: staging stops at the disk tier."""
+    """Quantized bindings load through special lanes a vanilla component
+    load cannot reproduce: staging stops at the disk tier.
+
+    pgw#1148: the signal is the declared CAST (`storage_dtype`), not a
+    `#fp8` in the ref — §1.32(d) deleted that address, and the preload
+    driver no longer has a flavor field to read."""
     ex = _executor(
-        tmp_path, monkeypatch, ComposedFamily, tree_writer=_composed_tree_writer)
+        tmp_path, monkeypatch, ComposedCastFamily,
+        tree_writer=_composed_tree_writer)
 
     async def _run() -> None:
-        ck = "acme/qwen-finetune#fp8"
+        ck = "acme/qwen-finetune"
         snaps = _composed_snapshot(ck, "e2" * 16)
         _seed_preloader(ex, [_instance("render", ck)], snaps)
         await asyncio.wait_for(ex.preloader._pass(), timeout=60)
         assert DOWNLOADS == [ck]  # tier 1 still happened
         stats = ex.store.residency.shared_stats()
-        assert stats["entries"] == []  # no host staging on the fp8 flavor
+        assert stats["entries"] == []  # no host staging on the cast lane
 
     asyncio.run(_run())
 

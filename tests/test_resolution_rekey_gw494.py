@@ -18,7 +18,8 @@ from typing import List
 import msgspec
 import pytest
 
-from gen_worker.api.binding import HF, Hub, rebind_pick, wire_ref
+from gen_worker.api.binding import Hub, rebind_pick, wire_ref
+from gen_worker.models.refs import FlavorSelectorRemoved
 from gen_worker.api.decorators import Resources
 from gen_worker.executor import Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -82,40 +83,47 @@ def _vram_refs(ex: Executor) -> set:
 
 def test_repick_rekeys_residency_zero_orphans() -> None:
     """resolve -> book -> re-resolve -> clear leaves ZERO orphans: nothing
-    stays VRAM-booked under a key no longer reachable from any binding."""
+    stays VRAM-booked under an instance key no longer reachable from any
+    binding.
+
+    pgw#1148 changed WHICH axis moves the key, not the mechanic. A pick can
+    no longer change a binding's WIRE REF — §1.32(d) deleted the `#flavor`
+    that used to, and th#1803's digest pin is a resolution of the SAME
+    address, not a second one — so the axis under test is the CAST, which
+    still re-keys the instance."""
 
     async def _run() -> None:
         ex = _executor()
         spec = ex.specs["generate"]
+        declared_key = spec.instance_key
 
-        # HelloAck 1: pick #fp8; instance loads and books under the pick.
-        ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "", "")})
-        assert wire_ref(spec.models["pipeline"]) == "acme/z-image#fp8"
+        # HelloAck 1: cast pick; instance loads and books under the ref.
+        ex.apply_model_resolutions({"acme/z-image": ("", "fp8", "")})
+        assert spec.models["pipeline"].storage_dtype == "fp8"
+        old_key = spec.instance_key
         old_ref = _simulate_loaded(ex, spec)
-        assert old_ref == "acme/z-image#fp8"
-        assert _vram_refs(ex) == {"acme/z-image#fp8"}
+        assert old_ref == "acme/z-image"
+        assert _vram_refs(ex) == {"acme/z-image"}
         rec = ex._classes[spec.instance_key]
 
-        # HelloAck 2: different pick. The record is stale and gets vacated —
-        # the OLD key's VRAM booking is released (no orphan), ready drops.
-        ex.apply_model_resolutions(
-            {"acme/z-image": ("acme/z-image#svdq-int4-r128", "", "")})
-        assert rec.stale is True
-        await asyncio.sleep(0.05)  # let the scheduled revalidate task run
-        assert rec.ready is False
-        assert rec.held_refs == []
-        assert _vram_refs(ex) == set()
+        # HelloAck 2: a different cast. The instance key MOVES and the live
+        # record is carried to it — nothing is left booked under a key no
+        # binding reaches, which is the invariant this test is named for.
+        ex.apply_model_resolutions({"acme/z-image": ("", "fp8+te", "")})
+        assert spec.instance_key != old_key
+        assert old_key not in ex._classes
+        assert ex._classes[spec.instance_key] is rec
 
-        # Instance reloads under the new pick; a revert-to-declared HelloAck
-        # (empty map) vacates again — still zero orphans anywhere.
-        new_ref = _simulate_loaded(ex, spec)
-        assert new_ref == "acme/z-image#svdq-int4-r128"
-        rec2 = ex._classes[spec.instance_key]
+        # A revert-to-declared HelloAck (empty map) moves it back, again with
+        # no record stranded on the vacated key.
+        mid_key = spec.instance_key
         ex.apply_model_resolutions({})
-        assert wire_ref(spec.models["pipeline"]) == "acme/z-image"
-        assert rec2.stale is True
-        await asyncio.sleep(0.05)
-        assert rec2.ready is False
+        assert spec.models["pipeline"].storage_dtype == ""
+        assert spec.instance_key == declared_key
+        assert mid_key not in ex._classes
+        assert _vram_refs(ex) == {"acme/z-image"}
+
+        await ex._vacate_record(ex._classes[spec.instance_key])
         assert _vram_refs(ex) == set()
 
     asyncio.run(_run())
@@ -132,7 +140,7 @@ def test_vacate_releases_booked_keys_not_rebound_ones() -> None:
         rec = ex._classes[spec.instance_key]
 
         # Rebind WITHOUT vacating first (simulates the pre-fix window).
-        ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "", "")})
+        ex.apply_model_resolutions({"acme/z-image": ("", "fp8", "")})
         # The rehome carried the live record to the new key; vacate it.
         rec = next(r for r in ex._classes.values() if r is rec)
         await ex._vacate_record(rec)
@@ -143,6 +151,8 @@ def test_vacate_releases_booked_keys_not_rebound_ones() -> None:
 
 
 def test_hf_binding_resolution_is_rejected_keeps_declared() -> None:
+    from gen_worker.api.binding import HF
+
     ex = _executor(EndpointSpec(
         name="generate", method=_Fake.generate, kind="inference",
         payload_type=_In, output_mode="single", cls=_Fake,
@@ -150,9 +160,14 @@ def test_hf_binding_resolution_is_rejected_keeps_declared() -> None:
         resources=Resources(gpu=True),
     ))
     spec = ex.specs["generate"]
+    # A tensorhub-shaped pick against an HF binding cannot round-trip
+    # (pgw#1148 makes the flavored spelling a typed refusal, and both are
+    # swallowed by apply_model_resolutions' keep-the-declared arm).
     ex.apply_model_resolutions(
         {"bfl/FLUX.2-klein-4B": ("bfl/FLUX.2-klein-4B#fp8", "", "")})
-    # HF picks fold flavor -- but HF has no flavor field: rejected, declared kept.
+    assert spec.models["pipeline"] == HF("bfl/FLUX.2-klein-4B")
+    ex.apply_model_resolutions(
+        {"bfl/FLUX.2-klein-4B": ("acme/other", "", "")})
     assert spec.models["pipeline"] == HF("bfl/FLUX.2-klein-4B")
 
 
@@ -183,32 +198,34 @@ def test_regate_runs_after_resolutions_and_is_idempotent() -> None:
 
     # Resolutions re-run the gates using the remembered probe.
     ex.unavailable.pop("generate")
-    ex.apply_model_resolutions({"acme/z-image": ("acme/z-image#fp8", "", "")})
+    ex.apply_model_resolutions({"acme/z-image": (_DIGEST_PICK, "", "")})
     assert ex._last_gpu_info is not None
     assert "generate" in ex.serve_plans
 
 
+#: th#1803: the hub ladder pins a CHECKPOINT by digest, never a flavor.
+_DIGEST_PICK = "acme/z-image@sha256:" + "1a" * 32
+
+
 def test_rebind_pick_is_the_single_fold() -> None:
+    """pgw#1148: the ladder/`flavor=` arm is GONE. A hub pick is a DIGEST
+    (th#1803) or a cast, and the round-trip guard is unchanged."""
     b = Hub("acme/z-image")
 
-    # hub path: resolved_ref authoritative (flavor fold + cast stamp)
-    out = rebind_pick(b, resolved_ref="acme/z-image#fp8", cast="")
-    assert wire_ref(out) == "acme/z-image#fp8"
+    # hub path: resolved_ref is checked, cast is stamped
     out = rebind_pick(b, resolved_ref="", cast="fp8")
     assert out.storage_dtype == "fp8" and wire_ref(out) == "acme/z-image"
     # non-normal hub spelling still round-trips (':prod' is the elided form
     # since th#1276)
-    out = rebind_pick(b, resolved_ref="acme/z-image:prod#fp8")
-    assert wire_ref(out) == "acme/z-image#fp8"
+    out = rebind_pick(b, resolved_ref="acme/z-image:prod")
+    assert wire_ref(out) == "acme/z-image"
     # ...and a pick at a genuinely DIFFERENT tag is refused, because the
     # rebound binding could not re-mint it (two residency identities).
     with pytest.raises(ValueError):
-        rebind_pick(b, resolved_ref="acme/z-image:latest#fp8")
+        rebind_pick(b, resolved_ref="acme/z-image:latest")
 
-    # ladder path: flavor/cast overlay with the same guard
-    out = rebind_pick(b, flavor="svdq-int4-r128", cast="")
-    assert wire_ref(out) == "acme/z-image#svdq-int4-r128"
     with pytest.raises(ValueError):
-        rebind_pick(b, resolved_ref="acme/OTHER#fp8")  # ref mismatch
-    with pytest.raises(ValueError):
-        rebind_pick(HF("o/r"), resolved_ref="o/r#fp8")  # HF has no flavor
+        rebind_pick(b, resolved_ref="acme/OTHER")  # ref mismatch
+    # A pick that still carries a `#flavor` is refused outright (§1.32(d)).
+    with pytest.raises(FlavorSelectorRemoved):
+        rebind_pick(b, resolved_ref="acme/z-image#fp8")

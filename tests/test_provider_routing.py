@@ -63,22 +63,25 @@ def _manifest(*binding_blocks: dict) -> dict:
     "block,expect",
     [
         (
+            # pgw#1148: a manifest `flavor` field is DEAD (§1.32(d)) — the key
+            # is the repo, and an entry that still carries one is not a
+            # second address.
             {"pipeline": {"kind": "fixed", "provider": "hf",
-                          "ref": "bfl/FLUX.2-klein-4B", "flavor": "bf16"}},
-            {"bfl/FLUX.2-klein-4B#bf16": "hf"},
+                          "ref": "bfl/FLUX.2-klein-4B"}},
+            {"bfl/FLUX.2-klein-4B": "hf"},
         ),
         (
             # A non-default tag folds into the normal-form key.
             {"pipeline": {"kind": "fixed", "provider": "tensorhub",
-                          "ref": "acme/flux", "flavor": "fp8", "tag": "canary"}},
-            {"acme/flux:canary#fp8": "tensorhub"},
+                          "ref": "acme/flux", "tag": "canary"}},
+            {"acme/flux:canary": "tensorhub"},
         ),
         (
             # th#928: retired dispatch-kind entries are ignored, not parsed.
             {"pipeline": {"kind": "dispatch", "field": "variant", "table": {
-                "bf16": {"provider": "hf", "ref": "owner/flux", "flavor": "bf16"},
+                "bf16": {"provider": "hf", "ref": "owner/flux"},
             }}},
-            {"owner/flux#bf16": None},
+            {"owner/flux": None},
         ),
     ],
 )
@@ -107,28 +110,26 @@ def test_provider_index_extracted_from_manifest(block: dict, expect: dict) -> No
 def test_lookup_default_and_index() -> None:
     assert lookup_provider_for_ref("foo/bar") == "tensorhub"
     assert lookup_provider_for_ref("foo/bar", default="hf") == "hf"
-    set_provider_index({"acme/flux#bf16": "hf"})
-    assert lookup_provider_for_ref("acme/flux#bf16") == "hf"
+    set_provider_index({"acme/flux:canary": "hf"})
+    assert lookup_provider_for_ref("acme/flux:canary") == "hf"
     assert lookup_provider_for_ref("not/in-index") == "tensorhub"
     set_provider_index(None)
-    assert lookup_provider_for_ref("acme/flux#bf16") == "tensorhub"  # cleared
+    assert lookup_provider_for_ref("acme/flux:canary") == "tensorhub"  # cleared
 
 
-def test_lookup_exact_flavor_beats_repo_fallback() -> None:
-    """Dispatch tables may bind two providers to ONE repo name via flavors:
-    the exact normal-form key disambiguates, and a hub-minted pick of a NEW
-    flavor still routes via the repo-identity fallback."""
-    set_provider_index({"owner/flux#bf16": "hf", "owner/flux#fp8": "tensorhub"})
-    assert lookup_provider_for_ref("owner/flux#fp8") == "tensorhub"
-    assert lookup_provider_for_ref("owner/flux#bf16") == "hf"
-    # normalization: the DEFAULT tag (':prod', th#1276) and flavor case fold
-    # to the same key...
-    assert lookup_provider_for_ref("owner/flux:prod#FP8") == "tensorhub"
-    # ...but an explicit non-default tag is a DISTINCT key, so it misses the
-    # exact match and lands on the repo-identity fallback.
-    assert lookup_provider_for_ref("owner/flux:latest#fp8") == "hf"
-    # unseen flavor -> repo-identity fallback (first provider indexed)
-    assert lookup_provider_for_ref("owner/flux#svdq-int4") == "hf"
+def test_lookup_exact_tag_beats_repo_fallback() -> None:
+    """pgw#1148: the index key is (repo, tag), not (repo, flavor) — the
+    flavor was the sub-selector §1.32(d) deleted. The exact normal-form key
+    still disambiguates, and a hub-minted DIGEST pick routes via the
+    repo-identity fallback."""
+    set_provider_index({"owner/flux:latest": "hf", "owner/flux:canary": "tensorhub"})
+    assert lookup_provider_for_ref("owner/flux:canary") == "tensorhub"
+    assert lookup_provider_for_ref("owner/flux:latest") == "hf"
+    # normalization: the DEFAULT tag (':prod', th#1276) folds to the bare key,
+    # which is not indexed here -> the repo-identity fallback.
+    assert lookup_provider_for_ref("owner/flux:prod") == "hf"
+    # a digest pick is not an indexed key -> repo-identity fallback
+    assert lookup_provider_for_ref("owner/flux@sha256:" + "ab" * 32) == "hf"
     set_provider_index(None)
 
 
@@ -163,10 +164,10 @@ def test_hf_indexed_ref_routes_to_hf_branch(tmp_path: Path, monkeypatch) -> None
         return snap
 
     monkeypatch.setattr(dl_mod, "download_hf", _fake_hf)
-    set_provider_index({"bfl/FLUX.2-klein-4B#bf16": "hf"})
-    out = asyncio.run(ensure_local("bfl/FLUX.2-klein-4B#bf16", cache_dir=tmp_path))
+    set_provider_index({"bfl/FLUX.2-klein-4B": "hf"})
+    out = asyncio.run(ensure_local("bfl/FLUX.2-klein-4B", cache_dir=tmp_path))
     assert len(calls) == 1
-    assert calls[0].repo_id == "bfl/FLUX.2-klein-4B"  # #flavor stripped
+    assert calls[0].repo_id == "bfl/FLUX.2-klein-4B"
     assert out == snap
 
 

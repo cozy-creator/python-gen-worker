@@ -345,7 +345,7 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
 
     Every binding is a fixed pick; the slot name is the dict key. Keys stay
     compatible with ``models.download.build_provider_index_from_manifest``
-    (``ref`` / ``provider`` / ``flavor``).
+    (``ref`` / ``provider`` / ``tag``).
     """
     out: Dict[str, Any] = {
         "kind": "fixed",
@@ -360,8 +360,6 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         # verbatim). An explicit 'latest' is stamped, never elided.
         if binding.tag and binding.tag != DEFAULT_REF_TAG:
             out["tag"] = binding.tag
-        if binding.flavor:
-            out["flavor"] = binding.flavor
         if binding.components:
             # pgw#505: the hub's desired-snapshot scoping (platform-side,
             # not yet built) reads this to resolve only the named pipeline
@@ -402,13 +400,11 @@ def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
 
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
     """``default_checkpoint`` ref shape used by the slots
-    block: ``{source, path, tag?, flavor?, revision?, version?, components?}``
+    block: ``{source, path, tag?, revision?, version?, components?}``
     — a structured ModelRef (pgw#511; ``components`` added pgw#505)."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
     if ref.tag and ref.tag != DEFAULT_REF_TAG:
         out["tag"] = ref.tag
-    if ref.flavor:
-        out["flavor"] = ref.flavor
     if ref.components:
         out["components"] = list(ref.components)
     if ref.source in ("huggingface", "modelscope") and ref.revision:

@@ -57,35 +57,29 @@ def test_parse_execution_lane_spec_dual_form() -> None:
         execution_lanes.parse_execution_lane_spec("int8")
 
 
-@pytest.mark.parametrize("flavor,storage,compiled,want", [
-    ("", "", False, "bf16-w16a16+eager"),
-    ("", "", True, "bf16-w16a16+compiled"),
-    ("", "fp8", False, "fp8-w8a16+eager"),
-    ("fp8", "", True, "fp8-w8a16+compiled"),
-    ("fp8-w8a8", "", True, "fp8-w8a8-dynamic+compiled"),
-    ("fp8-w8a8-cal1", "", False, "fp8-w8a8-dynamic+compiled"),
-    ("svdq-fp4-r128", "", True, "svdq-fp4-w4a4+eager"),
-    ("svdq-int4-r128", "", False, "svdq-int4-w4a4+eager"),
-    ("nvfp4-w4a4", "", True, "nvfp4-w4a4-static+compiled"),
-    ("nvfp4-w4a4", "", False, "nvfp4-w4a4-static+compiled"),
+# pgw#1148: the `flavor` argument is GONE (§1.32(d)). A BINDING names a tag or
+# a digest and declares at most a CAST; it no longer asserts a stored quant.
+@pytest.mark.parametrize("storage,compiled,want", [
+    ("", False, "bf16-w16a16+eager"),
+    ("", True, "bf16-w16a16+compiled"),
+    ("fp8", False, "fp8-w8a16+eager"),
+    ("fp8", True, "fp8-w8a16+compiled"),
+    ("fp8+te", False, "fp8-w8a16+eager"),
 ])
-def test_execution_lane_of_binding(flavor: str, storage: str, compiled: bool, want: str) -> None:
-    assert execution_lanes.execution_lane_id(execution_lanes.execution_lane_of_binding(flavor, storage, compiled)) == want
+def test_execution_lane_of_binding(storage: str, compiled: bool, want: str) -> None:
+    assert execution_lanes.execution_lane_id(execution_lanes.execution_lane_of_binding(storage, compiled)) == want
 
 
-def test_execution_lane_of_binding_covers_every_body_with_valid_execution() -> None:
-    inputs = [
-        ("", ""),
-        ("", "fp8"),
-        ("fp8-w8a8", ""),
-        ("svdq-fp4-r128", ""),
-        ("svdq-int4-r128", ""),
-        ("nvfp4-w4a4", ""),
-    ]
+def test_execution_lane_of_binding_is_always_a_valid_lane() -> None:
+    """The stored-quant BODIES are still in the table — they are just no
+    longer reachable from a binding. They arrive from the hub-resolved lane
+    and from setup()'s applied report (pgw#1104), both of which carry
+    evidence rather than a token in a ref."""
     bodies = set()
-    for flavor, storage in inputs:
+    for storage in ("", "fp8", "fp8+te"):
         for compiled in (False, True):
-            execution_lane = execution_lanes.execution_lane_of_binding(flavor, storage, compiled)
+            execution_lane = execution_lanes.execution_lane_of_binding(storage, compiled)
             assert execution_lanes.valid_execution_lane(execution_lane)
             bodies.add(execution_lanes.execution_lane_body_id(execution_lane))
-    assert bodies == set(execution_lanes.known_execution_lane_bodies())
+    assert bodies == {"bf16-w16a16", "fp8-w8a16"}
+    assert bodies < set(execution_lanes.known_execution_lane_bodies())

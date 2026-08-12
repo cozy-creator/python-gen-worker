@@ -387,13 +387,11 @@ class Preloader:
             ref = wire_ref(binding)
             dtype = str(getattr(binding, "dtype", "") or "").lower()
             storage = str(getattr(binding, "storage_dtype", "") or "")
-            flavor = str(getattr(binding, "flavor", "") or "")
-            if storage or flavor or dtype not in _PLAIN_DTYPES:
+            if storage or dtype not in _PLAIN_DTYPES:
                 logger.info(
-                    "rotation preload: %s slot %s uses a quantized/flavored "
-                    "lane (dtype=%r storage=%r flavor=%r); staging stops at "
-                    "the disk tier", effective.name, slot, dtype, storage,
-                    flavor,
+                    "rotation preload: %s slot %s uses a quantized lane "
+                    "(dtype=%r storage=%r); staging stops at the disk tier",
+                    effective.name, slot, dtype, storage,
                 )
                 continue
             if ex._placement_mode(effective, ref) != "auto":

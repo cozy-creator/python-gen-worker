@@ -169,7 +169,7 @@ class PinnedSlot:
 
     def pinned_echo(self, ctx: RequestContext[_V2Defaults], data: Ping) -> Reply:
         ref = ctx.slots["pipeline"].ref
-        return Reply(response=f"{ref.source}:{ref.path}:{ref.tag}#{ref.flavor}")
+        return Reply(response=f"{ref.source}:{ref.path}:{ref.tag}")
 
 
 @endpoint(models={
@@ -184,7 +184,7 @@ class PickedSlot:
 
     def picked_echo(self, ctx: RequestContext[_V2Defaults], data: Ping) -> Reply:
         ref = ctx.slots["pipeline"].ref
-        return Reply(response=f"{ref.source}:{ref.path}:{ref.tag}#{ref.flavor}")
+        return Reply(response=f"{ref.source}:{ref.path}:{ref.tag}")
 
 
 @endpoint

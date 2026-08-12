@@ -225,7 +225,22 @@ def _artifact(
     return cc.pack(cap, snapdir / "inductor-rtx-4090-torch2.9.tar.gz", meta)
 
 
-def _wire_executor(spec, tmp_path, *, ready=True, resident=True):
+#: pgw#1148: the w8a8 lane no longer arrives as a `#fp8-w8a8` ref TOKEN
+#: (§1.32(d) deleted that address). It arrives as the pipeline's own
+#: `_cozy_weight_lane` stamp — what the weights ARE — so these fixtures say
+#: so explicitly instead of sniffing a ref.
+#: pgw#1148: the mandate itself now comes from the HUB-RESOLVED lane — the
+#: only channel that carries evidence rather than an assertion in a ref.
+W8A8_LANE = "fp8-w8a8-dynamic+compiled"
+
+
+def _declare_w8a8_lane(ex, ref: str) -> None:
+    """State the w8a8 lane the way production does since th#1803/pgw#1148:
+    a hub RESOLUTION naming the execution lane, not a `#fp8-w8a8` ref."""
+    ex._model_resolutions = {ref: (ref, "", W8A8_LANE)}
+
+
+def _wire_executor(spec, tmp_path, *, ready=True, resident=True, w8a8=False):
     sent: list[pb.WorkerMessage] = []
 
     async def _send(msg: pb.WorkerMessage) -> None:
@@ -244,7 +259,7 @@ def _wire_executor(spec, tmp_path, *, ready=True, resident=True):
         rec.held_snapshot_digests = {model_ref: MODEL_DIGEST}
         rec.held_bindings = [("pipeline", model_ref, MODEL_DIGEST)]
         active = None
-        if "#fp8-w8a8" in model_ref:
+        if w8a8:
             setattr(pipe, "_cozy_weight_lane", "w8a8")
             _mark_fake_guard(pipe)
             selection = type("Selection", (), {
@@ -704,7 +719,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    spec = _cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
     mint_key = "ck1-" + "d" * 56
     mint_ref = f"root/family-{FAMILY}#{mint_key}"
@@ -791,7 +806,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
         name="cold-generate", method=_NoProofEndpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=_NoProofEndpoint,
         attr_name="run",
-        models={"pipeline": Hub("acme/klein-finetune", flavor="fp8-w8a8")},
+        models={"pipeline": Hub("acme/klein-finetune")},
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
     model_ref = wire_ref(spec.models["pipeline"])
@@ -939,7 +954,7 @@ def test_sdxl_w8a8_boot_proves_both_aliases_through_their_own_runs(
     calls = {"generate": 0, "generate_turbo": 0}
 
     @endpoint(
-        models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
+        models={"pipeline": Hub("acme/sdxl")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((1024, 1024),), family=family, text_len=0),
     )
@@ -1004,7 +1019,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     calls = {"generate": 0, "edit": 0}
 
     @endpoint(
-        models={"pipeline": Hub("acme/flux-base", flavor="fp8-w8a8")},
+        models={"pipeline": Hub("acme/flux-base")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
@@ -1445,7 +1460,7 @@ def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
         cls=_PipelineWithVaeEndpoint,
         attr_name="run",
         models={
-            "pipeline": Hub("acme/sdxl", flavor="fp8-w8a8"),
+            "pipeline": Hub("acme/sdxl"),
             "vae": Hub("acme/sdxl-vae"),
         },
         compile=Compile(shapes=((1024, 1024),), family=FAMILY, text_len=0),
@@ -1530,7 +1545,7 @@ def test_w8a8_without_exact_cell_self_mints_and_fails_typed_without_cuda(
     still lands in the same compile_cell_failed unavailable class."""
     import gen_worker.executor as executor_mod
 
-    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    spec = _cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
 
     async def _send(_msg):
@@ -1588,7 +1603,7 @@ def test_w8a8_custom_warmup_proof_attributes_to_all_compatible_siblings(
     model_dir.mkdir()
 
     @endpoint(
-        models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
+        models={"pipeline": Hub("acme/sdxl")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((1024, 1024),), family=family, text_len=0),
     )
@@ -1665,7 +1680,7 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
     model_dir.mkdir()
 
     @endpoint(
-        models={"pipeline": Hub("acme/ltx-shaped", flavor="fp8-w8a8")},
+        models={"pipeline": Hub("acme/ltx-shaped")},
         resources=Resources(gpu=True),
         compile=Compile(shapes=((1024, 1024),), family=family, text_len=0),
     )
@@ -1724,8 +1739,8 @@ def _merged_execution_lane_endpoint(record_warm):
 
     @endpoint(
         models={
-            "t2i": Hub("acme/qwen-image", flavor="fp8-w8a8"),
-            "edit": Hub("acme/qwen-image-edit", flavor="fp8-w8a8"),
+            "t2i": Hub("acme/qwen-image"),
+            "edit": Hub("acme/qwen-image-edit"),
         },
         resources=Resources(gpu=True),
         compile=Compile(shapes=((1328, 1328),), family="qwen-image", text_len=0),
@@ -1900,13 +1915,14 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
     monkeypatch.setenv("GEN_WORKER_COMPILE_CACHE", str(artifact))
     monkeypatch.setenv("GEN_WORKER_COMPILE_CACHE_URL", "https://ignored/cell")
     monkeypatch.setenv("GEN_WORKER_COMPILE_ALLOW_COLD", "1")
-    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    spec = _cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
 
     async def _send(_msg):
         return None
 
     ex = Executor([spec], _send)
+    _declare_w8a8_lane(ex, model_ref)
     model_dir = tmp_path / "model"
     model_dir.mkdir()
 
@@ -1952,7 +1968,7 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
 def test_w8a8_binding_cannot_advertise_plain_materialized_pipeline(tmp_path):
     spec = replace(
         _spec(), models={"pipeline": Hub(
-            "acme/klein-finetune", flavor="fp8-w8a8")})
+            "acme/klein-finetune")})
 
     async def _send(_msg):
         return None
@@ -1962,6 +1978,7 @@ def test_w8a8_binding_cannot_advertise_plain_materialized_pipeline(tmp_path):
     rec.ready = True
     rec.instance = _Endpoint()
     ref = wire_ref(spec.models["pipeline"])
+    _declare_w8a8_lane(ex, ref)
     rec.held_bindings = [("pipeline", ref, MODEL_DIGEST)]
     pipe = _Pipe()  # loader silently lost the W8A8 lane
     selection = type("Selection", (), {
@@ -1981,7 +1998,7 @@ def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, mo
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    spec = _cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
     cell_ref = CACHE_REF + "-w8a8"
 
@@ -2027,8 +2044,9 @@ def test_missing_desired_w8a8_cell_keeps_workers_own_armed_target(tmp_path, monk
     Pre-gw#587 this asserted the fail-closed teardown."""
     spec = replace(
         _spec(), models={"pipeline": Hub(
-            "acme/klein-finetune", flavor="fp8-w8a8")})
-    ex, _sent = _wire_executor(spec, tmp_path)
+            "acme/klein-finetune")})
+    ex, _sent = _wire_executor(spec, tmp_path, w8a8=True)
+    _declare_w8a8_lane(ex, wire_ref(spec.models["pipeline"]))
     _active_w8a8_target(ex)
     model_ref = wire_ref(spec.models["pipeline"])
 
@@ -2160,8 +2178,9 @@ def test_required_compile_rejects_wrong_target_cell_digest_or_contract(
 ):
     spec = replace(
         _spec(), models={"pipeline": Hub(
-            "acme/klein-finetune", flavor="fp8-w8a8")})
-    ex, _sent = _wire_executor(spec, tmp_path)
+            "acme/klein-finetune")})
+    ex, _sent = _wire_executor(spec, tmp_path, w8a8=True)
+    _declare_w8a8_lane(ex, wire_ref(spec.models["pipeline"]))
     target = _active_w8a8_target(ex)
     run = _required_run(spec, target, **override)
     with pytest.raises(RetryableError, match=reason):
@@ -2171,8 +2190,9 @@ def test_required_compile_rejects_wrong_target_cell_digest_or_contract(
 def test_required_compile_rejects_missing_fence_and_binding_digest_drift(tmp_path):
     spec = replace(
         _spec(), models={"pipeline": Hub(
-            "acme/klein-finetune", flavor="fp8-w8a8")})
-    ex, _sent = _wire_executor(spec, tmp_path)
+            "acme/klein-finetune")})
+    ex, _sent = _wire_executor(spec, tmp_path, w8a8=True)
+    _declare_w8a8_lane(ex, wire_ref(spec.models["pipeline"]))
     target = _active_w8a8_target(ex)
     model_ref = wire_ref(spec.models["pipeline"])
 
@@ -2185,7 +2205,7 @@ def test_required_compile_rejects_missing_fence_and_binding_digest_drift(tmp_pat
         ex._validate_required_compile(spec, run)
 
     other = replace(
-        spec, models={"pipeline": Hub("acme/other-klein", flavor="fp8-w8a8")})
+        spec, models={"pipeline": Hub("acme/other-klein")})
     other_ref = wire_ref(other.models["pipeline"])
     run = _required_run(spec, target)
     del run.snapshots[model_ref]
@@ -2209,8 +2229,9 @@ def test_runtime_guard_revokes_state_and_quarantines_the_cell(tmp_path):
     """
     spec = replace(
         _spec(), models={"pipeline": Hub(
-            "acme/klein-finetune", flavor="fp8-w8a8")})
-    ex, sent = _wire_executor(spec, tmp_path)
+            "acme/klein-finetune")})
+    ex, sent = _wire_executor(spec, tmp_path, w8a8=True)
+    _declare_w8a8_lane(ex, wire_ref(spec.models["pipeline"]))
     active = _active_w8a8_target(ex)
     active_ref = active.active_compile_ref
     active_id = active.incarnation_id
@@ -2258,8 +2279,9 @@ def test_guard_revocation_between_intake_and_gpu_turn_fails_final_fence(
 ):
     spec = replace(
         _spec(), models={"pipeline": Hub(
-            "acme/klein-finetune", flavor="fp8-w8a8")})
-    ex, sent = _wire_executor(spec, tmp_path)
+            "acme/klein-finetune")})
+    ex, sent = _wire_executor(spec, tmp_path, w8a8=True)
+    _declare_w8a8_lane(ex, wire_ref(spec.models["pipeline"]))
     active = _active_w8a8_target(ex)
     sent.clear()
     found = ex._compile_target(active.incarnation_id)
@@ -2306,8 +2328,9 @@ def test_guard_revocation_between_intake_and_gpu_turn_fails_final_fence(
 def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_path):
     spec = replace(
         _spec(), models={"pipeline": Hub(
-            "acme/klein-finetune", flavor="fp8-w8a8")})
-    ex, sent = _wire_executor(spec, tmp_path)
+            "acme/klein-finetune")})
+    ex, sent = _wire_executor(spec, tmp_path, w8a8=True)
+    _declare_w8a8_lane(ex, wire_ref(spec.models["pipeline"]))
     old = _active_w8a8_target(ex)
     run = _required_run(spec, old)
     run.compute.CopyFrom(pb.ResolvedCompute(accelerator="cuda", gpu_index=0))

@@ -194,20 +194,23 @@ def test_fixed_slot_wrong_repo_dispatch_refuses(tmp_path) -> None:
         blobs.shutdown()
 
 
-def test_fixed_slot_same_repo_flavor_pick_serves(tmp_path) -> None:
+def test_fixed_slot_same_repo_tag_pick_serves(tmp_path) -> None:
+    """pgw#1148: the same-repo pick used to be a `#fp8` FLAVOR; §1.32(d)
+    deleted that address, so the same-repo axis a dispatch can still name is
+    the TAG."""
     blobs = BlobHost(tmp_path)
     try:
-        same_repo_other_flavor = f"{DECLARED_PIPELINE.path}#fp8"
-        payload = b"fp8-flavor-bytes"
-        snap = blobs.one_file_snapshot("snap-fp8", "fp8", payload)
+        same_repo_other_tag = f"{DECLARED_PIPELINE.path}:canary"
+        payload = b"canary-tag-bytes"
+        snap = blobs.one_file_snapshot("snap-canary", "canary", payload)
         with hub_double() as (scheduler, _harness):
             conn = scheduler.wait_connection(0)
             conn.wait_for(is_ready)
             conn.send(run_job=pb.RunJob(
                 request_id="r-flavor", attempt=1, function_name="slot-identity-fixed",
                 input_payload=_payload(),
-                models=[pb.ModelBinding(slot="pipeline", ref=same_repo_other_flavor)],
-                snapshots={same_repo_other_flavor: snap},
+                models=[pb.ModelBinding(slot="pipeline", ref=same_repo_other_tag)],
+                snapshots={same_repo_other_tag: snap},
             ))
             res = conn.wait_for(is_result_for("r-flavor")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message
@@ -215,7 +218,7 @@ def test_fixed_slot_same_repo_flavor_pick_serves(tmp_path) -> None:
             # The harness echo interpolates ref.tag UNCONDITIONALLY (it is not
             # the normal form), so the resolved tag shows even though the
             # normal form would elide it (th#1276).
-            assert out.response == f"tensorhub:{DECLARED_PIPELINE.path}:prod#fp8"
+            assert out.response == f"tensorhub:{DECLARED_PIPELINE.path}:canary"
     finally:
         blobs.shutdown()
 
@@ -238,7 +241,7 @@ def test_catalog_slot_different_repo_pick_is_not_a_mismatch(tmp_path) -> None:
             res = conn.wait_for(is_result_for("r-catalog")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message
             out = _decode(res.inline)
-            assert out.response == "tensorhub:harness/slot-catalog-pick:prod#"
+            assert out.response == "tensorhub:harness/slot-catalog-pick:prod"
             assert CATALOG_DEFAULT_PIPELINE.path not in out.response
     finally:
         blobs.shutdown()

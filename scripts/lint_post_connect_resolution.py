@@ -30,7 +30,6 @@ What is watched, and why each one
                                                after the Hub already chose
                                                (pgw#904's `rows[0]` resolver)
     resolve_repo                               worker-side ref resolution
-    maybe_rebind_family_fp8 / pick_family_..   worker-AUTHORED flavour choice
     parse_execution_lane_spec                  the DUAL-form parse; its FAMILY
                                                branch is the coarse-family
                                                expansion §1.31 forbids
@@ -79,8 +78,6 @@ WATCHED = frozenset({
     "_discover_inner",
     "_candidates",
     "resolve_repo",
-    "maybe_rebind_family_fp8",
-    "pick_family_fp8_flavor",
     "parse_execution_lane_spec",
 })
 

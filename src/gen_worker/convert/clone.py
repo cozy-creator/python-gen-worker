@@ -54,7 +54,7 @@ from .dtype_pins import (
 from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
 from .registry import repackage_family
 from ..api.slot import OBJECTIVES
-from gen_worker.models.refs import flavor_token
+from .hub import _token as flavor_token
 
 logger = logging.getLogger(__name__)
 
@@ -992,7 +992,7 @@ def run_clone(
                 # Hub flavor tokens are [a-z0-9][a-z0-9._-]{0,63}: the gguf
                 # dtype-axis label ("gguf:q4_k_m") publishes as "gguf-q4_k_m"
                 # (the th#611 flavor convention).
-                from gen_worker.models.refs import flavor_token
+                from .hub import _token as flavor_token
 
                 flavor_label = flavor_token(flavor_label)
             except InlineConversionNotPossible as exc:

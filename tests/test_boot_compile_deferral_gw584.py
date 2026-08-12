@@ -97,7 +97,12 @@ class _Out(msgspec.Struct):
 FAMILY = "gw584-fam"
 AUTHORED = Hub("acme/qwen-image", tag="prod")           # bare authored binding
 AUTHORED_REF = "acme/qwen-image"
-RESOLVED_REF = "acme/qwen-image#fp8-w8a8"          # HelloAck ladder pick
+#: pgw#1148/§1.32(d): a HelloAck pick can no longer RE-ADDRESS a binding —
+#: the `#flavor` that used to is deleted and th#1803's digest pin resolves
+#: the same address. The pick's carried facts are the cast and the lane, and
+#: the w8a8 lane below is stated the way production states it.
+RESOLVED_REF = AUTHORED_REF
+RESOLVED_LANE = "fp8-w8a8-dynamic+compiled"
 CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
 PLAIN_CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
 
@@ -252,7 +257,8 @@ def _startup(ex: Executor) -> Lifecycle:
 
 
 def _apply_hello_ack(ex: Executor) -> None:
-    ex.apply_model_resolutions({AUTHORED_REF: (RESOLVED_REF, "", "")})
+    ex.apply_model_resolutions(
+        {AUTHORED_REF: (RESOLVED_REF, "", RESOLVED_LANE)})
     assert wire_ref(ex.specs["generate"].models["pipeline"]) == RESOLVED_REF
 
 

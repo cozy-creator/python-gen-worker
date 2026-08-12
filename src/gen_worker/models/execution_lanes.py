@@ -298,25 +298,6 @@ def parse_execution_lane_spec(s: str) -> ExecutionLaneSpec:
     return ExecutionLaneSpec(family=family_of(execution_lane), execution_lane=execution_lane)
 
 
-def is_w8a8_flavor(token: str) -> bool:
-    t = str(token or "").strip().lower()
-    return t == "fp8-w8a8" or t.startswith("fp8-w8a8-")
-
-
-def mandatory_traced_lane_of(flavor: str) -> str:
-    """Traced weight lane a stored flavor MANDATES for fail-closed serving:
-    "w8a8" for `#fp8-w8a8` (gw#534), "w4a4" for `#nvfp4-w4a4` (gw#540), ""
-    otherwise. th#1059 twin of the hub's ``mandatoryTracedLane``; th#1361/
-    pgw#1065 choke point — replaced by the hub-resolved lane once th#1721
-    descriptors cover every ref."""
-    t = str(flavor or "").strip().lower()
-    if is_w8a8_flavor(t):
-        return "w8a8"
-    if t == "nvfp4-w4a4" or t.startswith("nvfp4-w4a4-"):
-        return "w4a4"
-    return ""
-
-
 def _planned_execution(execution_lane: ExecutionLane, compiled: bool) -> ExecutionLane:
     """The execution axis of a PLANNED lane: the caller's preference, moved
     onto a mode the table says this body is chosen for. Planning only —
@@ -333,44 +314,31 @@ def _planned_execution(execution_lane: ExecutionLane, compiled: bool) -> Executi
     )
 
 
-def execution_lane_body_of_binding(flavor: str, storage_dtype: str) -> str:
-    """The lane BODY a (flavor, cast/storage_dtype) binding names — the
-    WEIGHTS half, with no execution axis. Split out of
-    ``execution_lane_of_binding`` (ie#655) so the reporting path can stamp an
-    observed execution onto it instead of a planned one."""
-    # cycle: ladder imports lanes at module top
-    from .ladder import (
-        CLASS_FP8,
-        CLASS_NVFP4_W4A4,
-        CLASS_SVDQ_FP4,
-        CLASS_SVDQ_INT4,
-        classify_flavor_token,
-    )
+def execution_lane_body_of_binding(storage_dtype: str) -> str:
+    """The lane BODY a binding's declared CAST names — the WEIGHTS half, with
+    no execution axis. Split out of ``execution_lane_of_binding`` (ie#655) so
+    the reporting path can stamp an observed execution onto it instead of a
+    planned one.
 
+    pgw#1148 dropped the ``flavor`` argument with the flavor axis itself
+    (§1.32(d)). A binding no longer NAMES a stored precision: it names a tag
+    (or a digest), and what the bytes are is the checkpoint's tensor-layout
+    contract, not a token in the ref. The stored half now reaches the lane id
+    through the two channels that carry evidence rather than an assertion —
+    the hub-resolved execution lane, and setup()'s APPLIED report (pgw#1104,
+    ``report_applied_lane``) — both of which already outrank this derivation
+    at every call site."""
     if str(storage_dtype or "").strip().lower() in ("fp8", "fp8+te"):
         execution_lane = ExecutionLane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
-    elif (cls := classify_flavor_token(flavor)) == CLASS_FP8:
-        if is_w8a8_flavor(flavor):
-            execution_lane = ExecutionLane(weights=WEIGHTS_FP8, activation=ACT_W8A8,
-                        scale=SCALE_DYNAMIC, execution="")
-        else:
-            execution_lane = ExecutionLane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
-    elif cls == CLASS_SVDQ_FP4:
-        execution_lane = ExecutionLane(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4, execution="")
-    elif cls == CLASS_SVDQ_INT4:
-        execution_lane = ExecutionLane(weights=WEIGHTS_SVDQ_INT4, activation=ACT_W4A4, execution="")
-    elif cls == CLASS_NVFP4_W4A4:
-        execution_lane = ExecutionLane(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
-                    scale=SCALE_STATIC, execution="")
     else:
         execution_lane = ExecutionLane(weights=WEIGHTS_BF16, activation=ACT_W16A16, execution="")
     return execution_lane_body_id(execution_lane)
 
 
-def execution_lane_of_binding(flavor: str, storage_dtype: str, compiled: bool) -> ExecutionLane:
-    """PLAN: the lane a (flavor, cast/storage_dtype) binding is chosen to
-    execute as — the twin of tensorhub's ``LaneOfResolution``."""
-    body = _body_for_token(execution_lane_body_of_binding(flavor, storage_dtype))
+def execution_lane_of_binding(storage_dtype: str, compiled: bool) -> ExecutionLane:
+    """PLAN: the lane a binding's cast is chosen to execute as — the twin of
+    tensorhub's ``LaneOfResolution``."""
+    body = _body_for_token(execution_lane_body_of_binding(storage_dtype))
     assert body is not None  # every branch above names a table row
     return _planned_execution(
         _execution_lane_for_body(body, EXEC_EAGER), compiled)
@@ -409,7 +377,6 @@ __all__ = [
     "WEIGHTS_SVDQ_FP4",
     "WEIGHTS_SVDQ_INT4",
     "family_of",
-    "mandatory_traced_lane_of",
     "known_execution_lane_bodies",
     "known_execution_lanes",
     "execution_lane_body_id",

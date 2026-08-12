@@ -138,7 +138,7 @@ class _ExecStub:
 
 _BINDING = ModelRef(
     source="tensorhub", path="tensorhub/wai-illustrious",
-    tag="prod", flavor="fp8-w8a8")
+    tag="prod")
 #: The one ref spelling the executor books under — derived, never hand-typed.
 _REF = wire_ref(_BINDING)
 

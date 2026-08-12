@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional
 
 from ..config import Settings, current_or
@@ -86,22 +86,16 @@ def resolved_entry_digest(
 
 
 @dataclass(frozen=True)
-class WorkerResolvedFlavor:
-    """One (tag, flavor) selector row of the resolved tag (th#697)."""
-
-    flavor: str
-    size_bytes: int
-    placement: Optional[dict[str, Any]] = None
-
-
-@dataclass(frozen=True)
 class WorkerResolvedRepo:
     snapshot_digest: str
     files: List[WorkerResolvedRepoFile]
-    # th#697: total checkpoint size + the tag's sibling flavor rows — the
-    # local precision ladder's candidate set. Empty on older hubs.
+    # th#697: total checkpoint size. pgw#1148: `sibling_flavors` is GONE —
+    # th#1803 re-keyed `repo_tags` to (repo, tag, checkpoint) and dropped the
+    # flavor column, so the hub emits `tag_members` (checkpoint rows) and no
+    # flavor row exists to parse. Nothing in the SDK reads the group today:
+    # selection within a tag group is contract compatibility (§1.33), and the
+    # local pickers that consumed these rows died with them.
     size_bytes: int = 0
-    sibling_flavors: List[WorkerResolvedFlavor] = field(default_factory=list)
     # th#964: the resolved checkpoint's architecture family ("sdxl-pony",
     # ...) — drives the local family lane policy. "" on hubs not sending it.
     model_family: str = ""
@@ -118,7 +112,7 @@ class HubResolveError(RuntimeError):
 
 
 class HubRepoNotFoundError(HubResolveError):
-    """404: unknown repo/tag/flavor OR a private repo the caller may not see
+    """404: unknown repo/tag OR a private repo the caller may not see
     (the route deliberately never distinguishes these)."""
 
 
@@ -218,8 +212,6 @@ def resolve_repo(
         params["digest"] = ref.digest
     elif ref.tag:
         params["tag"] = ref.tag
-    if ref.flavor:
-        params["flavor"] = ref.flavor
 
     url = f"{base}/api/v1/repos/{ref.owner}/{ref.repo}/resolve"
     try:
@@ -240,8 +232,8 @@ def resolve_repo(
                 "answered 404 (backend offline, e.g. hub restarting); retry shortly"
             )
         raise HubRepoNotFoundError(
-            f"tensorhub repo {ref.canonical()} not found (unknown repo/tag/"
-            "flavor, or a private repo — set TENSORHUB_TOKEN for private pulls)"
+            f"tensorhub repo {ref.canonical()} not found (unknown repo or "
+            "tag, or a private repo — set TENSORHUB_TOKEN for private pulls)"
         )
     if resp.status_code in (401, 403):
         raise HubAuthError(
@@ -289,16 +281,6 @@ def resolve_repo(
         raise HubResolveError(
             f"tensorhub resolve for {ref.canonical()}: empty snapshot manifest"
         )
-    siblings: List[WorkerResolvedFlavor] = []
-    for row in body.get("sibling_flavors") or []:
-        if not isinstance(row, dict):
-            continue
-        placement = row.get("placement")
-        siblings.append(WorkerResolvedFlavor(
-            flavor=str(row.get("flavor") or "").strip(),
-            size_bytes=int(row.get("size_bytes") or 0),
-            placement=placement if isinstance(placement, dict) else None,
-        ))
     distilled_status = str(body.get("distilled_status") or "").strip()
     if distilled_status not in ("", "classified", "unclassified", "inconclusive"):
         raise HubResolveError(
@@ -308,7 +290,6 @@ def resolve_repo(
     return WorkerResolvedRepo(
         snapshot_digest=digest, files=files,
         size_bytes=int(body.get("size_bytes") or 0),
-        sibling_flavors=siblings,
         model_family=str(body.get("model_family") or "").strip(),
         objective=str(body.get("objective") or "").strip(),
         distilled=bool(body.get("distilled") or False),
