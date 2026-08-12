@@ -148,6 +148,12 @@ gen_worker.aot_serve.realigned_inputs()
 gen_worker.aot_serve.served_entry_calls()
 gen_worker.boot_phases.BootSpan.skipped()
 gen_worker.boot_phases.servable_ms()
+#   shape_growth.coverage_line — ✅ DELISTED 2026-08-12 (pgw#1181), by the
+#   ratchet turning the RIGHT way: it acquired a production caller and the
+#   landing lane did not remove its row, which left `master` itself red on
+#   this guard. Removed here because every PR inherits that red; the symbol
+#   is not this lane's and nothing about it changed.
+#
 #   THE JIT PRODUCER DIED AND THE FORMAT FOLLOWED IT — ✅ DELISTED 2026-08-12
 #   (pgw#1181) by DELETION, five rows in one cut, three of them listed by
 #   pgw#1178 the same day with OWNER: Phase 1 and EXPIRY: the per-entry atom.

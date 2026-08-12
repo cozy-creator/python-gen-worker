@@ -714,33 +714,14 @@ def _pin_w8a8_identity(monkeypatch):
 # `test_enable_reconciles_*` above/below cover it on the live path.
 
 
-def test_reconcile_resident_mode_unit():
-    from gen_worker.models.memory import reconcile_resident_mode
+# pgw#1181 REMOVED `test_reconcile_resident_mode_unit` with its subject.
+# `models.memory.reconcile_resident_mode` adjusted a live pipeline's offload
+# mode to match the `low_vram_mode` a DELIVERED `torch-inductor-cache` cell had
+# recorded, and `compile_cache._reconcile_resident_mode` was its only caller.
+# The mode is still READ as a fact — `execution_contract_digest` folds it into
+# the contract — but nothing reconciles a pipeline to a cell's recorded mode,
+# because no cell records one.
 
-    # unset current mode: refuse, never stamp
-    pipe = _resident_pipe("")
-    assert reconcile_resident_mode(pipe, "off") is False
-    assert not hasattr(pipe, "_cozy_low_vram_mode")
-
-    # offload current or offload target: refuse, untouched
-    pipe = _resident_pipe("model_offload")
-    assert reconcile_resident_mode(pipe, "off") is False
-    assert pipe._cozy_low_vram_mode == "model_offload"
-    pipe = _resident_pipe("off")
-    assert reconcile_resident_mode(pipe, "group_offload") is False
-    assert pipe._cozy_low_vram_mode == "off"
-
-    # resident <-> resident converges both ways
-    pipe = _resident_pipe("off")
-    assert reconcile_resident_mode(pipe, "vae_only") is True
-    assert pipe._cozy_low_vram_mode == "vae_only"
-    assert all(pipe.flags.values())
-    assert reconcile_resident_mode(pipe, "off") is True
-    assert pipe._cozy_low_vram_mode == "off"
-    assert not any(pipe.flags.values())
-
-    # already converged: True, no-op
-    assert reconcile_resident_mode(pipe, "off") is True
 
 
 def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
@@ -919,7 +900,6 @@ def test_fx_cache_failure_report_names_b1_divergence(tmp_path, monkeypatch):
 # live-directory census the sibling row now fences is the half a pod can still
 # reach: what the executor hands this function is an exported cell, which
 # carries no `inductor/` tree at all.
-
 
 
 def test_fx_cache_failure_report_never_raises_without_state(tmp_path, monkeypatch):
