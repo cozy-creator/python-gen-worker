@@ -53,7 +53,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, guard_closure, hot_swap
+from gen_worker import fleet_cells, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -191,12 +191,11 @@ class _Harness:
         monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
-        monkeypatch.setattr(
-            guard_closure, "closure_manifest",
-            lambda pipe, cfg, label="": {
-                "v": 1, "graphs": [{"target": "transformer", "code": "sim",
-                                    "entry": 0, "guards": []}],
-                "verdicts": {}, "leaks": []})
+        # pgw#1181: the pgw#681 mint gate this simmed is deleted.
+        # `guard_closure.closure_manifest` classified every compiled graph at
+        # the MINT and wrote the result into the cell's metadata; it went with
+        # the `torch-inductor-cache` format that carried it, so a rig whose
+        # compiles never touch dynamo has no gate left to satisfy.
         self.ex = Executor(self.specs, _send, store=store)
 
     # -- the compile-arm leaf ------------------------------------------------
