@@ -1,5 +1,13 @@
 # Releasing gen-worker
 
+**This file is the ONLY release procedure.** Publication is the **tag push** — `publish.yml` refuses
+to ship a tree no CI run has proven. `Taskfile.yml` deliberately has no `publish` task: a local
+`uv publish` walks around that gate, and a second written procedure is how a cutter ends up
+following the stale one. **No local mint is a release gate** — the `rig:*` tasks are development
+vehicles, they run real inductor/AOTI compiles, and Paul's 2026-08-10 hard cut puts every mint on a
+remote pod. (pgw#1140, 2026-08-12: `task publish` still said otherwise, five days after the cut that
+superseded it.)
+
 Two rules, both from Paul (2026-08-02), both replacing an unwritten habit. If you are about to cut,
 read the first one — it is usually the answer.
 
@@ -155,6 +163,26 @@ scripts/assemble_changelog.py --check                     # names parse, none em
 scripts/assemble_changelog.py --version <X.Y.Z> \
     --headline "**the one thing this cut is about**"      # writes + `git rm`s fragments
 ```
+
+### SWEEP THE FRAGMENTS AGAINST `origin/master`, NOT YOUR CHECKOUT
+
+A merge with no fragment is a **silent release note**, and the sweep for one is the cutter's job —
+lanes forget. Do it by listing the range's commits against the fragments **as they exist on the
+ref you are cutting**:
+
+```bash
+git log --format='%h %s' v<prev>..origin/master          # every merge, with its issue number
+git ls-tree --name-only origin/master changelog.d/       # NOT `ls changelog.d/`
+```
+
+**`ls changelog.d/` lies whenever your checkout is behind**, and at a cut it usually is — lanes are
+merging while you assemble. The 0.113.0 cut's checkout was two commits behind and the working-tree
+listing showed pgw#1159's fragment MISSING when it was merged and present; had that been trusted,
+the cut would have written a duplicate. Same failure in the other direction is worse: a fragment
+that exists only in your stale tree looks owed and gets written twice.
+
+Expect the ledger's "known-owed" list to be **incomplete** — it names what a lane remembered to
+file. 0.113.0's ledger named one owed fragment; the sweep found five.
 
 ## Mechanics
 
