@@ -37,7 +37,7 @@ hub-side from the token claim, never from anything this module sends.
 cozy-local USES this module since pgw#1127, through ``local_serve``, with
 ``publisher=None`` — one arming brain, two sinks. What it never has is a
 PUBLISHER: user-controlled hardware is untrusted tier by definition, so its
-cells land in ``local_cell_store`` (``local_keep_reason`` -> ``no_publish_sink``)
+cells land in ``local_cell_store`` (``no_publish_sink_reason`` -> ``no_publish_sink``)
 and its obligation ends at :func:`keep_self_mint_local`. That absence is
 pinned structurally by ``tests/test_local_serve_no_publisher_pgw1127.py``,
 not by this paragraph: before pgw#1127 the local CLI armed JIT through
@@ -988,13 +988,24 @@ def _publish_async(
     cell_key_digest: str = "", mint_duration_ms: int = 0,
     arm_token: str = "",
 ) -> threading.Thread:
-    """Ship the cell in the background — readiness never waits on an upload.
+    """Ship an ALREADY-DURABLE cell in the background (pgw#1183 / §1.5).
 
     EVERY outcome is a typed event now (pgw#815), success included: this
     boundary used to emit only on failure, so "published" and "the thread was
     killed mid-upload when the pod retired" were the same observation —
-    silence. The mint dir is cleaned once the publish attempt finishes (the
-    adoption already staged its own copy under the cache dir).
+    silence.
+
+    pgw#1183 changed what this function IS. It used to be the last thing that
+    ever touched the only copy of a mint — the bytes lived under the mint root
+    and a ``finally`` rmtree'd them on every exit path, so one
+    ``connection reset`` destroyed a 1 h 37 m mint, and the event text conceded
+    it in as many words (*"this pod must survive the upload or the cell is
+    lost"*). It is now a transfer FROM the local CAS: ``artifact`` is the
+    store's own path, no path here is ever removed, the thread is not a daemon
+    (the upload is bounded by the transport's own timeouts, so waiting for it
+    at interpreter exit is finishing work, not hanging on it), and a failure
+    leaves the record ``pending`` for :func:`resume_cells_owed_to_sink` to
+    re-attempt on the next boot. The pod no longer has to survive anything.
     """
     key = cell_key_digest or str(meta.get("cell_key") or "")
     try:
@@ -1009,7 +1020,8 @@ def _publish_async(
     activity_mod.emit_event(
         "self_mint_publish",
         f"family={family} key={key}: uploading {size_mb:.1f} MB to the fleet "
-        f"store; this pod must survive the upload or the cell is lost",
+        f"store from this machine's local CAS; the bytes are already durable "
+        f"and a failed attempt is retried on the next boot",
         phase="started",
     )
 
@@ -1021,17 +1033,15 @@ def _publish_async(
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
             # pgw#1096/§4.28: the hub has just ASSERTED this hardware's trust
-            # class. Learn it (the worker never declares its own — the code is
-            # the only authority), and KEEP the cell: the `finally` below is
-            # about to rmtree the mint root, and this exact discard is what
-            # th#1643 books as SUNK ("a sealed cell was produced and thrown
-            # away"). An untrusted machine mints for ITSELF, so the bytes go
-            # to its own store and every later boot of it arms from disk.
-            if local_cell_store.note_refusal(
-                    str(getattr(exc, "code", "") or ""), str(exc)
-            ) and cell_key.is_key(key):
-                local_cell_store.store(
-                    artifact, key=key, family=family, arm_token=arm_token)
+            # class. Learn it — the worker never declares its own, the hub is
+            # the only authority. pgw#1183 deleted the SALVAGE that stood here
+            # (a `store` racing the `finally`'s rmtree): the cell was already
+            # written to the local CAS before it armed, so an untrusted
+            # machine's next boot finds it whatever the hub says, and th#1643's
+            # SUNK case cannot recur through this path or any other.
+            local_cell_store.note_refusal(
+                str(getattr(exc, "code", "") or ""), str(exc))
+            _mark_publish(key, local_cell_store.SINK_REFUSED)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: hub refused the publish: {exc}",
@@ -1042,17 +1052,25 @@ def _publish_async(
                 phase=_publish_failure_phase(exc) or "refused",
             )
         except Exception as exc:  # noqa: BLE001 — reported, never fatal
-            logger.warning("fleet-cells: publish failed; the next worker on this key re-mints", exc_info=True)
+            # pgw#1183: NOT "the next worker on this key re-mints" any more.
+            # The bytes are durable, the record stays `pending`, and this
+            # machine's next boot re-attempts the upload from them.
+            logger.warning(
+                "fleet-cells: publish failed; the cell stays durable in this "
+                "machine's local CAS and the upload is retried next boot",
+                exc_info=True)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: publish attempt failed: "
-                f"{type(exc).__name__}: {exc}",
+                f"{type(exc).__name__}: {exc}; the cell is durable locally "
+                f"and the upload is still owed",
                 # The hub's OWN code when it gave one, so a fleet-wide
                 # refusal is one `phase=` group instead of N prose strings.
                 phase=_publish_failure_phase(exc),
             )
         else:
             _note_durable(key, "published")
+            _mark_publish(key, local_cell_store.SINK_DELIVERED)
             activity_mod.emit_event(
                 "self_mint_publish",
                 f"family={family} key={key} checkpoint={checkpoint_id}: "
@@ -1063,11 +1081,58 @@ def _publish_async(
         finally:
             with _IN_FLIGHT_LOCK:
                 _IN_FLIGHT.pop(key, None)
-            shutil.rmtree(artifact.parent, ignore_errors=True)
 
-    t = threading.Thread(target=run, name="cell-publish", daemon=True)
+    # NOT a daemon (pgw#1183). A daemon thread is killed at interpreter exit
+    # with no unwinding, which is how an upload became "the pod must survive
+    # it". Each publish call is bounded by the transport's own request
+    # timeouts, so a graceful exit finishes the transfer instead of abandoning
+    # it — and a hard kill costs a retry, not the cell.
+    t = threading.Thread(target=run, name="cell-publish", daemon=False)
     t.start()
     return t
+
+
+def _mark_publish(key: str, state: str) -> None:
+    """Record an upload's outcome beside the bytes it uploaded (pgw#1183)."""
+    if cell_key.is_key(key):
+        local_cell_store.mark(key, sink=state)
+
+
+def resume_cells_owed_to_sink(
+    publisher: Optional[CellPublisher],
+) -> List[threading.Thread]:
+    """Re-attempt every upload this machine still OWES (pgw#1183 / §1.5).
+
+    The cross-boot half of "publish is a retryable background transfer from
+    durable bytes, surviving process death and pod retirement". A pod that
+    died mid-upload, was retired mid-upload, or hit a transport failure left
+    its cell ADMITTED and its record ``pending``; this reads them back and
+    ships them, at boot, off the critical path.
+
+    A machine with no sink owes nothing — cozy-local's cells are recorded
+    ``none`` at store time, so this is empty there by construction rather than
+    by a check on the trust class.
+    """
+    if publisher is None or not publisher.enabled():
+        return []
+    threads: List[threading.Thread] = []
+    in_flight = set(publishes_in_flight())
+    for cell in local_cell_store.cells_owed_to_sink():
+        # The sink is rebuilt on every HelloAck, so this runs on reconnects
+        # too. A key whose upload is already running is owed nothing more.
+        if cell.key in in_flight:
+            continue
+        meta = artifact_meta.try_read_metadata(cell.artifact) or {}
+        threads.append(_publish_async(
+            publisher, cell.family or str(meta.get("family") or ""),
+            cell.artifact, dict(meta), cell_key_digest=cell.key,
+            arm_token=cell.arm_token))
+    if threads:
+        logger.info(
+            "fleet-cells: re-attempting %d owed cell upload(s) from this "
+            "machine's local CAS — each survived the process that minted it",
+            len(threads))
+    return threads
 
 
 #: Typed PIPELINE-side refusals of out-of-process minting (pgw#813). The
@@ -1784,16 +1849,25 @@ def arm_axis_divergence(
     return ""
 
 
-#: pgw#1096: WHY a machine keeps the cell it just minted. Each is a fact about
-#: the SINK, and none of them is the worker deciding its own trust class —
-#: which stays what §4.28 makes it, the hub's call and only the hub's.
+#: pgw#1096: WHY a machine has nowhere to ship the cell it just minted. Each is
+#: a fact about the SINK, and none of them is the worker deciding its own trust
+#: class — which stays what §4.28 makes it, the hub's call and only the hub's.
 KEEP_HUB_ASSERTED_UNTRUSTED = "hub_asserted_untrusted"
 KEEP_NO_PUBLISHER = "no_publish_sink"
 KEEP_PUBLISH_DISARMED = "publish_disarmed"
 
 
-def local_keep_reason(publisher: Optional[CellPublisher]) -> str:
-    """Why this machine keeps its own cell, "" when it has no reason to.
+def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
+    """Why this machine cannot ship its cell, "" when it can.
+
+    pgw#1183 RENAMED THIS AND SHRANK WHAT IT DECIDES. As ``local_keep_reason``
+    it gated ``local_cell_store.store`` — durability decided by a fact about
+    the SINK, which is §1.5's inversion in one predicate: the pods that mint
+    for the fleet are exactly the pods with a sink, so exactly they kept
+    nothing. Storing is now unconditional and this answers only whether an
+    UPLOAD IS OWED (``SINK_OWED`` vs ``SINK_NONE``). A machine with
+    no sink by design must not accumulate an obligation nothing will ever
+    discharge; that is all this is for.
 
     §4.28 says an untrusted machine mints for ITSELF. Three disjoint ways a
     machine learns it has nowhere to ship — and NONE of them is a worker-side
@@ -1814,8 +1888,9 @@ def local_keep_reason(publisher: Optional[CellPublisher]) -> str:
       PARENT removes from its hub-call allowlist. Read from the predicate that
       owns that decision rather than sniffed off an exception.
 
-    Keeping bytes you already paid an hour of compute for, and cannot ship, is
-    not a claim about trust. It is the absence of a reason to delete them.
+    Keeping bytes you already paid an hour of compute for is no longer a
+    decision anything makes — §1.5 keeps them always. Whether to UPLOAD them
+    still is, and it is this.
     """
     if local_cell_store.keeps_cells_locally():
         return KEEP_HUB_ASSERTED_UNTRUSTED
@@ -2097,6 +2172,14 @@ def adopt_delegated_mint(
             os.replace(artifact, pending.target)
         except OSError:
             shutil.copy2(artifact, pending.target)
+    # §1.5 / §4.33 step 3 — DURABLE FIRST, and this is the whole ordering
+    # change. The bytes go to the local CAS BEFORE anything verifies, arms,
+    # publishes or cleans up, on EVERY tier, because the alternative is what
+    # the tree did: the artifact lived under a temp mint root owned by the
+    # process most likely to die, and durability was gated on the machine
+    # having NO publish sink — so the pods that mint for the fleet were exactly
+    # the pods that kept nothing.
+    _durable_key = _stage_durable(pending, pending.target)
     # pgw#1096: ONE gate for every self-produced cell — the child's, and the
     # local store's (§4.28). pgw#999's classification, pgw#1042's pre-arm axis
     # divergence and pgw#805's AOT-only arm all live in `_arm_exported_cell`;
@@ -2144,9 +2227,15 @@ def adopt_delegated_mint(
             f"cell_key={stamped}: the child process produced a cell this "
             f"runtime could not adopt "
             f"({reason}{': ' + detail if detail else ''}); serving stays "
-            f"eager and nothing is published",
+            f"eager, nothing is published, and the artifact is QUARANTINED in "
+            f"this machine's local CAS for forensics",
             phase=reason,
         )
+        # §1.3.4: do not arm, do not publish, KEEP the artifact quarantined.
+        # It is the only object that can explain the refusal, and the code
+        # reporting the refusal used to destroy it — which the local store's
+        # own header prices at *"a full GPU pod run. Twice."*
+        _quarantine_durable(_durable_key)
         mark_terminus(pending, TERMINUS_ABORTED)
         state["minted"] = None
         _unregister(pending)
@@ -2176,11 +2265,17 @@ def adopt_delegated_mint(
         _unregister(pending)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return None
+    # §1.5: the DURABLE copy is the mint's address from here on. `pending.target`
+    # lives under the mint root, which every terminus cleans; a `SelfMint`
+    # pointing there is a reference to bytes scheduled for deletion, and
+    # publishing from it is what made the upload a race against the cleanup.
+    durable = _admit_durable(pending, key, _durable_key)
+    artifact_path = durable.artifact if durable is not None else pending.target
     minted = SelfMint(
         family=pending.family, cell_key=key,
         ref=f"{cc.system_repo(pending.family)}#{key}",
-        snapshot_digest="sha256:" + sha256_file(pending.target),
-        artifact=pending.target,
+        snapshot_digest="sha256:" + sha256_file(artifact_path),
+        artifact=artifact_path,
     )
     state["minted"] = minted
     state["meta"] = dict(meta)
@@ -2200,29 +2295,96 @@ def adopt_delegated_mint(
         # unreadable by the only lookup there is, so every same-key re-arm in
         # this process paid a second full export.
         _FINALIZED[pending.arm_token] = minted
-    keep = local_keep_reason(pending.publisher)
-    if keep:
-        # §4.28: a machine with nowhere to ship keeps its own cell, where its
-        # next boot can find it. Done HERE, not after the publish attempt,
-        # because a pod that dies between adopting and being refused would
-        # otherwise lose the whole mint — the th#1643 SUNK case, one boot later.
-        stored = local_cell_store.store(
-            pending.target, key=minted.cell_key, family=pending.family,
-            arm_token=pending.arm_token)
-        if stored is not None:
-            activity_mod.emit_event(
-                "local_cell_stored",
-                f"family={pending.family} arm_key={pending.arm_token} "
-                f"cell_key={minted.cell_key}: this machine cannot ship this "
-                f"cell ({keep}), so it keeps it — every later boot of this "
-                f"machine arms it from disk with no mint (§4.28)",
-                phase=keep,
-            )
     logger.info(
         "fleet-cells: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
         "worker served eager throughout and now serves compiled",
-        pending.family, key, pending.target.stat().st_size / 1e6)
+        pending.family, key, artifact_path.stat().st_size / 1e6)
     return minted
+
+
+# ---------------------------------------------------------------------------
+# §1.5 durability: pack -> local CAS -> verify -> arm -> publish
+# ---------------------------------------------------------------------------
+
+
+def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
+    """Write a freshly minted artifact to the local CAS, UNVERIFIED.
+
+    Returns the stamped ``ck1`` key the bytes were filed under, or ``""`` when
+    the artifact carries no readable stamp — in which case there is nothing to
+    address it by and the ordinary ``cell_key_missing`` refusal downstream is
+    the honest end.
+
+    Unconditional, on every tier (§1.5). The publish state is decided here and
+    only here: a machine with a live sink OWES an upload from this moment,
+    which is what makes :func:`resume_cells_owed_to_sink` able to finish a
+    transfer the minting process never did.
+    """
+    try:
+        key = str((artifact_meta.try_read_metadata(artifact) or {}).get(
+            "cell_key") or "").strip()
+    except Exception:  # noqa: BLE001 — an unreadable stamp is refused below
+        key = ""
+    if not key or not cell_key.is_key(key):
+        return ""
+    sink_absent = no_publish_sink_reason(pending.publisher)
+    stored = local_cell_store.store(
+        artifact, key=key, family=pending.family,
+        arm_token=pending.arm_token,
+        verdict=local_cell_store.VERDICT_UNVERIFIED,
+        sink=(local_cell_store.SINK_NONE if sink_absent
+              else local_cell_store.SINK_OWED),
+    )
+    if stored is None:
+        # A local-store write failure is the one thing §1.5 cannot absorb
+        # silently: the mint continues, but its ONLY copy is back under the
+        # mint root. Wire-visible (§4.34's anti-silence rule), not a log line.
+        activity_mod.emit_event(
+            "local_cell_store_failed",
+            f"family={pending.family} arm_key={pending.arm_token} "
+            f"cell_key={key}: the local CAS write FAILED, so this mint has no "
+            f"durable copy and a crash before publish loses it",
+            phase="store_failed",
+        )
+        return ""
+    return key
+
+
+def _quarantine_durable(key: str) -> None:
+    """Keep a refused artifact addressable, and unservable (§1.3.4)."""
+    if key:
+        local_cell_store.mark(
+            key, verdict=local_cell_store.VERDICT_QUARANTINED)
+
+
+def _admit_durable(
+    pending: "PendingSelfMint", key: str, staged_key: str,
+) -> Optional[local_cell_store.LocalCell]:
+    """Promote a staged artifact to ADMITTED once its gate has passed.
+
+    ``staged_key`` is what the pre-arm stamp read; ``key`` is what the armed
+    metadata states. They agree on every path that works — the divergence is
+    already refused by name at ``arm_axis_divergence`` — so a mismatch here
+    means the staged row describes different bytes and is left unpromoted
+    rather than blessed.
+    """
+    if not key or staged_key != key:
+        return None
+    local_cell_store.mark(key, verdict=local_cell_store.VERDICT_ADMITTED)
+    cell = local_cell_store.lookup(key)
+    if cell is None:
+        return None
+    activity_mod.emit_event(
+        "local_cell_stored",
+        f"family={pending.family} arm_key={pending.arm_token} "
+        f"cell_key={key}: durable in this machine's local CAS before it "
+        f"armed, and admitted now that it has (§1.5); every later boot of "
+        f"this machine arms it from disk with no mint"
+        + ("" if cell.sink != local_cell_store.SINK_OWED
+           else ", and the fleet upload is owed from these bytes"),
+        phase=cell.sink,
+    )
+    return cell
 
 
 def adopt_refusal(pending: "PendingSelfMint") -> Tuple[str, str]:
@@ -2269,7 +2431,12 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
     if publisher is not None and publisher.enabled():
         mark_terminus(pending, TERMINUS_PUBLISHING)
         _publish_async(
-            publisher, pending.family, pending.target,
+            publisher, pending.family,
+            # §1.5: FROM THE DURABLE COPY. `adopt_delegated_mint` set this to
+            # the local CAS path; `pending.target` is under the mint root the
+            # terminus below cleans, and shipping from there is what made the
+            # upload a race against the cleanup.
+            getattr(state.get("minted"), "artifact", pending.target),
             dict(state.get("meta") or {}),
             cell_key_digest=str(
                 getattr(state.get("minted"), "cell_key", "")
@@ -2279,6 +2446,9 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             # teaches this machine it is untrusted can also write the memo
             # that lets its next boot find the salvaged cell without tracing.
             arm_token=pending.arm_token)
+        # The mint root is SCRATCH from here: the artifact is durable, so
+        # cleaning up cannot reach a sole copy any more.
+        shutil.rmtree(pending.mint_root, ignore_errors=True)
     else:
         # Runtime assertion (gw#587): every fleet cell miss must produce a
         # publish attempt. A fleet worker minting with no usable sink is a

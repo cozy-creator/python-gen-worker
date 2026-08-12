@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import content_credentials
+from . import fleet_cells
 from . import receipts
 from . import serve_posture
 from . import progress as progress_mod
@@ -546,6 +547,18 @@ class Lifecycle:
                 base_url=self.executor.file_base_url,
                 worker_jwt=self.executor.worker_jwt_provider,
             )
+            # pgw#1183 / §1.5: the same wiring moment is the first moment this
+            # pod CAN discharge an upload it still owes. A cell minted by a
+            # process that died mid-upload — or by a pod retired mid-upload —
+            # is durable in the local CAS with its record still `pending`;
+            # this ships it. Off the critical path, and a no-op on the pods
+            # that owe nothing, which is nearly all of them.
+            try:
+                fleet_cells.resume_pending_publishes(
+                    self.executor._cell_publisher())
+            except Exception:  # noqa: BLE001 — never blocks the handshake
+                logger.warning(
+                    "owed cell uploads could not be re-attempted", exc_info=True)
         # th#1087: the desired state advertises (release_id, config_gen).
         # Observe it (memory + snapshot file rewrite); parameter VALUES ride
         # RunJob stamps (class 1), bindings ride the desired-residency
