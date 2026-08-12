@@ -1466,7 +1466,7 @@ class RequestContext(Generic[D]):
 #
 # RequestContext is the per-inference base. Conversion, dataset-producing,
 # and trainer endpoints get richer subclasses that carry the
-# producer-contract RPCs (publish_dataset_revision, resolve_dataset,
+# producer-contract RPCs (resolve_dataset,
 # materialize_blob).
 #
 # ConversionContext / DatasetContext / TrainingContext share `_PublisherMixin`
@@ -2024,69 +2024,9 @@ class ConversionContext(_PublisherMixin, RequestContext):
 class DatasetContext(_PublisherMixin, RequestContext):
     """RequestContext for dataset-producing endpoints (``@dataset``).
 
-    Adds ``publish_dataset_revision``; ``resolve_dataset`` comes from
-    ``_PublisherMixin``.
+    ``resolve_dataset`` / ``save_checkpoint`` come from ``_PublisherMixin``;
+    dataset rows land as ordinary checkpoint publishes.
     """
-
-    def publish_dataset_revision(
-        self,
-        *,
-        destination_dataset: str,
-        features_json: Dict[str, Any],
-        row_artifacts_json: Optional[Dict[str, Any]] = None,
-        snapshot_manifest: Optional[List[Dict[str, Any]]] = None,
-        visibility: str = "private",
-        kind: str = "",
-        dataset_info: Optional[Dict[str, Any]] = None,
-    ) -> dict[str, Any]:
-        """Publish a dataset revision into ``tensorhub.datasets``.
-
-        Writes to the datasets subsystem instead of ``repo_checkpoints``.
-        The individual file bytes are expected to already be in CAS via
-        prior ``save_checkpoint`` calls — this method just records the
-        dataset-level metadata pointing at those blobs. The server
-        cross-references by blob digest at materialize time.
-
-        Args:
-            destination_dataset: ``owner/name`` or ``owner/name:tag`` ref.
-            features_json: HF-style features schema, e.g.
-                ``{"prompt": {"_type": "Value", "dtype": "string"}, ...}``.
-            row_artifacts_json: Optional mapping of row IDs → artifact
-                refs for datasets that reference external image blobs.
-            snapshot_manifest: Optional list of ``{path, digest, size_bytes}``
-                entries — the data shards + any sidecar files that
-                comprise this dataset revision. Used for provenance /
-                content-identity tracking (naming-based versioning means
-                the dataset row is mutable, but the manifest captures what
-                content was active at publish time).
-            visibility: ``"private"`` (default) or ``"public"``.
-            kind: Free-form kind string (``"prompt_corpus"`` / ``"eval_set"``).
-                Stored in features_json.__cozy_kind__ for now until
-                tensorhub grows a dedicated kind column.
-            dataset_info: Full ``dataset_info.json`` payload to record
-                as tenant metadata.
-
-        Returns:
-            ``{ok: True, dataset_id: str, owner: str, name: str, existed: bool}``.
-
-        Raises ``AuthError`` on 401/403 and ``RuntimeError`` on any other
-        HTTP failure. The hub-API plumbing lives next to ``HubClient``
-        (``gen_worker.convert.hub.publish_dataset_revision``).
-        """
-        # Deferred: convert.hub is +267 modules on the `import gen_worker` path.
-        from ..convert.hub import publish_dataset_revision
-
-        return publish_dataset_revision(
-            base_url=(self._file_api_base_url or "").strip(),
-            token=self._get_worker_capability_token(),
-            destination_dataset=destination_dataset,
-            features_json=features_json,
-            row_artifacts_json=row_artifacts_json,
-            snapshot_manifest=snapshot_manifest,
-            visibility=visibility,
-            kind=kind,
-            dataset_info=dataset_info,
-        )
 
 
 class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
