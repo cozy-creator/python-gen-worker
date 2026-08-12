@@ -238,22 +238,24 @@ def artifact(tmp_path: Path) -> Path:
 # these blocks and refuses anything that cannot state one, so a stub here would
 # only prove that a cell the fleet can never arm still uploads.
 _CLASS_HASH = "a" * 16
-GRAPH_CONTRACT = aot_serve.combined_graph_hash([_CLASS_HASH])
+#: pgw#1176: the DECLARATION-wide coverage label, published as
+#: `graph_contract`. No longer a copy of the graph axis — `graph` is this
+#: entry's class hash (identity), this names the class set it belongs to.
+GRAPH_CONTRACT = cell_key.manifest_digest([_CLASS_HASH])
 META = {
     "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "weight_lane": "w8a8", "lora_bucket": 64, "strict_export": True,
-    "entries": {"unet/main": {
+    cell_key.ENTRY_BLOCK_KEY: {
+        "name": "unet/main",
         "target": "unet", "fork": [], "class_dims": [],
         "range_digest": "r1", "class_hash": _CLASS_HASH, "graph": {"v": 2},
-    }},
-    "combined_graph_hash": GRAPH_CONTRACT,
+    },
+    "manifest_digest": GRAPH_CONTRACT,
     "env_seal": {"v": 1, "torch": "2.9.0"},
     "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
-    "declared_envelope": {
-        "shapes": [[1024, 1024]], "text_lens": [77], "guidance": [7.5]},
 }
-CELL_KEY = cell_key.from_exported_artifact_metadata(META).digest
+CELL_KEY = cell_key.from_entry_metadata(META).digest
 META["cell_key"] = CELL_KEY
 
 #: The shape every cell in the corpus was published under before pgw#1046 —
@@ -376,12 +378,19 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     # map also carries the wire facts (graph_contract, env_seal) and the
     # demoted store metadata (family, lane) — pgw#1059: neither is identity.
     ck = {k: v for k, v in axes.items()
-          if k in ("graph", "envelope", "sm", "toolchain")}
+          if k in ("graph", "sm", "toolchain")}
     assert cell_key.from_axes(ck).digest == intent["cell_key"] == CELL_KEY
-    assert set(axes) == {"graph", "envelope", "sm", "toolchain",
+    assert set(axes) == {"graph", "sm", "toolchain",
                          fc.GRAPH_CONTRACT_AXIS, fc.ENV_SEAL_AXIS,
                          "family", "lane"}
-    assert axes["graph"] == axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
+    # pgw#1176: `graph` and `graph_contract` are NO LONGER THE SAME VALUE, and
+    # that separation is the whole change. `graph` is THIS entry's class hash
+    # (identity); `graph_contract` names the class SET it belongs to
+    # (coverage). Fusing them is what re-minted 35 unchanged classes every
+    # time an author added an aspect ratio.
+    assert axes["graph"] == _CLASS_HASH
+    assert axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
+    assert axes["graph"] != axes[fc.GRAPH_CONTRACT_AXIS]
     assert axes["lane"] == "w8a8-lora64"
 
 
@@ -414,12 +423,34 @@ def test_a_stamp_that_disagrees_with_the_recorded_axes_is_refused(hub, artifact)
     assert not hub.httpd.calls
 
 
-def test_a_cell_with_no_graph_contract_is_refused(hub, artifact):
-    """pgw#903's pre-dlopen fence compares `Arm.graph_contract_digest` against
-    the artifact's `combined_graph_hash`; a cell that records none can never
-    pass it, so it must never reach the store."""
+def test_a_cell_with_no_manifest_digest_PUBLISHES(hub, artifact):
+    """DELIBERATELY INVERTED by pgw#1176 — read this before "fixing" it.
+
+    This row used to refuse a cell recording no `combined_graph_hash`, on the
+    reasoning that pgw#903's pre-dlopen fence compares
+    `Arm.graph_contract_digest` against it and a cell without one can never
+    pass. That reasoning held while `graph_contract` WAS the identity. It is
+    now the declaration-wide MANIFEST digest — a coverage label — and an entry
+    minted by a pod that has not folded its whole declaration is a complete,
+    keyable, armable artifact. Refusing it would reintroduce the COLLECTION as
+    a precondition for the atom, which is the entire disease.
+
+    What must still be refused is an entry with no IDENTITY, and the row below
+    this one asserts exactly that.
+    """
     hollow = dict(META)
-    hollow["combined_graph_hash"] = ""
+    hollow["manifest_digest"] = ""
+    _publisher(hub).publish(FAMILY, artifact, hollow)
+    assert hub.httpd.calls
+
+
+def test_a_cell_with_no_class_hash_is_refused(hub, artifact):
+    """The refusal that survives the inversion above: an entry that cannot
+    state its own graph axis has no identity, so it would be stored under a
+    flavor nothing can request."""
+    hollow = dict(META)
+    hollow[cell_key.ENTRY_BLOCK_KEY] = {
+        **META[cell_key.ENTRY_BLOCK_KEY], "class_hash": ""}
     with pytest.raises(fc.CellPublishRefused):
         _publisher(hub).publish(FAMILY, artifact, hollow)
     assert not hub.httpd.calls
