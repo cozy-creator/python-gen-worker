@@ -764,16 +764,19 @@ def test_provision_falls_through_to_inductor_when_the_pt2_is_unusable(
     monkeypatch.setattr(aot, "_load_package", _boom)
     seen: list = []
 
-    def _inductor(pipe, cfg, cache_dir=None, artifact=None):
-        seen.append(artifact)
+    def _inductor(pipe, cfg):
+        seen.append("reached")
         return False
     monkeypatch.setattr(cc, "enable", _inductor)
 
     pipeline = FakePipeline()
     assert provision.enable_compiled(
         pipeline, Cfg(), tmp_path / "cache", _tar(tmp_path)).armed is False
-    # the unusable .pt2 was DROPPED, not handed to the inductor lane
-    assert seen == [None]
+    # The unusable .pt2 is DROPPED and the fall-through lane is the JIT one.
+    # pgw#1181: it cannot be handed an artifact at all — `compile_cache.enable`
+    # takes none, because the `torch-inductor-cache` format it used to seed has
+    # no writer and is deleted. The drop is now structural, not a convention.
+    assert seen == ["reached"]
 
 
 def test_provision_still_routes_the_inductor_kind(tmp_path, monkeypatch, stub_runtime):
@@ -787,14 +790,16 @@ def test_provision_still_routes_the_inductor_kind(tmp_path, monkeypatch, stub_ru
 
     calls: list = []
 
-    def _inductor(pipe, cfg, cache_dir=None, artifact=None):
-        calls.append(artifact)
+    def _inductor(pipe, cfg):
+        calls.append("reached")
         return True
     monkeypatch.setattr(cc, "enable", _inductor)
-    inductor = _tar(tmp_path, _meta(kind="compile-cache"), name="cc.tar.gz")
+    # An artifact of an UNKNOWN kind still falls through to the JIT lane —
+    # which arms cold-compile and is handed no artifact (pgw#1181).
+    unknown = _tar(tmp_path, _meta(kind="compile-cache"), name="cc.tar.gz")
     assert provision.enable_compiled(
-        FakePipeline(), Cfg(), tmp_path / "cache", inductor).armed is True
-    assert calls == [inductor]
+        FakePipeline(), Cfg(), tmp_path / "cache", unknown).armed is True
+    assert calls == ["reached"]
 
 
 def test_provision_drops_the_artifact_when_the_receipts_gate_refuses(

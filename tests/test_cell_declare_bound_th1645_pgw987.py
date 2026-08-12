@@ -40,6 +40,17 @@ from pathlib import Path
 
 import pytest
 
+# pgw#1181: `guard_closure.MANIFEST_KEY` went with `closure_manifest`, the
+# only writer of this block, when the `torch-inductor-cache` format was
+# deleted. The BLOCK NAME stays spelled out here because
+# `fleet_cells._UNBOUNDED_ENVELOPE_BLOCKS` still lists it as a literal:
+# the control-plane cap is a defensive filter over whatever an envelope
+# carries, and what these rows prove — that an unbounded block is dropped
+# before the hub sees it, and that a 200 MB cell still publishes — is a
+# property of the CAP, not of any one producer.
+GUARD_MANIFEST_BLOCK = "guard_manifest"
+
+
 from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure, http_origin
 from gen_worker.convert.hub import HubPublishError
@@ -284,7 +295,7 @@ def _meta() -> dict:
         "loaded_libs": {f"lib{i}": f"1.{i}.0" for i in range(40)},
         "code_closure": {f"fn_{i}": "sha256:" + "b" * 64 for i in range(60)},
         # The two unbounded blocks, at measured magnitude.
-        guard_closure.MANIFEST_KEY: _guard_manifest(graphs=700, rows=400),
+        GUARD_MANIFEST_BLOCK: _guard_manifest(graphs=700, rows=400),
         "weight_contract": {f"unet.block{i}.weight": [1280, 1280, "fp8"]
                             for i in range(700)},
     }
@@ -337,7 +348,7 @@ def test_control_plane_metadata_drops_only_the_unbounded_blocks():
     meta = _meta()
     kept = fc.control_plane_metadata(meta)
 
-    for block in (guard_closure.MANIFEST_KEY, "weight_contract"):
+    for block in (GUARD_MANIFEST_BLOCK, "weight_contract"):
         assert block not in kept, f"{block} is data; it must not ride the declare"
     # Everything else survives byte-identically — this is a projection, not a
     # rewrite, so the hub still receives every fact it ever received that is
@@ -388,7 +399,7 @@ def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeyp
     assert len(hub.httpd.declares) == 1
     assert hub.httpd.declare_lengths[0] < fc.CELL_DECLARE_MAX_BYTES
     declared_meta = hub.httpd.declares[0]["metadata"]
-    assert guard_closure.MANIFEST_KEY not in declared_meta
+    assert GUARD_MANIFEST_BLOCK not in declared_meta
     assert declared_meta["cell_key"] == CELL_KEY
 
     # ...and the DATA still moved, all of it, over presigned PUTs, every

@@ -151,13 +151,12 @@ def test_apply_lora_execution_lane_stamps_and_allocates(w8a8_pipe: Any) -> None:
     assert compile_cache.apply_lora_execution_lane(w8a8_pipe, 128)
     assert branch_bucket(w8a8_pipe.unet) == 128
     assert w8a8_pipe._cozy_weight_lane == "w8a8-lora128"
-    meta = compile_cache.artifact_metadata(
-        family="f", weight_lane="w8a8-lora128", lora_bucket=128)
-    assert compile_cache.execution_lane_drift(meta, w8a8_pipe) == ""
-    assert meta["lora_bucket"] == 128
-    # branchless cells refuse the branch-bearing pipeline (symmetric guard)
-    assert "weight_lane" in compile_cache.execution_lane_drift(
-        compile_cache.artifact_metadata(family="f", weight_lane="w8a8"), w8a8_pipe)
+    # pgw#1181: the metadata round-trip that used to sit here
+    # (`artifact_metadata` + `execution_lane_drift`) compared a
+    # `torch-inductor-cache` cell's RECORDED lane with this pipeline's. Both
+    # are deleted with the format. The lane stamp itself is what this row is
+    # named for and it is unchanged; the exported lane's own recorded-lane
+    # check is `aot_serve`'s.
     compile_cache.drop_lora_execution_lane(w8a8_pipe)
     assert branch_bucket(w8a8_pipe.unet) == 0
     assert w8a8_pipe._cozy_weight_lane == "w8a8"
@@ -215,11 +214,6 @@ def test_discovery_carries_lora_bucket() -> None:
     assert cell.lora_bucket == 64
     assert cell.family == "f"
     assert cell.contract_facts()["lora_bucket"] == 64
-    # metadata parity: producer meta records the bucket beside the lane
-    meta = compile_cache.artifact_metadata(
-        family="f", weight_lane="w8a8-lora64", lora_bucket=64)
-    assert meta["weight_lane"] == "w8a8-lora64"
-    assert meta["lora_bucket"] == 64
 
 
 def test_enable_compiled_skips_execution_lane_on_component_slot_without_target() -> None:
@@ -266,18 +260,14 @@ def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
             super().__init__()
             self.decoder = torch.nn.Linear(8, 8)
 
+    # pgw#1181: the delivered cell this used to build is a
+    # `torch-inductor-cache` tarball — a format with no writer, now deleted.
+    # The gw#627 property does not need one: a component slot resolves none of
+    # `cfg.targets`, so the lane is never applied and nothing arms. Stating it
+    # without a cell states it on the path production takes for a bare VAE.
     cfg = _cfg("loracells-test", lora_bucket=64)
-    src = tmp_path / "cellsrc"
-    (src / "inductor" / "ab").mkdir(parents=True)
-    (src / "inductor" / "ab" / "graph.py").write_text("code")
-    meta = compile_cache.artifact_metadata(
-        family="loracells-test", shapes=[(64, 64)], targets=["unet"],
-        weight_lane="lora64", lora_bucket=64,
-        declared_compile_contract=compile_cache.declared_compile_facts(cfg),
-    )
-    artifact = compile_cache.pack(src, tmp_path / "cell.tar.gz", meta)
 
     vae = _Vae()
     armed = provision.enable_compiled(
-        vae, cfg, cache_dir=tmp_path / "cache", artifact=artifact).armed
+        vae, cfg, cache_dir=tmp_path / "cache", artifact=None).armed
     assert armed is False

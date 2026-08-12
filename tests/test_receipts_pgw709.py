@@ -186,7 +186,15 @@ class TestProvisionHook:
         self, tmp_path: Path, hub: HubStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The provision.enable_compiled hook: a refused delivered artifact
-        must be dropped BEFORE compile_cache.enable sees it."""
+        must be dropped BEFORE anything dispatches on it.
+
+        pgw#1181 moved where that is observable. The drop used to be visible
+        as `compile_cache.enable` receiving `artifact=None`; that function
+        takes no artifact any more (the `torch-inductor-cache` format it
+        seeded has no writer and is deleted), so the observable is the KIND
+        DISPATCH — `artifact_meta.try_read_metadata`, the first thing any
+        delivered cell touches — never being reached."""
+        from gen_worker import artifact_meta
         from gen_worker.models import provision
 
         artifact = make_artifact(tmp_path)
@@ -194,13 +202,15 @@ class TestProvisionHook:
 
         seen: Dict[str, Any] = {}
 
-        def fake_enable(pipe: Any, cfg: Any, cache_dir: Any, art: Any) -> bool:
-            seen["artifact"] = art
-            return False
+        def _dispatched(path: Any) -> Any:
+            seen["dispatched"] = path
+            return {}
+
+        monkeypatch.setattr(provision.artifact_meta, "try_read_metadata", _dispatched)
 
         from gen_worker import compile_cache
 
-        monkeypatch.setattr(compile_cache, "enable", fake_enable)
+        monkeypatch.setattr(compile_cache, "enable", lambda pipe, cfg: False)
 
         class Cfg:
             family = FAMILY
@@ -208,9 +218,10 @@ class TestProvisionHook:
 
         armed = provision.enable_compiled(object(), Cfg(), tmp_path, artifact).armed
         assert armed is False
-        assert seen["artifact"] is None, (
-            "refused delivered artifact leaked through to compile_cache.enable"
+        assert "dispatched" not in seen, (
+            "refused delivered artifact leaked through to the kind dispatch"
         )
+        assert artifact_meta is provision.artifact_meta
 
     def test_enable_compiled_passes_verified_artifact(
         self, tmp_path: Path, hub: HubStub, monkeypatch: pytest.MonkeyPatch
@@ -223,13 +234,15 @@ class TestProvisionHook:
 
         seen: Dict[str, Any] = {}
 
-        def fake_enable(pipe: Any, cfg: Any, cache_dir: Any, art: Any) -> bool:
-            seen["artifact"] = art
-            return True
+        def _dispatched(path: Any) -> Any:
+            seen["dispatched"] = path
+            return {}
+
+        monkeypatch.setattr(provision.artifact_meta, "try_read_metadata", _dispatched)
 
         from gen_worker import compile_cache
 
-        monkeypatch.setattr(compile_cache, "enable", fake_enable)
+        monkeypatch.setattr(compile_cache, "enable", lambda pipe, cfg: True)
 
         class Cfg:
             family = FAMILY
@@ -237,7 +250,7 @@ class TestProvisionHook:
 
         armed = provision.enable_compiled(object(), Cfg(), tmp_path, artifact).armed
         assert armed is True
-        assert seen["artifact"] == artifact
+        assert seen["dispatched"] == artifact
 
 
 # ---------------------------------------------------------------------------
