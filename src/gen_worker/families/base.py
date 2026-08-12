@@ -152,11 +152,28 @@ def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Typ
         key = (fam, knd)
         existing = _REGISTRY.get(key)
         if existing is not None and existing is not cls:
-            raise ValueError(
-                f"family {fam!r} kind {knd!r} already registered by "
-                f"{existing.__module__}.{existing.__qualname__} "
-                f"(redeclared by {cls.__module__}.{cls.__qualname__})"
+            # pgw#1161: a RE-IMPORT is not a collision. Registration is an
+            # import side effect, so re-importing a declaration module builds a
+            # NEW class object for the same declaration — same module, same
+            # qualname — and an identity check alone reads that as two families
+            # fighting over one name. It is the same one, twice, and the
+            # replacement is what the caller asked for. This was 66 of ie#690's
+            # failures: endpoint suites re-import their declaration modules
+            # between tests and hit "already registered" on their own.
+            #
+            # A different module, or a different class in the same module, is
+            # still a genuine collision and still refused: that is two
+            # declarations claiming one family, which nothing can adjudicate.
+            same_declaration = (
+                existing.__module__ == cls.__module__
+                and existing.__qualname__ == cls.__qualname__
             )
+            if not same_declaration:
+                raise ValueError(
+                    f"family {fam!r} kind {knd!r} already registered by "
+                    f"{existing.__module__}.{existing.__qualname__} "
+                    f"(redeclared by {cls.__module__}.{cls.__qualname__})"
+                )
         cls.__gen_worker_family__ = fam  # type: ignore[attr-defined]
         cls.__gen_worker_kind__ = knd  # type: ignore[attr-defined]
         _REGISTRY[key] = cls
