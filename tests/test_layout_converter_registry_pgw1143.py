@@ -58,7 +58,11 @@ from gen_worker.convert.layout_converters import (
     run_layout_conversion,
 )
 from gen_worker.convert.repack_spec import DeclarationError, RenameRule
-from gen_worker.convert.writer import shard_payload_digests, shard_tensor_entries
+from gen_worker.convert.writer import (
+    rewrite_safetensors_keys,
+    shard_payload_digests,
+    shard_tensor_entries,
+)
 from gen_worker.families.base import GenerationDefaults
 from gen_worker.models.tensor_layout_contract import (
     CONTRACT_COZY_FP8_ROWWISE,
@@ -243,6 +247,30 @@ def test_a_rename_that_collides_two_keys_is_refused() -> None:
                 kind="substring", pairs=(("to_x", "to_q"),)),),
             corpus=(DIT_CASE,),
         ))
+
+
+def test_the_byte_rewriter_refuses_a_non_injective_map(tmp_path: Path) -> None:
+    """`rewrite_safetensors_keys` is the ENGINE, and th#1809 T6 / cozy-local
+    will drive it WITHOUT the registration proof around it. So its own refusals
+    are tested directly — the delete-the-call-site experiment showed the proof's
+    key-count check was masking this one, which would have left the public
+    primitive's only safety check untested.
+    """
+    source = materialize_case(DIT_CASE, tmp_path / "src.safetensors")
+    keys = [name for name, _ in shard_tensor_entries(source)]
+    collide = {k: "one.key.for.all" for k in keys}
+    with pytest.raises(ValueError, match="not injective"):
+        rewrite_safetensors_keys(source, tmp_path / "out.safetensors", collide)
+
+
+def test_the_byte_rewriter_refuses_a_partial_map(tmp_path: Path) -> None:
+    """An unmapped key is a REFUSAL, never a silent passthrough: a partial
+    rename produces a file that loads as neither layout."""
+    source = materialize_case(DIT_CASE, tmp_path / "src.safetensors")
+    keys = [name for name, _ in shard_tensor_entries(source)]
+    partial = {keys[0]: "renamed.only.this"}
+    with pytest.raises(ValueError, match="no mapping"):
+        rewrite_safetensors_keys(source, tmp_path / "out.safetensors", partial)
 
 
 def test_the_conversion_engine_never_touches_a_payload_byte(tmp_path: Path) -> None:
@@ -571,23 +599,77 @@ def test_the_fence_covers_every_module_that_computes_a_cell_key() -> None:
             "aot_serve.py", "compile_cache.py"} <= fenced
 
 
+def _run_fence(*argv: str) -> subprocess.CompletedProcess:
+    """The gate exactly as CI runs it: the script, through its own `main()`."""
+    return subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "lint_cell_key_layout_fence.py"),
+         *argv],
+        capture_output=True, text=True, timeout=180)
+
+
 def test_the_fence_fires_on_a_key_axis_that_reads_the_layout(
     tmp_path: Path,
 ) -> None:
-    """The detector's own RED. A gate whose failure path nobody has executed is
-    a gate nobody knows the shape of."""
-    module = tmp_path / "offender.py"
-    module.write_text(textwrap.dedent(
+    """THE GATE'S OWN RED, through the ENTRY POINT CI invokes.
+
+    Deliberately not a call to `_violations()`. The delete-the-call-site
+    experiment on this very file found that disconnecting the detector from
+    `main()` left every test green — the th#1820 shape, where a function has
+    a dozen tests and its only call site has none. So this drives the SCRIPT
+    against a tree that violates the fence, and a disconnected detector fails
+    here.
+    """
+    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
         """
         from gen_worker.convert.layout_converters import LayoutId
+
 
         def envelope_facts(block, layout: LayoutId):
             return {"v": 1, "layout": layout.render()}
         """
     ), encoding="utf-8")
-    hits = _fence_module()._violations(module)
-    assert hits, "the fence did not see an import of the layout vocabulary"
-    assert any("layout_converters" in what for _line, what in hits)
+    result = _run_fence("--src", str(tmp_path))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "fence BROKEN" in result.stdout
+    assert "layout_converters" in result.stdout
+    # The refusal must tell the author what to do instead of widening the key.
+    assert "Conversion is UPSTREAM of compute" in result.stdout
+
+
+def test_the_fence_fires_on_a_deferred_import_too(tmp_path: Path) -> None:
+    """A string handed to `import_module` is the obvious way around an import
+    check, so it is checked as a string."""
+    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
+        """
+        import importlib
+
+
+        def envelope_facts(block):
+            mod = importlib.import_module("gen_worker.convert.layout_converters")
+            return {"v": 1, "chain": mod.conversion_provenance}
+        """
+    ), encoding="utf-8")
+    result = _run_fence("--src", str(tmp_path))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "string 'gen_worker.convert.layout_converters'" in result.stdout
+
+
+def test_the_fence_does_not_fire_on_prose(tmp_path: Path) -> None:
+    """Docstrings are excluded on purpose: a vocabulary gate that reds on the
+    word appearing in an explanation teaches lanes to stop explaining
+    themselves, and has already cost this repo a lane-day."""
+    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
+        '''
+        """The cell key. Deliberately blind to Slot.layouts and to any
+        LayoutId or conversion chain — see classify_layout for why."""
+
+
+        def envelope_facts(block):
+            return {"v": 1}
+        '''
+    ), encoding="utf-8")
+    result = _run_fence("--src", str(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_shipped_tree_passes_the_fence() -> None:

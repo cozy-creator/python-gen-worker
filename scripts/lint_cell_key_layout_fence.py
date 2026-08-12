@@ -46,11 +46,12 @@ Run::
 
 from __future__ import annotations
 
+import argparse
 import ast
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "gen_worker"
@@ -127,8 +128,8 @@ RELATION_FUNCTIONS: Tuple[str, ...] = (
 _HANDLE_LITERAL = re.compile(r"^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$")
 
 
-def _iter_modules() -> List[Path]:
-    return sorted(p for p in SRC.rglob("*.py"))
+def _iter_modules(root: Path) -> List[Path]:
+    return sorted(p for p in root.rglob("*.py"))
 
 
 def _called_names(tree: ast.AST) -> Set[str]:
@@ -145,11 +146,11 @@ def _called_names(tree: ast.AST) -> Set[str]:
     return out
 
 
-def fenced_modules() -> Dict[Path, str]:
+def fenced_modules(root: Path = SRC) -> Dict[Path, str]:
     """Modules the fence covers, mapped to WHY they are covered."""
     out: Dict[Path, str] = {}
-    for path in _iter_modules():
-        if path.name in FENCE_SEED and path.parent == SRC:
+    for path in _iter_modules(root):
+        if path.name in FENCE_SEED and path.parent == root:
             out[path] = "defines the cell key or one of its axis inputs"
             continue
         try:
@@ -236,17 +237,24 @@ def _relation_handle_literals() -> List[Tuple[int, str]]:
     return sorted(set(hits))
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--src", type=Path, default=SRC,
+        help="package root to sweep (default: src/gen_worker). Exists so the "
+             "gate's own RED can be executed against a tree that violates it — "
+             "a fence nobody has watched fail is a fence nobody knows works.")
+    args = parser.parse_args(argv)
     failures: List[str] = []
 
-    fenced = fenced_modules()
+    fenced = fenced_modules(args.src)
     if not fenced:
         print("FAIL: the fence covers NO module — the axis-producer probe is "
               "stale, which makes this gate green for the wrong reason")
         return 1
     print(f"fence 1: {len(fenced)} cell-key module(s)")
     for path, why in sorted(fenced.items()):
-        rel = path.relative_to(REPO)
+        rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
         hits = _violations(path)
         if hits:
             for line, what in hits:
