@@ -2665,6 +2665,24 @@ def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callabl
     extent outside the declared range is a typed :class:`DeclaredRangeExceeded`
     — the declaration is wrong and the endpoint must fix it — never a
     dynamo-internal error nobody can attribute.
+
+    pgw#1151: the declared range is enforced HERE and is not forwarded into
+    ``mark_dynamic``. Passing ``min=``/``max=`` makes dynamo build a
+    ``StrictMinMaxConstraint`` (``_dynamo/variables/builder.py``), and a
+    strict constraint turns any range NARROWING the compiler performs into a
+    ``ConstraintViolationError`` — a permanent eager degrade — even when the
+    narrowing carries no correctness content. Inductor's index-dtype choice is
+    exactly such a narrowing: ``can_use_32bit_indexing`` elects int32 from the
+    FIRST call's size hint and then installs ``check_leq(numel, INT32_MAX)``
+    (``_inductor/codegen/simd.py``), so on minimax-h3 the 5 s cold call
+    (38,015 rows x a 28,672 inner dim) pinned int32 and its guard,
+    ``sequence <= 74,898``, contradicted the declared max. Every width above
+    that took a hard refusal, which is why 11-15 s served 100% eager.
+    Marking without bounds yields a ``RelaxedUnspecConstraint`` instead: the
+    axis still may not specialize to a constant (the pgw#1082 failure this
+    function exists to prevent), but the compiler may split the range, so the
+    wide call simply RECOMPILES with int64 indexing. Two graphs, each
+    optimally indexed, no degrade.
     """
 
     import torch
@@ -2703,8 +2721,9 @@ def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callabl
                 for dim in range(t.dim()):
                     if int(t.shape[dim]) != extent:
                         continue
-                    torch._dynamo.mark_dynamic(
-                        t, dim, min=int(d.min), max=int(d.max))
+                    # No min=/max=: see the docstring. The range is a CONTRACT
+                    # checked above, never a strict dynamo constraint.
+                    torch._dynamo.mark_dynamic(t, dim)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
