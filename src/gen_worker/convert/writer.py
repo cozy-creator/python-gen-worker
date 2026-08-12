@@ -1164,6 +1164,7 @@ def streaming_w8a8_snapshot(
     components: tuple[str, ...] | None = None,
     te_components: tuple[str, ...] = (),
     weight_set_patterns: tuple[str, ...] = (),
+    skip_patterns: tuple[str, ...] = W8A8_SKIP_TENSOR_PATTERNS,
 ) -> dict[str, Any]:
     """Produce the ``#fp8-w8a8`` flavor of a diffusers snapshot, streaming.
 
@@ -1183,7 +1184,15 @@ def streaming_w8a8_snapshot(
     through byte-identical, so text encoders/VAEs never grow scale twins
     (their quantized keys could never resolve in the denoiser at swap
     time). No component config exists; the headers alone carry
-    detection."""
+    detection.
+
+    ``skip_patterns`` overrides the module-path skip regexes. The default set
+    is architecture-agnostic and therefore INCOMPLETE for any given denoiser:
+    it knows ``adaln_single`` but not MiniMax-H3's ``adaln_proj``, so a bare
+    produce run quantizes 50 modulation projections (26.01 GB, 39% of the
+    DiT) that the model's own serve recipe keeps bf16 (ie#681, measured from
+    headers). Model-specific selection is INVOKE data, like
+    ``weight_set_patterns`` — never a name added to the shared default."""
     # Resolved at call time, never as a default argument: a default is
     # evaluated at def time and would freeze the pre-declaration vocabulary.
     if components is None:
@@ -1220,6 +1229,7 @@ def streaming_w8a8_snapshot(
             result = streaming_w8a8_cast(
                 entry, out_dir / Path(rel).parent,
                 output_stem=component_output_stem(entry),
+                skip_patterns=skip_patterns,
             )
             tensor_count += int(result["tensor_count"])
             converted += int(result["converted_count"])
@@ -1262,6 +1272,7 @@ def streaming_w8a8_snapshot(
             result = streaming_w8a8_cast(
                 entry, out_dir / comp,
                 output_stem=component_output_stem(entry),
+                skip_patterns=skip_patterns,
             )
             if not int(result["converted_count"]):
                 raise ConversionImplementationError(
