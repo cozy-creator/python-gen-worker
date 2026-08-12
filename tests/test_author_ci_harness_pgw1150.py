@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -445,9 +446,26 @@ def _lint() -> Any:
 
 
 def _through_the_lint(lint: Any, tmp_path: Path, record: Path) -> int:
-    """The emitted record, in the tree shape the real gate reads."""
-    root = lint._tree(tmp_path / "lint", record=record.read_text("utf-8"),
-                      extra=", numerics_floor=0.995")
+    """The emitted record, in the tree shape the real gate reads.
+
+    pgw#1170: the synthetic DECORATOR must carry the same bar as the record
+    this repo's harness emits. `_tree`'s default is the sibling's own fixture
+    value (`min_speedup=1.2`) while our record template declares `1.10`, and
+    leaving them to disagree made the gate refuse EVERY record for a reason
+    that had nothing to do with the record — which is why two of these rows
+    were red and a third was passing vacuously (it asserts a refusal, and the
+    mismatch refused everything).
+    """
+    text = record.read_text("utf-8")
+    # Mirrored FROM the emitted record, never re-typed here: a literal would be
+    # a second copy of the bar and would drift the moment either side moved,
+    # which is the duplicate-map defect these suites exist to prevent. When the
+    # record declares no bar the sibling's own default stands.
+    found = re.search(r"^min_speedup\s*=\s*([0-9.]+)\s*$", text, re.M)
+    bar = (f', speed_metric="stage_ms.denoise", min_speedup={found.group(1)}'
+           if found else lint._tree.__defaults__[0])
+    root = lint._tree(tmp_path / "lint", record=text,
+                      extra=", numerics_floor=0.995", bar=bar)
     return int(lint.check(root, quiet=True))
 
 
@@ -481,6 +499,38 @@ def test_a_failed_record_is_REFUSED_by_the_real_lint(
     _code, report = invoke(record, "Regressed")
     assert report.status == author_ci.STATUS_FAILED
     assert _through_the_lint(lint, tmp_path, record) == 1
+
+
+def test_the_lint_DISCRIMINATES_proven_from_failed(
+        tmp_path, monkeypatch, declared, on_the_line):
+    """pgw#1170: the anti-vacuity row.
+
+    `test_a_failed_record_is_REFUSED_by_the_real_lint` asserts the gate returns
+    1. Before this fix it returned 1 for EVERY record — the synthetic
+    decorator's bar disagreed with the one our own record declares, so the gate
+    refused unconditionally for a reason unrelated to the record. The refusal
+    row therefore passed while proving nothing, and the two acceptance rows
+    were red.
+
+    One record of each status through ONE call each, so a regression that
+    re-breaks the fixture cannot hide behind an assertion that only ever
+    checks the failing direction.
+    """
+    armed_cell(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
+    lint = _lint()
+
+    (tmp_path / "ok").mkdir()
+    ok_record = record_file(tmp_path / "ok")
+    _code, report = invoke(ok_record, "Fast")
+    assert report.status == author_ci.STATUS_PROVEN
+
+    (tmp_path / "bad").mkdir()
+    bad_record = record_file(tmp_path / "bad")
+    _code2, report2 = invoke(bad_record, "Regressed")
+    assert report2.status == author_ci.STATUS_FAILED
+
+    assert _through_the_lint(lint, tmp_path / "ok", ok_record) == 0
+    assert _through_the_lint(lint, tmp_path / "bad", bad_record) == 1
 
 
 def test_the_harness_and_the_lint_agree_on_the_status_vocabulary():
