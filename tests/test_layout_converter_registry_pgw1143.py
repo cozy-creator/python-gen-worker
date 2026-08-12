@@ -69,6 +69,7 @@ from gen_worker.models.tensor_layout_contract import (
     TOPOLOGY_DIFFUSERS_SINGLEFILE,
     LayoutId,
     normalize_layout_demand,
+    parse_layout_id,
 )
 from gen_worker.registry import extract_specs
 
@@ -520,6 +521,21 @@ def test_the_derived_identity_is_identical_in_a_fresh_process(
         timeout=300, cwd=str(REPO))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert json.loads(proc.stdout.strip()) == here
+
+
+@pytest.mark.parametrize("rendered", [
+    "plain.bf16@1",                          # bare handle = the quant axis
+    "+plain.bf16@1",
+    "diffusers.multifile@1+plain.bf16@1",
+    "diffusers.multifile@1+",
+    "any+plain.bf16@1",                      # a DECLARED agnostic, not an inference
+])
+def test_a_layout_id_survives_its_own_rendering(rendered: str) -> None:
+    """`render()` is what `derived_artifact_identity` digests, so a rendering
+    that does not parse back to the same pair would let two different LayoutIds
+    address one CAS object — silently, on the axis nobody printed."""
+    parsed = parse_layout_id(rendered, where="t")
+    assert parse_layout_id(parsed.render(), where="t") == parsed
 
 
 def test_a_version_bump_moves_the_identity(tmp_path: Path) -> None:
