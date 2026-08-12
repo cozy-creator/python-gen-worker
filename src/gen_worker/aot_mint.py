@@ -1692,6 +1692,91 @@ class MintProgress:
             logger.debug("aot-mint progress callback failed", exc_info=True)
 
 
+#: pgw#1167 verdicts. UNRECONCILED is a FIRST-CLASS state, not a silent pass:
+#: the whole point is that a gate which cannot fire is indistinguishable from
+#: one that passed, so the two are named apart and both are reported.
+LATENT_RECONCILED = "latent_basis_reconciled"
+LATENT_UNRECONCILED_UNDECLARED = "latent_basis_unreconciled_no_declared_basis"
+LATENT_UNRECONCILED_NO_VAE = "latent_basis_unreconciled_no_vae"
+
+
+def observed_latent_basis(pipeline: Any) -> Optional[int]:
+    """The pipeline's REAL latent divisor, or ``None`` when unobservable.
+
+    diffusers computes it as ``2 ** (len(vae.config.block_out_channels) - 1)
+    if vae else 8`` — so a pipeline with NO vae reports **8**, a default nobody
+    chose and indistinguishable from a real observation of 8. Believing the
+    attribute alone would reproduce pgw#1058's silent-dtype-default defect one
+    field over, so the vae is required before the number is believed.
+    """
+    if getattr(pipeline, "vae", None) is None:
+        return None
+    value = getattr(pipeline, "vae_scale_factor", None)
+    try:
+        basis = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return basis if basis > 0 else None
+
+
+def reconcile_latent_basis(pipeline: Any, spec: ExportSpec) -> str:
+    """Refuse a mint whose declared latent divisor is not the pipeline's.
+
+    pgw#1167. The class rows are derived by dividing declared PIXEL shapes by a
+    latent divisor the author passes to ``derive.cfg_image_classes``. Nothing
+    checked that divisor against the checkpoint, so a wrong one produced a
+    whole cell of correctly-shaped, permanently unusable artifacts — silent,
+    and paid for at full mint price.
+
+    It is checked HERE because here is the first place both facts exist and the
+    last place before the export is paid for: ``mint()`` is reached by the
+    production child (``mint_child``) AND the operator CLI, whereas
+    ``aot_export_spec`` is on the pod route only and would have exempted the
+    operator entirely.
+
+    The divisor cannot be VALIDATED at declaration time (no pipeline) nor
+    DERIVED from one (§4.27/pgw#1089 requires ``ck1`` to derive from code alone,
+    before any weight is resident, and the class rows feed the key). So it is
+    declared once, carried, and reconciled — and when either side is missing
+    the verdict is UNRECONCILED, never a pass.
+    """
+    # This gate must never be the thing that kills a mint. Its only two
+    # outcomes are a NAMED refusal for a proven mismatch and an explicit
+    # UNRECONCILED; anything it cannot read is the latter, so a caller with no
+    # spec (the telemetry paths hand `mint` placeholder arguments) degrades
+    # instead of raising an AttributeError from inside a correctness check.
+    family = str(getattr(spec, "family", "") or "")
+    declaration = export_declaration(family) if family else None
+    declared = getattr(declaration, "latent_basis", None) if declaration else None
+    if declared is None:
+        logger.info(
+            "aot-mint: %s — the class rows carry no derived latent basis, so "
+            "the pipeline's divisor is not reconciled against anything",
+            LATENT_UNRECONCILED_UNDECLARED)
+        return LATENT_UNRECONCILED_UNDECLARED
+
+    observed = observed_latent_basis(pipeline)
+    if observed is None:
+        logger.info(
+            "aot-mint: %s — this pipeline exposes no vae, and diffusers' "
+            "`else 8` fallback is a default nobody chose; declared basis %d is "
+            "left unreconciled rather than compared against it",
+            LATENT_UNRECONCILED_NO_VAE, declared)
+        return LATENT_UNRECONCILED_NO_VAE
+
+    if declared != observed:
+        raise MintRefused(
+            f"latent_basis_mismatch: the declaration derived its graph classes "
+            f"at a latent divisor of {declared}, and the composed pipeline's "
+            f"vae divides by {observed}. Every declared latent extent is "
+            f"therefore wrong for THIS composition, and the cell would mint "
+            f"correctly-shaped artifacts that serve nothing. This declaration "
+            f"does not match this composition — check the `latent_scale=` "
+            f"passed to the class deriver, and any component override that "
+            f"swaps the vae for one of a different architecture")
+    return LATENT_RECONCILED
+
+
 def mint(
     pipeline: Any,
     spec: ExportSpec,
@@ -1740,6 +1825,9 @@ def mint(
     # refuse by name here; they can no longer move the (declaration-derived)
     # seal, so this is the only place ambient mutation can surface.
     env_seal.assert_seal_unchanged("aot_mint")
+    # pgw#1167: before ANY export, while a wrong latent divisor still costs
+    # seconds instead of a whole cell of unusable artifacts.
+    reconcile_latent_basis(pipeline, spec)
     progress = MintProgress(
         inductor_configs=inductor_configs, on_progress=on_progress)
     if phase_snapshot is not None:

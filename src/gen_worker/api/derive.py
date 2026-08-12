@@ -64,6 +64,31 @@ __all__ = [
 CFG_BATCH_REGIMES: Tuple[Tuple[bool, int], ...] = ((True, 2), (False, 1))
 
 
+class DerivedClasses(tuple):
+    """The deriver's class rows, carrying the divisor they were derived AT.
+
+    A tuple subclass so every existing call site is unaffected — it IS the
+    tuple they already got, and `Compile(classes=…)` still receives a sequence
+    of :class:`GraphClass`. The extra attribute exists only to survive the trip
+    from the deriver to `Compile.__post_init__`, which transfers it to
+    `Compile.latent_basis` and then rebuilds `classes` as a plain tuple.
+
+    So this is TRANSPORT, not storage: nothing downstream reads it, and it
+    deliberately does not persist on the declaration. The alternative — a
+    cell-wide scalar stamped onto every row and read back off `rows[0]` — is
+    the shape that produced a P0 filed on a false premise, because a label
+    written beside a thing cannot be told from a label describing it, and it
+    silently answers a question nothing asks (what if two rows disagree?).
+    """
+
+    latent_basis: int
+
+    def __new__(cls, rows: Sequence[GraphClass], *, latent_basis: int) -> "DerivedClasses":
+        self = super().__new__(cls, tuple(rows))
+        self.latent_basis = int(latent_basis)
+        return self
+
+
 def cfg_image_classes(
     *,
     shapes: Sequence[Sequence[int]],
@@ -108,7 +133,11 @@ def cfg_image_classes(
                 },
                 fork={cfg_fork: cfg},
             ))
-    return tuple(dict.fromkeys(out))
+    # pgw#1167: the divisor rides out with the rows it produced, so the mint
+    # can reconcile it against the pipeline instead of the author declaring it
+    # a second time.
+    return DerivedClasses(
+        tuple(dict.fromkeys(out)), latent_basis=int(latent_scale))
 
 
 # ---------------------------------------------------------------------------
