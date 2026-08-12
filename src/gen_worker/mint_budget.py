@@ -78,6 +78,12 @@ _ENTRY_RSS_PEAKS: Dict[Tuple[str, str], int] = {}
 #: run it 37-127 wide.
 _ENTRY_DEVICE_PEAKS: Dict[Tuple[str, str], int] = {}
 
+#: pgw#1164: and the ADOPT's, which is a different process AND a different
+#: step from all three above. Those measure a compile; this measures loading
+#: the finished cell onto the serving card and proving it against eager. It is
+#: the only one of the four that has destroyed a paid mint (th#1825).
+_ADOPT_PEAKS: Dict[Tuple[str, str], int] = {}
+
 
 def _gib(value: int) -> str:
     return f"{value / _GIB:.2f}GiB"
@@ -267,6 +273,106 @@ def record_child_peak(family: str, weight_lane: str, peak_bytes: int) -> None:
 
 def child_peak(family: str, weight_lane: str) -> int:
     return _CHILD_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
+
+
+def record_adopt_peak(family: str, weight_lane: str, peak_bytes: int) -> None:
+    """Bank the ADOPT-ARM's measured device high-water for the next ask.
+
+    pgw#1164. Every other bank in this module measures a COMPILE; this one
+    measures the step after it, which is the one that has actually killed a
+    mint. ``adopt_delegated_mint`` loads the packed cell onto the serving card
+    and runs ``gate_cell_numerics``, whose probe holds, simultaneously: the
+    retained eager callable, EVERY loaded AOTI entry runner, and two forwards'
+    activation working set per axis (``numerics_probe.probe_cell`` iterates
+    ``axes_from_meta`` and reads ``state["original"]`` and ``state["runner"]``
+    for each). sdxl declares 36 entries. Nothing measured that.
+
+    Monotone for the same reason the others are: an adopt that peaked higher
+    once can peak that high again, and the ask must not drift down on a lucky
+    run.
+    """
+    if peak_bytes <= 0:
+        return
+    key = (str(family or ""), str(weight_lane or ""))
+    _ADOPT_PEAKS[key] = max(_ADOPT_PEAKS.get(key, 0), int(peak_bytes))
+
+
+def adopt_peak(family: str, weight_lane: str) -> int:
+    """0 = this pod has never completed an adopt for this (family, lane)."""
+    return _ADOPT_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
+
+
+def adopt_headroom(
+    family: str = "", weight_lane: str = "", device: Optional[int] = None,
+) -> MintBudget:
+    """Can the ADOPT-ARM run here without taking the card down? (pgw#1164)
+
+    The gap this closes, stated exactly: :func:`probe` and :func:`co_residency`
+    budget the COMPILE. Nothing budgeted the adopt, so a pod could pass its
+    pre-mint gate, compile 36/36 entries over 1 h 37 m, and then die loading
+    what it had just built — which is th#1825, \\$0.81, one step from durable.
+    The budget it passed never described the step that killed it.
+
+    TWO BASES, and the difference is stated rather than blended:
+
+    * **measured** — this pod has completed an adopt for this (family, lane),
+      so :func:`adopt_peak` holds a real high-water and ``need`` IS that fact.
+      This is the ask that can refuse.
+    * **unmeasured** — no adopt has ever completed here. ``need`` is then a
+      FLOOR built only of measured terms: ``2 * activation``, the verify's own
+      two-forward working set, on the same construction :func:`probe` already
+      uses and for the same reason (the probe runs eager AND compiled on one
+      feed, so both allocate).
+
+    **The unmeasured floor is deliberately INCOMPLETE and must not be read as
+    a prediction.** It omits the loaded entry runners' own device footprint —
+    the term nobody has ever measured, and the term this function exists to
+    start banking. So an unmeasured verdict can refuse a card that cannot even
+    hold the verify, and it CANNOT refuse a card that merely cannot hold 36
+    runners. That is an honest under-refusal, not a guess dressed as a bound:
+    inventing a per-entry constant here is exactly the magic number this
+    codebase forbids, and the real figure arrives the moment one adopt
+    completes anywhere on this family.
+
+    ``probed=False`` (no CUDA) fits by construction, like every other budget
+    here — an unprobeable device never blocks a mint.
+    """
+    read = _read_device(device)
+    if read is None:
+        return _UNPROBEABLE
+    banked = adopt_peak(family, weight_lane)
+    need = banked if banked > 0 else 2 * read.activation
+    return MintBudget(
+        fits=read.free_bytes >= need,
+        probed=True,
+        measured=banked > 0,
+        free_bytes=read.free_bytes,
+        need_bytes=need,
+        resident_bytes=read.allocated,
+        activation_bytes=read.activation,
+        cache_slack_bytes=read.cache_slack,
+        cap_bytes=need,
+    )
+
+
+def adopt_watermark(device: Optional[int] = None) -> Tuple[int, int]:
+    """``(allocated_now, peak_so_far)`` on this device, or ``(0, 0)``.
+
+    The pair an adopt brackets itself with. ``max_memory_allocated`` is
+    process-monotone, so the caller takes ``peak_after - allocated_before`` —
+    the high-water the adopt added ABOVE the resident set it started from —
+    and never resets the counter, which other readers on this process share.
+    """
+    read = _read_device(device)
+    if read is None:
+        return 0, 0
+    try:
+        import torch
+
+        dev = torch.cuda.current_device() if device is None else int(device)
+        return read.allocated, int(torch.cuda.max_memory_allocated(dev))
+    except Exception:
+        return read.allocated, 0
 
 
 def record_entry_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> None:
@@ -497,6 +603,9 @@ def co_residency(
 
 __all__ = [
     "MintBudget",
+    "adopt_headroom",
+    "adopt_peak",
+    "adopt_watermark",
     "child_peak",
     "co_residency",
     "device_of",
@@ -504,6 +613,7 @@ __all__ = [
     "entry_device_peak",
     "entry_peak_rss",
     "probe",
+    "record_adopt_peak",
     "record_child_peak",
     "record_entry_device_peak",
     "record_entry_peak_rss",
