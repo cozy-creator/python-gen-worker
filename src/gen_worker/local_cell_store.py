@@ -33,6 +33,24 @@ Before this module existed that refusal was terminal in the worst way: th#1643
 books it as SUNK — *"a sealed cell was produced and thrown away"* — and
 ``fleet_cells._publish_async``'s ``finally`` then rmtree'd the bytes.
 
+pgw#1183 / §1.5 — THIS STORE IS THE DURABILITY LAYER, unconditionally, on every
+tier. It used to be written only by a machine with nowhere to ship, which is
+exactly backwards: a trusted fleet pod — the only kind that mints for anyone
+else — kept nothing, and its artifact lived in the temp dir owned by the
+process most likely to die. The ordering is now fixed: **pack -> here ->
+verify -> arm -> publish**, and the hub is a distribution layer reading these
+bytes, never the thing that makes them exist. Two facts ride the record and
+carry that:
+
+* :data:`VERDICT_UNVERIFIED` -> :data:`VERDICT_ADMITTED` / :data:`VERDICT_QUARANTINED`
+  — a cell is durable BEFORE it is proven, so only an ADMITTED one may be
+  armed by a later boot. A crash between the two costs one re-compile; a
+  quarantined one is kept for forensics and never served.
+* :data:`SINK_OWED` -> :data:`SINK_DELIVERED` / :data:`SINK_REFUSED`
+  — the upload obligation, recorded beside the bytes rather than held in a
+  thread, so it survives process death and pod retirement
+  (:func:`cells_owed_to_sink` is what the next boot reads).
+
 LAYOUT (one directory per cell, so a cell and the facts about it move as a
 unit and a partial write leaves nothing admissible)::
 
@@ -123,6 +141,30 @@ UNTRUSTED_REFUSAL_CODE = "cell_publish_untrusted_tier"
 
 TRUST_UNTRUSTED = "untrusted"
 
+#: pgw#1183: whether this cell has passed the gate that lets it SERVE. The
+#: store is written before the gate runs (§1.5), so "durable" and "provable"
+#: are two facts and the store records both.
+VERDICT_UNVERIFIED = "unverified"
+VERDICT_ADMITTED = "admitted"
+VERDICT_QUARANTINED = "quarantined"
+
+#: pgw#1183: this cell's standing with the fleet SINK, durable beside the
+#: bytes. A transfer that dies mid-flight leaves :data:`SINK_OWED`, which the
+#: next boot re-attempts from these bytes — the property that makes a failed
+#: transfer cost a retry rather than the mint. :data:`SINK_NONE` is the honest
+#: state for a machine with no sink by design (cozy-local, §4.28): nothing is
+#: owed, so nothing accumulates.
+#:
+#: The vocabulary is deliberately the SINK's and not the transfer's. This
+#: module's trust boundary is enforced by the ABSENCE of upload machinery, and
+#: ``test_the_local_store_has_no_publish_path`` pins that by refusing the word
+#: in any identifier here — correctly: the store records an obligation, it
+#: does not know how one is discharged.
+SINK_NONE = "none"
+SINK_OWED = "owed"
+SINK_DELIVERED = "delivered"
+SINK_REFUSED = "refused"
+
 
 def store_root() -> Path:
     """The local store root: the stated env path, else the cozy cache dir.
@@ -176,6 +218,10 @@ class LocalCell:
     arm_token: str
     bytes: int
     stored_at: float
+    #: pgw#1183: one of the ``VERDICT_*`` constants.
+    verdict: str = VERDICT_ADMITTED
+    #: pgw#1183: one of the ``PUBLISH_*`` constants.
+    sink: str = SINK_NONE
 
 
 def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
@@ -195,6 +241,7 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
 
 def store(
     artifact: Path, *, key: str, family: str, arm_token: str = "",
+    verdict: str = VERDICT_ADMITTED, sink: str = SINK_NONE,
     root: Optional[Path] = None,
 ) -> Optional[LocalCell]:
     """Copy ``artifact`` into the store under its STAMPED ``key``.
@@ -204,6 +251,12 @@ def store(
     is written LAST, so a crash mid-store leaves a directory with no record
     and the next lookup treats it as absent rather than as a short cell. Same
     ordering rule ``aot_resume`` banks entries under, for the same reason.
+
+    ``verdict`` defaults to :data:`VERDICT_ADMITTED` — "the caller vouches for
+    these bytes", which is what every route that finds an already-proven cell
+    means. The MINT route (pgw#1183) writes :data:`VERDICT_UNVERIFIED` and
+    promotes with :func:`mark` once its own gate passes, because §1.5 makes the
+    store write happen BEFORE the proof.
 
     Returns the stored cell, or ``None`` when the store failed: a local store
     is a cache, and failing to fill it must never take down a worker that is
@@ -221,6 +274,7 @@ def store(
             key=key, artifact=final, content_digest=digest,
             family=str(family or ""), arm_token=str(arm_token or ""),
             bytes=final.stat().st_size, stored_at=time.time(),
+            verdict=str(verdict), sink=str(sink),
         )
         _write_json_atomic(target_dir / RECORD_NAME, {
             "cell_key": record.key,
@@ -230,6 +284,8 @@ def store(
             "bytes": record.bytes,
             "stored_at": record.stored_at,
             "kind": KIND,
+            "verdict": record.verdict,
+            "sink": record.sink,
         })
         if arm_token:
             _write_json_atomic(
@@ -247,14 +303,71 @@ def store(
         return None
 
 
+def _cell_of(key: str, record: Dict[str, Any], artifact: Path,
+             digest: str) -> LocalCell:
+    return LocalCell(
+        key=key, artifact=artifact, content_digest=digest,
+        family=str(record.get("family") or ""),
+        arm_token=str(record.get("arm_token") or ""),
+        bytes=int(record.get("bytes") or artifact.stat().st_size),
+        stored_at=float(record.get("stored_at") or 0.0),
+        # A record written before pgw#1183 carries neither field; it was
+        # written by a route that only ever stored proven bytes, so ADMITTED
+        # is what it meant. `publish` is `none` for the same reason — the old
+        # store existed exactly where there was no sink.
+        verdict=str(record.get("verdict") or VERDICT_ADMITTED),
+        sink=str(record.get("sink") or SINK_NONE),
+    )
+
+
+def mark(
+    key: str, *, verdict: Optional[str] = None, sink: Optional[str] = None,
+    root: Optional[Path] = None,
+) -> bool:
+    """Move a stored cell's ``verdict`` and/or ``publish`` state (pgw#1183).
+
+    The two transitions the mint flow makes after the bytes are already
+    durable: unverified -> admitted/quarantined once the parity gate and the
+    arm answer, and pending -> done/refused once the upload does. Never fatal:
+    a record that cannot be rewritten leaves the previous state, which is the
+    conservative one in both directions (an unpromoted cell is re-minted; an
+    unresolved publish is re-attempted).
+    """
+    try:
+        target_dir = cell_dir(key, root)
+    except ValueError:
+        return False
+    record = _read_json(target_dir / RECORD_NAME)
+    if record is None:
+        return False
+    if verdict is not None:
+        record["verdict"] = str(verdict)
+    if sink is not None:
+        record["sink"] = str(sink)
+    try:
+        _write_json_atomic(target_dir / RECORD_NAME, record)
+    except OSError as exc:
+        logger.warning(
+            "local-cell-store: could not re-record %s (%s)", key, exc)
+        return False
+    return True
+
+
 def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCell]:
-    """The resident cell for ``key``, or ``None``.
+    """The resident, ADMITTED cell for ``key``, or ``None``.
 
     The recorded ``content_digest`` is RECOMPUTED over the bytes on disk, so a
     truncated, half-written or edited artifact refuses here instead of being
     handed to the arm — the ``aot_resume`` rule (*"a bank cannot vouch for
     itself"*) applied to the store. A refusing entry is dropped, which turns a
     corrupted cell into exactly one honest re-mint.
+
+    pgw#1183: a cell whose verdict is not :data:`VERDICT_ADMITTED` is absent
+    HERE and enumerable elsewhere (:func:`quarantined_cells`,
+    :func:`stored_cells`). Durability made the bytes exist before the proof
+    did, so this is the seam that keeps "we kept it" from meaning "we serve
+    it" — the next boot re-mints that class and overwrites the record, which
+    is how an unverified cell heals.
     """
     try:
         target_dir = cell_dir(key, root)
@@ -263,6 +376,8 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCell]:
     record = _read_json(target_dir / RECORD_NAME)
     artifact = target_dir / ARTIFACT_NAME
     if record is None or not artifact.is_file():
+        return None
+    if str(record.get("verdict") or VERDICT_ADMITTED) != VERDICT_ADMITTED:
         return None
     want = str(record.get("content_digest") or "")
     try:
@@ -277,13 +392,7 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCell]:
             "is never armed", key, have, want or "nothing")
         drop(key, root)
         return None
-    return LocalCell(
-        key=key, artifact=artifact, content_digest=have,
-        family=str(record.get("family") or ""),
-        arm_token=str(record.get("arm_token") or ""),
-        bytes=int(record.get("bytes") or artifact.stat().st_size),
-        stored_at=float(record.get("stored_at") or 0.0),
-    )
+    return _cell_of(key, record, artifact, have)
 
 
 def note_memo(
@@ -405,16 +514,34 @@ def stored_cells(root: Optional[Path] = None) -> List[LocalCell]:
         artifact = entry / ARTIFACT_NAME
         if record is None or not artifact.is_file():
             continue
-        out.append(LocalCell(
-            key=str(record.get("cell_key") or entry.name),
-            artifact=artifact,
-            content_digest=str(record.get("content_digest") or ""),
-            family=str(record.get("family") or ""),
-            arm_token=str(record.get("arm_token") or ""),
-            bytes=int(record.get("bytes") or artifact.stat().st_size),
-            stored_at=float(record.get("stored_at") or 0.0),
-        ))
+        out.append(_cell_of(
+            str(record.get("cell_key") or entry.name), record, artifact,
+            str(record.get("content_digest") or "")))
     return out
+
+
+def quarantined_cells(root: Optional[Path] = None) -> List[LocalCell]:
+    """Every cell kept for FORENSICS: it existed, and it failed its own gate.
+
+    §1.3.4 — *"do not arm, do not publish, keep the artifact quarantined-local
+    for forensics"*. Before pgw#1183 the refusal path rmtree'd the mint root,
+    so the one artifact that could explain a refusal was destroyed by the code
+    reporting it, and the store's own header records what that cost: *"cost a
+    full GPU pod run. Twice."*
+    """
+    return [c for c in stored_cells(root) if c.verdict == VERDICT_QUARANTINED]
+
+
+def cells_owed_to_sink(root: Optional[Path] = None) -> List[LocalCell]:
+    """Every ADMITTED cell whose upload is still owed — the cross-boot retry.
+
+    This is what makes publish a retryable background transfer from durable
+    bytes rather than a daemon thread the pod must outlive. Only admitted
+    cells are listed: an unverified or quarantined artifact is not something
+    any other pod may adopt, so it is not something to upload.
+    """
+    return [c for c in stored_cells(root)
+            if c.verdict == VERDICT_ADMITTED and c.sink == SINK_OWED]
 
 
 # ---------------------------------------------------------------------------
@@ -485,19 +612,29 @@ __all__ = [
     "KIND",
     "LocalCell",
     "MEMO_DIRNAME",
+    "SINK_DELIVERED",
+    "SINK_NONE",
+    "SINK_OWED",
+    "SINK_REFUSED",
     "RECORD_NAME",
     "TRUST_CLASS_NAME",
     "TRUST_UNTRUSTED",
     "UNTRUSTED_REFUSAL_CODE",
+    "VERDICT_ADMITTED",
+    "VERDICT_QUARANTINED",
+    "VERDICT_UNVERIFIED",
     "cell_dir",
     "cells_root",
     "drop",
     "keeps_cells_locally",
     "lookup",
     "lookup_for_arm",
+    "mark",
     "memo_path",
     "note_memo",
     "note_refusal",
+    "cells_owed_to_sink",
+    "quarantined_cells",
     "store",
     "store_root",
     "stored_cells",

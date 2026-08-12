@@ -538,13 +538,21 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
     thrown away"*. It is no longer thrown away: the machine learns its trust
     class from the hub's own code and keeps the bytes for its next boot.
 
-    RED before: `_publish_async`'s `finally` rmtree'd the mint root and the
-    next boot of the same pod paid the same mint again.
+    pgw#1183 moved WHERE that is true. The salvage this row used to drive — a
+    `store` inside `_publish_async`'s refusal branch, racing the `finally`
+    that was about to rmtree the same bytes — is DELETED, because the cell is
+    written to the local CAS before it arms and is therefore already durable
+    whatever the hub answers. What is left to prove here is the pair: the
+    refusal still teaches the machine its trust class, and it does not disturb
+    the durable copy.
     """
-    artifact = _artifact(tmp_path)
+    artifact = _artifact(tmp_path, b"packed-cell-bytes")
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event",
                         lambda *a, **k: None)
     monkeypatch.setattr(fleet_cells, "_note_durable", lambda *a, **k: None)
+    local_cell_store.store(
+        artifact, key=KEY_A, family="micro-diffusion", arm_token=ARM_A,
+        sink=local_cell_store.SINK_OWED)
 
     class _Refusing:
         def publish(self, family: str, art: Path, meta: dict,
@@ -554,7 +562,8 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
                 status=403, code=local_cell_store.UNTRUSTED_REFUSAL_CODE)
 
     fleet_cells._publish_async(
-        _Refusing(), "micro-diffusion", artifact,  # type: ignore[arg-type]
+        _Refusing(), "micro-diffusion",  # type: ignore[arg-type]
+        local_cell_store.lookup(KEY_A).artifact,  # type: ignore[union-attr]
         {"cell_key": KEY_A}, cell_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
@@ -562,6 +571,9 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
     kept = local_cell_store.lookup_for_arm(ARM_A)
     assert kept is not None and kept.key == KEY_A
     assert kept.artifact.read_bytes() == b"packed-cell-bytes"
+    # And the obligation is CLOSED, not left owed: a hub that says "never"
+    # must not be re-asked on every boot forever.
+    assert kept.sink == local_cell_store.SINK_REFUSED
 
 
 def test_a_transport_failure_is_not_a_trust_verdict(
@@ -611,8 +623,8 @@ def test_cozy_local_keeps_its_cell_without_ever_asking_a_hub(
     never arrive.
     """
     assert local_cell_store.trust_class() == "", "no hub has said anything"
-    assert fleet_cells.local_keep_reason(None) == fleet_cells.KEEP_NO_PUBLISHER
-    assert (fleet_cells.local_keep_reason(_Sink(on=False))  # type: ignore[arg-type]
+    assert fleet_cells.no_publish_sink_reason(None) == fleet_cells.KEEP_NO_PUBLISHER
+    assert (fleet_cells.no_publish_sink_reason(_Sink(on=False))  # type: ignore[arg-type]
             == fleet_cells.KEEP_NO_PUBLISHER)
 
 
@@ -626,28 +638,33 @@ def test_a_probe_pod_keeps_its_cell_because_its_publish_is_DISARMED(
     from gen_worker.procsplit import actions
 
     monkeypatch.setattr(actions, "publish_disarmed", lambda: True)
-    assert (fleet_cells.local_keep_reason(_Sink())  # type: ignore[arg-type]
+    assert (fleet_cells.no_publish_sink_reason(_Sink())  # type: ignore[arg-type]
             == fleet_cells.KEEP_PUBLISH_DISARMED)
 
     monkeypatch.setattr(actions, "publish_disarmed", lambda: False)
-    assert fleet_cells.local_keep_reason(_Sink()) == ""  # type: ignore[arg-type]
+    assert fleet_cells.no_publish_sink_reason(_Sink()) == ""  # type: ignore[arg-type]
 
 
-def test_a_trusted_fleet_pod_with_a_live_sink_keeps_NOTHING(
+def test_a_trusted_fleet_pod_with_a_live_sink_OWES_an_upload(
     store: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The negative that keeps this from becoming "every pod hoards cells": a
-    pod that CAN publish ships the cell and keeps no local copy, so the fleet's
-    ephemeral disks are unchanged."""
+    """pgw#1183 INVERTED what this row asserts, and the old claim is the bug.
+
+    It used to read *"a pod that CAN publish keeps no local copy, so the
+    fleet's ephemeral disks are unchanged"* — which made the pods that mint
+    for the fleet exactly the pods with no durable copy of what they minted,
+    and is how a 1 h 37 m mint was destroyed by a `finally`. Every pod keeps
+    its cell now (§1.5); what a live sink decides is only whether an UPLOAD is
+    owed on top."""
     from gen_worker.procsplit import actions
 
     monkeypatch.setattr(actions, "publish_disarmed", lambda: False)
-    assert fleet_cells.local_keep_reason(_Sink()) == ""  # type: ignore[arg-type]
+    assert fleet_cells.no_publish_sink_reason(_Sink()) == ""  # type: ignore[arg-type]
 
     # ...until the hub says otherwise, which is the ONLY trust input.
     local_cell_store.note_refusal(
         local_cell_store.UNTRUSTED_REFUSAL_CODE, "community_tier")
-    assert (fleet_cells.local_keep_reason(_Sink())  # type: ignore[arg-type]
+    assert (fleet_cells.no_publish_sink_reason(_Sink())  # type: ignore[arg-type]
             == fleet_cells.KEEP_HUB_ASSERTED_UNTRUSTED)
 
 

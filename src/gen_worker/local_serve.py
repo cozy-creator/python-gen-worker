@@ -30,7 +30,7 @@ No mint code (the delegated ``mint_delegate`` -> ``mint_process`` ->
 ``mint_child`` chain is used unchanged, weight-free since pgw#1080), no second
 key scheme, no coordinator, no mint-request in any address form, no trust
 self-declaration, and no env behaviour switch. A cozy-local box learns it keeps
-its own cells from ``local_keep_reason``'s ``no_publish_sink`` — a fact about
+its own cells from ``no_publish_sink_reason``'s ``no_publish_sink`` — a fact
 the SINK, never a claim about itself.
 """
 

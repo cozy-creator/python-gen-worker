@@ -265,7 +265,7 @@ def test_the_local_entry_hands_the_arming_brain_no_sink_at_all(
     monkeypatch.setattr(fleet_cells, "enable_compiled", _enable)
     assert local_serve.enable_compiled(_Pipe(), _Cfg(), None, mint=_ctx())
     assert "publisher" in seen and seen["publisher"] is None
-    assert fleet_cells.local_keep_reason(seen["publisher"]) == (
+    assert fleet_cells.no_publish_sink_reason(seen["publisher"]) == (
         fleet_cells.KEEP_NO_PUBLISHER)
 
 

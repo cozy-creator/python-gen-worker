@@ -114,7 +114,7 @@ if MODE == "mint":
         _bi = tarfile.TarInfo("payload.bin")
         _bi.size = len(_body)
         _tar.addfile(_bi, io.BytesIO(_body))
-    reason = fleet_cells.local_keep_reason(None)
+    reason = fleet_cells.no_publish_sink_reason(None)
     stored = local_cell_store.store(
         art, key=KEY, family=FAMILY, arm_token=ARM)
     print("RESULT " + json.dumps({
