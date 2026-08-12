@@ -84,6 +84,10 @@ _ENTRY_DEVICE_PEAKS: Dict[Tuple[str, str], int] = {}
 #: the only one of the four that has destroyed a paid mint (th#1825).
 _ADOPT_PEAKS: Dict[Tuple[str, str], int] = {}
 
+#: pgw#1169: (family, weight lane) this process has already refused to adopt.
+#: The refusal is STICKY — see :func:`note_adopt_declined`.
+_ADOPT_DECLINED: "set[Tuple[str, str]]" = set()
+
 
 def _gib(value: int) -> str:
     return f"{value / _GIB:.2f}GiB"
@@ -275,6 +279,30 @@ def child_peak(family: str, weight_lane: str) -> int:
     return _CHILD_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
 
 
+def note_adopt_declined(family: str, weight_lane: str) -> None:
+    """Make an adopt refusal STICKY for this process (pgw#1169, §4.31).
+
+    §4.31's serve-first posture is that a cell-attributable failure de-arms the
+    cell and serves eager IN-REQUEST. An adopt that cannot fit the card is that
+    failure in its worst-behaved form — it takes the process rather than
+    returning an error — so the refusal has to survive the decision that
+    produced it. Without this, a pod re-asks a question whose answer cannot
+    have improved and re-runs a load that killed the last attempt.
+
+    Deliberately NOT in :func:`compile_cache.arming_block`, which documents
+    that every reason it names *"is deterministic for the life of this
+    process: none of them can differ on a retry."* Free VRAM is not: it moves
+    with what is resident. So the STICKINESS lives here, next to the bank whose
+    numbers it is made of, and `arming_block`'s invariant stays true.
+    """
+    _ADOPT_DECLINED.add((str(family or ""), str(weight_lane or "")))
+
+
+def adopt_declined(family: str, weight_lane: str) -> bool:
+    """Whether this process has already refused to adopt this (family, lane)."""
+    return (str(family or ""), str(weight_lane or "")) in _ADOPT_DECLINED
+
+
 def record_adopt_peak(family: str, weight_lane: str, peak_bytes: int) -> None:
     """Bank the ADOPT-ARM's measured device high-water for the next ask.
 
@@ -342,8 +370,12 @@ def adopt_headroom(
         return _UNPROBEABLE
     banked = adopt_peak(family, weight_lane)
     need = banked if banked > 0 else 2 * read.activation
+    # pgw#1169: a refusal already taken stands. Re-asking would re-run a load
+    # that this process has already decided it cannot survive, and a transient
+    # dip in someone else's residency is not evidence that it can.
+    fits = read.free_bytes >= need and not adopt_declined(family, weight_lane)
     return MintBudget(
-        fits=read.free_bytes >= need,
+        fits=fits,
         probed=True,
         measured=banked > 0,
         free_bytes=read.free_bytes,
@@ -603,6 +635,7 @@ def co_residency(
 
 __all__ = [
     "MintBudget",
+    "adopt_declined",
     "adopt_headroom",
     "adopt_peak",
     "adopt_watermark",
@@ -613,6 +646,7 @@ __all__ = [
     "entry_device_peak",
     "entry_peak_rss",
     "probe",
+    "note_adopt_declined",
     "record_adopt_peak",
     "record_child_peak",
     "record_entry_device_peak",
