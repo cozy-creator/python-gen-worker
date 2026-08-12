@@ -2024,7 +2024,12 @@ def arm_from_local_store(
         # it an arm-scheme bump costs one TRACE per family per machine; without
         # it, one MINT.
         local_cell_store.note_memo(arm_key.token, local.key)
-    aot_serve.note_aot_key(key)
+    # pgw#1152: the `note_aot_key(key)` that stood here is GONE, not moved. The
+    # arm above already went through `aot_serve.load_and_wrap`, which registers
+    # the key at the wrap (pgw#1141b) — this line was one of the two
+    # SELF-PRODUCED routes that kept pgw#1033's convention, and keeping a
+    # redundant copy of a structural fact is how the convention survived long
+    # enough for `arm_ordered` to not keep it.
     minted = SelfMint(
         family=family, cell_key=key,
         ref=f"{cc.system_repo(family)}#{key}",
@@ -2155,13 +2160,12 @@ def adopt_delegated_mint(
     )
     state["minted"] = minted
     state["meta"] = dict(meta)
-    # pgw#1033: this process has now READ a stamped `aot-inductor` key off a
-    # packed envelope, which is the one event that teaches a runtime that a
-    # key-flavored ref names an EXPORTED cell (the delivered-arm path
-    # registers its keys the same way; a SELF-MINTED cell was the
-    # unregistered half, so the executor's #734/#735 kind dispatch scored this
-    # pod's own `.pt2` by FX cache hits it can never produce).
-    aot_serve.note_aot_key(minted.cell_key)
+    # pgw#1152: pgw#1033's registration stood here and is GONE, not moved.
+    # `_arm_exported_cell` above already wrapped these bytes onto the pipe, and
+    # `aot_serve.load_and_wrap` registers the key AT the wrap (pgw#1141b) — the
+    # one seam every arm route passes. This was the second of pgw#1033's two
+    # SELF-PRODUCED feeders; both are deleted, so the registry has exactly one
+    # writer and no route can inherit the convention that killed `arm_ordered`.
     # th#1355: the mint cost, banked at the moment the cell becomes real.
     state["mint_duration_ms"] = max(
         0, int((time.monotonic() - pending.armed_at) * 1000))

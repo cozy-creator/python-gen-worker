@@ -1,0 +1,67 @@
+# pgw#1152 — every writer of arming/serving process-global state, classified.
+# Enforced by scripts/lint_arm_state_feeders.py: an unclassified feed is red, a
+# row matching nothing is red, and a SEAM that stops feeding is red. Keyed
+# <path>::<scope>::<name>, never a line.
+#
+# WHY THIS FILE EXISTS. `aot_serve._KNOWN_AOT_KEYS` decides which failure
+# detector applies to a serving object — the DYNAMO lane's cache-hit ledger,
+# which an AOTI artifact can never move, or §4.31's serve-first rule. pgw#1033
+# wrote its feeding rule as a CONVENTION ("whoever reads a cell_key off an
+# aot-inductor envelope registers it") with two feeders, BOTH self-produced
+# routes. `arm_ordered` — every hub Plan arm and every §4.27 boot-adopt — kept
+# nothing, so on a real pod (pgw#1141b, POD PROOF #4) a cell that resolved,
+# materialized and armed was scored on the dynamo ledger, disarmed, and the pod
+# served eager for life. That was the FOURTH gate in a row with the same shape:
+# a rule written against the self-mint path, and an adopt path that does not
+# take it.
+#
+# THE SEAM. `aot_serve.load_and_wrap` registers the key at the wrap — the one
+# function every arm route passes, and the moment the fact becomes true. It is
+# never written here; the lint asserts the call still exists.
+#
+# THERE IS NO `CONVENTION` CLASSIFICATION, AND NO `RELAY`. A feeder called
+# because a docstring asked the caller to remember is the bug itself, twice
+# over. Move it to the seam, or delete it and ask the OBJECT
+# (`aot_serve.holds_exported_cell`, pgw#1141b).
+#
+#   VERDICT     the site records a decision only this frame can know, and sits
+#               AT that decision. No seam can derive it: a proof pass concluding
+#               a cell served its own graph is not a fact about the wrap.
+#   OWNER       the module that owns the state writing it from its own primary
+#               write path.
+#   RECOGNIZER  TESTS ONLY, and the lint CHECKS the claim: the enclosing
+#               function must drive no arm and the module must replace no arm
+#               driver. A fixture standing in for an adoption cannot qualify.
+
+# ---------------------------------------------------------------------------
+# VERDICT — a decision, recorded where the decision is made.
+# ---------------------------------------------------------------------------
+src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_cell_proven  VERDICT  the boot proof pass concluding this object served its OWN warmup graph (gw#587); no seam observes a proof
+src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_cell_quarantined  VERDICT  the same pass concluding the opposite — pgw#672's churn-loop stop, written at the disarm
+src/gen_worker/executor.py::Executor._compile_guard_failed::compile_cache.record_cell_quarantined  VERDICT  a serve-time cell-attributable fault; the guard is the only frame that saw it
+src/gen_worker/executor.py::Executor._delegated_mint_run::compile_cache.record_cell_proven  VERDICT  the delegated mint's own finalize proof, same fact from the other producer
+src/gen_worker/fleet_cells.py::arm_from_local_store::local_cell_store.note_memo  VERDICT  §4.28's memo REWRITTEN FROM EVIDENCE — the cell just proved it arms under this arm token, which no wrap can know
+
+# ---------------------------------------------------------------------------
+# OWNER — the producer putting its own bytes in its own store.
+# ---------------------------------------------------------------------------
+src/gen_worker/fleet_cells.py::adopt_delegated_mint::local_cell_store.store  OWNER  §4.28: this machine minted these bytes; the mint's own finalize is the store's primary write path
+src/gen_worker/fleet_cells.py::_publish_async.run::local_cell_store.store  OWNER  th#1643 SUNK: the hub refused the publish, so the producer keeps what it made rather than rmtree-ing it
+
+# ---------------------------------------------------------------------------
+# RECOGNIZER (tests) — the registry/classifier IS the subject. Each row's claim
+# is verified structurally: no arm driven in the function, none replaced in the
+# module. Anything that arms goes through tests/harness/adopt_rig.py.
+# ---------------------------------------------------------------------------
+tests/test_aot_serve_pgw721.py::test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key::aot_serve.note_aot_key  RECOGNIZER  the recognizer's own unit row — pgw#1035's deleted label sniff, asserted directly on is_aot_ref
+tests/test_compile_proof_pgw637.py::test_proven_cell_registry_roundtrip::compile_cache.record_cell_proven  RECOGNIZER  the proven-cell registry's own roundtrip; no pipeline exists in this row
+tests/test_compile_proof_pgw637.py::test_inmemory_probe_reports_dynamo_truth_not_the_registry::compile_cache.record_cell_proven  RECOGNIZER  pgw#637's point exactly: the registry alone must NOT certify, and the row proves it by feeding it and getting False
+tests/test_eager_only_command_pgw1142.py::test_a_suppressed_request_is_not_reported_as_compiled::aot_serve.note_aot_key  RECOGNIZER  a serving_mode.resolve dimension row — a ref and a posture, no object and no arm
+tests/test_boot_phases_pgw764.py::test_serving_mode_distinguishes_aot_from_jit_from_eager::aot_serve.is_aot_ref  RECOGNIZER  classify_mode's discrimination asserted over bare refs; nothing is armed anywhere in the row
+
+# ---------------------------------------------------------------------------
+# PROJECTION — builds the object from a DIFFERENT source shape, so it is not a
+# second copy of the fenced map. (There is no label for writing the same map
+# twice; that is pgw#1150's cause, restated.)
+# ---------------------------------------------------------------------------
+src/gen_worker/executor.py::_selection_for::_CompileArtifactSelection()  PROJECTION  built from a MINT object (ref + snapshot_digest off the SelfMint), not from a materialized artifact triple — a different source, and the `self_mint=True` flag says so

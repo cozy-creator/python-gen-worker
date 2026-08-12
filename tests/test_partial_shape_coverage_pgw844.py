@@ -322,13 +322,14 @@ def _boot(
         executor_mod.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0: events.append(
             (kind, phase, detail)))
-    if exported:
-        # The exported lane is identified by the ref the hub delivers; a
-        # stamped cell key is only computable on CUDA, so this process is TOLD
-        # the flavor is an AOT cell exactly as a Plan's `Arm.artifact` tells a
-        # pod (pgw#904). Everything downstream of that is production code.
-        aot_serve.note_aot_key(FLAVOR)
-
+    # pgw#1152: an `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
+    # arguing this process is "TOLD the flavor is an AOT cell exactly as a
+    # Plan's `Arm.artifact` tells a pod". Production is told no such thing — it
+    # LEARNS at the wrap (`load_and_wrap`, pgw#1141b), and the route that
+    # believed the convention instead is what cost four pods. The line is
+    # deleted rather than moved: `_arm` below publishes the pipeline-level
+    # marker `load_and_wrap` publishes, so `holds_exported_cell` answers the
+    # lane question off the OBJECT and the registry is not consulted at all.
     artifact = _cell_snapshot(tmp_path)
     model_dir = tmp_path / "sdxl-model"
     model_dir.mkdir()

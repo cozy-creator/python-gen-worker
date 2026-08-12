@@ -11,9 +11,9 @@ nobody else. The out-of-process producer this module was designed around —
 training-endpoints ``produce-inductor-cache`` — was DELETED by te#179 (it
 minted ``kind="torch-inductor-cache"``, and th#1788 made ``aot-inductor`` the
 only class the hub adopts, so its publishes were refused before entering the
-store), and DESIGN-RULINGS §4.28/§4.30 make that permanent: there is no forge,
-no mint request and no compile fleet, and compilation runs on the machine that
-will USE the cell. A family too large to self-mint beside its own server is a
+store), and DESIGN-RULINGS §4.28/§4.30 make that permanent: there is no
+central compile service, no mint request and no compile fleet, and compilation
+runs on the machine that will USE the cell. A family too large to self-mint beside its own server is a
 PLACEMENT question — boot its serving pod on a card that fits, per §4.28's
 "pre-warming a release/SKU = boot an ordinary serving pod there" — and
 :meth:`~gen_worker.mint_budget.MintBudget.card_bytes` is the number that
