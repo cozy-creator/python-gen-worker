@@ -1261,7 +1261,22 @@ def registered_export_families() -> Tuple[str, ...]:
 
 
 def reset_export_declarations() -> None:
-    """Drop every registration. Tests only."""
+    """Drop every registration. Tests only.
+
+    Deliberately does NOT clear ``families.base._REGISTRY`` (pgw#1161). That
+    was tried and is wrong for the same reason pgw#1031 was: `@family`
+    registration is an IMPORT SIDE EFFECT, so a registry emptied here can only
+    be refilled by a re-import — and a module already in ``sys.modules``
+    re-imports as a no-op. Clearing it therefore wipes module-level
+    registrations (``test_family_wire_names_pgw692`` imports
+    ``_example_family`` exactly once) permanently, for every test that runs
+    after any reset. Measured: 3 tests died that way.
+
+    The endpoint-suite failure this was meant to fix is closed at the other
+    end instead — ``families.base.family`` now treats a RE-IMPORT of the same
+    declaration as a replacement rather than a collision, so nothing needs
+    clearing for a re-import to succeed.
+    """
     with _lock:
         _declared.clear()
         _import_failures.clear()
