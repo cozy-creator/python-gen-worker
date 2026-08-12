@@ -10332,9 +10332,32 @@ class Executor:
         warmup_s = round(max(0, self._boot_warm_ms) / 1000.0, 3)
         for adoption in inj.adoptions:
             if not adoption.ref:
-                # An arm with no candidate identity is not an adoption anyone
-                # can attribute; recording it would add a row that answers
-                # nothing. (The hub applies the same rule from its side.)
+                # pgw#1176: THIS DROP INVERTED AND IS NOW A REPORT.
+                #
+                # Under ck1 it was sound: one cell, one ref, and no ref meant
+                # there was nothing anyone could attribute. Under a resolved
+                # KEY SET it swallows the commonest per-entry outcome there
+                # is — an entry that MISSED has no artifact ref BY
+                # CONSTRUCTION, so a pod resolving 30 of 36 keys would have
+                # reported the 30 and silently discarded the six that are the
+                # actual news. That is exactly how `compile_cache_adopt` went
+                # three readers and zero writers for five days.
+                #
+                # `ModelEvent` is keyed by ref and genuinely cannot carry
+                # this, so the miss goes out on the channel that CAN: the
+                # typed activity event, whose family/cell_key/graph_class
+                # fields (proto 18-20) land in the hub's own columns.
+                activity_mod.emit_event(
+                    "aot_entry_missed",
+                    f"this pod derived the key and nothing entitled answered "
+                    f"it ({adoption.reason or 'no_cell'}"
+                    f"{': ' + adoption.detail if adoption.detail else ''}); "
+                    f"the class serves EAGER and is queued to compile",
+                    phase=adoption.reason or "no_cell",
+                    family=str(getattr(inj, "family", "") or ""),
+                    cell_key=adoption.cell_key,
+                    graph_class=adoption.entry,
+                )
                 continue
             calls, hits, misses = proof_by_obj.get(adoption.pipeline_id, (0, 0, 0))
             if adoption.armed:
