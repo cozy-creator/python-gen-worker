@@ -544,7 +544,7 @@ from gen_worker.convert.hub import HubPublishError
 def _hub_client(base: str):
     from gen_worker.convert.hub import HubClient
 
-    return HubClient(base_url=base, token="t", owner="o")
+    return HubClient(base_url=base, token="t")
 
 
 def test_v2_complete_retries_only_when_nothing_was_heard(fast_hub_retries) -> None:
