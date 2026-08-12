@@ -147,12 +147,18 @@ class ProbeAxis:
 def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     """Every probeable axis of one cell, read off its own metadata.
 
-    One axis per PACKAGED ENTRY: a multi-graph cell's classes are separate
-    artifacts sharing a file (pgw#758), and a verdict that averaged them could
-    not name the class that parted from eager.
+    ONE axis, because pgw#1176 made one artifact one graph class: the mint
+    parity gate runs per entry, at the moment that entry exists, against the
+    eager callable it was traced from — never "after all 36". That is what
+    makes §4.33's ~8 GiB true by construction: exactly ONE compiled runner is
+    resident beside the already-resident weights while the probe runs.
+
+    The signature stays a TUPLE so every caller's shape is unchanged; what
+    changed is that its length is now one by construction rather than by luck.
     """
 
-    entries = aot_serve.entries_from_meta(dict(meta))
+    entry = aot_serve.entry_from_meta(dict(meta))
+    entries = {str(entry.get("name") or ""): entry}
     execution_lane = str(meta.get("precision") or "")
     cell_bucket = int(meta.get("lora_bucket") or 0)
     axes: List[ProbeAxis] = []
