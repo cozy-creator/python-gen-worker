@@ -13,7 +13,7 @@ were fine — stickily, for the life of the process. Two call sites ran it:
 ``provision.arm_aot`` (every arm route) and ``fleet_cells.adopt_delegated_mint``
 (the self-mint route). Both are gone.
 
-What refuses now is the bind itself. ``aot_serve.load_and_wrap`` attempts every
+What refuses now is the bind itself. ``aot_serve.arm_entry`` attempts every
 entry inside ``_bind_headroom``; a real CUDA OOM comes back as a typed
 ``insufficient_adopt_vram`` ``AdoptError`` that NAMES the entry, before the
 first live mutation, so the pod serves eager and stays up.

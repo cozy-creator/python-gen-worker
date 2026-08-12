@@ -307,12 +307,12 @@ def test_an_exclusion_free_contract_digests_exactly_as_before() -> None:
 @pytest.fixture
 def armed(cell, monkeypatch) -> Dict[str, Any]:
     """The real cell, armed on a fresh pipeline through the real
-    `aot_serve.load_and_wrap` (stage -> verify -> load every entry -> bind ->
+    `aot_serve.arm_entry` (stage -> verify -> load every entry -> bind ->
     wrap)."""
     _fake_sm(monkeypatch)
     pipe = _armed_pipe()
     cfg = types.SimpleNamespace(family=FAMILY)
-    meta = aot_serve.load_and_wrap(
+    meta = aot_serve.arm_entry(
         pipe, cfg, Path(cell["result"].artifact),
         cache_dir=cell["tmp"] / "stage")
     return {"pipe": pipe, "meta": meta}

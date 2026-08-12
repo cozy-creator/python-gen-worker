@@ -146,7 +146,7 @@ def _meta(**over: Any) -> Dict[str, Any]:
         "declared_envelope": {"shapes": [[1024, 1024]], "text_lens": [77],
                               "guidance": [7.5]},
     }
-    m["combined_graph_hash"] = aot_serve.combined_graph_hash(
+    m["combined_graph_hash"] = cell_key.manifest_digest(
         str((b or {}).get("class_hash") or "")
         for b in entries.values() if isinstance(b, dict))
     m.update(over)
@@ -225,7 +225,7 @@ def test_artifact_invalid_named_on_the_wire(
     assert "corrupt.tar.gz" in out.detail
 
     # Malformed entries classify the same, with the reason in the detail.
-    malformed = _tar(tmp_path, _meta(entries={ENTRY: {"target": "unet"}}))
+    malformed = _tar(tmp_path, _meta(name=ENTRY, entry={"target": "unet"}))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=malformed)
     assert not out.armed and out.reason == "artifact_invalid"
     assert "declares no inputs" in out.detail

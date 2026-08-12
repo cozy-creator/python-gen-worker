@@ -42,7 +42,7 @@ entered one gate east of the bug — twice.
 THE FIX, in two parts, because one of them is a convention and the other is a
 structure:
 
-1. ``aot_serve.load_and_wrap`` registers the key AT THE WRAP — the single seam
+1. ``aot_serve.arm_entry`` registers the key AT THE WRAP — the single seam
    every arm route passes, and the moment the fact becomes true;
 2. the executor's three lane readers ask the OBJECT
    (``aot_serve.holds_exported_cell`` via ``executor._exported_arm``), so the
@@ -53,7 +53,7 @@ WHAT RUNS FOR REAL HERE. The whole chain from the ordered arm to the install:
 ``Executor.ensure_setup`` -> ``_injection_kwargs`` -> ``_enable_compiled`` with
 a real ``_ArmOrder(adopt=…)`` -> ``fleet_cells.arm_ordered`` -> the real
 receipt gate against a real RSA-signed receipt from a real HTTP hub ->
-``provision.arm_aot`` -> ``aot_serve.load_and_wrap`` on a real packed artifact
+``provision.arm_aot`` -> ``aot_serve.arm_entry`` on a real packed artifact
 -> the real boot warmup -> the real proof pass -> the real
 ``_install_compile_targets`` and ``_assert_armed_targets_installed``.
 
@@ -261,7 +261,7 @@ def test_the_registration_lives_at_the_wrap_not_at_the_call_sites() -> None:
     """
     import inspect
 
-    body = inspect.getsource(aot_serve.load_and_wrap)
+    body = inspect.getsource(aot_serve.arm_entry)
     assert "note_aot_key(" in body, (
         "the wrap no longer registers the key it just armed; a new arm route "
         "is one convention away from pgw#1141b happening again")

@@ -157,16 +157,16 @@ def test_clamped_compile_package_is_portable_and_loads(
 
 
 def _artifact(tmp_path: Path, pt2_bytes: bytes) -> tuple[Path, dict]:
-    meta = aot_serve.artifact_metadata(
+    meta = aot_serve.entry_metadata(
         family="sdxl", precision="bf16", cell_key="",
-        entries={"unet/main": {
+        name="unet/main", entry={
             "target": "unet",
             "inputs": [{
                 "name": "x", "position": 0, "dtype": "float32",
                 "shape": [1, 4], "optional": False,
             }],
             "symbols": {}, "constants": [],
-        }},
+        },
     )
     content = tmp_path / "content"
     content.mkdir(exist_ok=True)
