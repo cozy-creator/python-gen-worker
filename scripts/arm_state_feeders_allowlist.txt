@@ -45,8 +45,7 @@ src/gen_worker/fleet_cells.py::arm_from_local_store::local_cell_store.note_memo 
 # ---------------------------------------------------------------------------
 # OWNER — the producer putting its own bytes in its own store.
 # ---------------------------------------------------------------------------
-src/gen_worker/fleet_cells.py::adopt_delegated_mint::local_cell_store.store  OWNER  §4.28: this machine minted these bytes; the mint's own finalize is the store's primary write path
-src/gen_worker/fleet_cells.py::_publish_async.run::local_cell_store.store  OWNER  th#1643 SUNK: the hub refused the publish, so the producer keeps what it made rather than rmtree-ing it
+src/gen_worker/fleet_cells.py::_stage_durable::local_cell_store.store  OWNER  pgw#1183/§1.5: this machine minted these bytes and this is the store's ONE write path — durable BEFORE the arm, so the write cannot sit at the arm seam by construction. The two rows this replaces were `adopt_delegated_mint` (gated on having no publish sink, the inversion §1.5 retires) and `_publish_async.run` (a salvage racing the `finally` that deleted the same bytes; both are gone)
 
 # ---------------------------------------------------------------------------
 # RECOGNIZER (tests) — the registry/classifier IS the subject. Each row's claim
