@@ -1065,6 +1065,21 @@ def validate_contract(compile_decl: Any) -> None:
                 raise DeclarationError(
                     f"Input {inp.name!r} is declared twice for target {target!r}")
             names.add(inp.name)
+        # pgw#1158: ...and a declared target must end up with AT LEAST ONE.
+        # `target_inputs` scopes by `not inp.targets or target in inp.targets`,
+        # so a target every row scopes AWAY from mints a plan with no declared
+        # inputs at all — the trace has nothing to feed. This is refused
+        # independently of how the untargeted-row default is later ruled: no
+        # defaulting semantic anyone would choose makes an input-less target
+        # correct, so the refusal cannot freeze that question either way.
+        if inputs and not names:
+            row_scopes = sorted({t for inp in inputs for t in inp.targets})
+            raise DeclarationError(
+                f"target {target!r} is declared but NO Input row reaches it — "
+                f"every row scopes itself to {row_scopes!r}, so this target would "
+                f"mint a plan with no declared inputs and the trace would have "
+                f"nothing to feed. Scope a row to {target!r}, drop the target, "
+                f"or leave the rows it needs untargeted")
 
     # A binding may belong to any target's inputs; refuse only when NO
     # declared row knows the name at all.
