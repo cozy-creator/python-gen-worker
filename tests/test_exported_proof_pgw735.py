@@ -21,10 +21,45 @@ class _Pipe:
     """A pipeline carrying only what the proof reads."""
 
 
+def _dispatch(calls: int, failed: bool) -> aot_serve.EntryDispatch:
+    """One armed entry, or a de-armed one — the registry state `is_armed`
+    and `execution_count` actually read."""
+    runner = aot_serve.ArtifactRunner(
+        package=None, contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
+        constants=(), module_name="unet", entry="unet/main")
+    runner.calls = calls
+    dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
+    dispatch.add("unet/main", runner)
+    if failed:
+        dispatch.remove("unet/main", "revoked")
+    return dispatch
+
+
 def _arm(pipe, *, calls: int, failed: bool = False) -> None:
+    """The marker shape `arm_entry` ACTUALLY publishes.
+
+    pgw#1176: this used to build a bare pipeline-level ``state``, a shape no
+    production path has ever written — `arm_entry` writes ``targets`` and
+    `wrap_module` writes the bare ``state`` on the MODULE. `_marker_states`
+    carried a fallback for it whose own docstring said "the legacy
+    single-``state`` shape tests use", i.e. a production branch kept alive by
+    a fixture constructing something production cannot construct. The fallback
+    is deleted; this builds the real thing.
+    """
     setattr(pipe, aot_serve._MARKER_ATTR, {
         "meta": {"sku": "sm_89", "torch": "2.13", "precision": "bf16"},
-        "state": {"successful_calls": calls, "failed": failed},
+        "targets": {"unet": {
+            "module": None, "attr": "forward",
+            "state": {
+                "successful_calls": calls, "failed": failed,
+                # pgw#1176: `is_armed` asks the REGISTRY what is armed rather
+                # than reading a boolean, so a fixture that wants to model an
+                # armed pipeline has to carry one. That is the point: there is
+                # no longer a flag that can claim more than the pod serves.
+                "runner": _dispatch(calls, failed),
+            },
+        }},
+        "entries": {"unet/main": {"key": "ek1-" + "0" * 56}},
     })
 
 
@@ -53,14 +88,13 @@ def test_exported_kind_cell_key_refusals_are_named():
     refusal names the missing fact instead of failing opaquely."""
     for kind in ("torch-inductor-cache", "an-unknown-kind", ""):
         with pytest.raises(cell_key.CellKeyError) as unknown:
-            cell_key.from_exported_artifact_metadata({"kind": kind})
-        assert "no cell-key identity" in str(unknown.value)
+            cell_key.from_entry_metadata({"kind": kind})
+        assert "no entry-key identity" in str(unknown.value)
 
     with pytest.raises(cell_key.CellKeyError) as no_sm:
-        cell_key.from_exported_artifact_metadata({"kind": "aot-inductor"})
+        cell_key.from_entry_metadata({"kind": "aot-inductor"})
     assert "sm" in str(no_sm.value)
 
-    with pytest.raises(cell_key.CellKeyError) as no_entries:
-        cell_key.from_exported_artifact_metadata(
-            {"kind": "aot-inductor", "sm": "sm_89"})
-    assert "combined_graph_hash" in str(no_entries.value)
+    with pytest.raises(cell_key.CellKeyError) as no_entry:
+        cell_key.from_entry_metadata({"kind": "aot-inductor", "sm": "sm_89"})
+    assert "entry" in str(no_entry.value)

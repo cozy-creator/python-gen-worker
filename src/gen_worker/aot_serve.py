@@ -2224,6 +2224,12 @@ class EntryDispatch:
     #: The entry :meth:`select` last routed to — the only way the fail-soft
     #: wrapper one frame up can name the graph class that raised.
     last_selected: str = ""
+    #: Calls served by entries that have since DE-ARMED. Banked rather than
+    #: discarded: those executions happened, and `execution_count` is the
+    #: adoption proof's evidence — dropping them when a sibling de-arms would
+    #: make a pod that served 5,000 compiled requests and then lost one class
+    #: read as a pod that never served compiled at all.
+    retired_calls: int = 0
 
     def add(self, name: str, runner: ArtifactRunner) -> None:
         """Register one armed entry. Replaces an entry of the same name (a
@@ -2248,6 +2254,8 @@ class EntryDispatch:
         """
         label = str(name)
         before = len(self.runners)
+        self.retired_calls += sum(
+            int(r.calls) for n, r in self.runners if n == label)
         self.runners = tuple(
             (n, r) for n, r in self.runners if n != label)
         self.de_armed[label] = str(reason or "unstated")
@@ -2341,7 +2349,8 @@ class EntryDispatch:
 
     @property
     def calls(self) -> int:
-        return sum(runner.calls for _n, runner in self.runners)
+        return int(self.retired_calls) + sum(
+            runner.calls for _n, runner in self.runners)
 
     def refusal_counts(self) -> Dict[str, int]:
         out: Dict[str, int] = {}
@@ -3214,14 +3223,21 @@ def enable(
 
 
 def _marker_states(pipeline: Any) -> List[Dict[str, Any]]:
-    """Every wrapped target's state dict on a pipeline marker (format-2
-    multi-target markers plus the legacy single-``state`` shape tests use)."""
+    """Every wrapped target's state dict on a PIPELINE marker.
+
+    pgw#1176 DELETED the single-``state`` fallback that stood here. Its own
+    docstring named the problem — "the legacy single-``state`` shape tests
+    use" — so it was a production branch kept alive by fixtures constructing
+    a shape production cannot construct: the two banned smells at once. The
+    two markers are genuinely different objects and always were:
+    :func:`wrap_module` writes a bare ``state`` on the MODULE, and
+    :func:`arm_entry` writes ``targets`` on the PIPELINE.
+    """
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
     rows = marker.get("targets")
-    if isinstance(rows, dict) and rows:
-        return [row.get("state") or {} for row in rows.values()]
-    state = marker.get("state")
-    return [state] if isinstance(state, dict) and state else []
+    if not isinstance(rows, dict):
+        return []
+    return [row.get("state") or {} for row in rows.values()]
 
 
 def execution_count(pipeline: Any) -> int:
@@ -3402,16 +3418,12 @@ def unwrap(pipeline: Any) -> bool:
     """Restore every wrapped target's eager callable — rotation/eviction
     and the unproven-adoption rollback both go through here."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    rows: List[Dict[str, Any]] = []
+    # pgw#1176: one shape, the one `arm_entry` writes. The `module`/`state`
+    # fallback that stood here read a pipeline marker no production path
+    # produces — see :func:`_marker_states`.
     targets = marker.get("targets")
-    if isinstance(targets, dict) and targets:
-        rows = list(targets.values())
-    elif marker.get("module") is not None:
-        rows = [{
-            "module": marker.get("module"),
-            "attr": (marker.get("state") or {}).get("attr", "forward"),
-            "state": marker.get("state") or {},
-        }]
+    rows: List[Dict[str, Any]] = (
+        list(targets.values()) if isinstance(targets, dict) else [])
     restored = False
     for row in rows:
         module = row.get("module")
