@@ -94,8 +94,14 @@ def test_torchless_isa_clamp_and_posture_no_op(torchless):
 
 
 def test_torchless_posture_assertion_agrees_with_its_own_seal(torchless):
+    """pgw#1181: `assert_posture` is deleted — it compared the live process
+    against a CELL's recorded posture seal, and the only writer of that seal
+    was `closure_manifest`, which went with the `torch-inductor-cache` format.
+    The property this row is named for survives without it: what a torchless
+    worker establishes is exactly what it later observes, so a seal taken at
+    boot and a snapshot taken afterwards agree fact for fact."""
     sealed = guard_closure.establish_posture()
-    guard_closure.assert_posture(sealed, "pgw788")
+    assert sealed == guard_closure.posture_snapshot()
 
 
 def test_declared_knob_on_a_torchless_worker_refuses_by_name(torchless):

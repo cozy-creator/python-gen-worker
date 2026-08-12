@@ -183,7 +183,6 @@ def test_a_real_hierarchy_with_both_triggers_closes(monkeypatch):
         assert not report.leaks, (
             "a call inside the declared envelope on a real module hierarchy leaked: "
             + "; ".join(str(leak) for leak in report.leaks))
-        gc.closure_manifest(pipe, _cfg(), label="sdxl")
         counts = report.verdict_counts()
         assert counts.get(gc.MODULE_STRUCTURE, 0) > 0, (
             "the derived self-rooted guards must land as module structure, "

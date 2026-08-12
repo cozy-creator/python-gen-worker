@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import threading
-from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Tuple
 
 import pytest
@@ -191,87 +190,29 @@ def test_out_of_envelope_scalar_is_recorded_naming_the_variable() -> None:
     compiled = torch.compile(fn, backend="eager", dynamic=None)
     compiled(torch.randn(2, 4, 8), 3.25)  # 3.25 is NOT declared
 
-    manifest = gc.closure_manifest(pipe, _cfg(), label="toyfam")
-    leaks = "\n".join(manifest["leaks"])
+    # pgw#1181: read the classification off `audit_armed`, the live view of an
+    # armed pipeline, instead of `closure_manifest` — the MINT-side wrapper
+    # that embedded it in a `torch-inductor-cache` cell and is deleted with
+    # that format. The classifier under test is the same one; only the
+    # serialize-into-a-cell step is gone.
+    leaks = "\n".join(gc.audit_armed(pipe, _cfg()).leaks)
     assert "L['scale']" in leaks
     assert "3.25" in leaks
-    assert manifest[gc.GATE_KEY] == gc.GATE_ADVISORY
 
     # The other direction still works: the SAME graph classifies clean once
     # the contract declares the pin — classification keys on the contract,
     # not the code shape.
-    manifest = gc.closure_manifest(
-        pipe, _cfg(guidance_scales=(3.25,)), label="toyfam")
-    assert manifest["leaks"] == []
+    assert gc.audit_armed(pipe, _cfg(guidance_scales=(3.25,))).leaks == ()
 
 
-def test_gate_refuses_when_nothing_is_extractable() -> None:
-    """A mint that compiled NOTHING is a proven defect (the cell would be
-    empty) — this refusal survives the pgw#756 demotion."""
-
-    class _Mod:
-        def forward(self, x: Any) -> Any:  # pragma: no cover - never called
-            return x
-
-    class _Pipe:
-        pass
-
-    pipe = _Pipe()
-    mod = _Mod()
-    pipe.transformer = mod  # type: ignore[attr-defined]
-    _arm_marker(pipe, mod, mod.forward)
-    with pytest.raises(gc.GuardClosureError, match="nothing was compiled"):
-        gc.closure_manifest(pipe, _cfg())
-
-
-def test_the_packed_cell_records_the_manifest_leaking_or_clean(
-    tmp_path: Path,
-) -> None:
-    """The audit rides the packed cell: a leaking capture PACKS anyway
-    (pgw#756) carrying its leak, and a clean capture packs with an empty leak
-    list — both with the manifest riding metadata.json.
-
-    pgw#1010: assembled the way the surviving producer (`mint_artifact`) does,
-    because `finish_fleet_mint` sealed a dynamo cell and is deleted with it."""
-
-    def forward(self: Any, x: Any, scale: float) -> Any:
-        return self.lin(x) * scale
-
-    pipe, _mod, fn = _compiled_toy(forward)
-    compiled = torch.compile(fn, backend="eager", dynamic=None)
-    compiled(torch.randn(2, 4, 8), 3.25)
-
-    capture = tmp_path / "capture"
-    fx_entry = capture / "inductor" / "fxgraph" / "aa" / "bb"
-    fx_entry.mkdir(parents=True)
-    (fx_entry / "entry").write_bytes(b"fx")
-    target = tmp_path / "cell.tar.gz"
-
-    def _packed(cfg: Any, out: Path) -> dict:
-        meta = cc.artifact_metadata(
-            family="toyfam", source_ref="self-mint",
-            shapes=cfg.shapes, targets=cfg.targets,
-            guidance_scales=getattr(cfg, "guidance_scales", ()))
-        meta[gc.MANIFEST_KEY] = gc.closure_manifest(pipe, cfg, label="toyfam")
-        cc.pack(capture, out, meta)
-        return meta
-
-    leaky = tmp_path / "leaky.tar.gz"
-    meta = _packed(_cfg(), leaky)
-    assert leaky.exists(), "an undeclared scalar must no longer refuse the mint"
-    assert any("L['scale']" in row for row in meta[gc.MANIFEST_KEY]["leaks"])
-    assert gc.load_manifest(leaky)["leaks"] == meta[gc.MANIFEST_KEY]["leaks"]
-
-    meta = _packed(_cfg(guidance_scales=(3.25,)), target)
-    assert meta[gc.MANIFEST_KEY]["leaks"] == []
-    assert target.exists()
-    loaded = gc.load_manifest(target)
-    assert loaded == meta[gc.MANIFEST_KEY]
-
-
-# ---------------------------------------------------------------------------
-# Acceptance: stride-perturbed input canonicalizes and HITS
-# ---------------------------------------------------------------------------
+# pgw#1181 REMOVED `test_gate_refuses_when_nothing_is_extractable` and
+# `test_the_packed_cell_records_the_manifest_leaking_or_clean`. Both are about
+# `closure_manifest` — the mint-side wrapper that refused an empty capture and
+# wrote the classification into a cell's metadata. It is deleted with the
+# `torch-inductor-cache` format, whose last writer died in pgw#1178: there is
+# no cell for a guard manifest to ride on and no mint for the empty-capture
+# refusal to fail. The CLASSIFIER those rows reached through it is untouched
+# and is driven directly above, via `audit_armed`.
 
 
 def _perturbed_inputs() -> List[Any]:
@@ -381,51 +322,10 @@ def _toy_manifest(**mutate: Any) -> Dict[str, Any]:
     return manifest
 
 
-def test_consolidate_identical_manifests_is_closed() -> None:
-    audit = gc.consolidate({"pod-a": _toy_manifest(), "pod-b": _toy_manifest()})
-    assert audit.ok
-    assert audit.guard_total == 4
-
-
-def test_consolidate_tolerates_per_host_ambient_content() -> None:
-    """GLOBAL_STATE content is per-host (num_threads); its PRESENCE is
-    compared, its content stays in the dump."""
-    other = _toy_manifest()
-    other["graphs"][0]["guards"][1]["expr"] = (
-        '___check_global_state() against {"num_threads":8}')
-    audit = gc.consolidate({"pod-a": _toy_manifest(), "pod-b": other})
-    assert audit.ok
-
-
-def test_consolidate_names_divergence_and_leaks() -> None:
-    missing = _toy_manifest()
-    missing["graphs"][0]["guards"] = missing["graphs"][0]["guards"][:1]
-    audit = gc.consolidate({"pod-a": _toy_manifest(), "pod-b": missing})
-    assert not audit.ok
-    assert any("GLOBAL_STATE" in d and "pod-b" in d for d in audit.divergence)
-
-    leaky = _toy_manifest(leaks=["target=transformer EQUALS_MATCH L['s']: ..."])
-    audit = gc.consolidate({"pod-a": leaky})
-    assert audit.leaks and "pod-a" in audit.leaks[0]
-
-
-def test_cli_zero_miss_check_exit_codes(tmp_path: Path) -> None:
-    good_a = tmp_path / "a.json"
-    good_b = tmp_path / "b.json"
-    good_a.write_text(json.dumps(_toy_manifest()))
-    good_b.write_text(json.dumps(_toy_manifest()))
-    assert gc.main([str(good_a), str(good_b)]) == 0
-
-    leaky = tmp_path / "leak.json"
-    leaky.write_text(json.dumps(_toy_manifest(leaks=["leak row"])))
-    assert gc.main([str(good_a), str(leaky)]) == 2
-
-    divergent = _toy_manifest()
-    divergent["graphs"][0]["guards"] = divergent["graphs"][0]["guards"][:1]
-    div = tmp_path / "div.json"
-    div.write_text(json.dumps(divergent))
-    assert gc.main([str(good_a), str(div)]) == 3
-
-    empty = tmp_path / "empty.json"
-    empty.write_text(json.dumps({"graphs": []}))
-    assert gc.main([str(good_a), str(empty)]) == 3  # unproven cell never passes
+# pgw#1181 REMOVED the three `consolidate` rows and
+# `test_cli_zero_miss_check_exit_codes`. `guard_closure.consolidate`,
+# `load_manifest`, `FleetAudit` and the `python -m gen_worker.guard_closure`
+# CLI compared the guard manifests of N cells — a cross-pod audit over a block
+# that no cell carries any more, since `closure_manifest` was its only writer.
+# `load_manifest` could only ever raise "carries no guard manifest", so the CLI
+# was a tool that could not succeed. Deleted with their subject (§4.34).

@@ -154,18 +154,21 @@ def test_relational_family_judged_by_type_regardless_of_root() -> None:
 
 
 def test_sdxl_shaped_mint_gate_passes_closed() -> None:
-    """The definitive acceptance: closure_manifest returns a leak-free
-    manifest on a real multi-tensor-input compiled module with the
-    sdxl-shaped contract. Pre-fix: refused 100% (NO_TENSOR_ALIASING)."""
+    """The definitive acceptance: the classifier is leak-free on a real
+    multi-tensor-input compiled module with the sdxl-shaped contract.
+    Pre-fix: refused 100% (NO_TENSOR_ALIASING).
+
+    pgw#1181 reads it off `audit_armed` rather than `closure_manifest`, the
+    mint-side wrapper deleted with the `torch-inductor-cache` format. Same
+    classifier, same verdicts, one fewer serialization step."""
     pipe, fn = _sdxl_shaped_pipe(_sdxl_forward)
     compiled = torch.compile(fn, backend="eager", dynamic=None)
     compiled(guidance_scale=5.0, **_sdxl_inputs())
 
-    manifest = gc.closure_manifest(pipe, _cfg(), label="sdxl")
-    assert manifest["leaks"] == []
-    assert manifest["graphs"]
-    types = {
-        r["type"] for g in manifest["graphs"] for r in g["guards"]}
+    report = gc.audit_armed(pipe, _cfg())
+    assert report.leaks == ()
+    assert report.graphs
+    types = {r.guard_type for g in report.graphs for r in g.guards}
     assert "NO_TENSOR_ALIASING" in types  # the P0 family really was present
 
 
@@ -177,8 +180,7 @@ def test_sdxl_shaped_mint_records_the_undeclared_variable() -> None:
     compiled = torch.compile(fn, backend="eager", dynamic=None)
     compiled(guidance_scale=7.5, **_sdxl_inputs())  # 7.5 is NOT declared
 
-    manifest = gc.closure_manifest(pipe, _cfg(), label="sdxl")
-    leaks = "\n".join(manifest["leaks"])
+    leaks = "\n".join(gc.audit_armed(pipe, _cfg()).leaks)
     assert "L['guidance_scale']" in leaks
     assert "7.5" in leaks
 
