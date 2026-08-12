@@ -1,5 +1,11 @@
-"""pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``ck1`` cell
-key AT BOOT, from CODE ALONE, before a single weight byte is resident.
+"""pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``ek1`` entry
+key SET AT BOOT, from CODE ALONE, before a single weight byte is resident.
+
+pgw#1176: §4.27 said "THE cell key" (singular). It is a KEY SET plus a derived
+contract manifest now — one ``ek1`` per declared graph class. Every property
+the ruling wanted survives STRENGTHENED, because a partial resolve now helps:
+a pod that resolves 30 of 36 keys arms 30 classes and compiles 6, where the
+cell key made that same outcome a total miss and a full re-mint.
 
 Paul, §4.27 step 1, verbatim: *"**Immediately** on boot: derive the cell key on
 CPU from code alone — fake/meta-tensor traces, **as parallel as possible** ('to
@@ -49,17 +55,17 @@ inside that child exactly as the mint orders them inside its one process.
 Parallelism is not an identity axis
 -----------------------------------
 Blocks are assembled by ENTRY NAME, never by completion, and the fold is over
-``aot_serve.artifact_metadata`` — the mint's own stamping code, called with the
+``aot_serve.stamp_entry`` — the mint's own stamping code, called with the
 mint's own blocks. K-wide and 1-wide therefore produce the identical key by
 construction rather than by care, and ``test_boot_key_pgw1089`` pins it.
 
 The memo, and what it may hold
 ------------------------------
 ``closure digest -> the per-class KEYING BLOCKS`` — i.e. the GRAPH half of the
-identity, and **never the folded key.** The other three axes (envelope, sm,
-toolchain) re-derive in milliseconds every boot and MUST: an sm that changed, a
-toolchain that changed or an envelope the author widened has to move the key on
-the very next boot, and a memoized key would answer with the previous pod's.
+identity, and **never the folded keys.** The other two axes (sm, toolchain)
+re-derive in milliseconds every boot and MUST: an sm that changed or a
+toolchain that changed has to move every key on the very next boot, and a
+memoized key would answer with the previous pod's.
 Memoizing the graph half is sound because the traced graph is a pure function
 of the code closure the digest names (pgw#990 demoted the closure to exactly
 this: *"a memo, never identity"*).
@@ -67,8 +73,8 @@ this: *"a memo, never identity"*).
 **A memo hit SKIPS THE TRACES.** That is the point of having one — the memo
 path is milliseconds, and pgw#1089 says so. It stores the blocks rather than
 the finished class hashes for one reason: the hashes are stamped by
-``aot_serve.artifact_metadata``, and a memo that stored them would make this
-module recompute ``combined_graph_hash`` itself, which is the second derivation
+``aot_serve.stamp_entry``, and a memo that stored them would make this
+module recompute a class hash itself, which is the second derivation
 the whole design forbids. Stored blocks re-fold through the mint's own code.
 
 Honesty is enforced, not trusted: when this pod goes on to MINT, the freshly
@@ -228,12 +234,22 @@ class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
 
 @dataclass(frozen=True)
 class DerivedKey:
-    """The key this boot derived, and the measurements that produced it."""
+    """The KEY SET this boot derived — the contract manifest — and the
+    measurements that produced it.
 
-    key: cell_key.CellKey
+    pgw#1176: ``entry_keys`` replaces the single ``key``. §4.27 ruled "THE
+    cell key" (singular); it is now a derived key SET plus a manifest, and
+    every property that ruling wanted survives strengthened, because a
+    PARTIAL resolve now helps instead of falling back to a full re-mint.
+    """
+
+    #: entry name -> that class's ``ek1`` key. THE thing resolve asks for.
+    entry_keys: Mapping[str, str]
     #: entry name -> that class's 16-hex ``class_hash``. THE memoizable half.
     class_hashes: Mapping[str, str]
-    combined: str
+    #: the declaration-wide coverage LABEL (``cell_key.manifest_digest``) —
+    #: telemetry, never identity, never an adoption unit.
+    manifest: str
     workers: int
     width_reason: str
     traced: int
@@ -250,11 +266,9 @@ class DerivedKey:
     graph_witnesses: Mapping[str, str] = field(default_factory=dict)
 
     @property
-    def digest(self) -> str:
-        return self.key.digest
-
-    def axes(self) -> Dict[str, str]:
-        return self.key.axes_dict()
+    def keys(self) -> Tuple[str, ...]:
+        """Every derived entry key, sorted — the batch a resolve carries."""
+        return tuple(sorted(set(self.entry_keys.values())))
 
 
 @dataclass(frozen=True)
@@ -575,24 +589,23 @@ def class_hashes_of(
 ) -> Dict[str, str]:
     """``{entry: class_hash}`` for one set of keying blocks.
 
-    Stamped by ``aot_serve.artifact_metadata`` — the mint's own function — so a
+    Stamped by ``aot_serve.stamp_entry`` — the mint's own function — so a
     hash computed here and a hash the mint stamped are the same computation.
-    The envelope/precision/strict arguments do not reach ``class_hash`` (it
-    folds target/fork/class_dims/range_digest/graph/graph_witness/strict/
+    The precision/family arguments do not reach ``class_hash`` (it folds
+    target/fork/class_dims/range_digest/graph/graph_witness/strict/
     lora_bucket), which is why this can answer without them; ``strict``/
     ``lora_bucket`` DO, so they are read off the blocks' own
     ``graph.specialization``.
     """
     head = next(iter(blocks.values()), {}) if blocks else {}
     spec = dict((head.get("graph") or {}).get("specialization") or {})
-    meta = aot_serve.artifact_metadata(
-        family="", precision="", cell_key="",
-        entries={str(k): dict(v) for k, v in blocks.items()},
-        strict_export=bool(spec.get("strict", True)),
-        lora_bucket=int(spec.get("lora_bucket", 0) or 0))
+    strict = bool(spec.get("strict", True))
+    bucket = int(spec.get("lora_bucket", 0) or 0)
     return {
-        str(name): str(row.get("class_hash") or "")
-        for name, row in (meta.get("entries") or {}).items()
+        str(name): str(aot_serve.stamp_entry(
+            str(name), dict(block), strict=strict,
+            lora_bucket=bucket).get("class_hash") or "")
+        for name, block in blocks.items()
     }
 
 
@@ -604,44 +617,61 @@ def fold(
     strict: bool,
     lora_bucket: int,
     envelope: Mapping[str, Any],
-) -> Tuple[cell_key.CellKey, Dict[str, str], str]:
-    """``(key, {entry: class_hash}, combined_graph_hash)`` for one class set.
+) -> Tuple[Dict[str, str], Dict[str, str], str]:
+    """``({entry: entry_key}, {entry: class_hash}, manifest_digest)`` for one
+    declaration's class set — THE derived contract manifest (pgw#1176).
 
-    The fold is ``aot_serve.artifact_metadata`` followed by
-    ``cell_key.from_exported_artifact_metadata`` — i.e. the mint's own stamp
-    and the publish path's own recomputation, reached through the identical
-    functions. There is deliberately no ``class_hash``/``combined_graph_hash``
-    arithmetic in this module: a second implementation of the fold is exactly
-    the attempt-28 phantom (a declared-facts key beside a traced-facts key
-    under one axis name) that pgw#1059 exists to have retired.
+    §4.27 asked for "THE cell key" (singular). This returns a KEY SET plus a
+    manifest, and everything §4.27 wanted survives strengthened: the <60 s
+    target is unchanged (the traces are the same traces), the memo is
+    unchanged (it holds graph blocks, never keys), and boot-time adoption
+    gets STRICTLY better because a PARTIAL hit now helps — a pod that
+    resolves 30 of 36 keys arms 30 classes and compiles 6, where the cell key
+    made that outcome a total miss and a full re-mint.
 
-    The three non-graph axes are restated FRESH here on every call — envelope
-    from the declaration, ``sm`` from ``aot_serve.artifact_metadata``'s own
-    ``runtime_key()`` probe, toolchain from ``cc.toolchain_digest()`` — which
-    is why the memo may hold graph hashes and must never hold the key.
+    The fold is ``aot_serve.stamp_entry`` followed by
+    ``cell_key.from_entry_metadata`` — i.e. the mint's own stamp and the
+    publish path's own recomputation, reached through the identical
+    functions. There is deliberately no ``class_hash`` arithmetic in this
+    module: a second implementation of the fold is exactly the attempt-28
+    phantom (a declared-facts key beside a traced-facts key under one axis
+    name) that pgw#1059 exists to have retired.
+
+    The two non-graph axes are restated FRESH here on every call — ``sm``
+    from ``aot_serve.runtime_key()``, toolchain from
+    ``cc.toolchain_digest()`` — which is why the memo may hold graph hashes
+    and must never hold a key. ``envelope`` is recorded on the MANIFEST and
+    reaches no key: pgw#1176 evicted it from identity because it digests the
+    union of the ladder across the whole bundle, so widening it re-minted
+    every class that traced identically.
     """
-    meta = aot_serve.artifact_metadata(
-        family=str(family or ""),
-        precision=str(precision or ""),
-        cell_key="",
-        entries={str(k): dict(v) for k, v in blocks.items()},
-        strict_export=bool(strict),
-        lora_bucket=int(lora_bucket or 0),
-    )
-    meta[cell_key.EXPORT_ENVELOPE_KEY] = dict(envelope)
-    meta["toolchain"] = dict(cc.toolchain_digest())
-    meta[env_seal.SEAL_KEY] = env_seal.effective_seal()
+    runtime = aot_serve.runtime_key()
+    toolchain = dict(cc.toolchain_digest())
+    seal = env_seal.effective_seal()
+    # `envelope` and `precision` are MANIFEST facts under pgw#1176 — recorded
+    # by the caller on the manifest, read by no key axis here.
+    del envelope, precision
     with boot_phases.span(
         boot_phases.PHASE_KEY_FOLD, function=str(family or ""),
     ) if boot_phases.in_boot() else _null() as span:
-        key = cell_key.from_exported_artifact_metadata(meta)
+        entry_keys: Dict[str, str] = {}
+        class_hashes: Dict[str, str] = {}
+        for name, block in blocks.items():
+            stamped = aot_serve.stamp_entry(
+                str(name), dict(block), strict=bool(strict),
+                lora_bucket=int(lora_bucket or 0))
+            class_hashes[str(name)] = str(stamped.get("class_hash") or "")
+            entry_keys[str(name)] = cell_key.from_entry_metadata({
+                "kind": aot_serve.ARTIFACT_KIND,
+                **runtime,
+                cell_key.ENTRY_BLOCK_KEY: stamped,
+                "toolchain": toolchain,
+                env_seal.SEAL_KEY: seal,
+            }).digest
         if span is not None:
             span.note(f"classes={len(blocks)}")
-    class_hashes = {
-        str(name): str(block.get("class_hash") or "")
-        for name, block in (meta.get("entries") or {}).items()
-    }
-    return key, class_hashes, str(meta.get("combined_graph_hash") or "")
+    return entry_keys, class_hashes, cell_key.manifest_digest(
+        class_hashes.values())
 
 
 def _null() -> Any:
@@ -906,17 +936,17 @@ def derive(
     # by `assert_memo_honest`, which is the only moment this pod holds a traced
     # truth to compare against.
     if memoized:
-        key, class_hashes, combined = fold(
+        entry_keys, class_hashes, manifest = fold(
             memoized, family=family,
             precision=str(precision or ""), strict=strict,
             lora_bucket=int(cfg.lora_bucket or 0), envelope=envelope)
         wall_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
-            "boot-key: %s from MEMO in %d ms — %d class(es), no trace "
-            "(closure %s)", key.digest, wall_ms, len(class_hashes), digest)
+            "boot-key: manifest %s from MEMO in %d ms — %d key(s), no trace "
+            "(closure %s)", manifest, wall_ms, len(entry_keys), digest)
         return DerivedKey(
-            key=key, class_hashes=class_hashes, combined=combined,
-            workers=0,
+            entry_keys=entry_keys, class_hashes=class_hashes,
+            manifest=manifest, workers=0,
             width_reason="memo hit — no trace child was spawned",
             traced=0, memo="hit", wall_ms=wall_ms,
             graph_witnesses=graph_witnesses_of(memoized))
@@ -995,7 +1025,7 @@ def derive(
             f"produces — the shares do not reconstruct the class set")
 
     head = reports[0]
-    key, class_hashes, combined = fold(
+    entry_keys, class_hashes, manifest = fold(
         blocks,
         family=family,
         precision=head.precision,
@@ -1029,13 +1059,12 @@ def derive(
 
     wall_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
-        "boot-key: %s in %d ms — %s, %d class(es), memo=%s, key=%s",
-        key.digest, wall_ms, width.reason, len(class_hashes), memo_state,
-        key.digest)
+        "boot-key: manifest %s in %d ms — %s, %d key(s), memo=%s",
+        manifest, wall_ms, width.reason, len(entry_keys), memo_state)
     return DerivedKey(
-        key=key,
+        entry_keys=entry_keys,
         class_hashes=class_hashes,
-        combined=combined,
+        manifest=manifest,
         workers=width.workers,
         width_reason=width.reason,
         traced=len(class_hashes),

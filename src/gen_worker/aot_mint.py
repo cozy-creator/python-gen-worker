@@ -90,6 +90,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -862,6 +863,17 @@ def compile_entry_files(
     return files
 
 
+def _entry_dir_name(entry: str) -> str:
+    """A filesystem-safe directory name for one entry's packing area.
+
+    Entry names carry ``/``, ``=`` and ``,`` (``denoiser/h=16,w=16``), so they
+    are not path components. The digest keeps two entries apart without
+    inventing a second naming scheme anyone has to keep in sync — nothing
+    reads this name back; the ARTIFACT is addressed by its ``ek1`` key.
+    """
+    return hashlib.sha256(str(entry).encode("utf-8")).hexdigest()[:16]
+
+
 def package_cell(
     files_by_entry: Mapping[str, Sequence[Any]], package_path: Path,
 ) -> Path:
@@ -984,16 +996,34 @@ def autotune_posture(
 
 
 @dataclass
-class MintResult:
-    """A packed, gated, publishable artifact plus its mint telemetry."""
+class MintedArtifact:
+    """ONE packed, gated, publishable ENTRY: one graph class."""
 
+    key: str
+    entry: str
     artifact: Path
     metadata: Dict[str, Any]
+
+
+@dataclass
+class MintResult:
+    """Every entry this mint packed, plus its telemetry.
+
+    pgw#1176: a mint no longer produces "a cell". It produces N independently
+    keyed, independently publishable, independently armable artifacts and a
+    derived MANIFEST digest. Nothing waits for the set to be complete —
+    :attr:`entries` is whatever finished, which is what makes the mint's
+    durability incremental (a crash costs the one in-flight entry, ~2 min,
+    never a 1 h 37 m cell) and what makes a partially compiled family useful.
+    """
+
+    entries: Tuple[MintedArtifact, ...]
+    manifest: str
     timings: Dict[str, float]
 
     @property
-    def cell_key(self) -> str:
-        return str(self.metadata.get("cell_key") or "")
+    def keys(self) -> Tuple[str, ...]:
+        return tuple(sorted(row.key for row in self.entries))
 
 
 @dataclass
@@ -2584,25 +2614,41 @@ def _mint_cell(
         sum(len(rows) for rows in class_aliases.values()))
     timings["entry_workers"] = float(width.workers)
 
+    # ── PACK PER ENTRY (pgw#1176) ──────────────────────────────────────────
+    #
+    # One artifact per graph class, not one per cell. The multi-entry
+    # `model.pt2` is DELETED: it made identity, adoption, durability,
+    # verification and arming the same 36-entry unit, so a class that failed
+    # anywhere destroyed the whole mint (th#1825 lost 1 h 37 m to a segfault on
+    # the last entry). Each entry is packed, keyed, and finished on its own —
+    # so a crash costs the one in flight, and the entries that already exist
+    # are publishable and armable immediately.
+    #
+    # NOTE ON PROCESS GRANULARITY, because "per entry" invites the wrong
+    # reading: this is the granularity of the ARTIFACT, not of the compile
+    # CHILD. pgw#1177 measured ~39 s of `env_seal.establish()` per fresh child
+    # — ~23 minutes across 36 entries — so a child that compiles several
+    # entries in sequence is strictly better and nothing here forbids it.
     t0 = time.monotonic()
     progress.beat(
         PHASE_SEAL_PUBLISH, len(minted), len(minted),
         f"packaging {len(minted)} entries")
-    package = package_cell(
-        {row.name: row.files for row in minted}, work / aot_serve.PACKAGE_NAME)
-    timings["package_s"] = round(time.monotonic() - t0, 2)
-
-    t0 = time.monotonic()
     entry_blocks: Dict[str, Dict[str, Any]] = {}
+    packages: Dict[str, Path] = {}
     for row in minted:
+        entry_work = work / "entries" / _entry_dir_name(row.name)
+        entry_work.mkdir(parents=True, exist_ok=True)
+        package = package_cell(
+            {row.name: row.files}, entry_work / aot_serve.PACKAGE_NAME)
+        packages[row.name] = package
         entry_blocks[row.name] = _gate_and_declare_entry(row, package)
         # pgw#917: the declared-class names this entry absorbed. Recorded so
-        # the merge is auditable from the envelope alone — a reader asking
+        # the merge is auditable from the artifact alone — a reader asking
         # "where did class row X go" gets an answer instead of an absence.
         # NOT a `class_hash` fact (see `aot_serve.class_hash`, which folds
         # named fields only): an alias declares no envelope the surviving
         # entry's own contract does not already declare, so it must not
-        # re-key an otherwise identical cell.
+        # re-key an otherwise identical entry.
         merged = class_aliases.get(row.name) or ()
         if merged:
             entry_blocks[row.name]["aliases"] = [
@@ -2611,73 +2657,87 @@ def _mint_cell(
                      [str(n), int(v)] for n, v in sorted(alias.spec.class_dims)]}
                 for alias in sorted(merged, key=lambda r: r.name)
             ]
-    _write_literals(minted, package, work)
+        _write_literals([row], package, entry_work)
+    timings["package_s"] = round(time.monotonic() - t0, 2)
 
-    try:
-        meta = aot_serve.artifact_metadata(
-            family=spec.family,
-            precision=spec.precision,
-            cell_key="",
-            entries=entry_blocks,
-            strict_export=bool(spec.strict),
-            lora_bucket=int(spec.lora_bucket or 0),
-            source_ref=spec.source_ref,
-            source_digest=spec.source_digest,
-        )
-    except ValueError as exc:
-        # The cell-metadata envelope validates the contract it is handed (the
-        # OTHER "envelope" — the declared serving region — is what the range
-        # gates above police). A malformed one must
-        # fail HERE, on the mint pod, not at serve time on a paying request.
-        raise MintRefused(
-            f"envelope refused the declared contract: {exc}") from exc
-    meta.update(shared_identity_blocks(spec))
-    if execution_lane_verdict is not None:
-        # pgw#947: the DISCRETE verdict only. Milliseconds in metadata.json
-        # would break the #699 double-mint byte-compare — the artifact
-        # deliberately carries no wall clocks — and the margin threshold is
-        # what makes the discrete answer reproducible across two mints.
-        meta[kernel_path.META_KEY] = kernel_path.envelope_block(execution_lane_verdict)
-    # pgw#1034: no strict-mode drift gate here. It compared
-    # ``meta["strict_export"]`` against the value it had just been assigned
-    # from, thirteen lines up — it could not fail. Trace mode is bound where it
-    # can actually be wrong: ``aot_serve.verify_contract`` recomputes every
-    # entry's ``class_hash`` with the mode the FOREIGN bytes record, so a cell
-    # traced in the other mode is refused on staged bytes, by name.
-
+    t0 = time.monotonic()
+    shared = shared_identity_blocks(spec)
+    # The declaration-wide coverage LABEL, computed once over every class this
+    # mint produced. Telemetry, never identity: nothing resolves it, nothing
+    # downloads it, and the hub folds compile-health rows under
+    # (manifest, sm, toolchain) with it.
+    manifest = cell_key.manifest_digest(
+        aot_serve.stamp_entry(
+            name, block, strict=bool(spec.strict),
+            lora_bucket=int(spec.lora_bucket or 0)).get("class_hash") or ""
+        for name, block in entry_blocks.items())
     timings["declare_s"] = round(time.monotonic() - t0, 2)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
     phase_table = _mint_phase_table(
         minted, timings, inductor_configs, width, progress.pool_ledger)
     _emit_phase_event(spec, phase_table)
 
-    meta["cell_key"] = key = cell_identity(meta).digest
     t0 = time.monotonic()
-    artifact = aot_serve.pack(work, out_dir / f"{key}.tar.gz", meta)
+    packed: List[MintedArtifact] = []
+    for name, block in entry_blocks.items():
+        try:
+            meta = aot_serve.entry_metadata(
+                family=spec.family,
+                precision=spec.precision,
+                cell_key="",
+                name=name,
+                entry=block,
+                strict_export=bool(spec.strict),
+                lora_bucket=int(spec.lora_bucket or 0),
+                source_ref=spec.source_ref,
+                source_digest=spec.source_digest,
+                manifest_digest=manifest,
+            )
+        except ValueError as exc:
+            # The artifact-metadata envelope validates the contract it is
+            # handed (the OTHER "envelope" — the declared serving region — is
+            # what the range gates above police). A malformed one must fail
+            # HERE, on the mint pod, not at serve time on a paying request.
+            raise MintRefused(
+                f"envelope refused the declared contract: {exc}") from exc
+        meta.update(shared)
+        if execution_lane_verdict is not None:
+            # pgw#947: the DISCRETE verdict only. Milliseconds in
+            # metadata.json would break the #699 double-mint byte-compare —
+            # the artifact deliberately carries no wall clocks — and the
+            # margin threshold is what makes the discrete answer reproducible
+            # across two mints.
+            meta[kernel_path.META_KEY] = kernel_path.envelope_block(
+                execution_lane_verdict)
+        meta["cell_key"] = key = cell_identity(meta).digest
+        artifact = aot_serve.pack(
+            packages[name].parent, out_dir / f"{key}.tar.gz", meta)
+        # The phase table rides the RESULT (and the published checkpoint
+        # metadata + the typed event), never the packed envelope: durations in
+        # metadata.json would break the #699 double-mint byte-compare — the
+        # artifact deliberately carries no timestamps and no wall clocks.
+        meta["mint_phases"] = phase_table
+        if execution_lane_verdict is not None:
+            # The EVIDENCE: both lanes' ms/step and peak bytes, the margin,
+            # the headroom terms, and the device it was all measured on.
+            meta[kernel_path.EVIDENCE_KEY] = kernel_path.evidence_block(
+                execution_lane_verdict)
+        packed.append(MintedArtifact(
+            key=key, entry=name, artifact=artifact, metadata=meta))
     timings["pack_s"] = round(time.monotonic() - t0, 2)
-    # The phase table rides the RESULT (and the published checkpoint
-    # metadata + the typed event), never the packed envelope: durations in
-    # metadata.json would break the #699 double-mint byte-compare — the
-    # artifact deliberately carries no timestamps and no wall clocks.
-    meta["mint_phases"] = phase_table
-    if execution_lane_verdict is not None:
-        # The EVIDENCE: both lanes' ms/step and peak bytes, the margin, the
-        # headroom terms, and the device it was all measured on. Same channel
-        # as the phase table (published checkpoint metadata + the typed
-        # event), so a verdict is auditable long after the pod is gone.
-        meta[kernel_path.EVIDENCE_KEY] = kernel_path.evidence_block(
-            execution_lane_verdict)
 
     logger.info(
-        "aot-mint: %s lane=%s -> %s (%d entr%s across %d target(s), %.1f MB "
-        "package, combined=%s, %s)",
-        spec.family, spec.execution_lane_label() or "(plain)", key,
-        len(minted), "y" if len(minted) == 1 else "ies",
+        "aot-mint: %s lane=%s -> manifest %s (%d entr%s across %d target(s), "
+        "%.1f MB packed, %s)",
+        spec.family, spec.execution_lane_label() or "(plain)", manifest,
+        len(packed), "y" if len(packed) == 1 else "ies",
         len({row.spec.target for row in minted}),
-        package.stat().st_size / 1e6, meta.get("combined_graph_hash"),
+        sum(row.artifact.stat().st_size for row in packed) / 1e6,
         timings,
     )
-    return MintResult(artifact=artifact, metadata=meta, timings=timings)
+    return MintResult(
+        entries=tuple(packed), manifest=manifest, timings=timings)
+
 
 
 def _drive_pool(
@@ -4090,22 +4150,20 @@ def _treespec_text(spec: Any) -> str:
 
 
 def cell_identity(meta: Mapping[str, Any]) -> cell_key.CellKey:
-    """The cell key a multi-graph artifact's OWN recorded facts describe.
+    """The ``ek1`` key ONE entry artifact's OWN recorded facts describe.
 
-    The computation is :func:`cell_key.from_exported_artifact_metadata` — ONE
+    The computation is :func:`cell_key.from_entry_metadata` — ONE
     implementation, so the key the mint stamps and the axes the publish path
     declares (``fleet_cells._identity_axes``) are the same object rather than
-    two derivations that can drift. pgw#1046 moved it there and dropped the
-    ``spec`` parameter: every input is a RECORDED block (the declared
-    envelope rides ``declared_envelope``), which is what makes the
-    recomputation possible off the artifact alone.
+    two derivations that can drift. Every input is a RECORDED block, which is
+    what makes the recomputation possible off the artifact alone.
 
     A missing fact is a :class:`MintRefused` here because at mint time it means
     this pod cannot name its own product; the same absence at publish time is a
     publish refusal, not a fallback.
     """
     try:
-        return cell_key.from_exported_artifact_metadata(meta)
+        return cell_key.from_entry_metadata(meta)
     except cell_key.CellKeyError as exc:
         raise MintRefused(str(exc)) from exc
 
@@ -4343,27 +4401,47 @@ class _CallableTarget:
 # ---------------------------------------------------------------------------
 
 
-def publish(result: MintResult, publisher: Any) -> str:
-    """Publish a minted cell through a ``fleet_cells.CellPublisher``.
+def publish_entry(
+    row: MintedArtifact, publisher: Any, mint_duration_ms: int = 0,
+) -> str:
+    """Publish ONE minted entry through a ``fleet_cells.CellPublisher``.
 
     Receipts are the HUB's business: it adds them at publish-finalize (#709),
     so the producer's whole obligation is a keyed ``metadata.json`` inside the
     tar — which :func:`mint` has already stamped and proven. Refuses before the
-    wire when the artifact carries no key, since an unaddressable cell would be
-    stored under a flavor nothing can request.
+    wire when the artifact carries no key, since an unaddressable entry would
+    be stored under a flavor nothing can request.
+
+    pgw#1176: publish is PER ENTRY, and a failure is per entry. Nothing waits
+    for a set; nothing is rolled back because a sibling failed.
     """
-    key = result.cell_key
-    if not key:
+    if not row.key:
         raise MintRefused("cannot publish an artifact with no cell_key")
-    family = str(result.metadata.get("family") or "")
+    family = str(row.metadata.get("family") or "")
     if not family:
         raise MintRefused("cannot publish an artifact with no family")
+    return str(publisher.publish(
+        family, row.artifact, dict(row.metadata), int(mint_duration_ms)))
+
+
+def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
+    """Publish every entry a mint produced. ``{entry key -> checkpoint}``.
+
+    Failures are NOT swallowed and not collected: the first refusal raises, so
+    a caller that wants best-effort per-entry publishing drives
+    :func:`publish_entry` itself and decides what a partial set means. What
+    changed under pgw#1176 is that a partial set is now a coherent outcome
+    rather than a broken cell.
+    """
     # th#1355: the mint pod already measured this (timings["total_s"]), so the
     # cell's own cell_store row records what it cost to build instead of the
     # cost living only in an activity event that carries no cell key.
-    mint_duration_ms = max(0, int(round(float(result.timings.get("total_s") or 0.0) * 1000)))
-    return str(publisher.publish(
-        family, result.artifact, dict(result.metadata), mint_duration_ms))
+    mint_duration_ms = max(0, int(round(
+        float(result.timings.get("total_s") or 0.0) * 1000)))
+    return {
+        row.key: publish_entry(row, publisher, mint_duration_ms)
+        for row in result.entries
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4486,19 +4564,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
     print(json.dumps({
-        "artifact": str(result.artifact),
-        "cell_key": result.cell_key,
-        "entries": sorted((result.metadata.get("entries") or {})),
+        "manifest": result.manifest,
+        "entries": [
+            {"entry": row.entry, "key": row.key, "artifact": str(row.artifact)}
+            for row in sorted(result.entries, key=lambda r: r.entry)
+        ],
         "timings": result.timings,
     }, indent=1))
 
     if args.publish:
         try:
-            checkpoint = publish(result, _publisher_from_settings())
+            checkpoints = publish(result, _publisher_from_settings())
         except MintRefused as exc:
             print(f"REFUSED: {exc}", file=sys.stderr)
             return 2
-        print(f"published checkpoint {checkpoint}")
+        for key, checkpoint in sorted(checkpoints.items()):
+            print(f"published {key} -> checkpoint {checkpoint}")
     return 0
 
 
@@ -4575,6 +4656,8 @@ __all__ = [
     "write_phase_snapshot",
     "MINT_COMPILE_THREADS",
     "MintResult",
+    "MintedArtifact",
+    "publish_entry",
     "autotune_posture",
     "bench_step",
     "cell_identity",
