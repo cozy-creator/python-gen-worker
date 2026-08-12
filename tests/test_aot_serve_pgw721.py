@@ -539,7 +539,7 @@ def test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key():
         assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}", family="other") is False
         # The retired label form is NOT a shortcut back in.
         assert aot.is_aot_ref(f"root/family-{FAMILY}#aot-l4-torch2.13-w8a8") is False
-        assert aot.is_aot_ref(f"root/family-{FAMILY}#trt-l4-trt10.16-fp16") is False
+        assert aot.is_aot_ref(f"root/family-{FAMILY}#fp8-w8a8") is False
         # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
         # it would then be scored by FX hits).
         assert aot.is_aot_ref(
@@ -569,7 +569,7 @@ def test_verify_is_abi_exact(stub_runtime):
     # pgw#765: the GPU MODEL is not an axis — an h100-minted cell would be
     # refused on sm_90-vs-sm_89, never on the marketing name.
     assert aot.verify(_meta(sku="h100-80gb-hbm3")) == ""
-    assert "kind" in aot.verify(_meta(kind="trt-engine"))
+    assert "kind" in aot.verify(_meta(kind="an-unknown-kind"))
     assert "format" in aot.verify(_meta(format=99))
     assert "family" in aot.verify(_meta(family="flux2"), family=FAMILY)
 
@@ -776,18 +776,14 @@ def test_provision_falls_through_to_inductor_when_the_pt2_is_unusable(
     assert seen == [None]
 
 
-def test_provision_still_routes_trt_and_inductor_kinds(tmp_path, monkeypatch, stub_runtime):
+def test_provision_still_routes_the_inductor_kind(tmp_path, monkeypatch, stub_runtime):
+    """pgw#1187 narrowed this from `..._routes_trt_and_inductor_kinds`. The TRT
+    half went with TensorRT; the inductor half is the live routing this asserts,
+    and an unrecognized `kind` still falls through to it."""
     from gen_worker import compile_cache as cc
-    from gen_worker import trt_engine as te
     from gen_worker.models import provision
 
     monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
-    monkeypatch.setattr(te, "enable", lambda *a, **k: AdoptOutcome.hit())
-    pipeline = FakePipeline()
-    trt = _tar(tmp_path, _meta(kind="trt-engine"), name="trt.tar.gz")
-    assert provision.enable_compiled(
-        pipeline, Cfg(), tmp_path / "cache", trt).armed is True
-    assert aot.is_armed(pipeline) is False
 
     calls: list = []
 

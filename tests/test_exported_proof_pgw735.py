@@ -51,7 +51,7 @@ def test_proven_since_requires_new_successful_calls_and_no_revocation():
 def test_exported_kind_cell_key_refusals_are_named():
     """pgw#1059: only exported (`aot-inductor`) cells are keyed, and every
     refusal names the missing fact instead of failing opaquely."""
-    for kind in ("torch-inductor-cache", "trt-engine", ""):
+    for kind in ("torch-inductor-cache", "an-unknown-kind", ""):
         with pytest.raises(cell_key.CellKeyError) as unknown:
             cell_key.from_exported_artifact_metadata({"kind": kind})
         assert "no cell-key identity" in str(unknown.value)

@@ -7,7 +7,15 @@
 # `training-endpoints/conversion/src/conversion/trt_engine.py:70` —
 # `TrtEngine.produce_trt_engine`, a registered conversion endpoint that vendors
 # this wheel. The deletion would have failed that endpoint with an
-# AttributeError at run time. It is restored.
+# AttributeError at run time. It was restored (pgw#1180).
+#
+# EPILOGUE, pgw#1187: TensorRT was then removed from the platform ENTIRELY on
+# Paul's 2026-08-12 ruling — consumer first (te#184), then this wheel's
+# `trt_engine` module — so the two `trt_engine.*` rows that founded this file
+# are gone with it, and the guard's own [stale-exemption] check is what said so.
+# The RULE this file encodes is unaffected and is why the file survives its
+# founding example: `src/` is not a delete authority for surface an endpoint
+# author calls from another repository.
 #
 # The guard walks `src/` and reports what `src/` does not reach. That is exactly
 # right for the pod's own wiring and exactly WRONG as a delete authority,
@@ -51,6 +59,4 @@ request_context.TrainingContext.training_metric	training-endpoints/image_lora_fi
 request_context._PublisherMixin.checkpoint_dir	training-endpoints/image_lora_finetuner/tests/test_diffsynth.py:1330	TEST
 runtime_config.read_snapshot	inference-endpoints/minimax-h3/tests/test_attn_config_ie678.py:7	TEST
 testing.fake_context	inference-endpoints/qwen3.6-27b-mtp-gguf/tests/test_completion.py:90	TEST
-trt_engine.flavor_label	training-endpoints/conversion/src/conversion/trt_engine.py:82	PROD
 
-trt_engine.build	training-endpoints/conversion/src/conversion/trt_engine.py:70	PROD

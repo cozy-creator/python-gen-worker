@@ -1,7 +1,7 @@
 """The ONE reader of the ``metadata.json`` packed at the root of a cell tarball.
 
-Every artifact kind this worker handles — AOT (``aot_serve``), inductor-cache
-(``compile_cache``), TRT (``trt_engine``) — packs its envelope as a
+Every artifact kind this worker handles — AOT (``aot_serve``) and
+inductor-cache (``compile_cache``) — packs its envelope as a
 ``metadata.json`` member at the tar root. Eight call sites had each grown their
 own ``tarfile.open`` / member scan / ``json.loads`` loop, agreeing on the format
 by convention and disagreeing on everything else: which members count, whether a

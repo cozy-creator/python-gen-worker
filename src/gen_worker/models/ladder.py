@@ -32,7 +32,7 @@ CLASS_BASE = "base"  # bare bf16/fp16/fp32 row — runs anywhere a card fits it
 CLASS_FP8 = "fp8"  # fp8-E4M3 storage; universal (bf16-upcast path needs no fp8 silicon)
 CLASS_SVDQ_FP4 = "svdq-fp4"  # nunchaku SVDQuant fp4 — consumer Blackwell only
 CLASS_SVDQ_INT4 = "svdq-int4"  # nunchaku SVDQuant int4 — sm_75-89
-CLASS_NVFP4 = "nvfp4"  # plain nvfp4 artifact — Blackwell datacenter, TRT lane (not a diffusers rung)
+CLASS_NVFP4 = "nvfp4"  # plain nvfp4 artifact — Blackwell datacenter, no serving lane (not a diffusers rung)
 # Calibrated nvfp4 with two-level scales (gw#540): torch fp4 blockwise
 # scaled_mm serve lane. Blackwell-only (sm_100+ incl. sm_120 consumer) —
 # no fp4 silicon below, and the 4x dequant blow-up erases the fit story.
@@ -67,7 +67,7 @@ class Placement:
 
 
 def classify_flavor_token(flavor: str) -> str:
-    """Flavor token -> precision class; "" when unrecognized (gguf/trt/etc.
+    """Flavor token -> precision class; "" when unrecognized (gguf/etc.
     stay opaque — never ladder rungs)."""
     token = str(flavor or "").strip().lower()
     if token in _BASE_TOKENS:

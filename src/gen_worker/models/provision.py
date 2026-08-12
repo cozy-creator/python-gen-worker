@@ -688,7 +688,7 @@ def enable_compiled(
     artifact: Optional[Path] = None,
 ) -> AdoptOutcome:
     """Arm the best available compiled path for a freshly loaded pipeline:
-    a TRT engine artifact swaps the module (fail-soft), anything else goes
+    an AOTI export swaps the module (fail-soft), anything else goes
     through the torch.compile cache policy (which also covers the no-
     artifact and ALLOW_COLD lanes).
 
@@ -697,7 +697,7 @@ def enable_compiled(
     adopt. Staying eager rolls the branches back — canonical zeroed slots
     cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
     placement per request."""
-    from .. import aot_serve, compile_cache, trt_engine  # lazy: keeps `import gen_worker` off the compile/pb stack
+    from .. import aot_serve, compile_cache  # lazy: keeps `import gen_worker` off the compile/pb stack
     # Deferred: receipts pulls +151 modules onto the `import gen_worker` path.
     from .. import receipts
 
@@ -734,14 +734,6 @@ def enable_compiled(
                 return aot
             refused = aot
             artifact = None  # unusable artifact: fall through to eager policy
-        elif kind == "trt-engine" and not bucket:
-            # TRT engines expose only their plain contract — a lora_bucket
-            # declaration always rides the inductor lane.
-            trt = trt_engine.enable(pipe, cfg, cache_dir, artifact)
-            if trt.armed:
-                return trt
-            refused = trt
-            artifact = None  # unusable engine: fall through to eager policy
     try:
         armed = compile_cache.enable(pipe, cfg, cache_dir, artifact)
     except compile_cache.CellSelectionBugError:
@@ -756,7 +748,7 @@ def enable_compiled(
         return AdoptOutcome.hit()
     # The inductor lane declines without a classified token of its own — "no
     # delivered cell for this identity" is the whole answer. A prior typed
-    # refusal from the exported/TRT arm is the more specific one and survives.
+    # refusal from the exported arm is the more specific one and survives.
     return refused if refused is not None else AdoptOutcome.miss("no_cell")
 
 

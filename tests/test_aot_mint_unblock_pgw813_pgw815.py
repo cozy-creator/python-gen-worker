@@ -225,8 +225,8 @@ def test_the_w8a8_execution_lane_is_delegatable(monkeypatch: pytest.MonkeyPatch)
 def test_an_armed_non_eager_backend_still_refuses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The genuine sub-case, scoped to itself: when an AOTI export or a TRT
-    engine has REPLACED the forward there is no eager tier to serve from."""
+    """The genuine sub-case, scoped to itself: when an AOTI export has
+    REPLACED the forward there is no eager tier to serve from."""
     from gen_worker import aot_serve
 
     monkeypatch.setattr(aot_serve, "is_armed", lambda p: True)
