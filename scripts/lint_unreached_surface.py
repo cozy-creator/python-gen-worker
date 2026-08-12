@@ -863,6 +863,45 @@ def inert_declarations() -> List[Tuple[str, Dict[str, List[str]]]]:
 
 
 
+def baseline_rows() -> Tuple[Set[str], Dict[str, str]]:
+    """The ratchet's labels, and the OWNER/EXPIRY note governing each.
+
+    The file already writes those notes as prose above the rows they cover
+    (pgw#1178's block is the model). Parsing them costs nothing and turns a
+    note nobody reads into the first line of the failure that needs it: a row
+    with an owner and an expiry is a deletion somebody OWES, and the reader who
+    trips the gate is usually not that somebody.
+    """
+    known: Set[str] = set()
+    notes: Dict[str, str] = {}
+    current = ""
+    buf: List[str] = []
+    for raw in BASELINE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            body = line.lstrip("#").strip()
+            if set(body) == {"-"} or not body:
+                # a separator or a blank comment ends the block's scope
+                if buf:
+                    current = " ".join(buf)
+                    buf = []
+                elif set(body) == {"-"}:
+                    current = ""
+                continue
+            if "OWNER:" in body or "EXPIRY:" in body or buf:
+                buf.append(body)
+            continue
+        if not line:
+            continue
+        if buf:
+            current = " ".join(buf)
+            buf = []
+        known.add(line)
+        if current:
+            notes[line] = current
+    return known, notes
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true",
@@ -917,8 +956,7 @@ def main() -> int:
         print(f"wrote {len(current)} entries to {BASELINE}", file=sys.stderr)
         return 0
 
-    known = {ln.strip() for ln in BASELINE.read_text(encoding="utf-8").splitlines()
-             if ln.strip() and not ln.startswith("#")}
+    known, notes = baseline_rows()
     new = sorted(current - known)
     stale = sorted(known - current)
     for label in new:
@@ -933,22 +971,33 @@ def main() -> int:
               f"               scripts/author_surface_allowlist.txt.\n"
               f"  'No call site in this repo' is NOT 'no consumer' (§4.34, "
               f"eb245671): a symbol behind a priced hub function has a consumer "
-              f"even when no code imports it.", file=sys.stderr)
+              f"even when no code imports it.\n"
+              f"  IT MAY NOT BE YOUR CHANGE. This gate reads the MERGED tree, "
+              f"so a callable whose last caller was removed by somebody else's "
+              f"PR goes red on yours — and on theirs it was green. That is "
+              f"invisible to both authors and it has cost this program four "
+              f"blocked lanes once already. Before you touch anything, find "
+              f"the change that stranded it:\n"
+              f"      git log --oneline -S {label.rstrip('()').rsplit('.', 1)[-1]!r} -- src/\n"
+              f"  If the answer is not your commit, the fix is a baseline row "
+              f"WITH AN OWNER AND AN EXPIRY, not a deletion.", file=sys.stderr)
     # A row goes stale two ways and they need opposite readings. Saying the
     # wrong one is not a cosmetic problem: `shape_growth.coverage_line()` was
     # DELETED by pgw#1184 and this guard told master's readers it "now has a
     # production caller", which is a search for something that does not exist.
     # A gate's message is part of the gate.
     for label in stale:
+        note = notes.get(label, "")
+        owed = f"\n  THE ROW SAID: {note}" if note else ""
         if label in DEFINED_LABELS:
-            print(f"WIRED UP — turn the ratchet: {label}\n"
+            print(f"WIRED UP — turn the ratchet: {label}{owed}\n"
                   f"  This is GOOD news, not a regression: the symbol still "
                   f"exists and now HAS a production caller. That is the "
                   f"outcome this guard exists to produce. Delete its line from "
                   f"{BASELINE.name} in the same commit as the wiring.",
                   file=sys.stderr)
         else:
-            print(f"DELETED — turn the ratchet: {label}\n"
+            print(f"DELETED — turn the ratchet: {label}{owed}\n"
                   f"  The symbol is GONE from the tree, so nothing calls it and "
                   f"nothing can. Delete its line from {BASELINE.name} in the "
                   f"same commit as the deletion. (Do not go looking for its new "

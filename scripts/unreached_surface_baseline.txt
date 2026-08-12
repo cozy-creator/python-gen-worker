@@ -173,11 +173,14 @@ gen_worker.boot_phases.servable_ms()
 #       this function as its owner.
 #     * `guard_closure.closure_manifest` is the guard-closure dependency dump
 #       that rode the cell; the guard-miss doctrine it belongs to is KEPT.
-#   OWNER: the per-entry atom (compile-loop greenfield Phase 1), which deletes
-#   the multi-entry tarball, `pack`/`unpack`'s fixed member set and
-#   `combined_graph_hash` as identity in one coherent change. EXPIRY: that
-#   change. If Phase 1 lands and these three are still here, the consumer half
-#   was never re-based and this note was wrong.
+#   OWNER: the per-entry atom (compile-loop greenfield Phase 1, `pgw#1176`),
+#   which deletes the multi-entry tarball, `pack`/`unpack`'s fixed member set
+#   and `combined_graph_hash` as identity in one coherent change.
+#   EXPIRY, restated 2026-08-12 rather than copied: these rows die when
+#   `pgw1176-per-entry-atom` lands. That PR (#718) is OPEN and holding on a
+#   proto-window reply, not on work — so this baseline is short-lived BY
+#   CONSTRUCTION, and if Phase 1 lands with these five still here, the consumer
+#   half was never re-based and this note was wrong.
 #
 gen_worker.compile_cache.seed_artifact()
 gen_worker.compile_cache.artifact_metadata()
@@ -227,20 +230,8 @@ gen_worker.guard_closure.manifest_digest()
 # anything absent was cleared.
 # ---------------------------------------------------------------------------
 
-gen_worker.aot_compile_spans.dark_fraction()
-gen_worker.aot_inputs.inputs_for()
-gen_worker.aot_inputs.latent_dims()
-gen_worker.aot_package.package_entry_names()
-gen_worker.aot_serve.EntryDispatch.refusal_counts()
-gen_worker.aot_serve.realigned_inputs()
-gen_worker.aot_serve.served_entry_calls()
 gen_worker.boot_key.assert_memo_honest()
 gen_worker.boot_key.prop_economy()
-gen_worker.boot_phases.BootSpan.skipped()
-gen_worker.boot_phases.servable_ms()
-gen_worker.compile_cache.artifact_metadata()
-gen_worker.compile_cache.pack()
-gen_worker.compile_cache.seed_artifact()
 gen_worker.component_vocab.ComponentVocabulary.role_of()
 gen_worker.component_vocab.declare_components()
 gen_worker.component_vocab.reset_component_vocabulary()
@@ -282,8 +273,6 @@ gen_worker.convert.writer.verify_w8a8_snapshot()
 gen_worker.discovery.validation.validate_endpoint()
 gen_worker.families.base.family_registry()
 gen_worker.geometry.FamilyGeometry.assert_declared()
-gen_worker.guard_closure.closure_manifest()
-gen_worker.guard_closure.manifest_digest()
 gen_worker.input_assets.inputs_dir_for_request()
 gen_worker.io.exists()
 gen_worker.io.read_audio()
