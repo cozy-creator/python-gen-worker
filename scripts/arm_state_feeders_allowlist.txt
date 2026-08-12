@@ -65,3 +65,4 @@ tests/test_boot_phases_pgw764.py::test_serving_mode_distinguishes_aot_from_jit_f
 # twice; that is pgw#1150's cause, restated.)
 # ---------------------------------------------------------------------------
 src/gen_worker/executor.py::_selection_for::_CompileArtifactSelection()  PROJECTION  built from a MINT object (ref + snapshot_digest off the SelfMint), not from a materialized artifact triple — a different source, and the `self_mint=True` flag says so
+src/gen_worker/aot_identity.py::artifact_identity::ExpectedIdentity()  PROJECTION  the OBSERVED side, read out of the mint's stored meta blocks — a Mapping, not a source that NAMED an artifact; it is what `verify_declared_identity` compares the expectation AGAINST, and it deliberately leaves publisher_org empty because an artifact cannot attest to its own producer
