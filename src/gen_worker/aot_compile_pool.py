@@ -2424,15 +2424,19 @@ class EntryCompilePool:
         """pgw#830: close the outermost partition — the one that spans the
         process boundary and therefore could never be closed inside the child.
 
-        ``compile_s = child_boot_s + child_wall_s + reap_lag_s``, where
-        ``child_boot_s`` is interpreter startup plus this package's import
-        (paid once per ENTRY, because the pool's unit of parallelism is a
-        process that exits) and ``reap_lag_s`` is the child's exit plus the
-        parent's poll granularity.
+        ``compile_s = child_boot_s + child_wall_s + reap_lag_s
+        + parent_other_s``, where ``child_boot_s`` is interpreter startup plus
+        this package's import (paid once per ENTRY, because the pool's unit of
+        parallelism is a process that exits) and ``reap_lag_s`` is the child's
+        exit plus the parent's poll granularity.
 
-        A child that predates this instrumentation reports no epochs; rather
-        than invent a split, the whole wall lands in the residual and the
-        invariant check says so out loud.
+        pgw#1099: ``reap_lag_s`` is a MEASURED span and may never double as
+        the partition's catch-all. When a child reports no epochs the split is
+        unknowable, so the unclaimed remainder lands in ``parent_other_s`` —
+        the declared residual — and ``reap_lag_s`` stays 0. Overloading it
+        cost a real investigation: pgw#1085 §5c read a 259.6 s median off the
+        residual branch as poll lag and pgw#1099 was filed against a lever
+        that did not exist.
         """
         spans = dict(report.spans or {})
         spans["compile_s"] = round(elapsed, 3)
@@ -2447,11 +2451,15 @@ class EntryCompilePool:
                 report.module_import_epoch - row.spawn_epoch, 3)
         if report.report_epoch:
             spans["reap_lag_s"] = round(reap_epoch - report.report_epoch, 3)
-        if "child_boot_s" not in spans or "reap_lag_s" not in spans:
-            spans["child_boot_s"] = spans.get("child_boot_s", 0.0)
-            spans["reap_lag_s"] = round(
-                spans["compile_s"] - spans["child_boot_s"]
-                - float(spans.get("child_wall_s", 0.0)), 3)
+        # The outer partition's residual: recorded on EVERY entry (0.0 when the
+        # named members closed it), so `check` covers it and `dark_fraction`
+        # counts it instead of a measured span silently absorbing the gap.
+        spans["child_boot_s"] = spans.get("child_boot_s", 0.0)
+        spans["reap_lag_s"] = spans.get("reap_lag_s", 0.0)
+        spans["parent_other_s"] = round(
+            spans["compile_s"] - spans["child_boot_s"]
+            - float(spans.get("child_wall_s", 0.0))
+            - spans["reap_lag_s"], 3)
         violations = aot_compile_spans.check(spans)
         if violations:
             # Named, loud, and non-fatal: an attribution defect must never

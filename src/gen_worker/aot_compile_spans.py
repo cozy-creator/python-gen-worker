@@ -24,7 +24,7 @@ total by construction and a newly-introduced phase shows up as the residual
 growing rather than as time silently vanishing::
 
     compile_s (parent Popen -> reap)
-      = child_boot_s + child_wall_s + reap_lag_s
+      = child_boot_s + child_wall_s + reap_lag_s + parent_other_s
 
     child_wall_s (child module import -> report written)
       = child_seal_s + child_torch_import_s + child_devlock_s
@@ -67,7 +67,13 @@ import time
 from typing import Dict, Iterator, List, Mapping, Tuple
 
 #: Bump when the partition changes shape, so a reader never mixes two ledgers.
-SPANS_V = 1
+#: v2 (pgw#1099): the outer partition grew its own residual, ``parent_other_s``.
+#: Before it, an unclosable outer split was written into ``reap_lag_s``, so one
+#: NAME meant two things — "the child's exit plus the parent's poll
+#: granularity" on a reporting child, and "everything nobody could attribute"
+#: on a silent one. A reader could not tell which, and one did not: pgw#1085
+#: §5c read the residual branch as poll lag on a 36-entry sdxl mint.
+SPANS_V = 2
 
 #: Disjoint ``compilation_time_metrics`` leaves. These partition the inside of
 #: ``aot_compile`` together with the ``compile_other_s`` residual.
@@ -97,7 +103,9 @@ OVERLAY_KEYS: Dict[str, Tuple[str, ...]] = {
 #: The three-level partition, as {total: members}. ``check`` walks this, so
 #: adding a member in one place is enough for the invariant to cover it.
 PARTITIONS: Dict[str, Tuple[str, ...]] = {
-    "compile_s": ("child_boot_s", "child_wall_s", "reap_lag_s"),
+    "compile_s": (
+        "child_boot_s", "child_wall_s", "reap_lag_s", "parent_other_s",
+    ),
     "child_wall_s": (
         "child_seal_s", "child_torch_import_s", "child_devlock_s",
         "child_program_load_s", "compile_wall_s", "child_other_s",
@@ -110,14 +118,20 @@ PARTITIONS: Dict[str, Tuple[str, ...]] = {
 
 #: Residual member of each partition — the one that absorbs whatever the named
 #: members did not claim. Named so the invariant can say WHICH bucket grew.
-RESIDUALS = ("child_other_s", "compile_other_s")
+#: Every level has exactly one, and no MEASURED span is ever used as another
+#: level's residual (pgw#1099): a name that means "what I measured" on one
+#: entry and "what nobody could measure" on the next is unreadable, and a
+#: reader who sums it across entries is measuring the instrument.
+RESIDUALS = ("parent_other_s", "child_other_s", "compile_other_s")
 
 #: Recorded alongside the partition but NOT a member of it: each is a split of
 #: a member above it, kept because it is the number that decides a fix.
 #: ``child_interp_s`` is the part of ``child_boot_s`` a persistent pool worker
 #: would delete; ``triton_s`` / ``device_lock_wait_s`` nest inside
 #: ``compile_wall_s``. Anything listed here must be excluded by a reader
-#: summing the table.
+#: summing the table. NOTE the two ``parent_*`` entries here are OUTSIDE
+#: ``compile_s`` (parent work that overlaps other children); ``parent_other_s``
+#: is not one of them — it is the residual INSIDE ``compile_s``.
 SUBSPANS = ("child_interp_s", "triton_s", "autotune_s", "device_lock_wait_s",
             "inductor_total_s", "parent_stage_s", "parent_spawn_s")
 
