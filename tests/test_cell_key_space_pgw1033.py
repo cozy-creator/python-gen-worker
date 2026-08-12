@@ -301,7 +301,7 @@ def test_an_ARM_TOKEN_is_never_classified_as_an_exported_ref(
     pgw#1152 moved the other half out. ``note_aot_key`` used to be called by
     this finalize — one of pgw#1033's two SELF-PRODUCED feeders, and the
     convention the ordered/boot-adopt arm did not keep (pgw#1141b, measured on
-    a pod). Registration is now a property of ``aot_serve.load_and_wrap``, so
+    a pod). Registration is now a property of ``aot_serve.arm_entry``, so
     "an exported cell's ref is recognized" is a fact about the WRAP and is
     asserted where a real wrap happens:
     ``test_adopted_arm_lane_pgw1141b::test_the_ordered_arm_teaches_the_recognizer_its_key``.

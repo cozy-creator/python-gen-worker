@@ -60,9 +60,9 @@ def _entry_block() -> Dict[str, Any]:
 
 def _minted(family: str = "sdxl") -> Dict[str, Any]:
     """A real, fully-stamped artifact envelope from the ONE producer."""
-    return aot_serve.artifact_metadata(
+    return aot_serve.entry_metadata(
         family=family, precision="bf16", cell_key="",
-        entries={"unet": _entry_block()},
+        name="unet", entry=_entry_block(),
         strict_export=True, lora_bucket=0,
     )
 
