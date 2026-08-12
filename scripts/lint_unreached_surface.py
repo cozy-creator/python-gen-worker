@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""pgw#849 guard 2 — public surface in the AOT/mint/serve packages that NOTHING
-in production reaches.
+"""pgw#849 guard 2 — public surface in `gen_worker` that NOTHING in production
+reaches. Whole-package since pgw#1182.
 
 This program's dominant defect class is *wiring*, not logic: correct code, green
 unit tests, no production caller. ``entry_workers(peak_rss_bytes=…)`` handled a
@@ -31,10 +31,28 @@ is missing is that the returned object is never entered. No reachability
 analysis sees that, and this guard does not pretend to. It catches the
 "nothing calls it" half of the class, not the "called but never driven" half.
 
-Scope (``GUARDED``) is deliberately the aot / mint / serve / arm modules where
-the eleven instances landed. Whole-package scope was measured and is noisier for
-no extra yield (pgw#849). This is not a general dead-code linter and must not
-grow into one.
+SCOPE. It was the aot / mint / serve modules only, on a pgw#849 measurement that
+whole-package scope was "noisier for no extra yield". **pgw#1182 supersedes
+that**: the noise was two fixable things, not a property of the wider scope —
+
+  1. the resolver mis-resolved every relative import inside an ``__init__.py``
+     (level 1 dropped a component that is not there when the module IS the
+     package), so all five ``cli.*.add_subparser`` and four ``request_context``
+     internals read as unreached while ``cli/__init__.py`` calls them by name;
+  2. there was no way to say *the caller is an endpoint repo*. An endpoint
+     author's code is production and lives where this process cannot see it.
+     ``scripts/author_surface_allowlist.txt`` says so, one symbol at a time,
+     with the call site as proof — after pgw#1179 deleted ``trt_engine.build``
+     and the producer turned out to be a conversion endpoint in
+     ``training-endpoints``.
+
+With both fixed the whole package yields 116 against the 14 this guard watched,
+and the defect class was never confined to the mint path.
+
+**This is still not a general dead-code linter.** It reports PUBLIC callables
+only, it clears anything an operator script or an endpoint repo reaches, and
+every finding is a question — wire it, delete it, or prove the caller is
+elsewhere — never an instruction.
 
 Usage::
 
@@ -81,15 +99,55 @@ SELF = Path(__file__).resolve()
 # nobody has to shrink is a baseline nobody reads.
 BASELINE = REPO / "scripts" / "unreached_surface_baseline.txt"
 
-# The guarded scope: the modules carrying the mint / arm / serve path.
-GUARDED = re.compile(
-    r"^gen_worker\.(aot_.*|mint_.*|forge|executor|lifecycle|worker|hot_swap"
-    r"|boot_phases|guard_closure|fleet_cells|cell_key"
-    r"|compile_cache|preload|numerics_ladder)$")
+# The guarded scope: THE WHOLE PACKAGE (pgw#1182). It used to be the mint / arm
+# / serve modules only, on a pgw#849 measurement that whole-package scope was
+# "noisier for no extra yield". That measurement is superseded: the noise was
+# two fixable things — a resolver that mis-resolved every relative import inside
+# an `__init__.py`, and no way to say "the caller is an endpoint repo" — and
+# with both fixed the whole package yields 116 findings against the 14 this
+# guard was watching. The defect class is not confined to the mint path and the
+# fence should not be either.
+#
+# `gen_worker.pb` is excluded: generated protobuf stubs, authored by protoc.
+GUARDED = re.compile(r"^gen_worker(?!\.pb($|\.))")
 
 # The authored-worker API. Its callers are endpoint repos that vendor the
 # wheel; this tree is not their call site and never will be.
 EXEMPT_PACKAGES = ("gen_worker.api",)
+
+# The same fact, one symbol at a time, WITH PROOF. `gen_worker.api` is exempt by
+# package because the whole package is authored-worker surface; these are
+# symbols OUTSIDE it that an endpoint repo nonetheless calls. Each row names the
+# call site. pgw#1179 deleted `trt_engine.build` for want of this file.
+AUTHOR_SURFACE_FILE = REPO / "scripts" / "author_surface_allowlist.txt"
+
+
+def author_surface() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not AUTHOR_SURFACE_FILE.exists():
+        return out
+    for raw in AUTHOR_SURFACE_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p for p in line.split("\t") if p]
+        if len(parts) < 2:
+            continue
+        target, site = parts[0], parts[1]
+        # Rows are written the way the report prints them (`io.read_image`);
+        # a Definition's target carries the package (`gen_worker.io.…`).
+        if not target.startswith("gen_worker."):
+            target = f"gen_worker.{target}"
+        kind = parts[2] if len(parts) > 2 else "PROD"
+        out[target] = f"called from {site} ({kind}) — see author_surface_allowlist.txt"
+    return out
+
+
+AUTHOR_SURFACE: Dict[str, str] = author_surface()
+
+#: Set by `run`. The author-surface staleness check only means something when
+#: every module was collected; in guarded scope most targets are simply absent.
+SCOPE_ALL = False
 
 # target -> why it is unreached AND who deletes it. Each row is a DELETION
 # THAT IS OWED, never a permanent pardon: the only legitimate reason to be in
@@ -259,8 +317,9 @@ class Reach:
 class _FileScan(ast.NodeVisitor):
     """Resolve import bindings, then record what this file reaches."""
 
-    def __init__(self, mod: str, reach: Reach) -> None:
+    def __init__(self, mod: str, reach: Reach, *, is_package: bool = False) -> None:
         self.mod = mod
+        self.is_package = is_package
         self.pkg = mod.rsplit(".", 1)[0] if "." in mod else mod
         self.reach = reach
         self.direct: Dict[str, str] = {}     # local name -> "mod.attr"
@@ -276,11 +335,17 @@ class _FileScan(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         base = node.module or ""
         if node.level:
+            # A relative import resolves against the importer's PACKAGE. For a
+            # module that is the parent (drop one component per level); for a
+            # package's own `__init__.py` the package IS `self.mod`, so one
+            # fewer. Getting this wrong made every `from . import x` inside an
+            # `__init__.py` resolve to the grandparent and read as unreached —
+            # `cli/__init__.py` wires all five subcommands that way, and all
+            # five looked dead under `--all`.
+            drop = node.level - 1 if self.is_package else node.level
             parts = self.mod.split(".")
-            root = ".".join(parts[: max(len(parts) - node.level + 1, 1)]) \
-                if node.level == 1 else ".".join(parts[: max(len(parts) - node.level, 1)])
-            # level 1 = current package (drop the module component)
-            root = ".".join(self.mod.split(".")[:-node.level]) or self.mod.split(".")[0]
+            root = ".".join(parts[: len(parts) - drop]) if drop else self.mod
+            root = root or parts[0]
             base = f"{root}.{base}" if base else root
         for a in node.names:
             local = a.asname or a.name
@@ -362,7 +427,7 @@ def collect_reach(paths: List[Path]) -> Reach:
         except SyntaxError:
             continue
         mod = module_name(path) if _under(path, SRC) else f"_script.{path.stem}"
-        scan = _FileScan(mod, reach)
+        scan = _FileScan(mod, reach, is_package=path.name == "__init__.py")
         scan.visit(tree)
         reach.strings |= scan.all_strings
     return reach
@@ -429,12 +494,16 @@ def stale_exemptions(defs: List[Definition]) -> List[str]:
     symbol gets waved through under a comment about a different one.
     """
     have = {d.target for d in defs}
-    return sorted(t for t in EXEMPT_TARGETS if t not in have)
+    return sorted(set(EXEMPT_TARGETS) - have) + sorted(
+        f"{t} (author_surface_allowlist.txt)"
+        for t in set(AUTHOR_SURFACE) - have)
 
 
 def exempt(d: Definition, published: Set[str], reach: Reach) -> Optional[str]:
     if d.target in EXEMPT_TARGETS:
         return EXEMPT_TARGETS[d.target]
+    if d.target in AUTHOR_SURFACE:
+        return AUTHOR_SURFACE[d.target]
     if any(d.module == p or d.module.startswith(p + ".") for p in EXEMPT_PACKAGES):
         return "authored-worker API (consumers are endpoint repos)"
     if d.name in published:
@@ -473,7 +542,144 @@ def reached(d: Definition, reach: Reach) -> bool:
             or d.name in reach.local.get(d.module, set()))
 
 
+# ---------------------------------------------------------------------------
+# THE CROSS-REPO CHECK (pgw#1182)
+#
+# The finding this whole guard produces is "no non-test call site IN THIS REPO",
+# and that is NOT the claim "no consumer". pgw#1179 deleted `trt_engine.build`
+# on the first reading of the second; its caller is a conversion endpoint in
+# `training-endpoints`, and the function it backs, `produce-trt-engine`, is a
+# PRICED hub product (`e2e/manifests/pricing.yaml`). A symbol behind a priced
+# function has a consumer even when no code in any repo imports it.
+#
+# CI has none of these checkouts, which is why the answer is a checked-in file
+# (`author_surface_allowlist.txt`) and this mode is the thing that MAINTAINS it.
+# Run it on a developer box before any deletion:
+#
+#     python scripts/lint_unreached_surface.py --siblings
+#
+# It is RED when a finding is reached from a sibling repo and is not in the
+# allowlist — i.e. exactly when somebody is about to delete a cross-repo
+# consumer's dependency.
+# ---------------------------------------------------------------------------
+
+SIBLINGS = ("training-endpoints", "inference-endpoints",
+            "private-inference-endpoints", "tensorhub", "e2e", "cozy-local")
+def _workspace() -> Path:
+    """The directory the sibling repos sit in. Walk up rather than assume
+    `REPO.parent`: a lane works from `~/cozy/.worktrees/<repo>/<branch>`, where
+    the parent holds worktrees and no siblings at all — and a check that
+    silently finds nothing is worse than no check."""
+    for cand in [REPO, *REPO.parents][:6]:
+        # `.worktrees/` holds a directory per repo too, so "the name exists" is
+        # not enough — require an actual checkout.
+        if sum((cand / s / ".git").exists() for s in SIBLINGS) >= 2:
+            return cand
+    return REPO.parent
+
+
+WORKSPACE = _workspace()
+PRICING = WORKSPACE / "e2e" / "manifests" / "pricing.yaml"
+
+
+def _sibling_texts(with_branches: bool,
+                   extra: Tuple[str, ...] = ()) -> List[Tuple[str, str, str]]:
+    """(repo, where, text) over every sibling checkout, and optionally over the
+    content of every REMOTE BRANCH — a call site can live on an unmerged branch
+    and is a consumer just the same.
+
+    ``git grep`` rather than a filesystem walk: it reads the index, skips
+    ``.venv`` / ``node_modules`` / build output for free, and turns a
+    ten-minute rglob over tensorhub into about a second. Only lines mentioning
+    ``gen_worker`` or a ``ctx.`` call can be a call site, so that is all we
+    carry.
+    """
+    import subprocess
+    # `gen_worker` and `ctx.` alone are NOT enough: a sibling writes
+    # `io.read_image(path)` on a line that mentions neither. So every finding's
+    # leaf name is a pattern too — that is the whole point of the check.
+    pats: List[str] = ["-e", "gen_worker", "-e", r"ctx\.[a-z_]"]
+    for name in extra:
+        pats += ["-e", name]
+    out: List[Tuple[str, str, str]] = []
+    for name in SIBLINGS:
+        root = WORKSPACE / name
+        if not (root / ".git").exists():
+            continue
+        try:
+            blob = subprocess.run(["git", "grep", "-h", "-I", *pats], cwd=root,
+                                  capture_output=True, text=True,
+                                  timeout=180).stdout
+        except Exception:
+            blob = ""
+        if blob:
+            out.append((name, name, blob))
+        if not with_branches:
+            continue
+        try:
+            heads = subprocess.run(["git", "ls-remote", "--heads", "origin"],
+                                   cwd=root, capture_output=True, text=True,
+                                   timeout=180).stdout.split()
+        except Exception:
+            continue
+        for ref in [h for h in heads if h.startswith("refs/heads/")]:
+            br = ref[len("refs/heads/"):]
+            try:
+                blob = subprocess.run(
+                    ["git", "grep", "-h", "-I", *pats, f"origin/{br}"],
+                    cwd=root, capture_output=True, text=True,
+                    timeout=180).stdout
+            except Exception:
+                continue
+            if blob:
+                out.append((name, f"{name}@{br}", blob))
+    return out
+
+
+def cross_repo_report(findings: List["Finding"], with_branches: bool) -> int:
+    leaves = tuple(sorted({f.label.rstrip("()").split(".")[-1]
+                           for f in findings}))
+    corpus = _sibling_texts(with_branches, leaves)
+    if not corpus:
+        print("no sibling checkouts beside this repo — nothing to check "
+              f"(looked for {', '.join(SIBLINGS)} in {WORKSPACE})", file=sys.stderr)
+        return 0
+    priced = PRICING.read_text(encoding="utf-8") if PRICING.exists() else ""
+    missing: List[str] = []
+    for f in findings:
+        target = f.label.rstrip("()")
+        parts = target.split(".")
+        leaf, mod = parts[-1], ".".join(parts[1:-1])
+        modtail = mod.split(".")[-1] if mod else ""
+        pats = [rf"from gen_worker\.{re.escape(mod)} import [^\n]*\b{re.escape(leaf)}\b",
+                rf"from gen_worker import [^\n]*\b{re.escape(leaf)}\b",
+                rf"\bctx\.{re.escape(leaf)}\s*\("]
+        if modtail:
+            pats.append(rf"\b{re.escape(modtail)}\.{re.escape(leaf)}\s*\(")
+        for repo, where, text in corpus:
+            if any(re.search(pat, text) for pat in pats):
+                if target not in AUTHOR_SURFACE:
+                    missing.append(f"{target} — reached from {where}")
+                break
+        else:
+            # A priced product function names a consumer no import shows.
+            hyphen = leaf.replace("_", "-")
+            if priced and re.search(rf"^\s*{re.escape(hyphen)}\s*:", priced, re.M):
+                missing.append(
+                    f"{target} — backs the PRICED function '{hyphen}' "
+                    f"({PRICING.relative_to(WORKSPACE)})")
+    for m in sorted(set(missing)):
+        print(f"CROSS-REPO CONSUMER, not in author_surface_allowlist.txt: {m}",
+              file=sys.stderr)
+    print(f"\ncross-repo check: {len(corpus)} files/branches scanned across "
+          f"{len(SIBLINGS)} siblings, {len(set(missing))} unlisted consumers",
+          file=sys.stderr)
+    return 1 if missing else 0
+
+
 def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
+    global SCOPE_ALL
+    SCOPE_ALL = scope_all
     src_files = py_files([PKG])
     defs = [d for d in collect_definitions(src_files)
             if scope_all or GUARDED.match(d.module)]
@@ -664,6 +870,13 @@ def main() -> int:
                          "steer nothing — report only; see the header note")
     ap.add_argument("--write-baseline", action="store_true",
                     help="rewrite the ratchet file from the current tree")
+    ap.add_argument("--siblings", action="store_true",
+                    help="check every finding against the sibling repos and "
+                         "the priced-function manifest (developer box only)")
+    ap.add_argument("--branches", action="store_true",
+                    help="with --siblings, also scan every REMOTE BRANCH of "
+                         "each sibling (slow; a call site on an unmerged "
+                         "branch is a consumer too)")
     args = ap.parse_args()
 
     if args.inert_declarations:
@@ -678,6 +891,8 @@ def main() -> int:
         return 0
 
     findings = run(args.all, args.params, args.explain)
+    if args.siblings:
+        return cross_repo_report(findings, args.branches)
     for f in sorted(findings, key=lambda f: (str(f.path), f.line, f.label)):
         tail = f"  [{f.note}]" if f.note else ""
         print(f"{f.path.relative_to(REPO)}:{f.line}: [{f.kind}] "

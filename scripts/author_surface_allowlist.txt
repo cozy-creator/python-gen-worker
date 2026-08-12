@@ -1,0 +1,56 @@
+# pgw#1182 — surface whose PRODUCTION CALLER IS IN ANOTHER REPOSITORY.
+#
+# WHY THIS FILE EXISTS, stated as the regression that produced it. pgw#1179 read
+# `lint_unreached_surface --all`, saw `trt_engine.build` with no call site in
+# this tree, called the TRT lane "a consumer with no producer" and deleted 245
+# lines. The producer was
+# `training-endpoints/conversion/src/conversion/trt_engine.py:70` —
+# `TrtEngine.produce_trt_engine`, a registered conversion endpoint that vendors
+# this wheel. The deletion would have failed that endpoint with an
+# AttributeError at run time. It is restored.
+#
+# The guard walks `src/` and reports what `src/` does not reach. That is exactly
+# right for the pod's own wiring and exactly WRONG as a delete authority,
+# because an endpoint author's code is production too and lives somewhere this
+# process cannot see. This file is the boundary between the two, and every row
+# carries the proof — repo/path:line of a real call site — so a reader can check
+# it rather than trust it.
+#
+# FORMAT: `<target> <TAB> <repo/path:line> <TAB> <PROD|TEST>`
+#
+#   PROD  a real endpoint / library call site. The symbol is load-bearing.
+#   TEST  proven only by a sibling repo's own test. Weaker: it means somebody
+#         depends on the symbol's shape, not that a pod ever runs it. Kept, but
+#         it is the row to re-examine first if the surface is ever reshaped.
+#
+# HOW TO REGENERATE (the sibling checkouts are developer-box only — CI has none
+# of them, which is why this is a checked-in file and not a live scan):
+#
+#     for each finding of `lint_unreached_surface.py --all`, search
+#     ~/cozy/{inference,private-inference,training}-endpoints, ~/cozy/e2e and
+#     ~/cozy/cozy-local for `from gen_worker.<mod> import <name>`,
+#     `<mod-tail>.<name>(`, or `ctx.<name>(`.
+#
+# A row naming a symbol this tree no longer defines is RED — same rule as
+# EXEMPT_TARGETS. A permanent pardon still has to point at something real.
+
+convert.clone.from_civitai	training-endpoints/conversion/src/conversion/mirror.py:185	PROD
+io.read_image	inference-endpoints/flux.2-klein-4b/src/flux2_klein_4b/main.py:569	PROD
+io.write_video	inference-endpoints/wan-2.2/src/wan_2_2/main.py:2134	PROD
+models.loading.apply_block_window_offload	inference-endpoints/ltx-video-2.3/src/ltx_video_23/main.py:128	PROD
+models.svdq_layout.pack_lowrank	training-endpoints/conversion/src/conversion/quant/svdq_produce.py:852	PROD
+models.svdq_layout.pack_qweight	training-endpoints/tests/test_foreign_quant_te134.py:166	TEST
+models.svdq_layout.pack_vector	training-endpoints/conversion/src/conversion/quant/svdq_produce.py:852	PROD
+models.svdq_layout.pack_wscales	training-endpoints/tests/test_foreign_quant_te134.py:166	TEST
+models.w8a8.quantize_tree_w8a8	inference-endpoints/scripts/ie543_batch_bench.py:78	PROD
+models.w8a8.sanitize_w8a8_state_dict	inference-endpoints/anima/src/anima/main.py:327	PROD
+request_context.ConversionContext.mktemp	training-endpoints/vlm_judge/src/vlm_judge/judge.py:166	PROD
+request_context.RequestContext.call_endpoint	private-inference-endpoints/dj-pipeline/src/dj_pipeline/main.py:175	PROD
+request_context.RequestContext.workflow_checkpoint	private-inference-endpoints/dj-pipeline/src/dj_pipeline/main.py:271	PROD
+request_context.TrainingContext.training_metric	training-endpoints/image_lora_finetuner/src/image_lora_finetuner/diffsynth_loop.py:593	PROD
+request_context._PublisherMixin.checkpoint_dir	training-endpoints/image_lora_finetuner/tests/test_diffsynth.py:1330	TEST
+runtime_config.read_snapshot	inference-endpoints/minimax-h3/tests/test_attn_config_ie678.py:7	TEST
+testing.fake_context	inference-endpoints/qwen3.6-27b-mtp-gguf/tests/test_completion.py:90	TEST
+trt_engine.flavor_label	training-endpoints/conversion/src/conversion/trt_engine.py:82	PROD
+
+trt_engine.build	training-endpoints/conversion/src/conversion/trt_engine.py:70	PROD
