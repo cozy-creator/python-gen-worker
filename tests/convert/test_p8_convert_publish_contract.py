@@ -100,7 +100,7 @@ def test_explicit_dtype_mismatch_casts_not_silent_passthrough(
     )
 
     assert not result.failed_flavors, result.failed_flavors
-    assert result.published[0]["flavor"] == "bf16"
+    assert result.published[0]["dtype"] == "bf16"
     assert len(calls) == 1 and calls[0]["dtype"] == "bf16"  # a real cast ran
 
 
@@ -120,7 +120,7 @@ def test_matching_dtype_is_genuinely_zero_work(
         outputs=[{"dtype": "fp32", "file_layout": "diffusers", "file_type": "safetensors"}],
     )
     assert not result.failed_flavors
-    assert result.published[0]["flavor"] == "fp32"
+    assert result.published[0]["dtype"] == "fp32"
     assert calls == []
 
 

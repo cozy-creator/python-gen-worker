@@ -774,7 +774,10 @@ class CellPublisher:
                 destination_repo=repo,
                 files=[CommitFile(path=artifact.name, local_path=artifact)],
                 mode="replace",
-                flavor=key,
+                # pgw#1159: the cell key is NOT a publish-body field. It is
+                # the capability token's cell claim (th#1340) — the hub
+                # derives the cell identity there and refuses a body that
+                # states one.
                 # th#1645: CONTROL only. The bulk envelope is in the artifact.
                 metadata=control_plane_metadata(meta),
                 on_stage=lambda stage, facts: _publish_leg(

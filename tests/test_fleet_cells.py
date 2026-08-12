@@ -478,7 +478,7 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     assert kind == "publish_v2", "the cell publisher ships over chunked sha256"
     assert kw["destination_repo"] == "root/family-fam"
     assert kw["mode"] == "replace"
-    assert kw["flavor"] == key
+    assert "flavor" not in kw  # pgw#1159: dead hub-side, so it is not sent
     assert "tags" not in kw  # a cell publish never binds tags
     # th#1340 refuses a body that names the cell identity: it is hub-derived
     # and rides the capability token.

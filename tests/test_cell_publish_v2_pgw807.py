@@ -302,7 +302,9 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
     # Genuinely chunked, and the chunk digests are what was PUT.
     assert len(f["chunks"]) > 1
     assert sorted(hub.httpd.puts) == sorted(c["digest"] for c in f["chunks"])
-    assert decl["mode"] == "replace" and decl["flavor"] == CELL_KEY
+    assert decl["mode"] == "replace"
+    # pgw#1159: the cell key is the token's claim, never a body field.
+    assert "flavor" not in decl
     assert "tags" not in decl and "default_flavor" not in decl
     # th#1340: the cell identity is hub-derived and rides the token.
     for forbidden in ("cell_publish", "cell_key", "family",

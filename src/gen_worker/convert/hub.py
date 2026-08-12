@@ -2,13 +2,15 @@
 
   POST /api/v1/repos/{org}/{name}/publishes
       {files: [{path, size_bytes, digest:"sha256:<hex>", chunks?}], mode,
-       tags, flavor/dtype/file_layout/file_type, metadata, provenance, ...}
+       tags: [{tag, head?}], dtype/file_layout/file_type, artifact_contract,
+       metadata, provenance, ...}
   → {publish_id, have: [...], need: [{digest, put_url, headers, ...}]}
 
 Then PUT every `need` grant VERBATIM (the sha256 is signed into the presigned
 URL, so the store itself refuses bytes that do not hash to the key), re-plan
-`.../grants` to resume, and POST `.../complete`. One publish == one checkpoint
-== one flavor.
+`.../grants` to resume, and POST `.../complete`. One publish == one
+checkpoint; N artifacts are N publishes joining one tag group, and exactly
+one of them is `head=True`.
 
 THE v1 (blake3) `/commits` PROTOCOL IS GONE FROM THIS CLIENT (pgw#807). It was
 frozen hub-side (th#1303 phase 3.5 — every new v1 commit answers 410
@@ -87,16 +89,14 @@ _COMPLETE_TIMEOUT_S = 600.0
 # way twice. Waiting stays observable: the loop beats liveness every pass.
 _COMPLETE_SILENCE_WINDOW_S = 6.0 * _COMPLETE_TIMEOUT_S
 
-def _token(v: str) -> str:
-    """Publish-body token hygiene (gw#488): the internal dtype-axis colon
+def _dtype_token(v: str) -> str:
+    """Publish-body dtype hygiene (gw#488): the internal dtype-axis colon
     forms (``gguf:q4_k_m``, ``int8:awq``) publish as ``-`` forms.
 
-    Moved here from ``models.refs`` by pgw#1148: the ref grammar no longer
-    has a flavor axis, so this is publish-body hygiene and nothing else. The
-    ``flavor``/``flavors``/``default_flavor`` publish fields it normalizes
-    are themselves DEAD hub-side (th#1803 decodes them and reads none) —
-    re-keying this surface onto ``tags[].head`` + ``artifact_contract`` is
-    the conversion-surface residual filed on pgw#1148.
+    pgw#1159 narrowed this to `dtype`, the one field it normalizes that the
+    hub still reads. `flavor`/`flavors`/`default_flavor` are GONE from the
+    publish body — th#1803 deleted the flavor as an address, and this surface
+    kept sending fields the hub decoded and never read.
     """
     return str(v or "").replace(":", "-")
 
@@ -440,9 +440,15 @@ class HubClient:
         # what it is for: assembling ONE checkpoint across several commits
         # (clone.py's chunked full-clone, _stream.py's streamed output).
         mode: str = "replace",
-        flavor: str = "",
-        flavors: list[str] | None = None,
-        default_flavor: str = "",
+        # th#1803/pgw#1159: HEAD, not `default_flavor`. A variant publish
+        # (one carrying quant provenance) JOINS the tag group without moving
+        # the tag; `head=True` says this publish owns the bare row.
+        head: bool = False,
+        # th#1580: `ns.name@N` — what the bytes ARE. PROVEN at tier 1 against
+        # the safetensors header, so an unprovable claim refuses the publish
+        # instead of being stored as a maybe. This replaces the `flavor`
+        # token, which stated the same thing and was never read.
+        artifact_contract: str = "",
         dtype: str = "",
         file_layout: str = "",
         file_type: str = "",
@@ -548,20 +554,16 @@ class HubClient:
         # the wire (the classification gate refuses an OMITTED tags field on
         # repos that carry tag rows); only None omits the field.
         if tags is not None:
-            df = _token(default_flavor)
             body["tags"] = [
-                {"tag": t, **({"default_flavor": df} if df else {})} for t in tags
+                {"tag": t, **({"head": True} if head else {})} for t in tags
             ]
         for key, val in (
-            ("flavor", _token(flavor)), ("default_flavor", _token(default_flavor)),
-            ("dtype", _token(dtype)), ("file_layout", file_layout),
+            ("dtype", _dtype_token(dtype)), ("file_layout", file_layout),
             ("file_type", file_type), ("display_label", display_label),
-            ("objective", objective),
+            ("objective", objective), ("artifact_contract", artifact_contract),
         ):
             if val:
                 body[key] = val
-        if flavors:
-            body["flavors"] = [_token(f) for f in flavors]
         if distilled is not None:
             body["distilled"] = bool(distilled)
         if required_paths:

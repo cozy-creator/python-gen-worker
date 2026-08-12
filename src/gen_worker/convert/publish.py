@@ -203,7 +203,11 @@ def publish_flavors(
         # per-component precision is published either way.
         produced_dtypes = verify_produced_tree(Path(flavor.path))
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
-        label = str(flavor.flavor or attrs.get("flavor") or attrs.get("dtype") or "").strip()
+        # pgw#1159: a PRODUCER-LOCAL label. It classifies the placement stamp
+        # and names the activity leg; it is NOT sent to the hub and does not
+        # name a catalog row — `dtype` + `artifact_contract` state what the
+        # bytes are (th#1803 §1.32(d)).
+        label = str(flavor.flavor or attrs.get("dtype") or "").strip()
         # th#606: worker-addable provenance stamp fields. Producers declare
         # quant identity in the flavor attribute bag; it rides the commit's
         # `provenance` object onto the checkpoint's node stamp (parents /
@@ -217,6 +221,9 @@ def publish_flavors(
         meta = {**(dict(metadata) if metadata else {}), **attrs}
         for k in _PLACEMENT_ATTR_KEYS:
             meta.pop(k, None)
+        # It rides its own typed field (and is PROVEN there); a metadata copy
+        # would be an unproven second statement of the same thing.
+        meta.pop("artifact_contract", None)
         if placement:
             meta["placement"] = placement
         if produced_dtypes:
@@ -249,8 +256,9 @@ def publish_flavors(
             # lost here.)
             on_stage=functools.partial(_publish_leg, dest, label),
             journal_path=journal_path or _journal_beside(flavor),
-            flavor=label,
-            flavors=list(flavor.flavors or []),
+            # th#1580: when the producer declares one, the hub PROVES it
+            # against the header before recording it.
+            artifact_contract=attrs.get("artifact_contract", ""),
             dtype=attrs.get("dtype", ""),
             file_layout=attrs.get("file_layout", ""),
             file_type=attrs.get("file_type", ""),
