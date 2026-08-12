@@ -78,25 +78,30 @@ def test_static_closure_reaches_the_composition_code() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ck1_axes_are_the_recipe(pinned_runtime: None,
+def test_ek1_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
     meta = exported_cell_meta()
-    key = ck.from_exported_artifact_metadata(meta)
-    assert key.digest.startswith("ck1-")
+    key = ck.from_entry_metadata(meta)
+    assert key.digest.startswith("ek1-")
     axes = key.axes_dict()
-    assert set(axes) == {"graph", "envelope", "sm", "toolchain"}
+    assert set(axes) == {"graph", "sm", "toolchain"}
     # Version strings and image identity are GONE from the key: a
     # version-string bump alone can never re-key a cell (content digests
     # decide) — they are not even inputs to the derivation.
     bumped = dict(meta, gen_worker="99.0.0", torch="9.9.9",
                   image_digest="sha256:other")
-    assert ck.from_exported_artifact_metadata(bumped).digest == key.digest
+    assert ck.from_entry_metadata(bumped).digest == key.digest
     # Foreign schemes can never collide with a current key; they stay
     # key-SHAPED (pgw#990 — is_key mirrors tensorhub's scheme-agnostic
     # IsCellKey) and are ruled on by axes, not by their label.
-    for dead in ("ck2-", "ck3-", "ck4-", "ck5-", "ck6-"):
+    for dead in ("ek2-", "ek3-", "ek4-", "ek5-", "ek6-"):
         assert ck.is_key(dead + "a" * 56)
         assert key.digest != dead + "a" * 56
+    # pgw#1176: a ``ck`` key is NOT merely a foreign scheme — it names a
+    # 36-entry all-or-nothing cell this runtime cannot arm at all, so it does
+    # not even parse. That is what makes an orphaned ref fail at the
+    # comparison rather than late, inside a per-entry code path.
+    assert not ck.is_key("ck1-" + "a" * 56)
     # Version-string axes are rejected outright.
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(axes, torch="2.13.0"))
@@ -104,28 +109,28 @@ def test_ck1_axes_are_the_recipe(pinned_runtime: None,
 
 def test_recipe_change_changes_the_key(pinned_runtime: None) -> None:
     meta = exported_cell_meta()
-    base = ck.from_exported_artifact_metadata(meta).digest
+    base = ck.from_entry_metadata(meta).digest
     # Toolchain content change -> new identity.
     retooled = json.loads(json.dumps(meta))
     retooled["toolchain"]["torch"] = "f" * 16
-    assert ck.from_exported_artifact_metadata(retooled).digest != base
+    assert ck.from_entry_metadata(retooled).digest != base
     # A deliberate settings-declaration change re-keys THROUGH toolchain
     # (pgw#1059 amendment 4) — the axis it honestly belongs to.
     reconfigured = json.loads(json.dumps(meta))
     reconfigured["toolchain"]["settings_declaration"] = "e" * 16
-    assert ck.from_exported_artifact_metadata(reconfigured).digest != base
+    assert ck.from_entry_metadata(reconfigured).digest != base
 
 
 def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     """Mint stamp == publish recompute, from the recorded recipe blocks —
     never trusted as a stamp."""
     meta = exported_cell_meta()
-    want = ck.from_exported_artifact_metadata(meta)
+    want = ck.from_entry_metadata(meta)
     assert meta["cell_key"] == want.digest
     # A cell with no toolchain block has no recipe identity.
     legacy = {k: v for k, v in meta.items() if k != "toolchain"}
     with pytest.raises(ck.CellKeyError, match="recipe"):
-        ck.from_exported_artifact_metadata(legacy)
+        ck.from_entry_metadata(legacy)
     # pgw#990: `code_closure` is a MEMO, not identity — a local JIT
     # artifact records it, and drifting it moves no key because the local
     # kind has no key at all (pgw#1059).
@@ -138,7 +143,7 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     # A TOOLCHAIN drift is identity on the exported kind.
     retooled = json.loads(json.dumps(meta))
     retooled["toolchain"]["torch"] = "0" * 16
-    assert ck.from_exported_artifact_metadata(retooled).digest != want.digest
+    assert ck.from_entry_metadata(retooled).digest != want.digest
 
 
 def test_toolchain_covers_the_compiler_and_not_the_model_libraries() -> None:

@@ -254,8 +254,13 @@ def test_seal_is_recorded_and_the_local_verdict_refuses_seal_drift(
     monkeypatch.delenv("WORKER_IMAGE_DIGEST", raising=False)
 
     # pgw#990: a foreign scheme is key-SHAPED and simply names nothing this
-    # runtime computes — refused on facts, not on its label.
-    assert ck.is_key("ck3-" + "a" * 56)
+    # runtime computes — refused on facts, not on its label. pgw#1176 keeps
+    # that scheme-agnosticism WITHIN the entry-key family and draws one hard
+    # line outside it: a `ck` key names a 36-entry all-or-nothing cell this
+    # runtime cannot arm, so it does not parse at all rather than being
+    # admitted and ruled on later.
+    assert ck.is_key("ek3-" + "a" * 56)
+    assert not ck.is_key("ck3-" + "a" * 56)
 
     facts = cc.declared_compile_facts(_cfg())
     meta = cc.artifact_metadata(
