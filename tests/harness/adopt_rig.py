@@ -28,7 +28,7 @@ WHAT RUNS FOR REAL. The whole chain from the ordered arm to the target install::
       -> fleet_cells.arm_ordered
       -> the real receipt gate, against a real RSA-signed receipt from a real
             HTTP hub (harness.receipt_hub)
-      -> provision.arm_aot -> aot_serve.load_and_wrap on a real packed cell
+      -> provision.arm_aot -> aot_serve.arm_entry on a real packed cell
             (harness.exported_cell) whose ck1 key is restatable from its own
             recorded facts
       -> the real boot warmup, the real per-object proof pass, the real
@@ -426,7 +426,7 @@ class AdoptRig:
         mp.setattr(provision, "arm_aot", _record_cfg)
 
         if self.after_arm is not None:
-            real_wrap = aot_serve.load_and_wrap
+            real_wrap = aot_serve.arm_entry
             hook = self.after_arm
 
             def _wrap_then_observe(pipeline: Any, *a: Any, **k: Any) -> Any:
@@ -434,7 +434,7 @@ class AdoptRig:
                 hook(pipeline)
                 return meta
 
-            mp.setattr(aot_serve, "load_and_wrap", _wrap_then_observe)
+            mp.setattr(aot_serve, "arm_entry", _wrap_then_observe)
 
     def _install_boot_adopt(
         self, cell: cell_resolve.ResolvedCell, artifact: Path,
@@ -533,7 +533,7 @@ def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
     Both are DELETIONS of the fix, not additions of a fault: this is master
     before the fix, reached by removing what the fix added.
     """
-    real_wrap = aot_serve.load_and_wrap
+    real_wrap = aot_serve.arm_entry
     real_note = aot_serve.note_aot_key
 
     def _wrap_without_registering(pipeline: Any, *a: Any, **k: Any) -> Any:
@@ -543,7 +543,7 @@ def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
         finally:
             aot_serve.note_aot_key = real_note  # type: ignore[assignment]
 
-    monkeypatch.setattr(aot_serve, "load_and_wrap", _wrap_without_registering)
+    monkeypatch.setattr(aot_serve, "arm_entry", _wrap_without_registering)
     monkeypatch.setattr(
         ex_mod, "_exported_arm",
         lambda pipeline, ref="": bool(ref) and aot_serve.is_aot_ref(ref))

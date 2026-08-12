@@ -197,18 +197,18 @@ def test_a_merged_cell_declares_one_dispatchable_entry_and_keeps_the_names():
         "symbols": {},
         "constants": [],
     }
-    bare = aot_serve.artifact_metadata(
+    bare = aot_serve.entry_metadata(
         family=FAMILY, precision="w8a8", cell_key="",
-        entries={survivor.name: dict(block)})
+        name=survivor.name, entry=dict(block))
     with_aliases = dict(block)
     with_aliases["aliases"] = [
         {"name": row.name,
          "class_dims": [[str(n), int(v)] for n, v in sorted(row.spec.class_dims)]}
         for row in sorted(aliases[survivor.name], key=lambda r: r.name)
     ]
-    stamped = aot_serve.artifact_metadata(
+    stamped = aot_serve.entry_metadata(
         family=FAMILY, precision="w8a8", cell_key="",
-        entries={survivor.name: with_aliases})
+        name=survivor.name, entry=with_aliases)
 
     assert len(stamped["entries"]) == 1
     assert (stamped["combined_graph_hash"] == bare["combined_graph_hash"]), (
