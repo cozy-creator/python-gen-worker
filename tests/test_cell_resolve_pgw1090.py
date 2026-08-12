@@ -8,11 +8,13 @@ broker is stubbed, which is what the ``procsplit`` seam exists to make possible.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 
-from gen_worker import cell_resolve
+from gen_worker import aot_identity, cell_key as ck, cell_resolve, env_seal
+from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.plan import AttemptRef, PlanFactory
 from gen_worker.procsplit import actions as actions_mod
 
 KEY = "ck1-" + "ab" * 28
@@ -151,6 +153,49 @@ def test_an_answer_naming_a_different_key_is_refused_not_adopted(stub) -> None:
     assert err.value.code == "cell_resolve_key_mismatch"
 
 
+#: ``cell_key`` is caught one gate earlier — an empty key is not the key that
+#: was asked for, so the mismatch gate names the seam that lied first.
+_EARLIER_GATE = {"cell_key": "cell_resolve_key_mismatch"}
+
+
+@pytest.mark.parametrize("field", [f for f, _ in cell_resolve._REQUIRED])
+def test_an_incomplete_answer_is_refused_before_the_cell_is_paid_for(
+    stub, field,
+) -> None:
+    """A 200 hit that leaves an admission field unnamed is REFUSED here.
+
+    The Plan route cannot reach the identity gate incomplete — ``plan._artifact``
+    ``_require``s every counterpart — so before pgw#1152 this route was the only
+    one that could, and the gate that would have caught it runs after
+    ``materialize`` has already downloaded the whole cell.
+    """
+    _sent, resp = stub
+    resp["r"] = _Resp(200, _hit_body(**{field: ""}))
+    with pytest.raises(cell_resolve.CellResolveRefused) as err:
+        cell_resolve.resolve("sdxl", KEY)
+    assert err.value.code == _EARLIER_GATE.get(field, "cell_resolve_incomplete")
+    assert field in err.value.detail or field == "cell_key"
+
+
+def test_every_expectation_axis_is_required_of_the_answer() -> None:
+    """An axis on ``ExpectedIdentity`` that the answer need not name is an
+    expectation this route can state as empty — and
+    ``verify_declared_identity`` refuses an empty expectation only AFTER the
+    bytes are paid for. Derived from the struct, so a new axis reds here."""
+    required = {f for f, _ in cell_resolve._REQUIRED}
+    # the answer spells the graph axis without the `_digest` suffix; every
+    # other axis is copied by name in `ExpectedIdentity.named_by`
+    answer_name = {"graph_contract_digest": "graph_contract"}
+    for axis in aot_identity.ExpectedIdentity.__struct_fields__:
+        assert answer_name.get(axis, axis) in required, axis
+
+
+def test_an_incomplete_answer_is_a_typed_refusal_not_a_miss() -> None:
+    """A pod that read it as "no cell" would go pay for a whole cold mint
+    believing the hub holds nothing, which is false and expensive."""
+    assert "cell_resolve_incomplete" in cell_resolve.REFUSAL_CODES
+
+
 def test_a_non_key_is_refused_before_the_hub_is_dialled(stub) -> None:
     sent, _resp = stub
     for bad in ("", "sdxl", "arm1-" + "ab" * 28, "ck1-short"):
@@ -184,7 +229,6 @@ def test_a_hit_builds_the_same_expected_identity_the_plan_path_builds(
     assert cell is not None
 
     expected = cell.expected_identity()
-    from gen_worker import aot_identity
 
     assert isinstance(expected, aot_identity.ExpectedIdentity)
     assert expected.cell_key == KEY
@@ -201,8 +245,6 @@ def test_a_hit_builds_the_same_expected_identity_the_plan_path_builds(
         "env_seal": {"a": 1},
         "combined_graph_hash": "c0ffee0000000000",
     }
-    from gen_worker import cell_key as ck, env_seal
-
     meta["toolchain_digest_expected"] = ck.facts_digest(meta["toolchain"])
     reason = aot_identity.verify_declared_identity(
         meta,
@@ -213,6 +255,56 @@ def test_a_hit_builds_the_same_expected_identity_the_plan_path_builds(
             graph_contract_digest="c0ffee0000000000",
             publisher_org="org-a"))
     assert reason == ""
+
+
+def _plan_naming_the_same_artifact() -> Any:
+    """A Plan whose arm names the artifact ``_hit_body`` describes."""
+    arm = pb.Arm(
+        graph_contract_digest="c0ffee0000000000",
+        shape=pb.ARM_SHAPE_BRANCHLESS,
+        backend=pb.STEADY_BACKEND_AOT_CELL,
+    )
+    arm.artifact.CopyFrom(pb.ArtifactIdentity(
+        cell_ref=f"root/family-sdxl#{KEY}",
+        content_digest="sha256:" + "11" * 32,
+        cell_key=KEY,
+        publisher_org="org-a",
+        toolchain_digest="toolch0000000000",
+        env_seal_digest="seal000000000000",
+    ))
+    spec = pb.ExecutionSpec(
+        digest="sha256:" + "a" * 64,
+        spec_version=1,
+        release=pb.EndpointRelease(
+            org="org-a", endpoint="sdxl", release_id="r1",
+            image_digest="sha256:img", code_closure_id="clo_01"),
+        function_name="txt2img",
+        numerical_lane=pb.ExecutionLane(weights=pb.WEIGHT_LANE_BF16),
+        arm=arm,
+        topology=pb.Topology(accelerator="cuda", gpu_count=1, execution_groups=1),
+        components=pb.ComponentManifest(slots=[pb.SlotBinding(
+            slot="unet", ref="org-a/sdxl@v1", snapshot_digest="sha256:d")]),
+    )
+    return PlanFactory.from_execution_spec(AttemptRef("req", 1), spec)
+
+
+def test_both_expectation_sources_produce_an_EQUAL_object(stub) -> None:
+    """Not "the same type" — the same VALUE, compared whole.
+
+    pgw#1150's defect was a field that reached one map and not the other while
+    both still produced the right type. Since pgw#1152 there is one map
+    (``ExpectedIdentity.named_by``), so this row is what proves the two sources
+    have not drifted apart again: a new axis copied on one side only reds here
+    without anyone remembering to extend an assertion list.
+    """
+    _sent, resp = stub
+    resp["r"] = _Resp(200, _hit_body())
+    cell = cell_resolve.resolve("sdxl", KEY)
+    assert cell is not None
+
+    from_plan = aot_identity.expected_from_plan(_plan_naming_the_same_artifact())
+    assert from_plan is not None
+    assert cell.expected_identity() == from_plan
 
 
 def test_the_receipt_rides_the_answer_and_is_never_re_fetched(stub) -> None:

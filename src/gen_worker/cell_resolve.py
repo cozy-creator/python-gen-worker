@@ -70,6 +70,24 @@ REFUSAL_CODES = (
     "cell_resolve_client_supplied_field",
 )
 
+#: Every field an accepted answer must NAME, and why. The Plan path
+#: ``_require``s each of its counterparts (``plan._artifact``), so an answer
+#: omitting one states an expectation the Plan route could never produce — and
+#: the gate that would catch it sits AFTER the whole cell is downloaded.
+#: ``cell_resolve_incomplete`` is the hub's own code for this fact: the pod
+#: reaches the same verdict from the same evidence, so it reports it under the
+#: same name rather than inventing a second word for one condition.
+_REQUIRED: Tuple[Tuple[str, str], ...] = (
+    ("cell_key", "the admission expectation's identity axis"),
+    ("toolchain_digest", "the admission expectation's toolchain axis"),
+    ("env_seal_digest", "the admission expectation's environment axis"),
+    ("graph_contract", "the admission expectation's graph axis"),
+    ("publisher_org", "an artifact whose producer is unnamed is trusted by no "
+                      "rule, and 'unknown publisher' is not a tier"),
+    ("cell_ref", "the address the bytes are fetched from"),
+    ("content_digest", "what the fetched bytes are verified against"),
+)
+
 
 class CellResolveRefused(RuntimeError):
     """The hub refused to answer, typed. Distinct from a MISS by construction."""
@@ -138,18 +156,12 @@ class ResolvedCell:
     def expected_identity(self) -> aot_identity.ExpectedIdentity:
         """The admission expectation this answer states.
 
-        The SAME type ``expected_from_plan`` builds, so the artifact reaching
-        ``aot_identity.verify_declared_identity`` cannot tell whether it was
-        named by a Plan or pulled by key — which is the property that keeps
-        this from being a second admission brain.
+        Built by the SAME map ``expected_from_plan`` uses, so the artifact
+        reaching ``aot_identity.verify_declared_identity`` cannot tell whether
+        it was named by a Plan or pulled by key — which is the property that
+        keeps this from being a second admission brain.
         """
-        return aot_identity.ExpectedIdentity(
-            cell_key=self.cell_key,
-            toolchain_digest=self.toolchain_digest,
-            env_seal_digest=self.env_seal_digest,
-            graph_contract_digest=self.graph_contract,
-            publisher_org=self.publisher_org,
-        )
+        return aot_identity.ExpectedIdentity.named_by(self, self.graph_contract)
 
 
 def _transport_from(body: Mapping[str, Any]) -> Transport:
@@ -270,6 +282,15 @@ def resolve(
         raise CellResolveRefused(
             "cell_resolve_key_mismatch",
             f"asked for {key}, the hub answered {cell.cell_key!r}")
+    missing = [(f, why) for f, why in _REQUIRED if not getattr(cell, f)]
+    if missing:
+        # Refused HERE rather than at the identity gate, which runs after
+        # `materialize` has already paid for the whole cell. The Plan route
+        # cannot reach that gate incomplete; this one could.
+        raise CellResolveRefused(
+            "cell_resolve_incomplete",
+            "the answer names no " + "; no ".join(
+                f"{f} ({why})" for f, why in missing))
     logger.info(
         "cell-resolve: HIT %s -> %s (%s tier, %d bytes)",
         key, cell.cell_ref, cell.publisher_tier, cell.size_bytes)

@@ -14,6 +14,8 @@ one expected fact must refuse, and the refusal must name that fact.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import json
 import tarfile
 from pathlib import Path
@@ -319,3 +321,49 @@ def test_an_internally_corrupt_artifact_keeps_its_own_distinct_refusal(
             cache_dir=tmp_path / "cache", expected=_expected())
     assert exc.value.reason == "key_mismatch"
     assert exc.value.reason != "expected_identity_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# pgw#1152: every axis is verified SOMEWHERE, and the claim is checked
+# ---------------------------------------------------------------------------
+
+
+def test_every_identity_axis_is_either_compared_here_or_named_elsewhere() -> None:
+    """The accounting is enforced at import (`aot_identity` refuses to load
+    otherwise), so this row states the invariant rather than re-deriving it: an
+    axis on the identity that nothing verifies is how a cell gets armed on an
+    unchecked claim."""
+    accounted = (set(aot_identity._COMPARED_AXES)
+                 | set(aot_identity._VERIFIED_ELSEWHERE))
+    assert accounted == set(ExpectedIdentity.__struct_fields__)
+
+
+def test_each_axis_verified_elsewhere_names_a_gate_that_really_reads_it() -> None:
+    """`_VERIFIED_ELSEWHERE` is a CLAIM, and pgw#1152's rule for this fence
+    family is that a claim is CHECKED, not trusted — the arm-state lint accepts
+    a `RECOGNIZER` row only after verifying it structurally, for exactly the
+    reason that a comment naming the wrong gate reads identical to one naming
+    the right gate.
+
+    The checked property is that the named gate **is handed the axis** — it
+    takes it as a parameter — because "this gate verifies the expectation"
+    means the expectation reaches it. Merely *mentioning* the axis is too weak
+    to discriminate: this entry first named
+    `receipts.refuse_untrusted_publisher`, whose body does mention
+    `publisher_org` while asking a different question (is this producer trusted
+    AT ALL, rather than is it the one the spec NAMED). It takes no
+    `publisher_org` parameter, so it fails this row; `fleet_cells.arm_ordered`,
+    which compares the named org to the signed receipt's `publisher_org_id`
+    fail-closed on silence (§4.26), takes one and passes.
+    """
+    for axis, why in aot_identity._VERIFIED_ELSEWHERE.items():
+        dotted = why.split(" ", 1)[0]
+        mod_name, _, func_name = dotted.rpartition(".")
+        assert mod_name and func_name, f"{axis}: {why!r} must start with mod.func"
+        module = importlib.import_module(f"gen_worker.{mod_name}")
+        gate = getattr(module, func_name, None)
+        assert gate is not None, f"{axis} names {dotted}, which does not exist"
+        assert axis in inspect.signature(gate).parameters, (
+            f"{axis} claims {dotted} verifies it, but that function is never "
+            "handed the axis — a gate that does not receive the expectation "
+            "cannot be the gate that checks it")

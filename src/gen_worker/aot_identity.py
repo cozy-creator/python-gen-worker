@@ -40,12 +40,34 @@ would add surface this PR cannot reach.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 import msgspec
 
 from . import cell_key, env_seal
 from .plan import Plan
+
+
+class NamesAnArtifact(Protocol):
+    """A source that NAMES one compiled cell, by the axes it already carries.
+
+    Both expectation sources satisfy it: the Plan's ``ArtifactRef`` (the hub
+    named the artifact) and ``cell_resolve.ResolvedCell`` (the hub answered a
+    pull by derived key). They are DIFFERENT sources of the same expectation,
+    which is why there is one map and not two.
+    """
+
+    @property
+    def cell_key(self) -> str: ...
+
+    @property
+    def toolchain_digest(self) -> str: ...
+
+    @property
+    def env_seal_digest(self) -> str: ...
+
+    @property
+    def publisher_org(self) -> str: ...
 
 
 class ExpectedIdentity(msgspec.Struct, frozen=True):
@@ -55,6 +77,11 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
     identity the hub digested. Every field is a digest that some producer
     already committed to; none is probed from this runtime (the runtime axes
     are ``aot_serve.verify``'s job and stay there).
+
+    ONE map builds it — :meth:`named_by`, fenced by
+    ``scripts/lint_arm_state_feeders.py``. This is the object every arm gate
+    compares a cell against, so a field reaching one source's map and not the
+    other's is pgw#1150's defect one level in.
     """
 
     cell_key: str
@@ -80,6 +107,26 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
     # row to delete it as readerless — this is its other possible resolution,
     # and the two lanes must not settle it independently).
 
+    @classmethod
+    def named_by(
+        cls, named: NamesAnArtifact, graph_contract_digest: str,
+    ) -> ExpectedIdentity:
+        """THE map from a source that named an artifact to the expectation.
+
+        The graph contract is passed rather than read off ``named`` because it
+        is a property of the ARM, not of the artifact: the Plan carries it on
+        ``arm``, the resolve answer carries it as ``graph_contract``. Every
+        other axis is the artifact's own and is copied by name, so a new axis
+        cannot reach one source and not the other.
+        """
+        return ExpectedIdentity(
+            cell_key=named.cell_key,
+            toolchain_digest=named.toolchain_digest,
+            env_seal_digest=named.env_seal_digest,
+            graph_contract_digest=graph_contract_digest,
+            publisher_org=named.publisher_org,
+        )
+
 
 def expected_from_plan(plan: Plan) -> ExpectedIdentity | None:
     """The expectation for a plan's arm, or ``None`` when it names no artifact.
@@ -93,13 +140,7 @@ def expected_from_plan(plan: Plan) -> ExpectedIdentity | None:
     artifact = plan.arm.artifact
     if artifact is None:
         return None
-    return ExpectedIdentity(
-        cell_key=artifact.cell_key,
-        toolchain_digest=artifact.toolchain_digest,
-        env_seal_digest=artifact.env_seal_digest,
-        graph_contract_digest=plan.arm.graph_contract_digest,
-        publisher_org=artifact.publisher_org,
-    )
+    return ExpectedIdentity.named_by(artifact, plan.arm.graph_contract_digest)
 
 
 def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
@@ -114,6 +155,12 @@ def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
     ``publisher_org`` is deliberately empty here. An artifact cannot attest to
     its own publisher — that claim lives inside the hub-signed receipt, and
     :func:`verify_receipt_publisher` is where it is checked.
+
+    Not built through :meth:`ExpectedIdentity.named_by`, and classified
+    PROJECTION in the fence's allowlist for that reason: this is the OBSERVED
+    side, DERIVED from the mint's stored blocks rather than copied from a
+    source that named an artifact. A projection from a different source shape
+    is not a second copy of the map.
     """
     seal = meta.get(env_seal.SEAL_KEY)
     toolchain = meta.get("toolchain")
@@ -136,6 +183,30 @@ def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
 _COMPARED_AXES: tuple[str, ...] = (
     "cell_key", "toolchain_digest", "env_seal_digest", "graph_contract_digest")
 
+#: The axes NOT compared here, each with the gate that does compare them. An
+#: axis is verified here or it is verified somewhere named — never neither.
+#: The claim is CHECKED, not trusted: `test_artifact_identity_pgw903.py`
+#: imports each named gate and asserts it reads the axis.
+_VERIFIED_ELSEWHERE: Mapping[str, str] = {
+    "publisher_org": (
+        "fleet_cells.arm_ordered — an artifact cannot attest to its own "
+        "producer, so §4.26's match is against the hub-signed RECEIPT's "
+        "publisher_org_id, fail-closed on silence. Distinct from "
+        "receipts.refuse_untrusted_publisher, which asks whether the producer "
+        "is trusted AT ALL, not whether it is the one the spec named"),
+}
+
+if set(_COMPARED_AXES) | set(_VERIFIED_ELSEWHERE) != set(
+    ExpectedIdentity.__struct_fields__
+):
+    # Unspellable rather than merely tested: an axis added to the identity and
+    # to neither set is an axis NOTHING verifies, and a silently unverified
+    # axis on this object is how a cell gets armed on an unchecked claim.
+    raise AssertionError(
+        "every ExpectedIdentity axis must be compared by "
+        "verify_declared_identity or named in _VERIFIED_ELSEWHERE; "
+        f"unaccounted: {sorted(set(ExpectedIdentity.__struct_fields__) - set(_COMPARED_AXES) - set(_VERIFIED_ELSEWHERE))}")
+
 
 def verify_declared_identity(
     meta: Mapping[str, Any], expected: ExpectedIdentity,
@@ -157,9 +228,10 @@ def verify_declared_identity(
         want, got = getattr(expected, axis), getattr(have, axis)
         if not want:
             # An expectation that names no value cannot be verified, and an
-            # unverifiable expectation must not read as a pass. The Plan
-            # refuses an artifact missing any of these, so reaching this
-            # branch means a caller built an ExpectedIdentity by hand.
+            # unverifiable expectation must not read as a pass. BOTH sources
+            # refuse an artifact missing any of these at the point they read
+            # it — `plan._artifact` and `cell_resolve.resolve` — so reaching
+            # this branch means a caller built an ExpectedIdentity by hand.
             return f"{axis}: the spec named no expected value"
         if want != got:
             return f"{axis}: expected {want}, have {got or '<absent>'}"
@@ -247,6 +319,7 @@ def verify_graph_witness(
 __all__ = [
     "GRAPH_WITNESS_FIELD",
     "ExpectedIdentity",
+    "NamesAnArtifact",
     "artifact_identity",
     "expected_from_plan",
     "verify_declared_identity",
