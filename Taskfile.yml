@@ -8,34 +8,34 @@ tasks:
       - rm -rf dist/
       - uv build
 
-  publish:
-    desc: |
-      Publish to PyPI (uses UV_PUBLISH_TOKEN from .env).
-
-      pgw#978 — the ORDER matters. Paul, 2026-08-06: "we want to release new
-      versions of python-gen-worker to pypi only after we've proven they work."
-      Run `task rig:mint` first; a version that has never completed a local
-      machinery cycle has not been proven by anything.
-    deps: [build]
-    cmds:
-      - sh -c 'unset UV_PUBLISH_USERNAME; uv publish'
+  # THERE IS NO `task publish`, deliberately (pgw#1140, 2026-08-12). PyPI
+  # publication is the TAG PUSH: `.github/workflows/publish.yml` refuses to ship
+  # a tree no CI run has proven, and a local `uv publish` walks around that gate.
+  # One procedure, and it lives in docs/releasing.md. Do not re-add this task.
+  #
+  # The task deleted here also carried pgw#978's "run `task rig:mint` first",
+  # which Paul's 2026-08-10 hard cut (all mints on remote machines only)
+  # superseded — a release instruction that told the next cutter to break a
+  # standing rule on the shared box.
 
   rig:mint:
     desc: |
-      pgw#978 — run the whole mint machinery locally against a toy model:
-      resolve -> MintSlot handoff -> child spawn -> load -> warmup_forward ->
-      torch.export + AOTInductor -> seal -> publish to a local hub -> a SECOND
-      process adopting the cell.
+      ⚠️ REMOTE ONLY (Paul, 2026-08-10 hard cut): this runs a REAL inductor/AOTI
+      compile. Run it on a micro pod, never on the shared box. The older
+      "local-inference carve-out" this task used to claim no longer covers mints.
 
-      Seconds per iteration instead of the publish->build->buy loop. Bounded by
-      the workspace policy's local-inference carve-out (generated weights under
-      500 MB, a 4 GiB budget split across processes, nice, a load gate at 24,
-      and GEN_WORKER_HOST_MOVE_GUARD untouched) — the driver enforces all five.
+      pgw#978 — the whole mint machinery against a toy model: resolve ->
+      MintSlot handoff -> child spawn -> load -> warmup_forward -> torch.export
+      + AOTInductor -> seal -> publish to a local hub -> a SECOND process
+      adopting the cell. Seconds per iteration instead of the
+      publish->build->buy loop. It is NOT a release gate — see docs/releasing.md.
     cmds:
       - nice -n 10 uv run python scripts/micro_mint_rig.py {{.CLI_ARGS}}
 
   rig:micro:
     desc: |
+      ⚠️ REMOTE ONLY — a real AOTI compile, same as `rig:mint`.
+
       pgw#997 — the same full cycle against `examples/micro-diffusion`, the
       org-worker-shaped endpoint: 3 export entries (two fork arms + a second
       target), CONTAINER inputs with a plain input after them so every cycle
@@ -49,6 +49,10 @@ tasks:
 
   rig:gauntlet:
     desc: |
+      ⚠️ REMOTE ONLY — every variant is a real compile. "Cardless" is not
+      "local": cardless still runs inductor, which the 2026-08-10 cut forbids
+      on the shared box.
+
       pgw#1014 — EVERY mint shape the fleet runs, in one command, with a table.
       Each variant is a full production cycle (spawn, export+AOTI, seal,
       publish, second-process adopt + parity) on a model that compiles in

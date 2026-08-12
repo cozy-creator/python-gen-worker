@@ -1,5 +1,13 @@
 # Releasing gen-worker
 
+**This file is the ONLY release procedure.** Publication is the **tag push** — `publish.yml` refuses
+to ship a tree no CI run has proven. `Taskfile.yml` deliberately has no `publish` task: a local
+`uv publish` walks around that gate, and a second written procedure is how a cutter ends up
+following the stale one. **No local mint is a release gate** — the `rig:*` tasks are development
+vehicles, they run real inductor/AOTI compiles, and Paul's 2026-08-10 hard cut puts every mint on a
+remote pod. (pgw#1140, 2026-08-12: `task publish` still said otherwise, five days after the cut that
+superseded it.)
+
 Two rules, both from Paul (2026-08-02), both replacing an unwritten habit. If you are about to cut,
 read the first one — it is usually the answer.
 
@@ -38,9 +46,10 @@ times in a day.
 > date."*
 
 **The bound, and why:** `>=X.Y.Z,<X.(Y+1).0` — i.e. bounded at the **major.minor the hub gate already
-admits**. `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` matches on `major.minor` (`0.91` as of this
-cut — bump it in lockstep with each MINOR), which is
-exactly why every patch this week rode without a hub bounce. Pinning wider than the hub admits would
+admits**. `TENSORHUB_SUPPORTED_GEN_WORKER_VERSIONS` matches on `major.minor` — **read its CURRENT
+value from the deployed hub rather than from this sentence, and bump it in lockstep with each
+MINOR** (it read `0.91` when this was written and the number has moved many times since) — which is
+exactly why every patch that week rode without a hub bounce. Pinning wider than the hub admits would
 produce a worker the hub refuses at Hello; pinning narrower re-creates the problem this removes.
 
 **The conversion endpoint tracks newest** rather than a range, because it is the *producer*: it should
@@ -86,8 +95,10 @@ one version deliberately; do not reach for a global exact pin to get it.
 `ci.yml`. **A local `pytest` run is not the gate** and will let you push a red.
 
 Since pgw#952 it is TWO PARALLEL JOBS, and both must be green — `publish.yml` keys on
-the run's conclusion, which is success only when both are. It also runs on PRs into
-`dev`, not just `master`, so a cut no longer inherits a pile of unproven lane merges.
+the run's conclusion, which is success only when both are. It runs on **every PR into `master`**
+(pgw#977 narrowed the trigger back to `[master]` alone when `dev` was deleted, so that IS the
+every-lane trigger), plus `workflow_dispatch` — so a cut no longer inherits a pile of unproven lane
+merges. A third context, `drift`, also gates.
 
 **`fast gates`** (~1m35s):
 
@@ -124,15 +135,14 @@ Measured on the 0.90.6 cut: three reds, none authored by the cutter — another 
 stale pgw#849 baseline entry, and **two tests that had never passed CI in their lives** (established
 by `git merge-base --is-ancestor` against the last green run).
 
-**Since pgw#952** the same debt could still accrue on `dev` — `chaos` is retired, but until then
-`ci.yml` was `branches: [master]` and a lane -> `dev` PR ran NO CI AT ALL (PR #466's
-`statusCheckRollup` was literally `[]`). `ci.yml` now runs on `[dev, master]`, so a red is refused
-at the lane PR that introduces it rather than at the cut. Expect this section to shrink; do not
-assume it already has. `dev` was RED on pgw#949's two gw#666 guard tests when the gate was turned
-on, and anything that merged before pgw#952 was never gated.
-
-The rule for whoever cuts is unchanged while any pre-pgw#952 history is in range: budget hours, not
-minutes, and establish by ancestry — never from cut notes — whether a red is yours.
+**Since pgw#952** every lane PR is gated, so the debt stopped accruing: `ci.yml` had been
+`branches: [master]` while lanes targeted `dev`, and such a PR ran NO CI AT ALL (PR #466's
+`statusCheckRollup` was literally `[]`). `dev` has since been deleted and pgw#977 pointed the
+trigger back at `master`, which is now where every lane PRs — so a red is refused at the lane PR
+that introduces it rather than at the cut. **This has held in practice:** the 0.113.0 cut was green
+first try on all three contexts, inheriting nothing. Anything that merged before pgw#952 was never
+gated, so while such history is in range, budget hours rather than minutes and establish by
+ancestry — never from cut notes — whether a red is yours.
 
 **If the red is a semantics decision inside another lane's work, do not fix it to unblock your tag.**
 Branch the release from a commit that predates it and say so in the CHANGELOG. A cut that launders
@@ -156,6 +166,26 @@ scripts/assemble_changelog.py --version <X.Y.Z> \
     --headline "**the one thing this cut is about**"      # writes + `git rm`s fragments
 ```
 
+### SWEEP THE FRAGMENTS AGAINST `origin/master`, NOT YOUR CHECKOUT
+
+A merge with no fragment is a **silent release note**, and the sweep for one is the cutter's job —
+lanes forget. Do it by listing the range's commits against the fragments **as they exist on the
+ref you are cutting**:
+
+```bash
+git log --format='%h %s' v<prev>..origin/master          # every merge, with its issue number
+git ls-tree --name-only origin/master changelog.d/       # NOT `ls changelog.d/`
+```
+
+**`ls changelog.d/` lies whenever your checkout is behind**, and at a cut it usually is — lanes are
+merging while you assemble. The 0.113.0 cut's checkout was two commits behind and the working-tree
+listing showed pgw#1159's fragment MISSING when it was merged and present; had that been trusted,
+the cut would have written a duplicate. Same failure in the other direction is worse: a fragment
+that exists only in your stale tree looks owed and gets written twice.
+
+Expect the ledger's "known-owed" list to be **incomplete** — it names what a lane remembered to
+file. 0.113.0's ledger named one owed fragment; the sweep found five.
+
 ## Mechanics
 
 ```bash
@@ -172,12 +202,74 @@ git rev-list --count v<prev>..HEAD            # and COUNT it; do not estimate
 
 # 3. green CI on this exact tree, then tag and push
 gh workflow run ci.yml --ref <branch>
-git tag -a v<X.Y.Z> -m "..." && git push origin v<X.Y.Z>   # tag push triggers publish.yml
+git tag -s v<X.Y.Z> -m "..." && git push origin v<X.Y.Z>   # tag push triggers publish.yml
 ```
 
-**Verify the publish landed against the SIMPLE INDEX, not the JSON API** — `pypi.org/pypi/<pkg>/json`
-is cached and showed the previous version for minutes after a successful upload:
+**Tags are SSH-SIGNED** (`git tag -s`; the repo sets `gpg.format=ssh` + `user.signingkey`). Check
+with `git tag -v v<X.Y.Z>` before pushing — a lightweight `git tag` produces an unsigned, unverifiable
+release marker, which v0.110.0 is.
+
+### Only a DISPATCHED run proves a tree — the gate enforces this, you do not have to remember it
+
+Step 3 is `gh workflow run ci.yml --ref <branch>` for a reason: a `workflow_dispatch` (or `push`) run
+checks out the ref it names, so its `head_sha` genuinely names the tree it built. **A `pull_request`
+run does not** — `ci.yml` checks out with no `ref:`, so GitHub builds `refs/pull/<n>/merge`, your head
+merged with whatever `master` is at that moment, while still recording your branch head as
+`head_sha`.
+
+**`publish.yml` refuses a `pull_request` run as proof** (pgw#1191, `scripts/assert_ci_proof.py`), so
+this is a rule the gate holds rather than a step you can forget. If you see it, the refusal tells you
+which problem you have:
+
+| refusal | what it means |
+|---|---|
+| `only_pull_request_proof` | your tree is fine, your **evidence** is the wrong kind — dispatch CI on the tag and re-run publish |
+| `no_run_carries_tree` | this content has **never been tested anywhere** |
+
+A `pull_request` run remains the right gate for *merging*. It is simply not proof for *publishing* —
+and it was pgw#795's v0.78.0 hole arriving through a different door, found by a cut whose PR run went
+green while master moved four times underneath it.
+
+### PIN the commit you cut, and TAG IT — do not tag master's tip
+
+Lanes merge while you assemble; master moved four times during the 0.113.0 cut. Cut from a pinned
+commit, say which one in the release notes, and **never re-point at master's tip to pick up work that
+landed under you** — that ships code with no changelog entry, which is the silent release note this
+whole file exists to prevent.
+
+That leaves the tag on a branch commit, so **merge the cut PR with a TRUE MERGE, not a squash**
+(`gh pr merge <n> --merge`). A squash rewrites your commit, the tag then points at something that is
+NOT an ancestor of `master`, and the next cutter's `git rev-list v<X.Y.Z>..HEAD` silently re-lists
+everything you just released. Assert it, do not hope:
+
+```bash
+git merge-base --is-ancestor v<X.Y.Z> origin/master && echo OK
+```
+
+## Verify the PUBLISHED ARTIFACT — a green pipeline is not evidence of a published wheel
+
+**Verify against the SIMPLE INDEX, not the JSON API** — `pypi.org/pypi/<pkg>/json` is cached and
+showed the previous version for minutes after a successful upload. **`pip` and `uv` read that same
+cached index**: minutes after 0.113.0 was live on the simple index, `pip download gen-worker==0.113.0`
+still failed with *"No matching distribution found"* and listed every version up to 0.112.0. That is
+the cache, not a missing wheel — do not re-cut, do not "fix" the publish. Consumers hitting it want
+`uv lock --refresh`.
 
 ```bash
 curl -s https://pypi.org/simple/gen-worker/ | grep gen_worker-<X.Y.Z>-
 ```
+
+Then **open the artifact and read it**, because the index only proves an upload happened:
+
+```bash
+url=$(curl -s https://pypi.org/simple/gen-worker/ \
+      | grep -o 'https://files.pythonhosted.org/[^"]*gen_worker-<X.Y.Z>-py3-none-any\.whl[^"]*' | head -1)
+curl -sL "$url" -o /tmp/w.whl && sha256sum /tmp/w.whl      # must match the index's #sha256=
+python3 -c "import zipfile;z=zipfile.ZipFile('/tmp/w.whl');\
+print([l for l in z.read([n for n in z.namelist() if n.endswith('METADATA')][0]).decode().splitlines() if l.startswith('Version:')])"
+```
+
+Check the METADATA version **and one thing this cut actually changed** — a file the release deleted
+should be absent, a restored function present. The 0.113.0 cut confirmed `mint_budget.py` and
+`local_cells.py` gone and `trt_engine.build()` present, which is the only check that distinguishes
+"the right tree shipped" from "a wheel with the right number shipped".
