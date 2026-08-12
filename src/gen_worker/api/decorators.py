@@ -128,6 +128,35 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     exist. It is never a gate, never a runtime ceiling, and never a
     per-load reservation. Declaring it implies ``gpu=True``.
 
+    ``min_vram_gb`` (pgw#660) is the HARD VRAM floor, and it is the exact
+    twin of ``compute_capability`` above: the v2 cut deleted ``vram_gb`` on
+    the reasoning that th#683 would MEASURE the real requirement, and that
+    reasoning is right about how much VRAM a function wants and wrong about
+    the card it cannot run on at all. The two are not the same question, and
+    only one of them has an answer before the first build exists.
+
+    It is deliberately NOT ``vram_gb_hint`` promoted. The hint's contract —
+    "never a gate" — is what pgw#647 froze, and teaching the scheduler to
+    gate on a value declared as advisory would silently turn every existing
+    hint into a hard refusal. A floor is a different statement, so it gets a
+    different field, named ``min_`` for what it is: a floor the hub may
+    exceed, never a cap (the same reading as ``min_disk_gb``). Declare it
+    ONLY for a genuine incapability — a function that merely runs BETTER
+    with more VRAM declares nothing and lets the fit ladder choose.
+
+    Declaring it implies ``gpu=True``. Where both are present the floor must
+    not exceed the hint: a hint BELOW the floor is a contradiction (the
+    first-build placement would land under the value the function says it
+    cannot run below), and it is refused here rather than shipped.
+
+    It is a PLACEMENT gate and nothing else. It deliberately does not reach
+    the worker-side fit ladder (``models/serve_fit.py``), which by contract
+    "never refuses on the recommended-VRAM hint alone" and whose sole author
+    opt-out is ``strict_vram``. A floor that also became a runtime refusal
+    would turn a scheduling statement into a serving one and could refuse
+    requests a pod can answer — a separate decision, not a consequence of
+    this one.
+
     ``ram_gb_hint`` (pgw#670) is its HOST-side twin, restored after the v2
     cut deleted ``ram_gb`` on the reasoning that host RAM is an
     opportunistic latency tier. For ltx-video-2.3 it was neither
@@ -221,6 +250,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     strict_vram: bool = False
     vcpus: int | None = None
     vram_gb_hint: float | None = None
+    min_vram_gb: float | None = None
     ram_gb_hint: float | None = None
     min_disk_gb: float | None = None
     compute_capability: float | str | None = None
@@ -241,6 +271,17 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         ``min_disk_gb`` (pgw#732) needs no remap either — it is already the
         key the hub reads as an additional disk floor
         (``mergeRequestDiskIntoSupply``), the same spelling on both sides.
+
+        ``min_vram_gb`` (pgw#660) needs no remap either, and that is the whole
+        reason the floor is spelled this way: it is already the key
+        ``function_requirements.go`` folds into ``requirement_payload_json``
+        (``for _, key := range []string{"min_vram_gb", "vram_multiplier"}``),
+        from which it reaches ``req.VRAMGB`` → ``MinVRAMGB`` → the GPU
+        candidate filter. The hub reads it as the floor ALREADY — v2 simply
+        stopped emitting anything that landed there, so the gate vanished with
+        no error and no build failure. Note the builder's own fallback,
+        ``vram_gb`` → ``min_vram_gb`` *when the explicit key is absent*: the
+        explicit key wins, so this field can never be shadowed by a v1 remap.
 
         ``compute_capability`` needs no remap: it is already the key
         ``internal/builder/function_requirements.go`` parses (scalar or
@@ -271,10 +312,24 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             if v <= 0:
                 raise ValueError(f"vram_gb_hint must be positive, got {v}")
             force(self, "vram_gb_hint", v)
+        if self.min_vram_gb is not None:
+            f = float(self.min_vram_gb)
+            if f <= 0:
+                raise ValueError(f"min_vram_gb must be positive, got {f}")
+            force(self, "min_vram_gb", f)
+            # A hint below the floor would place the first build under the
+            # value the function says it cannot run below — the declaration
+            # contradicts itself, so it costs a ValueError, not a build.
+            if self.vram_gb_hint is not None and self.vram_gb_hint < f:
+                raise ValueError(
+                    f"vram_gb_hint {self.vram_gb_hint} is below min_vram_gb {f}: "
+                    "the hint places the first build, and placing it under the "
+                    "hard floor cannot be what was meant")
         if self.compute_capability is not None:
             force(self, "compute_capability",
                   _normalize_compute_capability(self.compute_capability))
         if (n_gpu > 1 or self.vram_gb_hint is not None
+                or self.min_vram_gb is not None
                 or self.compute_capability is not None):
             force(self, "gpu", True)
         if self.ram_gb_hint is not None:

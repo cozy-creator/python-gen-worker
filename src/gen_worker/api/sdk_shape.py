@@ -54,9 +54,12 @@ DELETED_FIELDS: Tuple[DeletedField, ...] = (
         name="vram_gb",
         deleted_at="0.60.0",
         reason=(
-            "th#683 prove-and-profile MEASURES the real VRAM requirement per lane "
-            "and shape; an authored floor is a placement gate over a guess. The "
-            "survivor is the optional first-build hint `vram_gb_hint`."
+            "th#683 prove-and-profile MEASURES how much VRAM a function WANTS per "
+            "lane and shape, so the gate-shaped v1 spelling does not come back. It "
+            "split in two: `vram_gb_hint` is the optional first-build hint and is "
+            "NEVER a gate, and `min_vram_gb` (pgw#660) is the hard floor the "
+            "scheduler filters offers on. Declaring the hint when you meant the "
+            "floor is the v2 regression this row now exists to prevent."
         ),
     ),
     DeletedField(

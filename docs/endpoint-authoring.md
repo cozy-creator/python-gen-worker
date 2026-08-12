@@ -540,7 +540,8 @@ Resources(gpu=True, libraries=("nunchaku",))
 Fields: `gpu`, `gpu_count`, `max_gpu_count`,
 `max_gpus_per_execution_group`, `parallel`, `libraries`, `strict_vram`
 (bindings that cannot tolerate CPU-resident weights), `vcpus`,
-`compute_capability`, and the two hints `vram_gb_hint` / `ram_gb_hint`.
+the two hard floors `compute_capability` / `min_vram_gb`, and the two hints
+`vram_gb_hint` / `ram_gb_hint`.
 `max_gpus_per_execution_group` / `parallel` are the multi-GPU axis — see
 [multi-gpu.md](multi-gpu.md).
 
@@ -551,24 +552,44 @@ th#683 profiling measurements exist; `ram_gb_hint` (pgw#670) is its
 host-side twin and does not imply `gpu=True`. Both are allocation-time
 asks the platform may miss: never a gate, ceiling, or reservation.
 
-`compute_capability` (pgw#660) is the opposite — a HARD GPU-architecture
-floor the scheduler filters offers on and refuses to rent below. Declare
-the dotted capability the way NVIDIA writes it (`8.9`, `"8.9"`, or
-`"sm_89"`, never the bare SM code `89`); it implies `gpu=True`.
+`compute_capability` and `min_vram_gb` (both pgw#660) are the opposite —
+HARD floors the scheduler filters offers on and refuses to rent below.
+`compute_capability` is the GPU-architecture floor: declare the dotted
+capability the way NVIDIA writes it (`8.9`, `"8.9"`, or `"sm_89"`, never the
+bare SM code `89`). `min_vram_gb` is the VRAM floor, named `min_` for what it
+is — a floor the hub may exceed, never a cap. Both imply `gpu=True`.
 
 ```python
-# scaled_mm is sm_89+ or nothing — an incapability, not a slow rung.
-Resources(gpu=True, compute_capability=8.9, libraries=("modelopt",))
+# scaled_mm is sm_89+ or nothing, and 80 GB is the card it cannot run below —
+# both are incapabilities, not slow rungs.
+Resources(gpu=True, compute_capability=8.9, min_vram_gb=80,
+          libraries=("modelopt",))
 ```
 
-Declare it ONLY for genuine incapability. A function that merely runs
-*better* on newer silicon declares nothing and lets the fit ladder choose;
-over-declaring shrinks the rentable pool for no reason. Omitting it is
-always safe — no key, no gate, today's behaviour.
+**`vram_gb_hint` is not a smaller `min_vram_gb`.** The hint is never read as
+a gate by the builder, so a function that declares only the hint has *no*
+VRAM floor on the placement path — that is the exact v2 regression pgw#660
+closes, and it is silent (no error, no lint, no build failure). If your
+function cannot run below a size, say `min_vram_gb`. Where both are declared
+the hint may not sit below the floor; that contradiction is a declaration-time
+`ValueError`.
 
-`vram_gb` and `ram_gb` remain deleted from SDK v2 (measured requirements
-belong to the profiler; host RAM is an opportunistic tier), as does v1's
-`min_compute_capability` spelling — the hub rejects that key outright.
+Declare either ONLY for genuine incapability. A function that merely runs
+*better* on newer or larger silicon declares nothing and lets the fit ladder
+choose; over-declaring shrinks the rentable pool for no reason. Omitting them
+is always safe — no key, no gate, today's behaviour.
+
+Note the split of duties: `min_vram_gb` is a PLACEMENT gate only. The
+worker-side fit ladder never refuses on a declared VRAM number — `strict_vram`
+is the sole author opt-out of the CPU-touching rungs.
+
+The v1 spellings `vram_gb` and `ram_gb` remain deleted from SDK v2 — what a
+function WANTS per lane and shape is the profiler's measurement, not an
+authored guess. What it CANNOT RUN BELOW came back under explicit names
+(`min_vram_gb`, `compute_capability`), which is why the old words stay gone
+rather than being restored: one word for two questions is how the hint got
+declared where the gate was meant. v1's `min_compute_capability` spelling is
+also still dead — the hub rejects that key outright.
 
 ## Kinds
 
