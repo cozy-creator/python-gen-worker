@@ -53,6 +53,10 @@ from .aot_compile_pool import (
 )
 from . import aot_device_lock
 from . import aot_shape_hints
+# pgw#1111's META round-trip. Imports no torch of its own (measured 0.21 s,
+# `torch` absent from sys.modules afterwards), so `child_torch_import_s` still
+# measures only the child's own torch import.
+from .models import structure_only
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +146,41 @@ def _device_fields() -> dict:
             "peak_device_reserved_bytes": reserved}
 
 
+def load_program(job: EntryJob) -> Any:
+    """The child's half of the pool's process boundary: ``torch.export.load``
+    plus the two repairs the round trip needs before anything reads a shape.
+
+    A named function because both repairs are silent when skipped — the
+    artifact still builds, under the same cell key, and is wrong. A test can
+    reach this without an inductor compile; the compile itself cannot be a
+    cheap test.
+    """
+    import torch
+
+    program = torch.export.load(job.program)
+    # pgw#1111: the inverse of the parent's `as_meta_for_save`. A weight-free
+    # program crossed as META (fake tensors have no storage to serialize);
+    # re-virtualize META -> FAKE inside the mode the load rebuilt the example
+    # inputs in, so `aot_compile`'s one-fake-mode precondition holds and
+    # `compile_entry_files` reads `weightless=True` off the program exactly as
+    # the serial path does. A real-weight program carries no meta: a no-op.
+    if structure_only.has_meta_params(program):
+        if structure_only.revirtualize_from_meta(program) is None:
+            # The mode is read off the example inputs; with none there is
+            # nothing to re-virtualize INTO, and compiling a meta-param program
+            # selects the WEIGHT-BEARING inductor config for a weight-free
+            # graph — a different artifact under an unmoved key. Refuse.
+            raise RuntimeError(
+                "pgw#1111: the program crossed as META but its example inputs "
+                "name no fake mode to re-virtualize into")
+    # pgw#998: the round trip drops the ShapeEnv's symbol VALUES (it rebuilds
+    # the map keyed by size expressions), which makes any extent that is not
+    # literally one of those keys unlowerable. Restored from the parent's own
+    # env — the one authority for them — before anything reads a shape.
+    aot_shape_hints.restore_symbol_values(program, job.symbol_values)
+    return program
+
+
 def run(job: EntryJob) -> int:
     from . import aot_mint, env_seal
 
@@ -188,13 +227,7 @@ def run(job: EntryJob) -> int:
         # matching `load`). Named because "serialization across the pool's
         # process boundary" was a prime suspect for the dark 44 %.
         with ledger.span("child_program_load_s"):
-            program = torch.export.load(job.program)
-            # pgw#998: the round trip drops the ShapeEnv's symbol VALUES (it
-            # rebuilds the map keyed by size expressions), which makes any
-            # extent that is not literally one of those keys unlowerable.
-            # Restored from the parent's own env — the one authority for them
-            # — before anything reads a shape.
-            aot_shape_hints.restore_symbol_values(program, job.symbol_values)
+            program = load_program(job)
     except Exception as exc:  # noqa: BLE001
         _write(report_path, EntryReport(
             entry=job.entry, status=REFUSED,

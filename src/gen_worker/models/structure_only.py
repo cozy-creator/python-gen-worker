@@ -643,6 +643,151 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# pgw#1111: the META round-trip that lets a weight-free program cross the
+# entry-compile pool's process boundary
+# ---------------------------------------------------------------------------
+#
+# The parallel entry pool hands each ExportedProgram to a compile CHILD by
+# ``torch.export.save`` in the parent and ``torch.export.load`` in the child
+# (pgw#809). A structure-only program's PARAMETERS are FAKE tensors, and a fake
+# tensor has no storage to serialize — the child dies deserializing it
+# ("We ran into an error when deserializing the saved file"). So before
+# ``fc77b923`` a weight-free mint could only compile SERIALLY, in the parent,
+# which is K=1 (pgw#1051 regression).
+#
+# The round-trip: on the way OUT, re-cast the fake params to META — meta
+# tensors carry shape/dtype and serialize (they, too, hold no storage, but the
+# serializer records them as metadata rather than reaching for bytes). On the
+# way IN, re-virtualize META -> FAKE inside the load's OWN fake mode and on the
+# real device, both read off the program's example inputs (which are fake in
+# that mode already, exactly as a real-weight program's are). aot_compile then
+# sees params and inputs sharing ONE fake mode — its precondition — and the
+# graph is byte-identical to the serial path, so the cell key does not move.
+
+
+def _program_tensor_tables(program: Any) -> Iterator[Tuple[Any, str, Any]]:
+    """``(table, name, tensor)`` over a program's state_dict and constants."""
+    for holder in ("state_dict", "constants"):
+        table = getattr(program, holder, None)
+        if not isinstance(table, dict):
+            continue
+        for name, tensor in list(table.items()):
+            if tensor is not None:
+                yield table, name, tensor
+
+
+def to_meta_for_save(program: Any) -> int:
+    """Re-cast a weight-free program's FAKE params/constants to META, in place.
+
+    Only fake tensors move; real buffers (config-derived tables, the literals a
+    family ships inside the cell) stay real and serialize as they always have.
+    Returns the number of tensors converted — 0 means this was not a weight-free
+    program and nothing changed. The example inputs are left untouched: they are
+    fake on a real device and torch.export already serialises them as metadata
+    (a real-weight program round-trips with fake example inputs today).
+    """
+    import torch
+
+    moved = 0
+    for table, name, tensor in _program_tensor_tables(program):
+        if not mi.is_virtual(tensor):
+            continue
+        if str(getattr(getattr(tensor, "device", None), "type", "")) == "meta":
+            continue
+        meta = torch.empty(tuple(tensor.shape), dtype=tensor.dtype,
+                           device="meta")
+        if isinstance(tensor, torch.nn.Parameter):
+            meta = torch.nn.Parameter(meta, requires_grad=False)
+        table[name] = meta
+        moved += 1
+    return moved
+
+
+@contextlib.contextmanager
+def as_meta_for_save(program: Any) -> Iterator[int]:
+    """:func:`to_meta_for_save` for the duration of a save, then EXACTLY the
+    original tensor objects back.
+
+    The parent keeps using its programs after staging them (class
+    canonicalization, the resident release's weight aliases), so the cast must
+    not outlive the ``torch.export.save`` it exists for. Restoring the original
+    objects — not equivalent new fakes — keeps tensor IDENTITY, which is what
+    an alias map compares.
+    """
+    before: List[Tuple[Any, Dict[str, Any]]] = []
+    seen: List[int] = []
+    for table, _name, _tensor in _program_tensor_tables(program):
+        if id(table) not in seen:
+            seen.append(id(table))
+            before.append((table, dict(table)))
+    moved = to_meta_for_save(program)
+    try:
+        yield moved
+    finally:
+        if moved:
+            for table, original in before:
+                table.clear()
+                table.update(original)
+
+
+def has_meta_params(program: Any) -> bool:
+    """Whether this loaded program carries META params — the signal that it was
+    saved by :func:`to_meta_for_save` and must be re-virtualized before compile.
+    """
+    for _table, _name, tensor in _program_tensor_tables(program):
+        if str(getattr(getattr(tensor, "device", None), "type", "")) == "meta":
+            return True
+    return False
+
+
+def _load_mode_and_device(program: Any) -> Tuple[Optional[Any], Optional[Any]]:
+    """The fake mode and real device the load rebuilt this program's example
+    inputs in. aot_compile requires params and inputs to share ONE mode, so the
+    re-virtualized params must join THIS mode on THIS device — never a fresh one.
+    """
+    example = getattr(program, "example_inputs", None)
+    if not example:
+        return None, None
+    args, kwargs = example if isinstance(example, tuple) and len(example) == 2 \
+        else (example, {})
+    tensors: List[Any] = []
+    for value in list(args or ()) + list((kwargs or {}).values()):
+        if hasattr(value, "fake_mode") or hasattr(value, "device"):
+            tensors.append(value)
+    for tensor in tensors:
+        mode = getattr(tensor, "fake_mode", None)
+        if mode is not None:
+            return mode, getattr(tensor, "device", None)
+    return None, None
+
+
+def revirtualize_from_meta(program: Any) -> Optional[Any]:
+    """META params -> FAKE, inside the load's own mode and on the real device.
+
+    The inverse of :func:`to_meta_for_save`, run in the compile child after
+    ``torch.export.load``. Returns the fake mode the program now belongs to
+    (``None`` when there was nothing to do). After this call
+    :func:`fake_mode_of_program` finds that mode via the state dict, so
+    :func:`compiling_under` installs it and the export's ShapeEnv exactly as the
+    in-process serial path did — the compile is byte-identical.
+    """
+    import torch
+
+    mode, device = _load_mode_and_device(program)
+    if mode is None or device is None:
+        return None
+    for table, name, tensor in _program_tensor_tables(program):
+        if str(getattr(getattr(tensor, "device", None), "type", "")) != "meta":
+            continue
+        with mode, torch.device(str(device)):
+            fake = torch.empty(tuple(tensor.shape), dtype=tensor.dtype)
+        if isinstance(tensor, torch.nn.Parameter):
+            fake = torch.nn.Parameter(fake, requires_grad=False)
+        table[name] = fake
+    return mode
+
+
+# ---------------------------------------------------------------------------
 # The pgw#984 warm proof runs on RANDOM values (coordinator ruling, 2026-08-10)
 # ---------------------------------------------------------------------------
 
@@ -752,14 +897,17 @@ __all__ = [
     "facts_of",
     "fake_mode_of",
     "fake_mode_of_program",
+    "has_meta_params",
     "is_structure_only",
     "materialize_random",
     "modules_of",
     "program_shape_env",
     "refusal_token",
     "restore_virtual",
+    "revirtualize_from_meta",
     "stray_real_tensors",
     "structure_only_components",
+    "to_meta_for_save",
     "virtualize",
     "under",
 ]

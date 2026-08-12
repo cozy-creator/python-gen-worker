@@ -1447,6 +1447,10 @@ class EntryCompilePool:
         # other children run, so summing it into the compile total would
         # invent seconds nobody spent compiling.
         self.entry_stage_seconds: Dict[str, float] = {}
+        #: pgw#1111: how many entries crossed the process boundary as META
+        #: (a weight-free mint). A pool that ran a structure-only cell and
+        #: reports 0 here staged real weights and the round-trip never fired.
+        self.meta_staged_entries = 0
         self.entry_spawn_seconds: Dict[str, float] = {}
         self.entry_overlays: Dict[str, Dict[str, float]] = {}
         self.entry_metrics_raw: Dict[str, Dict[str, float]] = {}
@@ -1458,11 +1462,23 @@ class EntryCompilePool:
     def _stage(self, entry: str, program: Any, index: int) -> Tuple[EntryJob, Path]:
         import torch
 
+        from .models import structure_only
+
         slot = self.workdir / f"entry-{index:03d}"
         slot.mkdir(parents=True, exist_ok=True)
         program_path = slot / "program.pt2"
         t0 = time.monotonic()
-        torch.export.save(program, program_path)
+        # pgw#1111: a weight-free program's params are FAKE, and a fake tensor
+        # has no storage to serialize — the child died deserializing it, which
+        # is why every structure-only mint ran SERIALLY. META tensors carry the
+        # same shape/dtype and DO serialize, so the save crosses the process
+        # boundary on metadata and `aot_compile_child` re-virtualizes
+        # META -> FAKE inside the load's own mode. Real-weight programs are
+        # untouched (the cast moves nothing and the context is a no-op).
+        with structure_only.as_meta_for_save(program) as meta_params:
+            torch.export.save(program, program_path)
+        if meta_params:
+            self.meta_staged_entries += 1
         self.entry_stage_seconds[entry] = round(time.monotonic() - t0, 3)
         self.ledger.stage_total_s = round(
             self.ledger.stage_total_s + self.entry_stage_seconds[entry], 3)
