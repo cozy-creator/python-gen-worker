@@ -75,6 +75,9 @@ def test_a_compile_target_advertises_no_computed_key(monkeypatch) -> None:
     assert "requested_cell_key" in fields, (
         "the wire field is retired by the th#1457/pgw#891 RunJob cut, not "
         "here — this test is about the PRODUCER")
+    # ...and its axes twin is already gone: §4.28 / th#1751 W4 reserved 11,
+    # because "forge mint parameters" was its only stated purpose.
+    assert "requested_cell_axes" not in fields
 
     assert not hasattr(executor_mod._CompileTargetRecord, "requested_cell_key")
     assert not hasattr(executor_mod._CompileTargetRecord, "requested_cell_axes")
@@ -226,4 +229,3 @@ def test_an_armed_target_still_advertises_the_identity_it_serves() -> None:
     assert wire.active_compile_ref == ref
     assert wire.active_compile_snapshot_digest == "sha256:aa"
     assert not wire.requested_cell_key
-    assert not dict(wire.requested_cell_axes)

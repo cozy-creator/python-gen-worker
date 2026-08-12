@@ -37,7 +37,6 @@ _ENV_TO_FIELD: Dict[str, str] = {
     # (pgw#848) so no call site can read it as the live credential.
     "WORKER_JWT": "bootstrap_worker_jwt",
     "WORKER_RELEASE_ID": "worker_release_id",
-    "WORKER_MODE": "worker_mode",
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "GEN_WORKER_CONFIG_SNAPSHOT_PATH": "config_snapshot_path",

@@ -66,7 +66,7 @@ from ..transport import FatalTransportError, Transport
 from ..topology import ExecutionTopology
 from .. import postmortem
 from .. import proc_evidence
-from .. import config, worker_credential, worker_goals, worker_identity
+from .. import config, worker_credential, worker_identity
 from .. import worker_fatal
 from . import (
     ENV_CHILD,
@@ -1513,15 +1513,6 @@ class ParentControl:
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=str(m.get("gen_worker_version") or ""),
             image_digest=self._settings.worker_image_digest,
-            # pgw#846: this builder — not lifecycle's — is the one the hub
-            # actually receives, because the split is unconditional. th#1359
-            # Part 2 taught only `lifecycle._build_resources()` to declare the
-            # mode, so every forge pod ever bought echoed the protobuf default
-            # "" and was idle-reaped as `cold_idle_never_dispatched` (measured
-            # 2026-08-02, pods ld425b16fca080 / rd88n91cz0mxxl at 391s each,
-            # WORKER_MODE="forge" present in the container env throughout).
-            # RAW declared value, same contract as the other builder.
-            worker_mode=worker_goals.current().wire_declaration(),
             instance_id=self._settings.runpod_pod_id or "",
         )
 
@@ -2610,7 +2601,6 @@ def run_parent() -> int:
     postmortem.write_boot_record()
     # §1.18: the bootstrap-owned load for the CONTROL-PARENT process entry.
     settings = config.install(config.load_settings())
-    worker_goals.install(worker_goals.from_settings(settings))
     # The boot credential is installed by ParentControl.__init__, which is the
     # seam every parent goes through — not just this entry point.
     code = ParentControl(settings).run()

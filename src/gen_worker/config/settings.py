@@ -114,24 +114,6 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # itself volatile; /tmp only as a last resort, and loudly).
     boot_record_path: str = ""  # GEN_WORKER_BOOT_RECORD
 
-    # The hub's pod-launch GOAL DECLARATION — a bootstrap SEED, not a mode.
-    #
-    # pgw#930 (§1.17) deleted `gen_worker.worker_mode`. Paul: *"you can spawn a
-    # GPU and tell it to mint some AOT-cells, while also using it to serve jobs
-    # (inference) as needed"*, so the posture is a composable goal set
-    # (`gen_worker.worker_goals.WorkerGoals`), not an exclusive enum. This field
-    # is the only thing that still spells it "serve"/"forge", and
-    # `worker_goals.from_settings` is the ONLY interpreter of that spelling —
-    # one site to delete when th#1488's Directive delivers `repeated Goal
-    # goals` on the control channel and this field goes with it.
-    #
-    # Deliberately NOT an env_seal knob (a sealed knob would re-digest the
-    # env_seal key axis and give a mint-only pod's cell a key no serving pod can
-    # compute — the exact property that makes a minted cell reusable). Unknown
-    # values seed serve-only and are echoed raw on Hello, so the hub sees the
-    # disagreement rather than inferring a serving pod.
-    worker_mode: str = "serve"  # WORKER_MODE
-
     # tensorhub access for standalone clients (run/serve/prefetch). Production
     # workers get orchestrator-resolved manifests and never dial these.
     tensorhub_url: str = ""        # TENSORHUB_URL

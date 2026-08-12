@@ -52,7 +52,6 @@ from gen_worker import (
     mint_process)
 from gen_worker.compile_posture import FLEET, USER_MACHINE, CompilePosture
 from gen_worker.mint_process import MintFrame, MintRequest, MintSlot
-from gen_worker.worker_goals import SERVE_ONLY
 
 SRC = Path(aot_compile_pool.__file__).parent
 
@@ -81,7 +80,7 @@ def _width(
         available_bytes=int(avail_gib * 1024**3),
         free_vram_bytes=int(free_vram_gib * 1024**3),
         device_bytes=int(device_gib * 1024**3),
-        device_lock=True, goals=SERVE_ONLY, posture=posture, limit=limit)
+        device_lock=True, posture=posture, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +522,7 @@ def test_the_DEFAULT_posture_is_the_fleet_one_when_nothing_installed() -> None:
         36, vcpus=32, avail_gib=256, posture=FLEET).cpu_workers \
         == aot_compile_pool.entry_workers(
             36, vcpus=32, available_bytes=256 * 1024**3, free_vram_bytes=0,
-            device_lock=True, goals=SERVE_ONLY).cpu_workers
+            device_lock=True).cpu_workers
 
 
 def test_the_width_row_SAYS_which_posture_chose_K() -> None:

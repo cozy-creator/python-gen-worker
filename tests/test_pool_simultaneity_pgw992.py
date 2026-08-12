@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker import aot_compile_pool as pool
-from gen_worker import mint_budget, worker_goals
+from gen_worker import mint_budget
 
 _GIB = 1024 ** 3
 
@@ -51,9 +51,9 @@ def _incident_width() -> pool.PoolWidth:
     """K=2 from the REAL policy on the REAL estimate — reproduced, not typed."""
     return pool.entry_workers(
         36, vcpus=256, available_bytes=116 * _GIB, peak_rss_bytes=3 * _GIB,
-        free_vram_bytes=FREE_AT_OPEN, device_bytes=9.9 * _GIB and int(9.9 * _GIB),
-        device_basis="estimated", device_lock=True,
-        goals=worker_goals.MINT_ONLY)
+        free_vram_bytes=FREE_AT_OPEN + pool.DEVICE_RESERVE_BYTES,
+        device_bytes=int(9.9 * _GIB),
+        device_basis="estimated", device_lock=True)
 
 
 def _pool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
@@ -85,9 +85,8 @@ def test_the_free_sample_alone_still_says_K4_which_is_what_went_wrong() -> None:
     ask = mint_budget.entry_device_ask(MEASURED_ENTRY_PEAK)
     a4 = pool.entry_workers(
         36, vcpus=256, available_bytes=116 * _GIB, peak_rss_bytes=3 * _GIB,
-        free_vram_bytes=FREE_AT_OPEN, device_bytes=ask,
-        device_basis="measured", device_lock=True,
-        goals=worker_goals.MINT_ONLY)
+        free_vram_bytes=FREE_AT_OPEN + pool.DEVICE_RESERVE_BYTES,
+        device_bytes=ask, device_basis="measured", device_lock=True)
     assert a4.workers == 4, a4.reason
     # ...and four of them do not fit beside the residents. This is the OOM.
     assert 4 * ask + SERVING_PARENT + OWN_PEAK > CARD_TOTAL
@@ -118,8 +117,13 @@ def test_the_simultaneity_bound_holds_K_at_two_on_the_incident_card(
         "here is the OOM.")
     ask = mint_budget.entry_device_ask(MEASURED_ENTRY_PEAK)
     terms = box.simultaneity
+    # §4.28 / pgw#1092: the tenant reserve is a term of this budget on EVERY
+    # pod now (it used to be dropped for a mint-only one). K is unchanged at 2
+    # — the clamp this file exists for is untouched — and the budget it was
+    # derived from is exactly one `DEVICE_RESERVE_BYTES` smaller.
+    assert terms["simultaneity_tenant_reserve_bytes"] == pool.DEVICE_RESERVE_BYTES
     assert terms["simultaneity_budget_bytes"] == (
-        CARD_TOTAL - SERVING_PARENT - OWN_PEAK)
+        CARD_TOTAL - SERVING_PARENT - OWN_PEAK - pool.DEVICE_RESERVE_BYTES)
     assert terms["simultaneity_k_cap"] == 2
     # The granted set actually fits, which is the property that matters.
     assert (box.width.workers * ask + SERVING_PARENT + OWN_PEAK) <= CARD_TOTAL
@@ -186,17 +190,16 @@ def test_an_unreadable_card_refuses_the_widen(
 def test_a_serving_pod_pays_the_tenant_reserve_inside_the_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`serve_goal` is already in the width record, so the pool knows a tenant
-    forward is coming. The reserve is a TERM of the budget, not a pad bolted
-    on after the division (§4.24: the bound models the threat)."""
+    """Every pod is a serving pod after §4.28, so a tenant forward is always
+    coming. The reserve is a TERM of the budget, not a pad bolted on after the
+    division (§4.24: the bound models the threat)."""
     monkeypatch.setattr(pool, "card_census",
                         lambda device=-1: _incident_census())
     monkeypatch.setattr(pool, "own_device_high_water", lambda device=-1: 0)
     serving = pool.entry_workers(
         36, vcpus=256, available_bytes=116 * _GIB, peak_rss_bytes=3 * _GIB,
         free_vram_bytes=FREE_AT_OPEN, device_bytes=int(9.9 * _GIB),
-        device_basis="estimated", device_lock=True,
-        goals=worker_goals.WorkerGoals(serve=True, mint=True))
+        device_basis="estimated", device_lock=True)
     box = pool.EntryCompilePool(tmp_path / "pool", width=serving)
     _observe(box, MEASURED_ENTRY_PEAK)
     assert box.simultaneity["simultaneity_tenant_reserve_bytes"] == \
@@ -278,8 +281,8 @@ def test_the_estimate_only_LOOKED_safe_and_the_bound_does_not_rely_on_it(
                        ("measured", MEASURED_ENTRY_PEAK)):
         width = pool.entry_workers(
             4, vcpus=128, available_bytes=256 * _GIB, peak_rss_bytes=3 * _GIB,
-            free_vram_bytes=ZI_FREE, device_bytes=ask, device_basis=basis,
-            device_lock=True, goals=worker_goals.MINT_ONLY)
+            free_vram_bytes=ZI_FREE + pool.DEVICE_RESERVE_BYTES,
+            device_bytes=ask, device_basis=basis, device_lock=True)
         box = pool.EntryCompilePool(tmp_path / f"pool-{basis}", width=width)
         granted = box.width.workers
         run_ask = int(box.width.per_entry_device_bytes or ask)
@@ -315,9 +318,8 @@ def test_the_constructed_width_is_bounded_too_not_only_the_widen(
     # hold beside 25.74 GiB of residents.
     optimistic = pool.entry_workers(
         36, vcpus=256, available_bytes=116 * _GIB, peak_rss_bytes=3 * _GIB,
-        free_vram_bytes=FREE_AT_OPEN, device_bytes=4 * _GIB,
-        device_basis="measured", device_lock=True,
-        goals=worker_goals.MINT_ONLY)
+        free_vram_bytes=FREE_AT_OPEN + pool.DEVICE_RESERVE_BYTES,
+        device_bytes=4 * _GIB, device_basis="measured", device_lock=True)
     assert optimistic.workers >= 5, optimistic.reason
 
     box = pool.EntryCompilePool(tmp_path / "pool", width=optimistic)

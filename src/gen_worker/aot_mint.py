@@ -1828,8 +1828,8 @@ def _touch_pod_progress(note: str) -> None:
     SCOPE, stated because it is narrower than it looks. `PODGUARD_STATE` is
     injected by `podguard.arm()`, which runs only when PODGUARD creates the
     pod. A HUB-created pod never passes through it, carries no watchdog and no
-    state dir, and this call is therefore a no-op there — which is most pods,
-    and will include th#1359 forge pods. So this makes lane-rented pods
+    state dir, and this call is therefore a no-op there — which is most pods.
+    So this makes lane-rented pods
     progress-keyed and leaves hub-created pods on renter-liveness plus a fixed
     1800 s grace (`lease_seconds` 900 x `REAP_LEASE_MULTIPLE` 2.0).
 
@@ -3046,9 +3046,9 @@ def _release_mint_residents(
     — measured at 16.2 GiB held through the entire 97-minute compile phase on
     the L40S (attempt 30), which with the pgw#992 budget is most of what held
     K at 2. This is the MINT PARENT'S OWN copy: the serving worker's eager
-    pipeline lives in a different process and is untouched here (its
-    forge-pod release is ``mint_delegate``'s, and a serving pod keeps eager
-    resident per Paul's ruling — GPU hot, eager minimally disrupted).
+    pipeline lives in a different process and is untouched here — a serving pod
+    keeps eager resident per Paul's ruling (GPU hot, eager minimally
+    disrupted), and after §4.28 every pod is a serving pod.
 
     Projection, not deletion. Every retained ``ExportedProgram`` keeps its
     graph, signature, placeholders and LITERAL values (a literal ships inside

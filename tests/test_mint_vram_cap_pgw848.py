@@ -28,14 +28,10 @@ from gen_worker import aot_mint, mint_budget, mint_child, mint_process
 
 import inspect
 
-from gen_worker.worker_goals import WorkerGoals
-
-# pgw#930: these were `forge=True` / `forge=False`. The pool no longer takes a
-# mode boolean — it takes the GOAL SET, and derives its three tenant reserves from
-# whether a serve goal is held. Naming the goals makes the test say which fact it
-# is exercising instead of which branch of a two-valued ternary.
-_SERVE_ONLY = WorkerGoals(serve=True, mint=False, declared="serve")
-_MINT_ONLY = WorkerGoals(serve=False, mint=True, declared="forge")
+# §4.28 / pgw#1092: the reserves used to be relaxed to zero on a pod holding no
+# serve goal — a forge pod. That pod class is DELETED, so neither `co_residency`
+# nor `entry_workers` takes a goal set any more and every reserve is
+# unconditional. The tests below are the inverse of what they used to assert.
 
 _GIB = 1 << 30
 
@@ -177,115 +173,90 @@ def test_every_terminus_reports_the_device_peak() -> None:
 
 
 # ---------------------------------------------------------------------------
-# th#1359: on a FORGE pod every tenant reserve in this file protects nobody
+# §4.28 / pgw#1092: there is no pod class the tenant reserve does not protect
 # ---------------------------------------------------------------------------
 
 
-def test_no_serve_goal_means_no_tenant_to_reserve_for(monkeypatch) -> None:
-    """The premise of this whole module is a co-resident serving process.
+def test_the_tenant_reserve_is_unconditional(monkeypatch) -> None:
+    """The premise of this whole module is a co-resident serving process, and
+    after §4.28 that premise is UNIVERSAL.
 
-    A pod holding no serve goal receives no tenant dispatch and holds no
-    resident serving model, so the reserve is not "small" — it is zero, and the
-    mint gets the card. Stated explicitly rather than left to emerge from
-    `allocated -> 0`: "mostly falls out on its own" is how the 11.09 GiB ceiling
-    survived fifteen attempts.
+    The forge — the mint-only pod that held no serve goal and therefore no
+    tenant — is deleted (th#1751 W4 / pgw#1092). The only mint left is the one
+    a SERVING pod runs in the background on a cell miss (pgw#784), so there is
+    always a tenant and the reserve is never zeroed.
 
-    pgw#930 rewrote this from a source-text assertion (`"if forge:" in
-    inspect.getsource(...)`) into a BEHAVIOURAL one. The old form could only
-    ever check that a particular branch was still spelled a particular way, so
-    it would have passed unchanged if the branch had been keyed on the wrong
-    fact — and it would fail on any refactor that kept the behaviour. It also
-    could not express the case that matters now: a pod holding BOTH goals keeps
-    its reserve, which is a third answer the two-valued check had no room for.
+    RED before this change: `co_residency` took `goals=` and returned
+    `activation_bytes == 0` for `WorkerGoals(serve=False, mint=True)`.
     """
     reading = mint_budget._DeviceRead(
         free_bytes=40 * _GIB, allocated=5 * _GIB,
         measured_activation=0, activation=3 * _GIB, cache_slack=0)
     monkeypatch.setattr(mint_budget, "_read_device", lambda device: reading)
 
-    serve_only = mint_budget.co_residency(0, goals=_SERVE_ONLY)
-    mint_only = mint_budget.co_residency(0, goals=_MINT_ONLY)
-    both = mint_budget.co_residency(
-        0, goals=WorkerGoals(serve=True, mint=True))
+    assert mint_budget.co_residency(0).activation_bytes == 3 * _GIB, (
+        "the tenant activation reserve is unconditional after §4.28")
 
-    assert serve_only.activation_bytes == 3 * _GIB, (
-        "a pod holding a serve goal must keep its tenant activation reserve")
-    assert mint_only.activation_bytes == 0, (
-        "a pod holding no serve goal has no tenant to reserve for")
-    assert both.activation_bytes == serve_only.activation_bytes, (
-        "a pod serving AND minting kept no tenant reserve — this is the case "
-        "the deleted `forge` boolean could not express, and getting it wrong "
-        "is pgw#846's 11.09 GiB ceiling pointed at a live tenant")
-
-    # The signature takes the GOAL SET, not a mode, and defaults to reading the
-    # goals the process entry published.
+    # No posture argument survives on the signature: there is nothing left to
+    # relax it with, and a knob nobody can set is a knob a lane will re-key.
     params = inspect.signature(mint_budget.co_residency).parameters
-    assert "goals" in params and "forge" not in params
+    assert "goals" not in params and "forge" not in params
 
 
-def test_a_forge_pool_drops_all_three_tenant_reserves() -> None:
+def test_the_pool_keeps_all_three_tenant_reserves_for_every_pod() -> None:
     """CPU headroom, VRAM reserve and the host-RAM reserve are all tenant
-    reserves. On pgw#846's attempts 14/15 the VRAM one alone held the pool at
-    K=1 on a host that could have run it 127 CPU-side."""
+    reserves, and none of them can be dropped any more.
+
+    RED before this change: `entry_workers(goals=WorkerGoals(serve=False,
+    mint=True))` widened on all three axes against the identical hardware.
+    """
     from gen_worker import aot_compile_pool as pool
 
     hw: Any = dict(
         vcpus=127, available_bytes=116 * _GIB, device_bytes=int(11.09 * _GIB),
         device_lock=True)
-    serving = pool.entry_workers(
-        36, free_vram_bytes=int(21.48 * _GIB), goals=_SERVE_ONLY, **hw)
-    forge = pool.entry_workers(
-        36, free_vram_bytes=int(44.39 * _GIB), goals=_MINT_ONLY, **hw)
+    tight = pool.entry_workers(36, free_vram_bytes=int(21.48 * _GIB), **hw)
+    assert tight.workers == 1 and tight.binding == "vram", tight.reason
 
-    assert serving.workers == 1 and serving.binding == "vram", serving.reason
-    assert forge.workers > serving.workers, (
-        f"a pod holding no serve goal must not inherit the tenant reserves: "
-        f"{serving.reason!r} vs {forge.reason!r}")
-    # Every reserve, individually, on identical hardware.
-    same = dict(hw, free_vram_bytes=int(44.39 * _GIB))
-    a = pool.entry_workers(36, goals=_SERVE_ONLY, **same)
-    b = pool.entry_workers(36, goals=_MINT_ONLY, **same)
-    assert b.cpu_workers > a.cpu_workers, "CPU headroom not dropped"
-    assert b.mem_workers > a.mem_workers, "host-RAM reserve not dropped"
-    assert b.device_workers > a.device_workers, "VRAM reserve not dropped"
+    # The reserves are visible in the arithmetic: the width sized against the
+    # same card MINUS each reserve, not against the raw figure.
+    wide = pool.entry_workers(36, free_vram_bytes=int(44.39 * _GIB), **hw)
+    no_reserve = pool.entry_workers(
+        36, free_vram_bytes=int(44.39 * _GIB) + pool.DEVICE_RESERVE_BYTES,
+        **hw)
+    assert no_reserve.device_workers > wide.device_workers, (
+        "the VRAM reserve is not being subtracted at all")
+
+    # And the goal set is gone from the signature entirely.
+    params = inspect.signature(pool.entry_workers).parameters
+    assert "goals" not in params and "forge" not in params
 
 
-def test_the_width_row_says_which_regime_it_was() -> None:
-    """A K of 1 with a serve goal and a K of 1 without one are different
-    defects. The row has to say which — and pgw#930 makes that TWO facts
-    rather than one boolean, because a pod can hold both goals at once and a
-    single `forge` flag could not describe it."""
+def test_the_width_row_no_longer_reports_a_goal_set() -> None:
+    """A K of 1 is a K of 1: there is one pod class left, so the row has no
+    regime to name.
+
+    RED before this change: `facts()` carried `serve_goal`/`mint_goal` and the
+    reason string carried `goals=mint` / `goals=serve` / `goals=serve+mint`.
+    """
     from gen_worker import aot_compile_pool as pool
 
-    mint_only = pool.entry_workers(
+    w = pool.entry_workers(
         36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, goals=_MINT_ONLY)
-    assert mint_only.facts()["serve_goal"] is False
-    assert mint_only.facts()["mint_goal"] is True
-    assert "goals=mint" in mint_only.reason
-    serving = pool.entry_workers(
-        36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, goals=_SERVE_ONLY)
-    assert serving.facts()["serve_goal"] is True
-    assert serving.facts()["mint_goal"] is False
-    assert "goals=serve" in serving.reason
-
-    # The combination the deleted boolean could not spell.
-    both = pool.entry_workers(
-        36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, goals=WorkerGoals(serve=True, mint=True))
-    assert (both.facts()["serve_goal"], both.facts()["mint_goal"]) == (True, True)
-    assert "goals=serve+mint" in both.reason
+        device_lock=True)
+    facts = w.facts()
+    assert "serve_goal" not in facts and "mint_goal" not in facts
+    assert "goals=" not in w.reason, w.reason
 
 
 def test_serving_mode_is_completely_unchanged() -> None:
-    """The forge branch must be additive. A serving pod's width is a number
-    two lanes are currently measuring against; it must not move."""
+    """A serving pod's width is a number two lanes are currently measuring
+    against; deleting the forge relaxation must not move it."""
     from gen_worker import aot_compile_pool as pool
 
     w = pool.entry_workers(
         18, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, goals=_SERVE_ONLY)
+        device_lock=True)
     assert w.cpu_workers == (16 - pool.SERVING_HEADROOM_CPUS) // 2 == 7
     assert w.mem_workers == (64 * _GIB - pool.ENTRY_RSS_RESERVE_BYTES) // (
         pool.DEFAULT_ENTRY_PEAK_RSS_BYTES)

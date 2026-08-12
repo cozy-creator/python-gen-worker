@@ -63,7 +63,7 @@ Its worker was not started with GEN_WORKER_PROBE=1, so the parent's cell-publish
 disarm (pgw#980) is not in force and a mint from rsync'd code could reach the
 shared family namespace. Bring the pod up with:
 
-    GEN_WORKER_PROBE=1 WORKER_MODE=forge   # forge => no tenant dispatch either
+    GEN_WORKER_PROBE=1
 
 and re-run. Do not "just this once" a sync onto a serving pod.
 EOF

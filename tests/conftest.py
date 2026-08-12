@@ -119,8 +119,7 @@ def _fresh_process_settings():
     gw_config.reset_for_test()
     gw_worker_goals.reset_for_test()
     gw_config.install(gw_config.load_settings())
-    gw_worker_goals.install(
-        gw_worker_goals.from_settings(gw_config.current()))
+    gw_worker_goals.install(gw_worker_goals.SERVE_ONLY)
     yield
     gw_config.reset_for_test()
     gw_worker_goals.reset_for_test()

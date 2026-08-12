@@ -87,8 +87,8 @@ pgw#1059 splits away. A mint obligation is named by
 cozy-local store verdict compares recorded facts directly
 (``compile_cache.local_cell_mismatch``).
 
-A wrong key can only produce a MISS (eager + demand + forge), never a
-refusal: any failure to arm a self-requested cell is by construction a
+A wrong key can only produce a MISS (eager, then a background self-mint),
+never a refusal: any failure to arm a self-requested cell is by construction a
 selection-logic bug that must surface loudly (``cell_selection_bug``),
 never a silent eager fallback.
 """

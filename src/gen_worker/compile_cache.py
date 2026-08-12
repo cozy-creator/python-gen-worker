@@ -3856,7 +3856,7 @@ def enable(
                     refusal = "verified cell armed no compile target"
                 execution_lane_name = quant_execution_lane[:4].upper()
                 raise CompiledExecutionLaneUnavailableError(
-                    f"{execution_lane_name} requires an exact compatible Forge cell "
+                    f"{execution_lane_name} requires an exact compatible compile cell "
                     f"({refusal}); eager/dequantized execution is not a "
                     f"{execution_lane_name} production lane"
                 )

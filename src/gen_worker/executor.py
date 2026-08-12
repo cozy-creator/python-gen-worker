@@ -57,7 +57,6 @@ from . import serve_posture
 from . import serving_mode as serving_mode_mod
 from . import warmup
 from . import worker_credential
-from . import mint_goal as mint_goal_mod
 from . import worker_goals
 from .api.binding import (
     ModelRef,
@@ -4905,7 +4904,7 @@ class Executor:
                 # incarnation stays adoptable so a later armed cell can
                 # restore the compiled tier without a reload.
                 logger.error(
-                    "%s compile target for %r has no proven active Forge "
+                    "%s compile target for %r has no proven active compiled "
                     "artifact; registering active-less — its aliases serve "
                     "explicit eager (pgw#672)",
                     target_quant_execution_lane.upper(), spec.name,
@@ -4971,9 +4970,9 @@ class Executor:
         whose key was STAMPED on the artifact at mint) and nothing else. The
         `requested_cell_key`/`requested_cell_axes` fields it used to fill are
         a COMPUTED (`kind="inductor"`) key, a space with no producer since
-        pgw#1010 — so the hub's exact-key delivery and demand machinery on
-        them could never fire. The wire fields retire with the RunJob cut
-        (th#1457/pgw#891); this side simply stops filling them.
+        pgw#1010 — so the hub's exact-key delivery machinery on them could
+        never fire. `requested_cell_axes` is now `reserved 11` on the wire
+        (§4.28, th#1751 W4); `requested_cell_key` survives unfilled.
         """
         out: List[pb.CompileTarget] = []
         for rec in self._classes.values():
@@ -6201,15 +6200,6 @@ class Executor:
             "jit_intake" if any(
                 compile_cache.is_compile_armed(t.pipeline)
                 for t in rec.compile_targets.values()) else "")
-        # th#1359: reaching here means this boot's mint disposition is FINAL
-        # on every path (inline setup, adopted cell, eager-without-mint, and
-        # the background mint's own `finally`). The mint-goal driver waits on
-        # exactly that fact rather than inventing a second notion of "boot is
-        # over" that could disagree with the one boot telemetry publishes.
-        try:
-            mint_goal_mod.note_disposition_final()
-        except Exception:  # pragma: no cover - a latch never breaks a boot
-            logger.debug("mint-goal disposition latch failed", exc_info=True)
         if armed or rec.background_mint is not None:
             return
         # pgw#805: a boot that DECLARED a compile target and ends with no
@@ -9842,9 +9832,8 @@ class Executor:
         terminates COMPLETED on ARM — but the publish is a background thread
         that outlives the arm, so the window in which the cell EXISTS AND IS
         NOT YET DURABLE had no running activity at all. For a pod nobody is
-        watching (every PRODUCTION forge pod, hub-launched from a publish or
-        demand event) that window is unprotected, and a mint reaped there has
-        paid its entire cost and produced nothing.
+        watching that window is unprotected, and a mint reaped there has paid
+        its entire cost and produced nothing.
 
         THE CONSTRAINT THAT SHAPES ALL OF THIS: the counter advances on
         DURABLE STATE — a new key starting its upload, a key landing — and
@@ -10333,28 +10322,11 @@ class Executor:
                 return 0
         return 0
 
-    def background_mint_tasks(self) -> List["asyncio.Task"]:
-        """th#1359: every still-running background mint on this worker.
-
-        A forge pod joins these before it calls itself done — a release may
-        declare more than one compile family, and retiring on the first one to
-        finish would abandon the rest, which is the exact failure (pgw#846
-        attempt sixteen: `self_mint_abort/abandoned_shutdown`) this mode
-        exists to make impossible.
-        """
-        tasks: List["asyncio.Task"] = []
-        for rec in self._classes.values():
-            bg = rec.background_mint
-            task = getattr(bg, "task", None) if bg is not None else None
-            if task is not None and not task.done():
-                tasks.append(task)
-        return tasks
-
     def declares_compile(self) -> bool:
         """Whether ANY discovered spec declares a compile family.
 
-        A forge pod for a release that declares none has nothing to mint, and
-        must say `nothing_owed` and retire rather than sit on a paid card.
+        A release that declares none has nothing to mint, so a boot that ends
+        uncompiled there is not a miss.
         """
         return any(
             s.compile is not None and getattr(s.compile, "family", "")

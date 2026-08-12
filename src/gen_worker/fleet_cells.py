@@ -939,13 +939,13 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
 _IN_FLIGHT_LOCK = threading.Lock()
 _IN_FLIGHT: Dict[str, Tuple[str, float]] = {}
 
-#: th#1359: the SETTLED half of the same ledger — ``{cell_key: checkpoint_id}``
-#: for publishes the hub acknowledged, and ``{cell_key: phase}`` for the ones
-#: it refused. In-flight alone answers "is an upload running"; a forge pod also
-#: has to answer "did this pod produce a cell for the fleet, or not", and that
-#: fact otherwise exists only as a wire event this process cannot read back.
-_PUBLISHED: Dict[str, str] = {}
-_REFUSED: Dict[str, str] = {}
+# th#1359's SETTLED half of this ledger (`_PUBLISHED` / `_REFUSED` and their
+# two accessors) is DELETED with the mint-only pod class (§4.28 / pgw#1092).
+# Its only reader was the mint-goal driver, which had to answer "did this pod
+# produce a cell for the fleet" before retiring itself; a serving pod never
+# retires and never asks. Every write it recorded is already a typed activity event the hub
+# receives (`self_mint_publish` / `self_mint_publish_failed` + `phase=`), so
+# nothing observable was lost — only an in-process duplicate of it.
 
 #: pgw#848 item 1 / th#1359: a monotonic counter of DURABLE publish progress.
 #: It advances when a NEW cell key begins uploading and when one lands — never
@@ -981,18 +981,6 @@ def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
     thread has neither succeeded nor failed yet (pgw#815)."""
     with _IN_FLIGHT_LOCK:
         return dict(_IN_FLIGHT)
-
-
-def published_cells() -> Dict[str, str]:
-    """``{cell_key: checkpoint_id}`` the hub accepted from this process."""
-    with _IN_FLIGHT_LOCK:
-        return dict(_PUBLISHED)
-
-
-def refused_publishes() -> Dict[str, str]:
-    """``{cell_key: failure phase}`` for publishes this process could not land."""
-    with _IN_FLIGHT_LOCK:
-        return dict(_REFUSED)
 
 
 def _publish_async(
@@ -1044,8 +1032,6 @@ def _publish_async(
             ) and cell_key.is_key(key):
                 local_cell_store.store(
                     artifact, key=key, family=family, arm_token=arm_token)
-            with _IN_FLIGHT_LOCK:
-                _REFUSED[key] = "refused"
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: hub refused the publish: {exc}",
@@ -1057,8 +1043,6 @@ def _publish_async(
             )
         except Exception as exc:  # noqa: BLE001 — reported, never fatal
             logger.warning("fleet-cells: publish failed; the next worker on this key re-mints", exc_info=True)
-            with _IN_FLIGHT_LOCK:
-                _REFUSED[key] = _publish_failure_phase(exc)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: publish attempt failed: "
@@ -1068,8 +1052,6 @@ def _publish_async(
                 phase=_publish_failure_phase(exc),
             )
         else:
-            with _IN_FLIGHT_LOCK:
-                _PUBLISHED[key] = str(checkpoint_id or "")
             _note_durable(key, "published")
             activity_mod.emit_event(
                 "self_mint_publish",

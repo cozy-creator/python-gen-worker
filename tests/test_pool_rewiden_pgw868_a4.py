@@ -35,6 +35,7 @@ real ``EntryReport`` and the real ``observe_entry_device``.
 
 from __future__ import annotations
 
+import inspect
 import os
 from pathlib import Path
 
@@ -58,13 +59,19 @@ def _sized(
 
     Stated rather than derived: a CI runner honestly derives K=1 and every
     assertion below would then pass while exercising nothing.
+
+    §4.28 / pgw#1092: these widths used to be taken with `goals=MINT_ONLY`,
+    which zeroed the tenant reserves. The forge is deleted and the reserves are
+    unconditional, so the CARD is stated `DEVICE_RESERVE_BYTES` larger to leave
+    this file's A4 arithmetic — the property under test — byte-identical.
     """
     return pool.entry_workers(
-        entries, limit=limit, vcpus=32,
-        available_bytes=256 * _GIB, peak_rss_bytes=2 * _GIB,
-        free_vram_bytes=free_vram, device_bytes=per_entry,
-        device_basis="estimated", device_lock=device_lock,
-        goals=worker_goals.MINT_ONLY)
+        entries, limit=limit, vcpus=32 + pool.SERVING_HEADROOM_CPUS,
+        available_bytes=256 * _GIB + pool.ENTRY_RSS_RESERVE_BYTES,
+        peak_rss_bytes=2 * _GIB,
+        free_vram_bytes=free_vram + pool.DEVICE_RESERVE_BYTES,
+        device_bytes=per_entry,
+        device_basis="estimated", device_lock=device_lock)
 
 
 @pytest.fixture(autouse=True)
@@ -356,86 +363,34 @@ def test_the_width_change_is_emitted_not_silent(
 
 
 # ---------------------------------------------------------------------------
-# The goal set the width policy reads — and the process that never had one
+# §4.28 / pgw#1092: the width policy reads NO goal set — there is one pod class
 # ---------------------------------------------------------------------------
 
 
-def test_the_mint_child_installs_its_own_goal_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``worker_goals.install`` is called from ``entrypoint`` and
-    ``procsplit.parent`` — both the SERVING parent. The mint runs in a child
-    spawned as ``python -m gen_worker.mint_child``, which installed nothing, so
-    ``current()`` fell back to ``SERVE_ONLY`` in the one process that sizes the
-    compile pool: a mint-only pod held a tenant VRAM reserve, a serving CPU
-    headroom and a tenant host-RAM reserve for a tenant that cannot reach it.
+def test_the_width_policy_takes_no_goal_set_and_no_worker_mode() -> None:
+    """The forge is deleted (§4.28), so the three tenant reserves have nothing
+    left to be relaxed by and the pool asks the goal set nothing.
+
+    RED before this change: `entry_workers` took `goals=`, `mint_child` had an
+    `_install_goals()` that read `WORKER_MODE` off `Settings`, and a mint-only
+    pod compiled WIDER than a serving one on identical hardware.
     """
-    from gen_worker import mint_child
+    from gen_worker import config, mint_child
 
-    monkeypatch.setenv("WORKER_MODE", "forge")
-    worker_goals.reset_for_test()
-    assert worker_goals.current() is worker_goals.SERVE_ONLY, (
-        "precondition: nothing installed yet")
-
-    mint_child._install_goals()
-
-    goals = worker_goals.current()
-    assert goals.mint and not goals.serve, (
-        f"the child read {goals.declared!r} and holds serve={goals.serve} "
-        f"mint={goals.mint}")
-    assert not goals.tenant_reserve_applies()
-    worker_goals.reset_for_test()
+    assert "goals" not in inspect.signature(pool.entry_workers).parameters
+    assert not hasattr(mint_child, "_install_goals")
+    assert not hasattr(config.Settings(), "worker_mode")
+    assert not hasattr(worker_goals, "MINT_ONLY")
+    assert not hasattr(worker_goals.SERVE_ONLY, "mint")
 
 
-def test_the_goal_set_reaches_the_width_and_drops_the_tenant_reserves() -> None:
-    """The observable pgw#846's attempts fourteen and fifteen needed: the
-    reason string names the goals, and a mint-only pod's reserves are gone.
-    Two widths from the REAL policy on the SAME host — only the goals move."""
-    common = dict(
-        vcpus=4, available_bytes=32 * _GIB, peak_rss_bytes=2 * _GIB,
-        free_vram_bytes=30 * _GIB, device_bytes=10 * _GIB,
-        device_basis="estimated", device_lock=True)
-
-    serving = pool.entry_workers(36, goals=worker_goals.SERVE_ONLY, **common)
-    forge = pool.entry_workers(36, goals=worker_goals.MINT_ONLY, **common)
-
-    assert "goals=serve" in serving.reason and "goals=mint" in forge.reason
-    assert forge.workers >= serving.workers, (
-        f"a pod with no tenant may not compile NARROWER than one with a "
-        f"tenant: forge {forge.reason!r} vs serve {serving.reason!r}")
-    assert forge.cpu_workers > serving.cpu_workers, (
-        "SERVING_HEADROOM_CPUS protects an eager forward this pod will never "
-        "run — on a 4-vCPU pod that is a quarter of the pool")
-
-
-def test_the_declaration_the_child_cannot_read_is_not_fatal(
-    monkeypatch: pytest.MonkeyPatch,
+def test_the_child_env_no_longer_carries_a_mode(
 ) -> None:
-    """A mint that died because it could not parse its own goal declaration
-    would trade acceptance 2 for acceptance 3. The fallback is the narrow,
-    serve-only width — which is exactly what runs today."""
-    from gen_worker import mint_child
-
-    worker_goals.reset_for_test()
-    monkeypatch.setattr(
-        mint_child, "load_settings",
-        lambda **_: (_ for _ in ()).throw(RuntimeError("unreadable env")))
-
-    mint_child._install_goals()      # must not raise
-
-    assert worker_goals.current() is worker_goals.SERVE_ONLY
-    worker_goals.reset_for_test()
-
-
-def test_the_child_env_carries_the_declaration_the_child_now_reads(
-) -> None:
-    """The two halves have to meet: ``mint_process.child_env`` copies the
-    parent's environment (so ``WORKER_MODE`` is there), and the loader maps it
-    onto ``Settings.worker_mode``. Neither is new; the join is."""
+    """``mint_process.child_env`` copies the parent's environment, so a stale
+    ``WORKER_MODE`` from an old hub survives the copy — and means nothing,
+    because no `Settings` field and no `worker_goals` interpreter reads it."""
     from gen_worker import mint_process
-    from gen_worker.mint_process import MintRequest
-
-    from gen_worker.mint_process import CompileCellSpec
+    from gen_worker.mint_process import CompileCellSpec, MintRequest
 
     env = mint_process.child_env(
         MintRequest(
@@ -443,5 +398,8 @@ def test_the_child_env_carries_the_declaration_the_child_now_reads(
             target="/tmp/cell.tar.gz", work_root="/tmp/cap",
             report="/tmp/r.json", cfg=CompileCellSpec(family="sdxl")),
         base={"WORKER_MODE": "forge", "PATH": os.environ.get("PATH", "")})
-    assert env["WORKER_MODE"] == "forge"
     assert env["GEN_WORKER_MINT_CHILD"] == "1"
+
+    from gen_worker import config
+
+    assert "worker_mode" not in config.Settings.__struct_fields__

@@ -11,10 +11,12 @@ parent's copy ever reaches the hub.**
 th#1359 Part 2 taught `worker_mode` to the child's builder only. Every forge
 pod bought after that shipped the protobuf default `""` and was idle-reaped as
 `cold_idle_never_dispatched` — two pods at 391 s each, measured 2026-08-02,
-with `WORKER_MODE=forge` present in the container env the whole time. The
-fingerprint that named it was `worker_mode=""` rather than `"serve"`: the
-field's own default is `"serve"`, so an EMPTY string is the signature of a
-field that was never assigned, distinguishable from one assigned a default.
+with `WORKER_MODE=forge` present in the container env the whole time.
+
+`worker_mode` itself is now `reserved 12` (§4.28 / th#1751 W4 + pgw#1092) and
+the field is gone from both builders, but the GUARD it produced is the point
+and is what this file keeps: any field only one builder assigns is dead on the
+wire, and the value-level row below is how that is caught before a pod pays.
 
 These two rows make that fingerprint a red test instead of a paid pod:
 
@@ -31,12 +33,11 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from pathlib import Path
 
 import pytest
 
 from gen_worker import lifecycle as lifecycle_mod
-from gen_worker import config as gw_config
-from gen_worker import worker_goals
 from gen_worker.config import load_settings
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.procsplit.parent import ParentControl
@@ -112,14 +113,7 @@ def test_the_parent_builder_assigns_every_wire_field(monkeypatch: pytest.MonkeyP
     actually receives. That is the exact fingerprint th#1359 Part 2 left on two
     forge pods.
     """
-    monkeypatch.setenv("WORKER_MODE", "forge")
-    # pgw#930: the wire value is projected from the PUBLISHED goal set, not
-    # re-derived from env at the builder. Seeding the declaration therefore
-    # means installing the goals it seeds — which is what a process entry does.
-    settings = gw_config.reload_for_test()
-    worker_goals.install(worker_goals.from_settings(settings))
     pc = _parent_control(
-        worker_mode="forge",
         worker_image_digest="sha256:deadbeef",
         runpod_pod_id="pod-pgw876",
     )
@@ -138,7 +132,72 @@ def test_the_parent_builder_assigns_every_wire_field(monkeypatch: pytest.MonkeyP
         "with `worker_mode` and every forge pod bought afterwards was "
         "idle-reaped as a serving pod."
     )
-    assert res.worker_mode == "forge"
+
+
+def test_the_retired_wire_words_are_gone_from_the_contract() -> None:
+    """§4.28 / th#1751 W4 + pgw#1092 — the vocabulary cut, at the DESCRIPTOR
+    and in the contract text.
+
+    RED before this change: both names resolved to live fields (12 and 11) and
+    a stale `WORKER_MODE=forge` could still be echoed to the hub.
+    """
+    assert "worker_mode" not in {
+        f.name for f in pb.WorkerResources.DESCRIPTOR.fields}
+    assert "requested_cell_axes" not in {
+        f.name for f in pb.CompileTarget.DESCRIPTOR.fields}
+    # ...and no lane may reclaim the numbers or the names (§1.27(f): a
+    # within-major retirement reserves BOTH). The python descriptor does not
+    # expose reserved ranges, so the vendored contract itself is the assertion.
+    contract = (
+        Path(__file__).resolve().parents[1] / "proto" / "worker_scheduler.proto"
+    ).read_text()
+    assert "reserved 12;" in contract and 'reserved "worker_mode";' in contract
+    assert "reserved 11;" in contract
+    assert 'reserved "requested_cell_axes";' in contract
+
+
+def _append_unknown_string(wire: bytearray, field_no: int, value: bytes) -> None:
+    """Append `field_no` as a length-delimited (wire type 2) string."""
+    from google.protobuf.internal import encoder as _encoder
+
+    _encoder._VarintEncoder()(wire.extend, (field_no << 3) | 2, False)
+    _encoder._VarintEncoder()(wire.extend, len(value), False)
+    wire.extend(value)
+
+
+def test_a_wheel_that_still_sends_the_retired_fields_is_not_refused() -> None:
+    """THE FLEET-SAFETY CLAIM, proved rather than asserted in a PR body.
+
+    Wheels <= 0.112.0 SEND `worker_mode` (field 12), and a 0.94-vintage one
+    sends `requested_cell_axes` (field 11). proto3 has no strict mode: an
+    unknown field is skipped at decode and every KNOWN field parses normally,
+    so a peer on the new contract reads an old worker's message exactly as
+    before. This is why the hub half of the cut is safe to land while the fleet
+    still runs old wheels.
+
+    RED before this change is not available by construction (the fields WERE
+    known), which is the point: the row exists to fail if anyone ever makes the
+    decode strict.
+    """
+    old = pb.WorkerResources(gpu_count=4, gpu_sm="90")
+    wire = bytearray(old.SerializeToString())
+    _append_unknown_string(wire, 12, b"forge")
+
+    fresh = pb.WorkerResources()
+    assert fresh.ParseFromString(bytes(wire)) == len(wire)
+    assert fresh.gpu_count == 4 and fresh.gpu_sm == "90"
+    assert not hasattr(fresh, "worker_mode")
+
+    # Same for the CompileTarget half: field 11 was a map, whose entries are
+    # also length-delimited, so a single entry is the honest shape to feed it.
+    target = pb.CompileTarget(family="sdxl", requested_cell_key="ck1-abc")
+    twire = bytearray(target.SerializeToString())
+    _append_unknown_string(twire, 11, b"\n\x03sku\x12\x04L40S")
+
+    got = pb.CompileTarget()
+    assert got.ParseFromString(bytes(twire)) == len(twire)
+    assert got.family == "sdxl" and got.requested_cell_key == "ck1-abc"
+    assert not hasattr(got, "requested_cell_axes")
 
 
 def _assigned_field_names(func: object) -> set:

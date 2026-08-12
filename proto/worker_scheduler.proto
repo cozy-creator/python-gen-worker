@@ -172,15 +172,14 @@ message WorkerResources {
   // which is harmless for old workers, because they never call the publish
   // route at all.
   string gen_worker_version = 11;
-  // th#1359 Part 2: this worker's OPERATING MODE, as declared to it at pod
-  // launch (WORKER_MODE): "" / "serve" = a normal serving worker; "forge" =
-  // mint-only — it registers, receives no tenant dispatch, holds no resident
-  // serving model, mints what it was scheduled for, publishes, and retires.
-  // Additive: old workers send it unset and the hub reads that as "serve".
-  // The RAW declared value, not the worker's normalisation of it, so a mode
-  // the worker did not recognise is visible at the hub as a disagreement
-  // rather than a silent demotion to serving.
-  string worker_mode = 12;
+  // §4.28 / th#1751 W4 + pgw#1092: `worker_mode` is RETIRED with the forge.
+  // There is one pod class — a serving pod that mints in the background on a
+  // cell miss — so there is no mode to declare. §1.27(f): a within-major
+  // retirement reserves the number AND the name. Wheels <= 0.112.0 still SEND
+  // field 12; proto3 drops unknown fields at decode, so those workers connect
+  // and serve exactly as before.
+  reserved 12;
+  reserved "worker_mode";
   // th#1798: the HOST's NVIDIA driver version (nvidia-smi/NVML), e.g.
   // "580.159.04". The one fact that decides whether this pod's CUDA line can
   // run at all, and until now the hub only ever saw it on the FAILURE carrier
@@ -642,8 +641,8 @@ message StateDelta {
   // th#883 pull-by-key (gw#581): every cell key this worker's runtime could
   // consume right now — candidate keys computed pre-load from endpoint
   // declarations, narrowed to the exact per-target keys once objects are
-  // live. Full-replace. Store-lookup hints ONLY (boot attach rides these);
-  // forge demand comes exclusively from compile_targets' exact keys.
+  // live. Full-replace. Store-lookup hints ONLY (boot attach rides these).
+  // §4.28: nothing derives DEMAND from these — there is no mint to order.
   repeated CellLookup cell_lookups = 8;
   // th#962/pgw#610: MEASURED per-tier disk telemetry. Present in every
   // StateDelta (and thus in Hello.state). The hub budgets residency plans
@@ -692,8 +691,8 @@ message DiskUsageReport {
 }
 
 // One worker-computed cell identity the hub may look up in its store. The
-// hub never derives compatibility from the axes; they parameterize a forge
-// mint (SKU pin, lockstep image) and operator diagnostics only.
+// hub never derives compatibility from it — the worker owns the key (§4.27)
+// and the hub answers by key or misses.
 message CellLookup {
   string family = 1;
   string cell_key = 2; // "ck1-<sha256hex>", computed by gen_worker.cell_key
@@ -724,13 +723,18 @@ message CompileTarget {
   repeated CompileTargetBinding model_bindings = 9;
   // th#883 pull-by-key (gw#581): the exact cell key this live object's
   // runtime computed for itself (gen_worker.cell_key — the ONE compatibility
-  // brain). The hub serves a stored cell by this key or records demand for
-  // the forge; it never derives compatibility hub-side. Empty when the
-  // runtime cannot state a required axis.
+  // brain). The hub serves a stored cell by this key or misses; it never
+  // derives compatibility hub-side. Empty when the runtime cannot state a
+  // required axis.
   string requested_cell_key = 10;
-  // The requested key's axes, verbatim: forge mint parameters (SKU pin,
-  // torch, image digest) and diagnostics only — never hub-side selection.
-  map<string, string> requested_cell_axes = 11;
+  // §4.28 / th#1751 W4 + pgw#1092: `requested_cell_axes` is RETIRED. Its ONLY
+  // stated purpose was "forge mint parameters (SKU pin, torch, image digest)",
+  // and there is no forge to parameterize; the hub has never read it
+  // (compile_cache_delivery.go IGNORES it) and pgw has had no producer since
+  // pgw#1032. §1.27(f): number and name both reserved. Wheels <= 0.112.0 may
+  // still send field 11 and proto3 drops it at decode.
+  reserved 11;
+  reserved "requested_cell_axes";
 }
 
 message CompileTargetBinding {
