@@ -71,8 +71,13 @@ def _args(seq: int):
 
 @pytest.fixture(autouse=True)
 def _isolated_dynamo():
+    # `graph_audit` reads the PROCESS-WIDE dynamo counters, which `reset()` does
+    # not clear — a worker that ran other files first carries their graphs in.
+    from torch._dynamo.utils import counters
+
     gc.collect()
     torch._dynamo.reset()
+    counters.clear()
     yield
     gc.collect()
     torch._dynamo.reset()
