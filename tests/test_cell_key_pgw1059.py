@@ -41,26 +41,27 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 # ---------------------------------------------------------------------------
 
 
-def test_membership_axiom_the_key_is_exactly_four_axes():
-    """The ck1 key contains exactly {graph, envelope, sm, toolchain}.
+def test_membership_axiom_the_key_is_exactly_three_axes():
+    """The ek1 key contains exactly {graph, sm, toolchain}.
 
     If this test is failing because you added an axis: STOP. The membership
     axiom (pgw#1059 amendment 6, Paul 2026-08-09) admits an axis only when
     the fact provably alters the compiled artifact AND cannot ride an
-    existing axis's fact block (trace-shaping facts ride ``graph`` via the
-    class hashes; declared-region facts ride ``envelope``; compiler
-    configuration rides ``toolchain``). kind/format (single-valued),
-    family/lane (store metadata + discovery scoping) and env_seal (folded
-    into toolchain; gates remain) were each REMOVED by that test.
+    existing axis's fact block (trace-shaping facts ride ``graph`` via THIS
+    entry's class hash; compiler configuration rides ``toolchain``).
+    kind/format (single-valued), family/lane (store metadata + discovery
+    scoping) and env_seal (folded into toolchain; gates remain) were each
+    REMOVED by that test — and pgw#1176 removed ``envelope`` by it too: it
+    digests the UNION of the ladder across the whole declaration, which is a
+    property of the collection and not of any computation.
     """
-    assert cell_key._REQUIRED == ("graph", "envelope", "sm", "toolchain")
+    assert cell_key._REQUIRED == ("graph", "sm", "toolchain")
     assert cell_key._OPTIONAL == ()
 
 
 def test_adding_an_axis_refuses_with_the_axiom_named():
     axes = {
-        "graph": "g" * 16, "envelope": "e" * 16, "sm": "sm_89",
-        "toolchain": "t" * 16, "sku": "l4",
+        "graph": "g" * 16, "sm": "sm_89", "toolchain": "t" * 16, "sku": "l4",
     }
     with pytest.raises(cell_key.CellKeyError) as exc:
         cell_key.from_axes(axes)
@@ -70,10 +71,12 @@ def test_adding_an_axis_refuses_with_the_axiom_named():
 
 @pytest.mark.parametrize(
     "stale", ["contract", "env_seal", "kind", "format", "family", "lane",
-              "mode", "code_closure"])
+              "mode", "code_closure", "envelope"])
 def test_every_dropped_axis_is_a_typed_refusal(stale):
+    """``envelope`` joins the list under pgw#1176 — a stale caller shipping it
+    must fail here, not silently widen the key."""
     axes = {
-        "graph": "g" * 16, "envelope": "e" * 16, "sm": "sm_89",
+        "graph": "g" * 16, "sm": "sm_89",
         "toolchain": "t" * 16, stale: "anything",
     }
     with pytest.raises(cell_key.CellKeyError, match="unknown cell-key axis"):
@@ -202,18 +205,18 @@ def _old_schema_digest(meta: dict) -> str:
     facts — the strongest possible collision candidate."""
     contract_facts = {
         "v": 3,
-        "combined_graph_hash": meta["combined_graph_hash"],
+        "combined_graph_hash": "0" * 16,
         "shell_digest": "",
-        "targets": sorted({
-            str((b or {}).get("target") or "")
-            for b in meta["entries"].values()}),
-        "shapes": sorted(
-            [int(v) for v in row]
-            for row in meta["declared_envelope"]["shapes"]),
-        "text_lens": sorted(
-            {int(v) for v in meta["declared_envelope"]["text_lens"]}),
-        "guidance": sorted(
-            float(v) for v in meta["declared_envelope"]["guidance"]),
+        # The pre-pgw#1176 shape, spelled out verbatim because the whole point
+        # of this helper is to reconstruct a key the tree can no longer
+        # produce. It read an `entries` MAP and a `declared_envelope`; an
+        # entry artifact records neither, which is itself the structural
+        # reason an orphaned cell can never be re-derived.
+        "targets": [str(
+            (meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("target") or "")],
+        "shapes": [[1024, 1024]],
+        "text_lens": [77],
+        "guidance": [7.5],
         "lora_bucket": int(meta.get("lora_bucket") or 0),
         "strict": bool(meta.get("strict_export")),
     }
@@ -245,18 +248,23 @@ def test_old_and_new_keys_cannot_collide():
     the verification the purge note rests on: old dev-stack rows are
     unreachable by new derivations, so the purge is hygiene."""
     meta = exported_cell_meta()
-    new_key = cell_key.from_exported_artifact_metadata(meta).digest
+    new_key = cell_key.from_entry_metadata(meta).digest
     old_key = _old_schema_digest(meta)
     assert old_key != new_key
-    assert cell_key.is_key(old_key) and cell_key.is_key(new_key)
+    # pgw#1176 makes this STRUCTURAL rather than a collision argument: a ck1
+    # key does not even parse as an entry key, so an orphaned cell ref cannot
+    # reach a per-entry code path and fail late — it fails at the comparison.
+    assert not cell_key.is_key(old_key)
+    assert cell_key.is_key(new_key)
 
 
 def _admissible_meta() -> dict:
-    """A fully self-consistent exported-cell metadata: entries stamped by
-    the ONE producer (``aot_serve.artifact_metadata``), identity blocks
-    recorded, key stamped from the recorded facts."""
-    entries = {
-        "unet/main": {
+    """A fully self-consistent ENTRY metadata: the block stamped by the ONE
+    producer (``aot_serve.entry_metadata``), identity blocks recorded, key
+    stamped from the recorded facts."""
+    meta = aot_serve.entry_metadata(
+        family="fam", precision="bf16", cell_key="", name="unet/main",
+        entry={
             "target": "unet",
             "fork": [],
             "class_dims": [["b", 1]],
@@ -265,42 +273,44 @@ def _admissible_meta() -> dict:
             "symbols": {},
             "constants": [],
             "graph": {"v": 2},
-        },
-    }
-    meta = aot_serve.artifact_metadata(
-        family="fam", precision="bf16", cell_key="", entries=entries)
+        })
     meta.update({
         "sm": "sm_89",
         "weight_lane": "",
         "env_seal": {"seal_v": 4, "env": {"PYTHONHASHSEED": "0"}},
         "toolchain": {"torch": "x" * 16, "settings_declaration": "d" * 16,
                       "loaded_libs": "l" * 16},
-        "declared_envelope": {
-            "shapes": [[512, 512]], "text_lens": [77], "guidance": [7.5]},
     })
-    meta["cell_key"] = cell_key.from_exported_artifact_metadata(meta).digest
+    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
     return meta
 
 
 def test_pre_redefinition_artifact_is_structurally_refused():
-    """An artifact recording the OLD blocks (``declared_traffic``, fused-
-    contract era) cannot restate a post-redefinition identity: the key
-    derivation refuses typed, and admission (``verify_contract``) turns the
-    unrestatable stamp into a named refusal before anything can arm."""
+    """An artifact recording the OLD blocks (an ``entries`` MAP and a
+    ``combined_graph_hash``, the 36-entry-cell era) cannot restate a
+    per-entry identity: the key derivation refuses typed, and admission
+    (``verify_contract``) turns the unrestatable stamp into a named refusal
+    before anything can arm. That is what makes the ck1 corpus purge hygiene
+    rather than a correctness precondition."""
     meta = _admissible_meta()
     old = dict(meta)
-    old["declared_traffic"] = old.pop("declared_envelope")
-    with pytest.raises(cell_key.CellKeyError, match="declared_envelope"):
-        cell_key.from_exported_artifact_metadata(old)
-    # its (old-formula) stamp is present but unrestatable => admission refuses
-    old["cell_key"] = "ck1-" + "5" * 56
+    entry = old.pop(cell_key.ENTRY_BLOCK_KEY)
+    old["entries"] = {entry["name"]: entry}
+    old["combined_graph_hash"] = "0" * 16
+    old["format"] = 2
+    with pytest.raises(cell_key.CellKeyError, match="entry"):
+        cell_key.from_entry_metadata(old)
+    # its (old-formula) stamp is present but unrestatable => admission refuses.
+    # An ek-shaped stamp, because a ck1 stamp is not an identity CLAIM to this
+    # runtime at all — `is_key` refuses it, so it never reaches the restate.
+    old["cell_key"] = "ek1-" + "5" * 56
     reason = aot_serve.verify_contract(old)
-    assert "not restatable" in reason
+    assert "malformed declared contract" in reason or "not restatable" in reason
 
 
 def test_forged_stamp_is_refused_at_admission():
     meta = _admissible_meta()
-    meta["cell_key"] = "ck1-" + "0" * 56
+    meta["cell_key"] = "ek1-" + "0" * 56
     reason = aot_serve.verify_contract(meta)
     assert "recorded facts describe" in reason
 
@@ -344,20 +354,37 @@ def test_overlay_slot_empty_is_absent_and_nonempty_keys():
             != cell_key.envelope_digest(base))
 
 
-def test_envelope_change_rekeys_and_graph_change_rekeys():
-    meta = exported_cell_meta()
-    key = cell_key.from_exported_artifact_metadata(meta).digest
+def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
+    """HALF OF THIS ROW'S SUBJECT WAS DELETED, so half of it is INVERTED —
+    read this before "fixing" it.
 
+    It used to assert that widening the declared envelope re-keys. Under
+    pgw#1176 that is the disease, not the contract: `envelope_facts` digests
+    the union of the ladder across the whole declaration, so a widening
+    re-keyed 35 sdxl classes that traced byte-identically. Measured on
+    unmodified master @ 4dfdcd60 for two byte-identical classes:
+    ck1-c4c134db... -> ck1-48512ea3...
+
+    The graph half is untouched and is the axis that MUST still move. The one
+    real edge — widening a DYNAMIC dim's range genuinely changes the traced
+    graph — re-keys through that class's own hash, which is the honest
+    channel, rather than through a union digest that punishes its siblings.
+    """
+    meta = exported_cell_meta()
+    key = cell_key.from_entry_metadata(meta).digest
+
+    # The envelope is not an input to identity at all any more: there is no
+    # `declared_envelope` on an entry artifact, and adding one changes nothing.
     wider = dict(meta)
-    wider["declared_envelope"] = {
+    wider[cell_key.EXPORT_ENVELOPE_KEY] = {
         "shapes": [[1024, 1024], [768, 768]],
         "text_lens": [77], "guidance": [7.5]}
-    assert cell_key.from_exported_artifact_metadata(wider).digest != key
+    assert cell_key.from_entry_metadata(wider).digest == key
 
     other_graph = dict(meta)
-    other_graph["combined_graph_hash"] = "b" * 16
-    assert (cell_key.from_exported_artifact_metadata(other_graph).digest
-            != key)
+    other_graph[cell_key.ENTRY_BLOCK_KEY] = {
+        **meta[cell_key.ENTRY_BLOCK_KEY], "class_hash": "b" * 16}
+    assert cell_key.from_entry_metadata(other_graph).digest != key
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +414,10 @@ def test_arm_token_never_passes_is_key(monkeypatch):
     assert token.startswith(fleet_cells.ARM_SCHEME + "-")
     assert not token.startswith("ck")
     assert not cell_key.is_key(token)
-    # the compared facts are exactly the pre-trace set — graph is absent
+    # the compared facts are exactly the pre-trace set — graph is absent, and
+    # so is `envelope`: pgw#1176 dropped it from ARM_ENVIRONMENT_FACTS because
+    # a per-entry artifact records no declared envelope, so comparing it would
+    # refuse every child handback by construction.
     assert set(identity.facts_dict()) == set(fleet_cells.ARM_FACTS)
+    assert "envelope" not in fleet_cells.ARM_FACTS
     assert "graph" not in identity.facts_dict()

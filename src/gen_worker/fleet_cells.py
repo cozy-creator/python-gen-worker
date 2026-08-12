@@ -303,7 +303,6 @@ def arm_identity(
         "lane": cc.execution_lane_label(
             str(weight_lane or ""), int(lora_bucket or 0)),
         "sm": sm,
-        "envelope": cell_key.envelope_digest(declared_envelope_block(cfg)),
         "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
         "toolchain": cell_key.toolchain_axis_digest(dict(cc.toolchain_digest())),
         "subject": cell_key.subject_digest(subject),
