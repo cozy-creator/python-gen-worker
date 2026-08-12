@@ -198,6 +198,10 @@ class Definition:
     alias_of: Tuple[str, ...]     # private globals a one-line accessor returns
     alias_calls: Tuple[str, ...]  # everything a one-line accessor delegates to
     doc: str = ""
+    #: "callable" or "type". A symbol sweep that enumerates only functions
+    #: misses a dead TYPE entirely — one survived a whole deletion pass on a
+    #: sibling lane and only the compiler caught it (pgw#1189).
+    kind: str = "callable"
 
     @property
     def target(self) -> str:
@@ -278,6 +282,13 @@ def collect_definitions(paths: List[Path]) -> List[Definition]:
         def visit(node: ast.AST, prefix: str, is_method: bool) -> None:
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.ClassDef):
+                    if not child.name.startswith("_"):
+                        out.append(Definition(
+                            module=mod, qual=f"{prefix}{child.name}",
+                            name=child.name, path=path, line=child.lineno,
+                            is_method=False, decorators=_decorators(child),
+                            params=(), kwonly=(), alias_of=(), alias_calls=(),
+                            doc=ast.get_docstring(child) or "", kind="type"))
                     visit(child, f"{prefix}{child.name}.", True)
                 elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name.startswith("_"):
@@ -539,6 +550,15 @@ def exempt(d: Definition, published: Set[str], reach: Reach) -> Optional[str]:
 
 
 def reached(d: Definition, reach: Reach) -> bool:
+    if d.kind == "type":
+        # A type is reached by CONSTRUCTION, by annotation, by subclassing, by
+        # isinstance, by `except`, or by a bare name after an import — all of
+        # which land as a Name or an Attribute. Deliberately permissive: this
+        # half under-reports rather than crying wolf, exactly like the method
+        # half above.
+        return (d.target in reach.qualified
+                or d.name in reach.attrs
+                or any(d.name in names for names in reach.local.values()))
     if d.is_method:
         # A receiver's type is not knowable from the AST: fall back to the
         # attribute name. Conservative — under-reports, never cries wolf.
@@ -656,8 +676,13 @@ def cross_repo_report(findings: List["Finding"], with_branches: bool) -> int:
         parts = target.split(".")
         leaf, mod = parts[-1], ".".join(parts[1:-1])
         modtail = mod.split(".")[-1] if mod else ""
-        pats = [rf"from gen_worker\.{re.escape(mod)} import [^\n]*\b{re.escape(leaf)}\b",
-                rf"from gen_worker import [^\n]*\b{re.escape(leaf)}\b",
+        # ANY gen_worker module, not just the defining one: packages re-export,
+        # and training-endpoints imports `from gen_worker.convert import
+        # Dataset` while the class is defined in `gen_worker.convert.dataset`.
+        # Requiring the defining path made this check blind to every re-export
+        # — which is the same shape of miss that severed a priced consumer, so
+        # it over-matches on purpose. Over-matching says "do not delete".
+        pats = [rf"from gen_worker[.\w]* import [^\n]*\b{re.escape(leaf)}\b",
                 rf"\bctx\.{re.escape(leaf)}\s*\("]
         if modtail:
             pats.append(rf"\b{re.escape(modtail)}\.{re.escape(leaf)}\s*\(")
@@ -708,10 +733,10 @@ def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
         if not reached(d, reach):
             note = ("reached only by an operator script — not the pod's "
                     "production path") if reached(d, tools) else ""
-            findings.append(
-                Finding("callable", f"{d.target}()", d.path, d.line, note))
+            label = d.target if d.kind == "type" else f"{d.target}()"
+            findings.append(Finding(d.kind, label, d.path, d.line, note))
             continue
-        if not want_params:
+        if not want_params or d.kind == "type":
             continue
         # Parameters of a callable that IS reached.
         keys = [d.target, d.name] if not d.is_method else [d.name]

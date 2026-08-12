@@ -60,3 +60,21 @@ request_context._PublisherMixin.checkpoint_dir	training-endpoints/image_lora_fin
 runtime_config.read_snapshot	inference-endpoints/minimax-h3/tests/test_attn_config_ie678.py:7	TEST
 testing.fake_context	inference-endpoints/qwen3.6-27b-mtp-gguf/tests/test_completion.py:90	TEST
 
+
+# pgw#1192 — found only after two widenings of the check, and both are the
+# lesson. (1) TYPES: the sweep enumerated functions only, so
+# `convert.dataset.Dataset` and `convert.source.Source` were invisible to it
+# entirely. (2) RE-EXPORTS: the cross-repo pattern required the DEFINING module
+# path, and training-endpoints writes `from gen_worker.convert import Dataset`
+# against a class defined in `gen_worker.convert.dataset` — so every symbol
+# reached through a package re-export read as unreached. Nine consumers were
+# sitting in the baseline as "dead" because of it.
+convert.calibration.resolve_calibration_action	training-endpoints/conversion/src/conversion/quant/modelopt.py:39	PROD
+convert.dataset.Dataset	training-endpoints/conversion/src/conversion/quant/modelopt.py:39	PROD
+convert.dataset.write_jsonl_shard	training-endpoints/conversion/src/conversion/prompt_corpus.py:32	PROD
+convert.publish.publish_flavors	training-endpoints/conversion/src/conversion/_common.py:9	PROD
+convert.source.Source	training-endpoints/conversion/src/conversion/_common.py:9	PROD
+convert.svdq.build_svdq_flavor_tree	training-endpoints/conversion/src/conversion/quant/svdq.py:36	PROD
+convert.svdq.fetch_svdq_checkpoint	training-endpoints/conversion/src/conversion/quant/svdq.py:36	PROD
+convert.writer.streaming_fp8_snapshot	training-endpoints/tests/test_fuse_lora.py:317	TEST
+convert.writer.verify_w8a8_snapshot	training-endpoints/conversion/src/conversion/quant/modelopt.py:872	PROD
