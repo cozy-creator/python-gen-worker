@@ -209,32 +209,26 @@ git tag -s v<X.Y.Z> -m "..." && git push origin v<X.Y.Z>   # tag push triggers p
 with `git tag -v v<X.Y.Z>` before pushing — a lightweight `git tag` produces an unsigned, unverifiable
 release marker, which v0.110.0 is.
 
-### ⚠️ A GREEN PR IS NOT PROOF OF YOUR TREE — dispatch CI on the exact ref before tagging
+### Only a DISPATCHED run proves a tree — the gate enforces this, you do not have to remember it
 
-**Do not tag a commit whose only green run was a `pull_request` run.** `ci.yml` uses
-`actions/checkout@v4` with no `ref:`, so on a `pull_request` event GitHub checks out
-`refs/pull/<n>/merge` — **your head merged with whatever `master` is at that moment** — while the
-run's `head_sha` is recorded as your branch-head commit. `publish.yml` matches the tag's tree
-against `gh api commits/<head_sha>`'s tree, so **a PR run makes the provenance gate pass on a tree
-CI never actually executed** whenever `master` moved under you. That is the same class of hole
-pgw#795 closed for v0.78.0 (*"the promotion PR tested master plus cherry-picks, which is a different
-tree"*), reopened through a different door — it was found the honest way, by a cut whose PR run went
+Step 3 is `gh workflow run ci.yml --ref <branch>` for a reason: a `workflow_dispatch` (or `push`) run
+checks out the ref it names, so its `head_sha` genuinely names the tree it built. **A `pull_request`
+run does not** — `ci.yml` checks out with no `ref:`, so GitHub builds `refs/pull/<n>/merge`, your head
+merged with whatever `master` is at that moment, while still recording your branch head as
+`head_sha`.
+
+**`publish.yml` refuses a `pull_request` run as proof** (pgw#1191, `scripts/assert_ci_proof.py`), so
+this is a rule the gate holds rather than a step you can forget. If you see it, the refusal tells you
+which problem you have:
+
+| refusal | what it means |
+|---|---|
+| `only_pull_request_proof` | your tree is fine, your **evidence** is the wrong kind — dispatch CI on the tag and re-run publish |
+| `no_run_carries_tree` | this content has **never been tested anywhere** |
+
+A `pull_request` run remains the right gate for *merging*. It is simply not proof for *publishing* —
+and it was pgw#795's v0.78.0 hole arriving through a different door, found by a cut whose PR run went
 green while master moved four times underneath it.
-
-**So use `workflow_dispatch`, which checks out the ref itself**, exactly as step 3 of Mechanics
-already says — and confirm the green run you are relying on is that kind of run:
-
-```bash
-gh workflow run ci.yml --ref <branch-you-will-tag>
-gh run view <run-id> --json event,headSha -q '{event:.event,sha:.headSha}'   # event MUST be workflow_dispatch
-```
-
-A `pull_request` run is still the right gate for *merging*. It is not proof for *publishing*.
-
-**This paragraph is a WORKAROUND and should not survive.** The durable fix is that `publish.yml`
-refuses `pull_request` runs as proof — one `select` on the run's `event` — filed as **pgw#1191**.
-Delete this section when that lands, and leave the `workflow_dispatch` step in Mechanics alone
-either way.
 
 ### PIN the commit you cut, and TAG IT — do not tag master's tip
 
