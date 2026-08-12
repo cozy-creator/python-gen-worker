@@ -431,5 +431,5 @@ class _FakeHub(BaseHTTPRequestHandler):
 def _client(server) -> HubClient:
     return HubClient(
         base_url=f"http://127.0.0.1:{server.server_port}",
-        token="cap-token", owner="acme",
+        token="cap-token",
     )

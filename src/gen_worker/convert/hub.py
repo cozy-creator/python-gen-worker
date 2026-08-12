@@ -297,12 +297,10 @@ class HubClient:
         *,
         base_url: str,
         token: str,
-        owner: str,
         timeout_s: float = 120.0,
     ) -> None:
         self.base_url = str(base_url or "").strip().rstrip("/")
         self.token = str(token or "").strip()
-        self.owner = str(owner or "").strip()
         self.timeout_s = timeout_s
         if not self.base_url or not self.token:
             raise HubPublishError("missing tensorhub base URL or capability token")
@@ -312,16 +310,12 @@ class HubClient:
         """Build from a gen_worker RequestContext (cap-token identity)."""
         base = str(getattr(ctx, "_file_api_base_url", "") or "").strip()
         token = str(getattr(ctx, "_worker_capability_token", "") or "").strip()
-        owner = str(getattr(ctx, "owner", "") or getattr(ctx, "_owner", "") or "").strip()
-        return cls(base_url=base, token=token, owner=owner)
+        return cls(base_url=base, token=token)
 
     # ---- internals ----
 
     def _headers(self) -> dict[str, str]:
-        h = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
-        if self.owner:
-            h["X-Cozy-Owner"] = self.owner
-        return h
+        return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
 
     def _repo_path(self, destination_repo: str) -> str:
         owner, _, name = str(destination_repo).partition("/")
@@ -923,7 +917,6 @@ def publish_dataset_revision(
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "X-Cozy-Owner": owner,
     }
 
     # Stash the kind (+ dataset_info if provided) inside features_json

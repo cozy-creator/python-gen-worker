@@ -340,7 +340,6 @@ class _RequestOutputStream:
         client = HubClient(
             base_url=ctx._get_file_api_base_url(),
             token=ctx._get_worker_capability_token(),
-            owner=(ctx._owner or "").strip(),
         )
         # Worker-addable provenance stamp fields only (th#606).
         provenance: Dict[str, Any] = {}

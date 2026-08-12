@@ -768,7 +768,7 @@ class CellPublisher:
             # do not hash to the key; and resume needs no client state — a
             # re-plan comes back with the landed objects already resident, so
             # a pod that dies mid-upload costs only the in-flight chunks.
-            client = HubClient(base_url=self.base_url, token=token, owner="root")
+            client = HubClient(base_url=self.base_url, token=token)
             result = client.publish_v2(
                 destination_repo=repo,
                 files=[CommitFile(path=artifact.name, local_path=artifact)],

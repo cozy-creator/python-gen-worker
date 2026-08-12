@@ -175,7 +175,7 @@ def hub():
 
 
 def client(hub) -> HubClient:
-    return HubClient(base_url=hub.base, token="cap-token", owner="org")
+    return HubClient(base_url=hub.base, token="cap-token")
 
 
 def write(tmp: Path, name: str, data: bytes) -> CommitFile:
@@ -359,7 +359,7 @@ def test_a_hub_without_v2_routes_FAILS_rather_than_downgrading(tmp_path):
     t.start()
     try:
         with pytest.raises(HubPublishError, match="publish declare failed"):
-            HubClient(base_url=srv.base, token="t", owner="org").publish_v2(
+            HubClient(base_url=srv.base, token="t").publish_v2(
                 destination_repo="org/model",
                 files=[write(tmp_path, "config.json", b"x" * 32)], tags=["prod"],
             )
@@ -392,7 +392,7 @@ def test_a_grant_for_something_never_declared_is_refused(hub, tmp_path, monkeypa
     t.start()
     try:
         with pytest.raises(HubPublishError, match="never declared"):
-            HubClient(base_url=srv.base, token="t", owner="org").publish_v2(
+            HubClient(base_url=srv.base, token="t").publish_v2(
                 destination_repo="org/model",
                 files=[write(tmp_path, "config.json", payload(100))], tags=["prod"],
             )
