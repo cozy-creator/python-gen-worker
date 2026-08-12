@@ -554,7 +554,7 @@ class Lifecycle:
             # this ships it. Off the critical path, and a no-op on the pods
             # that owe nothing, which is nearly all of them.
             try:
-                fleet_cells.resume_pending_publishes(
+                fleet_cells.resume_owed_publishes(
                     self.executor._cell_publisher())
             except Exception:  # noqa: BLE001 — never blocks the handshake
                 logger.warning(

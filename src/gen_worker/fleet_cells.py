@@ -1004,7 +1004,7 @@ def _publish_async(
     store's own path, no path here is ever removed, the thread is not a daemon
     (the upload is bounded by the transport's own timeouts, so waiting for it
     at interpreter exit is finishing work, not hanging on it), and a failure
-    leaves the record ``pending`` for :func:`resume_cells_owed_to_sink` to
+    leaves the record ``pending`` for :func:`resume_owed_publishes` to
     re-attempt on the next boot. The pod no longer has to survive anything.
     """
     key = cell_key_digest or str(meta.get("cell_key") or "")
@@ -1098,7 +1098,7 @@ def _mark_publish(key: str, state: str) -> None:
         local_cell_store.mark(key, sink=state)
 
 
-def resume_cells_owed_to_sink(
+def resume_owed_publishes(
     publisher: Optional[CellPublisher],
 ) -> List[threading.Thread]:
     """Re-attempt every upload this machine still OWES (pgw#1183 / §1.5).
@@ -2317,7 +2317,7 @@ def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
 
     Unconditional, on every tier (§1.5). The publish state is decided here and
     only here: a machine with a live sink OWES an upload from this moment,
-    which is what makes :func:`resume_cells_owed_to_sink` able to finish a
+    which is what makes :func:`resume_owed_publishes` able to finish a
     transfer the minting process never did.
     """
     try:

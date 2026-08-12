@@ -262,7 +262,7 @@ def test_a_pending_publish_is_retried_on_the_NEXT_boot(
                            arm_token=ARM_A, sink=local_cell_store.SINK_OWED)
     sink = _Sink()
 
-    for t in fleet_cells.resume_cells_owed_to_sink(sink):  # type: ignore[arg-type]
+    for t in fleet_cells.resume_owed_publishes(sink):  # type: ignore[arg-type]
         t.join(timeout=30)
 
     assert [p.name for p in sink.published] == ["cell.tar.gz"]
@@ -278,7 +278,7 @@ def test_a_published_cell_is_not_re_uploaded_next_boot(
     local_cell_store.store(_artifact(tmp_path), key=KEY_A, family="f",
                            arm_token=ARM_A, sink=local_cell_store.SINK_DELIVERED)
     sink = _Sink()
-    assert list(fleet_cells.resume_cells_owed_to_sink(sink)) == []  # type: ignore[arg-type]
+    assert list(fleet_cells.resume_owed_publishes(sink)) == []  # type: ignore[arg-type]
     assert sink.published == []
 
 
@@ -294,7 +294,7 @@ def test_a_cell_with_no_sink_by_design_owes_no_publish(
     kept = local_cell_store.lookup(KEY_A)
     assert kept is not None
     assert kept.sink == local_cell_store.SINK_NONE
-    assert list(fleet_cells.resume_cells_owed_to_sink(None)) == []
+    assert list(fleet_cells.resume_owed_publishes(None)) == []
 
 
 # ---------------------------------------------------------------------------
