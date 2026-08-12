@@ -168,12 +168,17 @@ def test_the_witness_backstops_a_residual_collision(
     proves the backstop still holds beneath the sound key: were a witness-blind
     cell ever handed over, the adopt path still refuses on the witness."""
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    cell = aot_serve.artifact_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"].digest,
-        entries=fixed["blocks"], strict_export=True, lora_bucket=0)
+    # pgw#1176: ONE artifact, ONE class — so the witness backstop is asked
+    # about the class this artifact carries, which is the only thing it could
+    # ever honestly answer about.
+    name = sorted(fixed["blocks"])[0]
+    cell = aot_serve.entry_metadata(
+        family=PAIR[0], precision="", cell_key=fixed["key"],
+        name=name, entry=fixed["blocks"][name],
+        strict_export=True, lora_bucket=0)
 
-    mine = boot_key.graph_witnesses_of(fixed["blocks"])
-    theirs = boot_key.graph_witnesses_of(branchy["blocks"])
+    mine = {name: boot_key.graph_witnesses_of(fixed["blocks"])[name]}
+    theirs = {name: boot_key.graph_witnesses_of(branchy["blocks"])[name]}
 
     assert aot_identity.verify_graph_witness(cell, mine) == "", (
         "the pod whose graph this cell WAS compiled from must admit it")
@@ -191,34 +196,34 @@ def test_a_witnessless_cell_is_refused_not_skipped() -> None:
     A pre-pgw#1031 cell records no witness, so it cannot be shown to compute
     this pod's graph — and 'cannot be shown to match' is what a refusal means.
     """
-    meta = {"entries": {"unet": {"class_hash": "aa" * 8}}}
+    meta = {"entry": {"name": "unet", "class_hash": "aa" * 8}}
     reason = aot_identity.verify_graph_witness(meta, {"unet": "d" * 16})
     assert "graph_witness" in reason and "unet" in reason
 
     assert aot_identity.verify_graph_witness(
-        {"entries": {"unet": {"graph_witness": "d" * 16}}}, {})
+        {"entry": {"name": "unet", "graph_witness": "d" * 16}}, {})
     assert aot_identity.verify_graph_witness(
         {}, {"unet": "d" * 16})
 
 
-def test_a_differing_class_set_is_refused() -> None:
-    """A partial agreement is not a narrower match, it is an unproven one."""
-    meta = {"entries": {
-        "unet": {"graph_witness": "a" * 16},
-        "vae": {"graph_witness": "b" * 16}}}
-    reason = aot_identity.verify_graph_witness(meta, {"unet": "a" * 16})
-    assert "class set differs" in reason and "vae" in reason
+# pgw#1176 DELETED `test_a_differing_class_set_is_refused`. Its subject was a
+# CLASS SET on one artifact ("a partial agreement is not a narrower match, it
+# is an unproven one") — and one artifact carries one class now, so the set it
+# guarded cannot exist. Porting it would have preserved the collection in the
+# suite after removing it from the code. What survives is the row above: an
+# entry that records no witness is refused, never skipped.
 
 
 def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
     """One family's cell metadata, as the mint would stamp it."""
     from gen_worker import cell_key as ck, compile_cache as cc, env_seal
 
-    meta = aot_serve.artifact_metadata(
+    name = sorted(row["blocks"])[0]
+    meta = aot_serve.entry_metadata(
         family=family, precision="", cell_key=row["key"].digest,
-        entries=row["blocks"], strict_export=True, lora_bucket=0)
+        name=name, entry=row["blocks"][name],
+        strict_export=True, lora_bucket=0)
     meta["kind"] = ck.EXPORTED_KIND
-    meta[ck.EXPORT_ENVELOPE_KEY] = dict(row["envelope"])
     meta["toolchain"] = dict(cc.toolchain_digest())
     meta[env_seal.SEAL_KEY] = env_seal.effective_seal()
     return meta

@@ -51,8 +51,8 @@ def _meta(**over: Any) -> dict[str, Any]:
         "kind": aot_serve.ARTIFACT_KIND,
         "family": "micro",
         "cell_key": "aot-inductor:k1",
-        "combined_graph_hash": "gc_01",
-        "entries": {k: dict(v) for k, v in _ENTRIES.items()},
+        "manifest_digest": "gc_01",
+        "entry": {"name": "unet", **dict(_ENTRIES["unet"])},
         env_seal.SEAL_KEY: dict(_SEAL),
         "toolchain": dict(_TOOLCHAIN),
         "code_closure": dict(_CLOSURE),
@@ -118,7 +118,7 @@ def test_one_mutated_fact_refuses_and_names_itself(axis: str, mutated: Any) -> N
         ("cell_key", "cell_key"),
         ("toolchain_digest", "toolchain"),
         ("env_seal_digest", env_seal.SEAL_KEY),
-        ("graph_contract_digest", "combined_graph_hash"),
+        ("graph_contract_digest", "manifest_digest"),
     ],
 )
 def test_an_artifact_silent_on_an_axis_refuses_rather_than_skipping(
