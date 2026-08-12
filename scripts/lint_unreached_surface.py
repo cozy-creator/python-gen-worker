@@ -149,6 +149,11 @@ AUTHOR_SURFACE: Dict[str, str] = author_surface()
 #: every module was collected; in guarded scope most targets are simply absent.
 SCOPE_ALL = False
 
+#: Every label this tree currently DEFINES, set by `run`. A baseline row can go
+#: stale two ways that need opposite fixes, and telling a reader the wrong one
+#: sends them hunting for a caller that does not exist.
+DEFINED_LABELS: Set[str] = set()
+
 # target -> why it is unreached AND who deletes it. Each row is a DELETION
 # THAT IS OWED, never a permanent pardon: the only legitimate reason to be in
 # here is that something outside this lane's scope owns the removal, so every
@@ -678,7 +683,7 @@ def cross_repo_report(findings: List["Finding"], with_branches: bool) -> int:
 
 
 def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
-    global SCOPE_ALL
+    global SCOPE_ALL, DEFINED_LABELS
     SCOPE_ALL = scope_all
     src_files = py_files([PKG])
     defs = [d for d in collect_definitions(src_files)
@@ -686,6 +691,7 @@ def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
     reach = collect_reach(py_files(POD_ROOTS))
     tools = collect_reach(py_files(TOOL_ROOTS))
     published = published_names()
+    DEFINED_LABELS = {f"{d.target}()" for d in defs}
 
     findings: List[Finding] = []
     for target in stale_exemptions(defs):
@@ -917,15 +923,36 @@ def main() -> int:
     stale = sorted(known - current)
     for label in new:
         print(f"NEW unreached public surface: {label}\n"
-              f"  Nothing on the pod's production path calls this. This is the "
-              f"program's dominant defect class (pgw#849) — wire it, delete it, "
-              f"or, if its caller is genuinely outside this tree, add an "
-              f"exemption WITH A REASON in {SELF.name}.", file=sys.stderr)
+              f"  Nothing in src/ reaches this. That is the program's dominant "
+              f"defect class (pgw#849) and one of three things:\n"
+              f"    WIRE IT    the caller is missing and should exist;\n"
+              f"    DELETE IT  with its tests, never porting them (§4.34);\n"
+              f"    PROVE IT   the caller is in an ENDPOINT REPO — run\n"
+              f"               `python {SELF.name} --siblings` and, if it "
+              f"passes, add the row WITH its call site to\n"
+              f"               scripts/author_surface_allowlist.txt.\n"
+              f"  'No call site in this repo' is NOT 'no consumer' (§4.34, "
+              f"eb245671): a symbol behind a priced hub function has a consumer "
+              f"even when no code imports it.", file=sys.stderr)
+    # A row goes stale two ways and they need opposite readings. Saying the
+    # wrong one is not a cosmetic problem: `shape_growth.coverage_line()` was
+    # DELETED by pgw#1184 and this guard told master's readers it "now has a
+    # production caller", which is a search for something that does not exist.
+    # A gate's message is part of the gate.
     for label in stale:
-        print(f"STALE baseline entry: {label}\n"
-              f"  It now has a production caller. Remove the line from "
-              f"{BASELINE.name} in the same commit — the ratchet only turns "
-              f"one way if somebody turns it.", file=sys.stderr)
+        if label in DEFINED_LABELS:
+            print(f"WIRED UP — turn the ratchet: {label}\n"
+                  f"  This is GOOD news, not a regression: the symbol still "
+                  f"exists and now HAS a production caller. That is the "
+                  f"outcome this guard exists to produce. Delete its line from "
+                  f"{BASELINE.name} in the same commit as the wiring.",
+                  file=sys.stderr)
+        else:
+            print(f"DELETED — turn the ratchet: {label}\n"
+                  f"  The symbol is GONE from the tree, so nothing calls it and "
+                  f"nothing can. Delete its line from {BASELINE.name} in the "
+                  f"same commit as the deletion. (Do not go looking for its new "
+                  f"caller — there isn't one.)", file=sys.stderr)
     return 1 if (new or stale) else 0
 
 
