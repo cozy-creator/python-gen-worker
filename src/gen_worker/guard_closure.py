@@ -840,67 +840,6 @@ def audit_armed(pipeline: Any, cfg: Any) -> ClosureReport:
     return extract(pipeline, cfg)
 
 
-def closure_manifest(pipeline: Any, cfg: Any, label: str = "") -> Dict[str, Any]:
-    """Classify every compiled graph's guard set against the declared
-    contract and return the deterministic manifest to embed in the cell
-    metadata.
-
-    **ADVISORY (pgw#756).** Suspected leaks and unreadable entries are
-    logged, recorded in the returned manifest, and emitted as a countable
-    ``guard_leak`` event — the mint CONTINUES. Rationale: the consumer
-    re-evaluates these very guards on every call, so an unpinned dependency
-    fails there and degrades to explicit eager with a named reason
-    (pgw#680); a classifier bug, by contrast, refuses every mint on every
-    family (pgw#691, pgw#733). The classification is diagnosis, not a gate.
-
-    Two refusals survive, because each PROVES a defect rather than inferring
-    one:
-
-    * **no compiled graphs at all** — nothing was compiled, so the cell
-      would be empty; the mint is broken independently of any guard;
-    * **non-canonical process posture** (pgw#695) — a measurement of live
-      torch state against exact canonical values, not a classification. Such
-      a mint would arm nowhere, since every canonical consumer refuses its
-      seal.
-    """
-    report = audit_armed(pipeline, cfg)
-    name = label or type(pipeline).__name__
-    if not report.graphs:
-        raise GuardClosureError(
-            f"guard-closure ({name}): no compiled graphs extractable from "
-            "the armed targets — nothing was compiled, refusing to publish "
-            "an empty cell")
-    if report.leaks or report.unproven:
-        lines = list(report.leaks) + [f"UNPROVEN {u}" for u in report.unproven]
-        detail = (
-            f"guard-closure ADVISORY ({name}): {len(report.leaks)} "
-            f"guard(s) outside the declared envelope, {len(report.unproven)} unreadable "
-            f"entrie(s) — recorded in the cell manifest, mint continues "
-            f"(pgw#756; the consumer's own guard evaluation is the real "
-            f"check):\n  " + "\n  ".join(lines))
-        logger.warning("%s", detail)
-        phase = "+".join(
-            t for t, on in (("leak", report.leaks), ("unproven", report.unproven))
-            if on)
-        activity_mod.emit_event(
-            activity_mod.KIND_GUARD_LEAK, detail, phase=phase)
-    else:
-        logger.info(
-            "guard-closure (%s): CLOSED — %d graph(s), verdicts=%s",
-            name, len(report.graphs), report.verdict_counts())
-    # pgw#695: a mint in a non-canonical posture would arm nowhere (every
-    # canonical consumer refuses its seal) — fail THIS mint red instead.
-    posture = posture_snapshot()
-    canonical_diffs = _posture_diff(CANONICAL_POSTURE, posture)
-    if canonical_diffs:
-        raise PostureError(
-            f"guard-closure ({name}): minted in a non-canonical "
-            "process posture: " + "; ".join(canonical_diffs))
-    manifest = report.manifest()
-    manifest[POSTURE_KEY] = posture
-    return manifest
-
-
 # ---------------------------------------------------------------------------
 # Boundary canonicalization (the single compiled-graph ingress)
 # ---------------------------------------------------------------------------
@@ -1159,7 +1098,6 @@ __all__ = [
     "canonical_ingress",
     "canonical_strides",
     "classify",
-    "closure_manifest",
     "consolidate",
     "contract_pins",
     "establish_posture",
