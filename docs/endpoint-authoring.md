@@ -241,7 +241,7 @@ shorthand, the `setup()` parameter name). It is never a constructor argument.
 
 ```python
 HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...), components=(...), storage_dtype=...)
-Hub("owner/repo", tag="latest", flavor="", components=(...), storage_dtype="")  # tensorhub
+Hub("owner/repo", tag="latest", components=(...), storage_dtype="")  # tensorhub
 Civitai("123456", version="789")             # civitai model id
 ModelScope("owner/repo", revision=..., files=(...))
 ```
@@ -259,29 +259,30 @@ of it, e.g. `Hub("owner/sdxl-repo", components=("vae",))` for a VAE swap —
 `storage_dtype="fp8"` keeps denoiser weights in fp8-E4M3 STORAGE with
 per-layer upcast to the compute `dtype` (diffusers layerwise casting) — half
 the denoiser VRAM on any card, no fp8 silicon required. Snapshots whose
-weights are already fp8-stored (an `#fp8` flavor) get the same treatment
-automatically; endpoint code stays precision-agnostic and
-`ModelEvent.vram_bytes` reports the measured resident size. Quantized
-formats are platform-produced stored artifacts (`#fp8`, `#nvfp4` on Blackwell)
-— there is no runtime "quantize my model" kwarg, and which one a component
+weights are already fp8-stored get the same treatment automatically; endpoint
+code stays precision-agnostic and `ModelEvent.vram_bytes` reports the measured
+resident size. Quantized formats are platform-produced stored artifacts —
+there is no runtime "quantize my model" kwarg, and which one a component
 serves is deploy CONFIG, not a literal you pick here (th#980, th#1803).
 
-> **`flavor` is being deleted (th#1803, DESIGN-RULINGS §1.33).** Paul: the
-> flavor system was *"an arbitrary-string sub-selector within a tag-group…
-> too imprecise."* Selection within a tag group becomes tensor-layout-contract
-> compatibility — the endpoint declares a per-slot SET of accepted layouts and
-> the platform grades each candidate COMPATIBLE / CONVERTIBLE / PRODUCIBLE /
-> INCOMPATIBLE ahead of time. `#flavor` refs, flavored tag rows and the flavor
-> columns go away with no alias. The replacement surfaces are being designed in
-> th#1809 (hub) and pgw#1143 (SDK); the `flavor=`/`#fp8` spellings in this
-> document describe what exists today, not what to build against.
+> **`flavor` IS DELETED (th#1803 hub-side, pgw#1148 SDK-side; DESIGN-RULINGS
+> §1.32(d)).** Paul: the flavor system was *"an arbitrary-string sub-selector
+> within a tag-group… too imprecise."* Selection within a tag group is
+> tensor-layout-contract compatibility — the endpoint declares a per-slot SET
+> of accepted layouts (`Slot(layouts=…)`, §1.33) and the platform grades each
+> candidate COMPATIBLE / CONVERTIBLE / PRODUCIBLE / INCOMPATIBLE ahead of time.
+> `#flavor` refs, flavored tag rows and the flavor columns are GONE, with no
+> alias. A binding that carries a `#` selector is refused where it is written
+> (`FlavorSelectorRemoved`); one exact checkpoint is addressed
+> `owner/repo@sha256:<hex>`.
 
 The one exception is the
 EMERGENCY rung (automatic on CUDA hosts): when
-even the downloaded flavor cannot fit free VRAM, the loading layer
+even the downloaded artifact cannot fit free VRAM, the loading layer
 runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
 below platform standards) rather than falling straight to CPU offload.
-Fit ladder: bf16 → `#fp8` → `#nvfp4` (Blackwell) → emergency-nf4 → offload.
+Fit ladder: bf16 → stored fp8 → stored nvfp4 (Blackwell) → emergency-nf4 →
+offload.
 
 ## Model selection
 

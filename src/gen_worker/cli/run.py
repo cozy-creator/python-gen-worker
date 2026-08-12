@@ -137,9 +137,10 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         help=(
             "Execution lane (th#913 dual-form): a family 'bf16'|'fp8', or a "
             "full descriptor like 'fp8-w8a8-dynamic+compiled'. Default: auto "
-            "(the binding as declared). 'fp8' maps to the local cast lane; "
-            "'fp8-w8a8*' folds the #fp8-w8a8 flavor (must be published); "
-            "4bit lanes need an explicit ref#flavor instead."
+            "(the binding as declared). 'fp8' maps to the local cast lane. "
+            "Stored-quant lanes (fp8-w8a8, 4bit) are not selectable locally: "
+            "§1.32(d) deleted the within-tag-group selector, so bind the "
+            "checkpoint you mean by digest ('owner/repo@sha256:<hex>')."
         ),
     )
     p.add_argument(
@@ -948,7 +949,6 @@ def _local_executing_execution_lane(
     if not body:
         body = lanespec.most_quantized_body(
             lanespec.execution_lane_body_of_binding(
-                getattr(b, "flavor", "") or "",
                 getattr(b, "storage_dtype", "") or "")
             for b in (bindings or {}).values())
     # ie#655: a local run compiles nothing, so the execution axis is eager —
@@ -961,9 +961,10 @@ def _apply_execution_lane_to_bindings(bindings: Dict[str, Any], execution_lane_s
     """th#913/gw#596: fold a --lane choice into the declared bindings.
 
     bf16 = the declared base (no transform); fp8 family = the local cast
-    lane (per-layer fp8 storage); an explicit fp8-w8a8 descriptor folds the
-    #fp8-w8a8 flavor (fails loudly if unpublished at resolve time); 4bit
-    lanes need an exact ref#flavor and are refused here."""
+    lane (per-layer fp8 storage). STORED-quant lanes (fp8-w8a8, 4bit) are
+    refused: they used to fold a `#flavor` onto the binding, and pgw#1148
+    deleted that selector with the flavor system (§1.32(d)). Locally, bind
+    the stored-quant checkpoint by digest instead."""
 
     try:
         req = lanespec.parse_execution_lane_spec(execution_lane_str)
@@ -971,20 +972,22 @@ def _apply_execution_lane_to_bindings(bindings: Dict[str, Any], execution_lane_s
         raise _UsageError(f"--lane: {e}") from None
     if req.is_zero or req.family == lanespec.FAMILY_BF16:
         return bindings
-    if req.family == lanespec.FAMILY_4BIT:
+    if req.family == lanespec.FAMILY_4BIT or (
+        req.execution_lane is not None
+        and req.execution_lane.activation == lanespec.ACT_W8A8
+    ):
         raise _UsageError(
-            "--lane: 4bit lanes carry rank/engine-specific flavor tokens; "
-            "bind the exact ref#flavor (e.g. '#svdq-int4-r128') instead.")
-    want_w8a8 = req.execution_lane is not None and req.execution_lane.activation == lanespec.ACT_W8A8
+            f"--lane {execution_lane_str!r}: a STORED-quant lane is not "
+            "selectable locally. It used to fold a `#flavor` onto the "
+            "binding, and §1.32(d)/th#1803 deleted that selector "
+            "(pgw#1148) — bind the stored-quant checkpoint directly, e.g. "
+            "'owner/repo@sha256:<hex>'.")
     out: Dict[str, Any] = {}
     for name, binding in bindings.items():
         try:
-            if want_w8a8:
-                out[name] = rebind_pick(binding, flavor="fp8-w8a8")
-            else:
-                out[name] = rebind_pick(binding, cast="fp8")
+            out[name] = rebind_pick(binding, cast="fp8")
         except (ValueError, TypeError):
-            out[name] = binding  # non-foldable source (HF flavor etc.) — declared as-is
+            out[name] = binding  # non-foldable source — declared as-is
     return out
 
 

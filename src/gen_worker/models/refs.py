@@ -3,8 +3,8 @@
 Normal form — the ONE canonical string for a model ref (grammar th#597 C5,
 shared vectors ``tests/testdata/ref_grammar_vectors.json``):
 
-    tensorhub:  owner/repo[:tag][@sha256:<hex>|@blake3:<hex>][#flavor]
-    hf:         owner/repo[@revision][#flavor]
+    tensorhub:  owner/repo[:tag][@sha256:<hex>|@blake3:<hex>][#<cell-fragment>]
+    hf:         owner/repo[@revision]
 
 The tag is ELIDED when it equals ``prod`` (the grammar default) and stamped
 verbatim otherwise — including ``latest``. th#1276: ``prod`` is the STABLE
@@ -13,9 +13,22 @@ pointer that the finalize path auto-binds, so it must always be written
 explicitly. ``format(parse(s))`` is the normalization projection;
 ``parse(format(v)) == v`` for every value. Every ref string the worker mints
 (wire, residency keys, cache keys, telemetry) MUST come from :func:`wire_ref`
-(bindings), :func:`fold_ref` (string + tag/flavor overlay), or
+(bindings), :func:`fold_ref` (string + tag overlay), or
 :func:`format_model_ref` / ``.canonical()`` (parsed values). A grep-guard test
 (``tests/test_ref_normal_form.py``) rejects new ad-hoc formatter/parser sites.
+
+THE FLAVOR IS DEAD AS A WEIGHT ADDRESS (§1.32(d), th#1803, pgw#1148). The
+`#` tail no longer selects a checkpoint: selection within a tag group is
+tensor-layout contract compatibility (§1.33, ``Slot(layouts=…)``), and a
+specific checkpoint is addressed by ``owner/repo@sha256:…``. A weight ref
+carrying `#` is refused by :func:`refuse_flavor_selector` — the client-side
+twin of the hub's ``flavor_selection_removed`` 400.
+
+The `#` tail SURVIVES IN THE GRAMMAR for one reason only: COMPILE CELL refs
+are `#`-shaped (``root/family-<f>:cells#ck1-…``), exactly as tensorhub's own
+``release.ParseCanonicalRef`` still parses them. That retirement is a
+separate item on both sides; ``TensorhubRef.flavor`` is that cell fragment
+and has no other reader.
 """
 
 from __future__ import annotations
@@ -24,9 +37,47 @@ import re
 from dataclasses import dataclass
 from typing import NewType, Optional
 
-# th#597 C5: flavor charset [a-z0-9][a-z0-9._-]{0,63} (matches tensorhub's
-# validation.IsValidFlavorToken).
-_TENSORHUB_FLAVOR_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+# th#597 C5: `#` fragment charset [a-z0-9][a-z0-9._-]{0,63} (matches
+# tensorhub's validation.IsValidFlavorToken). Cell fragments only — see the
+# module docstring.
+_TENSORHUB_FRAGMENT_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
+class FlavorSelectorRemoved(ValueError):
+    """A weight ref carried a `#` selector. §1.32(d)/th#1803: THE FLAVOR
+    SYSTEM IS DEAD — deleted, not aliased.
+
+    The client-side twin of the hub's ``flavor_selection_removed`` /
+    ``binding_flavor_removed`` 400: the SDK refuses at the boundary rather
+    than minting a ref the hub will reject, so the caller is told what to
+    write instead of reading a server error about a selector they thought
+    was supported.
+    """
+
+
+def _flavor_removed_message(ref: str) -> str:
+    return (
+        f"model ref {ref!r} carries a `#` flavor selector, which is REMOVED "
+        "(§1.32(d), th#1803 / pgw#1148 — deleted, not aliased). Selection "
+        "within a tag group is tensor-layout contract compatibility: declare "
+        "what the code accepts with Slot(layouts=...) and bind "
+        "'owner/repo[:tag]', or address one exact checkpoint with "
+        "'owner/repo@sha256:<hex>'."
+    )
+
+
+def refuse_flavor_selector(ref: str, *, where: str = "") -> None:
+    """Refuse a WEIGHT ref that carries a `#` selector (§1.32(d)).
+
+    THE weight-path chokepoint. Cell refs do not pass through here — the
+    compile cache parses its own `#`-shaped keys, which is the only reason
+    the tail survives in the grammar at all.
+    """
+    s = (ref or "").strip()
+    if "#" not in s:
+        return
+    msg = _flavor_removed_message(s)
+    raise FlavorSelectorRemoved(f"{where}: {msg}" if where else msg)
 
 # th#1276: the ref grammar's default tag — a bare ``owner/repo`` means
 # ``owner/repo:prod``. ``prod`` is the STABLE SERVING pointer; ``latest`` is
@@ -59,13 +110,17 @@ class TensorhubRef:
     repo: str
     tag: str = DEFAULT_REF_TAG
     digest: Optional[str] = None  # snapshot digest, including algorithm prefix (e.g. "blake3:<hex>")
+    #: The `#` tail. A COMPILE CELL fragment (``root/family-<f>:cells#ck1-…``)
+    #: and nothing else — never a weight selector (§1.32(d)). Weight paths
+    #: call :func:`refuse_flavor_selector`; the compile cache is the one
+    #: reader (``compile_cache.parse_cell_ref``).
     flavor: Optional[str] = None
 
     def repo_id(self) -> str:
         return f"{self.owner}/{self.repo}"
 
     def canonical(self) -> "WireRef":
-        """Normal form: ``owner/repo[:tag][@digest][#flavor]``; the tag is
+        """Normal form: ``owner/repo[:tag][@digest][#cell-fragment]``; the tag is
         elided when it is ``prod`` (the grammar default) and stamped verbatim
         otherwise, including ``latest``. Tensorhub is the default provider so
         no prefix is emitted; consumers track provider separately."""
@@ -83,26 +138,21 @@ class TensorhubRef:
 class HuggingFaceRef:
     repo_id: str
     revision: Optional[str] = None
-    flavor: Optional[str] = None
 
     def canonical(self) -> "WireRef":
-        """Normal form ``owner/repo[@revision][#flavor]``. Provider is
-        tracked separately.
+        """Normal form ``owner/repo[@revision]``. Provider is tracked
+        separately.
 
-        Flavor is a binding-metadata side channel that the worker uses to
-        pick a weight-precision subset out of an HF repo. The orchestrator
-        carries the flavor folded into the ref as ``owner/repo#flavor`` in
-        its routing maps (RequiredRepoRefs, etc.). Keep the same form in
-        canonical() so disk_models / vram_models advertisements use the
-        same identity the orchestrator's cache-locality scorer expects.
-        Two flavors of the same repo therefore get two distinct cache
-        entries — matching how the orchestrator routes per-flavor refs.
+        pgw#1148: the `#flavor` tail and the CACHE-KEY FOLD that gave two
+        flavors of one HF repo two distinct residency entries are DELETED.
+        HF has no flavor axis of its own — it never did; the tail was the
+        orchestrator's per-flavor routing convention, and §1.32(d) deleted
+        the flavor as an address. File selection is binding metadata
+        (``allow_patterns``), carried beside the ref and never inside it.
         """
         base = self.repo_id
         if self.revision:
             base = f"{base}@{self.revision}"
-        if self.flavor:
-            base = f"{base}#{self.flavor}"
         return WireRef(base)
 
 
@@ -164,17 +214,13 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
 
     if provider in ("hf", "huggingface"):
         repo = s
-        # Issue #17: runtime wire format carries flavor in the ref string
-        # (e.g. "owner/repo#bf16") to identify which variant of an HF
-        # binding the orchestrator is referring to. The HF Hub itself has
-        # no notion of flavor — strip the `#flavor` tail before parsing
-        # so `huggingface_hub.snapshot_download` sees a valid repo_id.
-        flavor: Optional[str] = None
+        # pgw#1148: an HF ref has no `#` tail. The HF Hub never had a flavor
+        # notion — the tail was the orchestrator's per-flavor routing
+        # convention, deleted with the flavor as an address (§1.32(d)).
+        # Refuse it typed rather than silently stripping it, so a caller who
+        # still writes one is told, not quietly given a different repo.
         if "#" in repo:
-            repo, flavor_part = repo.split("#", 1)
-            repo = repo.strip()
-            flavor_part = flavor_part.strip()
-            flavor = flavor_part or None
+            raise FlavorSelectorRemoved(_flavor_removed_message(raw))
         revision = None
         if "@" in repo:
             repo, revision = repo.split("@", 1)
@@ -184,7 +230,7 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
             raise ValueError("hf ref must be 'owner/repo'")
         return ParsedModelRef(
             provider="hf",
-            hf=HuggingFaceRef(repo_id=repo, revision=revision, flavor=flavor),
+            hf=HuggingFaceRef(repo_id=repo, revision=revision),
         )
 
     if provider == "civitai":
@@ -221,15 +267,16 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
                 flavor_part = flavor_part.split("?", 1)[0].strip()
             flavor_part = flavor_part.lower()
             if not flavor_part:
-                raise ValueError("tensorhub ref flavor is empty")
-            # th#597 C5: ONE flavor token per ref, charset
+                raise ValueError("tensorhub ref fragment is empty")
+            # th#597 C5: ONE fragment token per ref, charset
             # [a-z0-9][a-z0-9._-]{0,63} — `#a#b` is invalid (cells encode
             # conjunction inside one token). Shared grammar vectors:
             # tests/testdata/ref_grammar_vectors.json (byte-identical copy in
-            # tensorhub internal/orchestrator/release/testdata/).
-            if not _TENSORHUB_FLAVOR_RE.fullmatch(flavor_part):
+            # tensorhub internal/orchestrator/release/testdata/, whose Go
+            # ParseCanonicalRef still parses the tail for the same reason).
+            if not _TENSORHUB_FRAGMENT_RE.fullmatch(flavor_part):
                 raise ValueError(
-                    f"tensorhub ref flavor {flavor_part!r} is not a valid flavor token"
+                    f"tensorhub ref fragment {flavor_part!r} is not a valid token"
                 )
             flavor = flavor_part
 
@@ -297,45 +344,29 @@ def fold_ref(
     ref: str,
     *,
     tag: str = "",
-    flavor: str = "",
     provider: str = "tensorhub",
 ) -> WireRef:
-    """Fold side-channel ``tag``/``flavor`` fields into a ref string and
-    return the normal form — the grammar-correct Python twin of tensorhub's
-    ``release.ModelRefWithTagFlavor``.
+    """Fold a side-channel ``tag`` field into a ref string and return the
+    normal form — the grammar-correct Python twin of tensorhub's
+    ``release.ModelRefWithTag``.
 
-    An explicit non-empty field wins over a tag/flavor already embedded in
-    ``ref``; empty fields preserve whatever the ref carries. Non-tensorhub
-    providers have no tag axis; flavor folds as ``#flavor`` (the orchestrator
-    routing convention for HF refs).
+    An explicit non-empty tag wins over one already embedded in ``ref``; an
+    empty tag preserves whatever the ref carries. Non-tensorhub providers
+    have no tag axis. pgw#1148 deleted the ``flavor=`` overlay with the
+    flavor itself — there is no second selector to fold.
     """
     parsed = parse_model_ref(ref, provider=provider)
     tag = (tag or "").strip()
-    flavor = (flavor or "").strip().lower()
     if parsed.tensorhub is not None:
         th = parsed.tensorhub
-        if tag or flavor:
+        if tag:
             th = TensorhubRef(
                 owner=th.owner,
                 repo=th.repo,
-                tag=tag or th.tag,
+                tag=tag,
                 digest=th.digest,
-                flavor=flavor or th.flavor,
+                flavor=th.flavor,
             )
         return th.canonical()
-    if parsed.hf is not None and flavor:
-        return HuggingFaceRef(
-            repo_id=parsed.hf.repo_id,
-            revision=parsed.hf.revision,
-            flavor=flavor,
-        ).canonical()
     return format_model_ref(parsed)
-
-
-def flavor_token(v: str) -> str:
-    """Wire-boundary flavor-token hygiene (gw#488): the internal dtype-axis
-    colon forms (``gguf:q4_k_m``, ``int8:awq``) publish as ``-`` forms to fit
-    the flavor charset ``[a-z0-9][a-z0-9._-]{0,63}``. The ONE implementation —
-    do not inline ``.replace(":", "-")`` at call sites."""
-    return str(v or "").replace(":", "-")
 

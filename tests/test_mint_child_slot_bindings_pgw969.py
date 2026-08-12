@@ -273,7 +273,7 @@ def test_the_binding_crosses_the_wire_whole(
     child cannot be handed a narrowed half of a resolution again."""
     tree, binding = served
     binding = msgspec.structs.replace(
-        binding, flavor="fp8", storage_dtype="fp8",
+        binding, storage_dtype="fp8",
         component_overrides=(("vae", "harness/override-vae:prod"),))
     request = _request(tree, binding, tmp_path)
     assert request.slots["pipeline"].ref == binding

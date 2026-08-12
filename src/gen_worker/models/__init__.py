@@ -15,11 +15,12 @@ from .refs import (
     ParsedModelRef,
     TensorhubRef,
     WireRef,
-    flavor_token,
+    FlavorSelectorRemoved,
     fold_ref,
     format_model_ref,
     normalize_model_ref,
     parse_model_ref,
+    refuse_flavor_selector,
 )
 from .residency import (
     LoadedComponentKey,
@@ -43,7 +44,8 @@ __all__ = [
     "format_model_ref",
     "normalize_model_ref",
     "fold_ref",
-    "flavor_token",
+    "FlavorSelectorRemoved",
+    "refuse_flavor_selector",
     "Residency",
     "Tier",
     "LoadedComponentKey",

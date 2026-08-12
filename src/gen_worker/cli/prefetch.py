@@ -25,7 +25,6 @@ from typing import Any, Dict, Tuple
 
 from ..api.binding import ModelRef
 from ..api.binding import wire_ref
-from ..models.gguf_local import maybe_rebind_gguf
 from ..models.provision import resolve_local_path
 from .run import (_collect_class_methods, _ensure_sys_path, _load_project_main)
 
@@ -89,9 +88,8 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
         for param_name, binding in c.bindings.items():
             try:
                 if isinstance(binding, ModelRef):
-                    selected = binding if args.offline else maybe_rebind_gguf(binding)
-                    ref, provider = wire_ref(selected), str(selected.source)
-                    ap = tuple(getattr(selected, "files", ()) or ())
+                    ref, provider = wire_ref(binding), str(binding.source)
+                    ap = tuple(getattr(binding, "files", ()) or ())
                     jobs[(ref, provider)] = (ref, provider, ap)
             except Exception as e:
                 sys.stderr.write(f"prefetch: skipping binding {param_name!r}: {e}\n")

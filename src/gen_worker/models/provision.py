@@ -36,7 +36,6 @@ _STANDALONE = Settings()
 from . import disk_gc, load_progress
 from .cache_paths import tensorhub_cas_dir
 from .errors import UrlExpiredError
-from .ladder import maybe_rebind_family_fp8
 from .envelope import envelope_refusal
 from .loading import (
     RUNG_NF4_UNLANDED,
@@ -1059,65 +1058,21 @@ def resolve_bindings(
                 f"unknown binding type for param {param_name!r}: "
                 f"{type(binding).__name__}"
             )
-        selected = binding if offline else _local_flavor_fold(binding, slot)
         out[param_name] = resolve_local_path(
-            ref=wire_ref(selected), provider=selected.source,
+            ref=wire_ref(binding), provider=binding.source,
             offline=offline, emit=emit,
-            allow_patterns=tuple(getattr(selected, "files", ()) or ()),
-            components=tuple(getattr(selected, "components", ()) or ()),
-            civitai_version_id=str(getattr(selected, "version", "") or ""),
+            allow_patterns=tuple(getattr(binding, "files", ()) or ()),
+            components=tuple(getattr(binding, "components", ()) or ()),
+            civitai_version_id=str(getattr(binding, "version", "") or ""),
         )
     return out
 
 
-def _local_flavor_fold(binding: Any, slot: Any) -> Any:
-    """Local AUTO flavor folds over ONE shared resolve: family fp8 (th#964)
-    first, then the GGUF small-VRAM pick (cl#27). Fail-open — any resolve or
-    probe error keeps the binding as declared. Production stays hub-owned."""
-    from .gguf_local import maybe_rebind_gguf  # cycle: gguf_local imports loading
-
-    if (
-        getattr(binding, "source", "") != "tensorhub"
-        or getattr(binding, "flavor", "")
-        or getattr(binding, "storage_dtype", "")
-        or getattr(binding, "components", ())
-    ):
-        return binding
-    try:
-        thref = parse_model_ref(wire_ref(binding)).tensorhub
-        if thref is None or thref.digest or thref.flavor:
-            return binding
-        from .hub_client import resolve_repo
-        from .hub_policy import detect_worker_capabilities
-        from .memory import get_available_vram_gb
-
-        resolved = resolve_repo(thref)
-        caps = detect_worker_capabilities()
-        free = get_available_vram_gb()
-    except Exception as exc:
-        logger.debug("local flavor fold failed open: %s", exc)
-        return binding
-    picked = maybe_rebind_family_fp8(
-        binding, resolved=resolved,
-        slot_family=str(getattr(slot, "family", "") or ""),
-        gpu_sm=caps.gpu_sm, free_vram_gb=free,
-        installed_libs=tuple(caps.installed_libs),
-    )
-    if picked is not binding:
-        return picked
-    return maybe_rebind_gguf(
-        binding, resolved=resolved, gpu_sm=caps.gpu_sm,
-        free_vram_gb=free, installed_libs=tuple(caps.installed_libs),
-    )
-
-
 def _hub_ref_map_path(cache_dir: Path, thref: Any) -> Path:
     """CAS-local memory of tag->snapshot resolutions, so a previously-fetched
-    tag ref keeps working offline: cas/refs/<owner>/<repo>/<tag>[#flavor]."""
+    tag ref keeps working offline: cas/refs/<owner>/<repo>/<tag>."""
     name = str(thref.tag or DEFAULT_REF_TAG)
-    if thref.flavor:
-        name += "#" + str(thref.flavor)
-    safe = "".join(ch if (ch.isalnum() or ch in "._#-") else "_" for ch in name)
+    safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in name)
     return cache_dir / "refs" / str(thref.owner) / str(thref.repo) / safe
 
 
@@ -1349,25 +1304,6 @@ def resolve_local_path(
                 "--offline once (or set TENSORHUB_CAS_DIR to a path with the "
                 "snapshot pre-seeded)."
             )
-        from .gguf_local import fetch_gguf_snapshot, gguf_qtype
-
-        if gguf_qtype(str(parsed.tensorhub.flavor or "")):
-            if components:
-                raise ModelResolutionError(
-                    "GGUF composed snapshots require the complete base model; "
-                    "components= cannot be combined with a #gguf-* flavor"
-                )
-            try:
-                gguf_snap = fetch_gguf_snapshot(
-                    parsed.tensorhub, cache_dir=cache_dir, emit=emit,
-                )
-            except Exception as e:
-                raise ModelResolutionError(
-                    "failed to compose tensorhub GGUF snapshot for "
-                    f"{parsed.tensorhub.canonical()}: {e}"
-                ) from e
-            _remember_hub_ref(cache_dir, parsed.tensorhub, Path(gguf_snap).name)
-            return gguf_snap
         return _fetch_tensorhub_snapshot(
             parsed.tensorhub, cache_dir=cache_dir, emit=emit, components=components,
         )

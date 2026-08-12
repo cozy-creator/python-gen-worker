@@ -226,8 +226,10 @@ def test_warm_contract_key_splits_on_execution_lane_and_overrides_not_ref(
     fine_tune = _pick(ex, "generate", "acme/cyberrealistic-xl")
     assert ex._warm_contract_key(base) == ex._warm_contract_key(fine_tune)
 
-    quant = _pick(ex, "generate", "acme/sdxl-base#fp8-w8a8")
-    assert ex._warm_contract_key(quant) != ex._warm_contract_key(base)
+    # pgw#1148: the flavor arm of this key is DELETED with the flavor axis
+    # (§1.32(d)) — a per-request pick can no longer name a stored precision,
+    # so the key's remaining discriminators are the declared cast/dtype and
+    # the component overrides asserted below.
 
     run = pb.RunJob(function_name="generate", models=[pb.ModelBinding(
         slot="pipeline", ref="acme/sdxl-base",

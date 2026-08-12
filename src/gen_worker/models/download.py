@@ -51,9 +51,9 @@ ProgressFn = Callable[[int, Optional[int]], None]
 #
 # ONE keying function (gw#492) normalizes both index keys and lookups —
 # replacing the old raw/stripped/tag-removed fallback chain and its
-# `_binding_canonical_ref` twin. Keys are flavor-granular, with a
-# repo-identity fallback so hub-minted picks of NEW flavors (`#svdq-int4`)
-# still route to their repo's provider.
+# `_binding_canonical_ref` twin. Keys are (repo, tag)-granular, with a
+# repo-identity fallback so a hub-minted DIGEST pick still routes to its
+# repo's provider.
 # ---------------------------------------------------------------------------
 
 _provider_by_ref: Mapping[str, str] = {}
@@ -83,8 +83,7 @@ def _provider_index_keys(ref: str) -> tuple[str, str]:
         return exact, th.repo_id()
     assert parsed.hf is not None
     hf = parsed.hf
-    exact = HuggingFaceRef(repo_id=hf.repo_id, revision=None,
-                           flavor=hf.flavor).canonical()
+    exact = HuggingFaceRef(repo_id=hf.repo_id, revision=None).canonical()
     return exact, hf.repo_id
 
 
@@ -130,8 +129,8 @@ def _collect_binding_entries(bindings: Any) -> list[dict[str, Any]]:
 def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) -> dict[str, str]:
     """{normal_form_ref: provider} from a loaded endpoint.lock manifest.
 
-    Entry ``tag``/``flavor`` side-channel fields fold into the ref via the
-    ONE grammar module before keying; ``set_provider_index`` adds the
+    The entry ``tag`` side-channel field folds into the ref via the ONE
+    grammar module before keying; ``set_provider_index`` adds the
     repo-identity fallback keys."""
     index: dict[str, str] = {}
     if not isinstance(manifest, Mapping):
@@ -151,7 +150,6 @@ def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) ->
                 key = str(fold_ref(
                     ref,
                     tag=str(entry.get("tag") or ""),
-                    flavor=str(entry.get("flavor") or ""),
                     provider=provider
                     if provider in ("tensorhub", "hf", "civitai", "modelscope")
                     else "tensorhub",
@@ -326,17 +324,14 @@ def _variant_of(filename: str) -> str:
     return ""
 
 
-def select_hf_files(
-    repo_files: Sequence[str],
-    *,
-    flavor: Optional[str] = None,
-) -> Optional[set[str]]:
+def select_hf_files(repo_files: Sequence[str]) -> Optional[set[str]]:
     """Small variant selector: which repo files to download.
 
     - Diffusers-style repos (component dirs): every non-weight file (configs,
-      tokenizers) plus ONE weight set per component directory — the requested
-      ``flavor`` when present, else bf16 > fp16 > untagged, safetensors
-      preferred. Root monolithic checkpoints are excluded (redundant).
+      tokenizers) plus ONE weight set per component directory — bf16 > fp16 >
+      untagged, safetensors preferred. Root monolithic checkpoints are
+      excluded (redundant). pgw#1148 deleted the ``flavor=`` override: HF has
+      no flavor axis, and an explicit file set is what ``files=`` is for.
     - Root-weights repos: the root weight files (same variant rule) + sidecars.
     - Anything else: None (download the whole repo).
     """
@@ -375,10 +370,7 @@ def select_hf_files(
         by_variant: Dict[str, list[str]] = {}
         for f in pool:
             by_variant.setdefault(_variant_of(f.rsplit("/", 1)[-1]), []).append(f)
-        order: list[str] = []
-        if flavor:
-            order.append(flavor.strip().lower())
-        order += ["bf16", "fp16", ""]
+        order: list[str] = ["bf16", "fp16", ""]
         for v in order:
             if by_variant.get(v):
                 return by_variant[v]
@@ -585,8 +577,7 @@ def _hf_progress_dir(hf_home: Optional[str], ref: HuggingFaceRef) -> Path:
     base = Path(hf_home) if hf_home else Path.home() / ".cache" / "huggingface"
     safe = ref.repo_id.replace("/", "--").replace(":", "_")
     rev = (ref.revision or "main").replace("/", "--").replace(":", "_")
-    flv = (ref.flavor or "default").replace("/", "--").replace(":", "_")
-    return base / "gen-worker-progress-snapshots" / safe / rev / flv
+    return base / "gen-worker-progress-snapshots" / safe / rev
 
 
 def download_hf(
@@ -665,7 +656,7 @@ def download_hf(
             )
         kwargs["allow_patterns"] = list(allow_patterns)
     else:
-        selected = select_hf_files(repo_files, flavor=ref.flavor)
+        selected = select_hf_files(repo_files)
         if selected is not None:
             kwargs["allow_patterns"] = sorted(selected)
         elif comps:

@@ -106,39 +106,18 @@ FIT_GGUF = "gguf_quant"
 FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
 
-# Stored-flavor hardware windows. nvfp4 is a genuine native-compute format:
-# its tensor-core kernels exist on Blackwell only, so an nvfp4 stored flavor
-# on older silicon is a hard refusal. fp8 is DIFFERENT — fp8-E4M3 storage
-# upcasts per-layer to bf16 at compute (loading.apply_fp8_storage: fp8 bytes
-# resident, no fp8 silicon required), so a stored #fp8 flavor SERVES on ANY
-# CUDA card and is never refused on SM. Whether fp8 is PREFERRED over bf16 is
-# the SM-conditional question (ladder.FP8_COMPUTE_MIN_SM): fp8 tensor cores
-# on SM>=89 make it faster+smaller, below that it merely halves storage.
-NVFP4_FLAVOR_MIN_SM = 100
-
-
-def svdq_flavor_kind(binding: Any) -> str:
-    """"fp4" / "int4" / "" — is this binding an svdq stored-flavor row?
-    The flavor token is the selector (th#597): ``svdq-fp4-*`` / ``svdq-int4-*``."""
-    flavor = str(getattr(binding, "flavor", "") or "").strip().lower()
-    if flavor.startswith("svdq-fp4"):
-        return "fp4"
-    if flavor.startswith("svdq-int4"):
-        return "int4"
-    return ""
-
-
-def quant_flavor_kind(binding: Any) -> str:
-    """"fp8" / "nvfp4" / "" — a stored quantized-flavor row this planner
-    HW-gates (svdq rows are classified separately by svdq_flavor_kind)."""
-    flavor = str(getattr(binding, "flavor", "") or "").strip().lower()
-    if flavor.startswith("svdq"):
-        return ""
-    if flavor.startswith("fp8"):
-        return "fp8"
-    if flavor.startswith("nvfp4"):
-        return "nvfp4"
-    return ""
+# pgw#1148 (§1.32(d), th#1803): the STORED-PRECISION classification of a
+# binding is gone from this planner. It read `binding.flavor` — the
+# arbitrary-string sub-selector Paul killed — and with that field deleted
+# `svdq_flavor_kind`/`quant_flavor_kind` could only ever have answered "".
+# A binding names a tag or a digest; WHAT THE BYTES ARE is the checkpoint's
+# TENSOR-LAYOUT CONTRACT (§1.33), which the loaders gate on for real
+# (`@implements_contract`, models/svdq_layout.py, w4a4.py, w8a8.py) instead
+# of trusting a token in a ref. The svdq SM-window and nvfp4-Blackwell
+# refusals therefore live where the artifact declares itself, not here.
+# Re-deriving a LOCAL fit verdict from the resolved checkpoint's contract is
+# a BUILD, filed as a pgw#1148 residual — this planner now answers on
+# resources + declared cast alone, which is what it can honestly know.
 
 
 def variant_fit(
@@ -150,20 +129,8 @@ def variant_fit(
 ) -> tuple[str, str]:
     """Fit verdict for ONE function/variant's ``Resources`` on this machine.
 
-    - ``incompatible``: hard gates unmet (no CUDA GPU, compute_capability
-      above this GPU's SM, required quant libraries not installed, an svdq
-      row whose SM window / nunchaku-diffusers pin matrix fails, or an
-      nvfp4 stored-flavor row below Blackwell). A stored #fp8 flavor is
-      NEVER incompatible on SM — its storage upcasts to bf16 at compute.
-    - ``fp8`` / ``nvfp4``: the binding is a stored quantized flavor and it
-      fits free VRAM — nvfp4 is Blackwell-native; fp8 serves on ANY card
-      (bf16-upcast). Ranking is SM-aware: on fp8-compute silicon (SM>=89)
-      fp8 outranks bf16 (faster+smaller); below it fp8 is a fit fallback
-      only (bf16 preferred when it fits).
-    - ``svdq_fp4`` / ``svdq_int4``: the binding is a stored SVDQuant flavor
-      (gw#415) and every gate passes — on Blackwell, svdq_fp4 OUTRANKS every
-      other fitting row (faster AND smaller, QUANTIZATION-POLICY fit ladder);
-      svdq_int4 is a fit rung ahead of emergency-nf4 only.
+    - ``incompatible``: hard gates unmet (no CUDA GPU, required quant
+      libraries not installed).
     - ``emergency_fp8``: does not fit as stored, but runtime fp8-E4M3 weight
       storage (loading.apply_fp8_storage: fp8 bytes resident, bf16 compute,
       no fp8 silicon required) would fit — quality ~= a stored #fp8 flavor.
@@ -181,62 +148,21 @@ def variant_fit(
     if needs_gpu and caps.gpu_sm <= 0:
         return FIT_INCOMPATIBLE, "no CUDA GPU detected"
     # SDK v2 (pgw#647): no declared compute-capability gate — the fit
-    # ladder picks precision per card; only stored-flavor SM windows below
-    # (svdq/nvfp4) are genuinely hard.
+    # ladder picks precision per card.
     missing = [lib for lib in libs if lib not in (caps.installed_libs or [])]
     if missing:
         return FIT_INCOMPATIBLE, f"missing libraries: {', '.join(missing)}"
-    svdq_kind = svdq_flavor_kind(binding)
-    if svdq_kind:
-        from .svdq import (
-            SVDQ_FP4_SMS,
-            SVDQ_INT4_SMS,
-            svdq_precision_for_sm,
-            svdq_stack_reason,
-        )
-
-        window = SVDQ_FP4_SMS if svdq_kind == "fp4" else SVDQ_INT4_SMS
-        if caps.gpu_sm not in window:
-            runs = svdq_precision_for_sm(caps.gpu_sm)
-            return FIT_INCOMPATIBLE, (
-                f"svdq-{svdq_kind} kernels need SM in "
-                f"{'/'.join(str(x) for x in window)}; GPU is SM{caps.gpu_sm}"
-                + (f" (runs svdq-{runs})" if runs and runs != svdq_kind else "")
-            )
-        reason = svdq_stack_reason()
-        if reason is not None:
-            return FIT_INCOMPATIBLE, reason
-    quant_kind = quant_flavor_kind(binding)
-    # fp8 has NO SM refusal — a stored #fp8 flavor upcasts to bf16 at compute
-    # and serves on any CUDA card (the refuse-bug fix: the hub could place
-    # #fp8 on an older card the worker then refused). nvfp4 stays gated: it is
-    # a genuine Blackwell-native tensor-core format with no upcast path here.
-    if quant_kind == "nvfp4" and caps.gpu_sm < NVFP4_FLAVOR_MIN_SM:
-        return FIT_INCOMPATIBLE, (
-            f"nvfp4 stored flavor needs Blackwell (SM >= {NVFP4_FLAVOR_MIN_SM}); "
-            f"GPU is SM{caps.gpu_sm}"
-        )
     vram = getattr(resources, "vram_gb_hint", None)
     # vram_gb recommends a card SIZE (total VRAM), so an idle card of exactly
     # that size counts as fitting: subtract the fixed driver/framebuffer/CUDA
     # reserve before comparing against measured free VRAM.
 
     if vram is None or effective_vram_requirement_gb(vram) <= float(free_vram_gb):
-        if svdq_kind == "fp4":
-            return FIT_SVDQ_FP4, "svdq-fp4 stored flavor (Blackwell 4-bit rung)"
-        if svdq_kind == "int4":
-            return FIT_SVDQ_INT4, "svdq-int4 stored flavor (4-bit fit rung)"
-        if quant_kind == "fp8":
-            return FIT_FP8, "fp8 stored flavor (universal; bf16-upcast below SM89)"
-        if quant_kind == "nvfp4":
-            return FIT_NVFP4, "nvfp4 stored flavor (Blackwell rung)"
         return FIT_FITS, ""
 
     # Runtime rungs are automatic on CUDA hosts (gw#420) — pure functions of
     # the declared capabilities, so verdicts don't depend on the probing host.
-    # Already-quantized flavors (svdq/fp8/nvfp4) can't be re-quantized: they
-    # fall straight to the offload ladder when they don't fit.
-    if caps.gpu_sm > 0 and not svdq_kind and not quant_kind:
+    if caps.gpu_sm > 0:
         # fp8-E4M3 runtime storage: weights ~halve, bf16 compute, quality
         # ~= a stored #fp8 flavor — try before dropping to 4-bit.
         if float(vram) * FP8_STORAGE_FIT_FACTOR <= float(free_vram_gb):

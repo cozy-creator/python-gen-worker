@@ -347,7 +347,7 @@ def _fake_resolve(monkeypatch: pytest.MonkeyPatch, body: dict) -> "object":
             }
 
     monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp())
-    ref = TensorhubRef(owner="acme", repo="gonzalomo-xl", tag="prod", flavor="")
+    ref = TensorhubRef(owner="acme", repo="gonzalomo-xl", tag="prod")
     return resolve_repo(ref, base_url="https://hub.example")
 
 

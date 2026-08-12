@@ -5,7 +5,7 @@ constructor argument — it comes from the ``models={}`` dict key (or, for a
 single ``model=`` binding, the ``setup()``/handler parameter name).
 
     HF("black-forest-labs/FLUX.1-dev", dtype="bf16")
-    Hub("owner/repo", tag="canary", flavor="nf4")
+    Hub("owner/repo", tag="canary")
     Civitai("123456", version="789012")
     ModelScope("circlestone-labs/Anima", files=("split_files/*.safetensors",))
 
@@ -30,6 +30,7 @@ from ..models.refs import (
     fold_ref,
     normalize_model_ref,
     parse_model_ref,
+    refuse_flavor_selector,
 )
 
 ModelSource = Literal["tensorhub", "huggingface", "civitai", "modelscope"]
@@ -43,7 +44,8 @@ def _clean(s: object) -> str:
 # "fp8" = fp8-E4M3 weight storage with per-layer upcast to the compute dtype
 # (diffusers layerwise casting) — the universal VRAM-fit mechanism; works on
 # cards without fp8 units. Applied by the loading layer; also auto-applied
-# when the snapshot itself stores fp8 (an `#fp8` flavor artifact).
+# when the snapshot itself stores fp8 (a checkpoint whose tensor-layout
+# contract is an fp8 one).
 # "fp8+te" additionally casts the pipeline's text encoders via the
 # transformers-aware path (linear weights fp8; embeddings/norms/tied weights
 # stay at compute dtype — component fit-ladder rung 2, gw#460).
@@ -66,7 +68,7 @@ class ModelRef(msgspec.Struct, frozen=True):
     permission is a slot-policy concern, not an identity-struct flag).
 
     Carries the union of every registry's per-source fields (tensorhub:
-    ``tag``/``flavor``; huggingface: ``revision``/``dtype``/``subfolder``/
+    ``tag``; huggingface: ``revision``/``dtype``/``subfolder``/
     ``files``; civitai: ``version``; modelscope: ``revision``/``files``).
     ``storage_dtype`` is shared by tensorhub/huggingface. Build one via
     ``Hub``/``HF``/``Civitai``/``ModelScope`` rather than the raw
@@ -87,7 +89,6 @@ class ModelRef(msgspec.Struct, frozen=True):
     source: ModelSource
     path: str
     tag: str = ""
-    flavor: str = ""
     revision: str = ""
     subfolder: str = ""
     dtype: str = ""
@@ -111,7 +112,6 @@ class ModelRef(msgspec.Struct, frozen=True):
         force = msgspec.structs.force_setattr
         force(self, "path", _clean(self.path))
         force(self, "tag", _clean(self.tag))
-        force(self, "flavor", _clean(self.flavor))
         force(self, "revision", _clean(self.revision))
         force(self, "subfolder", _clean(self.subfolder))
         force(self, "dtype", _clean(self.dtype))
@@ -129,6 +129,11 @@ class ModelRef(msgspec.Struct, frozen=True):
                 "component_overrides= is tensorhub-only (pgw#617: refs are "
                 "tensorhub-CAS, mirror-first)"
             )
+        # §1.32(d)/th#1803: THE FLAVOR SYSTEM IS DEAD. A `#` in ANY binding
+        # path is a weight selector and refuses typed here, at the site the
+        # author wrote — never as a hub 400 three layers away. Cell refs are
+        # not bindings and never reach this constructor.
+        refuse_flavor_selector(self.path, where=f"{self.source} binding")
         if self.source == "tensorhub":
             if not self.tag:
                 msgspec.structs.force_setattr(self, "tag", DEFAULT_REF_TAG)
@@ -165,8 +170,6 @@ class ModelRef(msgspec.Struct, frozen=True):
             label += f"@{self.version}"
         elif self.tag and self.tag != DEFAULT_REF_TAG:
             label += f":{self.tag}"
-        if self.flavor:
-            label += f"#{self.flavor}"
         return label
 
 
@@ -174,11 +177,10 @@ def Hub(
     ref: str,
     *,
     tag: str = DEFAULT_REF_TAG,
-    flavor: str = "",
     storage_dtype: str = "",
     components: tuple[str, ...] = (),
 ) -> ModelRef:
-    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=, components=)``.
+    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, storage_dtype=, components=)``.
 
     ``components=`` (pgw#505) fetches only the named pipeline component
     subfolders (+ root config files) instead of the whole repo — e.g. a
@@ -186,7 +188,7 @@ def Hub(
     ``Hub("owner/sdxl-repo", components=("vae",))``.
     """
     return ModelRef(
-        source="tensorhub", path=ref, tag=tag, flavor=flavor,
+        source="tensorhub", path=ref, tag=tag,
         storage_dtype=storage_dtype, components=components,
     )
 
@@ -251,15 +253,16 @@ def wire_ref(binding: Binding) -> str:
     grammar module (``gen_worker.models.refs``, gw#492).
 
     Hub refs carry ``:tag`` (elided when ``prod``, the grammar default — an
-    explicit ``tag="latest"`` is stamped verbatim, th#1276) and
-    ``#flavor`` suffixes; HF refs carry ``@revision``. Load-time metadata
-    (dtype/subfolder/files/storage_dtype) never enters the ref.
+    explicit ``tag="latest"`` is stamped verbatim, th#1276); HF refs carry
+    ``@revision``. Load-time metadata (dtype/subfolder/files/storage_dtype)
+    never enters the ref, and pgw#1148 deleted the ``#flavor`` suffix this
+    used to fold — a binding has no second selector to mint.
     """
 
     if binding.source == "tensorhub":
         # The default tag never overrides one embedded in ``ref``.
         tag = binding.tag if binding.tag != DEFAULT_REF_TAG else ""
-        return fold_ref(binding.path, tag=tag, flavor=binding.flavor)
+        return fold_ref(binding.path, tag=tag)
     if binding.source == "huggingface":
         return HuggingFaceRef(binding.path, binding.revision or None).canonical()
     return binding.path
@@ -290,48 +293,40 @@ def rebind_pick(
     binding: Binding,
     *,
     resolved_ref: str = "",
-    flavor: "str | None" = None,
     cast: str = "",
 ) -> Binding:
-    """THE fold of a precision pick into a binding (gw#494) — the hub
-    HelloAck path (``resolved_ref`` + ``cast``) and the local-ladder path
-    (``flavor`` + ``cast``) share this one implementation.
+    """THE fold of a hub pick into a binding (gw#494): the HelloAck path
+    (``resolved_ref`` + ``cast``).
 
-    ``resolved_ref`` is authoritative when given: its flavor (possibly none)
-    replaces the binding's. ``flavor=None`` leaves the binding's flavor
-    untouched. Raises ``ValueError`` when the pick cannot round-trip through
-    ``wire_ref`` — a pick the rebound binding cannot re-mint would split the
-    slot into two residency identities (the th#736 mechanic). This is also
-    how a flavor/cast fold onto a source without that axis (e.g. an HF ref's
-    flavor, which never enters its wire_ref) gets rejected — the rebound
-    struct always accepts the field (msgspec has no per-source shape), so the
-    round-trip mismatch is the enforcement point.
+    ``resolved_ref`` is authoritative when given — since th#1803 the hub's
+    ladder expresses its pick as a DIGEST (``owner/repo@sha256:…``), never a
+    ``#flavor``. Raises ``ValueError`` when the pick cannot round-trip
+    through ``wire_ref`` — a pick the rebound binding cannot re-mint would
+    split the slot into two residency identities (the th#736 mechanic).
+
+    pgw#1148 deleted the ``flavor=`` arm and with it the LOCAL-ladder caller
+    that used it: there is no within-tag-group selector left to fold, so a
+    pick is a digest or it is nothing.
     """
 
+    rebound: Any = binding
     if resolved_ref:
         parsed = parse_model_ref(resolved_ref)
         if parsed.tensorhub is None:
             raise ValueError(f"resolution {resolved_ref!r} is not a tensorhub ref")
-        flavor = parsed.tensorhub.flavor or ""
-    rebound: Any = binding
+        refuse_flavor_selector(resolved_ref, where="hub resolution")
     try:
-        if flavor is not None and flavor != binding.flavor:
-            rebound = structs.replace(rebound, flavor=flavor)
         if cast:
             rebound = structs.replace(rebound, storage_dtype=cast)
     except TypeError as exc:
         raise ValueError(f"pick does not fit binding {binding!r}: {exc}") from exc
     if resolved_ref:
         expected = normalize_model_ref(resolved_ref)
-    elif flavor:
-        expected = fold_ref(wire_ref(binding), flavor=flavor)
-    else:
-        expected = None
-    if expected is not None and wire_ref(rebound) != expected:
-        raise ValueError(
-            f"pick {expected!r} does not round-trip through the binding "
-            f"(got {wire_ref(rebound)!r})"
-        )
+        if wire_ref(rebound) != expected:
+            raise ValueError(
+                f"pick {expected!r} does not round-trip through the binding "
+                f"(got {wire_ref(rebound)!r})"
+            )
     return rebound
 
 

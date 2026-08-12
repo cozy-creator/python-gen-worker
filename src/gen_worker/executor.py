@@ -127,7 +127,7 @@ from .models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from .models.download import ensure_local, lookup_provider_for_ref
 from .models.envelope import ArtifactEnvelopeExceeded
 from .models.errors import MissingSnapshotError, UrlExpiredError
-from .models.execution_lanes import ExecutionLaneUnavailableError, mandatory_traced_lane_of
+from .models.execution_lanes import ExecutionLaneUnavailableError
 from .models.residency import Residency
 from .topology import (
     ExecutionTopology,
@@ -449,7 +449,7 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     """A tensorhub-source binding for a hub-named wire ref (pgw#532).
 
     ``RunJob.models`` / desired-instance refs name hub-CAS repos in the canonical
-    ``owner/repo[:tag][#flavor]`` grammar; this mints the binding the
+    ``owner/repo[:tag][@digest]`` grammar; this mints the binding the
     executor materializes them through (``ensure_local`` then follows the
     tensorhub lane: orchestrator snapshots or the th#763 missing_snapshot
     re-mint — never an upstream self-fetch). Raises ``ValueError`` when
@@ -464,7 +464,6 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
         source="tensorhub",
         path=f"{th.owner}/{th.repo}",
         tag=th.tag or DEFAULT_REF_TAG,
-        flavor=th.flavor or "",
     )
 
 
@@ -736,8 +735,10 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
     )
 
 
-#: Traced weight lanes a stored flavor MANDATES (fail-closed serving):
-#: `#fp8-w8a8` -> "w8a8" (gw#534), `#nvfp4-w4a4` -> "w4a4" (gw#540).
+#: Traced weight lanes that are MANDATORY once evidence names them
+#: (fail-closed serving): "w8a8" (gw#534), "w4a4" (gw#540). pgw#1148: the
+#: evidence is the hub-RESOLVED execution lane, never a `#flavor` token —
+#: §1.32(d) deleted the token, and an assertion in a ref was never evidence.
 _MANDATORY_EXECUTION_LANES = ("w8a8", "w4a4")
 
 # pgw#671 eager-first boot: background-mint driver pacing. The abandon grace
@@ -775,28 +776,6 @@ _BG_COMPILE_QUIESCENCE_S = 5.0
 #: warm queue; the persistent blocked-since clock keeps steals honest.
 _BG_THREAD_ADMIT_WAIT_S = 0.5
 
-
-def _ref_mandatory_execution_lane(ref: str) -> str:
-    """The traced weight lane one canonical Tensorhub model ref MANDATES:
-    "w8a8" for `#fp8-w8a8` flavors, "w4a4" for `#nvfp4-w4a4`, "" otherwise.
-    The token parse itself lives in execution_lanes (one spelling, th#1361)."""
-
-    try:
-        parsed = parse_model_ref(ref).tensorhub
-    except ValueError:
-        return ""
-    if parsed is None or parsed.owner == "root":
-        return ""
-    return mandatory_traced_lane_of(parsed.flavor or "")
-
-
-def _mandatory_execution_lane_of(refs: typing.Iterable[str]) -> str:
-    """The single mandatory lane a binding set selects ("" when none)."""
-    for ref in refs:
-        execution_lane = _ref_mandatory_execution_lane(ref)
-        if execution_lane:
-            return execution_lane
-    return ""
 
 
 def _model_failure_vocab(exc: BaseException) -> str:
@@ -5076,14 +5055,14 @@ class Executor:
         return None
 
     def _resolved_mandatory_execution_lane(self, ref: str) -> str:
-        """th#1059 twin (hub: ``mandatoryTracedLane``): the flavor token names
-        the STORAGE format, not the execution. Mandatory-ness follows the
-        hub-resolved EXECUTION lane whenever one is known for this ref —
-        SDXL's mixed variant is ``#fp8-w8a8`` storage serving the w8a16
-        upcast lane (plain graphs, never scaled_mm), while qwen's
-        ``#fp8-w8a8`` executes real w8a8. Without lane evidence the flavor
-        token remains the fallback; conflicting evidence fails closed to the
-        mandatory reading.
+        """th#1059 twin (hub: ``mandatoryTracedLane``): mandatory-ness follows
+        the hub-resolved EXECUTION lane. Storage never implied execution —
+        SDXL's mixed fp8 variant serves the w8a16 upcast lane (plain graphs,
+        never scaled_mm) while qwen's serves real w8a8 — and pgw#1148 deleted
+        the `#flavor` FALLBACK that guessed at it: §1.32(d) made the token a
+        non-address, and a token in a ref was an assertion, not evidence.
+        With no resolved lane there is no mandate, so the caller is free
+        rather than fail-closed against a guess.
         """
 
         ref = (ref or "").strip()
@@ -5103,9 +5082,7 @@ class Executor:
                 mandatory = "w8a8"
             elif execution_lane.activation == lanespec.ACT_W4A4:
                 mandatory = "w4a4"
-        if known:
-            return mandatory
-        return _ref_mandatory_execution_lane(ref)
+        return mandatory if known else ""
 
     def _mandatory_execution_lane_of_bound(self, refs: typing.Iterable[str]) -> str:
         """Resolution-aware :func:`_mandatory_lane_of` (th#1059)."""
@@ -5730,7 +5707,6 @@ class Executor:
         the hub handed the worker, before any serve-time recipe."""
         return lanespec.most_quantized_body(
             lanespec.execution_lane_body_of_binding(
-                getattr(binding, "flavor", "") or "",
                 getattr(binding, "storage_dtype", "") or "")
             for binding in spec.models.values())
 
@@ -5759,7 +5735,6 @@ class Executor:
                 applied = tuple(rec.applied_lanes)
         bodies = [
             lanespec.execution_lane_body_of_binding(
-                getattr(binding, "flavor", "") or "",
                 getattr(binding, "storage_dtype", "") or "")
             for binding in spec.models.values()
         ]
@@ -6388,15 +6363,14 @@ class Executor:
     def _warm_contract_key(self, spec: EndpointSpec) -> Any:
         """The identity under which warm RUNS are shared across checkpoint
         instances (pgw#654 warm-tax fix): the class plus every per-slot fact
-        that selects graphs or kernels — precision lane (flavor /
-        storage_dtype / dtype) and component overrides — and NEVER the
+        that selects graphs or kernels — precision lane (storage_dtype /
+        dtype) and component overrides — and NEVER the
         checkpoint ref itself. Two fine-tunes of one family land on the same
         key by construction; a lane rebind or a component substitution
         derives a different one."""
         rows = tuple(
             (
                 slot,
-                getattr(b, "flavor", "") or "",
                 getattr(b, "storage_dtype", "") or "",
                 getattr(b, "dtype", "") or "",
                 component_overrides(b),

@@ -43,18 +43,17 @@ def _executor() -> Executor:
     return Executor([_spec()], _send)
 
 
-def test_apply_model_resolutions_rebinds_flavor_and_cast() -> None:
+#: th#1803: the ladder's pick is a DIGEST, never a `#flavor` (pgw#1148).
+_DIGEST_PICK = "acme/z-image@sha256:" + "1a" * 32
+
+
+def test_apply_model_resolutions_rebinds_the_pick_and_cast() -> None:
     ex = _executor()
     spec = ex.specs["generate"]
     base_ref = wire_ref(spec.models["pipeline"])
     assert base_ref == "acme/z-image"
 
-    # Stored-flavor pick: the binding folds the resolved flavor.
-    ex.apply_model_resolutions({base_ref: ("acme/z-image#svdq-int4-r128", "", "")})
-    assert wire_ref(spec.models["pipeline"]) == "acme/z-image#svdq-int4-r128"
-    assert spec.models["pipeline"].storage_dtype == ""
-
-    # Full-replace: a new map with a cast-only pick reverts the flavor.
+    # Full-replace: a new map with a cast-only pick stamps the cast.
     ex.apply_model_resolutions({base_ref: ("acme/z-image", "fp8", "")})
     assert wire_ref(spec.models["pipeline"]) == "acme/z-image"
     assert spec.models["pipeline"].storage_dtype == "fp8"
@@ -70,7 +69,7 @@ def test_apply_model_resolutions_rejects_non_roundtrip() -> None:
     spec = ex.specs["generate"]
     # A resolved ref for a DIFFERENT repo can't round-trip through this
     # binding — the declared ref must be kept.
-    ex.apply_model_resolutions({"acme/z-image": ("acme/other#fp8", "", "")})
+    ex.apply_model_resolutions({"acme/z-image": ("acme/other", "", "")})
     assert wire_ref(spec.models["pipeline"]) == "acme/z-image"
 
 
@@ -81,11 +80,12 @@ def test_hello_ack_shape_applies() -> None:
     # assertion below is entirely about `resolutions`.
     ack = pb.HelloAck(
         resolutions=[pb.ModelResolution(
-            ref="acme/z-image", resolved_ref="acme/z-image#svdq-int4-r128", cast="",
+            ref="acme/z-image", resolved_ref="", cast="fp8",
         )],
     )
     ex.apply_model_resolutions({r.ref: (r.resolved_ref, r.cast, r.lane) for r in ack.resolutions})
-    assert wire_ref(ex.specs["generate"].models["pipeline"]) == "acme/z-image#svdq-int4-r128"
+    assert wire_ref(ex.specs["generate"].models["pipeline"]) == "acme/z-image"
+    assert ex.specs["generate"].models["pipeline"].storage_dtype == "fp8"
 
 
 def test_apply_model_resolutions_rehomes_the_instance_group() -> None:

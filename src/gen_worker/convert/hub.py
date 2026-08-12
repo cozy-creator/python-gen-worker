@@ -36,7 +36,6 @@ import socket
 from ..api.errors import AuthError
 from ..request_context._helpers import _parse_owner_repo
 from ..stall import SilenceWindow
-from gen_worker.models.refs import flavor_token as _token
 from .. import activity as _activity
 from ..http_origin import is_definite_hub_answer
 from ..models import chunk_upload as _cu
@@ -87,6 +86,20 @@ _COMPLETE_TIMEOUT_S = 600.0
 # re-downloading costs — and unlike the re-download it cannot fail the same
 # way twice. Waiting stays observable: the loop beats liveness every pass.
 _COMPLETE_SILENCE_WINDOW_S = 6.0 * _COMPLETE_TIMEOUT_S
+
+def _token(v: str) -> str:
+    """Publish-body token hygiene (gw#488): the internal dtype-axis colon
+    forms (``gguf:q4_k_m``, ``int8:awq``) publish as ``-`` forms.
+
+    Moved here from ``models.refs`` by pgw#1148: the ref grammar no longer
+    has a flavor axis, so this is publish-body hygiene and nothing else. The
+    ``flavor``/``flavors``/``default_flavor`` publish fields it normalizes
+    are themselves DEAD hub-side (th#1803 decodes them and reads none) —
+    re-keying this surface onto ``tags[].head`` + ``artifact_contract`` is
+    the conversion-surface residual filed on pgw#1148.
+    """
+    return str(v or "").replace(":", "-")
+
 
 _SESSION: Optional[requests.Session] = None
 

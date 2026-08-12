@@ -139,6 +139,19 @@ CI-SKIPPED tests/test_topology_fuzz_pgw867.py|got empty parameter set for (vecto
 # on every developer box.
 CI-SKIPPED tests/test_unbounded_read_guard_pgw1013.py|<hex> not in this checkout (shallow clone)
 
+# pgw#1148. `test_the_compile_cache_modules_are_byte_untouched_by_this_deletion`
+# proves the flavor deletion did not touch a single compile-cell module by
+# diffing the eight of them against `git merge-base HEAD origin/master` —
+# `actions/checkout@v4` is shallow, so there is no base commit to diff against.
+# It is REVIEWER EVIDENCE for one diff, and it runs on every developer box.
+# WHERE THE DURABLE PROPERTY IS MEASURED IN CI: the four rows beside it —
+# `test_the_cell_fragment_still_parses`, `test_parse_cell_ref_is_unchanged`,
+# `test_a_cell_ref_round_trips_through_the_normal_form` and
+# `test_the_trt_cell_predicate_still_reads_its_fragment` — which assert the
+# thing that actually matters forever (the `#`-shaped CELL ref grammar the
+# compile cache consumes still parses and round-trips) and run everywhere.
+CI-SKIPPED tests/test_flavor_deletion_pgw1148.py|no origin/master to diff against
+
 # ─── LOCAL-ONLY ───────────────────────────────────────────────────────────────
 LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (packs a real .pt#; needs g++)
 LOCAL-ONLY tests/test_chunk_cas_parallel_th1362.py|multi-gb throughput measurement; set chunk_cas_bench=#

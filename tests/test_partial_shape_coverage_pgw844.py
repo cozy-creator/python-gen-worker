@@ -224,7 +224,7 @@ class _Pipe:
 
 
 @endpoint(
-    models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
+    models={"pipeline": Hub("acme/sdxl")},
     resources=Resources(gpu=True),
     compile=Compile(
         shapes=((1024, 1024),), family=FAMILY, text_len=TEXT_LEN,

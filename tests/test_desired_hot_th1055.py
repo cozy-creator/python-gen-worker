@@ -48,7 +48,12 @@ from gen_worker.cell_adopt import AdoptOutcome
 FAMILY = "th1055-fam"
 AUTHORED = Hub("acme/qwen-image", tag="prod")
 AUTHORED_REF = "acme/qwen-image"
-RESOLVED_REF = "acme/qwen-image#fp8-w8a8"
+#: pgw#1148 (§1.32(d)): a hub pick can no longer change a binding's ADDRESS —
+#: the `#flavor` that used to is deleted, and th#1803's digest pin resolves
+#: the same address. What a resolution still carries is the CAST and the
+#: EXECUTION LANE, so that is what these tests remap through.
+RESOLVED_REF = AUTHORED_REF
+RESOLVED_CAST = "fp8"
 ADAPTER_REF = "acme/qwen-lightning"
 CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
 
@@ -241,7 +246,7 @@ def test_slot_only_desired_instance_warms_and_arms(tmp_path, monkeypatch) -> Non
         fleet_cells_mod, "enable_compiled",
         _mint_enable(CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
     ex.apply_model_resolutions(
-        {AUTHORED_REF: (RESOLVED_REF, "", "fp8-w8a8-dynamic+compiled")})
+        {AUTHORED_REF: (RESOLVED_REF, RESOLVED_CAST, "fp8-w8a8-dynamic+compiled")})
 
     desired = pb.DesiredInstance(
         function_name="generate",
@@ -254,7 +259,7 @@ def test_slot_only_desired_instance_warms_and_arms(tmp_path, monkeypatch) -> Non
 
     assert len(setup_calls) == 1
     pipeline_path, adapter_path = setup_calls[0]
-    assert "fp8-w8a8" in pipeline_path
+    assert AUTHORED_REF.split("/")[-1] in pipeline_path
     (target,) = ex.compile_targets()
     assert target.active_compile_ref == CELL_REF
     assert "generate" in ex.available_functions()
@@ -269,13 +274,15 @@ def test_slot_only_desired_instance_warms_and_arms(tmp_path, monkeypatch) -> Non
 def test_declared_space_hot_bindings_remap_through_picks(tmp_path, monkeypatch) -> None:
     """seedDynamicSlotDefaults sends DECLARED refs ("the worker rebinds
     specs through the resolutions map", hello_ack.go th#697) — the warm
-    instance must derive the RESOLVED binding, never silently undo the
-    pick (and never download the declared artifact the disk plan skipped)."""
+    instance must derive the RESOLVED binding, never silently undo the pick.
+
+    pgw#1148: the pick's visible half is now the CAST (the flavor that used
+    to re-address the binding is deleted), so that is what must survive."""
     setup_calls: List[str] = []
     ex, _sent, _enables = _harness(tmp_path, monkeypatch,
                                    [_default_binding_spec(setup_calls)])
     ex.apply_model_resolutions(
-        {AUTHORED_REF: (RESOLVED_REF, "", "fp8-w8a8-dynamic+compiled")})
+        {AUTHORED_REF: (RESOLVED_REF, RESOLVED_CAST, "fp8-w8a8-dynamic+compiled")})
 
     desired = pb.DesiredInstance(
         function_name="generate",
@@ -286,7 +293,7 @@ def test_declared_space_hot_bindings_remap_through_picks(tmp_path, monkeypatch) 
     asyncio.run(ex.ensure_desired_instance(desired, snapshots))
 
     assert len(setup_calls) == 1
-    assert "fp8-w8a8" in setup_calls[0], (
+    assert ex.specs["generate"].models["pipeline"].storage_dtype == RESOLVED_CAST, (
         "declared-space hot binding undid the precision pick")
     rec = ex._classes[ex.specs["generate"].instance_key]
     assert rec.held_refs == [RESOLVED_REF]

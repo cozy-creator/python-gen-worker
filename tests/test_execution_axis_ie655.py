@@ -122,6 +122,5 @@ def test_most_quantized_body_outranks_a_bf16_binding() -> None:
         ["bf16-w16a16", "fp8-w8a8-dynamic"]) == "fp8-w8a8-dynamic"
     assert lanespec.most_quantized_body([]) == "bf16-w16a16"
     assert lanespec.most_quantized_body(["nonsense"]) == "bf16-w16a16"
-    assert lanespec.execution_lane_body_of_binding("fp8-w8a8", "") == "fp8-w8a8-dynamic"
-    assert lanespec.execution_lane_body_of_binding("", "fp8") == "fp8-w8a16"
-    assert lanespec.execution_lane_body_of_binding("", "") == "bf16-w16a16"
+    assert lanespec.execution_lane_body_of_binding("fp8") == "fp8-w8a16"
+    assert lanespec.execution_lane_body_of_binding("") == "bf16-w16a16"

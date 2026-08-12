@@ -30,10 +30,7 @@ src/gen_worker/executor.py::parse_execution_lane_spec  CONNECTED  pgw#904 CUT th
 # The executor's bytes come from orchestrator-resolved snapshots via
 # ModelStore.ensure_local." Verified 2026-08-07: no connected path reaches them.
 
-src/gen_worker/cli/listing.py::resolve_repo  STANDALONE  `cozy` CLI listing surface; no dispatcher path reaches it.
 src/gen_worker/cli/run.py::parse_execution_lane_spec  STANDALONE  `cozy run --lane` is an operator naming a lane locally, which is §1.31 layer 3 (per-invoke override) exercised by hand, not the worker authoring one.
-src/gen_worker/models/gguf_local.py::resolve_repo  STANDALONE  maybe_rebind_gguf, reached only from provision._local_flavor_fold.
-src/gen_worker/models/provision.py::maybe_rebind_family_fp8  STANDALONE  _local_flavor_fold; the th#964 AUTO fold's own docstring says "Production resolution remains hub-owned".
 src/gen_worker/models/provision.py::resolve_repo  STANDALONE  _local_flavor_fold's own resolve, same containment.
 
 # --- PUBLISH ------------------------------------------------------------------
