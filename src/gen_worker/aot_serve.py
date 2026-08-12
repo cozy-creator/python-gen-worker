@@ -3224,22 +3224,28 @@ def enable(
         f"torch={meta.get('torch')} precision={meta.get('precision')}")
 
 
-def _marker_states(pipeline: Any) -> List[Dict[str, Any]]:
-    """Every wrapped target's state dict on a PIPELINE marker.
+def _marker_states(subject: Any) -> List[Dict[str, Any]]:
+    """Every wrapped target's state dict on a marker — PIPELINE or MODULE.
 
-    pgw#1176 DELETED the single-``state`` fallback that stood here. Its own
-    docstring named the problem — "the legacy single-``state`` shape tests
-    use" — so it was a production branch kept alive by fixtures constructing
-    a shape production cannot construct: the two banned smells at once. The
-    two markers are genuinely different objects and always were:
-    :func:`wrap_module` writes a bare ``state`` on the MODULE, and
-    :func:`arm_entry` writes ``targets`` on the PIPELINE.
+    pgw#1176, CORRECTED. I first deleted the single-``state`` branch here as
+    "a legacy shape only tests build". That was half right and the wrong
+    half: a bare ``state`` on a PIPELINE is indeed a shape nothing produces
+    (and no fixture builds one any more), but this function is also called
+    with a MODULE, and a bare ``state`` is exactly what :func:`wrap_module`
+    writes there — on every arm, in production. Deleting it made
+    `execution_count(module)` answer 0 for a module that had served.
+
+    So the branch is not legacy and stays; what it reads is named. The two
+    markers are different objects and always were: :func:`wrap_module` writes
+    ``state`` on the MODULE it swapped, :func:`arm_entry` writes ``targets``
+    on the PIPELINE that owns it.
     """
-    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    marker = getattr(subject, _MARKER_ATTR, None) or {}
     rows = marker.get("targets")
-    if not isinstance(rows, dict):
-        return []
-    return [row.get("state") or {} for row in rows.values()]
+    if isinstance(rows, dict):
+        return [row.get("state") or {} for row in rows.values()]
+    state = marker.get("state")
+    return [state] if isinstance(state, dict) and state else []
 
 
 def execution_count(pipeline: Any) -> int:
