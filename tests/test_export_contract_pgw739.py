@@ -57,20 +57,20 @@ def test_dim_refusals_are_named() -> None:
 
 def test_fork_served_unserved_partition() -> None:
     f = Fork("isolate_modalities", served=(False,), unserved=(True,),
-             why="20,509 vs 30,877 nodes")
+             why="20,509 vs 30,877 nodes", reason="unpassed_arg")
     assert f.served == (False,) and f.unserved == (True,)
     with pytest.raises(DeclarationError, match="no served arm"):
         Fork("dead", served=())
     with pytest.raises(DeclarationError, match="BOTH served and unserved"):
-        Fork("both", served=(True,), unserved=(True,))
+        Fork("both", served=(True,), unserved=(True,), reason="default_value")
 
 
 def test_fork_source_binds_pipeline_or_module() -> None:
     f = Fork("expand_timesteps", served=(True,), unserved=(False,),
-             source=("pipeline", "expand_timesteps"))
+             source=("pipeline", "expand_timesteps"), reason="default_value")
     assert f.source == ("pipeline", "expand_timesteps")
     Fork("use_tiling", served=(False,), unserved=(True,),
-         source=("module", "use_tiling"))
+         source=("module", "use_tiling"), reason="default_value")
     with pytest.raises(DeclarationError, match="pipeline"):
         Fork("bad", served=(True,), source=("config", "x"))
 
@@ -101,7 +101,8 @@ def _decl(**overrides) -> Compile:
         family="fam", targets=("transformer",), text_len=512,
         dims=(Dim("H", carried_by=(("hidden_states", 2),), multiple_of=2),
               Dim("B", carried_by=(("hidden_states", 0),))),
-        forks=(Fork("cfg", served=(False,), unserved=(True,)),),
+        forks=(Fork("cfg", served=(False,), unserved=(True,),
+                     reason="default_value"),),
         classes=(GraphClass(dims={"H": 90, "B": 1}, fork={"cfg": False}),
                  GraphClass(dims={"H": 160, "B": 1}, fork={"cfg": False})),
         shape_strategy="dynamic-collapse",
@@ -332,11 +333,17 @@ def test_ltx_section_2_3_draft_parses() -> None:
         ),
         forks=(
             Fork("isolate_modalities", served=(False,), unserved=(True,),
+                 # The arm is closed by the endpoint never passing it, not by
+                 # the code being absent — a WEAK guarantee, and naming it as
+                 # one is the whole point of the machine-readable field.
+                 reason="unpassed_arg",
                  why="text_to_audio drops both AV cross-attentions: 20,509 vs "
                      "30,877 nodes. UNSERVED today (ie#383 phase 2)."),
             Fork("cfg", served=(False,), unserved=(True,),
+                 reason="checkpoint_config",
                  why="distilled recipe pins guidance 1.0"),
             Fork("stg", served=(False,), unserved=(True,),
+                 reason="unpassed_arg",
                  why="the only path arming perturbation_mask"),
         ),
         classes=classes,

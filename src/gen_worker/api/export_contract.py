@@ -494,11 +494,15 @@ class Fork(msgspec.Struct, frozen=True):
     #: unserved arm, for machines. ``None`` means the declaration has not
     #: answered the question yet.
     #:
-    #: OPTIONAL BY DESIGN, FOR NOW. Every fleet declaration predates this
-    #: field, so requiring it would break them all at import. **Phase 2 makes
-    #: it required whenever ``unserved`` is non-empty** — an un-annotated
-    #: unserved arm is a declaration that has not said how strong its own
-    #: guarantee is, which is exactly the state this field exists to end.
+    #: REQUIRED whenever ``unserved`` is non-empty (pgw#1157 — this is the
+    #: phase 2 the field was staged for). An un-annotated unserved arm is a
+    #: declaration that has not said how strong its own guarantee is, which is
+    #: exactly the state this field exists to end; leaving it optional meant
+    #: the docstring asserted a rule nothing enforced.
+    #:
+    #: ``None`` therefore no longer means "not answered yet" — that state is
+    #: unconstructible. A fork with only served arms still leaves it unset,
+    #: because there is no closed arm to justify.
     reason: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -526,6 +530,16 @@ class Fork(msgspec.Struct, frozen=True):
             force(self, "source", (str(src[0]), str(src[1]).strip()))
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
         force(self, "why", str(self.why or ""))
+        if unserved and self.reason is None:
+            # pgw#1157 (the staged phase 2): an unserved arm is a CLOSED arm,
+            # and a declaration that cannot say what closes it has not made
+            # the guarantee it appears to make. Refused where it is written,
+            # at declaration time, so it costs nothing at serve time.
+            raise DeclarationError(
+                f"Fork {self.name!r} closes arm(s) "
+                f"{sorted(map(repr, unserved))} but declares no reason — name "
+                f"the KIND of guarantee that keeps them closed, one of "
+                f"{list(FORK_REASONS)!r}")
         if self.reason is not None:
             reason = str(self.reason).strip()
             if reason not in FORK_REASONS:
@@ -975,6 +989,41 @@ def validate_contract(compile_decl: Any) -> None:
                 raise DeclarationError(
                     f"graph class #{i}: fork {name}={value!r} is not a "
                     f"declared arm (served: {sorted(map(repr, served_by_fork.get(name, set())))})")
+
+    # pgw#1157: the SAME question, asked from the arm's end. Every check above
+    # reads class -> arm ("does this class sit on an arm the fork declares?"),
+    # so a SERVED arm no class covers passed silently — the declaration claims
+    # to serve it, the mint traces nothing for it, and the first request on
+    # that arm is a guard miss on a graph that was never exported. Found
+    # empirically while adapting sd15/sd2: a fork claiming both arms with
+    # classes covering one was ACCEPTED.
+    # Only askable of a CLASS-declaring family. A declaration that states its
+    # shapes instead of its classes has nothing that could cover an arm, and
+    # forks are legal there (they still key the graph) — so an empty class set
+    # is silence, not a missing class.
+    covered: Dict[str, set] = {f.name: set() for f in forks}
+    for cls in classes:
+        for name, value in cls.fork:
+            if name in covered:
+                covered[name].add(value)
+    for f in forks if classes else ():
+        # A target-scoped fork is only answerable by classes that reach those
+        # targets; if no class is scoped to them the fork states nothing here
+        # and the scoping refusals above already own that case.
+        if f.targets and not any(
+            not cls.targets or (set(cls.targets) & set(f.targets))
+            for cls in classes
+        ):
+            continue
+        missing_arms = sorted(
+            repr(v) for v in f.served if v not in covered.get(f.name, set()))
+        if missing_arms:
+            raise DeclarationError(
+                f"Fork {f.name!r} declares served arm(s) {missing_arms} that no "
+                f"graph class covers — a served arm with no class is a graph "
+                f"the mint never exports and the first request on it finds "
+                f"missing. Declare the class, or move the arm to `unserved` "
+                f"with a `reason`")
 
     blockers: Tuple[MintBlocker, ...] = compile_decl.blockers
     blocker_ids = [b.id for b in blockers]

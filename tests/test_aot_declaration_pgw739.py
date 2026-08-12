@@ -74,9 +74,11 @@ def _wan_a14b_decl() -> Compile:
         forks=(
             Fork("expand_timesteps", served=(False,), unserved=(True,),
                  source=("pipeline", "expand_timesteps"),
+                 reason="checkpoint_config",
                  why="ti2v-5b's per-token timestep is a DIFFERENT graph class"),
             Fork("use_tiling", served=(False,), unserved=(True,),
                  source=("module", "use_tiling"), targets=("vae.decode",),
+                 reason="default_value",
                  why="tiled decode forks AutoencoderKLWan._decode"),
         ),
         classes=(
@@ -338,6 +340,7 @@ def _ti2v_shaped_decl() -> Compile:
         ),
         forks=(Fork("expand_timesteps", served=(True,), unserved=(False,),
                     source=("pipeline", "expand_timesteps"),
+                    reason="checkpoint_config",
                     why="per-token timestep IS the ti2v graph class"),),
         classes=(GraphClass(
             dims={"B": 1, "F_lat": 31, "H_lat": 44, "W_lat": 80,
