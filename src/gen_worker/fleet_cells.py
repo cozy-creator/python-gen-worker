@@ -2134,33 +2134,17 @@ def adopt_delegated_mint(
             phase="insufficient_adopt_vram",
         )
         return None
-    resident_before, _peak_before = mint_budget.adopt_watermark(device)
-
+    # pgw#1168: the MEASUREMENT that stood here has MOVED to
+    # `provision.arm_aot`, the one seam every arm route passes. It measured the
+    # self-mint adopt only, so the boot adopt — the same `load_and_wrap`, on the
+    # card the fleet actually serves on — reported nothing. The gate above stays
+    # here, because this is the call site where a refusal has consequences
+    # (nothing is armed, nothing is published); the ACCOUNTING belongs at the
+    # seam so it cannot be wired on one path again.
     armed, meta, refusal = _arm_exported_cell(
         pipe, pending.cfg, pending.cache_dir,
         int(getattr(pending.cfg, "lora_bucket", 0) or 0),
         pending.target, pending.arm_key, verify_numerics=True)
-    # pgw#1164: bank what it actually cost, pass or fail — a refused arm still
-    # paid the device high-water, and that number is the one thing this program
-    # has never had. `max_memory_allocated` is process-monotone and never reset
-    # here, so this is the water mark ABOVE the resident set the adopt started
-    # from. Emitted as well as banked: the bank dies with the pod, the row does
-    # not, and th#1820's placement floor needs the row.
-    _, peak_after = mint_budget.adopt_watermark(device)
-    adopt_cost = max(0, peak_after - resident_before)
-    if adopt_cost > 0:
-        mint_budget.record_adopt_peak(pending.family, lane, adopt_cost)
-        activity_mod.emit_event(
-            "cell_adopt_budget",
-            f"family={pending.family} lane={lane or '(plain)'} "
-            f"adopt_device_peak={adopt_cost / (1 << 30):.2f}GiB "
-            f"resident_before={resident_before / (1 << 30):.2f}GiB "
-            f"armed={bool(armed)} basis=measured — the device cost of loading "
-            f"this cell beside the live residents and proving it against "
-            f"eager. th#1820's mint placement is sized on the COMPILE; this is "
-            f"the number the adopt needs.",
-            phase="measured",
-        )
     if not armed:
         reason, detail = refusal
         # pgw#999: `phase` is the countable column, so it carries the CLASS —
