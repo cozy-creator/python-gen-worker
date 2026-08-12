@@ -446,10 +446,12 @@ class Activity:
 #: ``PROTO_DIGEST`` (pgw#944/th#1562), so a field added here fails the
 #: contract gate by construction — which is exactly what that gate is for.
 #:
-#: So the wire half is a COORDINATED PROTO CHANGE riding the Phase 5 cut
-#: beside ``Arm.graph_contract_digest`` (proposed: ``string family = 18;
-#: string cell_key = 19; string graph_class = 20;`` — additive, old readers
-#: ignore). Until it lands, identity travels in ONE deterministic shape
+#: So the wire half is a COORDINATED PROTO CHANGE, and after th#1841 it is the
+#: ONLY one the re-key still needs: ``Arm.graph_contract_digest`` was struck
+#: from the cut as dead code (a 1,713-line island with zero production
+#: callers). Proposed: ``string family = 18; string cell_key = 19; string
+#: graph_class = 20;`` — additive, old readers ignore. Until it lands,
+#: identity travels in ONE deterministic shape
 #: instead of four, so the hub's interim parse is an exact prefix match
 #: rather than the measured 1-right-1-wrong-out-of-3 that
 #: ``detail LIKE 'ref=%#'||cell_key||' %'`` returned. When the fields land,
