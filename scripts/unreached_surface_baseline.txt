@@ -230,7 +230,7 @@ gen_worker.guard_closure.manifest_digest()
 # anything absent was cleared.
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# pgw#1189 — TYPES are enumerated now, and the cross-repo check follows package
+# pgw#1192 — TYPES are enumerated now, and the cross-repo check follows package
 # RE-EXPORTS. Both were blind spots and both were found the same way: by
 # checking, not by reasoning. A symbol sweep over functions alone let a dead
 # type survive a whole deletion pass on a sibling lane (only the compiler caught
@@ -242,8 +242,20 @@ gen_worker.guard_closure.manifest_digest()
 # Entries are `module.Symbol` for a type and `module.symbol()` for a callable.
 # ---------------------------------------------------------------------------
 
+gen_worker.aot_compile_spans.dark_fraction()
+gen_worker.aot_inputs.inputs_for()
+gen_worker.aot_inputs.latent_dims()
+gen_worker.aot_package.package_entry_names()
+gen_worker.aot_serve.EntryDispatch.refusal_counts()
+gen_worker.aot_serve.realigned_inputs()
+gen_worker.aot_serve.served_entry_calls()
 gen_worker.boot_key.assert_memo_honest()
 gen_worker.boot_key.prop_economy()
+gen_worker.boot_phases.BootSpan.skipped()
+gen_worker.boot_phases.servable_ms()
+gen_worker.compile_cache.artifact_metadata()
+gen_worker.compile_cache.pack()
+gen_worker.compile_cache.seed_artifact()
 gen_worker.component_vocab.ComponentVocabulary.role_of()
 gen_worker.component_vocab.declare_components()
 gen_worker.component_vocab.reset_component_vocabulary()
@@ -278,6 +290,8 @@ gen_worker.convert.writer.streaming_w8a8_snapshot()
 gen_worker.discovery.validation.validate_endpoint()
 gen_worker.families.base.family_registry()
 gen_worker.geometry.FamilyGeometry.assert_declared()
+gen_worker.guard_closure.closure_manifest()
+gen_worker.guard_closure.manifest_digest()
 gen_worker.input_assets.inputs_dir_for_request()
 gen_worker.io.exists()
 gen_worker.io.read_audio()
