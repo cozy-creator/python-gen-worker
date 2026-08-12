@@ -210,22 +210,36 @@ def test_an_UNMEASURED_first_adopt_is_NOT_refused(monkeypatch, _pending) -> None
         "measured — that is a guess, not a budget")
 
 
-def test_the_adopt_cost_is_BANKED_AND_EMITTED(monkeypatch, _pending) -> None:
-    """One adopt teaches the next, and teaches th#1820's placement floor: the
-    bank dies with the pod, so the row has to carry the number too."""
+def test_this_call_site_does_NOT_measure__the_SEAM_does(
+    monkeypatch, _pending,
+) -> None:
+    """pgw#1168 MOVED the measurement, and this row is the fence that keeps it
+    moved.
+
+    It used to assert that `adopt_delegated_mint` banked and emitted the
+    adopt's device cost. That was true and it was WIRED ON ONE OF N PATHS: the
+    boot adopt, the local-store adopt and the re-arm run the identical
+    `aot_serve.enable` -> `load_and_wrap` and reported nothing, so the cheap
+    measurement on the card the fleet actually serves on did not exist. The
+    accounting lives in `provision.arm_aot` now — the one seam every arm route
+    passes — and is covered by `test_adopt_seam_budget_pgw1168.py`.
+
+    So what belongs HERE is the negative: a second emitter at this call site
+    would double-count every self-mint adopt and re-open the one-of-N shape.
+    The GATE stays here (see the rows above); only the accounting left.
+    """
     events: List[Tuple[str, str, str]] = []
     arm_calls: List[int] = []
     _install(monkeypatch, free_gib=64.0, events=events, arm_calls=arm_calls)
-    # A real watermark pair this time: 17 GiB of high-water above resident.
     monkeypatch.setattr(
         mint_budget, "adopt_watermark",
         lambda _d: (0, int(17.0 * _GIB)) if arm_calls else (0, 0))
 
     fleet_cells.adopt_delegated_mint(object(), _pending, _pending.target)
 
-    assert mint_budget.adopt_peak("sdxl", "w8a8") == int(17.0 * _GIB), (
-        "the adopt's measured device cost was not banked, so the next adopt "
-        "on this pod is as blind as this one was")
+    assert arm_calls == [1], "the arm must still run; only the accounting moved"
     kinds = [k for k, _p, _d in events]
-    assert "cell_adopt_budget" in kinds, (
-        f"the number never reached the wire; got {kinds!r}")
+    assert "cell_adopt_budget" not in kinds, (
+        f"this call site emitted a budget row again — the seam in "
+        f"provision.arm_aot already does, so this is a double count and the "
+        f"one-of-N wiring shape is back. Got {kinds!r}")

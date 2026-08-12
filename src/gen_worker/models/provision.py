@@ -50,6 +50,7 @@ from .loading import (
 from .memory import place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
 from .. import activity as activity_mod
+from .. import mint_budget
 
 if TYPE_CHECKING:
     from ..aot_identity import ExpectedIdentity
@@ -431,7 +432,67 @@ def arm_aot(
                     "aot arm: lifted-binding install failed on %r (%s); a "
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
+    # pgw#1168: THE ADOPT'S DEVICE COST, MEASURED AT THE ONE SEAM EVERY ARM
+    # ROUTE PASSES. pgw#1164 measured this in `fleet_cells.adopt_delegated_mint`
+    # — the SELF-MINT adopt only — so the boot adopt, the local-store adopt and
+    # the re-arm ran the identical `aot_serve.enable` -> `load_and_wrap` and
+    # reported nothing. That is this program's most common defect shape (an
+    # emitter wired on one of N paths), and the fix is one emitter here rather
+    # than a second call site there.
+    #
+    # The two terms are measured SEPARATELY because they answer different
+    # questions, and the split is what decides whether the CELL or the GATE is
+    # the problem (th#1825):
+    #   load   — every loaded entry runner, which EVERY serving pod pays for the
+    #            life of the arm. This is the term that decides whether a cell
+    #            fits on the fleet it was built for.
+    #   verify — the §4.32 parity gate's two forwards, paid ONLY on the minting
+    #            pod (`verify_numerics=True`), never by an adopter.
+    # A boot adopt therefore reports `verify=0` by construction, and that row —
+    # taken on the card the fleet actually serves on — is the empirical answer
+    # to "does this cell fit", where before there was only arithmetic.
+    _budget_device = mint_budget.device_of(pipe)
+    _resident_before, _ = mint_budget.adopt_watermark(_budget_device)
+    _load_bytes = 0
+    _emitted = False
+
+    def _emit_adopt_budget(verify_bytes: int, armed: bool) -> None:
+        """One `cell_adopt_budget` row per arm attempt, whatever the outcome.
+
+        Emitted even for a REFUSED arm: the device high-water was paid either
+        way, and a refusal is exactly when the number is most worth having.
+        """
+        nonlocal _emitted
+        if _emitted:
+            return
+        _emitted = True
+        total = int(_load_bytes) + max(0, int(verify_bytes))
+        if total <= 0:
+            return
+        family = str((meta or {}).get("family") or getattr(cfg, "family", "") or "")
+        # The cell's OWN recorded lane, so this key matches the one
+        # `mint_budget`'s other banks use without importing compile_cache here.
+        lane = str((meta or {}).get("weight_lane") or "")
+        entries = len((meta or {}).get("entries") or {})
+        mint_budget.record_adopt_peak(family, lane, total)
+        gib = 1 << 30
+        activity_mod.emit_event(
+            "cell_adopt_budget",
+            f"family={family} lane={lane or '(plain)'} entries={entries} "
+            f"adopt_device_peak={total / gib:.3f}GiB "
+            f"load={_load_bytes / gib:.3f}GiB "
+            f"verify={max(0, int(verify_bytes)) / gib:.3f}GiB "
+            f"resident_before={_resident_before / gib:.3f}GiB "
+            f"verified={bool(verify_numerics)} armed={bool(armed)} "
+            f"basis=measured — `load` is what EVERY adopting pod pays and is "
+            f"the term that decides whether this cell fits its serving fleet; "
+            f"`verify` is the §4.32 gate and is paid only by the minting pod.",
+            phase="measured",
+        )
+
     outcome = aot_serve.enable(pipe, cfg, cache_dir, artifact, expected=expected)
+    _, _peak_after_load = mint_budget.adopt_watermark(_budget_device)
+    _load_bytes = max(0, _peak_after_load - _resident_before)
     if not outcome.armed and lifted_install_error:
         # The refusal is real; its ROOT is one frame up. Both, in the order a
         # reader needs them: what refused, and what made it refuse.
@@ -444,8 +505,12 @@ def arm_aot(
     if outcome.armed:
         # §4.32: quality is proven at MINT and in author CI, never at adoption.
         # An adopting pod materializes, arms and serves.
-        if not verify_numerics or gate_cell_numerics(pipe, cfg, strict=True):
+        gate_ok = not verify_numerics or gate_cell_numerics(pipe, cfg, strict=True)
+        _, _peak_after_verify = mint_budget.adopt_watermark(_budget_device)
+        if gate_ok:
+            _emit_adopt_budget(_peak_after_verify - _peak_after_load, True)
             return outcome
+        _emit_adopt_budget(_peak_after_verify - _peak_after_load, False)
         # A refused cell is UNARMED, not merely reported: the whole point is
         # that it must not serve. Staying eager is the ordinary miss policy
         # every other adopt gate uses, so the tenant keeps being served.
@@ -465,6 +530,10 @@ def arm_aot(
             f"they were traced from — nothing is published and this pod serves "
             f"eager (pgw#868, §4.32)",
             outcome.identity)
+    # An arm that never reached the gate (refused at `enable`) still paid the
+    # load, so it still reports — `_emit_adopt_budget` dedupes, so the armed
+    # paths above have already had their say.
+    _emit_adopt_budget(0, bool(outcome.armed))
     if lifted_installed:
         from . import lora_lifted
 
