@@ -238,7 +238,7 @@ def _old_schema_digest(meta: dict) -> str:
     }
     canonical = json.dumps(
         axes, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return "ck1-" + hashlib.sha256(canonical.encode()).hexdigest()[:56]
+    return "ek1-" + hashlib.sha256(canonical.encode()).hexdigest()[:56]
 
 
 def test_old_and_new_keys_cannot_collide():

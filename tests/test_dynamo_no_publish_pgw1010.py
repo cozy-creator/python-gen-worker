@@ -197,7 +197,7 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     seen: List[Tuple[str, str, str]] = []
 
     def capture(kind: str, detail: str, phase: str = "",
-                duration_ms: int = 0) -> None:
+                duration_ms: int = 0, **_kw) -> None:
         seen.append((kind, phase, detail))
 
     monkeypatch.setattr(activity_mod, "emit_event", capture)
@@ -229,7 +229,7 @@ def _miss_with_no_declaration(monkeypatch: pytest.MonkeyPatch) -> List[str]:
     monkeypatch.setattr(fc, "export_declaration", lambda family: None)
     monkeypatch.setattr(
         cc, "arm_jit_intake",
-        lambda pipe, cfg: armed.append(str(getattr(cfg, "family", ""))))
+        lambda pipe, cfg, **_kw: armed.append(str(getattr(cfg, "family", ""))))
     return armed
 
 

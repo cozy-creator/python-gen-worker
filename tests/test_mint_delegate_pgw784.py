@@ -99,7 +99,7 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
         lambda *a, **k: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(cc, "has_compile_target", lambda *a, **k: True)
     monkeypatch.setattr(cc, "mandatory_serving", lambda pipe: False)
-    monkeypatch.setattr(cc, "apply_lora_execution_lane", lambda pipe, bucket: True)
+    monkeypatch.setattr(cc, "apply_lora_execution_lane", lambda pipe, bucket, **_kw: True)
     monkeypatch.setattr(cc, "drop_lora_execution_lane", lambda pipe: True)
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
@@ -186,7 +186,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
 def _task(tmp_path: Path, **over: Any) -> mint_delegate.MintTask:
     pending = fleet_cells.PendingSelfMint(
         family="sdxl", arm_token="ck1-abc",
-        ref="root/family-sdxl#ck1-abc", cfg=_cfg(),
+        ref="root/family-sdxl#ek1-abc", cfg=_cfg(),
         target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
     fields: Dict[str, Any] = dict(
@@ -214,10 +214,10 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
     seen: List[tuple] = []
     monkeypatch.setattr(
         mint_delegate.activity_mod, "emit_event",
-        lambda kind, detail, phase="": seen.append((kind, phase, detail)))
+        lambda kind, detail, phase="", **_kw: seen.append((kind, phase, detail)))
     monkeypatch.setattr(
         fleet_cells.activity_mod, "emit_event",
-        lambda kind, detail, phase="": seen.append((kind, phase, detail)))
+        lambda kind, detail, phase="", **_kw: seen.append((kind, phase, detail)))
     return seen
 
 

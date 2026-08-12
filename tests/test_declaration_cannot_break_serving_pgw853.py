@@ -94,7 +94,7 @@ def test_the_guarded_import_reports_the_failure_instead_of_raising() -> None:
     seen: List[Tuple[str, str, str]] = []
     real_emit = activity.emit_event
     activity.emit_event = (  # type: ignore[assignment]
-        lambda kind, detail, phase="", duration_ms=0: seen.append(
+        lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append(
             (kind, phase, detail)))
     try:
         import sys

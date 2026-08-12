@@ -258,7 +258,7 @@ META["cell_key"] = CELL_KEY
 #: as a fixture so the refusal below is pinned against the real historical row,
 #: not against an invented one.
 TODAYS_FALLBACK_META = {
-    "cell_key": "ck1-" + "b" * 56, "family": FAMILY, "sku": "l4", "sm": "89",
+    "cell_key": "ek1-" + "b" * 56, "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "compile_mode": "regional", "weight_lane": "w8a8", "lora_bucket": 64,
 }
@@ -278,7 +278,7 @@ def _events(monkeypatch) -> list:
     seen: list = []
     monkeypatch.setattr(
         fc.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: seen.append((kind, phase)))
+        lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append((kind, phase)))
     return seen
 
 
@@ -412,7 +412,7 @@ def test_a_stamp_that_disagrees_with_the_recorded_axes_is_refused(hub, artifact)
     """A cell whose `cell_key` does not describe its own blocks is a cell the
     hub would index under one identity and the worker would fence on another."""
     forged = dict(META)
-    forged["cell_key"] = "ck1-" + "9" * 56
+    forged["cell_key"] = "ek1-" + "9" * 56
     with pytest.raises(fc.CellPublishRefused, match="disagrees"):
         _publisher(hub).publish(FAMILY, artifact, forged)
     assert not hub.httpd.calls

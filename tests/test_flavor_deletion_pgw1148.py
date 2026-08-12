@@ -24,7 +24,7 @@ from gen_worker.models.refs import (
     refuse_flavor_selector,
 )
 
-CELL_REF = "root/family-sdxl:cells#ck1-4f2a9b"
+CELL_REF = "root/family-sdxl:cells#ek1-4f2a9b"
 
 
 # --------------------------------------------------------------------------

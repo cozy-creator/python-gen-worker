@@ -101,7 +101,7 @@ def test_ek1_axes_are_the_recipe(pinned_runtime: None,
     # 36-entry all-or-nothing cell this runtime cannot arm at all, so it does
     # not even parse. That is what makes an orphaned ref fail at the
     # comparison rather than late, inside a per-entry code path.
-    assert not ck.is_key("ck1-" + "a" * 56)
+    assert not ck.is_key("ek1-" + "a" * 56)
     # Version-string axes are rejected outright.
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(axes, torch="2.13.0"))
@@ -188,7 +188,7 @@ def test_marked_cell_never_republishes(monkeypatch: pytest.MonkeyPatch,
     artifact.write_bytes(b"bytes")
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
-    meta = {"cell_key": "ck1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
+    meta = {"cell_key": "ek1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
     with pytest.raises(fc.CellPublishRefused, match="pgw#712"):
         pub.publish(FAMILY, artifact, meta)
 
