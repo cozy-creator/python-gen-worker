@@ -863,6 +863,29 @@ def inert_declarations() -> List[Tuple[str, Dict[str, List[str]]]]:
 
 
 
+def _upstream_baseline() -> Optional[Set[str]]:
+    """The ratchet file as `origin/master` has it, or None if unavailable.
+
+    Why a gate reads git: a STALE row is usually not a finding at all. Master
+    moves, somebody turns the ratchet there, and every branch that predates the
+    turn goes red on a row that is already gone upstream. Two lanes have now
+    spent time treating that as a real defect. The guard can tell — the row is
+    absent from `origin/master` — so it should say REBASE instead of letting a
+    reader investigate a deletion that has already happened.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "show", f"origin/master:{BASELINE.relative_to(REPO)}"],
+            cwd=REPO, capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    return {ln.strip() for ln in out.stdout.splitlines()
+            if ln.strip() and not ln.startswith("#")}
+
+
 def baseline_rows() -> Tuple[Set[str], Dict[str, str]]:
     """The ratchet's labels, and the OWNER/EXPIRY note governing each.
 
@@ -986,7 +1009,15 @@ def main() -> int:
     # DELETED by pgw#1184 and this guard told master's readers it "now has a
     # production caller", which is a search for something that does not exist.
     # A gate's message is part of the gate.
+    upstream = _upstream_baseline() if stale else None
     for label in stale:
+        if upstream is not None and label not in upstream:
+            print(f"BEHIND MASTER — rebase, this is not a finding: {label}\n"
+                  f"  The row is already gone from {BASELINE.name} on "
+                  f"origin/master: somebody turned this ratchet upstream and "
+                  f"your branch predates it. Rebase and the red goes with it. "
+                  f"Nothing here needs investigating.", file=sys.stderr)
+            continue
         note = notes.get(label, "")
         owed = f"\n  THE ROW SAID: {note}" if note else ""
         if label in DEFINED_LABELS:
