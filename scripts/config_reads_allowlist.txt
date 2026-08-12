@@ -103,7 +103,6 @@ src/gen_worker/procsplit/parent.py::$ENV_WATCHDOG_PING_S IPC watchdog ping caden
 # which is C4 dressed as plumbing: pgw#931 deliverable 6 folds them into one
 # inspectable Settings-derived builder.
 # ---------------------------------------------------------------------------
-src/gen_worker/compile_cache.py::$env LIBRARY reads the inductor/triton env block for the seal snapshot.
 src/gen_worker/settings_authority.py::TORCHINDUCTOR_AUTOGRAD_CACHE LIBRARY TORCHINDUCTOR_AUTOGRAD_CACHE=0 (gw#608, moved from compile_cache by pgw#1049); torch offers no other API.
 src/gen_worker/compile_cache.py::CXX LIBRARY CXX host-compiler discovery, the toolchain's own convention.
 src/gen_worker/compile_cache.py::TORCHINDUCTOR_CACHE_DIR LIBRARY reads back the inductor cache dir torch was steered to.
