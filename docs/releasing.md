@@ -231,6 +231,11 @@ gh run view <run-id> --json event,headSha -q '{event:.event,sha:.headSha}'   # e
 
 A `pull_request` run is still the right gate for *merging*. It is not proof for *publishing*.
 
+**This paragraph is a WORKAROUND and should not survive.** The durable fix is that `publish.yml`
+refuses `pull_request` runs as proof — one `select` on the run's `event` — filed as **pgw#1191**.
+Delete this section when that lands, and leave the `workflow_dispatch` step in Mechanics alone
+either way.
+
 ### PIN the commit you cut, and TAG IT — do not tag master's tip
 
 Lanes merge while you assemble; master moved four times during the 0.113.0 cut. Cut from a pinned
