@@ -2579,9 +2579,11 @@ def wrap_module(
             remove(name, reason)
             activity_mod.emit_event(
                 "aot_entry_de_armed",
-                f"family={meta.get('family')} target={label} entry={name}: "
-                f"{detail}",
+                f"target={label}: {detail}",
                 phase=reason,
+                family=str(meta.get("family") or ""),
+                cell_key=str(meta.get("cell_key") or ""),
+                graph_class=name,
             )
             if getattr(runner, "runners", ()):  # siblings still serve
                 logger.warning(
