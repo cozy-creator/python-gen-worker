@@ -300,7 +300,7 @@ def arm_identity(
         "sm": sm,
         "envelope": cell_key.envelope_digest(declared_envelope_block(cfg)),
         "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
-        "toolchain": cell_key.facts_digest(dict(cc.toolchain_digest())),
+        "toolchain": cell_key.toolchain_axis_digest(dict(cc.toolchain_digest())),
         "subject": cell_key.subject_digest(subject),
         "targets": ",".join(str(t) for t in declared["targets"]),
         "dynamic": json.dumps(
@@ -1760,7 +1760,8 @@ def arm_axis_divergence(
             if isinstance(envelope_block, dict) and envelope_block else ""),
         "env_seal": env_seal.seal_digest(
             dict(meta.get(env_seal.SEAL_KEY) or {})),
-        "toolchain": cell_key.facts_digest(dict(meta.get("toolchain") or {})),
+        "toolchain": cell_key.toolchain_axis_digest(
+            dict(meta.get("toolchain") or {})),
     }
     parent = arm_key.facts_dict()
     for fact in ARM_ENVIRONMENT_FACTS:

@@ -141,10 +141,17 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     assert ck.from_exported_artifact_metadata(retooled).digest != want.digest
 
 
-def test_toolchain_covers_the_model_libraries() -> None:
+def test_toolchain_covers_the_compiler_and_not_the_model_libraries() -> None:
+    """pgw#1050 INVERTS this test. It used to demand ``diffusers`` and
+    ``transformers`` in the axis; their whole effect on a cell arrives through
+    the traced ``graph`` axis, so folding them here re-keyed the fleet on every
+    model-library bump for a computation that had not moved. Membership is the
+    compiler — see ``tests/test_toolchain_membership_pgw1050.py``."""
     toolchain = dict(cc.toolchain_digest())
-    for pkg in ("torch", "triton", "diffusers", "transformers"):
+    for pkg in ("torch", "triton"):
         assert pkg in toolchain, pkg
+    for pkg in ("diffusers", "transformers", "peft"):
+        assert pkg not in toolchain, pkg
 
 
 # ---------------------------------------------------------------------------

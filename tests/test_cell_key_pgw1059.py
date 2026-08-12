@@ -124,6 +124,16 @@ _DERIVATION_ALLOWLIST = {
         "fleet_cells.py",  # arm_identity + arm_axis_divergence (same derivation
                            # both sides of the handback seam — the pgw#1042 check)
     },
+    # the toolchain-axis digest, i.e. its MEMBERSHIP (pgw#1050). The producer
+    # (`compile_cache.toolchain_digest`) collects components; this is the one
+    # place that says which of them ARE the axis, and every reader that
+    # restates the axis from a recorded block must come through it or the
+    # two ends can disagree about membership.
+    "toolchain_axis_digest(": {
+        "cell_key.py",     # def (+ toolchain_facts)
+        "fleet_cells.py",  # arm_identity + arm_axis_divergence
+        "aot_identity.py",  # artifact_identity (the wire fact)
+    },
 }
 
 

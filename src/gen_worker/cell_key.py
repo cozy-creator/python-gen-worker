@@ -50,7 +50,11 @@ test admits four axes and no more:
                   RECORDs + bundled ptxas/nvdisasm binaries) PLUS the
                   settings DECLARATION digest (pgw#1049 seal v4) and the
                   boot-frozen loaded-library digest. Content, never version
-                  strings.
+                  strings. MEMBERSHIP is the COMPILER, not the model
+                  libraries (pgw#1050) — ONE derivation:
+                  :func:`toolchain_axis_digest` over the recorded
+                  ``toolchain`` block, which is what
+                  :func:`toolchain_facts` says the axis is.
 
 Axes deliberately NOT in the key, each because it fails the axiom:
 
@@ -76,6 +80,22 @@ Axes deliberately NOT in the key, each because it fails the axiom:
 * ``code_closure`` — pgw#990: a memo, never identity.
 * ``sku`` / ``cuda_driver`` / version strings / ``image_digest`` —
   observability (pgw#691, gw#577, pgw#700).
+* the MODEL LIBRARIES — ``diffusers`` / ``transformers`` / ``peft``
+  (pgw#1050). They ran inside ``toolchain`` until 2026-08-11, and that was
+  the axiom's other failure mode: an OVER-split. They are pure-python and
+  run at TRACE time only, so everything they can do to a cell arrives as
+  the traced computation — ops, literal args, tensor meta, symbolic ranges,
+  the graph signature and both pytree specs, all of which the ``graph``
+  axis hashes node-for-node since pgw#1031. The two channels that could
+  route around the graph are both closed by construction, not by this
+  axis: weight/constant VALUES cannot reach the artifact (the B1 code-only
+  gate and the pgw#1097 folding fence, both DECLARED and refused
+  pre-download by ``aot_serve.verify_declared``), and torch settings a
+  library mutates behind our back trip ``env_seal.assert_seal_unchanged``
+  pre-trace and are refused by name. So a model-library bump either moves
+  the graph — and re-keys through ``graph``, which is the honest axis — or
+  cannot change the artifact at all. Keeping them double-counted the first
+  case and re-minted the whole fleet for the second.
 
 There is no pre-trace ("arm") cell key any more. The pgw#1033/#1042
 two-digest-space design — a COMPUTED ``kind="inductor"`` key from declared
@@ -271,6 +291,45 @@ def envelope_digest(block: Mapping[str, Any]) -> str:
     return facts_digest(envelope_facts(block))
 
 
+#: Components a recorded ``toolchain`` block may carry that are NOT the
+#: ``toolchain`` axis (pgw#1050). The eviction is a MEMBERSHIP change and
+#: only that: identification of everything that stays is still the CONTENT
+#: digest of the installed wheel's RECORD, never a version string (the
+#: pgw#1050 amendment's own constraint — in a pinned-PyPI fleet versions and
+#: content change at the same rate, so version strings would buy no churn
+#: reduction and would accept the rebuilt/patched-wheel divergences content
+#: catches).
+#:
+#: Read the module docstring for WHY these three are not members. Deny-list
+#: rather than allow-list on purpose: a component nobody has classified must
+#: stay IN the key, because the axiom's expensive failure is the over-split
+#: and the axiom's UNSAFE failure is the under-split.
+_NOT_TOOLCHAIN: Tuple[str, ...] = ("diffusers", "transformers", "peft")
+
+
+def toolchain_facts(block: Mapping[str, Any]) -> Dict[str, str]:
+    """The canonical form of one recorded TOOLCHAIN block — the single
+    statement of what the ``toolchain`` axis IS.
+
+    Applied at BOTH ends, exactly as :func:`envelope_facts` is: the producer
+    (``compile_cache.toolchain_digest``) collects the components, and every
+    reader that restates the axis from an artifact's recorded block
+    (the publish recompute, the boot key, the arm handback, the wire
+    identity) reads membership from here. Two ends that decide membership
+    separately are two derivations of one axis, which is the failure
+    ``test_cell_key_pgw1059``'s fence exists to prevent.
+    """
+    return {
+        str(name): str(value) for name, value in block.items()
+        if str(name) not in _NOT_TOOLCHAIN
+    }
+
+
+def toolchain_axis_digest(block: Mapping[str, Any]) -> str:
+    """The ``toolchain`` key-axis value for one recorded toolchain block."""
+    return facts_digest(toolchain_facts(block))
+
+
 # --- the SUBJECT: what an obligation is FOR (pgw#1113) ---------------------
 #
 # THE ASYMMETRY, stated once, here, because both consumers below depend on it:
@@ -401,7 +460,7 @@ def from_exported_artifact_metadata(meta: Mapping[str, Any]) -> CellKey:
         "graph": combined,
         "envelope": envelope_digest(envelope),
         "sm": sm,
-        "toolchain": facts_digest(toolchain),
+        "toolchain": toolchain_axis_digest(toolchain),
     })
 
 
@@ -417,6 +476,8 @@ __all__ = [
     "envelope_digest",
     "envelope_facts",
     "facts_digest",
+    "toolchain_axis_digest",
+    "toolchain_facts",
     "from_exported_artifact_metadata",
     "from_axes",
     "is_key",

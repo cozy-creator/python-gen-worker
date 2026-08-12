@@ -49,6 +49,12 @@ by a different gen-worker, or traced under different low-VRAM flags, can
 pass every other key yet miss inductor's FX-graph cache at trace time,
 serving eager while reporting adopted). ``source_ref`` records which family member the producer
 compiled from — informational, never part of the match.
+
+This paragraph is about the LOCAL/JIT recipe above, which is a PRE-TRACE facts
+comparison and must not UNDER-split: it cannot see a graph, so ``diffusers``
+stands in for one and stays. The exported lane's ck1 key is the opposite side
+of that asymmetry — it HAS the traced graph, so the model libraries are not in
+its ``toolchain`` axis (pgw#1050, :func:`toolchain_digest`).
 """
 
 from __future__ import annotations
@@ -950,8 +956,10 @@ def _static_imports(path: Path, module_name: str) -> set[str]:
 def static_code_closure() -> Tuple[Tuple[str, str], ...]:
     """The recipe's code identity: sorted (module path, content digest) of
     every source file statically reachable from the compile entrypoints.
-    Restricted to the gen_worker package; torch/diffusers/transformers content
-    rides the ``toolchain`` axis at package granularity instead. Deterministic:
+    Restricted to the gen_worker package; torch/triton content rides the
+    ``toolchain`` axis at package granularity, and the model libraries ride
+    the ``graph`` axis (pgw#1050 — their code IS the traced computation, and
+    nothing else about them reaches a cell). Deterministic:
     module-derived relative paths, sorted, content digests — never absolute
     paths, never bytecode.
 
@@ -991,6 +999,20 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     """pgw#710/pgw#1059: CONTENT identity of "the compiler stack AS WE
     CONFIGURE IT", per component — the ``toolchain`` key axis's whole input.
 
+    THE COMPILER, and not the model libraries (pgw#1050): ``diffusers`` /
+    ``transformers`` / ``peft`` rode this axis until 2026-08-11 and were
+    evicted because their whole effect on a cell arrives through the traced
+    graph, which the ``graph`` axis hashes node-for-node since pgw#1031 —
+    see ``cell_key``'s module docstring for the channel-by-channel argument
+    and for the two fences (B1 code-only + the pgw#1097 folding fence;
+    ``env_seal.assert_seal_unchanged``) that close the routes around it.
+    Folded here, every model-library patch release re-keyed every cell in
+    the fleet for a graph that had not moved. ``cell_key.toolchain_facts``
+    is the READER of the same membership, and the pair is what keeps one
+    axis one derivation. Their versions stay RECORDED for forensics
+    (:func:`_lib_versions`, ``artifact_metadata``'s ``libs`` block) — an
+    observability fact, exactly like ``sku``.
+
     The binary half (pgw#710) is the equivalence precondition that lets
     ``image_digest`` be relaxed (pgw#700) without degrading the compile
     stack's identity to version strings (the ccache ``compiler_check=mtime``
@@ -1028,7 +1050,7 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     # per-FILE digests and this axis's per-PACKAGE digests are two readings of
     # the same manifests, and reading them twice is how two surfaces start
     # disagreeing about what is installed.
-    wanted = ("torch", "triton", "diffusers", "transformers", "peft")
+    wanted = ("torch", "triton")
     for name, record in dist_records.record_texts().items():
         if name in wanted or name.startswith("nvidia-"):
             out[name] = hashlib.sha256(record.encode()).hexdigest()[:16]
