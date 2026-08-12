@@ -93,7 +93,7 @@ from . import (
     cell_key, dist_records, env_seal, guard_closure, hot_swap,
     serve_posture, settings_authority,
 )
-from .api.errors import RetryableError
+from .api.errors import FatalError, RetryableError
 from .models import w8a8_lora
 from .models.loading import pipeline_weight_lane
 from .models.memory import low_vram_mode, reconcile_resident_mode
@@ -2071,7 +2071,40 @@ class CellSelectionBugError(RuntimeError):
 
 
 class CompiledExecutionLaneUnavailableError(RetryableError):
-    """A precision lane whose production contract requires a cell is unsafe."""
+    """A precision lane whose production contract requires a cell is unsafe.
+
+    RETRYABLE, and correctly so: a cell that is merely ABSENT here can exist
+    elsewhere or later — another pod may already hold it, and a requeue is how
+    the request reaches that pod. Everything whose cause can change (no CUDA
+    on this pod, an arm that failed, an identity computation that raised) exits
+    through this class.
+    """
+
+
+class CompiledExecutionLaneImpossibleError(FatalError):
+    """The same refusal, for a cause that CANNOT change (pgw#888/pgw#1010).
+
+    A mandatory w8a8/w4a4 lane on a family that declares no export: the lane
+    serves only from a cell, the only cell is an AOT cell, and no export means
+    no cell can be minted for it on any pod, ever. Retrying spends the
+    orchestrator's whole attempt budget re-deriving one answer — pgw#888
+    measured 11 real requests each exhausting five retries — and the user waits
+    five times as long for the identical refusal.
+
+    NOT a subclass of :class:`CompiledExecutionLaneUnavailableError`: it is
+    exactly the retryability that differs, so inheriting it would put this back
+    on the retry path through any ``except`` clause that names the parent.
+
+    Why not serve eager instead (DESIGN-RULINGS §4.31)? §4.31's in-request
+    eager fallback governs the case where eager is a VALID POSTURE for the
+    endpoint. Here the author declared a mandatory quantized lane, so eager is
+    not a posture they sanctioned — falling back to it would serve numerics
+    nobody approved rather than refuse. §4.31 and pgw#1010 therefore do not
+    conflict once "cell-attributable failure => serve eager" is read as
+    "=> serve eager WHERE EAGER IS PERMITTED". Recorded here because it is an
+    assumption, not a quotation: if it is ever reversed, this class is the
+    single place the reversal lands.
+    """
 
 
 def _merge_staged_cache(staged: Path, live: Path) -> None:

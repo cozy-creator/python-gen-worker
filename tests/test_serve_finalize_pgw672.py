@@ -342,7 +342,11 @@ def test_a_mandatory_lane_without_a_declaration_fails_closed_before_it_compiles(
             "a mandatory lane must not compile an intake arm it cannot serve"))
 
     pipe = _Pipe()
-    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="cell"):
+    # pgw#888: this family declares NO export, so the refusal is PERMANENT —
+    # no pod can ever hold a cell for it — and it is therefore the terminal
+    # class, not the retryable one. Retrying it was pgw#888's own observation
+    # (11 requests, five attempts each, one answer).
+    with pytest.raises(cc.CompiledExecutionLaneImpossibleError, match="cell"):
         fleet_cells.enable_compiled(
             pipe, Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
             tmp_path, None, publisher=None)
