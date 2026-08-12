@@ -165,6 +165,14 @@ class MintBlocker(msgspec.Struct, frozen=True):
 
         python -m gen_worker.measure_child <request>.mint.json <report>.json
 
+    ``<request>.mint.json`` is the file the endpoint repo COMMITS under
+    ``aot/`` — the declaration payload, read as such since pgw#1153; the
+    function, the compile targets and the target slot's checkpoint are derived
+    from the declaration it names. Run it in the endpoint's own image. Any slot
+    the payload does not name (``setup()`` may require more than one) is
+    refused BY NAME, on the spot, and supplied with
+    ``--slot NAME=/path/to/tree`` — the run never downloads.
+
     It exports (and, unless ``--export-only``, AOT-compiles) the declared class
     set and writes ``export_peak_device_bytes`` /
     ``export_peak_device_reserved_bytes`` and a per-entry outcome. Cite that

@@ -1,0 +1,35 @@
+{
+  "_declaration": "wan-2.2/src/wan_2_2/main.py \u2014 the @endpoint(compile=...) blocks. pgw#1107: ONE declaration per family, on the class decorators; aot/declaration.py and src/wan_2_2/aot_declaration.py are DELETED.",
+  "_notes": [
+    "pgw#758: ONE cell for the family's whole declared class set — the former ti2v-5b-{transformer,vae-decode}.mint.json pair collapsed here and ie#574 dropped the decoder entry; targets/forks/class rows derive from declaration.py (transformer GC-3 per-token timestep, expand_timesteps=true).",
+    "Every future duration bucket is a new GRAPH CLASS ROW in declaration.py, which under pgw#758 lands as another named entry in this same cell. (The old note about the frame axis never being symbolic on vae.decode is moot: ie#574 removed that target.)",
+    "ie#574: the ~21k-node decode graph is NOT exported — compiling this VAE is a measured 0.46x, and it was the whole compile budget. lora_bucket=0: this family's endpoint declares no adapter bucket.",
+    "source_digest and declared_vram_gb are DEPLOY-TIME facts — fill from the serving release before minting."
+  ],
+  "family": "wan-2.2-ti2v-5b",
+  "weight_lane": "",
+  "precision": "bf16",
+  "batch": 1,
+  "lora_bucket": 0,
+  "shapes": [
+    [1280, 704, 121]
+  ],
+  "text_lens": [512],
+  "guidance_scales": [1.0],
+  "declaration_module": "wan_2_2.main",
+  "specialization": {
+    "return_dict": false,
+    "text_dim": 4096,
+    "timestep_kind": "per_token_float32"
+  },
+  "lora_fqns": [],
+  "lifted_inputs": [],
+  "strict": true,
+  "source_ref": "tensorhub/wan22-ti2v-5b:prod",
+  "source_digest": "",
+  "closure_roots": [],
+  "pipeline_class": "WanPipeline",
+  "dtype": "bf16",
+  "storage_dtype": "",
+  "declared_vram_gb": 24.0
+}

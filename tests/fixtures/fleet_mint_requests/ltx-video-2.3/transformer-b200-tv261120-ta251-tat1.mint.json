@@ -1,0 +1,83 @@
+{
+  "_declaration": "ltx-video-2.3/src/ltx_video_23/main.py \u2014 the @endpoint(compile=...) block (ie#571, folded by ie#645/pgw#1107)",
+  "_generated_by": "ltx-video-2.3/aot/make_mint_requests.py",
+  "_status": "READY BUT BLOCKED \u2014 see Compile(blockers=MINT_BLOCKERS) in src/ltx_video_23/main.py (OQ-2 / OQ-3 / OQ-8).",
+  "_tier": "b200",
+  "_lane": "generate/extend/a2v",
+  "_row": "T_v=261120 video tokens, T_a=251 audio tokens, T_at=1 (generate/extend/a2v)",
+  "_notes": [
+    "STATUS: READY BUT BLOCKED. The declaration carries three UNRESOLVED `Compile(blockers=...)` rows (pgw#1115) and the MINT fails closed on them: OQ-2 (audio_timestep rank), OQ-3 (whole-graph OOM unmeasured on the w8a8 lane) and OQ-8 (live coverage gaps). Those are LTX-AOT-DESIGN.md's mint-gating open questions, recorded as declared blockers rather than guessed. Do not hand-edit around them.",
+    "pgw#739: `dynamic` derives from the declaration's class rows (hand rows are refused). Under static-rows the request must NAME its row via `class_dims` \u2014 82/115 rows sit at the SINGLE served fork coordinate, so the coordinate alone does not identify an artifact.",
+    "BUCKET-ENUM FIRST (LTX-AOT-DESIGN OQ-4): one artifact per declared class \u2014 parity with today's dynamo behaviour, never a regression. The T_v/T_a dynamic collapse is a SEPARATE, MEASURED change, and ltx is the family where it is most likely FREE: #728 measured static->dynamic at 30,877 -> 30,878 nodes (+1, one range constraint), and #730's mechanism is conv-specific while transformer_ltx2.py has ZERO nn.Conv layers. If the collapse lands, T_v collapses per lane and the artifact set falls by an order of magnitude. Measure it early rather than deferring by analogy to sdxl, because the analogy is now known NOT to hold.",
+    "THE SHAPE TABLE IS WRONG IN BOTH DIRECTIONS, which is why class_dims and not shapes identifies this artifact. It OVER-counts by transposition (num_frames/height/width/fps are DEAD inside the forward \u2014 the pipeline always precomputes video_coords \u2014 so the graph is a function of T_v alone and 704x1280 == 1280x704: 10 of the 30 H100 rows are duplicates) and UNDER-counts by ~4x on T_a, T_at and T_kf, which have no slot in a 3-tuple.",
+    "T_a IS AN AXIS THE ROW CANNOT CARRY. T_a = round(frames / native_fps * 25) and the row carries num_frames but NOT frame_rate, so two admissible requests share a row and need different artifacts. It enumerates to exactly four values {126, 251, 376, 501}; rows at 241f and 481f carry TWO T_a and therefore DOUBLE. The endpoint's own comment \u2014 'frame_rate does not change the DiT graph; only num_frames does' (main.py:465) \u2014 is FALSE for the audio stream and must be corrected with this declaration.",
+    "T_kf IS BINARY, NOT OPEN-ENDED. _validate_image_roles admits first_frame and last_frame at most once each and rejects reference. first_frame OVERWRITES tokens (no growth); last_frame sits at a non-zero latent index so prepare_latents APPENDS one latent frame of patches. So T_kf in {0, H_lat*W_lat}, folded into T_v, and it applies to generate only.",
+    "EDIT IS PERMANENTLY ITS OWN ARTIFACT SET (OQ-9). T_at is 1 on generate/extend/a2v and T_a on edit, and {1, T_a} cannot fuse into one dynamic dim: torch specializes 0 and 1 unconditionally and the SDK encodes that as DynamicDim.min >= 2 (ie#543). Normalizing the rank (OQ-2) buys honesty and keyability, NOT artifacts. Edit contributes 28 (H100) / 39 (B200) classes nothing else shares \u2014 worth pricing before minting them.",
+    "STG IS UNREACHABLE ON EVERY SERVED PATH, and the stg fork makes that deliberate. LTX has exactly 2 data-dependent tensor ops, both torch.all(perturbation_mask == 0) \u2014 the only ones across all five denoisers #728 surveyed, and a genuine export blocker. Both sites are guarded by `perturbation_mask is not None`, a python-None check export erases at trace time, and all four served call sites pass both spatio_temporal_guidance_blocks and perturbation_mask as literal None.",
+    "isolate_modalities IS DECLARED UNSERVED. It drops both AV cross-attentions (transformer_ltx2.py:1587-1588/1616-1617) \u2014 measured 1276 vs 1708 nodes at 2 layers (ie#571) and 20,509 vs 30,877 at full depth (#728). Reachable only through pipeline_ltx2_audio.text_to_audio, which no worker_function calls (ie#383 phase 2). Declared so the phase-2 wiring cannot silently mint into the wrong class. NOTE for that day: strict dead-code-eliminates the unused AV cross-attention weights (19,261/2,960 placeholders strict vs 20,509/4,208 non-strict \u2014 a 1,248-parameter difference, i.e. a DIFFERENT WEIGHT CONTRACT), so export mode becomes load-bearing for pgw#698's expected-FQN set.",
+    "compile_mode='whole': the AOT lane exports the WHOLE transformer (design \u00a73.2), gated on OQ-3 \u2014 and since pgw#846 the AOT mint is whole-graph UNCONDITIONALLY and ignores `Compile.regional`, which on the one folded declaration carries its DYNAMO/JIT meaning (ie#645, regional=True). The published dynamo cell (compile_mode='regional') and these AOT cells (compile_mode='whole') therefore coexist and artifact_drift actively refuses a cross-mode adoption; the 20-row dynamo cell keeps serving unmodified. If OQ-3's re-measure shows whole-graph still OOMs, take the DESIGNED fallback \u2014 ONE exported repeated block \u2014 never regional-as-is, which yields N hashes and no whole-graph identity.",
+    "warm_changes_key=false \u2014 MEASURED (ie#571, 2026-07-28, meta device from the cached transformer config, depth-truncated): exported cold and pre-warmed, strict and non-strict, 1708 nodes in ALL FOUR arms. The opposite of z-image's measured True.",
+    "strict=true per pgw#723 S1. The mode is already keyed (strict_mode_drift in aot_package.py), so the isolate_modalities interaction above is a recording obligation, not a build one.",
+    "sigma IS REQUIRED IN PRACTICE despite defaulting to None: cross_attn_mod=true on this checkpoint makes prompt_modulation True, which calls sigma.flatten() unconditionally.",
+    "encoder_hidden_states MUST arrive at cross_attention_dim=4096 (audio at 2048), NOT the docstring's caption_channels=3840: use_prompt_embeddings is false on this checkpoint so caption_projection does not exist and the connector output arrives already projected. Passing 3840 fails with 'Attempting to broadcast a dimension of length 4096 at -1'.",
+    "THE CLASS SET IS PER-SKU and this request is tier-specific. H100 admits 82 classes, B200 115, because _frames_legal is tier-aware (ie#461): B200 adds the 4K family and 241f ultrawide. The SKU is already a cell-key axis, so this needs no new concept \u2014 but minting a b200 request on an h100 pod (or vice versa) is a category error.",
+    "source_digest, declared_vram_gb and the serving image digest are DEPLOY-TIME facts. source_digest is left empty deliberately \u2014 fill it from the release before minting."
+  ],
+  "family": "ltx-2.3",
+  "target": "transformer",
+  "weight_lane": "w8a8",
+  "precision": "bf16",
+  "batch": 1,
+  "lora_bucket": 0,
+  "shapes": [],
+  "text_lens": [
+    1024
+  ],
+  "guidance_scales": [
+    1.0
+  ],
+  "dynamic": [],
+  "fork": {
+    "cfg": false,
+    "isolate_modalities": false,
+    "stg": false
+  },
+  "class_dims": {
+    "B": 1,
+    "T_a": 251,
+    "T_at": 1,
+    "T_txt": 1024,
+    "T_v": 261120
+  },
+  "declaration_module": "ltx_video_23.main",
+  "specialization": {
+    "return_dict": false,
+    "isolate_modalities": false,
+    "spatio_temporal_guidance_blocks": null,
+    "perturbation_mask": null,
+    "use_cross_timestep": false,
+    "regional": false,
+    "compile_mode": "whole",
+    "in_channels": 128,
+    "audio_in_channels": 128,
+    "cross_attention_dim": 4096,
+    "audio_cross_attention_dim": 2048,
+    "vae_scale_factors": [
+      8,
+      32,
+      32
+    ],
+    "audio_tokens_per_second": 25.0,
+    "serving_tier": "b200"
+  },
+  "lora_fqns": [],
+  "lifted_inputs": [],
+  "strict": true,
+  "source_ref": "tensorhub/ltx-2.3-distilled:prod",
+  "source_digest": "",
+  "closure_roots": [],
+  "pipeline_class": "LTX2ConditionPipeline",
+  "dtype": "bf16",
+  "storage_dtype": "",
+  "declared_vram_gb": 140.0
+}
