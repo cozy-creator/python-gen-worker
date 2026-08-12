@@ -116,7 +116,12 @@ def _fake_arm(key: str, ref: str):
         marker = {"module": unet, "state": state, "meta": {}}
         setattr(unet, aot_serve._MARKER_ATTR, marker)
         setattr(pipe, aot_serve._MARKER_ATTR, marker)
-        aot_serve.note_aot_key(key)
+        # pgw#1152: an `aot_serve.note_aot_key(key)` stood here — the ONE line no
+        # production arm route ever called, which is why these rows were green
+        # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
+        # marker set above is what `load_and_wrap` publishes, so
+        # `holds_exported_cell` answers the lane question off the OBJECT.
+        # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
         adopted = fleet_cells.SelfMint(
             family=FAMILY, cell_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,

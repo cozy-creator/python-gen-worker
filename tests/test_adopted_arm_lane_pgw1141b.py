@@ -78,262 +78,22 @@ Run: uv run pytest tests/test_adopted_arm_lane_pgw1141b.py -q
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
-import msgspec
 import pytest
 
-from gen_worker import (
-    RequestContext, Resources, Slot, activity, aot_identity, aot_serve,
-    boot_adopt, cell_adopt, cell_key, cell_resolve, endpoint,
-    env_seal, receipts, worker_function,
-)
+from gen_worker import activity, aot_serve, cell_adopt
 from gen_worker import executor as ex_mod
-from gen_worker.executor import Executor
-from gen_worker.models import provision
-from gen_worker.models.refs import normalize_model_ref
-from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.registry import extract_specs
 
-# The REAL artifact/arm rig: a real packed cell, a real declaration, real
-# torch tensors. Its ONE substitution is the AOTI `.so`.
-import test_numerics_gate_pgw868 as rig868  # noqa: E402
-from test_numerics_gate_pgw868 import (  # noqa: E402
-    FAMILY, ROWS, RUNTIME, ProbeDenoiser, ProbePackage, ProbePipeline,
-    declaration, entry_name,
-)
-# The REAL receipt gate: a real RSA key, a real JWKS/receipt HTTP hub.
-from test_receipts_pgw709 import (  # noqa: F401,E402 — fixtures come with it
-    HubStub, hub, pub_map, rsa_key,
-)
-
-#: The publishing org. Platform tier, so the trust rule needs no viewer
-#: identity — the identity half is pgw#1122's, fenced there.
-ORG = "11111111-2222-3333-4444-555555555555"
-
-MODEL_REF = "acme/micro-probe:prod"
-
-#: Everything the endpoint instance and the load seam hand each other.
-RIG: Dict[str, Any] = {}
-
-
-class GenIn(msgspec.Struct):
-    prompt: str = "warm"
-
-
-class Out(msgspec.Struct):
-    y: str = "ok"
-
-
-#: pgw#868's declaration with the one field a `@endpoint` lint requires that a
-#: bare `provision.arm_aot` rig never needed: the probe denoiser is
-#: unconditioned, so the text axis is explicitly absent (ie#544).
-CELL = msgspec.structs.replace(declaration(), text_len=0)
-
-
-class AdoptedPipeline(ProbePipeline):
-    """A WORKER-LOADED slot class — the annotation shape that routes the arm
-    order into ``_enable_compiled``. ``from_pretrained`` is what the executor
-    tests for; the load itself is the named seam (``provision.load_slot``)."""
-
-    def __init__(self) -> None:
-        super().__init__(ProbeDenoiser())
-
-    @classmethod
-    def from_pretrained(cls, *_a: Any, **_k: Any) -> "AdoptedPipeline":
-        raise AssertionError("provision.load_slot is the seam, not this")
-
-
-@endpoint(
-    models={"pipeline": Slot(AdoptedPipeline)},
-    resources=Resources(gpu=True),
-    compile=CELL,
-)
-class AdoptedFamily:
-    """A CLASS-annotated slot, which is micro-diffusion's shape and the reason
-    the arm order reaches ``_enable_compiled`` at all: the arming-scope path a
-    ``Slot(str)`` endpoint takes never sees an ``_ArmOrder``."""
-
-    def setup(self, pipeline: AdoptedPipeline) -> None:
-        self.pipe = pipeline
-
-    @worker_function()
-    def generate(self, ctx: RequestContext, p: GenIn) -> Out:
-        # The pod's shape: the boot warmup runs and lands on no packaged entry
-        # of the adopted cell, so the artifact's own counter does not move.
-        return Out()
-
-
-# ---------------------------------------------------------------------------
-# the cell: a real packed artifact with a real, fully-stated identity
-# ---------------------------------------------------------------------------
-
-
-def _metadata() -> Dict[str, Any]:
-    """pgw#868's envelope plus the two identity blocks an ADOPTED cell must
-    carry: ``verify_declared_identity`` compares four axes and refuses a cell
-    that is SILENT on any of them."""
-    meta = rig868.metadata()
-    meta["toolchain"] = {"torch": RUNTIME["torch"], "cuda": RUNTIME["cuda"],
-                         "triton": "3.6.0"}
-    meta[env_seal.SEAL_KEY] = {"PYTHONHASHSEED": "0", "TORCH_COMPILE_DEBUG": ""}
-    meta[cell_key.EXPORT_ENVELOPE_KEY] = {
-        "shapes": [list(row) for row in ROWS], "text_len": 0,
-        "shape_strategy": "static-rows",
-    }
-    # The REAL key, restated from the artifact's own recorded facts — the same
-    # recomputation admission runs (pgw#1059), so nothing here is a stamp the
-    # bytes cannot back up.
-    meta["cell_key"] = cell_key.from_exported_artifact_metadata(meta).digest
-    return meta
-
-
-def _resolved(meta: Dict[str, Any]) -> cell_resolve.ResolvedCell:
-    """The hub's answer, stating exactly the identity the mint stamped."""
-    have = aot_identity.artifact_identity(meta)
-    return cell_resolve.ResolvedCell(
-        family=FAMILY, cell_key=have.cell_key,
-        cell_ref=f"root/family-{FAMILY}#{have.cell_key}",
-        checkpoint_id="", content_digest="sha256:" + "ab" * 32,
-        artifact_path="cell.tar.gz", size_bytes=0,
-        publisher_org=ORG, publisher_tier="platform",
-        graph_contract=have.graph_contract_digest,
-        toolchain_digest=have.toolchain_digest,
-        env_seal_digest=have.env_seal_digest,
-        identity_axes={}, sm=RUNTIME["sm"], sku=RUNTIME["sku"], lane="",
-        receipt="",
-        transport=cell_resolve.Transport(
-            snapshot_digest="blake3:" + "cd" * 32, files=()),
-    )
-
-
-def _derived(digest: str) -> Any:
-    from gen_worker import boot_key
-
-    return boot_key.DerivedKey(
-        key=cell_key.CellKey(axes=(("adopted", digest),)),
-        class_hashes={}, combined="", workers=1, width_reason="test",
-        traced=len(ROWS), memo="miss", wall_ms=10_291,
-    )
-
-
-# ---------------------------------------------------------------------------
-# the rig
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
-    """The typed rows, captured at the ONE sink the hub's
-    ``worker_activity_events`` table is built from."""
-    said: List[Tuple[str, str, str]] = []
-    real = activity.emit_event
-
-    def _spy(kind: str, detail: str = "", **kw: Any) -> Any:
-        said.append((kind, str(kw.get("phase", "")), detail))
-        try:
-            return real(kind, detail, **kw)
-        except Exception:
-            return None
-
-    monkeypatch.setattr(activity, "emit_event", _spy)
-    monkeypatch.setattr(ex_mod.activity_mod, "emit_event", _spy)
-    return said
-
-
-def phases(said: List[Tuple[str, str, str]], kind: str) -> List[str]:
-    return [phase for k, phase, _d in said if k == kind]
-
-
-@pytest.fixture
-def forget_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``note_aot_key`` learns into a PROCESS-global set, so a sibling file
-    that armed the same key would answer this file's question for it. Every
-    row here starts with a runtime that has been told nothing."""
-    monkeypatch.setattr(aot_serve, "_KNOWN_AOT_KEYS", set())
-
-
-@pytest.fixture
-def adopted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
-    forget_keys: None,
-) -> Dict[str, Any]:
-    """A boot that RESOLVED a cell by its own derived key and is about to arm
-    it — everything from the ``_ArmOrder`` down runs for real."""
-    RIG.clear()
-    meta = _metadata()
-    artifact = rig868.artifact(tmp_path, meta)
-    cell = _resolved(meta)
-
-    # The hub countersigns these exact bytes. Platform tier: adoptable by any
-    # pod, so the arm asks nobody who it is (pgw#1122 owns that direction).
-    hub.serve_receipt_for(
-        artifact, cell_key=cell.cell_key, family=FAMILY,
-        publisher_tier="platform", publisher_org_id=ORG,
-        owning_endpoint_id="")
-    receipts.configure(base_url=hub.base_url, worker_jwt=lambda: "")
-
-    # The one deferred piece (GPU) and the runtime axes a cardless box cannot
-    # state — pgw#868's substitutions, verbatim.
-    monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
-    monkeypatch.setattr(aot_serve, "_entry_admission_drift",
-                        lambda *a, **k: None)
-    packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
-    monkeypatch.setattr(
-        aot_serve, "_load_package", lambda path, entry="model": packages[entry])
-
-    # The class-annotated slot's weights load. `_inject_models` arms whatever
-    # this returns, through the real ordered path.
-    def _load_slot(annotation: Any, path: str, **_kw: Any) -> provision.SlotLoad:
-        pipe = AdoptedPipeline()
-        RIG["pipe"] = pipe
-        return provision.SlotLoad(obj=pipe, is_pipeline=True, ran="bf16")
-
-    monkeypatch.setattr(provision, "load_slot", _load_slot)
-    monkeypatch.setattr(ex_mod.provision, "load_slot", _load_slot)
-
-    def _adopt(self: Any, spec: Any, slots: Any) -> boot_adopt.BootAdoptOutcome:
-        return boot_adopt.report(boot_adopt.BootAdoptOutcome(
-            adoption=boot_adopt.BootAdoption(
-                derived=_derived(cell.cell_key), cell=cell, artifact=artifact),
-            reason=boot_adopt.HIT, derived_key=cell.cell_key, derive_ms=10_291,
-            family=FAMILY, function="generate"))
-
-    monkeypatch.setattr(Executor, "_boot_adopt", _adopt)
-    RIG["meta"], RIG["cell"], RIG["artifact"] = meta, cell, artifact
-    return RIG
-
-
-def _boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tuple[Executor, Any]:
-    sent: List[pb.WorkerMessage] = []
-
-    async def _send(msg: pb.WorkerMessage) -> None:
-        sent.append(msg)
-
-    ex = Executor(extract_specs(AdoptedFamily), _send)
-    ex.store._cache_dir = tmp_path / "cas"
-
-    async def _fake_download(target: str, **_kw: Any) -> Path:
-        p = tmp_path / target.replace("/", "_").replace(":", "_")
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
-
-    from gen_worker import dispatch as dispatch_mod
-
-    spec = ex.specs["generate"]
-    eff = ex._dispatched_spec(
-        spec, {"pipeline": dispatch_mod.SlotOrder(ref=MODEL_REF, components=())})
-    snaps = {normalize_model_ref(MODEL_REF): pb.Snapshot(
-        digest="d1" * 16,
-        files=[pb.SnapshotFile(
-            path="model.safetensors", size_bytes=5, blake3="cd" * 32,
-            url="http://r2.invalid/presigned")])}
-    asyncio.run(ex.ensure_setup(eff, snaps))
-    return ex, eff
+# pgw#1152: the vehicle this file built is now `tests/harness/adopt_rig.py`,
+# the DEFAULT rig for anything arming-adjacent. It is the same chain, verbatim
+# — real `ensure_setup` -> real `_enable_compiled` -> a real `_ArmOrder(adopt=…)`
+# -> real `arm_ordered` -> the real receipt gate against a real RSA-signed
+# receipt from a real HTTP hub -> `provision.arm_aot` -> `load_and_wrap` on a
+# real packed cell -> real warmup, proof pass and target install.
+from harness.adopt_rig import FAMILY, AdoptRig  # noqa: F401
+from harness.receipt_hub import HubStub, hub, pub_map, rsa_key  # noqa: F401
 
 
 # ===========================================================================
@@ -342,90 +102,89 @@ def _boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tuple[Executor, An
 
 
 def test_a_boot_adopted_cell_is_NOT_scored_on_the_dynamo_ledger(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adopted: Dict[str, Any],
-    events: List[Tuple[str, str, str]],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
-    """THE RED. On master this reproduces POD PROOF #4's chain exactly:
-    ``target_applicability_incomplete functions=()`` then
-    ``armed_target_unresolved`` then ``serve_degrade``, and the pod serves
-    eager for life having thrown away the cell it just materialized.
+    """THE RED. On the tree before ``f3ab710e`` this reproduces POD PROOF #4's
+    chain exactly: ``target_applicability_incomplete functions=()`` then
+    ``armed_target_unresolved`` then ``serve_degrade``, and the pod serves eager
+    for life having thrown away the cell it just materialized. That deletion is
+    now a first-class row of its own —
+    ``test_adopt_rig_pgw1152::test_the_rig_RE_FINDS_pgw1141b_when_its_fix_is_deleted``.
 
-    The four assertions below are the four rows the pod emitted, in order.
+    The assertions below are the four rows the pod emitted, in order.
     """
-    ex, eff = _boot(tmp_path, monkeypatch)
-    pipe = RIG["pipe"]
+    boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
 
-    assert "hit" in phases(events, activity.KIND_BOOT_ADOPT), (
+    assert boot.adopted(), (
         "the boot did not adopt at all — this row is testing the wrong thing")
 
     # seq 13: the object's applicability. `functions=()` is where the pod died.
-    assert "target_applicability_incomplete" not in phases(
-        events, "serve_eager_posture"), (
+    assert "target_applicability_incomplete" not in boot.phases(
+        "serve_eager_posture"), (
         "the boot-adopted cell computed EMPTY applicability — the ordered arm "
         "route never taught `is_aot_ref` its key, so the exported cell was "
         "scored on the dynamo lane's cache-hit ledger and disarmed")
     # seq 14 + 15: the orphan report and the degrade.
-    assert cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value not in phases(
-        events, "serve_eager_posture")
-    assert not [k for k, _p, _d in events if k == activity.KIND_SERVE_DEGRADE], (
+    assert cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value not in \
+        boot.phases("serve_eager_posture")
+    assert not boot.phases(activity.KIND_SERVE_DEGRADE), (
         "a cell that materialized, armed and was never dispatched through "
         "degraded the whole record")
 
     # ...and the positive statement of the same fact: it SERVES.
-    assert aot_serve.is_armed(pipe) is True
-    rec = ex._classes[eff.instance_key]
-    assert rec.compile_targets, "armed and still no installed compile target"
-    target = next(iter(rec.compile_targets.values()))
+    assert boot.is_armed() is True
+    target = boot.compile_target()
+    assert target is not None, "armed and still no installed compile target"
     assert "generate" in target.function_names
-    assert target.active_compile_ref == RIG["cell"].cell_ref
-    assert rec.eager_posture == ""
-    assert ex._served_execution_lane(eff).endswith("+compiled")
+    assert target.active_compile_ref == boot.cell.cell_ref
+    assert boot.record.eager_posture == ""
+    assert boot.serves_compiled()
 
 
 def test_the_ordered_arm_teaches_the_recognizer_its_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adopted: Dict[str, Any],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """THE LOCUS, stated as one fact. ``note_aot_key`` had two feeders and both
-    were self-produced routes; the ordered arm — every hub Plan and every
-    §4.27 boot-adopt — fed it nothing, so an adopted cell's own ref answered
-    "not an AOT cell" on the pod that was serving it.
-    """
-    _boot(tmp_path, monkeypatch)
+    were self-produced routes; the ordered arm — every hub Plan and every §4.27
+    boot-adopt — fed it nothing, so an adopted cell's own ref answered "not an
+    AOT cell" on the pod that was serving it.
 
-    ref = RIG["cell"].cell_ref
-    assert aot_serve.is_aot_ref(ref), (
+    pgw#1152 then DELETED both of those feeders: the wrap is now the registry's
+    only writer, so this fact has exactly one producer.
+    """
+    boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
+
+    assert aot_serve.is_aot_ref(boot.cell.cell_ref), (
         "the process armed this exact artifact and still does not recognize "
         "its ref as an exported cell")
-    assert aot_serve.is_aot_ref(ref, FAMILY)
+    assert aot_serve.is_aot_ref(boot.cell.cell_ref, FAMILY)
 
 
 def test_the_lane_is_read_off_the_OBJECT_not_a_registry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adopted: Dict[str, Any],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """The structural half. Registering the key is a convention a future arm
     route can forget again — twice now a disarm authority has survived one gate
     east of its fix. With the registry deliberately emptied AFTER the wrap, the
     readers must still put this object on the exported lane."""
-    ex, eff = _boot(tmp_path, monkeypatch)
-    pipe = RIG["pipe"]
+    boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
 
     monkeypatch.setattr(aot_serve, "_KNOWN_AOT_KEYS", set())
-    assert not aot_serve.is_aot_ref(RIG["cell"].cell_ref)
-    assert aot_serve.holds_exported_cell(pipe) is True
-    assert ex_mod._exported_arm(pipe, RIG["cell"].cell_ref) is True
+    assert not aot_serve.is_aot_ref(boot.cell.cell_ref)
+    assert aot_serve.holds_exported_cell(boot.pipeline) is True
+    assert ex_mod._exported_arm(boot.pipeline, boot.cell.cell_ref) is True
 
 
 def test_the_posture_row_names_the_adoption_not_the_dynamo_lane(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adopted: Dict[str, Any],
-    events: List[Tuple[str, str, str]],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """seq 12 on the pod carried §4.31's new sentence, which is why the leg
     read as "pgw#1141 works". It did — but the reason under it was the DYNAMO
     lane's ("this boot holds no evidence either way"), because the cell had
     been sorted onto that lane. An adopted cell's row must say what it is."""
-    _boot(tmp_path, monkeypatch)
+    boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
 
-    rows = [d for k, _p, d in events if k == activity.KIND_CELL_NUMERICS]
+    rows = boot.details(activity.KIND_CELL_NUMERICS)
     assert len(rows) == 1, rows
     assert "STAYS ARMED" in rows[0]
     assert "adoption runs no quality gate" in rows[0], (
@@ -439,37 +198,32 @@ def test_the_posture_row_names_the_adoption_not_the_dynamo_lane(
 
 
 def test_a_REVOKED_cell_still_de_arms_and_installs_no_target(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adopted: Dict[str, Any],
-    events: List[Tuple[str, str, str]],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """§4.31's sticky de-arm, unchanged. The artifact ran and failed before any
     guard was bound, so nothing may advertise ``serving_mode=aot_cell`` for it.
-    A fix that made a cell undisarmable would be worse than the bug."""
-    real_wrap = aot_serve.load_and_wrap
+    A fix that made a cell undisarmable would be worse than the bug.
 
-    def _wrap_then_revoke(pipeline: Any, *a: Any, **k: Any) -> Any:
-        meta = real_wrap(pipeline, *a, **k)
-        for state in aot_serve._marker_states(pipeline):
-            state["failed"] = True
-        return meta
+    pgw#1152: the revocation is forced by BREAKING a real input — the packaged
+    entry raises when the arm dispatches through it — rather than by setting
+    ``failed`` on a marker the test wrote itself.
+    """
+    boot = AdoptRig(
+        tmp_path, monkeypatch, hub,
+        package_raises="dlopen: undefined symbol", warm_dispatches=1,
+    ).boot()
 
-    monkeypatch.setattr(aot_serve, "load_and_wrap", _wrap_then_revoke)
-
-    ex, eff = _boot(tmp_path, monkeypatch)
-    pipe = RIG["pipe"]
-
-    assert aot_serve.is_armed(pipe) is False
-    rec = ex._classes[eff.instance_key]
-    assert not rec.compile_targets, (
+    assert boot.is_armed() is False
+    assert boot.compile_target() is None, (
         "a revoked cell kept an installed target, so the wire would say "
         "aot_cell on a pipeline whose every call runs eager")
-    assert cell_adopt.EagerPhase.COMPILED_DEGRADED.value in phases(
-        events, "serve_eager_posture")
-    assert rec.eager_posture
+    assert cell_adopt.EagerPhase.COMPILED_DEGRADED.value in boot.phases(
+        "serve_eager_posture")
+    assert boot.record.eager_posture
 
 
 def test_an_operator_eager_only_order_still_wins(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adopted: Dict[str, Any],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """§4.32 item 4: the consumer can always opt out of compiled serving. The
     exported-lane recognition must not route around the operator's order."""
@@ -477,15 +231,14 @@ def test_an_operator_eager_only_order_still_wins(
 
     serve_posture.apply_command(True, actor="operator", reason="pgw#1141b row")
     try:
-        ex, eff = _boot(tmp_path, monkeypatch)
-        rec = ex._classes[eff.instance_key]
+        boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
         # Nothing armed and nothing adopted: the order is obeyed at the
         # arming brain, before the lane question is ever asked.
-        assert aot_serve.is_armed(RIG["pipe"]) is False
-        assert aot_serve.holds_exported_cell(RIG["pipe"]) is False
-        assert rec.eager_posture == cell_adopt.EagerPhase.OPERATOR_EAGER_ONLY
-        assert ex.serving_tiers()["generate"] == "eager"
-        assert not ex._served_execution_lane(eff).endswith("+compiled")
+        assert boot.is_armed() is False
+        assert boot.holds_cell() is False
+        assert boot.record.eager_posture == cell_adopt.EagerPhase.OPERATOR_EAGER_ONLY
+        assert boot.executor.serving_tiers()["generate"] == "eager"
+        assert not boot.serves_compiled()
     finally:
         serve_posture.reset()
 
@@ -500,7 +253,12 @@ def test_the_registration_lives_at_the_wrap_not_at_the_call_sites() -> None:
     ("whoever reads a cell_key off an aot-inductor envelope registers it") and
     the ordered arm simply did not keep it. Registration now happens inside
     ``load_and_wrap``, the one function every arm route passes, so a new route
-    inherits it instead of having to remember it."""
+    inherits it instead of having to remember it.
+
+    pgw#1152 made this a repo-wide lint (``scripts/lint_arm_state_feeders.py``)
+    rather than one file's assertion; this row stays because it names the fact
+    at the place a reader of THIS issue looks for it.
+    """
     import inspect
 
     body = inspect.getsource(aot_serve.load_and_wrap)
@@ -510,13 +268,13 @@ def test_the_registration_lives_at_the_wrap_not_at_the_call_sites() -> None:
 
 
 def test_a_wrapped_object_answers_the_lane_question_itself(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adopted: Dict[str, Any],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """``holds_exported_cell`` is deliberately NOT ``is_armed``: the install
     path must tell a REVOKED exported cell (never advertise it) apart from an
     object carrying no cell at all (an ordinary dynamo/eager object)."""
-    _boot(tmp_path, monkeypatch)
-    pipe = RIG["pipe"]
+    boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
+    pipe = boot.pipeline
 
     assert aot_serve.holds_exported_cell(pipe) is True
     for state in aot_serve._marker_states(pipe):

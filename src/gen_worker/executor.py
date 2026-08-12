@@ -2651,6 +2651,40 @@ class _ArmOrder:
     publisher_org: str = ""
     adopt: Optional["boot_adopt.BootAdoptOutcome"] = None
 
+    @classmethod
+    def for_artifact(
+        cls,
+        *,
+        path: Path,
+        ref: str,
+        snapshot_digest: str,
+        expected: Optional["aot_identity.ExpectedIdentity"],
+        publisher_org: str,
+        adopt: Optional["boot_adopt.BootAdoptOutcome"] = None,
+    ) -> "_ArmOrder":
+        """THE artifact -> arming-order map, in one place (pgw#1152).
+
+        TWO routes build this object and they are field-for-field identical
+        except for ``adopt``: ``_setup_locked_inner``'s §4.27 BOOT-ADOPT order,
+        and ``_materialize_arm``'s hub PLAN order. That is the same duplicated
+        mapping pgw#1150 found between ``compile_cell()`` and ``cli.run`` — a
+        field ADDED here that one site sets and the other forgets silently
+        diverges the two arm routes, which is this repo's most expensive defect
+        shape: pgw#1108, pgw#1122, pgw#1141 and pgw#1141b were all "a rule the
+        self-mint/plan path keeps and the adopt path does not".
+
+        The selection is built here too, because the two sites also built THAT
+        independently from the same three fields.
+        """
+        return cls(
+            backend="aot_cell",
+            selection=_CompileArtifactSelection(
+                path=path, ref=ref, snapshot_digest=snapshot_digest),
+            expected=expected,
+            publisher_org=publisher_org,
+            adopt=adopt,
+        )
+
 
 @dataclass(frozen=True)
 class _JobOrder:
@@ -7016,16 +7050,15 @@ class Executor:
             boot_local_key = adopt.local_key
             if adopt.adoption is not None:
                 got = adopt.adoption
-                compile_selection = _CompileArtifactSelection(
-                    path=got.artifact, ref=got.ref,
-                    snapshot_digest=got.snapshot_digest)
                 compile_artifact = got.artifact
-                arm = _ArmOrder(
-                    backend="aot_cell", selection=compile_selection,
+                arm = _ArmOrder.for_artifact(
+                    path=got.artifact, ref=got.ref,
+                    snapshot_digest=got.snapshot_digest,
                     expected=got.expected,
                     publisher_org=got.cell.publisher_org,
                     # pgw#1122: this order is the POD's, not the hub's.
                     adopt=adopt)
+                compile_selection = arm.selection
         elif arm is None and spec.compile is not None:
             # pgw#1116: a compiled family that boots WITHOUT asking is a fact
             # somebody has to be able to read. This is the only branch where
@@ -11069,13 +11102,10 @@ class Executor:
             cache_dir=self.store._cache_dir,
             what=what,
         )
-        return _ArmOrder(
-            backend="aot_cell",
-            selection=_CompileArtifactSelection(
-                path=path,
-                ref=artifact.cell_ref,
-                snapshot_digest=artifact.content_digest,
-            ),
+        return _ArmOrder.for_artifact(
+            path=path,
+            ref=artifact.cell_ref,
+            snapshot_digest=artifact.content_digest,
             expected=expected,
             publisher_org=artifact.publisher_org,
         )

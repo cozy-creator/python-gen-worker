@@ -238,6 +238,20 @@ jobs:
       - name: pgw#1122 guard - worker-credential reads outside the resolver
         run: uv run python scripts/lint_credential_identity.py
 
+      # GATING (pgw#1152): the ADOPT-PATH half of the same class. Four gates in
+      # a row — pgw#1108, pgw#1122, pgw#1141, pgw#1141b — were one defect: a
+      # rule written against the SELF-MINT path that the boot-adopt path does
+      # not take. `aot_serve._KNOWN_AOT_KEYS` had two feeders, both
+      # self-produced routes, so a cell that resolved, materialized and armed
+      # was scored on the dynamo ledger and thrown away on a real pod. The rule
+      # is structural now (registration happens inside `load_and_wrap`), and
+      # this fence keeps it: a production feeder off the seam is red, a stale
+      # row is red, a SECOND map into a fenced object is red, and a TEST that
+      # hand-feeds one or stubs a lane accessor is red — it drives
+      # tests/harness/adopt_rig.py instead. There is no CONVENTION class.
+      - name: pgw#1152 guard - arm-state feeders and the adopt-path rig
+        run: uv run python scripts/lint_arm_state_feeders.py
+
       # GATING (pgw#1049): the ambient-input census's structural claims —
       # IMPOSED rows exist in DECLARED_ENV, NEUTRALIZED rows are actually
       # scrub-covered, watched env literals in the tree are classified. The
