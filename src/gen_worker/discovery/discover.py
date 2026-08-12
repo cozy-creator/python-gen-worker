@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import msgspec
 
 from gen_worker.aot_preconditions import (
+    adapter_backend_preconditions,
     declared_compile_families,
     static_mint_preconditions,
 )
@@ -388,7 +389,7 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
 
 def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
     """Stamp a binding manifest with the endpoint's architecture family
-    (pgw#523: unconditional-when-known, not ``allow_lora``-triggered) so
+    (pgw#523: unconditional-when-known, never gated on a declaration) so
     tensorhub's th#586 gate can family-police any LoRA overlay attached at
     this slot. Identity (the binding) and permission (whether a LoRA may
     attach here — the slot-policy ``loras`` axis, th#772) are separate
@@ -702,7 +703,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # Every binding carries the endpoint's architecture family, when
         # known, so the hub's th#586 gate can family-police any LoRA
         # overlay attached at that slot (pgw#523: unconditional-when-known,
-        # not allow_lora-triggered). For Slot-declared bindings the slot map is
+        # never gated on a declaration). For Slot-declared bindings the map is
         # AUTHORITATIVE: it already reconciles the function family with the
         # slot's explicit intent. Bare bindings have no slot declaration and
         # retain the function-level compile family fallback.
@@ -948,9 +949,15 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         # that will run them. `validate_endpoint_lock` turns a refusal into a
         # build error, so an endpoint that declares an export it cannot
         # compile never reaches a pod to downgrade there.
+        declared_families = declared_compile_families(functions)
         preconditions = static_mint_preconditions(
-            declared_compile_families(functions),
-            torch_available="torch" not in stubbed)
+            declared_families, torch_available="torch" not in stubbed)
+        # pgw#501: and the ADAPTER capability, which is not an AOT question —
+        # an endpoint declaring `lora_bucket > 0` serves adapters whether or
+        # not it compiles, and `peft` is honest under the heavy-dep stubbing
+        # (it is deliberately not a stubbed root), so this decides here too.
+        preconditions = preconditions + adapter_backend_preconditions(
+            declared_families)
     for fn in functions:
         bucket = int((fn.get("compile") or {}).get("lora_bucket") or 0)
         lanes, exclusions = execution_lanes_for_function(
