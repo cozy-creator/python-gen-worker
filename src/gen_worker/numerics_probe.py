@@ -375,11 +375,20 @@ class CellNumerics:
 
     @property
     def measured(self) -> bool:
-        """True only when EVERY declared axis produced a comparison.
+        """True only when every axis of THIS report produced a comparison.
 
-        Partial coverage is not a pass. A cell arming on a subset of its own
-        graph classes is precisely the "silent subset of what the cell key
-        advertises" that ``load_and_wrap`` refuses at bind time.
+        pgw#1176 DELETED the all-axes-of-the-cell rule this used to state
+        ("partial coverage is not a pass; a cell arming on a subset of its own
+        graph classes is a silent subset of what the cell key advertises").
+        That rule was the verification half of the wrong atom: it made one
+        unmeasurable class condemn 35 measured ones. A report is now one graph
+        class, so the predicate below says exactly what it always meant —
+        absent evidence is never a pass — without a collection to be partial
+        about.
+
+        Both remaining clauses are load-bearing and stay: a report short of
+        its own axis count has lost a verdict somewhere, and an errored axis
+        is not a measured one.
         """
         return (bool(self.verdicts)
                 and len(self.verdicts) == self.axes_total
