@@ -930,9 +930,28 @@ class RequestContext(Generic[D]):
     def _release_gpu_slot_for_finalize(self) -> None:
         """Worker-internal: TERMINAL GPU-slot release at the decode->finalize
         handoff (gw#476 / gw#516). The handler is done with GPU compute; the
-        encode + upload tail proceeds slotless so the next request's denoise
-        starts now instead of idling the GPU (measured up to 179s on a
-        CPU-contended host). Unlike :meth:`_gpu_slot_yielded` there is no
+        encode + upload tail proceeds slotless so a request on ANOTHER live
+        instance can take the card instead of idling it (measured up to 179s
+        on a CPU-contended host).
+
+        pgw#1154 — READ THIS BEFORE SIZING ANY OVERLAP AGAINST THIS RELEASE.
+        It does NOT hand the card to a SAME-instance follower, which is the
+        back-to-back case a single-endpoint pod actually serves. The worker's
+        lock order is instance gate -> GPU permit (pgw#954), so the follower
+        is queued on ``run_lock``, and this method releases only the permit;
+        the gate stays held until the handler RETURNS. Releasing the gate
+        here too would let a follower mutate the instance graph under a
+        handler that is still running, which no lock order makes safe, so it
+        is deliberately not done. What makes the tail overlap for real on the
+        fleet is th#1130: deferred outputs move encode+upload out of the
+        handler entirely, so the handler returns at the decode handoff and
+        gate + permit fall together. Endpoints EXCLUDED from that arming
+        (``output_mode == "stream"``, async-gen handlers) therefore still
+        serialize their whole tail against a same-instance follower — today
+        no fleet endpoint is in that class, and if one appears, this is the
+        seam that will cost it.
+
+        Unlike :meth:`_gpu_slot_yielded` there is no
         reacquire — a finishing request must never block behind the next
         request's denoise just to return. The executor's post-handler release
         no-ops (lease transitions are once-only), so the semaphore balance
@@ -999,7 +1018,20 @@ class RequestContext(Generic[D]):
         ``progress`` is a 0..1 fraction; ``step``/``total`` carry the exact
         step counter when known (e.g. denoise step 5 of 20) so UIs can render
         "5 / 20" instead of a bare percentage.
+
+        pgw#1154: a call carrying ``step`` is ALSO a timing mark. th#1111 wired
+        marks from ``diffusers_step_callback`` only, so every endpoint driving
+        its own step loop — the whole DiffSynth half of the fleet, minimax-h3
+        and ltx-video included — reported progress to the hub and no stage
+        window at all: `total.prep`, `total.tail` and `class.gpu_busy` were
+        absent and 98.5% of a 130 s handler landed in `resid.unattributed`.
+        The mark is the same fact the event already carries, so taking it here
+        costs nothing and needs no endpoint change.
         """
+        if step is not None:
+            timer = getattr(self, "_stages", None)
+            if timer is not None:
+                timer.mark_step(str(stage or "denoise"), int(step))
         payload: Dict[str, Any] = {"progress": progress}
         if stage is not None:
             payload["stage"] = stage

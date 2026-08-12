@@ -3242,12 +3242,25 @@ class _PermitLedger:
     outside this ledger or a hold whose owning task already finished.
     """
 
-    __slots__ = ("depth", "_holds", "_next_token", "transitions")
+    __slots__ = (
+        "depth", "_holds", "_next_token", "transitions", "_idle_since",
+        "_idle_span",
+    )
 
     def __init__(self, depth: int) -> None:
         self.depth = max(1, int(depth))
         self._holds: Dict[int, Dict[int, _PermitHold]] = {}
         self._next_token = 0
+        # pgw#1154, THE ZERO-BUBBLE METER. id(sem) -> the monotonic instant
+        # this group's permits went wholly unheld, and the span that ended
+        # when the next holder took one. A permit is the group's card, so an
+        # unheld permit is a card nobody is scheduled on — the inter-request
+        # bubble Paul's bar is stated against, measured on every request
+        # instead of inferred from a one-off harness. Seeded only by the
+        # FIRST release, so request 1 reports no span at all: "unmeasured"
+        # and "zero" must not render alike.
+        self._idle_since: Dict[int, float] = {}
+        self._idle_span: Dict[int, float] = {}
         # Bumped on every take/drop. Two probes spanning no transition saw a
         # settled ledger, which is what makes the predicate safe to act on: a
         # permit handed to another waiter between them would otherwise read as
@@ -3273,13 +3286,29 @@ class _PermitLedger:
                 task = asyncio.current_task()
             except RuntimeError:
                 task = None
-        self._holds.setdefault(id(sem), {})[token] = _PermitHold(label, task)
+        holds = self._holds.setdefault(id(sem), {})
+        if not holds:
+            # First holder after an unheld window: close the bubble.
+            since = self._idle_since.pop(id(sem), None)
+            if since is not None:
+                self._idle_span[id(sem)] = max(0.0, time.monotonic() - since)
+        holds[token] = _PermitHold(label, task)
         self.transitions += 1
         return token
 
     def drop(self, sem: asyncio.Semaphore, token: int) -> None:
-        if self._holds.get(id(sem), {}).pop(token, None) is not None:
+        holds = self._holds.get(id(sem), {})
+        if holds.pop(token, None) is not None:
             self.transitions += 1
+            if not holds:
+                # Nobody is scheduled on this group's card as of now.
+                self._idle_since[id(sem)] = time.monotonic()
+
+    def consume_idle(self, sem: asyncio.Semaphore) -> Optional[float]:
+        """Seconds this group's card sat with no permit holder immediately
+        before the current holder took it, or ``None`` when no such window
+        has been observed yet (the worker's first job). Read-once."""
+        return self._idle_span.pop(id(sem), None)
 
     def unreachable(self, sem: asyncio.Semaphore) -> Optional[str]:
         """Reason iff some outstanding permit has no live holder, else None."""
@@ -11972,6 +12001,21 @@ class Executor:
                     # the handler window, so runtime_ms never saw it.
                     ctx._stages.record_pre(
                         "gpu_permit_wait", time.monotonic() - permit_t0)
+                    # pgw#1154: and the INVERSE wait — the card idle, waiting
+                    # for a request — was in no metric either. Emitted only
+                    # when a previous holder has actually released on this
+                    # worker, so the number always means "gap after the job
+                    # before me" and never "time since boot".
+                    idle_before = self._permits.consume_idle(gpu_permit)
+                    if idle_before is not None:
+                        # `record_pre` drops non-positive values, and a ZERO
+                        # bubble is the target state — the one reading that
+                        # must never be silently indistinguishable from "this
+                        # worker has no meter". Floored so the key is always
+                        # emitted once a gap has actually been observed; it
+                        # renders as 0 ms either way.
+                        ctx._stages.record_pre(
+                            "gpu_idle_before", max(idle_before, 1e-9))
                     self._loop = asyncio.get_running_loop()
                     lease = _GpuSlotLease(
                         gpu_permit, self._loop, self._permits,

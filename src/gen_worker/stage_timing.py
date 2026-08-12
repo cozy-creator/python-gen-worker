@@ -94,7 +94,7 @@ class StageTimer:
 
     __slots__ = (
         "_lock", "_local", "_totals", "_intervals", "_pre", "_phases",
-        "_steps", "_handler_start", "_handler_end", "_truncated",
+        "_steps", "_step_seen", "_handler_start", "_handler_end", "_truncated",
     )
 
     def __init__(self) -> None:
@@ -108,6 +108,11 @@ class StageTimer:
         self._phases: Dict[Tuple[str, str], float] = {}
         # stage name -> [(step_index, monotonic_at_step_end), ...]
         self._steps: Dict[str, List[Tuple[int, float]]] = {}
+        # stage name -> step indices already marked. Two producers can mark the
+        # same step (pgw#1154: the diffusers callback marks, then calls
+        # ctx.progress, which marks too); a duplicate index would inflate the
+        # mark count and halve the derived per-step mean.
+        self._step_seen: Dict[str, set] = {}
         self._handler_start: Optional[float] = None
         self._handler_end: Optional[float] = None
         self._truncated = False
@@ -190,14 +195,24 @@ class StageTimer:
 
     def mark_step(self, stage: str, index: int) -> None:
         """Record the END of denoise step ``index`` (1-based) for ``stage``.
-        Wired from ``diffusers_step_callback``, so every endpoint using the
-        shared callback gets denoise timing with no code change."""
+
+        Wired from ``diffusers_step_callback`` AND from ``ctx.progress`` when
+        it carries a step counter (pgw#1154), so an endpoint driving its own
+        step loop gets denoise timing with no code change either. First mark
+        for an index wins: the callback's is un-throttled and therefore the
+        better clock, and ``ctx.progress`` only fills in the endpoints the
+        callback does not cover."""
         stage = str(stage or "denoise").strip() or "denoise"
+        index = int(index)
         now = time.monotonic()
         with self._lock:
+            seen = self._step_seen.setdefault(stage, set())
+            if index in seen:
+                return
             marks = self._steps.setdefault(stage, [])
             if len(marks) < _MAX_INTERVALS:
-                marks.append((int(index), now))
+                seen.add(index)
+                marks.append((index, now))
 
     # -- rendering ---------------------------------------------------------
 
@@ -342,8 +357,11 @@ def _clipped(
 #: ``runtime_ms`` reconciliation. ``instance_gate_wait`` is pgw#677's
 #: attribution of time queued behind the per-instance gate (typically a
 #: background mint/compile turn) — deliberately outside ``runtime_ms``.
+#: pgw#1154: ``gpu_idle_before`` is not a wait this request served at all — it
+#: is the gap BEFORE it, charged to no request's runtime. Reported, never summed.
 PRE_HANDLER_STAGES = frozenset(
-    {"gpu_permit_wait", "input_fetch", "setup_wait", "instance_gate_wait"})
+    {"gpu_permit_wait", "input_fetch", "setup_wait", "instance_gate_wait",
+     "gpu_idle_before"})
 
 
 def reconciliation(stage_ms: Mapping[str, int]) -> Tuple[int, int]:
