@@ -227,6 +227,15 @@ def _on_frame(act: Any, watch: Optional[Watcher] = None) -> Any:
     return _apply
 
 
+#: The mint child's evidence counter, in the `family:name` shape every other
+#: counter uses. It was plain `mint_child_evidence` (pgw#1157): `window_for`
+#: splits on ":" and falls back to DEFAULT_STALL_WINDOW_S, so the mint's
+#: patience was the generic 300 s by ACCIDENT rather than the 600 s the
+#: `compile` family declares for exactly this work. An AOTI entry that spends
+#: minutes inside one inductor call is the case that window exists for.
+EVIDENCE_COUNTER = "compile:mint_child_evidence"
+
+
 def _on_evidence(act: Any) -> Any:
     """pgw#824: the child's MEASURED progress, onto the parent's activity.
 
@@ -248,13 +257,29 @@ def _on_evidence(act: Any) -> Any:
     # carries no counter registry still gets the heartbeat, which is the half
     # the hub's liveness rule actually reads.
     make = getattr(act, "counter", None)
-    counter = (
-        make("mint_child_evidence", progress_mod.UNIT_EVIDENCE)
-        if callable(make) else None)
+    if not callable(make):
+        def _beat_only(value: float) -> None:
+            act.heartbeat()
+        return _beat_only
 
     def _apply(value: float) -> None:
-        if counter is not None:
-            counter.set_done(float(value))
+        # pgw#1157: RE-ACQUIRE per tick, never capture. `Activity.counter()`
+        # binds a counter to the phase that registered it, and
+        # `Activity.phase()` FINISHES every counter the new phase does not own
+        # (pgw#962) — `finish()` deletes it from the process registry. A
+        # captured Counter therefore goes unreadable at the first phase
+        # change, and every `set_done` after that feeds an object no reader
+        # can see. This mint crosses `load` -> `warmup_forward` ->
+        # `trace_graph`, so the counter was dead for the whole compile:
+        # `activity.on_beat` found no counter for the activity, returned
+        # WITHOUT emitting, and the hub got nothing but counterless beats.
+        # Measured on RunPod A40 `bgmdxhazxsugmk` (0.112.0): 62 minutes in
+        # `trace_graph` with no counter, no rate and no self-diagnosis
+        # possible, over a mint that was in fact advancing (16 of 36 entries).
+        # `progress.counter` is register-or-get, so re-acquiring costs a dict
+        # lookup and re-registers under whatever phase is current — which is
+        # exactly the contract `Activity.counter()` documents for producers.
+        make(EVIDENCE_COUNTER, progress_mod.UNIT_EVIDENCE).set_done(float(value))
         act.heartbeat()
 
     return _apply
