@@ -1,0 +1,63 @@
+{
+  "_declaration": "z-image/src/z_image/main.py — the @endpoint(compile=...) block. pgw#1107: ONE declaration, on the class decorator; aot/declaration.py and src/z_image/aot_declaration.py are DELETED.",
+  "_status": "READY. All three mint blockers (B1/B2/B3) are resolved, so the declaration no longer refuses at import or at mint.",
+  "_notes": [
+    "pgw#739: `dynamic` derives from declaration.py's class rows (hand rows are refused); `fork` states the minted class's arm values. z-image's `cfg` fork has NO source binding — the CFG regime is a request-time fact (the guidance scale), not a composed pipeline/module field, so the mint keys it but cannot assert it from composition.",
+    "THE CFG ARM: z-image is the ONE family in the pgw#728 survey whose CFG genuinely changes traced shape. pipeline_z_image.py:513-518 batches CFG into ONE forward — `latents.repeat(2,1,1,1)` plus a LIST CONCATENATION `prompt_embeds + negative_prompt_embeds` — so the pytree ARITY doubles to N=2. Measured: N=1 is 4327 nodes, N=2 is 4373. Two graphs, not one graph at two sizes. (Contrast flux2 and qwen, whose diffusers 0.39 pipelines run CFG as two SEQUENTIAL batch-1 forwards under cache_context('cond')/('uncond') — there the guidance axis changes call COUNT, not traced shape, and their endpoints' 'batch-2 graph' comments are wrong.)",
+    "shape_strategy is dynamic-collapse (#730 ratified for DiTs), so the 10 declared aspect rows collapse to ONE artifact per CFG arm. The derived latent hull is [90, 240] multiple-of-2 on both x[2] and x[3] — DERIVED by the SDK from the class rows, never hand-written here.",
+    "#730 DOES NOT HOLD THIS LANE. The 6.9-7.0% AOTI gap was root-caused as inductor's channels-last layout opt bailing when a CONVOLUTION operand carries a free symbol; #730 S4 states the scope outright — HOLD = conv-bearing sdxl-UNet-class lanes, UNHELD = DiTs, naming z-image. `transformer_z_image.py` has ZERO nn.Conv layers (counted 2026-07-28), so `decide_layout_opt` bails at nconv==0 in BOTH arms and there is nothing to lose.",
+    "CAVEAT for the mint operator: `aot_mint.lane_admitted` still hard-refuses every non-PARITY lane with a message citing #730, even though #730 is closed and explicitly UNHELD for DiTs. weight_lane 'w8a8' is a PARITY lane so this request is unaffected — but a plain-bf16 z-image mint would be refused by a stale gate. Flagged to the coordinator (ie#571 gap F).",
+    "strict=true is CONDITIONAL ON THE PRE-WARM (blocker B2). Measured: strict export FAILS COLD — 'Unsupported context manager ... Dynamo does not know how to enter a device context manager' — because ZImageRopeEmbedder.__call__ builds its rope tables lazily inside `with torch.device(\"cpu\"):` (transformer_z_image.py:328). One call to populate freqs_cis before export fixes it (4285 nodes). Until the mint path performs that pre-warm in an ORDERED way, this request cannot be honestly run.",
+    "warm_changes_key=true is z-image's headline fact and the opposite of sdxl's False: the pre-warm is NOT neutral. Cold non-strict export traces the rope-table construction INTO the graph (4327 nodes); pre-warmed export bakes the finished tables as constants (4285, -42). Same model, same inputs, two artifacts — a mint-order dependence that lands on pgw#699's double-mint determinism gate.",
+    "lora_bucket=128 mirrors the endpoint's Compile(lora_bucket=128): base is armed with canonical zeroed rank-128 branches so bare and runtime-overlay requests share one compiled graph without recompilation or state leakage.",
+    "source_digest, declared_vram_gb and the serving image digest are DEPLOY-TIME facts. source_digest is left empty deliberately — fill it from the release before minting; declared_vram_gb must be the SERVING release's envelope (Resources(vram_gb=40.0) is the endpoint's declared floor), not the mint pod's."
+  ],
+  "family": "z-image",
+  "target": "transformer",
+  "weight_lane": "w8a8",
+  "precision": "bf16",
+  "batch": 2,
+  "lora_bucket": 128,
+  "shapes": [
+    [1024, 1024],
+    [1152, 864],
+    [864, 1152],
+    [1248, 832],
+    [832, 1248],
+    [1280, 720],
+    [720, 1280],
+    [1408, 1408],
+    [1920, 1088],
+    [1088, 1920]
+  ],
+  "text_lens": [512],
+  "guidance_scales": [4.0],
+  "dynamic": [],
+  "fork": {
+    "cfg": true
+  },
+  "declaration_module": "z_image.main",
+  "specialization": {
+    "return_dict": false,
+    "patch_size": 2,
+    "f_patch_size": 1,
+    "in_channels": 16,
+    "cap_feat_dim": 2560,
+    "dim": 3840,
+    "n_layers": 30,
+    "vae_scale_factor": 8,
+    "cfg_batching": "one batch-2 forward (arity N=2 over the list inputs)",
+    "cfg_normalization": false,
+    "cfg_truncation": 1.0
+  },
+  "lora_fqns": [],
+  "lifted_inputs": [],
+  "strict": true,
+  "source_ref": "tensorhub/z-image:prod",
+  "source_digest": "",
+  "closure_roots": [],
+  "pipeline_class": "ZImagePipeline",
+  "dtype": "bf16",
+  "storage_dtype": "",
+  "declared_vram_gb": 40.0
+}

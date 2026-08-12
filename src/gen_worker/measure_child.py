@@ -1,11 +1,52 @@
 """pgw#1134: the MEASURE-ONLY child — ``python -m gen_worker.measure_child``.
 
-    python -m gen_worker.measure_child <request.json> [<report.json>]
+    python -m gen_worker.measure_child <request>.mint.json [<report>.json]
 
 It runs the mint's own load and the mint's own export loop — optionally with
 the INDUCTOR compile — against ONE declared class set, records what the run
 cost on the card, and produces **nothing else**. No cell, no artifact, no
 package, no hub call, no advertisement.
+
+What ``<request>.mint.json`` actually IS (pgw#1153)
+--------------------------------------------------
+The file an operator holds is the one an endpoint repo COMMITS — e.g.
+``ltx-video-2.3/aot/transformer-b200-tv261120-ta126-tat1.mint.json``. That is a
+DECLARATION payload: a flattened compile contract (``family``, ``shapes``,
+``text_lens``, ``specialization``, ``declaration_module``, ``source_ref``)
+generated from the ``@endpoint(compile=...)`` block. It is NOT a runtime
+``MintRequest``, which the hub-driven parent builds in a work root and which
+additionally carries ``function``, ``modules`` and RESOLVED ``slots``.
+
+pgw#1134 documented the committed file and decoded the runtime one, so the
+documented command — quoted in ltx's OQ-3 ``resolves_when``, i.e. in production
+endpoint source — died on ``ValidationError: Object missing required field
+'function'`` in the first millisecond of a bought B200. This module now reads
+the committed shape, because that is the artifact that exists:
+
+* ``modules``   <- the payload's ``declaration_module``;
+* ``function``  <- the endpoint whose ``Compile(family=)`` IS the payload's
+  ``family`` (``--function`` overrides, and is required only when that is
+  ambiguous across classes);
+* ``targets``   <- the chosen endpoint's own ``Compile(targets=)`` when the
+  payload names none, which since pgw#1107 is every committed file;
+* ``slots``     <- the payload's ``source_ref``, bound to the slot that owns
+  the declared targets, plus ``--slot NAME=...`` for anything else the
+  endpoint's ``setup()`` requires.
+
+Both shapes decode through :func:`load_document` -> :func:`resolve_job`, so
+there is ONE decoder and no second opinion about what a request file is. Every
+piece the payload cannot supply is refused BY NAME, before a weight is read,
+naming the flag that supplies it — the failure this issue exists for is a
+command that could not start, and a typed refusal on a laptop is worth a rented
+hour.
+
+**Slots resolve OFFLINE.** A ref named by the payload or a flag is looked up in
+this machine's local store and never downloaded: ``mint_process`` states the
+rule for the mint child (*"the child never touches the network: a mint is
+compute, and a mint process that could download is one that can stall on a
+lemon host"*) and a measurement of a mint inherits it. On a pod the serving
+process has already materialized every slot; ``--slot NAME=/path`` names a tree
+directly.
 
 Why a second child exists at all
 --------------------------------
@@ -95,6 +136,17 @@ REASONS: Tuple[str, ...] = (
     # A declared slot the request cannot resolve — refused by name, before a
     # weight is read.
     "slots_unresolvable",
+    # pgw#1153. The request file parsed, but it is not a request: it names no
+    # `declaration_module` and no `modules`, so there is no image to collect
+    # endpoints from and nothing to measure.
+    "no_declaration_module",
+    # pgw#1153. `declaration_module` named a module this image cannot import.
+    # The commonest shape of it is running the command outside the endpoint's
+    # own image, which is the one thing the runbook line says not to do.
+    "declaration_module_unimportable",
+    # pgw#1153. The payload's `family` selects no endpoint function, or selects
+    # several that do not share an instance — `--function` says which.
+    "function_underivable",
     # The endpoint's own `setup()` raised. Never re-classified here: a load
     # that fails under measurement fails under a mint too.
     "load_failed",
@@ -137,6 +189,58 @@ class MeasureJob(msgspec.Struct, frozen=True, kw_only=True):
     slots: Dict[str, MintSlot] = {}
     device: int = -1
     execution_lane: str = ""
+
+
+class MeasureDocument(msgspec.Struct, frozen=True, kw_only=True):
+    """pgw#1153: what a ``*.mint.json`` FILE may carry, either shape.
+
+    There are exactly two request documents in the fleet and this decodes both,
+    because a tool that decodes one of them is the defect this struct closes:
+
+    * an endpoint repo's committed ``aot/*.mint.json`` — a flattened
+      declaration payload. ``family`` / ``declaration_module`` / ``source_ref``
+      are top-level and there is no ``cfg``, no ``function``, no ``slots``;
+    * a mint work root's ``request.json`` — the runtime ``MintRequest``, whose
+      input half is ``function`` / ``modules`` / ``cfg`` / ``slots``.
+
+    Every field is optional and every field is INPUT-SIDE. :data:`WITHHELD_FIELDS`
+    still holds here for the same structural reason it holds on
+    :class:`MeasureJob`: msgspec drops what a struct does not declare, so an
+    artifact destination cannot enter this process through the widened door
+    either.
+    """
+
+    # The runtime envelope's input half.
+    function: str = ""
+    modules: Tuple[str, ...] = ()
+    cfg: Optional[CompileCellSpec] = None
+    slots: Dict[str, MintSlot] = {}
+    device: int = -1
+    execution_lane: str = ""
+    # The committed declaration payload's half. `family` is common to both.
+    family: str = ""
+    #: The module whose IMPORT registers the family's export declaration
+    #: (pgw#1107). Committed by every endpoint repo and fenced by their own
+    #: declaration suites, which is what makes it a safe default for `modules`.
+    declaration_module: str = ""
+    #: The compile target's checkpoint, as the endpoint repo records it. Bound
+    #: to the slot that owns the declared targets — see :func:`resolve_job`.
+    source_ref: str = ""
+
+
+class MeasureRefused(Exception):
+    """A typed refusal raised while BUILDING the job (pgw#1153).
+
+    It carries a :data:`REASONS` token so that a request that cannot start is
+    reported in the same vocabulary as a run that started and stopped. The
+    whole point of this issue is that "the command did not work" must be a row
+    somebody can count, not a stack trace on a pod.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
 
 
 class EntryMeasurement(msgspec.Struct, frozen=True, kw_only=True):
@@ -262,6 +366,238 @@ def _discard(files: Sequence[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# The envelope (pgw#1153): a committed declaration payload -> a MeasureJob.
+#
+# Nothing here decides anything about the measurement. It answers the four
+# questions the payload does not spell out — which image, which function,
+# which targets, which checkpoints — from the declaration the payload NAMES,
+# and refuses by name when it cannot.
+# ---------------------------------------------------------------------------
+
+
+def load_document(raw: bytes) -> Tuple[MeasureDocument, CompileCellSpec]:
+    """Decode one request file into ``(document, flattened compile spec)``.
+
+    The committed payload IS a ``CompileCellSpec`` at top level, so the same
+    bytes are read twice against two structs rather than sniffed for a
+    discriminator: msgspec drops what each struct does not declare, and a
+    document that carries neither half decodes to two empty structs and is
+    refused by :func:`resolve_job` with its emptiness named.
+
+    THE one decoder. ``main`` had a second (``type=MeasureJob``) and that is
+    the whole of pgw#1153: it accepted a shape nothing in the fleet commits.
+    """
+    return (
+        msgspec.json.decode(raw, type=MeasureDocument),
+        msgspec.json.decode(raw, type=CompileCellSpec),
+    )
+
+
+def _parse_slot_flag(raw: str) -> Tuple[str, str, str]:
+    """``NAME=VALUE[,ref=REF]`` -> ``(name, value, ref)``.
+
+    ``VALUE`` is a local tree when it exists on this filesystem and a model ref
+    otherwise, so an operator on a pod can name either the bytes or the
+    catalog row without a second flag to remember.
+    """
+    name, sep, rest = raw.partition("=")
+    name = name.strip()
+    if not sep or not name or not rest.strip():
+        raise MeasureRefused(
+            "slots_unresolvable",
+            f"--slot {raw!r} is not NAME=VALUE[,ref=REF]")
+    value, _, tail = rest.partition(",ref=")
+    return name, value.strip(), tail.strip()
+
+
+def _slot_from_value(name: str, value: str, ref_text: str) -> MintSlot:
+    """One resolved slot from ``VALUE`` — a local tree, or a ref already here.
+
+    A ref with no provider prefix is read as a tensorhub ref, which is what a
+    pod serves from. Nothing here guesses harder than that: a miss is a typed
+    refusal naming the flag that settles it, and a wrong guess would be a
+    measurement of the wrong checkpoint.
+
+    Identity is deliberately weak on the path form. No cell key, digest or
+    artifact leaves this process (:class:`MeasureReport` carries none of the
+    three), so a slot's ``ref`` exists only to satisfy ``ctx.slots``; it is the
+    operator's when ``,ref=`` gives one and a slot-shaped placeholder when not.
+    """
+    from .api.binding import ModelRef
+    from .models.provision import resolve_local_path
+
+    if Path(value).is_dir():
+        return MintSlot(
+            ref=ModelRef(source="tensorhub", path=ref_text or f"local/{name}"),
+            path=str(Path(value)))
+    ref = ModelRef(source="tensorhub", path=value)
+    try:
+        path = resolve_local_path(
+            ref=value, provider="tensorhub", offline=True, emit=lambda _e: None)
+    except Exception as exc:  # noqa: BLE001 — every miss is one refusal
+        raise MeasureRefused(
+            "slots_unresolvable",
+            f"slot {name!r}: {value!r} is neither a directory on this machine "
+            f"nor a tensorhub ref already materialized in its local store "
+            f"({type(exc).__name__}: {exc}). A measure run never downloads — "
+            f"it is compute, exactly as a mint is — so name a tree this pod "
+            f"already fetched: --slot {name}=/path/to/tree") from exc
+    return MintSlot(ref=ref, path=str(path))
+
+
+def _target_owner(spec: Any, targets: Sequence[str]) -> str:
+    """The ONE declared slot that owns every compile target, or ``""``.
+
+    Read off the declaration alone (``slot_components``, derived at decoration
+    from each slot's pipeline class), because this runs BEFORE the load: the
+    question "which checkpoint does `source_ref` name" has to be answered
+    before a checkpoint is opened.
+    """
+    roots = {str(t).split(".", 1)[0] for t in targets if str(t)}
+    owners = [
+        name for name, tree in (getattr(spec, "slot_components", {}) or {}).items()
+        if roots and roots.issubset(set(tree))
+    ]
+    if len(owners) != 1:
+        family = str(getattr(getattr(spec, "compile", None), "family", "") or "")
+        owners = [
+            name for name, fam in (getattr(spec, "slot_family", {}) or {}).items()
+            if family and str(fam) == family
+        ]
+    return owners[0] if len(owners) == 1 else ""
+
+
+def _declares(specs: Sequence[Any], family: str) -> bool:
+    return any(
+        str(getattr(getattr(s, "compile", None), "family", "") or "") == family
+        for s in specs)
+
+
+def _function_for_family(specs: Sequence[Any], family: str) -> str:
+    """The endpoint function the payload's ``family`` names.
+
+    A committed payload names a FAMILY because that is what a cell is scoped to
+    (pgw#758: one mint -> one cell for the family's whole declared class set);
+    it does not name a function, and it should not have to. Functions sharing a
+    class are interchangeable here — ``select_specs`` pulls the whole sibling
+    set from any of them — so ambiguity is only real when the candidates span
+    classes, and then it is `--function`'s to settle.
+    """
+    candidates = [
+        s for s in specs
+        if str(getattr(getattr(s, "compile", None), "family", "") or "") == family
+    ]
+    if not candidates:
+        declared = sorted({
+            str(getattr(getattr(s, "compile", None), "family", "") or "")
+            for s in specs} - {""})
+        raise MeasureRefused(
+            "function_underivable",
+            f"no endpoint in this image declares Compile(family={family!r}) — "
+            f"this image declares {declared or '(no compiling family)'}. Either "
+            f"the request belongs to a different endpoint or the payload's "
+            f"family is stale; --function names one explicitly.")
+    classes = {id(s.cls) for s in candidates}
+    if len(classes) > 1:
+        raise MeasureRefused(
+            "function_underivable",
+            f"family {family!r} is declared by functions on more than one "
+            f"class ({sorted(s.name for s in candidates)}), which are "
+            f"different instances and therefore different loads — name one "
+            f"with --function")
+    return sorted(s.name for s in candidates)[0]
+
+
+def resolve_job(
+    doc: MeasureDocument, flat: CompileCellSpec, *,
+    function: str = "", slot_flags: Sequence[str] = (),
+) -> MeasureJob:
+    """Build the job the run needs from whichever document arrived.
+
+    Imports the endpoint's declaring module — the same walk ``mint_child`` and
+    ``boot_trace_child`` do — because the three answers the committed payload
+    omits all live on the declaration, and reading them from anywhere else
+    would be a second declaration.
+    """
+    from .mint_child import MintChildRefused, select_specs
+    from .registry import collect_endpoints
+
+    modules = tuple(str(m) for m in doc.modules if str(m).strip())
+    if not modules and doc.declaration_module.strip():
+        modules = (doc.declaration_module.strip(),)
+    if not modules:
+        raise MeasureRefused(
+            "no_declaration_module",
+            "the request names neither `modules` nor `declaration_module`, so "
+            "there is no image to collect endpoints from. Every committed "
+            "aot/*.mint.json carries `declaration_module` (pgw#1107); a file "
+            "without one is not a request this child can measure.")
+
+    cfg = doc.cfg if doc.cfg is not None else flat
+    family = (doc.family or cfg.family).strip()
+    if not family:
+        raise MeasureRefused(
+            "no_declaration_module",
+            "the request names no `family`, so nothing selects a declaration "
+            "or a class set")
+
+    def _collect(names: Sequence[str]) -> List[Any]:
+        try:
+            return list(collect_endpoints(list(names)))
+        except BaseException as exc:  # noqa: BLE001 — an unimportable image is one
+            raise MeasureRefused(
+                "declaration_module_unimportable",
+                f"cannot import {list(names)} ({type(exc).__name__}: {exc}). "
+                f"Run this in the ENDPOINT'S OWN IMAGE, where the module that "
+                f"registers the declaration is on sys.path.") from exc
+
+    specs = _collect(modules)
+    if not _declares(specs, family) and len(modules) == 1 and "." in modules[0]:
+        # sdxl's shape: `declaration_module` names a declaration-ONLY module
+        # (`sdxl.aot_declaration`), which registers the export declaration and
+        # decorates nothing. `find_endpoints` walks submodules, never parents,
+        # so the family's functions live one level up. Widen ONCE, to the
+        # package that module belongs to — the same tree the pod imports.
+        package = modules[0].split(".", 1)[0]
+        widened = _collect((package,))
+        if _declares(widened, family):
+            modules, specs = (package,), widened
+
+    name = (function or doc.function).strip() or _function_for_family(
+        specs, family)
+    try:
+        chosen, _siblings = select_specs(specs, name)
+    except MintChildRefused as exc:
+        raise MeasureRefused("function_underivable", str(exc)) from exc
+
+    if not cfg.targets:
+        # pgw#1107: targets DERIVE from the declaration, so no committed
+        # payload carries them — and `compile_cache.resolve_targets` returns
+        # nothing for an empty tuple, which is the same defect one step later.
+        declared = tuple(
+            str(t) for t in
+            (getattr(getattr(chosen, "compile", None), "targets", ()) or ()))
+        cfg = msgspec.structs.replace(cfg, targets=declared)
+    if not cfg.family:
+        cfg = msgspec.structs.replace(cfg, family=family)
+
+    # Flags FIRST, then the payload's own ref for whatever they left unnamed —
+    # a `--slot` that names the target slot must not have to survive an
+    # eager refusal from the ref it was passed to replace.
+    slots: Dict[str, MintSlot] = dict(doc.slots)
+    for raw in slot_flags:
+        slot_name, value, ref_text = _parse_slot_flag(str(raw))
+        slots[slot_name] = _slot_from_value(slot_name, value, ref_text)
+    owner = _target_owner(chosen, cfg.targets)
+    if doc.source_ref.strip() and owner and owner not in slots:
+        slots[owner] = _slot_from_value(owner, doc.source_ref.strip(), "")
+
+    return MeasureJob(
+        function=chosen.name, modules=modules, cfg=cfg, family=family,
+        slots=slots, device=int(doc.device), execution_lane=doc.execution_lane)
+
+
+# ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
 
@@ -316,7 +652,11 @@ def run(
         chosen, siblings = select_specs(specs, job.function)
         bind_slots(siblings, job.slots)
         assert_slots_resolvable(
-            siblings, job.slots, what=f"measure-only run of {job.function!r}")
+            siblings, job.slots,
+            what=f"measure-only run of {job.function!r} — a committed "
+                 f"aot/*.mint.json names ONE checkpoint (`source_ref`), so "
+                 f"every other slot the endpoint's setup() requires is named "
+                 f"with `--slot NAME=/path/to/tree`")
     except MintChildRefused as exc:
         return _fail(report_path, "slots_unresolvable", str(exc),
                      partial=partial)
@@ -488,24 +828,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description=(
             "Export (and compile) one family's declared graph classes and "
             "report what it cost on the card. Publishes nothing, ever."))
-    parser.add_argument("request", help="a mint request JSON; its output-side "
-                                        "fields are ignored by construction")
+    parser.add_argument(
+        "request",
+        help="an endpoint repo's committed aot/*.mint.json (a declaration "
+             "payload) or a mint work root's request.json; either way the "
+             "output-side fields are dropped by construction")
     parser.add_argument("report", nargs="?", default="",
                         help="where to write the typed measurement "
                              "(default: <request>.measure.json)")
     parser.add_argument(
         "--export-only", action="store_true",
         help="skip the inductor compile — cheaper, and a weaker answer")
+    parser.add_argument(
+        "--function", default="",
+        help="the endpoint function to measure. Derived from the payload's "
+             "Compile(family=) unless that is ambiguous across classes")
+    parser.add_argument(
+        "--slot", action="append", default=[], metavar="NAME=VALUE[,ref=REF]",
+        help="a setup slot the payload does not name: VALUE is a local tree, "
+             "or a ref already materialized in this machine's store (a "
+             "measure run never downloads). Repeatable")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     request = Path(args.request)
     report_path = Path(args.report) if args.report else request.with_suffix(
         request.suffix + ".measure.json")
     try:
-        job = msgspec.json.decode(request.read_bytes(), type=MeasureJob)
+        doc, flat = load_document(request.read_bytes())
     except (OSError, msgspec.DecodeError, msgspec.ValidationError) as exc:
         sys.stderr.write(f"measure: unreadable request {request}: {exc}\n")
         return EXIT_BAD_JOB
+    try:
+        job = resolve_job(
+            doc, flat, function=str(args.function),
+            slot_flags=[str(s) for s in args.slot])
+    except MeasureRefused as exc:
+        return _fail(report_path, exc.reason, exc.detail)
     try:
         return run(job, report_path, compile_entries=not args.export_only)
     except BaseException as exc:  # noqa: BLE001 — every terminus is reported
@@ -517,5 +875,6 @@ if __name__ == "__main__":  # pragma: no cover — process entrypoint
     raise SystemExit(main())
 
 
-__all__ = ["EntryMeasurement", "MeasureJob", "MeasureReport", "REASONS",
-           "WITHHELD_FIELDS", "main", "run"]
+__all__ = ["EntryMeasurement", "MeasureDocument", "MeasureJob",
+           "MeasureRefused", "MeasureReport", "REASONS", "WITHHELD_FIELDS",
+           "load_document", "main", "resolve_job", "run"]
