@@ -186,17 +186,23 @@ def _derived(witnesses: Optional[Dict[str, str]] = None) -> Any:
     from gen_worker import cell_key as ck
 
     return boot_key.DerivedKey(
-        key=ck.from_axes({
-            "graph": "c0ffee0000000000", "envelope": "e" * 16,
-            "sm": "sm_89", "toolchain": "t" * 16}),
-        class_hashes={"a": "0" * 16}, combined="c0ffee0000000000",
+        entry_keys={"a": ck.from_axes({
+            "graph": "c0ffee0000000000",
+            "sm": "sm_89", "toolchain": "t" * 16}).digest},
+        class_hashes={"a": "c0ffee0000000000"},
+        manifest=ck.manifest_digest(["c0ffee0000000000"]),
         workers=2, width_reason="test", traced=1, memo="miss", wall_ms=7,
         graph_witnesses=dict(WITNESSES if witnesses is None else witnesses))
 
 
 #: The key that derivation actually produces — what the local store must be
 #: addressed by for a boot to find its own cell.
-KEY_DERIVED = _derived().digest
+#:
+#: pgw#1176: a boot derives a key SET. This declaration traces to one class, so
+#: the set has one member; a caller that wants "the address" takes it from
+#: `keys`, never from a `digest` property that no longer exists because there
+#: is no single key to have one.
+KEY_DERIVED = _derived().keys[0]
 
 
 @pytest.fixture()
@@ -231,7 +237,13 @@ def test_an_empty_store_and_no_hub_still_skips_the_derivation(
         boot_key, "derive",
         lambda **kw: pytest.fail("nobody could answer; the derive is latency"))
 
-    out = _executor(tmp_path)._boot_adopt(_Spec(), {})
+    # pgw#1176: a boot returns ONE outcome per declared graph class. This
+
+    # declaration traces to one, so the unpack ASSERTS that arity rather than
+
+    # indexing past a set nobody checked.
+
+    (out,) = _executor(tmp_path)._boot_adopt(_Spec(), {})
 
     assert out.reason == "no_cell_source"
     assert not out.derived_key
@@ -251,7 +263,13 @@ def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
         _cell(tmp_path), key=KEY_B, family="other", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
-    out = _executor(tmp_path)._boot_adopt(_Spec(), {})
+    # pgw#1176: a boot returns ONE outcome per declared graph class. This
+
+    # declaration traces to one, so the unpack ASSERTS that arity rather than
+
+    # indexing past a set nobody checked.
+
+    (out,) = _executor(tmp_path)._boot_adopt(_Spec(), {})
 
     assert out.derived_key == KEY_DERIVED, "the key was not derived at all"
     assert out.reason == "local_miss_no_hub"
@@ -332,7 +350,7 @@ def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
         family="micro-diffusion", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
-    out = boot_adopt.attempt(
+    (out,) = boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
         slots={}, declared_hint=1, envelope={}, work_root=tmp_path,
         hub_absent="nobody to ask")
@@ -366,7 +384,7 @@ def test_a_local_cell_whose_graphs_are_not_this_pods_graphs_is_refused(
     monkeypatch.setattr(
         boot_key, "derive", lambda **kw: _derived({"transformer": "aa" * 8}))
 
-    out = boot_adopt.attempt(
+    (out,) = boot_adopt.attempt(
         function="generate", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=1, envelope={}, work_root=tmp_path,
         hub_absent="nobody to ask")

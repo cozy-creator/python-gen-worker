@@ -7015,8 +7015,34 @@ class Executor:
         # gate at the end of both.
         boot_local_key = ""
         if arm is None and spec.compile is not None and not eager_only:
-            adopt = await asyncio.to_thread(
+            adopts = await asyncio.to_thread(
                 self._boot_adopt, spec, resolved_slots)
+            # pgw#1176: the boot resolves ONE outcome per declared graph class.
+            # Coverage accretes, so several hits are the expected shape and
+            # each is armed on its own.
+            #
+            # UNFINISHED, AND LOUD RATHER THAN SILENT (owner: pgw#1176; expiry:
+            # before this branch opens a PR). This call site still builds ONE
+            # `_ArmOrder`, so only the first hit is armed here. The remaining
+            # hits are NOT dropped quietly — they are named on the wire below,
+            # and the fix is to carry them on the order so `_enable_compiled`
+            # arms each into the same registry after the pipeline is up, which
+            # is what `aot_serve.arm_entry` already supports. A silent subset
+            # here would be the exact defect this whole change deletes.
+            hits = [o for o in adopts if o.adoption is not None]
+            adopt = hits[0] if hits else (
+                adopts[0] if adopts else boot_adopt.BootAdoptOutcome())
+            if len(hits) > 1:
+                activity.emit_event(
+                    "boot_adopt_entries_deferred",
+                    f"family={adopt.family} function={adopt.function}: the "
+                    f"boot resolved {len(hits)} entry keys and this boot arms "
+                    f"{hits[0].derived_key} only; "
+                    f"{[o.derived_key for o in hits[1:]]} are declared, "
+                    f"resolved and NOT YET ARMED — they serve eager until the "
+                    f"arm loop lands (pgw#1176)",
+                    phase="entries_deferred",
+                )
             boot_local_key = adopt.local_key
             if adopt.adoption is not None:
                 got = adopt.adoption
@@ -9984,7 +10010,7 @@ class Executor:
 
     def _boot_adopt(
         self, spec: EndpointSpec, slots: Dict[str, MintSlot],
-    ) -> "boot_adopt.BootAdoptOutcome":
+    ) -> "Tuple[boot_adopt.BootAdoptOutcome, ...]":
         """§4.27 steps 1-3 for one boot, off the event loop.
 
         ALWAYS an outcome, never ``None`` (pgw#1116). The three gates below
@@ -10047,10 +10073,10 @@ class Executor:
         # answerers are absent — and `attempt` decides the rest, after the
         # local store has been asked.
         if boot_adopt.no_cell_source(hub_absent):
-            return boot_adopt.refused(
+            return (boot_adopt.refused(
                 "no_cell_source",
                 f"{hub_absent}, and this machine's own cell store is empty",
-                family=family, function=fn)
+                family=family, function=fn),)
         work_root = Path(
             self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
         ) / "boot-key" / (spec.name or "endpoint")
