@@ -209,15 +209,27 @@ git tag -s v<X.Y.Z> -m "..." && git push origin v<X.Y.Z>   # tag push triggers p
 with `git tag -v v<X.Y.Z>` before pushing — a lightweight `git tag` produces an unsigned, unverifiable
 release marker, which v0.110.0 is.
 
-### The cut's own PR already satisfies the publish gate — you do not need a second CI run
+### ⚠️ A GREEN PR IS NOT PROOF OF YOUR TREE — dispatch CI on the exact ref before tagging
 
-A `pull_request` CI run's `head_sha` **is your branch-head commit**, not the ephemeral merge ref, and
-`publish.yml` matches on TREE. So: open the cut as a normal PR, let its CI go green, then tag **that
-commit**. Verify before tagging rather than assuming:
+**Do not tag a commit whose only green run was a `pull_request` run.** `ci.yml` uses
+`actions/checkout@v4` with no `ref:`, so on a `pull_request` event GitHub checks out
+`refs/pull/<n>/merge` — **your head merged with whatever `master` is at that moment** — while the
+run's `head_sha` is recorded as your branch-head commit. `publish.yml` matches the tag's tree
+against `gh api commits/<head_sha>`'s tree, so **a PR run makes the provenance gate pass on a tree
+CI never actually executed** whenever `master` moved under you. That is the same class of hole
+pgw#795 closed for v0.78.0 (*"the promotion PR tested master plus cherry-picks, which is a different
+tree"*), reopened through a different door — it was found the honest way, by a cut whose PR run went
+green while master moved four times underneath it.
+
+**So use `workflow_dispatch`, which checks out the ref itself**, exactly as step 3 of Mechanics
+already says — and confirm the green run you are relying on is that kind of run:
 
 ```bash
-gh run view <run-id> --json headSha -q .headSha   # must equal `git rev-parse HEAD`
+gh workflow run ci.yml --ref <branch-you-will-tag>
+gh run view <run-id> --json event,headSha -q '{event:.event,sha:.headSha}'   # event MUST be workflow_dispatch
 ```
+
+A `pull_request` run is still the right gate for *merging*. It is not proof for *publishing*.
 
 ### PIN the commit you cut, and TAG IT — do not tag master's tip
 
