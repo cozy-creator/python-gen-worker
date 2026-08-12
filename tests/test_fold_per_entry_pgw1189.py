@@ -102,7 +102,7 @@ def _drive(names: Sequence[str], *, fail_at: Optional[int] = None,
            progress: Any = None):
     pool = _StubPool(names, fail_at=fail_at)
     rows = [_entry(n) for n in names]
-    fold = aot_mint.entry_timing_folder(rows, pool)
+    fold = aot_mint._entry_timing_folder(rows, pool)
     source = ((r.name, None) for r in rows)
     try:
         by_entry = aot_mint._drive_pool(

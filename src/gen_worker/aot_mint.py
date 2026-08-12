@@ -2398,7 +2398,7 @@ def _mint_cell(
                 # pgw#1189: `kept` is the live list the producer appends to,
                 # so an entry that exports after this closure is built is
                 # still folded. This is the ONLY path a fleet mint takes.
-                on_entry_complete=entry_timing_folder(kept, pool),
+                on_entry_complete=_entry_timing_folder(kept, pool),
                 on_entry=lambda name, done, total: progress.beat(
                     PHASE_INDUCTOR_COMPILE, done, total, name))
         finally:
@@ -2551,7 +2551,7 @@ def _drive_pool(
     pgw#848 tests drive) or pgw#1052's live producer iterator.
 
     ``on_entry_complete`` (pgw#1189) folds one finished entry's measurement
-    onto the row that will be reported — see :func:`entry_timing_folder`. It
+    onto the row that will be reported — see :func:`_entry_timing_folder`. It
     fires per entry rather than at the end, so an abandoned mint keeps the
     numbers of every entry that finished.
     """
@@ -2620,10 +2620,10 @@ def _fold_pool_results(
             f"cell whose declared class set is a lie")
     for row in minted:
         row.files = list(by_entry[row.name])
-        fold_entry_timings(row, pool)
+        _fold_entry_timings(row, pool)
 
 
-def fold_entry_timings(
+def _fold_entry_timings(
     row: "_MintedEntry", pool: aot_compile_pool.EntryCompilePool,
 ) -> bool:
     """Fold ONE finished entry's measurement onto the row a reader will see.
@@ -2655,7 +2655,7 @@ def fold_entry_timings(
     return True
 
 
-def entry_timing_folder(
+def _entry_timing_folder(
     rows: Sequence["_MintedEntry"], pool: aot_compile_pool.EntryCompilePool,
 ) -> Callable[[str], None]:
     """A per-entry fold bound to ``rows`` (pgw#1189), for ``_drive_pool``.
@@ -2667,7 +2667,7 @@ def entry_timing_folder(
     def _fold(name: str) -> None:
         for row in rows:
             if row.name == name:
-                fold_entry_timings(row, pool)
+                _fold_entry_timings(row, pool)
                 return
     return _fold
 
@@ -2698,7 +2698,7 @@ def _compile_entries_parallel(
     by_entry = _drive_pool(
         pool, [(row.name, row.program) for row in minted],
         on_entry=on_entry, progress=progress,
-        on_entry_complete=entry_timing_folder(minted, pool))
+        on_entry_complete=_entry_timing_folder(minted, pool))
     wall = time.monotonic() - t0
     _fold_pool_results(minted, pool, by_entry)
     logger.info(
