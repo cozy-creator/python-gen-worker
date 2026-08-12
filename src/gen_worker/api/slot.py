@@ -127,16 +127,23 @@ class Slot(Generic[D]):
     decoration-time error, never a silent fallback.
 
     ``layouts`` is the slot's per-component DEMAND (§1.33, pgw#1143): a
-    mapping from component path to the ORDERED tuple of tensor-layout
-    contract handles this slot's code can execute. ``"*"`` is the whole-tree
-    default; a component key overrides it for that component only::
+    mapping from component path to the SET of tensor-layout contract handles
+    this slot's code can execute. ``"*"`` is the whole-tree default; a
+    component key overrides it for that component only::
 
         Slot(StableDiffusionXLPipeline, selected_by="model", layouts={
             "*":            (CONTRACT_PLAIN_BF16,),
             "text_encoder": (CONTRACT_HF_FP8_BLOCKWISE, CONTRACT_PLAIN_BF16),
         })
 
-    Order IS preference. The handles are validated here against the SDK's
+    **The set is a compatibility FILTER; its order carries NO preference**
+    (§1.33 point 2 as amended by th#1803). Preference has exactly one
+    authority — the author-configured ordered ladder of (GPU, lane) pairs —
+    so the handles are stored and published in CANONICAL order, not as
+    written. Two authors who spell the same set differently state the same
+    demand, and no downstream reader can mistake a position for a ranking.
+
+    The handles are validated here against the SDK's
     transcribed ``KNOWN_CONTRACTS``; the KEYS are validated at decoration
     against the slot's DERIVED component tree, so a key that would silently
     match nothing is a build error naming the tree. **Absent is UNDECLARED**

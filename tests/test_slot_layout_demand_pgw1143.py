@@ -4,8 +4,9 @@ SDK side.
 What is proven here, in the order the design puts it:
 
 1. a declared slot's demand reaches the PUBLISHED MANIFEST, per component
-   path, in declaration order — that is the whole point, since the manifest is
-   the only thing the hub reads;
+   path, in CANONICAL order — that is the whole point, since the manifest is
+   the only thing the hub reads, and §1.33 pt 2 as amended makes the set a
+   filter whose order carries no preference;
 2. absence is UNDECLARED — no key at all, not an empty one, so the hub cannot
    read it as "accepts everything";
 3. an invalid declaration is refused WHERE IT IS WRITTEN — an unknown handle
@@ -91,7 +92,7 @@ def _components() -> dict:
 # ── 1. the declaration reaches the manifest, ordered, per component ──────────
 
 
-def test_a_declared_slot_publishes_its_demand_per_component_in_order() -> None:
+def test_a_declared_slot_publishes_its_demand_per_component() -> None:
     slot = Slot(
         FakePipeline,
         selected_by="model",
@@ -106,9 +107,27 @@ def test_a_declared_slot_publishes_its_demand_per_component_in_order() -> None:
         "*": ["plain.bf16@1"],
         "text_encoder": ["hf.fp8-blockwise@1", "plain.bf16@1"],
     }
-    # Order IS preference (§1.33 pt 2) — the fp8 encoder is declared FIRST and
-    # must not be sorted into second place by anything on the way out.
-    assert block["layouts"]["text_encoder"][0] == "hf.fp8-blockwise@1"
+
+
+def test_the_published_set_is_canonical_so_no_reader_can_read_a_preference(
+) -> None:
+    """§1.33 pt 2 as AMENDED (th#1803): the accepted set is a compatibility
+    FILTER whose order carries no preference — preference has exactly ONE
+    authority, the (GPU, lane) ladder. So two authors who spell the same set in
+    different orders publish the SAME manifest block. Storing the written order
+    would be a second ordering that can disagree with the first, and the hub
+    stores an ordinal for whatever it is handed."""
+    declared = _slot_to_manifest(
+        "pipeline",
+        Slot(FakePipeline, layouts={
+            "text_encoder": (CONTRACT_HF_FP8_BLOCKWISE, CONTRACT_PLAIN_BF16)}),
+        family="", components=_components())
+    reversed_ = _slot_to_manifest(
+        "pipeline",
+        Slot(FakePipeline, layouts={
+            "text_encoder": (CONTRACT_PLAIN_BF16, CONTRACT_HF_FP8_BLOCKWISE)}),
+        family="", components=_components())
+    assert declared["layouts"] == reversed_["layouts"]
 
 
 def test_an_undeclared_slot_emits_no_layouts_key_at_all() -> None:
@@ -129,7 +148,7 @@ def test_an_undeclared_slot_emits_no_layouts_key_at_all() -> None:
     [
         ({}, "declares nothing"),
         ({"*": ()}, "is empty"),
-        ({"*": "plain.bf16@1"}, "ORDERED tuple"),
+        ({"*": "plain.bf16@1"}, "must be a tuple of handles"),
         ({"*": ("plain.bf16",)}, "not a contract handle"),
         ({"*": ("cozy.not-registered@1",)}, "is not registered"),
         ({"*": ("plain.bf16@1", "plain.bf16@1")}, "repeats"),

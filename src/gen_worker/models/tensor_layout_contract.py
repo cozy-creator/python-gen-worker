@@ -168,18 +168,74 @@ def contract_decoders_of(obj: Any) -> tuple[ContractDecoder, ...]:
 #: more specific declaration.
 LAYOUT_KEY_ANY_COMPONENT = "*"
 
+# ── The TWO AXES (§1.33 `d01ed428`; pgw#1143 Q2) ─────────────────────────────
+#
+# TOPOLOGY is SHALLOW — keys/nesting/file layout, "essentially just different
+# keys". It constrains the LOADER, and a conversion between two topologies is
+# pure renaming, bit-lossless. QUANT is DEEP — "what the weights ARE, which
+# requires different runtime code/kernels". It constrains the endpoint's
+# KERNELS.
+#
+# They are two registries with two digests, compared FIELD-WISE and never as
+# one string: a composite handle cannot express "topology differs, quant
+# matches ⇒ CONVERTIBLE", which is the whole ladder.
+AXIS_TOPOLOGY = "topology"
+AXIS_QUANT = "quant"
+LAYOUT_AXES: tuple[str, ...] = (AXIS_TOPOLOGY, AXIS_QUANT)
+
+#: An axis a demand declares itself AGNOSTIC on. A declaration, never an
+#: inference: an axis nobody stated is UNDECLARED (``None``) and is not
+#: evaluated, which is a different fact.
+LAYOUT_AXIS_ANY = "any"
+
+# The topology axis, transcribed from code we already run (pgw#1143 Q2 /
+# th#1809 T3): tensorhub's `catalog/layout_contract.go` (library_name x
+# file_layout) and training-endpoints' `conversion/comfyui.py`
+# `_SPLIT_COMPONENT_MAP`. Same transcription posture as KNOWN_CONTRACTS above —
+# allowed to be stale, CHECKED at the hub's manifest ingest, never authoritative.
+TOPOLOGY_DIFFUSERS_MULTIFILE = "diffusers.multifile@1"
+TOPOLOGY_DIFFUSERS_SINGLEFILE = "diffusers.singlefile@1"
+TOPOLOGY_TRANSFORMERS_NATIVE = "transformers.native@1"
+TOPOLOGY_PEFT_ADAPTER = "peft.adapter@1"
+TOPOLOGY_GGUF_NATIVE = "gguf.native@1"
+TOPOLOGY_COMFY_SPLITFILES = "comfy.splitfiles@1"
+
+KNOWN_TOPOLOGY_CONTRACTS: tuple[str, ...] = (
+    TOPOLOGY_DIFFUSERS_MULTIFILE,
+    TOPOLOGY_DIFFUSERS_SINGLEFILE,
+    TOPOLOGY_TRANSFORMERS_NATIVE,
+    TOPOLOGY_PEFT_ADAPTER,
+    TOPOLOGY_GGUF_NATIVE,
+    TOPOLOGY_COMFY_SPLITFILES,
+)
+
 
 class LayoutDeclarationError(ValueError):
     """A `Slot(layouts=...)` declaration the SDK refuses where it is written."""
 
 
-def validate_layout_handle(handle: object, *, where: str) -> str:
-    """One declared handle, normalized, or a decoration-time refusal.
+def known_contracts(axis: str) -> tuple[str, ...]:
+    """The transcribed handles of ONE axis. Unknown axis is a refusal, not an
+    empty tuple — an empty answer would read as "nothing is registered"."""
+    if axis == AXIS_QUANT:
+        return KNOWN_CONTRACTS
+    if axis == AXIS_TOPOLOGY:
+        return KNOWN_TOPOLOGY_CONTRACTS
+    raise LayoutDeclarationError(
+        f"unknown layout axis {axis!r}; the axes are {list(LAYOUT_AXES)}")
 
-    The quant axis only. §1.33's rendered `"<topology>+<quant>"` pair needs a
-    topology REGISTRY to compare against (th#1809 T3); until that exists a
-    composite is a handle naming a vocabulary the platform cannot resolve, and
-    exact-or-refused means refusing it rather than storing half a pair.
+
+def validate_layout_handle(
+    handle: object, *, where: str, axis: str = AXIS_QUANT,
+) -> str:
+    """One declared handle on ONE axis, normalized, or a refusal.
+
+    `Slot(layouts=...)` declares the QUANT axis alone: §1.33's rendered
+    `"<topology>+<quant>"` pair needs the hub's topology REGISTRY to resolve
+    against (th#1809 T3), and until that exists a composite in the manifest is
+    half a pair stored as if it were exact. The SDK-internal converter registry
+    names the topology axis explicitly (`axis=AXIS_TOPOLOGY`) — that vocabulary
+    is real here and inert hub-side until T3 lands.
     """
     if not isinstance(handle, str):
         raise LayoutDeclarationError(
@@ -187,6 +243,7 @@ def validate_layout_handle(handle: object, *, where: str) -> str:
             f"{type(handle).__name__}"
         )
     text = handle.strip()
+    known = known_contracts(axis)
     if "+" in text:
         raise LayoutDeclarationError(
             f"{where}: {text!r} names a <topology>+<quant> pair. The topology "
@@ -198,12 +255,12 @@ def validate_layout_handle(handle: object, *, where: str) -> str:
         raise LayoutDeclarationError(
             f"{where}: {text!r} is not a contract handle (want ns.name@N)"
         )
-    if text not in KNOWN_CONTRACTS:
+    if text not in known:
         raise LayoutDeclarationError(
-            f"{where}: contract {text!r} is not registered. "
+            f"{where}: {axis} contract {text!r} is not registered. "
             "Contracts are CODE (th#1580 A2): register it in tensorhub's "
             "internal/tensorlayout with a descriptor and a probe set "
-            f"before a slot may demand it. Known: {', '.join(KNOWN_CONTRACTS)}"
+            f"before a slot may demand it. Known: {', '.join(known)}"
         )
     return text
 
@@ -211,12 +268,21 @@ def validate_layout_handle(handle: object, *, where: str) -> str:
 def normalize_layout_demand(
     layouts: object, *, where: str,
 ) -> dict[str, tuple[str, ...]]:
-    """`Slot(layouts=...)` -> `{component_path: ordered handles}`.
+    """`Slot(layouts=...)` -> `{component_path: accepted handle SET}`.
 
-    Ordering IS preference (§1.33 point 2), so the tuple is kept as written
-    and never sorted. Component-path keys are validated against the DERIVED
-    component tree separately, at decoration time, by the registry — this
-    function owns only the shape and the vocabulary.
+    **The set is a compatibility FILTER; its order carries NO preference**
+    (§1.33 point 2 as amended 2026-08-11 by the tag-separability ruling,
+    th#1803). Preference has exactly ONE authority — the author-configured
+    ordered ladder of (GPU, lane) pairs — and "one filter, one order, never two
+    orderings that can disagree" is the property that keeps it that way. So the
+    handles are returned in CANONICAL order, not as written: two authors who
+    declare the same set in different orders state the SAME demand, and no
+    downstream reader can recover a preference from a position that never
+    carried one.
+
+    Component-path keys are validated against the DERIVED component tree
+    separately, at decoration time, by the registry — this function owns only
+    the shape and the vocabulary.
     """
     if not isinstance(layouts, dict):
         raise LayoutDeclarationError(
@@ -241,9 +307,9 @@ def normalize_layout_demand(
         if isinstance(raw_value, (str, bytes)) or not isinstance(
                 raw_value, (tuple, list)):
             raise LayoutDeclarationError(
-                f"{where}: layouts[{key!r}] must be an ORDERED tuple of "
-                f"handles (order is preference), got "
-                f"{type(raw_value).__name__}"
+                f"{where}: layouts[{key!r}] must be a tuple of handles — the "
+                f"SET this component accepts, whose order carries no "
+                f"preference — got {type(raw_value).__name__}"
             )
         if not raw_value:
             raise LayoutDeclarationError(
@@ -258,9 +324,89 @@ def normalize_layout_demand(
                 item, where=f"{where}: layouts[{key!r}]")
             if handle in handles:
                 raise LayoutDeclarationError(
-                    f"{where}: layouts[{key!r}] repeats {handle!r}; the "
-                    "second position is unreachable"
+                    f"{where}: layouts[{key!r}] repeats {handle!r}; a set "
+                    "states each member once"
                 )
             handles.append(handle)
-        out[key] = tuple(handles)
+        out[key] = tuple(sorted(handles))
     return out
+
+
+class LayoutId(msgspec.Struct, frozen=True, kw_only=True):
+    """One side of the two-sided vocabulary, as a PAIR of axes.
+
+    Rendered `"<topology>+<quant>"` and compared FIELD-WISE — never as one
+    string, because a whole-string compare cannot express "topology differs,
+    quant matches", which is the CONVERTIBLE rung.
+
+    Each axis is tri-state: a handle (declared), :data:`LAYOUT_AXIS_ANY`
+    (declared agnostic), or ``None`` (UNDECLARED — not evaluated, and the
+    verdict says so rather than guessing).
+    """
+
+    topology: str | None = None
+    quant: str | None = None
+
+    def render(self) -> str:
+        return f"{self.topology or ''}+{self.quant or ''}"
+
+    def axis(self, name: str) -> str | None:
+        if name == AXIS_TOPOLOGY:
+            return self.topology
+        if name == AXIS_QUANT:
+            return self.quant
+        raise LayoutDeclarationError(
+            f"unknown layout axis {name!r}; the axes are {list(LAYOUT_AXES)}")
+
+    def with_axis(self, name: str, value: str | None) -> "LayoutId":
+        if name == AXIS_TOPOLOGY:
+            return LayoutId(topology=value, quant=self.quant)
+        if name == AXIS_QUANT:
+            return LayoutId(topology=self.topology, quant=value)
+        raise LayoutDeclarationError(
+            f"unknown layout axis {name!r}; the axes are {list(LAYOUT_AXES)}")
+
+
+def parse_layout_id(text: object, *, where: str) -> LayoutId:
+    """`"<topology>+<quant>"`, or a bare handle meaning the QUANT axis alone.
+
+    A bare handle is quant because that is what `Slot(layouts=...)` publishes
+    (th#1809 T3 has not shipped the topology registry), so one spelling has one
+    meaning across the wire and this parser.
+    """
+    if isinstance(text, LayoutId):
+        return text
+    if not isinstance(text, str) or not text.strip():
+        raise LayoutDeclarationError(
+            f"{where}: a layout id is '<topology>+<quant>' or a bare quant "
+            f"handle, got {text!r}")
+    raw = text.strip()
+    if "+" not in raw:
+        return LayoutId(quant=_axis_member(raw, axis=AXIS_QUANT, where=where))
+    topology, _, quant = raw.partition("+")
+    return LayoutId(
+        topology=_axis_member(topology, axis=AXIS_TOPOLOGY, where=where),
+        quant=_axis_member(quant, axis=AXIS_QUANT, where=where),
+    )
+
+
+def _axis_member(text: str, *, axis: str, where: str) -> str | None:
+    """One axis of a layout id: a handle, the explicit agnostic, or UNDECLARED."""
+    value = text.strip()
+    if not value:
+        return None
+    if value == LAYOUT_AXIS_ANY:
+        return LAYOUT_AXIS_ANY
+    if "+" in value:
+        raise LayoutDeclarationError(
+            f"{where}: {value!r} carries a second '+' on the {axis} axis")
+    if not _HANDLE_RE.match(value):
+        raise LayoutDeclarationError(
+            f"{where}: {value!r} is not a contract handle (want ns.name@N)")
+    if value not in known_contracts(axis):
+        raise LayoutDeclarationError(
+            f"{where}: {axis} contract {value!r} is not registered. "
+            "Contracts are CODE (th#1580 A2): register it in tensorhub's "
+            "internal/tensorlayout with a descriptor and a probe set before "
+            f"anything may name it. Known: {', '.join(known_contracts(axis))}")
+    return value

@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker.convert.ingest import detect_snapshot_dtype
-from gen_worker.convert.writer import _read_safetensors_header, component_stored_tensor_names
+from gen_worker.convert.writer import read_safetensors_header, component_stored_tensor_names
 from gen_worker.models.loading import safetensors_file_valid
 from gen_worker.models.safetensors_header import MAX_HEADER_BYTES, header_len_ok
 from gen_worker.models.svdq import _read_safetensors_metadata
@@ -105,7 +105,7 @@ def test_every_reader_refuses(tmp_path: Path, declared: int):
     with pytest.raises(ValueError):
         fd = os.open(f, os.O_RDONLY)
         try:
-            _read_safetensors_header(fd)
+            read_safetensors_header(fd)
         finally:
             os.close(fd)
 
@@ -128,7 +128,7 @@ def test_a_legitimate_file_still_parses_everywhere(tmp_path: Path):
     assert w4a4_read_header(f) == _HEADER
     fd = os.open(f, os.O_RDONLY)
     try:
-        header, _ = _read_safetensors_header(fd)
+        header, _ = read_safetensors_header(fd)
     finally:
         os.close(fd)
     assert header == _HEADER
@@ -150,7 +150,7 @@ def test_writer_and_loader_agree_on_the_same_file(tmp_path: Path):
     fd = os.open(f, os.O_RDONLY)
     try:
         with pytest.raises(ValueError, match="implausible header_length"):
-            _read_safetensors_header(fd)
+            read_safetensors_header(fd)
     finally:
         os.close(fd)
 

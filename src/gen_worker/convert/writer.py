@@ -21,6 +21,7 @@ torch/safetensors imports are deferred so importing gen_worker.convert stays che
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -1470,7 +1471,7 @@ _HEADER_LEN_PREFIX = 8
 _RAW_COPY_CHUNK = 8 * 1024 * 1024
 
 
-def _read_safetensors_header(fd: int) -> tuple[dict, int]:
+def read_safetensors_header(fd: int) -> tuple[dict, int]:
 
     os.lseek(fd, 0, os.SEEK_SET)
     prefix = os.read(fd, _HEADER_LEN_PREFIX)
@@ -1486,6 +1487,197 @@ def _read_safetensors_header(fd: int) -> tuple[dict, int]:
     if not isinstance(header, dict):
         raise ValueError("safetensors: header root must be an object")
     return header, _HEADER_LEN_PREFIX + header_len
+
+
+def shard_tensor_entries(path: Path) -> list[tuple[str, dict]]:
+    """Every ``(name, header entry)`` of one shard, in DATA order."""
+    with open(path, "rb") as fh:
+        header, _ = read_safetensors_header(fh.fileno())
+    rows: list[tuple[str, dict]] = []
+    for name, meta in header.items():
+        if name == "__metadata__" or not isinstance(meta, dict):
+            continue
+        offs = meta.get("data_offsets")
+        if not isinstance(offs, list) or len(offs) != 2 or int(offs[1]) < int(offs[0]):
+            raise ValueError(f"safetensors: tensor {name!r} has invalid data_offsets")
+        rows.append((str(name), meta))
+    rows.sort(key=lambda r: int(r[1]["data_offsets"][0]))
+    return rows
+
+
+def shard_metadata(path: Path) -> dict[str, str]:
+    """One shard's ``__metadata__``, as strings."""
+    with open(path, "rb") as fh:
+        header, _ = read_safetensors_header(fh.fileno())
+    md = header.get("__metadata__")
+    return {str(k): str(v) for k, v in md.items()} if isinstance(md, dict) else {}
+
+
+def shard_payload_digests(path: Path) -> dict[str, str]:
+    """Per-tensor payload sha256, keyed by tensor name."""
+    out: dict[str, str] = {}
+    with open(path, "rb") as fh:
+        header, base = read_safetensors_header(fh.fileno())
+        for name, meta in header.items():
+            if name == "__metadata__" or not isinstance(meta, dict):
+                continue
+            start, end = int(meta["data_offsets"][0]), int(meta["data_offsets"][1])
+            fh.seek(base + start)
+            out[str(name)] = hashlib.sha256(fh.read(end - start)).hexdigest()
+    return out
+
+
+def shard_content_digest(path: Path) -> str:
+    """CONTENT identity of one shard: its tensors' (name, dtype, shape, payload)
+    and its ``__metadata__``, digested in a canonical order.
+
+    Deliberately NOT the file's bytes: tensor ORDER inside the file, header key
+    order and JSON separators are not content, and a rewrite that preserves
+    every tensor exactly must compare equal even when it lays them out
+    differently. That is what makes this digest usable as the round-trip
+    obligation in ``layout_converters`` — it refuses lost information, not
+    reordering.
+    """
+    rows = []
+    with open(path, "rb") as fh:
+        header, base = read_safetensors_header(fh.fileno())
+        for name, meta in sorted(
+            (n, m) for n, m in header.items()
+            if n != "__metadata__" and isinstance(m, dict)
+        ):
+            start, end = int(meta["data_offsets"][0]), int(meta["data_offsets"][1])
+            fh.seek(base + start)
+            rows.append([
+                str(name), str(meta["dtype"]),
+                [int(d) for d in meta["shape"]],
+                hashlib.sha256(fh.read(end - start)).hexdigest(),
+            ])
+    payload = json.dumps(
+        {"v": 1, "tensors": rows, "metadata": shard_metadata(path)},
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def write_safetensors_shard(
+    path: Path,
+    tensors: Mapping[str, tuple[str, Sequence[int], bytes]],
+    *,
+    metadata: Optional[Mapping[str, str]] = None,
+) -> Path:
+    """Write ONE safetensors file from raw ``(dtype, shape, payload)`` triples.
+
+    Torch-free on purpose: the layout-converter corpus materializes real
+    HEADERS with synthetic payloads, and pulling torch in to do that would make
+    a declaration-time proof cost a framework import.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header: dict[str, Any] = {}
+    if metadata:
+        header["__metadata__"] = {str(k): str(v) for k, v in metadata.items()}
+    cursor = 0
+    ordered: list[tuple[str, bytes]] = []
+    for name, (dtype, shape, payload) in tensors.items():
+        if not name or name == "__metadata__":
+            raise ValueError(f"safetensors: cannot write a tensor named {name!r}")
+        header[str(name)] = {
+            "dtype": str(dtype), "shape": [int(d) for d in shape],
+            "data_offsets": [cursor, cursor + len(payload)],
+        }
+        ordered.append((str(name), payload))
+        cursor += len(payload)
+    blob = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    tmp = path.parent / f".{path.name}.writing"
+    with open(tmp, "wb") as out:
+        out.write(len(blob).to_bytes(_HEADER_LEN_PREFIX, "little"))
+        out.write(blob)
+        for _name, payload in ordered:
+            out.write(payload)
+    tmp.replace(path)
+    return path
+
+
+def rewrite_safetensors_keys(
+    source: Path,
+    target: Path,
+    key_map: Mapping[str, str],
+    *,
+    extra_metadata: Optional[Mapping[str, str]] = None,
+) -> Path:
+    """Rename tensors by RAW BYTE-RANGE COPY — no tensor ever enters Python.
+
+    This is the whole topology-axis engine (§1.33: topology is "essentially
+    just different keys"). Because the payloads are copied as opaque ranges,
+    bit-losslessness on that axis is a property of THIS FUNCTION rather than a
+    claim each converter makes about itself.
+
+    ``key_map`` must be total over the shard's tensors — an unmapped key is a
+    refusal, never a silent passthrough — and injective. ``source`` may equal
+    ``target`` (used to stamp provenance in place); the write goes through a
+    temp file and an atomic rename either way.
+    """
+    source, target = Path(source), Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    entries = shard_tensor_entries(source)
+    missing = [name for name, _ in entries if name not in key_map]
+    if missing and key_map:
+        raise ValueError(
+            f"rewrite_safetensors_keys: {len(missing)} key(s) have no mapping "
+            f"({missing[:5]}). An unmapped key is a REFUSAL, never a silent "
+            "skip — a partial rename produces a file that loads as neither "
+            "layout.")
+    renamed = [(key_map.get(name, name), meta) for name, meta in entries]
+    seen: dict[str, str] = {}
+    for (new, _meta), (old, _m) in zip(renamed, entries):
+        if new in seen:
+            raise ValueError(
+                f"rewrite_safetensors_keys: {old!r} and {seen[new]!r} both map "
+                f"to {new!r}; the key map is not injective")
+        seen[new] = old
+
+    metadata = shard_metadata(source)
+    if extra_metadata:
+        metadata.update({str(k): str(v) for k, v in extra_metadata.items()})
+
+    header: dict[str, Any] = {}
+    if metadata:
+        header["__metadata__"] = metadata
+    cursor = 0
+    for new, meta in renamed:
+        start, end = int(meta["data_offsets"][0]), int(meta["data_offsets"][1])
+        header[new] = {
+            "dtype": meta["dtype"], "shape": list(meta["shape"]),
+            "data_offsets": [cursor, cursor + (end - start)],
+        }
+        cursor += end - start
+    blob = json.dumps(header, separators=(",", ":")).encode("utf-8")
+
+    tmp = target.parent / f".{target.name}.rewriting"
+    src_fd = os.open(str(source), os.O_RDONLY)
+    try:
+        _, base = read_safetensors_header(src_fd)
+        dst = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(dst, len(blob).to_bytes(_HEADER_LEN_PREFIX, "little"))
+            os.write(dst, blob)
+            for (_new, meta) in renamed:
+                start, end = int(meta["data_offsets"][0]), int(meta["data_offsets"][1])
+                remaining = end - start
+                src_abs = base + start
+                while remaining > 0:
+                    buf = os.pread(src_fd, min(remaining, _RAW_COPY_CHUNK), src_abs)
+                    if not buf:
+                        raise IOError(f"safetensors: short read at {src_abs}")
+                    os.write(dst, buf)
+                    remaining -= len(buf)
+                    src_abs += len(buf)
+        finally:
+            os.close(dst)
+    finally:
+        os.close(src_fd)
+    tmp.replace(target)
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -1570,7 +1762,7 @@ def merge_safetensors_by_offset(
         for shard in shard_paths:
             fd = os.open(str(shard), os.O_RDONLY)
             fds.append(fd)
-            header, data_base = _read_safetensors_header(fd)
+            header, data_base = read_safetensors_header(fd)
             md = header.get("__metadata__")
             if isinstance(md, dict):
                 for k, v in md.items():

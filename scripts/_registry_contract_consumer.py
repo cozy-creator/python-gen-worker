@@ -2,7 +2,7 @@
 
 pgw#740: the SDK ships registry MECHANISMS; every vocabulary is declared by the
 endpoint that owns it. This module declares a synthetic family the way a real
-endpoint does, across all five decorator/registration surfaces. The gate
+endpoint does, across all six decorator/registration surfaces. The gate
 (`check_registry_contract.py`) imports it via the documented
 ``load_declaration_module`` path and asserts every registration became visible.
 """
@@ -18,12 +18,21 @@ from gen_worker.api.export_contract import (
 )
 from gen_worker.convert import (
     CIVITAI,
+    ConversionCase,
+    CorpusTensor,
     HintMatch,
     LayoutDeclaration,
+    RenameRule,
     RepackageFamily,
+    TopologyConversion,
     declare_foreign_family_map,
     register_layout,
+    register_layout_conversion,
     register_repackage_family,
+)
+from gen_worker.models.tensor_layout_contract import (
+    TOPOLOGY_COMFY_SPLITFILES,
+    TOPOLOGY_DIFFUSERS_MULTIFILE,
 )
 from gen_worker.families import GenerationDefaults, family
 
@@ -50,6 +59,31 @@ register_layout(
 )
 
 declare_foreign_family_map(CIVITAI, {"ContractCheck 1.0": FAMILY})
+
+# The SIXTH registry (§1.33 / pgw#1143). A topology edge is DATA — declared
+# rename passes plus their inverse — and registration runs the round-trip
+# admission proof over the declared corpus before the edge exists.
+register_layout_conversion(
+    TopologyConversion(
+        from_id=TOPOLOGY_COMFY_SPLITFILES,
+        to_id=TOPOLOGY_DIFFUSERS_MULTIFILE,
+        version=1,
+        rules=(RenameRule(
+            kind="prefix", pairs=(("model.diffusion_model.", "transformer."),)),),
+        inverse_rules=(RenameRule(
+            kind="prefix", pairs=(("transformer.", "model.diffusion_model."),)),),
+        corpus=(ConversionCase(
+            name="contractcheck-dit",
+            tensors={
+                "model.diffusion_model.blocks.0.attn.to_q.weight":
+                    CorpusTensor(dtype="BF16", shape=(4, 4)),
+                "model.diffusion_model.blocks.0.attn.to_k.weight":
+                    CorpusTensor(dtype="BF16", shape=(4, 4)),
+            },
+        ),),
+        why="the registry-contract gate's representative topology edge",
+    )
+)
 
 register_export_declaration(
     Compile(
