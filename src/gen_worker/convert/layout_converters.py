@@ -10,35 +10,37 @@ match exactly, §1.33's ladder decides what happens next:
                  reaches one — a priced production JOB, never a converter
     INCOMPATIBLE none of the above; refused, both sides named
 
-This module owns the CONVERTIBLE edge set and the relation over it. Three
+This module owns the CONVERTIBLE edge set and the relation over it. Four
 properties are load-bearing and are enforced by construction rather than by
 review:
 
 **1. Re-quantization is structurally unregistrable.** A registration is a PAIR
-— forward and inverse — and the admission proof runs `A -> B -> A` over the
-declared corpus and requires the recovered shard's content digest to equal the
-source's. A cast that discards bits has no inverse that can satisfy that, so it
-cannot enter this registry at all. It is not a convention that a lossy transform
-stays out; the registry cannot hold one. Re-quantization is
-:class:`LayoutProduction` — a different edge set, a different rung, and it
-carries a recipe NAME, never a transform.
+— forward and inverse — and :func:`prove_layout_conversion` runs `A -> B -> A`
+over the declared corpus at REGISTRATION, requiring the recovered shard's
+content digest to equal the source's. A cast that discards bits has no inverse
+that can satisfy that, so it cannot enter this registry at all. It is not a
+convention that a lossy transform stays out; the registry cannot hold one.
+Re-quantization is :class:`LayoutProduction` — a different edge set, a different
+rung, carrying a recipe NAME and a quality gate, never a transform.
 
-**2. A topology converter cannot touch payload bytes.** It declares a KEY MAP
-(`Callable[[keys], {old: new}]`) and nothing else; the engine does the copy by
-raw byte range (`writer.rewrite_safetensors_keys`), never decoding a tensor. Bit
--losslessness on that axis is therefore a property of the API, not of the
-converter's care.
+**2. A topology converter cannot touch payload bytes.** It declares
+:class:`~gen_worker.convert.repack_spec.RenameRule` passes — the SDK's existing
+key-rewrite vocabulary, reused rather than re-invented — and the engine copies
+each tensor by raw byte range (`writer.rewrite_safetensors_keys`), never
+decoding one. Bit-losslessness on that axis is a property of the API, not of
+the converter's care. It is also DATA, so a topology edge is readable by an AST
+sweep and by the hub, not only by a Python interpreter.
 
 **3. The relation never grows a special case.** Registering a converter adds an
 EDGE. :func:`plan_layout_conversions` and :func:`classify_layout` are fixed
-logic — membership, then reachability — and must never gain a per-format branch,
-a similarity score or a "close enough" fallback (§1.33's extensibility
-invariant, `f6f95736`). `scripts/lint_cell_key_layout_fence.py` fails on a
-handle literal appearing in either function.
+logic — membership, then reachability — and must never gain a per-format
+branch, a similarity score or a "close enough" fallback (§1.33's extensibility
+invariant, `f6f95736`). Neither function contains a literal handle string, and
+`scripts/lint_cell_key_layout_fence.py` fails if one appears.
 
-Preference is NOT here. §1.33 point 2 as amended (th#1803): the accepted set is
-a compatibility FILTER whose order carries no preference, and preference has
-exactly one authority — the author-configured ordered ladder of (GPU, lane)
+**4. Preference is NOT here.** §1.33 point 2 as amended (th#1803): the accepted
+set is a compatibility FILTER whose order carries no preference, and preference
+has exactly one authority — the author-configured ordered ladder of (GPU, lane)
 pairs. So the planner returns EVERY reachable accepted target and orders the
 result deterministically for reproducibility; the caller that owns a ladder
 chooses. A planner that picked "the earliest accepted layout" would be a second
@@ -55,6 +57,8 @@ import hashlib
 import json
 import os
 import struct
+import sys
+import tempfile
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -71,11 +75,13 @@ from ..models.tensor_layout_contract import (
     LayoutId,
     validate_layout_handle,
 )
-from .repack_spec import DeclarationError
+from .repack_spec import DeclarationError, RenameRule
 from .writer import (
     read_safetensors_header,
     rewrite_safetensors_keys,
     shard_content_digest,
+    shard_payload_digests,
+    shard_tensor_entries,
     write_safetensors_shard,
 )
 
@@ -91,7 +97,6 @@ MAX_CORPUS_PAYLOAD_BYTES = 1 << 20
 #: which the planner says in its refusal rather than silently paying for.
 MAX_PLAN_HOPS_PER_AXIS = 2
 
-KeyMapFn = Callable[[Tuple[str, ...]], Mapping[str, str]]
 RepackFn = Callable[["ConversionIO"], None]
 EquivalenceFn = Callable[[Path, Path], None]
 
@@ -211,8 +216,8 @@ class ConversionIO:
 
     Streaming: payloads are read one tensor at a time and emitted into a spool,
     so a repack never holds a component in memory. Deliberately NOT handed to a
-    topology converter — that axis declares a key map and the engine copies by
-    byte range, which is what makes its bit-losslessness structural.
+    topology converter — that axis declares rename rules and the engine copies
+    by byte range, which is what makes its bit-losslessness structural.
     """
 
     def __init__(self, source: Path, target: Path) -> None:
@@ -239,12 +244,16 @@ class ConversionIO:
 
     def spec(self, key: str) -> CorpusTensor:
         meta = self._entry(key)
+        shape = meta["shape"]
+        assert isinstance(shape, (list, tuple))
         return CorpusTensor(
-            dtype=str(meta["dtype"]), shape=tuple(int(d) for d in meta["shape"]))
+            dtype=str(meta["dtype"]), shape=tuple(int(d) for d in shape))
 
     def read(self, key: str) -> bytes:
         meta = self._entry(key)
-        start, end = int(meta["data_offsets"][0]), int(meta["data_offsets"][1])
+        offsets = meta["data_offsets"]
+        assert isinstance(offsets, (list, tuple))
+        start, end = int(offsets[0]), int(offsets[1])
         out = bytearray()
         offset = self._base + start
         remaining = end - start
@@ -315,21 +324,42 @@ class ConversionIO:
 # ---------------------------------------------------------------------------
 
 
+def apply_rename_rules(
+    keys: Sequence[str], rules: Sequence[RenameRule],
+) -> Dict[str, str]:
+    """Run the declared rename passes over a key set: ``{old: new}``, total.
+
+    The passes are ``convert.repack_spec.RenameRule`` verbatim — the same
+    prefix / substring / alternation vocabulary the repackage engine already
+    executes. One vocabulary, one semantics; a topology edge that needed a
+    different one would be describing something that is not a rename.
+    """
+    out: Dict[str, str] = {}
+    for key in keys:
+        renamed = key
+        for rule in rules:
+            renamed = rule.apply(renamed)
+        out[key] = renamed
+    return out
+
+
 @dataclass(frozen=True)
 class TopologyConversion:
-    """A TOPOLOGY-axis mapping: a key map, and its inverse.
+    """A TOPOLOGY-axis mapping: declared rename passes, and their inverse.
 
-    The whole declaration is `(keys) -> {old: new}` in both directions. There
-    is no payload API — the engine copies each tensor by raw byte range — so
-    "bit-lossless" is a property of this class rather than a claim a converter
-    makes about itself.
+    The whole declaration is DATA — two tuples of
+    :class:`~gen_worker.convert.repack_spec.RenameRule` — so the engine copies
+    each tensor by raw byte range and "bit-lossless" is a property of this
+    class rather than a claim a converter makes about itself. There is
+    deliberately no payload hook and no callable: a topology edge that wanted
+    to touch bytes is a quant edge that has not admitted it.
     """
 
     from_id: str
     to_id: str
     version: int
-    forward_keys: KeyMapFn
-    inverse_keys: KeyMapFn
+    rules: Tuple[RenameRule, ...]
+    inverse_rules: Tuple[RenameRule, ...]
     corpus: Tuple[ConversionCase, ...]
     why: str = ""
 
@@ -337,16 +367,26 @@ class TopologyConversion:
     proof: str = field(default="key_bijection", init=False)
     needs_torch: bool = field(default=False, init=False)
 
+    def __post_init__(self) -> None:
+        if not self.rules or not self.inverse_rules:
+            raise DeclarationError(
+                f"topology {self.from_id} -> {self.to_id}: both rules= and "
+                "inverse_rules= are required. A lossless mapping is invertible "
+                "by definition, and the inverse is what the admission proof "
+                "runs — an edge with no stated inverse cannot be proven "
+                "lossless, so it cannot be a CONVERTIBLE edge.")
+
 
 @dataclass(frozen=True)
 class QuantRepack:
     """A QUANT-axis SAME-NUMERICS repack: different packing, identical values.
 
-    `equivalence` is the obligation §1.33 names — the target contract's own
-    reference dequant applied to both shards — and it runs over the corpus at
-    registration. It is required, not optional: a quant-axis edge with nothing
-    proving the values survived is exactly the re-quantization this registry
-    must not hold.
+    Unlike topology, this axis genuinely rewrites payload bytes, so the
+    transform is code. `equivalence` is the obligation §1.33 names — the target
+    contract's own reference dequant applied to both shards — and it runs over
+    the corpus at registration alongside the round trip. It is required, not
+    optional: a quant-axis edge with nothing proving the values survived is
+    exactly the re-quantization this registry must not hold.
     """
 
     from_id: str
@@ -429,36 +469,52 @@ class LayoutVerdict:
 _lock = RLock()
 _edges: Dict[Tuple[str, str, str], ConversionHop] = {}
 _specs: Dict[Tuple[str, str, str], LayoutConversion] = {}
-_applies: Dict[Tuple[str, str, str], Union[KeyMapFn, RepackFn]] = {}
+_directions: Dict[Tuple[str, str, str], bool] = {}  # key -> is the spec's forward
 _productions: Dict[Tuple[str, str, str], LayoutProduction] = {}
 
 
-def _apply_module_digest(fn: Callable[..., object]) -> str:
-    """Content identity of the module a converter's code lives in.
+def _module_content_digest(fn: Callable[..., object]) -> str:
+    """Content identity of the module a repack's code lives in.
 
     pgw#990's primitive, reused rather than reinvented: there is ONE
     code-identity mechanism in this SDK and a second one would be a second
-    answer to "did the bytes change".
+    answer to "did the bytes change". Content, not mtime — the digest must be
+    identical on the hub and on a laptop or the derived-artifact identity
+    stops deduping (§1.33 point 4).
     """
-    module = getattr(fn, "__module__", "")
-    path = getattr(__import__("sys").modules.get(module, None), "__file__", None)
+    module = sys.modules.get(getattr(fn, "__module__", ""), None)
+    path = getattr(module, "__file__", None)
     if not path:
         return "unlocatable"
     stat = Path(path).stat()
     return _closure_file_digest(str(path), stat.st_mtime_ns, stat.st_size)
 
 
+def _body_digest(spec: LayoutConversion, *, forward: bool) -> str:
+    """What the edge DOES, as a content address.
+
+    Topology edges are data, so their body IS the declared rename passes —
+    fully deterministic, no code identity needed. Quant edges are code, so
+    their body is the content digest of the module the transform lives in.
+    """
+    if isinstance(spec, TopologyConversion):
+        rules = spec.rules if forward else spec.inverse_rules
+        return hashlib.sha256(json.dumps(
+            [[r.kind, [list(p) for p in r.pairs]] for r in rules],
+            separators=(",", ":"),
+        ).encode()).hexdigest()[:16]
+    return _module_content_digest(spec.forward if forward else spec.inverse)
+
+
 def converter_digest(
-    axis: str, from_id: str, to_id: str, version: int,
-    fn: Callable[..., object],
+    axis: str, from_id: str, to_id: str, version: int, body: str,
 ) -> str:
-    """`sha256(axis ‖ from ‖ to ‖ version ‖ code closure of the apply module)`.
+    """`sha256(axis ‖ from ‖ to ‖ version ‖ body digest)`.
 
     Bumping `version` changes the digest, which changes every derived
     artifact's identity — bytes never silently change under a name.
     """
-    payload = "\x00".join(
-        [axis, from_id, to_id, str(int(version)), _apply_module_digest(fn)])
+    payload = "\x00".join([axis, from_id, to_id, str(int(version)), body])
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -485,6 +541,10 @@ def register_layout_conversion(
     Refuses, by name: an unknown handle on the axis, a self-edge, a re-declared
     edge with different content, and any mapping whose `A -> B -> A` round trip
     over its own corpus does not recover the source content exactly.
+
+    Both directions are registered because a lossless mapping is invertible and
+    the inverse was proven in the same pass: withholding it would be an edge
+    the platform knows is safe and refuses to use.
     """
     _validate_declaration(spec)
     prove_layout_conversion(spec)
@@ -499,15 +559,15 @@ def register_layout_conversion(
                     f"layout conversion {key[0]} {key[1]} -> {key[2]} is "
                     "already registered with a different declaration; pass "
                     "replace=True only if you own both")
-        for key, fn in ((forward_key, _forward_of(spec)),
-                        (inverse_key, _inverse_of(spec))):
+        for key, is_forward in ((forward_key, True), (inverse_key, False)):
             _specs[key] = spec
-            _applies[key] = fn
+            _directions[key] = is_forward
             _edges[key] = ConversionHop(
                 axis=key[0], from_id=key[1], to_id=key[2],
                 version=spec.version,
-                digest=converter_digest(key[0], key[1], key[2],
-                                        spec.version, fn),
+                digest=converter_digest(
+                    key[0], key[1], key[2], spec.version,
+                    _body_digest(spec, forward=is_forward)),
             )
     return spec
 
@@ -529,6 +589,8 @@ def register_layout_production(
     where = f"LayoutProduction({spec.from_id} -> {spec.to_id})"
     validate_layout_handle(spec.from_id, where=where, axis=spec.axis)
     validate_layout_handle(spec.to_id, where=where, axis=spec.axis)
+    if spec.from_id == spec.to_id:
+        raise DeclarationError(f"{where}: a production to itself is not an edge")
     if not str(spec.recipe or "").strip():
         raise DeclarationError(f"{where}: recipe is empty")
     if not str(spec.quality_gate or "").strip():
@@ -569,18 +631,8 @@ def reset_layout_conversions() -> None:
     with _lock:
         _edges.clear()
         _specs.clear()
-        _applies.clear()
+        _directions.clear()
         _productions.clear()
-
-
-def _forward_of(spec: LayoutConversion) -> Union[KeyMapFn, RepackFn]:
-    return (spec.forward_keys if isinstance(spec, TopologyConversion)
-            else spec.forward)
-
-
-def _inverse_of(spec: LayoutConversion) -> Union[KeyMapFn, RepackFn]:
-    return (spec.inverse_keys if isinstance(spec, TopologyConversion)
-            else spec.inverse)
 
 
 def _validate_declaration(spec: LayoutConversion) -> None:
@@ -622,8 +674,6 @@ def prove_layout_conversion(spec: LayoutConversion) -> Tuple[str, ...]:
     4. **dequant equivalence** (quant) — the declared reference dequant agrees
        across the pair.
     """
-    import tempfile
-
     passed: List[str] = []
     with tempfile.TemporaryDirectory(prefix="cozy-layout-proof-") as tmp:
         root = Path(tmp)
@@ -631,24 +681,13 @@ def prove_layout_conversion(spec: LayoutConversion) -> Tuple[str, ...]:
             source = materialize_case(case, root / f"{case.name}.src.safetensors")
             forward = root / f"{case.name}.fwd.safetensors"
             back = root / f"{case.name}.rt.safetensors"
-            try:
-                _apply_hop(spec, _forward_of(spec), source, forward)
-            except Exception as exc:  # noqa: BLE001 - re-raised typed
-                raise ConversionProofError(
-                    f"{spec.axis} {spec.from_id} -> {spec.to_id}: forward "
-                    f"mapping failed on corpus case {case.name!r}: {exc}"
-                ) from exc
+            _run_hop_or_raise(spec, source, forward, forward=True, case=case)
             _prove_keys(spec, case, source, forward)
+            passed.append(f"{case.name}:key_bijection")
             if isinstance(spec, TopologyConversion):
                 _prove_payload_invariance(spec, case, source, forward)
                 passed.append(f"{case.name}:payload_invariance")
-            try:
-                _apply_hop(spec, _inverse_of(spec), forward, back)
-            except Exception as exc:  # noqa: BLE001 - re-raised typed
-                raise ConversionProofError(
-                    f"{spec.axis} {spec.from_id} -> {spec.to_id}: inverse "
-                    f"mapping failed on corpus case {case.name!r}: {exc}"
-                ) from exc
+            _run_hop_or_raise(spec, forward, back, forward=False, case=case)
             before, after = shard_content_digest(source), shard_content_digest(back)
             if before != after:
                 raise ConversionProofError(
@@ -673,24 +712,34 @@ def prove_layout_conversion(spec: LayoutConversion) -> Tuple[str, ...]:
     return tuple(passed)
 
 
+def _run_hop_or_raise(
+    spec: LayoutConversion, source: Path, target: Path, *,
+    forward: bool, case: ConversionCase,
+) -> None:
+    try:
+        _apply_hop(spec, source, target, forward=forward)
+    except Exception as exc:  # noqa: BLE001 - re-raised typed
+        direction = "forward" if forward else "inverse"
+        raise ConversionProofError(
+            f"{spec.axis} {spec.from_id} -> {spec.to_id}: {direction} mapping "
+            f"failed on corpus case {case.name!r}: {exc}") from exc
+
+
 def _apply_hop(
-    spec: LayoutConversion, fn: Union[KeyMapFn, RepackFn],
-    source: Path, target: Path,
+    spec: LayoutConversion, source: Path, target: Path, *, forward: bool,
 ) -> None:
     """Execute ONE hop. Topology goes through the raw byte-range rewrite and
     never decodes; quant goes through the streaming IO."""
     if isinstance(spec, TopologyConversion):
-        keymap_fn: KeyMapFn = fn  # type: ignore[assignment]
-        with open(source, "rb") as fh:
-            fd = fh.fileno()
-            header, _ = read_safetensors_header(fd)
-        keys = tuple(k for k in header if k != "__metadata__")
-        rewrite_safetensors_keys(source, target, keymap_fn(keys))
+        rules = spec.rules if forward else spec.inverse_rules
+        keys = tuple(name for name, _ in shard_tensor_entries(source))
+        rewrite_safetensors_keys(
+            source, target, apply_rename_rules(keys, rules))
         return
-    repack_fn: RepackFn = fn  # type: ignore[assignment]
+    repack: RepackFn = spec.forward if forward else spec.inverse
     io = ConversionIO(source, target)
     try:
-        repack_fn(io)
+        repack(io)
     finally:
         io.close()
 
@@ -698,17 +747,17 @@ def _apply_hop(
 def _prove_keys(
     spec: LayoutConversion, case: ConversionCase, source: Path, target: Path,
 ) -> None:
-    src_keys = set(_shard_keys(source))
-    dst_keys = list(_shard_keys(target))
+    src_keys = [name for name, _ in shard_tensor_entries(source)]
+    dst_keys = [name for name, _ in shard_tensor_entries(target)]
     if len(dst_keys) != len(set(dst_keys)):
         raise ConversionProofError(
             f"{spec.axis} {spec.from_id} -> {spec.to_id}: corpus case "
             f"{case.name!r} produced a duplicate key — the map is not injective")
-    if len(dst_keys) != len(src_keys):
-        dropped = len(src_keys) - len(dst_keys)
+    if len(dst_keys) != len(set(src_keys)):
+        dropped = len(set(src_keys)) - len(dst_keys)
         raise ConversionProofError(
             f"{spec.axis} {spec.from_id} -> {spec.to_id}: corpus case "
-            f"{case.name!r} has {len(src_keys)} source keys and "
+            f"{case.name!r} has {len(set(src_keys))} source keys and "
             f"{len(dst_keys)} output keys ({dropped:+d}). An unmapped key is a "
             "REFUSAL, never a silent skip, and an invented key is worse.")
 
@@ -716,32 +765,13 @@ def _prove_keys(
 def _prove_payload_invariance(
     spec: TopologyConversion, case: ConversionCase, source: Path, target: Path,
 ) -> None:
-    before = sorted(_payload_digests(source).values())
-    after = sorted(_payload_digests(target).values())
+    before = sorted(shard_payload_digests(source).values())
+    after = sorted(shard_payload_digests(target).values())
     if before != after:
         raise ConversionProofError(
             f"topology {spec.from_id} -> {spec.to_id}: corpus case "
             f"{case.name!r} changed payload bytes. The topology axis is keys "
             "only — 'what the weights ARE' is the quant axis.")
-
-
-def _shard_keys(path: Path) -> Tuple[str, ...]:
-    with open(path, "rb") as fh:
-        header, _ = read_safetensors_header(fh.fileno())
-    return tuple(k for k in header if k != "__metadata__")
-
-
-def _payload_digests(path: Path) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    with open(path, "rb") as fh:
-        header, base = read_safetensors_header(fh.fileno())
-        for name, meta in header.items():
-            if name == "__metadata__" or not isinstance(meta, dict):
-                continue
-            start, end = int(meta["data_offsets"][0]), int(meta["data_offsets"][1])
-            fh.seek(base + start)
-            out[name] = hashlib.sha256(fh.read(end - start)).hexdigest()
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +794,12 @@ def _axis_satisfied(demand: Optional[str], supply: Optional[str]) -> bool:
 
 
 def _unevaluated(source: LayoutId, accepts: Sequence[LayoutId]) -> Tuple[str, ...]:
+    """Axes this verdict did NOT decide, because one side never stated them.
+
+    Reported rather than assumed: an unstated axis is UNDECLARED, which is a
+    different fact from "agnostic", and a caller that needs exactness on it
+    must refuse rather than read silence as agreement.
+    """
     return tuple(
         axis for axis in LAYOUT_AXES
         if source.axis(axis) is None
@@ -788,7 +824,7 @@ def _shortest_chain(
         node, chain = queue.popleft()
         if len(chain) >= MAX_PLAN_HOPS_PER_AXIS:
             continue
-        for edge in edges:
+        for edge in sorted(edges, key=lambda e: (e.from_id, e.to_id)):
             if edge.from_id != node or edge.to_id in seen:
                 continue
             extended = chain + (edge,)
@@ -842,8 +878,8 @@ def _reachable_productions(
     for production in productions:
         if source.axis(production.axis) != production.from_id:
             continue
+        candidate = source.with_axis(production.axis, production.to_id)
         for target in accepts:
-            candidate = source.with_axis(production.axis, production.to_id)
             if all(_axis_satisfied(target.axis(a), candidate.axis(a))
                    for a in LAYOUT_AXES):
                 out.append(production)
@@ -907,8 +943,8 @@ def classify_layout(
 #: self-describe, so anyone can re-derive the identity without the hub.
 CONVERSION_PROVENANCE_KEY = "cozy.conversion"
 
-#: `produced_by` value that the publish path REFUSES (§4.28): a conversion done
-#: on untrusted hardware is for that machine's own store, forever.
+#: `produced_by` value the publish path REFUSES (§4.28): a conversion done on
+#: an untrusted machine is for that machine's own store, forever.
 PRODUCED_BY_LOCAL = "local_conversion"
 
 
@@ -941,23 +977,22 @@ def run_layout_conversion(
     if not hops:
         raise DeclarationError("run_layout_conversion: the plan has no hops")
 
-    import tempfile
-
     current = Path(source)
     with tempfile.TemporaryDirectory(
             prefix="cozy-layout-", dir=str(target.parent)) as tmp:
         for index, hop in enumerate(hops):
+            key = (hop.axis, hop.from_id, hop.to_id)
             with _lock:
-                spec = _specs.get((hop.axis, hop.from_id, hop.to_id))
-                fn = _applies.get((hop.axis, hop.from_id, hop.to_id))
-            if spec is None or fn is None:
+                spec = _specs.get(key)
+                forward = _directions.get(key)
+            if spec is None or forward is None:
                 raise DeclarationError(
                     f"no registered converter for {hop.axis} {hop.from_id} -> "
                     f"{hop.to_id}; the plan names an edge this process does "
                     "not hold")
             last = index == len(hops) - 1
             out = target if last else Path(tmp) / f"hop{index}.safetensors"
-            _apply_hop(spec, fn, current, out)
+            _apply_hop(spec, current, out, forward=forward)
             current = out
 
     identity = derived_artifact_identity(source_digest, plan.digests, plan.target)
@@ -1013,10 +1048,12 @@ __all__ = [
     "PRODUCED_BY_LOCAL",
     "QuantRepack",
     "TopologyConversion",
+    "apply_rename_rules",
     "classify_layout",
     "conversion_provenance",
     "converter_digest",
     "derived_artifact_identity",
+    "materialize_case",
     "plan_layout_conversions",
     "prove_layout_conversion",
     "register_layout_conversion",

@@ -228,6 +228,19 @@ jobs:
       - name: pgw#1143 guard - Slot(layouts=) declarations are literals
         run: uv run python scripts/lint_layout_declarations.py
 
+      # GATING (pgw#1143, §1.33 point 5): conversion is UPSTREAM of compute, so
+      # no cell-key axis may read the layout demand or a conversion chain — no
+      # cell re-keys on a conversion, ever. The fenced module set is DERIVED
+      # from who calls a cell-key axis producer, so a new key computation joins
+      # the fence without anyone remembering to add it.
+      - name: pgw#1143 guard - no cell-key axis reads the layout vocabulary
+        run: uv run python scripts/lint_cell_key_layout_fence.py
+
+      # GATING (pgw#740 + pgw#1143): the shipped wheel's registries are bare
+      # by design and a consumer's declarations populate all six.
+      - name: pgw#740 guard - registry contract
+        run: uv run python scripts/check_registry_contract.py
+
       # GATING (pgw#1122): the compute child holds no worker credential BY
       # CONSTRUCTION, so a gate that reads one to answer "who am I?" or "is
       # there a hub?" refuses on every real serving pod (pgw#1108, then

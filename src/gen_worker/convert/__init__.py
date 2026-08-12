@@ -41,6 +41,29 @@ from .component import Component
 from .dataset import Dataset, write_jsonl_shard
 from .hub import CommitFile, CommitResult, HubClient, HubPublishError
 from .ingest import IngestedSource, ingest_civitai, ingest_huggingface
+from .layout_converters import (
+    ConversionCase,
+    ConversionHop,
+    ConversionIO,
+    ConversionPlan,
+    ConversionProofError,
+    ConversionResult,
+    CorpusTensor,
+    LayoutProduction,
+    LayoutRung,
+    LayoutVerdict,
+    QuantRepack,
+    TopologyConversion,
+    classify_layout,
+    conversion_provenance,
+    derived_artifact_identity,
+    plan_layout_conversions,
+    register_layout_conversion,
+    register_layout_production,
+    registered_layout_conversions,
+    registered_layout_productions,
+    run_layout_conversion,
+)
 from .layout_spec import DirMatch, HintMatch, LayoutDeclaration
 from .loaded_component import LoadedComponent
 from .produced import ProducedFlavor
@@ -156,4 +179,26 @@ __all__ = [
     "registered_repackage_families",
     "repackage_family",
     "require_repackage_family",
+    # §1.33 / pgw#1143: the layout converter registry — the CONVERTIBLE rung.
+    "ConversionCase",
+    "ConversionHop",
+    "ConversionIO",
+    "ConversionPlan",
+    "ConversionProofError",
+    "ConversionResult",
+    "CorpusTensor",
+    "LayoutProduction",
+    "LayoutRung",
+    "LayoutVerdict",
+    "QuantRepack",
+    "TopologyConversion",
+    "classify_layout",
+    "conversion_provenance",
+    "derived_artifact_identity",
+    "plan_layout_conversions",
+    "register_layout_conversion",
+    "register_layout_production",
+    "registered_layout_conversions",
+    "registered_layout_productions",
+    "run_layout_conversion",
 ]

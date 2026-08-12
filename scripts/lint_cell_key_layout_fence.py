@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""pgw#1143 (§1.33 point 5): CONVERSION IS UPSTREAM OF COMPUTE — no cell re-keys.
+
+    Every byte the endpoint's loader/`setup()` observes is in one of the slot's
+    DECLARED accepted layouts. Conversion completes strictly before
+    materialization into the worker's model tree, and the endpoint has no code
+    path that can observe the source layout, the conversion, or its provenance.
+    Therefore the traced graph, `Compile.contract_axes()`, the ck1 cell key and
+    the declared envelope are unchanged by any conversion, and no cell re-keys —
+    ever.
+
+An invariant nobody can execute is a comment, so this script executes it. Two
+fences, both structural:
+
+**FENCE 1 — no cell-key axis reads the layout vocabulary.** The fenced module
+set is DERIVED, not hand-listed: any module that calls a cell-key axis producer
+(`cell_key.from_axes`, `envelope_digest`, `toolchain_axis_digest`,
+`facts_digest`, `from_exported_artifact_metadata`, or constructs `CellKey`) is
+in it, plus `cell_key` itself. A new module that starts computing a key joins
+the fence automatically — the failure mode of a hand-maintained list is that the
+one file that violates the rule is the one nobody added.
+
+Inside the fence, referencing the DEMAND / CONVERSION half of the layout
+vocabulary is red: the `layout_converters` module, `Slot.layouts`, `LayoutId`,
+the planner, the verdict, the provenance. Whether by import, by attribute, or by
+a string naming the module — a deferred `importlib.import_module` is the obvious
+way around an import check, so strings count.
+
+Deliberately NOT banned: `@implements_contract` and `ContractDecoder`. Those are
+the DECODER CENSUS half of the same module — "which decoders does this image
+contain" — which is a property of the wheel that legitimately reaches the
+toolchain closure. The banned set is the demand/conversion half, which is what
+§1.33 point 5 is about.
+
+**FENCE 2 — the compatibility RELATION holds no format knowledge.** §1.33's
+extensibility invariant (`f6f95736`): *"Contract CONTENTS evolve; the
+compatibility RELATION never does."* So the functions that compute the rung
+must contain zero literal contract handles. A handle literal appearing there is
+the first line of a per-format special case, which the ruling forbids; it is
+also the shape a similarity heuristic arrives in.
+
+Run::
+
+    python scripts/lint_cell_key_layout_fence.py
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+import sys
+from pathlib import Path
+from typing import Dict, List, Set, Tuple
+
+REPO = Path(__file__).resolve().parents[1]
+SRC = REPO / "src" / "gen_worker"
+
+#: Calling one of these MAKES a module a cell-key axis producer. Narrow on
+#: purpose: `facts_digest` and `subject_digest` are generic canonical-digest
+#: helpers whose callers say so (`contract_facts`: "NOT a key-axis input";
+#: `subject_digest` names a MINT OBLIGATION, never a cell key), so probing on
+#: them would fence modules that compute no key and make the gate noise.
+AXIS_PRODUCERS: Tuple[str, ...] = (
+    "from_axes",
+    "envelope_digest",
+    "toolchain_axis_digest",
+    "from_exported_artifact_metadata",
+    "CellKey",
+)
+
+#: Always fenced, whatever they call: they DEFINE the key or one of its four
+#: axis inputs (graph / envelope / sm / toolchain).
+FENCE_SEED: Tuple[str, ...] = (
+    "cell_key.py",
+    "graph_hash.py",
+    "env_seal.py",
+    "host_isa.py",
+    "guard_closure.py",
+    "compile_cache.py",
+)
+
+#: The DEMAND / CONVERSION half of the layout vocabulary. Names.
+BANNED_NAMES: Tuple[str, ...] = (
+    "LayoutId",
+    "LayoutRung",
+    "LayoutVerdict",
+    "LayoutProduction",
+    "ConversionPlan",
+    "ConversionHop",
+    "ConversionResult",
+    "TopologyConversion",
+    "QuantRepack",
+    "classify_layout",
+    "plan_layout_conversions",
+    "run_layout_conversion",
+    "conversion_provenance",
+    "derived_artifact_identity",
+    "registered_layout_conversions",
+    "registered_layout_productions",
+    "normalize_layout_demand",
+    "validate_layout_handle",
+    "parse_layout_id",
+    "known_contracts",
+    "layouts",
+    "CONVERSION_PROVENANCE_KEY",
+)
+
+#: Module paths that must not be reachable from a fenced module, including via
+#: a string handed to importlib.
+BANNED_MODULES: Tuple[str, ...] = (
+    "gen_worker.convert.layout_converters",
+    "convert.layout_converters",
+    "layout_converters",
+)
+
+#: The functions that COMPUTE the rung. Fence 2 applies to their bodies.
+RELATION_MODULE = SRC / "convert" / "layout_converters.py"
+RELATION_FUNCTIONS: Tuple[str, ...] = (
+    "classify_layout",
+    "plan_layout_conversions",
+    "_shortest_chain",
+    "_axis_satisfied",
+    "_reachable_productions",
+    "_unevaluated",
+)
+
+_HANDLE_LITERAL = re.compile(r"^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$")
+
+
+def _iter_modules() -> List[Path]:
+    return sorted(p for p in SRC.rglob("*.py"))
+
+
+def _called_names(tree: ast.AST) -> Set[str]:
+    """Every callee's last name component in one module."""
+    out: Set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            out.add(func.attr)
+        elif isinstance(func, ast.Name):
+            out.add(func.id)
+    return out
+
+
+def fenced_modules() -> Dict[Path, str]:
+    """Modules the fence covers, mapped to WHY they are covered."""
+    out: Dict[Path, str] = {}
+    for path in _iter_modules():
+        if path.name in FENCE_SEED and path.parent == SRC:
+            out[path] = "defines the cell key or one of its axis inputs"
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        hits = sorted(_called_names(tree) & set(AXIS_PRODUCERS))
+        if hits:
+            out[path] = f"computes a cell-key axis ({', '.join(hits)})"
+    return out
+
+
+def _docstring_nodes(tree: ast.AST) -> Set[int]:
+    """Every docstring Constant, by id.
+
+    PROSE IS NOT A REFERENCE. A gate that reds on the word appearing in a
+    comment teaches lanes to avoid explaining themselves, and a vocabulary gate
+    that fires on a docstring has already cost this repo a lane-day.
+    """
+    out: Set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef,
+                                 ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", [])
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            out.add(id(body[0].value))
+    return out
+
+
+def _violations(path: Path) -> List[Tuple[int, str]]:
+    """Layout-vocabulary references in one fenced module."""
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    banned = set(BANNED_NAMES)
+    word = re.compile(r"\b(" + "|".join(re.escape(n) for n in BANNED_NAMES) + r")\b")
+    docstrings = _docstring_nodes(tree)
+    hits: List[Tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in BANNED_MODULES:
+                    hits.append((node.lineno, f"import {alias.name}"))
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module in BANNED_MODULES or module.endswith(".layout_converters"):
+                hits.append((node.lineno, f"from {module} import ..."))
+            for alias in node.names:
+                if alias.name in banned:
+                    hits.append((node.lineno, f"from {module} import {alias.name}"))
+        elif isinstance(node, ast.Attribute) and node.attr in banned:
+            hits.append((node.lineno, f".{node.attr}"))
+        elif isinstance(node, ast.Name) and node.id in banned:
+            hits.append((node.lineno, node.id))
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docstrings):
+            # Non-docstring strings count: `getattr(slot, "layouts")`, a
+            # deferred `import_module("...layout_converters")` and a stringized
+            # annotation are the three ways around a name/import check.
+            found = word.search(node.value)
+            if node.value in BANNED_MODULES:
+                hits.append((node.lineno, f"string {node.value!r}"))
+            elif found and any(m in node.value for m in BANNED_MODULES):
+                hits.append((node.lineno, f"string {node.value!r}"))
+            elif found:
+                hits.append((node.lineno, f"string names {found.group(1)!r}"))
+    return sorted(set(hits))
+
+
+def _relation_handle_literals() -> List[Tuple[int, str]]:
+    """Contract-handle literals inside the rung computation (fence 2)."""
+    tree = ast.parse(RELATION_MODULE.read_text(encoding="utf-8"))
+    hits: List[Tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name not in RELATION_FUNCTIONS:
+            continue
+        for inner in ast.walk(node):
+            if (isinstance(inner, ast.Constant)
+                    and isinstance(inner.value, str)
+                    and _HANDLE_LITERAL.match(inner.value)):
+                hits.append((inner.lineno, f"{node.name}: {inner.value!r}"))
+    return sorted(set(hits))
+
+
+def main() -> int:
+    failures: List[str] = []
+
+    fenced = fenced_modules()
+    if not fenced:
+        print("FAIL: the fence covers NO module — the axis-producer probe is "
+              "stale, which makes this gate green for the wrong reason")
+        return 1
+    print(f"fence 1: {len(fenced)} cell-key module(s)")
+    for path, why in sorted(fenced.items()):
+        rel = path.relative_to(REPO)
+        hits = _violations(path)
+        if hits:
+            for line, what in hits:
+                failures.append(f"{rel}:{line}: reads the layout vocabulary ({what})")
+            print(f"  [FAIL] {rel} — {why}")
+        else:
+            print(f"  [ok]   {rel} — {why}")
+
+    literals = _relation_handle_literals()
+    print(f"fence 2: {len(RELATION_FUNCTIONS)} relation function(s)")
+    if literals:
+        for line, what in literals:
+            failures.append(
+                f"{RELATION_MODULE.relative_to(REPO)}:{line}: the compatibility "
+                f"RELATION names a format ({what})")
+        print("  [FAIL] a handle literal reached the relation")
+    else:
+        print("  [ok]   no contract-handle literal in the relation")
+
+    if failures:
+        print(f"\n§1.33 point 5 fence BROKEN ({len(failures)} violation(s)):")
+        for line in failures:
+            print(f"  - {line}")
+        print(
+            "\nConversion is UPSTREAM of compute. If a cell-key axis needs to "
+            "know the layout, the conversion is happening too late — move it "
+            "ahead of materialization instead of widening the key.")
+        return 1
+    print("\n§1.33 point 5 fence holds: no cell re-keys on a conversion")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

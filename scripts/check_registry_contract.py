@@ -8,13 +8,13 @@ therefore the WRONG assertion for a bare wheel. The right one — asserted here 
 is the contract:
 
   A. bare import exposes working registry mechanisms in their DOCUMENTED bare
-     state (family/convert/export registries empty, generic component
-     vocabulary present, unknown families refused BY NAME with the fix in the
-     message);
+     state (family/convert/export/layout-conversion registries empty, generic
+     component vocabulary present, unknown families refused BY NAME with the
+     fix in the message);
   B. a representative consumer's declarations, imported via the documented
-     ``load_declaration_module`` path, become visible in ALL five registries
+     ``load_declaration_module`` path, become visible in ALL six registries
      and resolve (aliases, layout hints, foreign-catalog adapter, defaults
-     class, export declaration).
+     class, export declaration, layout conversion edge).
 
 Run with ``--installed`` (the publish workflow does, against the freshly built
 wheel in a clean venv) to also refuse a ``gen_worker`` that resolves from this
@@ -59,6 +59,8 @@ def phase_bare() -> None:
     from gen_worker.component_vocab import component_vocabulary
     from gen_worker.convert import (
         UnknownFamilyError,
+        registered_layout_conversions,
+        registered_layout_productions,
         registered_layouts,
         registered_repackage_families,
         require_repackage_family,
@@ -69,6 +71,12 @@ def phase_bare() -> None:
     _check("repackage", registered_repackage_families() == (), "bare registry empty-by-design")
     _check("layouts", registered_layouts() == (), "bare registry empty-by-design")
     _check("export", registered_export_families() == (), "bare registry empty-by-design")
+    _check(
+        "layout-conversions",
+        registered_layout_conversions() == () and registered_layout_productions() == (),
+        "bare registry empty-by-design (§1.33: edges are declared by whoever "
+        "owns the format, never shipped in the wheel)",
+    )
     vocab = component_vocabulary()
     _check(
         "component_vocab",
@@ -93,6 +101,7 @@ def phase_consumer() -> None:
         civitai_to_family,
         load_declaration_module,
         normalize_family,
+        registered_layout_conversions,
         registered_layouts,
         registered_repackage_families,
     )
@@ -133,6 +142,15 @@ def phase_consumer() -> None:
         "export",
         fam in registered_export_families(),
         "class-bearing Compile declaration registered",
+    )
+    edges = registered_layout_conversions()
+    _check(
+        "layout-conversions",
+        {(e.from_id, e.to_id) for e in edges}
+        == {("comfy.splitfiles@1", "diffusers.multifile@1"),
+            ("diffusers.multifile@1", "comfy.splitfiles@1")},
+        "TopologyConversion registered — BOTH directions, because the "
+        "round-trip admission proof passed on both",
     )
 
 
