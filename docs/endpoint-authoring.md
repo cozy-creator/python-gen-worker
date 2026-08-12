@@ -370,7 +370,7 @@ class Generate:
   (`share_components=` is deleted).
 - **`layouts=` declares WHAT BYTES THIS SLOT'S CODE CAN EXECUTE** (§1.33,
   pgw#1143) — the DEMAND half of the tensor-layout contract, per component
-  path, ordered by preference:
+  path, a SET:
 
   ```python
   from gen_worker.models.tensor_layout_contract import (
@@ -396,6 +396,47 @@ class Generate:
   lands in the build log as `layouts_census_unbacked`, because plenty of
   layouts are decoded natively by `transformers`/`diffusers` with no cozy
   marker.
+
+  **The set is a compatibility FILTER — its order carries no preference**
+  (§1.33 pt 2 as amended by th#1803). Preference has exactly one authority:
+  the owner-configured ordered ladder of (GPU, lane) pairs. The SDK
+  canonicalizes what you write, so spelling the set in a different order is
+  the same declaration, not a different one.
+
+  **When an artifact does not match, §1.33's ladder decides** — COMPATIBLE
+  (in the set) → **CONVERTIBLE** (a registered LOSSLESS mapping reaches an
+  accepted layout) → **PRODUCIBLE** (only a re-quantization from a named
+  higher-precision source does — a priced job, never automatic) →
+  INCOMPATIBLE (refused, both sides named, before any pod). The CONVERTIBLE
+  edge set is `gen_worker.convert.layout_converters`, declared by whoever
+  owns the format:
+
+  ```python
+  from gen_worker.convert import (
+      ConversionCase, CorpusTensor, TopologyConversion,
+      register_layout_conversion)
+  from gen_worker.convert.repack_spec import RenameRule
+
+  register_layout_conversion(TopologyConversion(
+      from_id=TOPOLOGY_COMFY_SPLITFILES,
+      to_id=TOPOLOGY_DIFFUSERS_MULTIFILE,
+      version=1,
+      rules=(RenameRule(kind="prefix",
+             pairs=(("model.diffusion_model.", "transformer."),)),),
+      inverse_rules=(RenameRule(kind="prefix",
+             pairs=(("transformer.", "model.diffusion_model."),)),),
+      corpus=(ConversionCase(name="dit-block0", tensors={...}),),
+  ))
+  ```
+
+  Registration RUNS the mapping's bit-exactness obligation over its corpus
+  before the edge exists: key bijection, payload invariance, and `A → B → A`
+  content recovery. **A re-quantization cannot pass that round trip, so it
+  cannot be registered as a converter** — it is
+  `register_layout_production()`, which carries a recipe name and a quality
+  gate and no transform. Bump `version` when the mapping changes; the digest
+  moves and every derived artifact gets a new identity, so bytes never
+  silently change under a name.
 
 **Per-family defaults vocabulary**: a typed, versioned,
 JSON-Schema-exportable struct per architecture — the shape tensorhub validates
