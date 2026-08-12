@@ -10174,6 +10174,9 @@ class Executor:
                             f"serving compiled",
                             phase=str(getattr(extra_exc, "reason", "")
                                       or "arm_failed"),
+                            family=str(getattr(cfg, "family", "") or ""),
+                            cell_key=str(
+                                getattr(extra_expected, "cell_key", "") or ""),
                         )
                 return outcome
             except fleet_cells.OrderedArmError as exc:
