@@ -1,12 +1,23 @@
 """Per-SKU torch.compile cache artifacts (#384).
 
 torch.compile wins 15-34% warm latency on flux-class models but costs 20-46s
-of compile per (model, resolution) and needs a C toolchain the prod worker
-images don't ship. The split: a platform compile job (training-endpoints
-``produce-inductor-cache``) compiles once per GPU SKU and publishes the
-inductor+triton cache dirs as a repo flavor; workers that opt in via
+of compile per (model, resolution). The artifact is the inductor+triton cache
+dirs, published as a repo flavor; workers that opt in via
 ``@endpoint(compile=Compile(...))`` seed those dirs before load and hit the
 cache with no compiler and no stall.
+
+**Who produces one, as of 2026-08-11 (th#1800).** The worker itself, and
+nobody else. The out-of-process producer this module was designed around —
+training-endpoints ``produce-inductor-cache`` — was DELETED by te#179 (it
+minted ``kind="torch-inductor-cache"``, and th#1788 made ``aot-inductor`` the
+only class the hub adopts, so its publishes were refused before entering the
+store), and DESIGN-RULINGS §4.28/§4.30 make that permanent: there is no forge,
+no mint request and no compile fleet, and compilation runs on the machine that
+will USE the cell. A family too large to self-mint beside its own server is a
+PLACEMENT question — boot its serving pod on a card that fits, per §4.28's
+"pre-warming a release/SKU = boot an ordinary serving pod there" — and
+:meth:`~gen_worker.mint_budget.MintBudget.card_bytes` is the number that
+question is answered with.
 
 Policy: cache miss / key mismatch / no artifact leaves ordinary lanes eager,
 never causing a boot stall or a runtime compile attempt in prod. A declared
@@ -18,7 +29,8 @@ Artifacts are FAMILY-keyed (settled 2026-07-06): torch.compile caches key on
 the traced graph + shapes, not the weights, so one artifact serves every
 fine-tune of a model family. They live in a system-owned repo per family
 (``root/family-<family>``), one flavor per (SKU, torch) cell — and they
-are CODE: only the platform's first-party compile job publishes shared ones.
+are CODE: only a TRUSTED-hardware worker publishes shared ones (§4.28;
+untrusted hardware mints for itself and never uploads).
 
 Artifact = deterministic ``.tar.gz``::
 

@@ -77,15 +77,22 @@ boot/pre-trace GATES unchanged). `kind`/`format` are single-valued metadata,
 recompile") is enforced by `tests/test_cell_key_pgw1059.py`.
 
 Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
-(model, shape) and needs a C toolchain prod worker images don't ship. The
-split:
+(model, shape). The split:
 
-- **Producer** — the platform's first-party compile job (training-endpoints
-  `produce-inductor-cache`) runs on the target GPU SKU with a toolchain,
-  compiles the declared shape set, and publishes the captured
+- **Producer** — the SERVING WORKER itself, on the card it will serve from. It
+  compiles the declared shape set in a mint child and publishes the captured
   `TORCHINDUCTOR_CACHE_DIR` + `TRITON_CACHE_DIR` as ONE deterministic
   `.tar.gz` flavor `#inductor-<sku>-torch<maj.min>` of the family system repo
   `root/family-<family>`.
+  **There is no out-of-process producer, and there must not be one** (th#1800):
+  training-endpoints' `produce-inductor-cache` was deleted by te#179 and
+  DESIGN-RULINGS §4.28/§4.30 make its absence permanent — no forge, no mint
+  request, no compile fleet, and compilation runs on the machine that will USE
+  the cell. A family whose mint does not fit beside its own server is a
+  PLACEMENT question, not a missing-producer question: §4.28's answer is "boot
+  an ordinary serving pod on a card that fits", and the decline line's
+  `card>=<N>GiB` (`mint_budget.MintBudget.card_bytes`) is the number that
+  names which card.
 - **Consumer** — an endpoint opts in with
   `@endpoint(compile=Compile(family="flux2-klein-4b", shapes=((768,768),(1024,1024)), text_len=512))`.
   Every `compile=` endpoint MUST state `text_len` (ie#544): a positive value
