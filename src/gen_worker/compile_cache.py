@@ -15,9 +15,11 @@ store), and DESIGN-RULINGS §4.28/§4.30 make that permanent: there is no
 central compile service, no mint request and no compile fleet, and compilation
 runs on the machine that will USE the cell. A family too large to self-mint beside its own server is a
 PLACEMENT question — boot its serving pod on a card that fits, per §4.28's
-"pre-warming a release/SKU = boot an ordinary serving pod there" — and
-:meth:`~gen_worker.mint_budget.MintBudget.card_bytes` is the number that
-question is answered with.
+"pre-warming a release/SKU = boot an ordinary serving pod there". pgw#1175
+deleted the ``card_bytes`` figure that used to answer it: it was
+``resident + need`` where ``need`` already re-charged ``resident``, and the
+49-113 GiB card classes it produced are retracted (§4.33). A mint costs ~8 GiB;
+what a family needs is measured by attempting it.
 
 Policy: cache miss / key mismatch / no artifact leaves ordinary lanes eager,
 never causing a boot stall or a runtime compile attempt in prod. A declared

@@ -5,9 +5,10 @@ One function, ``build_cell``, is the whole of step 2 of Paul's contract:
     "...if miss then begin compiling and serve eager until the local cell is
     available; then switch over to using that."
 
-It budgets for a co-resident child, spawns it, watches it with MEASURED
-evidence, retries by CLASS, and adopts the finished artifact through the
-ordinary delivered-cell path. It is `async` and every wait inside it is
+It spawns a child, watches it with MEASURED evidence, retries by CLASS, and
+adopts the finished artifact through the ordinary delivered-cell path. It
+budgets NOTHING: §4.33 / pgw#1175 deleted the pre-flight VRAM verdict, whose
+central term charged a weight-free child for the parent's resident weights. It is `async` and every wait inside it is
 loop-native, so the caller's 10s beat and its eager serving keep running for
 the whole mint — which is the entire point of th#1299.
 
@@ -39,7 +40,7 @@ from . import activity as activity_mod
 from . import aot_resume
 from . import boot_phases
 from . import compile_posture
-from . import mint_budget
+from . import mint_workers
 from . import mint_process
 from . import progress as progress_mod
 from .mint_process import MintOutcome, MintRequest
@@ -100,24 +101,19 @@ class MintTask:
 class DelegatedResult:
     """The outcome of one delegated mint, from the serving side.
 
-    ``declined`` is not a failure and never was (pgw#737): the card had no room
-    for a co-resident child, the worker serves eager, the cell stays absent,
-    and a roomier pod mints it later.
+    There is no DECLINED outcome any more (pgw#1175). A mint is attempted or
+    it is not; a card that genuinely cannot hold the child kills the child,
+    which comes back FAILED with the card's own classification.
     """
 
     status: str
     detail: str = ""
     minted: Optional[Any] = None      # fleet_cells.SelfMint
     attempts: int = 0
-    budget: Optional[mint_budget.MintBudget] = None
     #: pgw#999: the CLASSIFIED reason the child's cell did not adopt, carried
     #: up so the executor's decline names the same token the abort event did.
     #: Empty for every outcome that is not an adopt refusal.
     reason: str = ""
-
-    @property
-    def declined(self) -> bool:
-        return self.status == DECLINED
 
     @property
     def ok(self) -> bool:
@@ -125,7 +121,6 @@ class DelegatedResult:
 
 
 ADOPTED = "adopted"
-DECLINED = "declined"
 FAILED = "failed"
 ABANDONED = mint_process.ABANDONED
 
@@ -151,13 +146,12 @@ def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
 
 
 def build_request(
-    task: MintTask, *, workdir: Path, cap_bytes: int,
-    entry_peak_rss_bytes: int = 0, entry_device_peak_bytes: int = 0,
+    task: MintTask, *, workdir: Path, entry_peak_rss_bytes: int = 0,
+    device: Optional[int] = None,
 ) -> MintRequest:
     pending = task.pending
     return MintRequest(
         entry_peak_rss_bytes=int(entry_peak_rss_bytes),
-        entry_device_peak_bytes=int(entry_device_peak_bytes),
         function=task.function,
         modules=tuple(task.modules),
         family=str(pending.family),
@@ -183,12 +177,16 @@ def build_request(
         resume=str(aot_resume.bank_root(pending.arm_token)),
         cfg=cfg_spec(pending.cfg),
         slots=dict(task.slots),
-        device=-1 if task.device is None else int(task.device),
-        vram_cap_bytes=int(cap_bytes),
+        device=_ordinal(task.device if device is None else device),
         execution_lane=task.execution_lane,
         configs={k: dict(v) for k, v in task.configs.items()},
         posture=task.posture,
     )
+
+
+def _ordinal(device: Optional[int]) -> int:
+    """``-1`` = leave the child's default; any other value names a card."""
+    return -1 if device is None else int(device)
 
 
 def _pool_stat(phases: Any, key: str) -> int:
@@ -307,44 +305,30 @@ async def build_cell(
     pending = task.pending
     device = (
         task.device if task.device is not None
-        else mint_budget.device_of(task.pipe))
+        else mint_workers.device_of(task.pipe))
     family = str(pending.family)
     attempts = 0
-    budget: Optional[mint_budget.MintBudget] = None
     last = ""
     while attempts < max(1, max_attempts):
         attempts += 1
-        # Re-budget EVERY attempt. The first shortfall may have been the
-        # tenant's peak; the second may be a card that genuinely cannot hold a
-        # co-resident child, and that must decline rather than retry.
-        budget = mint_budget.co_residency(
-            device, family=family, weight_lane=task.weight_lane)
-        if not budget.fits:
-            reason = (
-                "insufficient_vram" if attempts == 1
-                else "insufficient_vram_after_retry")
-            detail = budget.line("self_mint_skipped", reason)
-            logger.info("mint-delegate: %s", detail)
-            activity_mod.emit_event("self_mint_skipped", detail, phase=reason)
-            return DelegatedResult(
-                status=DECLINED, detail=detail, attempts=attempts,
-                budget=budget)
-
+        # §4.33 / pgw#1175: NOTHING IS BUDGETED HERE. A `mint_budget
+        # .co_residency` gate stood at the top of this loop and charged the
+        # compiling child for `allocated` — the PARENT's resident weights,
+        # already excluded from the `free_bytes` it compared against. Compiles
+        # are weight-free (`fc77b923`), so the term described a process that
+        # does not exist, and four families were declined at 49-113 GiB on it.
+        # The attempt IS the budget: the child is a separate process, it is
+        # crash-isolated, it costs ~2 minutes, and a real shortfall comes back
+        # classified as `MintResourceExhausted` from the card itself.
         workdir = Path(pending.mint_root) / f"child-{attempts}"
         workdir.mkdir(parents=True, exist_ok=True)
         request = build_request(
-            # pgw#848: the CEILING, not the estimate. `need_bytes` answers
-            # "should this start"; handing it to the child as a hard cap is
-            # what pinned two mints at 11.09 GiB on cards with 21.48 GiB free.
-            task, workdir=workdir, cap_bytes=budget.cap_bytes,
-            # pgw#848: whatever a previous mint on this pod measured one entry
-            # child to peak at. Read here rather than in the child because the
-            # child is the thing that dies.
-            entry_peak_rss_bytes=mint_budget.entry_peak_rss(
-                family, task.weight_lane),
-            # pgw#877: and the DEVICE measurement, which until now had no way
-            # to reach the process that sizes K.
-            entry_device_peak_bytes=mint_budget.entry_device_peak(
+            task, workdir=workdir, device=device,
+            # The one banked measurement that survives: what a previous entry
+            # child on this pod really peaked at, in HOST RSS. It is K's
+            # divisor and nothing else. Read here rather than in the child
+            # because the child is the thing that dies.
+            entry_peak_rss_bytes=mint_workers.entry_peak_rss(
                 family, task.weight_lane))
         act.phase(activity_mod.PHASE_LOAD)
         outcome = await mint_process.run_mint(
@@ -353,42 +337,20 @@ async def build_cell(
         last = outcome.detail
 
         if outcome.report is not None:
-            # pgw#848: banked on EVERY outcome, not only a minted one. This
-            # was gated on a truthy `peak_vram_bytes`, which a child dying
-            # inside `torch.export` never produced — so attempt N+1 re-asked
-            # identically, forever, which is most of why the failure presented
-            # as deterministic. The device side now has the shape the host
-            # side got below: the attempt that FAILED is exactly the attempt
-            # whose measurement the next one needs.
-            mint_budget.record_child_peak(
-                family, task.weight_lane,
-                int(outcome.report.peak_vram_bytes or 0))
-            # pgw#848: the host half of the same loop. The pool has always
-            # measured `peak_child_rss_bytes` and put it in the phase table
-            # that rides `mint_phases`; nothing has ever read it, so every
-            # mint sized `mem_workers` off a 3 GiB constant. Banked on EVERY
-            # outcome, not just a minted one: an aborted mint's entries still
-            # peaked where they peaked, and the attempt that follows it is
-            # exactly the one that needs the fact.
-            mint_budget.record_entry_peak_rss(
+            # pgw#848: banked on EVERY outcome, not just a minted one — an
+            # aborted mint's entries still peaked where they peaked, and the
+            # attempt that follows is exactly the one that needs the fact.
+            # pgw#1175: the three DEVICE banks that stood beside this one are
+            # gone; this is the only measurement any decision still reads.
+            mint_workers.record_entry_peak_rss(
                 family, task.weight_lane,
                 _pool_stat(outcome.report.mint_phases,
                            "peak_child_rss_bytes"))
-            # pgw#877 #1/#2: the DEVICE half of the same loop, banked on the
-            # same terms. pgw#868 A4 measured this and left it telemetry-only;
-            # this is the read that makes it a decision.
-            mint_budget.record_entry_device_peak(
-                family, task.weight_lane,
-                _pool_stat(outcome.report.mint_phases,
-                           "peak_child_device_bytes"))
-        # pgw#848: ...and from the SNAPSHOT when the child never wrote a
-        # report at all, which is every killed and every abandoned mint.
-        mint_budget.record_entry_peak_rss(
+        # ...and from the SNAPSHOT when the child never wrote a report at all,
+        # which is every killed and every abandoned mint.
+        mint_workers.record_entry_peak_rss(
             family, task.weight_lane,
             _pool_stat(outcome.partial_phases, "peak_child_rss_bytes"))
-        mint_budget.record_entry_device_peak(
-            family, task.weight_lane,
-            _pool_stat(outcome.partial_phases, "peak_child_device_bytes"))
         # pgw#1010: every delegated mint is an AOT mint, so there is one
         # phase emitter. The JIT twin measured a child recipe that no longer
         # exists.
@@ -397,8 +359,7 @@ async def build_cell(
 
         if outcome.status == mint_process.ABANDONED:
             return DelegatedResult(
-                status=ABANDONED, detail=outcome.detail, attempts=attempts,
-                budget=budget)
+                status=ABANDONED, detail=outcome.detail, attempts=attempts)
 
         if outcome.minted and outcome.artifact is not None:
             act.phase(activity_mod.PHASE_SEAL_PUBLISH)
@@ -411,8 +372,7 @@ async def build_cell(
                 # resume area from being the only thing that grows.
                 aot_resume.discard(str(pending.arm_token))
                 return DelegatedResult(
-                    status=ADOPTED, minted=minted, attempts=attempts,
-                    budget=budget)
+                    status=ADOPTED, minted=minted, attempts=attempts)
             # The child produced bytes this runtime could not adopt.
             # `adopt_delegated_mint` emitted the typed abort and cleaned up;
             # retrying cannot change a verify()/drift verdict.
@@ -421,8 +381,7 @@ async def build_cell(
             # die. The sentence below was the whole of what the wire got.
             reason, why = fleet_cells.adopt_refusal(pending)
             return DelegatedResult(
-                status=FAILED, attempts=attempts, budget=budget,
-                reason=reason,
+                status=FAILED, attempts=attempts, reason=reason,
                 detail=(
                     f"the child's cell did not adopt on this runtime "
                     f"({reason}{': ' + why if why else ''})"
@@ -433,15 +392,14 @@ async def build_cell(
         if not (outcome.retryable and attempts < max(1, max_attempts)):
             fleet_cells.abandon_self_mint(pending)
             return DelegatedResult(
-                status=FAILED, detail=outcome.detail, attempts=attempts,
-                budget=budget)
+                status=FAILED, detail=outcome.detail, attempts=attempts)
         logger.info(
             "mint-delegate: retrying the mint for %s (attempt %d/%d) after a "
             "%s outcome", family, attempts + 1, max_attempts, outcome.status)
 
     fleet_cells.abandon_self_mint(pending)
     return DelegatedResult(
-        status=FAILED, detail=last, attempts=attempts, budget=budget)
+        status=FAILED, detail=last, attempts=attempts)
 
 
 def _emit_boot_trace_rows(table: Mapping[str, Any], *, family: str) -> None:
@@ -605,7 +563,6 @@ def scratch_root() -> Path:
 __all__ = [
     "ABANDONED",
     "ADOPTED",
-    "DECLINED",
     "FAILED",
     "DelegatedResult",
     "MintTask",

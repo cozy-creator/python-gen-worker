@@ -219,7 +219,7 @@ def test_the_POOLS_OWN_STAGE_writes_a_program_the_CHILDS_OWN_LOAD_can_read(
     original = dict(program.state_dict)
 
     width = aot_compile_pool.entry_workers(
-        1, available_bytes=1 << 36, free_vram_bytes=0, vcpus=8,
+        1, available_bytes=1 << 36, vcpus=8,
         device_lock=True)
     pool = aot_compile_pool.EntryCompilePool(tmp_path / "pool", width=width)
     job, _job_path = pool._stage("decoder", program, 0)

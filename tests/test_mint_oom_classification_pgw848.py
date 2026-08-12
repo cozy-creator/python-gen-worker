@@ -25,7 +25,7 @@ import pytest
 import torch
 
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_mint, mint_budget, mint_child, mint_process
+from gen_worker import aot_mint, mint_child, mint_process, mint_workers
 
 _GIB = 1 << 30
 _MIB = 1 << 20
@@ -127,8 +127,7 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         launcher.chmod(0o755)
 
         width = pool.entry_workers(
-            2, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-            device_lock=True, limit=1)
+            2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=1)
         box = pool.EntryCompilePool(
             tmp_path / "pool", width=width,
             inductor_configs={"compile_threads": 2},
@@ -199,13 +198,11 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
 
         # 5. ...and the parent banks it, so the RETRY is narrower
         fam, execution_lane = "pgw848-oom", "w8a8-lora64"
-        mint_budget.record_entry_peak_rss(
+        mint_workers.record_entry_peak_rss(
             fam, execution_lane, int(table["pool"]["peak_child_rss_bytes"]))
-        banked = mint_budget.entry_peak_rss(fam, execution_lane)
+        banked = mint_workers.entry_peak_rss(fam, execution_lane)
         assert banked > 0
-        common = dict(
-            vcpus=16, available_bytes=8 * _GIB, free_vram_bytes=0,
-            device_lock=True)
+        common = dict(vcpus=16, available_bytes=8 * _GIB, device_lock=True)
         before = pool.entry_workers(18, **common)
         after = pool.entry_workers(18, peak_rss_bytes=banked, **common)
         assert after.per_entry_rss_bytes == banked
@@ -252,8 +249,7 @@ def test_a_child_that_wrote_its_own_verdict_is_never_reclassified(
     box = pool.EntryCompilePool(
         tmp_path / "pool",
         width=pool.entry_workers(
-            2, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-            device_lock=True, limit=1))
+            2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=1))
     report = pool.EntryReport(entry="e", status=pool.REFUSED, detail="no")
     assert box._memory_verdict(-9, report) == (False, "")
     assert box._memory_verdict(-9, None)[0] is True

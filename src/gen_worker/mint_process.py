@@ -258,13 +258,6 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: See ``MintSlot``: the three views this replaced could disagree.
     slots: Dict[str, MintSlot] = {}
     device: int = -1     # CUDA ordinal; -1 = leave the child's default
-    #: The child's device ceiling in bytes. 0 = NO CAP, which is the honest
-    #: value for an unprobeable card (`mint_budget.co_residency` reports
-    #: `probed=False`) and is stated rather than inferred: `mint_child.cap_vram`
-    #: returns a "vram cap NOT applied" note the child frames, so an uncapped
-    #: mint is distinguishable from a capped one in the phase table (pgw#973
-    #: §4.24 item 4 — it used to return "" and record nothing at all).
-    vram_cap_bytes: int = 0
     #: pgw#848: where the child rewrites its live phase table, so a mint the
     #: parent KILLS still leaves its measurements behind. Empty = no snapshot.
     phases_snapshot: str = ""
@@ -274,24 +267,16 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: compile. Empty = this mint does not resume and behaves as it did before.
     resume: str = ""
     #: pgw#848: one ENTRY child's measured host high-water, banked by the
-    #: parent from a previous mint on this pod (``mint_budget.entry_peak_rss``).
+    #: parent from a previous mint on this pod (``mint_workers.entry_peak_rss``).
     #: 0 = never measured here, and the pool's width falls back to its
     #: constant. It has to travel on the request because the width is computed
-    #: INSIDE the mint child, whose memory dies with it — the same reason
-    #: ``vram_cap_bytes`` is computed parent-side and handed down.
-    entry_peak_rss_bytes: int = 0
-    #: pgw#877: the DEVICE twin of the field above, and the fix for the defect
-    #: that made the per-entry device ask a permanent estimate. ONE ENTRY
-    #: child's measured device high-water, banked by the parent from a
-    #: previous mint of this (family, lane).
+    #: INSIDE the mint child, whose memory dies with it — and a bank read in a
+    #: process that can never have written it is not a bank.
     #:
-    #: It has to travel HERE for exactly the reason the RSS figure does, and
-    #: the asymmetry between the two was the proof: `mint_budget._CHILD_PEAKS`
-    #: is written only in the SERVING PARENT, while the width is computed
-    #: INSIDE the mint child, where that dict is empty by construction. A bank
-    #: read in a process that can never have written it is not a bank.
-    #: 0 = never measured here, and the ask falls back to the estimate.
-    entry_device_peak_bytes: int = 0
+    #: pgw#1175: the last of the four peak banks, and the ONLY one. Its three
+    #: device siblings, and the ``vram_cap_bytes`` ceiling that used to ride
+    #: beside it, are deleted — nothing predicts VRAM (§4.33).
+    entry_peak_rss_bytes: int = 0
     #: The hub-resolved execution lane (``ctx.lane``) and the effective
     #: declared-parameter values per function (th#1087). Both STEER the warm
     #: forwards, so both must be the parent's values — a child warming at
@@ -302,8 +287,8 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: process entry that knows (``local_serve`` says user-machine; nothing
     #: else says anything, so every fleet mint gets the ``FLEET`` default).
     #:
-    #: It has to travel on the request for the same reason ``vram_cap_bytes``
-    #: does — the pool's width is computed INSIDE this child — and it travels
+    #: It has to travel on the request for the same reason the RSS bank does
+    #: — the pool's width is computed INSIDE this child — and it travels
     #: as a typed value rather than an env because §1.17 says an env may carry
     #: a VALUE and may not carry a DECISION. Politeness is a decision: it
     #: changes the nice level of every process in the mint tree and halves K.
@@ -408,8 +393,8 @@ class MintOutcome:
         """A retry may plausibly differ. A refusal never will.
 
         ``RESOURCE``: the shortfall may have been the tenant's peak, which
-        has since passed — retry, but only after re-budgeting (the caller's
-        job; see ``mint_budget``). ``CRASHED``: an UNCLASSIFIED death, worth
+        has since passed — retry, and the retry is the only budget there is
+        (§4.33). ``CRASHED``: an UNCLASSIFIED death, worth
         exactly one more attempt. ``ABANDONED`` is not a failure at all, and
         ``REFUSED`` is deterministic — re-running it buys a second billed
         compile for the same named refusal.
@@ -761,9 +746,9 @@ async def run_mint(
         start_new_session=True,  # own process group -> group-wide reaping
     )
     logger.info(
-        "mint_process: spawned pid=%s family=%s key=%s device=%s cap=%s",
+        "mint_process: spawned pid=%s family=%s key=%s device=%s",
         proc.pid, request.family, request.arm_token[:12] or "-",
-        request.device, request.vram_cap_bytes or "none")
+        request.device)
 
     frames = asyncio.ensure_future(_pump_frames(proc.stdout, on_frame, state))
     errs = asyncio.ensure_future(_pump_stderr(proc.stderr, state))

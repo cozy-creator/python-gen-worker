@@ -194,7 +194,7 @@ def _request(
                          tag="prod"),
             path=str(checkpoint))},
         device=-1, execution_lane="", configs={})
-    request = mint_delegate.build_request(task, workdir=workdir, cap_bytes=0)
+    request = mint_delegate.build_request(task, workdir=workdir)
     # The boundary IS a file: round-trip it exactly as the child decodes it.
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
 

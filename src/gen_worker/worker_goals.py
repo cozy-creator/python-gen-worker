@@ -17,11 +17,10 @@ left:
 * ``serve`` — accept tenant dispatch and hold a resident serving instance.
 
 Minting is no longer a goal anybody can hold, because nobody orders one. Every
-serving pod already mints opportunistically on a cell miss, arbitrated by
-:mod:`gen_worker.mint_budget`, and that is now the only mint path there is —
-so the tenant reserves it runs under are UNCONDITIONAL, not a function of a
-posture. The reserve terms in :mod:`gen_worker.aot_compile_pool` and
-:mod:`gen_worker.mint_budget` no longer ask this module anything.
+serving pod already mints opportunistically on a cell miss, and that is now the
+only mint path there is — so the tenant reserves it runs under are
+UNCONDITIONAL, not a function of a posture. The reserve terms in
+:mod:`gen_worker.aot_compile_pool` no longer ask this module anything.
 
 Carrier
 -------

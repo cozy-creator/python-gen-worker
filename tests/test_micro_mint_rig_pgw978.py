@@ -123,8 +123,11 @@ def test_the_device_budget_is_split_rather_than_assumed() -> None:
     written against 'the whole card' is how a co-resident pair OOMs the one that
     was merely second."""
     rig = _rig()
-    assert rig.MINT_VRAM_BYTES + rig.ADOPT_VRAM_BYTES == rig.RIG_VRAM_BUDGET_BYTES
-    assert rig.MINT_VRAM_BYTES > 0 and rig.ADOPT_VRAM_BYTES > 0
+    # pgw#1175: the mint/adopt VRAM split is deleted with `vram_cap_bytes`,
+    # the only thing that enforced it. The rig's remaining politeness levers
+    # are the load gate and `compile_posture.USER_MACHINE`.
+    assert not hasattr(rig, "MINT_VRAM_BYTES")
+    assert not hasattr(rig, "ADOPT_VRAM_BYTES")
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +168,7 @@ def test_the_request_the_rig_hands_the_child_carries_a_resolved_slot(
     # pgw#997: the vehicle is now an explicit argument — WHAT the rig mints is
     # a choice, so the handoff cannot read it off a module global.
     request = rig._mint_request(
-        tmp_path / "mint", tree, TINY, ordinal=-1, cap_bytes=0)
+        tmp_path / "mint", tree, TINY, ordinal=-1)
     # The boundary IS a JSON file, so round-trip it the way the child will.
     raw = msgspec.json.encode(request)
     decoded = msgspec.json.decode(raw, type=MintRequest)

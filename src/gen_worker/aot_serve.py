@@ -83,8 +83,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple,
-    Union,
+    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional,
+    Sequence, Tuple, Union,
 )
 
 from . import activity as activity_mod
@@ -106,7 +106,7 @@ from .compile_cache import (
     sku_slug,
 )
 from .models import lora_lifted
-from .models.memory import is_cuda_oom
+from .models.memory import flush_memory, is_cuda_oom
 
 logger = logging.getLogger(__name__)
 
@@ -2679,6 +2679,68 @@ def _entry_admission_drift(
             "admission_drift", f"entry {entry!r}: " + "; ".join(drift[:6]))
 
 
+#: The classified refusal a bind that ran out of device memory produces. Same
+#: token the two deleted `mint_budget.adopt_headroom` gates used, so every
+#: downstream reader (the `cell_adopt_declined` event, `fleet_cells`' abort
+#: classification, the hub's phase column) keeps its vocabulary — what changed
+#: is that it is now emitted on EVIDENCE rather than on an estimate.
+ADOPT_OOM_REASON = "insufficient_adopt_vram"
+
+
+@contextlib.contextmanager
+def _bind_headroom(what: str, index: int, total: int) -> Iterator[None]:
+    """Turn a CUDA OOM inside one bind into a typed adopt refusal (pgw#1175).
+
+    §4.33 step 4 loads the cell into the LIVE pipeline and keeps it or rejects
+    it. Rejection has to be survivable, and the ONLY honest evidence that a
+    card cannot hold the runners is a card that says so. This is the whole
+    replacement for the deleted headroom estimate: no number is computed, the
+    bind is attempted, and the attempt that fails names itself.
+
+    It is deliberately narrow. A CUDA OOM and nothing else — every other
+    exception keeps its own classification, because "the artifact is broken"
+    and "this pod is full" are different verdicts and only one of them says
+    anything about the cell. It also runs strictly BEFORE the first live
+    mutation (:func:`wrap_module` is called after every entry binds), so a
+    refusal leaves the pipeline exactly as eager as it found it.
+
+    THE CHAIN IS WALKED, not just the top frame. ``ArtifactRunner.bind`` wraps
+    every ``RuntimeError`` out of ``load_constants`` as
+    ``ConstantsUnboundError("injection_failed")`` — a CONTRACT verdict — and
+    ``torch.OutOfMemoryError`` is a ``RuntimeError``. So the exact failure this
+    guard exists for arrives already re-labelled as the cell's fault, which is
+    how "this pod is full" would have retired a correct cell. The cause is what
+    decides.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 — re-raised unless it is an OOM
+        oom = _oom_in_chain(exc)
+        if oom is None:
+            raise
+        flush_memory()
+        raise AdoptError(
+            ADOPT_OOM_REASON,
+            f"{what} ({index + 1} of {total}) ran out of device memory while "
+            f"binding ({type(oom).__name__}: {oom}) — this pod cannot hold the "
+            f"cell beside what it is already serving, so it serves EAGER and "
+            f"stays up. Nothing is armed. The cell is not condemned: another "
+            f"pod, or this one with less resident, may bind it fine",
+        ) from exc
+
+
+def _oom_in_chain(exc: BaseException) -> Optional[BaseException]:
+    """The CUDA OOM in this exception's cause chain, or ``None``."""
+    seen: set = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        if is_cuda_oom(cur):
+            return cur
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
 def load_and_wrap(
     pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None,
     *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
@@ -2696,6 +2758,20 @@ def load_and_wrap(
     ``expected`` (pgw#903) is checked inside :func:`stage_artifact`, i.e.
     strictly before the first ``_load_package`` — the identity question must be
     settled while the artifact is still inert bytes.
+
+    §4.33 / pgw#1175: THE DEVICE COST OF THIS FUNCTION IS ATTEMPTED, NEVER
+    PREDICTED. Two estimates used to stand in front of it — one in
+    ``fleet_cells.adopt_delegated_mint``, one at the ``provision.arm_aot``
+    seam — both ``mint_budget.adopt_headroom``, both pricing the arm at twice
+    an "activation" that was a quarter of the RESIDENT SET whenever no forward
+    had run, and both compared against a free figure those weights were already
+    outside of. The function's own docstring conceded it could not refuse the
+    failure it was written for. What refuses now is the bind: every entry's
+    ``_load_package`` + ``bind`` runs inside a CUDA-OOM guard, so a card that
+    genuinely cannot hold the runners returns a typed
+    ``insufficient_adopt_vram`` refusal NAMING the entry that did not fit —
+    before the first live mutation, so the pipeline is untouched and the pod
+    serves eager. The attempt is the measurement.
     """
     family = str(getattr(cfg, "family", "") or "")
     # pgw#1087: admission splits in two and the halves have different owners.
@@ -2789,11 +2865,12 @@ def load_and_wrap(
                     staged.root / PACKAGE_NAME, name,
                     list(block.get("inputs") or []))
                 parsed.append((name, contract, constants))
-            pool = target_constant_pool(
-                (constants for _n, _c, constants in parsed), state_dict)
+            with _bind_headroom(f"target {target!r}", 0, len(parsed)):
+                pool = target_constant_pool(
+                    (constants for _n, _c, constants in parsed), state_dict)
             pools[target] = pool
             runners: List[Tuple[str, ArtifactRunner]] = []
-            for name, contract, constants in parsed:
+            for index, (name, contract, constants) in enumerate(parsed):
                 # pgw#1087: ONE entry's admission — dlopen + bind. Per entry
                 # because that is the axis a 36-class cell varies on, and a
                 # roll-up cannot tell a uniformly slow admission from one
@@ -2802,17 +2879,20 @@ def load_and_wrap(
                     boot_phases.PHASE_ENTRY_ADMIT, ref=family, function=name,
                     artifact_kind="aot-inductor",
                 ) if boot_phases.in_boot() else contextlib.nullcontext() as sp:
-                    package = _load_package(staged.root / PACKAGE_NAME, name)
-                    runner = ArtifactRunner(
-                        package=package, contract=contract, constants=constants,
-                        module_name=target, entry=name, family=family)
-                    try:
-                        runner.bind(pool, literals_by_entry.get(name, {}),
-                                    user_managed=True)
-                    except ConstantsUnboundError as exc:
-                        raise AdoptError(
-                            f"constants_{exc.reason}",
-                            f"entry {name!r}: {exc}") from exc
+                    with _bind_headroom(f"entry {name!r}", index, len(parsed)):
+                        package = _load_package(
+                            staged.root / PACKAGE_NAME, name)
+                        runner = ArtifactRunner(
+                            package=package, contract=contract,
+                            constants=constants,
+                            module_name=target, entry=name, family=family)
+                        try:
+                            runner.bind(pool, literals_by_entry.get(name, {}),
+                                        user_managed=True)
+                        except ConstantsUnboundError as exc:
+                            raise AdoptError(
+                                f"constants_{exc.reason}",
+                                f"entry {name!r}: {exc}") from exc
                     if sp is not None:
                         sp.note(f"target={target} constants={len(constants)}")
                 total_constants += len(constants)

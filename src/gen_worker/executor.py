@@ -50,7 +50,7 @@ from .plan import (
 from .transport import FatalTransportError
 from . import cpu_budget
 from . import kernel_path
-from . import mint_budget
+from . import mint_workers
 from . import settings_authority
 from . import progress as progress_mod
 from . import serve_posture
@@ -2926,21 +2926,6 @@ class _ClassRecord:
 
 class _MintAbandoned(Exception):
     """The background mint was asked to stop (adoption/vacate/shutdown)."""
-
-
-class _MintDeclined(Exception):
-    """pgw#737: the mint refused itself — it cannot capture on this card
-    without taking the tenant down with it. NOT a failure: serving is eager,
-    the cell stays absent, and a roomier config mints it later."""
-
-    def __init__(
-        self, reason: str, budget: "mint_budget.MintBudget",
-        detail: str = "",
-    ) -> None:
-        self.reason = reason
-        self.budget = budget
-        line = budget.line("mint_skipped", reason)
-        super().__init__(f"{line}; {detail}" if detail else line)
 
 
 class _SeedPreempted(Exception):
@@ -7283,27 +7268,15 @@ class Executor:
             # no active artifacts => no exclusive-GPU window, eager warm
             # selection, no proof loop, targets registered active-less
             # (advertising the requested cell key for peer adoption).
+            # §4.33 / pgw#1175: a `mint_budget.probe` gate stood here and
+            # could turn a boot's eager-first capture off on an arithmetic
+            # whose activation term was a quarter of the RESIDENT SET — a
+            # fraction nobody measured, against a card whose free figure
+            # already excluded those weights. Nothing predicts VRAM: the boot
+            # arms, the compile children run weight-free, and a genuine
+            # shortfall comes back as a classified child death.
             eager_first = self._eager_first_eligible(spec, inj)
             delegated_mints = _delegated_pendings(inj.pending_self_mints)
-            if eager_first and delegated_mints:
-                # pgw#784: _mint_budget_ok gates an IN-PROCESS capture that
-                # will never exist here — nothing is armed on these pipes. The
-                # child's own co-residency ask (its weights + one activation
-                # set + inductor workspace + a CUDA context) is budgeted per
-                # attempt by mint_delegate, against the card as it actually is
-                # at spawn time rather than as it was at boot.
-                pass
-            elif eager_first and not self._mint_budget_ok(spec, inj):
-                # pgw#737: THE gate. It sits here and not only in the driver
-                # because arming + enabling the routers is already the first
-                # allocation of the capture — the boot warm's own forwards
-                # enqueue background compiles the instant the routers go
-                # concurrent. A card that cannot hold the capture never gets
-                # one armed: the targets go back to true eager, the cell
-                # stays absent, and the boot follows the plain-eager shape
-                # (never the foreground compile-then-serve mint, which is
-                # strictly worse for the tenant).
-                eager_first = False
             if delegated_mints and not eager_first:
                 # pgw#784: nothing is armed on these pipes, so the foreground
                 # compile-then-serve path below cannot drive them. Discard the
@@ -9608,55 +9581,6 @@ class Executor:
                 logger.debug("abandoning the unresolved mint failed",
                              exc_info=True)
 
-    def _mint_budget_ok(
-        self, spec: EndpointSpec, inj: "_InjectionResult",
-    ) -> bool:
-        """pgw#737: does this card have room to CAPTURE, on top of serving?
-
-        False = decline: every pending self-mint is discarded, its target
-        unwrapped to true eager and its branch lane dropped, so the boot
-        continues as a plain eager boot with the cell absent. Loud (one
-        structured ``mint_skipped`` line, logged and on the wire) and
-        automatic — a roomier config, or a smaller-resident flavor, mints
-        the same cell later."""
-
-        pipes = [
-            candidate.pipeline for candidate in inj.compile_objects
-            if id(candidate.pipeline) in inj.pending_self_mints
-        ]
-        device = next(
-            (dev for pipe in pipes
-             if (dev := mint_budget.device_of(pipe)) is not None),
-            None,
-        )
-        budget = mint_budget.probe(device)
-        if budget.fits:
-            return True
-        line = budget.line("mint_skipped", "insufficient_vram")
-        logger.warning("self-mint declined at boot for %s: %s", spec.name, line)
-        activity_mod.emit_event(
-            "self_mint_skipped",
-            f"{line}; {spec.name} boots eager with no cell — the capture "
-            "does not fit beside this model's own serving working set",
-            phase="insufficient_vram",
-        )
-        for pipe in pipes:
-            pending = inj.pending_self_mints.pop(id(pipe), None)
-            inj.active_compile_artifacts.pop(id(pipe), None)
-            if pending is not None:
-                try:
-                    fleet_cells_mod.abandon_self_mint(pending)
-                except Exception:
-                    logger.exception("declined mint capture cleanup failed")
-            try:
-                compile_cache.unwrap(pipe)
-                if spec.lora_bucket:
-                    compile_cache.drop_lora_execution_lane(pipe)
-            except Exception:
-                logger.exception("declined mint target unwrap failed")
-        flush_memory()
-        return False
-
     def serving_tiers(self) -> Dict[str, str]:
         """Per-function serving tier for the capability projection (th#1187
         wire contract): ``"compiled"`` when a READY record's compile target
@@ -9791,18 +9715,6 @@ class Executor:
             with activity_mod.watchdog(act):
                 await self._background_mint_run(rec, bg, act)
                 await self._await_publish_durable(act)
-        except _MintDeclined as declined:
-            # pgw#737: a declined mint is an OUTCOME, not a failure — the
-            # activity terminates COMPLETED and the tier stays eager, so
-            # nothing downstream classifies this worker as broken or
-            # re-dispatches against it. The cell stays absent: a roomier
-            # config (or a smaller-resident flavor) mints it later.
-            self._abandon_mint_state(rec, bg, free_targets=True)
-            logger.warning(
-                "self-mint declined for %s: %s", bg.spec.name, declined)
-            activity_mod.emit_event(
-                "self_mint_skipped", str(declined), phase=declined.reason)
-            act.completed()
         except (_MintAbandoned, asyncio.CancelledError):
             self._abandon_mint_state(rec, bg)
             logger.info(
@@ -9976,8 +9888,7 @@ class Executor:
         gw#612's sibling-coverage rule, and advertise the identity.
 
         Raises exactly what ``_background_mint_run`` raises, so
-        ``_background_mint``'s outcome handling is untouched: ``_MintDeclined``
-        (an OUTCOME — tier stays eager, cell absent), ``_MintAbandoned``
+        ``_background_mint``'s outcome handling is untouched: ``_MintAbandoned``
         (adopt-on-arm / vacate / shutdown), or a plain ``Exception`` (a failed
         mint). Serving continues in every branch: the worker never dies with
         its mint.
@@ -10008,7 +9919,6 @@ class Executor:
         #: rule (gw#612) is about the OBLIGATION, not about how many pipes
         #: hold it, so it reads this rather than `finalized`.
         discharged: Dict[int, Any] = {}
-        declined: Optional[_MintDeclined] = None
         # pgw#999: every classified refusal this run saw, so the terminal
         # RuntimeError names them instead of restating "no advertisable cell".
         declined_reasons: List[str] = []
@@ -10025,18 +9935,11 @@ class Executor:
                     weight_lane=compile_cache.cell_base_execution_lane(pipe),
                     execution_lane=self._served_execution_lane(spec),
                     configs={spec.name: self._effective_config(spec)},
-                    device=mint_budget.device_of(pipe),
+                    device=mint_workers.device_of(pipe),
                 ),
                 act=act, abandon=bg.abandon)
             if result.status == mint_delegate.ABANDONED:
                 raise _MintAbandoned()
-            if result.declined:
-                # Remembered, not raised yet: another pending may still fit.
-                declined = _MintDeclined(
-                    "insufficient_vram",
-                    result.budget or mint_budget.probe(),
-                    result.detail)
-                continue
             minted = result.minted
             if not result.ok or minted is None:
                 logger.warning(
@@ -10081,8 +9984,6 @@ class Executor:
             compile_cache.record_cell_proven(str(minted.ref))
 
         if not finalized:
-            if declined is not None:
-                raise declined
             raise RuntimeError(
                 "delegated mint produced no advertisable cell; serving stays "
                 "eager"

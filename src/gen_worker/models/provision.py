@@ -49,7 +49,7 @@ from .loading import (
 from .memory import place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
 from .. import activity as activity_mod
-from .. import mint_budget
+from .. import mint_workers
 
 if TYPE_CHECKING:
     from ..aot_identity import ExpectedIdentity
@@ -450,8 +450,8 @@ def arm_aot(
     # A boot adopt therefore reports `verify=0` by construction, and that row —
     # taken on the card the fleet actually serves on — is the empirical answer
     # to "does this cell fit", where before there was only arithmetic.
-    _budget_device = mint_budget.device_of(pipe)
-    _resident_before, _ = mint_budget.adopt_watermark(_budget_device)
+    _budget_device = mint_workers.device_of(pipe)
+    _resident_before, _ = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = 0
     _emitted = False
 
@@ -469,11 +469,9 @@ def arm_aot(
         if total <= 0:
             return
         family = str((meta or {}).get("family") or getattr(cfg, "family", "") or "")
-        # The cell's OWN recorded lane, so this key matches the one
-        # `mint_budget`'s other banks use without importing compile_cache here.
+        # The cell's OWN recorded lane.
         lane = str((meta or {}).get("weight_lane") or "")
         entries = len((meta or {}).get("entries") or {})
-        mint_budget.record_adopt_peak(family, lane, total)
         gib = 1 << 30
         activity_mod.emit_event(
             "cell_adopt_budget",
@@ -489,51 +487,19 @@ def arm_aot(
             phase="measured",
         )
 
-    # pgw#1169: THE HEADROOM GATE, AT THE SAME SEAM AND FOR EVERY ARM ROUTE.
-    # pgw#1164 gated the SELF-MINT adopt only, so a BOOT adopt that could not
-    # fit the cell had no way to decline — it simply ran the load and died.
-    # That is the shape that turns one bad cell into a fleet-wide crash loop:
-    # every serving pod on the release attempts the same adopt and takes the
-    # same SIGSEGV, and because the load kills the process rather than raising,
-    # nothing downstream can catch it.
-    #
-    # This is §4.31 applied where it could not previously reach, NOT new
-    # policy: a cell-attributable failure de-arms the cell and serves eager,
-    # and an adopt that cannot fit the card is that failure in its worst-
-    # behaved form. Declining here turns an outage into a logged degradation,
-    # and `cell_adopt_budget` still records what the attempt would have needed.
-    #
-    # ONE AUTHORITY, MANY CALLERS — the `compile_cache.arming_block` pattern.
-    # `mint_budget.adopt_headroom` is the only place that decides; the
-    # self-mint call site keeps its own earlier call to the SAME function so it
-    # can refuse before it even reads the artifact, and the two cannot drift
-    # because there is nothing to drift from.
-    _budget_family = str(
-        (meta or {}).get("family") or getattr(cfg, "family", "") or "")
-    _budget_lane = str((meta or {}).get("weight_lane") or "")
-    _adopt_budget = mint_budget.adopt_headroom(
-        _budget_family, _budget_lane, _budget_device)
-    if not _adopt_budget.fits:
-        # STICKY (§4.31): the answer cannot have improved, and re-running a
-        # load that killed the last attempt is the behaviour this exists to
-        # stop. A later arm of the same (family, lane) refuses without
-        # re-reading the card.
-        mint_budget.note_adopt_declined(_budget_family, _budget_lane)
-        detail = _adopt_budget.line("adopt_declined", "insufficient_adopt_vram")
-        activity_mod.emit_event(
-            "cell_adopt_declined",
-            f"family={_budget_family} lane={_budget_lane or '(plain)'} "
-            f"entries={len((meta or {}).get('entries') or {})}: {detail} — this "
-            f"pod cannot load the cell beside what it is already serving, so "
-            f"it serves EAGER and stays up. Nothing is armed.",
-            phase="insufficient_adopt_vram",
-        )
-        logger.warning(
-            "aot arm: %s — serving eager", detail)
-        return AdoptOutcome.miss("insufficient_adopt_vram", detail)
-
+    # §4.33 / pgw#1175: THE HEADROOM GATE IS GONE, and the ATTEMPT replaces it.
+    # `mint_budget.adopt_headroom` refused an arm here on `2 * activation`,
+    # where `activation` was a quarter of the RESIDENT SET whenever no forward
+    # had run — a fraction its own docstring called unmeasured — and its
+    # refusal was STICKY for the life of the process. Its own text conceded it
+    # "CANNOT refuse a card that merely cannot hold 36 runners", i.e. it could
+    # not refuse the failure it was written for (th#1825) and could refuse
+    # cards that were fine. The honest gate is the bind itself:
+    # `aot_serve.load_and_wrap` attempts each entry and returns a typed
+    # `insufficient_adopt_vram` miss on a real device OOM, before any live
+    # mutation, and this pod serves eager exactly as it did — on evidence.
     outcome = aot_serve.enable(pipe, cfg, cache_dir, artifact, expected=expected)
-    _, _peak_after_load = mint_budget.adopt_watermark(_budget_device)
+    _, _peak_after_load = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = max(0, _peak_after_load - _resident_before)
     if not outcome.armed and lifted_install_error:
         # The refusal is real; its ROOT is one frame up. Both, in the order a
@@ -548,7 +514,7 @@ def arm_aot(
         # §4.32: quality is proven at MINT and in author CI, never at adoption.
         # An adopting pod materializes, arms and serves.
         gate_ok = not verify_numerics or gate_cell_numerics(pipe, cfg, strict=True)
-        _, _peak_after_verify = mint_budget.adopt_watermark(_budget_device)
+        _, _peak_after_verify = mint_workers.adopt_watermark(_budget_device)
         if gate_ok:
             _emit_adopt_budget(_peak_after_verify - _peak_after_load, True)
             return outcome

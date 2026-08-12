@@ -237,10 +237,11 @@ def raise_if_device_oom(exc: BaseException, where: str) -> None:
         peak = 0
     raise MintResourceExhausted(
         f"{where}: OUT OF DEVICE MEMORY ({type(exc).__name__}: {exc}). "
-        f"This process peaked at {peak / (1 << 30):.2f} GiB against the cap "
-        f"the parent set from `mint_budget.co_residency`; it is a resource "
+        f"This process peaked at {peak / (1 << 30):.2f} GiB. It is a resource "
         f"shortfall to be retried with more room, NOT a deterministic "
-        f"refusal", peak_rss_bytes=0) from exc
+        f"refusal — and it is the ONLY VRAM signal this mint produces "
+        f"(§4.33: the attempt is the measurement, nothing predicts it)",
+        peak_rss_bytes=0) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1785,7 +1786,6 @@ def mint(
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
-    entry_device_peak_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     phase_snapshot: Optional[Path] = None,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
@@ -1857,7 +1857,6 @@ def mint(
             inductor_configs=inductor_configs,
             entry_workers=entry_workers,
             entry_peak_rss_bytes=entry_peak_rss_bytes,
-            entry_device_peak_bytes=entry_device_peak_bytes,
             execution_lane_verdict=execution_lane_verdict,
             release_residents=release_residents,
             progress=progress)
@@ -2063,39 +2062,28 @@ class _ExportFootprint:
     when it cannot be read is still a refusal to widen.
 
     Reported both ways, because they answer different questions and conflating
-    them is the defect: ``per_export_device_bytes`` (the MAX row delta — sizes
-    a pool) and ``export_peak_device_bytes`` (the phase high-water — sizes the
-    mint child itself, and is what pgw#992's CardCensus already prices).
+    them is the defect: ``per_export_device_bytes`` (the MAX row delta) and
+    ``export_peak_device_bytes`` (the phase high-water). pgw#1175: both are
+    TELEMETRY. Nothing divides a card by either.
     """
 
-    __slots__ = ("baseline", "rows", "readable", "census")
+    __slots__ = ("baseline", "rows", "readable")
 
-    def __init__(self, baseline: int, readable: bool,
-                 census: Optional[Any] = None) -> None:
+    def __init__(self, baseline: int, readable: bool) -> None:
         self.baseline = baseline
         self.rows: List[int] = []
         self.readable = readable
-        #: pgw#992's card census, taken HERE — before the first row traces.
-        #: The budget it feeds is `total - co-tenant - own high-water`, and
-        #: that only bounds anything if the census predates the growth it is
-        #: meant to price. Taken at `decide()` time instead it would read the
-        #: mint child's own grown footprint as the baseline and hand the
-        #: export pool back everything the phase had already consumed.
-        self.census = census
 
     @classmethod
     def open(cls) -> "_ExportFootprint":
-        from . import aot_compile_pool
-
-        census = aot_compile_pool.card_census()
         try:
             import torch as _t
 
             if not _t.cuda.is_available():
-                return cls(0, False, census)
-            return cls(int(_t.cuda.memory_reserved()), True, census)
+                return cls(0, False)
+            return cls(int(_t.cuda.memory_reserved()), True)
         except Exception:  # noqa: BLE001 — a probe never changes an outcome
-            return cls(0, False, census)
+            return cls(0, False)
 
     @contextlib.contextmanager
     def row(self) -> Iterator[None]:
@@ -2128,8 +2116,7 @@ class _ExportFootprint:
 
     def facts(self) -> Dict[str, float]:
         """Flat scalars for ``timings``. Absent keys where nothing was read —
-        a measured zero and an unread card are different facts, and the width
-        rule must be able to tell them apart."""
+        a measured zero and an unread card are different facts."""
         if not self.readable or not self.rows:
             return {}
         return {
@@ -2147,7 +2134,6 @@ def _mint_cell(
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
     entry_peak_rss_bytes: int = 0,
-    entry_device_peak_bytes: int = 0,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
     release_residents: bool = False,
     progress: Optional[MintProgress] = None,
@@ -2235,15 +2221,8 @@ def _mint_cell(
     # constant. K=1 IS the pre-#809 serial in-process path, which is the
     # honest answer on a narrow pod.
     entry_count = len(rows)
-    # pgw#877: the DEVICE ask now has the same shape the HOST ask got in
-    # pgw#848 — a measurement made on this pod by a previous mint of this
-    # (family, lane), banked by the serving parent and handed down on the
-    # request. 0 keeps the estimate, and keeps saying so.
-    device_bytes, device_basis = _entry_device_bytes(
-        spec, int(entry_device_peak_bytes or 0))
     width = aot_compile_pool.entry_workers(
         entry_count, limit=int(entry_workers or 0),
-        device_bytes=device_bytes, device_basis=device_basis,
         # pgw#848: the HOST ask, measured on this pod by a previous mint of
         # this (family, lane) and banked by the serving parent. Until this
         # existed the argument was never passed at ALL, so `mem_workers`
@@ -2370,9 +2349,6 @@ def _mint_cell(
         # is handed to it AS IT EXPORTS — producer ~113 s/row against a pool
         # consuming ~127 s/row at K=2 (attempt 30), so the two phases shadow
         # each other and the wall collapses toward max(export, compile).
-        # The census inside the pool is still taken before any child exists
-        # (pgw#992's requirement); the export phase's own growth after that
-        # reading is priced per spawn by `_spawn_admitted`.
         #
         # pgw#917 runs TWICE, deliberately: an arriving row that duplicates an
         # earlier row's ingress+identity is aliased at arrival (no compile
@@ -2409,7 +2385,6 @@ def _mint_cell(
                 timings.update(_release_mint_residents(pipeline, minted))
                 timings["residents_release_s"] = round(
                     time.monotonic() - t0, 2)
-                pool.note_residents_released()
 
         progress.beat(
             PHASE_INDUCTOR_COMPILE, 0, len(rows),
@@ -2553,48 +2528,6 @@ def _mint_cell(
         timings,
     )
     return MintResult(artifact=artifact, metadata=meta, timings=timings)
-
-
-def _entry_device_bytes(
-    spec: ExportSpec, banked_device_peak: int = 0,
-) -> Tuple[int, str]:
-    """One entry child's DEVICE ask, and the PROVENANCE of that number.
-
-    pgw#877 #1/#2. Two sources, ranked, because they are not the same kind of
-    thing:
-
-    * ``banked_device_peak`` — what an entry child on THIS pod, for this
-      (family, lane), was actually measured to peak at
-      (``EntryReport.peak_device_reserved_bytes``), banked by the serving
-      parent and handed down on ``MintRequest.entry_device_peak_bytes``. It
-      travels on the WIRE and not through ``mint_budget``'s module globals,
-      which is the entire fix: those globals are written in the serving parent
-      and this function runs in the MINT CHILD, where they are empty by
-      construction. Basis ``"measured"``.
-    * ``mint_budget.co_residency().need_bytes`` — the fallback, and an
-      ESTIMATE of a different process: the mint child's whole co-residency
-      footprint (a full pipeline), used as one entry child's (one exported
-      program plus inductor). ~56 % of it was never observed. Basis
-      ``"estimated"``, which is what it used to call ``"measured"``.
-
-    ``(0, "unmeasured")`` means unprobeable, and the width policy refuses to
-    license concurrency on a card it cannot size against.
-    """
-    if banked_device_peak > 0:
-        from . import mint_budget
-
-        return mint_budget.entry_device_ask(int(banked_device_peak)), "measured"
-    try:
-        from . import mint_budget
-
-        budget = mint_budget.co_residency(
-            family=str(spec.family or ""),
-            weight_lane=str(spec.execution_lane_label() or ""))
-    except Exception:  # noqa: BLE001
-        return 0, "unmeasured"
-    if not budget.probed:
-        return 0, "unmeasured"
-    return int(budget.need_bytes), "estimated"
 
 
 def _drive_pool(
@@ -3147,11 +3080,10 @@ def _release_mint_residents(
 
     Best-effort in every direction: a tensor or module that refuses the
     projection is skipped, and the release reports what it actually freed. A
-    partially released card still widens by what came back. Superseded by
-    construction once pgw#1056's fake-weight mint lands (there is then no
-    resident to release); the pool-side regrant it feeds
-    (``note_residents_released``) is exactly what that mint's verification
-    load will use too.
+    partially released card still hands back what came back. Superseded by
+    construction once pgw#1056's fake-weight mint lands — there is then no
+    resident to release. pgw#1175 deleted the pool-side regrant it used to
+    feed; what remains is a genuine release of memory to the tenant.
     """
     facts: Dict[str, float] = {}
     try:
@@ -3219,13 +3151,12 @@ def _release_mint_residents(
             torch.cuda.empty_cache()
             after = int(torch.cuda.memory_reserved())
             facts["residents_released_bytes"] = float(max(0, before - after))
-            # The TRUE mint peak, banked before the reset erases it: the
-            # parent's `record_child_peak` loop must keep learning what this
-            # process really held, not what it held after surrendering.
+            # The TRUE mint peak, reported before the reset erases it. §4.33
+            # target for a full sdxl mint is ~8 GiB; this is the figure that
+            # says whether we are there. It is telemetry — nothing sizes
+            # anything from it.
             facts["peak_vram_before_release_bytes"] = float(
                 torch.cuda.max_memory_allocated())
-            # Load-bearing: the pool's own high-water must restart from the
-            # released level or `note_residents_released` can regrant nothing.
             torch.cuda.reset_peak_memory_stats()
         except Exception:  # noqa: BLE001 — a probe never changes an outcome
             pass

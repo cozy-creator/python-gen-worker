@@ -96,7 +96,7 @@ def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
                          tag="prod"),
             path=str(checkpoint))},
         device=-1, execution_lane="", configs={})
-    request = mint_delegate.build_request(task, workdir=workdir, cap_bytes=0)
+    request = mint_delegate.build_request(task, workdir=workdir)
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
 
 

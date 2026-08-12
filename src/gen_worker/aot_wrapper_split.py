@@ -328,7 +328,7 @@ JOBS_ENV = "GEN_WORKER_AOT_HOST_COMPILE_JOBS"
 #: deliberately, rather than leaving the question open. This module is an
 #: INDUCTOR HOOK — it is imported from inside torch's compile path and its only
 #: in-repo imports are `host_isa` and `aot_run_impl_split`. Importing the pool
-#: to share one number would drag `aot_resume`, `mint_budget`, `env_seal` and
+#: to share one number would drag `aot_resume`, `env_seal` and
 #: `worker_goals` — the whole mint driver — into that hook, which is a far
 #: worse defect than two copies of `2`. A third module owning the constant
 #: would be the clean answer and is not worth a new module for one integer.

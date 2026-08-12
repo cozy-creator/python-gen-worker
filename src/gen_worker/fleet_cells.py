@@ -69,7 +69,6 @@ from . import activity as activity_mod
 from . import aot_identity, aot_serve, artifact_meta, cell_key, env_seal
 from . import boot_phases as boot_mod
 from . import local_cell_store
-from . import mint_budget
 from . import serve_posture
 from . import compile_cache as cc
 from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
@@ -2112,35 +2111,16 @@ def adopt_delegated_mint(
     # could re-check what ships. A refusal below unwraps, serves eager, emits
     # `self_mint_abort` to the hub and publishes nothing.
     #
-    # pgw#1164 THE ADOPT'S OWN HEADROOM GATE, and it runs BEFORE the arm
-    # because the arm is the step that cannot survive being wrong. th#1825:
-    # an A40 passed its pre-mint budget, compiled 36/36 entries over 1 h 37 m
-    # and then SIGSEGV'd here with 1.9 MB free of 47.7 GB — the budget it
-    # passed described the compile, and nothing described this. The refusal is
-    # named and typed the way `insufficient_vram` is, so a family that cannot
-    # adopt on this card says so instead of dying at finalize.
-    lane = str(cc.cell_base_execution_lane(pipe) or "")
-    device = mint_budget.device_of(pipe)
-    budget = mint_budget.adopt_headroom(pending.family, lane, device)
-    if not budget.fits:
-        state["adopt_refusal"] = (
-            "insufficient_adopt_vram", budget.line("adopt_declined", "insufficient_adopt_vram"))
-        activity_mod.emit_event(
-            "self_mint_abort",
-            f"family={pending.family} arm_key={pending.arm_token}: "
-            f"{budget.line('adopt_declined', 'insufficient_adopt_vram')} — the "
-            f"cell is BUILT and this card cannot load it beside the residents "
-            f"it is serving; nothing is armed and nothing is published",
-            phase="insufficient_adopt_vram",
-        )
-        return None
-    # pgw#1168: the MEASUREMENT that stood here has MOVED to
-    # `provision.arm_aot`, the one seam every arm route passes. It measured the
-    # self-mint adopt only, so the boot adopt — the same `load_and_wrap`, on the
-    # card the fleet actually serves on — reported nothing. The gate above stays
-    # here, because this is the call site where a refusal has consequences
-    # (nothing is armed, nothing is published); the ACCOUNTING belongs at the
-    # seam so it cannot be wired on one path again.
+    # §4.33 / pgw#1175: the pgw#1164 pre-arm headroom estimate that stood here
+    # is DELETED. It priced the arm at `2 * activation` off a resident set the
+    # card's free figure already excluded, and it declined stickily. The arm
+    # below is the measurement: `load_and_wrap` binds entry by entry and a real
+    # device OOM comes back as a typed `insufficient_adopt_vram` refusal
+    # through `_arm_exported_cell`'s ordinary classification — with nothing
+    # armed and nothing published, which is what this call site needs.
+    #
+    # pgw#1168: the accounting lives at `provision.arm_aot`, the one seam every
+    # arm route passes.
     armed, meta, refusal = _arm_exported_cell(
         pipe, pending.cfg, pending.cache_dir,
         int(getattr(pending.cfg, "lora_bucket", 0) or 0),

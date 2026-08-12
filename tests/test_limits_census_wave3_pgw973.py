@@ -389,16 +389,12 @@ def test_the_mint_reap_grace_is_named_and_argues_its_exemption() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. mint_child.cap_vram — "uncapped" is a state to STATE
+# 6. mint_child.cap_vram — DELETED WITH ITS INPUT (pgw#1175)
 # ---------------------------------------------------------------------------
+#
+# pgw#973 §4.24 item 4 was right: "uncapped" is a state to STATE, not an
+# absence to infer. The state it named is gone — §4.33 deleted the budget that
+# computed `vram_cap_bytes`, so there is no ceiling to apply and no silence to
+# distinguish from one. The RULE survives everywhere else in this census.
 
 
-def test_an_uncapped_mint_child_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`vram_cap_bytes=0` is the legitimate value for an unprobeable card AND
-    the value a budget that computed to nothing produces. Both used to return
-    an empty note, the caller framed nothing, and the phase table recorded a
-    capped mint and an uncapped mint identically."""
-    from gen_worker import mint_child
-
-    note = mint_child.cap_vram(0, 0)
-    assert "NOT applied" in note and "vram_cap_bytes=0" in note

@@ -259,7 +259,7 @@ def test_pooled_entries_stop_repaying_the_toolchain_hash(
     entries = _entries(3)
     width = pool.entry_workers(
         len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
     assert width.workers == 2
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width,

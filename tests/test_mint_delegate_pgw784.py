@@ -34,7 +34,7 @@ import pytest
 import torch
 
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, mint_budget, mint_delegate
+from gen_worker import fleet_cells, mint_delegate, mint_workers
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef
 from gen_worker.api.decorators import DynamicDim
@@ -170,12 +170,11 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
             ref=ModelRef(source="tensorhub", path="harness/sdxl",
                          tag="prod"), path="/cas/sdxl")},
         execution_lane="fp8-w8a16", configs={"gen": {"steps": 28}}, device=3)
-    req = mint_delegate.build_request(
-        task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
+    req = mint_delegate.build_request(task, workdir=tmp_path / "w")
     assert req.execution_lane == "fp8-w8a16"
     assert req.configs == {"gen": {"steps": 28}}
     assert req.slots["pipeline"].path == "/cas/sdxl"
-    assert req.device == 3 and req.vram_cap_bytes == 7 * GIB
+    assert req.device == 3
     # pgw#1010: the child's WORK ROOT — the tree it actually writes into, and
     # the byte-growth half of the parent's progress evidence. It used to be
     # the inductor capture dir, which an AOT mint never touched.
@@ -293,27 +292,6 @@ def test_a_resource_shortfall_gets_exactly_one_more_attempt(
     assert result.attempts == 2
 
 
-def test_no_room_for_a_co_resident_child_declines_without_spawning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The wan-2.2 shape. A decline is an OUTCOME (pgw#737): eager serving,
-    cell absent, typed self_mint_skipped — and crucially no child is ever
-    started, so nothing can OOM the tenant."""
-    monkeypatch.setenv("MINT_STUB_MODE", "minted")
-    _fake_card(monkeypatch, total_gib=80, resident_gib=54)
-    spawned: List[Any] = []
-    monkeypatch.setattr(
-        mp, "run_mint",
-        lambda *a, **k: spawned.append(a) or asyncio.sleep(0))
-    seen = _events(monkeypatch)
-    result = asyncio.run(mint_delegate.build_cell(_task(tmp_path), act=_Act()))
-    assert result.declined and result.status == mint_delegate.DECLINED
-    assert not spawned
-    skips = [e for e in seen if e[0] == "self_mint_skipped"]
-    assert skips and skips[0][1] == "insufficient_vram"
-    assert "needed~=" in skips[0][2] and "headroom=" in skips[0][2]
-
-
 def test_abandonment_is_not_a_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -337,23 +315,50 @@ def test_abandonment_is_not_a_failure(
     assert not result.ok
 
 
-def test_a_child_peak_is_banked_for_the_next_ask(
+def test_a_mint_spawns_a_child_with_no_pre_flight_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NO MAGIC NUMBERS: the child measures its own peak and the next ask on
-    this pod is that fact, not this module's arithmetic."""
+    """§4.33 / pgw#1175: THE ATTEMPT IS THE BUDGET.
+
+    A `mint_budget.co_residency` gate used to stand at the top of
+    `build_cell` and return DECLINED without spawning anything — on a `need`
+    whose leading term was `allocated`, the PARENT's resident weights, already
+    excluded from the `free_bytes` it was compared against. This card is the
+    wan-2.2 shape verbatim (80 GiB total, 54 GiB resident) and the mint now
+    RUNS: a weight-free compile child does not re-hold the parent's weights,
+    and if the card really cannot take it the child dies in its own process
+    and says so.
+    """
     monkeypatch.setenv("MINT_STUB_MODE", "minted")
-    monkeypatch.setenv("MINT_STUB_PEAK", str(11 * GIB))
-    _fake_card(monkeypatch, total_gib=80, resident_gib=6)
+    _fake_card(monkeypatch, total_gib=80, resident_gib=54)
     monkeypatch.setattr(
         fleet_cells, "adopt_delegated_mint",
         lambda pipe, pending, artifact: fleet_cells.SelfMint(
             family="sdxl", cell_key="k", ref="r", snapshot_digest="d",
             artifact=Path(artifact)))
-    monkeypatch.setattr(mint_budget, "_CHILD_PEAKS", {})
-    asyncio.run(mint_delegate.build_cell(
+    result = asyncio.run(mint_delegate.build_cell(
         _task(tmp_path, weight_lane="w8a8"), act=_Act()))
-    assert mint_budget.child_peak("sdxl", "w8a8") == 11 * GIB
+    assert result.status == mint_delegate.ADOPTED, (
+        "a 54-GiB-resident pod refused to even TRY — that is the retracted "
+        "double-count back on the tree")
+    assert not hasattr(mint_delegate, "DECLINED"), (
+        "the DECLINED vocabulary survived its only producer")
+
+
+def test_the_surviving_bank_is_the_host_rss_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K = f(cores, ONE measured child RSS). That measurement is banked and
+    handed down on the request; nothing else is."""
+    mint_workers._ENTRY_RSS_PEAKS.clear()
+    assert mint_workers.entry_peak_rss("sdxl", "w8a8") == 0
+    mint_workers.record_entry_peak_rss("sdxl", "w8a8", 5 * GIB)
+    mint_workers.record_entry_peak_rss("sdxl", "w8a8", 2 * GIB)
+    assert mint_workers.entry_peak_rss("sdxl", "w8a8") == 5 * GIB, (
+        "the bank is not monotone — a lucky run talked the ask down")
+    assert not hasattr(mint_workers, "record_child_peak")
+    assert not hasattr(mint_workers, "record_entry_device_peak")
+    assert not hasattr(mint_workers, "record_adopt_peak")
 
 
 def test_delegation_is_unconditional_and_has_no_kill_switch(
