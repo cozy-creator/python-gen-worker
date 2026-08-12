@@ -532,7 +532,7 @@ def attempt(
     # of the download AND the arm, because those are the two things it gates.
     # A hub that reports nothing seeds nothing: absent is no evidence.
     mint_budget.note_fleet_adopt_load(
-        family, str(getattr(cell, "lane", "") or ""),
+        str(getattr(cell, "cell_key", "") or key),
         int(getattr(cell, "adopt_load_bytes", 0) or 0))
 
     try:

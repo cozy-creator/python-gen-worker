@@ -515,7 +515,10 @@ def arm_aot(
         (meta or {}).get("family") or getattr(cfg, "family", "") or "")
     _budget_lane = str((meta or {}).get("weight_lane") or "")
     _adopt_budget = mint_budget.adopt_headroom(
-        _budget_family, _budget_lane, _budget_device)
+        _budget_family, _budget_lane, _budget_device,
+        # pgw#1171/§4.33: the fleet's figure is looked up by the CELL, so a
+        # measurement can only ever gate the exact artifact it was taken on.
+        cell_key=str((meta or {}).get("cell_key") or ""))
     if not _adopt_budget.fits:
         # STICKY (§4.31): the answer cannot have improved, and re-running a
         # load that killed the last attempt is the behaviour this exists to

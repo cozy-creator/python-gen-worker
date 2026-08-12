@@ -104,11 +104,11 @@ def test_a_FLEET_measurement_gates_a_pod_with_an_EMPTY_bank(monkeypatch) -> None
     # 18 GiB free: the unmeasured floor (2 x 8 GiB activation = 16 GiB) ADMITS,
     # so the ONLY thing that can refuse below is the fleet figure.
     monkeypatch.setattr(mint_budget, "_read_device", lambda _d: _device(18.0))
-    assert mint_budget.adopt_headroom("sdxl", "w8a8").fits, (
+    assert mint_budget.adopt_headroom("sdxl", "w8a8", cell_key="ck1-x").fits, (
         "precondition: with no evidence at all this card is admitted")
 
-    mint_budget.note_fleet_adopt_load("sdxl", "w8a8", 21 * _GIB)
-    verdict = mint_budget.adopt_headroom("sdxl", "w8a8")
+    mint_budget.note_fleet_adopt_load("ck1-x", 21 * _GIB)
+    verdict = mint_budget.adopt_headroom("sdxl", "w8a8", cell_key="ck1-x")
 
     assert not verdict.fits, (
         "a fleet-measured 21 GiB load against 18 GiB free must REFUSE — this "
@@ -121,9 +121,9 @@ def test_no_fleet_evidence_leaves_TODAY_S_behaviour_untouched(monkeypatch) -> No
     """THE DEGRADATION FENCE. Absent is not a pass and not a refusal — it is
     the unmeasured floor, exactly as before th#1828."""
     monkeypatch.setattr(mint_budget, "_read_device", lambda _d: _device(18.0))
-    mint_budget.note_fleet_adopt_load("sdxl", "w8a8", 0)  # the hub said nothing
+    mint_budget.note_fleet_adopt_load("ck1-x", 0)  # the hub said nothing
 
-    verdict = mint_budget.adopt_headroom("sdxl", "w8a8")
+    verdict = mint_budget.adopt_headroom("sdxl", "w8a8", cell_key="ck1-x")
 
     assert verdict.fits and not verdict.measured
     assert verdict.need_bytes == 2 * verdict.activation_bytes
@@ -133,9 +133,9 @@ def test_a_ZERO_report_records_NOTHING(monkeypatch) -> None:
     """The guard is at the door, not only downstream. A 0 must not create an
     entry at all — a stored 0 is a measurement nobody took, and the next reader
     of this map (there will be one) must not find one."""
-    mint_budget.note_fleet_adopt_load("sdxl", "w8a8", 0)
-    mint_budget.note_fleet_adopt_load("sdxl", "w8a8", -5)
-    assert ("sdxl", "w8a8") not in mint_budget._FLEET_ADOPT_LOAD, (
+    mint_budget.note_fleet_adopt_load("ck1-x", 0)
+    mint_budget.note_fleet_adopt_load("ck1-x", -5)
+    assert "ck1-x" not in mint_budget._FLEET_ADOPT_LOAD, (
         "a zero/negative report was BANKED — absent must stay absent in the "
         "store, not merely be filtered by whoever happens to read it next")
 
@@ -145,7 +145,7 @@ def test_the_floor_is_what_NO_evidence_falls_back_to(monkeypatch) -> None:
     fleet, `need` must be the unmeasured floor — not 0, which would admit
     everything, and not a refusal."""
     monkeypatch.setattr(mint_budget, "_read_device", lambda _d: _device(18.0))
-    verdict = mint_budget.adopt_headroom("sdxl", "w8a8")
+    verdict = mint_budget.adopt_headroom("sdxl", "w8a8", cell_key="ck1-x")
     assert verdict.need_bytes == 2 * verdict.activation_bytes > 0
     assert verdict.fits and not verdict.measured
 
@@ -157,20 +157,23 @@ def test_a_fleet_figure_never_LOWERS_a_local_measurement(monkeypatch) -> None:
     already proved it cannot do."""
     monkeypatch.setattr(mint_budget, "_read_device", lambda _d: _device(40.0))
     mint_budget.record_adopt_peak("sdxl", "w8a8", 45 * _GIB)
-    mint_budget.note_fleet_adopt_load("sdxl", "w8a8", 10 * _GIB)
+    mint_budget.note_fleet_adopt_load("ck1-x", 10 * _GIB)
 
-    verdict = mint_budget.adopt_headroom("sdxl", "w8a8")
+    verdict = mint_budget.adopt_headroom("sdxl", "w8a8", cell_key="ck1-x")
 
     assert verdict.need_bytes == 45 * _GIB
     assert not verdict.fits
 
 
 def test_the_fleet_bank_is_monotone_and_scoped() -> None:
-    mint_budget.note_fleet_adopt_load("sdxl", "w8a8", 21 * _GIB)
-    mint_budget.note_fleet_adopt_load("sdxl", "w8a8", 3 * _GIB)
-    assert mint_budget.fleet_adopt_load("sdxl", "w8a8") == 21 * _GIB
-    assert mint_budget.fleet_adopt_load("sdxl", "") == 0
-    assert mint_budget.fleet_adopt_load("micro-diffusion", "w8a8") == 0
+    mint_budget.note_fleet_adopt_load("ck1-x", 21 * _GIB)
+    mint_budget.note_fleet_adopt_load("ck1-x", 3 * _GIB)
+    assert mint_budget.fleet_adopt_load("ck1-x") == 21 * _GIB
+    assert mint_budget.fleet_adopt_load("ck1-other") == 0, (
+        "§4.33: a figure keyed per CELL cannot gate a different artifact — "
+        "keyed by (family, lane) it would be an old measurement acting as a "
+        "floor a newer one may not correct")
+    assert mint_budget.fleet_adopt_load("") == 0
 
 
 # --------------------------------------------------------------------------

@@ -94,7 +94,17 @@ _ADOPT_LOAD: Dict[Tuple[str, str], int] = {}
 #: from the pod that actually paid it (th#1828). Kept apart from the local banks
 #: so `MintBudget.measured` can say WHOSE measurement it is, and so a fleet
 #: figure can never be mistaken for something this process observed.
-_FLEET_ADOPT_LOAD: Dict[Tuple[str, str], int] = {}
+#:
+#: KEYED BY `cell_key`, not by (family, lane), and §4.33 is why. A ck1 key names
+#: graph-set x sm x toolchain x env_seal, so a figure under it can only ever
+#: describe the exact artifact it was measured on: a code change re-keys, a new
+#: cell gets a fresh measurement, and a stale number CANNOT outlive the code
+#: that produced it. Keyed by (family, lane) it would be an old measurement
+#: acting as a floor a newer one is not allowed to correct — precisely what
+#: §4.33 forbids, and exactly how the ~32 GiB this ruling retracts would have
+#: gated pods running the fix for it. It also matches the hub's own column,
+#: which is per cell (th#1828).
+_FLEET_ADOPT_LOAD: Dict[str, int] = {}
 
 #: pgw#1169: (family, weight lane) this process has already refused to adopt.
 #: The refusal is STICKY — see :func:`note_adopt_declined`.
@@ -310,7 +320,7 @@ def adopt_load(family: str, weight_lane: str) -> int:
     return _ADOPT_LOAD.get((str(family or ""), str(weight_lane or "")), 0)
 
 
-def note_fleet_adopt_load(family: str, weight_lane: str, load_bytes: int) -> None:
+def note_fleet_adopt_load(cell_key: str, load_bytes: int) -> None:
     """Learn what the FLEET measured this cell's load to be (pgw#1171/th#1828).
 
     THE POINT: a fresh pod's own banks are empty, so before this the gate had
@@ -324,15 +334,15 @@ def note_fleet_adopt_load(family: str, weight_lane: str, load_bytes: int) -> Non
     published before th#1828 reports nothing, and those must adopt exactly as
     they do today. Absent is never a pass and never a refusal.
     """
-    if load_bytes <= 0:
+    key = str(cell_key or "").strip()
+    if load_bytes <= 0 or not key:
         return
-    key = (str(family or ""), str(weight_lane or ""))
     _FLEET_ADOPT_LOAD[key] = max(_FLEET_ADOPT_LOAD.get(key, 0), int(load_bytes))
 
 
-def fleet_adopt_load(family: str, weight_lane: str) -> int:
-    """The fleet-measured load for this (family, lane), or 0 = no evidence."""
-    return _FLEET_ADOPT_LOAD.get((str(family or ""), str(weight_lane or "")), 0)
+def fleet_adopt_load(cell_key: str) -> int:
+    """The fleet-measured load for THIS cell, or 0 = no evidence."""
+    return _FLEET_ADOPT_LOAD.get(str(cell_key or "").strip(), 0)
 
 
 def note_adopt_declined(family: str, weight_lane: str) -> None:
@@ -388,6 +398,7 @@ def adopt_peak(family: str, weight_lane: str) -> int:
 
 def adopt_headroom(
     family: str = "", weight_lane: str = "", device: Optional[int] = None,
+    cell_key: str = "",
 ) -> MintBudget:
     """Can the ADOPT-ARM run here without taking the card down? (pgw#1164)
 
@@ -430,7 +441,7 @@ def adopt_headroom(
     # FLEET figure is real evidence about this cell — it was measured by a pod
     # that actually loaded it — and it is the only evidence a FRESH pod has.
     banked = adopt_peak(family, weight_lane)
-    fleet = fleet_adopt_load(family, weight_lane)
+    fleet = fleet_adopt_load(cell_key)
     evidence = max(banked, fleet)
     need = evidence if evidence > 0 else 2 * read.activation
     # pgw#1169: a refusal already taken stands. Re-asking would re-run a load
