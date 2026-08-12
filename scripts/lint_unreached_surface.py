@@ -84,7 +84,7 @@ BASELINE = REPO / "scripts" / "unreached_surface_baseline.txt"
 # The guarded scope: the modules carrying the mint / arm / serve path.
 GUARDED = re.compile(
     r"^gen_worker\.(aot_.*|mint_.*|forge|executor|lifecycle|worker|hot_swap"
-    r"|boot_phases|guard_closure|fleet_cells|local_cells|cell_key"
+    r"|boot_phases|guard_closure|fleet_cells|cell_key"
     r"|compile_cache|preload|numerics_ladder)$")
 
 # The authored-worker API. Its callers are endpoint repos that vendor the
@@ -98,17 +98,7 @@ EXEMPT_PACKAGES = ("gen_worker.api",)
 # `stale_exemptions`) — the same rule the config-reads and settings-writers
 # allowlists follow, and what stops this table becoming the place dead code
 # goes to be forgotten.
-EXEMPT_TARGETS = {
-    "gen_worker.local_cells.enable_compiled": (
-        "the JIT local-serve entry, dead since pgw#1127 re-pointed "
-        "`cli/run.py` at `local_serve.enable_compiled` (the AOT sink). The "
-        "MODULE's deletion is pgw#1086 wave 1's inventory item and pgw#1127 "
-        "§6 puts it explicitly out of that lane's scope — so this row exists "
-        "for exactly as long as `local_cells.py` does. OWNER: pgw#1086 "
-        "wave 1. EXPIRY: that module's deletion, which this row then fails "
-        "until it is removed with it."
-    ),
-}
+EXEMPT_TARGETS: dict[str, str] = {}
 
 # Decorators meaning "something else calls this, by table not by name".
 DYNAMIC_DECORATORS = {

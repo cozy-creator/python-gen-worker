@@ -76,7 +76,6 @@ import shutil
 import tarfile
 import tempfile
 import threading
-import time
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,7 +84,6 @@ from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple,
 )
 
-import inspect
 import pickle
 import sys
 
@@ -3961,100 +3959,6 @@ def resolve_pipeline_class(name: str) -> Any:
     return cls
 
 
-def _warm_text_lens(cfg: Any) -> tuple:
-    """The text pins a warm loop must trace (pgw#654 gap #6): the class
-    UNION when present (dual-lane classes trace one graph per pin), else
-    the single declared pin, else (None,) — one unpinned pass."""
-    pins = tuple(getattr(cfg, "text_lens", ()) or ())
-    if not pins:
-        tl = getattr(cfg, "text_len", None)
-        pins = (int(tl),) if tl is not None else ()
-    pins = tuple(sorted({int(v) for v in pins if int(v) > 0}))
-    return pins if pins else (None,)
-
-
-def _warm_call(
-    pipe: Any,
-    shape: Tuple[int, ...],
-    *,
-    steps: int,
-    prompt: str,
-    decode: bool,
-    guidance_scales: Iterable[float] = (),
-    text_len: Optional[int] = None,
-) -> None:
-    """One warm-up call for ``shape``. (w, h) is the classic image call;
-    (w, h, frames) is a video call (ie#381): the DiT graph keys on the token
-    count only, so a plain single-pipeline call traces the same graph the
-    serving path (including a two-stage refine, whose latents arrive from an
-    upsampler of identical shape) will look up. Video calls force the
-    batch-1 no-CFG serving class (CFG is a graph shape — ``Compile``) and
-    skip decode unless a vae target is declared. Image calls run once per
-    explicitly declared guidance scale, capturing CFG and no-CFG graphs in
-    one family cell.
-
-    Guidance-kwarg convention (gw#595, the gw#586 class one axis over): on
-    classes exposing ``true_cfg_scale`` (qwen-style), ``guidance_scale`` is
-    the distilled-guidance embed no-op and classic CFG rides
-    ``true_cfg_scale`` + a non-None ``negative_prompt`` — warming through
-    ``guidance_scale`` there traces the SAME unconditioned graph for every
-    declared scale and the serving CFG lookup can never hit."""
-
-    import torch
-
-    kwargs: Dict[str, Any] = dict(
-        prompt=prompt,
-        num_inference_steps=int(steps),
-        width=int(shape[0]),
-        height=int(shape[1]),
-        generator=torch.Generator(device="cuda").manual_seed(0),
-    )
-    # SDK v2 text pin (ie#544): warm through the SAME pinned token length
-    # the serving path uses, when the pipeline exposes the knob — the
-    # traced sequence dim must match serving or every request misses.
-    if text_len and text_len > 0:
-        if "max_sequence_length" in inspect.signature(type(pipe).__call__).parameters:
-            kwargs["max_sequence_length"] = int(text_len)
-    if len(shape) == 3:
-        params = inspect.signature(type(pipe).__call__).parameters
-        kwargs["num_frames"] = int(shape[2])
-        kwargs["output_type"] = "np" if decode else "latent"
-        if "frame_rate" in params:
-            kwargs["frame_rate"] = 24.0
-        if "guidance_scale" in params:
-            kwargs["guidance_scale"] = 1.0
-        if "audio_guidance_scale" in params:
-            kwargs["audio_guidance_scale"] = 1.0
-        pipe(**kwargs)
-        return
-
-    scales = tuple(float(v) for v in guidance_scales)
-    if not scales:
-        pipe(**kwargs)
-        return
-    params = inspect.signature(type(pipe).__call__).parameters
-    if "true_cfg_scale" in params:
-        # Serving parity with the endpoint call: true_cfg_scale always
-        # passed; negative_prompt only when CFG is on (scale > 1), matching
-        # the CFG-off batch-1 graph exactly (no uncond pass).
-        for scale in scales:
-            call = dict(kwargs, true_cfg_scale=scale)
-            if scale > 1.0:
-                call["negative_prompt"] = " "
-            pipe(**call)
-        return
-    accepts_guidance = "guidance_scale" in params or any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-    )
-    if not accepts_guidance:
-        raise RuntimeError(
-            f"{type(pipe).__name__} cannot warm declared guidance_scales; "
-            "its call signature has no guidance_scale"
-        )
-    for scale in scales:
-        pipe(**kwargs, guidance_scale=scale)
-
-
 def emit_jit_compile_event(
     timings: Mapping[str, float],
     *,
@@ -4120,122 +4024,6 @@ def emit_jit_compile_event(
     except Exception:  # pragma: no cover — telemetry never fails the work
         logger.debug("compile-cache: jit_compile event emission failed",
                      exc_info=True)
-
-
-def _compile_and_warm(pipe: Any, cfg: Any, *, steps: int = 2, say: Any = None) -> None:
-    """Cold-compile ``pipe`` over the declared shape table (the only part of
-    a mint that needs CUDA + a toolchain). ``guard=False``: a failing warm
-    call must fail the mint — a silently-eager capture must never be saved."""
-    _say = say if callable(say) else (lambda msg: logger.info("%s", msg))
-    if not apply(pipe, cfg, cache_ready=False, guard=False, allow_cold=True):
-        # pgw#985: name the fact that actually declined — "no compile targets"
-        # was this line's answer to every one of them, including "no CUDA".
-        raise CompileArmRefused(
-            f"cannot arm {type(pipe).__name__} for a cold compile: "
-            + (arming_block(pipe, cfg, cache_ready=False, allow_cold=True)
-               or f"no compile target resolves for targets="
-                  f"{[str(t) for t in (getattr(cfg, 'targets', ()) or ())]}"))
-    import torch
-
-    decode = any(t.startswith("vae") for t in cfg.targets)
-    timings: Dict[str, float] = {}
-    audit_before = graph_audit()
-    for shape in cfg.shapes:
-        torch.cuda.synchronize()
-        t0 = time.monotonic()
-        for pin in _warm_text_lens(cfg):
-            _warm_call(
-                pipe, shape, steps=steps,
-                prompt="cache warm-up: a lighthouse on a cliff at dawn, detailed",
-                decode=decode,
-                guidance_scales=getattr(cfg, "guidance_scales", ()),
-                text_len=pin,
-            )
-        torch.cuda.synchronize()
-        shape_key = "x".join(str(v) for v in shape)
-        timings[shape_key] = round(time.monotonic() - t0, 2)
-        _say(f"  compiled {shape_key} in {timings[shape_key]:.0f}s")
-    # th#1322: this line WAS the only record of JIT compile duration anywhere
-    # (compile_cache.py:3803, "compiled %s in %.0fs") — a log-only important
-    # metric, which is a defect class, not a style choice. Now it is a number in
-    # a column too.
-    audit = graph_audit_delta(audit_before)
-    _say(f"  {audit.summary()}")
-    emit_jit_compile_event(
-        timings, family=getattr(cfg, "family", "") or "",
-        execution_lane=pipeline_weight_lane(pipe), route="compile_and_warm",
-        audit=audit)
-
-
-def mint_artifact(
-    pipe: Any,
-    cfg: Any,
-    family: str,
-    target: Path,
-    capture: Path,
-    *,
-    steps: int = 2,
-    say: Any = None,
-) -> Dict[str, Any]:
-    """Self-mint (gw#555/gw#587): compile THIS pipeline over its declared
-    shape table, capture the inductor/triton output, and pack the production
-    artifact atomically at ``target``. Returns the stamped metadata (incl.
-    the cell key its axes describe).
-
-    The capture uses the production artifact recipe end to end
-    (``capture_env`` -> warm the shape table -> ``artifact_metadata`` ->
-    deterministic ``pack``), so the saved cell is byte-compatible with a
-    delivered one and adopts through the identical code path. Shared by the
-    cozy-local store mint and the fleet self-mint
-    (fleet_cells) — ONE mint brain, different publish sinks.
-
-    ``guard=False`` on the warm calls: a failing warm call must fail the
-    mint — a silently-eager capture must never be saved.
-    """
-    _say = say if callable(say) else (lambda msg: logger.info("%s", msg))
-    capture_env(capture)
-    _compile_and_warm(pipe, cfg, steps=steps, say=_say)
-
-    captured = [p for p in (capture / "inductor").rglob("*") if p.is_file()]
-    if not captured:
-        raise RuntimeError(
-            "compile warm-up captured nothing under TORCHINDUCTOR_CACHE_DIR"
-        )
-
-    # pgw#681/#756: the guard-closure audit is ADVISORY — a suspected leak
-    # is named and emitted as a `guard_leak` event, and the manifest rides
-    # the cell as its dependency dump; the mint is not refused.
-    # pgw#719: the environment this capture traced under must still be the
-    # BOOT environment — drift (endpoint code mutating config/env behind
-    # our back) fails the mint red, naming the fact.
-    env_seal.assert_seal_unchanged("mint")
-    guard_manifest = guard_closure.closure_manifest(pipe, cfg, label=family)
-
-    # gw#564: record the execution contract exactly like the production
-    # build — w8a8 cells are contract_drift-gated on the graph signature and
-    # weight-lane manifest, so a mint without them can never re-adopt.
-    graph_signature, weight_contract = execution_contract(pipe, cfg)
-    meta = artifact_metadata(
-        family=family,
-        source_ref="self-mint",
-        shapes=cfg.shapes,
-        targets=cfg.targets,
-        guidance_scales=getattr(cfg, "guidance_scales", ()),
-        low_vram_mode=low_vram_mode(pipe),
-        compile_mode="regional" if getattr(cfg, "regional", False) else "whole",
-        weight_lane=pipeline_weight_lane(pipe),
-        lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
-        graph_signature=graph_signature,
-        weight_contract=weight_contract,
-        declared_compile_contract=declared_compile_facts(cfg),
-        composition=composition_fingerprint(pipe, cfg),
-    )
-    meta[guard_closure.MANIFEST_KEY] = guard_manifest
-    tmp = target.with_suffix(".part")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    pack(capture, tmp, meta)
-    os.replace(tmp, target)
-    return meta
 
 
 def arm_jit_intake(pipe: Any, cfg: Any) -> None:
@@ -4329,7 +4117,6 @@ __all__ = [
     "execution_lane_bucket",
     "execution_lane_token",
     "execution_lane_drift",
-    "mint_artifact",
     "mode_drift",
     "pack",
     "resolve_pipeline_class",

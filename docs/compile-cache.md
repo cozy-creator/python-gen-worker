@@ -121,8 +121,9 @@ Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
 Serving artifacts are immutable per-(SKU, torch) snapshots attached by
 Tensorhub. They are verified against the exact live pipeline contract before
 the worker activates their cache files. Local tooling passes artifact paths
-explicitly or uses `gen_worker.local_cells`; the compile producer opts into
-cold compilation through an explicit library argument. There is no serving
+explicitly or uses `gen_worker.local_serve` (which reaches this machine's own
+`local_cell_store`); the compile producer opts into cold compilation through an
+explicit library argument. There is no serving
 environment fallback that can bypass scheduler attachment or W8A8 fencing.
 
 Trust: compiled artifacts are CODE. Only platform jobs may publish to
