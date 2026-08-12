@@ -2629,6 +2629,14 @@ class _ArmOrder:
     expected: Optional["aot_identity.ExpectedIdentity"] = None
     publisher_org: str = ""
     adopt: Optional["boot_adopt.BootAdoptOutcome"] = None
+    #: pgw#1176: the OTHER entries this boot resolved. A boot derives a key SET
+    #: and coverage ACCRETES, so several hits are the expected shape — each is
+    #: armed into the same registry, the same target pool and the same live
+    #: wrap after the first. A failure on one of these is a per-entry degrade
+    #: (that class serves eager), never terminal: the first arm already proved
+    #: the pod can serve compiled.
+    extra: Tuple[Tuple[Path, Optional["aot_identity.ExpectedIdentity"], str],
+                 ...] = ()
 
     @classmethod
     def for_artifact(
@@ -7032,17 +7040,6 @@ class Executor:
             hits = [o for o in adopts if o.adoption is not None]
             adopt = hits[0] if hits else (
                 adopts[0] if adopts else boot_adopt.BootAdoptOutcome())
-            if len(hits) > 1:
-                activity.emit_event(
-                    "boot_adopt_entries_deferred",
-                    f"family={adopt.family} function={adopt.function}: the "
-                    f"boot resolved {len(hits)} entry keys and this boot arms "
-                    f"{hits[0].derived_key} only; "
-                    f"{[o.derived_key for o in hits[1:]]} are declared, "
-                    f"resolved and NOT YET ARMED — they serve eager until the "
-                    f"arm loop lands (pgw#1176)",
-                    phase="entries_deferred",
-                )
             boot_local_key = adopt.local_key
             if adopt.adoption is not None:
                 got = adopt.adoption
@@ -7053,7 +7050,13 @@ class Executor:
                     expected=got.expected,
                     publisher_org=got.cell.publisher_org,
                     # pgw#1122: this order is the POD's, not the hub's.
-                    adopt=adopt)
+                    adopt=adopt,
+                    # pgw#1176: every OTHER class this boot resolved, armed
+                    # into the same registry after this one.
+                    extra=tuple(
+                        (o.adoption.artifact, o.adoption.expected,
+                         o.adoption.cell.publisher_org)
+                        for o in hits[1:]))
                 compile_selection = arm.selection
         elif arm is None and spec.compile is not None:
             # pgw#1116: a compiled family that boots WITHOUT asking is a fact
@@ -10142,7 +10145,7 @@ class Executor:
 
         if arm is not None:
             try:
-                return fleet_cells.arm_ordered(
+                outcome = fleet_cells.arm_ordered(
                     pipe, cfg, self.store._cache_dir,
                     backend=arm.backend,
                     artifact=artifact,
@@ -10152,6 +10155,31 @@ class Executor:
                     expected=arm.expected,
                     publisher_org=arm.publisher_org,
                 )
+                # pgw#1176: THE ACCRETION LOOP. Every other class this boot
+                # resolved arms into the SAME registry, target pool and live
+                # wrap. A failure here costs that class and nothing else —
+                # the pod is already serving compiled, so degrading one entry
+                # to eager is the design's normal state, not a fallback.
+                for extra_path, extra_expected, extra_org in arm.extra:
+                    try:
+                        fleet_cells.arm_ordered(
+                            pipe, cfg, self.store._cache_dir,
+                            backend=arm.backend, artifact=extra_path,
+                            delivered_ref="", delivered_digest="",
+                            expected=extra_expected,
+                            publisher_org=extra_org,
+                        )
+                    except Exception as extra_exc:  # noqa: BLE001
+                        activity_mod.emit_event(
+                            "aot_entry_arm_failed",
+                            f"a sibling entry of an armed cell would not arm "
+                            f"({type(extra_exc).__name__}: {extra_exc}); that "
+                            f"CLASS serves eager and every armed sibling keeps "
+                            f"serving compiled",
+                            phase=str(getattr(extra_exc, "reason", "")
+                                      or "arm_failed"),
+                        )
+                return outcome
             except fleet_cells.OrderedArmError as exc:
                 # pgw#1122: a HUB-ordered arm stays terminal (pgw#904 — the hub
                 # named one exact artifact and a substitute would not be it).
