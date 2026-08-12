@@ -1,4 +1,4 @@
-"""pgw#1157 — a fork's ARMS must agree with the classes that cover them.
+"""pgw#1158 — a fork's ARMS must agree with the classes that cover them.
 
 Found empirically by the endpoint-adaptation lane while writing sd15's and
 sd2's declarations. It ran a severance experiment against the declaration's own

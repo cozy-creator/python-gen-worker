@@ -494,7 +494,7 @@ class Fork(msgspec.Struct, frozen=True):
     #: unserved arm, for machines. ``None`` means the declaration has not
     #: answered the question yet.
     #:
-    #: REQUIRED whenever ``unserved`` is non-empty (pgw#1157 — this is the
+    #: REQUIRED whenever ``unserved`` is non-empty (pgw#1158 — this is the
     #: phase 2 the field was staged for). An un-annotated unserved arm is a
     #: declaration that has not said how strong its own guarantee is, which is
     #: exactly the state this field exists to end; leaving it optional meant
@@ -531,7 +531,7 @@ class Fork(msgspec.Struct, frozen=True):
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
         force(self, "why", str(self.why or ""))
         if unserved and self.reason is None:
-            # pgw#1157 (the staged phase 2): an unserved arm is a CLOSED arm,
+            # pgw#1158 (the staged phase 2): an unserved arm is a CLOSED arm,
             # and a declaration that cannot say what closes it has not made
             # the guarantee it appears to make. Refused where it is written,
             # at declaration time, so it costs nothing at serve time.
@@ -990,7 +990,7 @@ def validate_contract(compile_decl: Any) -> None:
                     f"graph class #{i}: fork {name}={value!r} is not a "
                     f"declared arm (served: {sorted(map(repr, served_by_fork.get(name, set())))})")
 
-    # pgw#1157: the SAME question, asked from the arm's end. Every check above
+    # pgw#1158: the SAME question, asked from the arm's end. Every check above
     # reads class -> arm ("does this class sit on an arm the fork declares?"),
     # so a SERVED arm no class covers passed silently — the declaration claims
     # to serve it, the mint traces nothing for it, and the first request on

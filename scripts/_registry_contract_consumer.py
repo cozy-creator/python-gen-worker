@@ -94,7 +94,8 @@ register_export_declaration(
             Dim("H", carried_by=(("hidden_states", 2),), multiple_of=2),
             Dim("B", carried_by=(("hidden_states", 0),)),
         ),
-        forks=(Fork("cfg", served=(False,), unserved=(True,)),),
+        forks=(Fork("cfg", served=(False,), unserved=(True,),
+                    reason="default_value"),),
         classes=(
             GraphClass(dims={"H": 90, "B": 1}, fork={"cfg": False}),
             GraphClass(dims={"H": 160, "B": 1}, fork={"cfg": False}),
