@@ -2,16 +2,15 @@
 consumer on the compile-cache rails (gw#384 / th#569 / #390).
 
 ``compile_cache`` serves the dynamo lane (a JIT warmed from seeded FX
-entries); ``trt_engine`` serves per-SKU TensorRT plans; this module serves
-``torch.export`` -> ``aoti_compile_and_package`` artifacts. Same trust
-model, storage, delivery, and arming seam as both — cells live as flavors
+entries); this module serves ``torch.export`` ->
+``aoti_compile_and_package`` artifacts. Same trust model, storage,
+delivery, and arming seam — cells live as flavors
 of ``root/family-<family>``::
 
     root/family-<f>#aot-<sku>-torch<maj.min>-<precision>
 
 Artifact = deterministic ``.tar.gz`` (the receipts gate reads
-``metadata.json`` straight out of the digested bytes, so the envelope is
-identical in shape to a TRT engine's)::
+``metadata.json`` straight out of the digested bytes)::
 
     metadata.json           kind/format, runtime key (sm, torch, cuda + sku),
                             family, cell_key, and the ENTRIES map — one
@@ -213,8 +212,8 @@ class IngressContractError(RuntimeError):
 
 
 def torch_version() -> str:
-    """Full torch version (``2.13.0+cu130``) — the artifact is ABI-locked to
-    it, exactly like a TRT plan is locked to its library build."""
+    """Full torch version (``2.13.0+cu130``) — the artifact is ABI-locked
+    to it."""
     try:
         import torch
 
@@ -1090,13 +1089,14 @@ def _unpack(
 #: pgw#1035: no serving-path caller since ``is_aot_artifact`` (its only one)
 #: was deleted, and DELIBERATELY KEPT — this is the AOT lane's own reader of its
 #: own envelope, and the pgw#699 double-mint byte-compare proof drives it over
-#: real minted tarballs. ``trt_engine.unpack_metadata`` is byte-identical; that
-#: dedup belongs to the TRT-engine ratification, not here, because whichever
-#: module survives owns the shared one.
+#: real minted tarballs. It once had a byte-identical twin in
+#: ``trt_engine.unpack_metadata``, and the dedup was deferred to a "TRT
+#: ratification" that never came — TensorRT was deleted outright in pgw#1187,
+#: so this is now the AOT lane's sole reader of its own envelope.
 #:
 #: pgw#1040 collapsed the OTHER seven envelope readers into
 #: :func:`artifact_meta.read_metadata` and left this one alone ON PURPOSE,
-#: reasoning that "it costs nothing to wait" for the TRT ratification.
+#: reasoning that "it costs nothing to wait".
 #:
 #: pgw#1098 PRICED THE WAIT: $1.584 and 92 minutes. pgw#1013 then bounded the
 #: collapsed reader and not this one, so two readers of one member disagreed
@@ -1763,8 +1763,8 @@ def resolve_constants(
     artifact's literal payload.
 
     Export preserves module FQNs, so a ``state_dict``-sourced constant is a
-    direct name lookup — no value-identity matching (``trt_engine`` needs
-    that only because ONNX renames). An unresolvable FQN is a named refusal:
+    direct name lookup — no value-identity matching is needed. An
+    unresolvable FQN is a named refusal:
     binding a partial set is exactly the state that segfaults.
 
     **MEASURED CONTRACT FACT (pgw#723 final pod, torch 2.13.0+cu130):**
@@ -2416,7 +2416,7 @@ def wrap_module(
     """Swap ``module.<attr>`` for the cell's dispatch behind a fail-soft
     guard.
 
-    Mirrors ``trt_engine.wrap_module``: the first artifact ERROR
+    The first artifact ERROR
     synchronously revokes scheduler-visible compiled proof and permanently
     routes to eager; the module object (config, dtype, device, weights)
     stays untouched, and its weights remain the constant-binding source.
@@ -2960,8 +2960,8 @@ def enable(
     """Consumer entry point: verify + load + bind + swap an AOTI artifact.
 
     Falsy (staying eager) on ANY miss — the caller's ordinary miss policy
-    (fleet self-mint / eager / typed refusal) takes over, exactly as for a TRT
-    engine. Truthy IS the HIT: ``fleet_cells`` treats it as a genuine match and
+    (fleet self-mint / eager / typed refusal) takes over. Truthy IS the HIT:
+    ``fleet_cells`` treats it as a genuine match and
     skips the self-mint.
 
     pgw#923: the outcome is RETURNED rather than narrated. The classified
@@ -3152,8 +3152,7 @@ def set_guard_failure_callback(pipeline: Any, callback: Any) -> bool:
 
 def unwrap(pipeline: Any) -> bool:
     """Restore every wrapped target's eager callable — rotation/eviction
-    and the unproven-adoption rollback both go through here, same as the
-    TRT lane."""
+    and the unproven-adoption rollback both go through here."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
     rows: List[Dict[str, Any]] = []
     targets = marker.get("targets")

@@ -259,11 +259,11 @@ def _fresh_receipt_gate():
     silently dropped to ``artifact=None``.
 
     That is the whole mechanism behind the long-standing order-dependent
-    flux/trt cluster: `provision.enable_compiled` drops the refused artifact
-    and falls through to the inductor lane, so `test_trt_engine`'s dispatch
-    assertion sees ``{'cc': None}`` instead of the TRT engine, and the
-    executor-adopt hit-counter tests lose their delivered cell. Those tests
-    passed in isolation and failed only after an earlier file armed the gate.
+    flux cluster: `provision.enable_compiled` drops the refused artifact and
+    falls through to the inductor lane, so a dispatch assertion sees
+    ``{'cc': None}`` instead of the delivered artifact, and the executor-adopt
+    hit-counter tests lose their delivered cell. Those tests passed in
+    isolation and failed only after an earlier file armed the gate.
     """
     from gen_worker import receipts as _receipts
 

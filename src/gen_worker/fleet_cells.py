@@ -2639,7 +2639,7 @@ _DELEGATION_DECLINE_PHASE = {
 }
 _DELEGATION_DECLINE_DETAIL = {
     "no_eager_tier":
-        "an armed non-eager backend (AOTI cell or TRT engine) has replaced "
+        "an armed non-eager backend (an AOTI cell) has replaced "
         "this pipeline's forward, so there is no eager tier to serve from",
     "caller_forced_in_process":
         "the caller passed delegate=False, and an AOTI export has no eager "

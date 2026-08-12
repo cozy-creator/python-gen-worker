@@ -42,7 +42,7 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 
     # Known optional libs that affect artifact compatibility.
     # Keep this hardcoded (no env config), per Cozy design.
-    known = ["bitsandbytes", "torchao", "transformer_engine", "tensorrt",
+    known = ["bitsandbytes", "torchao", "transformer_engine",
              "nunchaku", "deepcompressor", "modelopt"]
     if extra_libs:
         known.extend(extra_libs)
@@ -52,18 +52,6 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
             mod = "transformer_engine"
         if _is_importable(mod):
             installed.append(name)
-    # TRT engine cells (#390) are version-locked plans: the hub needs the
-    # runtime's trt version to resolve/schedule matching cells, so advertise
-    # a second `tensorrt==<full version>` entry alongside the plain name
-    # (plain-name library gating keeps working).
-    if "tensorrt" in installed:
-        try:
-            import tensorrt
-
-            installed.append(f"tensorrt=={tensorrt.__version__}")
-        except Exception:
-            pass
-
     cuda_version = ""
     gpu_sm = 0
     torch_version = ""

@@ -9,7 +9,7 @@ plain safetensors shards. The file self-describes in its safetensors
 the standard pipeline — same pipeline class, same handler, no new endpoint.
 
 Hardware: fp4 kernels exist ONLY on consumer Blackwell (sm_120/121); int4 on
-sm_75–89. No sm_90/100 (datacenter stays the TRT lane). Version coupling is
+sm_75–89. No sm_90/100 (no datacenter SVDQ kernels). Version coupling is
 HARD (gw#405, live-hit): nunchaku wheels are per-(torch minor, CUDA) and each
 nunchaku release calls diffusers transformer forwards positionally against one
 diffusers signature window — 1.2.x/1.3.x require diffusers 0.36/0.37 and crash

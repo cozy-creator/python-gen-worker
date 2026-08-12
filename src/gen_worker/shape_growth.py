@@ -7,7 +7,7 @@ and adopt*.  The second half only ever existed on the dynamo arm.
 (``compile_cache._MARKER_ATTR`` -> ``failure_signal.router``), and an AOT-armed
 pipeline never has one — ``models.provision.enable_compiled`` returns as soon
 as ``arm_aot`` succeeds and stamps ``aot_serve._MARKER_ATTR`` instead.  So on
-every AOT (and TRT) arm the executor's three growth call sites are no-ops, the
+every AOT arm the executor's three growth call sites are no-ops, the
 ``_shape_warm_republisher`` closure is constructed and discarded, and
 and pgw#1010 deleted the republish backend outright (a grown JIT cache is
 this pod's, and its cell had no consumer).

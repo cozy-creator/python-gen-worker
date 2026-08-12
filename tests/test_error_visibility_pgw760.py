@@ -21,8 +21,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from gen_worker import activity, capability_renewal, hot_swap, preload, trt_engine
-from gen_worker.compile_cache import AdoptError
+from gen_worker import activity, capability_renewal, hot_swap, preload
 from gen_worker.models import execution_lane_gate, residency
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.utils import lora
@@ -39,52 +38,11 @@ def _by_kind(events: List[Any], kind: str) -> List[Any]:
     return [e for e in events if e.kind == kind]
 
 
-# ---------------------------------------------------------------------------
-# trt_engine.enable — the pgw#733 pattern, TRT half
-# ---------------------------------------------------------------------------
-
-
-class _Cfg:
-    family = "sdxl"
-
-
-def test_trt_enable_refusal_names_the_classified_reason(
-    events: List[Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """pgw#923: the reason is RETURNED, not narrated.
-
-    It used to ride a free-text `trt_adopt` event — a third spelling of "a cell
-    adopted and what it cost", next to `aot_adopt` and the measured
-    `compile_cache_adopt`. `trt_adopt` is deleted; the classified reason now
-    reaches the hub as this adoption's own `adopt_failed:<reason>`, which is
-    countable in the same query as every other adoption outcome.
-    """
-    def refuse(*a: Any, **k: Any) -> Dict[str, Any]:
-        raise AdoptError("no_target", "pipeline has no module 'unet'")
-
-    monkeypatch.setattr(trt_engine, "load_and_wrap", refuse)
-    artifact = tmp_path / "engine.tar"
-    artifact.write_bytes(b"not-a-real-artifact")
-    out = trt_engine.enable(object(), _Cfg(), artifact=artifact)
-    assert out.armed is False
-    assert out.reason == "no_target"  # the CLASSIFIED reason, not a kind
-    assert "engine.tar" in out.detail
-    assert "no module 'unet'" in out.detail
-    # And no second vocabulary was written on the way past.
-    assert not [e for e in events if e.kind == "trt_adopt"]
-
-
-def test_trt_enable_success_names_the_engine(
-    events: List[Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    meta = {"module": "unet", "sku": "l4", "trt": "10.8", "precision": "fp8"}
-    monkeypatch.setattr(trt_engine, "load_and_wrap", lambda *a, **k: meta)
-    artifact = tmp_path / "engine.tar"
-    artifact.write_bytes(b"x")
-    out = trt_engine.enable(object(), _Cfg(), artifact=artifact)
-    assert out.armed is True
-    assert "module=unet" in out.identity
-    assert not [e for e in events if e.kind == "trt_adopt"]
+# pgw#1187 DELETED the two `trt_engine.enable` rows that stood here — the
+# pgw#733 pattern's TRT half. TensorRT was removed from the platform outright
+# on Paul's 2026-08-12 ruling, so their subject is gone; they die with it and
+# are not ported (DESIGN-RULINGS §4.34). The pattern they guarded is still
+# guarded by the `aot_serve` and `hot_swap` rows in this file.
 
 
 # ---------------------------------------------------------------------------

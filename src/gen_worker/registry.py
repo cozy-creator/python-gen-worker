@@ -59,7 +59,7 @@ class CompileCell:
     facts that shape the traced graph family — the decorator-level
     ``lora_bucket`` and the warm guidance representatives derived from the
     payload's ``CompileAxis`` classes. This is the object the compile
-    machinery (compile_cache / fleet_cells / local_cells / trt_engine)
+    machinery (compile_cache / fleet_cells / local_cells / aot_serve)
     consumes; raw ``Compile`` never travels past the registry."""
 
     shapes: tuple

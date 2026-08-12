@@ -16,8 +16,9 @@ S1 / #723 S1: ONE source of truth, imported by both lanes, never re-declared)
 ``.pt2`` (per entry) and holds the B1 gate. ``lora_lifted`` owns the
 no-baked-adapter gate. This module drives PRODUCTION and nothing else.
 Deliberately NOT folded into ``compile_cache``:
-``trt_engine`` already established that a compiled-lane backend is its own
-module riding the compile-cache rails, and the dynamo mint stays live and
+a compiled-lane backend is its own module riding the compile-cache rails
+(``trt_engine`` established the pattern before TensorRT was deleted in
+pgw#1187), and the dynamo mint stays live and
 fully-forced in parallel during rollout (#722: nothing retires before sdxl AOT
 is live in prod).
 

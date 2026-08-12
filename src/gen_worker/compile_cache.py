@@ -3362,22 +3362,17 @@ def eager_tier_available(pipeline: Any) -> bool:
     than being routed eager behind the tenant's back).
 
     False only when an armed non-eager backend has REPLACED the callable —
-    an AOTI export or a TRT engine — because there the eager forward is gone
-    until the artifact is unwrapped.
+    an AOTI export — because there the eager forward is gone until the
+    artifact is unwrapped.
     """
-    # CYCLE: aot_serve and trt_engine both import AdoptError from this module;
-    # hoisting makes compile_cache import itself through them at boot.
-    from . import aot_serve, trt_engine
+    # CYCLE: aot_serve imports AdoptError from this module; hoisting makes
+    # compile_cache import itself through it at boot.
+    from . import aot_serve
 
     try:
         if aot_serve.is_armed(pipeline):
             return False
     except Exception:  # noqa: BLE001 — an unanswerable arm is not a swap
-        pass
-    try:
-        if trt_engine.is_armed(pipeline):
-            return False
-    except Exception:  # noqa: BLE001
         pass
     return True
 

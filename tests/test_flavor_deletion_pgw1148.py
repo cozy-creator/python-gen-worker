@@ -153,18 +153,17 @@ def test_a_cell_ref_round_trips_through_the_normal_form() -> None:
     assert refs.normalize_model_ref(CELL_REF) == CELL_REF
 
 
-def test_the_trt_cell_predicate_still_reads_its_fragment() -> None:
-    from gen_worker import trt_engine
-    assert trt_engine.is_engine_ref(
-        "root/family-sdxl:cells#trt-rtx-4090-trt10.16-fp16")
-    assert not trt_engine.is_engine_ref("owner/repo")
+# pgw#1187 DELETED `test_the_trt_cell_predicate_still_reads_its_fragment` —
+# `trt_engine.is_engine_ref` went with TensorRT. The `#`-shaped CELL ref grammar
+# it also exercised is asserted by the three rows above, which is the durable
+# property; the predicate itself had no other reader.
 
 
 # pgw#1167 REMOVED `test_the_compile_cache_modules_are_byte_untouched_by_this_deletion`.
 #
 # It asserted that eight cell-KEY modules (`compile_cache`, `cell_key`,
-# `aot_mint`, `aot_serve`, `trt_engine`, `fleet_cells`, `local_cells`,
-# `mint_budget`) were byte-identical to `origin/master` — by diffing the
+# `aot_mint`, `aot_serve`, `fleet_cells`, `local_cells`, `mint_budget` and the
+# since-deleted `trt_engine`) were byte-identical to `origin/master` — by diffing the
 # WORKING TREE against the merge-base. On pgw#1148's own branch that proved
 # something real: THIS deletion did not touch a compile-cell module.
 #
@@ -176,8 +175,7 @@ def test_the_trt_cell_predicate_still_reads_its_fragment() -> None:
 #
 # The concern it encoded — "the GPU/compile-cell homonym is NOT this ruling's
 # subject" — is already covered DURABLY and by CONTENT immediately above:
-# `test_the_cell_fragment_still_parses`, `test_parse_cell_ref_is_unchanged`,
-# `test_a_cell_ref_round_trips_through_the_normal_form` and
-# `test_the_trt_cell_predicate_still_reads_its_fragment` all keep working no
+# `test_the_cell_fragment_still_parses`, `test_parse_cell_ref_is_unchanged`
+# and `test_a_cell_ref_round_trips_through_the_normal_form` all keep working no
 # matter who edits those modules, which is what a fence should do. A diff
 # against master is a fact about a branch, not an invariant of the codebase.

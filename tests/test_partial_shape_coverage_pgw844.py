@@ -21,7 +21,8 @@ derived warm plan and ``ensure_setup`` for the boot):
    bucket withheld the whole target (``target_applicability_incomplete``) and
    the pod advertised eager for every shape;
 2. **the exported lane was never asked for its revocation signal** —
-   ``_bind_compile_guard`` probed TRT and dynamo only, and
+   ``_bind_compile_guard`` probed the TRT lane (since deleted) and dynamo
+   only, and
    ``provision.enable_compiled`` returns as soon as ``arm_aot`` succeeds, so
    an AOT-armed pipeline carries no ``compile_cache`` ``failure_signal``
    marker at all.  Every AOT arm therefore answered "no runtime guard

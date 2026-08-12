@@ -21,7 +21,7 @@ A function is UNSERVEABLE only when a genuine incompatibility bars it (compute
 capability / required quant library / a stored flavor outside its SM window)
 OR the author opted out of the CPU-touching rungs with
 ``Resources(strict_vram=True)`` (a binding that cannot tolerate CPU-resident
-weights — compiled fixed-shape graphs, TRT engines — and would rather refuse
+weights — compiled fixed-shape graphs — and would rather refuse
 than serve slowly). It is never refused on hardware inadequacy alone: gen
 workers don't offload to CPU because we want them to, they do it out of
 necessity — better to run degraded than not run at all (Paul's ruling,

@@ -199,7 +199,7 @@ from .runtimes.server import ServerHandle
 from .models.execution_lane_gate import ExecutionLaneGate, arm_execution_lane_gate
 from .models.memory import rearm_offload
 from . import fleet_cells
-from . import aot_serve, numerics_ladder, shape_growth, trt_engine
+from . import aot_serve, numerics_ladder, shape_growth
 from . import fleet_cells as fleet_cells_mod
 from . import hot_swap
 from . import mint_delegate
@@ -3064,7 +3064,6 @@ class _InjectionResult:
     # Installed only after the setup warmup completes.
     active_compile_artifacts: Dict[int, _CompileArtifactSelection] = dc_field(
         default_factory=dict)
-    trt_execution_before: Dict[int, int] = dc_field(default_factory=dict)
     # gw#587 CORRECT FIX: id(pipeline) -> fleet_cells.PendingSelfMint for
     # objects armed from a fresh self-mint capture, not yet proven or
     # packed. The warmup-proof loop finalizes (packs + publishes) exactly
@@ -4392,8 +4391,6 @@ class Executor:
         def callback(detail: str) -> None:
             self._compile_guard_failed(rec, target, detail)
 
-        if trt_engine.set_guard_failure_callback(target.pipeline, callback):
-            return True
         # pgw#844: the EXPORTED lane owns its own revocation signal and this
         # was never asked for it — `enable_compiled` returns as soon as
         # `arm_aot` succeeds, so an AOT-armed pipeline never gets the dynamo
@@ -4415,8 +4412,7 @@ class Executor:
         ):
             return False
         # pgw#680: serve-window guard misses confess through the same
-        # target (telemetry only — no state mutation, no revocation). TRT
-        # engines never dynamo-recompile, so only torch guards bind this.
+        # target (telemetry only — no state mutation, no revocation).
         def miss_callback(miss: compile_cache.GuardMiss) -> None:
             self._compile_guard_missed(rec, target, miss)
 
@@ -6435,7 +6431,7 @@ class Executor:
         armed_refs = tuple(armed_cell_refs)
         # Tracing == some object under proof still needs the full class x
         # bucket cross-product, because its graphs must trace INTO something:
-        # a dynamo/TRT lane whose per-class FX cache-hit ledger is its only
+        # a dynamo lane whose per-class FX cache-hit ledger is its only
         # detector of a silent recompile, or a fresh self-mint capture every
         # declared graph must land in.
         #
@@ -6469,8 +6465,8 @@ class Executor:
                 "(contract-keyed warm memory holds %d graph keys)",
                 spec.name, warm_mode, len(run_jobs), len(jobs), len(memory))
         evidence = _WarmupEvidence()
-        # pgw#735: three compiled backends, three proofs. Dynamo proves by FX
-        # cache hits, TRT by engine executions, an EXPORTED artifact by its own
+        # pgw#735: two compiled backends, two proofs. Dynamo proves by FX
+        # cache hits, an EXPORTED artifact by its own
         # invocations — an exported cell performs no FX lookup at all, so a
         # cache-hit requirement would score every honest .pt2 adoption as a
         # failure. Never synthesize a hit counter for it: this is the one path
@@ -6478,7 +6474,6 @@ class Executor:
         start_counts = {
             id(obj): (
                 compile_cache.execution_count(obj),
-                trt_engine.execution_count(obj),
                 aot_serve.execution_count(obj),
             )
             for obj in objects
@@ -6508,7 +6503,6 @@ class Executor:
             before = {
                 id(obj): (
                     compile_cache.execution_count(obj),
-                    trt_engine.execution_count(obj),
                     aot_serve.execution_count(obj),
                 )
                 for obj in objects
@@ -6591,7 +6585,7 @@ class Executor:
                 # does not run is not a measurement anyone can read.
                 self._warm_iterations += 1
             for obj in objects:
-                calls_before, trt_before, aot_before = before[id(obj)]
+                calls_before, aot_before = before[id(obj)]
                 inductor_proven = (
                     compile_cache.execution_count(obj) > calls_before
                     and (
@@ -6599,14 +6593,13 @@ class Executor:
                         or id(obj) in cold_proof_ids
                     )
                 )
-                trt_proven = trt_engine.execution_count(obj) > trt_before
                 # pgw#735: an exported artifact proves itself by executing —
                 # and by still being armed, so a call that ended in a revoked
                 # (failed) artifact cannot count as proof.
                 aot_proven = aot_serve.proven_since(obj, aot_before)
                 if aot_proven:
                     exported_proof_ids.add(id(obj))
-                if inductor_proven or trt_proven or aot_proven:
+                if inductor_proven or aot_proven:
                     proven_keys.setdefault(id(obj), set()).add(wj.graph_key)
             logger.info(
                 "boot warmup %s (%s): %.1fs",
@@ -6632,8 +6625,7 @@ class Executor:
             return [
                 obj for obj in objects
                 if compile_cache.execution_count(obj) == start_counts[id(obj)][0]
-                and trt_engine.execution_count(obj) == start_counts[id(obj)][1]
-                and aot_serve.execution_count(obj) == start_counts[id(obj)][2]
+                and aot_serve.execution_count(obj) == start_counts[id(obj)][1]
             ]
 
         # gw#614 coverage pass: an input-routed sibling lane the planned
@@ -7242,9 +7234,6 @@ class Executor:
                         inj.pending_self_mints[id(pipe)] = mint
                     elif armed and selection is not None:
                         inj.active_compile_artifacts[id(pipe)] = selection
-                        if trt_engine.is_engine_ref(selection.ref):
-                            inj.trt_execution_before[id(pipe)] = (
-                                trt_engine.execution_count(pipe))
             # pgw#671 eager-first boot (worker half of th#1187): a fresh
             # self-mint on an eager-compatible lane no longer gates READY.
             # Stash the arm-time placeholder selections (their digest is
@@ -7331,9 +7320,9 @@ class Executor:
             # artifact SOURCE differs; a self-mint that does not actually
             # serve its own warmup graphs must fail closed below exactly
             # like a delivered cell that doesn't (never silent eager).
-            # pgw#735: TRT engines and EXPORTED artifacts both prove
-            # themselves by executing, not by an FX cache hit — only the
-            # dynamo lane is scored by hits below.
+            # pgw#735: EXPORTED artifacts prove themselves by executing,
+            # not by an FX cache hit — only the dynamo lane is scored by
+            # hits below.
             # pgw#1141b: the lane split is decided per OBJECT (`_exported_arm`),
             # never off the ref string alone. A boot-adopted cell wraps a live
             # pipeline through the ordered arm, which taught `is_aot_ref`
@@ -7344,8 +7333,7 @@ class Executor:
             # keep-the-arm branch below could not fire for the one object it
             # exists for.
             def _proves_by_fx(pipeline: Any, ref: str) -> bool:
-                return not trt_engine.is_engine_ref(ref) and not \
-                    _exported_arm(pipeline, ref)
+                return not _exported_arm(pipeline, ref)
 
             _armed_now = [
                 (candidate.pipeline, sel)
@@ -7498,8 +7486,7 @@ class Executor:
                         for _cand in inj.compile_objects:
                             _sel = inj.active_compile_artifacts.get(
                                 id(_cand.pipeline))
-                            if _sel is not None and not trt_engine.is_engine_ref(
-                                    _sel.ref):
+                            if _sel is not None:
                                 compile_cache.reset_target_code(_cand.pipeline)
                         warmed, function_proofs, warm_aborted = await run_warmup()
                 else:
@@ -7795,9 +7782,7 @@ class Executor:
                     # pgw#722 finding 2: FX forensics describe the dynamo
                     # lane only — a pure-exported disproof would report the
                     # SKIPPED delivered artifact's cache state, pure noise.
-                    if proves_inductor and compile_selection is not None and not (
-                        trt_engine.is_engine_ref(compile_selection.ref)
-                    ):
+                    if proves_inductor and compile_selection is not None:
                         try:
                             forensics = compile_cache.fx_cache_failure_report(
                                 compile_selection.path)
@@ -7971,30 +7956,6 @@ class Executor:
             self._assert_mint_termini(
                 spec,
                 [p for p in mint_obligations if id(p) not in owned_by_driver])
-            if compile_selection and trt_engine.is_engine_ref(compile_selection.ref):
-                trt_candidates = [
-                    candidate for candidate in inj.compile_objects
-                    if id(candidate.pipeline) in inj.active_compile_artifacts
-                ]
-                unproven = [
-                    candidate.pipeline for candidate in trt_candidates
-                    if trt_engine.execution_count(candidate.pipeline)
-                    <= inj.trt_execution_before.get(id(candidate.pipeline), 0)
-                ]
-                if callable(warmup):
-                    unproven_ids = {id(pipe) for pipe in unproven}
-                    for candidate in trt_candidates:
-                        if id(candidate.pipeline) not in unproven_ids:
-                            function_proofs[id(candidate.pipeline)] = {spec.name}
-                if unproven:
-                    for pipe in unproven:
-                        function_proofs[id(pipe)] = set()
-                        trt_engine.unwrap(pipe)
-                        inj.active_compile_artifacts.pop(id(pipe), None)
-                    logger.warning(
-                        "attached TRT artifact did not execute during warmup; "
-                        "serving eager"
-                    )
             vram_delta = max(0, self._vram_allocated() - vram_before)
             if rec.server is not None:
                 # Engine subprocess VRAM is invisible to torch's allocator;
@@ -9173,9 +9134,8 @@ class Executor:
                             "require resident placement; retrying without "
                             "content-keyed sharing for this ref")
                     if spec.compile is not None:
-                        # Opt-in acceleration against a pre-built per-SKU artifact:
-                        # a TRT engine (#390, refit with this pipeline's weights)
-                        # or an inductor cache (#384). No verified artifact =>
+                        # Opt-in acceleration against a pre-built per-SKU
+                        # inductor cache (#384). No verified artifact =>
                         # stays eager. ``compile_artifact`` is hub-attached (#569).
 
                         # pgw#677 reopen: stamp the hub-resolved execution
@@ -9265,10 +9225,6 @@ class Executor:
                                 result.pending_self_mints[id(pipe)] = pipe_mint
                             elif armed and selection is not None:
                                 result.active_compile_artifacts[id(pipe)] = selection
-
-                                if trt_engine.is_engine_ref(selection.ref):
-                                    result.trt_execution_before[id(pipe)] = (
-                                        trt_engine.execution_count(pipe))
                     delta = max(0, self._vram_allocated() - before)
                     if slot_share:
                         execution_lane_obj, execution_lane_bytes = self._register_execution_lane(
@@ -9424,7 +9380,7 @@ class Executor:
         """pgw#916: this armed target has NO serve-window shape-growth path.
 
         ``hot_swap.enable`` returns False whenever the pipeline carries no
-        dynamo router, which is every AOT and TRT arm by construction —
+        dynamo router, which is every AOT arm by construction —
         ``provision.enable_compiled`` returns as soon as ``arm_aot`` succeeds,
         so ``compile_cache.enable`` (the only thing that installs the router)
         is never reached.  The consequence is total: a class the cell does not
@@ -9440,8 +9396,6 @@ class Executor:
         arm = shape_growth.ARM_DYNAMO
         if aot_serve.is_armed(pipeline):
             arm = shape_growth.ARM_AOT
-        elif trt_engine.is_armed(pipeline):
-            arm = "trt"
         with target.state_lock:
             cell = target.active_compile_ref
         logger.warning(
@@ -9493,8 +9447,8 @@ class Executor:
         cfg = spec.compile_cell()
         if cfg is None or bool(getattr(cfg, "regional", False)):
             return False
-        # Any armed artifact that is NOT a pending self-mint (delivered
-        # cell, TRT engine) keeps today's foreground proof for the whole
+        # Any armed artifact that is NOT a pending self-mint (a delivered
+        # cell) keeps today's foreground proof for the whole
         # record — mixing tiers inside one proof window is not worth it.
         if set(inj.active_compile_artifacts) - set(inj.pending_self_mints):
             return False
