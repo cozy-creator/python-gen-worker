@@ -385,11 +385,6 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
         "though two sibling buckets are undispatchable")
     assert target.active_compile_snapshot_digest == CELL_DIGEST
     assert list(target.function_names) == ["generate"]
-
-    # One warm unit dispatched; the other two were refused and served eager.
-    assert aot_serve.execution_count(pipe) == 1
-    assert aot_serve.ingress_refusals(pipe) == 2
-    assert pipe.unet.eager_calls == 2
     assert aot_serve.is_armed(pipe)
 
     kinds = [(kind, phase) for kind, phase, _d in events]
@@ -399,16 +394,38 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
     assert ("serve_eager_posture", "target_applicability_incomplete") \
         not in kinds
 
-    coverage = [d for k, p, d in events
-                if k == "compiled_shape_coverage" and p == "partial_shape_coverage"]
-    assert len(coverage) == 1, events
-    assert "1/3 declared graph classes served COMPILED" in coverage[0]
-    assert "wide" in coverage[0] and "tall" in coverage[0]
-    assert serving_mode.FALLBACK_INGRESS_REFUSED in coverage[0]
-
     # pgw#844 defect 2: the exported lane's OWN revocation signal is what
     # keeps this target advertisable — nothing installed a dynamo marker.
     assert not hasattr(pipe, cc._MARKER_ATTR)
+
+
+def test_the_exported_lane_boots_on_the_eager_warm_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """pgw#1184 — an ARMED `.pt2` costs ONE warm generate, not one per class.
+
+    The fixture's three aspect classes share one eager group (one function,
+    one guidance class, one text pin), so the eager plan is one run and the
+    class x bucket cross-product is three. sdxl's real declaration is 18
+    classes in 2 eager groups: the same ratio, and the 18-where-2-would-do the
+    tree's own comment quoted while leaving it in place.
+
+    Nothing is being traced. A `.pt2` is ahead-of-time machine code that
+    performs no FX lookup, there is no per-class cache-hit ledger to move, and
+    §4.31 deleted the warm plan as a prerequisite to arming — so every run
+    past the first bought nothing but wall clock.
+
+    RED on unmodified master: `the boot ran 3 full warm generates against an
+    ARMED exported cell (1 dispatched, 2 refused at ingress), want 1`.
+    """
+    _ex, _generate, pipe, _events = _boot(tmp_path, monkeypatch)
+
+    dispatched = aot_serve.execution_count(pipe)
+    refused = aot_serve.ingress_refusals(pipe)
+    assert dispatched + refused == 1, (
+        f"the boot ran {dispatched + refused} full warm generates against an "
+        f"ARMED exported cell ({dispatched} dispatched, {refused} refused at "
+        f"ingress), want 1")
 
 
 def test_an_ambiguous_request_is_charged_ingress_refused_not_counted_compiled(
@@ -461,8 +478,12 @@ def test_the_partial_coverage_claim_is_scoped_to_the_exported_execution_lane(
     is an unannounced recompile at serve time, so the same warm plan on the
     dynamo lane must NOT produce a partial-coverage claim.
     """
-    _ex, _generate, pipe, events = _boot(tmp_path, monkeypatch, exported=False)
+    _ex, _generate, pipe, _events = _boot(tmp_path, monkeypatch, exported=False)
 
-    assert not [d for k, _p, d in events if k == "compiled_shape_coverage"]
+    # The FULL plan, all three classes: one served by the compiled callable,
+    # two fell through to eager. On this lane an unproven class is an
+    # unannounced recompile, so the runs are the only detector there is —
+    # which is exactly why pgw#1184 cut the exported lane out of the plan and
+    # left this one alone.
     assert cc.execution_count(pipe) == 1
     assert pipe.unet.eager_calls == 2

@@ -2776,12 +2776,6 @@ class _WarmupEvidence:
 
     count: int = 0
     functions_by_object: Dict[int, set[str]] = dc_field(default_factory=dict)
-    #: pgw#844: per object, the aliases that proved SOME but not all of their
-    #: declared graph classes on the EXPORTED lane -> the classes that stayed
-    #: eager. Non-empty means "compiled for these shapes, eager for those",
-    #: which is a serving posture, not a boot failure.
-    partial_by_object: Dict[int, Dict[str, Tuple[str, ...]]] = dc_field(
-        default_factory=dict)
     #: pgw#677 reopen: non-empty when the warm plan was CUT SHORT (OOM
     #: backoff) — names the truncation. A truncated plan must never publish
     #: its partial capture as the family cell.
@@ -6439,23 +6433,26 @@ class Executor:
         memory = self._warm_contract_runs.setdefault(
             self._warm_contract_key(spec), set())
         armed_refs = tuple(armed_cell_refs)
-        # Tracing == some artifact is armed or minting on this setup; only
-        # then does the full class x bucket cross-product buy anything (each
-        # graph must trace into the capture / prove against the cell).
+        # Tracing == some object under proof still needs the full class x
+        # bucket cross-product, because its graphs must trace INTO something:
+        # a dynamo/TRT lane whose per-class FX cache-hit ledger is its only
+        # detector of a silent recompile, or a fresh self-mint capture every
+        # declared graph must land in.
         #
-        # pgw#1141 DELIBERATELY LEAVES THIS ALONE, and the omission is the
-        # decision. §4.31 deletes the warm plan as a PREREQUISITE TO ARMING —
-        # which is this issue — and notes that the per-class cost then buys
-        # nothing on an exported adopt. Collapsing it to the eager plan is a
-        # real saving (sdxl: 18 full generates per handler -> 2) but it is not
-        # free: this plan is also what produces pgw#844's BOOT-TIME coverage
-        # census (`compiled_shape_coverage`, which names the declared classes a
-        # cell does not carry before any tenant meets one) and what feeds the
-        # dynamo lane's per-class cache-hit ledger, its only detector of a
-        # silent recompile. Both deserve an answer of their own rather than a
-        # rider on a P0 arm fix, so the collapse is filed as its own change
-        # with its own red tests. Nothing about the ARM depends on it.
-        tracing = bool(objects)
+        # pgw#1184 CUTS THE EXPORTED LANE OUT OF IT (th#1834 Phase 4). An
+        # armed `.pt2` is ahead-of-time machine code for this exact
+        # sm x toolchain: it performs no FX lookup, there is no ledger to
+        # move, and §4.31 already ruled that warmup "never made a cell faster,
+        # it only checked it." The 18 runs sdxl was paying per handler bought
+        # exactly one thing the arm did not already have — a BOOT-TIME census
+        # of which declared classes the dispatcher could route to — and that
+        # census is deleted with them (see `_arm_class_coverage`, and the
+        # commit message for why 16 extra full generates is not what that
+        # question is worth). The per-shape truth still arrives, per request,
+        # typed, at the ingress that already refuses a class BY NAME and
+        # charges the request `fallback_reason=ingress_refused`.
+        tracing = bool(cold_proof_ids) or any(
+            not aot_serve.holds_exported_cell(obj) for obj in objects)
         skip_ok = (
             allow_contract_skip
             and not cold_proof_ids
@@ -6495,7 +6492,16 @@ class Executor:
         # a per-shape posture, not a silent recompile — which is what lets the
         # attribution below be per-class for this lane and stay all-or-nothing
         # for dynamo, where an unproven class means an unannounced recompile.
-        exported_proof_ids: set = set()
+        #
+        # pgw#1184: the exported lane no longer runs the full plan, so this set
+        # is seeded from the LANE rather than discovered by executing 18
+        # generates. An armed exported object is on it from the start; what
+        # `_one` still adds is nothing this lane needs, and what the
+        # attribution below still does with it is attribute every alias
+        # (§4.31: the arm has no warm prerequisite).
+        exported_proof_ids: set = {
+            id(obj) for obj in objects if aot_serve.holds_exported_cell(obj)
+        }
 
         async def _one(wj: Any, build: Any, mode: str, *, variant: bool) -> bool:
             """One warmup forward; False = OOM, stop warming."""
@@ -6677,59 +6683,43 @@ class Executor:
         for wj in jobs:
             for name in (wj.covers or (wj.spec.name,)):
                 keys_by_name.setdefault(name, set()).add(wj.graph_key)
-        for obj_id, proven in proven_keys.items():
-            names = {
-                name for name, keys in keys_by_name.items()
-                if keys and keys <= proven
-            }
-            # pgw#844: …and on the EXPORTED lane an alias that proved SOME of
-            # its graph classes is attributed too, with the rest named.
-            #
-            # The measured shape (attempt twelve, pod o0legpgj5olhic): a
-            # regional sdxl cell armed all 72 entries, dispatched 1024x1024
-            # correctly, and refused the other eight aspect buckets
-            # `entry_ambiguous` because a transformer block sees H_lat*W_lat
-            # and the entries are keyed on H and W separately. Those eight
-            # classes went unproven, the all-or-nothing rule above attributed
-            # NO alias, the target was omitted as `target_applicability_
-            # incomplete`, and the boot ended `boot_ended_uncompiled` — so the
-            # ONE bucket that was armed, correct and unambiguous served eager
-            # too. One undispatchable shape cost the pod every shape.
+        for obj_id in set(proven_keys) | exported_proof_ids:
+            proven = proven_keys.get(obj_id, set())
+            # pgw#844's ORIGINAL FINDING, now answered at the lane instead of
+            # per class (pgw#1184). The measured shape (attempt twelve, pod
+            # o0legpgj5olhic): a regional sdxl cell armed all 72 entries,
+            # dispatched 1024x1024 correctly, and refused the other eight
+            # aspect buckets `entry_ambiguous`. Those eight classes went
+            # unproven, the all-or-nothing rule attributed NO alias, the
+            # target was omitted `target_applicability_incomplete`, and the
+            # boot ended `boot_ended_uncompiled` — so the ONE bucket that was
+            # armed, correct and unambiguous served eager too. One
+            # undispatchable shape cost the pod every shape.
             #
             # `boot_ended_uncompiled` must mean "nothing is dispatchable", not
             # "something wasn't". An exported artifact refuses a shape it
             # cannot serve BY NAME, counts it, emits `aot_ingress_refused`,
             # charges the request `fallback_reason=ingress_refused`, and stays
-            # armed — so the degradation is per shape and fully visible, which
-            # is exactly the fail-soft posture the compiled lane is built on.
-            # Dynamo keeps the strict rule: there an unproven class means an
-            # unannounced recompile at serve time, which is silent.
-            partial: Dict[str, Tuple[str, ...]] = {}
+            # armed — so the degradation is per shape and fully visible.
+            #
+            # pgw#844 bought that with a per-class warm census. §4.31 deleted
+            # the premise underneath it: the arm has NO warm prerequisite, so
+            # an armed exported object is attributed to every alias its plan
+            # covers, and the count of classes it served AT BOOT decides
+            # nothing. That is also what makes the eager plan sound above —
+            # attribution can no longer depend on how many runs happened.
+            #
+            # Dynamo keeps the strict rule verbatim: there an unproven class
+            # means an unannounced recompile at serve time, which is silent.
             if obj_id in exported_proof_ids:
-                for name, keys in keys_by_name.items():
-                    if not keys or name in names or not (keys & proven):
-                        continue
-                    names.add(name)
-                    partial[name] = tuple(sorted(
-                        str(key) for key in (keys - proven)))
+                names = {name for name, keys in keys_by_name.items() if keys}
+            else:
+                names = {
+                    name for name, keys in keys_by_name.items()
+                    if keys and keys <= proven
+                }
             if names:
                 evidence.functions_by_object[obj_id] = names
-            if partial:
-                evidence.partial_by_object[obj_id] = partial
-                for name, missing in sorted(partial.items()):
-                    total = len(keys_by_name[name])
-                    activity_mod.emit_event(
-                        "compiled_shape_coverage",
-                        f"fn={name}: {total - len(missing)}/{total} declared "
-                        f"graph classes served COMPILED at boot; the compiled "
-                        f"lane stays armed and these {len(missing)} class(es) "
-                        f"serve EAGER per request (each one named at ingress, "
-                        f"and every such request reports "
-                        f"fallback_reason="
-                        f"{serving_mode_mod.FALLBACK_INGRESS_REFUSED}): "
-                        f"{list(missing[:8])!r}",
-                        phase="partial_shape_coverage",
-                    )
         return evidence
 
     async def _invoke_warmup(
