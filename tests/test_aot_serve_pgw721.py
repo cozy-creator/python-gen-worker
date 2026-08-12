@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker import aot_serve as aot
+from gen_worker import cell_key as cell_key_mod
 from gen_worker.cell_adopt import AdoptOutcome
 
 FAMILY = "sdxl-base"
@@ -133,9 +134,10 @@ ENTRY = "unet/g"
 
 
 def _entry(**over):
-    """One format-2 entry block, range_digest/class_hash stamped the way
+    """One format-3 entry block, range_digest/class_hash stamped the way
     the mint stamps them (best effort for deliberately-malformed blocks)."""
     e = {
+        "name": ENTRY,
         "target": "unet", "fork": [], "class_dims": [],
         "inputs": [dict(r) for r in INPUTS],
         "symbols": {k: list(v) for k, v in SYMBOLS.items()},
@@ -152,14 +154,22 @@ def _entry(**over):
 
 
 def _meta(**over):
+    """ONE entry artifact's metadata (format 3, pgw#1176).
+
+    There is deliberately no way to ask this helper for several entries: one
+    artifact is one graph class, so a fixture that could build a multi-entry
+    envelope would be asserting against a shape production cannot produce.
+    """
     entry_over = {
         k: over.pop(k) for k in ("inputs", "symbols", "constants")
         if k in over}
-    entries = over.pop("entries", None) or {ENTRY: _entry(**entry_over)}
+    entry = over.pop("entry", None) or _entry(**entry_over)
     m = {
         "format": aot.ARTIFACT_FORMAT, "kind": aot.ARTIFACT_KIND, **RUNTIME,
         "family": FAMILY, "precision": "w8a8",
-        "cell_key": "deadbeef", "entries": entries,
+        "cell_key": "deadbeef", cell_key_mod.ENTRY_BLOCK_KEY: entry,
+        "manifest_digest": cell_key_mod.manifest_digest(
+            [str((entry or {}).get("class_hash") or "")]),
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
         # pgw#1097: the folding fence, declared (see the fixture note in
@@ -168,19 +178,18 @@ def _meta(**over):
         "source_ref": "", "source_digest": "",
         "host_isa": dict(HOST_ISA),
     }
-    m["combined_graph_hash"] = aot.combined_graph_hash(
-        str((b or {}).get("class_hash") or "")
-        for b in entries.values() if isinstance(b, dict))
     m.update(over)
     return m
 
 
 def _contract(meta=None):
-    return aot.contract_from_meta((meta or _meta())["entries"][ENTRY])
+    return aot.contract_from_meta(
+        (meta or _meta())[cell_key_mod.ENTRY_BLOCK_KEY])
 
 
 def _specs(meta=None):
-    return aot.constants_from_meta((meta or _meta())["entries"][ENTRY])
+    return aot.constants_from_meta(
+        (meta or _meta())[cell_key_mod.ENTRY_BLOCK_KEY])
 
 
 def _runner(package=None, meta=None):
@@ -453,9 +462,24 @@ def test_swap_serves_out_of_contract_requests_eagerly_and_stays_armed():
     runner = _runner(package)
     runner.bind(module.state_dict(), {})
     meta = _meta()
-    aot.wrap_module(module, runner, meta)
-    setattr(pipeline, "_cozy_aot", {"meta": meta, "module": module,
-                                    "state": getattr(module, "_cozy_aot")["state"]})
+    # pgw#1176: production wraps a REGISTRY, never a bare runner — `is_armed`
+    # asks it what is armed. A fixture wrapping a bare runner was modelling a
+    # call shape `arm_entry` does not make.
+    dispatch = aot.EntryDispatch(declared=(ENTRY,))
+    dispatch.add(ENTRY, runner)
+    aot.wrap_module(module, dispatch, meta)
+    # pgw#1176: the PIPELINE marker `arm_entry` publishes — `targets` plus one
+    # `entries` row per armed graph class. The bare `{"module": …, "state": …}`
+    # this used to build is a pipeline shape nothing produces; `is_armed` asks
+    # the REGISTRY what is armed rather than reading a flag, so a fixture that
+    # wants an armed pipeline has to carry one.
+    setattr(pipeline, "_cozy_aot", {
+        "meta": meta,
+        "targets": {"unet": {
+            "module": module, "attr": "forward",
+            "state": getattr(module, "_cozy_aot")["state"]}},
+        "entries": {ENTRY: {"key": meta["cell_key"], "target": "unet"}},
+    })
 
     # in-contract: the artifact serves
     assert module.forward(*_in_range_call()[0]) == "ARTIFACT_OUTPUT"
@@ -582,16 +606,16 @@ def test_verify_rejects_malformed_contract(stub_runtime):
 
 
 def test_verify_rejects_tampered_range_digest(stub_runtime):
-    meta = aot.artifact_metadata(
+    meta = aot.entry_metadata(
         family=FAMILY, precision="w8a8", cell_key="k",
-        entries=_entries_arg())
+        name=ENTRY, entry=_entry_arg())
     assert aot.verify(meta) == ""
-    meta["entries"][ENTRY]["symbols"]["h"] = [64, 4096]
+    meta[cell_key_mod.ENTRY_BLOCK_KEY]["symbols"]["h"] = [64, 4096]
     reason = aot.verify(meta)
     assert "range_digest" in reason and ENTRY in reason
 
 
-def _entries_arg(**entry_over):
+def _entry_arg(**entry_over):
     block = {
         "target": "unet", "fork": [], "class_dims": [],
         "inputs": [dict(r) for r in INPUTS],
@@ -599,29 +623,29 @@ def _entries_arg(**entry_over):
         "constants": [dict(r) for r in CONSTANTS],
         "graph": {}}
     block.update(entry_over)
-    return {ENTRY: block}
+    return block
 
 
-def test_artifact_metadata_validates_at_mint():
+def test_entry_metadata_validates_at_mint():
     """A malformed contract must fail on the pod, not on a paid request."""
     with pytest.raises(ValueError, match="no declared range"):
-        aot.artifact_metadata(
+        aot.entry_metadata(
             family=FAMILY, precision="w8a8", cell_key="k",
-            entries=_entries_arg(symbols={"h": [64, 160]}))
+            name=ENTRY, entry=_entry_arg(symbols={"h": [64, 160]}))
     with pytest.raises(ValueError, match="unknown source"):
-        aot.artifact_metadata(
-            family=FAMILY, precision="w8a8", cell_key="k",
-            entries=_entries_arg(
+        aot.entry_metadata(
+            family=FAMILY, precision="w8a8", cell_key="k", name=ENTRY,
+            entry=_entry_arg(
                 constants=[{"fqn": "a", "source": "guess", "shape": []}]))
-    meta = aot.artifact_metadata(
-        family=FAMILY, precision="w8a8", cell_key="k", entries=_entries_arg())
+    meta = aot.entry_metadata(
+        family=FAMILY, precision="w8a8", cell_key="k",
+        name=ENTRY, entry=_entry_arg())
     assert meta["package_constants_in_so"] is False
-    entry = meta["entries"][ENTRY]
+    entry = meta[cell_key_mod.ENTRY_BLOCK_KEY]
+    assert entry["name"] == ENTRY
     assert entry["range_digest"] == aot.range_digest(entry)
     assert entry["class_hash"] == aot.class_hash(
         entry, strict=True, lora_bucket=0)
-    assert meta["combined_graph_hash"] == aot.combined_graph_hash(
-        [entry["class_hash"]])
 
 
 def test_constant_manifest_rejects_duplicates():
