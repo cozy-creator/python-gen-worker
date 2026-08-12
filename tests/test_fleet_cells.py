@@ -111,7 +111,8 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
 
 def _publisher(calls):
     class _Pub(fc.CellPublisher):
-        def publish(self, family, artifact, meta, mint_duration_ms=0):
+        def publish(self, family, artifact, meta, mint_duration_ms=0,
+                    adopt_load_bytes=0):
             calls.append((family, Path(artifact), dict(meta), int(mint_duration_ms)))
             return "cp-1"
 
@@ -256,7 +257,8 @@ def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
     published = threading.Event()
 
     class _Pub(fc.CellPublisher):
-        def publish(self, family, artifact, meta, mint_duration_ms=0):
+        def publish(self, family, artifact, meta, mint_duration_ms=0,
+                    adopt_load_bytes=0):
             calls.append((family, artifact.read_bytes(), dict(meta),
                           int(mint_duration_ms)))
             published.set()
@@ -333,7 +335,8 @@ def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
     refused = threading.Event()
 
     class _Pub(fc.CellPublisher):
-        def publish(self, family, artifact, meta, mint_duration_ms=0):
+        def publish(self, family, artifact, meta, mint_duration_ms=0,
+                    adopt_load_bytes=0):
             refused.set()
             raise fc.CellPublishRefused("cell_publish_untrusted_tier: community_tier")
 

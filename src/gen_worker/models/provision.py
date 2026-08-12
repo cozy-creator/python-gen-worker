@@ -474,6 +474,9 @@ def arm_aot(
         lane = str((meta or {}).get("weight_lane") or "")
         entries = len((meta or {}).get("entries") or {})
         mint_budget.record_adopt_peak(family, lane, total)
+        # pgw#1171: the LOAD half alone, which is what an ADOPTER pays and
+        # therefore the only half worth telling the fleet about (th#1828).
+        mint_budget.record_adopt_load(family, lane, int(_load_bytes))
         gib = 1 << 30
         activity_mod.emit_event(
             "cell_adopt_budget",

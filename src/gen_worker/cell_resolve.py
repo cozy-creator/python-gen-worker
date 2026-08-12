@@ -152,6 +152,12 @@ class ResolvedCell:
     lane: str
     receipt: str
     transport: Transport
+    #: th#1828: the DEVICE cost of loading this cell, measured by the pod that
+    #: minted it (pgw#1168's `load` term — entry runners only, never the §4.32
+    #: verify, which only a minting pod pays). 0 = the hub reported none, which
+    #: is NO EVIDENCE: every cell published before th#1828 is in that case and
+    #: must adopt exactly as it does today.
+    adopt_load_bytes: int = 0
 
     def expected_identity(self) -> aot_identity.ExpectedIdentity:
         """The admission expectation this answer states.
@@ -211,6 +217,8 @@ def _cell_from(body: Mapping[str, Any]) -> ResolvedCell:
         lane=str(body.get("lane") or ""),
         receipt=str(body.get("receipt") or ""),
         transport=_transport_from(body),
+        # Absent stays absent: the hub OMITS this when it holds no measurement.
+        adopt_load_bytes=max(0, int(body.get("adopt_load_bytes") or 0)),
     )
 
 

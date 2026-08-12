@@ -688,7 +688,7 @@ class CellPublisher:
     # -- publish ------------------------------------------------------------
 
     def publish(self, family: str, artifact: Path, meta: dict,
-                mint_duration_ms: int = 0) -> str:
+                mint_duration_ms: int = 0, adopt_load_bytes: int = 0) -> str:
         """Publish one self-minted cell. Returns the checkpoint id.
 
         Steps: attested intent (worker JWT; hub corroborates the axes and
@@ -744,6 +744,12 @@ class CellPublisher:
                 # we ask to publish — so the cost commits in the same INSERT
                 # as the row it describes.
                 "mint_duration_ms": max(0, int(mint_duration_ms or 0)),
+                # th#1828: what loading this cell cost THIS pod's device.
+                # Carried so a pod that has never seen it can refuse an adopt
+                # it cannot survive (pgw#1169) instead of taking the SIGSEGV
+                # that would repeat on every pod of the release. 0 = we never
+                # measured, and the hub renders that as absent, not as zero.
+                "adopt_load_bytes": max(0, int(adopt_load_bytes or 0)),
             },
             timeout=_INTENT_TIMEOUT_S,
         )
@@ -1018,7 +1024,13 @@ def _publish_async(
         t0 = time.monotonic()
         try:
             checkpoint_id = publisher.publish(
-                family, artifact, meta, mint_duration_ms)
+                family, artifact, meta, mint_duration_ms,
+                # pgw#1171/th#1828: what THIS pod measured loading this cell
+                # (pgw#1168's `load` term, banked at the arm seam). The adopt
+                # runs before the publish, so by now the number exists; 0 means
+                # it was never measured and the hub stores no evidence.
+                adopt_load_bytes=mint_budget.adopt_load(
+                    family, str(meta.get("weight_lane") or "")))
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
             # pgw#1096/§4.28: the hub has just ASSERTED this hardware's trust

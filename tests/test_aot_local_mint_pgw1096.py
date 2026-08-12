@@ -548,7 +548,8 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
 
     class _Refusing:
         def publish(self, family: str, art: Path, meta: dict,
-                    mint_duration_ms: int = 0) -> str:
+                    mint_duration_ms: int = 0,
+                    adopt_load_bytes: int = 0) -> str:
             raise fleet_cells.CellPublishRefused(
                 "publish-intent refused (403): community_tier",
                 status=403, code=local_cell_store.UNTRUSTED_REFUSAL_CODE)
@@ -573,7 +574,8 @@ def test_a_transport_failure_is_not_a_trust_verdict(
 
     class _Broken:
         def publish(self, family: str, art: Path, meta: dict,
-                    mint_duration_ms: int = 0) -> str:
+                    mint_duration_ms: int = 0,
+                    adopt_load_bytes: int = 0) -> str:
             raise RuntimeError("connection reset")
 
     fleet_cells._publish_async(

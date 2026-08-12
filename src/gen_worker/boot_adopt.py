@@ -72,7 +72,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from . import (
     activity, aot_identity, artifact_meta, boot_key, cell_resolve,
-    local_cell_store,
+    local_cell_store, mint_budget,
 )
 from .mint_process import CompileCellSpec, MintSlot
 
@@ -524,6 +524,16 @@ def attempt(
             detail=f"the hub holds no entitled cell for {key}",
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
+
+    # pgw#1171/th#1828: LEARN WHAT IT COSTS BEFORE PAYING FOR IT. The hub
+    # carries the load the minting pod measured, so this pod — which has never
+    # seen this cell and whose own banks are empty — can refuse an adopt it
+    # cannot survive instead of SIGSEGVing on it (pgw#1169). Seeded here, ahead
+    # of the download AND the arm, because those are the two things it gates.
+    # A hub that reports nothing seeds nothing: absent is no evidence.
+    mint_budget.note_fleet_adopt_load(
+        family, str(getattr(cell, "lane", "") or ""),
+        int(getattr(cell, "adopt_load_bytes", 0) or 0))
 
     try:
         artifact = cell_resolve.materialize(

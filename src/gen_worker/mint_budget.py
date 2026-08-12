@@ -84,6 +84,18 @@ _ENTRY_DEVICE_PEAKS: Dict[Tuple[str, str], int] = {}
 #: the only one of the four that has destroyed a paid mint (th#1825).
 _ADOPT_PEAKS: Dict[Tuple[str, str], int] = {}
 
+#: pgw#1168's LOAD term alone, measured locally: what loading this cell's entry
+#: runners cost, WITHOUT the §4.32 verify. Banked apart from `_ADOPT_PEAKS`
+#: (which is load+verify) because only this half is true for an ADOPTER, and it
+#: is this half that pgw#1171 publishes to the fleet.
+_ADOPT_LOAD: Dict[Tuple[str, str], int] = {}
+
+#: pgw#1171: the load the FLEET measured — carried on the hub's resolve answer
+#: from the pod that actually paid it (th#1828). Kept apart from the local banks
+#: so `MintBudget.measured` can say WHOSE measurement it is, and so a fleet
+#: figure can never be mistaken for something this process observed.
+_FLEET_ADOPT_LOAD: Dict[Tuple[str, str], int] = {}
+
 #: pgw#1169: (family, weight lane) this process has already refused to adopt.
 #: The refusal is STICKY — see :func:`note_adopt_declined`.
 _ADOPT_DECLINED: "set[Tuple[str, str]]" = set()
@@ -279,6 +291,50 @@ def child_peak(family: str, weight_lane: str) -> int:
     return _CHILD_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
 
 
+def record_adopt_load(family: str, weight_lane: str, load_bytes: int) -> None:
+    """Bank the LOAD half of an adopt this process measured (pgw#1171).
+
+    Monotone, like every other bank here. Separate from
+    :func:`record_adopt_peak` because that one is load+verify — true for the
+    MINTING pod and nobody else — while this is what an ADOPTER pays, and
+    therefore the only half worth telling the fleet about.
+    """
+    if load_bytes <= 0:
+        return
+    key = (str(family or ""), str(weight_lane or ""))
+    _ADOPT_LOAD[key] = max(_ADOPT_LOAD.get(key, 0), int(load_bytes))
+
+
+def adopt_load(family: str, weight_lane: str) -> int:
+    """The locally measured load, or 0. This is what the publish carries."""
+    return _ADOPT_LOAD.get((str(family or ""), str(weight_lane or "")), 0)
+
+
+def note_fleet_adopt_load(family: str, weight_lane: str, load_bytes: int) -> None:
+    """Learn what the FLEET measured this cell's load to be (pgw#1171/th#1828).
+
+    THE POINT: a fresh pod's own banks are empty, so before this the gate had
+    only its unmeasured floor — which omits the loaded-runner term, i.e. the
+    term that actually exhausts the card. One pod paying th#1825's SIGSEGV
+    taught nobody. The hub carries the measurement on its resolve answer now,
+    so a pod that has never seen a cell can still refuse an adopt it cannot
+    survive.
+
+    ``load_bytes <= 0`` is NO EVIDENCE and is ignored outright — every cell
+    published before th#1828 reports nothing, and those must adopt exactly as
+    they do today. Absent is never a pass and never a refusal.
+    """
+    if load_bytes <= 0:
+        return
+    key = (str(family or ""), str(weight_lane or ""))
+    _FLEET_ADOPT_LOAD[key] = max(_FLEET_ADOPT_LOAD.get(key, 0), int(load_bytes))
+
+
+def fleet_adopt_load(family: str, weight_lane: str) -> int:
+    """The fleet-measured load for this (family, lane), or 0 = no evidence."""
+    return _FLEET_ADOPT_LOAD.get((str(family or ""), str(weight_lane or "")), 0)
+
+
 def note_adopt_declined(family: str, weight_lane: str) -> None:
     """Make an adopt refusal STICKY for this process (pgw#1169, §4.31).
 
@@ -368,8 +424,15 @@ def adopt_headroom(
     read = _read_device(device)
     if read is None:
         return _UNPROBEABLE
+    # Strongest evidence wins, and `max` is what makes that safe: the local
+    # bank is load+verify and the fleet figure is load alone, so where both
+    # exist the local one is the larger and the conservative one. pgw#1171: a
+    # FLEET figure is real evidence about this cell — it was measured by a pod
+    # that actually loaded it — and it is the only evidence a FRESH pod has.
     banked = adopt_peak(family, weight_lane)
-    need = banked if banked > 0 else 2 * read.activation
+    fleet = fleet_adopt_load(family, weight_lane)
+    evidence = max(banked, fleet)
+    need = evidence if evidence > 0 else 2 * read.activation
     # pgw#1169: a refusal already taken stands. Re-asking would re-run a load
     # that this process has already decided it cannot survive, and a transient
     # dip in someone else's residency is not evidence that it can.
@@ -377,7 +440,7 @@ def adopt_headroom(
     return MintBudget(
         fits=fits,
         probed=True,
-        measured=banked > 0,
+        measured=evidence > 0,
         free_bytes=read.free_bytes,
         need_bytes=need,
         resident_bytes=read.allocated,
@@ -637,6 +700,7 @@ __all__ = [
     "MintBudget",
     "adopt_declined",
     "adopt_headroom",
+    "adopt_load",
     "adopt_peak",
     "adopt_watermark",
     "child_peak",
@@ -646,7 +710,10 @@ __all__ = [
     "entry_device_peak",
     "entry_peak_rss",
     "probe",
+    "fleet_adopt_load",
     "note_adopt_declined",
+    "note_fleet_adopt_load",
+    "record_adopt_load",
     "record_adopt_peak",
     "record_child_peak",
     "record_entry_device_peak",
