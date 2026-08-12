@@ -33,8 +33,8 @@ import pytest
 from gen_worker import aot_resume, cell_key, fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
-KEY_A = "ck1-" + "a" * 56
-KEY_B = "ck1-" + "b" * 56
+KEY_A = "ek1-" + "a" * 56
+KEY_B = "ek1-" + "b" * 56
 # pgw#1113: spelled in the CURRENT token scheme — a predecessor-scheme memo
 # is swept by `fleet_cells._sweep_superseded_memos_once`, which is the point.
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
@@ -394,7 +394,7 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
     # implementation shared with the delegated adopt). Here the runtime and
     # the cell agree, so the gate passes and what is under test is the
     # LOOKUP -> ARM wiring.
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda arm, meta: "")
+    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda arm, meta, **_kw: "")
     monkeypatch.setattr(fleet_cells.aot_serve, "note_aot_key", lambda k: None)
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event",
                         lambda *a, **k: None)
@@ -432,11 +432,11 @@ def test_a_local_cell_that_cannot_arm_is_dropped_not_retried_forever(
         lambda *a, **k: AdoptOutcome.miss("constants_unbound", "norm.weight"))
     monkeypatch.setattr(
         fleet_cells.artifact_meta, "try_read_metadata", lambda p: {"cell_key": KEY_A})
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda arm, meta: "")
+    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda arm, meta, **_kw: "")
     events: List[Tuple[str, str]] = []
     monkeypatch.setattr(
         fleet_cells.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: events.append((kind, phase)))
+        lambda kind, detail, phase="", duration_ms=0, **_kw: events.append((kind, phase)))
     local_cell_store.store(
         _armable_artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A)
 
@@ -466,7 +466,7 @@ def test_a_local_cell_that_does_not_describe_this_runtime_is_refused_by_FACT(
     events: List[Tuple[str, str]] = []
     monkeypatch.setattr(
         fleet_cells.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: events.append((kind, phase)))
+        lambda kind, detail, phase="", duration_ms=0, **_kw: events.append((kind, phase)))
     local_cell_store.store(
         _artifact(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
 

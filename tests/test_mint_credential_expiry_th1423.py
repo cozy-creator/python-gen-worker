@@ -190,7 +190,7 @@ def test_the_lapse_is_on_the_wire_before_the_intent_is_spent(
     seen: list = []
     monkeypatch.setattr(
         fc.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: seen.append((kind, phase, detail)))
+        lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append((kind, phase, detail)))
 
     with pytest.raises(HubPublishError):
         _publisher(hub, _jwt(lifetime_s=-LAPSE_S)).publish(
@@ -206,7 +206,7 @@ def test_a_live_credential_publishes_no_lapse_leg(hub, artifact, monkeypatch):
     seen: list = []
     monkeypatch.setattr(
         fc.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: seen.append((kind, phase)))
+        lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append((kind, phase)))
 
     with pytest.raises(HubPublishError):
         _publisher(hub, _jwt(lifetime_s=900)).publish(
@@ -227,7 +227,7 @@ def test_the_background_publish_reports_the_grouped_phase(hub, artifact,
     seen: list = []
     monkeypatch.setattr(
         fc.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: seen.append((kind, phase)))
+        lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append((kind, phase)))
 
     thread = fc._publish_async(
         _publisher(hub, _jwt(lifetime_s=-LAPSE_S)),

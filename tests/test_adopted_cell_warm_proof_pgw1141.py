@@ -157,7 +157,7 @@ def _delegated_mint(tmp_path, monkeypatch, decl, packages, events):
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(rig868.RUNTIME))
     monkeypatch.setattr(aot, "_entry_admission_drift", lambda *a, **k: None)
     monkeypatch.setattr(aot, "_load_package", lambda path, entry="model": packages[entry])
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m: "")
+    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m, **_kw: "")
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event",
                         lambda kind, detail="", **kw: events.append(
                             (kind, detail, str(kw.get("phase", "")))))
@@ -166,7 +166,7 @@ def _delegated_mint(tmp_path, monkeypatch, decl, packages, events):
     pending.target.write_bytes(Path(built).read_bytes())
     module = rig868.ProbeDenoiser()
     pipeline = rig868.ProbePipeline(module)
-    return fleet_cells.adopt_delegated_mint(pipeline, pending, pending.target)
+    return fleet_cells.adopt_delegated_mint(pipeline, pending, [pending.target])
 
 
 def test_a_DIVERGENT_cell_is_not_published_by_the_pod_that_minted_it(
@@ -366,7 +366,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str,
          revoke: bool = False, dispatch: bool = False) -> Tuple[str, str]:
     RIG.clear()
     RIG["dispatch"] = dispatch
-    key = "ck1-" + (seed * 56)[:56]
+    key = "ek1-" + (seed * 56)[:56]
     ref = f"root/family-{FAMILY}#{key}"
     monkeypatch.setattr(
         fleet_cells, "enable_compiled",

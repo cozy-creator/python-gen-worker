@@ -326,7 +326,7 @@ def _boot(
     events: List[Tuple[str, str, str]] = []
     monkeypatch.setattr(
         executor_mod.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: events.append(
+        lambda kind, detail, phase="", duration_ms=0, **_kw: events.append(
             (kind, phase, detail)))
     # pgw#1152: an `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
     # arguing this process is "TOLD the flavor is an AOT cell exactly as a

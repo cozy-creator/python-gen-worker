@@ -421,7 +421,7 @@ def _fake_card(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _task(tmp_path: Path) -> mint_delegate.MintTask:
     pending = fleet_cells.PendingSelfMint(
-        family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#ck1-abc",
+        family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#ek1-abc",
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
                         family="sdxl", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),

@@ -197,7 +197,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str, exercise: bool,
     RIG["exercise"] = exercise
     if weight_lane:
         RIG["weight_lane"] = weight_lane
-    key = "ck1-" + (seed * 56)[:56]
+    key = "ek1-" + (seed * 56)[:56]
     ref = f"root/family-{FAMILY}#{key}"
     monkeypatch.setattr(fleet_cells, "enable_compiled", _fake_arm(key, ref))
     return key, ref
