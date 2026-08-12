@@ -76,8 +76,17 @@ def test_a_card_with_room_keeps_its_FULL_width() -> None:
         f"W={width} on a 48 GB card that fits all {SDXL_CLASSES} — the budget "
         f"must cost NOTHING where the card affords the fan-out")
 
+    # `trace_workers` decides SHARDING and is CPU-bound, so its width depends on
+    # the machine (CI runs on 4 cores and correctly returns 3). What must hold
+    # everywhere is that the device budget cannot be what narrowed it — the
+    # bound was deliberately removed from this function, so `vram` is
+    # unreachable here and a regression that re-adds it shows up as this
+    # binding appearing.
     w = boot_key.trace_workers(SDXL_CLASSES)
-    assert w.workers == SDXL_CLASSES and w.binding == "classes"
+    assert 1 <= w.workers <= SDXL_CLASSES
+    assert w.binding in ("classes", "cpu"), (
+        f"binding={w.binding!r}: sharding must never be narrowed by the device "
+        f"budget — that is concurrency_budget's job, one layer down")
 
 
 def test_an_unmeasured_card_keeps_EXACTLY_the_old_width() -> None:
