@@ -168,6 +168,21 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     rungs (offload / cpu) outright instead of serving slowly. The on-GPU
     rungs (fp8 storage, emergency 4-bit) remain available.
 
+    ``min_disk_gb`` (pgw#732) is the CONTAINER-DISK floor, and it is named
+    for what it is: a floor the hub may exceed, never a cap, so ``min_`` reads
+    truer than a ``_hint`` suffix. th#1233 already sizes a conversion pod's
+    disk from the bytes the job will materialize, so the common case needs no
+    declaration at all. The residue is jobs whose need is NOT derivable from
+    the source — multi-source marries, large intermediate scratch, and the
+    live example, ``mirror_svdq``, which fetches a 13.08 GB nunchaku
+    checkpoint straight from HuggingFace. No catalog read will ever see those
+    bytes; only the author knows they exist. The hub half is already wired and
+    waiting: ``mergeRequestDiskIntoSupply`` honours a per-function
+    ``min_disk_gb`` as an additional floor, exactly like ``min_vram_gb``, and
+    until this axis existed nothing emitted it. Like ``ram_gb_hint`` it is an
+    ALLOCATION-time ask and does not imply ``gpu=True`` — a CPU-only
+    conversion is the case that needed it first.
+
     ``vcpus`` (gw#490) declares the host-side vCPU ask (CPU-heavy encode);
     it does not imply ``gpu=True``. ``gpu_count`` (>1 later feeds
     ``DeviceRequest`` — pgw#648) declares how many devices one instance
@@ -207,6 +222,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     vcpus: int | None = None
     vram_gb_hint: float | None = None
     ram_gb_hint: float | None = None
+    min_disk_gb: float | None = None
     compute_capability: float | str | None = None
     max_gpu_count: int | None = None
     max_gpus_per_execution_group: int | None = None
@@ -221,6 +237,10 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         read-back-and-reject), so ``ram_gb_hint`` is projected under that
         name. One mapping, in one place, rather than a second spelling for
         endpoint authors to get wrong.
+
+        ``min_disk_gb`` (pgw#732) needs no remap either — it is already the
+        key the hub reads as an additional disk floor
+        (``mergeRequestDiskIntoSupply``), the same spelling on both sides.
 
         ``compute_capability`` needs no remap: it is already the key
         ``internal/builder/function_requirements.go`` parses (scalar or
@@ -262,6 +282,11 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             if r <= 0:
                 raise ValueError(f"ram_gb_hint must be positive, got {r}")
             force(self, "ram_gb_hint", r)
+        if self.min_disk_gb is not None:
+            d = float(self.min_disk_gb)
+            if d <= 0:
+                raise ValueError(f"min_disk_gb must be positive, got {d}")
+            force(self, "min_disk_gb", d)
         if self.vcpus is not None:
             c = int(self.vcpus)
             if c <= 0:
