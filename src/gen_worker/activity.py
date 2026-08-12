@@ -433,8 +433,40 @@ class Activity:
         _end(self)
 
 
+#: pgw#1176 / th#1839: the ONE canonical rendering of cell identity on an
+#: ActivityUpdate. Every emitter states ``family`` / ``cell_key`` /
+#: ``graph_class`` as DATA and this function renders them; no call site
+#: formats identity into prose itself.
+#:
+#: WHY THIS IS A RENDERER AND NOT YET A WIRE FIELD. The hub has typed
+#: ``family`` and ``cell_key`` columns on ``worker_activity_events``, and
+#: those are where these belong. ``ActivityUpdate`` has no such fields, and
+#: this worker CANNOT ADD THEM: ``proto/worker_scheduler.proto`` is a
+#: byte-for-byte VENDORED copy of tensorhub's canonical copy, gated on
+#: ``PROTO_DIGEST`` (pgw#944/th#1562), so a field added here fails the
+#: contract gate by construction — which is exactly what that gate is for.
+#:
+#: So the wire half is a COORDINATED PROTO CHANGE riding the Phase 5 cut
+#: beside ``Arm.graph_contract_digest`` (proposed: ``string family = 18;
+#: string cell_key = 19; string graph_class = 20;`` — additive, old readers
+#: ignore). Until it lands, identity travels in ONE deterministic shape
+#: instead of four, so the hub's interim parse is an exact prefix match
+#: rather than the measured 1-right-1-wrong-out-of-3 that
+#: ``detail LIKE 'ref=%#'||cell_key||' %'`` returned. When the fields land,
+#: the change is these three lines, not a sweep of call sites.
+_IDENTITY_PREFIX = "cell["
+
+
+def _identity_prefix(family: str, cell_key: str, graph_class: str) -> str:
+    if not (family or cell_key or graph_class):
+        return ""
+    return (f"{_IDENTITY_PREFIX}family={family} key={cell_key} "
+            f"class={graph_class}] ")
+
+
 def emit_event(
     kind: str, detail: str, phase: str = "", duration_ms: int = 0,
+    *, family: str = "", cell_key: str = "", graph_class: str = "",
 ) -> None:
     """One self-contained COMPLETED ActivityUpdate — a countable typed
     EVENT (pgw#680 ``guard_miss``), not a running activity.
@@ -453,10 +485,12 @@ def emit_event(
     long-running activity (background mint) without its progress beat.
     Thread-safe; without a bound sink it lands on the logger like every
     other report."""
+    identity = _identity_prefix(
+        str(family or ""), str(cell_key or ""), str(graph_class or ""))
     _emit(pb.ActivityUpdate(
         kind=kind, phase=phase[:300], seq=_next_seq(),
         state=pb.ActivityState.ACTIVITY_STATE_COMPLETED,
-        detail=detail[:2000],
+        detail=(identity + detail)[:2000],
         duration_ms=max(0, int(duration_ms)),
         updated_at_unix_ms=int(time.time() * 1000),
     ))
