@@ -240,6 +240,11 @@ def test_a_healthy_declaring_image_builds_and_records_its_proof(
 ) -> None:
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(pre, "_torch_version", lambda: "2.13.0+cu130")
+    # pgw#501: a bucket-bearing image also owes an adapter backend, and the
+    # CI box has no `peft` — that check has its own suite
+    # (`test_adapter_backend_preflight_pgw501`), so state the image's answer
+    # here rather than letting the box decide what "healthy" means.
+    monkeypatch.setattr(pre, "adapter_backend_present", lambda: True)
 
     manifest, result = _build(tmp_path, "ep996_ok", _DECLARATION, bucket=64)
 
@@ -254,6 +259,7 @@ def test_a_healthy_declaring_image_builds_and_records_its_proof(
         pre.CHECK_CUDA_ROOT: pre.OK,
         pre.CHECK_TORCH_SINGLETON: pre.OK,
         pre.CHECK_LIFTED_LORA_TORCH_FLOOR: pre.OK,
+        pre.CHECK_ADAPTER_BACKEND: pre.OK,
     }
 
 

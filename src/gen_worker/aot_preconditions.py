@@ -66,6 +66,14 @@ CHECK_CXX_TOOLCHAIN = "cxx_toolchain"
 CHECK_CUDA_ROOT = "cuda_root"
 CHECK_TORCH_SINGLETON = "torch_singleton"
 CHECK_LIFTED_LORA_TORCH_FLOOR = "lifted_lora_torch_floor"
+CHECK_ADAPTER_BACKEND = "adapter_backend"
+
+#: The distribution diffusers' ``load_lora_weights`` hard-requires, and the
+#: one ``models/fp8_storage`` imports three layer modules from at overlay
+#: time. gen-worker does NOT declare it: an endpoint that serves adapters
+#: declares that in ITS image, and this check is what makes the declaration
+#: PROVABLE at build instead of discoverable on a paid pod (pgw#501).
+ADAPTER_BACKEND_DIST = "peft"
 
 #: Distributions that must appear at most once. A second copy of any of them
 #: silently doubles the image by ~7 GB and desyncs the CUDA runtime — the
@@ -325,6 +333,72 @@ def _torch_singleton_row() -> Precondition:
             f"wheel set)"))
 
 
+def adapter_backend_present() -> bool:
+    """Whether this image can actually overlay an adapter.
+
+    `find_spec` rather than `import peft`: discovery must not pay a heavy
+    import to answer a yes/no, and `peft` is deliberately NOT in
+    `heavy_deps.DEFAULT_HEAVY_ROOTS`, so the probe is honest even under the
+    stubbing a torch-less manifest build arms.
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(ADAPTER_BACKEND_DIST) is not None
+    except (ImportError, ValueError):  # a broken/namespace parent
+        return False
+
+
+def adapter_backend_preconditions(
+    declared: Mapping[str, int], *, present: Optional[bool] = None,
+) -> Tuple[Precondition, ...]:
+    """One verdict per family that declares adapter serving (pgw#501).
+
+    ``lora_bucket > 0`` is the author declaring the unknowable — *this
+    endpoint serves adapters*. The platform's job is then to PROVE the
+    capability exists, at build, by name. Until this check existed nothing
+    did: `peft` is not a gen-worker dependency, `models/fp8_storage` imports
+    `peft.tuners.{loha,lokr,lora}.layer` at call time and `utils/lora` routes
+    overlays through diffusers' `load_lora_weights`, which hard-requires the
+    package. So the failure was an `ImportError` at the FIRST OVERLAY — after
+    acquisition, after the weights download, on a paid GPU pod, which is the
+    most expensive place in the system to learn that a package is missing.
+    Measured live on an A100 (qwen-image-edit BYOM serve): *"adapter failed to
+    load onto base pipeline: PEFT backend is required for this method."*
+
+    Unlike the AOT rows this sits beside, it does NOT depend on a registered
+    export declaration — an adapter-serving endpoint owes this whether or not
+    it compiles.
+    """
+    buckets = sorted(f for f, b in (declared or {}).items()
+                     if f and int(b or 0) > 0)
+    if not buckets:
+        return ()
+    ok = adapter_backend_present() if present is None else bool(present)
+    if ok:
+        return tuple(
+            Precondition(
+                check=CHECK_ADAPTER_BACKEND, verdict=OK, family=family,
+                detail=(f"{ADAPTER_BACKEND_DIST} is importable in this image, "
+                        f"so a declared adapter overlay can load"))
+            for family in buckets)
+    return tuple(
+        Precondition(
+            check=CHECK_ADAPTER_BACKEND, verdict=REFUSED, family=family,
+            detail=(
+                f"this endpoint declares `lora_bucket={int(declared[family])}` "
+                f"for family {family!r} — it serves ADAPTERS — but "
+                f"{ADAPTER_BACKEND_DIST!r} is not installed in this image. "
+                f"diffusers' `load_lora_weights` hard-requires it and "
+                f"`models/fp8_storage` imports "
+                f"`{ADAPTER_BACKEND_DIST}.tuners.{{loha,lokr,lora}}.layer` at "
+                f"overlay time, so this image boots, serves the base model "
+                f"fine, and then fails the FIRST adapter request on a paid "
+                f"pod. Add `{ADAPTER_BACKEND_DIST}` to this endpoint's "
+                f"dependencies, or drop the `lora_bucket` declaration"))
+        for family in buckets)
+
+
 def declared_compile_families(functions: Any) -> Dict[str, int]:
     """family -> largest declared ``lora_bucket``, over manifest functions.
 
@@ -346,6 +420,8 @@ def declared_compile_families(functions: Any) -> Dict[str, int]:
 __all__ = [
     "ABSTAINED",
     "BLOCKED",
+    "ADAPTER_BACKEND_DIST",
+    "CHECK_ADAPTER_BACKEND",
     "CHECK_CUDA_ROOT",
     "CHECK_CXX_TOOLCHAIN",
     "CHECK_DECLARATION_EVALUATES",
@@ -357,6 +433,8 @@ __all__ = [
     "REFUSED",
     "TORCH_FAMILY",
     "Precondition",
+    "adapter_backend_preconditions",
+    "adapter_backend_present",
     "declared_compile_families",
     "static_mint_preconditions",
     "torch_version_gap",
