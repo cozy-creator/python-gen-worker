@@ -124,7 +124,9 @@ def test_flavor_identity_and_provenance_survive_the_flip(
     _publish(ctx, _tree(tmp_path))
 
     req = _FakeHub.state["publish_request"]
-    assert req["flavor"] == "fp8-w8a8"
+    # pgw#1159: `flavor` is GONE from the body; `dtype` is the axis the hub
+    # actually records.
+    assert "flavor" not in req
     assert req["dtype"] == "fp8"
     assert req["mode"] == "replace"          # th#597 C2 default, unchanged
     assert req["tags"] == [{"tag": "prod"}]

@@ -48,19 +48,24 @@ class ProducedFlavor(msgspec.Struct):
         what belongs here vs what belongs in the orchestrator job record.
       - extra_files: rare escape hatch — sibling artifacts attached to the
         same flavor (e.g. a tokenizer.json next to a non-tree output).
-      - flavor: optional owner-facing row label such as ``bf16``, ``fp8``,
-        or ``int4``. When empty, the library falls back to attributes such
-        as ``flavor``.
-      - flavors: optional full flavor-label set such as
-        ``["fp8", "aio"]``. ``flavor`` is kept as the primary
-        compatibility label and is included automatically when present.
+      - flavor: optional PRODUCER-LOCAL label such as ``bf16``, ``fp8`` or
+        ``int4``. pgw#1159: it is NOT published and it names no catalog row —
+        th#1803 deleted the flavor as an address. It classifies the placement
+        stamp (th#697) and names the publish's activity legs; when empty the
+        ``dtype`` attribute is used. What the bytes ARE is stated by the
+        ``dtype`` attribute and, when the producer knows it, an
+        ``artifact_contract`` attribute (``ns.name@N``, PROVEN hub-side
+        against the safetensors header — th#1580/§1.33).
+
+    A job that emits several artifacts hands over several ``ProducedFlavor``
+    entries: N publishes joining ONE tag group. There is no flavor-label set
+    on a single publish (``flavors`` was deleted with the wire field).
     """
 
     path: _PathField
     attributes: dict = msgspec.field(default_factory=dict)
     extra_files: list[_PathField] = msgspec.field(default_factory=list)
     flavor: str = ""
-    flavors: list[str] = msgspec.field(default_factory=list)
 
 
 __all__ = ["ProducedFlavor"]
