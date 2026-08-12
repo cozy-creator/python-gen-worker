@@ -160,33 +160,24 @@ def test_the_trt_cell_predicate_still_reads_its_fragment() -> None:
     assert not trt_engine.is_engine_ref("owner/repo")
 
 
-def test_the_compile_cache_modules_are_byte_untouched_by_this_deletion() -> None:
-    """The GPU/compile-cell homonym is NOT this ruling's subject. Asserted as
-    a fact about the diff, not a promise in a comment: every module that owns
-    a cell KEY path must be identical to `origin/master`."""
-    import subprocess
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[1]
-    fenced = [
-        "src/gen_worker/compile_cache.py",
-        "src/gen_worker/cell_key.py",
-        "src/gen_worker/aot_mint.py",
-        "src/gen_worker/aot_serve.py",
-        "src/gen_worker/trt_engine.py",
-        "src/gen_worker/fleet_cells.py",
-        "src/gen_worker/local_cells.py",
-        "src/gen_worker/mint_budget.py",
-    ]
-    base = subprocess.run(
-        ["git", "merge-base", "HEAD", "origin/master"],
-        cwd=root, capture_output=True, text=True)
-    if base.returncode != 0:
-        pytest.skip("no origin/master to diff against")
-    changed = subprocess.run(
-        ["git", "diff", "--name-only", base.stdout.strip(), "--", *fenced],
-        cwd=root, capture_output=True, text=True)
-    assert changed.returncode == 0
-    assert changed.stdout.strip() == "", (
-        "pgw#1148 must not touch a compile-cell module; changed: "
-        + changed.stdout)
+# pgw#1167 REMOVED `test_the_compile_cache_modules_are_byte_untouched_by_this_deletion`.
+#
+# It asserted that eight cell-KEY modules (`compile_cache`, `cell_key`,
+# `aot_mint`, `aot_serve`, `trt_engine`, `fleet_cells`, `local_cells`,
+# `mint_budget`) were byte-identical to `origin/master` — by diffing the
+# WORKING TREE against the merge-base. On pgw#1148's own branch that proved
+# something real: THIS deletion did not touch a compile-cell module.
+#
+# Merged, it stops meaning that and becomes a permanent FREEZE: every future
+# branch that edits any of those eight files fails it, for no reason connected
+# to flavors. It is unfalsifiable by the change it was written about (pgw#1148
+# is merged and cannot touch anything again) and false for everyone else — it
+# went red on the very next lane to edit `aot_mint.py`, which was this one.
+#
+# The concern it encoded — "the GPU/compile-cell homonym is NOT this ruling's
+# subject" — is already covered DURABLY and by CONTENT immediately above:
+# `test_the_cell_fragment_still_parses`, `test_parse_cell_ref_is_unchanged`,
+# `test_a_cell_ref_round_trips_through_the_normal_form` and
+# `test_the_trt_cell_predicate_still_reads_its_fragment` all keep working no
+# matter who edits those modules, which is what a fence should do. A diff
+# against master is a fact about a branch, not an invariant of the codebase.

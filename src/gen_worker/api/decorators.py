@@ -1053,9 +1053,33 @@ class Compile(msgspec.Struct, frozen=True):
     # Deliberately NOT a contract axis (`contract_axes()`): resolving a blocker
     # must not re-key a cell.
     blockers: tuple[MintBlocker, ...] = ()
+    #: pgw#1167: the latent divisor the CLASS ROWS were derived at, carried so
+    #: the mint can reconcile it against the pipeline's real `vae_scale_factor`
+    #: before it spends an export. CELL-LEVEL because that is what it is — one
+    #: divisor per declaration, not a fact about any single row.
+    #:
+    #: NEVER AUTHORED. It is transferred off `derive.cfg_image_classes`'s
+    #: return value in `__post_init__`; an author who writes it by hand is
+    #: declaring the same number twice, which is the duplicate-map defect
+    #: (pgw#1150/#1152) in the surface pgw#1158 fenced. `None` means the class
+    #: rows did not come from a deriver that knows the divisor, and the mint
+    #: reports UNRECONCILED — never a pass.
+    #:
+    #: DELIBERATELY ABSENT FROM :meth:`contract_axes`, and fenced by
+    #: `test_latent_basis_pgw1167`: it is a provenance fact about how the rows
+    #: were COMPUTED, not a shape-contract axis (the latent extents it produced
+    #: are already digested, via `classes`). Adding it there would re-key every
+    #: cell in the fleet.
+    latent_basis: Optional[int] = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
+        # BEFORE the row coercion below, which rebuilds `classes` as a PLAIN
+        # tuple and drops any subclass attribute with it. The deriver's return
+        # value is the transport; this field is the home.
+        carried = getattr(self.classes, "latent_basis", None)
+        if carried is not None and self.latent_basis is None:
+            force(self, "latent_basis", int(carried))
         shapes = tuple(tuple(int(v) for v in s) for s in self.shapes)
         if (
             (not shapes and not self.classes)
