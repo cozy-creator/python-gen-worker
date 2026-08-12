@@ -312,6 +312,11 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     """
 
     status: str
+    #: pgw#1176: EVERY entry the child packed — ``(key, artifact path, sha256)``
+    #: per graph class. A mint produces N independently keyed artifacts, so a
+    #: report that named one would be reporting a subset of its own work. The
+    #: parent arms and publishes each; a failure on one costs that one.
+    entries: Tuple[Tuple[str, str, str], ...] = ()
     artifact: str = ""
     digest: str = ""
     cell_key: str = ""
@@ -371,7 +376,8 @@ class MintOutcome:
 
     status: str
     detail: str = ""
-    artifact: Optional[Path] = None
+    #: pgw#1176: every entry artifact the child produced, in report order.
+    artifacts: Tuple[Path, ...] = ()
     report: Optional[MintReport] = None
     exit_code: Optional[int] = None
     stderr_tail: str = ""
@@ -794,9 +800,11 @@ async def run_mint(
     # the child reached its own terminus.
     partial = _read_phase_snapshot(request.phases_snapshot)
 
-    def _out(status: str, detail: str, artifact: Optional[Path] = None) -> MintOutcome:
+    def _out(status: str, detail: str,
+             artifacts: Sequence[Path] = ()) -> MintOutcome:
         outcome = MintOutcome(
-            status=status, detail=detail, artifact=artifact, report=report,
+            status=status, detail=detail, artifacts=tuple(artifacts),
+            report=report,
             exit_code=code, stderr_tail=stderr_tail, last_phase=phase,
             elapsed_s=elapsed, partial_phases=partial)
         logger.info("%s", outcome.line())
@@ -808,13 +816,19 @@ async def run_mint(
         return _out(CRASHED, killed_reason)
 
     if code == EXIT_MINTED:
-        artifact = Path(report.artifact) if report and report.artifact else None
-        if artifact is None or not artifact.is_file():
+        # pgw#1176: a mint's product is a SET of independently keyed entry
+        # artifacts. A report naming none is a crash; a report naming some is
+        # a mint — a subset is a coherent outcome now, not a broken cell.
+        rows = [Path(path) for _key, path, _digest in (
+            report.entries if report else ())]
+        present = [path for path in rows if path.is_file()]
+        if not present:
             return _out(
                 CRASHED,
-                "the mint process exited 0 but wrote no artifact "
-                f"(report={'present' if report else 'absent'})")
-        return _out(MINTED, report.detail if report else "", artifact)
+                "the mint process exited 0 but wrote no entry artifact "
+                f"(report={'present' if report else 'absent'}, "
+                f"named={len(rows)})")
+        return _out(MINTED, report.detail if report else "", present)
     if code == EXIT_REFUSED:
         return _out(REFUSED, (report.detail if report else "") or stderr_tail[-400:])
     if code == EXIT_RESOURCE:

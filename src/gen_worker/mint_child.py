@@ -705,12 +705,21 @@ def _mint_aot(
             f"aot mint refused: {exc}",
             mint_phases=getattr(exc, "mint_phases", None)) from exc
 
-    frame(phase="seal_publish", note=f"packed {result.artifact.name}")
-    artifact = Path(result.artifact)
-    if artifact != target:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(artifact, target)
-    frame(phase="finalize", note=f"cell {result.cell_key}")
+    frame(phase="seal_publish",
+          note=f"packed {len(result.entries)} entry artifact(s)")
+    # pgw#1176: the child moves EVERY entry it packed into the parent's
+    # directory, one file per graph class, and reports the set. `target` names
+    # the directory the parent watches; the per-entry file names are the
+    # entries' own `ek1` keys, so the parent addresses each by identity rather
+    # than by position.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    moved: List[Tuple[str, str, str]] = []
+    for row in result.entries:
+        dest = target.parent / f"{row.key}.tar.gz"
+        if Path(row.artifact) != dest:
+            os.replace(Path(row.artifact), dest)
+        moved.append((row.key, str(dest), sha256_file(dest)))
+    frame(phase="finalize", note=f"manifest {result.manifest}")
 
     # pgw#1053: the release resets the allocator's high-water so the pool can
     # regrant K — the TRUE peak was banked into the timings first, and the
@@ -727,18 +736,19 @@ def _mint_aot(
     marks.setdefault("export_peak_bytes", peak)
     return MintReport(
         status="minted",
-        artifact=str(target),
-        digest=sha256_file(target),
-        cell_key=str(result.cell_key),
+        entries=tuple(moved),
         detail=(
-            f"exported {len((result.metadata.get('entries') or {}))} graph "
-            f"class(es) for family {cfg.family!r} as one aot-inductor cell"),
+            f"exported {len(moved)} graph class(es) for family "
+            f"{cfg.family!r} as {len(moved)} independently keyed "
+            f"aot-inductor entries (manifest {result.manifest})"),
         phase="finalize",
         peak_vram_bytes=max(
             peak, int(marks.get("warm_proof_peak_bytes", 0) or 0)),
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
-        mint_phases=dict(result.metadata.get("mint_phases") or {}),
+        mint_phases=dict(
+            (result.entries[0].metadata.get("mint_phases") or {})
+            if result.entries else {}),
         structure_only_components=tuple(
             marks.get("structure_only_components") or ()),
         structure_refusal=str(marks.get("structure_refusal") or ""),
