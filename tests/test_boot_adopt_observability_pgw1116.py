@@ -55,7 +55,7 @@ def _raise(exc: BaseException) -> Any:
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
 
-KEY = "ck1-" + "3f" * 28
+KEY = "ek1-" + "3f" * 28
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +566,7 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
         f"defect, reproduced off-pod. Hub saw: {hub.calls}")
     assert resolves[0][1] == {
         "family": "micro-diffusion", "cell_key": out.derived_key}
-    assert out.derived_key.startswith("ck1-")
+    assert out.derived_key.startswith("ek1-")
     assert out.reason == "miss"
 
     row = _one(events)
@@ -628,7 +628,7 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
         "the trace children still cannot build a structure without "
         f"`accelerate`: {out.detail}")
     assert out.reason == "miss", out.detail
-    assert out.derived_key.startswith("ck1-")
+    assert out.derived_key.startswith("ek1-")
     resolves = [c for c in hub.calls if c[0] == cell_resolve.RESOLVE_PATH]
     assert len(resolves) == 1, (
         "an image without `accelerate` must still ASK — this is the pgw#1123 "

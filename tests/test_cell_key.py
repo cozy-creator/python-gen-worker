@@ -90,14 +90,14 @@ def test_key_scheme_ck1_foreign_keys_are_key_shaped_but_distinct():
     key-shaped; it simply names no artifact this runtime computes.
     """
     key = ck.from_axes(_AXES).digest
-    assert key.startswith("ck1-")
+    assert key.startswith("ek1-")
     for dead in ("ck2-", "ck3-", "ck4-", "ck5-", "ck6-"):
         token = dead + "a" * 56
         assert ck.is_key(token), "a foreign-scheme token is still key-SHAPED"
         assert token != key
     assert not ck.is_key("ck-" + "a" * 56)      # no scheme digits
-    assert not ck.is_key("ck1-" + "a" * 55)     # wrong digest width
-    assert not ck.is_key("ck1-" + "A" * 56)     # uppercase hex
+    assert not ck.is_key("ek1-" + "a" * 55)     # wrong digest width
+    assert not ck.is_key("ek1-" + "A" * 56)     # uppercase hex
 
 
 def test_execution_lane_canonicalization():

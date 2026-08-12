@@ -105,7 +105,7 @@ def _clean_declarations() -> Any:
 def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     seen: List[Tuple[str, str, str]] = []
 
-    def _sink(kind: str, detail: str, phase: str = "", duration_ms: int = 0) -> None:
+    def _sink(kind: str, detail: str, phase: str = "", duration_ms: int = 0, **_kw) -> None:
         seen.append((kind, phase, detail))
 
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
@@ -124,9 +124,9 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
-    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
+    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
+    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
     monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
@@ -141,7 +141,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # serving refusal is a separate policy, exercised in its own test.
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
     monkeypatch.setattr(
-        fleet_cells.cc, "arm_jit_intake", lambda p, c: None)
+        fleet_cells.cc, "arm_jit_intake", lambda p, c, **_kw: None)
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     yield
@@ -392,7 +392,7 @@ def test_the_parent_reemits_the_childs_aot_phase_table(
 
     monkeypatch.setattr(
         activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: rows.append(
+        lambda kind, detail, phase="", duration_ms=0, **_kw: rows.append(
             (kind, phase, duration_ms)))
 
     table = {
@@ -554,11 +554,11 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
         _info.size = len(_payload)
         _tar.addfile(_info, _io.BytesIO(_payload))
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, arm_token="ck1-handle", ref="root/family-sdxl#ck1-handle",
+        family=FAMILY, arm_token="ck1-handle", ref="root/family-sdxl#ek1-handle",
         cfg=_Cfg(), target=artifact,
         mint_root=tmp_path, publisher=None)
 
-    minted = fleet_cells.adopt_delegated_mint(_Pipe(), pending, artifact)
+    minted = fleet_cells.adopt_delegated_mint(_Pipe(), pending, [artifact])
 
     assert calls == ["aot"]
     assert minted is not None

@@ -265,7 +265,7 @@ def test_an_ordered_aot_arm_is_obeyed_as_eager_not_refused() -> None:
     outcome = fleet_cells.arm_ordered(
         FakePipeline(FakeModule()), Cfg(), None,
         backend="aot_cell", artifact=Path("/nonexistent/cell.pt2"),
-        delivered_ref="root/family-sdxl-base#ck1-abc",
+        delivered_ref="root/family-sdxl-base#ek1-abc",
         delivered_digest="sha256:abc", expected=None, publisher_org="root")
     assert outcome.armed is False
     assert outcome.eager_reason == EagerPhase.OPERATOR_EAGER_ONLY
@@ -347,7 +347,7 @@ def test_the_two_triggers_report_different_reasons() -> None:
 
 
 def test_a_suppressed_request_is_not_reported_as_compiled() -> None:
-    ref = "root/family-sdxl-base#ck1-abc"
+    ref = "root/family-sdxl-base#ek1-abc"
     aot_serve.note_aot_key("ck1-abc")
     armed = serving_mode.resolve(active_compile_ref=ref, sm="89")
     assert armed.serving_mode == serving_mode.MODE_AOT_CELL
@@ -367,7 +367,7 @@ def test_a_suppressed_request_is_not_reported_as_compiled() -> None:
 def test_a_real_guard_miss_still_reports_itself() -> None:
     """The order must not swallow the per-request fallback vocabulary."""
     missed = serving_mode.resolve(
-        active_compile_ref="root/family-sdxl-base#ck1-abc", guard_missed=True)
+        active_compile_ref="root/family-sdxl-base#ek1-abc", guard_missed=True)
     assert missed.fallback_reason == serving_mode.FALLBACK_GUARD_MISS
     assert missed.served_eager_fallback is True
 

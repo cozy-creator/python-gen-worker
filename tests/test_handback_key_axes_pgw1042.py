@@ -62,7 +62,7 @@ def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_cells.Arm
 
 def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "cell_key": "ck1-" + "e" * 56,
+        "cell_key": "ek1-" + "e" * 56,
         "kind": "aot-inductor",
         "format": "2",
         "family": "micro-diffusion",
@@ -147,7 +147,7 @@ def test_adopt_refuses_typed_before_any_arm(
         mint_root=mint_root, publisher=None, cache_dir=tmp_path / "cache",
         arm_key=arm)
 
-    assert fleet_cells.adopt_delegated_mint(object(), pending, artifact) is None
+    assert fleet_cells.adopt_delegated_mint(object(), pending, [artifact]) is None
     reason, detail = fleet_cells.adopt_refusal(pending)
     assert reason == "key_axis_divergence"
     assert "env_seal: " in detail

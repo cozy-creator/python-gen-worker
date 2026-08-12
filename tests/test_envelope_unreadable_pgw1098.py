@@ -60,7 +60,7 @@ _ROW7_META: Dict[str, Any] = {
     "format": 2,
     "kind": "aot-inductor",
     "family": "sdxl",
-    "cell_key": "ck1-" + "a" * 56,
+    "cell_key": "ek1-" + "a" * 56,
     "lora_bucket": 64,
     "entries": {
         "unet/adapter=true,cfg=true/B=2,H_lat=128,T_txt=77,W_lat=128": {
@@ -229,7 +229,7 @@ def test_adopt_delegated_mint_refuses_an_unreadable_envelope_by_name(
         ref="repo#arm1", cfg=_Cfg(), target=target, mint_root=mint_root,
         publisher=None, cache_dir=tmp_path / "cache", arm_key=None)
 
-    minted = fleet_cells.adopt_delegated_mint(object(), pending, produced)
+    minted = fleet_cells.adopt_delegated_mint(object(), pending, [produced])
 
     assert minted is None
     reason, why = fleet_cells.adopt_refusal(pending)

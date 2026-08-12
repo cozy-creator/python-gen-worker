@@ -98,7 +98,7 @@ def test_a_ck1_key_is_not_an_entry_key() -> None:
     all-or-nothing cell, which this runtime cannot arm at all; admitting it
     would let a cell ref reach a per-entry path and fail late."""
     assert cell_key.KEY_SCHEME == "ek1"
-    assert not cell_key.is_key("ck1-" + "0" * 56)
+    assert not cell_key.is_key("ek1-" + "0" * 56)
     assert cell_key.is_key("ek1-" + "0" * 56)
 
 
@@ -135,7 +135,7 @@ def test_a_format_2_cell_cannot_restate_a_per_entry_identity() -> None:
     recomputation raises rather than matching."""
     legacy = {
         "format": 2, "kind": aot.ARTIFACT_KIND, **rig.RUNTIME,
-        "family": rig.FAMILY, "cell_key": "ck1-" + "0" * 56,
+        "family": rig.FAMILY, "cell_key": "ek1-" + "0" * 56,
         "entries": {rig.entry_name(h, w): rig._entry(h, w)
                     for h, w in rig.ROWS},
         "combined_graph_hash": "0" * 16,

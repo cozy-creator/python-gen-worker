@@ -54,7 +54,7 @@ class _Pipe:
 def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     seen: List[Tuple[str, str, str]] = []
 
-    def _sink(kind: str, detail: str, phase: str = "", duration_ms: int = 0) -> None:
+    def _sink(kind: str, detail: str, phase: str = "", duration_ms: int = 0, **_kw) -> None:
         seen.append((kind, phase, detail))
 
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
@@ -78,7 +78,7 @@ def _sealed_cell(path: Path, **over: Any) -> Path:
     import tarfile as _tarfile
 
     meta = {"format": 2, "kind": "aot-inductor", "family": FAMILY,
-            "cell_key": "ck1-" + "e" * 56, "entries": {}, **over}
+            "cell_key": "ek1-" + "e" * 56, "entries": {}, **over}
     payload = _json.dumps(meta).encode()
     with _tarfile.open(path, mode="w:gz") as tar:
         info = _tarfile.TarInfo("metadata.json")
@@ -96,10 +96,10 @@ def pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     question is whether the runtime that built it will arm it.
     """
     monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
-    monkeypatch.setattr(fleet_cells, "mark_terminus", lambda p, t: None)
+    monkeypatch.setattr(fleet_cells, "mark_terminus", lambda p, t, **_kw: None)
     artifact = _sealed_cell(tmp_path / "cell.tar.gz")
     return fleet_cells.PendingSelfMint(
-        family=FAMILY, arm_token="ck1-sealed", ref=f"root/family-{FAMILY}#ck1-sealed",
+        family=FAMILY, arm_token="ek1-sealed", ref=f"root/family-{FAMILY}#ek1-sealed",
         cfg=_Cfg(), target=artifact, mint_root=tmp_path / "root", publisher=None, delegated=True,)
 
 
@@ -139,7 +139,7 @@ def test_a_returned_refusal_puts_its_class_in_the_countable_field(
         "contract_invalid",
         "input_contract records 5 leaves, the traced call takes 3"))
 
-    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target) is None
+    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target]) is None
 
     phase, detail = _abort(events)
     assert phase == "contract_invalid"
@@ -153,7 +153,7 @@ def test_every_classified_reason_survives_verbatim(
     """The four the issue names, plus the numerics gate. A reason that is
     *transformed* on the way to the wire is a reason nobody can group by."""
     monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
-    monkeypatch.setattr(fleet_cells, "mark_terminus", lambda p, t: None)
+    monkeypatch.setattr(fleet_cells, "mark_terminus", lambda p, t, **_kw: None)
     for i, reason in enumerate((
         "contract_invalid", "constants_unbound", "no_arm_for_mode",
         "lane_unavailable", "numerics_refused", "sm_mismatch",
@@ -161,14 +161,14 @@ def test_every_classified_reason_survives_verbatim(
         seen: List[Tuple[str, str, str]] = []
         monkeypatch.setattr(
             fleet_cells.activity_mod, "emit_event",
-            lambda kind, detail, phase="", duration_ms=0: seen.append(
+            lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append(
                 (kind, phase, detail)))
         _arm_returns(monkeypatch, AdoptOutcome.miss(reason, f"detail for {reason}"))
         artifact = _sealed_cell(tmp_path / f"cell-{i}.tar.gz")
         p = fleet_cells.PendingSelfMint(
-            family=FAMILY, arm_token=f"ck1-{i}", ref=f"root/family-{FAMILY}#ck1-{i}",
+            family=FAMILY, arm_token=f"ek1-{i}", ref=f"root/family-{FAMILY}#ek1-{i}",
             cfg=_Cfg(), target=artifact, mint_root=tmp_path / f"root{i}", publisher=None, delegated=True,)
-        assert fleet_cells.adopt_delegated_mint(_Pipe(), p, artifact) is None
+        assert fleet_cells.adopt_delegated_mint(_Pipe(), p, [artifact]) is None
         phase, _detail = _abort(seen)
         assert phase == reason
         assert fleet_cells.adopt_refusal(p) == (reason, f"detail for {reason}")
@@ -189,7 +189,7 @@ def test_a_raised_AdoptError_is_classified_by_its_own_token(
     _arm_raises(monkeypatch, AdoptError(
         "constants_unbound", "7 constants have no resident weight"))
 
-    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target) is None
+    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target]) is None
 
     phase, detail = _abort(events)
     assert phase == "constants_unbound"
@@ -204,7 +204,7 @@ def test_an_unclassified_exception_is_named_by_its_TYPE_not_flattened(
     generic token would rebuild the very hole this issue is closing."""
     _arm_raises(monkeypatch, ValueError("shapes disagree"))
 
-    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target) is None
+    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target]) is None
 
     phase, detail = _abort(events)
     assert phase == "ValueError"
@@ -220,7 +220,7 @@ def test_the_cell_selection_bug_keeps_its_own_loud_class(
     the selection brain, not a compatibility miss."""
     _arm_raises(monkeypatch, CellSelectionBugError("axes describe this runtime"))
 
-    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target) is None
+    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target]) is None
 
     phase, detail = _abort(events)
     assert phase == "cell_selection_bug"
@@ -236,7 +236,7 @@ def test_a_silent_falsy_arm_says_SO_rather_than_inventing_a_reason(
     reason exists", which is the lie this whole issue is about."""
     _arm_returns(monkeypatch, AdoptOutcome(armed=False))
 
-    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target) is None
+    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target]) is None
 
     phase, _detail = _abort(events)
     assert phase == "unclassified_arm_refusal"
@@ -255,7 +255,7 @@ def test_the_reason_is_readable_by_the_caller_that_must_requote_it(
     about the same refusal. They read the classification from the one place
     that produced it instead of re-deriving three vocabularies."""
     _arm_returns(monkeypatch, AdoptOutcome.miss("no_arm_for_mode", "mode='regional'"))
-    fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target)
+    fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target])
 
     assert fleet_cells.adopt_refusal(pending) == ("no_arm_for_mode", "mode='regional'")
 
@@ -267,10 +267,10 @@ def test_a_pending_that_never_refused_reports_no_reason(
     an always-non-empty reason is as useless as an always-empty one."""
     _arm_returns(monkeypatch, AdoptOutcome.hit("family=x key=y"))
     monkeypatch.setattr(
-        fleet_cells, "_packed_metadata", lambda a: {"cell_key": "ck1-sealed"})
+        fleet_cells, "_packed_metadata", lambda a: {"cell_key": "ek1-sealed"})
     monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
 
-    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target) is not None
+    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target]) is not None
     assert fleet_cells.adopt_refusal(pending) == ("", "")
 
 

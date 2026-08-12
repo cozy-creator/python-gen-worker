@@ -57,7 +57,7 @@ def test_a_non_exported_kind_has_no_key_identity() -> None:
     a torch-inductor-cache artifact is refused by name."""
     with pytest.raises(cell_key.CellKeyError, match="no cell-key identity"):
         cell_key.from_exported_artifact_metadata(
-            {"kind": "torch-inductor-cache", "cell_key": "ck1-" + "b" * 56})
+            {"kind": "torch-inductor-cache", "cell_key": "ek1-" + "b" * 56})
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ def test_serving_tier_and_serving_mode_answer_DIFFERENT_questions(
     assert cc.is_compile_armed(pipe) is True
     # A cell ref IS what makes the tier compiled — nothing else.
     assert serving_mode.classify_mode(
-        f"root/family-{FAMILY}#ck1-" + "b" * 56, None) == serving_mode.MODE_JIT_CELL
+        f"root/family-{FAMILY}#ek1-" + "b" * 56, None) == serving_mode.MODE_JIT_CELL
 
 
 def test_an_armed_target_still_advertises_the_identity_it_serves() -> None:
@@ -213,7 +213,7 @@ def test_an_armed_target_still_advertises_the_identity_it_serves() -> None:
     store before W8A8 dispatch rides it — the load-bearing fence."""
     from gen_worker import executor as executor_mod
 
-    ref = f"root/family-{FAMILY}#ck1-" + "b" * 56
+    ref = f"root/family-{FAMILY}#ek1-" + "b" * 56
     target = executor_mod._CompileTargetRecord(
         incarnation_id="inc-1", spec=None, pipeline=object(),  # type: ignore[arg-type]
         pipeline_weight_lane="w8a8", lora_bucket=0, contract_digest="d",

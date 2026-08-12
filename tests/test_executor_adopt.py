@@ -729,7 +729,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     model_dir.mkdir()
     spec = _cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
-    mint_key = "ck1-" + "d" * 56
+    mint_key = "ek1-" + "d" * 56
     mint_ref = f"root/family-{FAMILY}#{mint_key}"
     mint_digest = "blake3:" + "e" * 64
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
@@ -818,7 +818,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
         compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
     )
     model_ref = wire_ref(spec.models["pipeline"])
-    mint_key = "ck1-" + "f" * 56
+    mint_key = "ek1-" + "f" * 56
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
     mint_artifact.parent.mkdir()
     mint_artifact.write_bytes(b"cell-bytes")

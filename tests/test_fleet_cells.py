@@ -62,7 +62,7 @@ class _Pipe:
         self.transformer = _Denoiser()
 
 
-FAKE_KEY = "ck1-" + "a" * 56
+FAKE_KEY = "ek1-" + "a" * 56
 
 
 @pytest.fixture(autouse=True)
@@ -120,7 +120,7 @@ def _publisher(calls):
 # ---------------------------------------------------------------------------
 
 
-_ADOPT_META = {"cell_key": "ck1-" + "d" * 56, "family": "fam",
+_ADOPT_META = {"cell_key": "ek1-" + "d" * 56, "family": "fam",
                "kind": "aot-inductor"}
 
 
@@ -157,7 +157,7 @@ def _adopted(monkeypatch, pending):
     # very hole this issue closes — so stubbing it here is making an existing
     # bypass EXPLICIT, not adding one. These tests are about the publish path;
     # the gate's own verdict is `test_handback_key_axes_pgw1042`'s.
-    monkeypatch.setattr(fc, "arm_axis_divergence", lambda arm_key, meta: "")
+    monkeypatch.setattr(fc, "arm_axis_divergence", lambda arm_key, meta, **_kw: "")
     # pgw#1176: the adopt takes the SET of entry artifacts.
     return fc.adopt_delegated_mint(_Pipe(), pending, [child])
 
@@ -455,7 +455,7 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     events: list = []
     monkeypatch.setattr(
         fc.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: events.append((kind, phase)))
+        lambda kind, detail, phase="", duration_ms=0, **_kw: events.append((kind, phase)))
 
     artifact = tmp_path / "cell.tar.gz"
     artifact.write_bytes(b"bytes")
