@@ -19,14 +19,17 @@ one recorded SEED — and every verdict carries the axis, the thresholds and
 their source with it, the way :class:`~gen_worker.aot_compile_pool.PoolWidth`
 carries its readings.
 
-**Placement: adopt time, deliberately.** A hub-delivered cell never re-enters
-mint, so the arm is the only point EVERY cell passes through, and it is the
-point that decides whether the artifact serves. Mint time is a cheaper early
-catch and worth having second — the mint child holds both forwards in one
-process and owns the device — which is why :func:`measure_axis` takes the two
-callables and a contract rather than a pipeline: the same measurement runs
-there with no new implementation. What must never exist is a mint-only gate,
-which cannot protect the adopting pod whose weights, lane and card differ.
+**Placement: MINT time, and nowhere else** (DESIGN-RULINGS §4.32, landed as
+pgw#1141). This module was written for adopt time and said so — *"what must
+never exist is a mint-only gate"* — and Paul overruled it: every failure it has
+ever caught (a baked ``conv_out.bias``, timestep dtype scars) was an AUTHOR
+defect in endpoint code or config, so re-measuring on every adopter taxes the
+whole fleet forever for one author's one-time mistake. The single caller is
+``provision.arm_aot(verify_numerics=True)``, set by ``adopt_delegated_mint`` on
+the pod that compiled the bytes, before they publish. Adoption materializes,
+arms and serves. That the measurement moved without a new implementation is the
+property :func:`measure_axis`'s signature was built for: it takes the two
+callables and a contract, never a pipeline.
 
 **Parity by construction.** The probe feed comes from
 :func:`gen_worker.aot_inputs.builder_for` — the mint's OWN input builder,
@@ -47,6 +50,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
@@ -480,11 +484,34 @@ def probe_cell(
         verdicts.append(AxisVerdict(
             axis=axis, comparison=comparison,
             elapsed_ms=int((time.monotonic() - t0) * 1000)))
-    return CellNumerics(
+    report = CellNumerics(
         family=family, cell_key=str(meta.get("cell_key") or ""),
         thresholds=thresholds, threshold_source=source,
         verdicts=tuple(verdicts), axes_total=len(axes),
         elapsed_ms=int((time.monotonic() - started) * 1000))
+    with _LAST_LOCK:
+        global _LAST
+        _LAST = report
+    return report
+
+
+_LAST_LOCK = threading.Lock()
+_LAST: Optional[CellNumerics] = None
+
+
+def last_report() -> Optional[CellNumerics]:
+    """The most recent :func:`probe_cell` report in this process, or None.
+
+    The GATE (``provision.gate_cell_numerics``) answers yes/no and confesses
+    the numbers to the activity wire; a caller in the same process that needs
+    the NUMBER — pgw#1150's author-CI harness, which has to write the measured
+    cosine into an ``author-ci.toml`` ``[proof]`` block — would otherwise have
+    to re-run the probe and record a second measurement of a different moment,
+    or parse the number back out of an event string. Neither is the gate's own
+    verdict. Read-only: nothing here changes what the gate decides.
+    """
+    with _LAST_LOCK:
+        return _LAST
 
 
 __all__ = [
@@ -496,6 +523,7 @@ __all__ = [
     "axes_from_meta",
     "build_feed",
     "eager_view",
+    "last_report",
     "measure_axis",
     "probe_cell",
 ]

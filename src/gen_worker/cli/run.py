@@ -860,6 +860,11 @@ def _load_injected_model(
             lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0),
             guidance_scales=(),
             text_lens=(),
+            # pgw#1150: the declared band travels with the declaration here
+            # too, or a locally minted cell would be gated at the SDK default
+            # while the family declares its own.
+            numerics_floor=compile_cfg.numerics_floor,
+            numerics_warn=compile_cfg.numerics_warn,
         )
     if (
         arm_compile

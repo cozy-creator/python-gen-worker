@@ -79,6 +79,16 @@ class CompileCell:
     # their own contracts (two checkpoints = two instances = two cells).
     guidance_scales: tuple
     text_lens: tuple = ()
+    # pgw#1150: the family's DECLARED numerics band, carried through to the
+    # gate. `numerics_ladder.declared_thresholds` has one caller
+    # (`numerics_probe.probe_cell`) and its `cfg` is always this object, so
+    # before these two fields existed `Compile(numerics_floor=…)` was read by
+    # nobody: every gate on every path scored against the SDK default and
+    # every `threshold_source` said `sdk-default`, sdxl's measured 0.995/0.999
+    # (pgw#812/#814) included. Deliberately NOT in `contract_facts()` below —
+    # a numerics band is not a graph axis and must never move a cell key.
+    numerics_floor: Optional[float] = None
+    numerics_warn: Optional[float] = None
 
     def contract_text_lens(self) -> tuple:
         if self.text_lens:
@@ -237,6 +247,8 @@ class EndpointSpec:
                 else warm_guidance_values(self.payload_axes)
             ),
             text_lens=self.text_lens,
+            numerics_floor=cfg.numerics_floor,
+            numerics_warn=cfg.numerics_warn,
         )
 
     @property

@@ -803,3 +803,33 @@ gen-worker prefetch                            # download weights, no GPU
 
 See [local-dev.md](local-dev.md) for the `field=value` payload grammar,
 `--offline`, exit codes, and SIGINT semantics.
+
+## Author CI: proving your compiled path is CORRECT and FASTER (pgw#1150)
+
+Declaring `compile=` claims two things about your own code — that the compiled
+output matches eager, and that it is faster. Both are the AUTHOR's claims to
+prove (DESIGN-RULINGS §4.32, ie#664), because every parity failure caught so far
+was an endpoint code or model config defect. One command, on a pod, in the
+endpoint's own image:
+
+```bash
+python -m gen_worker.author_ci --payload '{"prompt":"a cat"}'   # add --write
+```
+
+It asserts the fleet line first (exits **90** off the line, **91** when the host
+cannot run the wheel — `rigcheck`'s own numbers), arms through your real
+`setup()`, takes the parity verdict from the mint-parent gate, then measures
+steady-state compiled-vs-eager in ONE process: the compiled arm, then the same
+pipeline under pgw#1142's eager-only order. N>=5 per arm, first request of each
+discarded, median and p95 off `stage_ms.<stage>` — never a round trip
+(th#1795). It writes the `[proof]` block of `<endpoint>/author-ci.toml` and
+leaves your `[parity]` / `[speed]` declarations untouched; those are the bar it
+judges against, and `min_speedup` defaults to the fleet's 1.10.
+
+A family with open `Compile.blockers` reports `blocked-by-declaration` — a legal
+state — and runs eager-only. A below-bar speedup is recorded as `failed` with
+its evidence, never as a proof.
+
+**It measures; it never gates publish.** Promotion runs on trusted hardware, on
+the published code (th#1811). The standard and the record schema live in
+`inference-endpoints/AUTHOR-CI.md`.
