@@ -24,7 +24,7 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_serve  # noqa: E402
+from gen_worker import aot_serve, cell_key  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -101,22 +101,27 @@ def test_no_family_asked_means_no_family_refused() -> None:
 
 def test_an_unstamped_range_digest_is_refused_by_name() -> None:
     meta = _minted()
-    meta["entries"]["unet"].pop("range_digest")
+    meta[cell_key.ENTRY_BLOCK_KEY].pop("range_digest")
     reason = aot_serve.verify_contract(meta)
     assert reason == "entry 'unet': no range_digest stamped", reason
 
 
-def test_an_unstamped_combined_graph_hash_is_refused_by_name() -> None:
-    meta = _minted()
-    meta["combined_graph_hash"] = ""
-    assert aot_serve.verify_contract(meta) == "no combined_graph_hash stamped"
+# pgw#1176 DELETED `test_an_unstamped_combined_graph_hash_is_refused_by_name`.
+# Its subject was `combined_graph_hash` as IDENTITY — an artifact-level fact
+# `verify_contract` had to refuse on. There is no such fact now: the label it
+# became (`manifest_digest`) is coverage telemetry, and an entry minted by a
+# pod that has not folded its whole declaration is a complete, keyable,
+# armable artifact. Refusing on its absence would reintroduce the collection
+# as a precondition for the atom, which is the disease. The fail-closed claim
+# this file exists for survives whole in the row below: absence is a VERDICT,
+# not a skipped check.
 
 
 def test_class_hash_absence_was_already_correct_and_stays_so() -> None:
-    """`:665-666` proves the author knew the right form; the other two axes
-    are brought to IT, not the reverse."""
+    """`:665-666` proves the author knew the right form; the other axis is
+    brought to IT, not the reverse."""
     meta = _minted()
-    meta["entries"]["unet"]["class_hash"] = ""
+    meta[cell_key.ENTRY_BLOCK_KEY]["class_hash"] = ""
     assert aot_serve.verify_contract(meta) == "entry 'unet': no class_hash stamped"
 
 
