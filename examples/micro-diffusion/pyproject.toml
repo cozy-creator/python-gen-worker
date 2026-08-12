@@ -18,7 +18,7 @@ dependencies = [
     # wheel the fleet serves — which is the whole reason the gauntlet is a
     # usable probe. Floor facts still in force: pgw#1059's four-axis `ck1`
     # (0.97.0), so every cell minted from this pin is a live-scheme cell.
-    "gen-worker==0.111.0",
+    "gen-worker==0.112.0",
     "msgspec>=0.18",
     "safetensors>=0.4",
     "pillow",
