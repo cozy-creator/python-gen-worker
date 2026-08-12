@@ -52,7 +52,7 @@ GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 
 from gen_worker import fleet_cells as fc
-from gen_worker import guard_closure, http_origin
+from gen_worker import http_origin
 from gen_worker.convert.hub import HubPublishError
 from gen_worker.models import chunk_upload as cu
 from harness.cell_meta import exported_cell_meta

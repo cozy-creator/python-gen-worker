@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import tarfile
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from gen_worker import receipts, worker_credential, worker_identity
+from gen_worker import receipts
 
 # pgw#1152: the signer + the live hub moved to `tests/harness/receipt_hub.py`.
 # pgw#1122's identity seam already imported them from here, and the adopt-path
