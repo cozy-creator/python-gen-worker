@@ -78,8 +78,6 @@ def _width(
     return aot_compile_pool.entry_workers(
         entries, vcpus=vcpus,
         available_bytes=int(avail_gib * 1024**3),
-        free_vram_bytes=int(free_vram_gib * 1024**3),
-        device_bytes=int(device_gib * 1024**3),
         device_lock=True, posture=posture, limit=limit)
 
 
@@ -207,14 +205,14 @@ def test_the_posture_survives_the_parent_to_child_WIRE() -> None:
     """The child sizes the pool, so the declaration has to reach it.
 
     It rides ``MintRequest`` — the same JSON file that already carries
-    ``vram_cap_bytes`` and ``device`` — so the round trip through msgspec is
+    ``device`` — so the round trip through msgspec is
     the property, not the in-process object identity.
     """
     task = mint_delegate.MintTask(
         pending=_Pending(), pipe=None, function="generate",
         modules=("micro_diffusion.endpoint",), posture=USER_MACHINE)
     request = mint_delegate.build_request(
-        task, workdir=Path("/tmp/pgw1137"), cap_bytes=0)
+        task, workdir=Path("/tmp/pgw1137"))
     assert request.posture == USER_MACHINE
 
     decoded = msgspec.json.decode(
@@ -233,7 +231,7 @@ def test_a_fleet_mint_declares_nothing_and_gets_the_fleet_posture() -> None:
         pending=_Pending(), pipe=None, function="generate", modules=("m",))
     assert task.posture == FLEET
     request = mint_delegate.build_request(
-        task, workdir=Path("/tmp/pgw1137"), cap_bytes=0)
+        task, workdir=Path("/tmp/pgw1137"))
     assert request.posture == FLEET
     assert MintRequest(
         function="f", modules=(), family="x", arm_token="", target="",
@@ -447,15 +445,18 @@ def test_a_sixteen_gig_desktop_under_load_mints_serially() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _pre_issue_width(
-    entries: int, *, vcpus: int, avail: int, free_vram: int, per_device: int,
-    limit: int = 0,
+def _fleet_width(
+    entries: int, *, vcpus: int, avail: int, limit: int = 0,
 ) -> Dict[str, int]:
-    """``entry_workers``' arithmetic as it stood BEFORE this issue, restated.
+    """``entry_workers``' arithmetic, restated independently.
 
-    Deliberately an independent re-implementation and not a call into the code
-    under test: a non-regression test that asks the new code whether it changed
-    can only ever answer no.
+    Deliberately a re-implementation and not a call into the code under test:
+    a non-regression test that asks the new code whether it changed can only
+    ever answer no.
+
+    pgw#1175 removed the device term from BOTH sides. The rest of pgw#1137's
+    claim — that the FLEET posture is arithmetically the plain policy — is
+    what these rows are for, and it is unaffected.
     """
     cpu_workers = max(
         1, (vcpus - aot_compile_pool.SERVING_HEADROOM_CPUS)
@@ -464,52 +465,37 @@ def _pre_issue_width(
     mem_workers = max(
         1, max(0, avail - aot_compile_pool.ENTRY_RSS_RESERVE_BYTES)
         // per_entry) if avail > 0 else 1
-    if free_vram <= 0:
-        device_workers = aot_compile_pool.MAX_ENTRY_WORKERS
-    elif per_device <= 0:
-        device_workers = 1
-    else:
-        device_workers = max(
-            1, max(0, free_vram - aot_compile_pool.DEVICE_RESERVE_BYTES)
-            // per_device)
     ceiling = (
         min(aot_compile_pool.MAX_ENTRY_WORKERS, limit) if limit > 0
         else aot_compile_pool.MAX_ENTRY_WORKERS)
     return {
         "cpu_workers": cpu_workers, "mem_workers": mem_workers,
-        "device_workers": device_workers, "ceiling": ceiling,
-        "workers": max(
-            1, min(cpu_workers, mem_workers, device_workers, ceiling,
-                   entries)),
+        "ceiling": ceiling,
+        "workers": max(1, min(cpu_workers, mem_workers, ceiling, entries)),
     }
 
 
 @pytest.mark.parametrize(
-    "entries,vcpus,avail_gib,free_vram_gib,device_gib,limit", [
-        (18, 8, 32, 24, 8, 0),      # a modest serving pod
-        (36, 64, 200, 80, 11, 0),   # a fat H100 pod
-        (36, 128, 500, 80, 6, 0),   # the widest real pod
-        (18, 16, 64, 0, 0, 0),      # a CPU-only cell (no card at all)
-        (36, 64, 200, 80, 11, 3),   # an operator-forced narrow pool
-        (4, 4, 8, 24, 8, 0),        # a small pod where RAM binds
+    "entries,vcpus,avail_gib,limit", [
+        (18, 8, 32, 0),      # a modest serving pod
+        (36, 64, 200, 0),    # a fat H100 pod
+        (36, 128, 500, 0),   # the widest real pod
+        (18, 16, 64, 0),     # a CPU-only cell (no card at all)
+        (36, 64, 200, 3),    # an operator-forced narrow pool
+        (4, 4, 8, 0),        # a small pod where RAM binds
     ])
-def test_a_POD_width_is_arithmetically_unchanged_by_this_issue(
-    entries: int, vcpus: int, avail_gib: float, free_vram_gib: float,
-    device_gib: float, limit: int,
+def test_a_POD_width_is_arithmetically_the_plain_policy(
+    entries: int, vcpus: int, avail_gib: float, limit: int,
 ) -> None:
     """§4.30's constraint the other way round: *"aggressive on a dedicated
     serving pod"*. Every bound, over a matrix spanning the real fleet."""
     got = _width(
-        entries, vcpus=vcpus, avail_gib=avail_gib, posture=FLEET,
-        free_vram_gib=free_vram_gib, device_gib=device_gib, limit=limit)
-    want = _pre_issue_width(
-        entries, vcpus=vcpus, avail=int(avail_gib * 1024**3),
-        free_vram=int(free_vram_gib * 1024**3),
-        per_device=int(device_gib * 1024**3), limit=limit)
+        entries, vcpus=vcpus, avail_gib=avail_gib, posture=FLEET, limit=limit)
+    want = _fleet_width(
+        entries, vcpus=vcpus, avail=int(avail_gib * 1024**3), limit=limit)
     assert {
         "cpu_workers": got.cpu_workers, "mem_workers": got.mem_workers,
-        "device_workers": got.device_workers, "ceiling": got.ceiling,
-        "workers": got.workers,
+        "ceiling": got.ceiling, "workers": got.workers,
     } == want
 
 
@@ -521,8 +507,7 @@ def test_the_DEFAULT_posture_is_the_fleet_one_when_nothing_installed() -> None:
     assert _width(
         36, vcpus=32, avail_gib=256, posture=FLEET).cpu_workers \
         == aot_compile_pool.entry_workers(
-            36, vcpus=32, available_bytes=256 * 1024**3, free_vram_bytes=0,
-            device_lock=True).cpu_workers
+            36, vcpus=32, available_bytes=256 * 1024**3, device_lock=True).cpu_workers
 
 
 def test_the_width_row_SAYS_which_posture_chose_K() -> None:
@@ -654,7 +639,7 @@ def test_a_stopped_local_mint_does_not_WASTE_what_it_finished() -> None:
         mint_delegate.MintTask(
             pending=_Pending(), pipe=None, function="generate",
             modules=("m",), posture=USER_MACHINE),
-        workdir=workdir, cap_bytes=0)
+        workdir=workdir)
     bank = Path(request.resume)
     assert str(bank), "a local mint must bank its finished entries"
     assert workdir not in bank.parents and bank != workdir, (

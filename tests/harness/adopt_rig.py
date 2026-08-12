@@ -27,12 +27,12 @@ WHAT RUNS FOR REAL. The whole chain from the ordered arm to the target install::
       -> _injection_kwargs -> _enable_compiled with a real _ArmOrder(adopt=…)
       -> fleet_cells.arm_ordered
       -> the real receipt gate, against a real RSA-signed receipt from a real
-         HTTP hub (harness.receipt_hub)
+            HTTP hub (harness.receipt_hub)
       -> provision.arm_aot -> aot_serve.load_and_wrap on a real packed cell
-         (harness.exported_cell) whose ck1 key is restatable from its own
-         recorded facts
+            (harness.exported_cell) whose ck1 key is restatable from its own
+            recorded facts
       -> the real boot warmup, the real per-object proof pass, the real
-         _install_compile_targets and _assert_armed_targets_installed
+            _install_compile_targets and _assert_armed_targets_installed
 
 Nothing about applicability, the lane split, the proof pass, the arm decision
 or the target install is stubbed — those are the code under test.
@@ -311,6 +311,10 @@ class AdoptRig:
                         must NOT refuse; it is here so a test can prove that).
     ``package_raises``  the packaged entry really raises when dispatched, which
                         is how a cell revokes itself for real.
+    ``bind_oom_on``     that entry's constant bind really runs the card out of
+                        device memory (pgw#1175) — the ONLY evidence a pod
+                        cannot hold a cell, now that the estimate that used to
+                        guess it is deleted.
     ``serve_receipt``   False = the hub answers 404 for these bytes, so the real
                         receipt gate refuses on a missing input.
     ``publisher_tier``  what the RECEIPT says, verbatim. ``"org"`` needs a
@@ -331,6 +335,7 @@ class AdoptRig:
         *,
         cosine: float = 1.0,
         package_raises: str = "",
+        bind_oom_on: str = "",
         serve_receipt: bool = True,
         publisher_tier: str = "platform",
         publisher_org: str = ORG,
@@ -343,6 +348,7 @@ class AdoptRig:
         self.hub = hub
         self.cosine = cosine
         self.package_raises = package_raises
+        self.bind_oom_on = bind_oom_on
         self.serve_receipt = serve_receipt
         self.publisher_tier = publisher_tier
         self.publisher_org = publisher_org
@@ -382,7 +388,8 @@ class AdoptRig:
     def _packages(self) -> Dict[str, ProbePackage]:
         return {
             entry_name(h, w): ProbePackage(
-                cosine=self.cosine, raises=self.package_raises)
+                cosine=self.cosine, raises=self.package_raises,
+                bind_oom=entry_name(h, w) == self.bind_oom_on)
             for h, w in ROWS
         }
 

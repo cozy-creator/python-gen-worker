@@ -197,7 +197,7 @@ def test_the_child_is_handed_one_artifact_kind_and_cannot_choose(
         pending=pending, pipe=_Pipe(), function="generate",
         modules=("sdxl.main",), weight_lane="w8a8")
     request = mint_delegate.build_request(
-        task, workdir=tmp_path, cap_bytes=1 << 30)
+        task, workdir=tmp_path)
     assert not hasattr(request, "recipe")
     assert request.work_root == str(tmp_path)
 

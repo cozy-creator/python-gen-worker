@@ -263,7 +263,7 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
         modules=bg.modules, slots=dict(bg.slots),
         execution_lane="fp8-w8a16", device=0)
     request = mint_delegate.build_request(
-        task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
+        task, workdir=tmp_path / "w")
 
     wire = msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
     assert wire.slots == {"pipeline": resolved}, (

@@ -125,7 +125,7 @@ def test_a_child_from_other_code_is_refused_by_name(tmp_path: Path) -> None:
 
     width = pool.entry_workers(
         1, limit=1, vcpus=16, available_bytes=64 * 1024**3,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width, cache_dir=str(tmp_path / "cache"),
         python=str(stale))

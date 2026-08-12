@@ -26,18 +26,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from gen_worker import mint_budget
+from gen_worker import mint_workers
 from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.models import provision
 
 _GIB = 1 << 30
-
-
-@pytest.fixture(autouse=True)
-def _clean_bank():
-    mint_budget._ADOPT_PEAKS.clear()
-    yield
-    mint_budget._ADOPT_PEAKS.clear()
 
 
 _META: Dict[str, Any] = {
@@ -67,8 +60,8 @@ def _install(
         calls["n"] += 1
         return watermarks[i]
 
-    monkeypatch.setattr(mint_budget, "adopt_watermark", _watermark)
-    monkeypatch.setattr(mint_budget, "device_of", lambda _p: 0)
+    monkeypatch.setattr(mint_workers, "adopt_watermark", _watermark)
+    monkeypatch.setattr(mint_workers, "device_of", lambda _p: 0)
     monkeypatch.setattr(
         aot_serve, "enable",
         lambda *a, **k: (AdoptOutcome.hit("armed") if armed
@@ -166,19 +159,28 @@ def test_the_row_names_the_entry_count(monkeypatch, tmp_path) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_the_seam_feeds_the_BANK_under_the_cell_s_own_lane(
+def test_the_row_is_keyed_by_the_cell_s_OWN_recorded_lane(
     monkeypatch, tmp_path,
 ) -> None:
-    """The lane key is read from the cell's recorded `weight_lane`, so this
-    bank agrees with `mint_budget`'s other three without importing
-    compile_cache into provision."""
+    """The lane comes off the cell's recorded `weight_lane`, so a reader can
+    line these rows up per (family, lane) without provision importing
+    compile_cache.
+
+    pgw#1175: this row USED to feed `mint_budget._ADOPT_PEAKS`, which was then
+    divided into free VRAM to refuse the next adopt. The bank is deleted; the
+    ROW is not. It is the only instrument that answers where a loaded cell's
+    device memory goes, which is exactly what §4.33's ~8 GiB target has to be
+    checked against — a measurement, kept, with the prediction it fed removed.
+    """
     events: List[Tuple[str, str, str]] = []
     _install(monkeypatch, events,
              watermarks=[(0, 0), (0, 21 * _GIB), (0, 21 * _GIB)])
 
     _arm(tmp_path, verify_numerics=False)
 
-    assert mint_budget.adopt_peak("sdxl", "w8a8") == 21 * _GIB
+    detail = _row(events)
+    assert "family=sdxl lane=w8a8" in detail
+    assert "adopt_device_peak=21.000GiB" in detail
 
 
 def test_a_REFUSED_arm_still_reports_what_it_paid(monkeypatch, tmp_path) -> None:

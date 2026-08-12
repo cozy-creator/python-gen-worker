@@ -275,78 +275,24 @@ def test_a_torn_prior_manifest_is_no_evidence(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#940 §1 — an unreadable card licensed 8 concurrent compile children
+# pgw#940 §1 — DELETED WITH ITS SUBJECT (pgw#1175)
 # ---------------------------------------------------------------------------
-
+#
+# pgw#940 §1 covered `entry_workers`' DEVICE bound: an unreadable card used to
+# share the "0 free VRAM" branch with an absent one and licensed 8 concurrent
+# compile children on a card nobody could read. The fix was right and the rows
+# were real; §4.33 then deleted the bound they guarded. K is f(cores, one
+# measured child RSS) — free VRAM is not divided, sampled, or read at all, so
+# there is no zero left to misread and `DeviceProbeError`, `device_facts` and
+# `CardCensus` are gone with it.
+#
+# The behaviour §1 protected is covered by its ABSENCE: `entry_workers` takes
+# no device reading, and `test_aot_compile_pool_pgw809
+# .test_the_width_and_its_inputs_ride_the_telemetry` fails if a device term
+# reappears in the width record. pgw#940 §2 below is a DIFFERENT site (the
+# offload-rung selector in `models.memory`) and is untouched.
 
 _GIB = 1024 ** 3
-
-
-def test_a_readable_card_divides_as_before() -> None:
-    from gen_worker import aot_compile_pool as pool
-
-    width = pool.entry_workers(
-        8, free_vram_bytes=48 * _GIB, device_bytes=12 * _GIB,
-        vcpus=32, available_bytes=256 * _GIB, device_basis="measured")
-    assert width.device_workers > 1
-
-
-def test_an_unreadable_card_is_bounded_like_its_sibling_branches() -> None:
-    """`free_vram <= 0 -> MAX_ENTRY_WORKERS` (8), beside `avail <= 0 -> 1`
-    and `per_device <= 0 -> 1` in the same function. The comment defending it
-    claimed `_probe_free_device_bytes` fails only when there is no card; it
-    ended in `except Exception: return 0`, so a transient `mem_get_info`
-    failure, a post-fork CUDA-context error and a flapping `is_available()`
-    all produced that 8 with a card present."""
-    from gen_worker import aot_compile_pool as pool
-
-    def _raises(_device: int) -> int:
-        raise pool.DeviceProbeError("mem_get_info blew up")
-
-    facts = pool.device_facts(probe=_raises, samples=3, gap_s=0.0)
-    assert facts.basis == "unreadable" and facts.free_bytes == 0
-    # The decision those facts drive is the parametrized test below; this one
-    # pins that the probe's failure survives as a distinguishable FACT, which
-    # is the half that did not exist.
-
-
-def test_no_card_still_drops_the_device_bound() -> None:
-    """A CPU-only cell is not device-bound at all, and must not be narrowed
-    to K=1 by a fix aimed at unreadable cards."""
-    from gen_worker import aot_compile_pool as pool
-
-    facts = pool.device_facts(probe=lambda _d: 0, samples=3, gap_s=0.0)
-    assert facts.basis == "absent"
-
-
-@pytest.mark.parametrize(
-    "basis,expect_workers", [("unreadable", 1), ("absent", 8)])
-def test_the_two_zero_causes_decide_differently(
-    basis: str, expect_workers: int, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from gen_worker import aot_compile_pool as pool
-
-    monkeypatch.setattr(
-        pool, "device_facts",
-        lambda *a, **k: pool.DeviceFacts(0, basis, (0,)))
-    width = pool.entry_workers(
-        8, device_bytes=12 * _GIB, vcpus=32, available_bytes=256 * _GIB)
-    assert width.device_workers == expect_workers, width.facts()
-
-
-def test_an_unexpected_probe_exception_still_propagates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only `DeviceProbeError` is a measurement outcome. A probe that raises
-    something else is a bug, and swallowing it would rebuild the hole this
-    fix closes one level up."""
-    from gen_worker import aot_compile_pool as pool
-
-    def _bug(_device: int) -> int:
-        raise AssertionError("this must not be swallowed")
-
-    with pytest.raises(AssertionError):
-        pool.device_facts(probe=_bug, samples=1, gap_s=0.0)
 
 
 # ---------------------------------------------------------------------------

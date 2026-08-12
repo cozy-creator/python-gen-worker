@@ -33,7 +33,6 @@ import msgspec
 import pytest
 import torch
 
-from gen_worker import mint_budget
 from gen_worker import mint_process as mp
 
 GIB = 1 << 30
@@ -270,71 +269,28 @@ def _fake_card(
         torch.cuda, "max_memory_allocated", lambda dev=0: int(peak_gib * GIB))
 
 
-def test_co_residency_asks_for_a_whole_second_copy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The child is its own process, so it holds its OWN weights. State that
-    honestly rather than pretending the boundary is free."""
-    _fake_card(monkeypatch, total_gib=24, resident_gib=6, peak_gib=8)
-    budget = mint_budget.co_residency(0, family="sdxl", weight_lane="fp8")
-    # resident 6 + activation (8-6=2) + 4 workspace + 1 context
-    assert budget.need_bytes == pytest.approx(13 * GIB, rel=0.01)
-    assert budget.fits
-
-
-def test_a_weight_heavy_family_declines_instead_of_oomacking_the_tenant(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The wan-2.2 shape (54 GiB resident on an 80 GiB card): a second copy
-    does not fit, so the mint DECLINES. Eager serving, cell absent, a roomier
-    pod mints it — pgw#737's policy, unchanged by the process boundary."""
-    _fake_card(monkeypatch, total_gib=80, resident_gib=54, peak_gib=60)
-    assert not mint_budget.co_residency(0, family="wan-2.2").fits
-
-
-def test_an_unprobeable_card_never_blocks_a_mint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    budget = mint_budget.co_residency(0)
-    assert budget.fits and not budget.probed
-    assert "unprobeable" in budget.line("self_mint_skipped", "x")
-
-
-def test_one_mint_teaches_the_next_and_the_ask_never_drifts_down(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """NO MAGIC NUMBERS: the second ask on a pod is a MEASURED child peak, and
-    it is monotone — a mint that peaked high once can peak that high again."""
-    _fake_card(monkeypatch, total_gib=80, resident_gib=6, peak_gib=8)
-    estimated = mint_budget.co_residency(0, family="f", weight_lane="l")
-    mint_budget.record_child_peak("f", "l", 30 * GIB)
-    measured = mint_budget.co_residency(0, family="f", weight_lane="l")
-    assert measured.need_bytes > estimated.need_bytes
-    assert measured.measured
-    mint_budget.record_child_peak("f", "l", 2 * GIB)
-    assert mint_budget.child_peak("f", "l") == 30 * GIB
-
-
-def test_the_cap_is_bytes_expressed_as_the_cards_real_fraction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The child's bound is the parent's byte reservation — enforcement, not a
-    fraction anybody guessed. An under-estimate becomes the CHILD's OOM."""
-    from gen_worker import mint_child
-
-    seen: Dict[str, Any] = {}
-    _fake_card(monkeypatch, total_gib=24, resident_gib=0, peak_gib=0)
-    monkeypatch.setattr(torch.cuda, "set_device", lambda dev: None)
-    monkeypatch.setattr(
-        torch.cuda, "set_per_process_memory_fraction",
-        lambda frac, dev=0: seen.update(frac=frac, dev=dev))
-    note = mint_child.cap_vram(0, 12 * GIB)
-    assert seen["frac"] == pytest.approx(0.5, rel=0.01)
-    assert "12.00GiB" in note
-    seen.clear()
-    # pgw#973 §4.24 item 4: no cap is applied, and the child SAYS it is
-    # running uncapped rather than returning an empty note the caller drops.
-    uncapped = mint_child.cap_vram(0, 0)
-    assert not seen
-    assert "NOT applied" in uncapped and "vram_cap_bytes=0" in uncapped
+# pgw#1175 / §4.33: FIVE ROWS DELETED HERE, and what they asserted.
+#
+# `co_residency` priced a mint child as `resident weights + one activation set
+# + a 4 GiB inductor workspace + a CUDA context`, and its first term was read
+# off the PARENT — "a legitimate proxy and not a guess: the child loads the
+# same weights at the same lane". `fc77b923` made every production mint
+# weight-free, so the child loads no weights at all, and the term was being
+# added to a `free_bytes` that already excluded them. The rows that covered it
+# asserted that arithmetic faithfully:
+#
+#   * `..._asks_for_a_whole_second_copy` — 6 resident + 2 activation + 4 + 1 =
+#     13 GiB for a child that now holds nothing;
+#   * `..._declines_instead_of_oomacking_the_tenant` — the wan-2.2 shape, and
+#     the exact verdict §4.33 RETRACTS (113.19 GiB, "hardware-unsatisfiable");
+#   * `..._unprobeable_card_never_blocks_a_mint` — a permissive branch of a
+#     function that no longer exists;
+#   * `..._one_mint_teaches_the_next...` — the monotone device bank;
+#   * `..._cap_is_bytes_expressed_as_the_cards_real_fraction` — the child's
+#     `set_per_process_memory_fraction` ceiling, computed from that same
+#     estimate, which pinned two real mints at 11.09 GiB on cards with
+#     21.48 GiB free.
+#
+# Nothing replaces them, because nothing replaces the prediction: a mint is
+# attempted, and a card that cannot take it kills the child, which comes back
+# classified (`test_mint_oom_classification_pgw848`).

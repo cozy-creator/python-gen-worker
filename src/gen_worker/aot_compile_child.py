@@ -111,16 +111,13 @@ def _device_lock_wait_s() -> float:
 def _peak_device() -> tuple:
     """This entry child's DEVICE high-water — allocated and reserved.
 
-    pgw#868 A4. Nothing has ever measured this, and it is the number that
-    holds K to 1-2. The pool's per-entry device ask is
-    `mint_budget.co_residency().need_bytes`, which is NOT a compile-child
-    measurement at all: it is `resident_weights * 1.25 + 5 GiB`, i.e. sdxl's
-    4.87 GiB of weights plus an activation term the module's own docstring
-    calls "a fraction nobody measured" plus a flat context+workspace constant.
-    That estimate used to report as `per_entry_device_basis: 'measured'`,
-    which meant only "the caller handed a probed number" and never "somebody
-    watched a compile child"; pgw#877 renamed the value to `'estimated'`, and
-    the axis has no `'measured'` value until something reads THIS number.
+    pgw#868 A4. The pool's per-entry device ask used to be
+    `mint_budget.co_residency().need_bytes` — `resident_weights * 1.25 + 5 GiB`,
+    i.e. sdxl's 4.87 GiB of weights (which the compile does not hold at all
+    since `fc77b923`) plus an activation term that module's own docstring
+    called "a fraction nobody measured". pgw#1175 deleted the ask and the
+    module: K is f(cores, one measured child RSS), and nothing divides a card
+    by anything.
 
     So this reports what the child ACTUALLY peaked at. Telemetry only: no
     decision reads it, and the width policy is deliberately NOT changed in the

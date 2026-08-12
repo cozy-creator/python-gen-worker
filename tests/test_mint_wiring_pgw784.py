@@ -18,8 +18,9 @@ Four claims, and one of them is a bug this wiring had to fix:
    sibling-coverage rule, and advertises through the SAME phase-4 code the
    in-process route uses.
 4. Its failure modes map onto the wrapper's existing vocabulary:
-   `_MintDeclined` (an outcome), `_MintAbandoned` (stop asked), plain
-   `Exception` (a failed mint). Serving continues in every one.
+   `_MintAbandoned` (stop asked) or plain `Exception` (a failed mint).
+   Serving continues in either. (pgw#1175 deleted `_MintDeclined`: nothing
+   refuses a mint in advance any more — §4.33.)
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from typing import Any, List
 import pytest
 
 import gen_worker.executor as executor_mod
-from gen_worker import fleet_cells, mint_budget, mint_delegate
+from gen_worker import fleet_cells, mint_delegate, mint_workers
 from gen_worker.api.binding import ModelRef
 from gen_worker import mint_process as mp
 from gen_worker.executor import (
@@ -43,7 +44,6 @@ from gen_worker.executor import (
     _ClassRecord,
     _CompileTargetRecord,
     _MintAbandoned,
-    _MintDeclined,
     _delegated_pendings,
     _mint_modules,
 )
@@ -225,11 +225,8 @@ def _wired(
     monkeypatch.setattr(ex, "_served_execution_lane", lambda s, instructed="": "fp8-w8a16")
     monkeypatch.setattr(ex, "_effective_config", lambda s, run=None: {"steps": 28})
     monkeypatch.setattr(
-        executor_mod.mint_budget, "device_of", lambda pipe: 0)
-    monkeypatch.setattr(
-        mint_budget, "co_residency",
-        lambda dev=None, family="", weight_lane="": mint_budget.MintBudget(
-            fits=True, probed=True, free_bytes=40 * GIB, need_bytes=8 * GIB))
+        executor_mod.mint_workers, "device_of", lambda pipe: 0)
+    assert mint_workers.device_of is not None
     return ex, rec, bg, pending, objs
 
 
@@ -317,19 +314,14 @@ def test_shared_holders_mint_one_cell_between_them(
         "installed on one pipeline and only that pipeline serves it")
 
 
-def test_a_decline_raises_MintDeclined_so_the_tier_stays_eager(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`_background_mint`'s wrapper reads the EXCEPTION TYPE to decide whether
-    a mint that did not happen was a failure. A decline is not one: activity
-    COMPLETED, typed self_mint_skipped, cell absent, serving eager."""
-    ex, rec, bg, _pending, _objs = _wired(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        mint_budget, "co_residency",
-        lambda dev=None, family="", weight_lane="": mint_budget.MintBudget(
-            fits=False, probed=True, free_bytes=2 * GIB, need_bytes=60 * GIB))
-    with pytest.raises(_MintDeclined):
-        asyncio.run(ex._delegated_mint_run(rec, bg, _Act()))
+# pgw#1175 / §4.33: `test_a_decline_raises_MintDeclined_so_the_tier_stays_eager`
+# is DELETED with the exception it named. `_MintDeclined` existed so the
+# wrapper could read "the card had no room" off an EXCEPTION TYPE — a verdict
+# reached before any child ran, from `mint_budget.co_residency`, whose leading
+# term charged a weight-free child for the parent's resident weights. There is
+# no advance verdict any more, so there is no outcome to distinguish: a mint
+# either runs or it fails, and a failed one is a plain `Exception` covered by
+# `test_a_child_that_dies_leaves_the_worker_serving` below.
 
 
 def test_an_abandon_raises_MintAbandoned(
@@ -360,7 +352,7 @@ def test_a_dead_child_raises_a_plain_exception_and_never_advertises(
     ex, rec, bg, _pending, _objs = _wired(tmp_path, monkeypatch)
     with pytest.raises(Exception) as err:
         asyncio.run(ex._delegated_mint_run(rec, bg, _Act()))
-    assert not isinstance(err.value, (_MintDeclined, _MintAbandoned))
+    assert not isinstance(err.value, _MintAbandoned)
     assert rec.compile_targets["t0"].active_compile_ref == ""
     assert rec.compile_targets["t0"].active_self_mint is False
 

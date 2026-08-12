@@ -43,8 +43,7 @@ def _progress_midflight(tmp_path: Path) -> aot_mint.MintProgress:
     """A mint that has finished some entries and is inside another — exactly
     the state attempt sixteen was killed in."""
     width = pool.entry_workers(
-        36, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, limit=4)
+        36, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=4)
     progress = aot_mint.MintProgress()
     progress.t_mint = 0.0
     progress.width = width
@@ -246,8 +245,7 @@ def test_the_pool_ledger_is_live_not_end_of_run(tmp_path: Path) -> None:
         for i in range(2)
     ]
     width = pool.entry_workers(
-        2, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-        device_lock=True, limit=2)
+        2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
     progress = aot_mint.MintProgress()
     seen: list[Dict[str, Any]] = []
 
@@ -340,8 +338,7 @@ def test_every_mint_beat_feeds_both_survivors(
     def _one_beat(pipeline, spec, out_dir, **kw):  # type: ignore[no-untyped-def]
         progress = kw["progress"]
         progress.width = pool.entry_workers(
-            2, vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-            device_lock=True, limit=2)
+            2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
         progress.timings["export_all_s"] = 1.0
         progress.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 1, 36, "unet/row=0")
         raise aot_mint.MintRefused("stop here — the beat is what is under test")

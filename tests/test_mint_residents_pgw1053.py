@@ -178,8 +178,7 @@ def _wide_pool(monkeypatch) -> None:
     real = pool_mod.entry_workers
 
     def _wide(entries: int, **kw: Any) -> Any:
-        kw.update(vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-                  device_lock=True)
+        kw.update(vcpus=16, available_bytes=64 * _GIB, device_lock=True)
         return real(entries, **kw)
 
     monkeypatch.setattr(pool_mod, "entry_workers", _wide)
@@ -216,128 +215,28 @@ def test_full_mint_with_release_packs_and_keys_identically(
 
 
 # ---------------------------------------------------------------------------
-# The pool regrants K when the residents come back (the pgw#992 pod, freed)
+# The pool REGRANT — DELETED WITH THE BUDGET IT REGRANTED (pgw#1175)
 # ---------------------------------------------------------------------------
-
-# The incident pod's numbers, verbatim from test_pool_simultaneity_pgw992.
-CARD_TOTAL = 47661043712          # 44.39 GiB
-FREE_AT_OPEN = 31664532480        # 29.49 GiB
-SERVING_PARENT = 10243173417      # 9.54 GiB co-tenant
-OWN_AT_OPEN = CARD_TOTAL - FREE_AT_OPEN - SERVING_PARENT
-OWN_PEAK = 17394617548            # 16.20 GiB — the mint child's pipeline
-MEASURED_ENTRY_PEAK = 6461325312  # 6.02 GiB
-
-
-def _census() -> pool_mod.CardCensus:
-    return pool_mod.CardCensus(CARD_TOTAL, FREE_AT_OPEN, OWN_AT_OPEN, "sampled")
-
-
-def _width() -> pool_mod.PoolWidth:
-    return pool_mod.entry_workers(
-        36, vcpus=256, available_bytes=116 * _GIB, peak_rss_bytes=3 * _GIB,
-        free_vram_bytes=FREE_AT_OPEN + pool_mod.DEVICE_RESERVE_BYTES,
-        device_bytes=int(9.9 * _GIB),
-        device_basis="estimated", device_lock=True)
-
-
-def _pool(tmp_path: Path, monkeypatch, *, own_peak: int) -> pool_mod.EntryCompilePool:
-    monkeypatch.setattr(pool_mod, "card_census", lambda device=-1: _census())
-    monkeypatch.setattr(
-        pool_mod, "own_device_high_water", lambda device=-1: own_peak)
-    return pool_mod.EntryCompilePool(tmp_path / "pool", width=_width())
-
-
-def test_release_regrants_K_within_the_card_budget(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """The incident pod, with the mint child's 16.2 GiB handed back: the SAME
-    bounded arithmetic that held K=2 now grants more — and still never more
-    than the card's simultaneous budget with the 9.54 GiB co-tenant priced."""
-    box = _pool(tmp_path, monkeypatch, own_peak=OWN_PEAK)
-    # Two real entry reports first (the measured 6.02 GiB ask), as on the pod.
-    for i in range(2):
-        box.observe_entry_device(pool_mod.EntryReport(
-            entry=f"unet/dim={i}", status=pool_mod.COMPILED,
-            peak_device_reserved_bytes=MEASURED_ENTRY_PEAK))
-        box._rewiden()
-    held = box.width.workers
-    assert held == 2, box.width.reason   # the pgw#992 bound, still holding
-
-    # The release: the pipeline is gone, the high-water restarts small.
-    residue = 1 * _GIB
-    monkeypatch.setattr(
-        pool_mod, "own_reserved_now", lambda device=-1: residue)
-    monkeypatch.setattr(
-        pool_mod, "own_device_high_water", lambda device=-1: residue)
-    box.note_residents_released()
-
-    assert box.width.workers > held, (
-        f"the release freed {OWN_PEAK / _GIB:.1f} GiB and K did not move "
-        f"({box.width.reason})")
-    # Bounded: K children's simultaneous peak + co-tenant + residue <= card.
-    entry_ask = MEASURED_ENTRY_PEAK + 1 * _GIB  # +context floor
-    assert (box.width.workers * entry_ask + SERVING_PARENT + residue
-            <= CARD_TOTAL), box.width.reason
-    assert box.simultaneity.get("residents_released_bytes", 0) > 0
-
-
-def test_release_regrant_never_touches_the_cotenant_term(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """The census predates every child (pgw#992/pgw#1000 ordering) and the
-    release re-baselines ONLY the own floor — the 9.54 GiB serving parent
-    stays priced. A regrant that erased the co-tenant would re-create the
-    incident with a new receipt."""
-    box = _pool(tmp_path, monkeypatch, own_peak=OWN_PEAK)
-    before = box.census.resident_other_bytes
-    monkeypatch.setattr(pool_mod, "own_reserved_now", lambda device=-1: 0)
-    monkeypatch.setattr(pool_mod, "own_device_high_water", lambda device=-1: 0)
-    box.note_residents_released()
-    assert box.census.resident_other_bytes == before
-    budget, terms = box.entry_budget_bytes(MEASURED_ENTRY_PEAK)
-    assert budget is not None
-    assert budget <= CARD_TOTAL - SERVING_PARENT, (
-        "the freed budget swallowed the co-tenant's residency")
-
-
-def test_release_on_an_unreadable_card_regrants_nothing(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        pool_mod, "card_census",
-        lambda device=-1: pool_mod.CardCensus(0, 0, 0, "unreadable"))
-    box = pool_mod.EntryCompilePool(tmp_path / "pool", width=_width())
-    held = box.width.workers
-    box.note_residents_released()
-    assert box.width.workers == held
-
-
-def test_live_spawn_admission_holds_a_spawn_the_budget_cannot(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """pgw#992 under overlap: the residents keep growing through the export
-    phase, and `_spawn_admitted` re-asks the budget with the LIVE own
-    high-water before every spawn. At the incident pod's grown residency the
-    third child is held; after the release it is admitted."""
-    from dataclasses import replace as dc_replace
-
-    box = _pool(tmp_path, monkeypatch, own_peak=OWN_PEAK)
-    # Give the width room so admission, not construction, is the bound.
-    box.width = dc_replace(
-        box.width, workers=6,
-        per_entry_device_bytes=MEASURED_ENTRY_PEAK + 1 * _GIB)
-    # budget = 44.39 - 9.54 (co-tenant) - 16.20 (own) = 18.65 GiB -> k_cap 2
-    assert box._spawn_admitted(1) is True
-    assert box._spawn_admitted(2) is False, (
-        "a third child was admitted against a budget that holds two — the "
-        "pgw#992 incident, live")
-    assert box._spawn_admitted(0) is True, "the serial floor must always spawn"
-    # After the release the same question admits more.
-    monkeypatch.setattr(pool_mod, "own_reserved_now", lambda device=-1: 1 * _GIB)
-    monkeypatch.setattr(
-        pool_mod, "own_device_high_water", lambda device=-1: 1 * _GIB)
-    box.note_residents_released()
-    assert box._spawn_admitted(2) is True
+#
+# Four rows stood here. They drove the incident pod's real numbers (44.39 GiB
+# card, 9.54 GiB serving parent, 16.20 GiB mint-child pipeline, 6.02 GiB
+# measured entry peak) through `card_census` -> `entry_budget_bytes` ->
+# `_apply_simultaneity_bound` / `_spawn_admitted` / `_rewiden`, and asserted
+# that handing 16.2 GiB back moved K. Every one of those functions is deleted:
+# §4.33 forbids predicting VRAM, and K is f(cores, one measured child RSS).
+#
+# WHAT THE ROWS GUARDED, AND WHERE IT GOES. Their subject was "K children's
+# simultaneous device peak must fit beside the residents" — a prediction, and
+# a wrong one wherever the child's own weights were its leading term. It is
+# replaced by the attempt: a compile child that exceeds the card dies in its
+# own process and is classified `MintResourceExhausted`
+# (`test_mint_oom_classification_pgw848`), which is also what teaches the next
+# attempt (the host-RSS bank).
+#
+# THE RELEASE ITSELF SURVIVES and is covered above: `release_residents=True`
+# still projects the mint child's pipeline to meta and hands the memory back,
+# and `residents_release_s` / `residents_released_bytes` still ride the
+# timings. What is gone is the arithmetic that used to spend it.
 
 
 # ---------------------------------------------------------------------------

@@ -77,7 +77,7 @@ def test_entries_reach_the_pool_as_they_export(tmp_path: Path) -> None:
     the progress predicate is the pool's own completion record."""
     width = pool_mod.entry_workers(
         3, limit=2, vcpus=16, available_bytes=64 * _GIB,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
     assert width.workers == 2
     box = pool_mod.EntryCompilePool(
         tmp_path / "pool", width=width,
@@ -125,7 +125,7 @@ def test_a_sequence_still_compiles_exactly_as_before(tmp_path: Path) -> None:
     untouched: a fully-exported list goes through the same loop."""
     width = pool_mod.entry_workers(
         2, limit=2, vcpus=16, available_bytes=64 * _GIB,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
     box = pool_mod.EntryCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
@@ -263,8 +263,7 @@ def wide_pool(monkeypatch):
     real = pool_mod.entry_workers
 
     def _wide(entries: int, **kw: Any) -> Any:
-        kw.update(vcpus=16, available_bytes=64 * _GIB, free_vram_bytes=0,
-                  device_lock=True)
+        kw.update(vcpus=16, available_bytes=64 * _GIB, device_lock=True)
         return real(entries, **kw)
 
     monkeypatch.setattr(pool_mod, "entry_workers", _wide)

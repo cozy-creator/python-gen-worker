@@ -96,10 +96,14 @@ class ProbePackage:
     """
 
     def __init__(self, cosine: float = 1.0, *, raises: str = "",
-                 drop_output: bool = False) -> None:
+                 drop_output: bool = False, bind_oom: bool = False) -> None:
         self.cosine = float(cosine)
         self.raises = raises
         self.drop_output = drop_output
+        #: pgw#1175: this entry's constant bind really runs the card out of
+        #: memory. Breaking a REAL input (the bind is the device work an adopt
+        #: does), never supplying a fact — the rig's own doctrine.
+        self.bind_oom = bool(bind_oom)
         self.loaded: Dict[str, Any] = {}
         self.invocations = 0
 
@@ -108,6 +112,10 @@ class ProbePackage:
 
     def load_constants(self, values: Dict[str, Any], check_full_update: bool = False,
                        **_kw: Any) -> None:
+        if self.bind_oom:
+            raise torch.OutOfMemoryError(
+                "CUDA out of memory. Tried to allocate 2.00 GiB. GPU 0 has a "
+                "total capacity of 47.54 GiB of which 1.88 MiB is free.")
         self.loaded = dict(values)
 
     def __call__(self, sample: torch.Tensor, timestep: torch.Tensor) -> Any:

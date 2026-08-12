@@ -69,7 +69,7 @@ def test_every_second_of_a_pooled_compile_is_attributed(tmp_path: Path) -> None:
     entries = _entries(4)
     width = pool.entry_workers(
         len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
     assert width.workers == 2
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width,
@@ -166,7 +166,7 @@ def test_pool_idle_is_accounted_separately_from_compile_seconds(
     entries = _entries(4)
     width = pool.entry_workers(
         len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},

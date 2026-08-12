@@ -176,7 +176,7 @@ def score_adj_delta_for_domain(domain_bytes: int, ceiling_bytes: int) -> int:
     THREAT: a control parent that outweighs the compute child is the one the OOM
     killer picks, and then the death of the process whose ONLY job is to report
     the child's death goes unreported — the pod dies mute. Nothing else prevents
-    it: the guards upstream (mint_budget, host_move_guard, the VRAM caps) bound
+    it: the guards upstream (host_move_guard, the process caps) bound
     allocation, not victim selection, and RunPod sets no cgroup ceiling to fire
     first. Sized to the parent and no larger, because that OOM domain is a
     SHARED host: a bigger number volunteers our paying child ahead of a

@@ -37,6 +37,7 @@ RED VERIFICATION — restore any one of the three defaults:
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -174,11 +175,19 @@ def test_the_mint_stamps_the_dtype_it_actually_traces(
 
     carried: List[Tuple[str, ...]] = []
 
-    def _stop(spec: Any, _banked: int) -> Any:
-        carried.append(spec.precision)
+    # The first call `_mint_cell` makes AFTER stamping the precision.
+    # pgw#1175 deleted `_entry_device_bytes`, which used to stand here and
+    # took the stamped spec as an argument; `entry_workers` is the next
+    # production statement and does not, so the STAMPED local is read off the
+    # calling frame — the same value, at the same instant, and still the
+    # mint's own object rather than one this test built.
+    def _stop(*_a: Any, **_k: Any) -> Any:
+        frame = inspect.currentframe()
+        assert frame is not None and frame.f_back is not None
+        carried.append(frame.f_back.f_locals["spec"].precision)
         raise _StopAfterDerivation
 
-    monkeypatch.setattr(aot_mint, "_entry_device_bytes", _stop)
+    monkeypatch.setattr(aot_mint.aot_compile_pool, "entry_workers", _stop)
 
     spec = ExportSpec(family=decl_mod.FAMILY, target="", shapes=((192, 192),))
     assert spec.precision == ""

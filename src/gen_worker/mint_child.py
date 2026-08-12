@@ -12,12 +12,7 @@ What it does, and why in this order
 1. **Seal the environment** exactly as a worker boot does. The cell key
    digests the inductor config; a child that sealed differently would stamp a
    cell the parent's ``verify()`` then rejects on an axis nobody changed.
-2. **Cap its own VRAM** (``torch.cuda.set_per_process_memory_fraction``). The
-   parent reserved a share for this child and kept the rest for the tenant;
-   this is what makes that reservation an ENFORCED bound instead of a hope.
-   A child that wants more OOMs ITSELF — a failed mint reported by a live
-   worker — rather than stealing the peak out from under a live request.
-3. **Install the parent's RESOLVED slot bindings** (pgw#969) onto the specs
+2. **Install the parent's RESOLVED slot bindings** (pgw#969) onto the specs
    this process rediscovered, before a weight is read. Rediscovery yields
    only what ``@endpoint`` DECLARED, and a hub-catalog slot
    (``Slot(selected_by=...)`` with no ``default_checkpoint=``) declares
@@ -25,10 +20,10 @@ What it does, and why in this order
    ``ctx.slots["pipeline"]`` unbound and the mint dies 0.0 s into
    ``warmup_forward``. A request that still cannot resolve a declared slot
    REFUSES here, by name, rather than nine seconds later inside the endpoint.
-4. **Load the endpoint's own pipeline**, through ``cli.run.run_setup``: the
+3. **Load the endpoint's own pipeline**, through ``cli.run.run_setup``: the
    endpoint's real ``setup()``/``warmup()``, the production ``provision``
    loader, the same already-materialized weights on local disk. No network.
-5. **Arm COLD and drive the endpoint's OWN derived warm plan** — never
+4. **Arm COLD and drive the endpoint's OWN derived warm plan** — never
    ``mint_artifact``'s producer-style ``_compile_and_warm``. That distinction
    is gw#586/gw#587's whole lesson: a synthetic single-stage warm call can
    trace DIFFERENT FX graphs than a conditioned/two-stage endpoint's real
@@ -43,7 +38,7 @@ What it does, and why in this order
    working endpoint from one whose forward dies on its first request, and a
    green mint that sealed a cell for the latter is the shape pgw#969 cost
    four hours to find on a pod.
-6. **Pack** the exported cell and write a typed report.
+5. **Pack** the exported cell and write a typed report.
 
 The parity claim is checked, not asserted
 -----------------------------------------
@@ -211,67 +206,6 @@ def _write_report(path: Path, report: MintReport) -> None:
     tmp = path.with_suffix(".part")
     tmp.write_bytes(msgspec.json.encode(report))
     os.replace(tmp, path)
-
-
-def cap_vram(device: int, cap_bytes: int) -> str:
-    """Bound this process's device allocations to its reservation.
-
-    Returns a human note, ALWAYS non-empty, so the caller frames it. The
-    fraction is computed from the card's REAL total, so the bound is the
-    parent's byte reservation and not a fraction anybody guessed.
-
-    pgw#973 (§4.24 item 4): every path that does NOT cap now says so. A mint
-    child sharing a card with the serving process runs uncapped whenever
-    `MintRequest.vram_cap_bytes` is 0 — which is the legitimate value for an
-    unprobeable card (`mint_budget.co_residency` reports `probed=False`) and
-    equally the value a budget that computed to nothing produces. Both used to
-    return "" here, the caller framed nothing, and the phase table recorded a
-    capped mint and an uncapped mint identically. "Uncapped" is a state to
-    STATE, not an absence to infer.
-    """
-    if cap_bytes <= 0:
-        note = (
-            "vram cap NOT applied: the request carries no cap "
-            "(vram_cap_bytes=0) — this child may allocate the whole card")
-        logger.warning("mint-child: %s", note)
-        return note
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return "vram cap NOT applied: no CUDA in this process"
-        # pgw#877 #6. `mint_process.child_env` pins CUDA_VISIBLE_DEVICES only
-        # when `request.device >= 0`, so "the pin already chose for us" is
-        # true for a named device and FALSE for -1 — and this used to cap
-        # ordinal 0 either way, written `0 if device < 0 else 0`: a ternary
-        # with one arm, which read like a decision and was not one.
-        #
-        # A cap applied to the wrong card is worse than no cap: it neither
-        # bounds the child nor protects the tenant, and it reports a note
-        # saying it did both. So an ambiguous request refuses to cap and SAYS
-        # so, rather than capping a card nobody named.
-        if device < 0 and torch.cuda.device_count() > 1:
-            note = (
-                f"vram cap NOT applied: the request named no device and "
-                f"{torch.cuda.device_count()} cards are visible, so there is "
-                f"no ordinal this process can honestly cap — capping cuda:0 "
-                f"would bound a card the pipeline may not be on")
-            logger.warning("mint-child: %s", note)
-            return note
-        dev = torch.cuda.current_device()
-        torch.cuda.set_device(dev)
-        _free, total = torch.cuda.mem_get_info(dev)
-        if total <= 0:
-            return (f"vram cap NOT applied: cuda:{dev} reports no total "
-                    f"memory, so there is no fraction to compute")
-        fraction = min(1.0, max(0.01, cap_bytes / float(total)))
-        torch.cuda.set_per_process_memory_fraction(fraction, dev)
-        return (
-            f"vram cap {cap_bytes / (1 << 30):.2f}GiB "
-            f"({fraction:.3f} of {total / (1 << 30):.2f}GiB)")
-    except Exception as exc:  # noqa: BLE001 — an uncappable child still mints
-        logger.warning("mint-child: could not cap VRAM (%s)", exc)
-        return f"vram cap NOT applied: {type(exc).__name__}: {exc}"
 
 
 def select_specs(
@@ -748,11 +682,6 @@ def _mint_aot(
             # 0 on a pod that has never minted this (family, lane).
             entry_peak_rss_bytes=int(
                 getattr(request, "entry_peak_rss_bytes", 0) or 0),
-            # pgw#877: and the DEVICE half. Read off the request rather than a
-            # module global, because a module global here is always empty —
-            # the parent is the only process that banks.
-            entry_device_peak_bytes=int(
-                getattr(request, "entry_device_peak_bytes", 0) or 0),
             # pgw#848: rewritten on every beat, so a mint this process is
             # KILLED in still leaves its measurements on disk for the parent.
             phase_snapshot=(
@@ -846,8 +775,6 @@ def mint(request: MintRequest) -> MintReport:
 
     frame(phase="load", note="env seal")
     env_seal.establish()
-    # Always framed: `cap_vram` states the uncapped cases too (pgw#973).
-    frame(phase="load", note=cap_vram(request.device, request.vram_cap_bytes))
 
     if not cc.toolchain_present():
         raise MintChildRefused(
@@ -1267,5 +1194,5 @@ if __name__ == "__main__":  # pragma: no cover
 
 __all__ = ["MintChildRefused", "assert_composable", "assert_slots_resolvable",
            "pick_compile_target",
-           "bind_slots", "cap_vram", "frame", "main",
+           "bind_slots", "frame", "main",
            "mint_identity", "mint", "select_specs"]

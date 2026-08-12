@@ -100,9 +100,12 @@ Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
   request, no compile fleet, and compilation runs on the machine that will USE
   the cell. A family whose mint does not fit beside its own server is a
   PLACEMENT question, not a missing-producer question: §4.28's answer is "boot
-  an ordinary serving pod on a card that fits", and the decline line's
-  `card>=<N>GiB` (`mint_budget.MintBudget.card_bytes`) is the number that
-  names which card.
+  an ordinary serving pod on a card that fits". **pgw#1175 deleted the
+  `card>=<N>GiB` figure that used to name which card**: it was
+  `resident + need` where `need` already re-charged `resident`, and the
+  49-113 GiB card classes it produced are retracted (§4.33). A mint costs
+  ~8 GiB — the weights are already resident, the compile is weight-free, and
+  what a family needs is established by attempting it.
 - **Consumer** — an endpoint opts in with
   `@endpoint(compile=Compile(family="flux2-klein-4b", shapes=((768,768),(1024,1024)), text_len=512))`.
   Every `compile=` endpoint MUST state `text_len` (ie#544): a positive value

@@ -373,7 +373,7 @@ def _blocked_request(tmp_path: Path) -> mp.MintRequest:
             ref=blocked.DECLARED_PIPELINE, path=str(tree))},
         execution_lane="w8a8", device=-1)
     request = mint_delegate.build_request(
-        task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
+        task, workdir=tmp_path / "w")
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
 
 

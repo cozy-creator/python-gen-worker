@@ -73,7 +73,7 @@ def _width(entries: int, workers: int) -> pool.PoolWidth:
     # scenarios would then pass while exercising no pool at all.
     return pool.entry_workers(
         entries, limit=workers, vcpus=16, available_bytes=64 * 1024**3,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
 
 
 def _pool_with_root(workdir: Path, count: int, root: str) -> pool.EntryCompilePool:
@@ -483,7 +483,7 @@ def test_the_bank_outlives_an_abandoned_mint(
                 family="sdxl", arm_token=key, mint_root=mint_root,
                 cfg=SimpleNamespace(shapes=(), targets=(), family="sdxl")),
             pipe=None, function="generate", modules=("m",)),
-        workdir=mint_root / "child-1", cap_bytes=0)
+        workdir=mint_root / "child-1")
     assert request.resume == str(aot_resume.bank_root(key))
     assert not Path(request.resume).is_relative_to(mint_root), (
         "a bank under mint_root is deleted by the abandon path — which is the "

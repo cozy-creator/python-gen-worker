@@ -106,44 +106,19 @@ def test_the_ram_bound_is_monotone_in_the_pods_ram(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The VRAM reading: one sample, taken next to a live tenant
+# The VRAM reading — DELETED WITH ITS BOUND (pgw#1175)
 # ---------------------------------------------------------------------------
-
-
-def test_a_tenant_forward_in_flight_cannot_halve_the_width() -> None:
-    """The mint shares the card with a SERVING process (pgw#784), so a single
-    ``mem_get_info`` can land inside a tenant forward and read that forward's
-    activation set as gone — while :data:`DEVICE_RESERVE_BYTES` reserves the
-    tenant's peak anyway. The same bytes, charged twice.
-
-    Driven through the real :func:`device_facts` aggregation; only the CUDA
-    syscall is substituted, because this box has no card.
-    """
-    steady, dipped = 21 * _GIB, 13 * _GIB
-    samples = iter([steady, dipped, steady])
-    facts = pool.device_facts(
-        gap_s=0.0, probe=lambda _dev: next(samples))
-    assert facts.free_bytes == steady, facts
-    assert facts.samples == (steady, dipped, steady), (
-        "every sample is kept: a width chosen off a spread this wide is a "
-        "fact a reader needs, not one the pool gets to hide")
-
-    per_entry = 3 * _GIB
-    wide = pool.entry_workers(
-        72, vcpus=21, available_bytes=60 * _GIB, device_bytes=per_entry,
-        free_vram_bytes=facts.free_bytes, device_lock=True)
-    narrow = pool.entry_workers(
-        72, vcpus=21, available_bytes=60 * _GIB, device_bytes=per_entry,
-        free_vram_bytes=dipped, device_lock=True)
-    assert (wide.workers, narrow.workers) == (6, 3), (
-        f"{wide.reason} vs {narrow.reason} — this is the exact shape of "
-        f"attempt eleven's 3-vs-5: one dipped reading, half the pool")
-
-
-def test_an_absent_card_is_not_sampled_into_existence() -> None:
-    facts = pool.device_facts(gap_s=0.0, probe=lambda _dev: 0)
-    assert (facts.free_bytes, facts.basis) == (0, "absent")
-    assert len(facts.samples) == 1, "a zero is terminal, not sampled around"
+#
+# pgw#842's third bound divided free VRAM by a per-entry device ask, and this
+# section covered the READING behind it: a single `mem_get_info` taken beside
+# a live tenant forward reads that forward's activation set as gone, so the
+# figure was sampled over a short window and every sample kept. Correct, and
+# now moot — §4.33 deleted the bound, so there is no free-VRAM figure to
+# sample and `device_facts` / `DeviceFacts` / `CardCensus` are gone with it.
+#
+# What pgw#842 is actually ABOUT survives in full below: a K nobody can
+# explain is a K nobody can fix, and a bigger host may never yield a narrower
+# pool. Both properties now hold over the two bounds that remain.
 
 
 # ---------------------------------------------------------------------------
@@ -160,9 +135,8 @@ _HOSTS = {
 }
 
 
-@pytest.mark.parametrize("free_vram_gb", [0, 20, 40])
 def test_a_bigger_host_never_yields_a_narrower_pool(
-    tmp_path: Path, free_vram_gb: int,
+    tmp_path: Path,
 ) -> None:
     """The property the two mints violated, stated as a law.
 
@@ -181,7 +155,6 @@ def test_a_bigger_host_never_yields_a_narrower_pool(
             cgroup_root=root).available_bytes
         width = pool.entry_workers(
             72, vcpus=vcpus, available_bytes=avail,
-            free_vram_bytes=free_vram_gb * _GIB, device_bytes=3 * _GIB,
             device_lock=True)
         widths.append(((vcpus, ram_gb), width.workers))
     assert [k for _, k in widths] == sorted(k for _, k in widths), widths
@@ -195,32 +168,26 @@ def test_a_bigger_host_never_yields_a_narrower_pool(
 
 def test_the_width_names_its_binding_constraint_and_its_readings() -> None:
     """A K nobody can explain is a K nobody can fix."""
+    # 13 GiB available - 4 GiB tenant reserve = 9 GiB / 3 GiB per entry -> 3.
     width = pool.entry_workers(
-        72, vcpus=21, available_bytes=60 * _GIB, free_vram_bytes=20 * _GIB,
-        device_bytes=6 * _GIB, device_lock=True)
+        72, vcpus=21, available_bytes=13 * _GIB, device_lock=True)
     facts = width.facts()
-    assert width.binding == "vram", width.reason
+    assert width.binding == "host-memory", width.reason
     assert facts["underwidth"] == 5, facts
     # Every reading that fed a bound, and what KIND of reading it was.
     for key in ("binding", "underwidth", "ceiling", "cpu_basis", "mem_basis",
-                "device_basis", "per_entry_device_basis",
-                "per_entry_rss_basis", "free_device_samples",
+                "per_entry_rss_basis",
                 "cgroup_reclaimable_bytes", "host_available_bytes",
                 "os_cpu_count", "affinity_cpus", "quota_cores"):
         assert key in facts, f"{key} missing from {sorted(facts)}"
-    # pgw#877: THREE provenances, and none may read like another. A guess must
-    # not read like a measurement — and "the caller handed me a number", which
-    # is all `"measured"` ever meant on this axis, must not either.
+    # pgw#877's three DEVICE provenances died with the axis (pgw#1175). The
+    # one per-entry footprint left still says whether it was measured or
+    # defaulted, because a default must never read like a measurement.
     common: Dict[str, Any] = dict(
-        entries=72, vcpus=21, available_bytes=60 * _GIB,
-        free_vram_bytes=20 * _GIB, device_lock=True)
+        entries=72, vcpus=21, available_bytes=60 * _GIB, device_lock=True)
+    assert pool.entry_workers(**common).per_entry_rss_basis == "default"
     assert pool.entry_workers(
-        **common).per_entry_device_basis == "unmeasured"
-    assert pool.entry_workers(
-        device_bytes=6 * _GIB, **common).per_entry_device_basis == "estimated"
-    assert pool.entry_workers(
-        device_bytes=6 * _GIB, device_basis="measured",
-        **common).per_entry_device_basis == "measured"
+        peak_rss_bytes=2 * _GIB, **common).per_entry_rss_basis == "measured"
 
 
 def test_the_advertised_cores_are_not_the_ones_the_pool_believes() -> None:
@@ -295,7 +262,7 @@ def test_a_real_pools_width_and_ledger_land_hub_side(tmp_path: Path) -> None:
     entries = [(f"unet/adapter=true/dim={i}", _program(i)) for i in range(2)]
     width = pool.entry_workers(
         len(entries), vcpus=16, available_bytes=64 * _GIB,
-        free_vram_bytes=0, device_lock=True, limit=2)
+        device_lock=True, limit=2)
     assert width.workers == 2, width.reason
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width,
@@ -323,9 +290,9 @@ def test_a_real_pools_width_and_ledger_land_hub_side(tmp_path: Path) -> None:
     detail = pool_events[0].detail
     assert f"entry_workers={width.workers}" in detail
     assert f"binding={width.binding}" in detail
-    for key in ("cpu_workers", "mem_workers", "device_workers",
+    for key in ("cpu_workers", "mem_workers",
                 "pool_efficiency", "pool_idle_s", "peak_concurrency",
-                "cpu_basis", "mem_basis", "device_basis"):
+                "cpu_basis", "mem_basis"):
         assert key in detail, f"{key} missing from the pool event: {detail}"
     assert pool_events[0].duration_ms > 0, (
         "the pool's wall clock is the span this event measures")
@@ -338,12 +305,11 @@ def test_a_narrow_pool_says_so_in_the_first_line() -> None:
     cell could use names the shortfall and its cause up front — attempt
     eleven's 59 % was invisible precisely because nothing did."""
     width = pool.entry_workers(
-        72, vcpus=21, available_bytes=60 * _GIB, free_vram_bytes=14 * _GIB,
-        device_bytes=4 * _GIB, device_lock=True)
+        72, vcpus=21, available_bytes=13 * _GIB, device_lock=True)
     assert width.workers == 3 and width.underwidth == 5, width.reason
     table = aot_mint._mint_phase_table([], {"total_s": 554.78}, None, width,
                                        {"pool_wall_s": 453.0})
     updates = _relayed(table)
     detail = next(
         u.detail for u in updates if u.phase == aot_mint.POOL_PHASE)
-    assert "underwidth=5" in detail and "held by vram" in detail, detail
+    assert "underwidth=5" in detail and "held by host-memory" in detail, detail

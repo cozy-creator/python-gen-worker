@@ -84,13 +84,14 @@ GIB = 1 << 30
 #: run compatible with a desktop session and another agent's work.
 RIG_VRAM_BUDGET_BYTES = 4 * GIB
 
-#: The split. The mint child does the export and the compile, so it gets the
-#: larger share; the adopting process only loads a packed cell and runs one
-#: forward. Stated here rather than left to each leg's own idea of "the card":
-#: the ENV_HOST_SIBLINGS divisor pattern in procsplit exists for the same
-#: reason — two processes on one device must agree on the division up front.
-MINT_VRAM_BYTES = 3 * GIB
-ADOPT_VRAM_BYTES = RIG_VRAM_BUDGET_BYTES - MINT_VRAM_BYTES
+#: pgw#1175: the mint/adopt VRAM SPLIT is deleted. It was enforced through
+#: `MintRequest.vram_cap_bytes` -> `set_per_process_memory_fraction`, and that
+#: field is gone with `mint_budget` — the number it normally carried was
+#: `co_residency().cap_bytes`, which pinned two real mints at 11.09 GiB on
+#: cards with 21.48 GiB free. The rig's politeness lever is now
+#: `compile_posture.USER_MACHINE` (§4.30): half the cores, double the host-RAM
+#: reserve, and a nice level — bounds on what the box FEELS, not a guess at
+#: what a compile will allocate.
 
 #: Refuse to start above this 1-minute load. The box is shared with several
 #: agent sessions; a compile that starts at load 30 finishes slower AND makes
@@ -264,20 +265,17 @@ def _mint_slot(tree: Path, ref_path: str) -> Any:
 
 
 def _mint_request(
-    workdir: Path, tree: Path, veh: Any, *,
-    ordinal: int = 0, cap_bytes: int = MINT_VRAM_BYTES,
-    entry_device_peak_bytes: int = 0,
+    workdir: Path, tree: Path, veh: Any, *, ordinal: int = 0,
 ) -> Any:
     """Built through `mint_delegate.build_request` — the REAL parent chain.
 
     Not a hand-written `MintRequest`: the thing under test is the handoff, and
     a hand-written request is the one shape the handoff can never produce.
 
-    ``entry_device_peak_bytes`` is the pgw#877 banked measurement a serving
-    parent would hand down after a previous mint on the pod — the rig
-    forwards an operator-supplied value so a GPU cycle can open on the
-    measured basis and take the pool path (K>1), which is where pgw#1052's
-    overlap and pgw#1053's release are observable.
+    pgw#1175: the banked per-entry DEVICE peak this used to forward is gone
+    with the bound it opened. K is f(cores, one measured child RSS), so a rig
+    cycle takes the pool path on its own cores without an operator priming a
+    device basis.
     """
     from gen_worker import mint_delegate
     from gen_worker.mint_delegate import MintTask
@@ -293,9 +291,7 @@ def _mint_request(
         function=veh.function, modules=tuple(veh.modules),
         slots={"pipeline": _mint_slot(tree, veh.ref_path)}, device=ordinal,
         execution_lane="", configs={})
-    return mint_delegate.build_request(
-        task, workdir=workdir, cap_bytes=cap_bytes,
-        entry_device_peak_bytes=int(entry_device_peak_bytes))
+    return mint_delegate.build_request(task, workdir=workdir)
 
 
 #: What the rig's endpoint function DECLARES, the way a real build reads it off
@@ -331,7 +327,6 @@ def run_cycle(
     device: str = "auto", vehicle: str = DEFAULT_VEHICLE,
     hub_env_mode: bool = False,
     hub_env_entries: Optional[Dict[str, str]] = None,
-    entry_device_peak_bytes: int = 0,
 ) -> RigResult:
     from harness import rig_vehicles
 
@@ -349,9 +344,7 @@ def run_cycle(
     guard = assert_host_move_guard()
     dev = resolve_device(device)
     leg.ok, leg.seconds = True, time.monotonic() - g0
-    leg.facts = {"load1": load1, "host_move_guard": guard, **dev,
-                 "mint_vram_bytes": MINT_VRAM_BYTES,
-                 "adopt_vram_bytes": ADOPT_VRAM_BYTES}
+    leg.facts = {"load1": load1, "host_move_guard": guard, **dev}
     leg.facts["vehicle"] = veh.name
     leg.facts["vehicle_covers"] = veh.covers
     leg.detail = (f"vehicle={veh.name} {dev['device']} {dev['sm']} "
@@ -389,17 +382,13 @@ def run_cycle(
 
     leg = result.add(Leg("handoff"))
     g0 = time.monotonic()
-    request = _mint_request(workdir, tree, veh,
-                            ordinal=int(dev["device_ordinal"]),
-                            cap_bytes=(MINT_VRAM_BYTES
-                                       if dev["device_kind"] == "cuda" else 0),
-                            entry_device_peak_bytes=entry_device_peak_bytes)
+    request = _mint_request(
+        workdir, tree, veh, ordinal=int(dev["device_ordinal"]))
     leg.ok, leg.seconds = True, time.monotonic() - g0
     entries = _declared_entries(veh)
     leg.facts = {"family": request.family,
                  "slots": sorted(request.slots),
                  "arm_token": request.arm_token,
-                 "vram_cap_bytes": request.vram_cap_bytes,
                  "declared_entries": entries}
     leg.detail = (f"family={request.family} "
                   f"slots={sorted(request.slots)} "
@@ -764,13 +753,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--hub-env-entry", action="append", default=[], metavar="NAME=VALUE",
         help="an endpoint_env_entries row the operator has set; repeatable. "
              "Only names the release DECLARES are delivered.")
-    parser.add_argument(
-        "--entry-device-peak-bytes", type=int, default=0,
-        help="pgw#877/#1052: hand the child a banked per-entry device peak, "
-             "as a serving parent would after a previous mint on the pod — "
-             "opens the width on the measured basis so a GPU cycle takes the "
-             "pool path (K>1), where the overlap and the residents release "
-             "are observable")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     root = Path(args.root)
@@ -788,8 +770,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = run_cycle(root, stage=args.stage, force_load=args.force_load,
                            device=args.device, vehicle=args.vehicle,
                            hub_env_mode=args.hub_env,
-                           hub_env_entries=entries,
-                           entry_device_peak_bytes=args.entry_device_peak_bytes)
+                           hub_env_entries=entries)
     except RigRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2

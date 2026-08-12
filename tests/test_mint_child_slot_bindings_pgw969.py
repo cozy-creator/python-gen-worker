@@ -155,7 +155,7 @@ def _request(
         modules=bg.modules, slots=dict(bg.slots),
         execution_lane="w8a8-lora64", device=-1)
     request = mint_delegate.build_request(
-        task, workdir=tmp_path / "w", cap_bytes=7 * GIB)
+        task, workdir=tmp_path / "w")
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
 
 

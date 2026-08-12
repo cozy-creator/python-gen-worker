@@ -104,7 +104,7 @@ def test_pool_mints_a_multi_entry_cell(tmp_path: Path) -> None:
     # K=1, and this scenario would then pass while exercising no pool at all.
     width = pool.entry_workers(
         len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
     assert width.workers == 2
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width,
@@ -163,7 +163,7 @@ def test_one_failing_entry_fails_the_mint_and_takes_its_siblings(
     doomed = entries[1][0]
     width = pool.entry_workers(
         len(entries), limit=4, vcpus=16, available_bytes=64 * 1024**3,
-        free_vram_bytes=0, device_lock=True)
+        device_lock=True)
     box = pool.EntryCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
@@ -252,22 +252,17 @@ def test_a_malformed_job_is_a_wiring_defect_not_a_retry(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-#: A pod fat enough that CPU, host RAM and VRAM are all out of the way,
-#: so a case can isolate the ONE bound it is about.
-# pgw#877: the per-entry DEVICE footprint is now STATED here, because every
-# production caller states it — `aot_mint._entry_device_bytes` always supplies
-# one on a probeable card. It used to be omitted, which silently exercised
-# `DEFAULT_ENTRY_DEVICE_BYTES = 8 GiB`, a constant no production path could
-# reach (pgw#877 #5) and which is now deleted. The `/8` arithmetic in the
-# cases below is unchanged and now true because the CALLER says 8 GiB.
+#: A pod fat enough that CPU and host RAM are both out of the way, so a case
+#: can isolate the ONE bound it is about.
 #
-# Worth stating plainly, because it is pgw#849's lesson running backwards:
-# the combination "readable card, no footprint" was unreachable in production
-# and reached by this table on every run. A unit test is not only the caller
-# production is not — it is sometimes the ONLY caller a dead branch has.
-_ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3,
-              free_vram_bytes=640 * 1024**3, device_bytes=8 * 1024**3,
-              device_lock=True)
+# pgw#1175 / §4.33: the third bound is GONE. K used to divide free VRAM by a
+# per-entry device ask whose only production source was
+# `mint_budget.co_residency().need_bytes` — the mint child's whole
+# co-residency estimate, led by the PARENT's resident weights, for a child
+# that has held no weights since `fc77b923`. The rows that exercised it are
+# deleted with it rather than re-pointed: they asserted the arithmetic of a
+# quantity nobody may compute any more.
+_ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3, device_lock=True)
 
 
 @pytest.mark.parametrize(
@@ -278,15 +273,6 @@ _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3,
         ("cpu-bound 4 vCPU", dict(vcpus=4), 1),
         ("cpu-bound 8 vCPU", dict(vcpus=8), 3),
         ("cpu-bound 16 vCPU", dict(vcpus=16), 7),
-        # VRAM is the bound that actually binds. A 24 GiB card with the
-        # tenant's model resident leaves ~14 GiB: (14-2)/8 = 1.
-        ("24 GiB card, tenant resident",
-         dict(free_vram_bytes=14 * 1024**3), 1),
-        # An 80 GiB A100 with the tenant resident: (60-2)/8 = 7.
-        ("80 GiB card", dict(free_vram_bytes=60 * 1024**3), 7),
-        # A measured per-entry footprint narrower than the default buys width.
-        ("measured 3 GiB per entry",
-         dict(free_vram_bytes=26 * 1024**3, device_bytes=3 * 1024**3), 8),
         # Ceiling, not a bigger number, on a very fat host.
         ("fat host hits the ceiling", {}, pool.MAX_ENTRY_WORKERS),
         # Host RAM: 10 GiB available - 4 GiB reserve = 6 GiB / 3 GiB.
@@ -295,10 +281,10 @@ _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3,
         ("3 entries", dict(entries=3), 3),
         # A single-entry cell never pays for a pool.
         ("1 entry", dict(entries=1), 1),
-        # pgw#877 #5: a card we CAN read but have no per-entry footprint for
-        # refuses to widen, instead of dividing by a guess. The failure mode
-        # of guessing here is an OOM on paid work.
-        ("readable card, no footprint", dict(device_bytes=0), 1),
+        # pgw#1175: a MEASURED per-entry RSS narrower than the 3 GiB default
+        # buys width — the one per-entry footprint that still divides.
+        ("measured 1 GiB per entry",
+         dict(available_bytes=14 * 1024**3, peak_rss_bytes=1024**3), 8),
     ],
 )
 def test_width_is_derived_from_the_pod_not_the_host(
@@ -316,8 +302,7 @@ def test_an_unreadable_host_does_not_license_a_wide_pool() -> None:
     """No memory answer means K=1. A pool that widened on ignorance would
     OOM-kill the serving process it is supposed to be sharing with."""
     width = pool.entry_workers(
-        18, vcpus=64, available_bytes=0, free_vram_bytes=640 * 1024**3,
-        device_bytes=8 * 1024**3, device_lock=True)
+        18, vcpus=64, available_bytes=0, device_lock=True)
     assert width.workers == 1
     # pgw#877: the footprint is supplied so this pins the MEMORY bound alone.
     # Without it the width would be 1 for two reasons at once and the test
@@ -336,15 +321,23 @@ def test_without_the_gpu_benchmark_lock_a_gpu_cell_stays_serial() -> None:
     """
     kwargs = dict(_ROOMY)
     kwargs["device_lock"] = False
-    assert pool.entry_workers(18, **kwargs).workers == 1  # type: ignore[arg-type]
-    assert "benchmark" in pool.entry_workers(
-        18, **kwargs).reason                              # type: ignore[arg-type]
-    # ... and a card-less (CPU) cell is not held back by it: there is no
-    # device to benchmark on and nothing to perturb.
-    cpu_only = dict(_ROOMY)
-    cpu_only.update(device_lock=False, free_vram_bytes=0)
-    assert pool.entry_workers(
-        18, **cpu_only).workers > 1                       # type: ignore[arg-type]
+    # pgw#1175: PRESENCE is the only thing K still asks the card, and it asks
+    # it for exactly this bound. Stated by the test because this box has no
+    # usable driver, and because a bound that silently stops firing when the
+    # probe changes is the class of defect the width record exists to prevent.
+    real_card = pool._has_card
+    try:
+        pool._has_card = lambda: True
+        assert pool.entry_workers(18, **kwargs).workers == 1  # type: ignore[arg-type]
+        assert "benchmark" in pool.entry_workers(
+            18, **kwargs).reason                              # type: ignore[arg-type]
+        # ... and a card-less (CPU) cell is not held back by it: there is no
+        # device to benchmark on and nothing to perturb.
+        pool._has_card = lambda: False
+        assert pool.entry_workers(
+            18, **kwargs).workers > 1                         # type: ignore[arg-type]
+    finally:
+        pool._has_card = real_card
 
 
 def test_the_cap_narrows_and_never_widens() -> None:
@@ -361,10 +354,12 @@ def test_the_width_and_its_inputs_ride_the_telemetry() -> None:
     facts = pool.entry_workers(18, **_ROOMY).facts()      # type: ignore[arg-type]
     assert facts["entry_workers"] >= 1
     for key in ("entries", "vcpus", "cpu_workers", "mem_workers",
-                "device_workers", "available_bytes", "free_device_bytes",
-                "per_entry_rss_bytes", "per_entry_device_bytes",
+                "available_bytes", "per_entry_rss_bytes",
                 "device_lock", "width_reason"):
         assert key in facts
+    # pgw#1175: and the deleted terms must not creep back as telemetry that
+    # somebody later divides by.
+    assert not [k for k in facts if "device" in k and k != "device_lock"]
 
 
 # ---------------------------------------------------------------------------

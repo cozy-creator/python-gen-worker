@@ -56,7 +56,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional,
@@ -67,7 +67,7 @@ import msgspec
 from . import aot_shape_hints
 
 from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
-from . import compile_posture, mint_budget
+from . import compile_posture
 from .compile_posture import (
     USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
 from .postmortem import cpu_quota_cores
@@ -201,29 +201,12 @@ ENTRY_RSS_RESERVE_BYTES = 4 * 1024**3
 #: every cold pod's first mint, which is every mint of a new (family, lane).
 #:
 #: WHAT WOULD FALSIFY IT: an entry child measured above 3 GiB peak RSS, or any
-#: mint-time host OOM. Either means this bound, not the device bound, was
-#: binding — and the answer then is to make the FIRST entry serial and bank its
-#: peak, not to guess a larger constant.
+#: mint-time host OOM — the answer then is to make the FIRST entry serial and
+#: bank its peak, not to guess a larger constant.
 #:
-#: Banked per (family, lane) once measured, exactly like
-#: ``mint_budget.record_child_peak`` banks the device peak.
+#: Banked per (family, lane) once measured (``mint_workers.entry_peak_rss``).
+#: pgw#1175: this is now the ONLY per-entry footprint K divides by.
 DEFAULT_ENTRY_PEAK_RSS_BYTES = 3 * 1024**3
-
-#: VRAM the pool must leave to the tenant. The mint's whole premise is that
-#: the worker keeps serving (pgw#784), so the eager forward's weights AND its
-#: activation peak stay untouchable; this is the margin ON TOP of the free
-#: figure, because "free right now" is measured between tenant forwards.
-DEVICE_RESERVE_BYTES = 2 * 1024**3
-
-#: pgw#877 #5: there is NO per-entry device default, deliberately.
-#: ``DEFAULT_ENTRY_DEVICE_BYTES = 8 GiB`` sat here and was UNREACHABLE:
-#: ``aot_mint._entry_device_bytes`` returns 0 only when ``co_residency`` is
-#: unprobed, and ``_probe_free_device_bytes`` returns 0 under exactly those
-#: conditions, so ``free_vram <= 0`` short-circuited before the fallback could
-#: be consulted. A constant nothing can reach still reads as a policy, and
-#: this one read as "8 GiB is a reasonable entry". Deleted; a readable card
-#: with no footprint now refuses to widen instead, because the failure mode
-#: of guessing here is an OOM on paid work.
 
 #: Programs staged AHEAD of the running set. The export loop hands the pool
 #: every entry at once; staging them all would put ~46 GB of exported programs
@@ -233,31 +216,6 @@ INFLIGHT_PROGRAM_SLACK = 1
 
 _KILL_GRACE_S = 10.0
 _POLL_S = 0.25
-
-
-#: pgw#842: how many times the device bound samples free VRAM before it
-#: believes a number, and how far apart. The pool shares the card with a
-#: SERVING process by construction (pgw#784), so a single ``mem_get_info``
-#: can land inside a tenant forward and read that forward's activation set as
-#: "gone". :data:`DEVICE_RESERVE_BYTES` already reserves the tenant's peak;
-#: subtracting an in-flight peak on top of it charges the same bytes twice —
-#: measured as a 5 -> 3 width swing on identical work. The MAX over a short
-#: window is the steady figure the reserve was written against. Three samples
-#: over 0.1 s costs nothing against a mint that runs for minutes.
-DEVICE_FREE_SAMPLES = 3
-DEVICE_FREE_SAMPLE_GAP_S = 0.05
-
-#: Entry children whose DEVICE high-water must be in hand before the pool
-#: re-derives its own K from them (:meth:`EntryCompilePool._rewiden`).
-#:
-#: One is an anecdote. The first round's children start together, so they are
-#: also the ones that miss the shared PCH and the autotune cache, and a width
-#: re-derived from a single unrepresentative child is exactly the "5-vs-3 with
-#: nothing recorded to say why" defect pgw#842 closed. Two is the smallest
-#: number that is a measurement rather than a sample, and on a 36-entry sdxl
-#: cell it arrives after ~6 % of the work — early enough that the other 94 %
-#: is compiled at the measured width.
-REWIDEN_MIN_SAMPLES = 2
 
 
 @dataclass(frozen=True)
@@ -308,121 +266,6 @@ class MemoryFacts:
 
 
 @dataclass(frozen=True)
-class DeviceFacts:
-    """Free VRAM the pool may divide, and every sample behind it."""
-
-    free_bytes: int
-    basis: str
-    samples: Tuple[int, ...]
-
-    def facts(self) -> Dict[str, Any]:
-        return {
-            "free_device_bytes": int(self.free_bytes),
-            "device_basis": self.basis,
-            "free_device_samples": [int(x) for x in self.samples],
-        }
-
-
-@dataclass(frozen=True)
-class CardCensus:
-    """Who holds the card, taken BEFORE the pool spawns its first child.
-
-    pgw#992: the one reading that makes a simultaneity bound computable. At
-    pool construction no entry child exists, so everything on the device that
-    is not this process is, by elimination, the RESIDENT co-tenant — the
-    eager-serving parent the pgw#784 contract keeps alive through the mint.
-    Taken later the same subtraction would be meaningless, because the pool's
-    own children would be inside it.
-    """
-
-    total_bytes: int
-    free_bytes: int
-    own_reserved_bytes: int
-    basis: str
-
-    @property
-    def resident_other_bytes(self) -> int:
-        """The co-tenant's occupancy. Never negative: a driver that reports
-        `free + own > total` is reporting something this bound must not turn
-        into free capacity."""
-        return max(0, self.total_bytes - self.free_bytes - self.own_reserved_bytes)
-
-    @property
-    def readable(self) -> bool:
-        return self.basis == "sampled" and self.total_bytes > 0
-
-    def facts(self) -> Dict[str, Any]:
-        return {
-            "card_total_bytes": int(self.total_bytes),
-            "card_free_at_open_bytes": int(self.free_bytes),
-            "card_own_at_open_bytes": int(self.own_reserved_bytes),
-            "card_resident_other_bytes": int(self.resident_other_bytes),
-            "card_census_basis": self.basis,
-        }
-
-
-def card_census(device: int = -1) -> CardCensus:
-    """One (total, free, own-reserved) reading of the mint's card.
-
-    All three at the same moment on purpose: the subtraction that names the
-    co-tenant is only sound if its terms describe one instant.
-    """
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return CardCensus(0, 0, 0, "absent")
-        dev = torch.cuda.current_device() if device < 0 else int(device)
-        free, total = torch.cuda.mem_get_info(dev)
-        return CardCensus(
-            int(total), int(free), int(torch.cuda.memory_reserved(dev)),
-            "sampled")
-    except Exception:  # noqa: BLE001 — an unreadable card licenses nothing
-        return CardCensus(0, 0, 0, "unreadable")
-
-
-def own_reserved_now(device: int = -1) -> int:
-    """This process's CURRENT reserved bytes (-1 = unreadable).
-
-    pgw#1053: the post-release floor. Distinct from
-    :func:`own_device_high_water` on purpose — the high-water answers "what
-    did this process ever hold" and can only be re-baselined through
-    ``reset_peak_memory_stats``; this answers "what does it hold NOW", which
-    is what the released budget re-derives from.
-    """
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return -1
-        dev = torch.cuda.current_device() if device < 0 else int(device)
-        return int(torch.cuda.memory_reserved(dev))
-    except Exception:  # noqa: BLE001 — unreadable regrants nothing
-        return -1
-
-
-def own_device_high_water(device: int = -1) -> int:
-    """This process's own device high-water (0 = unreadable).
-
-    RESERVED, not allocated — the caching allocator's held blocks are exactly
-    what a co-resident child cannot have, which is the question a simultaneity
-    bound asks. The mint child's resident pipeline is the largest single
-    consumer on the card (16.20 GiB of 44.39 on the pgw#992 pod), and it is the
-    one consumer this process can measure exactly.
-    """
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return 0
-        dev = torch.cuda.current_device() if device < 0 else int(device)
-        return max(int(torch.cuda.max_memory_reserved(dev)),
-                   int(torch.cuda.memory_reserved(dev)))
-    except Exception:  # noqa: BLE001
-        return 0
-
-
-@dataclass(frozen=True)
 class PoolWidth:
     """The chosen K and every input that chose it — so a mint's telemetry can
     answer "why this width" without re-deriving anything."""
@@ -432,11 +275,8 @@ class PoolWidth:
     vcpus: int
     cpu_workers: int
     mem_workers: int
-    device_workers: int
     available_bytes: int
-    free_device_bytes: int
     per_entry_rss_bytes: int
-    per_entry_device_bytes: int
     device_lock: bool
     reason: str
     #: pgw#842: the constraint that ACTUALLY held K down, by name, plus the
@@ -445,30 +285,15 @@ class PoolWidth:
     #: rather than inferred by diffing two pods that no longer exist.
     binding: str = ""
     ceiling: int = MAX_ENTRY_WORKERS
-    #: The caller's own cap (``entry_workers(limit=)``), 0 when uncapped. It is
-    #: an INPUT that chose K and was the one input this record did not carry —
-    #: which mattered the moment :meth:`EntryCompilePool._rewiden` began
-    #: re-deriving K mid-mint: an operator who forced the serial path must not
-    #: have it widened back out from under them by a later measurement.
+    #: The caller's own cap (``entry_workers(limit=)``), 0 when uncapped. An
+    #: INPUT that chose K, carried so an operator who forced the serial path
+    #: can see from the record that they did.
     limit: int = 0
     cpu: Optional[CpuFacts] = None
     memory: Optional[MemoryFacts] = None
-    device: Optional[DeviceFacts] = None
-    #: ``"estimated"`` when the caller handed a per-entry device ask,
-    #: ``"default"`` when the width fell back to a constant.
-    #:
-    #: It read ``"measured"`` until pgw#877, and that overstated it. The only
-    #: caller is ``aot_mint._entry_device_bytes``, which returns
-    #: ``mint_budget.co_residency().need_bytes`` — the MINT CHILD's resident
-    #: set times :data:`~gen_worker.mint_budget._UNMEASURED_ACTIVATION_FRACTION`
-    #: plus two flat constants, i.e. ~56 % of the number was never observed and
-    #: no entry child was ever watched. ``EntryReport.peak_device_bytes`` is
-    #: the observation, and nothing reads it yet; until something does, this
-    #: axis has no ``"measured"`` value to report and must not claim one.
-    per_entry_device_basis: str = "default"
     #: ``"measured"`` here is literal: the value is one entry child's VmHWM
     #: summed over its real descendant tree (``_peak_rss_bytes``), banked by
-    #: the serving parent (``mint_budget.record_entry_peak_rss``).
+    #: the serving parent (``mint_workers.record_entry_peak_rss``).
     per_entry_rss_basis: str = "default"
     #: §4.30 / pgw#1137: whose MACHINE this is. Distinct from the goals above,
     #: which say what the pod was bought to do — a K held down for a human at
@@ -489,22 +314,18 @@ class PoolWidth:
             "vcpus": int(self.vcpus),
             "cpu_workers": int(self.cpu_workers),
             "mem_workers": int(self.mem_workers),
-            "device_workers": int(self.device_workers),
             "available_bytes": int(self.available_bytes),
-            "free_device_bytes": int(self.free_device_bytes),
             "per_entry_rss_bytes": int(self.per_entry_rss_bytes),
-            "per_entry_device_bytes": int(self.per_entry_device_bytes),
             "device_lock": bool(self.device_lock),
             "binding": self.binding,
             "ceiling": int(self.ceiling),
             "limit": int(self.limit),
             "underwidth": int(self.underwidth),
-            "per_entry_device_basis": self.per_entry_device_basis,
             "per_entry_rss_basis": self.per_entry_rss_basis,
             "width_reason": self.reason,
             **self.posture.facts(),
         }
-        for block in (self.cpu, self.memory, self.device):
+        for block in (self.cpu, self.memory):
             if block is not None:
                 out.update(block.facts())
         return out
@@ -620,170 +441,110 @@ def cpu_facts() -> CpuFacts:
     return CpuFacts(max(1, vcpus), basis, os_count, affinity, quota_cores)
 
 
-class DeviceProbeError(RuntimeError):
-    """The card could not be read (pgw#940).
+def _has_card() -> bool:
+    """Is there a CUDA device at all — the ONLY question :func:`entry_workers`
+    asks the card (pgw#1175).
 
-    Distinct from "there is no card", which is a 0 return. Collapsing the two
-    is the whole defect: `except Exception: return 0` made a transient
-    `mem_get_info` failure, a post-fork CUDA-context error and a flapping
-    `is_available()` indistinguishable from a CPU-only pod — and every caller
-    read that shared zero as the permissive case.
-    """
-
-
-def _probe_free_device_bytes(device: int = -1) -> int:
-    """One reading of free VRAM on the mint's card, 0 when there is no card.
-
-    Reads the ALLOCATOR's view of free plus what this process has reserved
-    but not allocated, exactly as ``mint_budget`` does — a cached block the
-    tenant is not using is free to nobody but this process, and pretending
-    otherwise is how a mint OOMs a live request.
-
-    Raises :class:`DeviceProbeError` when a card is present but unreadable.
+    It gates the device-LOCK bound, which is about whether two concurrent
+    autotunes would bake contention-chosen kernel configs into the artifact.
+    That is a correctness property of the bytes, not a capacity question, so
+    it needs presence and never size. Unreadable counts as present: refusing
+    to widen is the conservative answer for a lock question.
     """
     try:
         import torch
 
-        if not torch.cuda.is_available():
-            return 0
-    except Exception as exc:  # noqa: BLE001
-        # Even "is there a card" did not answer. That is unreadable, not
-        # absent: a pod with no torch at all fails at import long before here.
-        raise DeviceProbeError(f"cuda availability unreadable: {exc}") from exc
-    try:
-        dev = torch.cuda.current_device() if device < 0 else int(device)
-        free, _total = torch.cuda.mem_get_info(dev)
-        reserved = int(torch.cuda.memory_reserved(dev))
-        allocated = int(torch.cuda.memory_allocated(dev))
-        return int(free) + max(0, reserved - allocated)
-    except Exception as exc:  # noqa: BLE001
-        raise DeviceProbeError(f"free VRAM unreadable: {exc}") from exc
-
-
-def device_facts(
-    device: int = -1,
-    *,
-    samples: int = DEVICE_FREE_SAMPLES,
-    gap_s: float = DEVICE_FREE_SAMPLE_GAP_S,
-    probe: Optional[Callable[[int], int]] = None,
-) -> DeviceFacts:
-    """Free VRAM the pool may divide — the STEADY figure, not an instant.
-
-    pgw#842: the mint shares the card with the serving process, so one
-    ``mem_get_info`` taken while a tenant forward holds its activation set
-    reads several GiB below the steady free figure — and the pool then
-    subtracts :data:`DEVICE_RESERVE_BYTES` for that same tenant peak on top.
-    The MAX over a short window is the reading the reserve was written
-    against; every sample is kept so the choice is auditable.
-    """
-    read = probe if probe is not None else _probe_free_device_bytes
-    taken: List[int] = []
-    for i in range(max(1, int(samples))):
-        if i and gap_s > 0:
-            time.sleep(gap_s)
-        try:
-            value = int(read(device))
-        except DeviceProbeError as exc:
-            # pgw#940: "no card" and "unreadable card" are different facts and
-            # the pool must decide them differently. Only the caught type is
-            # narrowed here — anything else still propagates, because a probe
-            # that raises something unexpected is not a measurement outcome.
-            logger.warning("free-VRAM probe failed: %s", exc)
-            return DeviceFacts(0, "unreadable", tuple(taken))
-        taken.append(value)
-        if value <= 0:
-            # No card. Sampling an absence is not evidence of a size.
-            return DeviceFacts(0, "absent", tuple(taken))
-    return DeviceFacts(max(taken), "sampled", tuple(taken))
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def entry_workers(
     entries: int,
     *,
     peak_rss_bytes: int = 0,
-    device_bytes: int = 0,
     vcpus: int = 0,
     available_bytes: int = -1,
-    free_vram_bytes: int = -1,
-    device_basis: str = "",
     limit: int = 0,
     device_lock: Optional[bool] = None,
     posture: Optional[CompilePosture] = None,
 ) -> PoolWidth:
     """How many entries this pod may compile at once.
 
-    Derived, never configured, from THREE bounds:
+    **K = f(cores, one measured child RSS)** (§4.33, pgw#1175). Two bounds,
+    both read off the HOST, and neither predicts VRAM:
 
-    * **VRAM — the one that actually binds.** An AOTI compile benchmarks
-      kernels on the card, so every concurrent entry child holds its own
-      weight copy, activation set and CUDA context. On a 24 GB card with the
-      tenant's model resident that is K=2-3 whatever the CPU says. Read via
-      :func:`device_facts` — the STEADY free figure, never one sample.
     * **vCPU**, from :func:`cpu_facts` (cgroup quota AND affinity mask AND
       host cores, whichever is narrowest) minus
       :data:`SERVING_HEADROOM_CPUS`. ~94 % of an entry compile is ONE core of
       serial host work, so this bound is generous and scales near-perfectly.
-    * **Host RAM**, the loosest of the three: the wrapper ``cc1plus`` peaks at
-      ~2.1 GiB, so a pod that has VRAM for K has RAM for K several times over.
-      Read via :func:`memory_facts`, whose cgroup half counts the WORKING SET
-      rather than everything the pod has ever paged in.
+    * **Host RAM** over one entry child's MEASURED peak RSS
+      (``mint_workers.entry_peak_rss``, banked by the serving parent from a
+      previous entry on this pod). Read via :func:`memory_facts`, whose cgroup
+      half counts the WORKING SET rather than everything the pod has ever
+      paged in.
+
+    WHAT LEFT, AND WHY (pgw#1175). A third bound divided free VRAM by a
+    per-entry device ask, and the only source that ask ever had in production
+    was ``mint_budget.co_residency().need_bytes`` — the MINT CHILD's whole
+    co-residency estimate, whose leading term was the PARENT's resident
+    weights. Compiles are weight-free since ``fc77b923``; the estimate
+    described a process that no longer exists, and the machinery built on top
+    of it (a card census, a simultaneity budget, a per-spawn re-ask and a
+    mid-mint re-widen) was all arithmetic over that one wrong number. An entry
+    child that genuinely runs out of device memory dies in its own process and
+    is classified there — the attempt is the signal, and it costs ~2 minutes.
 
     ``device_lock=False`` FORCES K=1 on a GPU cell: without torch's
     ``set_gpu_benchmark_lock_context`` hook the pool cannot stop two entries
     benchmarking at once, and a cell whose kernel configs were chosen under
     self-inflicted contention publishes under an unchanged key. Refusing to
-    widen is the only safe answer.
+    widen is the only safe answer. This is a CORRECTNESS bound on the artifact
+    and has nothing to do with capacity — it is why the card is still asked
+    whether it exists, and never how big it is.
 
     pgw#842: every bound records the READING behind it (:class:`CpuFacts`,
-    :class:`MemoryFacts`, :class:`DeviceFacts`) and the returned width names
-    the constraint that actually bound. K is the mint's only multiplicative
-    lever — two mints of one cell differed 5-vs-3 with nothing recorded to
-    say why — so an unexplained K is a defect in itself.
+    :class:`MemoryFacts`) and the returned width names the constraint that
+    actually bound. K is the mint's only multiplicative lever — two mints of
+    one cell differed 5-vs-3 with nothing recorded to say why — so an
+    unexplained K is a defect in itself.
 
-    §4.30 / pgw#1137: two of the three bounds are ALSO posture-aware. The
-    ``goals`` above answer *"is there a tenant"*; ``posture`` answers *"is
-    there a human"*, and on a user's own desktop the CPU budget is halved and
-    the host-RAM reserve is doubled (:mod:`gen_worker.compile_posture` holds
-    the derivation for both). The DEVICE bound is untouched — a desktop GPU is
-    not shared with anyone the way its CPU and RAM are, and narrowing a bound
-    that already refuses to guess would only make first mints serial. The
-    default posture is ``FLEET``, so a pod's width is byte-identical to what it
-    was before this parameter existed.
+    §4.30 / pgw#1137: both bounds are posture-aware. The ``goals`` above answer
+    *"is there a tenant"*; ``posture`` answers *"is there a human"*, and on a
+    user's own desktop the CPU budget is halved and the host-RAM reserve is
+    doubled (:mod:`gen_worker.compile_posture` holds the derivation for both).
+    The default posture is ``FLEET``.
     """
     entries = max(0, int(entries))
     if posture is None:
         posture = compile_posture.current()
-    # §4.28 / pgw#1092: THREE of this policy's terms are tenant reserves and
-    # all three are now UNCONDITIONAL. They used to be relaxed to zero on a pod
-    # holding no serve goal, and §4.28 deleted that pod class: the only mint
-    # left is the one a SERVING pod runs in the background on a cell miss
-    # (pgw#784), so there is always a tenant to protect.
-    # `SERVING_HEADROOM_CPUS` keeps cores for an eager forward and a heartbeat;
-    # `DEVICE_RESERVE_BYTES` keeps VRAM for the tenant's peak;
-    # `ENTRY_RSS_RESERVE_BYTES` keeps host RAM so a request arriving mid-mint
-    # does not meet the OOM killer.
+    # §4.28 / pgw#1092: both of this policy's reserves are UNCONDITIONAL. They
+    # used to be relaxed to zero on a pod holding no serve goal, and §4.28
+    # deleted that pod class: the only mint left is the one a SERVING pod runs
+    # in the background on a cell miss (pgw#784), so there is always a tenant
+    # to protect. `SERVING_HEADROOM_CPUS` keeps cores for an eager forward and
+    # a heartbeat; `ENTRY_RSS_RESERVE_BYTES` keeps host RAM so a request
+    # arriving mid-mint does not meet the OOM killer.
     cpu_headroom = SERVING_HEADROOM_CPUS
-    device_reserve = DEVICE_RESERVE_BYTES
     rss_reserve = posture.rss_reserve_bytes(ENTRY_RSS_RESERVE_BYTES)
     locked = aot_device_lock.supported() if device_lock is None \
         else bool(device_lock)
     if entries <= 1:
         # pgw#877: the entry count alone decides this, so no bound is READ —
         # and the row must not report unread bounds as zeros. It used to say
-        # `available_bytes=0, free_device_bytes=0`: a row whose entire job is
-        # to explain K=1, telling its reader the pod has no RAM and no card.
-        # `-1` is this module's existing "not read" (`cgroup_available_bytes`,
-        # `quota_cores`), and the bases say so in words.
+        # `available_bytes=0`: a row whose entire job is to explain K=1,
+        # telling its reader the pod has no RAM. `-1` is this module's existing
+        # "not read" (`cgroup_available_bytes`, `quota_cores`), and the bases
+        # say so in words.
         return PoolWidth(
             workers=1, entries=entries, vcpus=0, cpu_workers=1, mem_workers=1,
-            device_workers=1, available_bytes=-1, free_device_bytes=-1,
-            per_entry_rss_bytes=0, per_entry_device_bytes=0,
-            per_entry_rss_basis="not-read", per_entry_device_basis="not-read",
+            available_bytes=-1, per_entry_rss_bytes=0,
+            per_entry_rss_basis="not-read",
             device_lock=locked, binding="entries", ceiling=1,
             limit=max(0, int(limit)), posture=posture,
             reason=(
                 f"{entries} entr{'y' if entries == 1 else 'ies'}: serial "
-                f"(no cpu/memory/device bound was read — the entry count "
+                f"(no cpu/memory bound was read — the entry count "
                 f"decides this width on its own)"))
 
     if vcpus > 0:
@@ -809,41 +570,6 @@ def entry_workers(
         mem_workers = max(
             1, int(max(0, avail - rss_reserve) // per_entry))
 
-    if free_vram_bytes >= 0:
-        device = DeviceFacts(
-            int(free_vram_bytes),
-            "caller" if free_vram_bytes > 0 else "absent",
-            (int(free_vram_bytes),))
-    else:
-        device = device_facts()
-    free_vram = device.free_bytes
-    per_device = max(0, int(device_bytes))
-    if free_vram <= 0 and device.basis == "unreadable":
-        # pgw#940. This branch used to be shared with "no card" and yielded
-        # MAX_ENTRY_WORKERS for both, so a GPU pod whose probe raised compiled
-        # eight children device-UNBOUNDED. The old comment defended it by
-        # asserting `_probe_free_device_bytes` fails only when there is no
-        # card — which was false, and is now true by construction: an
-        # unreadable card raises `DeviceProbeError` and lands HERE, closed,
-        # beside its two sibling branches. The stake is stated at :192-201 —
-        # "the failure mode of guessing here is an OOM on paid work."
-        device_workers = 1
-    elif free_vram <= 0:
-        # No card at all: the device bound is DROPPED and K falls to whichever
-        # of cpu/mem/ceiling binds. Right for a CPU-only cell, which is not
-        # device-bound at all.
-        device_workers = MAX_ENTRY_WORKERS
-    elif per_device <= 0:
-        # pgw#877 #5: a card we CAN read but have no per-entry footprint for.
-        # Unreachable in production today (see the note where the deleted
-        # default used to live), and stated explicitly rather than left to a
-        # constant: an unmeasured footprint does not license concurrency on
-        # the card it cannot describe.
-        device_workers = 1
-    else:
-        device_workers = max(
-            1, int(max(0, free_vram - device_reserve) // per_device))
-
     # A caller cap NARROWS. `limit` above MAX_ENTRY_WORKERS is a caller
     # asking for more than the ceiling allows, and the ceiling wins.
     # ...and so does the POSTURE (§4.30): a user's machine caps at half the
@@ -851,19 +577,6 @@ def entry_workers(
     # neither can widen.
     ceiling = posture.entry_ceiling(
         min(MAX_ENTRY_WORKERS, int(limit)) if limit > 0 else MAX_ENTRY_WORKERS)
-    # pgw#877: ONE definition of each basis. It was written twice — once for
-    # the row, once for the reason string — which is how the reason could
-    # have drifted from the field it explains.
-    # THREE values, because there are three provenances and collapsing them is
-    # the defect this issue is named for:
-    #   "measured"   — a real entry child was watched (pgw#877 #1/#2)
-    #   "estimated"  — `co_residency().need_bytes`, ~56 % never observed
-    #   "unmeasured" — a readable card and no footprint at all -> K=1
-    # The caller states which; a bare non-zero ask cannot tell them apart, and
-    # "the caller handed me a number" is precisely the overstatement that made
-    # `"measured"` meaningless in the first place.
-    device_basis = str(device_basis or "").strip() or (
-        "estimated" if device_bytes > 0 else "unmeasured")
     rss_basis = "measured" if peak_rss_bytes > 0 else "default"
 
     def _width(
@@ -872,18 +585,15 @@ def entry_workers(
         return PoolWidth(
             workers=workers, entries=entries, vcpus=vcpus,
             cpu_workers=cpu_workers, mem_workers=mem_workers,
-            device_workers=device_workers, available_bytes=avail,
-            free_device_bytes=free_vram, per_entry_rss_bytes=per_entry,
-            per_entry_device_bytes=per_device, device_lock=lock,
+            available_bytes=avail, per_entry_rss_bytes=per_entry,
+            device_lock=lock,
             reason=reason, binding=binding, ceiling=ceiling, cpu=cpu,
-            memory=memory, device=device,
-            per_entry_device_basis=device_basis,
+            memory=memory,
             per_entry_rss_basis=rss_basis,
             limit=max(0, int(limit)), posture=posture)
 
-    workers = max(
-        1, min(cpu_workers, mem_workers, device_workers, ceiling, entries))
-    if workers > 1 and free_vram > 0 and not locked:
+    workers = max(1, min(cpu_workers, mem_workers, ceiling, entries))
+    if workers > 1 and _has_card() and not locked:
         return _width(
             1, binding="device-lock", lock=False,
             reason=(
@@ -893,7 +603,7 @@ def entry_workers(
                 "not move"))
     binding = min(
         (cpu_workers, "cpu"), (mem_workers, "host-memory"),
-        (device_workers, "vram"), (ceiling, "ceiling"),
+        (ceiling, "ceiling"),
         (entries, "entries"))[1]
     polite = (
         " [§4.30 user-machine: half the cores, "
@@ -903,11 +613,9 @@ def entry_workers(
     reason = (
         f"K={workers} ({binding}-bound{polite}): "
         f"{vcpus} vCPU ({cpu.basis}) -> "
-        f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) -> "
-        f"{mem_workers}, {free_vram / 1024**3:.1f} GiB VRAM ({device.basis}) "
-        f"/ {per_device / 1024**3:.1f} GiB per entry "
-        f"({device_basis}) -> "
-        f"{device_workers}")
+        f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) "
+        f"/ {per_entry / 1024**3:.1f} GiB per entry ({rss_basis}) -> "
+        f"{mem_workers}")
     return _width(workers, binding=binding, reason=reason, lock=locked)
 
 
@@ -947,10 +655,10 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     elapsed_s: float = 0.0
     peak_rss_bytes: int = 0
     #: pgw#868 A4: the child's DEVICE high-water, allocated and reserved.
-    #: Defaulted so an older child's report still decodes. No longer telemetry
-    #: only: `EntryCompilePool._rewiden` divides the pool's own free-VRAM
-    #: reading by THIS, once two children have reported one, in place of the
-    #: `mint_budget.co_residency` estimate the pool was constructed with.
+    #: Defaulted so an older child's report still decodes. TELEMETRY (pgw#1175)
+    #: — it rides the phase table to the hub as `peak_child_device_bytes`, and
+    #: is the only honest answer to "what does one entry compile cost a card".
+    #: It sizes nothing: K is f(cores, measured child RSS).
     peak_device_bytes: int = 0
     peak_device_reserved_bytes: int = 0
     #: Inductor's own phase split (lowering / codegen / host C++ compile+link)
@@ -1061,10 +769,9 @@ class PoolLedger:
 
     workers: int = 1
     #: pgw#868 A4: the width the pool was CONSTRUCTED at, kept beside the one
-    #: it finished at. When ``_rewiden`` replaces an estimated per-entry device
-    #: ask with a measured one, ``workers`` moves and this does not — so the
-    #: prize is readable as a delta from one row, without a second mint to
-    #: compare against.
+    #: it finished at. Equal since pgw#1175 deleted the mid-mint re-widen;
+    #: retained because the ledger's identity is stated over intervals and a
+    #: future width change must stay readable as a delta from one row.
     workers_initial: int = 1
     wall_s: float = 0.0
     #: Sum of the per-entry Popen-to-reap walls (== the mint's ``compile_s``).
@@ -1358,31 +1065,6 @@ class EntryCompilePool:
         #: pgw#842/th#1359: the width facts as last EMITTED, so a re-emit
         #: happens only when they actually moved.
         self._emitted_width_facts: Optional[Dict[str, Any]] = None
-        #: pgw#992: who else is on the card, read before the first child exists.
-        #: `_rewiden` cannot compute a simultaneity bound without it, and a
-        #: census it cannot read refuses the widen rather than assuming an
-        #: empty card.
-        self.census = card_census()
-        #: pgw#1053: the OWN term's floor in the simultaneity budget. Seeded
-        #: from the construction census (the resident pipeline), and
-        #: re-baselined by :meth:`note_residents_released` when the mint
-        #: parent provably hands its residents back — the ONE way the budget's
-        #: own term is ever allowed to shrink. Without an explicit floor,
-        #: ``max(own_device_high_water(), census.own_reserved_bytes)`` pins
-        #: the budget to the construction-time pipeline forever, and a release
-        #: frees bytes the arithmetic can never grant.
-        self._own_floor_bytes = int(self.census.own_reserved_bytes)
-        #: pgw#1053: bytes the release handed back, added to the CONSTRUCTION
-        #: free reading when K is re-derived. ``_rewiden`` deliberately never
-        #: re-probes a card K children are sitting on; the release's gain is
-        #: instead reconstructed as "the construction free figure plus what
-        #: the residents measurably returned", which children cannot distort.
-        self._free_gain_bytes = 0
-        #: The terms of the last simultaneity decision, merged into the width
-        #: row so a future OOM names WHICH term was wrong instead of leaving a
-        #: reader to diff two pods that no longer exist.
-        self.simultaneity: Dict[str, Any] = {}
-        self._apply_simultaneity_bound()
         self._emit_width("construction")
         self.inductor_configs = dict(inductor_configs or {})
         # pgw#848 item 5: the crash-only half. `bank` is None whenever the
@@ -1417,19 +1099,11 @@ class EntryCompilePool:
         self.python = python
         self.peak_rss_bytes = 0
         #: pgw#877 #2: the widest DEVICE high-water any entry child reported.
-        #: pgw#868 A4 measured this and left it telemetry-only; nothing read
-        #: it, so the per-entry device ask stayed the mint child's whole
-        #: co-residency estimate. This is the number that ends that.
+        #: MEASUREMENT ONLY (pgw#1175) — it rides the phase table to the hub as
+        #: `peak_child_device_bytes` and decides nothing here. What one entry
+        #: child really costs a card is exactly the question P0-E/P0-F ask; it
+        #: is not, and was never, a licence to divide free VRAM by it.
         self.peak_device_bytes = 0
-        #: How many entry children have contributed one. `_rewiden` refuses to
-        #: act on fewer than :data:`REWIDEN_MIN_SAMPLES`.
-        self.device_samples = 0
-        #: The width the pool was CONSTRUCTED with — AFTER the pgw#992
-        #: simultaneity bound, so the record `_rewiden` re-derives against is
-        #: the one the pool actually ran. `_rewiden` re-uses this record's own
-        #: free-VRAM and host-RAM readings — the same question, a measured
-        #: divisor — so the initial row has to survive being superseded.
-        self.width_initial = self.width
         self.peak_concurrency = 0
         # pgw#848: the kernel's OOM-kill counter as it stood before this pool
         # ran. A DELTA over the pool's own wall is evidence; the absolute
@@ -1615,27 +1289,21 @@ class EntryCompilePool:
                 setattr(self.ledger, bucket,
                         getattr(self.ledger, bucket) + (now - mark) * free)
             # pgw#868 A4: capacity is ACCUMULATED at the width that was live
-            # for each interval, not multiplied out at the end. `_rewiden` can
-            # move K mid-pool, and `wall_s * final_workers` would then price
-            # the whole run at a width the first entries never had — turning
-            # the efficiency identity (busy + idle == capacity) into a
-            # residual nobody can trust, which is the one thing this ledger
-            # exists not to be.
+            # for each interval, not multiplied out at the end. K is fixed for
+            # the life of a pool since pgw#1175, but the identity (busy + idle
+            # == capacity) is stated over intervals so it stays true whatever
+            # K does.
             self.ledger.capacity_s += (now - mark) * self.width.workers
             mark = now
 
         try:
             while True:
-                # Re-read every round: `_rewiden` can widen K after an entry
-                # lands, and a staging cap frozen at the construction width
-                # would starve the slots it just opened.
                 staged_cap = max(1, self.width.workers + INFLIGHT_PROGRAM_SLACK)
                 # SPAWN first: a freed slot takes already-staged work before
                 # the parent disappears into a source pull that, on the
                 # overlapped path, can be minutes of export.
                 while staged and not failure \
-                        and len(running) < self.width.workers \
-                        and self._spawn_admitted(len(running)):
+                        and len(running) < self.width.workers:
                     job, job_path = staged.pop(0)
                     free = self.width.workers - len(running)
                     running.append(
@@ -1683,9 +1351,7 @@ class EntryCompilePool:
                 # Nothing left to start: the free slots are the straggler
                 # tail, which is a SCHEDULING loss and not a compile cost.
                 # pgw#829's entry collapse moves this number; nothing about
-                # the compiler does. A slot held by the LIVE simultaneity
-                # bound (`_spawn_admitted`) lands in `idle_other_s` with the
-                # holding terms recorded on `simultaneity`.
+                # the compiler does.
                 bucket = "idle_drain_s" if exhausted and not staged \
                     else "idle_other_s"
                 finished = self._reap(running)
@@ -1700,10 +1366,6 @@ class EntryCompilePool:
                 except EntryCompileFailed as exc:
                     failure = exc
                     break
-                # pgw#868 A4: this entry's own DEVICE high-water is now banked
-                # (`_collect` -> `observe_entry_device`). Ask K again with the
-                # measurement in place of the estimate the pool was built on.
-                self._rewiden()
                 _cb(finished.entry)
                 # Collection (report read, program unlink) and pgw#824's
                 # progress callback both run with the slot ALREADY FREE, so
@@ -1847,8 +1509,7 @@ class EntryCompilePool:
         try:
             from . import activity as activity_mod
 
-            facts = {**self.width.facts(), **self.census.facts(),
-                     **self.simultaneity}
+            facts = dict(self.width.facts())
             if facts == self._emitted_width_facts:
                 return
             first = self._emitted_width_facts is None
@@ -1914,354 +1575,6 @@ class EntryCompilePool:
             or int(report.peak_device_bytes or 0)
         if peak > 0:
             self.peak_device_bytes = max(self.peak_device_bytes, peak)
-            self.device_samples += 1
-
-    def entry_budget_bytes(
-        self, ask: int,
-    ) -> Tuple[Optional[int], Dict[str, Any]]:
-        """Bytes K entry children may hold AT THEIR SIMULTANEOUS PEAKS, with
-        every term named. ``(budget, terms)``, where ``None`` means a term was
-        unreadable — distinct from a budget that is readable and NEGATIVE,
-        which is a card already oversubscribed by its residents and a perfectly
-        computable answer of "one child, and only because one is the floor".
-        Conflating the two would let an oversubscribed card take the
-        unreadable branch and keep whatever width it had.
-
-        pgw#992 — the defect this replaces. A4 divided the pool's
-        free-VRAM SAMPLE by the measured per-entry peak: ``29.5 GiB / 6.02 GiB
-        -> K=4``. On the real path that killed the first AOT mint ever to reach
-        the compile phase, deterministically, on entry 2 of 36::
-
-            44.39 GiB card, 2.69 MiB free, OOM on a 14 MiB alloc
-              9.54 GiB  eager-serving parent   (resident, by pgw#784's contract)
-             16.20 GiB  mint child's pipeline  (resident, this process)
-             18.61 GiB  four entry children    (4 x ~6 GiB, as measured)
-
-        Two facts make the division wrong, and neither is a shortage of card:
-
-        * **"free right now" is not a simultaneous budget.** The sample is
-          taken before the widened children exist and prices none of their
-          growth. Its own comment already says it is read *between tenant
-          forwards*.
-        * **The residents keep growing against the same card.** They were
-          14.9 GiB at the sample and 25.7 GiB at the OOM. A momentary reading
-          cannot bound a future peak.
-
-        So the budget is taken against the CARD, not against a moment:
-
-            budget = total
-                   - resident co-tenant (census, measured before child one)
-                   - this process's own device high-water
-                   - the tenant's forward reserve, when a serve goal exists
-
-        Every term is an observation, and every term is read from the DEVICE.
-        Summing what the pool believes is loaded would not do: on the z-image
-        pod, 16.2 GiB was free on an 80 GB card whose static slot sum is
-        53.3 GiB — ~9 GiB of CUDA context, allocator fragmentation and child
-        overhead that no catalog arithmetic can see.
-
-        Indifferent to ``ask``'s BASIS, deliberately. The estimate is not safer
-        than the measurement (it only happened to be larger on one pod) and the
-        measurement is not more dangerous than the estimate; a bound that
-        preferred either would be a statement about the divisor, and the
-        divisor is not what was wrong.
-
-        Deliberately NOT a larger :data:`DEVICE_RESERVE_BYTES` (§4.24): padding
-        a constant moves the same unpriced simultaneity somewhere else and
-        re-fires on the next card.
-        """
-        terms: Dict[str, Any] = {
-            "simultaneity_ask_bytes": int(ask),
-            "simultaneity_basis": self.census.basis,
-        }
-        if not self.census.readable or ask <= 0:
-            terms["simultaneity_verdict"] = "unreadable — no widen"
-            return None, terms
-        # pgw#1053: the floor is `_own_floor_bytes`, not the construction
-        # census verbatim — identical until `note_residents_released`
-        # re-baselines it, which the caller may only do after a real release
-        # plus `reset_peak_memory_stats` (so the high-water restarts from the
-        # released level rather than remembering the pipeline).
-        own_peak = max(own_device_high_water(), int(self._own_floor_bytes))
-        if self._free_gain_bytes > 0:
-            # pgw#1053: the release rides every later decision row — a widen
-            # or a hold after it must say the budget it ran against moved.
-            terms["residents_released_bytes"] = int(self._free_gain_bytes)
-        # §4.28: unconditional, exactly like `entry_workers`' device reserve.
-        reserve = DEVICE_RESERVE_BYTES
-        budget = (self.census.total_bytes - self.census.resident_other_bytes
-                  - own_peak - reserve)
-        terms.update({
-            "simultaneity_own_peak_bytes": int(own_peak),
-            "simultaneity_tenant_reserve_bytes": int(reserve),
-            "simultaneity_budget_bytes": int(budget),
-            "simultaneity_k_cap": int(max(0, budget) // ask),
-        })
-        return budget, terms
-
-    def _apply_simultaneity_bound(self) -> None:
-        """Narrow the CONSTRUCTED width to what the card can hold at once.
-
-        pgw#992, second reading. The first version of this fix capped only
-        ``_rewiden``, which would have held the L40S at K=2 — and the z-image
-        contrast specimen shows why that is not the invariant. Same
-        ``_rewiden`` code, a different pod:
-
-            free_device 16.2 GiB / per_entry 25.0 GiB (**estimated**) -> K=1,
-            underwidth=3
-
-        The ESTIMATE accidentally protected that pod; the L40S died because the
-        MEASURED peak shrank the denominator. So the bound cannot be "prefer
-        the measured peak" or "distrust the measured peak" — either one is a
-        statement about the DIVISOR, and the divisor is not what was wrong.
-        **The threat is K children's simultaneous peak against the residents'
-        future peaks, and it has to be read from the DEVICE regardless of which
-        basis supplies the per-entry figure.** That makes it a bound on every
-        width this pool ever runs, not a patch on the one path that widens.
-
-        Measured on the same z-image pod, and the reason this reads the card
-        rather than adding up what the pool thinks is loaded: 16.2 GiB free on
-        an 80 GB card whose static slot sum is 53.3 GiB — **~9 GiB of CUDA
-        context, allocator fragmentation and child overhead that no catalog
-        arithmetic can see**.
-
-        Never below 1: K=1 is the in-process serial path, it is what the pool
-        degrades TO, and a bound that could forbid it would forbid minting at
-        all. Never above what the caller already chose — this only narrows.
-        """
-        ask = int(self.width.per_entry_device_bytes or 0)
-        budget, terms = self.entry_budget_bytes(ask)
-        self.simultaneity = terms
-        if budget is None or ask <= 0:
-            return
-        capped = max(1, int(terms["simultaneity_k_cap"]))
-        if capped >= self.width.workers:
-            return
-        logger.warning(
-            "aot-pool: pgw#992 narrowing the CONSTRUCTED K %d -> %d — the "
-            "card holds %.2f GiB, a %.2f GiB co-tenant and a %.2f GiB "
-            "resident set, leaving %.2f GiB for entries at %.2f GiB each",
-            self.width.workers, capped, self.census.total_bytes / 1024**3,
-            self.census.resident_other_bytes / 1024**3,
-            terms["simultaneity_own_peak_bytes"] / 1024**3,
-            budget / 1024**3, ask / 1024**3)
-        self.width = replace(
-            self.width, workers=capped, binding="simultaneity",
-            reason=(f"K={capped} (simultaneity-bound): {self.width.reason} — "
-                    f"narrowed to what the card holds at once"))
-
-    def note_residents_released(self) -> None:
-        """pgw#1053: the mint parent PROVABLY handed its residents back.
-
-        Called by the mint after the last row exports, once it has dropped its
-        pipeline and the retained programs' weight aliases, run
-        ``empty_cache()`` AND ``reset_peak_memory_stats()`` — the reset is
-        load-bearing: it is what lets ``own_device_high_water`` restart from
-        the released level instead of remembering the pipeline forever.
-
-        Two things happen, both measured rather than asserted:
-
-        * the OWN floor of the simultaneity budget re-baselines to what this
-          process holds NOW (the delta is exactly what the driver got back);
-        * K is re-derived through the SAME pgw#992-bounded path a measured
-          entry peak takes — with the construction ask when fewer than
-          :data:`REWIDEN_MIN_SAMPLES` children have reported, because the
-          release moved the BUDGET, not the divisor, and holding a freed card
-          at the resident-priced K would be pgw#842's underwidth defect with a
-          receipt attached.
-
-        A no-op on a cardless pool (nothing was priced off a card) and after a
-        release that freed nothing (the floor only ever re-baselines DOWN).
-        """
-        if not self.census.readable:
-            return
-        now = own_reserved_now()
-        if now < 0:
-            return
-        freed = max(0, int(self._own_floor_bytes) - now)
-        if freed <= 0:
-            return
-        self._own_floor_bytes = now
-        self._free_gain_bytes += freed
-        logger.info(
-            "aot-pool: pgw#1053 residents released %.2f GiB back to the "
-            "simultaneity budget (own floor %.2f GiB)",
-            freed / 1024**3, now / 1024**3)
-        self._rewiden(trigger="release")
-
-    def _spawn_admitted(self, running_count: int) -> bool:
-        """May a (``running_count + 1``)-th child exist on this card NOW?
-
-        pgw#992 continued under pgw#1052. The construction-time simultaneity
-        bound prices the residents as they stood when the pool was BUILT — and
-        the overlapped mint builds the pool before the export phase, whose own
-        device growth (measured 9.0 -> 15.6 GiB reserved across a 36-row sdxl
-        export) arrives after that reading. This re-asks the SAME budget with
-        the live own high-water before every spawn: a spawn the budget cannot
-        hold WAITS — for a sibling to exit, or for the pgw#1053 release to
-        grow the budget — instead of being priced against a reading it
-        postdates. Nothing narrows and nothing is killed; a spawn is deferred
-        to a boundary the card admits. Floor 1: the serial path must always
-        be reachable or the pool deadlocks against its own bound.
-        """
-        if running_count <= 0:
-            return True
-        ask = int(self.width.per_entry_device_bytes or 0)
-        if ask <= 0 or not self.census.readable:
-            return True
-        budget, terms = self.entry_budget_bytes(ask)
-        if budget is None:
-            return True
-        k_cap = max(1, int(terms["simultaneity_k_cap"]))
-        if running_count < k_cap:
-            return True
-        terms["simultaneity_spawn_held_at"] = int(running_count)
-        self.simultaneity = terms
-        return False
-
-    def _rewiden(self, *, trigger: str = "measured") -> None:
-        """Re-derive K from what the entry children MEASURED (pgw#868 A4),
-        bounded by what the CARD can hold at once (pgw#992).
-
-        pgw#809 sizes the pool before a single entry has run, and the only
-        per-entry device figure available then is
-        ``mint_budget.co_residency().need_bytes`` — the MINT CHILD's whole
-        co-residency estimate (a full weight copy, an activation set the
-        estimate never observed, and two flat constants), used as ONE entry
-        child's ask. pgw#877 measured that ~56 % of it was never observed and
-        renamed its basis from ``"measured"`` to ``"estimated"`` for exactly
-        that reason. Every entry child since has reported what it actually
-        peaked at, :meth:`observe_entry_device` has banked it, and nothing
-        read it: an sdxl cell spent 34 more entries at a width chosen by an
-        estimate its own first two entries had already disproved.
-
-        This asks the SAME question against the SAME readings — only the
-        divisor changes, from an estimate to an observation. That is the
-        pgw#847 shape (delete a guess, keep the computation), not a new
-        policy: no reserve moves, no ceiling moves, no bound is invented.
-
-        Fail-closed, in six directions:
-
-        * **the grant is capped by the card's simultaneous budget**
-          (:meth:`entry_budget_bytes`) — the one that was missing, and the one
-          that killed pgw#868 A1's first real AOT compile;
-        * it never NARROWS. Children are already running against the wider
-          number, and a mid-flight dip is the reading ``device_facts`` takes a
-          max over precisely so it cannot be acted on;
-        * it never exceeds the caller's own ``limit`` — an operator who forced
-          the serial path keeps it;
-        * it refuses on fewer than :data:`REWIDEN_MIN_SAMPLES` reports, on a
-          zero peak, and on a pool whose device lock is absent (``K=1`` there
-          is a safety width, not a resource one);
-        * it re-derives against ``width_initial``'s OWN free-VRAM and host-RAM
-          figures rather than re-probing a card that K running children are
-          sitting on — re-probing would read their footprints as absent
-          capacity and narrow, which is the opposite of the truth. That
-          argument is right about the FREE figure and was never a licence to
-          skip the card-wide bound above;
-        * anything raising leaves the width exactly as it was.
-
-        It changes no artifact. K is not an input to codegen, kernel selection
-        or the traced graph — the device lock already serializes the one thing
-        that is shared (``benchmark_all_configs``) — so this is a PROCESS
-        change under pgw#846's rule, and the emitted files are untouched.
-
-        ``trigger="release"`` (pgw#1053) is the residents-release re-ask: the
-        budget's own term just shrank by a MEASURED amount, so the same
-        derivation runs even before :data:`REWIDEN_MIN_SAMPLES` children have
-        reported — the divisor then stays the CONSTRUCTION ask on the
-        construction basis (never a new guess), and only the budget moved.
-        """
-        released = trigger == "release"
-        if not self.width.device_lock:
-            return
-        measured = (self.device_samples >= REWIDEN_MIN_SAMPLES
-                    and self.peak_device_bytes > 0)
-        if not measured and not released:
-            return
-        base = self.width_initial
-        if base.free_device_bytes <= 0:
-            # The initial width never read the card (`entries <= 1`, or an
-            # absent probe). There is nothing to re-divide, and inventing a
-            # free figure here is the guess this method exists to delete.
-            return
-        try:
-            if measured:
-                ask = mint_budget.entry_device_ask(int(self.peak_device_bytes))
-                basis = "measured"
-            else:
-                ask = int(base.per_entry_device_bytes or 0)
-                basis = base.per_entry_device_basis
-            if ask <= 0:
-                return
-            # pgw#992: the cap comes FIRST and is recorded whether or not the
-            # widen happens — a refused widen is the interesting row.
-            budget, terms = self.entry_budget_bytes(ask)
-            self.simultaneity = terms
-            if budget is None:
-                logger.info(
-                    "aot-pool: pgw#992 declining to widen from K=%d — the "
-                    "card census is %s, so K children's simultaneous peak "
-                    "cannot be priced", self.width.workers, self.census.basis)
-                self._emit_width("simultaneity bound unreadable")
-                return
-            k_cap = int(terms["simultaneity_k_cap"])
-            wider = entry_workers(
-                base.entries,
-                limit=base.limit,
-                device_bytes=ask,
-                device_basis=basis,
-                # pgw#1053: the construction reading plus what the release
-                # measurably returned — never a re-probe of a card K running
-                # children are sitting on (their footprints would read as
-                # absent capacity).
-                free_vram_bytes=int(
-                    base.free_device_bytes + self._free_gain_bytes),
-                available_bytes=int(base.available_bytes),
-                vcpus=int(base.vcpus),
-                peak_rss_bytes=int(self.peak_rss_bytes or 0),
-                device_lock=base.device_lock,
-                # Reconstructed from the record rather than re-read: a mid-mint
-                # widen must not quietly stop being polite on a machine that
-                # was polite when the pool was built.
-                posture=base.posture,
-            )
-        except Exception:  # noqa: BLE001 — a re-derivation never fails a mint
-            logger.debug("aot-pool: width re-derivation failed", exc_info=True)
-            return
-        granted = min(wider.workers, k_cap)
-        if granted < wider.workers:
-            # The row pgw#992 exists to produce: A4's own arithmetic said one
-            # thing, the card said another, and the card wins BY NAME.
-            logger.warning(
-                "aot-pool: pgw#992 capping K %d -> %d (A4 asked for %d) — the "
-                "card holds %.2f GiB, a %.2f GiB co-tenant and a %.2f GiB "
-                "resident pipeline, leaving %.2f GiB for entries at %.2f "
-                "GiB each",
-                self.width.workers, granted, wider.workers,
-                self.census.total_bytes / 1024**3,
-                self.census.resident_other_bytes / 1024**3,
-                terms["simultaneity_own_peak_bytes"] / 1024**3,
-                budget / 1024**3, ask / 1024**3)
-        if granted <= self.width.workers:
-            # Nothing to grant. Emit anyway: "the pool did NOT widen, and here
-            # is the bound that stopped it" is the row a later OOM needs.
-            self._emit_width("simultaneity bound held K")
-            return
-        wider = replace(wider, workers=granted)
-        logger.info(
-            "aot-pool: K %d -> %d (%s) — per-entry device ask %.2f GiB (%s, "
-            "%d report(s)) against the %.2f GiB (%s) the pool was sized "
-            "with, within a %.2f GiB simultaneous budget (pgw#992/pgw#1053)",
-            self.width.workers, wider.workers, trigger, ask / 1024**3,
-            basis, self.device_samples,
-            base.per_entry_device_bytes / 1024**3,
-            base.per_entry_device_basis, budget / 1024**3)
-        self.width = wider
-        self.ledger.workers = wider.workers
-        self._emit_width(
-            "re-derived from measured entry peaks" if trigger == "measured"
-            else "re-derived after residents release (pgw#1053)")
 
     def _collect(self, row: _Running) -> List[str]:
         elapsed = time.monotonic() - row.started
@@ -2515,20 +1828,17 @@ __all__ = [
     "arm_parent_death_signal",
     "EntryJob",
     "EntryReport",
-    "DEVICE_RESERVE_BYTES",
     "MAX_ENTRY_WORKERS",
     "PACKAGE_ROOT",
     "REFUSED",
     "SERVING_HEADROOM_CPUS",
     "CpuFacts",
-    "DeviceFacts",
     "MemoryFacts",
     "PoolLedger",
     "PoolWidth",
     "child_argv",
     "child_env",
     "cpu_facts",
-    "device_facts",
     "entry_workers",
     "memory_facts",
 ]

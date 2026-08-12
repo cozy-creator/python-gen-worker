@@ -723,8 +723,8 @@ def concurrency_budget(
     allocator high-water would under-count badly and in the direction that
     OOMs. `total - free` is the only input that sees all of it.
 
-    Two conventions, matching `mint_budget`'s peak banks and pgw#1164's adopt
-    bank: the number is MONOTONE (it only ever tightens — see `_run_children`),
+    Two conventions, matching `mint_workers`' surviving RSS bank: the number
+    is MONOTONE (it only ever tightens — see `_run_children`),
     and the reason STATES ITS BASIS, so a measured bound and an absent one can
     never be read as the same claim.
     """
