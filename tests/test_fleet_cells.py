@@ -158,7 +158,8 @@ def _adopted(monkeypatch, pending):
     # bypass EXPLICIT, not adding one. These tests are about the publish path;
     # the gate's own verdict is `test_handback_key_axes_pgw1042`'s.
     monkeypatch.setattr(fc, "arm_axis_divergence", lambda arm_key, meta: "")
-    return fc.adopt_delegated_mint(_Pipe(), pending, child)
+    # pgw#1176: the adopt takes the SET of entry artifacts.
+    return fc.adopt_delegated_mint(_Pipe(), pending, [child])
 
 
 def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
@@ -294,7 +295,8 @@ def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
     # its own thread, so `_adopted`'s mkdir-then-write raced that reaper and
     # lost with a FileNotFoundError whenever the publish path got there first.
     assert fc.adopt_delegated_mint(
-        _Pipe(), pending, pending.mint_root / "child-cell.tar.gz") is minted
+        _Pipe(), pending,
+        [pending.mint_root / "child-cell.tar.gz"]) is minted
     fc.publish_self_mint(pending)
     assert len(calls) == 1
 
