@@ -2158,7 +2158,7 @@ def arm_from_local_store(
 
 
 def adopt_delegated_mint(
-    pipe: Any, pending: "PendingSelfMint", artifact: Path,
+    pipe: Any, pending: "PendingSelfMint", artifacts: Sequence[Path],
 ) -> Optional[SelfMint]:
     """pgw#784: adopt a cell a CHILD PROCESS just built, then publish it.
 
@@ -2169,6 +2169,12 @@ def adopt_delegated_mint(
     unwrap, serve eager, leave the cell absent, publish nothing. A parity gap
     degrades; it never poisons the store.
 
+    pgw#1176: the child produces ONE ARTIFACT PER GRAPH CLASS, so this arms,
+    gates and stores each in turn. A class that cannot arm, or that fails its
+    own parity gate, costs THAT class — its siblings stay armed and are still
+    published. ``None`` is returned only when NOTHING adopted, which is the
+    honest "the mint produced nothing this pod can serve".
+
     ``None`` = not adoptable. The caller treats that exactly like a disproven
     candidate (the mint failed, the worker keeps serving).
     """
@@ -2176,13 +2182,22 @@ def adopt_delegated_mint(
     if "minted" in state:
         return state["minted"]
 
-    artifact = Path(artifact)
+    rows = [Path(a) for a in artifacts]
+    if not rows:
+        state["adopt_refusal"] = (
+            "no_entry_artifact", "the child reported no entry artifact")
+        return None
+    # The FIRST entry keeps the pending's canonical target path (the resume
+    # bank and the local-store write address it); the rest sit beside it under
+    # their own keys. Nothing reads a cell-shaped single path any more.
+    artifact = rows[0]
     if artifact != pending.target:
         try:
             pending.target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(artifact, pending.target)
         except OSError:
             shutil.copy2(artifact, pending.target)
+    rows[0] = pending.target
     # §1.5 / §4.33 step 3 — DURABLE FIRST, and this is the whole ordering
     # change. The bytes go to the local CAS BEFORE anything verifies, arms,
     # publishes or cleans up, on EVERY tier, because the alternative is what
@@ -2190,7 +2205,14 @@ def adopt_delegated_mint(
     # process most likely to die, and durability was gated on the machine
     # having NO publish sink — so the pods that mint for the fleet were exactly
     # the pods that kept nothing.
-    _durable_key = _stage_durable(pending, pending.target)
+    #
+    # pgw#1176: PER ROW — and pgw#1183 wrote the seam per-artifact precisely so
+    # that this loop is the only change needed. Every class is durable before
+    # any class is verified, so a crash costs the one entry in flight rather
+    # than the set, and a class that refuses is quarantined without touching a
+    # sibling that armed.
+    _durable_keys: Dict[Path, str] = {
+        row: _stage_durable(pending, row) for row in rows}
     # pgw#1096: ONE gate for every self-produced cell — the child's, and the
     # local store's (§4.28). pgw#999's classification, pgw#1042's pre-arm axis
     # divergence and pgw#805's AOT-only arm all live in `_arm_exported_cell`;
@@ -2208,17 +2230,67 @@ def adopt_delegated_mint(
     # §4.33 / pgw#1175: the pgw#1164 pre-arm headroom estimate that stood here
     # is DELETED. It priced the arm at `2 * activation` off a resident set the
     # card's free figure already excluded, and it declined stickily. The arm
-    # below is the measurement: `load_and_wrap` binds entry by entry and a real
-    # device OOM comes back as a typed `insufficient_adopt_vram` refusal
-    # through `_arm_exported_cell`'s ordinary classification — with nothing
-    # armed and nothing published, which is what this call site needs.
+    # below is the measurement: `arm_entry` binds ONE class and a real device
+    # OOM comes back as a typed `insufficient_adopt_vram` refusal through
+    # `_arm_exported_cell`'s ordinary classification.
+    #
+    # pgw#1176 sharpens that: the refusal now costs ONE graph class, so a card
+    # that cannot hold entry 12 still serves entries 1-11 compiled — where the
+    # estimate, and the cell it guarded, discarded all 36.
     #
     # pgw#1168: the accounting lives at `provision.arm_aot`, the one seam every
     # arm route passes.
-    armed, meta, refusal = _arm_exported_cell(
-        pipe, pending.cfg, pending.cache_dir,
-        int(getattr(pending.cfg, "lora_bucket", 0) or 0),
-        pending.target, pending.arm_key, verify_numerics=True)
+    # pgw#1168: the MEASUREMENT that stood here has MOVED to
+    # `provision.arm_aot`, the one seam every arm route passes. It measured the
+    # self-mint adopt only, so the boot adopt — the same `load_and_wrap`, on the
+    # card the fleet actually serves on — reported nothing. The gate above stays
+    # here, because this is the call site where a refusal has consequences
+    # (nothing is armed, nothing is published); the ACCOUNTING belongs at the
+    # seam so it cannot be wired on one path again.
+    # pgw#1176: ARM AND GATE EACH ENTRY. Every class is armed and parity-gated
+    # on its own, at the moment it exists — which is what makes §4.33's ~8 GiB
+    # true by construction (exactly ONE compiled runner resident beside the
+    # already-resident weights while its probe runs) and what stops one bad
+    # class costing a whole mint.
+    adopted: List[Tuple[str, Path, Dict[str, Any]]] = []
+    refusals: List[Tuple[str, str, str]] = []
+    for row in rows:
+        row_armed, row_meta, row_refusal = _arm_exported_cell(
+            pipe, pending.cfg, pending.cache_dir,
+            int(getattr(pending.cfg, "lora_bucket", 0) or 0),
+            row, pending.arm_key, verify_numerics=True)
+        row_meta = dict(row_meta) if row_meta is not None else \
+            _packed_metadata(row)
+        row_key = str(row_meta.get("cell_key") or "").strip()
+        entry_name = str(
+            (row_meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+        if not row_armed:
+            refusals.append((entry_name or row.name, *row_refusal))
+            activity_mod.emit_event(
+                "aot_entry_arm_failed",
+                f"arm_key={pending.arm_token}: this class does not arm "
+                f"({row_refusal[0]}"
+                f"{': ' + row_refusal[1] if row_refusal[1] else ''}); it "
+                f"serves EAGER and is not published. Sibling classes are "
+                f"unaffected.",
+                phase=row_refusal[0],
+                family=pending.family,
+                cell_key=row_key,
+                graph_class=entry_name or row.name,
+            )
+            continue
+        if not row_key:
+            # pgw#1059: a produced entry without a stamped key has no identity
+            # to advertise, publish or ledger.
+            refusals.append((
+                entry_name or row.name, "cell_key_missing",
+                "the child's entry carries no stamped cell_key"))
+            continue
+        adopted.append((row_key, row, row_meta))
+
+    armed = bool(adopted)
+    meta = adopted[0][2] if adopted else None
+    refusal = (refusals[0][1], refusals[0][2]) if refusals else ("", "")
     if not armed:
         reason, detail = refusal
         # pgw#999: `phase` is the countable column, so it carries the CLASS —
@@ -2246,42 +2318,48 @@ def adopt_delegated_mint(
         # It is the only object that can explain the refusal, and the code
         # reporting the refusal used to destroy it — which the local store's
         # own header prices at *"a full GPU pod run. Twice."*
-        _quarantine_durable(_durable_key)
+        #
+        # pgw#1176: this terminus is reached only when NOTHING adopted, so
+        # every row is quarantined here. A refusal that cost ONE class
+        # quarantines that class alone, further down, and never reaches this.
+        for _row_key in _durable_keys.values():
+            _quarantine_durable(_row_key)
         mark_terminus(pending, TERMINUS_ABORTED)
         state["minted"] = None
         _unregister(pending)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return None
 
-    meta = dict(meta) if meta is not None else _packed_metadata(pending.target)
-    key = str(meta.get("cell_key") or "").strip()
-    if not key:
-        # pgw#1059: a produced cell without a stamped key has no identity to
-        # advertise, publish or ledger — and the arm token is NOT a cell key,
-        # so the old fallback to it would have advertised an arm1- ref the
-        # hub can never corroborate. Refuse, typed, like any other
-        # unadoptable candidate.
-        state["adopt_refusal"] = (
-            "cell_key_missing",
-            "the child's cell carries no stamped cell_key")
-        activity_mod.emit_event(
-            "self_mint_abort",
-            f"family={pending.family} arm_key={pending.arm_token}: the "
-            f"child's cell carries no stamped cell_key; serving stays eager "
-            f"and nothing is published",
-            phase="cell_key_missing",
-        )
-        mark_terminus(pending, TERMINUS_ABORTED)
-        state["minted"] = None
-        _unregister(pending)
-        shutil.rmtree(pending.mint_root, ignore_errors=True)
-        return None
-    # §1.5: the DURABLE copy is the mint's address from here on. `pending.target`
-    # lives under the mint root, which every terminus cleans; a `SelfMint`
-    # pointing there is a reference to bytes scheduled for deletion, and
-    # publishing from it is what made the upload a race against the cleanup.
-    durable = _admit_durable(pending, key, _durable_key)
-    artifact_path = durable.artifact if durable is not None else pending.target
+    # The identity carried forward is the FIRST adopted entry's; the whole
+    # adopted set rides `state["adopted_entries"]` so publish and the local
+    # store loop over it. pgw#1176: there is no cell-level identity to carry.
+    key, first_artifact, meta = adopted[0]
+    if refusals:
+        logger.warning(
+            "fleet-cells: %d of %d minted classes did not adopt (%s); the "
+            "rest are armed and will publish", len(refusals), len(rows),
+            ", ".join(f"{n}:{r}" for n, r, _d in refusals[:4]))
+    # §1.5 + pgw#1176: the DURABLE copy is each entry's address from here on.
+    # `pending.target` and its siblings live under the mint root, which every
+    # terminus cleans; a `SelfMint` pointing there is a reference to bytes
+    # scheduled for deletion, and publishing from it is what made the upload a
+    # race against the cleanup. Admitted PER ENTRY, so a class that adopted is
+    # durable under its own key whatever its siblings did.
+    _adopted_paths = {row_path for _k, row_path, _m in adopted}
+    durable_paths: Dict[str, Path] = {}
+    for row_key, row_path, _row_meta in adopted:
+        row_durable = _admit_durable(
+            pending, row_key, _durable_keys.get(row_path, ""))
+        durable_paths[row_key] = (
+            row_durable.artifact if row_durable is not None else row_path)
+    # §1.3.4 per class: a class that did NOT adopt keeps its bytes QUARANTINED
+    # for forensics instead of being swept with the mint root. It is the only
+    # object that can explain its own refusal, and its siblings arming is no
+    # reason to destroy it.
+    for row in rows:
+        if row not in _adopted_paths:
+            _quarantine_durable(_durable_keys.get(row, ""))
+    artifact_path = durable_paths.get(key, first_artifact)
     minted = SelfMint(
         family=pending.family, cell_key=key,
         ref=f"{cc.system_repo(pending.family)}#{key}",
@@ -2290,6 +2368,8 @@ def adopt_delegated_mint(
     )
     state["minted"] = minted
     state["meta"] = dict(meta)
+    state["adopted_entries"] = [
+        (k, p, dict(m)) for k, p, m in adopted]
     # pgw#1152: pgw#1033's registration stood here and is GONE, not moved.
     # `_arm_exported_cell` above already wrapped these bytes onto the pipe, and
     # `aot_serve.load_and_wrap` registers the key AT the wrap (pgw#1141b) — the
