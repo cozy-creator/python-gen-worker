@@ -1,5 +1,5 @@
 {
-  "_declaration": "sdxl/src/sdxl/aot_declaration.py (pgw#739); one-cell shape per pgw#758. Moved into the WHEEL by pgw#805 — a serving pod that mints in the background needs the declaration registered by its own endpoint import, not by a mint request.",
+  "_declaration": "sdxl/src/sdxl/main.py — the @endpoint(compile=...) block (pgw#739; folded onto the decorator by ie#645/pgw#1107, which DELETED aot_declaration.py). One-cell shape per pgw#758. A serving pod that mints in the background needs the declaration registered by its own endpoint import, not by a mint request.",
   "_notes": [
     "pgw#758 (Paul's ruling): 'generate and generate_turbo are separate functions, they have separate graphs, but they are COMBINED TOGETHER INTO ONE FILE.' One mint -> ONE cell carrying all 18 declared classes (9 aspect rows x cfg/no-cfg) as named entries — the pilot runbook's one-artifact-per-pod serving ceiling is gone; a single resident cell serves every declared aspect and both CFG arms.",
     "The SDXL-AOT-PILOT minted 4 of these classes as 4 separate format-1 cells; those are RETIRED by the format-2 envelope + v2 contract facts (ck5 exact identity: recipe change strands old cells, correct and expected).",
@@ -25,7 +25,7 @@
   ],
   "text_lens": [77],
   "guidance_scales": [1.0, 5.0],
-  "declaration_module": "sdxl.aot_declaration",
+  "declaration_module": "sdxl.main",
   "specialization": {
     "return_dict": false
   },

@@ -13,10 +13,13 @@ This file is the fence that makes that impossible to reintroduce:
 
 1. **Every committed ``aot/*.mint.json`` in the fleet parses through the real
    entry** — the corpus under ``tests/fixtures/fleet_mint_requests/`` is a
-   verbatim copy of all 24 of them (inference-endpoints ``dfc6e2bc``), and each
+   verbatim copy of all 24 of them, and each
    one is driven through :func:`measure_child.load_document`, which is the ONE
    decoder ``main()`` uses. On the pre-fix tree the same corpus raises
-   ``ValidationError`` on file one.
+   ``ValidationError`` on file one. The corpus is a SNAPSHOT
+   (inference-endpoints ``dd41755``); the half that cannot go stale is that
+   repo's own ``scripts/lint_mint_requests.py``, which reads the real tree on
+   every PR — and which found sdxl naming a module ie#645 had deleted.
 2. **The derivation is exercised, not asserted** — the three answers a committed
    payload does not spell out (which function, which targets, which checkpoint)
    are taken from the declaration the payload NAMES, on a real endpoint with a
