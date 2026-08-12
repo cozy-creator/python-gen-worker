@@ -292,17 +292,12 @@ def test_classifier_refuses_non_safetensors_only_repos(files: list, reason: str)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="pgw#566 open: normalize_adapter_state_dict only passes unet_config "
-           "to converters with a NAMED unet_config parameter (inspect.signature "
-           "check); diffusers' real StableDiffusionXLPipeline.lora_state_dict "
-           "takes **kwargs only, so unet_config is silently never passed and "
-           "the SGM block remap never runs — the live nerijs/pixel-art-xl "
-           "r32 repro (2166 unresolved keys). Fix direction: pass unet_config "
-           "through **kwargs-accepting converters too.",
-)
 def test_normalize_passes_unet_config_through_kwargs_only_converters() -> None:
+    """pgw#566 FIXED (was xfail-strict): diffusers' real
+    `StableDiffusionXLPipeline.lora_state_dict` takes `**kwargs` only, so the
+    old NAMED-parameter test meant `unet_config` was never passed on the one
+    class that needs it — the SGM block remap never ran and the live
+    nerijs/pixel-art-xl r32 repro failed with 2166 unresolved keys."""
     captured: Dict[str, Any] = {}
 
     class _KwargsOnlySDXLPipe:

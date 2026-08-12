@@ -1063,6 +1063,84 @@ def stamp_execution_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None)
         pass
 
 
+def _accepts_unet_config(fn: Any) -> bool:
+    """Whether ``unet_config`` reaches ``fn``.
+
+    pgw#566: this used to ask only for a NAMED ``unet_config`` parameter, and
+    diffusers' real ``StableDiffusionXLPipeline.lora_state_dict`` takes
+    ``**kwargs``. So on the one class that needs it, the SGM block remap was
+    silently never run — the converter renamed kohya's block indices without
+    REMAPPING them (``unet.down_blocks.4.1…``; SDXL has down_blocks 0-2) and
+    ``map_adapter`` then failed loud with 2166 unresolved keys, killing every
+    kohya SDXL adapter on the branch-capable lanes since 0.33.0.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "unet_config" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD
+               for p in params.values())
+
+
+def _unresolved_count(pipe: Any, sd: Dict[str, Any]) -> Optional[int]:
+    """How many of ``sd``'s DENOISER keys land on no branch-capable module.
+
+    ``None`` when the question cannot be asked (no denoiser resident, no
+    denoiser keys, torch absent) — an unanswerable probe must never decide.
+    """
+    try:
+        den, _rest = split_state_dict(sd)
+        if not den:
+            return None
+        model = next(
+            (m for m in (getattr(pipe, c, None) for c in _denoiser_components())
+             if m is not None and hasattr(m, "named_modules")), None)
+        if model is None:
+            return None
+        mods = branch_modules(model)
+        if not mods:
+            return None
+        _groups, unresolved = _group_keys(den, mods)
+        return len(unresolved)
+    except Exception:  # noqa: BLE001 — a probe never breaks an overlay
+        logger.debug("adapter resolvability probe failed", exc_info=True)
+        return None
+
+
+def _converted_resolves_at_least_as_well(
+    pipe: Any, raw: Dict[str, Any], converted: Dict[str, Any], *, ref: str = "",
+) -> bool:
+    """pgw#566, and the half that catches BOTH known failures.
+
+    The gw#627 fix below is a NAME test (``.processor.`` in the output), so it
+    only catches the family whose breakage it was written from. The live
+    kohya-SGM failure emits half-converted SGM block indices which contain no
+    ``.processor.`` and sail straight through. The general question is not
+    "which names came out" but "does the converted dict actually RESOLVE
+    against this model" — asked with ``map_adapter``'s own oracle rather than
+    a second copy of its grammar, so the two can never drift.
+
+    Strictly worse than the raw keys ⇒ keep the raw keys, which the
+    ``map_adapter`` kohya/SGM grammar then maps directly (722/722 modules on
+    the live repro). Equal or better ⇒ prefer the converted dict, which is the
+    zero-drift te#81 path and stays the default.
+    """
+    after = _unresolved_count(pipe, converted)
+    if after in (None, 0):
+        return True
+    before = _unresolved_count(pipe, raw)
+    if before is None or after <= before:
+        return True
+    logger.info(
+        "lora_state_dict normalization for %s left %d unresolved denoiser "
+        "key(s) against this model where the RAW keys leave %d; using raw "
+        "keys (pgw#566)", ref, after, before,
+    )
+    return False
+
+
 def normalize_adapter_state_dict(
     pipe: Any, sd: Dict[str, Any], *, ref: str = ""
 ) -> Dict[str, Any]:
@@ -1081,11 +1159,8 @@ def normalize_adapter_state_dict(
     kwargs: Dict[str, Any] = {}
     unet = getattr(pipe, "unet", None)
     if unet is not None and hasattr(unet, "config"):
-        try:
-            if "unet_config" in inspect.signature(fn).parameters:
-                kwargs["unet_config"] = unet.config
-        except (TypeError, ValueError):
-            pass
+        if _accepts_unet_config(fn):
+            kwargs["unet_config"] = unet.config
     try:
         converted = fn(dict(sd), **kwargs)
     except Exception:
@@ -1104,6 +1179,8 @@ def normalize_adapter_state_dict(
             return sd
         converted, raw_alphas = converted
         alphas = dict(raw_alphas or {})
+    if not _converted_resolves_at_least_as_well(pipe, sd, converted, ref=ref):
+        return sd
     if any(".processor." in k for k in converted):
         # gw#627 live find: diffusers' non-diffusers converter emits LEGACY
         # attn-processor names for kohya sdxl attention keys
