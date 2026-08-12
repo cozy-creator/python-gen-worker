@@ -275,8 +275,39 @@ def run(job: TraceJob) -> int:
         code_digest=CODE_DIGEST,
         prop_probe_ms=prop_ms,
         export_probe_ms=export_ms,
+        device_peak_bytes=_device_peak_bytes(),
     ))
     return EXIT_OK
+
+
+def _device_peak_bytes() -> int:
+    """This child's own device high-water, including its CUDA context.
+
+    pgw#1165: the number the parent's concurrency budget is derived from, and
+    it has to be the WHOLE process footprint rather than the allocator's view.
+    `max_memory_allocated` reports tensors only; the dominant term here is the
+    CUDA context plus the cuBLAS/cuDNN kernel images the export loads, which is
+    ~1.3 GiB and belongs to the process, not to any tensor. Measured as
+    `total - free` on THIS process's device after the work, minus nothing:
+    the parent needs to know what one child costs the card, and every byte of
+    it costs the card.
+
+    A trace that never touched CUDA reports 0, which the parent reads as
+    "unmeasured" rather than "free" — an absent measurement must never widen a
+    pool.
+    """
+    try:
+        import torch
+    except Exception:  # noqa: BLE001 — telemetry never fails a trace
+        return 0
+    try:
+        if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+            return 0
+        free, total = torch.cuda.mem_get_info()
+        used = int(total) - int(free)
+        return max(0, used)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def main(argv: List[str]) -> int:

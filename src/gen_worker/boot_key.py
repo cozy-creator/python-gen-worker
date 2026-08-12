@@ -215,6 +215,10 @@ class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
     #: seconds. Never read by a decision here — see ``prop_economy``.
     prop_probe_ms: int = 0
     export_probe_ms: int = 0
+    #: pgw#1165: this child's WHOLE device footprint (`total - free` on its own
+    #: card), context and kernel images included. 0 = unmeasured, which the
+    #: parent's budget reads as "no evidence", never as "free".
+    device_peak_bytes: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +263,11 @@ class PoolWidth:
 
     workers: int
     reason: str
+    #: pgw#1165: WHICH bound decided it — `classes`, `cpu`, `vram` or `cap`.
+    #: Named rather than inferred from the prose so a regression that collapses
+    #: the pool is assertable (`c9fb5d4a`'s lesson: the mint pool ran at K=1
+    #: fleet-wide for weeks because nothing asserted the achieved width).
+    binding: str = "classes"
 
 
 def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
@@ -277,11 +286,24 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
     real bound, and one core is reserved for the serving parent that is
     concurrently fetching and loading weights.
 
-    That premise was FALSE until pgw#1124 and this sizing was the multiplier:
-    the child ran the serving placement ladder, so each of K children pushed
-    the slot's real non-target components onto the parent's card. The child
-    now loads ``place=False`` and proves it (``boot_trace_child``), which is
-    what makes the paragraph above a fact rather than an intention.
+    pgw#1165 CORRECTS the paragraph above, which was measured wrong and said so
+    confidently. A structure-only export's *allocator* high-water really is
+    ~9.8 MiB — but the CHILD is a process, and a process that touches CUDA pays
+    for a context plus the cuBLAS/cuDNN kernel images the export loads. Measured
+    on a live pod (RTX 3090, sdxl, uncontended, one request): **7 children at
+    1.25-1.29 GiB each**, card at 3.12 MiB free of 23.56 GiB, every one of the
+    18 declared classes refused with `torch.export … OUT OF DEVICE MEMORY`. The
+    same derivation on a 48 GB A40 succeeded twice. So there IS a device bound,
+    it is per-PROCESS rather than per-tensor, and sizing this pool by CPU alone
+    is what made a 96-vCPU pod spawn 18 contexts onto a 24 GB card.
+
+    The device bound does NOT live here. This function decides the SHARDING —
+    how the declared classes are divided (``rows[i::K]``) — which is a
+    correctness question; how many of those children hold the card at once is a
+    resource question, and it is answered from a MEASUREMENT by
+    :func:`concurrency_budget`, which ``_run_children`` reaches on every boot.
+    Splitting them is what lets the budget ship without moving any key, and it
+    keeps this function free of a device parameter no caller would pass.
     """
     classes = max(1, int(classes))
     quota = cpu_quota_cores()
@@ -293,13 +315,15 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
         basis = f"effective_cpu_count={cores} (uncapped cgroup)"
     usable = max(1, cores - SERVING_HEADROOM_CORES)
     workers = min(classes, usable)
+    binding = "classes" if workers == classes else "cpu"
     reason = (
         f"K={workers} of {classes} class(es): {basis}, "
         f"minus {SERVING_HEADROOM_CORES} serving-headroom core(s)")
     if limit and limit < workers:
         workers = max(1, int(limit))
+        binding = "cap"
         reason = f"K={workers} — caller cap {int(limit)} narrows: {reason}"
-    return PoolWidth(workers=workers, reason=reason)
+    return PoolWidth(workers=workers, reason=reason, binding=binding)
 
 
 # ---------------------------------------------------------------------------
@@ -660,10 +684,68 @@ def shares(classes: int, workers: int) -> List[Tuple[int, int]]:
     return [(i, count) for i in range(count) if i < max(1, int(classes))]
 
 
-def _run_children(
+def free_device_bytes() -> int:
+    """Bytes actually free on this process's card, or 0 when there is no card.
+
+    pgw#1165: read at the moment of the fan-out, so the parent's OWN residents
+    (it is serving throughout a §4.28 boot) are already excluded — the children
+    compete for what is left, not for the nameplate capacity.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return 0
+        free, _total = torch.cuda.mem_get_info()
+        return max(0, int(free))
+    except Exception:  # noqa: BLE001 — a probe never changes an outcome
+        return 0
+
+
+def concurrency_budget(
+    pending: int, *, free_bytes: int, per_child_bytes: int,
+) -> Tuple[int, str]:
+    """How many trace children may hold this card AT ONCE.
+
+    Separate from :func:`trace_workers`, which decides the SHARDING: how the
+    declared classes are divided is a correctness question (`rows[i::K]`, and
+    the union must be the whole class set), while how many of those children
+    are resident simultaneously is purely a resource question. Bounding the
+    second leaves the first — and therefore the derived key — byte-identical,
+    which is the property that lets this ship without re-keying anything.
+
+    ``per_child_bytes`` is the child's WHOLE PROCESS footprint on the card and
+    must stay that. The th#1825 lane bounded the same question for finalize's
+    adopt and ruled out per-entry literals as the dominant term by three
+    independent measurements (literals live inside the artifact — 4.19 MB); the
+    real cost is the loaded AOTI packages, plus device code, per-runner
+    workspace and load-time buffers, **none of which appear in the artifact**.
+    So sizing this budget against an artifact size, a literal size or an
+    allocator high-water would under-count badly and in the direction that
+    OOMs. `total - free` is the only input that sees all of it.
+
+    Two conventions, matching `mint_budget`'s peak banks and pgw#1164's adopt
+    bank: the number is MONOTONE (it only ever tightens — see `_run_children`),
+    and the reason STATES ITS BASIS, so a measured bound and an absent one can
+    never be read as the same claim.
+    """
+    pending = max(1, int(pending))
+    if per_child_bytes <= 0 or free_bytes <= 0:
+        return pending, (
+            "basis=unmeasured — every pending child at once "
+            "(pre-pgw#1165 behaviour)")
+    affordable = max(1, int(free_bytes // int(per_child_bytes)))
+    width = min(pending, affordable)
+    return width, (
+        f"W={width} of {pending} pending: basis=measured "
+        f"{free_bytes / 1024**3:.2f} GiB free / "
+        f"{int(per_child_bytes) / 1024**3:.2f} GiB per child "
+        f"= {affordable} affordable")
+
+
+def _spawn_wave(
     jobs: Sequence[Tuple[TraceJob, Path]], *, python: str = "",
 ) -> List[TraceReport]:
-    """Spawn every child at once and reap them all. K is already the width."""
+    """Spawn this wave's children at once and reap them all."""
     procs: List[Tuple[TraceJob, Path, subprocess.Popen, Any]] = []
     for job, job_path in jobs:
         stderr_path = job_path.parent / f"{job_path.stem}.stderr.log"
@@ -712,6 +794,62 @@ def _run_children(
                 f"trace child exited {code} without a report; stderr tail: "
                 f"{tail}"),
         ))
+    return reports
+
+
+def _run_children(
+    jobs: Sequence[Tuple[TraceJob, Path]], *, python: str = "",
+) -> List[TraceReport]:
+    """Run every child, holding the card to what it can actually carry.
+
+    pgw#1165. This used to be "spawn every child at once", and K came from CPU
+    alone — so a 96-vCPU pod put 18 CUDA contexts on one card. On a 24 GB card
+    that is 3.12 MiB free and 18 of 18 classes refusing with OUT OF DEVICE
+    MEMORY; on a 48 GB card it fits, which is why the failure looked like "small
+    cards cannot derive keys" for a day.
+
+    The FIRST child is a probe: it runs alone and reports what one child costs
+    the card (`TraceReport.device_peak_bytes`, the whole process footprint
+    including its CUDA context). Every remaining child is admitted against that
+    measurement and the card's real free bytes. Nothing is estimated, nothing is
+    configured, and a card that reports nothing keeps exactly the old width —
+    an absent measurement must not be able to throttle a pod.
+
+    Deliberately NOT a serialization. `c9fb5d4a` is the cautionary case: the
+    mint's entry pool ran at K=1 fleet-wide for weeks, cost every mint 2.4x, and
+    survived because nothing asserted the achieved width. So the width reached
+    here is reported (`wave_widths`) and asserted in tests, and the probe costs
+    exactly one child's latency — on a card with room, wave 2 carries the whole
+    remainder.
+    """
+    jobs = list(jobs)
+    if len(jobs) <= 1:
+        return _spawn_wave(jobs, python=python)
+
+    reports: List[TraceReport] = list(_spawn_wave(jobs[:1], python=python))
+    measured = max((int(r.device_peak_bytes or 0) for r in reports), default=0)
+    pending = jobs[1:]
+    widths: List[int] = [1]
+    while pending:
+        width, why = concurrency_budget(
+            len(pending),
+            free_bytes=free_device_bytes(),
+            per_child_bytes=measured,
+        )
+        logger.info(
+            "boot-key: pgw#1165 trace wave %s (%d child(ren) still pending)",
+            why, len(pending))
+        wave, pending = pending[:width], pending[width:]
+        widths.append(len(wave))
+        got = _spawn_wave(wave, python=python)
+        reports.extend(got)
+        # A later child may cost more than the probe did; keep the high-water
+        # so the budget tightens on evidence and never loosens on hope.
+        measured = max([measured] + [int(r.device_peak_bytes or 0) for r in got])
+    logger.info(
+        "boot-key: pgw#1165 traced %d child(ren) in %d wave(s) %s, "
+        "per-child device high-water %.2f GiB",
+        len(jobs), len(widths), widths, measured / 1024**3 if measured else 0.0)
     return reports
 
 
