@@ -24,6 +24,7 @@ A vehicle answers six questions and nothing else:
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Tuple
@@ -1148,6 +1149,29 @@ MICRO_ESCAPE = Vehicle(
 # ---------------------------------------------------------------------------
 
 
+def _declaration_module(module: str, family: str) -> Any:
+    """Import a family's declaration module AND GUARANTEE the registration.
+
+    The registration is an import SIDE EFFECT (``register_export_declaration``
+    at module scope), so the second import of the same module is a no-op — and
+    dozens of test modules call ``reset_export_declarations()``, which empties
+    the registry that import populated. The two compose into an order-dependent
+    silent failure: ``compile_cell()`` returns a cell whose family nothing has
+    declared, and it surfaces much later and elsewhere as
+    ``export_declaration(family) -> None``.
+
+    Asking the registry instead of trusting the import is what makes it
+    order-free. Re-executing is safe because the declaration modules register
+    with ``replace=True``.
+    """
+    mod = importlib.import_module(module)
+    from gen_worker.api.export_contract import export_declaration
+
+    if export_declaration(family) is None:
+        mod = importlib.reload(mod)
+    return mod
+
+
 def _micro_pad32_cell(family: str = "micro-pad32") -> Any:
     """The cell, AND the declaration registration the parent needs.
 
@@ -1160,15 +1184,15 @@ def _micro_pad32_cell(family: str = "micro-pad32") -> Any:
     """
     from gen_worker.registry import CompileCell
 
-    if family == "micro-pad32-branchy":
-        from micro_diffusion.aot_declaration_pad32_branchy import (
-            COND_LEN, PIXEL_ROWS)
-    else:
-        from micro_diffusion.aot_declaration_pad32 import COND_LEN, PIXEL_ROWS
+    mod = _declaration_module(
+        "micro_diffusion.aot_declaration_pad32_branchy"
+        if family == "micro-pad32-branchy"
+        else "micro_diffusion.aot_declaration_pad32",
+        family)
 
     return CompileCell(
-        shapes=PIXEL_ROWS, targets=("transformer",), family=family,
-        regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
+        shapes=mod.PIXEL_ROWS, targets=("transformer",), family=family,
+        regional=False, text_len=mod.COND_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
 
 
