@@ -47,6 +47,7 @@ from .writer import (
 )
 from .convert import run_inline_conversion
 from .dtype_pins import (
+    DTYPE_BITS as _DTYPE_STORAGE_BITS,
     cast_exempt_components,
     check_explicit_pin_conflict,
     verify_produced_tree,
@@ -412,18 +413,8 @@ _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES = frozenset({
     "diffusers_component",
 })
 _DIRECT_GGUF_ENCODINGS = frozenset({"f32", "f16", "bf16", "q8_0"})
-_DTYPE_STORAGE_BITS = {
-    "fp32": 32, "f32": 32, "float32": 32,
-    "bf16": 16, "fp16": 16, "f16": 16, "float16": 16,
-    "fp8": 8, "fp8:e5m2": 8, "q8_0": 8,
-    "q6_k": 6,
-    "q5_k_m": 5, "q5_k_s": 5,
-    "nvfp4": 4, "int4": 4, "int4:nf4": 4, "int4:fp4": 4,
-    "nf4": 4, "fp4": 4, "q4_k_m": 4, "q4_k_s": 4, "q4_0": 4,
-    "q4_1": 4,
-    "q3_k_m": 3, "q3_k_s": 3,
-    "q2_k": 2,
-}
+# Storage widths live in dtype_pins.DTYPE_BITS (one table, one fact —
+# clone.py carried a drifting duplicate until pgw#1180).
 # pgw#1121. The source's dtype is READ at plan time from the safetensors
 # headers (`ingest.stamp_plan_source_dtype`), so this fires only when no
 # header could be read at all. It is 32 — the widest DENSE width — and the
