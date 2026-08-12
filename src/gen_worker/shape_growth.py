@@ -12,14 +12,20 @@ every AOT (and TRT) arm the executor's three growth call sites are no-ops, the
 and pgw#1010 deleted the republish backend outright (a grown JIT cache is
 this pod's, and its cell had no consumer).
 
-What that costs, measured on the standing stack: one
-``compiled_shape_coverage`` row reporting **2 of 18 declared graph classes
-served compiled at boot**.  Under dynamo each of the other 16 would be routed
-eager once, warmed in one background thread and republished so the fleet never
-pays it again.  Under AOT they stay eager for the life of the pod, every pod,
-forever — and the ratified reuse strategy is *AOT cells only, JIT demotes to
-intake mode*, with pgw#731 deleting the very apparatus the growth system lives
-inside.  "It heals on the JIT path" is therefore not an answer.
+What that costs: a declared class outside the armed cell's envelope stays
+eager for the life of the pod, every pod, forever.  Under dynamo it would be
+routed eager once, warmed in one background thread and republished so the fleet
+never pays it again — but the ratified reuse strategy is *AOT cells only, JIT
+demotes to intake mode*, with pgw#731 deleting the very apparatus the growth
+system lives inside.  "It heals on the JIT path" is therefore not an answer.
+
+pgw#1184 DELETED THE BOOT-TIME CENSUS this paragraph used to quote (a
+``compiled_shape_coverage`` row reading "2 of 18 declared graph classes served
+compiled at boot").  It was an OBSERVATION: it could only name a class a warm
+run happened to dispatch, and on sdxl the warm plan it depended on cost 18 full
+generates per handler where the eager plan needs 2.  :data:`activity.
+KIND_SHAPE_GAP` — reported per request at the ingress that refuses the class BY
+NAME — is the same fact, measured on the traffic that actually asks for it.
 
 What this module owns
 ---------------------
@@ -297,23 +303,6 @@ class Debounce:
                 self._dirty = False
 
 
-def coverage_line(
-    declared: Sequence[str], gaps: Mapping[Tuple[str, str, str], int],
-) -> str:
-    """One human-readable convergence line for ``compiled_shape_coverage``.
-
-    The acceptance asks the coverage event to report CONVERGENCE, not only the
-    initial gap, so the reader needs both numbers in one place.
-    """
-    total = len(declared)
-    open_classes = sorted({key[2] for key in gaps})
-    return (
-        f"{total - len(open_classes)}/{total} declared graph classes are "
-        f"covered by the armed cell; {len(open_classes)} still serve EAGER: "
-        f"{open_classes[:8]!r}"
-    )
-
-
 __all__ = [
     "ARM_AOT",
     "ARM_DYNAMO",
@@ -327,7 +316,6 @@ __all__ = [
     "TurnGateBusy",
     "TurnGateClosed",
     "backend_for",
-    "coverage_line",
     "register_backend",
     "report",
     "report_and_submit",

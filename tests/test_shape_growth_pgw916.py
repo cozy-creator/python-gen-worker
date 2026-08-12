@@ -252,10 +252,3 @@ def test_the_dynamo_arm_books_its_permanent_holes_in_the_same_ledger():
     assert "ARM_DYNAMO" in source
 
 
-def test_coverage_reports_convergence_not_only_the_initial_gap():
-    declared = [f"unet/class{i}" for i in range(18)]
-    assert "18/18" in shape_growth.coverage_line(declared, {})
-    gaps: Dict[Tuple[str, str, str], int] = {
-        ("sdxl", "unet", name): 3 for name in declared[2:]}
-    line = shape_growth.coverage_line(declared, gaps)
-    assert "2/18" in line and "16 still serve EAGER" in line
