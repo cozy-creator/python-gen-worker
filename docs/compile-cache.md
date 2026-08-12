@@ -76,6 +76,16 @@ boot/pre-trace GATES unchanged). `kind`/`format` are single-valued metadata,
 (pgw#1059 amendment 6: "don't key on parameters that don't require us to
 recompile") is enforced by `tests/test_cell_key_pgw1059.py`.
 
+`toolchain` is the COMPILER — torch/Inductor, triton, ptxas, the CUDA runtime
+wheels, the settings declaration, the boot-frozen native manifest. It is **not**
+`diffusers`/`transformers`/`peft` (pgw#1050): those are pure python, run at
+trace time only, and everything they do to a cell arrives as the traced graph,
+which the `graph` axis hashes node-for-node since pgw#1031. Folding them
+re-keyed every cell in the fleet on every model-library patch release for a
+computation that had not moved. Their versions stay recorded for forensics.
+`tests/test_toolchain_membership_pgw1050.py` holds both halves: an evicted
+library moves no key, a compiler component still does.
+
 Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
 (model, shape) and needs a C toolchain prod worker images don't ship. The
 split:

@@ -120,7 +120,8 @@ def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
     return ExpectedIdentity(
         cell_key=str(meta.get("cell_key") or ""),
         toolchain_digest=(
-            cell_key.facts_digest(dict(toolchain)) if isinstance(toolchain, dict) else ""),
+            cell_key.toolchain_axis_digest(dict(toolchain))
+            if isinstance(toolchain, dict) else ""),
         env_seal_digest=(
             env_seal.seal_digest(dict(seal)) if isinstance(seal, dict) else ""),
         graph_contract_digest=str(meta.get("combined_graph_hash") or ""),
