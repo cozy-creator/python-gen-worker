@@ -468,12 +468,6 @@ def _slot_to_manifest(
 def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
     """Generate JSON schema and SHA256 hash for a msgspec type."""
     schema = msgspec.json.schema(t)
-    try:
-        from gen_worker.api.payload_constraints import apply_schema_constraints
-
-        schema = apply_schema_constraints(schema, t)
-    except Exception:
-        pass
     raw = json.dumps(schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return schema, hashlib.sha256(raw).hexdigest()
 

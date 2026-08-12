@@ -143,7 +143,6 @@ src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_DIR STANDALONE GEN_WORKER_M
 # ---------------------------------------------------------------------------
 src/gen_worker/content_credentials.py::$env_name TRIPWIRE GEN_WORKER_C2PA_KEY_PEM / _KEY_PATH presence RAISES and refuses the boot (th#1307). A private key must never reach a pod. Correctly loud; carries no behaviour of its own.
 src/gen_worker/models/memory.py::GEN_WORKER_FORBID_CPU_OFFLOAD TRIPWIRE GEN_WORKER_FORBID_CPU_OFFLOAD, now enforced at the REAL placement boundary (pgw#929 AMBIGUOUS #1). Read as env rather than Settings because a control-plane box exports it box-wide with no worker config in sight.
-src/gen_worker/benchmarks/swap_latency.py::GEN_WORKER_FORBID_CPU_OFFLOAD TRIPWIRE GEN_WORKER_FORBID_CPU_OFFLOAD, the original single reader. Retained: refusing the benchmark is still correct.
 src/gen_worker/host_move_guard.py::GEN_WORKER_HOST_MOVE_GUARD TRIPWIRE GEN_WORKER_HOST_MOVE_GUARD, the pgw#763 host-move guard's disable escape hatch. See the kill-switch note below.
 
 src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter with a producer OUTSIDE this process (`podguard.arm()` on rented pods), so there is no argv to move it to and no Settings that could own it. Gated on podguard_status()==armed; pgw#929 owns its validation and observability permanently and deletion is explicitly out of scope.

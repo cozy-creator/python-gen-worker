@@ -479,52 +479,6 @@ def test_copy_stream_is_none_off_cuda() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6: benchmark vehicle — packaged harness + diagnostics endpoint
-# ---------------------------------------------------------------------------
-
-
-def test_swap_plan_diffs_components_by_content(tmp_path: Path) -> None:
-    from gen_worker.benchmarks.swap_latency import swap_plan
-
-    for name, denoiser in (("a", b"weights-A"), ("b", b"weights-B")):
-        tree = tmp_path / name
-        (tree / "denoiser").mkdir(parents=True)
-        (tree / "vae").mkdir(parents=True)
-        (tree / "model_index.json").write_text(json.dumps({
-            "denoiser": ["lib", "Cls"], "vae": ["lib", "Cls"],
-        }))
-        (tree / "denoiser" / "w.bin").write_bytes(denoiser)
-        (tree / "vae" / "w.bin").write_bytes(b"shared-vae")
-    differing, shared = swap_plan(tmp_path / "a", tmp_path / "b")
-    assert differing == ["denoiser"]
-    assert shared == ["vae"]
-
-
-def test_benchmark_refuses_off_pod(monkeypatch: pytest.MonkeyPatch) -> None:
-    from gen_worker.benchmarks import swap_latency as bench
-
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
-    with pytest.raises(bench.OffPodError):
-        bench.run_cases(("overlap",))
-
-
-def test_diagnostics_endpoint_extracts_and_validates() -> None:
-    from gen_worker.diagnostics import SwapLatencyDiagnostics, SwapLatencyInput
-
-    specs = extract_specs(SwapLatencyDiagnostics)
-    by_name = {s.name: s for s in specs}
-    assert "swap-latency" in by_name
-    spec = by_name["swap-latency"]
-    assert set(spec.slots) == {"checkpoint", "to"}
-    assert spec.resources.gpu is True
-
-    with pytest.raises(ValueError):
-        SwapLatencyInput(checkpoint="x", cases=("nonsense",))
-    ok = SwapLatencyInput(checkpoint="x")
-    assert "stage" in ok.cases
-
-
-# ---------------------------------------------------------------------------
 # wiring: poke/update/stop lifecycle
 # ---------------------------------------------------------------------------
 

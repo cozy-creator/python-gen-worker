@@ -289,7 +289,6 @@ def test_the_parent_declines_the_mint_by_name_instead_of_renting(monkeypatch) ->
         family=FAMILY, lora_bucket=BUCKET, shapes=(), text_lens=(),
         guidance_scales=(), targets=("unet",))
 
-    monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda spec: "")
     events: list = []
     monkeypatch.setattr(
         fleet_cells.activity_mod, "emit_event",

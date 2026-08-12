@@ -113,7 +113,6 @@ def test_the_parent_no_longer_second_guesses_the_image(
     monkeypatch.setattr(fleet_cells.cc, "cxx_toolchain_present", lambda: False)
     from gen_worker import aot_mint
 
-    monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda *a, **k: "")
     monkeypatch.setattr(
         aot_mint, "declaration_module_gaps", lambda *a, **k: [])
     monkeypatch.setattr(

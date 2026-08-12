@@ -16,8 +16,9 @@ mode (ruled), and it keeps the dynamo lane.
 
 This module is the ONE spelling of those rows. ``discovery.discover`` stamps
 them into ``endpoint.lock`` and ``discovery.validation`` turns a refusal into a
-build error; ``aot_mint.lifted_torch_gap`` reads the same floor check the gate
-does, so the build cannot prove one thing and the mint another.
+build error. pgw#914: this is now the ONLY place the torch floor is decided —
+the mint's second spelling (``aot_mint.lifted_torch_gap``) is deleted, so a
+build cannot prove one thing and a pod discover another.
 
 Four verdicts, and the difference between the last three is the whole point:
 
@@ -99,9 +100,10 @@ class Precondition:
 def torch_version_gap(version: str) -> str:
     """'' when ``version`` meets the lifted-LoRA floor, else the refusal.
 
-    Pure string arithmetic so the BUILD gate and the mint's own
-    ``aot_mint.lifted_torch_gap`` read one implementation. Two spellings of a
-    floor is how a build proves one thing and a pod discovers another.
+    Pure string arithmetic, and the ONE implementation: the floor is decided
+    at image build (``static_mint_preconditions`` -> ``endpoint.lock``), never
+    again per mint. Two spellings of a floor is how a build proves one thing
+    and a pod discovers another (pgw#914).
     """
     parts = version.split("+")[0].split(".")
     floor = ".".join(map(str, LIFTED_LORA_TORCH_FLOOR))

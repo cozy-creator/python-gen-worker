@@ -177,7 +177,6 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     # measure and torch is not importable on a CPU dev box.
     from gen_worker import aot_mint
 
-    monkeypatch.setattr(aot_mint, "lifted_torch_gap", lambda spec: "")
     yield
     gw_config.reload_for_test()
 

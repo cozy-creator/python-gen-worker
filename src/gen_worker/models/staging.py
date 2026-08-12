@@ -17,9 +17,10 @@ facilities live here:
   Copy engines are separate hardware from the SMs, so a pinned-memory H2D
   on this stream runs concurrently with the serving job's compute instead
   of serializing behind it on the default stream (pgw#652 overlap #2).
-  Interference is measured, not assumed: ``gen_worker.benchmarks.
-  swap_latency overlap`` reports the compute-throughput cost of a
-  concurrent copy.
+  Interference is measured from ordinary production traffic
+  (DESIGN-RULINGS §1.2), not from a bespoke harness — the
+  ``benchmarks.swap_latency overlap`` case was deleted with its
+  zero-adopter endpoint wrapper (pgw#883).
 
 CPU-only hosts (and the CPU-only test suite) get honest no-ops: no CUDA
 means no copy stream and pinned allocation falls back to pageable.
