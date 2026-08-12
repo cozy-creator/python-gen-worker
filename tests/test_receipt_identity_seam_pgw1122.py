@@ -213,7 +213,10 @@ def test_the_parent_refuses_to_invent_an_identity_it_does_not_have(
         h.pc._settings = msgspec.structs.replace(
             h.pc._settings, bootstrap_worker_jwt="")
         h.pc.transport._settings = h.pc._settings
-        h.pc.transport._worker_jwt = ""
+        # pgw#893 §2 deleted the transport's stream-local credential cache;
+        # `worker_credential` is now the ONE home, so emptying it is what
+        # "this parent holds no credential" means.
+        worker_credential.reset()
         with pytest.raises(actions.ActionRefused) as exc:
             h.pc._viewer_identity()
         assert "holds no worker credential" in str(exc.value)
