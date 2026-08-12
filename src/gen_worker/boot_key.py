@@ -215,7 +215,7 @@ class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
     #: seconds. Never read by a decision here — see ``prop_economy``.
     prop_probe_ms: int = 0
     export_probe_ms: int = 0
-    #: pgw#1163: this child's WHOLE device footprint (`total - free` on its own
+    #: pgw#1165: this child's WHOLE device footprint (`total - free` on its own
     #: card), context and kernel images included. 0 = unmeasured, which the
     #: parent's budget reads as "no evidence", never as "free".
     device_peak_bytes: int = 0
@@ -263,7 +263,7 @@ class PoolWidth:
 
     workers: int
     reason: str
-    #: pgw#1163: WHICH bound decided it — `classes`, `cpu`, `vram` or `cap`.
+    #: pgw#1165: WHICH bound decided it — `classes`, `cpu`, `vram` or `cap`.
     #: Named rather than inferred from the prose so a regression that collapses
     #: the pool is assertable (`c9fb5d4a`'s lesson: the mint pool ran at K=1
     #: fleet-wide for weeks because nothing asserted the achieved width).
@@ -286,7 +286,7 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
     real bound, and one core is reserved for the serving parent that is
     concurrently fetching and loading weights.
 
-    pgw#1163 CORRECTS the paragraph above, which was measured wrong and said so
+    pgw#1165 CORRECTS the paragraph above, which was measured wrong and said so
     confidently. A structure-only export's *allocator* high-water really is
     ~9.8 MiB — but the CHILD is a process, and a process that touches CUDA pays
     for a context plus the cuBLAS/cuDNN kernel images the export loads. Measured
@@ -687,7 +687,7 @@ def shares(classes: int, workers: int) -> List[Tuple[int, int]]:
 def free_device_bytes() -> int:
     """Bytes actually free on this process's card, or 0 when there is no card.
 
-    pgw#1163: read at the moment of the fan-out, so the parent's OWN residents
+    pgw#1165: read at the moment of the fan-out, so the parent's OWN residents
     (it is serving throughout a §4.28 boot) are already excluded — the children
     compete for what is left, not for the nameplate capacity.
     """
@@ -712,15 +712,33 @@ def concurrency_budget(
     are resident simultaneously is purely a resource question. Bounding the
     second leaves the first — and therefore the derived key — byte-identical,
     which is the property that lets this ship without re-keying anything.
+
+    ``per_child_bytes`` is the child's WHOLE PROCESS footprint on the card and
+    must stay that. The th#1825 lane bounded the same question for finalize's
+    adopt and ruled out per-entry literals as the dominant term by three
+    independent measurements (literals live inside the artifact — 4.19 MB); the
+    real cost is the loaded AOTI packages, plus device code, per-runner
+    workspace and load-time buffers, **none of which appear in the artifact**.
+    So sizing this budget against an artifact size, a literal size or an
+    allocator high-water would under-count badly and in the direction that
+    OOMs. `total - free` is the only input that sees all of it.
+
+    Two conventions, matching `mint_budget`'s peak banks and pgw#1164's adopt
+    bank: the number is MONOTONE (it only ever tightens — see `_run_children`),
+    and the reason STATES ITS BASIS, so a measured bound and an absent one can
+    never be read as the same claim.
     """
     pending = max(1, int(pending))
     if per_child_bytes <= 0 or free_bytes <= 0:
-        return pending, "unmeasured — every pending child at once (pre-pgw#1163 behaviour)"
+        return pending, (
+            "basis=unmeasured — every pending child at once "
+            "(pre-pgw#1165 behaviour)")
     affordable = max(1, int(free_bytes // int(per_child_bytes)))
     width = min(pending, affordable)
     return width, (
-        f"W={width} of {pending} pending: {free_bytes / 1024**3:.2f} GiB free / "
-        f"{int(per_child_bytes) / 1024**3:.2f} GiB measured per child "
+        f"W={width} of {pending} pending: basis=measured "
+        f"{free_bytes / 1024**3:.2f} GiB free / "
+        f"{int(per_child_bytes) / 1024**3:.2f} GiB per child "
         f"= {affordable} affordable")
 
 
@@ -784,7 +802,7 @@ def _run_children(
 ) -> List[TraceReport]:
     """Run every child, holding the card to what it can actually carry.
 
-    pgw#1163. This used to be "spawn every child at once", and K came from CPU
+    pgw#1165. This used to be "spawn every child at once", and K came from CPU
     alone — so a 96-vCPU pod put 18 CUDA contexts on one card. On a 24 GB card
     that is 3.12 MiB free and 18 of 18 classes refusing with OUT OF DEVICE
     MEMORY; on a 48 GB card it fits, which is why the failure looked like "small
@@ -819,7 +837,7 @@ def _run_children(
             per_child_bytes=measured,
         )
         logger.info(
-            "boot-key: pgw#1163 trace wave %s (%d child(ren) still pending)",
+            "boot-key: pgw#1165 trace wave %s (%d child(ren) still pending)",
             why, len(pending))
         wave, pending = pending[:width], pending[width:]
         widths.append(len(wave))
@@ -829,7 +847,7 @@ def _run_children(
         # so the budget tightens on evidence and never loosens on hope.
         measured = max([measured] + [int(r.device_peak_bytes or 0) for r in got])
     logger.info(
-        "boot-key: pgw#1163 traced %d child(ren) in %d wave(s) %s, "
+        "boot-key: pgw#1165 traced %d child(ren) in %d wave(s) %s, "
         "per-child device high-water %.2f GiB",
         len(jobs), len(widths), widths, measured / 1024**3 if measured else 0.0)
     return reports

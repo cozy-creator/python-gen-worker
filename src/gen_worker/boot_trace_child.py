@@ -283,7 +283,7 @@ def run(job: TraceJob) -> int:
 def _device_peak_bytes() -> int:
     """This child's own device high-water, including its CUDA context.
 
-    pgw#1163: the number the parent's concurrency budget is derived from, and
+    pgw#1165: the number the parent's concurrency budget is derived from, and
     it has to be the WHOLE process footprint rather than the allocator's view.
     `max_memory_allocated` reports tensors only; the dominant term here is the
     CUDA context plus the cuBLAS/cuDNN kernel images the export loads, which is

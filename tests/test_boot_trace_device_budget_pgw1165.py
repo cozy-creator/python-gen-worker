@@ -1,4 +1,4 @@
-"""pgw#1163: the boot trace's fan-out gets a DEVICE budget.
+"""pgw#1165: the boot trace's fan-out gets a DEVICE budget.
 
 Measured on a live pod, not inferred. RTX 3090 `q1y1tx4fa1vjzs` (24 GB, sm_86),
 release 6ee9b4d4df2697a53da6f43a, gen-worker 0.112.0, **uncontended** — a fresh
@@ -50,7 +50,7 @@ def test_the_3090_incident_no_longer_puts_18_contexts_on_the_card() -> None:
     assert width * CHILD_BYTES <= CARD_3090_FREE, (
         f"admitted {width} children at 1.29 GiB onto {CARD_3090_FREE / GIB:.2f} "
         f"GiB — that is the incident, verbatim")
-    assert "affordable" in why
+    assert "affordable" in why and "basis=measured" in why
 
 
 def test_a_16gb_a4000_derives_instead_of_refusing() -> None:
@@ -94,7 +94,7 @@ def test_an_unmeasured_card_keeps_EXACTLY_the_old_width() -> None:
     not 'no memory' — the direction that fails safe is the old behaviour."""
     width, why = boot_key.concurrency_budget(
         SDXL_CLASSES, free_bytes=0, per_child_bytes=0)
-    assert width == SDXL_CLASSES and "unmeasured" in why
+    assert width == SDXL_CLASSES and "basis=unmeasured" in why
 
     for free, per in ((CARD_3090_FREE, 0), (0, CHILD_BYTES)):
         w, _ = boot_key.concurrency_budget(
@@ -127,7 +127,7 @@ def test_the_binding_is_NAMED_so_a_regression_is_assertable() -> None:
 def test_sharding_is_untouched_so_the_KEY_cannot_move() -> None:
     """The property that lets this ship without re-keying anything: the budget
     bounds CONCURRENCY, never how the declared classes are divided. `shares`
-    is the sharding, and pgw#1163 does not call it differently."""
+    is the sharding, and pgw#1165 does not call it differently."""
     for k in (1, 3, 18):
         got = boot_key.shares(SDXL_CLASSES, k)
         assert [i for i, _ in got] == list(range(min(k, SDXL_CLASSES)))
@@ -154,3 +154,21 @@ def test_the_child_reports_its_whole_process_footprint() -> None:
 
     assert "device_peak_bytes" in boot_key.TraceReport.__struct_fields__
     assert boot_key.TraceReport().device_peak_bytes == 0
+
+
+def test_the_budget_is_sized_on_the_PROCESS_not_the_artifact() -> None:
+    """th#1825's lane ruled out per-entry literals as the dominant term by three
+    independent bounds — they live inside the artifact, measured at 4.19 MB —
+    and found the real cost is the loaded AOTI packages plus device code,
+    per-runner workspace and load-time buffers, none of which appear in the
+    artifact. A budget sized on artifact or literal bytes under-counts in the
+    direction that OOMs, so the input stays `total - free`."""
+    import inspect
+
+    from gen_worker import boot_key as bk
+
+    body = inspect.getsource(bk.free_device_bytes)
+    assert "mem_get_info" in body
+    for wrong in ("artifact", "literal", "max_memory_allocated", "getsize"):
+        assert wrong not in body.split('"""')[-1], (
+            f"{wrong!r} in the sizing input — it cannot see the loaded packages")
