@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import logging
 import os
-import tarfile
 import threading
 
 import msgspec
@@ -67,55 +65,25 @@ def test_compile_target_execution_lane_vocabulary_rejects_impossible_states(exec
     assert cc.compile_target_execution_lane_error(execution_lane, bucket)
 
 
-def test_verify_mismatches():
-    meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
-    assert cc.verify(meta, family="sd15") == ""
-    assert cc.verify(meta, family="") == ""  # consumer without a family: key-only check
-
-    other = dict(meta, torch="0.0.0")
-    assert "torch" in cc.verify(other, family="sd15")
-
-    # pgw#691/ck3 completion: sku is metadata, not identity — a same-sm
-    # cell minted on a different SKU must arm (sm/cuda/torch/triton pin
-    # the hardware facts).
-    other = dict(meta, sku="not-this-gpu")
-    assert cc.verify(other, family="sd15") == ""
-    other = dict(meta, sm="sm_00")
-    assert "sm" in cc.verify(other, family="sd15")
-
-    assert "family" in cc.verify(meta, family="sdxl")
-
-    other = dict(meta, format=99)
-    assert "format" in cc.verify(other, family="sd15")
-
-    # gw#391: producer gen-worker version is part of the key — a cell built
-    # by other gen-worker code must never be adopted (graph drift => FX miss).
-    assert meta["gen_worker"] == cc.gen_worker_version() != ""
-    other = dict(meta, gen_worker="0.9.2-not-this")
-    assert "gen_worker" in cc.verify(other, family="sd15")
-    other = dict(meta)
-    del other["gen_worker"]
-    assert "gen_worker" in cc.verify(other, family="sd15")
-
-    for field in ("sm", "cuda", "image_digest"):
-        other = dict(meta)
-        other[field] = "definitely-not-this-runtime"
-        reason = cc.verify(other, family="sd15")
-        # the named-axis contract (gw#577): refusals carry axis + both values
-        assert field in reason and "definitely-not-this-runtime" in reason
-
-
-def test_verify_ignores_cuda_driver_host_lottery():
-    """gw#577: a cell minted on one host must deliver to another same-SKU
-    same-image host running a different driver build. Inductor/triton
-    artifacts are keyed by torch/triton/cuda-runtime/SM arch (triton's disk
-    key is source+ptxas-version+arch, ptxas ships in the wheel); the host
-    libcuda build keys nothing — pinning it made fleet delivery a lottery
-    (2 of 3 fresh B200 pods refused a proven cell, ie#495 flip rollback)."""
-    meta = cc.artifact_metadata(
-        family="sd15", shapes=[(768, 768)], targets=["transformer"])
-    other = dict(meta, cuda_driver="13010")
-    assert cc.verify(other, family="sd15") == ""
+# pgw#1181 REMOVED 20 rows whose subject is the `torch-inductor-cache` format
+# itself: `verify` (2), `mode_drift` (2), `artifact_metadata` (2), `pack` /
+# `unpack` (3), the stage/seed/merge transaction (5:
+# `test_failed_seed_never_mutates_live_cache`,
+# `test_pipeline_mismatch_never_activates_staged_cache`,
+# `test_cache_collision_and_merge_failure_leave_live_tree_unchanged`,
+# `test_seed_activation_blocks_concurrent_cold_arming`,
+# `test_seeding_rejects_a_key_mismatch`), `capture_env` (1), `contract_drift`
+# (1), `_reconcile_resident_mode` (2: the two `enable_reconciles_*` rows) and
+# the w8a8 identity gate over `verify`'s axis set (1).
+#
+# The format's last writer died with `mint_artifact` in pgw#1178 and the format
+# itself is deleted here, so every one of these builds a cell no pod can
+# produce and drives a transaction no pod can enter (§4.34: they die with
+# their subject, never ported). What each fenced survives on the exported
+# lane by CONSTRUCTION rather than by comparison — sm, the declared contract,
+# the env seal, the lane and the graph are all axes of `ck1`, so a cell that
+# disagrees has a different key and never resolves; see
+# `tests/test_cell_key_pgw1059.py`.
 
 
 def test_execution_contract_uses_structure_not_checkpoint_values():
@@ -309,22 +277,6 @@ def test_guard_records_cache_proof_on_the_exact_wrapped_object(monkeypatch):
     assert signal["cache_misses"] == 1
 
 
-def test_mode_drift():
-    class _P:
-        pass
-
-    p = _P()
-    meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)],
-                                targets=["transformer"], low_vram_mode="off")
-    assert meta["low_vram_mode"] == "off"
-    assert cc.mode_drift({}, p) == ""  # producer recorded no mode: unenforced
-    assert "low_vram_mode" in cc.mode_drift(meta, p)  # unprepped pipeline
-    p._cozy_low_vram_mode = "off"
-    assert cc.mode_drift(meta, p) == ""
-    p._cozy_low_vram_mode = "vae_only"
-    assert "low_vram_mode" in cc.mode_drift(meta, p)
-
-
 def test_unwrap_restores_eager():
     class _Mod:
         def forward(self, x):  # pragma: no cover
@@ -404,16 +356,6 @@ def test_unwrap_clears_regional_mods():
     assert mod.block._compiled_call_impl is None
 
 
-def test_artifact_metadata_records_compile_mode():
-    meta = cc.artifact_metadata(
-        family="ltx-2.3", shapes=[(960, 544, 241)],
-        targets=["transformer"], compile_mode="regional",
-    )
-    assert meta["compile_mode"] == "regional"
-    default = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
-    assert default["compile_mode"] == "whole"
-
-
 def test_system_repo():
     assert cc.system_repo("sd15") == "root/family-sd15"
     with pytest.raises(ValueError):
@@ -440,147 +382,6 @@ def _tree_snapshot(root):
         str(path.relative_to(root)): path.read_bytes()
         for path in sorted(root.rglob("*")) if path.is_file()
     }
-
-
-def test_pack_is_deterministic_and_roundtrips(tmp_path):
-    src = _capture_tree(tmp_path / "cap")
-    meta = cc.artifact_metadata(family="sd15", source_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
-
-    a = cc.pack(src, tmp_path / "a.tar.gz", meta)
-    b = cc.pack(src, tmp_path / "b.tar.gz", meta)
-    assert a.read_bytes() == b.read_bytes()
-
-    dest = tmp_path / "seed"
-    got = cc.unpack(a, dest)
-    assert got["family"] == "sd15"
-    assert got["source_ref"] == "owner/model"
-    assert (dest / "inductor" / "ab" / "graph.py").read_text() == "code"
-    assert (dest / "triton" / "kern" / "kernel.cubin").read_bytes() == b"\x00\x01"
-    assert not (dest / "inductor" / "stale.lock").exists()
-
-    # merge: a second artifact lands next to the first
-    (src / "inductor" / "cd").mkdir()
-    (src / "inductor" / "cd" / "more.py").write_text("x")
-    c = cc.pack(src, tmp_path / "c.tar.gz", meta)
-    cc.unpack(c, dest)
-    assert (dest / "inductor" / "ab" / "graph.py").exists()
-    assert (dest / "inductor" / "cd" / "more.py").exists()
-
-
-def test_unpack_rejects_traversal(tmp_path):
-    evil = tmp_path / "evil.tar.gz"
-    import gzip
-
-    with open(evil, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as gz:
-        with tarfile.open(fileobj=gz, mode="w") as tar:
-            data = b"{}"
-            ti = tarfile.TarInfo(cc.METADATA_NAME)
-            ti.size = len(data)
-            tar.addfile(ti, io.BytesIO(data))
-            ti = tarfile.TarInfo("inductor/../../escape.py")
-            ti.size = 1
-            tar.addfile(ti, io.BytesIO(b"x"))
-    with pytest.raises(ValueError, match="unsafe"):
-        cc.unpack(evil, tmp_path / "seed")
-
-
-def test_unpack_requires_metadata(tmp_path):
-    bad = tmp_path / "bad.tar.gz"
-    with tarfile.open(bad, mode="w:gz") as tar:
-        ti = tarfile.TarInfo("inductor/x")
-        ti.size = 1
-        tar.addfile(ti, io.BytesIO(b"x"))
-    with pytest.raises(ValueError, match="metadata"):
-        cc.unpack(bad, tmp_path / "seed")
-
-
-def test_failed_seed_never_mutates_live_cache(tmp_path):
-    cache_dir = tmp_path / "cache"
-    live = _capture_tree(cache_dir / "compile-cache")
-    before = _tree_snapshot(live)
-
-    src = _capture_tree(tmp_path / "candidate")
-    (src / "inductor" / "ab" / "graph.py").write_text("must-not-land")
-    mismatch = cc.artifact_metadata(
-        family="sd15", shapes=[(768, 768)], targets=["transformer"])
-    mismatch["torch"] = "not-this-runtime"
-    wrong = cc.pack(src, tmp_path / "wrong.tar.gz", mismatch)
-    with pytest.raises(cc.AdoptError, match="torch") as exc:
-        cc.seed_artifact(wrong, "sd15", cache_dir)
-    assert exc.value.reason == "key_mismatch"
-    assert _tree_snapshot(live) == before
-
-    unsafe = tmp_path / "unsafe.tar.gz"
-    valid = cc.artifact_metadata(
-        family="sd15", shapes=[(768, 768)], targets=["transformer"])
-    with tarfile.open(unsafe, mode="w:gz") as tar:
-        metadata = msgspec.json.encode(valid)
-        info = tarfile.TarInfo(cc.METADATA_NAME)
-        info.size = len(metadata)
-        tar.addfile(info, io.BytesIO(metadata))
-        info = tarfile.TarInfo("inductor/ab/graph.py")
-        info.size = len(b"must-not-land")
-        tar.addfile(info, io.BytesIO(b"must-not-land"))
-        info = tarfile.TarInfo("../inductor/escape.py")
-        info.size = 1
-        tar.addfile(info, io.BytesIO(b"x"))
-    with pytest.raises(cc.AdoptError, match="unsafe") as exc:
-        cc.seed_artifact(unsafe, "sd15", cache_dir)
-    assert exc.value.reason == "artifact_invalid"
-    assert _tree_snapshot(live) == before
-
-    corrupt = tmp_path / "corrupt.tar.gz"
-    corrupt.write_bytes(b"not a tar archive")
-    with pytest.raises(cc.AdoptError) as exc:
-        cc.seed_artifact(corrupt, "sd15", cache_dir)
-    assert exc.value.reason == "artifact_invalid"
-    assert _tree_snapshot(live) == before
-
-
-@pytest.mark.parametrize("mismatch", ["lane", "contract", "mode"])
-def test_pipeline_mismatch_never_activates_staged_cache(
-    tmp_path, monkeypatch, mismatch,
-):
-    class _Target:
-        def forward(self, value):
-            return value
-
-    class _Pipeline:
-        def __init__(self):
-            self.transformer = _Target()
-
-    pipe = _Pipeline()
-    cfg = Compile(
-        shapes=((768, 768),), family="sd15", targets=("transformer",),
-    )
-    signature, contract = cc.execution_contract(pipe, cfg)
-    meta = cc.artifact_metadata(
-        family="sd15", shapes=cfg.shapes, targets=cfg.targets,
-        graph_signature=signature, weight_contract=contract,
-    )
-    if mismatch == "lane":
-        meta["weight_lane"] = "fp8-hooks"
-    elif mismatch == "contract":
-        meta["graph_signature"] = "different-module-graph"
-    else:
-        meta["compile_mode"] = "regional"
-    # A pre-key cell (no computable cell-key axes): gw#581 SELF-REQUESTED
-    # cells escalate drift to CellSelectionBugError instead — own test below.
-    # verify() skips an unrecorded sm; the key requires it, so this cell can
-    # never be classified as this runtime's own request.
-    meta.pop("sm", None)
-    meta.pop("cell_key", None)
-
-    cache_dir = tmp_path / "cache"
-    live = _capture_tree(cache_dir / "compile-cache")
-    before = _tree_snapshot(live)
-    source = _capture_tree(tmp_path / "candidate")
-    (source / "inductor" / "ab" / "graph.py").write_text("must-not-land")
-    artifact = cc.pack(source, tmp_path / "cell.tar.gz", meta)
-    monkeypatch.setattr(cc, "apply", lambda *args, **kwargs: False)
-
-    assert cc.enable(pipe, cfg, cache_dir, artifact) is False
-    assert _tree_snapshot(live) == before
 
 
 # ---------------------------------------------------------------------------
@@ -621,220 +422,25 @@ def test_execution_contract_ignores_pipeline_wrapper_class():
     assert cc.execution_contract(other, cfg)[0] != conv_sig
 
 
-def test_contract_drift_names_signature_values():
-    """A genuine graph mismatch refuses with BOTH digests in the reason —
-    never the bare 'module graph signature mismatch' that cost a raw
-    dual-load probe pod to diagnose."""
-    pipe = _module_tree_pipe("AnyPipeline")
-    cfg = Compile(shapes=((1024, 1024),), targets=("transformer",), family="fam")
-    sig, wc = cc.execution_contract(pipe, cfg)
-    meta = cc.artifact_metadata(
-        family="fam", shapes=cfg.shapes, targets=cfg.targets,
-        graph_signature="0" * 64, weight_contract=wc)
-    reason = cc.contract_drift(meta, pipe, cfg)
-    assert "module graph signature" in reason
-    assert "0" * 12 in reason and sig[:12] in reason
-
-
-def test_w8a8_identity_gate_drops_cuda_driver_keeps_rest(monkeypatch):
-    """W8A8 cells still require sm/cuda/image_digest identity, but not the
-    host-lottery cuda_driver axis (gw#577)."""
-    pytest.importorskip("torch")
-    real_key = cc.runtime_key
-
-    def prod_key():
-        key = dict(real_key())
-        key.update(sm="sm_100", cuda="13.0", cuda_driver="13000",
-                   image_digest="sha256:feedface")
-        return key
-
-    monkeypatch.setattr(cc, "runtime_key", prod_key)
-    pipe = _module_tree_pipe("Serving")
-    pipe.transformer[0]._cozy_w8a8_linear = True
-    pipe.transformer[0].gemm_mode = "rowwise"
-    pipe._cozy_weight_lane = "w8a8"
-    cfg = Compile(shapes=((1024, 1024),), targets=("transformer",), family="fam")
-    sig, wc = cc.execution_contract(pipe, cfg)
-    meta = cc.artifact_metadata(
-        family="fam", shapes=cfg.shapes, targets=cfg.targets,
-        weight_lane="w8a8", graph_signature=sig, weight_contract=wc)
-    meta["cuda_driver"] = ""  # cell minted without the axis: fine
-    assert cc.contract_drift(meta, pipe, cfg) == ""
-    # a cell recording a DIFFERENT driver build still delivers (verify skips)
-    meta["cuda_driver"] = "13010"
-    assert cc.verify(meta, family="fam") == ""
-    assert cc.contract_drift(meta, pipe, cfg) == ""
-    # the honest axes stay fail-closed, with named values.
-    #
-    # pgw#1035: this loop is now the SOLE guardian of gw#577 finding (b). The
-    # producer-side twin — `build`'s refusal to mint a w8a8 cell without a
-    # `serving_image_digest` — went with `build`, which had no caller. That is
-    # the correct survivor of the two: a serving pod runs THIS one, on the
-    # artifact's own recorded axes, at adopt time, against cells it did not
-    # mint. Do not delete it without replacing the gate.
-    for field in ("sm", "cuda", "image_digest"):
-        broken = dict(meta)
-        broken[field] = ""
-        assert field in cc.contract_drift(broken, pipe, cfg)
-
-
 def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
-    """gw#577 axis (a): the raised CompiledLaneUnavailableError is the ONLY
-    wire-visible diagnostic on a serve pod — it must carry the exact
-    mismatched axis and values, per refusal cause."""
+    """gw#577 axis (a): the raised CompiledExecutionLaneUnavailableError is the
+    ONLY wire-visible diagnostic on a serve pod, so it must name the cause.
+
+    pgw#1181 leaves it ONE cause. The key-mismatch and drift halves refused a
+    delivered `torch-inductor-cache` cell, and that format has no writer and
+    is deleted; a w8a8 pipeline that arms nothing now has exactly one reason —
+    no cell — and `enable` takes no artifact with which to have another."""
     pytest.importorskip("torch")
     pipe = _module_tree_pipe("Serving")
     pipe._cozy_weight_lane = "w8a8"
     cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
-    cache_dir = tmp_path / "cache"
 
-    # no artifact delivered
-    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="no cell artifact delivered"):
-        cc.enable(pipe, cfg, cache_dir, artifact=None)
-
-    # key mismatch: the axis and both values appear in the raise
-    sig, wc = cc.execution_contract(pipe, cfg)
-    meta = cc.artifact_metadata(
-        family="fam", shapes=cfg.shapes, targets=cfg.targets,
-        weight_lane="w8a8", graph_signature=sig, weight_contract=wc)
-    meta["torch"] = "0.0.0+fake"
-    source = _capture_tree(tmp_path / "cand")
-    artifact = cc.pack(source, tmp_path / "cell.tar.gz", meta)
     with pytest.raises(cc.CompiledExecutionLaneUnavailableError) as exc:
-        cc.enable(pipe, cfg, cache_dir, artifact=artifact)
-    assert "torch" in str(exc.value) and "0.0.0+fake" in str(exc.value)
-
-    # contract drift on a FOREIGN cell: the drift verdict appears in the
-    # raise. (A self-keyed drifted cell is the th#883 cell_selection_bug
-    # class instead — tests/test_cell_key.py.)
-    meta = cc.artifact_metadata(
-        family="fam", shapes=cfg.shapes, targets=cfg.targets,
-        weight_lane="w8a8", graph_signature="1" * 64, weight_contract=wc)
-    meta.pop("sm", None)
-    meta.pop("cell_key", None)
-    source2 = _capture_tree(tmp_path / "cand2")
-    artifact2 = cc.pack(source2, tmp_path / "cell2.tar.gz", meta)
-    with pytest.raises(cc.CompiledExecutionLaneUnavailableError) as exc:
-        cc.enable(pipe, cfg, cache_dir, artifact=artifact2)
-    assert "module graph signature" in str(exc.value)
-    assert "1" * 12 in str(exc.value)
-
-
-def test_cache_collision_and_merge_failure_leave_live_tree_unchanged(
-    tmp_path, monkeypatch,
-):
-    cache_dir = tmp_path / "cache"
-    live = _capture_tree(cache_dir / "compile-cache")
-    before = _tree_snapshot(live)
-    meta = cc.artifact_metadata(
-        family="sd15", shapes=[(768, 768)], targets=["transformer"])
-
-    # pgw#751: a byte-divergent same-key member is the SAME cache entry
-    # (bytes are not the identity) — adoption succeeds, LOCAL bytes win,
-    # the live tree is otherwise unchanged.
-    collision_src = _capture_tree(tmp_path / "collision")
-    (collision_src / "inductor" / "ab" / "graph.py").write_text("different")
-    collision = cc.pack(collision_src, tmp_path / "collision.tar.gz", meta)
-    cc.seed_artifact(collision, "sd15", cache_dir)
-    assert _tree_snapshot(live) == before
-
-    additive_src = tmp_path / "additive"
-    (additive_src / "inductor" / "new-a").mkdir(parents=True)
-    (additive_src / "inductor" / "new-a" / "a.py").write_text("a")
-    (additive_src / "inductor" / "new-b").mkdir(parents=True)
-    (additive_src / "inductor" / "new-b" / "b.py").write_text("b")
-    additive = cc.pack(additive_src, tmp_path / "additive.tar.gz", meta)
-    real_replace = cc.os.replace
-    additions = 0
-
-    def fail_second_addition(source, target):
-        nonlocal additions
-        if "new-" in str(target):
-            additions += 1
-            if additions == 2:
-                raise OSError("injected merge failure")
-        real_replace(source, target)
-
-    monkeypatch.setattr(cc.os, "replace", fail_second_addition)
-    with pytest.raises(cc.AdoptError) as exc:
-        cc.seed_artifact(additive, "sd15", cache_dir)
-    assert exc.value.reason == "activation_failed"
-    assert _tree_snapshot(live) == before
-
-
-def test_seed_activation_blocks_concurrent_cold_arming(
-    tmp_path, monkeypatch,
-):
-    cache_dir = tmp_path / "cache"
-    src = _capture_tree(tmp_path / "candidate")
-    meta = cc.artifact_metadata(
-        family="sd15", shapes=[(768, 768)], targets=["transformer"])
-    artifact = cc.pack(src, tmp_path / "cell.tar.gz", meta)
-    merging = threading.Event()
-    release = threading.Event()
-    observed = []
-    errors = []
-    real_merge = cc._merge_staged_cache
-
-    def blocked_merge(staged, live):
-        merging.set()
-        assert release.wait(5)
-        real_merge(staged, live)
-
-    def observed_apply(_pipeline, _cfg, *, cache_ready):
-        observed.append((cache_ready, _tree_snapshot(cache_dir / "compile-cache")))
-        return True
-
-    monkeypatch.setattr(cc, "_merge_staged_cache", blocked_merge)
-    monkeypatch.setattr(cc, "apply", observed_apply)
-
-    def seed():
-        try:
-            cc.seed_artifact(artifact, "sd15", cache_dir)
-        except BaseException as exc:  # surfaced in the main test thread
-            errors.append(exc)
-
-    def cold_arm():
-        try:
-            cc.enable(
-                _FakePipe(), Compile(shapes=((768, 768),), family="sd15"),
-                cache_dir,
-            )
-        except BaseException as exc:  # surfaced in the main test thread
-            errors.append(exc)
-
-    seed_thread = threading.Thread(target=seed)
-    seed_thread.start()
-    assert merging.wait(5)
-    arm_thread = threading.Thread(target=cold_arm)
-    arm_thread.start()
-    arm_thread.join(0.1)
-    assert arm_thread.is_alive()
-    assert observed == []
-    release.set()
-    seed_thread.join(5)
-    arm_thread.join(5)
-    assert not seed_thread.is_alive() and not arm_thread.is_alive()
-    assert errors == []
-    assert observed == [(False, {
-        "inductor/ab/graph.py": b"code",
-        "triton/kern/kernel.cubin": b"\x00\x01",
-    })]
-
-
-def test_capture_env_sets_cache_dirs(tmp_path, monkeypatch):
-    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
-    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
-    import os
-
-    cc.capture_env(tmp_path / "cap")
-    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "cap" / "inductor")
-    assert os.environ["TRITON_CACHE_DIR"] == str(tmp_path / "cap" / "triton")
-
-
-# ---------------------------------------------------------------------------
-# safety policy
-# ---------------------------------------------------------------------------
+        cc.enable(pipe, cfg)
+    message = str(exc.value)
+    assert "no cell artifact delivered" in message
+    assert "W8A8" in message
+    assert "not a W8A8 production lane" in message
 
 
 class _FakePipe:
@@ -847,19 +453,6 @@ def test_apply_stays_eager_without_cache():
     cfg = Compile(shapes=((768, 768),))
     assert cc.apply(pipe, cfg, cache_ready=False) is False
     assert getattr(pipe, "_cozy_compile", None) is None
-
-
-def test_seeding_rejects_a_key_mismatch(tmp_path):
-    """pgw#1035: `prepare` (a swallow-everything wrapper with no production
-    caller) is gone; `seed_artifact` is the entry the adopt lane uses, and it
-    RAISES the named refusal instead of logging it and returning None."""
-    src = _capture_tree(tmp_path / "cap")
-    meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
-    meta["torch"] = "0.0.0"  # never matches this runtime
-    art = cc.pack(src, tmp_path / "art.tar.gz", meta)
-    with pytest.raises(cc.AdoptError) as exc:
-        cc.seed_artifact(art, "sd15", cache_dir=tmp_path / "cache")
-    assert exc.value.reason == "key_mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -938,60 +531,21 @@ def test_compile_struct_video_shapes():
         Compile(shapes=((1280, 704, 121, 24),))
 
 
-def test_artifact_metadata_video_shapes_and_storage_dtype():
-    meta = cc.artifact_metadata(
-        family="ltx-2.3",
-        shapes=[(1280, 704, 121), (1920, 1088, 241)],
-        targets=["transformer"],
-        storage_dtype="fp8",
-    )
-    assert meta["shapes"] == [[1280, 704, 121], [1920, 1088, 241]]
-    assert meta["storage_dtype"] == "fp8"
-    assert cc.verify(meta, family="ltx-2.3") == ""
-
-
 def test_guidance_regimes_are_an_envelope_axis():
     """SDK v2: warm guidance regimes live on the enriched CompileCell (from
-    payload CompileAxis classes), and remain part of the declared envelope."""
-    torch = pytest.importorskip("torch")
+    payload CompileAxis classes), and remain part of the declared envelope.
 
-    class _Pipe:
-        def __init__(self) -> None:
-            self.transformer = torch.nn.Linear(16, 16)
-
+    pgw#1181 asserts that on the DECLARATION rather than on a
+    `torch-inductor-cache` cell's metadata: `declared_compile_facts` is the
+    canonical form of the declared envelope, it is what the arm identity and
+    the cell key are both built from, and it outlived the format."""
     cfg = CompileCell(
         shapes=((1024, 1024),), targets=("transformer",), family="sdxl",
         regional=False, text_len=0, dynamic=(), lora_bucket=0,
         guidance_scales=(5.0, 0.0),
     )
-    meta = cc.artifact_metadata(
-        family="sdxl", shapes=cfg.shapes, targets=cfg.targets,
-        guidance_scales=cfg.guidance_scales,
-        # pgw#950: as every production mint does — a cell silent on the
-        # module-graph signature is no longer adoptable.
-        graph_signature=cc.execution_contract(_Pipe(), cfg)[0],
-        weight_contract=cc.execution_contract(_Pipe(), cfg)[1],
-    )
-    assert meta["guidance_scales"] == [5.0, 0.0]
-    assert cc.contract_drift(meta, _Pipe(), cfg) == ""
-    assert "guidance_scales" in cc.contract_drift(
-        dict(meta, guidance_scales=[5.0]), _Pipe(), cfg,
-    )
-
-
-# pgw#1178 REMOVED `test_warm_call_captures_cfg_and_no_cfg` and
-# `test_warm_call_true_cfg_convention`. Their subject, `compile_cache._warm_call`,
-# went with `_compile_and_warm` and `mint_artifact` — the JIT producer whose only
-# caller was `local_cells.py`. The guidance-parity property they pinned
-# (gw#595/ie#501: classic CFG rides `true_cfg_scale` + `negative_prompt`, never
-# the distilled-guidance embed) belongs to whatever warms a graph, and on the AOT
-# path that is `aot_inputs`/`aot_mint`, not this module. Keeping the rows would
-# have meant keeping a producer nothing produces with, tested by nothing that
-# runs it.
-
-
-class In(msgspec.Struct):
-    prompt: str = ""
+    assert cfg.guidance_scales == (5.0, 0.0)
+    assert cc.declared_compile_facts(cfg)["guidance"] == [0.0, 5.0]
 
 
 class Out(msgspec.Struct):
@@ -1153,68 +707,11 @@ def _pin_w8a8_identity(monkeypatch):
     monkeypatch.setattr(cc, "runtime_key", prod_key)
 
 
-def test_enable_reconciles_vae_only_pipeline_to_off_cell(tmp_path, monkeypatch):
-    """ie#501 run 18: producer minted alone ('off'), serve worker's multi-lane
-    load landed 'vae_only'. Both fully resident — the consumer converges to
-    the cell's traced mode and ARMS instead of starving the w8a8 lane."""
-    _pin_w8a8_identity(monkeypatch)
-    pipe = _resident_pipe("vae_only")
-    pipe.transformer[0]._cozy_w8a8_linear = True
-    pipe.transformer[0].gemm_mode = "rowwise"
-    pipe._cozy_weight_lane = "w8a8"
-    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
-    artifact = _resident_cell(
-        tmp_path, pipe, cfg, low_vram_mode="off", weight_lane="w8a8")
-    monkeypatch.setattr(
-        cc, "apply", lambda pipeline, cfg, **kw: kw.get("cache_ready", False))
-
-    assert cc.enable(pipe, cfg, tmp_path / "cache", artifact) is True
-    assert pipe._cozy_low_vram_mode == "off"
-    assert pipe.flags == {
-        "vae_slicing": False, "vae_tiling": False, "attention_slicing": False,
-    }
-
-
 # pgw#1032: `test_arm_staged_artifact_reconciles_resident_drift` is deleted with
 # `arm_staged_artifact` itself — the STRICT arm entry point existed only for
 # hub-commanded hot adoption, which nothing has ever dispatched. The resident
 # convergence it checked is the same one `enable()` performs, and
 # `test_enable_reconciles_*` above/below cover it on the live path.
-
-
-def test_enable_reconciles_off_pipeline_to_vae_only_cell(tmp_path, monkeypatch):
-    pipe = _resident_pipe("off")
-    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
-    artifact = _resident_cell(tmp_path, pipe, cfg, low_vram_mode="vae_only")
-    monkeypatch.setattr(
-        cc, "apply", lambda pipeline, cfg, **kw: kw.get("cache_ready", False))
-
-    assert cc.enable(pipe, cfg, tmp_path / "cache", artifact) is True
-    assert pipe._cozy_low_vram_mode == "vae_only"
-    assert pipe.flags == {
-        "vae_slicing": True, "vae_tiling": True, "attention_slicing": True,
-    }
-
-
-def test_offload_mode_drift_still_refuses(tmp_path, monkeypatch):
-    """model_offload traces genuinely different graphs: enable() on a w8a8 lane
-    raises the named refusal.
-
-    pgw#1032: the hot-adopt half (`arm_staged_artifact` classifying the same
-    drift as `key_mismatch`) is deleted with the adoption it served. The
-    refusal on the LIVE path is what protects serving, and it is unchanged.
-    """
-    pipe = _resident_pipe("model_offload")
-    pipe._cozy_weight_lane = "w8a8"
-    cfg = Compile(shapes=((768, 768),), targets=("transformer",), family="fam")
-    artifact = _resident_cell(
-        tmp_path, pipe, cfg, low_vram_mode="off", weight_lane="w8a8")
-    monkeypatch.setattr(
-        cc, "apply", lambda pipeline, cfg, **kw: kw.get("cache_ready", False))
-
-    with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="low_vram_mode"):
-        cc.enable(pipe, cfg, tmp_path / "cache", artifact)
-    assert pipe._cozy_low_vram_mode == "model_offload"
 
 
 def test_reconcile_resident_mode_unit():
@@ -1255,9 +752,15 @@ def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
     FX cache is the lookup surface, symmetrically for producer and consumer."""
     import torch._functorch.config as fconf
 
+    from gen_worker import settings_authority as sa
+
     monkeypatch.delenv("TORCHINDUCTOR_AUTOGRAD_CACHE", raising=False)
     monkeypatch.setattr(fconf, "enable_autograd_cache", True)
-    cc.capture_env(tmp_path / "cap")
+    # pgw#1181: the pin is `settings_authority.disable_autograd_cache`, the ONE
+    # writer of torch settings (pgw#1049). `capture_env` used to call it on the
+    # way to writing a `torch-inductor-cache` capture and is deleted with that
+    # format; the invariant is unchanged and is asserted at its owner.
+    sa.disable_autograd_cache()
     assert os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] == "0"
     assert fconf.enable_autograd_cache is False
 
@@ -1295,7 +798,9 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
     monkeypatch.setattr(fconf, "enable_autograd_cache", True)
     try:
         entry.__dict__.pop("env_value_force", None)  # simulate no pre-import env
-        cc.capture_env(tmp_path / "cap")
+        from gen_worker import settings_authority as sa
+
+        sa.disable_autograd_cache()  # pgw#1181: the pin's owner, see above
 
         seen: dict = {}
 
@@ -1392,50 +897,29 @@ def test_fx_key_forensics_matches_nearest_seeded_key(tmp_path):
 
 def test_fx_cache_failure_report_names_b1_divergence(tmp_path, monkeypatch):
     """fresh_keys>0: the report carries the counts AND the component diff."""
-    capture = tmp_path / "capture"
-    _write_fx_entry(capture / "inductor", "fseededkey111", _fx_lines("cell-value"))
-    (capture / "triton").mkdir()
-    artifact = cc.pack(capture, tmp_path / "cell.tar.gz", {"format": 2})
-
+    # pgw#1181: no `cell=` side. `fx_cache_failure_report`'s cell half read FX
+    # entries out of a `torch-inductor-cache` tarball, and that format has no
+    # writer and is deleted — what the executor can still hand this function is
+    # an exported cell, which carries no `inductor/` tree. The LIVE-directory
+    # census is the half that still runs on a pod, so that is what is fenced.
     live = tmp_path / "live-inductor"
     _write_fx_entry(live, "fseededkey111", _fx_lines("cell-value"))
     _write_fx_entry(live, "ffreshkey2222", _fx_lines("boot-value"))
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(live))
 
-    report = cc.fx_cache_failure_report(artifact)
-    assert "cell_keys=1" in report
+    report = cc.fx_cache_failure_report(None)
     assert "live_keys=2" in report
-    assert "fresh_keys=1" in report
-    assert "samekey_resaves=0" in report
-    assert "inductor_config[foo]" in report
-    assert "cell=cell-value" in report and "boot=boot-value" in report
 
 
-def test_fx_cache_failure_report_names_b2_samekey_resave(tmp_path, monkeypatch):
-    """fresh_keys=0 with a second entry file in a seeded key dir proves the
-    boot computed the SAME key and torch's candidate-load path refused the
-    seeded entry — the report says so and diffs the siblings."""
-    import pickle
+# pgw#1181 REMOVED `test_fx_cache_failure_report_names_b2_samekey_resave`.
+# `samekey_resaves` counts entry files that a boot re-saved under a key the
+# CELL had already seeded, so it is undefined without a cell — and the cell
+# half of `fx_cache_failure_report` read FX entries out of a
+# `torch-inductor-cache` tarball, a format with no writer, deleted here. The
+# live-directory census the sibling row now fences is the half a pod can still
+# reach: what the executor hands this function is an exported cell, which
+# carries no `inductor/` tree at all.
 
-    key = "fseededkey111"
-    capture = tmp_path / "capture"
-    _write_fx_entry(capture / "inductor", key, _fx_lines("same"))
-    (capture / "triton").mkdir()
-    artifact = cc.pack(capture, tmp_path / "cell.tar.gz", {"format": 2})
-
-    live = tmp_path / "live-inductor"
-    _write_fx_entry(live, key, _fx_lines("same"))
-    # torch names entry files by content sha; any OTHER name in the key dir
-    # is this boot's re-save of the same key.
-    resave = live / "fxgraph" / key[1:3] / key / "boot-resave"
-    resave.write_bytes(pickle.dumps(_FakeFxEntry(key, _fx_lines("same"))))
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(live))
-
-    report = cc.fx_cache_failure_report(artifact)
-    assert "fresh_keys=0" in report
-    assert "samekey_resaves=1" in report
-    assert "samekey_resave[fseededkey11" in report
-    assert "live_cell_entry_unpickle=ok" in report
 
 
 def test_fx_cache_failure_report_never_raises_without_state(tmp_path, monkeypatch):

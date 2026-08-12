@@ -7,7 +7,6 @@ torch posture, no fabricated guard rows where a real API exists. CPU only.
 
 from __future__ import annotations
 
-import json
 import struct
 from pathlib import Path
 from typing import Any, Dict, Iterator
@@ -16,7 +15,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import cell_key as ck
 from gen_worker import compile_cache as cc
 from gen_worker import guard_closure as gc
 from gen_worker.registry import CompileCell
@@ -75,110 +73,16 @@ def test_pytest_process_posture_is_canonical() -> None:
     assert gc.establish_posture() == gc.CANONICAL_POSTURE
 
 
-def test_assert_posture_names_every_drifted_fact() -> None:
-    with torch.no_grad():
-        with pytest.raises(gc.PostureError) as excinfo:
-            gc.assert_posture(gc.CANONICAL_POSTURE, label="arm")
-    message = str(excinfo.value)
-    assert "grad_enabled" in message
-    assert "sealed 'True'" in message and "process 'False'" in message
-    assert "arm" in message
-    # Clean state passes.
-    gc.assert_posture(gc.CANONICAL_POSTURE, label="arm")
+# pgw#1181 REMOVED 11 rows whose subject is the `torch-inductor-cache` format:
+# `assert_posture` and the two posture rows that round-tripped a seal through a
+# cell's metadata, the three `consolidate` rows, the cubin/PTX `pack`
+# completeness rows (3), `verify`'s sku and silent-axes rows (2), and the local
+# store's seal-drift verdict. The manifest they compared is written by
+# `closure_manifest`, the pack they exercised is `compile_cache.pack`, and both
+# are deleted with the format whose last writer died in pgw#1178. The posture
+# fact itself survives and is proven where it is produced —
+# `establish_posture` in this file and in `test_torchless_boot_pgw788`.
 
-
-def test_mint_manifest_carries_the_posture_seal() -> None:
-    """closure_manifest seals the live posture into the manifest (v3).
-
-    pgw#756: the posture refusal SURVIVES the gate demotion — it measures
-    live torch state against exact canonical values rather than inferring
-    anything from a guard classification."""
-    import threading
-
-    def forward(self: Any, x: Any) -> Any:
-        return self.lin(x) + 1
-
-    class _Mod(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.lin = torch.nn.Linear(8, 8)
-
-    _Mod.forward = forward  # type: ignore[method-assign]
-
-    class _Pipe:
-        pass
-
-    pipe = _Pipe()
-    mod = _Mod()
-    pipe.transformer = mod  # type: ignore[attr-defined]
-    setattr(pipe, cc._MARKER_ATTR, {
-        "targets": ["transformer"], "shapes": [(64, 64)], "cache": True,
-        "originals": [(mod, "forward", mod.forward)], "regional_mods": [],
-        "failure_signal": {
-            "callback": None, "lock": threading.Lock(),
-            "successful_calls": 0, "cache_hits": 0, "cache_misses": 0,
-            "router": None,
-        },
-    })
-    compiled = torch.compile(mod.forward, backend="eager", dynamic=None)
-    compiled(torch.randn(2, 4, 8))
-
-    manifest = gc.closure_manifest(pipe, _cfg(), label="toyfam")
-    assert manifest[gc.POSTURE_KEY] == gc.CANONICAL_POSTURE
-    # pgw#958 §1.27(g): one live manifest version, and it is 1.
-    assert gc.MANIFEST_VERSION == 1 and manifest["v"] == 1
-
-    # A mint attempted in a non-canonical posture fails red, named.
-    with torch.no_grad():
-        with pytest.raises(gc.PostureError, match="grad_enabled"):
-            gc.closure_manifest(pipe, _cfg(), label="toyfam")
-
-
-def test_arm_refuses_on_posture_drift_named() -> None:
-    """artifact_drift converts a sealed-vs-live posture mismatch into a
-    named refusal at arm time — never a downstream guard miss."""
-    class _Pipe:
-        pass
-
-    _sig, _wc = cc.execution_contract(_Pipe(), _cfg())
-    base = {
-        "compile_mode": "whole", "shapes": [[64, 64]],
-        "targets": ["transformer"], "guidance_scales": [],
-        # pgw#950: as every production mint does — a cell silent on the
-        # module-graph signature is no longer adoptable.
-        "graph_signature": _sig, "weight_contract": _wc,
-    }
-    meta = dict(base)
-    meta[gc.MANIFEST_KEY] = {
-        "v": 2, "graphs": [], "leaks": [],
-        gc.POSTURE_KEY: dict(gc.CANONICAL_POSTURE),
-    }
-
-    assert cc.artifact_drift(meta, _Pipe(), _cfg()) == ""
-    with torch.no_grad():
-        drift = cc.artifact_drift(meta, _Pipe(), _cfg())
-    assert "posture" in drift and "grad_enabled" in drift
-
-    # A manifest-bearing cell WITHOUT a posture seal is a pre-#695 mint.
-    legacy = dict(base)
-    legacy[gc.MANIFEST_KEY] = {"v": 1, "graphs": [], "leaks": []}
-    assert "no posture seal" in cc.artifact_drift(legacy, _Pipe(), _cfg())
-
-
-def test_consolidate_flags_posture_divergence() -> None:
-    base = {"v": 2, "graphs": [], "leaks": [],
-            gc.POSTURE_KEY: dict(gc.CANONICAL_POSTURE)}
-    drifted = json.loads(json.dumps(base))
-    drifted[gc.POSTURE_KEY]["grad_enabled"] = "False"
-    audit = gc.consolidate({"pod-a": base, "pod-b": drifted})
-    assert not audit.ok
-    assert any("posture/grad_enabled" in d for d in audit.divergence)
-    # Identical postures stay clean; a missing seal on ONE pod diverges.
-    assert gc.consolidate({"pod-a": base, "pod-b": base}).divergence == ()
-    unsealed = {"v": 1, "graphs": [], "leaks": []}
-    audit = gc.consolidate({"pod-a": base, "pod-b": unsealed})
-    assert any("posture seal absent" in d and "pod-b" in d
-               for d in audit.divergence)
 
 
 # ---------------------------------------------------------------------------
@@ -238,70 +142,6 @@ def test_seal_digest_tracks_the_declaration_not_live_flags() -> None:
     assert _env_seal().seal_digest(knobbed) != baseline
 
 
-def test_seal_is_recorded_and_the_local_verdict_refuses_seal_drift(
-    monkeypatch: Any,
-) -> None:
-    """pgw#1059 re-cut of the ck1-requires-the-seal test: the seal is no
-    longer a KEY axis (its declaration folds into `toolchain`), but it is
-    still RECORDED verbatim on every artifact and the local verdict still
-    refuses a cell sealed under a different environment, BY NAME."""
-    monkeypatch.setattr(cc, "runtime_key", lambda: {
-        "sku": "l4", "sm": "sm_89", "cuda": "13.0", "cuda_driver": "13000",
-        "torch": "2.13.0+cu130", "triton": "3.7.1", "image_digest": "",
-    })
-    monkeypatch.setattr(cc, "gen_worker_version", lambda: "0.74.0")
-    monkeypatch.setattr(cc, "_lib_versions", lambda: {})
-    monkeypatch.delenv("WORKER_IMAGE_DIGEST", raising=False)
-
-    # pgw#990: a foreign scheme is key-SHAPED and simply names nothing this
-    # runtime computes — refused on facts, not on its label.
-    assert ck.is_key("ck3-" + "a" * 56)
-
-    facts = cc.declared_compile_facts(_cfg())
-    meta = cc.artifact_metadata(
-        family="toyfam", shapes=((64, 64),), targets=("transformer",),
-        declared_compile_contract=facts,
-    )
-    # The metadata records the seal dict verbatim; the local kind carries
-    # no key stamp at all (pgw#1059).
-    assert meta[_env_seal().SEAL_KEY]["seal_v"] == _env_seal().SEAL_VERSION
-    assert "cell_key" not in meta
-    assert cc.local_cell_mismatch(
-        dict(meta), family="toyfam", weight_lane="", cfg=_cfg()) == ""
-
-    # A cell sealed under a DIFFERENT environment is refused, named.
-    drifted = json.loads(json.dumps(meta))
-    drifted[_env_seal().SEAL_KEY]["config"]["cudnn_benchmark"] = "True"
-    reason = cc.local_cell_mismatch(
-        drifted, family="toyfam", weight_lane="", cfg=_cfg())
-    assert reason.startswith("env_seal")
-
-    # No env_seal block = no sealed environment = refused.
-    unsealed = {k: v for k, v in meta.items() if k != _env_seal().SEAL_KEY}
-    assert "env_seal" in cc.local_cell_mismatch(
-        dict(unsealed), family="toyfam", weight_lane="", cfg=_cfg())
-
-
-def test_verify_no_longer_pins_sku(monkeypatch: Any) -> None:
-    """pgw#691: sku left the identity axes, but verify()
-    still hard-required it — a same-sm cell minted on a different SKU
-    refused to arm, structurally undoing the collapse."""
-    monkeypatch.setattr(cc, "runtime_key", lambda: {
-        "sku": "rtx-3090", "sm": "sm_86", "cuda": "13.0",
-        "cuda_driver": "13000", "torch": "2.13.0+cu130", "triton": "3.7.1",
-        "image_digest": "",
-    })
-    monkeypatch.setattr(cc, "gen_worker_version", lambda: "0.74.0")
-    monkeypatch.setattr(cc, "_lib_versions", lambda: {})
-    meta = {
-        "format": cc.ARTIFACT_FORMAT, "sku": "a40", "sm": "sm_86",
-        "cuda": "13.0", "torch": "2.13.0+cu130", "triton": "3.7.1",
-        "gen_worker": "0.74.0", "libs": {},
-    }
-    assert cc.verify(dict(meta)) == ""  # sku differs, sm matches: arms
-    assert "sm" in cc.verify(dict(meta, sm="sm_89"))  # sm still refuses
-
-
 # ---------------------------------------------------------------------------
 # #697: composition fingerprint
 # ---------------------------------------------------------------------------
@@ -322,31 +162,32 @@ class _Pipe:
         self.transformer = _Tree()
 
 
-def test_fingerprint_names_the_drifted_module_on_dtype_flip() -> None:
-    """The pgw#683 class: one submodule left in Half inside a bf16-tree.
-    Pre-fix the refusal was two digest prefixes; now it names the module."""
+def test_a_dtype_flip_in_one_submodule_moves_the_graph_signature() -> None:
+    """The pgw#683 class: one submodule left in Half inside a bf16 tree.
+
+    pgw#1181: `composition_fingerprint` and `contract_drift` were the
+    `torch-inductor-cache` cell's own adoption fence and are deleted with the
+    format. The FACT they rested on is `execution_contract`, which is alive and
+    is folded into `ck1`'s contract axis — so on the surviving lane the drifted
+    consumer does not get a named refusal, it gets a different key and never
+    resolves the cell at all. That is strictly stronger, and this row states
+    the fact underneath it: the signature moves on the flip and does NOT move
+    on a fine-tune of the same composition."""
     minted = _Pipe()
     cfg = _cfg()
-    signature, contract = cc.execution_contract(minted, cfg)
-    meta = cc.artifact_metadata(
-        family="toyfam", shapes=cfg.shapes, targets=cfg.targets,
-        graph_signature=signature, weight_contract=contract,
-        declared_compile_contract=cc.declared_compile_facts(cfg),
-        composition=cc.composition_fingerprint(minted, cfg),
-    )
+    signature, _contract = cc.execution_contract(minted, cfg)
 
     consumer = _Pipe()
     consumer.transformer.lin2.half()  # the drift
-    drift = cc.contract_drift(meta, consumer, cfg)
-    assert "module composition" in drift
-    assert "transformer:lin2" in drift
-    assert "transformer:lin1" not in drift
+    drifted, _ = cc.execution_contract(consumer, cfg)
+    assert drifted != signature
 
-    # Identical composition (different VALUES = a fine-tune) arms.
+    # Identical composition (different VALUES = a fine-tune) is the same graph.
     finetune = _Pipe()
     with torch.no_grad():
         finetune.transformer.lin1.weight.mul_(2.0)
-    assert cc.contract_drift(meta, finetune, cfg) == ""
+    same, _ = cc.execution_contract(finetune, cfg)
+    assert same == signature
 
 
 def test_hook_presence_is_a_composition_fact() -> None:
@@ -361,10 +202,11 @@ def test_hook_presence_is_a_composition_fact() -> None:
         sig_bare, _ = cc.execution_contract(bare, cfg)
         sig_hooked, _ = cc.execution_contract(hooked, cfg)
         assert sig_bare != sig_hooked
-        rows_bare = dict(cc.composition_fingerprint(bare, cfg))
-        rows_hooked = dict(cc.composition_fingerprint(hooked, cfg))
-        assert rows_bare["transformer:lin1"] != rows_hooked["transformer:lin1"]
-        assert rows_bare["transformer:lin2"] == rows_hooked["transformer:lin2"]
+        # pgw#1181: the per-module `composition_fingerprint` rows that used to
+        # localise this to `transformer:lin1` were the deleted format's
+        # adoption fence. The hook-presence FACT they digested is the same one
+        # `execution_contract` hashes (`_module_hooks`), which is why the
+        # signatures above differ at all.
     finally:
         handle.remove()
 
@@ -397,35 +239,6 @@ def _capture(tmp_path: Path, *, ptx: bool, cubin_arch: int = 0) -> Path:
     if cubin_arch:
         (kdir / "kern.cubin").write_bytes(_elf_cubin_bytes(cubin_arch))
     return root
-
-
-def test_ptx_only_kernel_fails_the_pack_naming_it(tmp_path: Path) -> None:
-    root = _capture(tmp_path, ptx=True)
-    with pytest.raises(RuntimeError) as excinfo:
-        cc.pack(root, tmp_path / "cell.tar.gz", {"sm": "sm_89"})
-    message = str(excinfo.value)
-    assert "PTX" in message and "kern.ptx" in message and "pgw#698" in message
-    assert not (tmp_path / "cell.tar.gz").exists()
-
-
-def test_sm_exact_cubin_packs_and_wrong_arch_refuses(tmp_path: Path) -> None:
-    good = _capture(tmp_path, ptx=True, cubin_arch=89)
-    out = tmp_path / "cell.tar.gz"
-    cc.pack(good, out, {"sm": "sm_89"})
-    assert out.exists()
-
-    bad = _capture(tmp_path / "bad", ptx=True, cubin_arch=86)
-    with pytest.raises(RuntimeError) as excinfo:
-        cc.pack(bad, tmp_path / "bad.tar.gz", {"sm": "sm_89"})
-    assert "sm_86" in str(excinfo.value) and "sm_89" in str(excinfo.value)
-
-
-def test_inductor_only_capture_still_packs(tmp_path: Path) -> None:
-    """No triton kernels at all (the existing fixture shape) stays valid."""
-    root = _capture(tmp_path, ptx=False)
-    out = tmp_path / "cell.tar.gz"
-    cc.pack(root, out, {"sm": "sm_89"})
-    assert out.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -520,31 +333,6 @@ def test_semantic_cache_tag_binds_semantic_axes_only() -> None:
         compiler_config.cache_key_tag = before
 
 
-def test_verify_refuses_silent_axes_named(monkeypatch: Any) -> None:
-    """P1 (review 6.9 — the JAX #27814 wrong-hit shape): a cell SILENT on
-    sm/cuda/image_digest/libs was accepted by `if want and ...`. Strict
-    now: absent axis = named refusal."""
-    monkeypatch.setattr(cc, "runtime_key", lambda: {
-        "sku": "l4", "sm": "sm_89", "cuda": "13.0", "cuda_driver": "",
-        "torch": "2.13.0+cu130", "triton": "3.7.1",
-        "image_digest": "sha256:live",
-    })
-    monkeypatch.setattr(cc, "gen_worker_version", lambda: "0.74.0")
-    monkeypatch.setattr(cc, "_lib_versions", lambda: {"diffusers": "0.39.0"})
-    complete = {
-        "format": cc.ARTIFACT_FORMAT, "torch": "2.13.0+cu130",
-        "triton": "3.7.1", "sm": "sm_89", "cuda": "13.0",
-        "image_digest": "sha256:live", "gen_worker": "0.74.0",
-        "libs": {"diffusers": "0.39.0"},
-    }
-    assert cc.verify(dict(complete)) == ""
-    for axis in ("sm", "cuda", "image_digest"):
-        silent = {k: v for k, v in complete.items() if k != axis}
-        assert axis in cc.verify(silent), axis
-    silent_libs = dict(complete, libs={})
-    assert "diffusers" in cc.verify(silent_libs)
-
-
 def test_pytorch_and_triton_namespaces_are_scrubbed(monkeypatch: Any) -> None:
     """pgw#718: every behavior namespace is erased wholesale — PYTORCH_*
     (which the original TORCH*-only gate missed) and TRITON_*
@@ -585,15 +373,3 @@ def test_the_seal_carries_no_operator_settable_recall_salt(
     monkeypatch.setenv("COZY_CELL_EPOCH", "1")
     assert seal.seal_digest(seal.effective_seal()) == baseline
 
-
-def test_content_keys_recorded_in_metadata() -> None:
-    """Review 6.5: torch/triton CONTENT digests ride metadata as the
-    pgw#700 equivalence precondition (a patched wheel under an unchanged
-    version string becomes visible)."""
-    keys = dict(cc.content_keys())
-    assert set(keys) == {"torch", "triton"}
-    assert all(len(v) == 16 for v in keys.values() if v)
-    assert keys["torch"], "torch_key must be computable on this wheel"
-    meta = cc.artifact_metadata(
-        family="toyfam", shapes=((64, 64),), targets=("transformer",))
-    assert meta["content_keys"] == keys

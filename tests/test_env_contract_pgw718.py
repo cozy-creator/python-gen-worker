@@ -15,7 +15,6 @@ torch = pytest.importorskip("torch")
 
 from gen_worker import compile_cache as cc
 from gen_worker import env_seal
-from gen_worker import guard_closure as gc
 from gen_worker.registry import CompileCell
 
 
@@ -137,14 +136,14 @@ def test_loaded_libraries_come_from_the_real_loader_map() -> None:
     assert env_seal.loaded_library_digests() == tuple(sorted(libs.items()))
     seal = env_seal.effective_seal()
     assert len(seal["loaded_libs"]) == 16  # combined digest is a seal fact
-    meta = cc.artifact_metadata(
-        family="toyfam", shapes=((64, 64),), targets=("transformer",))
-    # pgw#749: metadata records the DISK identity manifest (phase-
-    # independent), of which the mapped set is a content-consistent subset
-    # — a mapped toolchain lib whose digest diverges from the manifest is a
-    # substitution assert_seal_unchanged refuses by name.
+    # pgw#749: the DISK identity manifest (phase-independent), of which the
+    # mapped set is a content-consistent subset — a mapped toolchain lib whose
+    # digest diverges from the manifest is a substitution
+    # `assert_seal_unchanged` refuses by name. pgw#1181 reads the manifest from
+    # its producer: `compile_cache.artifact_metadata` embedded it in a
+    # `torch-inductor-cache` cell and is deleted with that format, while
+    # `aot_mint` records this same call's output under the same key.
     manifest = dict(env_seal.frozen_library_digests())
-    assert meta["loaded_libs"] == manifest
     for base, digest in libs.items():
         if base in manifest and digest != "<unreadable>":
             assert manifest[base] == digest, base
@@ -228,32 +227,12 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
         torch._dynamo.reset()
 
 
-def test_arm_names_env_seal_drift(monkeypatch: pytest.MonkeyPatch) -> None:
-    """artifact_drift's config half: a cell sealed under a different
-    environment refuses with the fact named — a foreign cell is
-    diagnosable, never a silent inner-key miss."""
-    class _Pipe:
-        pass
-
-    _sig, _wc = cc.execution_contract(_Pipe(), _cfg())
-    base = {
-        "compile_mode": "whole", "shapes": [[64, 64]],
-        "targets": ["transformer"], "guidance_scales": [],
-        # pgw#950: as every production mint does — a cell silent on the
-        # module-graph signature is no longer adoptable.
-        "graph_signature": _sig, "weight_contract": _wc,
-        gc.MANIFEST_KEY: {
-            "v": 2, "graphs": [], "leaks": [],
-            gc.POSTURE_KEY: dict(gc.CANONICAL_POSTURE),
-        },
-    }
-
-    live = dict(base, **{env_seal.SEAL_KEY: env_seal.effective_seal()})
-    assert cc.artifact_drift(live, _Pipe(), _cfg()) == ""
-    foreign_seal = env_seal.effective_seal()
-    foreign_seal["config"] = dict(
-        foreign_seal["config"], cudnn_benchmark="True")
-    foreign = dict(base, **{env_seal.SEAL_KEY: foreign_seal})
-    drift = cc.artifact_drift(foreign, _Pipe(), _cfg())
-    assert "env seal drift at arm" in drift
-    assert "config/cudnn_benchmark" in drift
+# pgw#1181 REMOVED `test_arm_names_env_seal_drift`. Its subject,
+# `compile_cache.artifact_drift`, compared a delivered
+# `torch-inductor-cache` cell's recorded env seal with the live one at ARM
+# time; the format has had no writer since pgw#1178 and is deleted. The
+# property is stronger on the surviving lane rather than absent: the seal is
+# an identity AXIS of the exported cell (`fleet_cells.ENV_SEAL_AXIS`, folded
+# into `ck1`), so a drifted seal yields a different key and the cell never
+# resolves at all — proven in `tests/test_cell_key_pgw1059.py`, whose
+# staleness matrix lists `env_seal` among the axes that re-key.
