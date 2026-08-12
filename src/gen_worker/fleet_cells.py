@@ -181,7 +181,12 @@ class ArmIdentity:
 #: ``graph`` is deliberately absent: it exists only after the export, and
 #: comparing a declared-facts stand-in against the traced fact is the
 #: phantom divergence this type retires.
-ARM_ENVIRONMENT_FACTS = ("family", "format", "lane", "sm", "envelope",
+# pgw#1176: ``envelope`` LEFT this comparison with the key. A per-entry
+# artifact records no DECLARED ENVELOPE — that is a manifest fact about the
+# whole declaration, not about one graph class — so comparing it here would
+# compare a value the child can no longer state against one the parent can,
+# and refuse every handback by construction.
+ARM_ENVIRONMENT_FACTS = ("family", "format", "lane", "sm",
                          "env_seal", "toolchain")
 
 #: The SUBJECT half (pgw#1113): WHAT this obligation compiles, as opposed to
@@ -877,7 +882,7 @@ def _recomputed_key(meta: Mapping[str, Any]) -> cell_key.CellKey:
     kind is refused here by the derivation itself.
     """
     try:
-        return cell_key.from_exported_artifact_metadata(meta)
+        return cell_key.from_entry_metadata(meta)
     except cell_key.CellKeyError as exc:
         raise CellPublishRefused(
             f"cell states no computable identity ({exc}); publishing it under "
@@ -899,11 +904,18 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
     So this FAILS CLOSED (pgw#1046): a mint that cannot name an axis raises
     :class:`CellPublishRefused` here, before a byte moves.
 
-    Contents (pgw#1059): the four ck1 key axes (``graph``, ``envelope``,
-    ``sm``, ``toolchain``) verbatim, plus the wire facts the hub requires by
-    name (``graph_contract`` — same value as ``graph``; ``env_seal``) and
-    the demoted store metadata (``family``, ``lane`` — discovery scoping and
-    row self-description, never identity).
+    Contents (pgw#1176): the three ek1 key axes (``graph``, ``sm``,
+    ``toolchain``) verbatim, plus the wire facts the hub requires by name
+    (``graph_contract`` — the DECLARATION-wide manifest digest, which is what
+    the hub folds compile-health coverage under; ``env_seal``) and the demoted
+    store metadata (``family``, ``lane`` — discovery scoping and row
+    self-description, never identity).
+
+    ``graph_contract`` and ``graph`` are no longer the same value, and that is
+    the point: ``graph`` is THIS entry's class hash (identity), while
+    ``graph_contract`` names the class SET this entry belongs to (coverage).
+    Fusing them is what made adding one aspect ratio re-mint 35 unchanged
+    classes.
     """
     key = _recomputed_key(meta)
     stamped = str(meta.get("cell_key") or "").strip()
@@ -913,9 +925,10 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
             f"axes describe ({key.digest}); refusing to publish an identity "
             "the artifact does not corroborate")
     axes = {k: str(v) for k, v in key.axes_dict().items()}
-    # Non-empty by construction: the key above refuses a cell whose
-    # metadata records no `combined_graph_hash` at all.
-    axes[GRAPH_CONTRACT_AXIS] = str(meta["combined_graph_hash"]).strip()
+    # The manifest label — telemetry/coverage, never identity. Empty is
+    # HONEST for an entry minted by a pod that has not folded its whole
+    # declaration, so it is not a publish refusal.
+    axes[GRAPH_CONTRACT_AXIS] = str(meta.get("manifest_digest") or "").strip()
     seal = meta.get(env_seal.SEAL_KEY)
     if not isinstance(seal, dict) or not seal:
         # The seal left the KEY (pgw#1059 amendment 4) but not the wire: the
@@ -1828,7 +1841,6 @@ def arm_axis_divergence(
     subject splits the obligation on THIS side of the boundary; what crosses
     it is compared here.
     """
-    envelope_block = meta.get(cell_key.EXPORT_ENVELOPE_KEY)
     child: Dict[str, str] = {
         "family": str(meta.get("family") or ""),
         "format": str(meta.get("format") or ""),
@@ -1836,9 +1848,6 @@ def arm_axis_divergence(
             str(meta.get("weight_lane") or ""),
             int(meta.get("lora_bucket") or 0)),
         "sm": str(meta.get("sm") or ""),
-        "envelope": (
-            cell_key.envelope_digest(envelope_block)
-            if isinstance(envelope_block, dict) and envelope_block else ""),
         "env_seal": env_seal.seal_digest(
             dict(meta.get(env_seal.SEAL_KEY) or {})),
         "toolchain": cell_key.toolchain_axis_digest(
