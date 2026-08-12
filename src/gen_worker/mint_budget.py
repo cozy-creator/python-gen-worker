@@ -108,6 +108,27 @@ class MintBudget:
     #: 21.48 GiB free.
     cap_bytes: int = 0
 
+    @property
+    def card_bytes(self) -> int:
+        """th#1800: the TOTAL device memory a card must carry to admit this
+        mint at all — the server's own resident set plus the child's whole ask.
+
+        A decline that says only "not here" cannot be acted on; §4.28 leaves
+        exactly one way to get a cell for a family that does not fit
+        (*"pre-warming a release/SKU = boot an ordinary serving pod there"*),
+        and acting on that needs a card CLASS, not a shortfall. wan-2.2-t2v-a14b
+        declined at ``resident=40.65 need~=72.54`` on an 80 GiB H100 — the H200
+        that admits it is a fact of THIS number (113.19 GiB), and it had to be
+        re-derived by hand from a log line before it could be stated.
+
+        ``resident_bytes`` is added because the server's weights are already
+        allocated and therefore already outside ``free_bytes``: the card must
+        hold both processes, not just the child.
+        """
+        if not self.probed:
+            return 0
+        return self.resident_bytes + self.need_bytes
+
     def line(self, event: str, reason: str) -> str:
         """The one structured line a decline logs and puts on the wire."""
         if not self.probed:
@@ -119,6 +140,7 @@ class MintBudget:
             f"activation={_gib(self.activation_bytes)}"
             f"({'measured' if self.measured else 'estimated'}) "
             f"cap={_gib(self.cap_bytes)} "
+            f"card>={_gib(self.card_bytes)} "
             f"cache_slack={_gib(self.cache_slack_bytes)}"
         )
 
