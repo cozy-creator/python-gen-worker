@@ -58,3 +58,30 @@ class Staged:
             format="webp", as_type=ImageAsset,
         )
         return GenOut(image=asset)
+
+
+@endpoint
+class ProgressOnly:
+    """pgw#1154: the OTHER half of the fleet — an endpoint that drives its own
+    step loop and reports it with ``ctx.progress(..., step=, total=)`` instead
+    of the shared ``diffusers_step_callback``. This is minimax-h3's, ltx's
+    stage-1, anima's and hidream's shape (a DiffSynth ``progress_bar_cmd``
+    shim), and it used to produce NO denoise window at all: no `total.prep`,
+    no `total.tail`, no `class.gpu_busy`, the whole handler in
+    `resid.unattributed`. Nothing here brackets a stage on purpose."""
+
+    def progress_generate(self, ctx: RequestContext, data: GenIn) -> GenOut:
+        time.sleep(TEXT_ENCODE_S)  # prep: un-bracketed, like the real ones
+
+        for i in range(STEPS):
+            time.sleep(STEP_S)
+            ctx.progress((i + 1) / STEPS, "denoise", step=i + 1, total=STEPS)
+
+        time.sleep(DECODE_S)  # tail: un-bracketed VAE-decode stand-in
+
+        image = Image.effect_noise((512, 512), 64).convert("RGB")
+        asset = gw_io.write_image(
+            ctx, f"outputs/{ctx.request_id}/image.webp", image,
+            format="webp", as_type=ImageAsset,
+        )
+        return GenOut(image=asset)
