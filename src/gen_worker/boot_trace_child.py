@@ -64,6 +64,13 @@ from typing import Any, Dict, List
 
 import msgspec
 
+from .child_preflight import (
+    PreflightRefused,
+    assert_slots_resolvable,
+    bind_slots,
+    pick_compile_target,
+    select_specs,
+)
 from .boot_key import (
     CODE_DIGEST, EXIT_BAD_JOB, EXIT_OK, EXIT_REFUSED, TraceJob, TraceReport,
 )
@@ -151,10 +158,6 @@ def run(job: TraceJob) -> int:
     from . import aot_mint, fleet_cells
     from .cli.run import run_setup
     from .registry import collect_endpoints
-    from .mint_child import (
-        MintChildRefused, assert_slots_resolvable, bind_slots,
-        pick_compile_target, select_specs,
-    )
     from .models import structure_only
 
     t_setup = time.monotonic()
@@ -165,7 +168,7 @@ def run(job: TraceJob) -> int:
         assert_slots_resolvable(
             siblings, job.slots,
             what=f"boot key derivation for {job.function!r}")
-    except MintChildRefused as exc:
+    except PreflightRefused as exc:
         return _fail(report_path, "slots_unresolvable", str(exc))
 
     cfg = job.cfg
@@ -193,7 +196,7 @@ def run(job: TraceJob) -> int:
 
     try:
         _slot, pipeline = pick_compile_target(loaded, cfg)
-    except MintChildRefused as exc:
+    except PreflightRefused as exc:
         return _fail(report_path, "no_compile_target", str(exc))
 
     resident = off_host_tensors(pipeline)

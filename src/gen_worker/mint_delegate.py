@@ -42,6 +42,8 @@ from . import boot_phases
 from . import compile_posture
 from . import mint_workers
 from . import mint_process
+from .child_contract import (
+    CompileSpec, MintFrame, MintSlot)
 from . import progress as progress_mod
 from .mint_process import MintOutcome, MintRequest
 
@@ -84,8 +86,8 @@ class MintTask:
     # pgw#974: the parent's resolution of each setup slot — identity, bytes and
     # pgw#617 composition in ONE value, resolved together in
     # `_setup_locked_inner` and carried together from here to the child. See
-    # `mint_process.MintSlot`.
-    slots: Dict[str, mint_process.MintSlot] = field(default_factory=dict)
+    # `child_contract.MintSlot`.
+    slots: Dict[str, MintSlot] = field(default_factory=dict)
     weight_lane: str = ""
     execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -131,7 +133,7 @@ FAILED = "failed"
 ABANDONED = mint_process.ABANDONED
 
 
-def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
+def cfg_spec(cfg: Any) -> CompileSpec:
     """Flatten the parent's ``CompileCell`` for the wire.
 
     The parent states the contract because the class-scoped guidance/text-len
@@ -140,7 +142,7 @@ def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
     parent asked for. It carries what the child READS and nothing else
     (pgw#1034) — the child computes no key, so this is not a key-parity wire.
     """
-    return mint_process.CompileCellSpec(
+    return CompileSpec(
         shapes=tuple(tuple(int(v) for v in row) for row in (cfg.shapes or ())),
         targets=tuple(str(t) for t in (cfg.targets or ())),
         family=str(getattr(cfg, "family", "") or ""),
@@ -262,7 +264,7 @@ def _bank_device_peaks(phases: Any, *, weight_lane: str) -> int:
 
 
 def _on_frame(act: Any, watch: Optional[Watcher] = None) -> Any:
-    def _apply(frame: mint_process.MintFrame) -> None:
+    def _apply(frame: MintFrame) -> None:
         # No new protocol: the child's phase lands on the SAME
         # self_mint_compile activity the hub already reads, and ships on the
         # ordinary 10s beat — which now actually fires, because nothing on
@@ -343,7 +345,7 @@ def _on_evidence(act: Any) -> Any:
 #: fleet passes nothing and behaves exactly as before; ``local_serve`` passes a
 #: terminal renderer, because a 20-minute compile a user cannot see is a
 #: support ticket regardless of how correct it is.
-Watcher = Callable[[mint_process.MintFrame], None]
+Watcher = Callable[[MintFrame], None]
 
 
 async def build_cell(

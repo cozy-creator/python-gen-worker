@@ -293,7 +293,7 @@ def arm_identity(
     # is the canonical form the cozy-local store verdict and the JIT semantic
     # tag already read), so the obligation and the contract cannot disagree
     # about what was declared. ``targets`` keeps DECLARATION ORDER: the child
-    # picks its compile target first-match (``mint_child.pick_compile_target``),
+    # picks its compile target first-match (``child_preflight.pick_compile_target``),
     # so the order is meaning, not presentation.
     declared = cc.declared_compile_facts(
         cfg, lora_bucket_override=int(lora_bucket or 0))

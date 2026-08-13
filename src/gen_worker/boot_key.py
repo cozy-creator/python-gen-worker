@@ -99,7 +99,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import msgspec
 
 from . import aot_serve, boot_phases, cell_key, compile_cache as cc, env_seal
-from .mint_process import CompileCellSpec, MintSlot, slot_subjects
+from .child_contract import CompileSpec, MintSlot, slot_subjects
 from .postmortem import cpu_quota_cores, effective_cpu_count
 
 logger = logging.getLogger(__name__)
@@ -176,7 +176,7 @@ class TraceJob(msgspec.Struct, frozen=True, kw_only=True):
     function: str
     modules: Tuple[str, ...]
     family: str
-    cfg: CompileCellSpec
+    cfg: CompileSpec
     slots: Dict[str, MintSlot] = {}
     #: This child's share of the declaration's row order, ``rows[i::K]``.
     #: Sharded by INDEX and not by name because the adapter fork is decided by
@@ -365,7 +365,7 @@ MEMO_FILENAME = "boot-key-graphs.json"
 
 
 def closure_digest(
-    family: str, cfg: CompileCellSpec, *, function: str = "",
+    family: str, cfg: CompileSpec, *, function: str = "",
     slots: Optional[Mapping[str, MintSlot]] = None,
 ) -> str:
     """The memo's key: what a per-class graph hash is a pure function OF.
@@ -390,7 +390,7 @@ def closure_digest(
     Deliberately NOT included: sm, toolchain, env seal. They are key AXES and
     they re-derive every boot in milliseconds; folding them in here would make
     the memo miss on facts whose whole point is that they are cheap to restate.
-    Nor the slots' local PATHS — see ``mint_process.slot_subjects``: where the
+    Nor the slots' local PATHS — see ``child_contract.slot_subjects``: where the
     bytes landed on this disk is not what was traced.
     """
     facts = {
@@ -888,7 +888,7 @@ def derive(
     function: str,
     modules: Sequence[str],
     family: str,
-    cfg: CompileCellSpec,
+    cfg: CompileSpec,
     slots: Mapping[str, MintSlot],
     declared_hint: int,
     envelope: Mapping[str, Any],

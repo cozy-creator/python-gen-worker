@@ -18,7 +18,7 @@ from typing import Any, Dict
 import pytest
 
 from gen_worker import aot_mint, aot_serve, boot_key, cell_key
-from gen_worker.mint_process import CompileCellSpec
+from gen_worker.child_contract import CompileSpec
 
 
 # ---------------------------------------------------------------------------
@@ -328,12 +328,12 @@ def test_the_closure_digest_moves_on_code_and_on_declaration(
     in milliseconds, and folding them in here would make the memo miss on
     facts whose whole point is that they are cheap to restate.
     """
-    cfg = CompileCellSpec(
+    cfg = CompileSpec(
         family="tiny", targets=("unet",), shapes=((1024, 1024),),
         text_lens=(77,), guidance_scales=(7.5,))
     base = boot_key.closure_digest("tiny", cfg)
 
-    wider = CompileCellSpec(
+    wider = CompileSpec(
         family="tiny", targets=("unet",),
         shapes=((1024, 1024), (768, 768)),
         text_lens=(77,), guidance_scales=(7.5,))
@@ -350,7 +350,7 @@ def test_the_closure_digest_ignores_the_re_derived_axes(axis: str) -> None:
     """Stated as a property of the recorded facts rather than by monkeypatching
     a probe: the digest's inputs are enumerated in one dict, and neither the
     sm nor the toolchain is among them."""
-    cfg = CompileCellSpec(family="tiny", targets=("unet",))
+    cfg = CompileSpec(family="tiny", targets=("unet",))
     # The digest is over a literal fact block; assert the axis names appear
     # nowhere in the source of that block.
     import inspect
@@ -478,7 +478,7 @@ def test_a_child_that_produced_no_hashes_refuses_the_whole_derivation(
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+            cfg=CompileSpec(family="tiny", targets=("unet",)),
             slots={}, declared_hint=2, envelope=_ENVELOPE,
             work_root=tmp_path)
     assert err.value.reason == "structure_unsupported"
@@ -489,7 +489,7 @@ def test_a_declaration_with_no_classes_refuses(tmp_path: Path) -> None:
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny"), slots={}, declared_hint=0,
+            cfg=CompileSpec(family="tiny"), slots={}, declared_hint=0,
             envelope=_ENVELOPE, work_root=tmp_path)
     assert err.value.reason == "no_classes"
 
@@ -507,7 +507,7 @@ def test_a_child_running_drifted_source_refuses_rather_than_being_believed(
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+            cfg=CompileSpec(family="tiny", targets=("unet",)),
             slots={}, declared_hint=1, envelope=_ENVELOPE,
             work_root=tmp_path)
     assert err.value.reason == "code_drift"
@@ -527,7 +527,7 @@ def test_a_derivation_that_returns_an_incomplete_class_set_refuses(
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+            cfg=CompileSpec(family="tiny", targets=("unet",)),
             slots={}, declared_hint=2, envelope=_ENVELOPE,
             work_root=tmp_path)
     assert err.value.reason == "class_set_gap"
@@ -556,7 +556,7 @@ def test_children_that_enumerated_different_class_sets_refuse(
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+            cfg=CompileSpec(family="tiny", targets=("unet",)),
             slots={}, declared_hint=2, envelope=_ENVELOPE,
             work_root=tmp_path)
     assert err.value.reason == "class_set_disagreement"
@@ -587,7 +587,7 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     monkeypatch.setattr(boot_key, "_run_children", _children)
     kwargs: Dict[str, Any] = dict(
         function="fn", modules=("m",), family="tiny",
-        cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+        cfg=CompileSpec(family="tiny", targets=("unet",)),
         slots={}, declared_hint=2, envelope=_ENVELOPE,
         work_root=tmp_path, memo_dir=tmp_path)
 

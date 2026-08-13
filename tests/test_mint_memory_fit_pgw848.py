@@ -48,6 +48,7 @@ from typing import Any, Dict
 
 import pytest
 
+from gen_worker import child_contract
 from gen_worker import aot_compile_pool as pool
 from gen_worker import mint_workers
 
@@ -249,7 +250,7 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
     ever read the field. This drives the REAL ``build_cell`` bookkeeping
     against a real ``MintOutcome`` and asserts the ask lands in the bank.
     """
-    from gen_worker import mint_delegate, mint_process
+    from gen_worker import mint_process
     from gen_worker import aot_mint
 
     fam, execution_lane = "pgw848-relay", "w8a8-lora64"
@@ -279,7 +280,7 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
     request = mint_process.MintRequest(
         function="f", modules=(), family=fam, arm_token="k", target="t",
         work_root="c", report="r",
-        cfg=mint_delegate.mint_process.CompileCellSpec(),
+        cfg=child_contract.CompileSpec(),
         entry_peak_rss_bytes=banked)
     assert request.entry_peak_rss_bytes == 6 * _GIB, (
         "a banked measurement that cannot cross the process boundary is a "

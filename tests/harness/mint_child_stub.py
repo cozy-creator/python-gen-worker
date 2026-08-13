@@ -30,7 +30,8 @@ from pathlib import Path
 
 import msgspec
 
-from gen_worker.mint_process import MintReport, MintRequest, frame_line  # type: ignore
+from gen_worker.child_contract import frame_line  # type: ignore
+from gen_worker.mint_process import MintReport, MintRequest  # type: ignore
 
 
 def _seconds() -> float:

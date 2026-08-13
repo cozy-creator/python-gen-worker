@@ -50,9 +50,11 @@ from typing import Any, Dict, Iterator, List, Tuple
 import msgspec
 import pytest
 
+from gen_worker import child_preflight
 from gen_worker import activity, aot_mint, boot_trace_child, boot_key
 from gen_worker import measure_child, mint_child
-from gen_worker.mint_process import CompileCellSpec, MintRequest, MintSlot
+from gen_worker.child_contract import CompileSpec, MintSlot
+from gen_worker.mint_process import MintRequest
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -127,13 +129,13 @@ def blocked_declaration(micro_src: None) -> Iterator[None]:
         ec.register_export_declaration(decl.DECLARATION, replace=True)
 
 
-def _cfg() -> CompileCellSpec:
+def _cfg() -> CompileSpec:
     from gen_worker.registry import collect_endpoints
 
     specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main_w8a8"])
     spec = next(s for s in specs if s.name == "generate-w8a8")
     cell = spec.compile_cell()
-    return CompileCellSpec(
+    return CompileSpec(
         shapes=tuple(tuple(int(v) for v in row) for row in (cell.shapes or ())),
         targets=tuple(str(t) for t in (cell.targets or ())),
         family=str(cell.family or ""),
@@ -204,7 +206,7 @@ def test_both_front_doors_are_shut_and_the_measure_child_runs_anyway(
     family because its tree is a quantized artifact. Door 3 — the measure
     child runs, on real weights, and says so.
     """
-    with pytest.raises(mint_child.MintChildRefused) as refusal:
+    with pytest.raises(child_preflight.PreflightRefused) as refusal:
         mint_child._assert_family_mintable(FAMILY)
     assert BLOCKER_ID in str(refusal.value)
 
@@ -258,7 +260,7 @@ def test_the_mint_gate_is_UNTOUCHED_by_a_measurement(
     measure_child.run(
         _measure_job(w8a8_tree), tmp_path / "m.json", compile_entries=False)
 
-    with pytest.raises(mint_child.MintChildRefused) as refusal:
+    with pytest.raises(child_preflight.PreflightRefused) as refusal:
         mint_child._assert_family_mintable(FAMILY)
     assert BLOCKER_ID in str(refusal.value)
 
@@ -322,7 +324,7 @@ def test_a_full_mint_request_decodes_with_its_destinations_dropped(
 ) -> None:
     """The fence, exercised rather than asserted: a REAL MintRequest, encoded
     and decoded as the operator's file, arrives carrying no destination."""
-    cfg = CompileCellSpec(family=FAMILY, targets=("transformer",))
+    cfg = CompileSpec(family=FAMILY, targets=("transformer",))
     request = MintRequest(
         function="generate-w8a8", modules=("micro_diffusion.main_w8a8",), family=FAMILY,
         arm_token="arm1-deadbeef", target=str(tmp_path / "cell.tar.gz"),

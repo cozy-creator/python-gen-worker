@@ -54,6 +54,8 @@ import torch.nn as nn  # noqa: E402
 
 from torch._dynamo.exc import Unsupported  # noqa: E402
 
+from gen_worker import child_preflight
+from gen_worker import child_contract
 from gen_worker import aot_mint, aot_serve, compile_cache  # noqa: E402
 from gen_worker.api.decorators import Compile  # noqa: E402
 from gen_worker.api.export_contract import (  # noqa: E402
@@ -367,10 +369,10 @@ def _drive_to_load(
         target=str(tmp_path / "cell.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
-        cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
+        cfg=child_contract.CompileSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),
         handler_proof="test: the parent proved it",
-        slots={"pipeline": mp.MintSlot(
+        slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/composed",
                          tag="prod"),
             path=str(tree))},
@@ -488,13 +490,13 @@ def test_the_mint_refuses_ONCE_before_export_naming_the_construct() -> None:
     request = mp.MintRequest(
         function="f", modules=(), family="sdxl", arm_token="a",
         target="t", work_root="w", report="r",
-        cfg=mp.CompileCellSpec(family="sdxl", targets=("unet",)))
+        cfg=child_contract.CompileSpec(family="sdxl", targets=("unet",)))
 
     # A traceable pipeline passes silently.
     mint_child.assert_traceable_as_loaded(
         types.SimpleNamespace(unet=TinyUNet()), request)
 
-    with pytest.raises(mint_child.MintChildRefused) as caught:
+    with pytest.raises(child_preflight.PreflightRefused) as caught:
         mint_child.assert_traceable_as_loaded(_offloaded(), request)
 
     said = str(caught.value)

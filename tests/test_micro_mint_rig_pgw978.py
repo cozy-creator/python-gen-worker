@@ -145,7 +145,7 @@ def test_a_slot_with_bytes_and_no_identity_cannot_reach_the_child() -> None:
     this row is what proves the rig did not route around the guard by
     hand-rolling a dict.
     """
-    from gen_worker.mint_process import MintSlot
+    from gen_worker.child_contract import MintSlot
 
     with pytest.raises(TypeError):
         MintSlot(path="/tmp/x")  # type: ignore[call-arg]  # no ref

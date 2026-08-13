@@ -46,6 +46,8 @@ from typing import Dict, Tuple
 import msgspec
 import pytest
 
+from gen_worker import child_preflight
+from gen_worker import child_contract
 from gen_worker import mint_child, mint_delegate
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef
@@ -91,7 +93,7 @@ def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
     task = mint_delegate.MintTask(
         pending=pending, pipe=None, function=FUNCTION,
         modules=(ENDPOINT_MODULE,),
-        slots={"pipeline": mp.MintSlot(
+        slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="rig/tiny-diffusion",
                          tag="prod"),
             path=str(checkpoint))},
@@ -221,7 +223,7 @@ def test_the_refusal_type_is_the_sdks_own_bad_input_type() -> None:
 
     refusal = mint_child._declaration_refusal(
         ValidationError("invalid lora rank bucket 8 (valid: (16, 32, 64, 128))"))
-    assert isinstance(refusal, mint_child.MintChildRefused), (
+    assert isinstance(refusal, child_preflight.PreflightRefused), (
         "it must land on the type the child already exits EXIT_REFUSED for — "
         "one refusal path, not two")
     assert "invalid lora rank bucket 8" in str(refusal)

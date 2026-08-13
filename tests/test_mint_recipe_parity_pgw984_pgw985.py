@@ -31,7 +31,7 @@ and each is a class:
 2. A bare ``RuntimeError`` exits 1, which classifies ``CRASHED`` — the
    retryable class. On a pod that is a second billed mint for a condition the
    first attempt had already settled. The AOT recipe types the identical
-   condition ``MintChildRefused`` -> ``EXIT_REFUSED`` -> terminal.
+   condition ``PreflightRefused`` -> ``EXIT_REFUSED`` -> terminal.
 
 pgw#1010 deleted the dynamo recipe's ARTIFACT (it had no consumer), so the
 child now mints one kind. Both findings survive intact and are asserted where
@@ -54,6 +54,8 @@ from typing import Any, Dict, List, Tuple
 import msgspec
 import pytest
 
+from gen_worker import child_preflight
+from gen_worker import child_contract
 from gen_worker import compile_cache as cc
 from gen_worker import mint_child, mint_delegate
 from gen_worker import mint_process as mp
@@ -189,7 +191,7 @@ def _request(
     task = mint_delegate.MintTask(
         pending=pending, pipe=None, function=FUNCTION,
         modules=(ENDPOINT_MODULE,),
-        slots={"pipeline": mp.MintSlot(
+        slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="rig/tiny-diffusion",
                          tag="prod"),
             path=str(checkpoint))},
@@ -336,7 +338,7 @@ def test_an_aot_mint_cannot_seal_for_a_handler_that_cannot_run(
 
     monkeypatch.setattr(ep.MicroRigEndpoint, "rig_generate", _broken)
 
-    with pytest.raises(mint_child.MintChildRefused) as exc:
+    with pytest.raises(child_preflight.PreflightRefused) as exc:
         mint_child.mint(_request(checkpoint, tmp_path / "w"))
 
     text = str(exc.value)

@@ -82,7 +82,7 @@ def _trace(
 
     from gen_worker import aot_mint, fleet_cells
     from gen_worker.cli.run import run_setup
-    from gen_worker.mint_child import pick_compile_target
+    from gen_worker.child_preflight import pick_compile_target
     from gen_worker.registry import collect_endpoints
 
     veh = rig_vehicles.vehicle(vehicle_name)

@@ -41,6 +41,8 @@ from typing import Any, Dict, List, Tuple
 import msgspec
 import pytest
 
+from gen_worker import child_preflight
+from gen_worker import child_contract
 from gen_worker import fleet_cells, mint_child, mint_delegate
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef, wire_ref
@@ -247,7 +249,7 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
                         dynamic=(), lora_bucket=0, guidance_scales=(),
                         text_lens=()), target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path, recipe="aot")
-    resolved = mp.MintSlot(
+    resolved = child_contract.MintSlot(
         ref=ModelRef(source="tensorhub", path="harness/composed", tag="prod"),
         path="/cas/snapshots/sha256:cafe__xdeadbeef",
         component_paths={"vae": "/cas/snapshots/sha256:beef"})
@@ -291,8 +293,8 @@ def test_a_narrowed_tree_with_no_override_refuses_by_name(
     and a stack trace: the refusal names the SLOT and the reason, before a
     single weight is read."""
     base, _vae = trees
-    with pytest.raises(mint_child.MintChildRefused) as exc:
-        mint_child.assert_composable({"pipeline": mp.MintSlot(
+    with pytest.raises(child_preflight.PreflightRefused) as exc:
+        mint_child.assert_composable({"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/composed",
                          tag="prod"),
             path=str(base))})
@@ -308,14 +310,14 @@ def test_a_narrowed_tree_with_no_override_refuses_by_name(
         target=str(tmp_path / "cell.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
-        cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
+        cfg=child_contract.CompileSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),
-        slots={"pipeline": mp.MintSlot(
+        slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/composed",
                          tag="prod"),
             path=str(base))},
     )
-    with pytest.raises(mint_child.MintChildRefused):
+    with pytest.raises(child_preflight.PreflightRefused):
         mint_child.mint(request)
     assert not (tmp_path / "capture").exists(), (
         "the refusal must precede every side effect")
@@ -326,8 +328,8 @@ def test_a_complete_tree_never_demands_overrides(tmp_path: Path) -> None:
     a bare-digest (complete) tree is loadable alone and must stay that way."""
     ref = ModelRef(source="tensorhub", path="harness/composed", tag="prod")
 
-    def _one(key: str, **comps: str) -> Dict[str, mp.MintSlot]:
-        return {"pipeline": mp.MintSlot(
+    def _one(key: str, **comps: str) -> Dict[str, child_contract.MintSlot]:
+        return {"pipeline": child_contract.MintSlot(
             ref=ref, path=f"/cas/{key}", component_paths=dict(comps))}
 
     complete = snapshot_dir_key("sha256:cafe")
@@ -337,7 +339,7 @@ def test_a_complete_tree_never_demands_overrides(tmp_path: Path) -> None:
     mint_child.assert_composable(_one(complete))
     # A component-SCOPED subset is what the caller asked to fetch; loadable.
     mint_child.assert_composable(_one(subset))
-    with pytest.raises(mint_child.MintChildRefused):
+    with pytest.raises(child_preflight.PreflightRefused):
         mint_child.assert_composable(_one(narrowed))
     # With the override in hand, the same tree is composable.
     mint_child.assert_composable(_one(narrowed, vae="/cas/x"))

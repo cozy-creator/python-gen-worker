@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
+from gen_worker import child_preflight
 from gen_worker import aot_mint, fleet_cells, mint_delegate
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
@@ -518,7 +519,7 @@ def test_a_named_export_refusal_is_a_refusal_not_a_crash(
         arm_token="k", target=str(tmp_path / "cell.tar.gz"),
         work_root=str(tmp_path), report=str(tmp_path / "r.json"),
         cfg=cfg_spec(_Cfg()))
-    with pytest.raises(mint_child.MintChildRefused, match="lane held on dynamo"):
+    with pytest.raises(child_preflight.PreflightRefused, match="lane held on dynamo"):
         mint_child._mint_aot(
             request, _Pipe(), _Cfg(), tmp_path / "cell.tar.gz",
             started=0.0, sha256_file=lambda p: "x")

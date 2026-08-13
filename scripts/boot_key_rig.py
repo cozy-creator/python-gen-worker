@@ -73,7 +73,7 @@ def _vehicle(name: str) -> Any:
 
 def _slots(veh: Any, tree: Path) -> Dict[str, Any]:
     from gen_worker.api.binding import ModelRef
-    from gen_worker.mint_process import MintSlot
+    from gen_worker.child_contract import MintSlot
 
     return {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path=veh.ref_path, tag="prod"),
@@ -92,10 +92,10 @@ def _declared_hint(family: str) -> int:
 
 
 def _spec(veh: Any) -> Any:
-    from gen_worker.mint_process import CompileCellSpec
+    from gen_worker.child_contract import CompileSpec
 
     cfg = veh.compile_cell()
-    return CompileCellSpec(
+    return CompileSpec(
         shapes=tuple(tuple(int(v) for v in row) for row in (cfg.shapes or ())),
         targets=tuple(str(t) for t in (cfg.targets or ())),
         family=str(cfg.family or ""),
@@ -150,7 +150,7 @@ def real_weight_class_hashes(veh: Any, tree: Path) -> Dict[str, str]:
     """
     from gen_worker import aot_mint, boot_key, fleet_cells
     from gen_worker.cli.run import run_setup
-    from gen_worker.mint_child import pick_compile_target
+    from gen_worker.child_preflight import pick_compile_target
     from gen_worker.registry import collect_endpoints
 
     cfg = veh.compile_cell()

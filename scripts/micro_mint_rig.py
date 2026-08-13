@@ -256,7 +256,7 @@ def _mint_slot(tree: Path, ref_path: str) -> Any:
     exercise.
     """
     from gen_worker.api.binding import ModelRef
-    from gen_worker.mint_process import MintSlot
+    from gen_worker.child_contract import MintSlot
 
     return MintSlot(
         ref=ModelRef(source="tensorhub", path=ref_path, tag="prod"),

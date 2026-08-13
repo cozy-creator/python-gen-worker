@@ -52,6 +52,8 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
+from gen_worker import child_preflight
+from gen_worker import child_contract
 from gen_worker import handler_proof
 from gen_worker import mint_child, mint_delegate, registry, warmup
 from gen_worker import mint_process as mp
@@ -148,7 +150,7 @@ def _request(
         spec=SimpleNamespace(name=function), instance=object(), snapshots=None,
         pendings={}, pipes={},
         modules=(CATALOG_MODULE,),
-        slots=({"pipeline": mp.MintSlot(ref=binding, path=str(tree))}
+        slots=({"pipeline": child_contract.MintSlot(ref=binding, path=str(tree))}
                if binding is not None else {}),
     )
     task = mint_delegate.MintTask(
@@ -165,13 +167,13 @@ def _child_specs(request: mp.MintRequest) -> Tuple[Any, List[Any]]:
     rediscover, select the class-scoped sibling set, install the parent's
     bindings, and refuse if they cannot resolve."""
     specs = registry.collect_endpoints(list(request.modules))
-    chosen, siblings = mint_child.select_specs(specs, request.function)
-    mint_child.bind_slots(siblings, request.slots)
+    chosen, siblings = child_preflight.select_specs(specs, request.function)
+    child_preflight.bind_slots(siblings, request.slots)
     # pgw#1089 took the whole request out of this signature: the boot-trace
     # child resolves the same slots for the same reason and must get the same
     # refusal, and a second copy of the check would be a second answer to "can
     # this process trace the checkpoint the parent serves".
-    mint_child.assert_slots_resolvable(
+    child_preflight.assert_slots_resolvable(
         siblings, request.slots, what=mint_child.mint_identity(request))
     return chosen, siblings
 
@@ -299,7 +301,7 @@ def test_an_unbound_required_slot_refuses_by_name_before_the_load(
     """
     tree, _binding = served
     request = _request(tree, None, tmp_path)
-    with pytest.raises(mint_child.MintChildRefused) as exc:
+    with pytest.raises(child_preflight.PreflightRefused) as exc:
         _child_specs(request)
     text = str(exc.value)
     for fact in ("pgw969", "ck1-catalog", "w8a8-lora64", "catalog-generate",
@@ -354,10 +356,10 @@ def test_a_bound_slot_that_still_fails_names_the_divergence(
         tmp_path, ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
         tmp_path)
     request = msgspec.structs.replace(
-        request, slots={"nonexistent-slot": mp.MintSlot(
+        request, slots={"nonexistent-slot": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
             path=str(tmp_path))})
-    with pytest.raises(mint_child.MintChildRefused) as exc:
+    with pytest.raises(child_preflight.PreflightRefused) as exc:
         _child_specs(request)
     assert "sent no resolved binding" in str(exc.value)
     assert "nonexistent-slot" in str(exc.value), (
@@ -382,10 +384,10 @@ def test_a_code_default_never_stands_in_for_the_parents_pick(
     declared = wire_ref(toy.JUGGLE_DECLARED)
     picked = ModelRef(source="tensorhub", path="harness/juggle-pick", tag="prod")
     specs = registry.collect_endpoints(["harness.toy_endpoints"])
-    chosen, siblings = mint_child.select_specs(specs, "juggle-echo")
+    chosen, siblings = child_preflight.select_specs(specs, "juggle-echo")
     assert wire_ref(chosen.models["pipeline"]) == declared
 
-    mint_child.bind_slots(siblings, {"pipeline": mp.MintSlot(
+    child_preflight.bind_slots(siblings, {"pipeline": child_contract.MintSlot(
         ref=picked, path=str(tmp_path))})
     with __import__("tempfile").TemporaryDirectory() as tmp:
         ctx = warmup.warm_context(
@@ -433,13 +435,13 @@ def test_a_slot_with_bytes_and_no_identity_cannot_be_constructed() -> None:
     with two defaults. ``ref`` and ``path`` now have none.
     """
     with pytest.raises(TypeError):
-        mp.MintSlot(path="/cas/snapshots/sha256:cafe")   # type: ignore[call-arg]
+        child_contract.MintSlot(path="/cas/snapshots/sha256:cafe")   # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        mp.MintSlot(ref=ModelRef(                        # type: ignore[call-arg]
+        child_contract.MintSlot(ref=ModelRef(                        # type: ignore[call-arg]
             source="tensorhub", path="harness/pick", tag="prod"))
     # ...and the degenerate spelling of the same lie.
     with pytest.raises(ValueError):
-        mp.MintSlot(
+        child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
             path="")
 
@@ -468,5 +470,5 @@ def test_the_pods_wire_no_longer_decodes(
     doc["slots"] = {}
     empty = msgspec.json.decode(msgspec.json.encode(doc), type=mp.MintRequest)
     assert empty.slots == {}
-    with pytest.raises(mint_child.MintChildRefused):
+    with pytest.raises(child_preflight.PreflightRefused):
         _child_specs(empty)

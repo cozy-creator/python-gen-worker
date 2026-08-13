@@ -120,7 +120,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import msgspec
 
 from . import activity
-from .mint_process import CompileCellSpec, MintSlot
+from .child_contract import CompileSpec, MintSlot
+from .child_preflight import (
+    PreflightRefused,
+    assert_slots_resolvable,
+    bind_slots,
+    pick_compile_target,
+    select_specs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +191,7 @@ class MeasureJob(msgspec.Struct, frozen=True, kw_only=True):
 
     function: str
     modules: Tuple[str, ...]
-    cfg: CompileCellSpec
+    cfg: CompileSpec
     family: str = ""
     slots: Dict[str, MintSlot] = {}
     device: int = -1
@@ -213,7 +220,7 @@ class MeasureDocument(msgspec.Struct, frozen=True, kw_only=True):
     # The runtime envelope's input half.
     function: str = ""
     modules: Tuple[str, ...] = ()
-    cfg: Optional[CompileCellSpec] = None
+    cfg: Optional[CompileSpec] = None
     slots: Dict[str, MintSlot] = {}
     device: int = -1
     execution_lane: str = ""
@@ -375,10 +382,10 @@ def _discard(files: Sequence[str]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def load_document(raw: bytes) -> Tuple[MeasureDocument, CompileCellSpec]:
+def load_document(raw: bytes) -> Tuple[MeasureDocument, CompileSpec]:
     """Decode one request file into ``(document, flattened compile spec)``.
 
-    The committed payload IS a ``CompileCellSpec`` at top level, so the same
+    The committed payload IS a ``CompileSpec`` at top level, so the same
     bytes are read twice against two structs rather than sniffed for a
     discriminator: msgspec drops what each struct does not declare, and a
     document that carries neither half decodes to two empty structs and is
@@ -389,7 +396,7 @@ def load_document(raw: bytes) -> Tuple[MeasureDocument, CompileCellSpec]:
     """
     return (
         msgspec.json.decode(raw, type=MeasureDocument),
-        msgspec.json.decode(raw, type=CompileCellSpec),
+        msgspec.json.decode(raw, type=CompileSpec),
     )
 
 
@@ -509,7 +516,7 @@ def _function_for_family(specs: Sequence[Any], family: str) -> str:
 
 
 def resolve_job(
-    doc: MeasureDocument, flat: CompileCellSpec, *,
+    doc: MeasureDocument, flat: CompileSpec, *,
     function: str = "", slot_flags: Sequence[str] = (),
 ) -> MeasureJob:
     """Build the job the run needs from whichever document arrived.
@@ -519,7 +526,6 @@ def resolve_job(
     omits all live on the declaration, and reading them from anywhere else
     would be a second declaration.
     """
-    from .mint_child import MintChildRefused, select_specs
     from .registry import collect_endpoints
 
     modules = tuple(str(m) for m in doc.modules if str(m).strip())
@@ -567,7 +573,7 @@ def resolve_job(
         specs, family)
     try:
         chosen, _siblings = select_specs(specs, name)
-    except MintChildRefused as exc:
+    except PreflightRefused as exc:
         raise MeasureRefused("function_underivable", str(exc)) from exc
 
     if not cfg.targets:
@@ -634,10 +640,6 @@ def run(
     """Measure this job's declared class set. Never raises, never publishes."""
     from . import aot_declaration, aot_mint, compile_cache as cc, fleet_cells
     from .cli.run import run_setup
-    from .mint_child import (
-        MintChildRefused, assert_slots_resolvable, bind_slots,
-        pick_compile_target, select_specs,
-    )
     from .models import structure_only
     from .registry import collect_endpoints
 
@@ -657,7 +659,7 @@ def run(
                  f"aot/*.mint.json names ONE checkpoint (`source_ref`), so "
                  f"every other slot the endpoint's setup() requires is named "
                  f"with `--slot NAME=/path/to/tree`")
-    except MintChildRefused as exc:
+    except PreflightRefused as exc:
         return _fail(report_path, "slots_unresolvable", str(exc),
                      partial=partial)
 
@@ -702,7 +704,7 @@ def run(
 
     try:
         _slot, pipeline = pick_compile_target(loaded, cfg)
-    except MintChildRefused as exc:
+    except PreflightRefused as exc:
         return _fail(report_path, "no_compile_target", str(exc),
                      partial=partial)
 

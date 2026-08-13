@@ -33,6 +33,7 @@ from typing import Any, List
 
 import pytest
 
+from gen_worker import child_contract
 import gen_worker.executor as executor_mod
 from gen_worker import fleet_cells, mint_delegate, mint_workers
 from gen_worker.api.binding import ModelRef
@@ -55,10 +56,10 @@ STUB_MODULE = "harness.mint_child_stub"
 SDXL_REF = ModelRef(source="tensorhub", path="harness/sdxl", tag="prod")
 
 
-def _slot(path: str) -> mp.MintSlot:
+def _slot(path: str) -> child_contract.MintSlot:
     """One resolved slot. ``ref`` has no default (pgw#974), so a test cannot
     describe bytes without saying whose they are either."""
-    return mp.MintSlot(ref=SDXL_REF, path=path)
+    return child_contract.MintSlot(ref=SDXL_REF, path=path)
 
 
 class _Pipe:

@@ -231,7 +231,7 @@ def test_the_real_load_seam_raises_NOT_HONORED_on_a_swallowed_injection(
     pipeline drops the injection and carries a real module — so
     ``_load_injected_model`` raises ``StructureNotHonored`` (NOT the buildable
     strand). The mint child's three-line handler turns exactly this type into a
-    ``MintChildRefused`` so the real-weight export never starts; conflating it
+    ``PreflightRefused`` so the real-weight export never starts; conflating it
     with the strand is what let z-image OOM ~40 GiB as `retryable` (ie#638)."""
     from gen_worker.cli import run as run_mod
     from gen_worker.models import provision
