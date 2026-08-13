@@ -28,6 +28,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Type,
     TypedDict,
 )
 
@@ -93,7 +94,7 @@ from ..api.types import (
 )
 
 
-class _SlotTable(Mapping):
+class _SlotTable(Mapping[str, "ResolvedSlot[Any]"]):
     """``ctx.slots`` — a read-only mapping of slot name -> ResolvedSlot.
 
     Built once at context construction (executor.py::_run_job_pinned / the
@@ -139,13 +140,17 @@ class _SlotTable(Mapping):
         return len(set(self._resolved) | set(self._errors))
 
 
-def _copy_context_metadata(value: Any) -> Any:
+def _copy_context_metadata(value: _MetaT) -> _MetaT:
+    # pgw#1202: a structure-preserving deep copy. mypy cannot prove the rebuilt
+    # dict/list/tuple is the SAME type it was handed, so the narrowing is a
+    # single `_cast` at this definition rather than an `Any` escaping into every
+    # caller — `ctx.models` and `ctx.loras` are typed because of it.
     if isinstance(value, dict):
-        return {str(k): _copy_context_metadata(v) for k, v in value.items()}
+        return _cast(_MetaT, {str(k): _copy_context_metadata(v) for k, v in value.items()})
     if isinstance(value, list):
-        return [_copy_context_metadata(v) for v in value]
+        return _cast(_MetaT, [_copy_context_metadata(v) for v in value])
     if isinstance(value, tuple):
-        return tuple(_copy_context_metadata(v) for v in value)
+        return _cast(_MetaT, tuple(_copy_context_metadata(v) for v in value))
     return value
 
 
@@ -234,7 +239,7 @@ def _refuse_without_disk_room(root: Path, declared_bytes: int, what: str) -> Non
         )
 
 
-def _as_asset(asset: Asset, cls: type) -> Any:
+def _as_asset(asset: Asset, cls: Type[_AssetT]) -> _AssetT:
     """Re-type a plain Asset as a media Asset subclass (same fields)."""
     kw = {f: getattr(asset, f) for f in asset.__struct_fields__}
     return cls(**kw)
@@ -270,6 +275,10 @@ from ..callout import CalloutClient
 from ..callout import ChildRequest
 
 D = TypeVar("D", bound=GenerationDefaults)
+#: pgw#1202: these two helpers are shape-preserving, so saying so removes an
+#: Any from every caller rather than at each call site.
+_MetaT = TypeVar("_MetaT")
+_AssetT = TypeVar("_AssetT", bound=Asset)
 
 
 class RequestContext(Generic[D]):
@@ -494,7 +503,11 @@ class RequestContext(Generic[D]):
         values still win over these — that precedence is handler logic.
         Non-root lanes of a multi-slot class read
         ``ctx.slots[name].defaults`` explicitly."""
-        d = self._root_slot().defaults
+        # `_root_slot()` erases to ResolvedSlot[Any]; the ctx's own D is
+        # what the root slot resolves to. Stating Optional[D] here keeps
+        # the existing runtime guard below load-bearing AND lets the
+        # return be D rather than Any (pgw#1202).
+        d: Optional[D] = self._root_slot().defaults
         if d is None:
             raise ValueError(
                 "ctx.defaults: no config schema derived for this handler — "
@@ -1349,6 +1362,7 @@ class RequestContext(Generic[D]):
             ref = _normalize_output_ref(str(ref))
             if Path(ref).suffix == "":
                 ref += f".{fmt}"
+        asset: VideoAsset
         if isinstance(video, (bytes, bytearray)):
             asset = _as_asset(self.save_bytes(ref, bytes(video)), VideoAsset)
         else:
@@ -1715,7 +1729,7 @@ class _PublisherMixin:
         self._require_repo_job_scope_for_tensors(ref)
 
         return _RequestOutputStream(
-            ctx=_cast("RequestContext", self),
+            ctx=_cast("RequestContext[Any]", self),
             ref=ref,
             kind="checkpoint",
             format=format,
@@ -1975,7 +1989,7 @@ class _PublisherMixin:
         return str(target_root)
 
 
-class ConversionContext(_PublisherMixin, RequestContext):
+class ConversionContext(_PublisherMixin, RequestContext[GenerationDefaults]):
     """RequestContext for ``@conversion(sub_kind="format-conversion")``
     and similar conversion endpoints.
 
@@ -2021,7 +2035,7 @@ class ConversionContext(_PublisherMixin, RequestContext):
             )
         return Path(tempfile.mkdtemp(dir=str(self._mktemp_root)))
 
-class DatasetContext(_PublisherMixin, RequestContext):
+class DatasetContext(_PublisherMixin, RequestContext[GenerationDefaults]):
     """RequestContext for dataset-producing endpoints (``@dataset``).
 
     ``resolve_dataset`` / ``save_checkpoint`` come from ``_PublisherMixin``;
@@ -2047,7 +2061,7 @@ class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
     advice: Optional[str] = None
 
 
-class TrainingContext(_PublisherMixin, RequestContext):
+class TrainingContext(_PublisherMixin, RequestContext[GenerationDefaults]):
     """RequestContext for ``@endpoint(kind="training")`` endpoints.
 
     From ``_PublisherMixin``: ``save_checkpoint``,
