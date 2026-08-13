@@ -196,13 +196,15 @@ def test_an_incomplete_answer_is_a_typed_refusal_not_a_miss() -> None:
 
 def test_a_non_key_is_refused_before_the_hub_is_dialled(stub) -> None:
     sent, _resp = stub
-    # `ck1-short` is refused for its LENGTH, which is why the WELL-FORMED ck1
-    # key sits beside it: pgw#1176 re-keyed the grammar, and a `ck1` key names
-    # a 36-entry all-or-nothing cell this runtime cannot arm at all. It must
-    # fail HERE, at the comparison, rather than late inside a per-entry path —
-    # so the prefix, not the shape, has to be what refuses it.
-    for bad in ("", "sdxl", "arm1-" + "ab" * 28, "ck1-short",
-                "ck1-" + "0" * 56):
+    # Every entry here is refused for its SHAPE, which after th#1897 is the
+    # only thing either side of the wire refuses: the grammar never rules on
+    # scheme, so that a newer fleet's key stays addressable by an older hub.
+    # A WELL-FORMED `ck1-<56 hex>` therefore no longer belongs in this list —
+    # it parses, and then misses on the axes, which is where the re-key is
+    # actually enforced. `arm1-` needs the arm token's own 64-hex width to be
+    # a non-key at all.
+    for bad in ("", "sdxl", "arm1-" + "ab" * 32, "ck1-short",
+                "cg-key-v1-" + "0" * 55):
         with pytest.raises(cell_resolve.CellResolveRefused):
             cell_resolve.resolve("sdxl", bad)
     assert not sent  # nothing was sent

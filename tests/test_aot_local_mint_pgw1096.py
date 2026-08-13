@@ -115,7 +115,11 @@ def test_the_store_refuses_to_be_addressed_by_anything_that_is_not_a_key(
 ) -> None:
     """A store addressed by a key-shaped string it never verified is a store
     whose layout depends on what a caller happened to pass."""
-    for bad in ("arm1-" + "a" * 56, "../escape", "", "sha256:deadbeef"):
+    # th#1897: the grammar refuses SHAPE, never scheme, so an arm token is
+    # separated from the key space by its DIGEST WIDTH — `arm1-<56 hex>` would
+    # be a perfectly good key of a scheme this runtime does not mint.
+    for bad in ("arm1-" + "a" * fleet_cells.ARM_DIGEST_HEX, "../escape", "",
+                "sha256:deadbeef"):
         with pytest.raises(ValueError):
             local_cell_store.cell_dir(bad)
     assert local_cell_store.lookup("../escape") is None
