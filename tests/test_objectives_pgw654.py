@@ -423,7 +423,7 @@ def test_flow_objective_refuses_a_diffusion_sampler() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the flow gate reads CAPABILITY, not the class NAME.
+# The flow gate reads CAPABILITY, not the class NAME.
 #
 # `WAN_SCHEDULER_CONFIG` is verbatim
 # `Wan-AI/Wan2.2-TI2V-5B-Diffusers@b8fff731:scheduler/scheduler_config.json` —
@@ -526,7 +526,7 @@ def test_declared_flow_shift_reaches_the_field_the_class_honours() -> None:
 
 
 def test_sampler_table_defines_euler_trailing_and_dpmpp_completely() -> None:
-    # the SDK table is the ONE definition of each
+    # The SDK table is the ONE definition of each
     # named sampler; endpoints delete their private maps.
     from gen_worker.view import SAMPLERS
 

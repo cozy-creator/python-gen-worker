@@ -779,7 +779,7 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     assert meta["weight_lane"] == "w8a8"
     assert meta["cell_key"] == row.key
     assert meta[cell_key.ENTRY_BLOCK_KEY]["name"] == CELL_ENTRY
-    # the manifest label rides the artifact as telemetry; identity
+    # The manifest label rides the artifact as telemetry; identity
     # is `cell_key`, which is this ONE class's.
     assert meta["manifest_digest"]
 
@@ -800,7 +800,7 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     assert entry["graph"]["specialization"]["gemm_mode"] == "pertensor"
     assert entry["graph"]["specialization"]["shape_strategy"] == "static-rows"
     assert meta["toolchain"] and meta["sm"] == "sm_89"
-    # the envelope records NO `code_closure` — nothing ever read it.
+    # The envelope records NO `code_closure` — nothing ever read it.
     assert "code_closure" not in meta
     assert aot_mint.cell_identity(meta).digest == row.key
 
@@ -808,7 +808,7 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     # on the RESULT/published metadata, never in the packed envelope (the
     # tar must stay byte-deterministic for the #699 double-mint compare).
     assert "mint_phases" not in meta
-    # the phase table is a property of the MINT RUN, so every
+    # The phase table is a property of the MINT RUN, so every
     # entry's metadata carries the same one — it is the run's record, not an
     # artifact's identity.
     table = _only(result).metadata["mint_phases"]
@@ -976,7 +976,7 @@ def test_cell_key_differs_when_ONLY_the_declared_range_differs(
     # combined hash, the combined hash into the key.
     assert (narrow[cell_key.ENTRY_BLOCK_KEY]["class_hash"]
             != wide[cell_key.ENTRY_BLOCK_KEY]["class_hash"])
-    # the graph axis IS this class's hash, so a declared-range
+    # The graph axis IS this class's hash, so a declared-range
     # change moves the key directly rather than through a combined digest.
     assert narrow["cell_key"] != wide["cell_key"]
     assert narrow["cell_key"] != wide["cell_key"], (
@@ -1181,7 +1181,7 @@ def test_unknown_family_has_no_input_contract() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the four wan blockers
+# The four wan blockers
 # ---------------------------------------------------------------------------
 
 

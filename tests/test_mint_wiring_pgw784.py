@@ -238,7 +238,7 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     published: List[Any] = []
 
     def _adopt(pipe: Any, pending: Any, artifacts: Any) -> Any:
-        # the adopt takes the SET the child produced, one artifact
+        # The adopt takes the SET the child produced, one artifact
         # per graph class. A double taking a single Path models a call
         # production does not make — and `Path(a_tuple)` is how that surfaces.
         rows = [Path(a) for a in artifacts]
@@ -261,7 +261,7 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     # A real child produced real bytes, and they were adopted through the
     # delivered-cell path rather than trusted.
     assert adopted and adopted[0].read_bytes() == b"stub-cell-bytes"
-    # every sharer is covered, so the cell ships.
+    # Every sharer is covered, so the cell ships.
     assert published == [pending]
     # Phase 4, shared with the in-process route: the target now advertises the
     # worker's OWN key (th#910's self-attested fence).

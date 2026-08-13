@@ -59,7 +59,7 @@ _MEASUREMENT = {
         "gpu_sm": "90",
         "torch_version": "2.13.0+cu130",
         "installed_libs": ["diffusers==0.36.0"],
-        # the HOST driver. 580.159.04 is a real RunPod draw
+        # The HOST driver. 580.159.04 is a real RunPod draw
         # and the tuple-vs-float trap (as floats 580.159 < the 580.65 floor).
         "driver_version": "580.159.04",
     },

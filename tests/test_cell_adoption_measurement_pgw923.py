@@ -137,7 +137,7 @@ def test_each_adoption_is_its_own_sample() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the arm itself: measured once, in the one place that arms
+# The arm itself: measured once, in the one place that arms
 # ---------------------------------------------------------------------------
 
 

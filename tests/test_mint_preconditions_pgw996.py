@@ -254,7 +254,7 @@ def test_a_healthy_declaring_image_builds_and_records_its_proof(
     assert verdicts == {
         pre.CHECK_DECLARATION_EVALUATES: pre.OK,
         pre.CHECK_CXX_TOOLCHAIN: pre.OK,
-        # the two the custom-Dockerfile audit added. An exhaustive
+        # The two the custom-Dockerfile audit added. An exhaustive
         # equality, deliberately — a row that stops being stamped is the exact
         # defect this whole issue is about, and `in` would not notice.
         pre.CHECK_CUDA_ROOT: pre.OK,

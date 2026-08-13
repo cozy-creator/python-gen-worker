@@ -298,7 +298,7 @@ def test_overlapped_and_serial_mints_share_one_cell_key(
     assert "export_all_s" in overlapped.timings, (
         "the export phase's own wall must survive the overlap (the pgw#1052 "
         "acceptance names it)")
-    # the phase table is a property of the MINT RUN, carried on
+    # The phase table is a property of the MINT RUN, carried on
     # every entry's metadata. Read it off one entry rather than off a result
     # that no longer has a single metadata.
     pool_block = ((overlapped.entries[0].metadata.get("mint_phases") or {})

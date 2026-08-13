@@ -446,7 +446,7 @@ WEIGHTS_SHA = hashlib.sha256(WEIGHTS).hexdigest()
 def _civitai(url: str, dst: Path, *, expected_size: int, sha: str = "") -> int:
     from gen_worker.models.download import _civitai_stream_one
 
-    # the observed digest now rides back beside the byte count so the
+    # The observed digest now rides back beside the byte count so the
     # manifest can distinguish a verified download from an unverified one.
     written, _observed = _civitai_stream_one(
         url, dst, api_key="", expected_size=expected_size,
@@ -572,7 +572,7 @@ def test_cell_artifact_oversized_stream_is_abandoned_mid_transfer(
 
 
 # ---------------------------------------------------------------------------
-# the SEVERANCE check — `_aborted_early` must still be able to fail
+# The SEVERANCE check — `_aborted_early` must still be able to fail
 # ---------------------------------------------------------------------------
 
 

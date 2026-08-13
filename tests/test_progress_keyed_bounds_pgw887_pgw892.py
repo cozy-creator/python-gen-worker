@@ -39,7 +39,7 @@ from gen_worker.stall import SilenceWindow
 
 
 # ---------------------------------------------------------------------------
-# the drain aborts on non-advancement, never on elapsed time
+# The drain aborts on non-advancement, never on elapsed time
 # ---------------------------------------------------------------------------
 
 
@@ -224,7 +224,7 @@ def test_the_drain_no_longer_reads_a_deadline_for_the_tenant_wait() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the two group-formation bounds
+# The two group-formation bounds
 # ---------------------------------------------------------------------------
 
 

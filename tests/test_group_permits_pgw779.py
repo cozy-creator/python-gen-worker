@@ -195,7 +195,7 @@ def test_the_refusal_ends_the_job_terminally() -> None:
 
     job = _Job()
     job.spec = ex.specs["gen"]  # type: ignore[attr-defined]
-    # the driver takes the head's projection, not the wire message.
+    # The driver takes the head's projection, not the wire message.
     asyncio.run(ex._run_job(
         job, functools.partial(ex._legacy_order, job, _run())))  # type: ignore[arg-type]
     assert finished["status"] == pb.JOB_STATUS_RETRYABLE, finished

@@ -223,7 +223,7 @@ def write_image(
     is typed ``ImageAsset`` don't have to round-trip through
     ``msgspec.to_builtins``.
     """
-    # the encode+upload tail runs slotless so it overlaps the next
+    # The encode+upload tail runs slotless so it overlaps the next
     # request's denoise, the same terminal handoff write_video performs. The
     # release is TERMINAL and once-only — safe here because this call is the
     # handler's last GPU-relevant act, which is why it is not applied to
@@ -363,7 +363,7 @@ def write_video(
                 # types pass through unchanged.
                 from .media_transfer import staged_uint8_chunks
 
-                # each chunk is judged INSIDE the loop — the staged
+                # Each chunk is judged INSIDE the loop — the staged
                 # host buffer a chunk borrows is only valid until the next
                 # iteration step, and nothing here may rebuffer the clip. Its
                 # wall lands on `video_encode` (it interleaves with the

@@ -304,7 +304,7 @@ class Lifecycle:
         self._desired_residency: Optional[pb.DesiredResidency] = None
         self._residency_task: Optional[asyncio.Task] = None
         self._observed_residency_generation = 0
-        # the reconcile loop's currently-loading work item
+        # The reconcile loop's currently-loading work item
         # ((kind, identity, context)) + the level-trigger that re-runs a
         # convergence pass instead of cancelling an in-flight load.
         self._reconcile_active: Optional[tuple] = None
@@ -390,7 +390,7 @@ class Lifecycle:
                 vcpus=c.vcpus,
                 ram_total_gb=c.ram_total_gb,
                 duration_ms=c.duration_ms,
-                # the measured GPU fabric, alongside gpu_count.
+                # The measured GPU fabric, alongside gpu_count.
                 interconnect=c.interconnect,
                 peer_gbps=c.peer_gbps,
                 peer_access=c.peer_access,
@@ -567,7 +567,7 @@ class Lifecycle:
             for r in ack.resolutions
         }
         self.executor.apply_model_resolutions(resolutions)
-        # the reconcile's active-work context compares against the
+        # The reconcile's active-work context compares against the
         # resolutions actually applied to the executor.
         self._model_resolutions = resolutions
         desired = pb.DesiredResidency()
@@ -805,7 +805,7 @@ class Lifecycle:
     ) -> None:
         """One convergence pass over ``desired`` in declared order."""
         snapshots = dict(desired.snapshots)
-        # never materialize a declared spelling the hub's own
+        # Never materialize a declared spelling the hub's own
         # resolutions have replaced with another ref in this same list.
         superseded = self._superseded_disk_refs(desired)
         for ref in desired.disk_refs:

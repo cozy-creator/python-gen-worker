@@ -51,8 +51,8 @@ PHASE_DEGRADED = "degraded"
 PHASE_REFUSED = "refused"
 
 #: An armed exported cell took no warm dispatch this boot, which is the
-#: NORMAL state of every adopted cell (the arm precedes
-#: setup) and is no longer a verdict about it. Carried on this kind so one
+#: NORMAL state of every adopted cell (the arm precedes setup) and is NOT a
+#: verdict about it. Carried on this kind so one
 #: query (`?kind=cell_numerics`) still answers what happened to every cell that
 #: armed on a pod, and emitted because an unannounced posture is
 #: indistinguishable from a gate that never ran.

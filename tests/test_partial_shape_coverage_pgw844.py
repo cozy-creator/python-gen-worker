@@ -329,7 +329,7 @@ def _boot(
         executor_mod.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0, **_kw: events.append(
             (kind, phase, detail)))
-    # an `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
+    # An `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
     # arguing this process is "TOLD the flavor is an AOT cell exactly as a
     # Plan's `Arm.artifact` tells a pod". Production is told no such thing — it
     # LEARNS at the wrap (`arm_entry`, pgw#1141b), and the route that
@@ -361,7 +361,7 @@ def _boot(
     monkeypatch.setattr(
         ex, "_enable_compiled", _arm if exported else _arm_dynamo)
 
-    # the cell is an exact ORDER (Arm.artifact), never a snapshot
+    # The cell is an exact ORDER (Arm.artifact), never a snapshot
     # entry the worker scans for.
     arm_order = executor_mod._ArmOrder(
         backend="aot_cell",
@@ -401,7 +401,7 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
     assert ("serve_eager_posture", "target_applicability_incomplete") \
         not in kinds
 
-    # the exported lane's OWN revocation signal is what
+    # The exported lane's OWN revocation signal is what
     # keeps this target advertisable — nothing installed a dynamo marker.
     assert not hasattr(pipe, cc._MARKER_ATTR)
 

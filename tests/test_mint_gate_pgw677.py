@@ -193,7 +193,7 @@ class _Harness:
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
-        # the pgw#681 mint gate this simmed is deleted.
+        # The pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
         # the MINT and wrote the result into the cell's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
@@ -344,7 +344,7 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
     instance_gate_wait stage, not billed as runtime. RED: with the kill
     switch the overlap is observed (pgw#995: that arm is gone — see below)."""
 
-    # the RED arm drove `GEN_WORKER_BG_YIELD=0` and asserted that the
+    # The RED arm drove `GEN_WORKER_BG_YIELD=0` and asserted that the
     # pre-fix tree DOES exhibit the pgw#676 overlap. The switch and that tree
     # are deleted, so the overlap is now structurally impossible rather than
     # merely not-selected — which is the stronger statement the docstring
@@ -366,7 +366,7 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
         assert wall >= 0.1
         # ...the wait is attributed, and runtime_ms excludes it.
         assert _stage_ms(res, "instance_gate_wait") >= 100
-        # the gate wait it must EXCLUDE is the compile it waited on,
+        # The gate wait it must EXCLUDE is the compile it waited on,
         # so that is the anchor — a runtime that absorbed the wait could not
         # come in under it.
         assert res.metrics.runtime_ms < h_on.compile_delay_s * 1000, (
@@ -444,7 +444,7 @@ def test_mint_seed_window_forces_eager_enqueue_on_degraded_routers(
 
 
 # ---------------------------------------------------------------------------
-# the deleted arm is UNREACHABLE, not merely unused
+# The deleted arm is UNREACHABLE, not merely unused
 # ---------------------------------------------------------------------------
 
 

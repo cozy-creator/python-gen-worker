@@ -178,7 +178,7 @@ _BOOT_WINDOWS = 4.0
 # is loaded. Under the deleted `_DEFAULT_BOOT_TIMEOUT_S` this shape died for
 # the sole crime of taking longer than the constant.
 #
-# it used to print for `talk_s` and only THEN bind its port, so
+# It used to print for `talk_s` and only THEN bind its port, so
 # becoming healthy cost a silent handoff — 53 ms idle, against a window the
 # boot fails the moment that gap outlives — that nothing kept talking across.
 # That is a bet on the runner's speed, in the file that polices exactly that
@@ -652,7 +652,7 @@ def test_the_wall_clock_constants_are_gone(relpath: str, gone: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# the guard covers TEST code too, because a release gate runs it
+# The guard covers TEST code too, because a release gate runs it
 # ---------------------------------------------------------------------------
 #
 # The five tapes above pin five NAMED constants in five NAMED src files. That
@@ -691,7 +691,7 @@ _CLOCK = r"time\.(?:monotonic|time|perf_counter)\(\)"
 
 _LITERAL_DEADLINE = re.compile(rf"{_CLOCK}\s*\+\s*[0-9]")
 
-# the two regexes below used to require a DIGIT and a small token
+# The two regexes below used to require a DIGIT and a small token
 # vocabulary, and both holes were load-bearing.
 #
 #   `deadline = time.monotonic() + _TIMEOUT`  (_TIMEOUT = 15.0)
@@ -795,7 +795,7 @@ def _scan(root: Path, pattern: "re.Pattern[str]", *, match: bool = False) -> set
     for path in sorted(root.rglob("*.py")):
         if path.name == Path(__file__).name:
             # This file HOLDS the patterns, so scanning it only finds itself.
-            # the guard's OWN boot fixture ran on a
+            # The guard's OWN boot fixture ran on a
             # literal 0.3s window, unpoliced. The rule here is manual.
             continue
         for line in _code_lines(path):

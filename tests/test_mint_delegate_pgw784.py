@@ -177,7 +177,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
     assert req.configs == {"gen": {"steps": 28}}
     assert req.slots["pipeline"].path == "/cas/sdxl"
     assert req.device == 3
-    # the child's WORK ROOT — the tree it actually writes into, and
+    # The child's WORK ROOT — the tree it actually writes into, and
     # the byte-growth half of the parent's progress evidence. It used to be
     # the inductor capture dir, which an AOT mint never touched.
     assert req.work_root == str(tmp_path / "w")
@@ -231,7 +231,7 @@ def test_a_minted_child_is_adopted_through_the_delivered_cell_path(
     adopted: List[Path] = []
 
     def _adopt(pipe: Any, pending: Any, artifacts: Any) -> Any:
-        # the adopt takes the SET the child produced, one artifact
+        # The adopt takes the SET the child produced, one artifact
         # per graph class. A double taking a single Path models a call
         # production does not make.
         rows = [Path(a) for a in artifacts]
@@ -431,6 +431,6 @@ def test_delegation_is_unconditional_and_has_no_kill_switch(
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     assert mint_delegate.delegation_refusal() == ""
     assert not hasattr(mint_delegate, "ENV_IN_PROCESS")
-    # the `delegated()` bool wrapper is deleted with the switch it
+    # The `delegated()` bool wrapper is deleted with the switch it
     # once negated; `delegation_refusal` is the predicate.
     assert not hasattr(mint_delegate, "delegated")

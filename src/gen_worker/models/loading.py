@@ -2074,7 +2074,7 @@ def hydrate_modular_pipeline(
                     "pretrained_model_name_or_path": {n: sources[n]},
                     "subfolder": {n: ""},
                 }
-                # this component's OWN checkpoint dtype when the
+                # This component's OWN checkpoint dtype when the
                 # caller declared none. Sniffed here rather than by the
                 # caller because this is the only place that knows each
                 # component's actual source dir — an override tree is a

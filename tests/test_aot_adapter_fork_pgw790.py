@@ -305,7 +305,7 @@ def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(
         out = tmp_path / f"active{int(active)}"
         result = aot_mint.mint(
             pipe, _spec(), out)
-        # the key SET, per entry name. One comparison now carries
+        # The key SET, per entry name. One comparison now carries
         # both halves this row used to assert apart (same classes, same keys),
         # and the length assert is what stops an empty mint passing it
         # vacuously.

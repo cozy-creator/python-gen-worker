@@ -136,7 +136,7 @@ def test_loaded_libraries_come_from_the_real_loader_map() -> None:
     assert env_seal.loaded_library_digests() == tuple(sorted(libs.items()))
     seal = env_seal.effective_seal()
     assert len(seal["loaded_libs"]) == 16  # combined digest is a seal fact
-    # the DISK identity manifest (phase-independent), of which the
+    # The DISK identity manifest (phase-independent), of which the
     # mapped set is a content-consistent subset — a mapped toolchain lib whose
     # digest diverges from the manifest is a substitution
     # `assert_seal_unchanged` refuses by name. pgw#1181 reads the manifest from
@@ -209,7 +209,7 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
     fx_entry.mkdir(parents=True)
     (fx_entry / "entry").write_bytes(b"fx")
 
-    # the seal this drove was `finish_fleet_mint`'s, which packed a
+    # The seal this drove was `finish_fleet_mint`'s, which packed a
     # DYNAMO cell and is deleted with that artifact class. The RULE is
     # unchanged and lives where every surviving mint reads it —
     # `env_seal.assert_seal_unchanged("mint")`, called by `mint_artifact` (the

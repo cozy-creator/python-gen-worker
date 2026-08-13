@@ -122,11 +122,11 @@ def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
     assert outcome.armed is False, "a gray-band cell was published to the fleet"
     assert aot_serve.is_armed(pipeline) is False
     assert outcome.reason == "numerics_refused"
-    # the refusal is per CLASS, so it says "is not published" of
+    # The refusal is per CLASS, so it says "is not published" of
     # that class rather than "nothing is published" of a bundle.
     assert "is not published" in outcome.detail
     # It still CONFESSES — a fleet-wide rate is only countable from rows.
-    # one gate row PER GRAPH CLASS — this declaration has two,
+    # One gate row PER GRAPH CLASS — this declaration has two,
     # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
             if k == activity.KIND_CELL_NUMERICS] == ["degraded", "degraded"]
@@ -143,7 +143,7 @@ def test_the_MINT_gate_refuses_a_cell_below_its_floor(
 
     assert outcome.armed is False
     assert aot_serve.is_armed(pipeline) is False
-    # one gate row PER GRAPH CLASS — this declaration has two,
+    # One gate row PER GRAPH CLASS — this declaration has two,
     # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
             if k == activity.KIND_CELL_NUMERICS] == ["refused", "refused"]
@@ -219,7 +219,7 @@ def test_a_FAITHFUL_cell_passes_the_mint_gate_and_is_publishable(
     minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
 
     assert minted is not None, "a faithful cell was refused by the mint gate"
-    # the key is COMPUTED from the artifact's own recorded facts, not
+    # The key is COMPUTED from the artifact's own recorded facts, not
     # a fixture placeholder. `"cell868"` was a stand-in from when the harness
     # stamped a literal; asserting it now would assert that the mint FAILED to
     # key its own product.
@@ -372,7 +372,7 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
         _dispatch.add("unet/main", _runner)
         state = {"successful_calls": PROBE_CALLS, "failed": False,
                  "original": unet.forward, "runner": _dispatch}
-        # the two markers are DIFFERENT SHAPES in production and
+        # The two markers are DIFFERENT SHAPES in production and
         # this rig now models that honestly. `wrap_module` writes a bare
         # `state` on the MODULE; `arm_entry` writes `targets` (+ `entries`) on
         # the PIPELINE. Sharing one dict between them was what kept a
@@ -386,7 +386,7 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
             "entries": {"unet/main": {"key": key, "target": "unet"}},
         })
         marker = getattr(pipe, aot_serve._MARKER_ATTR)
-        # an `aot_serve.note_aot_key(key)` stood here — the ONE line no
+        # An `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
         # marker set above is what `arm_entry` publishes, so

@@ -240,7 +240,7 @@ def test_the_child_refuses_a_deterministic_environment_decline(
     for fact in ("sm",):
         assert fact in report.detail, f"{fact!r} missing from: {report.detail}"
     assert not Path(request.target).exists()
-    # and the phase it died in survives into the report. This was
+    # And the phase it died in survives into the report. This was
     # ALWAYS "" — `_close_phases()` closes the open phase, and the field was
     # read after it in the same call.
     # The phase it died in survives into the report. WHICH phase is
@@ -343,7 +343,7 @@ def test_an_aot_mint_cannot_seal_for_a_handler_that_cannot_run(
 
     text = str(exc.value)
     assert "warm plan does not run" in text, text
-    # the recipe left the identity line with the recipe axis — the
+    # The recipe left the identity line with the recipe axis — the
     # child mints one kind, so a name for it on every refusal is noise.
     assert "microrig" in text and FUNCTION in text, text
     assert "no resolved model ref" in text, text

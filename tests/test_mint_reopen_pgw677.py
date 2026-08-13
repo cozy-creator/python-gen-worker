@@ -195,7 +195,7 @@ class _Harness:
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
-        # every mint is a CHILD mint now (the in-process capture only
+        # Every mint is a CHILD mint now (the in-process capture only
         # ever built a dynamo cell). This harness has no child process, so the
         # child's OUTCOME is stubbed — what it is testing is the serving side
         # around it: eager-first, the tenant never starving, the router, and
@@ -203,7 +203,7 @@ class _Harness:
         # `compiled` wrapper does, on the boot/warm thread, exactly as before.
         monkeypatch.setattr(
             mint_delegate, "build_cell", self._fake_build_cell)
-        # the pgw#681 mint gate this simmed is deleted.
+        # The pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
         # the MINT and wrote the result into the cell's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose

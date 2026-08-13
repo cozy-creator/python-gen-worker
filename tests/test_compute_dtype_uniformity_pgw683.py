@@ -288,7 +288,7 @@ def test_invariant_admits_every_legal_composition() -> None:
     assert_uniform_compute_dtype(
         _Pipe(unet=_linear_stack(torch.bfloat16),
               text_encoder=_linear_stack(torch.bfloat16)), "bf16")
-    # the wider part is a DECLARED decision, never a collision.
+    # The wider part is a DECLARED decision, never a collision.
     assert_uniform_compute_dtype(
         _Pipe(unet=_linear_stack(torch.bfloat16),
               vae=_linear_stack(torch.float32)), "bf16")

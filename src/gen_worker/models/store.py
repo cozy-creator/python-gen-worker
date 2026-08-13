@@ -114,7 +114,7 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
                 path=f.path,
                 size_bytes=int(f.size_bytes),
                 url=f.url or None,
-                # the algorithm-tagged digest and the
+                # The algorithm-tagged digest and the
                 # ordered chunk list. Dropping these here is what would make
                 # every chunked snapshot look like a whole file with no URL.
                 #
@@ -279,7 +279,7 @@ class ModelStore:
         # pipeline is still in RAM/VRAM. Keep the disk identity separately
         # until record teardown makes it the highest residency tier.
         self._disk_identities: Dict[str, _ResidencyIdentity] = {}
-        # every applied HelloAck opens a new
+        # Every applied HelloAck opens a new
         # republish epoch. The reconcile pass re-announces verified cached
         # identities the hub re-asked about even when unchanged — observations
         # are content-addressed and idempotent hub-side, and a force-resent
@@ -534,7 +534,7 @@ class ModelStore:
                 # Retarget it rather than replace it: its entries and leases
                 # are already the live bookkeeping.
                 zero.device_group = self._residency_groups[0]
-        # the pinned-host fair share was DEAD code — the pool's
+        # The pinned-host fair share was DEAD code — the pool's
         # per-group cap only engages once it knows G, and nothing in src/ ever
         # told it. Without this a G=4 degraded pod lets group 0 claim the whole
         # pinned budget (§4.3 caveat 2).
@@ -645,7 +645,7 @@ class ModelStore:
             return {}
         sizes: Dict[str, int] = {}
         for f in snap.files:
-            # the tagged digest and nothing else. The legacy
+            # The tagged digest and nothing else. The legacy
             # `blake3` fallback was empty on every v2 entry, so this used to
             # bail to {} — sizes unknown — on exactly the manifests it was
             # written for. Zero entries is a REFUSAL ({}), never a silent 0.
@@ -713,7 +713,7 @@ class ModelStore:
         loop (boothang: 0.40.7's post-seal_publish LTX hang)."""
         keep = set(self.keep)
         entries = self._index.entries()
-        # the CAS is ONE tree with one page cache, hardlinked
+        # The CAS is ONE tree with one page cache, hardlinked
         # across every group, so the preserve set is the UNION across groups —
         # dropping clean pages one group is done with would drop the pages a
         # sibling group is still mmapping (§4.3 caveat 3).
@@ -972,7 +972,7 @@ class ModelStore:
         groups: Dict[str, Dict[str, str]] = {}
         for f in snap.files:
             rel = str(f.path).strip().lstrip("/")
-            # this read `f.blake3`, which is EMPTY on every v2
+            # This read `f.blake3`, which is EMPTY on every v2
             # entry, so every file of a v2 snapshot was skipped and component
             # sharing was silently OFF fleet-wide — the fail-CLOSED half of
             # the empty-guard class (the fail-open half is
@@ -1088,7 +1088,7 @@ class ModelStore:
             out.append((last, ref))
         return self._disk_eviction_order(out, include_keep, keep_rank)
 
-    # the eviction POLICY (ranking one
+    # The eviction POLICY (ranking one
     # pass's evictable set) is a distinct seam from the evictable SET itself
     # (``_gc_candidates`` above, which owns the hard never-evict invariants).
     # Default is the LRU-oldest-first/keep-priority-escape-hatch ordering
@@ -1320,7 +1320,7 @@ class ModelStore:
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         operation_identity = self._snapshot_identity(ref, snapshot)
-        # the components this dispatch SUBSTITUTES are not fetched
+        # The components this dispatch SUBSTITUTES are not fetched
         # from the base composition. The base is loaded with the override
         # object handed to `from_pretrained` (pgw#617 load-then-substitute),
         # so its own copy of that subfolder is downloaded and discarded.
@@ -1347,7 +1347,7 @@ class ModelStore:
         acquired = False
 
         def complete(path: Path) -> _MaterializedLocal:
-            # the bytes are pod-wide but each group keeps its own
+            # The bytes are pod-wide but each group keeps its own
             # ledger, so the group that asked must ALSO book the shared disk
             # entry — otherwise a group riding a sibling's materialization
             # never sees the ref in its own LRU, preserve set or eviction.
@@ -1394,7 +1394,7 @@ class ModelStore:
             want = ""
             if snapshot is not None and snapshot.digest:
                 want = snapshot.digest.split(":", 1)[-1].strip().lower()
-            # with an override exclusion the acceptable cached
+            # With an override exclusion the acceptable cached
             # names are the exclusion's own key OR the bare digest — the
             # latter is a SUPERSET (a complete tree already on disk serves an
             # excluded fetch for free, and is never narrowed retroactively).
@@ -1454,7 +1454,7 @@ class ModelStore:
                         intent_id=intent_id,
                     )
                     operation_identity = self._snapshot_identity(ref, snapshot)
-            # every byte figure below (headroom gate, DOWNLOADING
+            # Every byte figure below (headroom gate, DOWNLOADING
             # totals, the boot weights span) counts what will actually be
             # fetched, so an override's skipped component never shows up as
             # bytes anybody planned for or reported.
@@ -1480,7 +1480,7 @@ class ModelStore:
             # both must carry it for the wire contract to actually work.
             net_scope = cozy_snapshot.NetworkBytesScope()
 
-            # per-ref bytes as a registry counter (visible on every
+            # Per-ref bytes as a registry counter (visible on every
             # 10s beat while an activity is open); snapshot sizes make the
             # total known up front, so the wire never shows total=0 for
             # tensorhub refs.
@@ -1612,7 +1612,7 @@ class ModelStore:
                         if terminal:
                             vocab = self._error_vocab(exc)
                             if vocab == "download_failed":
-                                # the generic bucket must carry the root
+                                # The generic bucket must carry the root
                                 # cause — pods are often unreachable and the hub
                                 # log is the only forensic surface (J24M run11:
                                 # a starved request was undiagnosable hub-side).
@@ -1740,7 +1740,7 @@ class ModelStore:
         covered: set[Path] = set()
         files = list(snapshot.files) if snapshot is not None else []
         if files and p.is_dir():
-            # the hash algorithm comes from the DIGEST,
+            # The hash algorithm comes from the DIGEST,
             # never from this call site. This used to read `f.blake3` and hash
             # with blake3 -- but under manifest v2 that field is EMPTY, so
             # `digest` was "" and BOTH the size and hash checks were skipped

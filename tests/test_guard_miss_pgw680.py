@@ -484,7 +484,7 @@ def _spec(name: str, cls: type) -> EndpointSpec:
 class _Rig:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
-        # no export declaration is registered, so the miss takes the
+        # No export declaration is registered, so the miss takes the
         # JIT INTAKE arm — the in-process compile the guard-miss doctrine
         # (mint window OFF while compiling, serve window ON while serving) is
         # about. It mints and publishes nothing, which is orthogonal to this
@@ -543,7 +543,7 @@ class _Rig:
         monkeypatch.setattr(
             cc, "compile_wall_seconds",
             lambda: self.compile_wall.pop(0) if self.compile_wall else 12.5)
-        # when the guard-closure mint gate is present,
+        # When the guard-closure mint gate is present,
         # neutralize it — it audits REAL dynamo graphs, which this rig's
         # simulated torch boundary never creates. Orthogonal to the
         # guard-miss doctrine under test here.
@@ -631,7 +631,7 @@ def test_tenant_guard_miss_end_to_end(
     (target,) = rig.ex.compile_targets()
     cell_ref = target.active_compile_ref
     assert cell_ref == "", "an intake arm has no cell to advertise"
-    # and the compile it just paid for is a NUMBER on the
+    # And the compile it just paid for is a NUMBER on the
     # wire. The emitter used to be the mint parent's, and the mint no longer
     # runs JIT — so this boot is the only place an AOT-vs-JIT cost comparison
     # can get its JIT arm from.

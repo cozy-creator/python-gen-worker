@@ -214,7 +214,7 @@ def test_weights_fetch_carries_bytes_and_source(ladder) -> None:
 
 
 # --------------------------------------------------------------------------
-# the warmup split
+# The warmup split
 # --------------------------------------------------------------------------
 
 def test_warmup_is_a_span_nested_inside_pipeline_load(ladder) -> None:

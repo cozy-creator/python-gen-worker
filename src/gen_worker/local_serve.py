@@ -303,7 +303,7 @@ def _mint_here(
                     slots=dict(mint.slots),
                     # Cell IDENTITY's lane, the same probe the mint's own
                     # `stamp_lane` memoizes — so what this machine looks up on
-                    # its next boot is what this mint stamps.
+                    # Its next boot is what this mint stamps.
                     weight_lane=cc.cell_base_execution_lane(pipe),
                     device=mint.device,
                     posture=posture,

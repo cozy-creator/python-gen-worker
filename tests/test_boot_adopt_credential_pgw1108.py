@@ -55,7 +55,7 @@ def wired(monkeypatch, tmp_path):
     whether the gate let the derive/resolve leg run — no trace child, no mint."""
     calls: list[Dict[str, Any]] = []
 
-    # the pre-derive gate now asks whether ANYBODY could answer, and
+    # The pre-derive gate now asks whether ANYBODY could answer, and
     # this machine's own cell store is one of the two answerers. Pin it to an
     # empty tmp root so the gate under test reads a fact about the test and not
     # about whatever the developer's `~/.cache/cozy/compile-cells` happens to
@@ -94,7 +94,7 @@ def wired(monkeypatch, tmp_path):
 
 
 def _run_boot_adopt(ex: Any) -> Any:
-    # one outcome per declared class, and this suite declares one —
+    # One outcome per declared class, and this suite declares one —
     # so the unpack ASSERTS that arity rather than indexing past a set nobody
     # checked. Every gate below is about the ONE declaration.
     (out,) = ex._boot_adopt(_Spec(), {})

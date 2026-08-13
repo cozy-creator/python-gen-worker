@@ -207,7 +207,7 @@ def test_real_entrypoint_seals_dials_and_dumps_stacks(tmp_path: Path) -> None:
             seal_phase = next(p for p in phases if p.get("phase") == "env_seal")
             assert seal_phase.get("digest"), "the seal phase must carry its digest"
 
-            # the seal's COST, off the wire. The startup phase lines
+            # The seal's COST, off the wire. The startup phase lines
             # above prove the seal ran and in what order; they say nothing
             # about what it cost, and "expect ms; prove it" was the issue's own
             # instruction. The library-digest memo nests inside it, so the
@@ -325,7 +325,7 @@ def test_gpu_boot_refusal_is_typed_and_reaches_the_hub(tmp_path: Path) -> None:
         assert fatal.get("exit_code") == 1
         assert "Starting worker..." not in combined
 
-        # the probe fails in the compute child, which holds no
+        # The probe fails in the compute child, which holds no
         # credential — it hands the typed report to the parent (boot_fatal,
         # relayed=true) and the PARENT delivers it to the hub before exiting 1.
         report = next(

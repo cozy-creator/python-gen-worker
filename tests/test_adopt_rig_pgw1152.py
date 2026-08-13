@@ -226,7 +226,7 @@ def test_a_hub_that_serves_NO_RECEIPT_refuses_the_order(
     assert boot.is_armed() is False
     assert boot.holds_cell() is False, (
         "an unreceipted cell was wrapped onto the pipeline anyway")
-    # an ordered arm this pod ordered ITSELF degrades to eager rather
+    # An ordered arm this pod ordered ITSELF degrades to eager rather
     # than failing the function, so the boot falls through to the ordinary
     # policy — a target is still registered (active-less, advertising the key
     # for peer adoption), and it must name NO artifact.

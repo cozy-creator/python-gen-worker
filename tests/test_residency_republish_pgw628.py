@@ -18,7 +18,7 @@ from harness.blob_host import BlobHost, GatedBlobHost
 from harness.hub_double import Conn, WorkerHarness, hub_double, is_model_event, is_ready
 from harness.progress_wait import Cadence, await_count, await_progress
 
-# this ref must NOT be one a toy
+# This ref must NOT be one a toy
 # endpoint declares. It used to be `harness/residency-tiny`, which
 # harness/toy_endpoints.py binds — so ~2 s after boot the eager first-boot
 # promoted the ref to RAM, and from that moment every re-sent plan

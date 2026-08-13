@@ -201,8 +201,7 @@ def svdq_precision_for_sm(gpu_sm: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Engine selection — nunchaku is no longer the only way to serve an
-# svdq artifact.
+# Engine selection: an svdq artifact serves on the native lane or on nunchaku.
 # ---------------------------------------------------------------------------
 
 SVDQ_ENGINES = ("native", "nunchaku")

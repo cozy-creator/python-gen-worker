@@ -40,7 +40,7 @@ _CHUNK_BYTES = 1024 * 1024
 
 # DATASET-V2 202 contract.
 #
-# the old `_MATERIALIZE_BUDGET_S = 30 min` gave up
+# The old `_MATERIALIZE_BUDGET_S = 30 min` gave up
 # on a materialization purely because a stopwatch expired. What the hub
 # actually reports is a DEFINITE state per poll — `202 building`, `503
 # snapshot_build_failed` (typed, terminal), or the manifest — and every poll

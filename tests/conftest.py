@@ -55,7 +55,7 @@ if str(Path(__file__).parent) not in sys.path:
 
 import gen_worker  # noqa: E402
 
-# the suite runs under the DECLARED interpreter env — the exact
+# The suite runs under the DECLARED interpreter env — the exact
 # imposition the entrypoint performs at boot (PYTHONHASHSEED=0; env_seal.
 # establish refuses without it). CPython read the seed at interpreter start,
 # so a pytest launched without it gets ONE re-exec, in pytest_configure

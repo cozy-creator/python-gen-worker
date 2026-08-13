@@ -122,7 +122,7 @@ META: Dict[str, Any] = {
     "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
     "family": "sdxl-base", "precision": "w8a8", "sku": "l4", "sm": "sm_89",
     "torch": "2.13.0+cu130", "cuda": "13.0",
-    # this is now an ENTRY key and rides the marker's `entries` row,
+    # This is now an ENTRY key and rides the marker's `entries` row,
     # so it is spelled in the grammar `cell_key.is_key` actually admits.
     "cell_key": "cg-key-v1-" + "d" * 56,
     "lora_bucket": 0,

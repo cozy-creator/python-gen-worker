@@ -428,7 +428,7 @@ def extract_target_guards(
         try:
             rows = _entry_guard_rows(entry)
         except Exception as exc:  # noqa: BLE001 — recorded, never fatal
-            # the guards of a LIVE compiled graph were unreadable.
+            # The guards of a LIVE compiled graph were unreadable.
             # That is a torch-surface fact, not a mint defect, so it is
             # recorded as an UNPROVEN row and the mint continues.
             logger.warning(

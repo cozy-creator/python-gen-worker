@@ -315,7 +315,7 @@ def _pin_identity(monkeypatch):
     # pgw#681 gate at its torch boundary, simmed: these republish rigs
     # never compile through dynamo, so extraction would honestly report
     # closure unprovable and refuse the republish.
-    # the pgw#681 mint gate this simmed is deleted.
+    # The pgw#681 mint gate this simmed is deleted.
     # `guard_closure.closure_manifest` classified every compiled graph at
     # the MINT and wrote the result into the cell's metadata; it went with
     # the `torch-inductor-cache` format that carried it, so a rig whose

@@ -210,7 +210,7 @@ class _FakeHub(BaseHTTPRequestHandler):
                        if op["type"] == "add")
             self._send(201, {"revision_id": "rev-1", "uploads": uploads,
                              "deletions": [], "copies": [], "tags": req.get("tags") or [],
-                             # the hub's normalizePublishMode("")
+                             # The hub's normalizePublishMode("")
                              # returns "replace" on BOTH routes now. A double
                              # that still echoed "merge" would assert the
                              # retired default back into existence.
@@ -251,7 +251,7 @@ class _FakeHub(BaseHTTPRequestHandler):
             path_label = st.get("upload_paths", {}).get(uid, "")
             misses = st.get("staging_missing") or {}
             if misses.get(path_label, 0) > 0:
-                # the staged bytes vanished server-side; retrying this
+                # The staged bytes vanished server-side; retrying this
                 # complete can never succeed — the client must re-open.
                 misses[path_label] -= 1
                 st.setdefault("staging_missing_hits", []).append(uid)
@@ -260,7 +260,7 @@ class _FakeHub(BaseHTTPRequestHandler):
                 return
             expired = st.get("session_expired") or {}
             if expired.get(path_label, 0) > 0:
-                # the up-front-minted session outlived its fixed
+                # The up-front-minted session outlived its fixed
                 # expiry mid-publish; only a re-open can mint a fresh one.
                 expired[path_label] -= 1
                 st.setdefault("session_expired_hits", []).append(uid)
@@ -368,7 +368,7 @@ class _FakeHub(BaseHTTPRequestHandler):
         data = self.rfile.read(n) if n else b""
         counts = st.setdefault("put_counts", {})
         counts[self.path] = counts.get(self.path, 0) + 1
-        # the 5xx and expired-presign injectors apply to EVERY PUT
+        # The 5xx and expired-presign injectors apply to EVERY PUT
         # surface, v1 part URLs and v2 chunk grants alike. They used to sit
         # below the v2 branch, so the chunk-CAS data plane — the one every
         # producer now rides — could not be made to fail at all.

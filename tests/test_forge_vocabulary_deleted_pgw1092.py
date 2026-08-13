@@ -137,7 +137,7 @@ def test_the_word_forge_survives_only_as_the_english_verb() -> None:
     ``config.settings.worker_mode``'s docstring all matched.
     """
     allowed_files = {
-        # the zero-download forge — structure, not a pod class
+        # The zero-download forge — structure, not a pod class
         "src/gen_worker/meta_instantiation.py",
         "src/gen_worker/models/meta_init.py",
         "src/gen_worker/models/structure_only.py",

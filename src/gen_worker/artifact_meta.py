@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional, Union
 #: The packed envelope's member name, at the tar root, for every artifact kind.
 METADATA_NAME = "metadata.json"
 
-#: THREAT (pgw#1013 §4.24): the tarball is gzipped, so a 50 GB zero-filled
+#: THREAT: the tarball is gzipped, so a 50 GB zero-filled
 #: ``metadata.json`` costs a few MB on the wire and OOMs the pod INSIDE
 #: ``receipts.verify_delivered_artifact`` — this reader supplies the envelope
 #: that gate is about to verify, so the read precedes the digest check and no
@@ -39,10 +39,10 @@ METADATA_NAME = "metadata.json"
 #: size: ``tarfile`` stops the member reader there, so an under-declaring
 #: header cannot yield a larger ``.read()``.
 #:
-#: pgw#1098 — WHY THIS IS NOT SIZED OFF THE DECLARE BOUND, as it was. The
-#: original derivation was "4x ``fleet_cells.CELL_DECLARE_MAX_BYTES``", which
-#: sizes an ARTIFACT-plane read off the CONTROL-plane bound. Those are
-#: deliberately different planes: ``_UNBOUNDED_ENVELOPE_BLOCKS``
+#: WHY THIS IS NOT SIZED OFF THE DECLARE BOUND. "4x
+#: ``fleet_cells.CELL_DECLARE_MAX_BYTES``" sizes an ARTIFACT-plane read off the
+#: CONTROL-plane bound. Those are deliberately different planes:
+#: ``_UNBOUNDED_ENVELOPE_BLOCKS``
 #: (``entries``/``guard_manifest``/``composition``/``weight_contract``) are
 #: STRIPPED from the declare precisely because they "belong in the artifact,
 #: not in the declare" — so this member is by design the place the unbounded
@@ -50,21 +50,20 @@ METADATA_NAME = "metadata.json"
 #: design demands. Measured, in this tree: a real published sdxl cell's
 #: metadata is 13,377,167 bytes on a 69 MB artifact (see
 #: ``fleet_cells._UNBOUNDED_ENVELOPE_BLOCKS``), and it grows with the
-#: artifact — row 7's 36-entry AOT cell was ~141 MB and its envelope did not
-#: fit 16 MiB, so a 92-minute mint was discarded.
+#: artifact — a 36-entry ~141 MB AOT cell's envelope did not fit 16 MiB, and
+#: the 92-minute mint that produced it was discarded.
 #:
 #: This is a MEMORY-SAFETY bound and nothing else: what a pod can decode into
-#: host RAM without the OOM pgw#1013 named. It is not a policy on how large a
-#: legitimate envelope may be — the artifact's own digest is that.
+#: host RAM without OOMing. It is not a policy on how large a legitimate
+#: envelope may be — the artifact's own digest is that.
 #:
 #: THE NUMBER, and its honest margin: 64 MiB is ~4.8x the largest envelope
-#: anyone has measured (the 13,377,167-byte sdxl cell above). Row 7's own
-#: envelope was never measured — all that is known is that it exceeded 16 MiB
-#: — so this is a margin, not a fit. That is acceptable now only because
-#: exceeding it is no longer silent: `fleet_cells.adopt_delegated_mint`
-#: refuses `cell_envelope_unreadable` naming this constant and the byte count,
-#: so the next envelope that outgrows it costs one typed event, not a
-#: 92-minute mint. Raise it on that evidence; do not raise it on a guess.
+#: anyone has measured (the 13,377,167-byte sdxl cell above), so this is a
+#: margin, not a fit. Acceptable because exceeding it is not silent:
+#: `fleet_cells.adopt_delegated_mint` refuses `cell_envelope_unreadable` naming
+#: this constant and the byte count, so the next envelope that outgrows it
+#: costs one typed event, not a mint. Raise it on that evidence; do not raise
+#: it on a guess.
 MAX_METADATA_BYTES = 64 << 20
 
 

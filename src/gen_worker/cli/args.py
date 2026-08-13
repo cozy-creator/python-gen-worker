@@ -4,7 +4,7 @@ Instead of ``--payload '{"prompt":"a cat","seed":42}'`` a user can type::
 
     gen-worker run "a cat" seed=42 guidance=3.5 hires=true
 
-The grammar (decided in ``progress.json`` #350):
+The grammar:
 
 * ``field=value``  — set ``field``; value COERCED by the payload Struct's field
   type (``seed=42`` -> int, ``prompt=hi`` -> str, ``hires=true`` -> bool).

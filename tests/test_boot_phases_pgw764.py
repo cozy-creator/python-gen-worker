@@ -106,7 +106,7 @@ def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
 
         boot_phases.bind_sink(_send, asyncio.get_running_loop())
         # Phases recorded AFTER the bind ride the same sink.
-        # the boot CLOSE now requires `hello` first — a worker the hub
+        # The boot CLOSE now requires `hello` first — a worker the hub
         # cannot reach is not servable, and closing before the stream existed is
         # what suppressed every span on 0.78.0. Binding the sink is exactly the
         # moment the real `on_hello_ack` records hello, so record it here too.
@@ -226,7 +226,7 @@ def test_telemetry_never_breaks_the_boot_it_measures() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the serving-mode dimensions
+# The serving-mode dimensions
 # ---------------------------------------------------------------------------
 
 

@@ -689,7 +689,7 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
     assert any(
         "STORE_SERVED_BOOT_COMPILED" in r.message for r in caplog.records
     ), "a store-served boot that hid a real compile must alarm loudly"
-    # the alarm has its OWN typed event. It used to ride
+    # The alarm has its OWN typed event. It used to ride
     # `ModelEvent{ADOPTED}` with `duration_ms` redefined to mean "inductor
     # compile wall" — a second meaning for the one field the adoption
     # measurement lane (`compile_cache_adopt`) percentiles over, on the only
@@ -852,7 +852,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
     _NoProofEndpoint.setups = _NoProofEndpoint.warmups = _NoProofEndpoint.runs = 0
 
-    # the disproven mandatory-lane mint DEGRADES to explicit eager
+    # The disproven mandatory-lane mint DEGRADES to explicit eager
     # instead of failing the boot closed — the function stays dispatchable,
     # nothing is advertised, and the identity is quarantined in-process.
     asyncio.run(ex.ensure_setup(
@@ -1105,7 +1105,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
         await asyncio.sleep(0)
 
     asyncio.run(_trip())
-    # no reload churn, no function disable — serving continues.
+    # No reload churn, no function disable — serving continues.
     assert rec.stale is False
     assert "edit" not in ex.unavailable
     assert "generate" not in ex.unavailable
@@ -1840,7 +1840,7 @@ def test_w8a8_exercised_miss_degrades_despite_unexercised_sibling(
     ex, pipes, cell_ref, artifact = _wire_merged_execution_lane(
         specs, tmp_path, monkeypatch)
 
-    # the disproven proof DEGRADES to explicit eager — setup
+    # The disproven proof DEGRADES to explicit eager — setup
     # completes, nothing is advertised, and the gw#608 self-discriminating
     # counts (compile_seconds ~0 = crediting bug vs minutes = recompile)
     # land in the loud degrade record instead of a fatal raise.
@@ -1882,7 +1882,7 @@ def test_a_failed_warmup_proof_carries_the_fx_cache_state(
         cc, "fx_cache_failure_report",
         lambda: "live_keys=2; extern_current=libdevice.10.bc")
 
-    # the disproof degrades; the forensics ride the degrade record.
+    # The disproof degrades; the forensics ride the degrade record.
     with caplog.at_level(logging.ERROR, logger="gen_worker.executor"):
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
@@ -1954,7 +1954,7 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
         function_name=spec.name,
         models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
     )
-    # the miss proceeds to the self-mint, IGNORING the inherited
+    # The miss proceeds to the self-mint, IGNORING the inherited
     # local/producer env cells (if the env were honored this would arm and
     # succeed); in a CUDA-less env the typed quantized refusal fires from
     # the self-mint exit.
@@ -2035,7 +2035,7 @@ def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, mo
     )
     monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
 
-    # no addressable compile target => the functions serve
+    # No addressable compile target => the functions serve
     # explicit eager; the boot never dies for a missing optimization.
     asyncio.run(ex.ensure_setup(spec, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
@@ -2271,14 +2271,14 @@ def test_runtime_guard_revokes_state_and_quarantines_the_cell(tmp_path):
     assert revoked.incarnation_id == active_id
     assert revoked.active_compile_ref == ""
     assert revoked.active_compile_snapshot_digest == ""
-    # the record is NOT marked stale and the aliases stay
+    # The record is NOT marked stale and the aliases stay
     # dispatchable — the object serves explicit eager; the identity is
     # quarantined process-wide, which is the half `fleet_cells` reads on the
     # arm path so this boot never re-arms the cell that just exploded.
     assert rec.stale is False
     assert spec.name not in ex.unavailable
     assert cc.cell_quarantined_in_process(active_ref)
-    # no ModelEvent. The causal terminal belonged to a hub-commanded
+    # No ModelEvent. The causal terminal belonged to a hub-commanded
     # adoption operation, and there is no operation to terminate.
     assert _events(sent, pb.MODEL_STATE_FAILED) == []
 
@@ -2449,7 +2449,7 @@ def test_manifest_carries_compile_block():
         "shapes": [[768, 768], [1024, 1024]],
         "targets": ["transformer", "vae.decode"],
         "text_len": 0,
-        # the class's per-lane pin union rides too.
+        # The class's per-lane pin union rides too.
         "text_lens": [0],
         "guidance_scales": [0.0, 5.0],
         "shape_contract_digest": cell.contract_digest(),
@@ -2511,7 +2511,7 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-# the two-lane IN-PROCESS mint boots that stood here
+# The two-lane IN-PROCESS mint boots that stood here
 # (`_dual_mint_boot` / `_routed_mint_boot` + three publish/withhold tests) are
 # deleted with the route they drove. Each armed live pipes cold, packed one
 # shared inductor capture and published the union as a family cell — a DYNAMO

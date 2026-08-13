@@ -183,7 +183,7 @@ def out_runtime(timer: StageTimer) -> int:
 
 
 # ---------------------------------------------------------------------------
-# the store-enforced single PUT
+# The store-enforced single PUT
 # ---------------------------------------------------------------------------
 
 

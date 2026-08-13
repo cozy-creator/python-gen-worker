@@ -87,7 +87,7 @@ def test_establish_wires_the_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inductor_config.cpp, "simdlen", None)
     monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     seal = env_seal.establish()
-    # the clamp is a DECLARED inductor fact in the seal.
+    # The clamp is a DECLARED inductor fact in the seal.
     assert seal["inductor"]["cpp.march"] == host_isa.mint_march()
 
 

@@ -418,7 +418,7 @@ def test_worker_survives_hub_restart_and_reconnects(tmp_path, monkeypatch) -> No
         before = len(worker.transport.reconnect_delays)
         assert server.stop(grace=0).wait(_TIMEOUT)
 
-        # this was a 15s deadline hiding behind a name — the exact
+        # This was a 15s deadline hiding behind a name — the exact
         # pgw#795 shape, invisible to the source guard because the digit was
         # spelled `_TIMEOUT`. The property is that the worker KEEPS retrying
         # while the hub is down, so wait on the retries and give up only when

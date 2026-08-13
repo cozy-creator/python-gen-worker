@@ -202,7 +202,7 @@ def test_hook_presence_is_a_composition_fact() -> None:
         sig_bare, _ = cc.execution_contract(bare, cfg)
         sig_hooked, _ = cc.execution_contract(hooked, cfg)
         assert sig_bare != sig_hooked
-        # the per-module `composition_fingerprint` rows that used to
+        # The per-module `composition_fingerprint` rows that used to
         # localise this to `transformer:lin1` were the deleted format's
         # adoption fence. The hook-presence FACT they digested is the same one
         # `execution_contract` hashes (`_module_hooks`), which is why the

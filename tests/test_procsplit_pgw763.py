@@ -681,7 +681,7 @@ def test_signal_death_consumes_the_inflight_marker_and_records_the_streak(
         died = conn.wait_for(is_result_for("r-marker"))
         assert died.job_result.status == pb.JOB_STATUS_FATAL
 
-        # the job_result is NOT the event these assertions want. The
+        # The job_result is NOT the event these assertions want. The
         # durable attribution is deliberately emitted first (parent.py
         # `_handle_child_death` step 1) and the post-mortem — signal
         # attribution, streak write, dial — is step 2, several awaits and one

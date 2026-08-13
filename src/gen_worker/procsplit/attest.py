@@ -99,7 +99,7 @@ def attest(
             )
         metrics.rss_at_end_bytes = int(child_rss_bytes)
 
-    # the `output_media_duration_s == 0` divergence is DELETED, and
+    # The `output_media_duration_s == 0` divergence is DELETED, and
     # deleting it is the fix rather than relabelling what it emitted.
     #
     # `_scan_output_assets` sums `Asset.duration_s`, which only a TEMPORAL asset

@@ -46,7 +46,7 @@ def test_one_ordered_ladder() -> None:
         "native", "fp8_storage",
         "model_offload", "group_offload", "sequential", "cpu",
     ]
-    # no rung manufactures a quant at runtime. A quant rung is an
+    # No rung manufactures a quant at runtime. A quant rung is an
     # AOT artifact the ladder SELECTS; the only runtime storage transform left
     # is fp8-E4M3, which is a re-encoding of the same weights, not a quant
     # recipe with an ungated quality verdict.

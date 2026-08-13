@@ -1,7 +1,7 @@
 """Which instance record holds which ref, and whether tearing it down would
 disturb live work.
 
-pgw#1206 C2. These three are pure QUERIES over the executor's record book:
+These three are pure QUERIES over the executor's record book:
 they read records, jobs and residency and mutate nothing. Lifting them out as
 free functions is what lets the residency-reconcile lifetime be reasoned about
 without the 11,000-line job engine around it.
@@ -13,8 +13,8 @@ executor and put us back where we started.
 
 Their two MUTATING callers (`Executor.shutdown_instances` and
 `Executor._vacate_record`) deliberately stay on the executor: both call
-`abandon_background_mint`, which is inside th#1834's frozen Phase-3 region, and
-dragging a frozen method across a module seam is exactly what the fence forbids.
+`abandon_background_mint`, which is inside a frozen region, and dragging a
+frozen method across a module seam is what that fence forbids.
 """
 
 from __future__ import annotations

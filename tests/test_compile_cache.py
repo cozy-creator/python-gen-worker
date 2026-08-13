@@ -479,7 +479,7 @@ def test_compile_struct_validation():
 def test_dynamic_dim_validation():
     d = DynamicDim(dim=" Batch ", min=2, max=8)
     assert (d.dim, d.min, d.max) == ("batch", 2, 8)
-    # the two-literal "batch"|"sequence" wall is REPLACED — wan's
+    # The two-literal "batch"|"sequence" wall is REPLACED — wan's
     # latent-spatial axis is the red case (ie#550/ie#566 hit it from both
     # sides). A named axis constructs; validation moved to Compile, which
     # cross-references the name against declared Compile.dims.
@@ -662,7 +662,7 @@ def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
 
     monkeypatch.delenv("TORCHINDUCTOR_AUTOGRAD_CACHE", raising=False)
     monkeypatch.setattr(fconf, "enable_autograd_cache", True)
-    # the pin is `settings_authority.disable_autograd_cache`, the ONE
+    # The pin is `settings_authority.disable_autograd_cache`, the ONE
     # writer of torch settings. `capture_env` used to call it on the
     # way to writing a `torch-inductor-cache` capture and is deleted with that
     # format; the invariant is unchanged and is asserted at its owner.

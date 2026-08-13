@@ -29,10 +29,10 @@ Three rules:
   what torch already gets wrong.
 * The **divisor is the delivered topology's group count** — the number of
   requests this process runs at once.
-* The imposition is **CODE**, never an env var: pgw#718 scrubs ``OMP_*`` and
-  ``MKL_*`` wholesale precisely so that no base image and no operator decides
-  this, and it then left the decision to a library default reading the wrong
-  CPU count. This closes that gap.
+* The imposition is **CODE**, never an env var: the env seal scrubs ``OMP_*``
+  and ``MKL_*`` wholesale precisely so that no base image and no operator
+  decides this, which otherwise leaves the decision to a library default
+  reading the wrong CPU count.
 
 De-escalation only: the imposed value is ``min(torch's own default, budget)``,
 so a pod whose allowance already exceeds torch's default is untouched and a
@@ -104,15 +104,14 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
     ONE group's share of this process. Returns the recorded facts; never
     raises — a host that will not answer keeps torch's default.
 
-    the divisor is the number of execution groups sharing this CPU
-    cgroup, which is ``groups`` (this process's own) TIMES the compute-child
-    sibling count. Under the process split each child rewrites its own
+    The divisor is the number of execution groups sharing this CPU cgroup,
+    which is ``groups`` (this process's own) TIMES the compute-child sibling
+    count. Under the process split each child rewrites its own
     ``WORKER_EXECUTION_TOPOLOGY`` to a single local group, so ``groups`` reads 1
     in every child — but G of them share one cgroup, and without the sibling
-    multiplier each would claim the whole allowance and reinstate exactly the
-    192-threads-on-32-cores oversubscription pgw#782 removed. ``host_siblings()``
-    is 1 for every pod that is not running the split, so this is unchanged for
-    them (byte-identical at G=1)."""
+    multiplier each would claim the whole allowance and reinstate a
+    192-threads-on-32-cores oversubscription. ``host_siblings()`` is 1 for every
+    pod that is not running the split, so this is byte-identical at G=1."""
 
     siblings = host_siblings()
     effective = max(1, int(groups)) * siblings

@@ -103,7 +103,7 @@ def _assert_partition(topo: ExecutionTopology, source: object) -> None:
         assert topo.parallel == PARALLEL_NONE, (
             f"{source!r} accepted parallel={topo.parallel!r} at degree 1"
         )
-    # the decoder now has a CEILING as well as a floor
+    # The decoder now has a CEILING as well as a floor
     # (``MAX_GPU_COUNT``), so enumerating every group of an accepted topology is
     # bounded work and this property no longer needs an escape hatch.
     assert topo.gpu_count <= MAX_GPU_COUNT, (

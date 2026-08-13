@@ -104,7 +104,7 @@ def _hello_canary(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_measured_fabric_reaches_the_hub(_fake_cuda, monkeypatch: pytest.MonkeyPatch) -> None:
-    # the whole point of the leg is that the number leaves the pod.
+    # The whole point of the leg is that the number leaves the pod.
     _fake_cuda(2)
     monkeypatch.setattr(hc, "_measure_peer", lambda *a, **k: ("nvlink", 348.5, True, "NV18"))
     canary = _hello_canary(monkeypatch)

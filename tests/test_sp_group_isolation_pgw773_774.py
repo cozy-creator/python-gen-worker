@@ -351,7 +351,7 @@ def test_group_mesh_contract_matches_installed_diffusers() -> None:
 
 
 def test_executor_close_sequence_group_runs_off_the_event_loop() -> None:
-    # the recovery path used to run runtime.close() ON the event
+    # The recovery path used to run runtime.close() ON the event
     # loop, whose first act was a broadcast that could block forever — the
     # loop (and the heartbeat) stopped, presenting as a platform stall.
     import asyncio
@@ -374,7 +374,7 @@ def test_executor_close_sequence_group_runs_off_the_event_loop() -> None:
 
     async def _drive() -> bool:
         ex._close_sequence_group(rec)
-        # the property is that the call RETURNED without waiting for
+        # The property is that the call RETURNED without waiting for
         # the 0.5s close — proven by the close still being in flight when it
         # did, not by an elapsed-time budget that asserts the runner instead.
         returned_early = not closed.is_set()

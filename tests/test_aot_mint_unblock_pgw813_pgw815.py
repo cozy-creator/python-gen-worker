@@ -187,7 +187,7 @@ def _arm(**kw: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# the w8a8 lane is eager-serveable, therefore delegatable
+# The w8a8 lane is eager-serveable, therefore delegatable
 # ---------------------------------------------------------------------------
 
 
@@ -263,13 +263,13 @@ def test_delegation_declines_name_their_TRUE_cause(
     kill switch from a pipeline classification."""
     register_export_declaration(_declaration())
 
-    # the OPERATOR arm of this test drove
+    # The OPERATOR arm of this test drove
     # `GEN_WORKER_MINT_IN_PROCESS=1`. The env and the shape it selected are
     # deleted (in-process minting existed only to pack a dynamo cell), so the
     # caller-forced seam that replaces it is the one asserted here — the same
     # phase, reached the way a caller can still reach it.
     with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
-        # this rig's lane is w8a8, which serves only from a cell — so
+        # This rig's lane is w8a8, which serves only from a cell — so
         # the decline is followed by the typed fail-closed rather than by a JIT
         # intake arm. The decline still NAMES ITS CAUSE first, which is the
         # pgw#813 claim under test.
@@ -277,7 +277,7 @@ def test_delegation_declines_name_their_TRUE_cause(
             _Pipe(), _Cfg(), publisher=_Publisher(), delegate=False)  # type: ignore[arg-type]
     assert "aot_mint_forced_in_process" in _phases(_events, "self_mint_skipped")
 
-    # the second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and
+    # The second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and
     # asserted the `aot_eager_first_disabled` phase. Both the switch and the
     # phase are deleted — eager-first is unconditional, so that decline cannot
     # arise, and a reason nobody can reach is a cause a reader hunts for and
@@ -310,7 +310,7 @@ def test_mint_delegate_names_its_own_refusals(
     monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "0")
     assert mint_delegate.delegation_refusal() == ""
     assert not hasattr(mint_delegate, "REFUSAL_EAGER_FIRST_DISABLED")
-    # and the same is now true of the in-process switch — the WORKER
+    # And the same is now true of the in-process switch — the WORKER
     # half of the decision can no longer refuse anything, because there is no
     # in-process mint shape to select.
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
@@ -400,7 +400,7 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
 
 
 # ---------------------------------------------------------------------------
-# every publish terminus is typed
+# Every publish terminus is typed
 # ---------------------------------------------------------------------------
 
 
@@ -529,7 +529,7 @@ def test_a_boot_that_resolves_NOTHING_confesses(
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root4", publisher=_Publisher())
     pending.mint_root.mkdir(parents=True, exist_ok=True)
 
-    # every pending is a DELEGATED mint now, so the BOOT sweep
+    # Every pending is a DELEGATED mint now, so the BOOT sweep
     # defers to the driver that owns it — asserted, so a reader cannot mistake
     # the silence for the defect this test exists about...
     ex._assert_mint_termini(spec, [pending])  # type: ignore[arg-type]

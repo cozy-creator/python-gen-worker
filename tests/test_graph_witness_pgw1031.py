@@ -152,7 +152,7 @@ def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
         "the pair no longer differs in its computation")
 
     # …and THE FIX: the key now sees the body, so the members key apart.
-    # the claim is now per GRAPH CLASS, which is what it always
+    # The claim is now per GRAPH CLASS, which is what it always
     # meant — the two declarations trace the same class names with different
     # bodies, so every shared class must key apart. Asserting it per class is
     # strictly stronger than asserting it once over a combined digest, which

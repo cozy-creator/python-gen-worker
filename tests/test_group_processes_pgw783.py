@@ -918,7 +918,7 @@ def test_a_child_is_reaped_when_its_parent_dies():
         # Kill the intermediate parent; PR_SET_PDEATHSIG must reap the grandchild.
         parent.kill()
         parent.wait(timeout=10)
-        # the reap itself is the progress signal — the wait ends when
+        # The reap itself is the progress signal — the wait ends when
         # the pid is gone, or fails on a silence window, never on a clock.
         def _gone_yet() -> bool:
             try:

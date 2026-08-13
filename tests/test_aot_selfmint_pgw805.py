@@ -332,7 +332,7 @@ def test_an_in_process_only_pod_declines_the_aot_recipe_by_name(
     assert outcome.self_mint is None, (
         "a pod that cannot delegate cannot mint an AOT cell — and pgw#1010 "
         "leaves it nothing else to mint, so it serves JIT intake")
-    # the generic `aot_requires_delegation`
+    # The generic `aot_requires_delegation`
     # carried a hand-written either/or sentence and could not distinguish an
     # operator kill switch from a pipeline classification. Each cause now
     # declines under its own phase; this arm is the forced in-process one.
@@ -482,7 +482,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         started=0.0, sha256_file=lambda p: "deadbeef")
 
     assert report.status == "minted"
-    # the child moves EVERY entry it packed into the parent's
+    # The child moves EVERY entry it packed into the parent's
     # directory, one file per graph class NAMED BY ITS OWN `cg-key-v1` key — so the
     # parent addresses each by identity rather than by position, and `target`
     # names the directory rather than the single file it used to be. The

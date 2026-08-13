@@ -208,7 +208,7 @@ def test_check_names_the_partition_that_broke() -> None:
     the same defect this issue is closing."""
     good = {
         "compile_s": 10.0, "child_boot_s": 1.0, "child_wall_s": 8.5,
-        # the outer partition has its own residual now, so a
+        # The outer partition has its own residual now, so a
         # measured span never doubles as the catch-all. Zero here because the
         # named members already close the level — which is the normal case.
         "reap_lag_s": 0.5, "parent_other_s": 0.0,

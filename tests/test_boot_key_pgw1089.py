@@ -112,7 +112,7 @@ def test_the_fold_is_the_mints_own_stamp_not_a_second_arithmetic() -> None:
     blocks = {"forward/x@64": _block(dim=64), "forward/x@128": _block(dim=128)}
     from gen_worker import compile_cache as cc, env_seal
 
-    # the mint packs ONE artifact per class, so the comparison is
+    # The mint packs ONE artifact per class, so the comparison is
     # per class too — and it is stronger for it. A single combined key could
     # agree while an individual class's hash disagreed underneath it.
     minted = {}

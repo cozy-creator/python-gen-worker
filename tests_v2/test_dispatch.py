@@ -125,7 +125,7 @@ def test_dispatch_load_serve_and_upload_walk(hub, blob_host, upload_sink) -> Non
             request_id="r-stage", attempt=1, function_name="staged-generate",
             input_payload=catalog.row("staged-generate").input_bytes(prompt="a cat"),
             output_mode=pb.OUTPUT_MODE_INLINE,
-            # the ~200 KiB result envelope is now always really
+            # The ~200 KiB result envelope is now always really
             # stored, so this dispatch needs the capability token every other
             # large-result dispatch needs. It passed without one only because
             # the inline shortcut skipped the upload and handed back a ref for
@@ -168,7 +168,7 @@ def test_dispatch_load_serve_and_upload_walk(hub, blob_host, upload_sink) -> Non
         )
         assert upload_sink.requests, "the real upload sink was never hit"
         path, body = upload_sink.requests[-1]
-        # the org rides the CREDENTIAL, not the path —
+        # The org rides the CREDENTIAL, not the path —
         # ORG is dispatched on the job and must not appear in the URL.
         assert path == MEDIA_UPLOADS_PATH
         assert ORG not in path

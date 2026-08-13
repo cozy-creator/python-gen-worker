@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""pgw#740 gate: the registry CONTRACT of the shipped artifact.
+"""The registry CONTRACT of the shipped artifact.
 
-The SDK deliberately ships every family registry EMPTY (pgw#740 / pgw#739:
-vocabularies are declared by the endpoint that owns them — a vocabulary in the
-library needs a wheel release to change). "Registries are populated" is
+The SDK deliberately ships every family registry EMPTY: vocabularies are
+declared by the endpoint that owns them, because a vocabulary in the library
+needs a wheel release to change. "Registries are populated" is
 therefore the WRONG assertion for a bare wheel. The right one — asserted here —
 is the contract:
 

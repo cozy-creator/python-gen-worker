@@ -118,7 +118,7 @@ def test_cancelled_to_thread_join_releases_result() -> None:
         release.set()
         with pytest.raises(asyncio.CancelledError) as excinfo:
             await task
-        # this used to judge reachability after five event-loop turns
+        # This used to judge reachability after five event-loop turns
         # — a wall clock spelled in turns, and the wrong clock besides. The
         # holder at turn five is the EXECUTOR thread, which had set the result
         # but not yet dropped its work item, so the row red whenever that

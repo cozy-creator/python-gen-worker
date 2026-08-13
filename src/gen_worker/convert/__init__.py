@@ -119,7 +119,7 @@ __all__ = [
     "registered_layouts",
     "registered_repackage_families",
     "require_repackage_family",
-    # §1.33 / pgw#1143: the layout converter registry — the CONVERTIBLE rung.
+    # §1.33: the layout converter registry — the CONVERTIBLE rung.
     "ConversionCase",
     "ConversionHop",
     "ConversionIO",

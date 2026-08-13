@@ -97,7 +97,7 @@ CLASS_LESS_DYNAMO: Tuple[Tuple[str, Compile], ...] = (
     ("krea-2", Compile(
         family="krea-2", shapes=((1024, 1024),), targets=("transformer",),
         text_len=512)),
-    # the prior lane's list said FIVE. minimax-h3 is the
+    # The prior lane's list said FIVE. minimax-h3 is the
     # sixth, and the one with the most export-adjacent-LOOKING declaration —
     # `regional=True` plus a declared dynamic sequence range, and still no
     # export contract. An intent test that mistook either for export intent

@@ -220,7 +220,7 @@ class _Rig:
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
-        # no export declaration is registered, so this rig's miss
+        # No export declaration is registered, so this rig's miss
         # takes the JIT INTAKE arm — the in-process compile whose honesty
         # (requirement (a)) and degrade posture (requirement (c)) are what
         # survives here. It mints nothing, which is the point.
@@ -261,7 +261,7 @@ class _Rig:
         # pgw#681 gate at its torch boundary, simmed like apply's compile
         # leaf: _Sim never touches dynamo, so extraction would honestly
         # report closure unprovable and refuse every finalize.
-        # the pgw#681 mint gate this simmed is deleted.
+        # The pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
         # the MINT and wrote the result into the cell's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
@@ -341,7 +341,7 @@ def test_a_mandatory_lane_without_a_declaration_fails_closed_before_it_compiles(
             "a mandatory lane must not compile an intake arm it cannot serve"))
 
     pipe = _Pipe()
-    # this family declares NO export, so the refusal is PERMANENT —
+    # This family declares NO export, so the refusal is PERMANENT —
     # no pod can ever hold a cell for it — and it is therefore the terminal
     # class, not the retryable one. Retrying it was pgw#888's own observation
     # (11 requests, five attempts each, one answer).

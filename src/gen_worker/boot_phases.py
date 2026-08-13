@@ -88,9 +88,9 @@ PHASE_FIRST_REQUEST_SERVABLE = "first_request_servable"
 # new.
 
 #: Process start -> the SDK is usable (interpreter + torch import + endpoint
-#: discovery + executor construction). CUMULATIVE. Names the window that
-#: previously arrived as an unexplained residual: no span could start before
-#: the code that opens spans had been imported.
+#: discovery + executor construction). CUMULATIVE. Names a window no span can
+#: cover: nothing can start a span before the code that opens spans is
+#: imported.
 PHASE_SDK_READY = "sdk_ready"
 #: One component of one ref's weights. Child of `weights_fetch`, opened at the
 #: component's first byte and closed at its last, so CONCURRENCY IS VISIBLE:

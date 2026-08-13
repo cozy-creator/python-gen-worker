@@ -30,7 +30,7 @@ def _payload() -> bytes:
 
 
 def test_stage_map_reconciles_with_runtime_ms_on_the_real_serve_path() -> None:
-    # this test used to need no file API at all. Under
+    # This test used to need no file API at all. Under
     # OUTPUT_MODE_INLINE the image AND the (~200 KiB) result envelope both took
     # the inline shortcut, and the envelope's shortcut was the defect — it
     # returned a ref for bytes that were never uploaded. With the envelope now

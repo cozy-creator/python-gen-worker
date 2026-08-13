@@ -215,7 +215,7 @@ class _WarmJob:
     # requesting thread (every heal would be dead, sigs would go volatile).
     # The warm compile imposes this value first, like grad/autocast.
     num_threads: Optional[int] = None
-    # the executor's background GPU turn — the compile executes
+    # The executor's background GPU turn — the compile executes
     # ONLY inside it (yields to tenant demand; mutually exclusive with
     # tenant forwards on the owning instance). None = ungated legacy.
     turn: Optional[Callable[[str], ContextManager[None]]] = None

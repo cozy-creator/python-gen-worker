@@ -92,7 +92,7 @@ class WorkerResolvedRepo:
     # hub emits `tag_members` (checkpoint rows) and no flavor row exists to
     # parse. Selection within a tag group is contract compatibility (§1.33).
     size_bytes: int = 0
-    # the resolved checkpoint's architecture family ("sdxl-pony",
+    # The resolved checkpoint's architecture family ("sdxl-pony",
     # ...) — drives the local family lane policy. "" on hubs not sending it.
     # resolved objective and distillation value plus the
     # evidence status that distinguishes explicit false from unknown. Empty

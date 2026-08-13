@@ -210,7 +210,7 @@ def test_a_merged_cell_declares_one_dispatchable_entry_and_keeps_the_names():
         family=FAMILY, precision="w8a8", cell_key="",
         name=survivor.name, entry=with_aliases)
 
-    # one artifact, one class — and the claim that mattered is
+    # One artifact, one class — and the claim that mattered is
     # sharper per entry: recording the merged declared-class names must not
     # move THIS class's identity, which is now the key itself rather than a
     # digest over a collection.

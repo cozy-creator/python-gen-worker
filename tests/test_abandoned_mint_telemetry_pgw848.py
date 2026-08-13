@@ -266,7 +266,7 @@ def test_the_pool_ledger_is_live_not_end_of_run(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# the pod-side reaper's progress signal had no producer
+# The pod-side reaper's progress signal had no producer
 # ---------------------------------------------------------------------------
 
 
@@ -358,7 +358,7 @@ def test_every_mint_beat_feeds_both_survivors(
 
 
 # ---------------------------------------------------------------------------
-# the worker never looked at its own credential's expiry
+# The worker never looked at its own credential's expiry
 # ---------------------------------------------------------------------------
 
 
@@ -511,7 +511,7 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
     cfg = type("Cfg", (), {"family": "sdxl", "numerics_floor": 0.995,
                            "numerics_warn": 0.999, "lora_bucket": 0,
                            "targets": ()})()
-    # the gate runs on the MINT arm now (adoption runs no
+    # The gate runs on the MINT arm now (adoption runs no
     # quality gate at all), so this is the flag the minting pod passes. What
     # this test is about is unchanged: an arm that could not be MEASURED is a
     # refusal, never a silent `unchecked` announcement.

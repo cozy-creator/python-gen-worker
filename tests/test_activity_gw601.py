@@ -80,7 +80,7 @@ def test_executor_setup_emits_monotonic_activity_phases():
 
     ups = _updates(sent)
     assert ups, "no activity envelopes emitted"
-    # the boot-forward roll-up is a self-contained EVENT under its
+    # The boot-forward roll-up is a self-contained EVENT under its
     # own kind, not part of this activity's phase envelope. This assertion
     # read as "one activity" only because the two used to share a kind.
     assert {u.kind for u in ups} <= {

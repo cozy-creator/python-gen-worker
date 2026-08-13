@@ -398,7 +398,7 @@ def test_downloading_progress_reports_populated_bytes_done_and_total(
 
 
 # ---------------------------------------------------------------------------
-# no fill source on a datacenter pod must be LOUD
+# No fill source on a datacenter pod must be LOUD
 # ---------------------------------------------------------------------------
 
 def test_datacenter_pod_without_fill_source_logs(tmp_path: Path, monkeypatch, caplog) -> None:

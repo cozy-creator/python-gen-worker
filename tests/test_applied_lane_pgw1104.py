@@ -159,7 +159,7 @@ def test_a_serve_time_recipe_moves_the_reported_lane(boot) -> None:
         # The binding on its own still says bf16 — the divergence is real,
         # not a mis-resolved binding.
         assert ex._bound_execution_body(eff) == "bf16-w16a16"
-        # this rig has no compiled cell, so the honest execution axis
+        # This rig has no compiled cell, so the honest execution axis
         # is `+eager`. Until ie#655 this line read `+compiled` — the lane
         # table's compiled-only PLAN for the w8a8 body coerced an observed
         # eager posture, and the test encoded the over-claim.

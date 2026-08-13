@@ -136,7 +136,7 @@ def _fresh_process_settings():
 
 
 def pytest_configure(config):
-    # same treatment as tests/conftest.py — the declared
+    # Same treatment as tests/conftest.py — the declared
     # interpreter env (PYTHONHASHSEED=0), imposed by ONE re-exec with global
     # capture stopped first so the re-exec'd run still owns the terminal.
     # xdist workers inherit the env from the re-exec'd master.

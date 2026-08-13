@@ -106,7 +106,7 @@ class Cfg:
 
 def _entry(**over: Any) -> Dict[str, Any]:
     e: Dict[str, Any] = {
-        # an entry block NAMES its class — that is what makes a
+        # An entry block NAMES its class — that is what makes a
         # refusal bisectable to the thing that failed.
         "name": ENTRY,
         "target": "unet", "fork": [], "class_dims": [],
@@ -132,17 +132,17 @@ def _meta(**over: Any) -> Dict[str, Any]:
         "cell_key": KEY, cell_key_mod.ENTRY_BLOCK_KEY: entry,
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
-        # no weight BYTES in the .so (above) and no weight VALUES in
+        # No weight BYTES in the .so (above) and no weight VALUES in
         # its kernels (here). Both are declared axes; a cell silent on either
         # is refused before a byte moves.
         "constant_folding_fenced": True,
         "source_ref": "", "source_digest": "",
-        # every mint stamps a host-ISA requirement, and a cell that
+        # Every mint stamps a host-ISA requirement, and a cell that
         # stamps none is refused rather than sniffed from the .pt2. Satisfiable
         # anywhere: this host's machine, no ISA level.
         "host_isa": {"machine": platform.machine(), "march": "", "simdlen": 0,
                      "level": ""},
-        # the identity blocks the four-axis key restates from —
+        # The identity blocks the four-axis key restates from —
         # verify_contract refuses a stamp the artifact cannot restate.
         "env_seal": {"seal_v": 4, "env": {"PYTHONHASHSEED": "0"}},
         "toolchain": {"torch": "t" * 16, "settings_declaration": "d" * 16,
@@ -201,7 +201,7 @@ def test_successful_arm_returns_an_armed_outcome_naming_the_cell(
 def test_key_mismatch_named_on_the_wire(
     tmp_path: Path, events: List[Any], stub_runtime: None,
 ) -> None:
-    # an sm mismatch is the key mismatch; a SKU difference alone is
+    # An sm mismatch is the key mismatch; a SKU difference alone is
     # adopted (same-sm cross-SKU cells are the point of the pgw#691 collapse).
     art = _tar(tmp_path, _meta(sm="sm_80"))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=art)

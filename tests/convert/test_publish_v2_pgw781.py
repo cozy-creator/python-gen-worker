@@ -321,7 +321,7 @@ def test_corrupt_local_bytes_are_refused_BEFORE_the_transfer(hub, tmp_path, monk
         hub_c.publish_v2(destination_repo="org/model", files=[f], tags=["prod"])
     # Nothing corrupt was stored.
     assert all(sha(v) == k for k, v in hub.store.items())
-    # and the session is LEFT ALONE. `DELETE /publishes/:id`
+    # And the session is LEFT ALONE. `DELETE /publishes/:id`
     # deletes every staged chunk hub-side, so it is answered only for a refusal
     # the HUB classified terminal — never for a client-side fault, where the
     # objects that did land are exactly what a retry wants. Sessions nobody

@@ -144,7 +144,7 @@ def test_keepalive_measures_recovery(fake_hub: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# the PUBLISH envelope is a second hub shape, and missing it converted
+# The PUBLISH envelope is a second hub shape, and missing it converted
 # a diagnosable refusal into a different, later error.
 # ---------------------------------------------------------------------------
 

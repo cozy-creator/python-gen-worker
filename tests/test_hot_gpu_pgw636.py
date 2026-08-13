@@ -166,7 +166,7 @@ def test_lru_victims_order_multi_holder_shared_last() -> None:
 
 
 def test_release_shared_leaves_entry_resident_for_the_next_pick() -> None:
-    # no eager drain — a hot GPU keeps components resident; the
+    # No eager drain — a hot GPU keeps components resident; the
     # next pick with equal bytes aliases them for free.
     res = _budget_residency(24)
     key = _key("text_encoder", "a" * 32)

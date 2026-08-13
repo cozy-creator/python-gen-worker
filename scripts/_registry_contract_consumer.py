@@ -60,7 +60,7 @@ register_layout(
 
 declare_foreign_family_map(CIVITAI, {"ContractCheck 1.0": FAMILY})
 
-# The SIXTH registry (§1.33 / pgw#1143). A topology edge is DATA — declared
+# The SIXTH registry (§1.33). A topology edge is DATA — declared
 # rename passes plus their inverse — and registration runs the round-trip
 # admission proof over the declared corpus before the edge exists.
 register_layout_conversion(

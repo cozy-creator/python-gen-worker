@@ -10,12 +10,12 @@ so it must never be a gate.
 Why differential at all. `WORKER_EXECUTION_TOPOLOGY` is one grammar with two
 decoders — tensorhub `internal/orchestrator/topology` writes it,
 `gen_worker.topology` reads it. Each side's own tests only ever prove that side
-self-consistent, which is exactly how th#1375/pgw#856 shipped: Go's zero value
-for the degree field is illegal so Go refused for the wrong reason, while
-Python's default of 1 is legal so Python silently served degree 1. The property
-that catches that class is AGREEMENT: same bytes in, both accept with an
-identical derived (gpu_count, gpus_per_execution_group, execution_groups,
-parallel), or both refuse.
+self-consistent, which is how a rename hole ships: Go's zero value for the
+degree field is illegal so Go refuses for the wrong reason, while Python's
+default of 1 is legal so Python silently serves degree 1. The property that
+catches that class is AGREEMENT: same bytes in, both accept with an identical
+derived (gpu_count, gpus_per_execution_group, execution_groups, parallel), or
+both refuse.
 
 Usage:
 
@@ -122,7 +122,7 @@ def go_verdicts(tensorhub: pathlib.Path, wires: list[str]) -> list[dict[str, Any
 # WELL-FORMED JSON objects over this key set whose VALUES sit on the edges the
 # two decoders might read differently — zero (Go's "not written" sentinel vs
 # Python's explicit-present), floats that are integral, non-string `parallel`,
-# case, whitespace, and the th#1375 spelling pairs in every combination.
+# case, whitespace, and the retired/current spelling pairs in every combination.
 
 INTERESTING_NUMBERS: list[Any] = [
     0, 1, 2, 3, 4, 8, -1, -2,
@@ -209,16 +209,7 @@ def generate(n: int, rng: random.Random) -> list[str]:
 
 
 
-# The recorded divergence CLASSES — EMPTY as of 2026-08-02.
-#
-# the Go decoder now checks its key set
-# case-SENSITIVELY on a raw key map, refuses trailing data, distinguishes an
-# absent field from an explicit zero, and no longer case-folds `parallel`; the
-# Python decoder type-checks `parallel` BEFORE defaulting, refuses non-integer
-# and out-of-int64 numbers (so NaN/Infinity are typed refusals rather than an
-# untyped escape), and both sides refuse an absent gpu_count/degree instead of
-# defaulting one side to a legal single slot. Every witness moved into the
-# fixture's `agreed` block.
+# The recorded divergence CLASSES — currently EMPTY.
 #
 # Suppression is by CLASS, not by exact string, because each class has thousands
 # of concrete witnesses. A non-zero exit from this driver means "a disagreement

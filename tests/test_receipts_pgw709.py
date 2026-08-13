@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from gen_worker import receipts
 
-# the signer + the live hub moved to `tests/harness/receipt_hub.py`.
+# The signer + the live hub moved to `tests/harness/receipt_hub.py`.
 # pgw#1122's identity seam already imported them from here, and the adopt-path
 # rig needs the same real receipt gate. Same objects, one home.
 from harness.receipt_hub import (  # noqa: F401 — fixtures come with it
@@ -357,7 +357,7 @@ class TestAlgorithmAgnosticReceipts:
 
 
 # ---------------------------------------------------------------------------
-# the publisher trust boundary at the arm gate
+# The publisher trust boundary at the arm gate
 # ---------------------------------------------------------------------------
 
 
@@ -511,7 +511,7 @@ class TestPublisherTrustTh1657:
 
 
 # ---------------------------------------------------------------------------
-# the two layers apply ONE rule
+# The two layers apply ONE rule
 # ---------------------------------------------------------------------------
 
 # THE SHARED ADOPTION TABLE. Twin of tensorhub's

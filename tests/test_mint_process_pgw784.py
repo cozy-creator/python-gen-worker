@@ -126,13 +126,13 @@ def test_a_minted_cell_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> None
     frames: list = []
     out = asyncio.run(_run(tmp_path, "minted", frames=frames))
     assert out.status == mp.MINTED and out.minted
-    # the child reports its ENTRY SET, so the outcome carries the
+    # The child reports its ENTRY SET, so the outcome carries the
     # artifacts it produced. This vehicle mints one class, and the unpack
     # asserts that arity rather than indexing past a set nobody checked.
     (only,) = out.artifacts
     assert only == tmp_path / "cell.tar.gz"
     assert only.read_bytes() == b"stub-cell-bytes"
-    # the digest rides the ENTRY row, beside the key and the path —
+    # The digest rides the ENTRY row, beside the key and the path —
     # a per-artifact fact belongs with its artifact, not on the report.
     assert out.report is not None
     ((_key, _path, digest),) = out.report.entries

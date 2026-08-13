@@ -1,13 +1,12 @@
 #!/usr/bin/env python
-"""pgw#966 guard: every skip the suite produces is CLASSIFIED, and the rows CI
-is supposed to run are not among them.
+"""Every skip the suite produces is CLASSIFIED, and the rows CI is supposed to
+run are not among them.
 
 **Why a guard and not a one-time cleanup.** A skipped row and a passing row look
 identical in a green run, so a row that stops running is invisible for as long
-as nobody happens to read the reason lines. pgw#858 went that way: its container
-row skips on `ubuntu-latest` and has therefore only ever executed on developer
-boxes, which is how the pgw#956 flake reached `dev` behind a green CI. A
-one-time census would have found it once; this makes the NEXT one fail a build.
+as nobody happens to read the reason lines — which is how a flake reaches master
+behind a green CI. A one-time census would find it once; this makes the NEXT one
+fail a build.
 
 Input is whatever `--skip-census-out=` produced (see the repo-root conftest.py):
 the skips a session ACTUALLY took, on the machine that took them — not a static
@@ -19,9 +18,9 @@ Two rules, both cheap:
   1. Every observed key must appear in `scripts/skip_census.txt`. A new skip is
      a decision; making it costs one line naming which of the four dispositions
      it is.
-  2. In `--ci` mode a key classified `CI-MUST-RUN` must NOT be observed. That is
-     the pgw#858 shape stated positively: this row is expected to execute on the
-     runner, so seeing it skip there is a failure and not a note.
+  2. In `--ci` mode a key classified `CI-MUST-RUN` must NOT be observed: this
+     row is expected to execute on the runner, so seeing it skip there is a
+     failure and not a note.
 
 Dispositions:
 

@@ -54,7 +54,7 @@ from gen_worker.convert import repackage, writer  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# the untrusted-pickle boundary in the convert lane
+# The untrusted-pickle boundary in the convert lane
 # ---------------------------------------------------------------------------
 
 

@@ -1,19 +1,15 @@
-"""Local-only GGUF snapshot detection (cl#27, GGUF-DESIGN consumption half).
+"""Local-only GGUF snapshot detection.
 
-What survives here is the DETECTION half: a materialized snapshot dir that
-carries :data:`GGUF_MARKER` is a composed gguf tree, and the loading layer
-reads the marker to pick its lane.
+This is the DETECTION half only: a materialized snapshot dir that carries
+:data:`GGUF_MARKER` is a composed gguf tree, and the loading layer reads the
+marker to pick its lane.
 
-pgw#1148 DELETED the SELECTION half — `select_gguf`, `maybe_rebind_gguf`,
-`compose_resolved`, `write_marker` and `fetch_gguf_snapshot`. All of it
-addressed the artifact as `owner/repo#gguf-<qtype>` and chose among the
-resolve's `sibling_flavors` rows. th#1803 deleted both: `repo_tags` is
-re-keyed to (repo, tag, checkpoint), the flavor column is gone, the resolve
-emits `tag_members` (checkpoint rows) and no longer accepts `?flavor=`, and
-§1.32(d) makes the `#` tail a non-address. The code could not have worked
-against the current hub — this is a deletion of a broken path, not of a
-working feature. Re-addressing the gguf member by CHECKPOINT DIGEST and
-re-composing is a BUILD, filed as a pgw#1148 residual.
+There is deliberately no SELECTION half. Selecting a gguf member by
+`owner/repo#gguf-<qtype>` addressed a flavor column that no longer exists —
+`repo_tags` is keyed on (repo, tag, checkpoint), the resolve emits `tag_members`
+and rejects `?flavor=`, and the `#` tail is not an address. Re-addressing the
+gguf member by CHECKPOINT DIGEST and re-composing is a build that has not
+happened.
 """
 
 from __future__ import annotations

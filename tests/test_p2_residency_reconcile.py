@@ -183,7 +183,7 @@ def test_mutable_tag_move_fences_events_by_digest_and_generation(tmp_path) -> No
             assert priority_a.status == pb.JOB_STATUS_OK
             assert _decode(priority_a.inline).response == payload_a.decode()
             conn.wait_for_count(resumed_b, b_events_before + 1)
-            # the event and the store update are not the same instant,
+            # The event and the store update are not the same instant,
             # so read the store on PROGRESS rather than sampling it once and
             # hoping. Sampling failed a full-suite run at ('snap-a', 0) — the
             # resumed pass had announced B but not yet rebased the identity.

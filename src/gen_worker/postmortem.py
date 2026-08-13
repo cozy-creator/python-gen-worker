@@ -40,7 +40,7 @@ _PROC_MOUNTS = Path("/proc/mounts")
 _GIB = 1024 ** 3
 
 # Filesystems whose contents die with the container's memory — i.e. exactly
-# the death this record exists to report.
+# The death this record exists to report.
 _VOLATILE_FSTYPES = {"tmpfs", "ramfs"}
 
 _BOOT_RECORD_NAME = "gen-worker-boot-record.json"
@@ -415,7 +415,7 @@ def write_boot_record(path: Path = BOOT_RECORD_PATH, **extra: Any) -> None:
         "oom_kill_at_boot": oom_kill_count(),
         "limits": container_limits(),
         # Carried IN the record so a reader can tell "the pod did not die"
-        # from "the evidence was on RAM and died with it".
+        # From "the evidence was on RAM and died with it".
         "carrier_volatile": volatile,
     }
     record.update(extra)

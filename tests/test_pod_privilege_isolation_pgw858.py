@@ -495,7 +495,7 @@ def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
     assert proc is not None and proc.returncode is None
     pid = proc.pid
     # NO `assert time.monotonic() - started < 120.0` here, and
-    #  no single read after `close()` either — returning from `close()`
+    #  No single read after `close()` either — returning from `close()`
     # is not proof the reap completed. The property is that the parent exited
     # and the child was reaped, so wait on THAT advancing; a hang fails by never
     # reaping, which is the actual defect.

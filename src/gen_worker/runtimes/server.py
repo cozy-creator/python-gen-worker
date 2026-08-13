@@ -216,7 +216,7 @@ class DegradingBoot:
             try:
                 handle = proc.start()
                 if rung > 0:
-                    # the engine is serving on a degraded rung
+                    # The engine is serving on a degraded rung
                     # (fewer GPU layers / CPU-only) — a quality decision the
                     # planned rung's failure would otherwise hide.
                     activity_mod.emit_event(

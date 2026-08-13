@@ -660,7 +660,7 @@ def test_fork_and_row_reach_the_cell_identity() -> None:
             # digest rides beside it as a coverage label, never as identity.
             cell_key.ENTRY_BLOCK_KEY: entry,
             "manifest_digest": cell_key.manifest_digest([ch]),
-            # every key input is now a RECORDED block, so this
+            # Every key input is now a RECORDED block, so this
             # fixture states them rather than relying on an empty-dict digest.
             "env_seal": {"v": 1}, "toolchain": {"torch": "2.9.0"},
             "declared_envelope": {"shapes": [], "text_lens": [], "guidance": []},

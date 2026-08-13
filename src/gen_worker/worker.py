@@ -149,7 +149,7 @@ class Worker:
             )
         self.lifecycle = Lifecycle(settings, self.executor)
         self.executor._on_state_change = self.lifecycle.state_changed
-        # in the split's COMPUTE CHILD, the "transport" speaks frames
+        # In the split's COMPUTE CHILD, the "transport" speaks frames
         # to the control parent (which owns the real gRPC stream + SendQueue).
         # Lifecycle/Executor wiring is identical either way.
 
@@ -236,7 +236,7 @@ class Worker:
             return 0
         if self._stop_requested:
             return 0
-        # the reconnect loop is supposed to run until a hub Drain or a
+        # The reconnect loop is supposed to run until a hub Drain or a
         # signal. Falling out of it any other way ended the process with a
         # clean exit 0 and NOTHING on the wire — the hub saw only a stream
         # close and a young-worker death. An unexplained exit is a fatal.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""pgw#1089 — drive the BOOT-SIDE key derivation against a real endpoint, with
-no compile anywhere.
+"""Drive the BOOT-SIDE key derivation against a real endpoint, with no compile
+anywhere.
 
 This is the derivation half of the rig gauntlet's cycle and NOTHING else: it
 composes the vehicle's compile target structure-only, exports each declared
@@ -12,23 +12,23 @@ which explicitly permits fake-tensor tracing for key derivation.
 What it proves, and why each is worth a run
 -------------------------------------------
 * **The derivation WORKS on a real endpoint** — the structure-only builder
-  reaches the boot path (pgw#1080's owed widening), the export gates pass on
-  fake parameters, and every declared class produces a keying block.
+  reaches the boot path, the export gates pass on fake parameters, and every
+  declared class produces a keying block.
 * **Parallelism is not an identity axis** — the same tree derived at K=1 and at
   K=N yields the identical key. The unit tests pin the arithmetic; this pins
   the PROCESSES, which is where `aot_compile_pool` measured its failures.
 * **The memo is honest and fast** — a second derivation over the same closure
   reports ``hit``, and a poisoned memo reports ``invalidated`` while the FRESH
   hashes are what the key names.
-* **pgw#847's economy, priced on real graphs** — ``FakeTensorProp`` ms beside
-  export ms, per child. Reported; it decides nothing here.
+* **The prop/export economy, priced on real graphs** — ``FakeTensorProp`` ms
+  beside export ms, per child. Reported; it decides nothing here.
 
 What it CANNOT prove, and must not be read as proving
 ------------------------------------------------------
 **derived == stamped.** A stamp needs a mint, a mint needs a compile, and a
 compile is a pod. This rig's key is self-consistent, not corroborated. The
-comparison against a real mint's stamp is the pod leg, and it is the only load-
-bearing proof in pgw#1089.
+comparison against a real mint's stamp is the pod leg, and it is the only
+load-bearing proof.
 
 Usage::
 

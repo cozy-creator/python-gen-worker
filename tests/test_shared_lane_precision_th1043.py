@@ -95,7 +95,7 @@ def test_fp8_execution_lane_holds_with_and_without_group_forcing(tmp_path):
                    force_storage_dtype="fp8")
     assert getattr(sl.obj, "_cozy_weight_lane", "") == "fp8-hooks"
     assert getattr(sl.obj, "_cozy_fp8_storage_requested", False) is True
-    # the forced downgrade is reported structurally, not
+    # The forced downgrade is reported structurally, not
     # served silently as a native bf16 plan.
     assert sl.rung == "fp8"
     assert "shared-lane" in sl.rung_detail

@@ -170,7 +170,7 @@ _WORKER_SCOPED_MSGS = frozenset(
 # wire. Ring-buffered, bounded, reset per spawn.
 _STDERR_TAIL_CAP_BYTES = 32768
 _STDERR_TAIL_DIAL_CHARS = 3000
-# the compute uid's home — HF cache, ~/.triton, ~/.nv, TMPDIR and the
+# The compute uid's home — HF cache, ~/.triton, ~/.nv, TMPDIR and the
 # .pyc prefix all hang off it. On disk, not in the world-writable /tmp, and
 # owned by the compute uid rather than shared with the control parent.
 _COMPUTE_HOME = "/var/lib/gen-worker/compute"
@@ -278,7 +278,7 @@ class _ChildSlot:
             postmortem.group_fault_dump_path(group.ordinal, parent._postmortem_dir)
             if parent._topology.execution_groups > 1 else None
         )
-        # the load path's breadcrumb — consumed on a signal death
+        # The load path's breadcrumb — consumed on a signal death
         # so a SIGKILL mid-load names its phase/component and byte counts.
         self.load_progress_path = (
             postmortem.group_load_progress_path(
@@ -1225,7 +1225,7 @@ class ParentControl:
         self._child_exited_clean = False
         self._shutdown_flushed = False
         self.crash_loop_reports = 0  # observability + tests
-        # set when a terminal boot outcome makes the parent exit 1.
+        # Set when a terminal boot outcome makes the parent exit 1.
         self._terminal_exit = False
         self.terminal_exit_reason = ""  # observability + tests
         self._stop_deadline_task: Optional[asyncio.Task] = None

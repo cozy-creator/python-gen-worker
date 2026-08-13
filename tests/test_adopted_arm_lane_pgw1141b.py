@@ -86,7 +86,7 @@ import pytest
 from gen_worker import activity, aot_serve, cell_adopt
 from gen_worker import executor as ex_mod
 
-# the vehicle this file built is now `tests/harness/adopt_rig.py`,
+# The vehicle this file built is now `tests/harness/adopt_rig.py`,
 # the DEFAULT rig for anything arming-adjacent. It is the same chain, verbatim
 # — real `ensure_setup` -> real `_enable_compiled` -> a real `_ArmOrder(adopt=…)`
 # -> real `arm_ordered` -> the real receipt gate against a real RSA-signed

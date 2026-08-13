@@ -206,7 +206,7 @@ def test_state_delta_never_blocks_event_loop_on_a_stalled_mount(
             "to_thread call")
         # Meanwhile _state_delta() (the hot path) must also stay non-
         # blocking and cheap: it only reads the (still-empty) cache.
-        # the proof is STRUCTURAL, not a 0.1s budget — the hot path
+        # The proof is STRUCTURAL, not a 0.1s budget — the hot path
         # answered while the 5s statvfs was demonstrably still running, which
         # is the property, and is true at any runner speed. A wall-clock
         # budget here asserts the runner's scheduler instead.

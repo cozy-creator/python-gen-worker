@@ -59,18 +59,13 @@ SRC = REPO / "src" / "gen_worker"
 #: helpers whose callers say so (`contract_facts`: "NOT a key-axis input";
 #: `subject_digest` names a MINT OBLIGATION, never a cell key), so probing on
 #: them would fence modules that compute no key and make the gate noise.
-# pgw#1176, and this fence was SILENTLY WEAKENED until it was corrected:
-# it named `from_exported_artifact_metadata`, which no longer exists, so any
-# module computing an entry key through the real producer was no longer
-# detected as an axis producer at all. The gate still exited 0 — a fence that
-# names a deleted symbol guards nothing and passes vacuously forever, which is
-# the same shape as the pgw#1059 derivation fence and the `_old_schema_digest`
-# rename. After ANY rename, re-read every fence and ask what symbol it names
+# A fence that names a DELETED symbol guards nothing and passes vacuously
+# forever. After ANY rename, re-read every fence and ask what symbol it names
 # NOW.
 #
-# `envelope_digest` also LEAVES this list: the envelope is a MANIFEST fact
-# since pgw#1176, not a key axis, so fencing on it would fence modules that
-# compute no key — exactly the noise the comment above says to avoid.
+# `envelope_digest` is deliberately absent: the envelope is a MANIFEST fact,
+# not a key axis, so fencing on it would fence modules that compute no key —
+# exactly the noise the note above says to avoid.
 AXIS_PRODUCERS: Tuple[str, ...] = (
     "from_axes",
     "toolchain_axis_digest",
@@ -78,8 +73,8 @@ AXIS_PRODUCERS: Tuple[str, ...] = (
     "CellKey",
 )
 
-#: Always fenced, whatever they call: they DEFINE the key or one of its
-#: THREE axis inputs (graph / sm / toolchain) — pgw#1176 evicted `envelope`.
+#: Always fenced, whatever they call: they DEFINE the key or one of its THREE
+#: axis inputs (graph / sm / toolchain). The envelope is not one of them.
 FENCE_SEED: Tuple[str, ...] = (
     "cell_key.py",
     "graph_hash.py",
@@ -176,8 +171,7 @@ def _docstring_nodes(tree: ast.AST) -> Set[int]:
     """Every docstring Constant, by id.
 
     PROSE IS NOT A REFERENCE. A gate that reds on the word appearing in a
-    comment teaches lanes to avoid explaining themselves, and a vocabulary gate
-    that fires on a docstring has already cost this repo a lane-day.
+    comment teaches lanes to avoid explaining themselves.
     """
     out: Set[int] = set()
     for node in ast.walk(tree):

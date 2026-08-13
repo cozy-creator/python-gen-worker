@@ -1,19 +1,19 @@
 """The one `Settings` this process was started with — PUBLISHED, never found.
 
-pgw#931 deleted `get_settings()`, a `functools.lru_cache(maxsize=1)` wrapper
-around `load_settings()`. The problem was never the caching; it was that any
-module, at any depth, at any moment, could *materialise configuration out of
-the environment* just by importing it. Three consequences, all measured:
+There is deliberately no `get_settings()` accessor that loads on demand. A
+cached loader lets any module, at any depth, at any moment, *materialise
+configuration out of the environment* just by importing it, and that has three
+measured consequences:
 
-* content depended on **which module imported first**, because `lru_cache`
-  latches at first touch;
-* a caller that wanted to pass different settings had no way to;
-* nothing could tell whether config had been loaded at all, so a module running
-  before bootstrap silently got a fresh read of a half-built environment
-  instead of an error.
+* content depends on **which module imported first**, because the cache latches
+  at first touch;
+* a caller that wants to pass different settings has no way to;
+* nothing can tell whether config was loaded at all, so a module running before
+  bootstrap silently gets a fresh read of a half-built environment instead of
+  an error.
 
-This module keeps exactly one property of the old accessor — a process-wide
-answer for code too deep to hand a parameter to — and removes the rest. It
+This module keeps exactly one property of such an accessor — a process-wide
+answer for code too deep to hand a parameter to — and nothing else. It
 **cannot load**. `install()` is called by a process entry with the `Settings`
 that entry loaded, and `current()` raises if that never happened.
 

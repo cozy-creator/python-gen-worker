@@ -59,7 +59,7 @@ _CLASS_BY_STAGE: Dict[str, str] = {
     "setup_wait": GPU_IDLE,
     "image_encode": GPU_IDLE,
     "video_encode": GPU_IDLE,
-    # the output-integrity floor. CPU numpy over a handful of
+    # The output-integrity floor. CPU numpy over a handful of
     # decimated frames — single-digit ms, and it must be ATTRIBUTED rather than
     # appear as unexplained residual on every render.
     "output_integrity": GPU_IDLE,

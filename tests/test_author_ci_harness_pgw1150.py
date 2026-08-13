@@ -285,7 +285,7 @@ def test_a_healthy_cell_records_the_gates_own_cosine(
     assert report.parity is not None and report.parity.passed
     proof = tomllib.loads(record.read_text(encoding="utf-8"))["proof"]
     assert proof["cosine"] >= 0.999
-    # the record names the ENTRY KEY that was measured, computed
+    # The record names the ENTRY KEY that was measured, computed
     # from the artifact's own facts. `"cell868"` was a harness placeholder
     # from when the key was a literal; asserting it now would assert the mint
     # failed to key its own product.

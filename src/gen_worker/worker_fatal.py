@@ -111,7 +111,7 @@ def report_worker_fatal(
     if settings is None or not (settings.orchestrator_public_addr or "").strip():
         return False
     detail = build_fatal_detail(phase, exc, exit_code=exit_code)
-    # in the compute child there is no worker JWT to open a
+    # In the compute child there is no worker JWT to open a
     # Connect with, and there should not be — a HardwareUnsuitable-carrier
     # report is a fleet-wide verdict key, so it is worth more dialed
     # by the process that runs no tenant code. The parent dials it.

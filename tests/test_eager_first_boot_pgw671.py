@@ -164,14 +164,14 @@ class _Harness:
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
-        # every mint is a CHILD mint now. This rig has no child
+        # Every mint is a CHILD mint now. This rig has no child
         # process — without a stub it spawns a REAL one per attempt and the
         # test spends minutes importing torch to watch it fail. The serving
         # side is what pgw#671 is about: READY at eager tier first, the tier
         # flipping only when the mint lands.
         monkeypatch.setattr(
             mint_delegate, "build_cell", self._fake_build_cell)
-        # the pgw#681 mint gate this simmed is deleted with the
+        # The pgw#681 mint gate this simmed is deleted with the
         # `torch-inductor-cache` format whose metadata carried its manifest.
         self.ex = Executor(self.specs, _send, store=store)
 
