@@ -1530,7 +1530,7 @@ class ParentControl:
         token = (self._settings.bootstrap_worker_jwt or "").strip()
         if token:
             try:
-                from ..request_context import _decode_unverified_jwt_claims
+                from ..request_context._helpers import _decode_unverified_jwt_claims
 
                 claims = _decode_unverified_jwt_claims(token)
                 worker_id = worker_id or str(claims.get("sub") or "").strip()

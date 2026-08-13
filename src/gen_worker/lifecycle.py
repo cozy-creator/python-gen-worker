@@ -281,7 +281,7 @@ class Lifecycle:
         # credential to AUTHENTICATE must use `worker_credential.current()`.
         _boot_jwt = (settings.bootstrap_worker_jwt or "").strip()
         if _boot_jwt:
-            from .request_context import _decode_unverified_jwt_claims
+            from .request_context._helpers import _decode_unverified_jwt_claims
 
             claims = _decode_unverified_jwt_claims(_boot_jwt)
         self.worker_id = (

@@ -15,7 +15,7 @@ from typing import Callable, Optional, Tuple
 
 from . import activity as activity_mod
 from .procsplit import broker
-from .request_context import _decode_unverified_jwt_claims
+from .request_context._helpers import _decode_unverified_jwt_claims
 
 logger = logging.getLogger(__name__)
 
