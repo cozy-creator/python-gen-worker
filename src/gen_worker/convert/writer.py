@@ -250,54 +250,6 @@ def _weight_component_dirs() -> frozenset[str]:
     return frozenset(weight_components())
 
 
-#: Where a converted pickle is staged, beside the component it came from.
-#: One spelling, because there is one pickle reader.
-PICKLE_CACHE_DIR = ".__pickle_cache__"
-
-
-def materialize_pickle_to_safetensors(pickle_path: Path, work_dir: Path) -> Path:
-    """Convert a pickle weight file to safetensors (``weights_only=True``).
-
-    **The only pickle reader in this package**. Conversion ingests
-    ARBITRARY tenant-submitted repos, so every ``.bin``/``.ckpt`` reaching this
-    process is untrusted bytes; ``weights_only=True`` is passed EXPLICITLY and
-    never left to torch's default, which ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD``
-    in the pod environment silently flips back for any call site that omitted
-    the argument.
-    """
-    import torch
-    from safetensors.torch import save_file
-
-    try:
-        state = torch.load(str(pickle_path), map_location="cpu", weights_only=True)
-    except Exception as exc:
-        # A checkpoint the SAFE unpickler cannot read is a checkpoint whose
-        # bytes ask to construct something other than tensors. That is the
-        # refusal this vocabulary exists for; there is no permissive retry.
-        if "weights only" in str(exc).lower() or type(exc).__name__ == "UnpicklingError":
-            raise ConversionImplementationError(
-                f"unsafe_weight_format:{pickle_path.name}: the file only loads "
-                f"with unpickling enabled, which executes arbitrary code in "
-                f"this pod. Republish it as safetensors. "
-                f"({type(exc).__name__}: {str(exc)[:200]})"
-            ) from exc
-        raise ConversionImplementationError(
-            f"pickle_load_failed: {type(exc).__name__}: {str(exc)[:200]}"
-        ) from exc
-    if isinstance(state, dict) and isinstance(state.get("state_dict"), dict):
-        state = state["state_dict"]
-    tensors = {
-        k: v.contiguous() for k, v in state.items()
-        if hasattr(v, "dtype") and hasattr(v, "shape")
-    }
-    if not tensors:
-        raise ConversionImplementationError(f"pickle_no_tensors_found:{pickle_path}")
-    work_dir.mkdir(parents=True, exist_ok=True)
-    out = work_dir / (pickle_path.stem + ".safetensors")
-    save_file(tensors, str(out))
-    return out
-
-
 def _resolve_input_shards(input_path: Path) -> list[Path]:
     if input_path.name.lower().endswith(".safetensors.index.json"):
         return list_shard_files_from_index(input_path)
@@ -307,7 +259,8 @@ def _resolve_input_shards(input_path: Path) -> list[Path]:
 def iter_component_tensors(component_dir: Path) -> Iterator[tuple[str, "torch.Tensor"]]:
     """Yield (name, tensor) for every weight in one component directory.
 
-    Preference: sharded index > single safetensors > pickle (converted).
+    Preference: sharded index > single safetensors. A component that offers
+    only a pickle is REFUSED -- pickles are banned platform-wide.
     """
     from safetensors import safe_open
 
@@ -324,9 +277,11 @@ def iter_component_tensors(component_dir: Path) -> Iterator[tuple[str, "torch.Te
         for ext in _PICKLE_EXTS:
             found = sorted(component_dir.glob(f"*{ext}"))
             if found:
-                entry = materialize_pickle_to_safetensors(
-                    found[0], component_dir / PICKLE_CACHE_DIR)
-                break
+                raise ConversionImplementationError(
+                    f"pickle_only:{found[0].name}: this component offers only "
+                    f"a pickle, and pickles are refused. Mirror the source "
+                    f"repo without the pickle (safetensors) and convert that."
+                )
     if entry is None:
         return
     for shard in _resolve_input_shards(entry):
@@ -1996,7 +1951,6 @@ __all__ = [
     "assert_one_file_per_component",
     "IncrementalSafetensorsWriter",
     "torch_dtype_to_st",
-    "materialize_pickle_to_safetensors",
     "iter_component_tensors",
     "iter_source_tensors",
     "streaming_dtype_cast",

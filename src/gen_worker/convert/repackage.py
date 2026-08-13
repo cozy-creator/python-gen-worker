@@ -30,10 +30,8 @@ from .registry import (
 from .repack_spec import ComponentRepack, DtypePolicy, RepackageFamily
 from .writer import (
     NEVER_SHARD_MAX_SIZE,
-    PICKLE_CACHE_DIR,
     ConversionImplementationError,
     assert_one_file_per_component,
-    materialize_pickle_to_safetensors,
 )
 
 if TYPE_CHECKING:
@@ -106,8 +104,9 @@ def _load_component_state_dict(
       downloads keep the suffix — e.g. diffusion_pytorch_model.fp16.safetensors
       in repo-cas mirrors cloned with a dtype preference)
 
-    Legacy pickle fallback, through the package's ONE pickle reader:
-    - <bin_base>.bin
+    A component that offers only a pickle (``<bin_base>.bin``) is REFUSED:
+    pickles are banned platform-wide, and the remedy is to mirror the source
+    repo without the pickle rather than to unpickle it here.
     """
     for raw_base in safetensors_bases:
         base = str(raw_base or "").strip()
@@ -138,19 +137,18 @@ def _load_component_state_dict(
     if bin_base:
         bin_path = component_dir / f"{bin_base}.bin"
         if bin_path.exists():
-            # the clone lane feeds this ARBITRARY tenant-submitted
-            # repos, so a `.bin` here is an untrusted pickle and unpickling it
-            # is arbitrary code execution inside a pod holding hub credentials
-            # and other tenants' work (cozy_snapshot.py:285-292). This used to
-            # be a bare `torch.load(path, map_location="cpu")`. Its safety then
-            # rested entirely on torch's 2.6 `weights_only` DEFAULT, which
-            # `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` in the pod env flips back
-            # for exactly the call sites that did not pass the argument
-            # (torch/serialization.py:1496 — "can only override if callsite did
-            # not explicitly set weights_only"). One pickle reader, one
-            # implementation, and it passes `weights_only=True` explicitly.
-            return _st_load(materialize_pickle_to_safetensors(
-                bin_path, component_dir / PICKLE_CACHE_DIR))
+            # The clone lane feeds this ARBITRARY tenant-submitted repos, so a
+            # `.bin` here is an untrusted pickle and reading it is arbitrary
+            # code execution inside a pod holding hub credentials and other
+            # tenants' work (cozy_snapshot.py:285-292). Pickles are banned
+            # platform-wide; `classifier.py` already refuses a pickle-only repo
+            # with `pickle_only`, and this is the same refusal at the component
+            # door.
+            raise ConversionImplementationError(
+                f"pickle_only:{bin_path.name}: this component offers only a "
+                f"pickle, and pickles are refused. Mirror the source repo "
+                f"without the pickle (safetensors) and convert that."
+            )
     raise FileNotFoundError(f"missing weights for {component_dir.name}")
 
 

@@ -1,12 +1,19 @@
 """pgw#498 + pgw#884 — the two places untrusted bytes and refused secrets
 crossed a boundary that was supposed to be closed.
 
-**pgw#498.** `convert/repackage.py` loaded a component's legacy `.bin` with a
-bare `torch.load(path, map_location="cpu")`. The convert/clone lane ingests
-ARBITRARY tenant-submitted repos, so those bytes are hostile by assumption and
-unpickling them is arbitrary code execution inside a pod holding hub
-credentials and other tenants' work — the threat this repo states in its own
-words at `models/cozy_snapshot.py:285-292`.
+**pgw#498, now closed by a BAN rather than by a safe reader.** The convert/clone
+lane ingests ARBITRARY tenant-submitted repos, so a `.bin` reaching this process
+is hostile by assumption and unpickling it is arbitrary code execution inside a
+pod holding hub credentials and other tenants' work — the threat this repo
+states in its own words at `models/cozy_snapshot.py:285-292`.
+
+Paul, 2026-08-12: **"keep pickles banned"** — refuse always; the sanctioned
+remedy for a legacy repo is to MIRROR it without the pickle. So there is no
+pickle reader in this package at all any more: `classifier.py` refuses a
+pickle-only repo with `pickle_only`, and both component-level doors
+(`repackage._load_component_state_dict`, `writer.iter_component_tensors`) raise
+the same refusal instead of converting. The scan below therefore asserts ZERO
+`torch.load` sites, not "one safe one".
 
 The interesting part is WHY it looked safe. On torch >= 2.6 the `weights_only`
 default is `True`, so on the pinned toolchain the bare call refuses a hostile
@@ -109,7 +116,7 @@ def test_the_payload_really_does_execute_through_an_unguarded_load(
 def test_a_poisoned_bin_cannot_execute_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pgw#498: the production path refuses, and nothing runs.
+    """The production path refuses, and nothing runs.
 
     Same bytes, same environment, through `_load_component_state_dict` —
     reached from the clone lane's layout-repackage branch
@@ -126,18 +133,20 @@ def test_a_poisoned_bin_cannot_execute_code(
         )
 
     assert not marker.exists(), "a tenant-supplied pickle executed code in this process"
-    # A named refusal, not a generic load failure: a checkpoint that only opens
-    # with unpickling enabled is refused BY THAT FACT.
-    assert "unsafe_weight_format" in str(excinfo.value)
+    # A named refusal, not a generic load failure. The file is never opened at
+    # all: the refusal is that it IS a pickle, not that its bytes are hostile.
+    assert "pickle_only" in str(excinfo.value)
 
 
-def test_a_legitimate_bin_still_converts(tmp_path: Path) -> None:
-    """The refusal is about executable pickles, not about `.bin` repos.
+def test_even_a_benign_bin_is_refused(tmp_path: Path) -> None:
+    """The ban has NO benign arm — that is the whole point of it.
 
-    The conversion endpoint declares `bin_base` for seven real families
-    (`training-endpoints/.../declarations/families.py`), which is the whole
-    reason the branch cannot simply be deleted: turning upstream `.bin` into
-    safetensors is what this lane is FOR.
+    A pickle carrying nothing but tensors is refused exactly like a poisoned
+    one, because the safe/unsafe distinction can only be drawn by READING the
+    file, which is the act being banned. The conversion endpoint still declares
+    `bin_base` for seven families
+    (`training-endpoints/.../declarations/families.py`); those declarations are
+    now inert and their repos must be mirrored without the pickle.
     """
     component = tmp_path / "unet"
     component.mkdir(parents=True)
@@ -146,13 +155,15 @@ def test_a_legitimate_bin_still_converts(tmp_path: Path) -> None:
         component / "diffusion_pytorch_model.bin",
     )
 
-    state = repackage._load_component_state_dict(
-        component,
-        safetensors_bases=("diffusion_pytorch_model",),
-        bin_base="diffusion_pytorch_model",
-    )
-    assert sorted(state) == ["a.bias", "a.weight"]
-    assert state["a.weight"].shape == (2, 3)
+    with pytest.raises(writer.ConversionImplementationError) as excinfo:
+        repackage._load_component_state_dict(
+            component,
+            safetensors_bases=("diffusion_pytorch_model",),
+            bin_base="diffusion_pytorch_model",
+        )
+    assert "pickle_only" in str(excinfo.value)
+    # The refusal must name the remedy, not just the rule.
+    assert "mirror" in str(excinfo.value).lower()
 
 
 def test_safetensors_still_wins_over_the_pickle(tmp_path: Path) -> None:
@@ -172,14 +183,14 @@ def test_safetensors_still_wins_over_the_pickle(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
-def test_there_is_exactly_one_pickle_reader_in_the_tree() -> None:
-    """One operation, one implementation (the pgw#498 ruling).
+def test_there_is_no_pickle_reader_in_the_tree() -> None:
+    """ZERO pickle readers: Paul's ban, enforced structurally.
 
-    A second `torch.load` is how the first one got its safety from a default:
-    the safe twin already existed in the same package and one of the two call
-    sites simply did not have the argument. Scanning for the shape is what
-    stops that recurring, since a new site is silently safe on today's torch
-    and silently unsafe under `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`.
+    Scanning for the shape is what stops one coming back, since a new site is
+    silently safe on today's torch and silently unsafe under
+    `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`. A `weights_only=True` site would be
+    safe and is STILL refused here — the ban is on reading pickles at all, so
+    the scan deliberately does not exempt it.
 
     `torch.export.load` is deliberately out of scope: an AOTI `.pt2` is
     admitted through the cell-key identity gate and the org/endpoint trust
@@ -194,12 +205,10 @@ def test_there_is_exactly_one_pickle_reader_in_the_tree() -> None:
                 continue
             if "torch.load(" not in stripped and "torch_mod.load(" not in stripped:
                 continue
-            if "weights_only" in stripped:
-                continue
             offenders.append(f"{path.relative_to(src_root)}:{lineno}: {stripped}")
     assert offenders == [], (
-        "torch.load without an explicit weights_only= — its safety would rest "
-        "on a torch default that TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD flips back:\n"
+        "a pickle reader is back. Pickles are banned platform-wide; mirror the "
+        "source repo without the pickle instead of reading it:\n"
         + "\n".join(offenders)
     )
 
