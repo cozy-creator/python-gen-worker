@@ -236,6 +236,16 @@ jobs:
       - name: pgw#1143 guard - no cell-key axis reads the layout vocabulary
         run: uv run python scripts/lint_cell_key_layout_fence.py
 
+      # GATING (pgw#1176): THE GUARDS ARE GUARDED. A fence names symbols in
+      # string literals; when one is renamed or deleted the fence keeps
+      # running, keeps exiting 0, and guards NOTHING — it does not go red, so
+      # no amount of running things finds it. Measured: this repo shipped
+      # `lint_cell_key_layout_fence.py` naming a deleted symbol, green the
+      # whole time. This gate scans ITSELF along with the others, so it is the
+      # one guard that cannot rot silently.
+      - name: pgw#1176 guard - every symbol a fence names still exists
+        run: uv run python scripts/lint_fence_symbols.py
+
       # GATING (pgw#740 + pgw#1143): the shipped wheel's registries are bare
       # by design and a consumer's declarations populate all six.
       - name: pgw#740 guard - registry contract
