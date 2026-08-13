@@ -37,6 +37,8 @@ from ..api.binding import ModelRef, wire_ref
 from ..config import Settings, current_or
 
 _STANDALONE = Settings()
+from ..measured_posture import normalize_backend
+from . import attention_modes
 from . import disk_gc, load_progress
 from .cache_paths import tensorhub_cas_dir
 from .errors import UrlExpiredError
@@ -1064,8 +1066,6 @@ def report_applied_attention(
     asked for and the density is what the geometry produced, and the wall is a
     function of the second. Returns whether the report was recorded; outside a
     setup scope it logs once and returns False rather than raising."""
-    from . import attention_modes
-
     tok = str(mode or "").strip().lower()
     if not attention_modes.valid_attention_mode(tok):
         raise ValueError(
@@ -1090,6 +1090,56 @@ def report_applied_attention(
         density=max(0.0, float(density)),
         selector=str(selector or "").strip(),
         index_ref=str(index_ref or "").strip(),
+    ))
+    return True
+
+
+def report_attention_backend(
+    component: str,
+    backend: str,
+    *,
+    wanted: str = "",
+) -> bool:
+    """Report the attention KERNEL that was actually engaged (th#1871 P1).
+
+    Call it from ``setup()`` wherever the backend is chosen — right after the
+    attention processor is installed, or right after the ``try: import
+    flash_attn`` that decided it. ``backend`` is one of ``fa3``, ``fa2``,
+    ``sdpa``, ``xformers``, ``eager`` (the ecosystem's own spellings —
+    ``flash_attention_2``, ``torch_sdpa``, … — are accepted and normalized).
+    ``wanted`` is what the code ASKED FOR, and passing it is what makes a
+    fallback visible: ``wanted="fa2", backend="sdpa"`` is ie#707 exactly.
+
+    WHY THIS IS A SECOND FUNCTION AND NOT A LOOSER GRAMMAR ON THE FIRST.
+    ``report_applied_attention`` reports SPARSITY (``dense`` / ``sparse-k<N>``)
+    and correctly refuses ``"sdpa"`` — the kernel is not a sparsity budget.
+    Those are two independent axes: the same ``sparse-k8`` costs roughly twice
+    as much on ``sdpa`` as on ``fa3``. Widening one token to cover both would
+    make every measurement of either uninterpretable, which is the vocabulary
+    collapse th#1871 §1.3 measured one layer up.
+
+    Reporting nothing is honest and stays the default: an unreported backend is
+    UNKNOWN to the hub, never "fine". Returns whether the report was recorded;
+    outside a setup scope it logs once and returns False rather than raising.
+    An ungrammatical backend token raises ``ValueError`` — the reporter is the
+    last place a fourth vocabulary can be stopped."""
+    engaged = normalize_backend(backend)
+    asked = normalize_backend(wanted)
+    if not engaged:
+        raise ValueError(
+            f"report_attention_backend({component!r}, {backend!r}): the "
+            "engaged backend is required (report what RAN; `wanted` is the "
+            "optional half)")
+    ctx = _APPLIED_ATTENTION_CTX.get()
+    if ctx is None:
+        logger.info(
+            "gen_worker.report_attention_backend(): no active setup scope; "
+            "%s backend %s is not attributed to an instance", component, engaged)
+        return False
+    ctx.applied.append(attention_modes.AppliedAttention(
+        component=str(component or "").strip() or "instance",
+        backend=engaged,
+        backend_wanted=asked,
     ))
     return True
 

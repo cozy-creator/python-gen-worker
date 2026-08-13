@@ -50,7 +50,7 @@ from .api.formula import RuntimeFormula
 from .api.slot import OBJECTIVES, ObjectiveMismatchError, ResolvedSlot, Slot, resolve_slot
 from .families import GenerationDefaults
 from .models.provision import (arm_compile, report_applied_attention,
-                               report_applied_lane)
+                               report_applied_lane, report_attention_backend)
 from .text_pin import TextLengthExceededError, pad_text_sequence
 from .geometry import (
     FamilyGeometry,
@@ -150,6 +150,9 @@ __all__ = [
     # pgw#1104: the serve-time recipe reports the lane it APPLIED.
     "report_applied_attention",
     "report_applied_lane",
+    # th#1871 P1: the attention KERNEL axis, which the sparsity reporter
+    # correctly refuses to carry.
+    "report_attention_backend",
     # SDK v2 per-request views + text pinning.
     "for_request",
     "FetchedUrl",

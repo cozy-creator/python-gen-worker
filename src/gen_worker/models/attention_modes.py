@@ -90,7 +90,19 @@ class AppliedAttention(msgspec.Struct, frozen=True, kw_only=True):
     """
 
     component: str
-    mode: str
+    #: The SPARSITY axis (``dense`` / ``sparse-k<N>``). Empty means this report
+    #: says nothing about sparsity — which is what a backend-only report is, and
+    #: is NOT the same as claiming dense.
+    mode: str = ""
+    #: th#1871 P1 (pgw#1225): the KERNEL axis — ``fa3``/``fa2``/``sdpa``/
+    #: ``xformers``/``eager``, and what was asked for. A different question from
+    #: ``mode``: `sparse-k8 on sdpa` and `sparse-k8 on fa3` are the same
+    #: sparsity and a ~2x different number. Reporting them on one axis is how
+    #: ie#707 stayed silent — the only reporter that existed validated against
+    #: the sparsity grammar and RAISED on ``"sdpa"``, so 23 of 29 families
+    #: reported nothing at all rather than the wrong thing.
+    backend: str = ""
+    backend_wanted: str = ""
     k_blocks: int = 0
     block_size: int = 0
     density: float = 0.0
@@ -98,7 +110,13 @@ class AppliedAttention(msgspec.Struct, frozen=True, kw_only=True):
     index_ref: str = ""
 
     def detail(self) -> str:
-        bits = [f"component={self.component}", f"attention={self.mode}"]
+        bits = [f"component={self.component}"]
+        if self.mode:
+            bits.append(f"attention={self.mode}")
+        if self.backend:
+            bits.append(f"backend={self.backend}")
+        if self.backend_wanted and self.backend_wanted != self.backend:
+            bits.append(f"backend_wanted={self.backend_wanted}")
         if self.k_blocks:
             bits.append(f"k={self.k_blocks}")
         if self.block_size:

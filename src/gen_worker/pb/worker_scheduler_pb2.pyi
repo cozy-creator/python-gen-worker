@@ -1114,7 +1114,7 @@ class Adjustment(_message.Message):
     def __init__(self, field: _Optional[str] = ..., requested: _Optional[str] = ..., applied: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class JobMetrics(_message.Message):
-    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane", "runtime_terms", "stage_ms", "serving_mode", "served_cell_ref", "served_eager_fallback", "fallback_reason", "sm", "steps", "width", "height")
+    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane", "runtime_terms", "stage_ms", "serving_mode", "served_cell_ref", "served_eager_fallback", "fallback_reason", "sm", "steps", "width", "height", "posture")
     class RuntimeTermsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -1152,6 +1152,7 @@ class JobMetrics(_message.Message):
     STEPS_FIELD_NUMBER: _ClassVar[int]
     WIDTH_FIELD_NUMBER: _ClassVar[int]
     HEIGHT_FIELD_NUMBER: _ClassVar[int]
+    POSTURE_FIELD_NUMBER: _ClassVar[int]
     runtime_ms: int
     queue_ms: int
     rss_at_end_bytes: int
@@ -1175,7 +1176,70 @@ class JobMetrics(_message.Message):
     steps: int
     width: int
     height: int
-    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ..., stage_ms: _Optional[_Mapping[str, int]] = ..., serving_mode: _Optional[str] = ..., served_cell_ref: _Optional[str] = ..., served_eager_fallback: _Optional[bool] = ..., fallback_reason: _Optional[str] = ..., sm: _Optional[str] = ..., steps: _Optional[int] = ..., width: _Optional[int] = ..., height: _Optional[int] = ...) -> None: ...
+    posture: MeasuredPosture
+    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ..., stage_ms: _Optional[_Mapping[str, int]] = ..., serving_mode: _Optional[str] = ..., served_cell_ref: _Optional[str] = ..., served_eager_fallback: _Optional[bool] = ..., fallback_reason: _Optional[str] = ..., sm: _Optional[str] = ..., steps: _Optional[int] = ..., width: _Optional[int] = ..., height: _Optional[int] = ..., posture: _Optional[_Union[MeasuredPosture, _Mapping]] = ...) -> None: ...
+
+class MeasuredPosture(_message.Message):
+    __slots__ = ("execution_lane", "attention_backend", "attention_backend_wanted", "compile_state", "compile_state_wanted", "residency_mode", "applied", "components", "shortfall")
+    EXECUTION_LANE_FIELD_NUMBER: _ClassVar[int]
+    ATTENTION_BACKEND_FIELD_NUMBER: _ClassVar[int]
+    ATTENTION_BACKEND_WANTED_FIELD_NUMBER: _ClassVar[int]
+    COMPILE_STATE_FIELD_NUMBER: _ClassVar[int]
+    COMPILE_STATE_WANTED_FIELD_NUMBER: _ClassVar[int]
+    RESIDENCY_MODE_FIELD_NUMBER: _ClassVar[int]
+    APPLIED_FIELD_NUMBER: _ClassVar[int]
+    COMPONENTS_FIELD_NUMBER: _ClassVar[int]
+    SHORTFALL_FIELD_NUMBER: _ClassVar[int]
+    execution_lane: str
+    attention_backend: str
+    attention_backend_wanted: str
+    compile_state: str
+    compile_state_wanted: str
+    residency_mode: str
+    applied: _containers.RepeatedCompositeFieldContainer[AppliedTechnique]
+    components: _containers.RepeatedCompositeFieldContainer[ComponentPosture]
+    shortfall: ResourceShortfall
+    def __init__(self, execution_lane: _Optional[str] = ..., attention_backend: _Optional[str] = ..., attention_backend_wanted: _Optional[str] = ..., compile_state: _Optional[str] = ..., compile_state_wanted: _Optional[str] = ..., residency_mode: _Optional[str] = ..., applied: _Optional[_Iterable[_Union[AppliedTechnique, _Mapping]]] = ..., components: _Optional[_Iterable[_Union[ComponentPosture, _Mapping]]] = ..., shortfall: _Optional[_Union[ResourceShortfall, _Mapping]] = ...) -> None: ...
+
+class AppliedTechnique(_message.Message):
+    __slots__ = ("name", "component", "wanted", "reason", "est_slowdown")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    COMPONENT_FIELD_NUMBER: _ClassVar[int]
+    WANTED_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    EST_SLOWDOWN_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    component: str
+    wanted: str
+    reason: str
+    est_slowdown: float
+    def __init__(self, name: _Optional[str] = ..., component: _Optional[str] = ..., wanted: _Optional[str] = ..., reason: _Optional[str] = ..., est_slowdown: _Optional[float] = ...) -> None: ...
+
+class ComponentPosture(_message.Message):
+    __slots__ = ("component", "applied_quant", "bound_quant", "placement", "bytes")
+    COMPONENT_FIELD_NUMBER: _ClassVar[int]
+    APPLIED_QUANT_FIELD_NUMBER: _ClassVar[int]
+    BOUND_QUANT_FIELD_NUMBER: _ClassVar[int]
+    PLACEMENT_FIELD_NUMBER: _ClassVar[int]
+    BYTES_FIELD_NUMBER: _ClassVar[int]
+    component: str
+    applied_quant: str
+    bound_quant: str
+    placement: str
+    bytes: int
+    def __init__(self, component: _Optional[str] = ..., applied_quant: _Optional[str] = ..., bound_quant: _Optional[str] = ..., placement: _Optional[str] = ..., bytes: _Optional[int] = ...) -> None: ...
+
+class ResourceShortfall(_message.Message):
+    __slots__ = ("resource", "component", "needed_bytes", "available_bytes")
+    RESOURCE_FIELD_NUMBER: _ClassVar[int]
+    COMPONENT_FIELD_NUMBER: _ClassVar[int]
+    NEEDED_BYTES_FIELD_NUMBER: _ClassVar[int]
+    AVAILABLE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    resource: str
+    component: str
+    needed_bytes: int
+    available_bytes: int
+    def __init__(self, resource: _Optional[str] = ..., component: _Optional[str] = ..., needed_bytes: _Optional[int] = ..., available_bytes: _Optional[int] = ...) -> None: ...
 
 class JobProgress(_message.Message):
     __slots__ = ("request_id", "attempt", "seq", "data", "content_type")

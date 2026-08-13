@@ -1246,15 +1246,34 @@ def place_pipeline(
             "free VRAM"
         )
     requested = effective
+    # th#1871 P1 (pgw#1225) §6.6 item 2/3: the fit numbers this decision was
+    # made on, kept instead of discarded. They are locals of the decision one
+    # frame up (`select_auto_mode`) and were the only quantified answer to "why
+    # is this pipeline offloaded" anywhere on the pod — and only on the REACTIVE
+    # OOM path did anything downstream even hear that it had happened. A
+    # measured descent taken BEFORE any OOM is the largest silent degradation
+    # the census found, and it is this branch.
+    fit_needed_gb = 0.0
+    fit_available_gb = 0.0
     demotions = 0
     while True:
         try:
+            # Measured at the rung being ATTEMPTED, and only the first time a
+            # CPU-touching one is: on a reactive descent the interesting numbers
+            # are the ones that made the resident attempt fail, not the ones
+            # left after it has already spilled.
+            if fit_needed_gb <= 0.0 and touches_host_ram(effective):
+                fit_needed_gb = estimate_pipeline_size_gb(pipeline)
+                fit_available_gb = get_available_vram_gb()
             if effective in ("off", "vae_only") and callable(getattr(pipeline, "to", None)):
                 pipeline.to("cuda")
             applied = apply_low_vram_config(pipeline, mode=effective, logger=log)
             if demotions:
                 applied["oom_demotions"] = demotions
                 applied["requested_mode"] = requested
+            if fit_needed_gb > 0.0:
+                applied["fit_needed_gb"] = fit_needed_gb
+                applied["fit_available_gb"] = fit_available_gb
             return applied
         except BaseException as exc:
             if not is_cuda_oom(exc):
