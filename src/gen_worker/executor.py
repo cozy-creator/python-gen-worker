@@ -94,7 +94,7 @@ from .input_assets import (
 from .lifecycle_intents import IntentRegistry
 from .models import disk_gc
 from .models import provision
-from .models.refs import normalize_model_ref
+from .models.refs import WireRef, normalize_model_ref
 from .models import residency as residency_mod
 from .models.memory import (
     aflush_memory,
@@ -5272,7 +5272,7 @@ class Executor:
         # resolved space; downloads, booking and the record's held_refs all
         # use these exact strings (a HelloAck rebind during an await below
         # cannot split download/booking/teardown identities).
-        slot_refs: Dict[str, str] = {
+        slot_refs: Dict[str, WireRef] = {
             slot: wire_ref(spec.models[slot]) for slot in setup_slots
         }
         slot_identities: Dict[str, _ResidencyIdentity] = {}
@@ -6414,7 +6414,7 @@ class Executor:
         self,
         rec: "_ClassRecord",
         spec: EndpointSpec,
-        slot_refs: Dict[str, str],
+        slot_refs: Dict[str, WireRef],
     ) -> None:
         """Turn this record's execution group into D ranks, or refuse loudly.
 
@@ -6504,7 +6504,7 @@ class Executor:
         *,
         execution_lane_slots: Optional[set] = None,
         shared_bytes: int = 0,
-        slot_refs: Optional[Dict[str, str]] = None,
+        slot_refs: Optional[Dict[str, WireRef]] = None,
         slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
     ) -> None:
         """Honest per-ref residency after a setup (#369). Worker-constructed
@@ -6519,7 +6519,7 @@ class Executor:
         execution_lanes = execution_lane_slots or set()
         refs = slot_refs or {}
         identities = slot_identities or {}
-        per_ref: Dict[str, Tuple[Any, int]] = {}
+        per_ref: Dict[WireRef, Tuple[Any, int]] = {}
         per_ref_identity: Dict[str, _ResidencyIdentity] = {}
         for slot in setup_slots:
             if slot in execution_lanes:
@@ -6710,7 +6710,7 @@ class Executor:
                 await asyncio.to_thread(gc.collect)
             observed = await asyncio.to_thread(self.store.residency.host_ram_headroom, 0)
             available = observed.available_bytes
-            satisfied: List[Tuple[str, _HostRamBlock]] = []
+            satisfied: List[Tuple[WireRef, _HostRamBlock]] = []
             for ref, block in sorted(self._host_ram_blocks.items()):
                 previous = block.last_available_bytes
                 if available <= previous:
@@ -9994,7 +9994,7 @@ class Executor:
                 # wait is its own `record_pre` stage above.
                 started = time.monotonic()
                 with self.store.residency.executing(*exec_refs, *adapter_refs):
-                    active: List[Tuple[str, Any]] = []
+                    active: List[Tuple[WireRef, Any]] = []
                     try:
                         for slot, prepared in adapters.items():
                             pipe = self._adapter_target(spec, slot)
@@ -10505,7 +10505,7 @@ class Executor:
             diffusers_component_type = ModelMixin
         except ImportError:
             pass
-        transitions: List[Tuple[str, str, str, float]] = []
+        transitions: List[Tuple[WireRef, str, str, float]] = []
         for slot in spec.models:
             ref = wire_ref(spec.models[slot])
             # pgw#678: a shared-component lane's residency entry is an
@@ -10602,7 +10602,7 @@ class Executor:
 
     async def _refuse_unfittable_offload(
         self, spec: EndpointSpec,
-        transitions: List[Tuple[str, str, str, float]],
+        transitions: List[Tuple[WireRef, str, str, float]],
     ) -> str:
         """pgw#1063: price the offloaded reload the ladder is about to
         prescribe, and refuse the DEGRADE when the host cannot hold it.

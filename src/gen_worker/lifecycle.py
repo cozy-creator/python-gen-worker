@@ -19,6 +19,7 @@ from . import fleet_cells
 from . import receipts
 from . import serve_posture
 from . import progress as progress_mod
+from .models.refs import WireRef
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
@@ -1278,7 +1279,7 @@ class Lifecycle:
         self.executor.store.rescan_disk()
         self.executor.gate_functions(self.hardware)
 
-        prefetch_refs: List[str] = []
+        prefetch_refs: List[WireRef] = []
         for spec in self.executor.specs.values():
             if spec.name in self.executor.unavailable:
                 continue
@@ -1330,7 +1331,7 @@ class Lifecycle:
                     )
 
         await self.set_phase(pb.WORKER_PHASE_LOADING_PIPELINES)
-        awaiting_hub: Dict[str, List[str]] = {}
+        awaiting_hub: Dict[str, List[WireRef]] = {}
         dynamic: List[str] = []
         for spec in list(self.executor.specs.values()):
             if spec.name in self.executor.unavailable:

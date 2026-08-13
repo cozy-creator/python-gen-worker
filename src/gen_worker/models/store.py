@@ -267,13 +267,13 @@ class ModelStore:
         # Current generation attached to each banked snapshot. A generation-
         # less bank inherits only from the exact current desired identity
         # below; historical desired generations are never resurrected.
-        self._snapshot_generations: Dict[str, int] = {}
+        self._snapshot_generations: Dict[WireRef, int] = {}
         # Current full-replacement desired identity per ref. This is bounded
         # by the active DesiredResidency set, not an unbounded digest history:
         # a priority RunJob may bank different bytes temporarily, while a
         # later generation-less bank of the still-desired digest recovers its
         # causal generation. Replacing desired state clears stale generations.
-        self._desired_snapshot_identities: Dict[str, _ResidencyIdentity] = {}
+        self._desired_snapshot_identities: Dict[WireRef, _ResidencyIdentity] = {}
         # Identity of the bytes that ACTUALLY produced the current residency.
         # This deliberately does not follow _snapshots when a tag moves.
         self._resident_identities: Dict[str, _ResidencyIdentity] = {}
@@ -394,7 +394,7 @@ class ModelStore:
         )
 
     def _on_residency_event(
-        self, ref: WireRef, state: str, vram_bytes: int, duration_ms: int = 0
+        self, ref: str, state: str, vram_bytes: int, duration_ms: int = 0
     ) -> None:
         pb_state = _RESIDENCY_STATE_TO_PB.get(state)
         if pb_state is None:
@@ -417,8 +417,8 @@ class ModelStore:
             if pending_network_bytes is not None:
                 kw["network_bytes"] = int(pending_network_bytes)
         else:
-            identity = self.resident_identity(ref)
-        coro = self._event(ref, pb_state, identity=identity, **kw)
+            identity = self.resident_identity(WireRef(ref))
+        coro = self._event(WireRef(ref), pb_state, identity=identity, **kw)
         if state == residency_mod.EVICTED:
             # Capture before removal so the eviction names the exact bytes it
             # removed; later events cannot inherit that stale identity.
@@ -561,12 +561,17 @@ class ModelStore:
                 return path
         return None
 
-    def disk_refs(self) -> List[str]:
-        """Union of DISK-tier refs across groups."""
-        seen: Dict[str, None] = {}
+    def disk_refs(self) -> List[WireRef]:
+        """Union of DISK-tier refs across groups.
+
+        The tier lists hand back what normalized-ref callers wrote, so the
+        cast restates a fact rather than making a new claim; `residency` is
+        still keyed by plain `str` and is its own unit.
+        """
+        seen: Dict[WireRef, None] = {}
         for reg in self.all_residencies():
             for ref in reg.refs_in(residency_mod.Tier.DISK):
-                seen.setdefault(ref, None)
+                seen.setdefault(WireRef(ref), None)
         return list(seen)
 
     # ---- residency facade ----------------------------------------------------
@@ -1030,7 +1035,7 @@ class ModelStore:
         if removed:
             logger.info("disk-gc: swept %d abandoned writer temp artifact(s)", removed)
 
-    def lru_disk_refs(self, *, exclude: Tuple[str, ...] = ()) -> List[str]:
+    def lru_disk_refs(self, *, exclude: Tuple[str, ...] = ()) -> List[WireRef]:
         """Idle DISK refs in persisted last-use order, oldest first."""
         excluded = set(exclude)
         candidates = [
@@ -1067,7 +1072,7 @@ class ModelStore:
         exclude: Tuple[str, ...],
         keep: Tuple[str, ...],
         keep_rank: Dict[str, int],
-    ) -> List[str]:
+    ) -> List[WireRef]:
         """The evictable SET for one gc_disk pass: hard invariants only
         (never exclude/in-use — no policy ever overrides these), plus this
         pass's keep-membership/grace filter. Ordering within that set is a

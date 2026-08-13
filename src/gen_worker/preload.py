@@ -55,6 +55,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
 from . import dispatch
+from .models.refs import WireRef
 from .api.binding import binding_wire_refs, component_overrides, wire_ref
 from .models import residency as residency_mod
 from .models.loading import ComponentSubstitutionError
@@ -291,7 +292,7 @@ class Preloader:
                     out.setdefault(comp_ref, None)
         return out
 
-    def _fence_conflict(self, ref: str) -> bool:
+    def _fence_conflict(self, ref: WireRef) -> bool:
         """True when the ref is RESIDENT under a different identity than the
         desired snapshot names — the pgw#638 case the idle-gated reconcile
         owns (a tenant job may be re-materializing the older bytes)."""
@@ -353,7 +354,7 @@ class Preloader:
         staged = await self._stage_components_host(effective)
         return did_work or staged
 
-    def _expected_vram_bytes(self, ref: str) -> int:
+    def _expected_vram_bytes(self, ref: WireRef) -> int:
         res = self._ex.store.residency
         hint = res.vram_hint(ref)
         if hint > 0:

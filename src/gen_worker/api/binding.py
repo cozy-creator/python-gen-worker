@@ -27,6 +27,7 @@ from msgspec import structs
 from ..models.refs import (
     DEFAULT_REF_TAG,
     HuggingFaceRef,
+    WireRef,
     fold_ref,
     normalize_model_ref,
     parse_model_ref,
@@ -248,7 +249,7 @@ Binding = ModelRef
 BINDING_TYPES: tuple[type, ...] = (ModelRef,)
 
 
-def wire_ref(binding: Binding) -> str:
+def wire_ref(binding: Binding) -> WireRef:
     """Normal-form ref string for the wire / cache key — delegates to the ONE
     grammar module (``gen_worker.models.refs``, gw#492).
 
@@ -265,10 +266,14 @@ def wire_ref(binding: Binding) -> str:
         return fold_ref(binding.path, tag=tag)
     if binding.source == "huggingface":
         return HuggingFaceRef(binding.path, binding.revision or None).canonical()
-    return binding.path
+    # civitai/modelscope: the path is ASSERTED to be normal form rather than
+    # derived through the grammar, which the other two branches do. The
+    # `WireRef(...)` makes that the one visible assertion in this function
+    # instead of a silent widening of its whole return type.
+    return WireRef(binding.path)
 
 
-def component_overrides(binding: Binding) -> tuple[tuple[str, str], ...]:
+def component_overrides(binding: Binding) -> tuple[tuple[str, WireRef], ...]:
     """The ``(component, canonical ref)`` substitutions ``binding`` carries
     (pgw#617), normalized and sorted by :class:`ModelRef` itself.
 
@@ -283,7 +288,7 @@ def component_overrides(binding: Binding) -> tuple[tuple[str, str], ...]:
     return tuple(getattr(binding, "component_overrides", ()) or ())
 
 
-def binding_wire_refs(binding: Binding) -> list[str]:
+def binding_wire_refs(binding: Binding) -> list[WireRef]:
     """The base :func:`wire_ref` plus every component-override ref (pgw#617):
     the full set of refs materializing this binding pins and downloads."""
     return [wire_ref(binding), *(ref for _, ref in component_overrides(binding))]
