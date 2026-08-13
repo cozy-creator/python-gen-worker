@@ -194,8 +194,13 @@ jobs:
       # pgw#1202: `strict = true` is now the DEFAULT for every module, so a
       # module added tomorrow is born strict. 101 modules carry a named
       # single-flag exemption; the guard below is what stops that list growing.
-      - name: Type check (mypy, strict by default)
-        run: uv run mypy src/gen_worker
+      #
+      # pgw#1202 PR 2: the TEST tree is checked too. Before that it was not
+      # merely unchecked — `mypy tests` REFUSED TO START on a duplicate
+      # `conftest` module, so 486 test modules had zero static coverage, which
+      # is where the doubles that lied about production contracts lived.
+      - name: Type check (mypy, strict by default, src + tests)
+        run: uv run mypy src/gen_worker tests tests_v2
 
       # GATING (pgw#1202): `strict = true` cannot silently stop being true, but
       # a per-module exemption list can grow one reasonable-looking name at a
