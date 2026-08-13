@@ -36,9 +36,11 @@ from typing import Dict, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
 
-#: flag name -> (high-water module count, errors it was hiding at adoption).
-#: Measured 2026-08-12 on 28018a0a: 413 --strict errors in 101 of 266 modules.
-#: Lower a number only together with the names you deleted from pyproject.toml.
+#: flag name -> (high-water EXACT-module count, errors it was hiding at adoption).
+#: Measured 2026-08-12 on 28018a0a: 413 --strict errors in 101 of 266 src modules,
+#: and 2,016 errors in 316 of 486 test modules once the test tree could be checked
+#: at all. Lower a number only together with the names you deleted from
+#: pyproject.toml — that is what makes the burn-down a number in the diff.
 HIGH_WATER: Dict[str, Tuple[int, int]] = {
     "disallow_any_generics": (69, 285),
     "warn_return_any": (26, 48),
@@ -47,15 +49,19 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # implicit_reexport is split in two: our modules (a burn-down) and
     # third-party stub export gaps (not our debt — upstream's __all__).
     "implicit_reexport": (17, 34),
+    # pgw#1202 PR 2: test modules still dirty at the relaxed test posture.
+    # 170 of 486 were already clean and are checked from that commit on.
+    "ignore_errors": (316, 2016),
 }
 
-#: Overrides that relax something for a reason other than a burn-down. These
-#: are exempt from the growth check but not from being listed: an override
-#: appearing in neither table is a failure, so a new escape hatch cannot be
-#: added without touching this file.
-DECLARED_NON_BURNDOWN: Dict[str, str] = {
-    "ignore_errors": "generated protobuf modules (gen_worker.pb.*)",
-    "disallow_untyped_defs": "gen_worker.convert.* — inherited from cozy_convert",
+#: WILDCARD patterns are structural policy, not debt, so they are not counted
+#: against a high-water mark — but they must be declared here, so a new blanket
+#: exemption cannot be introduced by adding one line to pyproject.toml.
+DECLARED_WILDCARDS: Dict[str, str] = {
+    "gen_worker.pb.*": "generated protobuf; no source of ours to fix",
+    "gen_worker.convert.*": "inherited from cozy_convert; bodies ARE checked",
+    "tests.*": "test fns may be `def test_x():`; contract checks stay on",
+    "tests_v2.*": "test fns may be `def test_x():`; contract checks stay on",
 }
 
 #: Every strict-implied option that costs zero errors today and is therefore
@@ -105,18 +111,54 @@ def check(pyproject: Path) -> List[str]:
         if not relaxers:
             problems.append(f"override #{index} relaxes nothing; delete it")
             continue
+
+        wildcards = [m for m in modules if "*" in m]
+        for pattern in wildcards:
+            if pattern not in DECLARED_WILDCARDS:
+                problems.append(
+                    f"override #{index} exempts the WILDCARD `{pattern}`, "
+                    f"which is not declared in {Path(__file__).name}. A "
+                    f"blanket exemption covers modules that do not exist yet, "
+                    f"so it needs a written reason before it can be used."
+                )
+        exact = [m for m in modules if "*" not in m]
+        if not exact:
+            # A declared-wildcard block. The declaration above is its
+            # justification, so the flags it relaxes need no separate number.
+            continue
+
         for key in relaxers:
-            if key in DECLARED_NON_BURNDOWN:
-                continue
             if key not in HIGH_WATER:
                 problems.append(
-                    f"override #{index} sets `{key}`, which is recorded in "
-                    f"neither HIGH_WATER nor DECLARED_NON_BURNDOWN in "
+                    f"override #{index} sets `{key}` on named modules, and "
+                    f"`{key}` has no high-water mark in "
                     f"{Path(__file__).name}. A new way to opt out of strict "
                     f"needs a name and a number here first."
                 )
                 continue
-            counts[key] = counts.get(key, 0) + len(modules)
+            counts[key] = counts.get(key, 0) + len(exact)
+
+    # The config above is worthless if CI stops handing mypy the paths. Dropping
+    # `tests tests_v2` from the invocation would return the suite to zero static
+    # coverage and every check would stay green — the exact shape of failure
+    # this repo keeps paying for, so it is asserted rather than trusted.
+    workflow = pyproject.parent / ".github" / "workflows" / "ci.yml"
+    if workflow.exists():
+        invocations = [
+            line.strip() for line in workflow.read_text().splitlines()
+            if "run:" in line and " mypy " in line
+        ]
+        if not invocations:
+            problems.append(f"no mypy invocation found in {workflow.name}")
+        for line in invocations:
+            for required in ("src/gen_worker", "tests", "tests_v2"):
+                if required not in line:
+                    problems.append(
+                        f"the mypy step in {workflow.name} does not check "
+                        f"`{required}`: {line!r}. Every path the config covers "
+                        f"has to actually be handed to mypy, or the exemption "
+                        f"lists below describe a check nobody runs."
+                    )
 
     for flag, (limit, errors) in HIGH_WATER.items():
         actual = counts.get(flag, 0)
