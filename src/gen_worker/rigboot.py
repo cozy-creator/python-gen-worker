@@ -17,8 +17,8 @@ Two consequences, both mechanical here:
 2. **A too-old driver is repairable, not fatal.** NVIDIA ships a forward-compat
    libcuda (``cuda-compat-13-0``) for data-center GPUs; installing it and putting
    it ahead of the host's libcuda makes a cu130 build run against a 570 host
-   driver — proven on a 570.211.01 H100. :func:`ensure_cuda_line` installs it
-   and re-verifies; only when THAT fails is the verdict "re-roll this host".
+   driver. :func:`ensure_cuda_line` installs it and re-verifies; only when THAT
+   fails is the verdict "re-roll this host".
 
 The module always says which of the three paths it took — ``native``,
 ``compat`` or ``reroll`` — because a wall measured through forward-compat libcuda

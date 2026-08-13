@@ -19,7 +19,7 @@ both refuse.
 
 Usage:
 
-    python scripts/topology_differential_pgw867.py --tensorhub ~/cozy/tensorhub-chaos
+    python scripts/topology_differential_pgw867.py --tensorhub ~/cozy/tensorhub
     python scripts/topology_differential_pgw867.py -n 20000 --seed 7
 
 Disagreements print as a table and are written to --report as JSON, ready to be
@@ -222,7 +222,7 @@ def known_divergence_class(go: dict[str, Any], py: dict[str, Any]) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tensorhub", default=os.environ.get("TENSORHUB_REPO", "~/cozy/tensorhub-chaos"))
+    ap.add_argument("--tensorhub", default=os.environ.get("TENSORHUB_REPO", "~/cozy/tensorhub"))
     ap.add_argument("-n", type=int, default=5000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", default="")
