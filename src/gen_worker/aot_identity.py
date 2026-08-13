@@ -215,7 +215,7 @@ def verify_declared_identity(
             # An expectation that names no value cannot be verified, and an
             # unverifiable expectation must not read as a pass. BOTH sources
             # refuse an artifact missing any of these at the point they read
-            # it — `plan._artifact` and `cell_resolve.resolve` — so reaching
+            # it — `plan._artifact` and `cell_resolve.resolve_batch` — so reaching
             # this branch means a caller built an ExpectedIdentity by hand.
             return f"{axis}: the spec named no expected value"
         if want != got:

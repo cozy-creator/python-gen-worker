@@ -333,7 +333,7 @@ def test_the_local_store_is_asked_BEFORE_a_perfectly_reachable_hub(
         family="micro-diffusion", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
     monkeypatch.setattr(
-        cell_resolve, "resolve",
+        cell_resolve, "resolve_batch",
         lambda *a, **k: pytest.fail("the hub was asked for a resident cell"))
 
     ex = _executor(tmp_path)

@@ -609,6 +609,84 @@ def control_plane_metadata(meta: Mapping[str, Any]) -> Dict[str, Any]:
     return kept
 
 
+#: The hub's bound on one intent batch (``maxCellPublishEntries``). Over it the
+#: hub refuses the WHOLE batch by name, so splitting late would cost every
+#: entry's grant to learn the number.
+MAX_PUBLISH_ENTRIES = 256
+
+#: Per-entry outcome vocabulary (th#1842 PR #1121). Everything that is a
+#: property of the POD — the three attested axes, the trust tier, the pod
+#: record, the quota — stays a WHOLE-BATCH refusal, because a forged axis
+#: indicts the pod and every entry from it is suspect. Only a fact about ONE
+#: key is answered per entry.
+PUBLISH_STATUS_GRANTED = "granted"
+PUBLISH_STATUS_CONDEMNED = "condemned"
+
+
+@dataclass(frozen=True)
+class PublishEntry:
+    """One compiled graph asking to be published.
+
+    ``identity_axes`` restates ALL THREE key axes (``graph``, ``sm``,
+    ``toolchain``) even though the last two are constant within any real batch.
+    Hoisting them would be the obvious compression and it is the wrong one: the
+    constancy would become a convention the wire DEPENDS on rather than one it
+    enforces, and a row whose identity is only verifiable inside its collection
+    is not an identity. The hub refuses an entry that cannot restate its own
+    key, so this is a wire requirement, not a style.
+    """
+
+    compiled_graph_key: str
+    identity_axes: Mapping[str, str]
+    mint_duration_ms: int = 0
+
+    def wire(self) -> Dict[str, Any]:
+        return {
+            "cell_key": self.compiled_graph_key,
+            "identity_axes": {str(k): str(v)
+                              for k, v in dict(self.identity_axes).items()},
+            "mint_duration_ms": max(0, int(self.mint_duration_ms or 0)),
+        }
+
+
+@dataclass(frozen=True)
+class PublishGrant:
+    """ONE entry's answer — and, when granted, ITS OWN capability token.
+
+    One token per entry is the same argument as batch resolve's per-answer
+    receipt: a single token covering the batch would make the COLLECTION the
+    unit of trust. Each claim names its own key, so a grant can be used,
+    cached, retried or revoked per artifact, and a token for entry 5 cannot
+    publish entry 6's bytes.
+    """
+
+    compiled_graph_key: str
+    status: str
+    capability_token: str = ""
+    expires_at_unix: int = 0
+    detail: str = ""
+
+    @property
+    def granted(self) -> bool:
+        return self.status == PUBLISH_STATUS_GRANTED
+
+
+@dataclass(frozen=True)
+class PublishIntentBatch:
+    """The whole answer: the batch-level repo plus one grant per entry."""
+
+    repo: str
+    family: str
+    grants: Tuple[PublishGrant, ...]
+
+    def grant_for(self, compiled_graph_key: str) -> PublishGrant:
+        for g in self.grants:
+            if g.compiled_graph_key == compiled_graph_key:
+                return g
+        raise CellPublishRefused(
+            f"the intent batch names no answer for {compiled_graph_key}")
+
+
 class CellPublisher:
     """The fleet publish sink: intent -> commit flow -> complete.
 
@@ -706,71 +784,178 @@ class CellPublisher:
 
     # -- publish ------------------------------------------------------------
 
-    def publish(self, family: str, artifact: Path, meta: dict,
-                mint_duration_ms: int = 0) -> str:
-        """Publish one self-minted cell. Returns the checkpoint id.
+    def publish_intent(
+        self, family: str, entries: Sequence[PublishEntry], *, sku: str,
+        gen_worker: str,
+    ) -> PublishIntentBatch:
+        """Ask the hub to admit a WHOLE MINT'S entries, one token each.
 
-        Steps: attested intent (worker JWT; hub corroborates the axes and
-        mints a key-pinned capability token) -> the CHUNKED SHA-256 publish
-        (declare -> {have, need} -> PUT -> complete; mode=replace, no tags —
-        the hub refuses any tag bind under the claim anyway) ->
-        publish-complete bookkeeping. Raises on any failure; the caller
-        treats every raise as non-fatal to serving.
+        ``POST {family, axes, entries[<=256]}`` -> one answer per entry, IN
+        REQUEST ORDER, each ``granted`` answer carrying its own capability
+        token (th#1842 PR #1121). The single-entry body is GONE — hard cut, no
+        alias — so a 36-class sdxl mint pays ONE attested round trip instead of
+        36, each of which carried the full axis attestation.
+
+        ``axes`` is batch-level because all three of its members are properties
+        of the POD: ``gen_worker`` from this session, ``sku`` from the pod's
+        provisioning record, ``image_digest`` from the release. They cannot
+        differ between entries of one mint, and accepting them per entry would
+        invite a body claiming two SKUs for one pod and make the hub choose.
+
+        Raises :class:`CellPublishRefused` / :class:`HubPublishError` for a
+        WHOLE-BATCH refusal. A per-entry refusal is not a raise: it is a grant
+        with ``status="condemned"``, so one quarantined key does not throw away
+        35 siblings whose bytes have not moved.
         """
-
-        # pgw#712 (kept under the exact-identity ruling as
-        # defense-in-depth): a cell whose metadata carries a foreign
-        # adoption provenance must never republish under this worker's
-        # key. Nothing in-tree stamps the mark anymore (equivalence
-        # adoption was deleted with exact identity); a marked cell can only be a
-        # foreign/hand-copied artifact — refuse it.
-        mark = meta.get(ADOPTION_MARK)
-        if mark:
+        asked = tuple(entries)
+        if not family.strip():
+            raise CellPublishRefused("publish-intent requires a family")
+        if not asked:
             raise CellPublishRefused(
-                f"cell carries adoption provenance {mark!r}; republishing "
-                "it is fenced (pgw#712)")
-        key = str(meta.get("cell_key") or "").strip()
-        if not key:
-            key = _recomputed_key(meta).digest
-        axes = {
-            "sku": str(meta.get("sku") or ""),
-            "image_digest": self.image_digest,
-            "gen_worker": str(meta.get("gen_worker") or ""),
-        }
+                "publish-intent requires a non-empty entries[]")
+        if len(asked) > MAX_PUBLISH_ENTRIES:
+            raise CellPublishRefused(
+                f"this batch names {len(asked)} entries and the bound is "
+                f"{MAX_PUBLISH_ENTRIES}; split it rather than receiving a "
+                f"short answer that reads as entries nobody asked to publish")
+        seen: Dict[str, int] = {}
+        for i, entry in enumerate(asked):
+            key = entry.compiled_graph_key
+            if not cell_key.is_key(key):
+                raise CellPublishRefused(
+                    f"entries[{i}].cell_key is {key!r}, which is not a "
+                    f"compiled-graph key")
+            if key in seen:
+                # Answers are positional; a collapsed duplicate would shift
+                # every later answer against its entry.
+                raise CellPublishRefused(
+                    f"entries[{i}] repeats entries[{seen[key]}]'s key {key}")
+            seen[key] = i
+            for axis in cell_key.KEY_AXES:
+                if not str(entry.identity_axes.get(axis) or "").strip():
+                    raise CellPublishRefused(
+                        f"entries[{i}].identity_axes states no {axis!r}; an "
+                        f"entry that cannot restate all of (graph, sm, "
+                        f"toolchain) cannot restate its own key, and a row "
+                        f"whose identity is only verifiable inside its batch "
+                        f"is not an identity")
         # th#1423: a mint outliving its credential is only visible AFTER the
         # compile, in a 401 nothing could group. The credential states its own
         # `exp`, so the lapse is a MEASURED fact at the one moment it decides
         # the outcome — on the wire before the intent, not inferred later.
         lapse = _credential_lapse_s(self.worker_jwt(), now=time.time())
         if lapse:
-            _publish_leg(family, key, "credential_expired",
-                         {"past_exp_s": int(lapse)})
-        intent = self._post(
+            _publish_leg(family, asked[0].compiled_graph_key,
+                         "credential_expired", {"past_exp_s": int(lapse)})
+        body = self._post(
             "/v1/worker/cells/publish-intent",
             {
-                "family": family, "cell_key": key, "axes": axes,
-                # th#1355: the identity the hub could not otherwise learn.
-                # `axes` above are the three the hub ATTESTS against its own
-                # records; `identity_axes` are the ck axes that HASH INTO
-                # `cell_key`. Before this, they reached the hub only on the
-                # DEMAND side and were deleted the moment the demand was
-                # satisfied — so a minted cell's row could not say which lane
-                # or which card it was for. Diagnostic by contract: the hub
-                # cannot recompute the digest and must never select on them.
-                "identity_axes": _identity_axes(family, meta),
-                # The compile wall for THIS cell. Sent at INTENT, not
-                # complete, because the mint is already finished by the time
-                # we ask to publish — so the cost commits in the same INSERT
-                # as the row it describes.
-                "mint_duration_ms": max(0, int(mint_duration_ms or 0)),
+                "family": family,
+                # The three HUB-ATTESTED axes (pgw#709), checked against the
+                # hub's own records before any token is minted.
+                "axes": {
+                    "sku": str(sku or ""),
+                    "image_digest": self.image_digest,
+                    "gen_worker": str(gen_worker or ""),
+                },
+                "entries": [e.wire() for e in asked],
             },
             timeout=_INTENT_TIMEOUT_S,
         )
-        token = str(intent.get("capability_token") or "").strip()
-        repo = str(intent.get("repo") or "").strip()
-        if not token or not repo:
-            raise RuntimeError("publish-intent response missing token/repo")
+        repo = str(body.get("repo") or "").strip()
+        if not repo:
+            raise RuntimeError("publish-intent response missing repo")
+        rows = body.get("answers")
+        if not isinstance(rows, list) or len(rows) != len(asked):
+            # A short batch is not a smaller reply. An omitted answer reads as
+            # an entry nobody asked to publish, and the bytes it was minted
+            # from are already paid for.
+            raise RuntimeError(
+                f"publish-intent asked {len(asked)} entries and was answered "
+                f"{len(rows) if isinstance(rows, list) else 'no answers[]'}; "
+                f"answers are positional and every entry must get one")
+        grants: List[PublishGrant] = []
+        tokens: Dict[str, str] = {}
+        for i, entry in enumerate(asked):
+            row = rows[i]
+            if not isinstance(row, dict):
+                raise RuntimeError(f"publish-intent answers[{i}] is not an answer")
+            echoed = str(row.get("cell_key") or "").strip()
+            if echoed != entry.compiled_graph_key:
+                raise RuntimeError(
+                    f"publish-intent answers[{i}] answers {echoed!r} and "
+                    f"entries[{i}] asked {entry.compiled_graph_key}; answers "
+                    f"are consumed positionally, so a transposed batch would "
+                    f"upload every artifact under a sibling's grant")
+            status = str(row.get("status") or "").strip()
+            if status == PUBLISH_STATUS_CONDEMNED:
+                grants.append(PublishGrant(
+                    compiled_graph_key=echoed, status=PUBLISH_STATUS_CONDEMNED,
+                    detail=str(row.get("detail") or "")))
+                continue
+            token = str(row.get("capability_token") or "").strip()
+            if status != PUBLISH_STATUS_GRANTED or not token:
+                raise RuntimeError(
+                    f"publish-intent answers[{i}] carries status {status!r} "
+                    f"with{'out' if not token else ''} a token; this worker "
+                    f"cannot act on it")
+            if token in tokens:
+                # ONE TOKEN EACH. A token shared between two entries is a
+                # batch-level grant wearing a per-entry field name — and a
+                # grant for entry 5 must not be able to publish entry 6's
+                # bytes.
+                raise RuntimeError(
+                    f"publish-intent granted {echoed} and {tokens[token]} the "
+                    f"SAME capability token; each entry's grant is signed on "
+                    f"its own and must name only its own key")
+            tokens[token] = echoed
+            grants.append(PublishGrant(
+                compiled_graph_key=echoed, status=PUBLISH_STATUS_GRANTED,
+                capability_token=token,
+                expires_at_unix=int(row.get("expires_at_unix") or 0)))
+        return PublishIntentBatch(
+            repo=repo, family=family, grants=tuple(grants))
 
+    def publish(self, family: str, artifact: Path, meta: dict,
+                mint_duration_ms: int = 0) -> str:
+        """Publish ONE self-minted compiled graph. Returns the checkpoint id.
+
+        Steps: attested intent (worker JWT; hub corroborates the axes and mints
+        a key-pinned capability token) -> the CHUNKED SHA-256 publish (declare
+        -> {have, need} -> PUT -> complete; mode=replace, no tags — the hub
+        refuses any tag bind under the claim anyway) -> publish-complete
+        bookkeeping. Raises on any failure; the caller treats every raise as
+        non-fatal to serving.
+
+        A one-entry batch, and that is the honest shape for it: the live
+        publish paths are independent background transfers, one per key
+        (``_publish_async``), so their intents cannot be joined without joining
+        the threads. :meth:`publish_intent` is where a caller holding a whole
+        mint at once — :func:`aot_mint.publish` — asks for every token in one
+        round trip.
+        """
+        entry, sku, gen_worker = intent_entry(family, meta, mint_duration_ms)
+        batch = self.publish_intent(
+            family, [entry], sku=sku, gen_worker=gen_worker)
+        return self.publish_granted(
+            family, artifact, meta, batch.grants[0], repo=batch.repo)
+
+    def publish_granted(
+        self, family: str, artifact: Path, meta: dict, grant: PublishGrant, *,
+        repo: str,
+    ) -> str:
+        """Ship ONE entry's bytes under ITS OWN grant. Returns the checkpoint id.
+
+        Split from :meth:`publish_intent` because the grant is per entry and
+        the transfer is per entry: a caller holding a whole mint's grants
+        uploads them one at a time, each under the token that names only its
+        own key, and one failure costs one artifact.
+        """
+        key = grant.compiled_graph_key
+        if not grant.granted:
+            raise CellPublishRefused(
+                grant.detail or f"the hub refused to admit {key}",
+                code="cell_publish_key_condemned")
         try:
             from .hubio.client import CommitFile, HubClient
 
@@ -788,7 +973,8 @@ class CellPublisher:
             # do not hash to the key; and resume needs no client state — a
             # re-plan comes back with the landed objects already resident, so
             # a pod that dies mid-upload costs only the in-flight chunks.
-            client = HubClient(base_url=self.base_url, token=token)
+            client = HubClient(base_url=self.base_url,
+                               token=grant.capability_token)
             result = client.publish_v2(
                 destination_repo=repo,
                 files=[CommitFile(path=artifact.name, local_path=artifact)],
@@ -833,6 +1019,41 @@ class CellPublisher:
             family, key, checkpoint_id, artifact.stat().st_size / 1e6,
             result.uploaded, result.deduped)
         return checkpoint_id
+
+
+def intent_entry(
+    family: str, meta: dict, mint_duration_ms: int = 0,
+) -> Tuple[PublishEntry, str, str]:
+    """One artifact's metadata -> its entry plus the two pod axes it declares.
+
+    The pod axes come back separately because they are BATCH-level on the wire:
+    ``sku`` and ``gen_worker`` describe the pod, so a caller batching a whole
+    mint reads them once and the hub attests them once.
+    """
+    # pgw#712 (kept under the exact-identity ruling as defense-in-depth): a
+    # cell whose metadata carries a foreign adoption provenance must never
+    # republish under this worker's key. Nothing in-tree stamps the mark
+    # anymore (equivalence adoption was deleted with exact identity); a marked
+    # cell can only be a foreign/hand-copied artifact — refuse it. It sits HERE
+    # because this is what every publisher runs BEFORE the intent: the fence
+    # has to refuse before a byte moves and before the hub is even asked.
+    mark = meta.get(ADOPTION_MARK)
+    if mark:
+        raise CellPublishRefused(
+            f"cell carries adoption provenance {mark!r}; republishing "
+            "it is fenced (pgw#712)")
+    key = str(meta.get("cell_key") or "").strip()
+    if not key:
+        key = _recomputed_key(meta).digest
+    return (
+        PublishEntry(
+            compiled_graph_key=key,
+            identity_axes=_identity_axes(family, meta),
+            mint_duration_ms=max(0, int(mint_duration_ms or 0)),
+        ),
+        str(meta.get("sku") or ""),
+        str(meta.get("gen_worker") or ""),
+    )
 
 
 def _publish_leg(family: str, key: str, stage: str, facts: Dict[str, Any]) -> None:

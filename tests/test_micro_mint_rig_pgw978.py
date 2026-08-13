@@ -274,8 +274,9 @@ def test_arming_a_probes_publish_is_explicit(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("GEN_WORKER_PROBE_PUBLISH_ARMED", "1")
     action, _q, _b = actions.authorize({
         "method": "POST", "path": "/v1/worker/cells/publish-intent",
-        "json": {"family": "microrig", "cell_key": "ck5-" + "a" * 56,
-                 "axes": {}, "identity_axes": {}, "mint_duration_ms": 1}})
+        "json": {"family": "microrig", "axes": {},
+                 "entries": [{"cell_key": "cg-key-v1-" + "a" * 56,
+                              "identity_axes": {}, "mint_duration_ms": 1}]}})
     assert action.name == "cells.publish_intent"
 
 

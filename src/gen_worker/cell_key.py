@@ -180,6 +180,13 @@ _DIGEST_HEX = 56
 _REQUIRED = ("graph", "sm", "toolchain")
 _OPTIONAL: tuple = ()
 
+#: The same three, public, because the PUBLISH WIRE has to name them: every
+#: batched entry restates all three (pgw#1224 / th#1842 PR #1121), so the
+#: enumeration the wire enforces and the enumeration the key is built from must
+#: be ONE list. Two copies of an axis set is how a wire starts accepting a row
+#: that cannot restate its own key.
+KEY_AXES: Tuple[str, ...] = _REQUIRED
+
 #: The `kind` METADATA value of an exported .pt2 entry — the only publishable
 #: kind since pgw#1010, and since pgw#1059 a compat-gate fact rather than a
 #: key axis (`aot_serve.verify_declared` refuses on it by name).
@@ -571,6 +578,7 @@ def manifest_digest(class_hashes: Iterable[str]) -> str:
 
 
 __all__ = [
+    "KEY_AXES",
     "KEY_SCHEME",
     "EXPORTED_KIND",
     "EXPORT_ENVELOPE_KEY",

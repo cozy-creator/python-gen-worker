@@ -112,8 +112,19 @@ class _Hub(http.server.BaseHTTPRequestHandler):
             srv.calls.append((path, body))
 
         if path.endswith("/v1/worker/cells/publish-intent"):
-            self._json(200, {"capability_token": "cap-token",
-                             "repo": f"root/family-{body.get('family')}"})
+            # pgw#1224: one answer per entry, in request order, ONE TOKEN EACH.
+            entries = body.get("entries") or []
+            self._json(200, {
+                "object": "cell_publish_intent_batch",
+                "repo": f"root/family-{body.get('family')}",
+                "family": body.get("family"),
+                "granted": len(entries),
+                "answers": [
+                    {"cell_key": e.get("cell_key"), "status": "granted",
+                     "capability_token": f"cap-token-{i}",
+                     "expires_at_unix": 4102444800}
+                    for i, e in enumerate(entries)],
+            })
             return
         if path.endswith("/v1/worker/cells/publish-complete"):
             self._json(200, {"recorded": True})
@@ -331,11 +342,16 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
 def test_intent_carries_the_identity_axes_and_the_mint_cost(hub, artifact):
     _publisher(hub).publish(FAMILY, artifact, dict(META), mint_duration_ms=347_940)
     intent = next(b for p, b in hub.httpd.calls if p.endswith("publish-intent"))
-    assert intent["cell_key"] == CELL_KEY
+    # pgw#1224: the three ATTESTED axes are batch-level (all three are
+    # properties of the POD); the key, the identity axes and the mint cost are
+    # per ENTRY — the last one because under the old whole-cell shape ONE
+    # number covered 36 entries and could not answer which class is expensive.
     assert intent["axes"] == {"sku": "l4", "image_digest": "sha256:" + "1" * 64,
                               "gen_worker": "0.87.0"}
-    assert intent["mint_duration_ms"] == 347_940
-    assert intent["identity_axes"]["lane"] == "w8a8-lora64"
+    (entry,) = intent["entries"]
+    assert entry["cell_key"] == CELL_KEY
+    assert entry["mint_duration_ms"] == 347_940
+    assert entry["identity_axes"]["lane"] == "w8a8-lora64"
 
     complete = next(b for p, b in hub.httpd.calls if p.endswith("publish-complete"))
     assert complete["ok"] is True
@@ -366,7 +382,8 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     that were not in it."""
     _publisher(hub).publish(FAMILY, artifact, dict(META))
     intent = next(b for p, b in hub.httpd.calls if p.endswith("publish-intent"))
-    axes = intent["identity_axes"]
+    (entry,) = intent["entries"]
+    axes = entry["identity_axes"]
 
     # Derived from the recorded blocks, never from a second stamp.
     assert axes["toolchain"] == cell_key.facts_digest(META["toolchain"])
@@ -379,7 +396,7 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     # demoted store metadata (family, lane) — pgw#1059: neither is identity.
     ck = {k: v for k, v in axes.items()
           if k in ("graph", "sm", "toolchain")}
-    assert cell_key.from_axes(ck).digest == intent["cell_key"] == CELL_KEY
+    assert cell_key.from_axes(ck).digest == entry["cell_key"] == CELL_KEY
     assert set(axes) == {"graph", "sm", "toolchain",
                          fc.GRAPH_CONTRACT_AXIS, fc.ENV_SEAL_AXIS,
                          "family", "lane"}

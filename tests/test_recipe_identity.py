@@ -230,9 +230,14 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
               timeout: Any = None) -> Any:
         posts.append((url, json))
         if url.endswith("/publish-intent"):
+            # pgw#1224: one answer per entry, one token each.
+            entries = (json or {}).get("entries") or []
             return _FakeResp(200, {
-                "capability_token": "cap", "repo": f"root/family-{FAMILY}",
-                "cell_key": key})
+                "repo": f"root/family-{FAMILY}", "granted": len(entries),
+                "answers": [
+                    {"cell_key": e.get("cell_key"), "status": "granted",
+                     "capability_token": f"cap-{i}"}
+                    for i, e in enumerate(entries)]})
         return _FakeResp(200, {"recorded": True})
 
     import requests

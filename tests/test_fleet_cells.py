@@ -400,6 +400,24 @@ class _FakeResp:
         return json.loads(self.text)
 
 
+def _granted(body, repo: str) -> dict:
+    """The hub's batch answer: one grant per entry, in request order, each
+    with ITS OWN token (pgw#1224 / th#1842 PR #1121)."""
+    entries = (body or {}).get("entries") or []
+    return {
+        "object": "cell_publish_intent_batch",
+        "repo": repo,
+        "family": str((body or {}).get("family") or ""),
+        "granted": len(entries),
+        "answers": [
+            {"cell_key": str(e.get("cell_key") or ""), "status": "granted",
+             "capability_token": f"cap-token-{i}",
+             "expires_at_unix": 4102444800}
+            for i, e in enumerate(entries)
+        ],
+    }
+
+
 def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     posts: list = []
     # pgw#1046: a real exported-cell envelope — the publish path recomputes the
@@ -410,11 +428,7 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     def _post(url, headers=None, json=None, timeout=None):
         posts.append((url, json))
         if url.endswith("/publish-intent"):
-            return _FakeResp(200, {
-                "capability_token": "cap-token",
-                "repo": "root/family-fam",
-                "cell_key": key,
-            })
+            return _FakeResp(200, _granted(json, "root/family-fam"))
         return _FakeResp(200, {"recorded": True})
 
     import requests
@@ -469,10 +483,13 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     # The claimed axes the hub will attest.
     assert intent_body["axes"] == {
         "sku": "b200", "image_digest": "sha256:img", "gen_worker": "0.39.0"}
-    assert intent_body["cell_key"] == key
+    # pgw#1224: the KEY is per ENTRY, the attested axes are per BATCH. A
+    # one-artifact publish is a one-entry batch — the single-entry body is gone.
+    assert [e["cell_key"] for e in intent_body["entries"]] == [key]
+    assert set(intent_body) == {"family", "axes", "entries"}
 
     kind, kw = committed[0]
-    assert kind == "client" and kw["token"] == "cap-token"
+    assert kind == "client" and kw["token"] == "cap-token-0"
     kind, kw = committed[1]
     assert kind == "publish_v2", "the cell publisher ships over chunked sha256"
     assert kw["destination_repo"] == "root/family-fam"
@@ -521,8 +538,7 @@ def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
     def _post(url, headers=None, json=None, timeout=None):
         posts.append((url, json))
         if url.endswith("/publish-intent"):
-            return _FakeResp(200, {
-                "capability_token": "cap", "repo": "root/family-fam"})
+            return _FakeResp(200, _granted(json, "root/family-fam"))
         return _FakeResp(200, {"recorded": True})
 
     import requests
