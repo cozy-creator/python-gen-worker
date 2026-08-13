@@ -94,6 +94,7 @@ from .input_assets import (
 from .lifecycle_intents import IntentRegistry
 from .models import disk_gc
 from .models import provision
+from .models.refs import normalize_model_ref
 from .models import residency as residency_mod
 from .models.memory import (
     aflush_memory,
@@ -10218,9 +10219,20 @@ class Executor:
         ``payload.source``, also used for ``payload.text_encoder``) locally
         before the handler runs. Same ModelStore path as model bindings —
         identical retry/classification and ModelEvent emission."""
-        ref = str(info.get("ref") or "").strip()
-        if not ref:
+        raw = str(info.get("ref") or "").strip()
+        if not raw:
             raise ValidationError(f"payload.{field_name}.ref must be a non-empty repo ref")
+        # pgw#1217: NORMALIZE WHERE IT ENTERS. This ref is client-supplied and
+        # is then used as both the `snapshots` lookup key (that map is keyed in
+        # normal form) and the residency key. Taken verbatim, a non-normal
+        # spelling misses its snapshot and mints a SECOND residency identity for
+        # one model — the th#736 mechanic `binding.rebind_pick` warns about.
+        try:
+            ref = normalize_model_ref(raw)
+        except ValueError as exc:
+            raise ValidationError(
+                f"payload.{field_name}.ref {raw!r} is not a valid repo ref: {exc}"
+            ) from exc
         path = await self.store.ensure_local(ref, snapshots.get(ref))
         (set_path or ctx._set_source_path)(str(path))
 
@@ -10295,9 +10307,20 @@ class Executor:
                 raise ValidationError(f"lora overlay names unknown model slot {slot!r}")
             prepared: List[lora_util.PreparedAdapter] = []
             for overlay in loras:
-                ref = str(overlay.ref or "").strip()
-                if not ref:
+                raw = str(overlay.ref or "").strip()
+                if not raw:
                     raise ValidationError(f"lora overlay on slot {slot!r} has an empty ref")
+                # pgw#1217, same boundary as `_materialize_source`: gw#491 made
+                # one adapter mint one cache identity for the DIGEST spelling
+                # (see below); this does it for the REF spelling, which it left
+                # open.
+                try:
+                    ref = normalize_model_ref(raw)
+                except ValueError as exc:
+                    raise ValidationError(
+                        f"lora overlay on slot {slot!r} has an invalid ref "
+                        f"{raw!r}: {exc}"
+                    ) from exc
                 weight = lora_util.validate_overlay_weight(overlay.weight, ref=ref)
                 t0 = time.monotonic()
                 path = await self.store.ensure_local(ref, snapshots.get(ref))
