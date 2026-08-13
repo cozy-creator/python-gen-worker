@@ -34,7 +34,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "ORCHESTRATOR_PUBLIC_ADDR": "orchestrator_public_addr",
     "WORKER_ID": "worker_id",
     # The ENV name is hub-injected and fixed; the FIELD is renamed
-    #  so no call site can read it as the live credential.
+    #  So no call site can read it as the live credential.
     "WORKER_JWT": "bootstrap_worker_jwt",
     "WORKER_RELEASE_ID": "worker_release_id",
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
@@ -134,7 +134,7 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     "GEN_WORKER_SEAL_LIB_MEMO",
     "GEN_WORKER_SUPERVISED",
     "WORKER_EXECUTION_TOPOLOGY",
-    # the live-edit probe marking and its separate publish arming.
+    # The live-edit probe marking and its separate publish arming.
     # Read by `procsplit.actions` — the PARENT's security boundary, which must
     # be readable with no Settings in hand, and which tenant-adjacent code in
     # the compute child must not be able to reach through the config surface.

@@ -199,7 +199,7 @@ def _index_variant_tag(path: str) -> str:
         match = _LEGACY_INDEX_VARIANT_RE.search(name)
         if match is not None:
             tag = match.group(1)
-    # same guard as _variant_tag — only a recognized dtype token.
+    # Same guard as _variant_tag — only a recognized dtype token.
     return tag if tag in _KNOWN_VARIANT_TAGS else ""
 
 

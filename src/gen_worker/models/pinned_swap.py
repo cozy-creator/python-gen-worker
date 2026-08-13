@@ -111,7 +111,7 @@ def swap_module(module: Any, device: str) -> bool:
     # Promotes ride the dedicated copy stream: H2D from pinned
     # memory overlaps compute on the SMs. Demotes (D2H) stay on the ambient
     # stream — they must order after any compute that produced the weights.
-    # the TARGET device's stream — a promote onto cuda:3 must
+    # The TARGET device's stream — a promote onto cuda:3 must
     # ride (and synchronize) a cuda:3 stream, not a device-0 singleton.
     copy_stream = staging.copy_stream(target) if target.type == "cuda" else None
     try:

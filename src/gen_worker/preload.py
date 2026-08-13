@@ -179,7 +179,7 @@ class Preloader:
             return
         except Exception as exc:
             logger.exception("rotation preload driver crashed; parked until next poke")
-            # the whole background-staging subsystem is now off
+            # The whole background-staging subsystem is now off
             # until the next poke — the hub's desired plan goes silently
             # unfulfilled and every rotation pays the full visible swap.
             activity_mod.emit_event(

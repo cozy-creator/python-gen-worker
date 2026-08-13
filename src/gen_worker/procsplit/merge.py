@@ -124,7 +124,7 @@ def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
             d.observed_residency_generation for d in deltas
         ),
         observed_config_generation=min(d.observed_config_generation for d in deltas),
-        # no `cell_lookups` — no child produces them any more.
+        # No `cell_lookups` — no child produces them any more.
         compile_targets=targets,
     )
     # THE TRAP: disk is NOT summable. All G children share ONE container

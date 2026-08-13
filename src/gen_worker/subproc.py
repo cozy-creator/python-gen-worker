@@ -129,7 +129,7 @@ def run_process(
       once the child has been silent this long. ``None`` (default) = no
       watchdog. There is deliberately no total-runtime bound: a wall clock
       cannot tell a healthy 3-hour quantize from a wedge, so it is either
-      useless or it kills real work (gw#655's residency-design principle).
+      useless or it kills real work.
     - Returns the process exit code on natural exit (callers decide whether
       nonzero is fatal).
     """

@@ -1,10 +1,9 @@
-"""gw#619/th#988: worker -> hub hardware-unsuitable report, dialed BEFORE the
-boot-time CUDA probe's silent exit.
+"""Worker -> hub hardware-unsuitable report, dialed BEFORE the boot-time CUDA
+probe's silent exit.
 
-Previously a probe failure (cuda_probe.py, gw#529) logged
-``GEN_WORKER_CUDA_PROBE_FAILED`` and exit(1)'d with no orchestrator contact —
-the pod died invisibly to every layer of telemetry. This module
-sends ONE ``HardwareUnsuitable`` ``WorkerMessage`` on the Connect stream, in
+A probe failure that logs ``GEN_WORKER_CUDA_PROBE_FAILED`` and exit(1)s with no
+orchestrator contact kills the pod invisibly to every layer of telemetry. This
+module sends ONE ``HardwareUnsuitable`` ``WorkerMessage`` on the Connect stream, in
 place of Hello, so the hub can attribute the death and reschedule/blacklist
 the host. Bounded best-effort: a couple of short retries, then give up — the
 silent exit remains the fallback (unreachable hub, or an old hub that
@@ -166,8 +165,8 @@ async def _send_once(
 ) -> bool:
     """One dial attempt: open Connect, write the report, half-close, and wait
     for the hub to end the call. Returns True only on a clean, unrejected
-    round trip (delivered); any exception (unreachable, UNAUTHENTICATED, a
-    pre-th#988 hub rejecting the missing Hello with FAILED_PRECONDITION) is
+    round trip (delivered); any exception (unreachable, UNAUTHENTICATED, an old
+    hub rejecting the missing Hello with FAILED_PRECONDITION) is
     "not delivered" — the caller retries or falls through to the silent
     exit."""
     channel = (
@@ -216,9 +215,9 @@ async def _report_async(settings: Settings, report: HardwareReport) -> bool:
 
 
 def deliver_hardware_report(settings: Settings, report: HardwareReport) -> bool:
-    """Dial the hub with an already-built report. Never raises. pgw#826: also
-    the path a control parent uses to relay a compute child's terminal boot
-    verdict on its own credential."""
+    """Dial the hub with an already-built report. Never raises. Also the path a
+    control parent uses to relay a compute child's terminal boot verdict on its
+    own credential."""
     if not (settings.orchestrator_public_addr or "").strip():
         return False
     try:

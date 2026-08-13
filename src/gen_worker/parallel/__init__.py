@@ -1,4 +1,4 @@
-"""Sequence-parallel execution runtime (pgw#748 phase 1).
+"""Sequence-parallel execution runtime.
 
 One execution GROUP of degree D is executed by D ranks: rank 0 is the worker
 process itself (it owns the pipeline object, the request payload, VAE decode,

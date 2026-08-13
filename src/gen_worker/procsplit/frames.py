@@ -99,7 +99,7 @@ class FrameWriter:
 
 def frame_bytes(ftype: int, payload: bytes = b"") -> bytes:
     """One frame as a single buffer — for callers that must write it with one
-    atomic ``os.write`` from a thread (pgw#771's liveness pipe)."""
+    atomic ``os.write`` from a thread (the liveness pipe)."""
     return _HEADER.pack(ftype, len(payload)) + payload
 
 
