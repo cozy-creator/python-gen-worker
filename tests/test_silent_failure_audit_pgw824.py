@@ -506,33 +506,34 @@ def test_the_delegated_mint_actually_passes_the_evidence_callback() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_unlanded_nf4_rung_is_a_rung_OUTCOME_not_the_absence_of_one() -> None:
-    """RED before pgw#824: the failure did `adaptive_rung = ""`, and the
-    `if adaptive_rung:` stamp below it is the very mechanism that reports rung
-    outcomes to placement — so clearing the variable SELF-SUPPRESSED the
-    report. The worst outcome the ladder can produce (serving full precision
-    over the budgeted VRAM, on a host already too tight for stored precision)
-    was the only one that reported nothing, while every sibling rung reported
-    itself.
+def test_a_rung_OUTCOME_reaches_placement_THROUGH_SlotLoad_not_a_log_line() -> None:
+    """RED before pgw#824: an emergency rung that engaged and landed on nothing
+    did ``adaptive_rung = ""``, and the ``if adaptive_rung:`` stamp below it is
+    the very mechanism that reports rung outcomes to placement — so clearing
+    the variable SELF-SUPPRESSED the report. The worst outcome the ladder could
+    produce was the only one that reported nothing.
+
+    pgw#1206 D deleted the rung that carried this incident (bnb-nf4 —
+    Paul: no runtime quants), and the INVARIANT is what survives it: a rung
+    outcome reaches placement through ``SlotLoad.rung`` ->
+    ``_record_rung_transition``, never through a log line a hub-spawned pod
+    cannot expose. The surviving fp8-storage rung is checked on the same seam.
     """
-    from gen_worker.models import loading, provision
-
-    # Three states placement must be able to tell apart.
-    assert loading.RUNG_NF4_UNLANDED not in ("", "nf4")
-    assert provision.RUNG_NF4_UNLANDED == loading.RUNG_NF4_UNLANDED
-
-
-def test_the_unlanded_rung_reaches_placement_through_SlotLoad() -> None:
-    """An event alone would not be enough: every sibling rung reaches
-    ServePlan/FnDegraded via SlotLoad.rung -> `_record_rung_transition`, and a
-    fix that only logged-but-typed would still leave placement blind."""
     import inspect
 
-    from gen_worker.models import provision
+    from gen_worker.models import loading, provision
 
     src = inspect.getsource(provision)
-    assert "if rung == RUNG_NF4_UNLANDED:" in src
+    assert 'if rung == "fp8" and not cast_failed:' in src
     assert "out.rung = rung" in src
+    assert "out.rung_detail = (" in src
+    # The stamp the seam reads, still written by the loader and still gated on
+    # the rung being non-empty (which is what made the bug possible).
+    loader = inspect.getsource(loading)
+    assert "pipe._cozy_adaptive_rung = adaptive_rung" in loader
+    # ...and the rung that carried the incident cannot come back silently.
+    assert not hasattr(loading, "RUNG_NF4_UNLANDED")
+    assert not hasattr(provision, "RUNG_NF4_UNLANDED")
 
 
 def test_a_failed_eviction_stays_booked_in_vram(

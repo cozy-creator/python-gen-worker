@@ -168,7 +168,7 @@ from .compile_cache import CompiledExecutionLaneUnavailableError
 from .preload import Preloader
 from .api.binding import rebind_pick
 from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
-from .models.serve_fit import (RUN_CPU, RUN_EMERGENCY, RUN_FP8_STORAGE,
+from .models.serve_fit import (RUN_CPU, RUN_FP8_STORAGE,
                                    RUN_OFFLOAD, plan_serve)
 from . import postmortem
 from .models.serve_fit import replan
@@ -9073,8 +9073,7 @@ class Executor:
                     if sl.rung_detail:
                         self._record_rung_transition(
                             spec, ref=ref, phase="load",
-                            run_mode=(RUN_FP8_STORAGE if sl.rung == "fp8"
-                                      else RUN_EMERGENCY),
+                            run_mode=RUN_FP8_STORAGE,
                             detail=sl.rung_detail)
                     elif sl.cast_fail_detail:
                         self._record_rung_transition(

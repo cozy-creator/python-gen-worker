@@ -19,13 +19,11 @@ from ..component_vocab import (
     weight_components,
 )
 from ..families.facts import component_dtype_for_class
-from .ladder import EMERGENCY_NF4_VRAM_FACTOR, NF4_WEIGHT_BYTES_FACTOR
 import importlib
 import importlib.util
 import inspect
 import os
 import struct
-import sys
 
 from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
@@ -233,14 +231,6 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
 _fp8_storage_components = denoiser_components
 # The "+te" rung (component fit-ladder rung 2): the pipeline's text encoders.
 _fp8_text_encoder_components = text_encoder_components
-
-#: pgw#824: the emergency nf4 rung was engaged and landed on ZERO modules. A
-#: rung OUTCOME, not the absence of one — the pipeline serves full precision on
-#: a host whose free VRAM was already below the stored-precision footprint,
-#: which is the worst outcome the ladder can produce. Distinct from "nf4" (it
-#: landed) and from "" (no rung was needed), because placement must be able to
-#: tell those three apart. Consumed by ``models.provision``.
-RUNG_NF4_UNLANDED = "nf4-unlanded"
 
 class _Fp8WeightWindow:
     """Weight-only fp8 storage for one transformer block: the block's
@@ -818,7 +808,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # dodged is +1.9% for the structural storage lane (pgw#727 re-measure; the
 # +44-73% figure that justified it measured the retired HOOK form), so it
 # traded ~2x weight VRAM for ~1.9% latency AND identity determinism.
-# Involuntary transitions stay: the fit-ladder rungs below (can't-fit fp8/nf4)
+# Involuntary transitions stay: the fit-ladder rung below (can't-fit fp8)
 # and the w8a8/w4a4 dequant-on-unsupported-host lanes are declared rungs, not
 # probe outcomes.
 
@@ -871,35 +861,22 @@ def pipeline_weight_lane(pipeline: Any) -> str:
     return ""
 
 
-# --- Runtime fit rungs (th#546 emergency lane + th#683 fp8 storage) --------
+# --- The runtime fit rung (th#683 fp8 storage) -----------------------------
 # Fit ladder: bf16 -> #fp8 flavor -> #nvfp4 (Blackwell) -> runtime fp8-E4M3
-# storage -> EMERGENCY nf4 -> CPU offload. When even the downloaded flavor
-# cannot fit free VRAM, the load path first tries fp8-E4M3 weight storage
-# (apply_fp8_storage: fp8 bytes resident, bf16 compute — quality ~= a stored
-# #fp8 flavor), then runtime-quantizes the denoiser to bnb nf4. Always armed
-# on CUDA hosts (gw#420: fitting is the runtime's job, not a flag); the
-# platform never reaches it because its scheduler places by declared
-# Resources.
-# Coarse whole-model resident factor after nf4-quantizing the denoiser
-# (denoiser ~4x smaller; encoders/VAE stay at compute dtype). Single-sourced
-# from the shared ladder spec (ladder.EMERGENCY_NF4_VRAM_FACTOR) so the
-# runtime rung and the Go/Py ladder never drift.
-EMERGENCY_FIT_FACTOR = EMERGENCY_NF4_VRAM_FACTOR
+# storage -> CPU offload. When even the downloaded flavor cannot fit free
+# VRAM, the load path tries fp8-E4M3 weight storage (apply_fp8_storage: fp8
+# bytes resident, bf16 compute — quality ~= a stored #fp8 flavor) and then
+# hands the slot to the offload ladder. Nothing QUANTIZES here: the bnb-nf4
+# emergency rung was deleted in pgw#1206 D (Paul: "We shouldn't be doing
+# runtime quants; if we're really memory-constrained then we should be
+# fetching the quant we need"). Armed on CUDA hosts (gw#420: fitting is the
+# runtime's job, not a flag).
 # Resident factor after fp8-E4M3 storage of the denoiser, expressed against
 # the declared CARD SIZE (resources.vram_gb — includes activation/framework
 # headroom over raw weights). The ONE fp8 fit factor (pgw#515 deleted the
 # duplicate ladder walk and its weight-bytes-based 0.75 estimate).
 FP8_STORAGE_FIT_FACTOR = 0.55
 _EMERGENCY_MARGIN_GB = 2.0
-
-
-def emergency_quant_enabled() -> bool:
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available())
-    except ImportError:
-        return False
 
 
 def runtime_fp8_storage_supported() -> bool:
@@ -2216,117 +2193,22 @@ def specialized_weight_layout(model_path: str | Path) -> str:
     return ""
 
 
-def bitsandbytes_available() -> bool:
-    """Importability gate for the bnb-nf4 rung (gw#469): the quant config
-    constructs fine without bitsandbytes and the load then dies deep in
-    ``validate_environment`` (PackageNotFoundError -> setup_failed). An
-    unavailable rung must be SKIPPED, never attempted."""
-
-    if "bitsandbytes" in sys.modules:
-        return True
-    try:
-        return importlib.util.find_spec("bitsandbytes") is not None
-    except (ImportError, ValueError):
-        return False
-
-
-def emergency_quantization_config(
-    cls: Any,
-    *,
-    components: Optional[List[str]] = None,
-    compute_dtype: Any = None,
-) -> Optional[Any]:
-    """bnb-nf4 config for the emergency rung, scoped to ``components`` (the
-    snapshot's REAL denoiser/text-encoder names — gw#521: a config naming
-    absent components is silently ignored by diffusers, so the caller derives
-    the list from the tree and this function refuses an empty one). None
-    (with a warning) when the stack can't do it — the offload ladder then
-    carries it."""
-    if not bitsandbytes_available():
-        logger.warning(
-            "emergency nf4 unavailable (bitsandbytes not installed in this "
-            "image); skipping the quantized rung — the offload ladder carries it"
-        )
-        return None
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return None
-        import diffusers
-        from diffusers.quantizers import PipelineQuantizationConfig
-    except ImportError as exc:
-        logger.warning("emergency nf4 unavailable (%s); falling to offload", exc)
-        return None
-    kwargs: Dict[str, Any] = {
-        "load_in_4bit": True,
-        "bnb_4bit_quant_type": "nf4",
-        "bnb_4bit_compute_dtype": compute_dtype or torch.bfloat16,
-        "bnb_4bit_use_double_quant": True,
-    }
-    if isinstance(cls, type) and issubclass(cls, diffusers.DiffusionPipeline):
-        targets = list(_fp8_storage_components()) if components is None else list(components)
-        if not targets:
-            logger.warning(
-                "emergency nf4 skipped: no quantizable component in the "
-                "snapshot (denoiser-less tree); the offload ladder carries it"
-            )
-            return None
-        try:
-            return PipelineQuantizationConfig(
-                quant_backend="bitsandbytes_4bit",
-                quant_kwargs=kwargs,
-                components_to_quantize=targets,
-            )
-        except ValueError as exc:
-            # diffusers validates the bnb config signature against BOTH
-            # libraries; a diffusers/transformers skew raises here — skip the
-            # rung instead of killing the load.
-            logger.warning("emergency nf4 unavailable (%s); falling to offload", exc)
-            return None
-    from diffusers.quantizers.quantization_config import BitsAndBytesConfig
-
-    return BitsAndBytesConfig(**kwargs)
-
-
-def _bnb_quantized_components(pipe: Any, targets: List[str]) -> List[str]:
-    """The subset of ``targets`` whose modules actually hold bnb 4-bit layers
-    after the load — the gw#521 no-op detector (diffusers silently ignores
-    config components absent from the pipeline)."""
-    landed: List[str] = []
-    for name in targets:
-        mod = getattr(pipe, name, None)
-        if mod is None or not hasattr(mod, "modules"):
-            continue
-        try:
-            for m in mod.modules():
-                if type(m).__name__ in ("Linear4bit", "LinearNF4", "LinearFP4"):
-                    landed.append(name)
-                    break
-        except Exception:  # noqa: BLE001
-            continue
-    return landed
-
-
 def _adaptive_fit_rung(
     cls: Any, path: Path, *, fp8_planned: bool, compute_dtype: Any = None
 ) -> tuple[str, Optional[Any]]:
-    """Serve-time fit ladder at load (th#683 P3): when the snapshot's
-    estimated resident bytes (after any planned fp8 storage) exceed free
-    VRAM, engage the cheapest-quality-loss runtime lever that FITS:
-    fp8-E4M3 storage first (denoiser weights ~halve, quality ~= a stored
-    #fp8 flavor), then the nf4 emergency rung — denoiser first, text
-    encoders joining only when the denoiser alone isn't enough. Targets are
-    the snapshot's REAL component names (gw#521: a config naming absent
-    components is silently ignored by diffusers — the rung must never be a
-    hard-coded archetype guess). When even nf4 cannot fit, the rung is
-    SKIPPED (full-precision weights preserved; the offload ladder carries
-    it) instead of paying the quality cost for nothing.
+    """Serve-time fit rung at load (th#683 P3): when the snapshot's estimated
+    resident bytes exceed free VRAM, engage runtime fp8-E4M3 weight storage
+    if it makes the difference (denoiser weights ~halve, quality ~= a stored
+    #fp8 flavor). Otherwise the rung is SKIPPED and the OFFLOAD ladder carries
+    the slot — a lower-precision serve is never manufactured here (pgw#1206 D).
 
-    Returns ``(mode, config)``: ``("", None)`` fits as planned (or no rung
-    helps); ``("fp8", None)`` engage fp8 storage; ``("nf4", qc)``
-    emergency-quantize."""
-    if not emergency_quant_enabled():
+    Returns ``(mode, config)``: ``("", None)`` fits as planned, or no rung
+    helps and offload takes it; ``("fp8", None)`` engage fp8 storage. The
+    config slot stays in the signature because the caller's contract is
+    "a rung may hand me a quantization_config" — an AOT artifact read off disk
+    still does, through ``synthesize_quantization_config``.
+    """
+    if not runtime_fp8_storage_supported():
         return "", None
 
     free_gb = get_available_vram_gb()
@@ -2341,8 +2223,6 @@ def _adaptive_fit_rung(
     named = model_index_components(path) or set(comp_bytes)
     denoisers = [c for c in _fp8_storage_components()
                  if c in named and comp_bytes.get(c, 0) > 0]
-    encoders = [c for c in _fp8_text_encoder_components()
-                if c in named and comp_bytes.get(c, 0) > 0]
     denoiser_bytes = sum(comp_bytes[c] for c in denoisers)
 
     on_disk = detect_on_disk_dtype(path)
@@ -2355,7 +2235,6 @@ def _adaptive_fit_rung(
     # fp8-storage rung: only for un-quantized bf16/fp16 snapshots (an already
     # quantized flavor can't be halved again) when the halved estimate fits.
     if not fp8_planned and on_disk in ("bf16", "fp16") and denoisers \
-            and runtime_fp8_storage_supported() \
             and total - 0.5 * denoiser_bytes <= budget:
         logger.warning(
             "fp8-E4M3 emergency weight storage engaged for %s (%.1f GB "
@@ -2364,38 +2243,14 @@ def _adaptive_fit_rung(
             path, total_gb, free_gb,
         )
         return "fp8", None
-    if not denoisers:
-        logger.warning(
-            "emergency nf4 skipped for %s: no denoiser component in the "
-            "snapshot (components: %s); the offload ladder carries it",
-            path, sorted(named),
-        )
-        return "", None
-    # nf4 rung: denoiser first; text encoders join only when needed.
-    targets = list(denoisers)
-    est = total - denoiser_bytes * (1.0 - NF4_WEIGHT_BYTES_FACTOR)
-    if est > budget and encoders:
-        targets += encoders
-        est -= sum(comp_bytes[c] for c in encoders) * (1.0 - NF4_WEIGHT_BYTES_FACTOR)
-    if est > budget:
-        logger.warning(
-            "emergency nf4 skipped for %s: even 4-bit weights (~%.1f GB) "
-            "exceed the %.1f GB budget; keeping full precision — the "
-            "offload ladder carries it",
-            path, est / float(1 << 30), budget / float(1 << 30),
-        )
-        return "", None
-    qc = emergency_quantization_config(
-        cls, components=targets, compute_dtype=compute_dtype)
-    if qc is not None:
-        logger.warning(
-            "EMERGENCY 4-bit quantization engaged for %s (components %s; "
-            "%.1f GB weights, %.1f GB free) — quality below platform "
-            "standards; a larger card or Blackwell SKU would serve stored "
-            "flavors instead.",
-            path, targets, total_gb, free_gb,
-        )
-    return "nf4", qc
+    logger.warning(
+        "no runtime fit rung applies to %s (%.1f GB weights, %.1f GB free): "
+        "serving at stored precision and letting the OFFLOAD ladder carry it "
+        "— a smaller-precision serve is an AOT artifact to fetch, never one "
+        "to manufacture here",
+        path, total_gb, free_gb,
+    )
+    return "", None
 
 
 def _load_modular_pipeline(
@@ -2500,8 +2355,8 @@ def load_from_pretrained(
     snapshot) keeps denoiser weights in fp8 storage with per-layer upcast to
     the compute dtype; ``"fp8+te"`` extends that to the pipeline's text
     encoders (transformers-aware, gw#460). When the snapshot cannot fit free
-    VRAM as stored, the adaptive fit ladder engages runtime fp8-E4M3 storage
-    first, then the emergency nf4 rung (automatic on CUDA hosts).
+    VRAM as stored, the adaptive fit rung engages runtime fp8-E4M3 storage
+    (automatic on CUDA hosts); below that, the offload ladder carries it.
     ``components`` are PRELOADED module objects (content-keyed shared
     components, gw#479) forwarded to ``from_pretrained`` — diffusers skips
     loading those from disk and wires the given objects in. Used by the
@@ -2653,13 +2508,10 @@ def load_from_pretrained(
                 cls, Path(path), fp8_planned=fp8_storage,
                 compute_dtype=kwargs.get("torch_dtype"),
             )
+            assert eqc is None  # the fp8 rung carries no quantization_config
             if mode == "fp8":
                 fp8_storage = True  # runtime fp8-E4M3 storage rung (th#683)
                 adaptive_rung = "fp8"
-            elif eqc is not None:
-                qc = eqc
-                fp8_storage = False  # nf4 supersedes the fp8 rung
-                adaptive_rung = "nf4"
         if qc is not None:
             kwargs["quantization_config"] = qc
     # The composition's ONE compute dtype, captured before pgw#667's
@@ -2727,43 +2579,6 @@ def load_from_pretrained(
                 setattr(pipe, _WEIGHT_LANE_ATTR, "fp8-hooks")
         except Exception:
             pass
-    if adaptive_rung == "nf4":
-        # gw#521: verify the quant actually LANDED — a config whose component
-        # names miss the pipeline is silently ignored by diffusers, and a
-        # full-precision pipeline stamped "nf4" lies to placement and billing.
-        targets = list(getattr(
-            kwargs.get("quantization_config"), "components_to_quantize", None) or [])
-        if targets and not _bnb_quantized_components(pipe, targets):
-            logger.error(
-                "EMERGENCY nf4 did NOT land on %s (targets %s, pipeline %s) — "
-                "serving full precision; the offload ladder carries it",
-                path, targets, type(pipe).__name__,
-            )
-            # pgw#824: this was `adaptive_rung = ""`, which made the failure
-            # SELF-SUPPRESSING — the `if adaptive_rung:` stamp below is the
-            # very mechanism that reports rung outcomes to placement, and
-            # clearing the variable is exactly what switches it off. So the
-            # worst rung outcome on the ladder (serving FULL PRECISION over
-            # the budgeted VRAM, on a host that was already too tight for
-            # stored precision) was the only one that reported nothing at all,
-            # while every sibling rung reported itself.
-            #
-            # A distinct token instead: `provision` routes it to
-            # SlotLoad.rung/rung_detail, so it reaches placement through the
-            # SAME ServePlan/FnDegraded path as every other rung
-            # (`_record_adaptive_rung`) rather than through a log line no
-            # hub-spawned pod can expose.
-            adaptive_rung = RUNG_NF4_UNLANDED
-            activity_mod.emit_event(
-                activity_mod.KIND_SERVE_DEGRADE,
-                f"model={path} pipeline={type(pipe).__name__} "
-                f"targets={targets}: the emergency nf4 rung was engaged "
-                f"because free VRAM was below the stored-precision footprint, "
-                f"and it landed on ZERO modules (the config's component names "
-                f"miss this pipeline). Serving FULL PRECISION over the "
-                f"budgeted VRAM; only the offload ladder carries it now",
-                phase="nf4_rung_did_not_land",
-            )
     if adaptive_rung:
         # gw#491: a silently-engaged emergency rung is the th#736 bug class —
         # the executor reconciles this stamp into ServePlan.ran / FnDegraded.
@@ -2790,10 +2605,7 @@ __all__ = [
     "apply_block_window_offload",
     "block_offload_active",
     "pipeline_weight_lane",
-    "emergency_quant_enabled",
-    "bitsandbytes_available",
     "runtime_fp8_storage_supported",
-    "emergency_quantization_config",
     "component_load_dtypes",
     "model_index_components",
     "model_index_component_classes",

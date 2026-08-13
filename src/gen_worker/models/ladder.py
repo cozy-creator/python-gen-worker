@@ -14,7 +14,7 @@ internal/orchestrator/precision resolver) and delivers picks via HelloAck;
 this module is the classification + placement half, plus the family lane
 policy (th#964). The former local walk (``resolve``/``resolve_local_bindings``)
 was deleted with pgw#515 — locally, fit is the loading layer's job (runtime
-fp8/nf4 rungs + the offload ladder). pgw#1148 deleted the local AUTO fp8
+fp8 rung + the offload ladder). pgw#1148 deleted the local AUTO fp8
 FOLD on top of it: it selected among sibling FLAVOR rows, and th#1803 deleted
 those rows (`repo_tags` is re-keyed to (repo, tag, checkpoint), the flavor
 column is gone, and selection within a tag group is §1.33 contract
@@ -150,14 +150,6 @@ CONV_UNET_W8A8_EXCLUDED_ROOTS = frozenset({"sd1", "sd2", "sdxl"})
 
 
 
-EMERGENCY_NF4_VRAM_FACTOR = 0.45  # nf4 denoiser, encoders/VAE at compute dtype
-
-# Per-component resident-bytes factor for a bnb-nf4 quantized module vs its
-# bf16/fp16 stored bytes (4-bit packed + double-quant + quant-state overhead).
-# Used by the load-time fit ladder's per-component estimate (gw#521); the
-# whole-model EMERGENCY_NF4_VRAM_FACTOR above stays the hub-side coarse spec.
-NF4_WEIGHT_BYTES_FACTOR = 0.30
-
 
 # th#1361/pgw#1065: the flavor-token parses (classify_flavor_token,
 # placement_for_flavor) are package-internal choke points, not public API —
@@ -175,8 +167,6 @@ __all__ = [
     "CLASS_SVDQ_FP4",
     "CLASS_SVDQ_INT4",
     "CONV_UNET_W8A8_EXCLUDED_ROOTS",
-    "EMERGENCY_NF4_VRAM_FACTOR",
-    "NF4_WEIGHT_BYTES_FACTOR",
     "Placement",
     "default_placement",
     "placement_to_metadata",

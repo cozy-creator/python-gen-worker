@@ -12,11 +12,10 @@ Three buckets:
    files. No conversion needed.
 
 2. **Inline-supported** — weight-only schemes that don't need calibration,
-   streaming per-tensor (peak anon RAM ≈ largest single tensor) except bnb:
+   streaming per-tensor (peak anon RAM ≈ largest single tensor):
    - ``bf16`` / ``fp16`` / ``fp32`` (streaming dtype cast)
    - ``fp8`` / ``fp8:e4m3`` (streaming fp8-E4M3 storage cast — the ``#fp8``
      flavor; scale-free, consumed via diffusers layerwise casting)
-   - ``nf4`` / ``fp4`` / ``int4`` (bitsandbytes; full component load)
    - GGUF quants (``q4_k_m``, ``q8_0``, …) via convert_hf_to_gguf + llama-quantize
 
 3. **Calibration-required** — raise ``InlineConversionNotPossible`` with a
@@ -34,13 +33,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from .writer import NEVER_SHARD_MAX_SIZE
-from .writer import assert_one_file_per_component
 from .writer import streaming_dtype_cast
 from .writer import streaming_fp8_storage_cast
-import json as _json
-import shutil as _shutil
-from ._hf_load import load_component_module
 from ..subproc import ProcessStalledError, run_process
 from .gguf_tools import (GGUF_TOOLCHAIN_STALL_WINDOW_S, prepare_hf_source_tree_for_gguf, resolve_gguf_convert_script, run_hf_to_gguf_conversion)
 
@@ -110,18 +104,6 @@ class InlineConversionNotPossible(Exception):
 # fp8-E4M3 storage flavor (`#fp8`) — a streaming per-tensor cast with the
 # layerwise-casting skip patterns honored. No model load, no scales.
 _INLINE_FP8_STORAGE_DTYPES: frozenset[str] = frozenset({"fp8", "fp8:e4m3"})
-
-# bitsandbytes 4-bit weight-only: nf4 / fp4. Works on CPU (the quantization
-# pass + save_pretrained run end-to-end without CUDA; LLM.int8() is the only
-# bnb path that genuinely requires CUDA). Loads via transformers'
-# BitsAndBytesConfig integration which is mature and stable.
-_INLINE_BNB_SCHEMES: dict[str, str] = {
-    "nf4":           "nf4",
-    "fp4":           "fp4",
-    "int4":          "nf4",   # plain "int4" → nf4 (bnb's default 4-bit)
-    "int4:nf4":      "nf4",
-    "int4:fp4":      "fp4",
-}
 
 # Pure dtype casts that go through the streaming primitive — no HF model load.
 _INLINE_CAST_DTYPES: frozenset[str] = frozenset({
@@ -205,7 +187,7 @@ def run_inline_conversion(
 
     ``source_repo_dir`` is the parent component directory containing
     ``config.json`` and tokenizer assets — used by the GGUF path and by
-    the bnb path (which loads the component as an HF model). When
+    the calibrated paths (which load the component as an HF model). When
     omitted we fall back to ``source_path.parent``.
 
     Raises ``InlineConversionNotPossible`` for calibrated dtypes; the
@@ -256,17 +238,6 @@ def run_inline_conversion(
             out_dir=out_dir,
             output_stem=output_stem,
             block_scope=fp8_block_scope,
-        )
-
-    # bitsandbytes nf4 / fp4 — runs on CPU for the quant pass; save_pretrained
-    # handles Params4bit transparently (no flatten helper needed). The fast
-    # path for "I want a 4-bit model on a laptop" use case.
-    if dtype in _INLINE_BNB_SCHEMES:
-        return _run_bnb_inline(
-            source_path=source_path,
-            source_repo_dir=source_repo_dir or source_path.parent,
-            out_dir=out_dir,
-            target_dtype=dtype,
         )
 
     # Fallthrough: dtype is not in any known bucket.
@@ -360,286 +331,6 @@ def _run_fp8_storage_inline(
         target_file_type="safetensors",
         attributes=attrs,
         summary=dict(result),
-    )
-
-
-def _run_bnb_inline(
-    *,
-    source_path: Path,
-    source_repo_dir: Path,
-    out_dir: Path,
-    target_dtype: str,
-) -> InlineConversionResult:
-    """bitsandbytes nf4 / fp4 weight-only quantization (CPU-friendly).
-
-    Routes through transformers' ``BitsAndBytesConfig`` integration.
-    bitsandbytes' ``Params4bit`` is a parameter subclass that handles
-    its own save/load via ``save_pretrained`` directly — no flatten helper
-    needed.
-
-    LLM.int8() (8-bit) is the only bnb path that genuinely requires CUDA;
-    nf4/fp4 quantization runs end-to-end on CPU.
-    """
-    import torch
-
-    dtype = _normalize(target_dtype)
-    bnb_quant_type = _INLINE_BNB_SCHEMES.get(dtype)
-    if bnb_quant_type is None:
-        raise InlineConversionNotPossible(
-            reason=f"_run_bnb_inline got unexpected dtype {dtype!r}",
-            target_dtype=dtype,
-        )
-    # Stamp the PRODUCED dtype: an "int4" request routes through bnb nf4, so
-    # the checkpoint must be labeled nf4/fp4 — inference dispatches on it (#358).
-    produced_dtype = bnb_quant_type  # "nf4" | "fp4"
-    if produced_dtype != dtype:
-        logger.warning(
-            "inline bnb: requested dtype %s produces %s; stamping %s",
-            dtype, produced_dtype, produced_dtype,
-        )
-
-    repo_dir = Path(source_repo_dir)
-    if not repo_dir.exists() or not repo_dir.is_dir():
-        repo_dir = Path(source_path).parent
-
-    is_diffusers = (repo_dir / "model_index.json").is_file()
-    is_transformers = (repo_dir / "config.json").is_file() and not is_diffusers
-    if not (is_diffusers or is_transformers):
-        raise InlineConversionNotPossible(
-            reason=(
-                f"source dir at {repo_dir} has neither model_index.json "
-                f"(diffusers) nor config.json (transformers) — can't load "
-                f"as a model for inline {dtype}"
-            ),
-            target_dtype=dtype,
-        )
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        from transformers import BitsAndBytesConfig
-        from ._hf_load import load_component_module
-    except ImportError as exc:
-        raise InlineConversionNotPossible(
-            reason=f"transformers/bitsandbytes not installed for {dtype}: {exc}",
-            target_dtype=dtype,
-        ) from exc
-
-    # Diffusers-layout fan-out: per-component bnb quantization.
-    if is_diffusers:
-        return _run_bnb_diffusers_inline(
-            repo_dir=repo_dir,
-            out_dir=out_dir,
-            dtype=dtype,
-            bnb_quant_type=bnb_quant_type,
-        )
-
-    # bnb_4bit_compute_dtype=bf16 keeps activations in bf16 during dequant
-    # at inference time. Standard bitsandbytes 4-bit recipe.
-    cfg = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type=bnb_quant_type,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-
-    cfg_path = repo_dir / "config.json"
-    try:
-        cfg_blob = _json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.is_file() else {}
-    except Exception:
-        cfg_blob = {}
-    try:
-        model = load_component_module(
-            repo_dir, cfg_blob, quantization_config=cfg,
-        )
-    except Exception as exc:
-        raise InlineConversionNotPossible(
-            reason=f"bitsandbytes load failed for {dtype}: {exc}",
-            target_dtype=dtype,
-        ) from exc
-
-    try:
-        model.save_pretrained(str(out_dir), max_shard_size=NEVER_SHARD_MAX_SIZE)
-    except Exception as exc:
-        raise InlineConversionNotPossible(
-            reason=f"bitsandbytes save_pretrained failed for {dtype}: {exc}",
-            target_dtype=dtype,
-        ) from exc
-
-    assert_one_file_per_component(out_dir, producer="bitsandbytes quantize")
-    saved_files: list[Path] = sorted(
-        f for f in out_dir.rglob("*") if f.is_file()
-    )
-    if not saved_files:
-        raise RuntimeError(
-            f"_run_bnb_inline: no files produced for {dtype} from {repo_dir}"
-        )
-
-    try:
-        import bitsandbytes as bnb
-        bnb_version = str(bnb.__version__)
-    except Exception:
-        bnb_version = ""
-
-    attrs = {
-        "dtype": produced_dtype,
-        "file_type": "safetensors",
-        "conversion_strategy": "inline_bitsandbytes",
-        "quant_scheme": f"bitsandbytes:{bnb_quant_type}",
-        "quant_library": "bitsandbytes",
-    }
-    if bnb_version:
-        attrs["quant_library_version"] = bnb_version
-    return InlineConversionResult(
-        output_paths=saved_files,
-        target_dtype=produced_dtype,
-        target_file_type="safetensors",
-        attributes=attrs,
-        summary={
-            "scheme": bnb_quant_type,
-            "file_count": len(saved_files),
-        },
-    )
-
-
-from ..component_vocab import quant_candidate_components
-# Components that hold quantizable weights (DiT, UNet, text encoders, etc.).
-# Everything not in this set passes through unchanged.
-def _diffusers_quant_components() -> frozenset[str]:
-    return frozenset(quant_candidate_components())
-
-# Top-level files copied verbatim into the destination snapshot.
-_DIFFUSERS_ROOT_FILES: tuple[str, ...] = (
-    "model_index.json", "README.md", "LICENSE", "LICENSE.md", "USAGE_POLICY.md",
-)
-
-
-def _run_bnb_diffusers_inline(
-    *,
-    repo_dir: Path,
-    out_dir: Path,
-    dtype: str,
-    bnb_quant_type: str,
-) -> InlineConversionResult:
-    """Per-component bitsandbytes nf4/fp4 for a diffusers-layout source.
-
-    Walk components, quantize
-    weight-bearing ones (transformer / unet / text_encoder*), copy the rest
-    verbatim. bitsandbytes' `Params4bit` is a parameter subclass that
-    handles its own save/load via ``module.save_pretrained`` directly — no
-    flatten helper needed.
-    """
-    import torch
-    from transformers import BitsAndBytesConfig
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    cfg = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type=bnb_quant_type,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-
-    quantized_components: list[str] = []
-    passthrough_components: list[str] = []
-
-    for entry in sorted(repo_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        comp_name = entry.name
-        comp_out = out_dir / comp_name
-
-        if comp_name in _diffusers_quant_components():
-            cfg_path = entry / "config.json"
-            if not cfg_path.is_file():
-                _shutil.copytree(entry, comp_out, dirs_exist_ok=True)
-                passthrough_components.append(comp_name)
-                continue
-            try:
-                cfg_data = _json.loads(cfg_path.read_text(encoding="utf-8"))
-            except Exception:
-                cfg_data = {}
-            try:
-                module = load_component_module(
-                    entry, cfg_data, quantization_config=cfg,
-                )
-            except Exception as exc:
-                raise InlineConversionNotPossible(
-                    reason=(
-                        f"failed to load diffusers component {comp_name!r} for "
-                        f"inline {dtype}: {exc}"
-                    ),
-                    target_dtype=dtype,
-                ) from exc
-
-            comp_out.mkdir(parents=True, exist_ok=True)
-            try:
-                module.save_pretrained(
-                    str(comp_out), max_shard_size=NEVER_SHARD_MAX_SIZE)
-            except Exception as exc:
-                raise InlineConversionNotPossible(
-                    reason=(
-                        f"bitsandbytes save_pretrained failed for component "
-                        f"{comp_name!r} ({dtype}): {exc}"
-                    ),
-                    target_dtype=dtype,
-                ) from exc
-            assert_one_file_per_component(
-                comp_out, producer=f"bitsandbytes quantize [{comp_name}]")
-            quantized_components.append(comp_name)
-            del module
-        else:
-            _shutil.copytree(entry, comp_out, dirs_exist_ok=True)
-            passthrough_components.append(comp_name)
-
-    for fname in _DIFFUSERS_ROOT_FILES:
-        src = repo_dir / fname
-        if src.is_file():
-            _shutil.copy2(src, out_dir / fname)
-
-    if not quantized_components:
-        raise InlineConversionNotPossible(
-            reason=(
-                f"diffusers source at {repo_dir} has no quantizable "
-                f"components for {dtype} (looked for: "
-                f"{sorted(_diffusers_quant_components())})"
-            ),
-            target_dtype=dtype,
-        )
-
-    saved_files: list[Path] = sorted(
-        f for f in out_dir.rglob("*") if f.is_file()
-    )
-
-    try:
-        import bitsandbytes as bnb
-        bnb_version = str(bnb.__version__)
-    except Exception:
-        bnb_version = ""
-
-    attrs = {
-        "dtype": dtype,
-        "file_type": "safetensors",
-        "conversion_strategy": "inline_bitsandbytes_diffusers",
-        "quant_scheme": f"bitsandbytes:{bnb_quant_type}",
-        "quant_library": "bitsandbytes",
-        "quant_components": ",".join(sorted(quantized_components)),
-        "passthrough_components": ",".join(sorted(passthrough_components)),
-    }
-    if bnb_version:
-        attrs["quant_library_version"] = bnb_version
-    return InlineConversionResult(
-        output_paths=saved_files,
-        target_dtype=dtype,
-        target_file_type="safetensors",
-        attributes=attrs,
-        summary={
-            "scheme": bnb_quant_type,
-            "quantized_components": quantized_components,
-            "passthrough_components": passthrough_components,
-            "file_count": len(saved_files),
-        },
     )
 
 

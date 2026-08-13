@@ -140,7 +140,6 @@ def test_involuntary_cant_fit_rung_still_engages(
         # but DOES fit with the fp8-storage rung's halved denoiser:
         # budget = total - 0.25 * denoiser.
         free_gb = 2.0 + (total - 0.25 * denoiser) / float(_GiB)
-        monkeypatch.setattr(loading, "emergency_quant_enabled", lambda: True)
         monkeypatch.setattr(
             loading, "runtime_fp8_storage_supported", lambda: True)
         _pin_free_vram(monkeypatch, free_gb)

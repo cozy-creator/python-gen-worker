@@ -11,7 +11,6 @@ means and is HONEST about the trade. The full ladder, best-first:
   fp8 storage   -> runtime fp8-E4M3 weight storage + bf16 compute
                   (loading.apply_fp8_storage; no fp8 silicon required):
                   near-native quality, weights ~halve
-  emergency nf4 -> runtime 4-bit, below-platform quality, still on-GPU
   offload       -> weights spill to CPU/disk, slower but valid (the PRIMARY
                   lever at the low end where weights exceed VRAM even quantized)
   cpu           -> no GPU at all: very slow, offered behind a loud warning
@@ -32,7 +31,7 @@ Selection ACROSS stored flavors stays upstream: this planner marks each
 function serveable/unserveable + how-it-runs, and the hub's routing (th#597
 ranking) picks the highest-quality fitting flavor. bf16 -> fp8 -> nvfp4 ->
 int4 falls out of that ranking over the serveable set; this planner adds the
-RUNTIME rungs (fp8 storage / nf4 / offload / cpu) for the one function it
+RUNTIME rungs (fp8 storage / offload / cpu) for the one function it
 was given, plus an honest hint when a stored flavor would have served
 natively.
 
@@ -47,7 +46,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 from .hub_policy import (
-    FIT_EMERGENCY,
     FIT_EMERGENCY_FP8,
     FIT_FITS,
     FIT_FP8,
@@ -63,7 +61,6 @@ from .hub_policy import (
 # here because this module is the hub-vocabulary projection.
 from .rung import (
     RUN_CPU as RUN_CPU,
-    RUN_EMERGENCY as RUN_EMERGENCY,
     RUN_FP8_STORAGE as RUN_FP8_STORAGE,
     RUN_NATIVE as RUN_NATIVE,
     RUN_OFFLOAD as RUN_OFFLOAD,
@@ -184,15 +181,10 @@ def plan_serve(
             ran=wanted,
         )
 
-    # Runs, but degraded: runtime fp8 storage, emergency 4-bit, or the offload
-    # ladder. At the low end offload is the PRIMARY lever (weights exceed VRAM
-    # even quantized) — fit over speed. Only offload is CPU-touching.
-    if verdict == FIT_EMERGENCY_FP8:
-        run_mode = RUN_FP8_STORAGE
-    elif verdict == FIT_EMERGENCY:
-        run_mode = RUN_EMERGENCY
-    else:
-        run_mode = RUN_OFFLOAD
+    # Runs, but degraded: runtime fp8 storage or the offload ladder. Offload
+    # is the PRIMARY lever whenever the weights exceed VRAM — fit over speed.
+    # Only offload is CPU-touching. Nothing quantizes at runtime (pgw#1206 D).
+    run_mode = RUN_FP8_STORAGE if verdict == FIT_EMERGENCY_FP8 else RUN_OFFLOAD
     if run_mode == RUN_OFFLOAD and strict_vram:
         return ServePlan(
             serveable=False,
@@ -273,11 +265,5 @@ def _honest_warning(run_mode: str, recommended_vram_gb: Optional[float], detail:
             "does not fit at full precision; running fp8-E4M3 weight storage: "
             "near-native quality. A stored #fp8 flavor of this model would "
             "serve natively here." + ideal
-        )
-    if run_mode == RUN_EMERGENCY:
-        return (
-            "does not fit at full precision; running 4-bit emergency "
-            "quantization: below-platform quality. A stored 4-bit flavor "
-            "(#nvfp4 / #svdq-int4) would serve natively here." + ideal
         )
     return detail
