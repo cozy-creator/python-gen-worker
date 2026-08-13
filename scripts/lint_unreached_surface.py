@@ -911,6 +911,41 @@ def _upstream_baseline() -> Optional[Set[str]]:
             if ln.strip() and not ln.startswith("#")}
 
 
+def rewrite_baseline(current: Set[str]) -> None:
+    """Rewrite the ratchet, PRESERVING the documented sections verbatim.
+
+    The naive version — dump `sorted(current)` over the whole file — destroys
+    the prose, and the prose is load-bearing: `baseline_rows` reads the
+    OWNER/EXPIRY notes out of it, and those notes are what tell a reader that a
+    row is a deletion somebody else OWES.
+
+    So the header is kept byte-for-byte, and only rows it does NOT already list
+    are appended. That second half is not a nicety. The documented sections
+    contain DATA rows under their notes, so a writer that appends everything
+    duplicates every documented row — 14 of them, twice now, because I wrote the
+    naive version in pgw#1182, deduped it by hand in pgw#1190, and reintroduced
+    it in pgw#1192 by regenerating again. A hand-fix that a tool re-breaks is
+    not a fix; this is the tool.
+    """
+    lines = BASELINE.read_text(encoding="utf-8").splitlines()
+    comment_idx = [i for i, ln in enumerate(lines) if ln.startswith("#")]
+    head_end = max(comment_idx) + 1 if comment_idx else 0
+    header = lines[:head_end]
+    documented = {ln.strip() for ln in header
+                  if ln.strip() and not ln.strip().startswith("#")}
+    tail = sorted(current - documented)
+    dropped = documented - current
+    BASELINE.write_text("\n".join(header) + "\n\n" + "\n".join(tail) + "\n",
+                        encoding="utf-8")
+    print(f"wrote {len(tail)} entries + {len(documented & current)} already "
+          f"listed in the documented sections = {len(current)} to "
+          f"{BASELINE.name}", file=sys.stderr)
+    for label in sorted(dropped):
+        print(f"  NOTE: {label} is written into a documented section but is no "
+              f"longer a finding — edit that section by hand; this writer will "
+              f"not touch prose.", file=sys.stderr)
+
+
 def baseline_rows() -> Tuple[Set[str], Dict[str, str]]:
     """The ratchet's labels, and the OWNER/EXPIRY note governing each.
 
@@ -1000,8 +1035,7 @@ def main() -> int:
 
     current = {f.label for f in findings}
     if args.write_baseline:
-        BASELINE.write_text("\n".join(sorted(current)) + "\n", encoding="utf-8")
-        print(f"wrote {len(current)} entries to {BASELINE}", file=sys.stderr)
+        rewrite_baseline(current)
         return 0
 
     known, notes = baseline_rows()
