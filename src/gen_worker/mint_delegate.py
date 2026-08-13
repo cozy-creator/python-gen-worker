@@ -212,6 +212,55 @@ def _pool_stat(phases: Any, key: str) -> int:
         return 0
 
 
+def _bank_device_peaks(phases: Any, *, weight_lane: str) -> int:
+    """Bank every per-graph-class device reading in one phase table.
+
+    Returns how many rows were banked, so a caller can tell "no rows" from
+    "banked nothing" — an absent measurement is NO EVIDENCE, not a zero
+    (§4.33), and the two must not look alike here either.
+
+    Called on EVERY outcome, from the report AND from the snapshot, for the
+    reason pgw#848 gives about the host half and which is sharper here: the
+    attempt that ran out of device memory is the one whose reading the next
+    attempt most needs, and it is exactly the attempt that seals no cell and
+    writes no manifest. A bank whose writer only runs on success is not a bank.
+
+    ``weight_lane`` is the parent's own fact — the same axis it keys the RSS
+    bank by — and it is the one axis the child does not state, because the
+    parent is what knows it first-hand.
+    """
+    try:
+        block = (phases or {}).get("pool") or {}
+        rows = block.get("entry_device_peaks") or {}
+        prov = block.get("device_peak_provenance") or {}
+        if not isinstance(rows, dict) or not isinstance(prov, dict):
+            return 0
+    except (TypeError, AttributeError):
+        return 0
+    banked = 0
+    for graph_class, reading in rows.items():
+        if not isinstance(reading, dict):
+            continue
+        try:
+            key = mint_workers.DevicePeakKey(
+                graph_class=str(graph_class),
+                card=str(prov.get("card") or ""),
+                sm=str(prov.get("sm") or ""),
+                toolchain=str(prov.get("toolchain") or ""),
+                gen_worker=str(prov.get("gen_worker") or ""),
+                weight_lane=str(weight_lane or ""),
+                phase=str(prov.get("phase") or ""),
+            )
+            mint_workers.record_entry_device_peak(
+                key,
+                int(reading.get("allocated_bytes") or 0),
+                int(reading.get("reserved_bytes") or 0))
+        except (TypeError, ValueError):
+            continue
+        banked += 1
+    return banked
+
+
 def _on_frame(act: Any, watch: Optional[Watcher] = None) -> Any:
     def _apply(frame: mint_process.MintFrame) -> None:
         # No new protocol: the child's phase lands on the SAME
@@ -358,6 +407,18 @@ async def build_cell(
         mint_workers.record_entry_peak_rss(
             family, task.weight_lane,
             _pool_stat(outcome.partial_phases, "peak_child_rss_bytes"))
+        # pgw#1205: the DEVICE reading, per graph class, from both sources for
+        # the same reason — the report when the child reached a terminus, the
+        # snapshot when it was killed. The rows are banked HERE, on this
+        # machine, because the consumer is local (K is decided in the mint
+        # child) and because a cell manifest cannot carry them: a mint that
+        # OOMs seals no cell. The identical rows ride `aot_mint_phases` to the
+        # hub below, so the two sinks cannot disagree — they are the same bytes.
+        if outcome.report is not None:
+            _bank_device_peaks(
+                outcome.report.mint_phases, weight_lane=task.weight_lane)
+        _bank_device_peaks(
+            outcome.partial_phases, weight_lane=task.weight_lane)
         # pgw#1010: every delegated mint is an AOT mint, so there is one
         # phase emitter. The JIT twin measured a child recipe that no longer
         # exists.

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -345,20 +346,71 @@ def test_a_mint_spawns_a_child_with_no_pre_flight_verdict(
         "the DECLINED vocabulary survived its only producer")
 
 
-def test_the_surviving_bank_is_the_host_rss_one(
+def test_the_only_bank_that_SIZES_anything_is_the_host_rss_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """K = f(cores, ONE measured child RSS). That measurement is banked and
-    handed down on the request; nothing else is."""
+    """K = f(cores, ONE measured child RSS), and no device number takes part.
+
+    §4.33 / pgw#1175 deleted five peak banks whose arithmetic declined four
+    families at 49-113 GiB. This fence keeps that deletion — but it now states
+    the PROPERTY rather than a list of forbidden names.
+
+    WHY IT CHANGED (pgw#1205, coordinator ruling 2026-08-13). It used to assert
+    `not hasattr(mint_workers, "record_entry_device_peak")`, and §4.33's own
+    follow-up then asked for exactly that function back: *"Bank, per GRAPH
+    CLASS … Provenance on every row — this is the point … Monotone per (class,
+    card, toolchain, lane), as `record_child_peak` already was."* A banked
+    MEASUREMENT is not the thing §4.33 deleted; a banked measurement that SIZES
+    something is. Naming symbols could not tell those apart, and this session
+    watched the same form fail in both directions — a required gate stayed
+    green while naming a symbol that had been deleted, and then a legitimate
+    reintroduction went red on a name while the protected invariant was
+    stronger than before.
+
+    So: prohibition by STRUCTURE, not by vocabulary.
+
+    * `record_child_peak` and `record_adopt_peak` stay banned BY NAME. They had
+      consumers; their names are load-bearing history and their return would be
+      the arithmetic itself coming back.
+    * The device census that DOES exist may not be read outside its own module
+      — asserted here, and asserted more fully by
+      `test_device_peak_bank_pgw1205.test_no_width_or_placement_decision_reads_the_bank`.
+    * Nothing device-shaped is handed down on the request.
+    """
     mint_workers._ENTRY_RSS_PEAKS.clear()
     assert mint_workers.entry_peak_rss("sdxl", "w8a8") == 0
     mint_workers.record_entry_peak_rss("sdxl", "w8a8", 5 * GIB)
     mint_workers.record_entry_peak_rss("sdxl", "w8a8", 2 * GIB)
     assert mint_workers.entry_peak_rss("sdxl", "w8a8") == 5 * GIB, (
         "the bank is not monotone — a lucky run talked the ask down")
+
+    # The two whose names are history: they had consumers, and a consumer is
+    # what turns a reading into a floor.
     assert not hasattr(mint_workers, "record_child_peak")
-    assert not hasattr(mint_workers, "record_entry_device_peak")
     assert not hasattr(mint_workers, "record_adopt_peak")
+
+    # The invariant itself. A device reading may be BANKED (it is a
+    # measurement) and may not be READ by anything that decides a width, a
+    # placement or an admission.
+    reader = re.compile(r"(?<!record_)entry_device_peak\s*\(")
+    src_root = Path(mint_workers.__file__).resolve().parent
+    consumers = [
+        path.name for path in sorted(src_root.rglob("*.py"))
+        if path.name != "mint_workers.py" and reader.search(path.read_text())
+    ]
+    assert consumers == [], (
+        f"{consumers} reads the device census — that is `mint_budget`'s "
+        f"arithmetic returning, and §4.33 deleted it on measured evidence")
+
+    # ...and nothing device-shaped crosses to the child, which is the other
+    # half of the sentence this fence used to carry. `entry_peak_rss_bytes` is
+    # the one measurement handed down; `vram_cap_bytes` died with pgw#1175.
+    handed_down = set(mp.MintRequest.__struct_fields__)
+    assert "entry_peak_rss_bytes" in handed_down
+    assert not [
+        f for f in handed_down
+        if ("vram" in f or "device" in f) and f.endswith("_bytes")
+    ], "a device budget is being handed down on the request again"
 
 
 def test_delegation_is_unconditional_and_has_no_kill_switch(
