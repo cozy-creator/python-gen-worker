@@ -166,7 +166,7 @@ def test_corrupt_bytes_cannot_be_published_under_a_clean_digest(
 
     monkeypatch.setattr(cu, "upload_grants", swapped)
 
-    from gen_worker.convert.hub import HubPublishError
+    from gen_worker.hubio.client import HubPublishError
 
     with pytest.raises(HubPublishError):
         _publish(ctx, tree)

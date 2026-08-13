@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 
 from fake_hub import _FakeHub, _client
-from gen_worker.convert.hub import CommitFile, HubPublishError
-from gen_worker.convert.publish_journal import JOURNAL_NAME, PublishJournal
+from gen_worker.hubio.client import CommitFile, HubPublishError
+from gen_worker.hubio.journal import JOURNAL_NAME, PublishJournal
 
 CS = 4096
 
@@ -227,8 +227,8 @@ def test_a_session_the_hub_no_longer_knows_falls_back_to_a_fresh_declare(
     journal entry (expired staging, wiped session) costs one round trip."""
     journal = tmp_path / JOURNAL_NAME
     f = write(tmp_path, "w.safetensors", payload(CS * 2, seed=11))
-    from gen_worker.convert.hub import CommitFile as _CF  # noqa: F401
-    from gen_worker.convert.publish_journal import JournalEntry, artifact_key
+    from gen_worker.hubio.client import CommitFile as _CF  # noqa: F401
+    from gen_worker.hubio.journal import JournalEntry, artifact_key
     from gen_worker.models.chunk_upload import hash_file_and_chunks
 
     decl = hash_file_and_chunks(Path(f.local_path), chunk_size=CS, rel_path=f.path)
@@ -265,7 +265,7 @@ def test_a_DIFFERENT_artifact_never_adopts_another_publishs_session(
 def test_the_journal_is_never_published_as_repo_content(fake_hub, tmp_path, small_chunks):
     """It lives next to the tree, and `files_from_tree` skips it by name even
     if a caller puts one inside."""
-    from gen_worker.convert.hub import files_from_tree
+    from gen_worker.hubio.client import files_from_tree
 
     tree = tmp_path / "flavor"
     tree.mkdir()
@@ -298,7 +298,7 @@ def test_expired_grants_are_RE_MINTED_without_spending_the_reupload_budget(
     # Nothing was ever sent — the client refused to start a PUT it could not
     # finish — and the failure was NOT charged to the re-upload budget.
     assert st.get("put_counts", {}) == {}
-    from gen_worker.convert.hub import _EXPIRY_REPLAN_ATTEMPTS
+    from gen_worker.hubio.client import _EXPIRY_REPLAN_ATTEMPTS
 
     assert len(st["replans"]) == _EXPIRY_REPLAN_ATTEMPTS
     # And the session survives: nothing about the bytes was in question.

@@ -327,7 +327,7 @@ class _RequestOutputStream:
         multi-GB adapter now retries a 64 MiB chunk instead of a whole shard,
         and the digest is signed into each presigned PUT.
         """
-        from ..convert.hub import CommitFile, HubClient  # lazy: keeps `import gen_worker` off the convert/requests stack
+        from ..hubio.client import CommitFile, HubClient  # lazy: keeps `import gen_worker` off the convert/requests stack
 
         assert self._tmp_path is not None
         assert self._repo_job_scope is not None

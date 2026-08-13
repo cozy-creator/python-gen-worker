@@ -28,7 +28,7 @@ Under self-mint the arming policy for a compile-declared function becomes:
      produces is ``aot-inductor``.
 
 The publish transport reuses the existing repo-commit machinery
-(``convert.hub.HubClient``) with a capability token minted by
+(``hubio.client.HubClient``) with a capability token minted by
 ``POST /v1/worker/cells/publish-intent`` (worker JWT) — the hub corroborates
 every claimed key axis against its own records and pins the token to
 exactly this cell key; the endpoint-scoped ``cell_store`` row is stamped
@@ -78,7 +78,7 @@ from .procsplit import broker
 # monkeypatch models.loading.pipeline_weight_lane; stay late-bound.
 from .models import loading, provision
 from .request_context._helpers import _decode_unverified_jwt_claims
-from .convert.hub import HubPublishError
+from .hubio.client import HubPublishError
 from .api.export_contract import (
     blocker_refusal, export_declaration, open_blockers)
 from .models import lora_lifted
@@ -464,7 +464,7 @@ class CellPublishRefused(Exception):
     this publish attempt — never retried, never fatal to serving.
 
     Carries the hub's own ``status``/``code`` for the same reason
-    :class:`convert.hub.HubPublishError` does: a refusal reason re-derived from
+    :class:`hubio.client.HubPublishError` does: a refusal reason re-derived from
     ``str(exc)`` is prose that nothing can group by.
     """
 
@@ -752,7 +752,7 @@ class CellPublisher:
             raise RuntimeError("publish-intent response missing token/repo")
 
         try:
-            from .convert.hub import CommitFile, HubClient
+            from .hubio.client import CommitFile, HubClient
 
             # th#1303/pgw#807 item 3 — THE FLIP, taken. Both gates that held
             # it are discharged: th#1340 gave the v2 route the cell-publish

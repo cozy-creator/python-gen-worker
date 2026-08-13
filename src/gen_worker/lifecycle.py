@@ -22,7 +22,7 @@ from . import progress as progress_mod
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
-from .intent_registry import IntentRegistry, UnreportedIntentWait
+from .lifecycle_intents import IntentRegistry, UnreportedIntentWait
 from .pb import worker_scheduler_pb2 as pb
 from .runtime_config import ConfigSnapshotWriteError, extract_config_push
 from .transport import (

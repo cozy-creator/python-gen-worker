@@ -22,7 +22,7 @@ from typing import Dict, List
 import msgspec
 
 from gen_worker import activity
-from gen_worker.api import Resources, endpoint
+from gen_worker import Resources, endpoint
 from gen_worker.executor import Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs

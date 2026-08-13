@@ -23,7 +23,7 @@ import msgspec
 import pytest
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.api import Hub, Resources
+from gen_worker import Hub, Resources
 from gen_worker.executor import EndpointSpec, Executor
 from gen_worker.topology import ExecutionTopology
 

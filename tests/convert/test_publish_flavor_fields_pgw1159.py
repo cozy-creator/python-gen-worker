@@ -108,7 +108,7 @@ def test_head_replaces_default_flavor_on_the_tag_binding(
 ) -> None:
     """`default_flavor`'s only real job was "this publish owns the bare row".
     That is `tags[].head` now — stated, not inferred from a token."""
-    from gen_worker.convert.hub import CommitFile, HubClient
+    from gen_worker.hubio.client import CommitFile, HubClient
 
     tree = _tree(tmp_path)
     client = HubClient(
@@ -128,7 +128,7 @@ def test_head_replaces_default_flavor_on_the_tag_binding(
 def test_publish_v2_refuses_the_deleted_keyword_arguments() -> None:
     """A caller still writing `flavor=`/`default_flavor=` gets a TypeError,
     not a body field the hub throws away."""
-    from gen_worker.convert.hub import HubClient
+    from gen_worker.hubio.client import HubClient
 
     client = HubClient(base_url="http://127.0.0.1:1", token="t")
     for kw in _DEAD_FIELDS:

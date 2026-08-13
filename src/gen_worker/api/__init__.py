@@ -1,97 +1,11 @@
-"""Public SDK surface: the @endpoint decorator, bindings, types, and errors."""
+"""Declaration-layer modules: the @endpoint decorator, bindings, types, errors.
 
-from .binding import Binding, Civitai, HF, Hub, ModelRef, ModelScope
-from .decorators import ConfigParam, Resources, endpoint
-from .derive import (
-    DeclarationMismatch,
-    assert_faithful,
-    cfg_image_classes,
-    class_set_delta,
-    contract_delta,
-    override_delta,
-)
-from .slot import ResolvedSlot, Slot, resolve_slot
-from .errors import (
-    AuthError,
-    CanceledError,
-    FatalError,
-    IllegalCombination,
-    OutputTooLargeError,
-    RefCompatibilitySurprise,
-    ResourceError,
-    RetryableError,
-    SnapshotBuildFailedError,
-    ValidationError,
-    WorkerError,
-)
-from .progress import diffusers_step_callback
-from .streaming import (
-    BatchItemDelta,
-    Done,
-    Error,
-    IncrementalTokenDelta,
-    StreamItem,
-    StreamResult,
-    TokenUsage,
-    iter_transformers_text_deltas,
-)
-from .types import (
-    Asset,
-    AudioAsset,
-    ExpectedOutput,
-    ImageAsset,
-    MediaAsset,
-    PromptRole,
-    StringEnum,
-    Tensors,
-    VideoAsset,
-)
+The single public facade is ``gen_worker`` itself (pgw#1206 A1) — import
+public names from there::
 
-__all__ = [
-    "Binding",
-    "Civitai",
-    "HF",
-    "Hub",
-    "ModelRef",
-    "ModelScope",
-    "DeclarationMismatch",
-    "assert_faithful",
-    "cfg_image_classes",
-    "class_set_delta",
-    "contract_delta",
-    "override_delta",
-    "ResolvedSlot",
-    "Resources",
-    "Slot",
-    "endpoint",
-    "resolve_slot",
-    "diffusers_step_callback",
-    "AuthError",
-    "CanceledError",
-    "FatalError",
-    "IllegalCombination",
-    "OutputTooLargeError",
-    "RefCompatibilitySurprise",
-    "ResourceError",
-    "RetryableError",
-    "SnapshotBuildFailedError",
-    "ValidationError",
-    "WorkerError",
-    "BatchItemDelta",
-    "Done",
-    "Error",
-    "IncrementalTokenDelta",
-    "StreamItem",
-    "StreamResult",
-    "TokenUsage",
-    "iter_transformers_text_deltas",
-    "Asset",
-    "AudioAsset",
-    "ExpectedOutput",
-    "ImageAsset",
-    "MediaAsset",
-    "PromptRole",
-    "StringEnum",
-    "Tensors",
-    "VideoAsset",
-]
+    from gen_worker import endpoint, Resources, Slot, ValidationError
+
+This package deliberately re-exports nothing; code that needs a name the
+facade does not carry imports the defining module (``gen_worker.api.types``,
+``gen_worker.api.errors``, ...).
+"""

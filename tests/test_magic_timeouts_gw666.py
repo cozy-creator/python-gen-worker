@@ -519,13 +519,13 @@ def test_a_hub_that_stops_answering_fails_the_finalize(fast_finalize_polls) -> N
 
 
 # ---------------------------------------------------------------------------
-# D — convert/hub.py: publish-complete waits while the hub verifies
+# D — hubio/client.py: publish-complete waits while the hub verifies
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def fast_hub_retries(monkeypatch) -> None:
-    from gen_worker.convert import hub
+    from gen_worker.hubio import client as hub
 
     monkeypatch.setattr(hub, "_RETRY_BASE_DELAY_S", 0.01)
     monkeypatch.setattr(hub, "_RETRY_MAX_DELAY_S", 0.02)
@@ -538,11 +538,11 @@ def fast_hub_retries(monkeypatch) -> None:
     monkeypatch.setattr(hub, "_SEND_SILENCE_WINDOW_S", 0.4)
 
 
-from gen_worker.convert.hub import HubPublishError
+from gen_worker.hubio.client import HubPublishError
 
 
 def _hub_client(base: str):
-    from gen_worker.convert.hub import HubClient
+    from gen_worker.hubio.client import HubClient
 
     return HubClient(base_url=base, token="t")
 
@@ -638,7 +638,7 @@ def test_materialize_gives_up_only_when_the_hub_says_nothing_definite(
     [
         ("runtimes/server.py", "_DEFAULT_BOOT_TIMEOUT_S"),
         ("models/cozy_cas.py", "_MAX_RETRY_TIME_S"),
-        ("convert/hub.py", "_COMPLETE_NETWORK_MAX_WAIT_S"),
+        ("hubio/client.py", "_COMPLETE_NETWORK_MAX_WAIT_S"),
         ("presigned_upload.py", "_COMPLETE_IN_PROGRESS_MAX_WAIT_S"),
         ("request_context/_datasets.py", "_MATERIALIZE_BUDGET_S"),
     ],

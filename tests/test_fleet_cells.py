@@ -446,7 +446,7 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
 
             return _R()
 
-    import gen_worker.convert.hub as hub_mod
+    import gen_worker.hubio.client as hub_mod
 
     monkeypatch.setattr(hub_mod, "HubClient", _FakeHub)
 
@@ -534,7 +534,7 @@ def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
         def publish_v2(self, **kw):
             raise RuntimeError("upload exploded")
 
-    import gen_worker.convert.hub as hub_mod
+    import gen_worker.hubio.client as hub_mod
 
     monkeypatch.setattr(hub_mod, "HubClient", _FakeHub)
     artifact = tmp_path / "cell.tar.gz"

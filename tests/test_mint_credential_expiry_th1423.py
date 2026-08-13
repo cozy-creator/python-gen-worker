@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker import fleet_cells as fc
-from gen_worker.convert.hub import HubPublishError
+from gen_worker.hubio.client import HubPublishError
 from harness.cell_meta import exported_cell_meta
 
 LAPSE_S = 150  # how far past `exp` the presented credential is, in the JWT

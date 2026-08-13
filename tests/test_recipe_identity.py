@@ -239,7 +239,7 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
 
             return _R()
 
-    import gen_worker.convert.hub as hub_mod
+    import gen_worker.hubio.client as hub_mod
 
     monkeypatch.setattr(hub_mod, "HubClient", _FakeHub)
     artifact = tmp_path / "cell.tar.gz"

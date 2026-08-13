@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker.convert.hub import CommitFile, HubClient, HubPublishError
+from gen_worker.hubio.client import CommitFile, HubClient, HubPublishError
 from gen_worker.models.chunk_upload import hash_file_and_chunks
 
 CS = 4096  # test chunk size; production is 64 MiB and pinned elsewhere

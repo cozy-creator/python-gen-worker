@@ -132,7 +132,7 @@ def test_waiting_intent_always_carries_blocker_retry_or_deadline():
     command's first_action deadline) carried none of the three. That is the
     exact snapshot the hub rejected for twelve straight th#1085 runs.
     """
-    from gen_worker.intent_registry import IntentRegistry
+    from gen_worker.lifecycle_intents import IntentRegistry
     from gen_worker.pb import worker_scheduler_pb2 as p
 
     reg = IntentRegistry("release-1", ["artifact-stat"])
@@ -155,7 +155,7 @@ def test_waiting_intent_always_carries_blocker_retry_or_deadline():
 
 def test_explicit_waiting_fields_are_not_overwritten():
     """The fallback must only fill a genuine gap."""
-    from gen_worker.intent_registry import IntentRegistry
+    from gen_worker.lifecycle_intents import IntentRegistry
     from gen_worker.pb import worker_scheduler_pb2 as p
 
     reg = IntentRegistry("release-1", ["artifact-stat"])

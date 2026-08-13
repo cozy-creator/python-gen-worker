@@ -138,7 +138,7 @@ def test_plan_module_imports_nothing_that_could_resolve() -> None:
         "store", "models", "executor", "lifecycle", "transport", "registry",
         "compile_cache", "aot_cells", "aot_serve", "fleet_cells", "preload",
         "activity", "net", "convert", "cli", "procsplit", "capability",
-        "runtime_config", "intent_registry", "cell_key", "local_cells",
+        "runtime_config", "lifecycle_intents", "hubio", "cell_key", "local_cells",
     }
     tree = ast.parse((SRC / "plan.py").read_text())
     seen: set[str] = set()

@@ -7,7 +7,7 @@ proxy-shaped 5xx after ~2 min of bounded retries. These tests drive the real
 ``HubClient.commit`` path against the fake hub with injected proxy pages,
 connection resets, and outage exhaustion.
 
-Red-verified against the pre-fix ``convert/hub.py`` (5-attempt cap, no origin
+Red-verified against the pre-fix ``hubio/client.py`` (5-attempt cap, no origin
 discrimination): the proxy-404 test failed immediately with
 ``commit create failed (404)``.
 
@@ -24,8 +24,8 @@ from typing import Any
 
 import pytest
 
-from gen_worker.convert import hub as hub_mod
-from gen_worker.convert.hub import CommitFile, HubPublishError
+from gen_worker.hubio import client as hub_mod
+from gen_worker.hubio.client import CommitFile, HubPublishError
 
 from fake_hub import _FakeHub, _client
 

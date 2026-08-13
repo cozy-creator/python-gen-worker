@@ -27,7 +27,7 @@ from typing import List
 import msgspec
 import pytest
 
-from gen_worker.api import Resources, endpoint
+from gen_worker import Resources, endpoint
 from gen_worker.executor import Executor, _to_thread_complete
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs

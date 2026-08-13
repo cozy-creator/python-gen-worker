@@ -28,7 +28,7 @@ import msgspec
 import pytest
 
 from gen_worker import activity
-from gen_worker.api import Resources, endpoint
+from gen_worker import Resources, endpoint
 from gen_worker.api.errors import RetryableError
 from gen_worker.executor import MAX_TRANSIENT_SETUP_ATTEMPTS, Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb

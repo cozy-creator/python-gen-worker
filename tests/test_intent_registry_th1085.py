@@ -8,7 +8,7 @@ import msgspec
 import pytest
 
 from gen_worker.executor import Executor, ModelStore
-from gen_worker.intent_registry import IntentRegistry, UnreportedIntentWait
+from gen_worker.lifecycle_intents import IntentRegistry, UnreportedIntentWait
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 

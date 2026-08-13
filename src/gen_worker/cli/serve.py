@@ -55,10 +55,10 @@ from ..discovery.names import slugify_name
 from ..models import memory
 from ..models.residency import Residency, Tier
 from . import run as run_mod
-from . import transport
+from . import sockaddr
 from .local_context import _stderr_emitter, build_local_context
 from .protocol import PROTOCOL_VERSION, gen_worker_version
-from .transport import DEFAULT_SOCKET_PATH
+from .sockaddr import DEFAULT_SOCKET_PATH
 from ..api.binding import BINDING_TYPES
 from ..models import provision
 
@@ -796,7 +796,7 @@ def _sidecar_path(listen_spec: str) -> Path:
     Adjacent to the Unix socket (``<sock>.json``) so several serves don't
     collide; in cwd for TCP (no socket file).
     """
-    addr = transport.parse_addr(listen_spec)
+    addr = sockaddr.parse_addr(listen_spec)
     if addr.scheme == "unix":
         return Path(addr.host + ".json")
     return Path.cwd() / ".gen-worker.serve.json"
@@ -810,7 +810,7 @@ def _write_sidecar(listen_spec: str, endpoint: _Endpoint, idle_timeout: float) -
         "protocol_version": PROTOCOL_VERSION,
         "gen_worker_version": gen_worker_version(),
         "pid": os.getpid(),
-        "listen": transport.display(listen_spec),
+        "listen": sockaddr.display(listen_spec),
         "ready_at": time.time(),
         "idle_timeout": idle_timeout or 0.0,
         "functions": endpoint.function_names(),
@@ -831,12 +831,12 @@ def _serve_socket(
     Each connection is handled on its own thread so the accept loop stays free
     to receive a cancel control frame WHILE a request runs.
     """
-    srv = transport.create_listener(listen_spec, backlog=8)
+    srv = sockaddr.create_listener(listen_spec, backlog=8)
     srv.settimeout(0.5)  # so we can poll `stop`
 
     sidecar = _write_sidecar(listen_spec, endpoint, idle_timeout)
     sys.stderr.write(
-        f"gen-worker serve: listening on {transport.display(listen_spec)} "
+        f"gen-worker serve: listening on {sockaddr.display(listen_spec)} "
         f"(functions: {', '.join(endpoint.function_names())})\n"
     )
     sys.stderr.write("gen-worker serve: ready\n")
@@ -858,7 +858,7 @@ def _serve_socket(
         try:
             srv.close()
         finally:
-            transport.cleanup_listener(listen_spec)
+            sockaddr.cleanup_listener(listen_spec)
             try:
                 sidecar.unlink()
             except OSError:
@@ -893,7 +893,7 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
             chunk = conn.recv(65536)
             if not chunk:
                 break
-            if len(buf) + len(chunk) > transport.MAX_NDJSON_LINE_BYTES:
+            if len(buf) + len(chunk) > sockaddr.MAX_NDJSON_LINE_BYTES:
                 # pgw#1013: refuse at the byte that passes the bound, not after
                 # the peer has finished deciding how much to send.
                 return
@@ -1071,8 +1071,8 @@ def _serve_inner(args: argparse.Namespace) -> int:
     # Listen address: --listen overrides --socket. Resolve a Unix path to an
     # absolute form so teardown unlinks the right file regardless of cwd.
     listen_spec = getattr(args, "listen", None) or args.socket_path
-    if transport.is_unix(listen_spec):
-        listen_spec = str(Path(transport.parse_addr(listen_spec).host).resolve())
+    if sockaddr.is_unix(listen_spec):
+        listen_spec = str(Path(sockaddr.parse_addr(listen_spec).host).resolve())
     stop = threading.Event()
 
     # 3. SIGINT / SIGTERM -> cancel in-flight requests, then clean teardown.
@@ -1150,7 +1150,7 @@ def _serve_inner(args: argparse.Namespace) -> int:
                     pass
         endpoint.shutdown()
         # Belt-and-suspenders: ensure a Unix socket file is gone (no-op for TCP).
-        transport.cleanup_listener(listen_spec)
+        sockaddr.cleanup_listener(listen_spec)
 
     sys.stderr.write("gen-worker serve: stopped\n")
     sys.stderr.flush()

@@ -18,8 +18,8 @@ from typing import Any
 
 import pytest
 
-from gen_worker.convert import hub as hub_mod
-from gen_worker.convert.hub import CommitFile, HubPublishError
+from gen_worker.hubio import client as hub_mod
+from gen_worker.hubio.client import CommitFile, HubPublishError
 from gen_worker.convert.keepalive import HubKeepalive
 
 from fake_hub import _FakeHub, _client
