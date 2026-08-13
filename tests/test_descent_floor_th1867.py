@@ -55,8 +55,18 @@ def test_a_rung_or_a_floor_never_both_and_never_neither(token: str, strict: bool
 
 # --- a token that fired everywhere would be noise ---------------------------
 
-@pytest.mark.parametrize("token", [None, "", "off", "vae_only", "resident", "native",
-                                   "fp8_storage", "nf4", "model_offload", "group_offload"])
+#: Every rung above the floor, DERIVED so a rung added or deleted is covered
+#: automatically. Hardcoding this list is how it came to name `nf4` — a rung
+#: pgw#1206 D deleted while this file sat on the merge queue, after which the
+#: case still passed, for a different reason (an unknown token also descends to
+#: `model_offload`). A green assertion about a symbol that no longer exists is
+#: the defect class this file was written to guard.
+UPPER_RUNGS = [None, "", "off", "vae_only", "resident"] + [
+    r.name for r in rung.LADDER if rung.descend(r.name) is not None
+]
+
+
+@pytest.mark.parametrize("token", UPPER_RUNGS)
 def test_upper_rungs_descend_with_no_floor(token: str) -> None:
     """The half that matters as much as the token itself.
 
