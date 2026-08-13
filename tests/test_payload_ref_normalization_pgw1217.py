@@ -43,11 +43,12 @@ import pytest
 from gen_worker import dispatch
 from gen_worker.api.errors import ValidationError
 from gen_worker.executor import Executor
+from gen_worker.models.refs import WireRef
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 #: The same model, spelled two legitimate ways. `prod` is the grammar default,
 #: so `canonical()` elides it — these are one model, not two.
-NORMAL = "acme/repo"
+NORMAL = WireRef("acme/repo")
 NON_NORMAL = "acme/repo:prod"
 
 
@@ -88,7 +89,7 @@ def _recording_store(
     return keys, snaps
 
 
-def _snapshots() -> Dict[str, pb.Snapshot]:
+def _snapshots() -> Dict[WireRef, pb.Snapshot]:
     """The hub's map, keyed in NORMAL form — which is how it is really built."""
     return {
         NORMAL: pb.Snapshot(

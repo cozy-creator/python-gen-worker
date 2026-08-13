@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from gen_worker.models.refs import WireRef
 from gen_worker.models.store import ModelStore
 from gen_worker.lifecycle_intents import IntentRegistry
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -66,7 +67,7 @@ def test_no_cancel_offset_around_the_ref_lock_grant_can_wedge_the_ref(
         registry = IntentRegistry("release-1", [])
         store = ModelStore(_noop_send, cache_dir=cache_dir)
         store.bind_intent_registry(registry)
-        ref = "owner/model:latest"
+        ref = WireRef("owner/model:latest")
 
         lock = store._lock(ref)
         await lock.acquire()  # a sibling materialization owns the ref

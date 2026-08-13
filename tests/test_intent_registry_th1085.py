@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import msgspec
 import pytest
 
+from gen_worker.models.refs import WireRef
 from gen_worker.executor import Executor
 from gen_worker.models.store import ModelStore
 from gen_worker.lifecycle_intents import IntentRegistry, UnreportedIntentWait
@@ -71,7 +72,7 @@ def test_materialization_waiter_names_the_active_ref_owner(tmp_path: Path) -> No
         registry = IntentRegistry("release-1", [])
         store = ModelStore(_noop_send, cache_dir=tmp_path)
         store.bind_intent_registry(registry)
-        ref = "owner/model:latest"
+        ref = WireRef("owner/model:latest")
         lock = store._lock(ref)
         await lock.acquire()
         owner = asyncio.create_task(store.ensure_local(ref))

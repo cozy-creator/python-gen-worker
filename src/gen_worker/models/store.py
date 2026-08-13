@@ -31,6 +31,7 @@ from ..lifecycle_intents import IntentRegistry
 from ..pb import worker_scheduler_pb2 as pb
 from ..redact import sanitize as _sanitize
 from ..topology import current_device_group
+from .refs import WireRef
 from . import cozy_snapshot
 from . import disk_gc
 from . import disk_telemetry
@@ -262,17 +263,17 @@ class ModelStore:
         # setups may arrive snapshot-less; without memory of the hub's desired
         # state / RunJob snapshot they cannot materialize tensorhub refs. Stale
         # URLs self-heal: they fail url_expired and the hub re-mints.
-        self._snapshots: Dict[str, pb.Snapshot] = {}
+        self._snapshots: Dict[WireRef, pb.Snapshot] = {}
         # Current generation attached to each banked snapshot. A generation-
         # less bank inherits only from the exact current desired identity
         # below; historical desired generations are never resurrected.
-        self._snapshot_generations: Dict[str, int] = {}
+        self._snapshot_generations: Dict[WireRef, int] = {}
         # Current full-replacement desired identity per ref. This is bounded
         # by the active DesiredResidency set, not an unbounded digest history:
         # a priority RunJob may bank different bytes temporarily, while a
         # later generation-less bank of the still-desired digest recovers its
         # causal generation. Replacing desired state clears stale generations.
-        self._desired_snapshot_identities: Dict[str, _ResidencyIdentity] = {}
+        self._desired_snapshot_identities: Dict[WireRef, _ResidencyIdentity] = {}
         # Identity of the bytes that ACTUALLY produced the current residency.
         # This deliberately does not follow _snapshots when a tag moves.
         self._resident_identities: Dict[str, _ResidencyIdentity] = {}
@@ -345,7 +346,7 @@ class ModelStore:
     def bind_intent_registry(self, registry: IntentRegistry) -> None:
         self._intent_registry = registry
 
-    def _materialize_intent(self, ref: str) -> str:
+    def _materialize_intent(self, ref: WireRef) -> str:
         registry = self._intent_registry
         if registry is None:
             return ""
@@ -416,8 +417,8 @@ class ModelStore:
             if pending_network_bytes is not None:
                 kw["network_bytes"] = int(pending_network_bytes)
         else:
-            identity = self.resident_identity(ref)
-        coro = self._event(ref, pb_state, identity=identity, **kw)
+            identity = self.resident_identity(WireRef(ref))
+        coro = self._event(WireRef(ref), pb_state, identity=identity, **kw)
         if state == residency_mod.EVICTED:
             # Capture before removal so the eviction names the exact bytes it
             # removed; later events cannot inherit that stale identity.
@@ -437,7 +438,7 @@ class ModelStore:
 
     def model_event(
         self,
-        ref: str,
+        ref: WireRef,
         state: "pb.ModelState",
         *,
         identity: Any = _USE_RESIDENT_IDENTITY,
@@ -460,7 +461,7 @@ class ModelStore:
 
     async def _event(
         self,
-        ref: str,
+        ref: WireRef,
         state: "pb.ModelState",
         *,
         identity: Any = _USE_RESIDENT_IDENTITY,
@@ -548,24 +549,29 @@ class ModelStore:
         for ordinal in range(int(topology.execution_groups)):
             self.residency_for(ordinal)
 
-    def disk_ref_in_use(self, ref: str) -> bool:
+    def disk_ref_in_use(self, ref: WireRef) -> bool:
         """In-use across ALL groups (§4.3 caveat 3): one group's GC must never
         drop the pages another group is mmapping."""
         return any(reg.in_use(ref) for reg in self.all_residencies())
 
-    def disk_local_path(self, ref: str) -> Optional[Path]:
+    def disk_local_path(self, ref: WireRef) -> Optional[Path]:
         for reg in self.all_residencies():
             path = reg.local_path(ref)
             if path is not None:
                 return path
         return None
 
-    def disk_refs(self) -> List[str]:
-        """Union of DISK-tier refs across groups."""
-        seen: Dict[str, None] = {}
+    def disk_refs(self) -> List[WireRef]:
+        """Union of DISK-tier refs across groups.
+
+        The tier lists hand back what normalized-ref callers wrote, so the
+        cast restates a fact rather than making a new claim; `residency` is
+        still keyed by plain `str` and is its own unit.
+        """
+        seen: Dict[WireRef, None] = {}
         for reg in self.all_residencies():
             for ref in reg.refs_in(residency_mod.Tier.DISK):
-                seen.setdefault(ref, None)
+                seen.setdefault(WireRef(ref), None)
         return list(seen)
 
     # ---- residency facade ----------------------------------------------------
@@ -631,7 +637,7 @@ class ModelStore:
         a dispatch gate on its own)."""
         return self._cached_disk_usage_report
 
-    def _ref_blob_sizes(self, ref: str) -> Dict[str, int]:
+    def _ref_blob_sizes(self, ref: WireRef) -> Dict[str, int]:
         """CAS digest -> bytes for ``ref``'s banked snapshot, or ``{}`` when
         the worker has no manifest for it. The digest is the identity the CAS
         dedups on: ``blobs/`` is hardlinked into every snapshot tree, so a
@@ -747,18 +753,18 @@ class ModelStore:
         self._cached_disk_usage_report = report
         return report
 
-    def local_path(self, ref: str) -> Optional[Path]:
+    def local_path(self, ref: WireRef) -> Optional[Path]:
         # Union across groups (pgw#748): the CAS is ONE hardlinked tree. A
         # group that has not yet booked this ref must still SEE the bytes a
         # sibling group already materialized.
         return self.disk_local_path(ref)
 
-    def has_snapshot(self, ref: str) -> bool:
+    def has_snapshot(self, ref: WireRef) -> bool:
         """A digest-carrying snapshot for ``ref`` was seen this connection
         (gw#465): snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
 
-    def bank_snapshot(self, ref: str, snapshot: pb.Snapshot) -> None:
+    def bank_snapshot(self, ref: WireRef, snapshot: pb.Snapshot) -> None:
         """Make hub metadata available without starting a download."""
         if not ref or not snapshot.digest or not snapshot.files:
             return
@@ -778,7 +784,7 @@ class ModelStore:
             waiter.set()
 
     def replace_desired_snapshots(
-        self, snapshots: Dict[str, pb.Snapshot], *, generation: int,
+        self, snapshots: Dict[WireRef, pb.Snapshot], *, generation: int,
     ) -> None:
         """Atomically replace desired snapshot identity and bank its metadata.
 
@@ -788,7 +794,7 @@ class ModelStore:
         removal cannot resurrect an obsolete generation later.
         """
         accepted_generation = max(0, int(generation))
-        stored: Dict[str, pb.Snapshot] = {}
+        stored: Dict[WireRef, pb.Snapshot] = {}
         for ref, snapshot in snapshots.items():
             if not ref or not snapshot.digest or not snapshot.files:
                 continue
@@ -819,7 +825,7 @@ class ModelStore:
             if waiter is not None:
                 waiter.set()
 
-    def _prune_banked_snapshots(self, desired: Dict[str, pb.Snapshot]) -> None:
+    def _prune_banked_snapshots(self, desired: Dict[WireRef, pb.Snapshot]) -> None:
         """Drop banked manifests for refs that are neither desired, resident,
         in use, nor being materialized (th#1330 B5).
 
@@ -858,19 +864,19 @@ class ModelStore:
             len(stale), ", ".join(sorted(stale)[:8]),
         )
 
-    def snapshot_digest(self, ref: str, snapshot: Optional[pb.Snapshot] = None) -> str:
+    def snapshot_digest(self, ref: WireRef, snapshot: Optional[pb.Snapshot] = None) -> str:
         candidate = snapshot
         if candidate is None:
             with self._identity_lock:
                 candidate = self._snapshots.get(ref)
         return str(getattr(candidate, "digest", "") or "").strip()
 
-    def resident_identity(self, ref: str) -> _ResidencyIdentity:
+    def resident_identity(self, ref: WireRef) -> _ResidencyIdentity:
         with self._identity_lock:
             return self._resident_identities.get(ref, ("", 0))
 
     def _snapshot_identity(
-        self, ref: str, snapshot: Optional[pb.Snapshot],
+        self, ref: WireRef, snapshot: Optional[pb.Snapshot],
     ) -> _ResidencyIdentity:
         digest = self.snapshot_digest(ref, snapshot)
         if not digest:
@@ -885,7 +891,7 @@ class ModelStore:
         return (digest, generation)
 
     def _set_resident_identity(
-        self, ref: str, identity: _ResidencyIdentity,
+        self, ref: WireRef, identity: _ResidencyIdentity,
     ) -> bool:
         digest, generation = identity
         if not digest:
@@ -896,7 +902,7 @@ class ModelStore:
             self._resident_identities[ref] = exact
         return changed
 
-    def activate_disk_identity(self, ref: str) -> _ResidencyIdentity:
+    def activate_disk_identity(self, ref: WireRef) -> _ResidencyIdentity:
         """Make the verified disk snapshot the identity of a newly loaded
         RAM/VRAM instance immediately before its residency transition."""
         with self._identity_lock:
@@ -906,7 +912,7 @@ class ModelStore:
             return identity
 
     async def _confirm_cached_identity(
-        self, ref: str, identity: _ResidencyIdentity,
+        self, ref: WireRef, identity: _ResidencyIdentity,
     ) -> None:
         """Publish exact identity when verified cached bytes satisfy the
         desired state without requiring a redundant download.
@@ -950,7 +956,7 @@ class ModelStore:
             kw["vram_bytes"] = self.residency.vram_bytes(ref)
         await self._event(ref, state, identity=identity, **kw)
 
-    def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
+    def component_digests(self, ref: WireRef, local_path: Optional[Path] = None) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
         ``{top_level_subfolder: content_set_digest}``. Weight/data files use
         the wire snapshot's per-file tagged digest; small JSON sidecars use
@@ -990,7 +996,7 @@ class ModelStore:
         return {c: residency_mod.content_set_digest(files)
                 for c, files in groups.items()}
 
-    def component_sizes(self, ref: str) -> Dict[str, int]:
+    def component_sizes(self, ref: WireRef) -> Dict[str, int]:
         """Per-top-level-subfolder byte totals of ``ref``'s snapshot (gw#479):
         the make_room estimate for loading a subset of components."""
         snap = self._snapshots.get(ref)
@@ -1029,7 +1035,7 @@ class ModelStore:
         if removed:
             logger.info("disk-gc: swept %d abandoned writer temp artifact(s)", removed)
 
-    def lru_disk_refs(self, *, exclude: Tuple[str, ...] = ()) -> List[str]:
+    def lru_disk_refs(self, *, exclude: Tuple[str, ...] = ()) -> List[WireRef]:
         """Idle DISK refs in persisted last-use order, oldest first."""
         excluded = set(exclude)
         candidates = [
@@ -1066,13 +1072,13 @@ class ModelStore:
         exclude: Tuple[str, ...],
         keep: Tuple[str, ...],
         keep_rank: Dict[str, int],
-    ) -> List[str]:
+    ) -> List[WireRef]:
         """The evictable SET for one gc_disk pass: hard invariants only
         (never exclude/in-use — no policy ever overrides these), plus this
         pass's keep-membership/grace filter. Ordering within that set is a
         separate seam, see ``_disk_eviction_order``."""
         now = time.time()
-        out: List[Tuple[float, str]] = []
+        out: List[Tuple[float, WireRef]] = []
         for ref in self.disk_refs():
             if ref in exclude or self.disk_ref_in_use(ref):
                 continue
@@ -1095,8 +1101,9 @@ class ModelStore:
     # behavior, byte-for-byte.
     @staticmethod
     def _default_disk_eviction_order(
-        entries: List[Tuple[float, str]], include_keep: bool, keep_rank: Dict[str, int],
-    ) -> List[str]:
+        entries: List[Tuple[float, WireRef]], include_keep: bool,
+        keep_rank: Dict[str, int],
+    ) -> List[WireRef]:
         if include_keep:
             ordered = sorted(entries, key=lambda item: (-keep_rank[item[1]], item[0], item[1]))
         else:
@@ -1105,7 +1112,7 @@ class ModelStore:
 
     _disk_eviction_order = _default_disk_eviction_order
 
-    def _evict_disk_ref(self, ref: str) -> None:
+    def _evict_disk_ref(self, ref: WireRef) -> None:
         path = self.residency.local_path(ref) or self._index.path(ref)
         if not self.residency.evict(ref):  # refuses in-use entries; emits EVICTED
             return
@@ -1127,7 +1134,7 @@ class ModelStore:
                 disk_gc.sweep_orphan_blobs(self._cache_dir)
         self._index.remove(ref)
 
-    def _other_ref_at_path(self, ref: str, path: Path) -> str:
+    def _other_ref_at_path(self, ref: WireRef, path: Path) -> str:
         """A still-tracked ref (any group) materialized at the same path."""
         target = str(path)
         for reg in self.all_residencies():
@@ -1141,7 +1148,7 @@ class ModelStore:
 
     async def _ensure_disk_headroom(
         self,
-        ref: str,
+        ref: WireRef,
         needed_bytes: int,
         identity: _ResidencyIdentity = ("", 0),
         *,
@@ -1172,17 +1179,17 @@ class ModelStore:
 
     # ---- ensure-local ----------------------------------------------------------
 
-    def _lock(self, ref: str) -> asyncio.Lock:
+    def _lock(self, ref: WireRef) -> asyncio.Lock:
         return self._locks.setdefault(ref, asyncio.Lock())
 
-    def register_binding(self, ref: str, binding: Any) -> None:
+    def register_binding(self, ref: WireRef, binding: Any) -> None:
         """Endpoint-spec binding for ``ref`` — supplies files/provider on
         download paths that only carry the bare ref (DesiredResidency or
         startup prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
 
     def _override_excluded_components(
-        self, ref: str, binding: Any, snapshot: Optional[pb.Snapshot],
+        self, ref: WireRef, binding: Any, snapshot: Optional[pb.Snapshot],
     ) -> Tuple[str, ...]:
         """Base-composition subfolders this materialization must NOT fetch
         (th#1330 B2): the components a pgw#617 dispatch SUBSTITUTES.
@@ -1230,7 +1237,7 @@ class ModelStore:
 
     async def _await_hub_snapshot(
         self,
-        ref: str,
+        ref: WireRef,
         *,
         intent_id: str = "",
     ) -> pb.Snapshot:
@@ -1281,7 +1288,7 @@ class ModelStore:
 
     async def ensure_local(
         self,
-        ref: str,
+        ref: WireRef,
         snapshot: Optional[pb.Snapshot] = None,
         *,
         binding: Any = None,
@@ -1297,7 +1304,7 @@ class ModelStore:
 
     async def _materialize_local(
         self,
-        ref: str,
+        ref: WireRef,
         snapshot: Optional[pb.Snapshot] = None,
         *,
         binding: Any = None,
@@ -1707,7 +1714,7 @@ class ModelStore:
                 lock.release()
 
     def activate_load_identity(
-        self, ref: str, identity: _ResidencyIdentity,
+        self, ref: WireRef, identity: _ResidencyIdentity,
     ) -> _ResidencyIdentity:
         """Promote the exact bytes used by one setup, never current disk state."""
         if identity[0]:
@@ -1792,7 +1799,7 @@ class ModelStore:
                 bad.append(str(st.relative_to(p)) if st != p else st.name)
         return (not bad, bad)
 
-    def _quarantine_snapshot(self, ref: str, path: Path, bad: List[str]) -> None:
+    def _quarantine_snapshot(self, ref: WireRef, path: Path, bad: List[str]) -> None:
         """Evict + delete a corrupt materialization AND the corrupt blobs it
         was built from, so re-materialization re-downloads instead of
         re-linking the same bad bytes. Emits EVICTED via residency."""
@@ -1805,7 +1812,7 @@ class ModelStore:
         self._index.remove(ref)
 
     async def refetch_corrupt(
-        self, ref: str, snapshot: Optional[pb.Snapshot] = None, *, binding: Any = None
+        self, ref: WireRef, snapshot: Optional[pb.Snapshot] = None, *, binding: Any = None
     ) -> Optional[Path]:
         """Load-failure path (gw#408): a weights load failed with a
         corruption-shaped error — digest-verify the snapshot. A clean tree

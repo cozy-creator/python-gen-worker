@@ -94,7 +94,7 @@ from .input_assets import (
 from .lifecycle_intents import IntentRegistry
 from .models import disk_gc
 from .models import provision
-from .models.refs import normalize_model_ref
+from .models.refs import WireRef, normalize_model_ref
 from .models import residency as residency_mod
 from .models.memory import (
     aflush_memory,
@@ -881,7 +881,7 @@ class _JobOrder:
     group: int
     slots: Mapping[str, dispatch.SlotOrder]
     adapters: Mapping[str, Tuple[dispatch.AdapterOrder, ...]]
-    snapshots: Dict[str, pb.Snapshot]
+    snapshots: Dict[WireRef, pb.Snapshot]
     input_manifest: Tuple[InputManifestEntry, ...]
     fence: Callable[[EndpointSpec], None]
     config_snapshot: Callable[[str, Dict[str, Any]], Optional[Any]]
@@ -1146,7 +1146,7 @@ class _BackgroundMint:
 
     spec: EndpointSpec
     instance: Any
-    snapshots: Optional[Dict[str, "pb.Snapshot"]]
+    snapshots: Optional[Dict[WireRef, "pb.Snapshot"]]
     # id(pipeline) -> fleet_cells.PendingSelfMint (same objects the arming
     # scope produced; shared captures keep their sharing structure).
     pendings: Dict[int, Any]
@@ -1217,10 +1217,10 @@ class _HostRamBlock:
     last_available_bytes: int
 
 
-def _canonical_host_ram_refs(refs: typing.Iterable[str]) -> List[str]:
+def _canonical_host_ram_refs(refs: typing.Iterable[str]) -> List[WireRef]:
     """Keep only canonical model refs suitable for protocol evidence."""
     return list(dict.fromkeys(
-        ref
+        WireRef(ref)
         for value in refs
         if (ref := str(value or "").strip()) and not ref.startswith("shared::")
     ))
@@ -1703,7 +1703,7 @@ class Executor:
         self._host_ram_lock = asyncio.Lock()
         self._host_ram_send_lock = asyncio.Lock()
         self._host_ram_generation = 0
-        self._host_ram_blocks: Dict[str, _HostRamBlock] = {}
+        self._host_ram_blocks: Dict[WireRef, _HostRamBlock] = {}
         # Commit-ordered, latest-per-ref producer outbox. Transport capacity
         # enqueue is nonblocking, but this outbox still makes global generation
         # order explicit under concurrent failure/progress producers.
@@ -2130,7 +2130,7 @@ class Executor:
         self._on_state_change()
 
     async def revalidate_snapshot_identity(
-        self, ref: str, snapshot: Optional[pb.Snapshot],
+        self, ref: WireRef, snapshot: Optional[pb.Snapshot],
     ) -> None:
         """Vacate ready instances built from an older digest of the same ref.
 
@@ -4099,7 +4099,7 @@ class Executor:
     async def ensure_desired_instance(
         self,
         desired: "pb.DesiredInstance",
-        snapshots: Dict[str, "pb.Snapshot"],
+        snapshots: Dict[WireRef, "pb.Snapshot"],
     ) -> None:
         """Best-effort warm of one declarative, fully bound instance.
 
@@ -4134,7 +4134,7 @@ class Executor:
         self,
         spec: EndpointSpec,
         desired: "pb.DesiredInstance",
-        snapshots: Dict[str, "pb.Snapshot"],
+        snapshots: Dict[WireRef, "pb.Snapshot"],
     ) -> None:
         if spec.cls is None:
             raise ValidationError(
@@ -4205,7 +4205,7 @@ class Executor:
             )
         await self.ensure_setup(effective, snapshots)
 
-    def _job_pin_refs(self, spec: EndpointSpec, slots: List[str]) -> List[str]:
+    def _job_pin_refs(self, spec: EndpointSpec, slots: List[str]) -> List[WireRef]:
         """Refs a job pins for its whole lifetime: every routed slot EXCEPT
         lane refs (gw#551 — the LaneGate pins those around the actual
         pipeline call, so the idle sibling stays LRU-demotable), PLUS the
@@ -4228,8 +4228,8 @@ class Executor:
 
     def _job_admission_sizes(
         self, spec: EndpointSpec, slots: List[str],
-        snapshots: Mapping[str, pb.Snapshot],
-    ) -> Dict[str, int]:
+        snapshots: Mapping[WireRef, pb.Snapshot],
+    ) -> Dict[WireRef, int]:
         """ref -> expected VRAM bytes for one job's admission lease (pgw#641
         Stage 2). Same ref set as :meth:`_job_pin_refs`; bytes follow the
         pgw#636 ask ladder — a prior MEASURED hint wins, else the dispatch's
@@ -4238,7 +4238,7 @@ class Executor:
         res = self.store.residency
         run_snapshots = dict(snapshots)
 
-        def _expect(ref: str) -> int:
+        def _expect(ref: WireRef) -> int:
             hint = res.vram_hint(ref)
             if hint > 0:
                 return hint
@@ -4335,7 +4335,7 @@ class Executor:
     async def ensure_setup(
         self,
         spec: EndpointSpec,
-        snapshots: Optional[Dict[str, pb.Snapshot]] = None,
+        snapshots: Optional[Dict[WireRef, pb.Snapshot]] = None,
         promote_slots: Optional[List[str]] = None,
         arm: Optional[_ArmOrder] = None,
     ) -> Any:
@@ -4733,7 +4733,7 @@ class Executor:
 
     async def _run_synthesized_warmup(
         self, spec: EndpointSpec, rec: _ClassRecord, instance: Any,
-        snapshots: Optional[Dict[str, pb.Snapshot]],
+        snapshots: Optional[Dict[WireRef, pb.Snapshot]],
         *,
         proof_objects: typing.Iterable[Any] = (),
         cold_proof_ids: typing.Collection[int] = (),
@@ -5228,7 +5228,7 @@ class Executor:
 
     async def _setup_locked(
         self, spec: EndpointSpec, rec: _ClassRecord,
-        snapshots: Optional[Dict[str, pb.Snapshot]],
+        snapshots: Optional[Dict[WireRef, pb.Snapshot]],
         *,
         intent_id: str = "",
         arm: Optional[_ArmOrder] = None,
@@ -5261,7 +5261,7 @@ class Executor:
 
     async def _setup_locked_inner(
         self, spec: EndpointSpec, rec: _ClassRecord,
-        snapshots: Optional[Dict[str, pb.Snapshot]],
+        snapshots: Optional[Dict[WireRef, pb.Snapshot]],
         *,
         intent_id: str = "",
         setup_slots: List[str],
@@ -5272,7 +5272,7 @@ class Executor:
         # resolved space; downloads, booking and the record's held_refs all
         # use these exact strings (a HelloAck rebind during an await below
         # cannot split download/booking/teardown identities).
-        slot_refs: Dict[str, str] = {
+        slot_refs: Dict[str, WireRef] = {
             slot: wire_ref(spec.models[slot]) for slot in setup_slots
         }
         slot_identities: Dict[str, _ResidencyIdentity] = {}
@@ -6279,7 +6279,7 @@ class Executor:
                     # specifically (not the ordinary hot-adopt op-wall
                     # meaning) since this call site only fires on alarm.
                     family = str(getattr(spec.compile, "family", "") or "")
-                    ref = compile_selection.ref if compile_selection else ""
+                    ref = WireRef(compile_selection.ref if compile_selection else "")
                     digest = (
                         compile_selection.snapshot_digest
                         if compile_selection else "")
@@ -6414,7 +6414,7 @@ class Executor:
         self,
         rec: "_ClassRecord",
         spec: EndpointSpec,
-        slot_refs: Dict[str, str],
+        slot_refs: Dict[str, WireRef],
     ) -> None:
         """Turn this record's execution group into D ranks, or refuse loudly.
 
@@ -6432,7 +6432,7 @@ class Executor:
         device_group = topo.group(group)
         slot = self._sequence_boot_slot(spec, rec)
         pipe = rec.slot_pipelines[slot]
-        ref = slot_refs.get(slot, "")
+        ref = slot_refs.get(slot, WireRef(""))
         path = self.store.local_path(ref) if ref else None
         binding = spec.models.get(slot)
 
@@ -6504,7 +6504,7 @@ class Executor:
         *,
         execution_lane_slots: Optional[set] = None,
         shared_bytes: int = 0,
-        slot_refs: Optional[Dict[str, str]] = None,
+        slot_refs: Optional[Dict[str, WireRef]] = None,
         slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
     ) -> None:
         """Honest per-ref residency after a setup (#369). Worker-constructed
@@ -6519,7 +6519,7 @@ class Executor:
         execution_lanes = execution_lane_slots or set()
         refs = slot_refs or {}
         identities = slot_identities or {}
-        per_ref: Dict[str, Tuple[Any, int]] = {}
+        per_ref: Dict[WireRef, Tuple[Any, int]] = {}
         per_ref_identity: Dict[str, _ResidencyIdentity] = {}
         for slot in setup_slots:
             if slot in execution_lanes:
@@ -6710,7 +6710,7 @@ class Executor:
                 await asyncio.to_thread(gc.collect)
             observed = await asyncio.to_thread(self.store.residency.host_ram_headroom, 0)
             available = observed.available_bytes
-            satisfied: List[Tuple[str, _HostRamBlock]] = []
+            satisfied: List[Tuple[WireRef, _HostRamBlock]] = []
             for ref, block in sorted(self._host_ram_blocks.items()):
                 previous = block.last_available_bytes
                 if available <= previous:
@@ -6729,7 +6729,7 @@ class Executor:
 
             self._host_ram_generation += 1
             generation = self._host_ram_generation
-            events: List[Tuple[str, pb.ModelEvent]] = []
+            events: List[Tuple[WireRef, pb.ModelEvent]] = []
             for ref, block in satisfied:
                 event = self.store.model_event(
                     ref, pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
@@ -6764,7 +6764,7 @@ class Executor:
                 list(event.host_ram_evicted_refs),
             )
 
-    async def _clear_host_ram_capacity(self, refs: List[str]) -> None:
+    async def _clear_host_ram_capacity(self, refs: List[WireRef]) -> None:
         """Drop stale block/replay state after the ref is actually resident."""
         async with self._host_ram_lock:
             for ref in refs:
@@ -6940,7 +6940,7 @@ class Executor:
 
         evicted: List[str] = []
         after = before
-        for ref in res.lru_ram_victims():
+        for ref in (WireRef(v) for v in res.lru_ram_victims()):
             # A previous record teardown may already have transitioned every
             # ref that appeared in the snapshot of LRU candidates.
             if res.tier(ref) is not residency_mod.Tier.RAM:
@@ -7286,7 +7286,7 @@ class Executor:
         *,
         server: Any = None,
         compile_selection: Optional[_CompileArtifactSelection] = None,
-        snapshots: Optional[Dict[str, pb.Snapshot]] = None,
+        snapshots: Optional[Dict[WireRef, pb.Snapshot]] = None,
         slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
         component_paths: Optional[Dict[str, Dict[str, str]]] = None,
         arm: Optional[_ArmOrder] = None,
@@ -7351,7 +7351,7 @@ class Executor:
                     # pick the starting rung so a doomed fully-resident attempt
                     # is never paid (gw#463 / ie#369); a CUDA OOM inside is a
                     # ladder transition, not a failure.
-                    ref = wire_ref(binding) if binding is not None else ""
+                    ref = wire_ref(binding) if binding is not None else WireRef("")
                     mode = self._placement_mode(spec, ref)
                     slot_share = dict((share_plan or {}).get(slot) or {})
                     if slot_share and mode != "auto":
@@ -7656,7 +7656,7 @@ class Executor:
     def _register_execution_lane(
         self,
         slot: str,
-        ref: str,
+        ref: WireRef,
         pipe: Any,
         slot_share: Dict[str, Any],
         injected: Dict[str, Any],
@@ -8368,7 +8368,8 @@ class Executor:
         event class on the wire (th#1031: no longer fatal to serving — the
         fleet policy already fell through to self-mint; this only makes
         sure the invariant stays wire-visible)."""
-        bug_ref = compile_selection.ref if compile_selection is not None else ""
+        bug_ref = WireRef(
+            compile_selection.ref if compile_selection is not None else "")
         bug_digest = (
             compile_selection.snapshot_digest
             if compile_selection is not None else "")
@@ -9640,7 +9641,9 @@ class Executor:
         # exactly the lane it executes, at call time.
         try:
             with self.store.residency.admit(
-                self._job_admission_sizes(spec, routed, order.snapshots),
+                typing.cast(
+                    Mapping[str, int],
+                    self._job_admission_sizes(spec, routed, order.snapshots)),
                 # pgw#652: weights are not the whole cost of admitting a
                 # request — a concurrent 1024^2 diffusion request also holds
                 # GBs of latents/attention workspace. The claim is LEARNED
@@ -9994,7 +9997,7 @@ class Executor:
                 # wait is its own `record_pre` stage above.
                 started = time.monotonic()
                 with self.store.residency.executing(*exec_refs, *adapter_refs):
-                    active: List[Tuple[str, Any]] = []
+                    active: List[Tuple[WireRef, Any]] = []
                     try:
                         for slot, prepared in adapters.items():
                             pipe = self._adapter_target(spec, slot)
@@ -10209,7 +10212,7 @@ class Executor:
         self,
         ctx: Any,
         info: Dict[str, Any],
-        snapshots: Dict[str, pb.Snapshot],
+        snapshots: Dict[WireRef, pb.Snapshot],
         *,
         set_path: Optional[Callable[[str], None]] = None,
         field_name: str = "source",
@@ -10256,7 +10259,7 @@ class Executor:
             await asyncio.to_thread(resolve, ref)
 
     async def _handler_kwargs(
-        self, spec: EndpointSpec, snapshots: Dict[str, pb.Snapshot]
+        self, spec: EndpointSpec, snapshots: Dict[WireRef, pb.Snapshot]
     ) -> Dict[str, Any]:
         """Per-call model injection: handler parameters (after ctx, payload)
         whose names match model slots receive the local snapshot path."""
@@ -10284,7 +10287,7 @@ class Executor:
         self,
         adapters: Mapping[str, Tuple[dispatch.AdapterOrder, ...]],
         spec: EndpointSpec,
-        snapshots: Dict[str, pb.Snapshot],
+        snapshots: Dict[WireRef, pb.Snapshot],
     ) -> Dict[str, List[lora_util.PreparedAdapter]]:
         """Materialize + parse the job's per-slot LoRA overlays (gw#393).
 
@@ -10505,7 +10508,7 @@ class Executor:
             diffusers_component_type = ModelMixin
         except ImportError:
             pass
-        transitions: List[Tuple[str, str, str, float]] = []
+        transitions: List[Tuple[WireRef, str, str, float]] = []
         for slot in spec.models:
             ref = wire_ref(spec.models[slot])
             # pgw#678: a shared-component lane's residency entry is an
@@ -10602,7 +10605,7 @@ class Executor:
 
     async def _refuse_unfittable_offload(
         self, spec: EndpointSpec,
-        transitions: List[Tuple[str, str, str, float]],
+        transitions: List[Tuple[WireRef, str, str, float]],
     ) -> str:
         """pgw#1063: price the offloaded reload the ladder is about to
         prescribe, and refuse the DEGRADE when the host cannot hold it.
@@ -10629,7 +10632,7 @@ class Executor:
         Returns the structural refusal summary, or "" when the ladder may
         proceed."""
         res = self.store.residency
-        worst: Tuple[int, str] = (0, "")
+        worst: Tuple[int, WireRef] = (0, WireRef(""))
         for ref, _from_mode, to_mode, _needed_gb in transitions:
             if not touches_host_ram(to_mode):
                 continue

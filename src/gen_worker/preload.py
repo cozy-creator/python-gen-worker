@@ -55,6 +55,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
 from . import dispatch
+from .models.refs import WireRef
 from .api.binding import binding_wire_refs, component_overrides, wire_ref
 from .models import residency as residency_mod
 from .models.loading import ComponentSubstitutionError
@@ -103,7 +104,7 @@ class Preloader:
     def __init__(self, executor: "Executor") -> None:
         self._ex = executor
         self._hot: Tuple["pb.DesiredInstance", ...] = ()
-        self._snapshots: Dict[str, "pb.Snapshot"] = {}
+        self._snapshots: Dict[WireRef, "pb.Snapshot"] = {}
         self._generation = -1
         self._wake: Optional[asyncio.Event] = None
         self._task: Optional[asyncio.Task[None]] = None
@@ -126,7 +127,7 @@ class Preloader:
     def update_desired(
         self,
         hot: Sequence["pb.DesiredInstance"],
-        snapshots: Mapping[str, "pb.Snapshot"],
+        snapshots: Mapping[WireRef, "pb.Snapshot"],
         generation: int,
     ) -> None:
         """Full-replacement desired state (call only with the ACCEPTED
@@ -276,10 +277,10 @@ class Preloader:
         except Exception:
             return None
 
-    def _instance_refs(self, effective: Any) -> Dict[str, Any]:
+    def _instance_refs(self, effective: Any) -> Dict[WireRef, Any]:
         """ref -> binding for every setup slot and component override."""
         ex = self._ex
-        out: Dict[str, Any] = {}
+        out: Dict[WireRef, Any] = {}
         for slot in ex._setup_slots(effective):
             binding = effective.models[slot]
             for ref in binding_wire_refs(binding):
@@ -291,7 +292,7 @@ class Preloader:
                     out.setdefault(comp_ref, None)
         return out
 
-    def _fence_conflict(self, ref: str) -> bool:
+    def _fence_conflict(self, ref: WireRef) -> bool:
         """True when the ref is RESIDENT under a different identity than the
         desired snapshot names — the pgw#638 case the idle-gated reconcile
         owns (a tenant job may be re-materializing the older bytes)."""
@@ -340,7 +341,7 @@ class Preloader:
         sizes = {
             ref: self._expected_vram_bytes(ref) for ref in refs
         }
-        if res.fits(sizes):
+        if res.fits(typing.cast(Mapping[str, int], sizes)):
             logger.info(
                 "rotation preload: %s fits alongside the resident set — "
                 "running full background setup (double-buffer)",
@@ -353,7 +354,7 @@ class Preloader:
         staged = await self._stage_components_host(effective)
         return did_work or staged
 
-    def _expected_vram_bytes(self, ref: str) -> int:
+    def _expected_vram_bytes(self, ref: WireRef) -> int:
         res = self._ex.store.residency
         hint = res.vram_hint(ref)
         if hint > 0:

@@ -19,6 +19,7 @@ from . import fleet_cells
 from . import receipts
 from . import serve_posture
 from . import progress as progress_mod
+from .models.refs import WireRef
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
@@ -1278,7 +1279,7 @@ class Lifecycle:
         self.executor.store.rescan_disk()
         self.executor.gate_functions(self.hardware)
 
-        prefetch_refs: List[str] = []
+        prefetch_refs: List[WireRef] = []
         for spec in self.executor.specs.values():
             if spec.name in self.executor.unavailable:
                 continue
@@ -1330,7 +1331,7 @@ class Lifecycle:
                     )
 
         await self.set_phase(pb.WORKER_PHASE_LOADING_PIPELINES)
-        awaiting_hub: Dict[str, List[str]] = {}
+        awaiting_hub: Dict[str, List[WireRef]] = {}
         dynamic: List[str] = []
         for spec in list(self.executor.specs.values()):
             if spec.name in self.executor.unavailable:
@@ -1460,7 +1461,9 @@ class Lifecycle:
             # open, plus the typed self-diagnosis on a stalled registry.
             activity_mod.on_beat()
 
-    async def _setup_awaiting_functions(self, awaiting: Dict[str, List[str]]) -> None:
+    async def _setup_awaiting_functions(
+        self, awaiting: Dict[str, List[WireRef]],
+    ) -> None:
         """Complete boot setup for functions whose tensorhub snapshots arrive
         via hub delivery after the startup scan (gw#591), then push a
         StateDelta so ``available_functions`` advertises them."""

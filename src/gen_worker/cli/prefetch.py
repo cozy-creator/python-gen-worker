@@ -23,6 +23,7 @@ import json
 import sys
 from typing import Any, Dict, Tuple
 
+from ..models.refs import WireRef
 from ..api.binding import ModelRef
 from ..api.binding import wire_ref
 from ..models.provision import resolve_local_path
@@ -83,7 +84,7 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
 
     # Collect unique (ref, provider) jobs so a binding shared across
     # functions/classes is downloaded once.
-    jobs: Dict[Tuple[str, str], Tuple[str, str, tuple]] = {}
+    jobs: Dict[Tuple[str, str], Tuple[WireRef, str, tuple]] = {}
     for c in candidates:
         for param_name, binding in c.bindings.items():
             try:
