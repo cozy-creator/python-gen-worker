@@ -1,8 +1,7 @@
-"""pgw#672: the minted/attached ck2 compile object must serve its own warmup.
+"""The minted/attached ck2 compile object must serve its own warmup.
 
-Live signature this closes (ie#546 burst rerun #2, gen-worker 0.64.0, L4):
-a worker MINTS its cell (publish-intent 200, armed, obligation discharged),
-then fails its own finalize —
+The signature this closes: a worker MINTS its cell (publish-intent 200, armed,
+obligation discharged), then fails its own finalize —
 
     CompiledLaneUnavailableError: 1 attached compile object(s) did not serve
     their own warmup graph (warmups=18, calls=18, cache_hits=0,
@@ -13,8 +12,8 @@ consulted: dynamo's in-memory code cache (keyed on the class-shared
 ``__code__``; torch 2.13 inlined-module guards match any same-class
 instance) served the warmup that a LATER same-family arm in the same warm
 process was supposed to compile/look up. The pending capture stays empty,
-finalize disproves it, the mandatory lane raised, both functions disabled,
-pod retired, replacement re-mints the same key — 5 cycles, 4 dead workers.
+finalize disproves it, the mandatory lane raises, both functions are disabled
+and the pod retires — whose replacement re-mints the same key, in a loop.
 
 These tests run the REAL executor ensure_setup codepath and the REAL
 fleet_cells miss policy (miss -> `compile_cache.arm_jit_intake` -> executor

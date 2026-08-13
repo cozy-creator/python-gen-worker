@@ -33,38 +33,27 @@ recorded INTO the cell, and adopted by serving:
               value out of it
 
 CELL KEYS ARE KEYED ON SM, AND THE LANE IS DELIBERATELY NOT A KEY AXIS (that
-would fork the namespace and halve reuse). One SM class is therefore many
-cards: a cell minted on a 96 GB RTX PRO 6000 and a 32 GB RTX 5090 share a
-key. Two GPUs of one compute capability cannot be assumed to want the same
-kernels, so a recorded verdict is EVIDENCE, not an instruction — serving
-RE-APPLIES the fit constraint against its own detected total before it
-adopts, and falls to the fastest candidate that does fit here with a typed
-reason when the minting card's winner does not. That is why each candidate's
-peak rides the packed envelope beside the winner: bytes are discrete, wall
-clocks are not, so the fit half of the rule can be re-applied by a worker
-that will never see the timings.
+would fork the namespace and halve reuse), so one SM class is many cards (a
+96 GB RTX PRO 6000 and a 32 GB RTX 5090 share a key) and a recorded verdict is
+EVIDENCE, not an instruction: serving RE-APPLIES the fit constraint against its
+own detected total before it adopts, and falls to the fastest candidate that
+does fit here with a typed reason. That is why each candidate's peak rides the
+packed envelope beside the winner — bytes are discrete, wall clocks are not, so
+the fit half of the rule can be re-applied by a worker that will never see the
+timings.
 
 A lane is therefore a COMBINATION, written ``"<linear>+<modulation>"``
 (``"baseline+packed"``, ``"fused+dense"``, ...). Measuring the combinations
-rather than each axis alone is deliberate: it assumes no independence between
-them, and it is what lets ONE rule price a residency win and a throughput win
-against each other instead of hard-coding which one matters.
+rather than each axis alone assumes no independence between them, and is what
+lets ONE rule price a residency win and a throughput win against each other
+instead of hard-coding which one matters.
 
-THE SELECTION RULE (Paul, 2026-08-03): **fit-constrained speed
-maximization.** Among lanes whose measured peak VRAM fits the target card
-with headroom, pick the FASTEST. VRAM is a CONSTRAINT, not an objective — it
-breaks a tie only when two lanes are within the speed noise margin. On a
-B200 that means baseline linears (228 ms/step) over fused (350 ms/step): the
-card has the room. The packed modulation is speed-NEUTRAL, so it wins its
-axis on exactly that tiebreak — the smaller peak — which is how sm_100 ends
-up on ``baseline+packed`` without anyone writing that down. On a 32 GB card
-the fit constraint does real work and can exclude a faster lane outright.
-
-`models/w4a4.py::_gemm_profitable` is the in-tree precedent — it
-micro-benchmarks fp4 against bf16 at boot and refuses to arm unless it wins
-by a real margin. This is that mechanism one level up: whole compiled graphs
-instead of one GEMM, paid once at mint instead of on every boot, and
-RECORDED instead of re-derived.
+THE SELECTION RULE: **fit-constrained speed maximization.** Among lanes whose
+measured peak VRAM fits the target card with headroom, pick the FASTEST. VRAM is
+a CONSTRAINT, not an objective — it breaks a tie only when two lanes are within
+the speed noise margin. The packed modulation is speed-NEUTRAL, so it wins its
+axis on exactly that tiebreak, the smaller peak. On a 32 GB card the fit
+constraint does real work and can exclude a faster lane outright.
 """
 
 from __future__ import annotations

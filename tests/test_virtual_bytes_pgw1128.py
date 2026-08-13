@@ -1,29 +1,27 @@
-"""pgw#1128: a VIRTUAL tensor is not resident bytes, and is never data_ptr-ed.
+"""A VIRTUAL tensor is not resident bytes, and is never data_ptr-ed.
 
-``memory._sum_tensor_bytes`` walked every parameter and buffer as if it held
-storage. A pgw#1080 structure-only component's parameters are FAKE on the
-compute device by construction — they declare a shape and a device and allocate
-nothing — and the walk booked them three ways wrong:
+A structure-only component's parameters are FAKE on the compute device by
+construction — they declare a shape and a device and allocate nothing — so a
+walk (``memory._sum_tensor_bytes``) that treats every parameter and buffer as
+holding storage books them three ways wrong:
 
-1. **as resident VRAM.** ``estimate_cuda_resident_gb`` is the "what occupies
-   the card right now" question, and it answered with the full declared weight
-   of a structure that occupies none of it. Downstream that is
-   ``select_auto_mode``'s pgw#1025 net requirement falling to ZERO, so a
-   structure-only pipeline reads as one whose weights the card has already paid
-   for: a 40 GB tree "fits" a 24 GB card and takes a fully RESIDENT rung.
+1. **as resident VRAM.** ``estimate_cuda_resident_gb`` asks what occupies the
+   card right now, and would answer with the full declared weight of a structure
+   that occupies none of it. Downstream that is ``select_auto_mode``'s net
+   requirement falling to ZERO, so a 40 GB tree "fits" a 24 GB card and takes a
+   fully RESIDENT rung.
 2. **collapsed by the storage dedupe.** Every FakeTensor answers ``data_ptr()``
-   with ``0``, so a tree of them deduped to its FIRST tensor and the whole rest
-   of the requirement vanished.
+   with ``0``, so a tree of them dedupes to its FIRST tensor and the rest of the
+   requirement vanishes.
 3. **on a call torch is removing.** *"Accessing the data pointer of FakeTensor
    is deprecated and will error"* — and this walk's callers wrap it in a bare
-   ``except: return 0.0``, so the day it errors, every estimate in the placement
+   ``except: return 0.0``, so the day it errors every estimate in the placement
    ladder silently becomes zero.
 
-The counterpart the fix must NOT break is the pgw#1025 measurement technique:
-that test stands in for a 15.5 GiB CUDA-resident component on a cardless box,
-and its stand-in WAS a fake tensor. ``tests/_declared_residency`` replaces it
-with a real tensor that declares its size through shape and its device through
-a subclass — so the arithmetic runs on a real tensor with a real storage, and
+The counterpart the exemption must NOT break is the cardless residency
+measurement technique: ``tests/_declared_residency`` stands in for a 15.5 GiB
+CUDA-resident component with a REAL tensor that declares its size through shape
+and its device through a subclass, so the arithmetic runs on real storage and
 the fake-tensor exemption proved here correctly does not fire on it.
 """
 

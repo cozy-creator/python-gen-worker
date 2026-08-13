@@ -1,24 +1,20 @@
-"""pgw#498 + pgw#884 — the two places untrusted bytes and refused secrets
-crossed a boundary that was supposed to be closed.
+"""Untrusted bytes and refused secrets, at the two boundaries that must stay
+closed.
 
-**pgw#498, now closed by a BAN rather than by a safe reader.** The convert/clone
+**PICKLES ARE BANNED — refused always, never read safely.** The convert/clone
 lane ingests ARBITRARY tenant-submitted repos, so a `.bin` reaching this process
 is hostile by assumption and unpickling it is arbitrary code execution inside a
-pod holding hub credentials and other tenants' work — the threat this repo
-states in its own words at `models/cozy_snapshot.py:285-292`.
-
-Paul, 2026-08-12: **"keep pickles banned"** — refuse always; the sanctioned
-remedy for a legacy repo is to MIRROR it without the pickle. So there is no
-pickle reader in this package at all any more: `classifier.py` refuses a
-pickle-only repo with `pickle_only`, and both component-level doors
+pod holding hub credentials and other tenants' work. The sanctioned remedy for a
+legacy repo is to MIRROR it without the pickle. There is no pickle reader in
+this package at all: `classifier.py` refuses a pickle-only repo with
+`pickle_only`, and both component-level doors
 (`repackage._load_component_state_dict`, `writer.iter_component_tensors`) raise
-the same refusal instead of converting. The scan below therefore asserts ZERO
+the same refusal instead of converting. The scan below asserts ZERO
 `torch.load` sites, not "one safe one".
 
-The interesting part is WHY it looked safe. On torch >= 2.6 the `weights_only`
-default is `True`, so on the pinned toolchain the bare call refuses a hostile
-pickle all by itself. That safety is a DEFAULT, not a decision — and torch
-publishes the switch that flips it back:
+A bare `torch.load` is NOT a substitute. On torch >= 2.6 `weights_only` defaults
+to `True`, but that safety is a DEFAULT, not a decision — and torch publishes
+the switch that flips it back:
 
     TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
@@ -28,13 +24,12 @@ argument-less `torch.load` in the process back into an unpickle, and the
 variable is outside this program's owned namespaces, so nothing here would ever
 report it. `test_a_poisoned_bin_cannot_execute_code` runs exactly that.
 
-**pgw#884.** th#1307's guard — "a pod holding C2PA key material refuses to
-start" — read `os.environ` alone. A PEM delivered as
-`/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, or as a `.env` / yaml entry, was
-neither loaded (the loader dropped the name as "not a Settings field") nor
-refused: the pod booted green with a private key sitting world-readable to
-tenant code at a mounted path, which is precisely the scenario th#1307 exists
-to make impossible.
+**Secret SOURCES.** The "a pod holding C2PA key material refuses to start" guard
+must not read `os.environ` alone. A PEM delivered as
+`/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, or as a `.env` / yaml entry, is
+otherwise neither loaded (the loader drops the name as "not a Settings field")
+nor refused — the pod boots green with a private key world-readable to tenant
+code at a mounted path.
 
 Every payload below writes a marker file into a pytest `tmp_path` and does
 nothing else. It proves EXECUTION; it does not do anything harmful.

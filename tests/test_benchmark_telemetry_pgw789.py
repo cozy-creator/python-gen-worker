@@ -1,33 +1,26 @@
-"""pgw#789: the benchmark telemetry the platform could not actually answer with.
+"""Benchmark telemetry — the connections that make the hub-side records usable.
 
-Three questions have to be answerable from durable HUB-side records — compile
+Three questions must be answerable from durable HUB-side records — compile
 duration, cold-boot phase breakdown, warm per-request latency by serving mode —
-without anyone SSH-ing into a pod. pgw#764/th#1293 built the wire and the
-tables for all three. This file is the red-verify for the parts that were
-BUILT BUT NEVER CONNECTED, each of which was measured absent on the live chaos
-stack before the fix:
+without anyone SSH-ing into a pod. The wire and the tables exist; this file
+pins the three places where the record can be built and left unwired:
 
-* ``serving_mode.py`` was imported by nothing but its own unit test, so
-  ``JobMetrics.serving_mode`` / ``served_cell_ref`` / ``sm`` / ``steps`` /
-  ``width`` / ``height`` were never populated. Measured: 0 of 416
-  ``request_state`` rows carried ``serving_mode``, so
-  ``/v1/admin/request-latency`` could not separate AOT from JIT from eager over
-  ANY traffic. Asserted here on the real wire (the terminal ``JobResult`` the
+* ``serving_mode.py`` must actually populate ``JobMetrics.serving_mode`` /
+  ``served_cell_ref`` / ``sm`` / ``steps`` / ``width`` / ``height``. Unpopulated,
+  ``/v1/admin/request-latency`` cannot separate AOT from JIT from eager over ANY
+  traffic. Asserted here on the real wire (the terminal ``JobResult`` the
   hub-double receives), not on a return value.
 
-* The ``weights_fetch`` boot span wrapped only the hf/civitai prefetch loop.
-  The tensorhub refs that own the ~230s of a real cold boot arrive later via
-  DesiredResidency/RunJob and never pass through it — so the expensive phase
-  was invisible and nothing stamped bytes or source at all. Measured: six real
-  boots on chaos recorded exactly two rows each (``first_request_servable`` and
-  ``hello``, both cumulative milestones) — zero spans, so ``measured_ms`` was 0
-  and the whole boot was residual.
+* The ``weights_fetch`` boot span must cover the tensorhub refs that arrive via
+  DesiredResidency/RunJob, not only the hf/civitai prefetch loop — those refs own
+  most of a real cold boot, so wrapping the prefetch alone leaves the expensive
+  phase invisible with nothing stamping bytes or source, ``measured_ms`` at 0 and
+  the whole boot residual.
 
-* ``first_request_servable`` was marked when ``startup()`` returned, even when
-  every function was still awaiting hub-supplied snapshots and the worker
-  therefore advertised nothing the hub could dispatch to. Measured: those same
-  six boots reported 4.2-12.3s cold boots for pods whose real boots were
-  minutes.
+* ``first_request_servable`` must not be marked when ``startup()`` returns while
+  functions still await hub-supplied snapshots and the worker therefore
+  advertises nothing the hub could dispatch to — that reports seconds-long cold
+  boots for pods whose real boots are minutes.
 
 Real codepaths throughout: the dimension test drives a real worker over a real
 gRPC socket via the hub-double; the boot tests drive the real recorder and the

@@ -2,12 +2,9 @@
 
 A precondition is static when the endpoint IMAGE decides it: the C++ toolchain
 apt installed into it, the torch wheel pinned into it, the declaration module
-baked into it. ``fleet_cells.mint_recipe`` used to ask those questions on a
-rented pod, and a "no" there is a silent downgrade with a rental bill attached
-— the fleet serves eager forever and the evidence is one ``self_mint_skipped``
-event nobody queries. The generated Dockerfile said so out loud: *"Absent it a
-mint declines (typed, cheap) and the pod serves eager forever — not fatal, just
-never fast."*
+baked into it. Asking those questions on a rented pod instead makes a "no" a
+silent downgrade with a rental bill attached — the fleet serves eager forever
+and the evidence is one ``self_mint_skipped`` event nobody queries.
 
 The ruling: a release whose image cannot AOT-compile the endpoints it DECLARES
 is a broken build, and must refuse to publish naming the precondition. An

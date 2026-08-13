@@ -6,9 +6,7 @@ the mint needs from it — mint plans, dynamic-shape rows, fork assertions, and
 generic example inputs. No family name appears here (vocabulary / registration
 / engine, family-free all three).
 
-The one derivation rule
------------------------
-**Bounds derive from the declared class rows.** A dim's admissible range is
+THE ONE DERIVATION RULE: **bounds derive from the declared class rows.** A dim's admissible range is
 the hull of its resolved values over the rows an artifact serves, rounded OUT
 to its ``multiple_of`` — rounding in would exclude a declared coordinate from
 the artifact's own contract, and nothing at runtime refuses the difference.

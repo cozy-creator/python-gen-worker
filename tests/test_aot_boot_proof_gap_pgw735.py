@@ -1,30 +1,23 @@
-"""Pure-AOT boot arms run the boot warmup proof (pgw#722 finding 2 — the
-#735 boot-proof gap).
+"""Pure-AOT boot arms run the boot warmup proof.
 
-The shipped #735 executor proof scored EXPORTED arms inside a loop gated on
-``proves_inductor`` — it ran only when SOME dynamo selection coexisted. A
-worker whose ONLY arm is an adopted AOT cell (the prod flip shape: F1
-adopts, the delivered dynamo artifact is skipped) skipped the boot proof
-entirely and stayed armed UNPROVEN: an artifact that never executed — or
-executed and revoked — kept advertising itself. Same fail-closed rule as
-the dynamo lane, through the REAL executor setup path (fakes only at the
-download + arming boundaries):
+An executor proof that scores EXPORTED arms inside a loop gated on
+``proves_inductor`` runs only when SOME dynamo selection coexists. A worker
+whose ONLY arm is an adopted AOT cell then skips the boot proof entirely and
+stays armed UNPROVEN. Same fail-closed rule as the dynamo lane, through the
+REAL executor setup path (fakes only at the download + arming boundaries):
 
   1. an exercised pure-AOT arm is PROVEN — stays armed, cell recorded
      proven in-process (the pgw#637 registry);
   2. an unexercised pure-AOT arm KEEPS SERVING and banks no proof;
   3. the same on the MANDATORY (w8a8) lane does not kill the boot.
 
-**Rows 2 and 3 were the opposite assertion until pgw#1141** (Paul's ruling,
-2026-08-11): an unexercised arm was unwrapped, quarantined and dropped. That
-barrier is deleted — an ADOPTED cell arms before setup, so nothing has
-dispatched through it by construction, and two real pods threw away artifacts
-they had just verified at `cos=1.00000` because of it. The fail-closed property
-this file was written to defend now lives where it belongs: the pgw#868
-numerics gate refuses a cell that does not reproduce eager, and a
-cell-attributable failure at SERVE time revokes the arm in-request. What an
-absent measurement still decides is the PUBLISH — which is what rows 2 and 3
-now pin.
+An unexercised arm must NOT be unwrapped, quarantined or dropped: an ADOPTED
+cell arms before setup, so nothing has dispatched through it by construction,
+and pods threw away artifacts they had just verified at `cos=1.00000`. The
+fail-closed property lives elsewhere — the numerics gate refuses a cell that
+does not reproduce eager, and a cell-attributable failure at SERVE time revokes
+the arm in-request. What an absent measurement still decides is the PUBLISH,
+which is what rows 2 and 3 pin.
 """
 
 from __future__ import annotations

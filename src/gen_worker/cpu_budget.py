@@ -7,14 +7,11 @@ teams (from 96 host processors) against a 32.3-core quota — and the boot
 window really does get CFS-throttled under it (``nr_throttled`` 4,
 ``throttled_usec`` 9.5 s in a 146-period window, before a single request).
 
-WHAT THIS DOES **NOT** FIX, measured (samples/dpfix, sdxl 1024^2/28 steps,
-4xA40, width-4 burst): 37.1 s with torch's 48-thread default vs 36.7 s pinned
-to 8 — within noise. The width-4 collapse is the shared interpreter,
-not thread oversubscription: at width 4 the process uses 2.3 of its 32.3
-allowed cores, so CPU was never the scarce resource on THIS pod. An earlier
-run appeared to show 74.0 s -> 42.3 s from this change; that was the probe's
-own per-thread /proc sampler getting cheaper as the thread count fell, not the
-workload getting faster. The claim is retracted.
+WHAT THIS DOES **NOT** FIX, measured (sdxl 1024^2/28 steps, 4xA40, width-4
+burst): 37.1 s with torch's 48-thread default vs 36.7 s pinned to 8 — within
+noise. This is NOT a throughput fix. The width-4 collapse is the shared
+interpreter, not thread oversubscription: at width 4 the process uses 2.3 of
+its 32.3 allowed cores, so CPU was never the scarce resource on that pod.
 
 It is kept because 192 threads on a 32.3-core quota is a misconfiguration on
 its own terms, it is de-escalation-only (so it can never slow anything down),

@@ -1,15 +1,13 @@
 """Boot-time warm-plan DERIVATION.
 
-First-call tax on a fresh worker is EAGER cost — allocator-pool growth to
-the activation peak plus cuBLAS/cuDNN heuristic selection (measured 216s vs
-63s warm on LTX/H100 pre-expandable-segments; 0-152s host lottery on B200).
-The worker runs synthetic requests per GPU inference function after
+First-call tax on a fresh worker is EAGER cost — allocator-pool growth to the
+activation peak plus cuBLAS/cuDNN heuristic selection (216s cold vs 63s warm on
+LTX/H100). The worker runs synthetic requests per GPU inference function after
 ``setup()``, BEFORE the function reports READY. Output is discarded (never
 billing/outputs/CAS); a failure is a load failure (loud).
 
 The warm plan is DERIVED, never developer-written: a hand-written warmup
-payload is a coverage CLAIM that drifts (add a guidance class, forget warmup,
-ship an untraced graph that compiles at request time). Derivation per handler:
+payload is a coverage CLAIM that drifts. Derivation per handler:
 
 1. Defaulted payload fields keep their defaults (neutral schema values —
    deterministic).
@@ -22,8 +20,8 @@ ship an untraced graph that compiles at request time). Derivation per handler:
    :class:`~gen_worker.IllegalCombination` from its payload
    ``__post_init__``; the plan drops exactly those rows and records the
    coverage it achieved. Every OTHER exception during payload construction is
-   still a load failure — that is the point of the typed error: a sparse legal
-   set and a synthesis bug are not the same event.
+   a load failure — a sparse legal set and a synthesis bug are not the same
+   event.
 3. Required no-default fields synthesize neutral values by type: ``str``
    fills ``"warmup"`` (content never affects the graph; ``text_len`` pins
    the traced shape), ``ImageAsset``/``AudioAsset`` get a tiny generated
@@ -42,16 +40,16 @@ hit, never a second trace.
 
 Handlers SHOULD cheapen non-graph work on ``ctx.boot_warmup`` (e.g.
 ``steps = 1 if ctx.boot_warmup else steps``): the allocator peak is
-shape-driven and the traced graph is step-count-independent. The SDK no
-longer trusts that alone: synthesized payloads CLAMP step-count fields
+shape-driven and the traced graph is step-count-independent. The SDK does not
+trust that alone — synthesized payloads CLAMP step-count fields
 (:data:`_STEP_FIELDS`) to their declared floor, so a warm run never pays a
 full recipe's steps even on an endpoint that forgot the clamp.
 
 Warm RUNS are further bounded by :func:`select_runs`: eager lanes run one
 shape representative per guidance class instead of the full cross-product,
-and a checkpoint INSTANCE whose warm contract
-already executed in this process runs a single verification job — juggle
-swaps cost weights transfer + load, never a warm-plan re-run.
+and a checkpoint INSTANCE whose warm contract already executed in this process
+runs a single verification job — juggle swaps cost weights transfer + load,
+never a warm-plan re-run.
 
 Remaining class-level surfaces: a class-defined ``warmup()`` method wins
 outright (fully custom — the LTX two-stage synthetic);

@@ -1,4 +1,4 @@
-"""Inline conversion dispatch for clone_huggingface / clone_civitai (issue #73).
+"""Inline conversion dispatch for clone_huggingface / clone_civitai.
 
 When the user requests an output dtype the source repo doesn't ship, the
 clone path runs the conversion in-process — the same library code paths

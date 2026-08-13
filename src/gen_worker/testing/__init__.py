@@ -28,10 +28,9 @@ and land in an inspectable list::
     assert rec.images[0].read_bytes()[:4] == b"RIFF"     # a real webp encode
     assert "loaded 2 loras" in rec.messages
 
-That is the half 23 endpoint suites were hand-rolling: a ``_Ctx`` subclass
-overriding ``save_image``/``save_audio`` to capture the call. Overriding it
-is what made those suites green over an encode path they never ran; the
-recorder captures the same facts on the way THROUGH it.
+Do NOT hand-roll a ``_Ctx`` subclass overriding ``save_image``/``save_audio``
+to capture calls: overriding them makes a suite green over an encode path it
+never ran. The recorder captures the same facts on the way THROUGH it.
 
 Not imported by ``gen_worker`` itself — production code has no reason to
 import test helpers; import ``gen_worker.testing`` explicitly from test

@@ -1,21 +1,20 @@
-"""pgw#867 / th#1382 — property tests over the ref grammar, the CAS-ref parser,
-and the chunked-manifest entry decode.
+"""Property tests over the ref grammar, the CAS-ref parser, and the
+chunked-manifest entry decode.
 
 Three decode boundaries, one theme: each turns cross-service bytes into a value
-the worker then acts on, and each has a history of being wrong SILENTLY rather
-than loudly.
+the worker then acts on, and each fails SILENTLY rather than loudly.
 
 * **ref grammar** (``gen_worker.models.refs``) is the Python half of a contract
   whose vectors are vendored byte-identically from tensorhub
-  (``ref_grammar_vectors.json``, th#1276). The vectors assert the cases somebody
-  thought of; the properties here assert the ones nobody did — chiefly that the
-  NORMAL FORM IS A FIXED POINT, because hub-minted refs and worker wire refs are
+  (``ref_grammar_vectors.json``). The vectors assert the cases somebody thought
+  of; the properties here assert the ones nobody did — chiefly that the NORMAL
+  FORM IS A FIXED POINT, because hub-minted refs and worker wire refs are
   compared byte-wise, so a ref that normalizes two ways is a cache miss that
   presents as a missing model.
-* **CAS refs** (``gen_worker.models.chunk_cas.parse_cas_ref``) is where a bare
-  hex string silently defaulted to ``blake3:`` for years. ``len(digest) == 64``
-  cannot tell blake3 from sha256 — both are 32 bytes — so a length check is not
-  a discriminator, it only looks like one.
+* **CAS refs** (``gen_worker.models.chunk_cas.parse_cas_ref``): a bare hex
+  string must not default to ``blake3:``. ``len(digest) == 64`` cannot tell
+  blake3 from sha256 — both are 32 bytes — so a length check is not a
+  discriminator, it only looks like one.
 * **chunked entries** (``gen_worker.models.hub_client.parse_chunk_list``): a
   malformed chunk list must be a hard failure, never a silent empty list. An
   empty list is indistinguishable from "stored whole", and reading a chunked

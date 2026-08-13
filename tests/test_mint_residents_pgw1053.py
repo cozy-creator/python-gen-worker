@@ -1,7 +1,7 @@
 """pgw#1053 — 25.7 GiB of the L40S was held by two residents that did NOTHING
 through the 97-minute compile phase.
 
-The two residents, measured (attempts 24/26/30):
+The two residents:
 
 * the serving PARENT's eager pipeline — 9.54 GiB, now always a live tenant's
   and therefore never parked (see the last section);

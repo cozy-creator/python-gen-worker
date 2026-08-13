@@ -1,22 +1,17 @@
-"""pgw#1058 — the artifact-identity gate on ADMISSION facts.
+"""The artifact-identity gate on ADMISSION facts.
 
-Attempt 30 published the first-ever aot-inductor cell and every adopting pod
-refused all 36 entries. The filed hypothesis was a lying label (entry says
-H_lat=80,W_lat=192, program specialized differently). Pulling the published
-cell apart off-pod ($0) FALSIFIED that: the labels and the packed manifest
-faithfully describe the program. The program itself was minted for a call
-class real traffic never presents — sdxl's declaration omitted `dtype` on its
-scalar `timestep` row and the SDK silently defaulted it to the MODULE's weight
-dtype (bfloat16), while every real scheduler presents float32. 36 entries,
-zero admissible calls, published.
+A cell can be published whose labels and packed manifest faithfully describe
+its program, yet whose program was minted for a call class real traffic never
+presents: a declaration that omits `dtype` on a scalar `timestep` row and gets
+silently defaulted to the MODULE's weight dtype (bfloat16) while every real
+scheduler presents float32. Every entry then refuses on every adopting pod.
 
 Two defect classes die here:
 
-1. THE SILENT DTYPE GUESS — `Input.dtype` is now required: a concrete torch
-   dtype or the explicit word "model". Omission fails the declaring repo's
-   import, not a rented mint pod.
-2. THE UNVERIFIED LABEL (the pgw#1058 acceptance as filed, one layer down
-   from pgw#1042) — the declared manifest rows are now proven against the
+1. THE SILENT DTYPE GUESS — `Input.dtype` is required: a concrete torch dtype
+   or the explicit word "model". Omission fails the declaring repo's import,
+   not a rented mint pod.
+2. THE UNVERIFIED LABEL — the declared manifest rows are proven against the
    artifact's OWN generated `check_input_<i>` guards, at package time (a
    divergent cell is never published) and at arm time (a corrupted one is
    never served), through ONE function: `aot_package.admission_drift`.

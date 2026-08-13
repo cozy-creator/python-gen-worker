@@ -1,9 +1,7 @@
-"""pgw#1197 — the discovery stub satisfied a guarded optional import, so torch
-concluded triton was INSTALLED and then died touching it.
-
-Shipped in 0.113.0; measured on a real fleet1130 conversion build (CPU profile):
-`conversion.quant.vendored_h3` → diffusers' `PeftAdapterMixin` → `peft_utils` →
-`torch_utils` → `torch._dynamo` → **build dead**.
+"""A discovery stub that satisfies a guarded optional import makes torch
+conclude triton is INSTALLED, and torch then dies touching it — e.g.
+`PeftAdapterMixin` → `peft_utils` → `torch_utils` → `torch._dynamo` → build
+dead, on a CPU conversion build.
 
 THE CHAIN, exactly, on torch 2.13.0 with triton genuinely absent::
 
@@ -17,16 +15,14 @@ THE CHAIN, exactly, on torch 2.13.0 with triton genuinely absent::
                                                               ^^^^^^^^^^^^^^^^
                                     not inside any `try` — HeavyDepStubError, fatal
 
-**The root cause is the IMPORT, not the exception type.** The issue filed
-against this proposed raising an `ImportError` subclass so upstream `try/except`
-keeps working. That is wrong twice over and both are pinned below: the fatal
-touch is not inside a `try` at all, and the exception cannot become an
-`ImportError` without breaking `from torch import nn`, which is the entire
-purpose of the stub.
+**The root cause is the IMPORT, not the exception type.** Raising an
+`ImportError` subclass so upstream `try/except` keeps working is wrong twice
+over, and both are pinned below: the fatal touch is not inside a `try` at all,
+and the exception cannot become an `ImportError` without breaking
+`from torch import nn`, which is the entire purpose of the stub.
 
-The module docstring already forbade fooling `find_spec` availability probes.
-`try: import X / except ImportError` is the *other* probe idiom and we were
-fooling it at the same time.
+Fooling `find_spec` availability probes is already forbidden;
+`try: import X / except ImportError` is the *other* probe idiom.
 """
 
 from __future__ import annotations

@@ -1,34 +1,27 @@
-"""pgw#677 REOPEN: the live break the 0.70.0 tapes could not see.
-
-The ie#546 final cycle measured, on gen-worker 0.70.0, a cold L4 pod
-holding one tenant `generate` for 26m25s while an 18-unit mint ran
-4-7-minute units back to back, finalizing at unit 8/18 and publishing
-nothing — with the turn gate armed. Root causes, each pinned here:
+"""A background mint must not starve the tenant, oversize a stolen turn, or
+lose its publish outcome. Three failure modes, each pinned here:
 
   1. ELIGIBILITY MISCLASSIFICATION (the starvation): sdxl's mixed
      ``#fp8-w8a8``-storage checkpoint stamps ``_cozy_weight_lane =
      "w8a8-lora64"`` while the hub serves it ``fp8-w8a16+eager``. The
-     eager-first eligibility (and the router's ``fail_closed``) read the
-     weight-lane prefix, classified the boot mandatory-quantized, and
-     silently fell back to the FOREGROUND compile-then-serve mint: the
-     tenant sat inside ensure_setup for the whole inline-compile plan,
-     and the entire pgw#677 gate/preemption machinery never ran.
-     Fix: ONE serveability brain (``compile_cache.mandatory_serving``) —
-     the hub-resolved execution lane outranks the weight-lane stamp.
+     an eligibility check reading the weight-lane prefix classifies the
+     boot mandatory-quantized and silently falls back to the FOREGROUND
+     compile-then-serve mint, so the tenant sits inside ensure_setup for
+     the whole inline-compile plan and the gate/preemption machinery
+     never runs. ONE serveability brain
+     (``compile_cache.mandatory_serving``): the hub-resolved execution
+     lane outranks the weight-lane stamp.
   2. STOLEN-COMPILE SIZING: a stolen turn is not preemptible and a real
      inductor compile is 4-7 unabortable minutes — ~100x the advertised
      30-90s residual. Compile turns now steal only against MINUTES of
      continuous demand (``_BG_COMPILE_STEAL_FLOOR_S``) and announce the
      steal on the wire.
-  3. THE PUBLISH BREAK: every mint-abort / publish-withhold /
-     closure-refusal exit died in unreachable pod logs. All of them now
+  3. THE PUBLISH BREAK: a mint-abort / publish-withhold /
+     closure-refusal exit dying in unreachable pod logs. All of them
      ride the wire as typed events (``self_mint_abort``,
      ``self_mint_publish_withheld``, ``self_mint_publish_failed``), and
-     an OOM-truncated warm plan can no longer converge silently into a
-     partial finalize.
-
-Every tape here is RED on the 0.70.0 tree (this file is self-contained
-so it can be dropped onto that tree to prove it).
+     an OOM-truncated warm plan cannot converge silently into a partial
+     finalize.
 """
 
 from __future__ import annotations

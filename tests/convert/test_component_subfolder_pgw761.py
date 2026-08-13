@@ -1,24 +1,20 @@
-"""pgw#761: a standalone diffusers component published in a SUBFOLDER.
+"""A standalone diffusers component published in a SUBFOLDER.
 
-PrunaAI/PrunaVAED — the LTX-2.3 VAE decoder ie#572 ruled ships to production —
-publishes ``vae/config.json`` + ``vae/diffusion_pytorch_model.safetensors``
-with no root ``config.json`` and no ``model_index.json``. Every classifier
-case wanted a ROOT marker, so ``clone-huggingface`` refused the repo
-(``unknown_shape``) both full-repo and with ``source_include=["vae/*"]`` —
+PrunaAI/PrunaVAED publishes ``vae/config.json`` +
+``vae/diffusion_pytorch_model.safetensors`` with no root ``config.json`` and no
+``model_index.json``. A classifier that requires a ROOT marker refuses the repo
+``unknown_shape``, full-repo and with ``source_include=["vae/*"]`` alike —
 ``apply_source_include`` filters paths, it never re-roots them.
 
 The fixture is the repo's REAL file listing (``tests/testdata/
 prunavaed_hf_listing.json``, metadata only, no weight bytes) so the red case
 is the production repo, not a hand-drawn approximation.
 
-Paul's ruling (2026-07-29, verbatim): *"yes I actually prefer how Pruna-AI
-laid out their folder; I think we should support this type of layout, rather
-than re-writing the layout, although our repo-composition should be flexible
-and support both."* So both standalone-component shapes are first-class and
-the mirror PRESERVES the publisher's layout — ingest learns to READ the
-shape, it never transforms it. ``vae/`` stays ``vae/``, which is exactly what
-``load_component``'s ``src = root / component`` resolves, and the root-config
-shape (``tensorhub/sdxl-vae-fp16-fix``) is unchanged.
+Both standalone-component shapes are first-class and the mirror PRESERVES the
+publisher's layout — ingest learns to READ the shape, it never transforms it.
+``vae/`` stays ``vae/``, which is exactly what ``load_component``'s
+``src = root / component`` resolves, and the root-config shape
+(``tensorhub/sdxl-vae-fp16-fix``) is unchanged.
 
 The ingest test drives the real ``plan_huggingface``/``ingest_huggingface``
 code path against a local stand-in for the provider (the only thing that

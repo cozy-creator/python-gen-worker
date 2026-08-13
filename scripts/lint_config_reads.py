@@ -9,16 +9,13 @@ with a classification, or this script fails.
 
 Why a repo-owned AST walk rather than ruff's `flake8-tidy-imports` banned-api
 -----------------------------------------------------------------------------
-Ruff is already pinned and already gating, so TID251 would have been free. Its
-exemption unit is `per-file-ignores` — WHOLE FILES — and this repo's accepted
-sites are individual lines inside files that also contain violations
-(`procsplit/parent.py` holds legitimate child-IPC handoffs next to config reads).
-A file-granular allowlist would exempt exactly the files that need checking.
-
-Line granularity is the smaller half of the reason. The larger half: the
-allowlist format forces every accepted site to NAME ITS CLASSIFICATION, which
-is what stops it decaying into a prose exception list that no longer describes
-the tree.
+Ruff's TID251 exemption unit is `per-file-ignores` — WHOLE FILES — and this
+repo's accepted sites are individual lines inside files that also contain
+violations (`procsplit/parent.py` holds legitimate child-IPC handoffs next to
+config reads), so a file-granular allowlist would exempt exactly the files that
+need checking. The bigger reason: this allowlist format forces every accepted
+site to NAME ITS CLASSIFICATION, which stops it decaying into a prose exception
+list that no longer describes the tree.
 
 Only the first classification is a defect:
 

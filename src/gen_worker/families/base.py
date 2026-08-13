@@ -19,11 +19,8 @@ endpoint that serves it::
         negative: str = ""
         max_guidance: float | None = None  # a CLAMP, never a wire reshape
 
-``@family(...)`` self-registers the class in the module-level registry
-(keyed by ``(name, kind)`` — see below) — :func:`family_for` /
-:func:`family_registry` look it up by name/kind, the way
-:class:`~gen_worker.api.slot.Slot`'s resolution chain does when repo
-metadata JSON arrives with no code fallback to decode against.
+``@family(...)`` self-registers the class in the module-level registry keyed by
+``(name, kind)``; :func:`family_for` / :func:`family_registry` look it up.
 
 **Kind axis.** A family name has (up to) two vocabularies: the CHECKPOINT
 recipe (``kind="checkpoint"``, the default) and the
@@ -37,20 +34,18 @@ sharing the same family name::
         steps: int | None = None
         ...
 
-Same family, separate KIND axis rather than a second family namespace
-(``"sdxl-lora"``) — a LoRA targets the SAME architecture root as its base
-checkpoint (``modelfamily.Root`` on the tensorhub side), so keying the
-vocabulary registry by ``(family, kind)`` keeps that identity explicit
-instead of inventing a parallel family name per kind. tensorhub's schema
-registry mirrors this: ``<root>.schema.json`` (checkpoint) vs
-``<root>.lora.schema.json`` (lora) — see ``export_json_schema``.
+A separate KIND axis rather than a second family namespace (``"sdxl-lora"``):
+a LoRA targets the SAME architecture root as its base checkpoint
+(``modelfamily.Root`` on the tensorhub side), so keying by ``(family, kind)``
+keeps that identity explicit. tensorhub's schema registry mirrors this:
+``<root>.schema.json`` (checkpoint) vs ``<root>.lora.schema.json`` (lora) —
+see ``export_json_schema``.
 
 A DECORATOR, not a ``class X(GenerationDefaults, family="sdxl")`` class kwarg:
-msgspec's own ``StructMeta`` does not forward unrecognized class keywords to
-``__init_subclass__`` (verified: it raises ``TypeError`` on an unknown
-kwarg), and mypy cannot type-check a metaclass computed at runtime
-(``type(msgspec.Struct)``) as a valid base for a wrapping metaclass either —
-both dead ends given the "mypy 0" gate, hence the decorator.
+msgspec's ``StructMeta`` does not forward unrecognized class keywords to
+``__init_subclass__`` (it raises ``TypeError`` on an unknown kwarg), and mypy
+cannot type-check a metaclass computed at runtime (``type(msgspec.Struct)``) as
+a base for a wrapping metaclass.
 
 ``forbid_unknown_fields=True`` on the base is what makes
 :func:`export_json_schema` emit ``additionalProperties: false`` — the

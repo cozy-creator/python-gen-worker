@@ -10,7 +10,7 @@ three ways and none carried a cause:
                               did not adopt on this runtime)"
     error                  : "delegated mint produced no advertisable cell"
 
-Attempt 26 paid 2 h 45 m and $2.72 of L40S to learn "something". The
+A mint can therefore burn hours of rented GPU to report "something". The
 classified string existed in-process — ``contract_invalid``,
 ``constants_unbound``, ``no_arm_for_mode``, ``numerics_refused`` — and was
 discarded one frame before the wire. This is the ``worker-errors-to-

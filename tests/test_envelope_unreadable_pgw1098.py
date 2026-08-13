@@ -1,27 +1,20 @@
-"""pgw#1098 — an UNREADABLE cell envelope must refuse by name, not vanish.
+"""An UNREADABLE cell envelope must refuse BY NAME, not vanish.
 
-Row 7 (2026-08-10, sdxl on L40S): 36/36 entries compiled in 92 minutes, then
-nothing was published. The wire said `lifted_inputs_unbindable` — a LoRA
-contract refusal — and the mint-goal driver correctly retired the pod on the
-resulting `forge_terminal no_cell`. $1.584 for no cell.
+The failure mode: `artifact_meta.MAX_METADATA_BYTES` (16 MiB) refuses to READ a
+36-entry envelope, `try_read_metadata` turns that refusal into `None`, and
+`None` reads as "this cell states no facts" at two consecutive call sites, each
+silently skipping the work it owed:
 
-The LoRA contract was never the problem. `artifact_meta.MAX_METADATA_BYTES`
-(16 MiB, landed in the same release) refused to READ the 36-entry envelope;
-`try_read_metadata` turned that refusal into `None`; and `None` then read as
-"this cell states no facts" at two consecutive call sites, each of which
-silently skipped the work it owed:
+  1. `adopt_delegated_mint` skips the key-axis divergence check;
+  2. `arm_aot` skips the lifted-binding install, because an envelope that states
+     no targets names no module to install onto.
 
-  1. `adopt_delegated_mint` skipped the pgw#1042 key-axis divergence check;
-  2. `arm_aot` skipped the lifted-binding install, because an envelope that
-     states no targets names no module to install onto.
-
-`aot_serve.enable` — which read the SAME member through a SECOND, unbounded
-reader — then found the artifact declaring `lora_a`/`lora_b` against an
-unlifted module and refused. The gate that noticed got named; the read that
-failed did not. The only trace of the real cause on the wire was the word
-`unreadable` in one event's `cell_key=` field.
-
-Each test below is RED on the pre-fix tree for its own reason.
+`aot_serve.enable`, reading the SAME member through a SECOND unbounded reader,
+then finds the artifact declaring `lora_a`/`lora_b` against an unlifted module
+and refuses `lifted_inputs_unbindable`. The gate that noticed gets named; the
+read that failed does not — a 92-minute 36/36 compile publishes nothing and the
+only trace of the real cause on the wire is the word `unreadable` in one event's
+`cell_key=` field.
 """
 
 from __future__ import annotations

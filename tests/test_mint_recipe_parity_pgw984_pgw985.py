@@ -1,44 +1,29 @@
 """pgw#984 + pgw#985 — the two mint recipes, held to one contract.
 
-Both defects were MEASURED by the pgw#978 micro-mint rig inside its first hour,
-at ~20 s a cycle, by running the same machinery twice with only
-``MintRequest.recipe`` changed. They are the same kind of finding: the two
-recipes had drifted into two different answers to one question.
+Two properties, each a defect CLASS rather than a call site:
 
-**pgw#984 — the AOT recipe never entered the endpoint.** A measured AOT mint's
-phase table was ``{'load': 4.4, 'trace_graph': 8.1, 'seal_publish': 0.9,
-'finalize': 0.0}`` — no ``warmup_forward`` row at all, because
-``torch.export`` traces the declared modules directly and the handler is never
-called. So a green AOT mint proved the family's graphs export and said nothing
-about whether the forward those graphs serve can run. pgw#969's crash
-(``ctx.slots["pipeline"]``, 0.0 s into ``warmup_forward``, twice on L40S pods)
-is *unreachable* on that recipe: it would have sealed and published a cell for
-an endpoint whose first real request dies.
+**The AOT recipe never enters the endpoint.** ``torch.export`` traces the
+declared modules directly and the handler is never called, so an AOT mint has no
+``warmup_forward`` phase: a green mint proves the family's graphs export and
+says nothing about whether the forward those graphs serve can run. Unchecked, it
+seals and publishes a cell for an endpoint whose first real request dies.
 
-**pgw#985 — a deterministic arm decline was a crash.** On the same box, the
-same pipeline, the (then-existing) dynamo recipe raised::
+**A deterministic arm decline must not be a crash.** Two things go wrong when it
+is, and each is a class:
 
-    RuntimeError: no compile targets resolved on TinyDiffusionPipeline
-
-...out of the cold arm — about a pipeline whose ``.unet``
-``has_compile_target`` had resolved one frame earlier. Two things were wrong
-and each is a class:
-
-1. the arm answered TWO facts with ONE sentence. The pipeline
-   owned its declared target; what actually declined was ``apply``, because
-   the process had no CUDA. Two computations of one fact disagree eventually
-   (§1.29, th#1616) — these two had, and the survivor lied.
+1. the arm answers TWO facts with ONE sentence — "no compile targets resolved"
+   about a pipeline whose ``.unet`` ``has_compile_target`` resolved one frame
+   earlier, when what actually declined was ``apply``, because the process had
+   no CUDA. Two computations of one fact disagree eventually (§1.29), and the
+   survivor lies.
 2. A bare ``RuntimeError`` exits 1, which classifies ``CRASHED`` — the
    retryable class. On a pod that is a second billed mint for a condition the
-   first attempt had already settled. The AOT recipe types the identical
-   condition ``PreflightRefused`` -> ``EXIT_REFUSED`` -> terminal.
+   first attempt had already settled. The correct typing is
+   ``PreflightRefused`` -> ``EXIT_REFUSED`` -> terminal.
 
-pgw#1010 deleted the dynamo recipe's ARTIFACT (it had no consumer), so the
-child now mints one kind. Both findings survive intact and are asserted where
-they still live: the arm that answers with one sentence is
-``compile_cache.arm_jit_intake`` — the JIT INTAKE arm a serving pod takes
-instead — and the terminal classification is the child's, on the one recipe it
-has.
+The child mints one kind of artifact, so both are asserted where they live: the
+arm that answers with one sentence is ``compile_cache.arm_jit_intake`` — the JIT
+INTAKE arm a serving pod takes — and the terminal classification is the child's.
 """
 
 from __future__ import annotations

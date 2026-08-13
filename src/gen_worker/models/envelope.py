@@ -1,10 +1,9 @@
 """The pre-stage envelope precondition.
 
-Without it a worker that KNOWS an artifact weighs 32.81 GiB and KNOWS the
-declaration says 22 stages anyway, OOMs inside ``setup()``, disables every
-function in its lane, trips the hub's ``model_load_failure_streak`` and darkens
-a live endpoint — a billed GPU per attempt for a fact that was on disk before
-the first byte moved.
+Without it a worker that KNOWS an artifact outweighs the declared envelope
+stages anyway, OOMs inside ``setup()``, disables every function in its lane,
+trips the hub's ``model_load_failure_streak`` and darkens a live endpoint — a
+billed GPU per attempt for a fact that was on disk before the first byte moved.
 
 THE PRECONDITION. Before staging, weigh the artifact AS IT WILL LOAD and
 compare it against the envelope the release declares. A clear breach is a

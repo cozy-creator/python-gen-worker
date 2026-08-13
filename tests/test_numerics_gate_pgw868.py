@@ -1,9 +1,9 @@
-"""pgw#868 — THE NUMERICS GATE. Everything that runs without a card.
+"""THE NUMERICS GATE. Everything that runs without a card.
 
-The cross-cutting requirement of pgw#868: *everything this program built
-refuses a cell for being UNUSABLE; nothing refused one for being WRONG.*
+The requirement: a cell must be refusable for being WRONG, not only for being
+UNUSABLE.
 
-The trap this file exists to keep shut, stated once: `numerics_ladder.gate()`
+The trap this file keeps shut: `numerics_ladder.gate()`
 opens `if comparison is None: return None`. Wiring the call without producing a
 measurement passes EVERY cell, always, while looking correct in the diff and in
 the call graph. So the tests that matter here are not "is `gate` called" — they
@@ -14,8 +14,8 @@ are:
 * a cell that cannot be MEASURED does not arm either — "nobody could ask" is
   not "it passed";
 * and the verdict is bisectable to ONE named axis (one entry x one shape row x
-  one lane), because a whole-cell fail nobody can split is the artifact that
-  produced three wrong confident diagnoses in this program.
+  one lane) — a whole-cell fail nobody can split invites a confident wrong
+  diagnosis.
 
 Everything below drives the REAL arm path — `provision.arm_aot` ->
 `aot_serve.enable` -> stage/verify/bind/wrap -> the gate — against a real packed

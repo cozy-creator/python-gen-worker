@@ -9,11 +9,10 @@ three named classes, and the classification is what the caller reads:
   in torch's candidate-load path (B2),
 * ``cell_keys=0``  => the artifact was unreadable.
 
-All three are differences measured against a CELL side that the function read
-out of a `torch-inductor-cache` tarball's `inductor/fxgraph/` tree. pgw#1178
-deleted that format's last writer and pgw#1181 deleted the format, so the tar
-walk can only ever yield nothing — and with an empty cell side the arithmetic
-does not degrade gracefully, it INVERTS:
+All three are differences measured against a CELL side the function read out of
+a `torch-inductor-cache` tarball's `inductor/fxgraph/` tree. That format no
+longer exists, so the tar walk can only ever yield nothing — and with an empty
+cell side the arithmetic does not degrade gracefully, it INVERTS:
 
 * `fresh = live_keys - seeded_names` becomes EVERY live key, so `fresh_keys>0`
   fires on every boot that has any FX entry at all. The report names B1 —
@@ -22,15 +21,10 @@ does not degrade gracefully, it INVERTS:
   structurally 0 and B2 is unreportable.
 * `cell_keys=0`, the "unreadable artifact" class, is now the normal case.
 
-A diagnostic that always names one class is worse than no diagnostic: it is
-read as evidence. §4.35's amendment decides the disposition — the cell half
-cannot be switched ON (there is no format to read) and finishing it would mean
-resurrecting the format, so it is DELETED, and what remains is the live-cache
-census the dynamo lane can actually observe.
-
-The call site was already scoped correctly (`if proves_inductor and ...`,
-"FX forensics describe the dynamo lane only"), which is why
-this went unnoticed — the branch is reachable, its yield is not.
+A diagnostic that always names one class is worse than no diagnostic: it is read
+as evidence. The cell half cannot be switched ON — there is no format to read,
+and restoring it would mean resurrecting the format — so it is DELETED, and what
+remains is the live-cache census the dynamo lane can actually observe.
 """
 
 from __future__ import annotations

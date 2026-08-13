@@ -11,8 +11,6 @@ A mint hour with one name on it cannot be optimised — you cannot tell a
 compile-bound mint from a warm plan that is simply running too many diffusion
 steps. This module measures the split.
 
-How, and why these keys
------------------------
 Same instrument as the AOT path (:mod:`gen_worker.aot_compile_spans`): deltas
 of dynamo's process-global ``compilation_time_metrics`` across a span. The KEY
 SET is different and that difference is the whole point — the AOT partition

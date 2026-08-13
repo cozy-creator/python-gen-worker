@@ -10,8 +10,8 @@ endpoint whose handler cannot run at all.
 Running that proof in the MINT CHILD is wrong: on a weight-free mint the child
 holds no weights, so it would have to materialise REAL random values for every
 virtual parameter — one full checkpoint at compute dtype, **concurrently with
-the parent's resident copy**. Measured on an H100-80 for wan-2.2: 56.2 GB
-wanted, 15.5 GiB free, `CUDA out of memory` twice, no cell, eager for life.
+the parent's resident copy**. On an H100-80 for wan-2.2 that is 56.2 GB wanted
+against 15.5 GiB free: `CUDA out of memory`, no cell, eager for life.
 
 §4.33 steps 4-5 already say where verification goes: *"load the cell into the
 LIVE pipeline — already running eager — and verify it works"*, against weights

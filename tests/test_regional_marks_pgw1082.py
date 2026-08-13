@@ -1,10 +1,8 @@
 """pgw#1082: the regional lane armed, entered, never guard-missed — and ran
 100% EAGER while every telemetry axis said compiled.
 
-pgw#1078 fixed *routing* (a ``regional=True`` + ``dynamic=(...)`` target now
-takes the dynamo regional branch). This suite covers what the routing fix
-then EXECUTED, measured on minimax-h3 0.4.3 at 6.27 s/step against the rig's
-4.31 for the identical recipe:
+With routing correct (a ``regional=True`` + ``dynamic=(...)`` target takes the
+dynamo regional branch), four defects remain in what it then EXECUTES:
 
 1. ``_with_declared_marks`` marked one dim of one KIND of tensor. The sibling
    tensors carrying the same axis — the integer ``adaln_indices[S]``, the

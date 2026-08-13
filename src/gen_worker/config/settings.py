@@ -1,10 +1,9 @@
 """Worker `Settings` struct — the canonical typed config for the worker process.
 
-Ruling §1.18 (Paul, 2026-08-02): *"we should NEVER be loading random envs in
-the middle of code; we should only load it from our config pipeline and then
-pass it around."* Exactly one component in this process reads the process
-environment — `gen_worker.config` — and it produces exactly one typed struct,
-which is **passed by parameter**.
+Ruling §1.18: NEVER load envs in the middle of code — load from the config
+pipeline and pass the value around. Exactly one component in this process reads
+the process environment — `gen_worker.config` — and it produces exactly one
+typed struct, which is **passed by parameter**.
 
 Each process entry performs one bootstrap-owned `load_settings()`:
 `entrypoint._run_main()` for the worker, `procsplit.parent.main()` for the
@@ -17,9 +16,8 @@ by whichever module happened to import first.
 
 The list of sanctioned raw-read sites is deliberately not prose here (prose
 drifts). It is `scripts/config_reads_allowlist.txt`, every line classified,
-enforced by
-`scripts/lint_config_reads.py` in CI. A new `os.environ` read outside this
-package fails the build.
+enforced by `scripts/lint_config_reads.py` in CI. A new `os.environ` read
+outside this package fails the build.
 
 Built on msgspec.Struct (already a worker dep) instead of pydantic-settings to
 avoid pulling in pydantic. The source-loader layering (env → .env → secrets dir

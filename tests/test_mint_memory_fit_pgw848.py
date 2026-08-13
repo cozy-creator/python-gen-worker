@@ -1,32 +1,21 @@
-"""pgw#848: K must be a FIT against a measured high-water, not a constant.
+"""K must be a FIT against a measured high-water, not a constant.
 
-RED/GREEN, verified by reverting the seven source files in place: **4 failed /
-1 passed** on the tip that preceded this change, 5/5 green with it. The one
-that was already green is
-``test_a_measured_per_entry_ask_actually_narrows_the_pool`` — and that is the
-finding, not a gap: ``entry_workers(peak_rss_bytes=...)`` has always DONE the
-right thing with a measurement. No caller had ever handed it one.
-
-The chain, and where it was broken
-----------------------------------
 ``aot_compile_pool.entry_workers`` bounds K on three readings, one of which is
-``peak_rss_bytes`` — one entry child's host high-water. Four independent breaks
-meant that argument had never carried a measured value on any mint the fleet
-has run:
+``peak_rss_bytes`` — one entry child's host high-water. Four things must hold
+for that argument to carry a real measurement:
 
-1. the entry child measured ``RUSAGE_SELF``, which cannot see ``cc1plus``;
-2. the pool's live sampler walked ONE level of ``/proc/<pid>/children``, and
+1. the entry child measures ``RUSAGE_CHILDREN``, not ``RUSAGE_SELF``, which
+   cannot see ``cc1plus``;
+2. the pool's live sampler walks ``/proc/<pid>/children`` RECURSIVELY —
    ``cc1plus`` is at depth 2;
-3. nothing banked the pool's own ``peak_child_rss_bytes``, which it has
-   measured and published in its phase table since pgw#830;
-4. ``aot_mint`` called ``entry_workers`` with a per-entry DEVICE ask and never
-   passed ``peak_rss_bytes`` at all, so ``mem_workers`` divided available RAM
-   by a 3 GiB constant and ``per_entry_rss_basis`` read ``"default"`` forever.
-   (pgw#1175 deleted the device ask; this reading is now the ONLY per-entry
-   footprint K divides by, which makes every row below load-bearing.)
+3. the pool's own ``peak_child_rss_bytes`` is banked;
+4. ``aot_mint`` passes ``peak_rss_bytes`` to ``entry_workers``; without it
+   ``mem_workers`` divides available RAM by a 3 GiB constant and
+   ``per_entry_rss_basis`` reads ``"default"`` forever. This is the ONLY
+   per-entry footprint K divides by.
 
-MEASURED behind (1) and (2), off-pod, $0, on the real sdxl AOTI wrapper TU
-(6,324,290 bytes, production flags, g++ 13.3, this box)::
+Why (1) and (2) matter — measured on the real sdxl AOTI wrapper TU (6,324,290
+bytes, production flags, g++ 13.3)::
 
     ground truth, whole process tree          2.052 GiB
       of which ONE process, cc1plus           2.049 GiB
@@ -34,8 +23,9 @@ MEASURED behind (1) and (2), off-pod, $0, on the real sdxl AOTI wrapper TU
     RUSAGE_SELF          (instrument 1)       0.012 GiB   <- 171x low
     one-level /proc walk (instrument 2)       0.015 GiB   <- 133x low
 
-Both instruments the fleet actually ships read ~0.015 GiB of a real 2.05 GiB.
-Wall clock is deliberately not quoted: the box was loaded. RSS is not.
+``test_a_measured_per_entry_ask_actually_narrows_the_pool`` is green either
+way: ``entry_workers(peak_rss_bytes=...)`` always did the right thing with a
+measurement; the defect was that no caller handed it one.
 """
 
 from __future__ import annotations

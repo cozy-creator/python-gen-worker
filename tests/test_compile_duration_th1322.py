@@ -1,38 +1,22 @@
-"""th#1322: compile duration is a NUMBER on the wire, for both mint routes.
+"""Compile duration is a NUMBER on the wire, for both mint routes.
 
-The gap this closes (audited 2026-07-30, `BENCHMARK-TELEMETRY-COMPLETENESS.md`):
+A duration parsed out of free-text `detail` is not indexable, not
+percentile-able without a per-row cast, and silently NULL the first time the
+formatting changes. So: `ActivityUpdate.duration_ms` (proto field 17) + a typed
+`jit_compile` event with the SAME event shape as `aot_mint_phases` —
+`phase=minted` carries the roll-up, finer phases carry the spans inside it.
+Comparing the two routes is one grouped query, not two incompatible sources.
 
-* **AOT mint** already reached the hub as a typed `aot_mint_phases` event, but
-  the whole phase table arrived interpolated into the free-text `detail`. A
-  measurement lane had to run `substring(detail from 'total_s.: ?([0-9.]+)')`
-  to get a duration — not indexable, not percentile-able without a cast per
-  row, and silently NULL the first time the formatting changes.
-* **JIT mint** was worse: `compile_cache` logged `"compiled %s in %.0fs"` and
-  nothing else, and a serve pod exposes no logs. The single number an
-  AOT-vs-JIT comparison most needs did not exist off-pod in any form.
+What is real here:
 
-So: `ActivityUpdate.duration_ms` (proto field 17) + a typed `jit_compile` event
-with the SAME event shape as `aot_mint_phases` — `phase=minted` carries the
-roll-up, finer phases carry the spans inside it. Comparing the two routes is one
-grouped query, not two incompatible sources.
-
-What is real here
------------------
 * The events cross a REAL TCP gRPC socket to the hub-double, emitted through the
-  REAL `activity.bind_sink` the real `Worker` transport installed — the same leg
-  the pgw#789 dimension assertion uses. Read back off the wire, never from a
-  spy.
+  REAL `activity.bind_sink` the real `Worker` transport installed. Read back off
+  the wire, never from a spy.
 * The emitters are the PRODUCTION functions: `aot_mint._emit_phase_event` and
-  `compile_cache.emit_jit_compile_event`. Nothing is re-implemented for the
-  test — the pgw#789 lesson was a module that was correct, unit-tested, and
-  imported by nothing but its own test.
-
-pgw#1010 moved the JIT half of this contract without weakening it. The mint
-child no longer runs a JIT recipe (a dynamo cell had no consumer), so
-`mint_delegate._emit_jit_compile` is deleted; the JIT compile that still
-happens — and still has to be comparable against an AOT mint — is the INTAKE
-compile on a serving pod, emitted by the executor's proof window through the
-same `emit_jit_compile_event`.
+  `compile_cache.emit_jit_compile_event`. Nothing is re-implemented for the test.
+* The JIT compile that has to be comparable against an AOT mint is the INTAKE
+  compile on a serving pod, emitted by the executor's proof window through
+  `emit_jit_compile_event`; the mint child runs no JIT recipe.
 * The `mint_child` phase clock is driven through the real `frame()` funnel, in a
   real subprocess-free path, and the resulting `MintReport` is what the parent
   emitter consumes.

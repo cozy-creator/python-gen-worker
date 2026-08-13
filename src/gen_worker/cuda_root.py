@@ -22,24 +22,20 @@ Tensorhub's SYNTHESIZED Dockerfile composes this root. A family that ships its
 OWN Dockerfile gets none of it, so without this module it can install ``g++``,
 pass the ``cxx_toolchain`` precondition, boot a pod, load, export — the
 expensive part — and only then die at ``CUDA_HOME``: a PAID failure where the
-missing-compiler sibling is a free one.
-
-The fix is this module, invoked by the author in one line:
+missing-compiler sibling is a free one. The author invokes it in one line:
 
     RUN python -m gen_worker.cuda_root
 
-The author still owns invoking it — the platform never injects layers into
-author-owned content. The SDK owns the recipe's correctness, so there is ONE
-authority for it rather than twenty lines of shell transcribed into every
-Dockerfile that needs it.
+The author owns invoking it — the platform never injects layers into
+author-owned content — while the SDK owns the recipe, so there is ONE authority
+rather than twenty lines of shell transcribed into every Dockerfile.
 ``aot_preconditions.CHECK_CUDA_ROOT`` then VERIFIES the result at build time,
 so an image that declares an AOT export and skipped this refuses for $0.00
 instead of on a rented card.
 
 Nothing here fails: a CPU image has no CUDA root to compose, and an image that
-cannot AOT-compile is still a working eager-serving image. The refusal is the
-precondition's job, and it is deliberately a separate one — this step reports,
-the gate decides.
+cannot AOT-compile is still a working eager-serving image. Refusing is the
+precondition's job, deliberately separate — this step reports, the gate decides.
 
 ``/usr/local/cuda`` is COMPOSED (a real directory of symlinks) rather than
 pointed at a wheel, so nothing is ever written inside a pip package.

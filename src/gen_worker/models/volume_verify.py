@@ -8,11 +8,11 @@ between one release and another's weights. It is therefore:
 *   **MANDATORY** — never sampled, never opt-in, never skipped because the tree
     "looks fine". A file the manifest covers is hashed.
 *   **PREFIX-DISPATCHED** — the algorithm comes from the digest, never from the
-    call site. The old code read ``f.blake3`` and hashed with blake3; under
-    manifest v2 that field is EMPTY and the digest lives in ``f.digest`` as
-    ``sha256:<hex>``, so the check would have silently verified nothing while
-    still reporting a clean tree. That is the same false-clean shape as reading
-    ``manifest["files"]`` when the key is ``entries``.
+    call site. Under manifest v2 ``f.blake3`` is EMPTY and the digest lives in
+    ``f.digest`` as ``sha256:<hex>``, so a call site that picks the algorithm
+    itself verifies nothing while still reporting a clean tree — the same
+    false-clean shape as reading ``manifest["files"]`` when the key is
+    ``entries``.
 *   **FAIL-CLOSED** — a mismatch names the blob to quarantine so
     re-materialization re-downloads instead of re-linking the same bad bytes.
     Upstream reports stay untrusted hints.

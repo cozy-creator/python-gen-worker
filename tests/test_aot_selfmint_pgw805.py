@@ -1,31 +1,18 @@
-"""pgw#805 — an AOT cell-discovery MISS must start a mint, or refuse BY NAME.
+"""An AOT cell-discovery MISS must start a mint, or refuse BY NAME.
 
-The defect this pins, measured on five real 0.78.0 L4 pods (hub-dispatched,
-`Compile(family="sdxl",
-targets=("unet",))` declared, compile target advertised, discovery working
-through a 200 listing, `cell_mint_hold_granted` on every pod, trickle traffic
-earning pgw#677 background turns):
+A miss that produces no mint, no `self_mint_abort` and no `self_mint_skipped`
+is the failure this pins. Three wires make it possible, and each gets a test:
 
-    self_mint_compile  load            running
-    aot_cell_discovery miss            completed   family=sdxl lane=lora64
-    self_mint_compile  warmup_forward  running
-    self_mint_compile  warmup_forward  completed
-    (nothing further, ever)
-
-No mint, no `self_mint_abort`, no `self_mint_skipped` — no refusal of ANY
-kind. Three separate wires were missing, and each gets a test here:
-
-1. **No producer.** `aot_mint.mint` was reachable only from
-   `python -m gen_worker.aot_mint`; nothing on the serving path imported it.
-   A miss could only fall through to the DYNAMO self-mint, whose artifact
-   kind `aot_cells._candidates` rejects — so the next pod missed identically,
+1. **No producer.** If `aot_mint.mint` is reachable only from
+   `python -m gen_worker.aot_mint` and nothing on the serving path imports it,
+   a miss falls through to the DYNAMO self-mint, whose artifact kind
+   `aot_cells._candidates` rejects — so the next pod misses identically,
    forever.
 2. **No declaration.** `aot_mint.mint` refuses a family with no registered
-   export declaration, and registration only happened when a mint REQUEST
-   named a declaration module. A serving pod loads its endpoint and nothing
-   else.
-3. **Silence.** Every not-mint exit was a `logger.info`, and a serve pod
-   exposes no logs.
+   export declaration. Registration must not depend on a mint REQUEST naming a
+   declaration module: a serving pod loads its endpoint and nothing else.
+3. **Silence.** A not-mint exit written as a `logger.info` is invisible — a
+   serve pod exposes no logs.
 """
 
 from __future__ import annotations

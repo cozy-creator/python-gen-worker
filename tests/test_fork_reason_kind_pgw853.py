@@ -1,10 +1,9 @@
-"""pgw#853 / ie#591: `unserved` meant five things; make the kind DECLARED.
+"""`unserved` means five different things; the kind is DECLARED.
 
-THE MEASUREMENT THIS EXISTS FOR. A fleet audit asked of every `unserved` fork
-arm whether it is closed by an ABSENT CODE PATH or by a DEFAULT VALUE. Seven
-distinct forks, and the answer was that ``Fork(unserved=)`` was recording
-**five materially different guarantees as one word**, only one of which means
-"unreachable":
+``Fork(unserved=)`` records five materially different guarantees, only one of
+which means "unreachable". Whether a fork arm is closed by an ABSENT CODE PATH
+or merely by a DEFAULT VALUE is the question, and it must be answerable by
+machine:
 
 ===================  ==========================================  ===========
 kind                 fleet example                               strength
@@ -20,13 +19,10 @@ eager_by_choice      qwen ``condition_images`` — reachable AND    not a hazard
                      served, excluded from the COMPILED set       at all
 ===================  ==========================================  ===========
 
-and ``why=`` was free prose doing a machine's job — prose that ltx was shown
-wrong on TWICE in one day. A guarantee whose strength is only discoverable by
-reading prose is not a guarantee; it is a note.
-
-The property that makes the field worth having is that it makes the WEAK ones
-greppable instead of readable: :func:`weak_arms` answers in a call what took a
-day to answer by hand.
+``why=`` is free prose and cannot carry this: a guarantee whose strength is only
+discoverable by reading prose is a note, not a guarantee. The declared kind
+makes the WEAK ones greppable — :func:`weak_arms` answers in one call what
+otherwise takes a day of reading.
 """
 
 from __future__ import annotations

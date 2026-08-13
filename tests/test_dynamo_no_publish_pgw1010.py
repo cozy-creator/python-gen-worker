@@ -1,22 +1,19 @@
-"""pgw#1010 — the JIT recipe serves, and produces nothing.
+"""The JIT recipe serves, and produces nothing.
 
-Paul's ratified reuse ruling ("reuse = AOT cells only; JIT = intake mode,
-honest cold boots") composed with two facts already in the tree:
-``aot_cells._candidates`` rejects ``kind="torch-inductor-cache"`` BY NAME, and
-nothing else has ever adopted one. A dynamo cell therefore had zero possible
-consumers, and every one minted was pod time and platform storage spent on an
-artifact that could not be adopted — attempt 23's ``ck5-a53e02a7…`` among them.
+Reuse is AOT cells only; JIT is intake mode with honest cold boots.
+``aot_cells._candidates`` rejects ``kind="torch-inductor-cache"`` BY NAME and
+nothing else adopts one, so a dynamo cell has zero possible consumers and every
+one minted is pod time and platform storage spent on an unadoptable artifact.
 
 The dynamo recipe KEEPS its serving role (intake for a family with no export
-declaration — ruled, untouched). What it loses is the artifact: no seal, no
-key, no publish, no ``cell_store`` row, no mint obligation.
+declaration). What it loses is the artifact: no seal, no key, no publish, no
+``cell_store`` row, no mint obligation.
 
 Two guards, because either alone is weak:
 
-* a SOURCE guard (the ``mint_recipe`` silent-decline AST guard's style): the
-  intake branch cannot reach the seal/publish vocabulary, and the vocabulary
-  itself is gone where it was dynamo-only. A future edit that re-wires a pack
-  onto this branch fails here rather than on a rented pod;
+* a SOURCE guard: the intake branch cannot reach the seal/publish vocabulary,
+  and the vocabulary itself is gone where it was dynamo-only. A future edit that
+  re-wires a pack onto this branch fails here rather than on a rented pod;
 * a BEHAVIOURAL guard: drive the real arming policy on a family with no export
   declaration and assert what the pod does — armed (it compiles and serves),
   no pending, no publisher call, and a typed decline on the wire.

@@ -23,17 +23,13 @@ lets two concurrent requests corrupt each other's trajectory — and the
 assignment is exactly the swap-don't-wrap that risks a recompile. Cloning the
 scheduler per request is a CORRECTNESS fix, not an optimization.
 
-The view clones EVERY scheduler the pipeline carries, not just the
-attribute literally named ``scheduler``. A pipeline with a second stateful
-sampler — ``LTX2ConditionPipeline.audio_scheduler`` for the audio half of its
-joint video+audio latent, which diffusers' own ``__call__`` drives with
-``retrieve_timesteps`` and a ``.step()`` per denoise step — otherwise kept
-SHARING it, silently reintroducing the exact corruption ``for_request``
-exists to remove, in a pipeline that reads as fully fixed. "Which of my
-attributes carry per-request state" is the question this function was
-introduced to stop endpoints answering by hand, so the SDK owns the
-enumeration (:func:`discover_schedulers`) and no endpoint has to know to
-hand-roll a second clone.
+The view clones EVERY scheduler the pipeline carries, not just the attribute
+literally named ``scheduler``: a pipeline with a second stateful sampler (e.g.
+``LTX2ConditionPipeline.audio_scheduler``, stepped once per denoise step by
+diffusers' own ``__call__``) would otherwise keep SHARING it and silently
+reintroduce the corruption ``for_request`` exists to remove. The SDK owns the
+enumeration (:func:`discover_schedulers`) so no endpoint has to answer "which of
+my attributes carry per-request state" by hand.
 
 Handlers reach this through ``ctx.for_request(self.pipeline, ...)`` (which
 also applies the resolved checkpoint's objective — v-prediction/flow are

@@ -2,15 +2,11 @@
 """The compute child cannot answer a question about itself with a credential
 it does not hold — so every site that reads one is classified.
 
-THE DEFECT CLASS. The compute child (the only execution model) holds **no
-worker credential by construction**: the parent strips ``WORKER_JWT`` from its
-environment and no frame carries it. A gate that reads that credential to
-answer "who am I?" or "is there a hub?" is therefore not wrong on some pods —
-it is wrong on **every real serving pod, always**, and it looks like a decision
-while it does it. Measured twice on the same seam: boot-adopt read "do I hold a
-bearer?" as "is there a hub to ask?" and never called resolve at all, and the
-cell receipt trust gate decoded viewer claims out of this process's own JWT and
-refused every org-tier cell.
+The compute child (the only execution model) holds **no worker credential by
+construction**: the parent strips ``WORKER_JWT`` from its environment and no
+frame carries it. A gate that reads that credential to answer "who am I?" or
+"is there a hub?" is therefore not wrong on some pods — it is wrong on **every
+real serving pod, always**, and it looks like a decision while it does it.
 
 Every read of a worker credential inside
 ``src/gen_worker`` must appear in ``scripts/credential_identity_allowlist.txt``

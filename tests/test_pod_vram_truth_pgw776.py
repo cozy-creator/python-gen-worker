@@ -1,7 +1,6 @@
-"""pgw#776: the pod's hub-facing VRAM truth is not one group's.
+"""The pod's hub-facing VRAM truth is not one group's.
 
-Two defects in `lifecycle.free_vram_bytes` (DPA-5) and one in `probe_hardware`
-(DPA-7):
+Two defects in `lifecycle.free_vram_bytes` and one in `probe_hardware`:
 
 - MAX across groups is honest PER JOB and dishonest per POD: the hub admits
   against a single scalar, so it can admit G concurrent jobs whose sum is G

@@ -6,7 +6,7 @@ the job produces into the destination checkpoint — and calls
 flavor's ``path`` (file OR directory) as one Tensorhub commit and attaches
 the declared ``attributes`` to the commit payload.
 
-Attribute-bag ownership (issue #22 — server-authoritative metadata):
+Attribute-bag ownership (server-authoritative metadata):
   - Tenant declares ONLY tenant-specific attributes (technique config,
     quant_library + family-required keys, human-readable labels).
   - dtype / file_layout / file_type / kind / library are SERVER-INFERRED

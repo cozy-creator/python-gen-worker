@@ -6,11 +6,10 @@ pytree leaf. Every part of this SDK that has to line the two views up — the
 mint building an ingress contract, the serve path binding a real call to it,
 the declared-range gate resolving a declared name against an exported one —
 needs the same answer to "which leaf is this". Computing it separately in each
-place has produced three distinct off-by-a-container defects, so the rule lives
-in exactly one place and every consumer reads it from here.
+place produces off-by-a-container defects, so the rule lives in exactly one
+place and every consumer reads it from here.
 
-MEASURED, on torch 2.13.0+cu130, because each of these had been assumed wrong
-at least once:
+MEASURED on torch 2.13.0+cu130:
 
 * A sequence leaf is ``<param>_<index>``, for EVERY arity — a one-element
   container is ``x_0``, never ``x``.

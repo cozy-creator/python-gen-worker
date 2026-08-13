@@ -3,9 +3,9 @@ one command.
 
 An endpoint that declares ``compile=`` claims two things about its own code:
 that the compiled output is CORRECT and that it is FASTER. Both are the AUTHOR's
-claims to prove, because every parity failure ever caught (a baked
-``conv_out.bias``, timestep dtype scars) was an endpoint code / model config
-defect that no consumer runtime can fix. Tier 1 is the torch-free lint in
+claims to prove — every parity failure ever caught (a baked ``conv_out.bias``,
+timestep dtype scars) was an endpoint code / model config defect that no
+consumer runtime can fix. Tier 1 is the torch-free lint in
 ``inference-endpoints`` (``scripts/lint_author_ci.py``, every PR); this module is
 tier 2 — ``AUTHOR-CI.md``'s checklist as ONE COMMAND, run on a pod in the
 endpoint's own image::
@@ -34,8 +34,8 @@ WHAT IT ASSEMBLES:
    (``serve_posture.apply_command``) and released in a ``finally`` — never the
    hub route, because the author's pod may have no hub. N >= 5 per arm with the
    first request of each arm discarded, median AND p95, read off
-   ``stage_ms.<stage>`` and never a round trip (a sibling lane's "10.9x"
-   corrected to 1.3x when read off the stage instead).
+   ``stage_ms.<stage>`` and NEVER a round trip — round-trip ratios overstate the
+   speedup by nearly an order of magnitude.
 4. The RECORD — the ``[proof]`` block of ``<endpoint>/author-ci.toml``, in
    exactly the schema ``scripts/lint_author_ci.py`` validates. The harness owns
    ``[proof]`` and nothing else: ``[parity]`` and ``[speed]`` are DECLARATIONS

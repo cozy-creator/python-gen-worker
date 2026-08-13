@@ -1,46 +1,8 @@
-"""pgw#1141b: a BOOT-ADOPTED cell is on the EXPORTED lane, and the setup pass
-has to know that from the OBJECT — not from a process-global set of cell keys
-somebody remembered to announce.
+"""A BOOT-ADOPTED cell is on the EXPORTED lane, and the setup pass has to know
+that from the OBJECT — not from a process-global set of cell keys somebody
+remembered to announce.
 
-MEASURED on a real pod (RTX A4500, sm_86, gen-worker **0.111.0** — the wheel
-carrying pgw#1141's fix — POD PROOF #4 in pgw#1108, first try)::
-
-    seq  3  boot_adopt           hit                    key=ck1-329a6fbe… 10 291 ms
-    seq 12  cell_numerics        armed_undispatched     "It STAYS ARMED and serves…"
-    seq 13  serve_eager_posture  target_applicability_incomplete
-              functions=() bindings=(('pipeline','tensorhub/micro-diffusion',…))
-    seq 14  serve_eager_posture  armed_target_unresolved  armed=False targets_resolve=True
-    seq 15  serve_degrade        armed_target_unresolved
-    seq 17  self_mint_skipped    boot_ended_uncompiled
-
-pgw#1141's half WORKS — seq 12 is 0.111.0's own new sentence, so the warmup
-barrier really is deleted. And 677 ms later the object was unwrapped anyway.
-
-THE LOCUS. ``aot_serve.is_aot_ref`` answers out of ``_KNOWN_AOT_KEYS``, a
-process-global set fed by ``note_aot_key``. Before this issue it had exactly
-two feeders, ``fleet_cells.arm_from_local_store`` and
-``fleet_cells.adopt_delegated_mint`` — both SELF-PRODUCED routes. The ORDERED
-arm (``fleet_cells.arm_ordered``: every hub Plan, and §4.27 boot-adopt) fed it
-NOTHING. So for a boot-adopted cell, on the pod:
-
-* ``_proves_by_fx(ref)`` was True -> the artifact went into ``proof_before``,
-  the DYNAMO lane's cache-hit ledger, which an AOTI artifact can never move;
-* ``aot_proof_before`` was EMPTY -> §4.31's "an exported arm keeps its arm"
-  branch could not fire for the one object it exists for;
-* the object scored calls=0, was folded into ``unproven``, got
-  ``function_proofs[id]=set()`` and was unwrapped;
-* ``exported_arm`` was then False at the install too, so ``permitted_names``
-  came from that empty proof set -> ``functions=()`` ->
-  ``target_applicability_incomplete`` -> ``armed_target_unresolved`` -> eager.
-
-pgw#1141's own tests could not see it: their fleet-policy stand-ins call
-``aot_serve.note_aot_key(key)`` BY HAND (``test_adopted_cell_warm_proof_
-pgw1141.py`` ``_fake_adopt_arm``, ``test_aot_boot_proof_gap_pgw735.py``
-``_fake_arm``), which is the one thing no production arm route did. The tests
-entered one gate east of the bug — twice.
-
-THE FIX, in two parts, because one of them is a convention and the other is a
-structure:
+The contract under test, in two parts:
 
 1. ``aot_serve.arm_entry`` registers the key AT THE WRAP — the single seam
    every arm route passes, and the moment the fact becomes true;
@@ -48,6 +10,12 @@ structure:
    (``aot_serve.holds_exported_cell`` via ``executor._exported_arm``), so the
    disarm authority cannot be exercised over an object carrying a live cell
    even if no registry ever learned its key.
+
+Without both, a boot-adopted artifact lands in ``proof_before`` — the DYNAMO
+lane's cache-hit ledger, which an AOTI artifact can never move — scores
+calls=0, is folded into ``unproven`` and unwrapped, and the install resolves
+``functions=()`` -> ``target_applicability_incomplete`` ->
+``armed_target_unresolved`` -> eager serving.
 
 WHAT RUNS FOR REAL HERE. The whole chain from the ordered arm to the install:
 ``Executor.ensure_setup`` -> ``_injection_kwargs`` -> ``_enable_compiled`` with
@@ -59,16 +27,14 @@ receipt gate against a real RSA-signed receipt from a real HTTP hub ->
 
 THREE SEAMS, all WEST of the locus and all named:
 
-* ``Executor._boot_adopt`` returns a constructed HIT. Its derive+resolve half
-  is driven end to end for real by ``test_boot_adopt_observability_pgw1116.py``
-  against ``examples/micro-diffusion`` and a real hub; repeating it here would
-  measure that, not this.
+* ``Executor._boot_adopt`` returns a constructed HIT; its derive+resolve half
+  is driven end to end by ``test_boot_adopt_observability_pgw1116.py``.
 * ``provision.load_slot`` returns the probe pipeline instead of reading
   weights off disk (the class-annotated slot shape micro-diffusion uses —
   ``Slot(MicroPipeline, selected_by="model")`` — which is what routes the arm
   order to ``_enable_compiled`` at all).
-* ``aot_serve._load_package``: an AOTI ``.so`` needs a GPU. pgw#868's rig owns
-  this substitution and it is the only piece deferred to a pod.
+* ``aot_serve._load_package``: an AOTI ``.so`` needs a GPU; the rig owns this
+  substitution and it is the only piece deferred to a pod.
 
 Nothing about applicability, the lane split, the proof pass or the target
 install is stubbed — those are the code under test.

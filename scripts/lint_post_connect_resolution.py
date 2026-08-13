@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
 """The post-connect resolution surface may not GROW.
 
-The threat, named as DESIGN-RULINGS §4.24 requires
--------------------------------------------------
-A connected worker that can reconstruct or substitute a Hub decision is a
-SECOND RESOLVER. The Hub issues one execution decision; a worker that re-derives
-any part of it can serve a different checkpoint, lane, arm or artifact than the
-one that was billed, ranked and recorded — silently, because both answers look
-plausible from the outside. §1.10 and §1.31 put lane authority in the endpoint's
-declaration and the owner's ladder, never in worker code; the wire contract says
-outright that *"the worker never calls tensorhub for ref resolution; the
-orchestrator is the only resolver"* (`proto/worker_scheduler.proto`, `Snapshot`).
+The threat: a connected worker that can reconstruct or substitute a Hub decision
+is a SECOND RESOLVER. The Hub issues one execution decision; a worker that
+re-derives any part of it can serve a different checkpoint, lane, arm or
+artifact than the one that was billed, ranked and recorded — silently, because
+both answers look plausible from the outside. Lane authority lives in the
+endpoint's declaration and the owner's ladder, never in worker code; the wire
+contract says outright that *"the worker never calls tensorhub for ref
+resolution; the orchestrator is the only resolver"*
+(`proto/worker_scheduler.proto`, `Snapshot`).
 
-Why a gate rather than the repair
----------------------------------
-The real repair is an exact `ExecutionSpec` whose schema half is hub-side, so
-the deletion cannot land yet. What CAN be protected is the SIZE of the job:
-this gate freezes the census at its current, enumerated set so the deletion
-stays a bounded list rather than an open-ended hunt. It is deliberately not a
-behaviour change, and it fails on ADDITION only.
+A gate rather than the repair: the real repair is an exact `ExecutionSpec` whose
+schema half is hub-side, so the deletion cannot land yet. This gate freezes the
+census at its current enumerated set so the deletion stays a bounded list rather
+than an open-ended hunt. It is not a behaviour change and it fails on ADDITION
+only — the accepted `CONNECTED` sites still run on every boot.
 
-That is the whole claim. This gate does not prevent the second resolver from
-running — the accepted `CONNECTED` sites below run on every boot today. It
-prevents a ninth one appearing while the replacement is built.
+What is watched:
 
-What is watched, and why each one
----------------------------------
     discover / _discover_inner / _candidates   catalog listing + sibling ranking
                                                after the Hub already chose
                                                (the `rows[0]` resolver)
@@ -35,11 +28,9 @@ What is watched, and why each one
                                                expansion §1.31 forbids
 
 Keyed on `<path>::<callee>`, never on a line number: a `path:line` key goes red
-whenever a sibling PR shifts lines in a file nobody in that change touched. A
-line number is a fact other people change independently.
+whenever a sibling PR shifts lines in a file nobody in that change touched.
 
-Every accepted site must NAME ITS CLASSIFICATION, which is what stops the
-allowlist decaying into prose:
+Every accepted site must NAME ITS CLASSIFICATION:
 
     CONNECTED    reachable from the connected dispatcher — a real second
                  resolver. Replacement-gated; every line must say what blocks

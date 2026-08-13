@@ -1,26 +1,22 @@
-"""pgw#784: the executor wiring — the delegated route actually runs.
+"""The executor wiring — the delegated mint route actually runs.
 
-Everything else in pgw#784 is reachable in isolation; this is the file that
-proves the serving worker CALLS it, and that the exception contract the
-existing ``_background_mint`` wrapper depends on is preserved exactly.
-
-Four claims, and one of them is a bug this wiring had to fix:
+Proves the serving worker CALLS it, and that the exception contract
+``_background_mint`` depends on is preserved exactly. Four claims:
 
 1. A DELEGATED pending is recorded even though the arm reports ``armed=False``.
-   That is not a detail — the recording gate was `if armed and selection is not
-   None`, so a delegated pending was silently DROPPED and no mint ever ran. The
-   pipe serves eager, so nothing is armed, so `armed` is honestly False; the
-   obligation is still real, it is just owed to a child process.
+   A recording gate of `if armed and selection is not None` silently DROPS it
+   and no mint ever runs: the pipe serves eager, so nothing is armed and
+   `armed` is honestly False, but the obligation is real — owed to a child
+   process.
 2. `_BackgroundMint` carries the two facts a child cannot rediscover — the
    declaring module(s) to walk, and the already-materialized local snapshot
    path per slot (a mint is compute; the child never touches the network).
-3. `_delegated_mint_run` drives a child, adopts, publishes on gw#612's
+3. `_delegated_mint_run` drives a child, adopts, publishes on the
    sibling-coverage rule, and advertises through the SAME phase-4 code the
    in-process route uses.
-4. Its failure modes map onto the wrapper's existing vocabulary:
-   `_MintAbandoned` (stop asked) or plain `Exception` (a failed mint).
-   Serving continues in either. (pgw#1175 deleted `_MintDeclined`: nothing
-   refuses a mint in advance any more — §4.33.)
+4. Its failure modes map onto the wrapper's vocabulary: `_MintAbandoned` (stop
+   asked) or plain `Exception` (a failed mint). Serving continues in either;
+   nothing refuses a mint in advance.
 """
 
 from __future__ import annotations

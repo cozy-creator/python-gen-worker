@@ -1,18 +1,17 @@
-"""pgw#674 rotation preload: the NEXT checkpoint stages while jobs compute.
+"""Rotation preload: the NEXT checkpoint stages while jobs compute.
 
-WORKER-RESIDENCY-DESIGN "Rotating double-buffer serving" (Paul-ratified):
-load model-B while model-A runs inference; rotate on completion; the GPU
-stays hot. Pinned here, through the REAL executor/preloader code paths
-(fakes only at the download and CUDA boundaries):
+WORKER-RESIDENCY-DESIGN "Rotating double-buffer serving": load model-B while
+model-A runs inference; rotate on completion; the GPU stays hot. Pinned here,
+through the REAL executor/preloader code paths (fakes only at the download and
+CUDA boundaries):
 
   1. the preloader stages a desired NEXT instance to a READY record while
-     the executor is NOT idle (a live unfinished job) — the old
-     reconcile-only path is tenant-idle-gated, so this is the behavior
-     that did not exist before;
+     the executor is NOT idle (a live unfinished job) — the reconcile-only
+     path is tenant-idle-gated and cannot do this;
   2. a later dispatch of that instance is a pure cache hit: no download,
      no load, no warm run — visible swap ~0 (double-buffer);
-  3. the pgw#638 fence carve-out: a ref RESIDENT under a different
-     identity than the desired snapshot is never touched by the preloader;
+  3. the fence carve-out: a ref RESIDENT under a different identity than
+     the desired snapshot is never touched by the preloader;
   4. when VRAM cannot hold both (fits() False), staging is COMPONENT-FIRST:
      exclusive components load on CPU into the shared cache (by content
      digest) and dispatch-time injection consumes them — from_pretrained
@@ -20,8 +19,7 @@ stays hot. Pinned here, through the REAL executor/preloader code paths
   5. the pinned pool bounds pinned host memory (refusal degrades to
      pageable, accounting balances);
   6. the packaged benchmark harness + diagnostics endpoint extract as
-     ordinary specs (the th#1198 payload path) and their pure planning
-     parts run off-pod.
+     ordinary specs and their pure planning parts run off-pod.
 """
 
 from __future__ import annotations

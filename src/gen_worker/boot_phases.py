@@ -10,8 +10,7 @@ trustworthiness properties:
 
 * **It reconciles.** Spans nest, and a nested span's time is charged to the
   CHILD, never twice. So measured phases + named segments + ``residual`` ==
-  the whole boot window. A boot instrument that reports 120s of phases inside
-  a 190s boot cannot answer the question it exists for.
+  the whole boot window.
 
   The reconciliation is a UNION, not a sum: once phases decompose per
   component they run concurrently, and a summing reconciliation "explains"

@@ -2,20 +2,19 @@
 """A process-global fact about an ARMED cell is fed at a SEAM, never by a
 caller who remembered — and a TEST may not feed one at all.
 
-THE DEFECT CLASS. ``aot_serve._KNOWN_AOT_KEYS`` decides which failure detector
-applies to a serving object: the DYNAMO lane's per-class cache-hit ledger (which
-an AOTI artifact can never move, so it reads every honest adoption as a disproof)
-or §4.31's serve-first rule. A feeding rule written as a CONVENTION —
+``aot_serve._KNOWN_AOT_KEYS`` decides which failure detector applies to a
+serving object: the DYNAMO lane's per-class cache-hit ledger (which an AOTI
+artifact can never move, so it reads every honest adoption as a disproof) or
+§4.31's serve-first rule. A feeding rule written as a CONVENTION —
 *"whoever reads a `cell_key` off an aot-inductor envelope registers it"* — is
 taken by the SELF-PRODUCED routes and skipped by the adopt routes, and a cell
 that resolved, materialized and armed is then scored on the dynamo ledger,
 disarmed, so the pod serves eager for life.
 
 So the rule is structural: the registration happens inside
-``aot_serve.arm_entry``, the one function every arm route passes — and this
-script keeps it that way. ``arm_entry`` arms ONE graph class, and every arm
-route passes through it exactly once per class. The registration is a property
-of the function that arms, never of a caller remembering to announce.
+``aot_serve.arm_entry``, which arms ONE graph class and which every arm route
+passes exactly once per class. The registration is a property of the function
+that arms, never of a caller remembering to announce.
 
 TWO SCOPES, TWO RULES.
 
@@ -40,19 +39,17 @@ bug. It has no label to write down: move the call to the seam, or delete it and
 ask the OBJECT instead (``aot_serve.holds_exported_cell``).
 
 **tests/** — a hand-feed is RED, and so is stubbing a lane ACCESSOR. A
-fleet-policy stand-in that calls ``aot_serve.note_aot_key(key)`` BY HAND, or a
-suite that stubs ``is_aot_ref`` outright, answers the question the gate is
-supposed to ask, so the test enters one gate east of the bug and RED-first
-prevents nothing. A test that needs an armed, boot-adopted object drives
-``tests/harness/adopt_rig.py``, which arms a real packed cell through the real
-ordered path.
+stand-in calling ``aot_serve.note_aot_key(key)`` BY HAND, or a suite that stubs
+``is_aot_ref`` outright, answers the question the gate is supposed to ask, so
+RED-first prevents nothing. A test that needs an armed, boot-adopted object
+drives ``tests/harness/adopt_rig.py``, which arms a real packed cell through the
+real ordered path.
 
 There is exactly ONE test classification, ``RECOGNIZER``, and **the lint checks
 the claim instead of trusting it**: the row is accepted only when the enclosing
 function DRIVES no arm and the module REPLACES no arm driver. A unit test of the
-recognizer itself (no pipeline anywhere, the classifier is the subject) qualifies
-structurally; a fixture standing in for an adoption cannot, whatever it writes in
-the file. So a simulated arm still has no label to write down.
+recognizer itself qualifies structurally; a fixture standing in for an adoption
+cannot, whatever it writes in the file.
 
 Same enforcement shape as ``lint_credential_identity.py``,
 ``lint_settings_writers.py`` and ``lint_config_reads.py`` (§1.18).

@@ -1,13 +1,12 @@
-"""pgw#779: a slot is a GROUP's permit, not one of G interchangeable tickets.
+"""A slot is a GROUP's permit, not one of G interchangeable tickets.
 
 `asyncio.Semaphore(G)` admits G concurrent jobs but binds none of them to a
-group. The group came solely from `ResolvedCompute.gpu_index`, and a missing
-`compute` floored to group 0 while an index that was not a rank-0 device was
-floored to a real group with a `logger.warning`. So four dispatches naming card
-0 all took a permit, all resolved to ONE record, and serialized on one
-`run_lock` while three cards idled — and the pod reported four healthy slots.
-The width-4 campaign never saw it because the harness assigned `gpu_index=g`
-itself: the acceptance proved the worker CAN spread, not that it MUST.
+group. If the group comes solely from `ResolvedCompute.gpu_index`, a missing
+`compute` floors to group 0 and a non-rank-0 index floors to a real group with
+only a `logger.warning`. Four dispatches naming card 0 then all take a permit,
+all resolve to ONE record, and serialize on one `run_lock` while three cards
+idle — with the pod reporting four healthy slots. A harness that assigns
+`gpu_index=g` itself proves the worker CAN spread, not that it MUST.
 
 Layers exercised:
 

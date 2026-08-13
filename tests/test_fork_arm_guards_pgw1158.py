@@ -1,27 +1,20 @@
-"""pgw#1158 — a fork's ARMS must agree with the classes that cover them.
+"""A fork's ARMS must agree with the classes that cover them.
 
-Found empirically by the endpoint-adaptation lane while writing sd15's and
-sd2's declarations. It ran a severance experiment against the declaration's own
-construction surface and found the SDK catches one error and silently accepts
-two others:
+Three cases, of which the SDK natively catches only the first:
 
-    sd15's 14-class set applied to sd2   REFUSED  "graph class #0 sits on
-                                                   UNSERVED arm cfg=True"
+    a class sitting on an UNSERVED arm                REFUSED
     a Fork claiming BOTH arms served,
-      classes covering only one          ACCEPTED  <- no guard
-    an unserved arm with NO `reason`     ACCEPTED  <- no guard
+      classes covering only one                       needs a guard
+    an unserved arm with NO `reason`                  needs a guard
 
-The second is a direction nothing asked. Every existing check reads
+The second is the direction nothing asks about. Every class-side check reads
 CLASS -> ARM ("does this class sit on an arm the fork declares?"), so a served
-arm that no class covers passed silently: the declaration claims to serve it,
+arm that no class covers passes silently: the declaration claims to serve it,
 the mint traces nothing for it, and the first request on that arm finds a graph
 that was never exported.
 
-The third was a rule the docstring already asserted. `reason` was staged as
-"optional BY DESIGN, FOR NOW ... phase 2 makes it required whenever `unserved`
-is non-empty", and the reminder test even said it "will need deleting when that
-lands — which is the point". Until it landed, the field read as a guarantee to
-every endpoint author and enforced nothing.
+The third makes `reason` mean something: while it is optional the field reads as
+a guarantee to every endpoint author and enforces nothing.
 
 Both refusals are DECLARATION-time, so they cost nothing at serve time.
 """

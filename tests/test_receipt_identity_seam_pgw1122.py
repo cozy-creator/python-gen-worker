@@ -1,27 +1,13 @@
 """pgw#1122: the cell RECEIPT TRUST GATE runs in the process that holds no
 credential — so it must not answer "who am I?" by decoding one.
 
-MEASURED, three real pods, 2026-08-11 (RTX 4090, sm_89, gen-worker 0.104.0).
-All three derived ``ck1-f023c374…``, issued ``POST /v1/worker/cells/resolve``
-(hub GIN log: 3 calls, all 200), were answered with the cell + receipt,
-materialized it — and then failed identically::
-
-    OrderedArmError: artifact_receipt_refused: publisher_untrusted:
-    this pod cannot name its own endpoint or org (no cell_read_* claim on the
-    worker credential), so it may adopt platform-tier cells only
-
-``receipts._self_endpoint_id``/``_self_org_id`` decoded ``cell_read_*`` out of
-*this process's* worker JWT, and the gate is armed at ``lifecycle.py`` with
-``executor.worker_jwt_provider`` — in the COMPUTE CHILD, whose
-``current_worker_jwt`` is ``""`` by construction (``procsplit/child.py``,
-pgw#763 delta 1). Both viewer ids were therefore ``""`` on every split serving
-pod, so every ORG-tier cell was unadoptable, always. The blast radius was not a
-wasted download: the hub logged ``worker_function_unavailable
-reason=compile_cell_failed``, the pod never served, the autoscaler reaped it
-``state_blocked_idle`` and bought a replacement — twice.
-
-This is byte-for-byte the pgw#1108 defect class one gate later. The rows below
-are therefore about the CLASS, not the call site:
+The defect class: ``receipts._self_endpoint_id``/``_self_org_id`` named this pod
+by decoding ``cell_read_*`` out of *this process's* worker JWT, but the gate is
+armed with ``executor.worker_jwt_provider`` in the COMPUTE CHILD, whose
+``current_worker_jwt`` is ``""`` by construction (``procsplit/child.py``). Both
+viewer ids are therefore ``""`` on every split serving pod, making every
+ORG-tier cell unadoptable, always. The rows below are about the CLASS, not the
+call site:
 
 1. the real compute child, in a real split, names itself without holding a JWT;
 2. the receipt gate arms an org-tier cell from that child;

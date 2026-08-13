@@ -1,19 +1,14 @@
-"""gw#661: a will-retry setup condition must not present to the hub as a
-failure.
+"""A will-retry setup condition must not present to the hub as a failure.
 
-Measured live 2026-07-25: a self-mint compile hit ``RetryableError: lane
-tensorhub/qwen-image:prod cannot promote to VRAM (waited 45s for headroom);
-retrying``, reported ACTIVITY_STATE_FAILED, and the hub condemned the pod —
-4 condemnations against 4 compiles that then COMPLETED, one finishing 53s
-after its pod was already condemned. The hub's ``lastWorkerProgressLocked``
- *excludes* failed activities from progress evidence, so declaring a
-will-retry attempt FAILED erases exactly the evidence that keeps a working pod
-alive.
+The hub's ``lastWorkerProgressLocked`` *excludes* failed activities from
+progress evidence, so reporting ACTIVITY_STATE_FAILED for a retryable loss (a
+lane that cannot promote to VRAM yet, say) erases exactly the evidence that
+keeps a working pod alive — the hub condemns pods whose compiles then complete.
 
 So: retryable losses report RUNNING with a ``retrying`` detail, exhaustion
 reports FAILED and disables the function (the hub must still see the terminal
-truth — th#1159's genuinely-unfittable VRAM lane depends on it), and a
-non-retryable failure reports FAILED on the first attempt as it always did.
+truth — the genuinely-unfittable VRAM lane depends on it), and a non-retryable
+failure reports FAILED on the first attempt.
 
 These drive the real ``Executor.ensure_setup`` path with the real activity
 sink, not a stub reporter.

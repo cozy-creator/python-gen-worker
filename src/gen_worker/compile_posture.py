@@ -1,14 +1,10 @@
 """WHOSE machine this mint is running on — declared by the entry point.
 
-DESIGN-RULINGS §4.30 (Paul, 2026-08-11), verbatim: *"Be nice, especially on
-cozy-local — never saturate the user's only machine. Compile parallelism K is
-POSTURE-AWARE: aggressive on a dedicated serving pod, gentle/niced/capped on
-cozy-local, accepting a slower local mint to stay polite."*
-
+Compile parallelism K is POSTURE-AWARE: aggressive on a dedicated serving pod,
+gentle/niced/capped on cozy-local, accepting a slower local mint to stay polite.
 Every clamp in :mod:`gen_worker.aot_compile_pool` is written for a SERVING POD
-with a co-resident tenant. Those are the wrong terms for a desktop, where the
-co-resident workload is a human — who outranks the mint, cannot be scheduled
-around, and will stop using the product if their machine stops responding.
+with a co-resident tenant; on a desktop the co-resident workload is a human, who
+outranks the mint and cannot be scheduled around.
 
 THE FACT IS DECLARED, NOT SNIFFED. *"A person is sitting at this machine"* is
 not measurable, and the three plausible proxies each answer a DIFFERENT
@@ -20,10 +16,9 @@ the pod was BOUGHT to do. So :mod:`gen_worker.local_serve` — the cozy-local
 CLI's only arming entry — passes :data:`USER_MACHINE`, and everything else gets
 :data:`FLEET` by construction because that is the struct's default.
 
-Deliberately NOT an environment variable (§1.17: *"Envs are for secrets and
-configuration, not for logic gates"*). Politeness changes what the machine DOES,
-so it travels as a typed value on the parent->child ``MintRequest``, never as an
-ambient toggle a stray shell export could flip.
+Deliberately NOT an environment variable: politeness changes what the machine
+DOES, so it travels as a typed value on the parent->child ``MintRequest``, never
+as an ambient toggle a stray shell export could flip.
 
 The policy lives here as methods, so no caller branches on the boolean and the
 four terms cannot drift apart:

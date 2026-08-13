@@ -7,13 +7,12 @@ per declared graph class — so a PARTIAL resolve helps: a pod that resolves 30
 of 36 keys arms 30 classes and compiles 6, where a single cell key made that
 same outcome a total miss and a full re-mint.
 
-Processes, not threads — and the reason is measured
----------------------------------------------------
-``aot_compile_pool``'s docstring records four concurrent ``aot_compile`` calls
-in ONE process producing one usable result and three distinct internal failures
-(``CURRENT_PATCHER is None``, ``KeyError: 'custom'`` in
-``fx.traceback.annotate``, a fake-tensor propagation crash), because inductor
-keeps process-global mutable state. A boot trace is ``torch.export`` under a
+Processes, not threads
+----------------------
+Concurrent ``aot_compile`` calls in ONE process corrupt each other — inductor
+keeps process-global mutable state (``CURRENT_PATCHER is None``, ``KeyError:
+'custom'`` in ``fx.traceback.annotate``, fake-tensor propagation crashes). A
+boot trace is ``torch.export`` under a
 fake mode — the SAME dynamo patcher and the SAME ``fx.traceback`` stack — so
 the unit of parallelism is an OS process here too. The parent never imports the
 endpoint, never builds a fake mode and never installs a dynamo patcher: the

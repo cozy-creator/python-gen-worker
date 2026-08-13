@@ -1,14 +1,12 @@
-"""pgw#1115 — a mint REFUSAL is DATA on the declaration, and it fails CLOSED.
+"""A mint REFUSAL is DATA on the declaration, and it fails CLOSED.
 
-The defect this file exists to prevent, found by the pgw#1107 fold lane: three
-families express "this family may not mint yet" by registering a THUNK that
-raises ``MintRefused``, and ltx-video-2.3's thunk genuinely refuses
-today on three open design questions. ``@endpoint(compile=)`` accepts a
-``Compile`` and never a callable, so folding that family verbatim onto its
-decorator — which is exactly what pgw#1107 does to all seven — would SILENTLY
-DELETE a live mint refusal and let it mint against three unanswered questions.
+The defect this prevents: a family that expresses "may not mint yet" by
+registering a THUNK raising ``MintRefused`` loses that refusal the moment the
+declaration folds onto ``@endpoint(compile=)``, which accepts a ``Compile`` and
+never a callable — the family then mints against unanswered design questions,
+silently.
 
-So the refusal becomes vocabulary: ``Compile(blockers=(MintBlocker(...),))``.
+So the refusal is vocabulary: ``Compile(blockers=(MintBlocker(...),))``.
 Four properties, one section each:
 
 1. it is DATA — SDK vocabulary plus literals, nothing callable, nothing to

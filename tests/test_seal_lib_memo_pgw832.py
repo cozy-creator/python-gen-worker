@@ -1,13 +1,12 @@
-"""pgw#832: pooled entry children stop re-paying the toolchain hash.
+"""Pooled entry children do not re-pay the toolchain hash.
 
 ``env_seal.establish()`` SHA-256s every toolchain ``.so`` the image ships
-(measured on this box: 36 files, 3.96 GB, 8.13 s). The memo that made it
-"once" was per PROCESS, and pgw#809's pool made the unit of parallelism a
-process that compiles one entry and exits — so a 72-entry mint re-paid the
-pass 72 times, K-wide (pgw#830 measured it at 28 % of per-entry compile_s).
+(36 files, 3.96 GB, 8.13 s). A per-PROCESS memo cannot help: the pool's unit of
+parallelism is a process that compiles one entry and exits, so a 72-entry mint
+re-pays the pass 72 times, K-wide (28 % of per-entry compile_s).
 
-The fix is a parent-seeded on-disk memo keyed by ``(path, mtime_ns, size)``.
-This file holds it to two standards:
+The memo is therefore parent-seeded and on disk, keyed by
+``(path, mtime_ns, size)``. This file holds it to two standards:
 
 * **The seal value may never move.** The memo changes WHERE a digest comes
   from, never what it is. The equivalence tests below prove memo-served and
@@ -17,9 +16,9 @@ This file holds it to two standards:
   explicitly as stale, because that is the same trust boundary the
   in-process ``lru_cache`` (keyed on the same triple) has always had, and
   claiming more would be a lie.
-* **The drop is measured on the real pool** (pgw#830's pattern: real
-  children, real ``aot_compile``), against a cold-pass reference measured in
-  the same run — not a magic number.
+* **The drop is measured on the real pool** (real children, real
+  ``aot_compile``), against a cold-pass reference measured in the same run —
+  not a magic number.
 """
 
 from __future__ import annotations

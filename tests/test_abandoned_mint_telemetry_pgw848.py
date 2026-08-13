@@ -1,26 +1,18 @@
-"""pgw#848: an ABANDONED mint discarded 29 minutes of measurement.
+"""An ABANDONED mint must not discard what it measured.
 
-Attempt sixteen ran on the `8559140` cap fix and proved it — 29 minutes with
-no memory error, where attempts 14 and 15 died at +11.6 and +11.0 min against
-the 11.09 GiB ceiling. Then the worker's endpoint instances were torn down
-under the drain path and the mint was abandoned, and the ENTIRE phase table
-for those 29 minutes was one row::
+`report.json` is written ONCE, at a terminus the child reaches under its own
+power. A child that is group-killed (endpoint teardown under the drain path)
+reaches no terminus, raises nothing, and writes nothing, so the whole phase
+table collapses to one row::
 
     status=abandoned total_s=1741.33 — no cell produced
 
-**Zero `entry:` rows. No `pool` row.** K, its binding constraint, every
-per-entry timing and every peak were measured and thrown away, and the
-K-and-binding answer had to be re-bought with another pod.
-
-The mechanism: `report.json` is written ONCE, at a terminus the child reaches
-under its own power. A child that is group-killed reaches no terminus, raises
-nothing, and writes nothing — so `f9c1b2d`'s work on the *aborted* path (the
-failed attempt teaches the retry instead of discarding what it measured) never
-applied here. Same code, different exit.
+— zero `entry:` rows, no `pool` row: K, its binding constraint, every per-entry
+timing and every peak measured and thrown away. Work on the *aborted* path does
+not apply here; same code, different exit.
 
 The fix is a snapshot on disk, rewritten atomically on every beat, because a
-file is the only thing that survives a signal — the same principle the pgw#848
-resume design keys on.
+file is the only thing that survives a signal.
 """
 
 from __future__ import annotations

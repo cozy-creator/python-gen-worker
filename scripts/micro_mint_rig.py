@@ -5,10 +5,8 @@
     python scripts/micro_mint_rig.py --stage mint   # stop after the child
     python scripts/micro_mint_rig.py --json out.json
 
-WHAT THIS REPLACES. The loop it inverts is: change code -> publish to PyPI ->
-build an image on the published version -> spawn a pod -> observe for the FIRST
-time. New versions of python-gen-worker go to PyPI only after we have proven
-they work.
+It exists so a mint is proven before a version reaches PyPI, rather than first
+observed on a pod built from a published wheel.
 
 WHAT IT ACTUALLY RUNS. Every leg below is the production code path, against a
 randomly-initialized toy latent-diffusion model on this box's card:
@@ -36,8 +34,8 @@ than trusting the operator:
   * `GEN_WORKER_HOST_MOVE_GUARD` untouched — the rig never disables it.
 
 THE ENV-DELIVERY MODE (`--hub-env`). The default rig builds the child's
-environment itself — `mint_process.child_env` plus a few rig keys — which is a
-shape no production pod ever has, leaving the real chain invisible:
+environment itself (`mint_process.child_env` plus a few rig keys), a shape no
+production pod ever has, so the real chain stays invisible:
 
     worker function declares env -> release_env_declarations
     operator sets a value        -> endpoint_env_entries

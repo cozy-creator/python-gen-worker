@@ -1,16 +1,16 @@
 """Hub-signed cell receipt verification.
 
 A ``cell_store`` row (cell_key -> artifact) is a Nix *realisation*: fetch
-verifies the BYTES against the hub's recorded digest, but nothing ever
-signed the RECORD binding the key to those bytes. Under "bucket is truth,
-DB is a rebuildable index" that made bucket write access
-equivalent to arbitrary cell delivery after any index rebuild.
+verifies the BYTES against the hub's recorded digest, but nothing signs the
+RECORD binding the key to those bytes. Under "bucket is truth, DB is a
+rebuildable index" that makes bucket write access equivalent to arbitrary cell
+delivery after any index rebuild.
 
-The hub now signs a ``cell-receipt-v1`` compact JWS at publish-finalize
-binding: cell_key + owning endpoint + the publisher-trust rung + the snapshot
-digest (the derivation binding Nix's fingerprint famously omits) + the
-packed tarball's ALGORITHM-TAGGED digest AND integral size (Bazel REv2:
-size is part of the digest). This module is the WORKER half: before arming any hub-delivered
+The hub signs a ``cell-receipt-v1`` compact JWS at publish-finalize binding:
+cell_key + owning endpoint + the publisher-trust rung + the snapshot digest
+(the derivation binding Nix's fingerprint omits) + the packed tarball's
+ALGORITHM-TAGGED digest AND integral size (Bazel REv2: size is part of the
+digest). This module is the WORKER half: before arming any hub-delivered
 artifact the worker fetches the receipt, verifies the signature against
 the hub's public artifact-signing JWKS, checks every binding against the
 local bytes, and re-checks the operator revocation list — the targeted

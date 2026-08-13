@@ -1,16 +1,11 @@
 """Declare a multi-gigabyte CUDA-resident component on a box with no card.
 
-pgw#1025's arithmetic is about GIGABYTES that are already on the card, and it
-has to be exercised on a cardless CI runner. Until pgw#1128 the technique was a
-FAKE tensor — which worked only because ``memory._sum_tensor_bytes`` counted a
-FakeTensor's declared bytes as real ones. That is the defect pgw#1128 fixes, so
-the test and the fix could not both be right; this module is how they become
-compatible.
+The residency arithmetic is about GIGABYTES that are already on the card, and it
+has to be exercised on a cardless CI runner. A FAKE tensor cannot stand in:
+``memory._sum_tensor_bytes`` exempts fake tensors, correctly.
 
-WHAT IS DECLARED, AND WHAT IS REAL
-----------------------------------
-Two facts cannot be allocated on a cardless box, and exactly those two are
-declared:
+WHAT IS DECLARED, AND WHAT IS REAL. Two facts cannot be allocated on a cardless
+box, and exactly those two are declared:
 
 * **size**, through the tensor's SHAPE — a one-element storage ``expand``\\ ed
   to the weight count. Already this test's technique for the host-side

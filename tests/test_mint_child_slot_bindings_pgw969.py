@@ -1,43 +1,27 @@
-"""pgw#969 — the delegated mint child gets the parent's RESOLVED slot refs.
-
-Measured twice, on two independent RunPod L40S pods, ~80 minutes apart
-(release ``50ff5bdf5ace8a075fbe6255``, sdxl ``v0.2.30+gecc868d7``, gen-worker
-0.92.1, ``torch=2.13.0+cu130``). The child loaded the pipeline in 9.49 s /
-10.69 s and then died **0.0 s into ``warmup_forward``**, exit 1,
-self-classified ``deterministic``, with the same traceback both times::
-
-    site-packages/sdxl/main.py", line 316, in generate
-        resolved = ctx.slots["pipeline"]
-      File ".../gen_worker/request_context/__init__.py", line 115, in __getitem__
-        raise ValueError(self._errors[key])
-    ValueError: slot 'pipeline': no resolved model ref for this request
-                 (no Slot(default_checkpoint=...) and no hub resolution)
-
-    jit_compile aborted status=crashed phases={'load': 10.689, 'warmup_forward': 0.0}
+"""The delegated mint child gets the parent's RESOLVED slot refs.
 
 **The mechanism.** ``MintRequest`` carries ``snapshots`` — slot -> local
 tree — and nothing else about the resolution. A path says which BYTES to
 load; only a binding says which CHECKPOINT the request is for, and
 ``ctx.slots`` is built from bindings. The child re-runs discovery in a fresh
 interpreter, so its ``spec.models`` holds only what ``@endpoint`` declared,
-and sdxl's slot is a hub-catalog slot::
+and a hub-catalog slot::
 
     models={"pipeline": Slot(StableDiffusionXLPipeline, selected_by="model")}
 
-— no ``default_checkpoint=``, so rediscovery yields ``spec.models == {}`` and
-the resolution chain has nothing to resolve. Not an ordering problem (the
-parent resolved these long before the spawn) and not a serialisation gap
-(``ModelRef`` is already a ``msgspec.Struct``): a field the handoff struct
-never had.
+— has no ``default_checkpoint=``, so rediscovery yields ``spec.models == {}``
+and the resolution chain has nothing to resolve; ``ctx.slots[...]`` then raises
+*"no resolved model ref for this request"* 0.0 s into ``warmup_forward``. Not
+an ordering problem (the parent resolves long before the spawn) and not a
+serialisation gap (``ModelRef`` is already a ``msgspec.Struct``): a field the
+handoff struct never had.
 
-**Why pgw#828's regression test could not have caught it.** That fix removed a
-child ctx with *no slots at all*; its harness endpoint declares
-``default_checkpoint=WARM_SLOT_PIPELINE``, and a declared ref survives
-rediscovery. The production shape — a catalog slot — has none. The endpoint
-under test here is that shape, and it is also the *quiet* half of the same
-defect: a catalog slot WITH a code default would have resolved in the child,
-to the DECLARED checkpoint, while the parent serves the hub's pick — a mint
-tracing graphs for a model this pod never runs (``JuggleEndpoint`` below).
+A harness endpoint that declares ``default_checkpoint=`` cannot see this — a
+declared ref survives rediscovery. The endpoint under test is a CATALOG slot,
+which is also the *quiet* half of the same defect: a catalog slot WITH a code
+default resolves in the child to the DECLARED checkpoint while the parent
+serves the hub's pick — a mint tracing graphs for a model this pod never runs
+(``JuggleEndpoint`` below).
 """
 
 from __future__ import annotations

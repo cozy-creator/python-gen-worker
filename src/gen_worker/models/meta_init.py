@@ -7,11 +7,11 @@ building a compile target from code + config alone.
 
 WHY THIS IS NOT ``accelerate.init_empty_weights``
 -------------------------------------------------
-Measured on two real pods: importing ``accelerate`` without anything declaring
-it means an endpoint that deliberately ships no diffusers stack cannot derive a
-key, never issues a resolve, and self-mints forever.
+Importing ``accelerate`` without anything declaring it means an endpoint that
+deliberately ships no diffusers stack cannot derive a key, never issues a
+resolve, and self-mints forever.
 
-Declaring the dependency instead was considered and rejected on two facts:
+Declaring the dependency instead is rejected on two facts:
 
 * ``accelerate`` hard-requires ``torch>=2.0.0``, and this package's base wheel
   deliberately carries no torch ("the base wheel stays lean for plain-Python

@@ -29,20 +29,17 @@ honest. ``HeavyDepStubError`` subclasses ``AttributeError`` so defaulted
 **THE SAME RULE BINDS THE OTHER PROBE IDIOM.** ``find_spec`` has a twin:
 libraries also probe with ``try: import X / except ImportError``, and a stub
 satisfies THAT probe too. A root nothing imports at module scope but everything
-probes must
-therefore not be stubbed at all — see :data:`NEVER_STUB`. Stubbing it buys
-nothing and turns "absent" into "present but landmined".
+probes must therefore not be stubbed at all — see :data:`NEVER_STUB`. Stubbing
+it buys nothing and turns "absent" into "present but landmined".
 
-Why the exception type is not the fix, since it is the obvious first idea and
-it is wrong twice over. (1) ``HeavyDepStubError`` cannot be both an
-``AttributeError`` and an ``ImportError``: CPython refuses the dual base with
-*"multiple bases have instance lay-out conflict"*. (2) Dropping the
-``AttributeError`` base to gain the ``ImportError`` one **breaks
-``from torch import nn``** — the import machinery's submodule fallback catches
-``AttributeError`` on ``torch.__path__``, so an ``ImportError`` there kills the
-very import this module exists to make free. MEASURED both ways. And it would
-not have fixed the reported chain anyway: the fatal
-``triton.language.dtype`` touch is not inside any ``try``.
+Changing the exception type is NOT the fix, twice over. (1)
+``HeavyDepStubError`` cannot be both an ``AttributeError`` and an
+``ImportError``: CPython refuses the dual base with *"multiple bases have
+instance lay-out conflict"*. (2) Dropping the ``AttributeError`` base to gain
+the ``ImportError`` one **breaks ``from torch import nn``** — the import
+machinery's submodule fallback catches ``AttributeError`` on ``torch.__path__``,
+so an ``ImportError`` there kills the very import this module exists to make
+free.
 
 Extension point: the allowlist is ``DEFAULT_HEAVY_ROOTS`` plus per-project
 ``[tool.gen_worker] discovery_heavy_deps = ["my_heavy_lib"]`` entries

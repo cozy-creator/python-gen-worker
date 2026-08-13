@@ -16,9 +16,9 @@ a custom op is opaque to inductor, so our fusion beats inductor's own on sm_120
 and loses to it on sm_100. It is MEASURED at mint on the card the cell is being
 minted for, ranked by fit-constrained speed (which prices the residency axis and
 the throughput axis in one comparison instead of hard-coding either), recorded
-into the cell as ONE combined lane, and read back here: see
-``gen_worker.kernel_lane``. This module's whole job is to project the pin onto
-its axis, prove that axis's kernels still self-check, and say loudly what it did.
+into the cell as ONE combined lane, and read back here (``gen_worker.kernel_lane``).
+This module projects the pin onto its axis, proves that axis's kernels still
+self-check, and says loudly what it did.
 
 Order of decision, PER AXIS, each step typed and never silent-wrong:
 

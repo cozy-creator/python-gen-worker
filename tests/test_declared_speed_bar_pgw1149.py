@@ -1,17 +1,15 @@
-"""pgw#1149 — the family's DECLARED compile-vs-eager bar reaches the hub.
+"""The family's DECLARED compile-vs-eager bar reaches the hub.
 
-th#1811 built the publish-time validation session and the promotability gate:
-at initial publish the hub boots one pod, drives real inferences compiled and
-eager, and judges the steady-state medians *against the family's own declared
-bar*. Its hub-side ingest for `compile.speed_metric` / `min_speedup` /
-`blockers` landed with it — and **discovery emitted none of them**, so every
-compile-declaring release resolved `bar_undeclared` and enforcement had to ship
-defaulted to observe.
+At initial publish the hub boots one pod, drives real inferences compiled and
+eager, and judges the steady-state medians against the family's own declared
+bar. If discovery emits no `compile.speed_metric` / `min_speedup` / `blockers`,
+every compile-declaring release resolves `bar_undeclared` and enforcement can
+only observe.
 
-The bar therefore lives on the DECLARATION (`Compile`), beside `numerics_floor`
-whose precedent it copies field for field — not in the endpoint repo's
+The bar lives on the DECLARATION (`Compile`), beside `numerics_floor` whose
+precedent it copies field for field — not in the endpoint repo's
 `author-ci.toml`, which the wheel cannot see at discovery and which would be a
-second file feeding the manifest (the drift pgw#1107 spent a campaign deleting).
+second file feeding the manifest.
 
 What this file pins:
 

@@ -2,11 +2,10 @@
 """Every skip the suite produces is CLASSIFIED, and the rows CI is supposed to
 run are not among them.
 
-**Why a guard and not a one-time cleanup.** A skipped row and a passing row look
-identical in a green run, so a row that stops running is invisible for as long
-as nobody happens to read the reason lines — which is how a flake reaches master
-behind a green CI. A one-time census would find it once; this makes the NEXT one
-fail a build.
+A guard rather than a one-time cleanup: a skipped row and a passing row look
+identical in a green run, so a row that stops running is invisible until
+somebody reads the reason lines. A census finds it once; this fails the build on
+the next one.
 
 Input is whatever `--skip-census-out=` produced (see the repo-root conftest.py):
 the skips a session ACTUALLY took, on the machine that took them — not a static

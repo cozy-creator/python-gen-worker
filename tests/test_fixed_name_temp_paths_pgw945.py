@@ -1,8 +1,7 @@
-"""pgw#945 (tail of pgw#938): three more fixed-name temp paths, classified.
+"""Three fixed-name temp paths, classified.
 
-pgw#938 replaced the SDK uploader's ``dest.tmp`` and noticed three siblings
-without analysing them. Its own finding was that a pod-wide path can be
-CORRECT, so each site here is classified rather than assumed:
+A pod-wide fixed temp path can be CORRECT, so each site is classified rather
+than assumed:
 
 * ``request_context/_datasets._download_url_streamed`` — **RACY, and it is
   the real one.** ``resolve_dataset`` materializes into a pod-wide

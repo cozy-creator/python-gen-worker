@@ -1,7 +1,6 @@
 """pgw#823 — AOTInductor needs a C++ compiler; the endpoint images have none.
 
-Measured on a real L4 (gen-worker 0.84.0, sdxl 0.2.102, release `39ac3726`,
-pod `d0l6455n9nifo3`): the mint loaded the pipeline, exported the
+Measured on a real L4: the mint loaded the pipeline, exported the
 adapter-bearing graph class, reached the linker and refused —
 
     entry 'unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192':

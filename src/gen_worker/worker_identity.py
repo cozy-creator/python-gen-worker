@@ -9,10 +9,7 @@ frame carries it, so ``ChildTransport.current_worker_jwt`` returns ``""``
 forever. Every gate that answers a question about *identity* by reading that
 credential is therefore not merely wrong on some pods — it is wrong on
 **every** real serving pod, always, and it looks like a security refusal while
-it does it. (Twice measured: a boot-adopt that read "do I hold a bearer?" as
-"is there a hub to ask?" and never resolved, and a cell-receipt trust gate that
-decoded the viewer claims out of *this process's* JWT and refused every
-org-tier cell ``publisher_untrusted``.)
+it does it.
 
 So identity is not a gate's private business. It is ONE process-wide fact with
 ONE resolver, and this is it. A caller asks :func:`viewer`; it never decodes a

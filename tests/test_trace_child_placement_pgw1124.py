@@ -1,18 +1,15 @@
-"""pgw#1124: a boot-trace child holds no card, and a VIRTUAL structure is not
-a placement miss.
+"""A boot-trace child holds no card, and a VIRTUAL structure is not a
+placement miss.
 
-Two independent defects, measured on the fleet as qwen-image 14/14 and
-flux2-klein-9b 9/9 boot-trace children failing `CUDA OOM left the pipeline
-mixed-device` — every boot of both families paying a failed trace and adopting
-nothing:
+Two independent defects, either of which makes every boot-trace child of a
+family fail `CUDA OOM left the pipeline mixed-device` deterministically:
 
-1. the child ran the serving PLACEMENT ladder, so the slot's real non-target
-   components (a 15.5 GiB text encoder) were pushed onto the card the serving
-   parent already occupies — the trigger;
-2. the CPU rollback that OOM was supposed to demote through counted the
-   deliberately-virtual compile target as "not on cpu" and could never
-   succeed — which is what made a recoverable ladder step FATAL, on every
-   child, deterministically.
+1. the child must NOT run the serving PLACEMENT ladder — that pushes the slot's
+   real non-target components (a 15.5 GiB text encoder) onto the card the
+   serving parent already occupies;
+2. the CPU rollback that OOM demotes through must not count the
+   deliberately-virtual compile target as "not on cpu", or it can never
+   succeed and a recoverable ladder step becomes FATAL.
 
 The fixtures here are what production actually composes: the compile target is
 built by `structure_only.virtualize` (the function `build_component` ends in)

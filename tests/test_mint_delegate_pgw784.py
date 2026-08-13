@@ -6,16 +6,15 @@ Three claims, each with the fact that would break it:
    in-process shape the serving pipe carries guarded wrappers, LoRA branch
    containers and a process-global ``TORCHINDUCTOR_CACHE_DIR`` move for the
    whole mint; delegated, it carries none of that and keeps serving plain
-   eager. (pgw#1010 deleted the in-process shape outright, so this is now the
-   only shape a mint has — and the restriction it carried is gone with it.)
+   eager. (The in-process shape is gone; delegated is the only shape a mint
+   has.)
 2. **The child exports the declaration the PARENT stated.** The parent states
    the compile contract on the wire because the class-scoped unions live on
    the spec, not the decorator: a child re-deriving from ``@endpoint`` alone
-   would export a different declaration than the parent asked for. (pgw#1034:
-   this used to be phrased as key parity — "the child computes the same key" —
-   which stopped being true at pgw#758. The child computes no key; the parent
-   stamps one from the returned envelope. What the wire owes is the DECLARED
-   EXPORT, and that is what is checked below.)
+   would export a different declaration than the parent asked for. (This is NOT
+   key parity: the child computes no key; the parent stamps one from the
+   returned envelope. What the wire owes is the DECLARED EXPORT, and that is
+   what is checked below.)
 3. **Failure inversion.** A dead mint process is a FAILED MINT reported by a
    LIVE worker. Every branch returns a typed result, the retry is bounded and
    class-driven, and a card with no room for a co-resident child DECLINES

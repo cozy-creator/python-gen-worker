@@ -1,11 +1,9 @@
 """The ONE guarded HTTP fetch for endpoint code.
 
 Endpoints that accept a URL from a caller — a VLM caption input, an img2img
-source — were each hand-rolling `urlopen(url).read()`. That is an SSRF hole
-(the worker sits inside a datacenter network with a cloud metadata endpoint at
-169.254.169.254) plus an unbounded read into a pod's RAM, and it was already
-copied four times, so every copy has to be found and fixed independently
-forever.
+source — must not hand-roll `urlopen(url).read()`: that is an SSRF hole (the
+worker sits inside a datacenter network with a cloud metadata endpoint at
+169.254.169.254) plus an unbounded read into a pod's RAM.
 
 This module is that policy's single home:
 

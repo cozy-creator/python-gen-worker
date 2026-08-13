@@ -1,43 +1,22 @@
-"""pgw#1208: one class that cannot export must not cost the other thirty-five.
+"""One class that cannot export must not cost the other thirty-five.
 
-WHAT HAPPENED. The first sdxl full-circle leg reached the compile phase and
-died there, deterministically, on pod ``fry7suf4xgycie`` (RTX A4000, 0.113.2):
+The failure shape: the mint child ran the worker's SERVING placement ladder, the
+ladder engaged diffusers group offloading, and the offload hooks put a
+``@torch.compiler.disable``d function (``ModuleGroup.onload_``) in the traced
+path, which ``torch.export(strict=True)`` refuses fatally.
 
-    entry 'unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192':
-    torch.export(strict=True) failed for UNet2DConditionModel:
-    Unsupported: Skip inlining `torch.compiler.disable()`d function
-      Explanation: … <function ModuleGroup.onload_> … wrapped with
-      `torch.compiler.disable`
+Two properties are guarded:
 
-``ModuleGroup.onload_`` is **diffusers group offloading**. The mint child ran
-the worker's SERVING placement ladder, the ladder engaged group offload (a
-serving parent was already resident on that card), and the offload hooks put a
-``@torch.compiler.disable``d function in the traced path — which
-``torch.export(strict=True)`` refuses, fatally.
-
-THE CONTROLLED COMPARISON, which is what makes the diagnosis rather than a
-guess: the SAME entry name, on the SAME wheel (0.113.2), exported in **91.07 s**
-on an A4500 (`ft5vr2zg86jwmi`) and was `Unsupported` on the A4000. Six
-adapter-bearing entries exported clean there. The adapter axis is exonerated —
-rows are ordered adapter-bearing first (`aot_mint._rows_source`), so the
-adapter entry was simply the first one tried.
-
-TWO FIXES, AND THE SECOND IS THE MORE IMPORTANT
------------------------------------------------
-1. The mint child no longer PLACES on the weight-free path (``place=False``) —
-   the pgw#1124 seam, applied one door over. The ladder is for a pipeline that
-   will run a forward, and this one only ever exports. The hooks are never
-   installed rather than stripped afterwards, which is why this is small.
-2. **A deterministic per-entry export failure no longer kills the mint.** That
-   pod threw away nothing (it died on its first entry), but the A4500 shows the
-   shape that matters: 6 classes exported clean, and under the old code a
-   refusal at row 7 would have discarded all six. The entry is already the unit
-   of identity and of publish; it is now the unit of FAILURE too.
+1. The mint child does not PLACE on the weight-free path (``place=False``). The
+   ladder is for a pipeline that will run a forward; this one only ever exports,
+   so the hooks are never installed rather than stripped afterwards.
+2. **A deterministic per-entry export failure does not kill the mint.** The
+   entry is already the unit of identity and of publish; it is the unit of
+   FAILURE too.
 
 Fail-closed stays fail-closed AT THE ENTRY: a skipped class is never packed and
 never published, and serving covers it eager by the same mechanism that covers
-any shape outside a cell's declared envelope. Only the blast radius
-changed.
+any shape outside a cell's declared envelope. Only the blast radius changed.
 """
 
 from __future__ import annotations

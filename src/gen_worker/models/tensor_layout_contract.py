@@ -17,7 +17,7 @@ The vocabulary lives in tensorhub's ``internal/tensorlayout`` (A2: contracts
 are CODE). This module carries only the handles a decoder may name and refuses
 anything else; it does not re-specify the descriptors.
 
-**No exclusion marker exists, deliberately** (A4 corollary, Paul 2026-08-04).
+**No exclusion marker exists, deliberately** (A4 corollary).
 Exclusions are DERIVED from declared traits — ``composes_lora`` crossed with a
 function's ``lora_bucket`` is computable at build — or they do not exist.
 """

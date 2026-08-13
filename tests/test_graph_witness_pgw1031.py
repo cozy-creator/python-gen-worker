@@ -1,16 +1,15 @@
 """pgw#1031 — the cell key is the traced COMPUTATION, and two different
 computations behind one declaration now key APART (option a, Paul-ruled).
 
-The LIVE SIGHTING this file pins, measured 2026-08-10 during pgw#1079: the
-gauntlet's ``micro-pad32`` and ``micro-pad32-branchy`` members are the same
-model with two spellings of the same pad, so every DECLARED fact agrees —
-signature, symbol ranges, pytree spec, constant FQNs, declared envelope —
-while the traced bodies do not (112 nodes vs 102). Before pgw#1031's depth fix
-``class_hash`` folded only the declared/interface facts, so the key could not
-see the body and both minted under ONE ``ck1`` key. The fix folds the
-node-level ``graph_witness`` into ``class_hash`` (facts v3), so the ``graph``
-axis is now the computation: the two members derive DIFFERENT keys and a
-collision is a MISS (eager + mint), the cheap outcome.
+The case this file pins: the gauntlet's ``micro-pad32`` and
+``micro-pad32-branchy`` members are the same model with two spellings of the
+same pad, so every DECLARED fact agrees — signature, symbol ranges, pytree spec,
+constant FQNs, declared envelope — while the traced bodies do not (112 nodes vs
+102). A ``class_hash`` folding only the declared/interface facts cannot see the
+body, and both mint under ONE ``ck1`` key. Folding the node-level
+``graph_witness`` into ``class_hash`` (facts v3) makes the ``graph`` axis the
+computation: the two members derive DIFFERENT keys and a collision is a MISS
+(eager + mint), the cheap outcome.
 
 The rows:
 
@@ -25,8 +24,8 @@ The rows:
   braces beneath the now-sound key.
 
 **No compile anywhere.** ``trace_for_key`` is ``torch.export`` and stops there
-(Paul 2026-08-10: tracing for key derivation is explicitly permitted locally;
-mints are not). The weights are the rig's 1.1 MB generated checkpoint.
+(tracing for key derivation is explicitly permitted locally; mints are not).
+The weights are the rig's 1.1 MB generated checkpoint.
 """
 
 from __future__ import annotations

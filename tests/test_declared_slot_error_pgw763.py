@@ -1,27 +1,18 @@
-"""pgw#1088 (pgw#763's deferred worker half, th#1288 fix 1).
-
-The te#138-class incident: a release-declared slot fails to resolve, the
-handler reads ``ctx.slots["pipeline"]``, and the worker reports
-
-    ValueError: slot 'pipeline': no repo inference-defaults metadata...
+"""A release-declared slot that fails to resolve emits a TYPED declared-fault
+label, not a bare ``ValueError``.
 
 A bare ``ValueError`` carries no origin claim, so the hub can only classify it
 by WORKER VERSION — and every protocol-stale worker sits below
 ``MinRefProvenanceWorkerVersion``, so its FATALs are DISCARDED and neither the
-load-failure streak nor the spend brake ever sees the deterministic fault.
-
-The hub half (tensorhub ``c84939ff``) has been waiting for this label since:
-``declaredFaultLabels`` in ``blame_ladder.go`` already allowlists
-``declaredslotresolutionerror`` and ``declared_fault_labels_th1288_test.go``
-already asserts a 0.58.2 worker emitting it classifies
-``EvidenceDeclaredRefLoad``. The worker never emitted it.
+load-failure streak nor the spend brake ever sees the deterministic fault. The
+hub side allowlists ``declaredslotresolutionerror`` and classifies it
+``EvidenceDeclaredRefLoad``.
 
 The FIXED/``selected_by`` split is the load-bearing half, not a detail: the
 hub's own rule is "never add a label a payload field can participate in
 producing". A ``Slot(selected_by="model")`` slot is picked by the payload, so
 its resolution failure is the CALLER's, and typing it would let one bad
-request feed the release's health streak — th#1259's defect wearing a new
-label.
+request feed the release's health streak.
 """
 
 from __future__ import annotations

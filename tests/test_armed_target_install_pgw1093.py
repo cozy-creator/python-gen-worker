@@ -1,19 +1,10 @@
-"""pgw#1093: "armed at setup, no installed target" is an IMPOSSIBLE state, and
-a target that armed and then DEGRADED must never read as one that was never
-installed.
+"""Armed at setup with no installed target is an IMPOSSIBLE state, and a target
+that armed and then DEGRADED must never read as one that was never installed.
 
-The live failure (master stack, pod `kwiz5n9o41yn5i`, request
-`55971bce-…`, minimax-h3 0.4.4 on gen-worker 0.98.0, $1.15): the boot armed a
-regional JIT-intake target, inductor compiled it WHOLE
-(`jit_compile/minted n_graphs=2 n_breaks=0 total_s=39.36`), and every request
-then served eager at 6.30 s/step against a rig-measured 4.31. The pod's 59
-activity rows carry no `serve_eager_posture` and no `self_mint_abort` — the
-whole boot reported `metrics.lane=bf16-w16a16+eager`,
-`fallback_reason=uncompiled`, `self_mint_skipped/boot_ended_uncompiled` and
-nothing else.
-
-TWO different defects produce that exact reading, and before this issue they
-were indistinguishable:
+A pod that arms a regional JIT-intake target, compiles it whole, and then serves
+every request eager reports only `metrics.lane=…+eager`,
+`fallback_reason=uncompiled` and `self_mint_skipped/boot_ended_uncompiled`. TWO
+different defects produce that exact reading, and they must be distinguishable:
 
   (A) NEVER INSTALLED — `_install_compile_targets` dropped the candidate on one
       of three exits that emitted nothing at all: `cfg is None`, the bare
@@ -22,19 +13,15 @@ were indistinguishable:
       `bf16-w16a16` is not).
   (B) INSTALLED THEN DEGRADED — `_guarded_regional` caught an exception on a
       served call, set `degraded=True` and cleared the region. A graph break
-      and a `DeclaredRangeExceeded` each got their own wire row from pgw#1082;
-      EVERY OTHER exception class took `logger.warning` and reached the wire as
-      nothing. On a hub-spawned pod stdout is unreachable — pgw#824's ruling
-      verbatim. `is_compile_armed` then reads False and every downstream reader
-      falls through to the generic `uncompiled`.
+      and a `DeclaredRangeExceeded` each get their own wire row; every OTHER
+      exception class took `logger.warning` and reached the wire as nothing,
+      and on a hub-spawned pod stdout is unreachable. `is_compile_armed` then
+      reads False and every downstream reader falls through to the generic
+      `uncompiled`.
 
-pgw#1082's body predicted this ambiguity for the PRE-0.98.0 guard and fixed the
-LIE (`jit_cell` on an eager pod); raising the degrade flag made (B) look like
-(A) rather than making (B) say "degraded".
-
-REVERT-TURNS-RED: each test below fails on 0.98.0 — no posture is recorded, no
-`serve_eager_posture` row is emitted, and `_eager_posture()` answers
-`uncompiled` for a target that demonstrably armed.
+REVERT-TURNS-RED: each test below fails without the fix — no posture is
+recorded, no `serve_eager_posture` row is emitted, and `_eager_posture()`
+answers `uncompiled` for a target that demonstrably armed.
 """
 
 from __future__ import annotations

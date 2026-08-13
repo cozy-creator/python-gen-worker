@@ -1,31 +1,27 @@
-"""pgw#671 eager-first boot (worker half of th#1187).
+"""Eager-first boot.
 
-The startup ladder no longer serializes pipeline_loading ->
-self_mint_compile -> ready on eager-compatible lanes: after weights load
-and the derived warm plan's eager pass, the record goes READY at the EAGER
-tier while the self-mint runs as a background task through the pgw#622
-routers; the record hot-swaps to compiled when the mint arms. Proven here
-through the REAL executor ensure_setup codepath (fakes only at the
-download and compile-arm leaves):
+The startup ladder does not serialize pipeline_loading -> self_mint_compile ->
+ready on eager-compatible lanes: after weights load and the derived warm plan's
+eager pass, the record goes READY at the EAGER tier while the self-mint runs as
+a background task through the hot-swap routers; the record hot-swaps to compiled
+when the mint arms. Proven here through the REAL executor ensure_setup codepath
+(fakes only at the download and compile-arm leaves):
 
-  1. READY is reached BEFORE the graph compiles finish (the 30-min block
-     is gone); the background driver seeds the FULL plan, proves, packs,
-     publishes and flips the tier to compiled with no capability-state
-     flap. The self_mint_compile activity stays RUNNING past READY and
-     terminates from the driver.
-  2. RED-VERIFICATION via the kill switch: GEN_WORKER_EAGER_FIRST_BOOT=0
-     restores today's sequential gate — every compile completes BEFORE
-     READY. The elapsed-time split is the eager-vs-compiled boot latency
-     evidence.
+  1. READY is reached BEFORE the graph compiles finish; the background
+     driver seeds the FULL plan, proves, packs, publishes and flips the
+     tier to compiled with no capability-state flap. The self_mint_compile
+     activity stays RUNNING past READY and terminates from the driver.
+  2. GEN_WORKER_EAGER_FIRST_BOOT=0 restores the sequential gate — every
+     compile completes BEFORE READY. The elapsed-time split is the
+     eager-vs-compiled boot latency evidence.
   3. Clean abandonment (adopt-on-arm shape): mid-build abandonment
      discards the capture wholesale, keeps serving eager, suspends
      concurrent routing, and completes (never fails) the activity.
   4. A failed background compile keeps the function serving eager and
      reports the typed activity failure — a mint failure never un-serves.
-  5. Mandatory-quantized lanes are ineligible (gw#586: eager is not a
-     production lane there).
-  6. The capability projection carries serving_tier on READY only
-     (th#1187 wire contract).
+  5. Mandatory-quantized lanes are ineligible — eager is not a production
+     lane there.
+  6. The capability projection carries serving_tier on READY only.
 """
 
 from __future__ import annotations

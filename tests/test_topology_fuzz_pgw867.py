@@ -25,13 +25,6 @@ properties here are:
       .json`` as recorded (the merge-path half; the random cross-language search
       lives in ``scripts/topology_differential_pgw867.py``, not here).
 
-§4.34 deletions: the row asserting the fixture is byte-identical with
-tensorhub's copy probed ``~/cozy/tensorhub-chaos``, a path the workspace policy
-declares a read-only leftover — it has skipped everywhere, always, so the
-cross-repo identity claim above is UNVERIFIED by anything. And the
-``divergent`` ledger row parametrized over a list the fixture records as empty
-since 2026-08-02, so it ran zero cases.
-
 hypothesis over atheris: these decoders are shallow, so libFuzzer's coverage
 feedback buys little, and ``@example`` puts each historical defect in the source
 as an always-run regression case rather than an opaque corpus blob.

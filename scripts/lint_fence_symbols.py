@@ -4,24 +4,18 @@
 A fence names symbols in string literals: the arm-state feeder list, the
 cell-key derivation allowlist, the layout fence's ``AXIS_PRODUCERS``. When one
 of those symbols is renamed or deleted, the fence keeps running, keeps exiting
-0, and **guards nothing**. It does not go red. Nothing anywhere says so — no
-amount of running things finds it, because nothing is failing. This script asks
-every fence what symbol it names NOW, mechanically.
+0, and **guards nothing** — nothing is failing, so no amount of running things
+finds it. This script asks every fence what symbol it names NOW, mechanically.
 
-WHY IT SCANS ITSELF
--------------------
-This script is a guard that names things, so it has exactly the failure mode it
-detects. It is pointed at itself rather than exempted: if it ever names a symbol
-that no longer exists, it goes red **about itself**. The self-reference
-terminates rather than recursing.
+IT SCANS ITSELF: this script is a guard that names things, so it has exactly
+the failure mode it detects. Pointed at itself rather than exempted — if it
+names a symbol that no longer exists it goes red about itself, and the
+self-reference terminates rather than recursing.
 
-DELIBERATELY SMALL
-------------------
-String literals in lint scripts and fence-shaped tests, checked against
-``src/gen_worker``. It is NOT a general dead-symbol linter —
+DELIBERATELY SMALL: string literals in lint scripts and fence-shaped tests,
+checked against ``src/gen_worker``. NOT a general dead-symbol linter —
 ``lint_unreached_surface.py`` owns that question, and this one's whole value is
-that it looks at **the guards**. Keep it small; a fence that grows into a linter
-gets disabled by the first person it annoys.
+that it looks at **the guards**.
 
 THE FALSE-POSITIVE SHAPE. Two kinds, handled differently on purpose:
 

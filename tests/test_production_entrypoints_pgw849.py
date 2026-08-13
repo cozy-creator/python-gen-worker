@@ -1,18 +1,8 @@
-"""pgw#849 guard 1 — TESTS MUST DRIVE THE PRODUCTION ENTRYPOINT, NOT THE UNIT
-BENEATH IT.
+"""TESTS MUST DRIVE THE PRODUCTION ENTRYPOINT, NOT THE UNIT BENEATH IT.
 
-Eleven instances of one defect: correct code, green unit tests, and no route
-that reached it. ``aot_serve.set_guard_failure_callback`` was never called, so
-every AOT arm ever built was unadvertisable, for weeks. ``entry_workers``
-handled a ``peak_rss_bytes`` no caller passed. ``podguard.attend()`` returned a
-Keeper nobody entered, so sixteen attended pods sat on a silent fuse. All of
-them green, all of them at unit level, and unit level is exactly where a wiring
-defect is invisible — because the unit test IS the caller that production is
-not.
-
-Paul's standing rule already says integration tests are the gold standard. The
-gap this file closes is that NOTHING ENFORCED IT, so unit-level tests kept
-accruing next to untested wiring.
+The defect class is correct code, green unit tests, and no route that reaches
+it. Unit level is exactly where a wiring defect is invisible, because the unit
+test IS the caller that production is not. This file is what enforces the rule.
 
 The mechanism: declare each path's production call chain as a LADDER, drive a
 real scenario, and assert the deepest rung was reached WITH THE WHOLE CHAIN
@@ -23,7 +13,7 @@ The ledger below is the deliverable, in both directions:
 * ``COVERED`` ladders are asserted green here. One that stops being driven from
   its front door — a route deleted, a rung renamed, a wrapper that stops being
   entered — fails, loudly, in CI.
-* ``UNCOVERED`` ladders are the measured gaps as of 2026-08-01, each with the
+* ``UNCOVERED`` ladders are the known gaps, each with the
   rung the traversal stops at and WHY. They are asserted to still be
   uncovered, so closing one is a deliberate edit to this file rather than a
   silent drift. That is the same contract ``scripts/check_registry_contract.py``

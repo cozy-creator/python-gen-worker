@@ -1,31 +1,15 @@
 """pgw#1165: the boot trace's fan-out gets a DEVICE budget.
 
-Measured on a live pod, not inferred. RTX 3090 `q1y1tx4fa1vjzs` (24 GB, sm_86),
-release 6ee9b4d4df2697a53da6f43a, gen-worker 0.112.0, **uncontended** — a fresh
-pod, one request, nothing else on the card:
+Sizing `trace_workers` from CPU alone (a pod reporting `host_cpu_count=96`) caps
+K only by the declared class count, so 18 boot-trace children put 18 CUDA
+contexts onto a 24 GB card and all 18 die `OUT OF DEVICE MEMORY` on an
+uncontended pod. The same derivation succeeds on a 48 GB A40, which is why it
+reads as "small cards cannot derive keys" rather than a pool with no budget.
 
-    boot_adopt child_error key=- — 18 of 18 boot-trace child(ren) produced no
-    class hashes: MintResourceExhausted: torch.export(strict=True) for
-    UNet2DConditionModel: OUT OF DEVICE MEMORY
-    (GPU 0 has a total capacity of 23.56 GiB of which 3.12 MiB is free.
-     Process 783428 has 578.00 MiB memory in use.
-     Process 794409 has 1.29 GiB   Process 794397 has 1.29 GiB
-     Process 794400 has 1.29 GiB   Process 794401 has 1.29 GiB
-     Process 794403 has 1.29 GiB   Process 794405 has 1.25 GiB
-     Process 794404 has 1.26 GiB   …)
-
-Those processes are the trace's own children. `trace_workers` sized the pool
-from CPU alone — the pod reported `host_cpu_count=96` — so K was capped only by
-the declared class count, 18, and 18 CUDA contexts went onto a 24 GB card. The
-same derivation on a 48 GB A40 succeeded twice with a byte-identical key, which
-is why this looked like "small cards cannot derive keys" rather than a pool
-with no budget.
-
-Note what the per-child cost IS: one structure-only export's *allocator*
-high-water really is ~9.8 MiB (pgw#1080, and `trace_workers` said so). The
-1.25-1.29 GiB is the PROCESS — a CUDA context plus the cuBLAS/cuDNN kernel
-images the export loads. It is not going to shrink, which is exactly why the
-answer is a budget rather than a diet.
+What the per-child cost IS: one structure-only export's *allocator* high-water
+is ~9.8 MiB, but the PROCESS is 1.25-1.29 GiB — a CUDA context plus the
+cuBLAS/cuDNN kernel images the export loads. It is not going to shrink, which is
+exactly why the answer is a budget rather than a diet.
 """
 from __future__ import annotations
 

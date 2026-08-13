@@ -1,28 +1,17 @@
-"""pgw#1210: a component declaring a layout contract loads through that
-contract's registered loader — on BOTH entry points, or it is a typed refusal.
+"""A component declaring a layout contract loads through that contract's
+registered loader — on BOTH entry points, or it is a typed refusal.
 
-THE FAULT (filed by the ie#681/ie#699 lane; minimax-h3 0.4.34, two releases,
-three pods, same signature):
-
-    ModularHydrationError: … Failed to create component transformer:
-      modular_pipeline_utils.py load -> modeling_utils.py from_pretrained
-      -> config["quantization_config"] = DiffusersAutoQuantizer.merge_…
-
-The artifact is a PROVEN `cozy.fp8-rowwise@1` tree and the SDK ships the
-declaring loader for exactly that layout (`w8a8.load_w8a8_denoiser`,
-`@implements_contract`). The NON-modular path dispatches to it. A diffusers
-MODULAR pipeline hydrates through `ComponentSpec.load()` -> plain
-`from_pretrained`, which never consults it — so the same bytes that serve fine
-on one path kill the pod on the other, forever (`deterministic_fault_loop`).
+The SDK ships a declaring loader for a `cozy.fp8-rowwise@1` tree
+(`w8a8.load_w8a8_denoiser`, `@implements_contract`) and the NON-modular path
+dispatches to it. A diffusers MODULAR pipeline hydrates through
+`ComponentSpec.load()` -> plain `from_pretrained`, which never consults it — so
+the same bytes that serve fine on one path kill the pod on the other, forever
+(`deterministic_fault_loop`).
 
 THE INVARIANT, and why the fix is a shared dispatch rather than a second copy:
 one artifact shape has two entry points, and two dispatches that agree today
-are two dispatches that will disagree later. `contract_loaded_component` is now
-the only place that decides, and both callers ask it.
-
-wan-2.2's fp8 lane is the sibling consumer — it binds a produced fp8
-tree on the non-modular path — which is why "keep both entry points on one
-dispatch" was the filing's own requirement.
+are two dispatches that will disagree later. `contract_loaded_component` is the
+only place that decides, and both callers ask it.
 """
 
 from __future__ import annotations

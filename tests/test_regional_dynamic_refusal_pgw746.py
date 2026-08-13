@@ -1,27 +1,19 @@
-"""pgw#746 (OQ-7) -> pgw#817/D4 -> **pgw#1078, which closes it**: the
-``regional=True`` + ``dynamic=(...)`` combination is now SERVED by the dynamo
-regional branch instead of declined by it.
+"""``regional=True`` + ``dynamic=(...)`` is SERVED by the dynamo regional
+branch, never declined by it.
 
-pgw#746 refused the combination in ``Compile.__post_init__``; pgw#817/D4 moved
-the refusal onto the dynamo arm, which then sent such a target to the
-whole-forward branch. Both rested on one premise — *"the dynamo regional
-branch cannot apply the declared marks"* — and ie#632 measured what it costs:
-minimax-h3's 20.1B denoiser declares ``regional=True`` precisely because
-whole-graph inductor planning is unaffordable for its class, and the
-decline compiled it whole-forward anyway. Its boot warmup compiled one shape;
-every real request presented a different packed sequence, guard-missed, and
-`_guarded` served eager for the life of the pod (`lane=bf16-w16a16+eager`,
-257.7 s against a 131.7 s measured compiled wall).
+Declining it sends the target to the whole-forward branch, which is exactly
+what a large denoiser declares ``regional=True`` to avoid: boot warmup compiles
+one shape, every real request presents a different packed sequence, guard-miss,
+and `_guarded` serves eager for the life of the pod.
 
-The premise was simply wrong. ``compile_repeated_blocks`` compiles each
-repeated BLOCK, so the block call is where this lane's graphs are traced and
-where the marks belong — ``_mark_regional_blocks`` wraps each block's
-``_compiled_call_impl`` with the same ``_with_declared_marks`` the
-whole-forward branch uses. One declaration, two lanes, one meaning.
+``compile_repeated_blocks`` compiles each repeated BLOCK, so the block call is
+where this lane's graphs are traced and where the marks belong —
+``_mark_regional_blocks`` wraps each block's ``_compiled_call_impl`` with the
+same ``_with_declared_marks`` the whole-forward branch uses. One declaration,
+two lanes, one meaning.
 
-What pgw#746 was right about is unchanged and still pinned below: the contract
-digest distinguishes the two configs, because they genuinely produce different
-artifacts.
+Also pinned: the contract digest distinguishes the two configs, because they
+genuinely produce different artifacts.
 """
 
 from __future__ import annotations

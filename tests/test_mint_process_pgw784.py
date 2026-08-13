@@ -1,10 +1,8 @@
-"""pgw#784: the mint runs in its OWN OS process, and its death is not the
-worker's.
+"""The mint runs in its OWN OS process, and its death is not the worker's.
 
-th#1299's tape, restated as the contract this file pins (WORKER-CONTRACTS §2):
-a compile-cell MISS must not put long-running GIL-holding Python on the loop
-that carries the 10s beat and eager serving. So the mint becomes a child
-process, and this file proves the SUPERVISOR half:
+WORKER-CONTRACTS §2: a compile-cell MISS must not put long-running GIL-holding
+Python on the loop that carries the 10s beat and eager serving. So the mint is a
+child process, and this file proves the SUPERVISOR half:
 
 * the boundary is files + argv, never a pickled live object (spawn, not fork —
   a CUDA context cannot survive fork, and the child loads what it needs);

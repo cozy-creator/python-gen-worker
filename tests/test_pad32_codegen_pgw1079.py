@@ -1,12 +1,9 @@
-"""pgw#1079 / ie#637's surviving watch item: the pad-to-32 expression class.
+"""The pad-to-32 expression class.
 
 z-image pads its flattened latent to a multiple of 32, and with both latent
 axes declared dynamic that padded length becomes an algebraic function of the
-declared symbols. ie#637 proved off-GPU that HOW it is spelled decides whether
-the exported program is servable; what no run had ever reached is whether the
-compiler then CODEGENS the surviving expression. Two z-image pods died before
-that phase (the declared-range gate, then ie#638's VRAM), so the question cost
-a rented A100 to ask there.
+declared symbols. HOW it is spelled decides whether the exported program is
+servable.
 
 This file asks the algebra half locally, on a 1.1 MB toy that carries the exact
 same expression class. The CODEGEN half is the gauntlet's `micro-pad32` member
@@ -16,11 +13,10 @@ artifact); this is the cheap unit that says WHY that member is the right shape.
 What is pinned:
 
 * the fixed spelling's shape env holds NO equality over the declared symbols —
-  every `Eq` it records about them is REFUTED (`False`), which is the class
-  pgw#1077 taught the declared-range gate to evaluate rather than count;
-* the upstream spelling carries `Eq(PythonMod(-L, 32), 0)` — ie#637's first
-  named guard, verbatim in shape — plus `Ne`/`>=` RANGE restrictions that
-  exclude the pad-0 row;
+  every `Eq` it records about them is REFUTED (`False`), the class the
+  declared-range gate must EVALUATE rather than count;
+* the upstream spelling carries `Eq(PythonMod(-L, 32), 0)` plus `Ne`/`>=` RANGE
+  restrictions that exclude the pad-0 row;
 * both spellings compute the same values as the unpadded base denoiser, at
   pads 0, 16 and 28.
 """

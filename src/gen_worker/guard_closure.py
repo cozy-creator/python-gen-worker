@@ -6,14 +6,13 @@ machine-checkable. Three pieces, all SDK-generic (parameterized ONLY by the
 declared ``CompileCell`` contract — never per-endpoint or per-family code):
 
 1. **Extraction** (:func:`extract`): post-mint, walk every compiled graph's live
-   guard tree. The robust torch 2.13 surface (probed on 2.13.0+cu130):
+   guard tree. The robust torch 2.13 surface:
    ``torch._dynamo.eval_frame._debug_get_cache_entry_list(code)`` ->
    ``entry.guard_manager.root`` -> recursive ``get_child_managers()`` (each
    carries ``get_source()``) + ``get_leaf_guards()``. A repr parse of the
    ``TREE_GUARD_MANAGER`` dump is the fallback when the structured walk is
    unavailable. An entry whose guards cannot be read records an
-   :data:`UNPROVEN` row (never silent) — that is a fact about our diagnostic
-   surface on this torch build, not about the mint.
+   :data:`UNPROVEN` row, never a silent pass.
 
 2. **Closure classifier** (:func:`classify`): the RelationalGuard family
    (aliasing, symbolic shapes) is judged by TYPE first — torch attaches it to
@@ -31,18 +30,15 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
    REUSE, not incorrectness: dynamo re-evaluates its own guards on every call at
    the consumer, so a cell depending on unpinned state fails its guards THERE —
    and with fail-on-recompile armed that raises, serves eager, and reports a
-   countable ``guard_miss``. A missed leak degrades gracefully and loudly and can
-   never produce a wrong result. A CLASSIFIER BUG, by contrast, refuses every
-   mint on every family — which happened twice fleet-wide while the gate caught
-   zero real leaks in production. So :func:`closure_manifest` classifies,
+   countable ``guard_miss``. So :func:`closure_manifest` classifies,
    records, emits a typed ``guard_leak`` event, and CONTINUES the mint. Hard
    refusals survive only where a defect is PROVEN rather than inferred: zero
    compiled graphs, and posture drift (:func:`assert_posture`).
 
    **Never rebuild this classifier.** torch's own ``guard_filter_fn`` /
    ``GuardFilterEntry`` is the supported structured hook (typed entries, no C++
-   manager walk and no repr parsing — where BOTH fleet-wide bugs lived), and
-   upstream maintains a versioned ``UNSUPPORTED_SERIALIZATION_GUARD_TYPES``
+   manager walk and no repr parsing), and upstream maintains a versioned
+   ``UNSUPPORTED_SERIALIZATION_GUARD_TYPES``
    classification. torch.export / AOTI removes the question entirely, and this
    module is DELETED when the last family migrates to AOT. If a JIT-resident
    family ever needs the check, implement it as a thin call into
@@ -54,8 +50,7 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
    SAME canonical form). Tensor strides are pinned to the canonical contiguous
    layout — ``.contiguous()`` alone is NOT the pin: a size-1 dim makes
    ``is_contiguous()`` true under an arbitrary stride and ``.contiguous()`` a
-   no-op while TENSOR_MATCH still guards the exact stride tuple (reproduced:
-   entries 1->2 on ``stride=(8,999,1)`` for size ``(4,1,8)``), so the residue
+   no-op while TENSOR_MATCH still guards the exact stride tuple, so the residue
    case rebuilds via ``as_strided``. Tensor dtypes are memo-asserted per
    argument path — a drift raises a NAMED :class:`GuardBoundaryError` instead of
    a silent recompile. Scalar policy is REPORTED by the classifier; the ingress

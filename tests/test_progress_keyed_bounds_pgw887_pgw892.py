@@ -1,13 +1,11 @@
-"""pgw#887 + pgw#892 — three flat wall clocks that ended REAL WORK.
+"""Three flat wall clocks that ended REAL WORK.
 
-Paul's standing rule, and `stall.py`'s own opening line: *nothing that can END
-REAL WORK may key on a wall clock. A fixed budget cannot tell a healthy
-three-hour transfer from a wedge, so it is either useless or it kills work
-that was about to succeed.* DESIGN-RULINGS §2 states the same thing as a
-boundary: a deadline may bound a COMMAND, never the WORK.
+The rule (also `stall.py`'s opening line): *nothing that can END REAL WORK may
+key on a wall clock. A fixed budget cannot tell a healthy three-hour transfer
+from a wedge, so it is either useless or it kills work that was about to
+succeed.* A deadline may bound a COMMAND, never the WORK.
 
-Three sites violated it, and each already had its replacement primitive
-in-repo:
+Three sites violated it; each replacement primitive already existed in-repo:
 
 * `lifecycle._finish_drain` — `wait_idle(timeout=deadline)` then
   `abort_all()`. A render at step 30/50 and one at step 1/50 aborted alike; a

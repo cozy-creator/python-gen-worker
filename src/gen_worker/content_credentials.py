@@ -8,12 +8,12 @@ every generated media asset as it passes through ``RequestContext.save_bytes``
 / ``save_file``, i.e. the last point the bytes touch trusted compute before
 upload.
 
-**The private key is NOT here**. A pod imports untrusted tenant code
-into this process, so a signing key in pod env or on the pod filesystem is one
-``print(os.environ[...])`` from being exfiltrated — and a leaked platform leaf
-key forges or strips provenance on every asset Cozy ever signed. So the split
-is: the worker builds the claim (it has the bytes) and the HUB signs it. The
-c2pa-rs callback signer sends the claim's COSE to-be-signed octets to
+**The private key is NOT here**. A pod imports untrusted tenant code into this
+process, so a signing key in pod env or on the pod filesystem is one
+``print(os.environ[...])`` from being exfiltrated, and a leaked platform leaf
+key forges or strips provenance on every asset Cozy ever signed. The worker
+builds the claim (it has the bytes) and the HUB signs it: the c2pa-rs callback
+signer sends the claim's COSE to-be-signed octets to
 ``POST /v1/worker/c2pa/sign``, authenticated with this pod's worker JWT, and
 gets back a signature. No media leaves the pod; no key enters it.
 
@@ -26,16 +26,15 @@ Config (Settings / env) — the PUBLIC half only:
 - ``GEN_WORKER_C2PA_TA_URL``   — optional RFC3161 timestamp authority URL.
 
 ``GEN_WORKER_C2PA_KEY_PEM`` / ``_KEY_PATH`` are REFUSED: if either is present
-this module raises instead of using it. That is the ratchet — a hub regression
-that re-injects the key kills the pod loudly rather than quietly re-creating
-the leak.
+this module raises instead of using it, so a hub regression that re-injects the
+key kills the pod loudly rather than quietly re-creating the leak.
 
-The refusal is a property of the POD ENVIRONMENT, not of one call. It is
-therefore evaluated at every read of the signing state (:func:`_active_config`,
-and so :func:`enabled` and both ``sign_media_*``), not only inside
-:func:`configure`. A process that never called ``configure()`` — a library
-embed, a compute child, a test harness — must not be the process where a
-delivered private key goes unnoticed and media then ships unsigned.
+The refusal is a property of the POD ENVIRONMENT, not of one call, so it is
+evaluated at every read of the signing state (:func:`_active_config`, and so
+:func:`enabled` and both ``sign_media_*``), not only inside :func:`configure`.
+A process that never called ``configure()`` — a library embed, a compute child,
+a test harness — must not be the process where a delivered private key goes
+unnoticed and media then ships unsigned.
 
 Signing is ON iff cert material is set. The hub transport is armed at HelloAck
 (``configure_remote_signer``, same wiring moment as the cell-receipt gate).

@@ -1,15 +1,11 @@
-"""pgw#1205: what a compile costs a card, banked per GRAPH CLASS with provenance.
+"""What a compile costs a card, banked per GRAPH CLASS with provenance.
 
-§4.33 deleted a prediction layer and left one sentence standing — *an estimate
-may never act as a floor a measurement is not allowed to correct, and an absent
-measurement means NO EVIDENCE.* pgw#1199 then deleted the last thing that made a
-mint weight-scale, so the honest requirement is what a compile actually costs a
-card (activation scale), and nobody was keeping that number: the instrumentation
-existed (`aot_compile_child._peak_device`, marked *"telemetry only"*) but the
-BANKING and the PROVENANCE died with `mint_budget.py`.
+An estimate may never act as a floor a measurement is not allowed to correct,
+and an absent measurement means NO EVIDENCE. A mint is activation-scale, not
+weight-scale, so the honest number is what a compile actually costs a card.
 
-WHY THE MACHINE AND NOT THE CELL MANIFEST — the argument that decided the shape
-------------------------------------------------------------------------------
+WHY THE MACHINE AND NOT THE CELL MANIFEST
+-----------------------------------------
 The manifest is written when a cell SEALS. **The mint that most needs measuring
 is the one that OOMed and sealed nothing**, so a manifest-only bank has a writer
 that dies exactly when the interesting data exists. And the consumer is local:
@@ -19,13 +15,11 @@ through a hub is the wrong shape to read it from — and cozy-local has no hub.
 So: two sinks, one measurement, each answering only the question it can. The
 machine banks the row for "what did this cost HERE"; `aot_mint_phases` carries
 the identical bytes to the hub for the fleet view. The artifact schema is
-untouched, so there is no adoption risk.
+untouched.
 
-WHAT THIS IS NOT
-----------------
-It sizes nothing. `entry_workers` is still f(cores, measured child RSS), and no
-width, placement or admission decision reads a banked row. Wiring one in would
-re-create precisely what §4.33 deleted.
+WHAT THIS IS NOT: it sizes nothing. `entry_workers` is still f(cores, measured
+child RSS), and no width, placement or admission decision reads a banked row.
+Wiring one in would re-create the prediction layer §4.33 deleted.
 """
 
 from __future__ import annotations

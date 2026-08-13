@@ -13,9 +13,8 @@ Layers exercised:
 - ``parallel/cp.py`` (the module hooks): a real degree-2 gloo group is armed
   through the real diffusers CP machinery, then a component is forwarded
   OUTSIDE the gate. It must raise ``UngatedShardedForward`` on the calling
-  thread. BEFORE this change that forward blocks in the collective forever
-  (proved out of band with a bounded probe: the thread is still alive after
-  30s); after it, the group survives and the next gated call serves.
+  thread; without the check that forward blocks in the collective forever. The
+  group must survive and the next gated call must serve.
 - the SAME check from another thread, which is where the real strays come from
   (the shared shape-warm thread, a background mint turn).
 - ``Executor`` construction (the "eager only" claim itself): on a

@@ -9,8 +9,8 @@ It never calls AOTInductor, never links a ``.so`` and never publishes — so it
 runs on a laptop under the standing "mints run on remote machines only" rule,
 which explicitly permits fake-tensor tracing for key derivation.
 
-What it proves, and why each is worth a run
--------------------------------------------
+What it proves:
+
 * **The derivation WORKS on a real endpoint** — the structure-only builder
   reaches the boot path, the export gates pass on fake parameters, and every
   declared class produces a keying block.
@@ -23,9 +23,8 @@ What it proves, and why each is worth a run
 * **The prop/export economy, priced on real graphs** — ``FakeTensorProp`` ms
   beside export ms, per child. Reported; it decides nothing here.
 
-What it CANNOT prove, and must not be read as proving
-------------------------------------------------------
-**derived == stamped.** A stamp needs a mint, a mint needs a compile, and a
+What it CANNOT prove: **derived == stamped.**
+A stamp needs a mint, a mint needs a compile, and a
 compile is a pod. This rig's key is self-consistent, not corroborated. The
 comparison against a real mint's stamp is the pod leg, and it is the only
 load-bearing proof.

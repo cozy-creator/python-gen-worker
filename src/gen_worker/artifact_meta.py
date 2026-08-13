@@ -2,10 +2,10 @@
 
 Every artifact kind this worker handles — AOT (``aot_serve``) and
 inductor-cache (``compile_cache``) — packs its envelope as a
-``metadata.json`` member at the tar root. Eight call sites had each grown their
-own ``tarfile.open`` / member scan / ``json.loads`` loop, agreeing on the format
-by convention and disagreeing on everything else: which members count, whether a
-non-``dict`` payload is a value or an error, and what a missing member raises.
+``metadata.json`` member at the tar root. Per-call-site ``tarfile.open`` /
+member scan / ``json.loads`` loops agree on the format by convention and
+disagree on everything else: which members count, whether a non-``dict``
+payload is a value or an error, and what a missing member raises.
 
 STDLIB ONLY, and deliberately so — that is what makes it usable from the two
 modules that must not import the compile stack:

@@ -20,20 +20,17 @@ A function is UNSERVEABLE only when a genuine incompatibility bars it (compute
 capability / required quant library / a stored flavor outside its SM window)
 OR the author opted out of the CPU-touching rungs with
 ``Resources(strict_vram=True)`` (a binding that cannot tolerate CPU-resident
-weights — compiled fixed-shape graphs — and would rather refuse
-than serve slowly). It is never refused on hardware inadequacy alone: gen
-workers don't offload to CPU because we want them to, they do it out of
-necessity — better to run degraded than not run at all (Paul's ruling,
-2026-07-10). The orchestrator hears about every degraded serve (FnDegraded)
-and owns moving the workload to a bigger card.
+weights — compiled fixed-shape graphs — and would rather refuse than serve
+slowly). It is never refused on hardware inadequacy alone: better to run
+degraded than not run at all. The orchestrator hears about every degraded serve
+(FnDegraded) and owns moving the workload to a bigger card.
 
 Selection ACROSS stored flavors stays upstream: this planner marks each
 function serveable/unserveable + how-it-runs, and the hub's routing ranking
-picks the highest-quality fitting flavor. bf16 -> fp8 -> nvfp4 ->
-int4 falls out of that ranking over the serveable set; this planner adds the
-RUNTIME rungs (fp8 storage / offload / cpu) for the one function it
-was given, plus an honest hint when a stored flavor would have served
-natively.
+picks the highest-quality fitting flavor. bf16 -> fp8 -> nvfp4 -> int4 falls out
+of that ranking over the serveable set; this planner adds the RUNTIME rungs (fp8
+storage / offload / cpu) for the one function it was given, plus an honest hint
+when a stored flavor would have served natively.
 
 Every degraded plan carries ``wanted`` (what the function declares) and
 ``ran`` (what actually runs) so the worker can report the degradation

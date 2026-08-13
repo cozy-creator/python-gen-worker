@@ -1,34 +1,26 @@
-"""pgw#853 — the #739 vocabulary learns non-tensor / container arguments.
+"""The export declaration vocabulary covers non-tensor / container arguments.
 
-THE FINDING THIS BUILDS ON. The pgw#853 blocker inventory measured what each
-of the fleet's eight declaring families actually refuses with, and **three of
-the eight blockers reduce to one gap**: the declaration vocabulary cannot
-express an argument that is not a single tensor.
+Three of the fleet's eight declaring families are blocked by one gap: the
+vocabulary cannot express an argument that is not a single tensor.
 
-* **z-image B1** — ``x`` is a ``list[Tensor]``. ``_nest`` builds DICTS from
-  dotted names, so ``Input('x.0', ...)`` yielded ``{'0': tensor}`` where the
-  target takes ``[tensor]``; and ``dynamic_shapes_spec`` emitted a flat
-  ``{input: {axis: Dim}}`` mapping, which torch refuses by name.
-* **qwen-image B1** — ``img_shapes`` is ``[[(1, H_pat, W_pat)]] * B``: the
-  class row restated as python ints. ``Arg.value`` is a scalar union AND an
-  ``Arg`` is declaration-global, while this value is per-row.
-* **qwen-image B2's second half** — the edit lane "cannot go dynamic either,
-  for the same img_shapes reason".
+* **z-image** — ``x`` is a ``list[Tensor]``. ``_nest`` builds DICTS from dotted
+  names, so ``Input('x.0', ...)`` yields ``{'0': tensor}`` where the target takes
+  ``[tensor]``; and ``dynamic_shapes_spec`` emits a flat ``{input: {axis: Dim}}``
+  mapping, which torch refuses by name.
+* **qwen-image** — ``img_shapes`` is ``[[(1, H_pat, W_pat)]] * B``: the class
+  row restated as python ints. ``Arg.value`` is a scalar union AND an ``Arg`` is
+  declaration-global, while this value is per-row. The edit lane cannot go
+  dynamic for the same reason.
 
-**The gap was in the SDK, not in torch** — z-image's own measurement said so
-("the nested form torch wants exports fine, control rc=4"), and
-:func:`test_a_real_torch_export_accepts_the_container_form` re-proves it here
-rather than taking it on faith. This is the vocabulary catching up to what the
-platform underneath already supports.
+**The gap is in the SDK, not in torch** —
+:func:`test_a_real_torch_export_accepts_the_container_form` proves the nested
+form exports fine rather than taking it on faith.
 
-THE pgw#846 GATE. A vocabulary may change how a declaration is EXPRESSED,
-never what graph gets traced. Both new fields are ``None``-defaulted and
-OMITTED from ``as_row()`` when absent, so every declaration written before
-they existed is untouched by construction —
-:func:`test_existing_declarations_are_byte_identical` pins that, and the same
-comparison was run against the three real fleet declarations off-tree (flux2
-4b/9b, wan x3, sdxl: byte-identical declarations AND byte-identical derived
-entries, dynamic rows included).
+THE EXPRESSION GATE. A vocabulary may change how a declaration is EXPRESSED,
+never what graph gets traced. Both new fields are ``None``-defaulted and OMITTED
+from ``as_row()`` when absent, so every declaration written before they existed
+is untouched by construction;
+:func:`test_existing_declarations_are_byte_identical` pins that.
 """
 
 from __future__ import annotations

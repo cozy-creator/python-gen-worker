@@ -1,13 +1,11 @@
-"""pgw#676: a native crash (SIGSEGV in a CUDA/C extension) must be NAMED and
-must not crash-loop the pod.
+"""A native crash (SIGSEGV in a CUDA/C extension) must be NAMED and must not
+crash-loop the pod.
 
-The live shape: gen-worker 0.66.0 on RTX A4500 (sm_86) segfaulted
-(``exit_code=139``) on every 28-step CFG-on ``generate`` — six times across
-two pods — while 4-step ``generate-turbo`` completed on the same workers.
-The hub saw ``phase=worker_process_exit exit_code=139`` and NOTHING else; the
-process restarted in the pod, took the same shape, and died again until
-th#878's wedge terminate killed the pod (~31 min of billing), with every
-request burned 5 attempts deep first.
+The shape it prevents: one function segfaults (``exit_code=139``) on every
+request while its siblings serve fine; the hub sees
+``phase=worker_process_exit exit_code=139`` and NOTHING else; the process
+restarts in the pod, takes the same shape and dies again until the wedge
+terminate kills the pod, with every request burned 5 attempts deep first.
 
 Three closures, tested here with real forks and a real native fault:
 
@@ -15,8 +13,8 @@ Three closures, tested here with real forks and a real native fault:
   * the in-flight marker names WHAT was executing (function, kind, request);
   * the per-pod crash registry makes the NEXT boot's gate refuse a function
     with ``NATIVE_CRASH_REFUSE_STREAK`` signal deaths — siblings keep
-    serving, the refusal is loud and typed (degrade-never-die across
-    process death; the pgw#673/pgw#672 posture extended below Python).
+    serving, the refusal is loud and typed (degrade-never-die extended
+    across process death, below Python).
 """
 
 from __future__ import annotations

@@ -1,22 +1,17 @@
-"""pgw#675: a component override must load at the dtype the base tree's LOAD
-LANE computes at — never at the tree's MAJORITY on-disk dtype.
+"""A component override must load at the dtype the base tree's LOAD LANE
+computes at — never at the tree's MAJORITY on-disk dtype.
 
-The ie#546 sdxl finale hit this live: `wai-illustrious#fp8-w8a8` quantizes
-only the repeated-block Linears (F8_E4M3 + F32 scale twins) and passes every
-other tensor through at SOURCE precision. The upstream fine-tune is
-fp16-stored, so the flavor tree header-counts majority-F16 (measured on the
-real snapshot: 1902 F16 / 739 F8 / 739 F32) while `load_w8a8_pipeline` loads
-the composition at its bf16 compute default. `composition_compute_dtype`'s
-majority sniff said "fp16", the fp16-fix VAE override loaded Half into a
-bf16-activation pipeline, and every warm/serve forward died with the exact
-signature::
+A `#fp8-w8a8` flavor quantizes only the repeated-block Linears (F8_E4M3 + F32
+scale twins) and passes every other tensor through at SOURCE precision, so a
+tree built from an fp16-stored fine-tune header-counts majority-F16 while
+`load_w8a8_pipeline` loads the composition at its bf16 compute default. A
+majority sniff then loads a Half override into a bf16-activation pipeline and
+every warm/serve forward dies with::
 
     RuntimeError: Input type (c10::BFloat16) and bias type (c10::Half)
     should be the same
 
-(3/3 workers, ~4 min into `self_mint_compile phase=warmup_forward`; release
-`9037b1b3...` unprovable). These tapes rebuild that composition for real on
-CPU: the REAL producer (`streaming_w8a8_cast`) makes the w8a8 tree from an
+These tapes rebuild that composition for real on CPU: the REAL producer (`streaming_w8a8_cast`) makes the w8a8 tree from an
 fp16 source, the REAL `load_component_override` loads a REAL tiny diffusers
 `AutoencoderKL` override, and the decode forward runs bf16 latents through
 it — the exact crash path.

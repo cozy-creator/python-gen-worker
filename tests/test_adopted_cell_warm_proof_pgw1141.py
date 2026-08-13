@@ -1,27 +1,19 @@
-"""pgw#1141 (DESIGN-RULINGS §4.31 + §4.32): a boot-ADOPTED cell materializes,
-arms and SERVES. No warmup barrier, and no quality gate at adoption.
+"""DESIGN-RULINGS §4.31 + §4.32: a boot-ADOPTED cell materializes, arms and
+SERVES. No warmup barrier, and no quality gate at adoption.
 
-MEASURED, twice, on two real pods (RTX 4000 Ada, gen-worker 0.106.0, hub
-`7ae35d54a2`): `boot_adopt=hit` -> materialize -> `cell_numerics cos=1.00000
-ret=1.0000 rel_l2=0.0000` on 3/3 axes -> and then the setup warmup scored that
-same artifact `unexercised` (it dispatched nothing through it — the adopt arms
-BEFORE setup, so by construction nothing has), folded it into `unproven`, wrote
-`function_proofs[id]=set()` and unwrapped it. `functions=()` then made the
-target omission (`target_applicability_incomplete`) and the orphan report
-(`armed_target_unresolved`) inevitable, and the pod served eager for life. The
-SELF-MINT arm was healthy on the same wheel, card and release, because a mint's
-warmup DRIVES its own capture and therefore dispatches.
+§4.31: skip the warmup / arm check and serve right away; if serving raises and
+the cell is the cause, de-arm the cell and serve eager. The barrier could never
+pass for an adopt anyway — the adopt arms BEFORE setup, so the setup warmup
+dispatches nothing through the artifact, scores it `unexercised`, folds it into
+`unproven` and unwraps it. (The SELF-MINT arm is healthy because a mint's warmup
+drives its own capture and therefore dispatches.)
 
-§4.31 deleted the barrier: *"skip the warmup / arm check, so we can serve right
-away … try to serve, if an error is encountered, and it's the cause of the
-cell, de-arm the cell, and serve eager instead."*
-
-§4.32 then deleted the adopt-side numerics re-check too, and moved the quality
-question to where the defect is: every failure that gate ever caught (a baked
-`conv_out.bias`, timestep dtype scars) was an AUTHOR defect in endpoint code or
-config. Re-measuring on every adopter taxes the fleet forever for one author's
-one-time mistake. Adoption is materialize -> arm -> serve; the gate runs ONCE,
-on the pod that minted the bytes, before they are published, and it is STRICT.
+§4.32: no adopt-side numerics re-check either. Every failure that gate ever
+caught (a baked `conv_out.bias`, timestep dtype scars) was an AUTHOR defect in
+endpoint code or config; re-measuring on every adopter taxes the fleet forever
+for one author's one-time mistake. Adoption is materialize -> arm -> serve; the
+gate runs ONCE, on the pod that minted the bytes, before they are published,
+and it is STRICT.
 
 Safety without re-measurement comes from CONSTRUCTION, not from checkpoint
 identity (a `ck1` key is graph x envelope x sm x toolchain and carries no
@@ -44,10 +36,9 @@ D. try-serve — a cell-attributable failure answers the request eager and
    de-arms sticky; a transient OOM does neither.
 
 Nothing is stubbed. Parts A and B drive the REAL `provision.arm_aot` against a
-real packed artifact (the pgw#868 rig, whose ONE substitution is the AOTI
-`.so`); part C drives the REAL `ensure_setup`, faking only the download and the
-arming policy (the seam `test_aot_boot_proof_gap_pgw735.py` uses); part D
-drives the real serving wrapper.
+real packed artifact (the rig's ONE substitution is the AOTI `.so`); part C
+drives the REAL `ensure_setup`, faking only the download and the arming policy;
+part D drives the real serving wrapper.
 """
 
 from __future__ import annotations

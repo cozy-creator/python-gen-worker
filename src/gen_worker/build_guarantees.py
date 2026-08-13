@@ -6,12 +6,11 @@ there by writing a layer. A family that ships its own Dockerfile gets none of
 those layers: its file is author-owned content and the platform never injects
 into it. So on that path the platform can only VERIFY — and each invariant it
 forgets to verify is a guarantee that quietly holds on one path and not the
-other, which has cost several one-off fixes and a hand sweep of the fleet.
+other.
 
 This module is the mechanism: ONE enumerated registry of the steps a
-hand-written Dockerfile owes,
-each row naming where the platform itself refuses if the author skips it, and a
-checker any repo can run over its own endpoints::
+hand-written Dockerfile owes, each row naming where the platform itself refuses
+if the author skips it, and a checker any repo can run over its own endpoints::
 
     python -m gen_worker.build_guarantees path/to/endpoint [more...]
 
@@ -20,12 +19,12 @@ the same division as ``python -m gen_worker.cuda_root``, and for the same
 reason: three spellings of one platform requirement drift the moment a base
 image changes.
 
-**Scope, stated rather than implied.** This is a STATIC pre-flight over a source
-tree. It is not the authority — ``aot_preconditions`` (in-image, at build) and
-tensorhub's post-build image inspection are, and every row here names which one.
-Its value is where it runs: in CI, on a diff, before a build exists, for $0.00.
-The registry enumerates what the synthesized file DOES, line by line, not what
-it INSTALLS — which is why two of these five rows are not packages at all.
+SCOPE: a STATIC pre-flight over a source tree, not the authority —
+``aot_preconditions`` (in-image, at build) and tensorhub's post-build image
+inspection are, and every row here names which one. Its value is where it runs:
+in CI, on a diff, before a build exists. The registry enumerates what the
+synthesized file DOES, line by line, not what it INSTALLS — which is why some
+rows are not packages at all.
 """
 
 from __future__ import annotations

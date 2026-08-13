@@ -8,9 +8,8 @@ it that way — the module imports nothing from the worker's transport.
 
 The download shape is **positional materialisation**: the destination is
 preallocated and every chunk is streamed straight to ITS OWN byte range by a
-bounded worker pool. A component arrives as ONE multi-GB file, so this is where
-everything sharding used to buy (parallel transfer, resume, partial-failure
-refetch) has to live.
+bounded worker pool. A component arrives as ONE multi-GB file, so parallel
+transfer, resume and partial-failure refetch all have to live here.
 
 *   ``K`` chunks are fetched concurrently and each worker ``pwrite``s its blocks
     at ``offset_i`` as they arrive, hashing them on the way past. A chunk counts

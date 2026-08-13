@@ -1,24 +1,21 @@
-"""pgw#739 — derivation over real declarations (the engine half).
+"""Export-declaration derivation over real declarations (the engine half).
 
-Red-verified against the accumulated worked examples:
-
-- a wan-a14b-shaped declaration derives EXACTLY the measured ie#566 §4
-  dynamic contract (latent H/W [90, 160] multiple-of-2, on the denoiser AND
-  the decoder's ``z``) from class rows alone — no endpoint hand-math;
+- a wan-a14b-shaped declaration derives EXACTLY the measured dynamic contract
+  (latent H/W [90, 160] multiple-of-2, on the denoiser AND the decoder's ``z``)
+  from class rows alone — no endpoint hand-math;
 - the RELATIONAL axis (wan ti2v's per-token timestep) rides the measured
   solver-unification path: a free ranged dim with SDK-derived bounds, a real
   ``torch.export`` run, and torch unifying the relation into the shape env.
   The composite-range check in ``declared_range_gaps`` is proven
-  load-bearing: every per-symbol range fails to cover the declared bounds,
-  so the pre-#739 per-symbol comparison would have refused a sound artifact;
+  load-bearing: every per-symbol range fails to cover the declared bounds, so
+  a per-symbol comparison would refuse a sound artifact;
 - two families with DIFFERENT declarations derive correct export inputs
   through ONE code path (``declared_inputs``);
 - the fork gate reads ``(pipeline|module, field)`` sources off composed
   objects and refuses a wrong or unstated arm by name;
 - fork coordinates and class rows reach the cell identity.
 
-Real torch throughout; the only fabricated things are tiny modules, per the
-pgw#723 test doctrine.
+Real torch throughout; the only fabricated things are tiny modules.
 """
 
 from __future__ import annotations

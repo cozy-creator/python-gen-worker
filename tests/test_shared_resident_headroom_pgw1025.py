@@ -1,13 +1,11 @@
-"""pgw#1025: ``select_auto_mode`` must not count already-resident shared
-components twice.
+"""``select_auto_mode`` must not count already-resident shared components twice.
 
-The gw#479 shape: a second lane of a shared-component endpoint boots against
-a card that ALREADY holds the shared text encoder / VAE. Free VRAM has
-already been reduced by those bytes, and the requirement estimate
-(``estimate_pipeline_size_gb``) counts them again — measured overstatement
-~7.85 GB for z-image, ~15.5 GB for qwen-image. Enough to fall off the
-resident rung entirely; under th#1107's ``strict_vram`` that is not a slower
-placement but a hard refusal (th#1043, the live failure).
+The shape: a second lane of a shared-component endpoint boots against a card
+that ALREADY holds the shared text encoder / VAE. Free VRAM has already been
+reduced by those bytes, and the requirement estimate
+(``estimate_pipeline_size_gb``) counting them again overstates by ~7.85 GB for
+z-image and ~15.5 GB for qwen-image — enough to fall off the resident rung
+entirely.
 
 Sizes are declared through tensor SHAPE, not allocation: a 1-element storage
 expanded to the weight count, a real tensor with a real, distinct ``data_ptr``
@@ -15,12 +13,10 @@ so the storage dedupe behaves. The already-resident component additionally
 declares its DEVICE, which is the one fact a host with no CUDA device cannot
 produce — and the arithmetic, which is what the issue is about, runs for real.
 
-pgw#1128 moved the resident stand-in off a FAKE tensor. It was one only because
-``_sum_tensor_bytes`` counted a fake tensor's declared bytes as occupied VRAM,
-which is the defect pgw#1128 fixes: a structure-only pipeline's virtual weights
-are not on any card. ``tests/_declared_residency`` keeps this test's ability to
-put 15.5 GB in front of the arithmetic WITHOUT depending on the production path
-mis-measuring anything — see that module for what is declared and what is real.
+The resident stand-in is deliberately NOT a fake tensor: ``_sum_tensor_bytes``
+exempts those (a structure-only pipeline's virtual weights are not on any card).
+``tests/_declared_residency`` puts 15.5 GB in front of the arithmetic without
+depending on the production path mis-measuring anything.
 """
 
 from __future__ import annotations

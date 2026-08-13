@@ -1,4 +1,4 @@
-"""pgw#723 — the AOT mint path: export, code-only AOTI package, gates, pack.
+"""The AOT mint path: export, code-only AOTI package, gates, pack.
 
 Integration tests over REAL ``torch.export`` + REAL ``aoti_compile_and_package``
 runs on tiny CPU modules. Nothing that carries meaning is mocked: the packages
@@ -12,7 +12,7 @@ an ``sm``, this box has no usable GPU, and no test design changes that.
 pack path exercised below is the production one.
 
 Envelope ownership: ``aot_serve`` owns ``entry_metadata``/``pack``/``verify``
-(#721 S1) and this lane imports it. ``aot_package`` owns the mint-side ``.pt2``
+and this lane imports it. ``aot_package`` owns the mint-side ``.pt2``
 introspection and the B1 gate. ``lora_lifted`` owns the no-baked-adapter gate,
 which must run on the ExportedProgram — see the test that proves the
 package-side alternative is a false pass.

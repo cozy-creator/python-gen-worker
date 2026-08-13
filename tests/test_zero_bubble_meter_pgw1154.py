@@ -4,16 +4,15 @@ Paul's bar is *"the GPU should remain hot at all times ... no wasted time in
 between requests."* Two things have to be true before that bar can even be
 scored, and neither was:
 
-1. **The stage window must exist on the endpoints that matter.** th#1111 wired
-   step marks from ``diffusers_step_callback`` only. Every endpoint driving its
+1. **The stage window must exist on the endpoints that matter.** Step marks
+   wired from ``diffusers_step_callback`` only leave every endpoint driving its
    own step loop and reporting it with ``ctx.progress(..., step=, total=)`` —
    minimax-h3, ltx-video's stage 1, anima, hidream-o1-image, i.e. the whole
-   DiffSynth half of the fleet and the entire video lane — produced no denoise
-   window at all. Banked evidence, standing master stack, 2026-08-12: an H3 row
-   with ``total.handler`` 130,666 ms reported ``class.gpu_busy`` 0 and
-   ``resid.unattributed`` 128,660 ms (98.5%), and no ``total.prep`` /
-   ``total.tail`` key whatsoever. The number the whole pipelining program is
-   sized against was structurally absent exactly where the round-trip gap is.
+   DiffSynth half of the fleet and the entire video lane — with no denoise
+   window at all: 98.5% of an H3 handler lands in ``resid.unattributed``, with
+   ``class.gpu_busy`` 0 and no ``total.prep`` / ``total.tail`` key whatsoever.
+   The number the whole pipelining program is sized against is structurally
+   absent exactly where the round-trip gap is.
 
 2. **The gap BETWEEN requests must be measured, not inferred.** Nothing in the
    platform reported it. ``gpu_permit_wait`` measures a request waiting for the

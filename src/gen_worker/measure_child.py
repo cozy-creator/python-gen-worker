@@ -23,13 +23,10 @@ supplies it.
 downloaded, inheriting ``mint_process``'s rule that a mint process which could
 download is one that can stall on a lemon host.
 
-Why a second child exists: a blocker's exit criterion is often a MEASUREMENT,
-and both front doors are shut against the run that answers it —
-``mint_child._assert_family_mintable`` refuses while any blocker is open, and
-``boot_trace_child`` composes structure-only, whose
-``_refuse_artifact_lanes`` refuses a w8a8/w4a4/svdq tree by name. Without this
-child the only moves are to guess, or to resolve a blocker in order to unblock
-its own run.
+Why a second child exists: both other front doors are shut against a
+measurement run — ``mint_child._assert_family_mintable`` refuses while any
+blocker is open, and ``boot_trace_child`` composes structure-only, whose
+``_refuse_artifact_lanes`` refuses a w8a8/w4a4/svdq tree by name.
 
 The three properties that make that safe:
 

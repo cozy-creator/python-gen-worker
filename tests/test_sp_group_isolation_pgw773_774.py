@@ -1,12 +1,12 @@
-"""pgw#773 + pgw#774: per-group process groups and symmetric failure, on the
-gloo/CPU multi-rank rig.
+"""Per-group process groups and symmetric failure, on the gloo/CPU multi-rank
+rig.
 
 Layers exercised, per test:
 
 - ``init_rank``/``RankGroup`` (the process-group construction itself): two
   degree-2 groups coexist in ONE parent process with independent worlds —
-  the exact shape (``gpu_count=4, gpus_per_execution_group=2``) the old code corrupted
-  by joining the default group. Collectives run CONCURRENTLY on both groups
+  the shape (``gpu_count=4, gpus_per_execution_group=2``) that joining the
+  default group corrupts. Collectives run CONCURRENTLY on both groups
   through the real diffusers CP hooks (split/gather over our mesh) and the
   values prove no cross-talk.
 - ``SequenceRuntime.call_with`` (the serving path): a rank-0 exception
@@ -19,9 +19,9 @@ Layers exercised, per test:
 - ``RankGroup.close``/``wait_armed``: teardown and arming never perform a
   collective, so a hung or dead follower cannot park them.
 
-The previous acceptance proved barrier-reachability INSIDE handlers, which
-said nothing about group isolation — every test here fails on the pre-pgw#773
-runtime (default-PG collision, missing timeout, collective close).
+Barrier-reachability INSIDE handlers says nothing about group isolation, which
+is why the rows above target the default-PG collision, the missing timeout and
+the collective close directly.
 """
 
 from __future__ import annotations

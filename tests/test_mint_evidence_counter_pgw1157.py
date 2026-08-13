@@ -1,24 +1,18 @@
-"""pgw#1157: the mint child's evidence counter must survive a phase change.
+"""The mint child's evidence counter must survive a phase change.
 
-The incident is measured, not hypothetical. RunPod A40 ``bgmdxhazxsugmk``,
-release ``6ee9b4d4df2697a53da6f43a``, gen-worker **0.112.0** — every piece of
-pgw#824's instrumentation present and shipped — spent 62 minutes inside
-``trace_graph`` and sent the hub not one counter-carrying beat. The mint was
-advancing the whole time (16 of 36 declared entries packed, ``export_s``
-1378.52, ``compile_s`` 2065.36), and the lane that paid for the pod correctly
-reported that it could not tell that from a wedge.
-
-The locus is one captured object. ``mint_delegate._on_evidence`` acquired the
-``mint_child_evidence`` counter ONCE and closed over it, while
-``Activity.counter()`` binds a counter to the phase that registered it and
-``Activity.phase()`` FINISHES — i.e. unregisters from the process registry —
-every counter the new phase does not own. The mint crosses
+The locus is one captured object. If ``mint_delegate._on_evidence`` acquires
+the ``mint_child_evidence`` counter ONCE and closes over it, it goes deaf:
+``Activity.counter()`` binds a counter to the phase that registered it, and
+``Activity.phase()`` FINISHES — unregisters from the process registry — every
+counter the new phase does not own. The mint crosses
 ``load`` -> ``warmup_forward`` -> ``trace_graph``, so from the first phase
-change onward every ``set_done`` fed an object no reader could reach:
-``activity.on_beat`` found no counter for the activity and returned WITHOUT
-emitting, ``progress.self_diagnosis`` had nothing to diagnose, and the hub saw
+change onward every ``set_done`` feeds an object no reader can reach:
+``activity.on_beat`` finds no counter for the activity and returns WITHOUT
+emitting, ``progress.self_diagnosis`` has nothing to diagnose, and the hub sees
 only counterless heartbeats — which its rule treats as progress by definition,
-because an old worker must never be condemned for a signal it cannot send.
+because an old worker must never be condemned for a signal it cannot send. A
+mint then spends an hour inside ``trace_graph``, advancing, indistinguishable
+from a wedge.
 
 These tests drive the REAL ``Activity``, the REAL process counter registry,
 the REAL ``_on_evidence`` callback and the REAL ``activity.on_beat``.

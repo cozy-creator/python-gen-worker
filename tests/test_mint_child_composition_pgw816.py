@@ -1,33 +1,26 @@
-"""pgw#816: the delegated mint child must load the pipeline the parent SERVES.
+"""The delegated mint child must load the pipeline the parent SERVES.
 
-The first delegated AOT mint ever to run in production (0.81.0, real L4, sdxl
-w8a8) crashed twice in ``phase=load``, 8.5 s each::
+A directory path does not describe a composition. ``snapshot_dir_key`` stamps
+an ``__x<hex>`` suffix when a tree is materialized with an overridden component
+EXCLUDED from the fetch; such a tree is loadable only TOGETHER with the override
+trees it was narrowed for. The parent holds those (``_setup_locked_inner``
+resolves them and injects them through ``from_pretrained(components=…)``); a
+child handed only a ``Dict[slot, path]`` re-loads a composition missing a
+component by construction, which diffusers reports as::
 
     OSError: Error no file named config.json found in directory
       /tmp/tensorhub-cache/cas/snapshots/sha256:32fa2ba6…__x76b2ae62d32f
 
-...while the SERVING process in the same pod was loading that exact directory
-fine and answering requests from it throughout.
+— naming neither the component nor the cause, while the SERVING process in the
+same pod loads that exact directory fine.
 
-The ``__x`` suffix is the whole diagnosis, and it is written by our own code:
-``snapshot_dir_key`` stamps it when a tree is materialized with an overridden
-component EXCLUDED from the fetch (th#1330 B2, worth 167-335 MB/pod). Such a
-tree is loadable only TOGETHER with the override trees it was narrowed for.
-The parent holds those (``_setup_locked_inner`` resolved them, and injects
-them through ``from_pretrained(components=…)``); the child was handed a
-``Dict[slot, path]`` and nothing else, so it re-loaded a composition that is
-missing a component by construction — and diffusers reported that as a
-missing ``config.json`` at the tree's ROOT, naming neither the component nor
-the cause.
-
-So the boundary was the bug: a directory path does not describe a
-composition. The fix carries the parent's RESOLVED component overrides across
-it and loads through the same ``run_setup`` -> ``load_slot`` ->
-``from_pretrained(components=…)`` seam the executor uses.
+So the child carries the parent's RESOLVED component overrides and loads through
+the same ``run_setup`` -> ``load_slot`` -> ``from_pretrained(components=…)``
+seam the executor uses.
 
 The trees here are produced by a REAL dispatch through the real executor and
-the real blake3 CAS downloader (the th#1330 boundary) — a narrowed tree
-nobody hand-built, keyed by the code that keys the production one.
+the real blake3 CAS downloader — a narrowed tree nobody hand-built, keyed by
+the code that keys the production one.
 """
 
 from __future__ import annotations

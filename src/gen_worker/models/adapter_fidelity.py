@@ -9,15 +9,11 @@ The qwen Lightning row is the shape of the hazard: surviving-delta cosine
 **0.074** with **15x the norm** of the true delta, i.e. the served weights carry
 a perturbation larger than the adapter and 99.7% orthogonal to it.
 
-The guards that existed could not see this:
-
-* ``utils.lora._reject_zero_delta`` catches an EMPTY adapter — no
-  down/up pair with both halves nonzero. An INERT adapter is fully populated;
-  it dies in the cast, not in the file.
-* the produce-time detector (``conversion/fuse_checks.py``) is advisory by
-  construction, speaks only above a 50%-of-tensors threshold, and diffs in the
-  SOURCE dtype — the fp8 cast is a separate later step, so the 16x-larger loss
-  is measured by nothing.
+Neither existing guard sees this: ``utils.lora._reject_zero_delta`` catches an
+EMPTY adapter (no down/up pair with both halves nonzero), while an INERT adapter
+is fully populated and dies in the cast; and the produce-time
+``conversion/fuse_checks.py`` is advisory, speaks only above a 50%-of-tensors
+threshold, and diffs in the SOURCE dtype, before the separate fp8 cast.
 
 So gen-worker owns the SERVE-side gate, and this module is it. The rule is one
 sentence: **evaluate the delta against the grid it will actually serve
@@ -33,7 +29,7 @@ load-bearing:
 2. **An adapter is refused only on the path that destroys it.** The resident
    branch keeps A and B as separate bf16 tensors and never touches the base
    grid, so the same qwen/sdxl adapters that fuse at cosine 0.07-0.35 ride the
-   branch at cosine 1.000000 (measured, this lane) — and even a hypothetical
+   branch at cosine 1.000000 — and even a hypothetical
    fp8 BRANCH measures 0.9998, because rounding the two low-rank FACTORS is
    nothing like rounding their sum onto an occupied grid. Over-refusal is its
    own failure and the evaluator's shape prevents it.
@@ -42,20 +38,18 @@ Coverage: every path in this worker where an adapter reaches weights or
 arithmetic.
 
 * resident-branch buffer copy (rank buckets) — gated in ``w8a8_lora._stage_for``,
-  which is the single seam BOTH the plain buffer path and the lifted-binding
-  path funnel through (``apply_branch_adapters`` / ``apply_branch_adapter_set``
-  / ``LiftedLoraBinding.swap`` / ``swap_lifted_lane_set``). It is the pure pass
+  the single seam BOTH the plain buffer path and the lifted-binding path funnel
+  through (``apply_branch_adapters`` / ``apply_branch_adapter_set`` /
+  ``LiftedLoraBinding.swap`` / ``swap_lifted_lane_set``). It is the pure pass
   that runs before any module is touched, so a refusal leaves the pipeline
   exactly as it was.
 * fuse — :func:`gate_fuse` is the seam any fuse must call. gen-worker ships no
   fuse today (the platform ruling: never fuse into a denoiser that serves
-  quantized), so this is the gate that makes the ruling enforceable rather
-  than remembered, and the entry point for a produce-time fuse to adopt.
-* peft — the remaining adapter surface (text-encoder halves, and the plain-lane
-  whole-adapter fallback) stores A/B as separate module parameters exactly like
-  the branch, and is already refused outright against a cast text encoder
-  (``utils.lora._reject_te_keys_on_cast_te``). It never lands on a quantized
-  grid, so it carries no instance of this hazard class.
+  quantized), so this gate makes the ruling enforceable rather than remembered.
+* peft — text-encoder halves and the plain-lane whole-adapter fallback store
+  A/B as separate module parameters exactly like the branch, and are already
+  refused outright against a cast text encoder
+  (``utils.lora._reject_te_keys_on_cast_te``). Never lands on a quantized grid.
 """
 
 from __future__ import annotations

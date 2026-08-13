@@ -1,23 +1,14 @@
 """pgw#1084 §8.4.1 — the worker half of the micro-family cross-repo fence.
 
-THE DEFECT CLASS, three times in three weeks. `examples/micro-diffusion` gains
-a member; tensorhub's `internal/modelfamily` does not learn about it; and
-because build-time discovery walks the WHOLE package
-(`top_level = main_module.split(".", 1)[0]`, discovery/discover.py), the
-unregistered family fails EVERY build that carries the tarball — not only its
-own function. Each occurrence was found by a lane that had already paid for the
-build:
-
-    micro-escape        pgw#1068   worked around by excluding *_escape.py
-    micro-conv          pgw#1073   same shape, recorded in modelfamily.go
-    micro-pad32(+…)     pgw#1079   found by pgw#1084 §8.4.1, mid-campaign:
-                                   `invalid discovery manifest: family
-                                    "micro-pad32" is not a known architecture
-                                    family`
+THE DEFECT CLASS. `examples/micro-diffusion` gains a member; tensorhub's
+`internal/modelfamily` does not learn about it; and because build-time discovery
+walks the WHOLE package (`top_level = main_module.split(".", 1)[0]`,
+discovery/discover.py), the unregistered family fails EVERY build that carries
+the tarball — not only its own function.
 
 The refusal is already TYPED and already names its remedy (tensorhub
-`modelfamily.HowToRegister`). That was not enough, three times over, because it
-can only fire against a live hub with a tarball already uploaded. Neither repo's
+`modelfamily.HowToRegister`), but it can only fire against a live hub with a
+tarball already uploaded. Neither repo's
 CI can reach the other's registry, so the fence is two halves over one shared
 constant, `examples/micro-diffusion/FAMILIES`:
 

@@ -1,11 +1,8 @@
 """pgw#917 — an area-preserving aspect family is ONE dispatchable entry.
 
-The measured failure, on the standing chaos stack (read-only SQL, 2026-08-03):
-``worker_activity_events`` holds **24 ``aot_ingress_refused`` rows, every one
-``phase='entry_ambiguous'``** — zero ``no_entry_admits``, zero anything else —
-summing to **4,200 refused calls** across gen-worker 0.89.0 and 0.90.0, against
-a cell that adopted and armed (``mode=regional entries=72 precision=
-w8a8-lora64``).  The cell armed, advertised, and served nothing.
+The measured failure: a cell that adopted and armed refused every call with
+``aot_ingress_refused`` / ``phase='entry_ambiguous'`` — thousands of them, and
+zero refusals of any other kind.  It armed, advertised, and served nothing.
 
 The mechanism is arithmetic, not a race.  112x144 = 144x112 = 168x96 = 96x168
 = 16,128: the four aspect rows of one megapixel bucket.  A block-level target
@@ -18,7 +15,7 @@ exactly how the fleet's shape rows are generated.
 So the entry key and the ingress contract must be the same object: rows that
 reduce to one contract over one target with byte-identical code are merged to
 one entry with the declared names kept as aliases (36 of that cell's 72
-compiles bought nothing — the direct pgw#847 win), and a collision whose
+compiles bought nothing), and a collision whose
 members are NOT the same artifact is refused by name and by differing axis.
 
 Real ``torch.export`` programs, real ``aot_package.input_contract``, real

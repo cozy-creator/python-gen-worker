@@ -1,19 +1,16 @@
-"""pgw#1125 / th#1795 candidate 3: the hub CONTROL plane keeps its connection
-across saves; the R2 DATA plane still does not.
+"""The hub CONTROL plane keeps its connection across saves; the R2 DATA plane
+still does not.
 
-MEASURED, standing `master` stack 2026-08-11 (th#1795 §11, n=18 steady-state
-256x256 webp saves on gen-worker 0.106.0): `upload.create` is **589 ms**
-worker-side against a **4.5 ms** hub handler — ~584 ms of pure control-plane
-network, the largest attributable slice of the whole upload tail once the hub's
-own chain collapsed 1224 -> 292 ms. One fresh TCP+TLS handshake through the
-tunnel is 109-155 ms of that, and it was paid on EVERY save because the
-`requests.Session` died with the save.
+A `requests.Session` that dies with the save pays a fresh TCP+TLS handshake
+through the tunnel on EVERY save (109-155 ms), which is most of the ~584 ms of
+pure control-plane network in a 589 ms `upload.create` against a 4.5 ms hub
+handler.
 
-The two planes are asserted TOGETHER here on purpose, because the boundary is
-the safety property: the per-save scoping of the R2 pool came from a real
-production incident (`SSLV3_ALERT_BAD_RECORD_MAC`, issue #13) and does not
-move. A change that "fixed" the tail by widening the data plane too would pass
-half of this file and fail the other half.
+The two planes are asserted TOGETHER on purpose, because the boundary is the
+safety property: the per-save scoping of the R2 pool comes from a real
+production incident (`SSLV3_ALERT_BAD_RECORD_MAC`) and does not move. A change
+that "fixes" the tail by widening the data plane too would pass half of this
+file and fail the other half.
 
 Connections are counted where they are actually made — the accept loop of two
 separate real servers — not through a mock. Over TLS one accepted TCP

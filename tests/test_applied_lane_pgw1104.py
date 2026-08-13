@@ -1,26 +1,17 @@
-"""pgw#1104: the lane a request REPORTS must be the lane its weights EXECUTE.
+"""The lane a request REPORTS must be the lane its weights EXECUTE.
 
-The live defect (master stack, pod `x7cenpmm785q27`, requests `4f73d00c` /
-`be2a4c00`, minimax-h3 0.4.6): the endpoint binds `tensorhub/minimax-h3:
-serve-narrowed` — a bare tag with an EMPTY flavor — and then quantizes 300
-Linears of the DiT to w8a8 fp8 with torchao INSIDE `setup()`. Every request
-reported `bf16-w16a16+compiled` while a 21.7 GiB fp8 DiT executed against a
-37.5 GiB bf16 checkpoint. The lane id is a KEY (th#935 verdicts, compile
-cells, floors, pricing, the executed-lane proof), so the label was wrong
-everywhere the key is joined.
+An endpoint can bind a bare tag with an EMPTY flavor and then quantize its DiT
+to w8a8 fp8 with torchao INSIDE `setup()`. If `_served_execution_lane` is a pure
+function of the BINDING, every request reports `bf16-w16a16+compiled` while an
+fp8 DiT executes. The lane id is a KEY (quant verdicts, compile cells, floors,
+pricing, the executed-lane proof), so the label is then wrong everywhere the key
+is joined.
 
-REVERT-TURNS-RED: `test_a_serve_time_recipe_moves_the_reported_lane` fails on
-the pre-fix tree (checked on both 0.101.0 and 0.102.0) — `_served_execution_lane`
-was a pure function of the binding, so with the report stubbed out it answers,
-verbatim,
-`assert 'bf16-w16a16+eager' == 'fp8-w8a8-dynamic+compiled'` for an instance
-whose setup() had just converted the weights.
-
-The control matters as much as the red test: `test_an_unapplied_recipe_keeps
-_the_binding_lane` is why position 2 (a STATIC `handles=`-style declaration)
-was rejected in the tracker. H3's recipe is runtime-gated on sm89 and on the
-compile preflight; a declaration would report fp8 on the card that skips it —
-the same defect in the UNSAFE direction.
+The control matters as much as the positive test:
+`test_an_unapplied_recipe_keeps_the_binding_lane` is why a STATIC
+`handles=`-style declaration was rejected. A recipe runtime-gated on sm89 and on
+the compile preflight would be declared fp8 on the card that skips it — the same
+defect in the UNSAFE direction.
 """
 
 from __future__ import annotations

@@ -1,16 +1,11 @@
-"""pgw#844 — one undispatchable aspect bucket must not cost the pod its
-compiled lane.
+"""One undispatchable aspect bucket must not cost the pod its compiled lane.
 
-MEASURED, attempt twelve (L4 pod `o0legpgj5olhic`, 2026-08-01, $0.04): the
-first cross-pod cell adopt in platform history armed all 72 entries of a
-regional sdxl cell, and then served 100 % eager.  A transformer block sees
-``(B, H_lat*W_lat, C)`` — the token PRODUCT — while the entries are keyed on
-the latent H and W separately, so sdxl's nine aspect buckets collapse to four
-distinct token counts and eight of the nine admit more than one entry.  The
-boot warm plan refused them ``aot_ingress_refused / entry_ambiguous`` x12 and
-the boot ended ``self_mint_skipped / boot_ended_uncompiled`` — including for
-1024x1024, whose 128x128 latent is unique and whose entry was armed and
-correct.
+The shape of the hazard: a transformer block sees ``(B, H_lat*W_lat, C)`` — the
+token PRODUCT — while entries are keyed on the latent H and W separately, so
+sdxl's nine aspect buckets collapse to four distinct token counts and eight of
+the nine admit more than one entry, refusing ``entry_ambiguous``. Under the
+all-or-nothing rule that cost even 1024x1024, whose 128x128 latent is unique and
+whose entry was armed and correct.
 
 Two independent defects produced that, and both are asserted here on the real
 paths (:class:`aot_serve.EntryDispatch` for dispatch, the executor's own

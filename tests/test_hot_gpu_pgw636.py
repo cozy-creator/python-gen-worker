@@ -7,9 +7,8 @@ while absent models download in the background, and LRU-evicts exclusive
 entries (per-pick UNets) before genuinely shared components (TE/VAE).
 
 Layers under test, all real logic (fakes only at the torch module boundary):
-1. ``_estimate_setup_need`` — the pre-load headroom ask that used to reserve
-   the declared ``vram_gb`` wholesale for every never-seen pick (the live
-   9.8/24 GB one-pipeline incident).
+1. ``_estimate_setup_need`` — the pre-load headroom ask, which must not reserve
+   the declared ``vram_gb`` wholesale for every never-seen pick.
 2. ``Residency`` holders semantics — shared components are demotable while
    idle, never evictable while referenced, and multi-holder entries sort
    last in LRU victim order.
@@ -23,8 +22,8 @@ Layers under test, all real logic (fakes only at the torch module boundary):
    through ONE ``selected_by=`` slot all stay hot (zero re-setups on the
    second round).
 
-Serve-while-downloading is deliberately absent — see that issue:
-the naive fix breaks the P2 mutable-tag identity fence and was reverted.
+Serve-while-downloading is deliberately absent: the naive fix breaks the P2
+mutable-tag identity fence.
 """
 
 from __future__ import annotations

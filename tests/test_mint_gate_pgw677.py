@@ -1,26 +1,18 @@
-"""pgw#677: the background mint yields the GPU to tenant work.
+"""The background mint yields the GPU to tenant work.
 
 Doctrine under test — tenant requests ALWAYS win the GPU immediately;
 mint work yields:
 
-  1. STARVATION SHAPE (the live incident): during a background mint,
-     tenant requests complete at serving latency. This used to be
-     RED-verified against the pre-fix tree, reachable via a
-     GEN_WORKER_BG_YIELD=0 kill switch: mint seed units inline-compiled
-     while holding the per-instance run gate (the router's headroom
-     degrade), so a tenant request queued for the length of the unit —
-     the measured "completions land exactly as mint units free the gate /
-     0 renders in 19 min" shape. pgw#995 DELETED that switch and the tree
-     it selected, so the shape is now unreachable rather than merely
-     unselected, and the property is asserted in absolute terms against
-     the harness's own configured quantities.
-  2. RACE EXCLUSION (the pgw#676 SIGSEGV class): the shape-warm thread's
+  1. NO STARVATION: during a background mint, tenant requests complete at
+     serving latency. Asserted in absolute terms against the harness's own
+     configured quantities; mint seed units inline-compiling while holding
+     the per-instance run gate is the shape that must stay unreachable.
+  2. RACE EXCLUSION (the SIGSEGV class): the shape-warm thread's
      compile can never execute the shared modules concurrently with a
-     tenant forward. Post-fix the compile owns a background turn
-     (single-flight, instance turn_mutex, tenant-quiet admission); the
-     tenant that arrives mid-compile waits — bounded by ONE compile — and
-     its wait is attributed to `instance_gate_wait`, never to runtime_ms.
-     Structurally impossible post-pgw#995, not merely not-selected.
+     tenant forward. The compile owns a background turn (single-flight,
+     instance turn_mutex, tenant-quiet admission); the tenant that arrives
+     mid-compile waits — bounded by ONE compile — and its wait is
+     attributed to `instance_gate_wait`, never to runtime_ms.
   3. MINIMUM PROGRESS: under a sustained tenant stream the mint still
      finishes — the steal rule grants one bounded background unit per
      debt window; stolen units are not preemptible.

@@ -1,26 +1,20 @@
-"""pgw#857: a cell's LITERAL constants are part of the artifact, so key them.
+"""A cell's LITERAL constants are part of the artifact, so key them.
 
-THE BUG, in one sentence: the graph hash folded constant NAMES but never their
-VALUES, so two checkpoints that need different literals shared a cell key —
-and a pod could adopt one built for the other. It arms, it serves, and it is
-wrong.
+A graph hash folding constant NAMES but not their VALUES lets two checkpoints
+that need different literals share a cell key, so a pod can adopt one built for
+the other. It arms, it serves, and it is wrong.
 
-WHY NAMES-ONLY WAS RIGHT FOR WEIGHTS AND WRONG FOR LITERALS. A weight is
+WHY NAMES-ONLY IS RIGHT FOR WEIGHTS AND WRONG FOR LITERALS. A weight is
 rebound from the resident ``state_dict`` at load, so two fine-tunes of one
 family SHOULD share a cell — keying weight values would break exactly the
 property the exclusion exists to protect. A ``SOURCE_LITERAL`` constant is
 different in kind: it ships INSIDE the artifact and is never rebound
 (*"nothing outside the artifact knows its value"*, ``aot_serve``), so **for a
-literal the value IS the artifact**. Both were excluded; only one should have
-been.
+literal the value IS the artifact**. Only the weight exclusion is correct.
 
-MEASURED, before building (pgw#857 measurement 1 and 2):
-
-* **sdxl lifts ZERO literals** — five real recorded mints, ~2,420 constants
-  each, every one a dotted state_dict FQN. So this fix must be a NO-OP for it,
-  which matters because a forge lane is minting sdxl right now.
-* **z-image and qwen-image each lift rope tables** — ~393 KB and 4.19 MB,
-  both pure functions of config.
+Families differ: sdxl lifts ZERO literals (every constant a dotted state_dict
+FQN, so keying values is a no-op for it), while z-image and qwen-image each lift
+rope tables (~393 KB and 4.19 MB, both pure functions of config).
 
 The discriminator is **assignment style, not class ancestry**:
 ``QwenEmbedRope`` IS an ``nn.Module`` and its ``state_dict()`` is still empty,

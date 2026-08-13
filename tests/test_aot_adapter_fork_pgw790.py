@@ -1,10 +1,9 @@
-"""pgw#790 — the adapter FORK: one cell, two graph classes, routed by the
-declared ingress contract.
+"""The adapter FORK: one cell, two graph classes, routed by the declared
+ingress contract.
 
-gw#627 gave every branch-capable leaf a canonical zeroed rank-bucket branch so
-a curated attach is a buffer copy instead of a recompile. Measured
-(WARM-INFERENCE-MATRIX §2b; RTX 4090 + RTX 5090, SDXL UNet, batch-2 CFG,
-1024x1024, n=28 warm, gen-worker 0.76.8 / torch 2.13.0+cu130):
+Every branch-capable leaf carries a canonical zeroed rank-bucket branch so a
+curated attach is a buffer copy instead of a recompile. That branch is not free
+(RTX 4090 + RTX 5090, SDXL UNet, batch-2 CFG, 1024x1024, n=28 warm):
 
     card    arm                base w8a8   w8a8-lora64   branch tax
     5090    AOT aoti_static    62.20 ms    90.75 ms      +45.9%
@@ -13,8 +12,7 @@ a curated attach is a buffer copy instead of a recompile. Measured
     launches/fwd (5090)        1,638       3,507         +114%
 
 The branches are ZEROED — every request that names no adapter pays that to
-compute zeros. On the hub's own record (master stack `requests`, 2026-07-30)
-95% of sdxl denoiser forwards name no adapter.
+compute zeros, and ~95% of sdxl denoiser forwards name no adapter.
 
 The fix is a fork, not a flag: a bucket-bearing family mints BOTH classes into
 the one cell, and the serve path routes per request. Real mint (torch.export +

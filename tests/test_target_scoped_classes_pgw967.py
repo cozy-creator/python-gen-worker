@@ -1,25 +1,14 @@
-"""pgw#967 — a graph class belongs to a TARGET, not to the whole cell.
+"""A graph class belongs to a TARGET, not to the whole cell.
 
-pgw#854 recorded that no fleet family compiles anything but its denoiser and
-that the SDK's own ``("transformer", "vae.decode")`` default is exercised by
-nobody. This module pins the reason, which is not policy: until now the
-vocabulary could not EXPRESS a second target's coordinates.
-
-``Compile`` scopes ``Input``, ``Arg`` and ``Fork`` by target but not
-``classes``, and ``validate_contract`` required every class row to state every
-declared dim and fork. So a family adding its VAE decoder or text encoders had
-exactly two options, both wrong: declare one flat class table and have
-``mint_plans`` hand all of it to every target (sdxl: 18 identical text-encoder
-graphs under 18 entry names, each compiled and paid for), or declare dims the
-text encoder cannot receive.
-
-Red-verified against the pre-change tree:
-
-- the sdxl-shaped three-target declaration raises ``DeclarationError`` at
-  construction ("graph class #18 omits declared dim(s) ['H_lat', 'W_lat']"),
-  so the entry-count assertions below could not even be reached;
-- with the row-scope check removed but scoping honoured nowhere, every target
-  gets 18 plans and the totals below fail.
+No fleet family compiles anything but its denoiser, and the reason is not
+policy: without target-scoped ``classes`` the vocabulary cannot EXPRESS a second
+target's coordinates. If ``Compile`` scopes ``Input``, ``Arg`` and ``Fork`` by
+target but not ``classes``, and ``validate_contract`` requires every class row
+to state every declared dim and fork, a family adding its VAE decoder or text
+encoders has exactly two options, both wrong: declare one flat class table and
+have ``mint_plans`` hand all of it to every target (sdxl: 18 identical
+text-encoder graphs under 18 entry names, each compiled and paid for), or
+declare dims the text encoder cannot receive.
 
 The unscoped path is pinned too, because it is what protects every published
 cell: a declaration that does not scope must serialise byte-identically, or

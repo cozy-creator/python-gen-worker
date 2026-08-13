@@ -9,8 +9,7 @@
     the declared envelope are unchanged by any conversion, and no cell re-keys —
     ever.
 
-An invariant nobody can execute is a comment, so this script executes it. Two
-fences, both structural:
+Two fences, both structural:
 
 **FENCE 1 — no cell-key axis reads the layout vocabulary.** The fenced module
 set is DERIVED, not hand-listed: any module that calls a cell-key axis producer

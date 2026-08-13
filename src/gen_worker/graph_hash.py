@@ -10,32 +10,26 @@ recorded as a top-level sibling and is compared at adopt time by
 ``aot_identity.verify_graph_witness`` — the fail-closed backstop that catches
 any residual witness-blind collision (defense-in-depth).
 
-Paul's ruling: "I'd rather key on the graph that is changed, not hash on code
-changes... look at some code and be like 'oh this is graph-ABC' and that is the
-key exactly." So cell identity is the digest of the TRACED graph, and the axes
-that used to stand in for it (``family``, ``lane``, ``mode``, ``contract``,
-``code_closure``) dissolve into it: a fine-tune that traces the same graph
-SHARES cells, and a quant-lane rewrite is a different graph by construction
-(measured: one unchanged UNet topology traces to 5,464 / 6,950 / 23,619 / 35,507
-nodes across four lanes — ``lane`` is a LABEL for the graph, not information on
-top of it).
+Cell identity is the digest of the TRACED graph, never a hash over code: the
+axes that used to stand in for it (``family``, ``lane``, ``mode``, ``contract``,
+``code_closure``) dissolve into it. A fine-tune that traces the same graph
+SHARES cells, and a quant-lane rewrite is a different graph by construction —
+``lane`` is a LABEL for the graph, not information on top of it.
 
 ONE canonicalizer, TWO ingest paths: dynamo ``fx.GraphModule``s and
 ``torch.export.ExportedProgram``s. Both are ``fx.Graph`` underneath; an
 ExportedProgram adds a signature and range constraints, which are semantic and
 therefore hash.
 
-**RANGE CONSTRAINTS ARE PART OF THE GRAPH'S MEANING** (measured, and the reason
-this module exists rather than a one-liner over ``graph.print_tabular``):
-the sdxl UNet exported three times differing ONLY in declared dynamic range
-(``VR[64,160]`` / ``VR[64,320]`` / ``VR[96,128]``) produced ONE node-only digest
-(``9dd33abbc7617d98``) for all three. The ranges live in
-``ExportedProgram.range_constraints`` — a field BESIDE the graph, not in its
-nodes — so a node-only hash collides artifacts whose declared ENVELOPES differ:
-adopt the ``[96,128]`` cell against a ``[64,160]`` key and 1024x1024 requests are
+**RANGE CONSTRAINTS ARE PART OF THE GRAPH'S MEANING**, and the reason this
+module exists rather than a one-liner over ``graph.print_tabular``. Ranges live
+in ``ExportedProgram.range_constraints`` — a field BESIDE the graph, not in its
+nodes — so exports differing ONLY in declared dynamic range hash identically
+under a node-only digest, colliding artifacts whose declared ENVELOPES differ:
+adopt a ``[96,128]`` cell against a ``[64,160]`` key and 1024x1024 requests are
 refused by an artifact whose key promised to serve them. Symbolic ranges are the
-OPPOSITE of the non-semantic noise scrubbed below, and they are equally a defect
-for dynamo cells with declared dynamic dims, not only for ``.pt2``.
+OPPOSITE of the non-semantic noise scrubbed below, and are equally a defect for
+dynamo cells with declared dynamic dims, not only for ``.pt2``.
 
 What is SCRUBBED (non-semantic noise, the guard-manifest discipline):
 

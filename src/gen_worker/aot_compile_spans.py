@@ -1,19 +1,16 @@
 """Complete span coverage over one entry's compile.
 
-The defect this closes
-----------------------
-Reading dynamo's ``compilation_time_metrics`` alone (lowering / codegen /
-graph passes / host C++ / triton) names about 56 % of a recorded ``compile_s``;
-the other 44 % has no name, and a number with no name cannot be optimized,
-argued about, or defended.
-
-The gap is structural, not a missing metric key: ``compile_s`` in the pooled
-path is the parent's Popen-to-reap wall of an entry CHILD PROCESS, while
-``phases`` only measures the inside of ``aot_compile``. Everything the child
-does before and after that call — interpreter boot, ``import torch``,
-``env_seal.establish``, the device-lock install, ``torch.export.load`` of the
-staged program, the report write, the parent's poll granularity — is inside
-the measured total and outside the measured parts.
+Why the partitions exist
+------------------------
+Dynamo's ``compilation_time_metrics`` alone (lowering / codegen / graph passes
+/ host C++ / triton) names about 56 % of a recorded ``compile_s``. The gap is
+structural, not a missing metric key: ``compile_s`` in the pooled path is the
+parent's Popen-to-reap wall of an entry CHILD PROCESS, while ``phases`` only
+measures the inside of ``aot_compile``. Everything the child does before and
+after that call — interpreter boot, ``import torch``, ``env_seal.establish``,
+the device-lock install, ``torch.export.load`` of the staged program, the
+report write, the parent's poll granularity — is inside the measured total and
+outside the measured parts.
 
 The model: three nested partitions, each exact
 ----------------------------------------------
@@ -35,21 +32,20 @@ growing rather than as time silently vanishing::
 Overlays vs partition members
 -----------------------------
 ``triton_s``, ``autotune_s`` and ``device_lock_wait_s`` are OVERLAYS, not
-partition members: they are known to nest inside the members above them (the
-triton keys sit inside codegen / host compile on a CUDA entry; a
-device-benchmark flock wait happens inside ``aot_compile``). Summing them with
-the partition was the second attribution bug — it inflates "attributed" while
-leaving the residual unexplained. They are reported under their own names so a
-reader can attribute WITHIN a member without double-counting the total.
+partition members: they nest inside the members above them (the triton keys sit
+inside codegen / host compile on a CUDA entry; a device-benchmark flock wait
+happens inside ``aot_compile``). Never sum them with the partition — that
+inflates "attributed" while leaving the residual unexplained. They are reported
+under their own names so a reader can attribute WITHIN a member without
+double-counting the total.
 
 ``autotune_s`` is the compile-time Triton autotune benchmark —
 ``autotune_at_compile_time`` resolves True for AOTI, so the autotune block runs
-INSIDE ``GraphLowering.codegen``. It is named because it decides two separate
-questions and both were being answered from a residual: how much of a mint a
-shared autotune cache could ever return (measured 3.1 % of a 390 s w8a8 SDXL
-UNet entry — 12.1 s over 96 calls), and whether the selected config, which is
-baked into the generated wrapper's grid expression and ``num_warps``, moved
-between two mints of the same key.
+INSIDE ``GraphLowering.codegen``. It is named separately because it answers two
+questions: how much of a mint a shared autotune cache could ever return
+(measured 3.1 % of a 390 s w8a8 SDXL UNet entry), and whether the selected
+config — baked into the generated wrapper's grid expression and ``num_warps``
+— moved between two mints of the same key.
 
 The partition members are the four dynamo keys that are provably disjoint on
 the pin (verified by the containment arithmetic on torch 2.13.0:

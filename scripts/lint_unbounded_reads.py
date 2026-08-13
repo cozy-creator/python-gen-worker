@@ -3,13 +3,7 @@
 bounded it, and a stream may not be copied without a bound checked INSIDE the
 loop.
 
-WHY THIS GUARD EXISTS. A bounds census can only inspect bounds that EXIST, so
-it is blind by construction to a read site that needs one and has none. Two
-real ones took the attacker-controlled 8-byte safetensors prefix and allocated
-on it, measured RED as `OverflowError: byte string is too large` attempting a
-2**63-byte allocation. This guard is what stops the class coming back.
-
-THE RULE. Inside a function, if a name is bound from a binary length prefix —
+RULE 1. Inside a function, if a name is bound from a binary length prefix —
 
     (n,) = struct.unpack("<Q", ...)      n = struct.unpack(...)[0]
     n = int.from_bytes(prefix, "little")
@@ -29,15 +23,9 @@ Two ways, deliberately: §4.24 asks for a bound OR a stated reason none is
 needed, and a guard that only accepts the bound would push honest exemptions
 into silence.
 
-RULE 2 — THE STREAMING-COPY LOOP ("check after the loop"). The dominant residual
-class the wave-1 sweep tabled. Seven downloaders copy a remote body to disk;
-three checked the running byte count inside the loop and aborted at the first
-excess byte, four wrote the whole body and compared sizes AFTER it ended. A
-check after the loop is not a bound — the bytes are already on disk, and the
-pod can be dead before the comparison runs.
-
-So: a loop that pulls a stream and sinks the bytes must, in the loop body,
-compare a running byte count against something. Concretely, the loop must
+RULE 2 — THE STREAMING-COPY LOOP. A check AFTER the loop is not a bound: the
+bytes are already on disk, and the pod can be dead before the comparison runs.
+So a loop that pulls a stream and sinks the bytes must, in the loop body,
 
   * hold a counter accumulated with ``total += len(chunk)``; and
   * compare that counter directly (``total > cap``, ``cap < total``) somewhere
@@ -47,25 +35,18 @@ or carry a ``# bound-justified:`` comment, exactly as rule 1 does. Loops that
 delegate to ``bounded_stream.copy_bounded`` have no loop here to inspect, which
 is the point of that helper existing.
 
-THIS RULE IS CALIBRATED, NOT GUESSED. The repo contains four correct in-loop
-implementations — ``models/chunk_cas``, ``models/cozy_cas``, ``input_assets``,
-``url_fetch`` — and the rule is written to pass all four and fail the four that
-were fixed under this issue. The counter must be a DIRECT operand of the
-compare: ``cozy_cas`` also compares ``downloaded - last_log >= log_every`` for
-progress logging, and a rule that accepted a counter buried in a sub-expression
-would have taken that for the bound.
+The counter must be a DIRECT operand of the compare: ``cozy_cas`` also compares
+``downloaded - last_log >= log_every`` for progress logging, and a rule that
+accepted a counter buried in a sub-expression would have taken that for the
+bound.
 
-WHAT NEITHER RULE CATCHES, stated so nobody reads a green run as proof of
-absence. Rule 1 matches the SHAPE the specimens had — a binary length prefix
-feeding a read in the SAME function. A size arriving via a return value, an
-attribute, a JSON field, or a DB column is out of reach of a rule this cheap.
-Rule 2 sees loops; it does NOT see ``shutil.copyfileobj``, which is the same
-defect with the loop inside the stdlib, nor a sizeless ``.read()`` on a tar
-member (the 12-site family this issue still has tabled). Both were left out
-deliberately: ``copyfileobj`` in this tree is local file-to-file work, and
-folding the tar family in here would fire on sites another remainder owns.
-Widening either rule means dataflow analysis, and a noisy guard gets
-suppressed, which is worse than a narrow one that holds.
+LIMITS — a green run is not proof of absence. Rule 1 matches only a binary
+length prefix feeding a read in the SAME function; a size arriving via a return
+value, an attribute, a JSON field or a DB column is out of reach. Rule 2 sees
+loops, not ``shutil.copyfileobj`` (local file-to-file work in this tree) nor a
+sizeless ``.read()`` on a tar member (sites another remainder owns). Widening
+either rule means dataflow analysis, and a noisy guard gets suppressed, which
+is worse than a narrow one that holds.
 
 Usage: scripts/lint_unbounded_reads.py   (exit 1 on any finding)
 """

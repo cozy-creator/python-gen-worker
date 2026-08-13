@@ -1,11 +1,9 @@
-"""pgw#680: guard-miss doctrine — fail-on-recompile at serve time.
+"""Guard-miss doctrine — fail-on-recompile at serve time.
 
-The 187s incident class (ie#546 retag cycle): a tenant request whose inputs
-missed every cached guard set paid dynamo's INLINE recompile inside the
-request, and single-flight stalled everything queued behind it. Paul's
-design, verbatim: "instead of compiling [inline], it should throw an error,
-which we catch, then run in eager mode + compile [in background] and note
-the mismatch."
+A tenant request whose inputs miss every cached guard set must not pay dynamo's
+INLINE recompile inside the request: single-flight then stalls everything queued
+behind it. Instead of compiling inline, throw, catch, serve eager, compile in
+the background, and note the mismatch.
 
 Doctrine under test:
   1. STANCE — tenant requests on compiled lanes run under
@@ -30,11 +28,10 @@ the REAL background warm thread. The executor tape drives the REAL
 ``handle_run_job`` tenant path end-to-end with the torch.compile leaf
 simulated at the same boundary as tests/test_serve_finalize_pgw672.py.
 
-RED (verified before the fix landed): with the serve window neutralized —
-exactly the pre-pgw#680 tree's behavior — the same guard-missing input
-recompiles INLINE inside the request, silently
-(test_outside_serve_window_recompiles_inline is that behavior, kept as the
-permanent contrast tape for the warm/mint windows).
+With the serve window neutralized the same guard-missing input recompiles
+INLINE inside the request, silently —
+``test_outside_serve_window_recompiles_inline`` is that behavior, kept as the
+permanent contrast tape for the warm/mint windows.
 """
 
 from __future__ import annotations

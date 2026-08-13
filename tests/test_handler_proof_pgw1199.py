@@ -1,19 +1,14 @@
-"""pgw#1199: the does-it-run proof runs where the weights already are.
+"""The does-it-run proof runs where the weights already are.
 
-§4.33 said a mint costs ~8 GiB because *"the model is fully resident and serving
-eager"* and *"compile weight-free … VRAM cost is negligible"*. The compile is.
-The MINT was not: `mint_child` ran pgw#984's does-it-run proof by materialising
-REAL random values for every virtual parameter — one full checkpoint at compute
-dtype, in a child process holding none, concurrently with the parent's resident
-copy. On pod `729431an6ugbvq` (H100-80, wan-2.2) that is 56.2 GB against 15.5
-GiB free: `CUDA out of memory`, twice, then `delegated_no_cell`, then
-`boot_ended_uncompiled`. The ~8 GiB figure was measuring that same walk for an
-sdxl-sized family.
+§4.33 prices a mint on "the model is fully resident and serving eager" plus a
+weight-free compile. A does-it-run proof inside `mint_child` breaks that: it
+materialises REAL random values for every virtual parameter — one full
+checkpoint at compute dtype, in a child process holding none, concurrently with
+the parent's resident copy (wan-2.2 on an H100-80: 56.2 GB against 15.5 GiB
+free, so `CUDA out of memory` -> `delegated_no_cell` -> `boot_ended_uncompiled`).
 
-§4.33 steps 4-5 already put verification on the LIVE pipeline — *"already
-running eager"* — against weights that are resident and paid for once. So the
-proof was in the wrong process, and this file fences the correction from both
-ends:
+§4.33 steps 4-5 put verification on the LIVE pipeline, against weights that are
+resident and paid for once. This file fences that from both ends:
 
 * the CHILD may not prove it (and may not mint without one), because proving it
   there is the allocation;
@@ -23,8 +18,8 @@ ends:
 
 WHAT IS DELIBERATELY NOT WEAKENED
 ---------------------------------
-pgw#984's sentence is unchanged: *a cell must not seal for a handler that cannot
-serve*. A missing proof REFUSES the mint. It never degrades to "mint anyway".
+A cell must not seal for a handler that cannot serve. A missing proof REFUSES
+the mint. It never degrades to "mint anyway".
 """
 
 from __future__ import annotations

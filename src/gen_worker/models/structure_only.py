@@ -6,27 +6,26 @@ the tracing process would hold every byte the serving process holds — and on a
 two-pipeline family the two copies do not fit on one card at all. The ruling:
 export and compile must not require real weights resident AT ALL.
 
-WHY THIS IS PER-COMPONENT AND NOT A ``structure_only=True`` LOADER FLAG
------------------------------------------------------------------------
+PER-COMPONENT, NOT A ``structure_only=True`` LOADER FLAG
+--------------------------------------------------------
 A device context cannot make ``from_pretrained`` structure-only: ``with
 torch.device("meta")`` is a CONSTRUCTION DEFAULT and the weight READ is
 unaffected (safetensors mmaps to CPU; the subsequent ``load_state_dict`` either
 refuses or copies real data in). The pattern that actually skips the state dict
-is ``init_empty_weights()`` + ``from_config`` — which is a per-CLASS capability
-(diffusers' ``ConfigMixin``), and which every quantized loader in this tree
-already uses to build its denoiser (:mod:`.w8a8` , :mod:`.w4a4`,
-:mod:`.svdq_native`). The context manager itself is :mod:`.meta_init`, owned
-here rather than imported from ``accelerate`` — an undeclared import on this
-path strands every family in the image. A
-PIPELINE's config is its component CLASS MAP
+is ``init_empty_weights()`` + ``from_config`` — a per-CLASS capability
+(diffusers' ``ConfigMixin``) that every quantized loader in this tree already
+uses to build its denoiser (:mod:`.w8a8`, :mod:`.w4a4`, :mod:`.svdq_native`).
+The context manager itself is :mod:`.meta_init`, owned here rather than imported
+from ``accelerate`` — an undeclared import on this path strands every family in
+the image. A PIPELINE's config is its component CLASS MAP
 (``model_index.json``), not a weights layout, so ``from_config`` on a pipeline
 builds nothing the export traces. Hence: build the COMPONENT, inject it through
 the ``components=`` seam the loader already has, and let the pipeline class
 compose the rest exactly as it composes a preloaded shared component.
 
-WHY THE PARAMETERS END UP **FAKE** AND THE BUFFERS STAY **REAL**
----------------------------------------------------------------
-Measured on torch 2.13.0, not assumed (four variants, cardless rig):
+PARAMETERS END UP **FAKE**, BUFFERS STAY **REAL**
+-------------------------------------------------
+Measured on torch 2.13.0:
 
 * meta parameters + real inputs → ``torch.export`` refuses: *Tensor device
   mismatch … cpu and meta*. Meta is not a device the compile can target either

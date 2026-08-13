@@ -1,22 +1,19 @@
-"""pgw#782: what four execution groups in ONE process are allowed to share.
+"""What four execution groups in ONE process are allowed to share.
 
-The pgw#748 real-endpoint campaign measured width-4 data parallelism at 0.88x
-of serial throughput and attributed it to "the host-side decode/encode tail".
-The instrumented probe (4xA40, sdxl, `~/cozy/samples/dpfix/`) says otherwise:
-the tail is 0.5 s of a 72 s request, the four model calls fully OVERLAP, all
-four cards sit at ~21% utilization, and the process uses 2.3 of its 32.3
-allowed cores with zero CFS throttling. Four SEPARATE worker processes on the
-same pod ran the identical burst at **4.00x** (8.67-8.90 s solo -> 8.58-8.83 s
-concurrent, 91-93% utilization on every card, per-step 275 ms unchanged). The
-ceiling is the shared interpreter, not the tail and not a lock.
+Measured (4xA40, sdxl): at width 4 the four model calls fully OVERLAP, the
+host-side tail is 0.5 s of a 72 s request, all four cards sit at ~21%
+utilization, and the process uses 2.3 of its 32.3 allowed cores with zero CFS
+throttling — while four SEPARATE worker processes on the same pod run the
+identical burst at **4.00x** and 91-93% utilization. The ceiling is the shared
+interpreter, not the tail and not a lock.
 
-What is asserted here is the part that is fixable inside one process, plus the
-property Paul suspected (and the audit disproved) so it can never regress:
+Asserted here: the part that is fixable inside one process, plus the
+serialization property that must never regress.
 
 A. The MODEL CALLS OF FOUR GROUPS OVERLAP. A per-class lock across the model
    call is the one shape that would serialize them; the group ordinal is part
-   of instance identity precisely so it cannot. RED-verified by restoring the
-   pre-pgw#748 behavior (the group does not join the key).
+   of instance identity precisely so it cannot. RED-verified by dropping the
+   group from the key.
 B. Intra-op threads are divided by the groups that share the process, and the
    allowance comes from the CGROUP, not the host's cpu count.
 C. The buffered-finalize bound is per GROUP, not per process: at G=4 a flat 2
@@ -24,7 +21,8 @@ C. The buffered-finalize bound is per GROUP, not per process: at G=4 a flat 2
 
 Neither B nor C is the throughput fix — both measured neutral on the sdxl
 launch path (37.1 s unfixed vs 36.7 s fixed at width 4). They remove a
-misconfiguration and a cross-group serializer; the 4x lives in pgw#783.
+misconfiguration and a cross-group serializer; the 4x comes from the process
+split.
 """
 
 from __future__ import annotations

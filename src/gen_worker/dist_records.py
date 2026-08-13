@@ -12,17 +12,15 @@ Two consumers, ONE derivation:
 * :func:`digest_for` — per-FILE identity for ``env_seal``'s native-library
   manifest (the seal's ``loaded_libs`` fact and the live substitution check).
 * :func:`record_texts` — per-DISTRIBUTION RECORD text for
-  ``compile_cache.toolchain_digest``'s binary half, which has always
-  read exactly these files.
+  ``compile_cache.toolchain_digest``'s binary half, which reads exactly these
+  files.
 
 **The digest is byte-identical to the hash it replaces.** RECORD stores
 ``sha256=<urlsafe-b64 of the 32 raw bytes>``; decoding to hex and truncating
-to 16 chars reproduces ``hashlib.sha256(content).hexdigest()[:16]`` exactly.
-Proven over the whole 36-library manifest on this env (0 disagreements), which
-is what makes this a pure COST move: no seal value changes, no cell re-keys.
+to 16 chars reproduces ``hashlib.sha256(content).hexdigest()[:16]`` exactly. So
+this is a pure COST move: no seal value changes, no cell re-keys.
 
-**What RECORD trust is, precisely** (stated so the trade is ruled on, not
-buried):
+**What RECORD trust is, precisely:**
 
 * The installer verified the hash when it wrote the file. It is NOT re-verified
   at load time, so RECORD trust is a claim about install, extended forward by
@@ -35,11 +33,10 @@ buried):
   RECORD does not describe itself.
 * NOT CAUGHT: an in-place rewrite that preserves the byte SIZE *and* restores
   the original ``mtime_ns``. A full-hash boot would have seen that and moved
-  the seal. This is the one place RECORD trust is weaker than the status quo,
-  and it is the same forge the memo and the ``_lib_digest`` lru_cache (both
-  keyed on ``(path, mtime_ns, size)``) have always been open to — an
-  actor able to do it already holds write access to site-packages, i.e. to
-  ``env_seal.py`` itself.
+  the seal. This is the one place RECORD trust is weaker than hashing, and it is
+  the same forge the memo and the ``_lib_digest`` lru_cache (both keyed on
+  ``(path, mtime_ns, size)``) are open to — an actor able to do it already holds
+  write access to site-packages, i.e. to ``env_seal.py`` itself.
 """
 
 from __future__ import annotations

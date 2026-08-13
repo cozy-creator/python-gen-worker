@@ -6,9 +6,8 @@ A status code is not one condition. It is two, with opposite handling:
   * A PROXY answering 404 (ngrok, an ingress, a load balancer with no healthy
     backend) means "the hub is not reachable right now". Transient.
 
-This holds for EVERY status, not just 404: two 58-minute clones died
-byte-identically on `upload complete failed (503) ... <!DOCTYPE html>` — the
-same proxy, the same HTML page, a different number. The question a caller
+This holds for EVERY status, not just 404 — a proxy 503 carrying an HTML page
+is the same condition wearing a different number. The question a caller
 actually needs answered is never "was it a 404?" but "did the hub ITSELF
 answer?", so that is the question this module exposes
 (:func:`is_definite_hub_answer`). Conflating them costs whole GPU runs: a hub

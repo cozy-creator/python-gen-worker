@@ -20,63 +20,42 @@ gpus_per_execution_group)`` alone::
     G = gpu_count / D                   # execution groups == serving slots
     group g owns devices [g*D, (g+1)*D)
 
-``gpu_count = execution_groups × gpus_per_execution_group`` is not bookkeeping;
-it **encodes a partition invariant**. An execution group exclusively owns its
-devices — no card is in two groups, and no card is idle. Should GPU sharing
-between groups ever be introduced, that arithmetic stops holding and every
-consumer that derives G from it refuses loudly (``topology_degree_not_divisor``,
-``topology_execution_groups_disagree``) instead of quietly serving a packing
-nobody chose. Keep it that way: derive, never store a fourth independent fact.
+``gpu_count = execution_groups × gpus_per_execution_group`` encodes a
+**partition invariant**: an execution group exclusively owns its devices — no
+card is in two groups, and no card is idle. Every consumer that derives G from
+it refuses loudly (``topology_degree_not_divisor``,
+``topology_execution_groups_disagree``) rather than quietly serve a packing
+nobody chose. Derive, never store a fourth independent fact.
 
-``ResolvedCompute.gpu_index`` is unchanged on the job wire and names the
-**rank-0 device of the group** (0, D, 2D, ...), so at D == 1 it is byte-identical
-to what has always shipped.
+``ResolvedCompute.gpu_index`` names the **rank-0 device of the group**
+(0, D, 2D, ...), so at D == 1 it is byte-identical to the single-GPU wire.
 
-An absent ENV VAR is a legal state, never an error: every CPU pod and every pod
-created before the field existed has no topology and keeps the historical
-single slot. An absent FIELD inside a *present* object is the opposite — a
-typed refusal, because both producers always write ``gpu_count`` and
-the degree, so an object missing one did not come from a producer this contract
-knows, and defaulting it reads as ONE SLOT. Everything *present but not fully
-recognised* is likewise a typed refusal — never a silent fallback. That covers
-unknown keys (``topology_unknown_field``): the field set is CLOSED, so growing
-the contract is itself a two-release transition. The alternative — ignore what
-you do not understand — is how a hub that believes it bought degree 2 gets
-served degree 1 in silence.
+An absent ENV VAR is a legal state, never an error: a CPU pod has no topology
+and keeps the single slot. An absent FIELD inside a *present* object is the
+opposite — a typed refusal, because both producers always write ``gpu_count``
+and the degree, and defaulting it reads as ONE SLOT. Everything *present but
+not fully recognised* is likewise a typed refusal, unknown keys included
+(``topology_unknown_field``): the field set is CLOSED, so growing the contract
+is itself a two-release transition. Ignoring what you do not understand is how
+a hub that believes it bought degree 2 gets served degree 1 in silence.
 
-An "execution group" is NOT a PyTorch ``ProcessGroup``
----------------------------------------------------
-They sound identical and appear within a few lines of each other in the process
--split code, and they are different things. An **execution group** is the
-*serving unit*: the set of cards that cooperate on one request, and the thing
-whose count is this worker's slot count. A ``torch.distributed.ProcessGroup``
-is the *communication handle* those ranks collect over. Each execution group
-owns one (non-default, over its own store), so the relationship is
-one-ProcessGroup-per-execution-group — not a synonym.
+An "execution group" is NOT a PyTorch ``ProcessGroup``. An **execution group**
+is the *serving unit*: the set of cards that cooperate on one request, and the
+thing whose count is this worker's slot count. A
+``torch.distributed.ProcessGroup`` is the *communication handle* those ranks
+collect over; each execution group owns exactly one (non-default, over its own
+store).
 
-Translating from another stack
-------------------------------
-The same two numbers exist everywhere; only the names differ. Ours are spelled
-out because a bare ``groups`` collides with process groups, parameter groups
-and co-location groups, all of which live in these files:
-
-===========================  ==================================================
-ours                         theirs
-===========================  ==================================================
-``gpus_per_execution_group``  ``tensor_parallel_size`` (vLLM, SGLang);
-                              ``context_parallel_size`` / ``cp_size``
-                              (Megatron); ``sequence_parallel_size``
-                              (DeepSpeed-Ulysses)
-``execution_groups``          ``data_parallel_size``; ``num_replicas``
-                              (Ray Serve); instance count (Triton)
-===========================  ==================================================
-
-Note what those names do that ours does not: each of them fuses the *width* of
-a group with the *technique* used to fill it, so a stack that wants Ulysses
-instead of tensor parallelism needs a different field. We keep ``parallel`` as
-a separate field precisely so the width is named independently of the mechanism
-— ``gpus_per_execution_group=2`` means two cards serve one request whether the
+Elsewhere ``gpus_per_execution_group`` is spelled ``tensor_parallel_size``
+(vLLM, SGLang), ``context_parallel_size`` (Megatron) or
+``sequence_parallel_size`` (DeepSpeed-Ulysses), and ``execution_groups`` is
+``data_parallel_size`` / ``num_replicas``. Each of those fuses the *width* of a
+group with the *technique* used to fill it; ``parallel`` stays a separate field
+so the width is named independently of the mechanism —
+``gpus_per_execution_group=2`` means two cards serve one request whether the
 sharding is ``sequence``, ``cfg``, or the model's own ``internal`` arrangement.
+A bare ``groups`` is avoided: it collides with process groups, parameter groups
+and co-location groups, all of which live in these files.
 """
 
 from __future__ import annotations

@@ -1,22 +1,14 @@
 """pgw#733 (arm half) + pgw#923: every AOT adopt/arm outcome is TYPED and MEASURED.
 
-The verdict lane's blocker (tracker CP5, 2026-07-29): a cross-pod adopt fails
-inside stage/bind/arm with a classified ``AdoptError`` reason, and v0.76.5
-reduced ALL of them to ``logger.warning`` — hub-spawned workers expose no
-stdout, so the reason was structurally invisible. pgw#733 fixed that with a
-free-text ``aot_adopt`` activity event.
+A cross-pod adopt fails inside stage/bind/arm with a classified ``AdoptError``
+reason. Reducing those to ``logger.warning`` makes the reason structurally
+invisible, because hub-spawned workers expose no stdout.
 
-pgw#923 replaced that spelling. The event carried a reason and no numbers,
-while the MEASURED lane it duplicated (``compile_cache_adopt``, fed by
-``ModelEvent{ADOPTED}``) had zero rows on both live stacks because its only
-sender was a hub operation nothing dispatches. So the arm now RETURNS its
-outcome, the arming policy MEASURES it, and one ledger — ``ArmOutcome.
-adoptions`` — carries every attempt with its identity, its classified reason
-and its wall time to the executor, which puts it on the wire the hub already
-stores.
-
-The acceptance is unchanged and strictly stronger: every classified refusal is
-still named, and now it is also timed and bound to the candidate's ref+digest.
+So the arm RETURNS its outcome, the arming policy MEASURES it, and one ledger —
+``ArmOutcome.adoptions`` — carries every attempt with its identity, its
+classified reason and its wall time to the executor, which puts it on the wire
+the hub already stores. Every classified refusal is named, and also timed and
+bound to the candidate's ref+digest.
 """
 
 from __future__ import annotations

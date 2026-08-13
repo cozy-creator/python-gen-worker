@@ -1,8 +1,7 @@
-"""th#1362 item 1: parallel POSITIONAL materialisation of a chunked CAS file.
+"""Parallel POSITIONAL materialisation of a chunked CAS file.
 
-Retiring safetensors sharding pushes us toward multi-GB SINGLE files, so the
-reassembler is the component that has to absorb what sharding used to buy
-(parallel transfer, resume, partial-failure re-fetch). These drive the REAL
+Components arrive as multi-GB SINGLE files, so the reassembler is where parallel
+transfer, resume and partial-failure re-fetch have to live. These drive the REAL
 `download_chunked_file` over a real threaded HTTP server on localhost — real
 sockets, real bodies, real threads, real files — because every property under
 test is a property of the concurrency and the IO.

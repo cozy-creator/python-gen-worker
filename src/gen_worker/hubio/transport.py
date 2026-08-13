@@ -30,10 +30,9 @@ presigned part URLs; the worker PUTs bytes directly to those URLs.
 
 The control plane (create / complete / abort POSTs to tensorhub) stays
 on ``requests``, on a PROCESS-scoped ``requests.Session`` per hub origin
-owned by ``presigned_upload.py``. That wider scope is deliberate and
-stops at this file's edge: the R2 data plane below stays per-save,
-because the behaviour this module exists for is an R2 edge behaviour and
-the hub is a different peer.
+owned by ``presigned_upload.py``. That wider scope is deliberate and stops at
+this file's edge: the R2 data plane below stays per-save, because the behaviour
+this module exists for is an R2 edge behaviour and the hub is a different peer.
 
 Public API: ``upload_part_to_presigned_url(url, file_path, offset,
 length, pool=None)`` -> ``etag``, ``PutPool``, and ``backoff_sleep_s`` —

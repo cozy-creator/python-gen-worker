@@ -1,10 +1,9 @@
-"""pgw#654 warm-tax fix: warm RUNS are contract-keyed, never instance-keyed.
+"""Warm RUNS are contract-keyed, never instance-keyed.
 
-The ie#546 sdxl canary measured the 0.61.0 derived warm plan re-running per
-CHECKPOINT INSTANCE: ~30-min first boots (full class x bucket cross-product
-of real eager denoises) and a ~9-min warm tax on every juggle swap whose
-genuine cost (download + VRAM load) was ~74s. Pinned here, through the REAL
-executor setup path (fakes only at the download boundary):
+A warm plan re-run per CHECKPOINT INSTANCE costs ~30-min first boots (the full
+class x bucket cross-product of real eager denoises) and a ~9-min tax on every
+juggle swap whose genuine cost (download + VRAM load) is ~74 s. Pinned here
+through the REAL executor setup path (fakes only at the download boundary):
 
   1. boot on an eager lane runs ONE shape representative per (function,
      guidance class) — not the cross-product — with step fields clamped to
@@ -17,9 +16,8 @@ executor setup path (fakes only at the download boundary):
   4. select_runs keeps the full plan while tracing, keeps the max-area
      bucket for numeric shape axes, and honors msgspec Meta floors in the
      step clamp;
-  5. pgw#647 gap #2: a component override inherits the base COMPOSITION's
-     compute dtype (fp8-stored base => bf16 compute), never the override's
-     on-disk dtype;
+  5. a component override inherits the base COMPOSITION's compute dtype
+     (fp8-stored base => bf16 compute), never the override's on-disk dtype;
   6. ctx.adjustments is the public, immutable read side of the ledger.
 """
 

@@ -12,16 +12,13 @@ succeeds.
 trace inside :func:`guard`, and any tensor that lands on a real device is a
 typed refusal naming the site that allocated it.
 
-WHY THE SCOPE IS "INSTANTIATION *OR* TRACE"
--------------------------------------------
-An ``__init__``-inspecting gate is not enough. The measured counterexample: an
-upstream rope embedder that is not an ``nn.Module`` at all, holds
+WHY THE SCOPE IS "INSTANTIATION *OR* TRACE." An ``__init__``-inspecting gate is
+not enough: an upstream rope embedder that is not an ``nn.Module`` at all, holds
 ``self.freqs_cis = None``, and builds its tables on FIRST CALL inside
-``with torch.device("cpu")`` — a pin that overrides any ambient meta context.
-Nothing happens at ``__init__``; the violation happens mid-trace.
+``with torch.device("cpu")`` — a pin that overrides any ambient meta context —
+does nothing at ``__init__`` and violates mid-trace.
 
-WHY A ``TorchFunctionMode`` AND NOT A DEVICE CONTEXT
----------------------------------------------------
+WHY A ``TorchFunctionMode`` AND NOT A DEVICE CONTEXT.
 ``with torch.device("meta")`` is a DEFAULT, and a default is exactly what model
 code overrides — explicitly (``torch.device("cpu")``) or implicitly
 (``device=`` / ``.to("cuda")`` / ``.cpu()``). A mode sits above the factory
@@ -29,9 +26,7 @@ functions themselves, so it observes the tensor that was actually produced
 rather than the default that was requested, and an override is therefore
 visible instead of authoritative.
 
-WHAT IS DELIBERATELY *NOT* REFUSED
-----------------------------------
-Fake tensors. ``FakeTensorMode`` produces tensors whose ``.device`` reads as a
+WHAT IS DELIBERATELY *NOT* REFUSED: fake tensors. ``FakeTensorMode`` produces tensors whose ``.device`` reads as a
 real device by design (that is what makes them faithful to trace against) while
 allocating nothing. Refusing them would refuse the very mechanism this gate
 protects, so :func:`is_virtual` treats a fake tensor as virtual regardless of

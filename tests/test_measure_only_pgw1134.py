@@ -1,15 +1,13 @@
-"""pgw#1134 — a blocker whose exit criterion is a MEASUREMENT must be able to
-gather it, and gathering it must not be able to publish anything.
+"""A blocker whose exit criterion is a MEASUREMENT must be able to gather it,
+and gathering it must not be able to publish anything.
 
-The catch-22, exactly as ie#651 found it on ltx-video-2.3's OQ-3
-(*"whole-graph export OOM, never measured on the served w8a8 lane"*):
+The catch-22 this guards against:
 
 * ``mint_child._assert_family_mintable`` refuses a family while ANY blocker is
-  open — so the run that would CLOSE OQ-3 was refused BY OQ-3;
+  open — so the run that would CLOSE a blocker is refused BY it;
 * ``boot_trace_child`` is ungated but composes structure-only, and
   ``structure_only._refuse_artifact_lanes`` refuses a w8a8 artifact tree by
-  name — so the cheap path was shut too, for the same family, for a different
-  reason.
+  name — so the cheap path is shut too, for a different reason.
 
 Both doors are reproduced here on a REAL vehicle (micro-diffusion, a real
 declaration, a real tree carrying a real fp8 weight table), and the third door
@@ -30,13 +28,10 @@ The properties, one section each:
 3. **The compile half is real work with no residue** — the inductor output is
    counted and DELETED, so the one thing a measure run could have left behind
    is gone before the report is written.
-4. **Every refusal names itself** in an enumerable vocabulary (pgw#1116's rule
-   at a new refusal surface).
+4. **Every refusal names itself** in an enumerable vocabulary.
 
 Cardless: CPU fixtures throughout, and the inductor compile is FAKED wherever
 it is exercised — this file mints nothing, compiles nothing and touches no GPU.
-The real LTX measurement is pod work and is a checklist item on OQ-3, not a
-test.
 """
 
 from __future__ import annotations

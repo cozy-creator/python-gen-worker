@@ -4,15 +4,13 @@ The threat is named in ``gen_worker/models/safetensors_header.py``: an 8-byte
 declared header length, read from the file before anything has validated it,
 sizes a read and a JSON parse in whichever process opened the file.
 
-It used to be stated six times — five readers at 100 MiB and
-``convert/writer.py`` at 512 MiB. The outlier was not harmless: the writer
-accepted headers the loader would refuse, so the re-shard path could emit a
-shard the serving path could not open. Same bytes, two verdicts.
+A second copy of the bound that disagrees is not harmless: a writer accepting
+headers the loader refuses emits a shard the serving path cannot open — same
+bytes, two verdicts.
 
-These tests drive every real entry point against real files on disk — no
-mocks, no monkeypatching of the bound. They prove the surviving bound still
-refuses the runaway everywhere the deleted copies used to, and that writer and
-loader now agree.
+These tests drive every real entry point against real files on disk — no mocks,
+no monkeypatching of the bound. They prove the one bound refuses the runaway
+everywhere, and that writer and loader agree.
 
 RED-verified: restoring ``_MAX_HEADER_BYTES = 512 * 1024 * 1024`` in
 convert/writer.py fails ``test_writer_and_loader_agree_on_the_same_file``

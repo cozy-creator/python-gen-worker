@@ -1,12 +1,9 @@
-"""pgw#849 guard 1 — instrument: did the test enter at the PRODUCTION
-entrypoint, or at the unit beneath it?
+"""Instrument: did the test enter at the PRODUCTION entrypoint, or at the unit
+beneath it?
 
 A unit test is structurally blind to wiring, because the unit test IS the
-caller the production path is not. ``entry_workers(peak_rss_bytes=…)``,
-``set_guard_failure_callback``, the pgw#805/#815/#827 mint arms and the
-pgw#828 warm child were all correct code with green unit tests and no route
-that reached them. The only thing that would have caught them is a test that
-enters where production enters and lets production do the calling.
+caller the production path is not. The only thing that catches that class is a
+test that enters where production enters and lets production do the calling.
 
 This module makes that mechanically checkable. Declare a LADDER — the ordered
 production call chain for a path — wrap it, run a real scenario, and ask two

@@ -16,11 +16,8 @@ facilities live here:
 - the process copy stream — a dedicated CUDA stream for weight H2D.
   Copy engines are separate hardware from the SMs, so a pinned-memory H2D
   on this stream runs concurrently with the serving job's compute instead
-  of serializing behind it on the default stream.
-  Interference is measured from ordinary production traffic
-  (DESIGN-RULINGS §1.2), not from a bespoke harness — the
-  ``benchmarks.swap_latency overlap`` case was deleted with its
-  zero-adopter endpoint wrapper.
+  of serializing behind it on the default stream. Interference is measured
+  from ordinary production traffic, never from a bespoke harness.
 
 CPU-only hosts (and the CPU-only test suite) get honest no-ops: no CUDA
 means no copy stream and pinned allocation falls back to pageable.

@@ -2,12 +2,12 @@
 
 ``families.facts`` states which component CLASSES must come off disk wider
 than the composition's compute dtype (``AutoencoderKLWan -> fp32``), and
-``models.loading`` honours it on every materialize. The producer did not: a
-plain ``dtype: "bf16"`` clone cast every weight group in the tree, so a
-published "bf16" wan flavor carried a bf16 VAE the load side then upcast back
+``models.loading`` honours it on every materialize. Without a producer half, a
+plain ``dtype: "bf16"`` clone casts every weight group in the tree, so a
+published "bf16" wan flavor carries a bf16 VAE the load side then upcasts back
 into fp32 — truncated, and invisible at every gate.
 
-This module is the producer half of that one fact. It reads the TREE'S OWN
+This module is that producer half. It reads the TREE'S OWN
 ``model_index.json`` (authoritative: a fine-tune may substitute a class), asks
 ``families.facts`` — never a second table — and answers two questions:
 

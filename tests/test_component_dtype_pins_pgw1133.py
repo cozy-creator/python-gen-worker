@@ -1,17 +1,10 @@
-"""pgw#1133 — a tree-wide dtype cast must not narrow an fp32-pinned component.
+"""A tree-wide dtype cast must not narrow an fp32-pinned component.
 
-**The field observation** (ie#649 leg A, master stack 2026-08-11, request
-`96084387-2f6d-4632-9ebe-f6fb0fa91a2a`). A plain ``dtype: "bf16"`` clone of
-`Wan-AI/Wan2.2-T2V-A14B-Diffusers` published
-``vae/diffusion_pytorch_model.safetensors`` at **253,806,966 B** against the
-**507,591,892 B** fp32 upstream — while ``families.facts`` pins
+A plain ``dtype: "bf16"`` clone halves ``vae/diffusion_pytorch_model.safetensors``
+(507,591,892 B fp32 -> 253,806,966 B) even though ``families.facts`` pins
 ``AutoencoderKLWan -> fp32`` and ``models.loading`` honours that on every
-materialize. The checkpoint was valid, classified, complete and served by every
-gate; the truncation was visible only as a byte count nobody was reading.
-
-The audit that followed found the same downcast on the SERVED head of
-`tensorhub/wan22-ti2v-5b` (vae 1,409,400,600 B bf16 against upstream's
-2,818,777,808 B fp32), so this is not one lane's accident.
+materialize. The resulting checkpoint is valid, classified, complete and served
+by every gate; the truncation is visible only as a byte count nobody reads.
 
 Real codepaths: the real `build_flavor_tree` cast over real safetensors files,
 the real `verify_produced_tree` publish gate, the real `families.facts` table.

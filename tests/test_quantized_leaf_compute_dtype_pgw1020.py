@@ -14,9 +14,8 @@ exact cross-composition aliasing shape pgw#683 exists to refuse — passed
 silently, and the fp16-vs-bf16 collision surfaced where it always did: inside
 torch, mid-forward, naming neither the component nor the tensor.
 
-Newly fixable because pgw#1015/pgw#1019 made every quantized leaf RECORD
-``self.compute_dtype``. Before that a bias-free quantized leaf stated its
-compute dtype nowhere and the guard had nothing to read.
+The guard reads ``self.compute_dtype``, which every quantized leaf RECORDS —
+without it a bias-free quantized leaf states its compute dtype nowhere.
 
 Real classes throughout — the production module factories, not a stand-in.
 """

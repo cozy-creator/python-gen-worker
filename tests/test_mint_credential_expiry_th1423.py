@@ -1,9 +1,8 @@
-"""th#1423 pgw half: a mint that outlives its credential must SAY SO.
+"""A mint that outlives its credential must SAY SO.
 
-Measured on the standing master stack: three `self_mint_publish_failed` events,
-all `/v1/worker/cells/publish-intent failed (401): invalid worker token` after a
-28-minute inductor compile, at 32m30s past first activity against a 30m worker
-JWT TTL. Two worker-side defects made that unreadable:
+A 28-minute inductor compile finishes past a 30m worker JWT TTL and publish
+fails `(401): invalid worker token`. Two worker-side defects make that
+unreadable:
 
 * `CellPublisher._post` raised a BARE `RuntimeError`, so `_publish_failure_phase`
   had no `status`/`code` to group by and all three landed under the phase

@@ -1,4 +1,4 @@
-"""pgw#667: per-COMPONENT load dtype — the wan fp32-VAE blocker.
+"""Per-COMPONENT load dtype — the wan fp32-VAE case.
 
 A component's dtype is part of its resident identity and is decided AT LOAD:
 upcasting a bf16-loaded VAE afterwards recovers no precision, it only hides the

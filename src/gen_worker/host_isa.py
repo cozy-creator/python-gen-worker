@@ -5,13 +5,13 @@ CPU kernels). torch compiles that code ``-march=native`` when
 ``inductor.config.cpp.march`` is None and vectorizes CPU kernels with
 ``cpu_vec_isa.pick_vec_isa()`` — both resolve to the MINT host's CPU. A cell
 minted on an AVX-512 host therefore carries EVEX-encoded instructions that
-SIGILL any serving host without AVX-512 (observed live 2026-07-28: machine
-``hv220gc4f7vu``, exit 132 inside ``aoti_load_package``, five crash loops).
-GPU compatibility is keyed (``sm``); host CPU compatibility was not — and
-``cpp.march=None`` hashes identically into the env seal on every host while
-the emitted code differs per host, so the key could not see the difference.
+SIGILL any serving host without AVX-512 (exit 132 inside ``aoti_load_package``,
+in a crash loop). GPU compatibility is keyed (``sm``); host CPU compatibility is
+not keyed by anything upstream — ``cpp.march=None`` hashes identically into the
+env seal on every host while the emitted code differs per host, so the key
+cannot see the difference.
 
-Fix: at boot (``env_seal.establish``) the effective codegen target is clamped
+So: at boot (``env_seal.establish``) the effective codegen target is clamped
 to ``min(host level, BASELINE)`` — psABI micro-architecture levels, baseline
 ``x86-64-v3`` (AVX2/FMA/BMI2; every GPU host SKU family we rent is >= v3).
 Measured on the live artifact this costs nothing: the ``-march=native``

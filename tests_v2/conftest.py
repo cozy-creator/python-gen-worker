@@ -42,7 +42,7 @@ Fixture / helper interface
 
 ``torchless`` (fixture)
     in-process torch absence: blocks ``import torch`` via a meta-path finder
-    and strips cached torch modules for the duration (pgw#788 shape).
+    and strips cached torch modules for the duration.
 
 From the old harness (import directly; they are part of this interface):
     ``harness.hub_double``: ``hub_double``, ``custom_scheduler_server``,

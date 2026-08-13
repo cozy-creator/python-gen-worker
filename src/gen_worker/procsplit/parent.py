@@ -19,9 +19,8 @@ and it is a regression test (``test_group_processes``). At G>1 one child's death
 is attributed to ITS request and respawns ITS group; siblings never see it (**a
 group where one of four children dies is not a dead group**).
 
-Supervision primitives are deliberately systemd's (Paul, 2026-07-29):
-``Restart=on-failure``, ``StartLimitBurst``/``StartLimitIntervalSec``,
-``WatchdogSec``+``sd_notify`` (child frames are the liveness pings; loop silence
+Supervision primitives are deliberately systemd's: ``Restart=on-failure``,
+``StartLimitBurst``/``StartLimitIntervalSec``, ``WatchdogSec``+``sd_notify`` (child frames are the liveness pings; loop silence
 ARMS a hang verdict the child's accounted work DECIDES), socket activation (the
 hub connection outlives the process doing the work). What systemd cannot do —
 job attribution — needs the stream, the JWT and the in-flight table in the

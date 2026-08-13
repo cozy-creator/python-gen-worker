@@ -1,28 +1,24 @@
-"""pgw#1152: the adopt-path rig re-finds a bug we already fixed, and the fence
-makes the fixture that hid it unwriteable.
+"""The adopt-path rig re-finds a bug we already fixed, and the fence makes the
+fixture that hid it unwriteable.
 
-THE BUG CLASS, stated once. Four of the six reuse-circle gates — pgw#1108,
-pgw#1122, pgw#1141, pgw#1141b — were ONE defect: the boot-adopt path
-structurally differs from the self-mint path (it arms BEFORE setup, its compute
-child holds no JWT, and it is fed by ``arm_ordered`` rather than by the
-self-produced routes), and every gate was written and validated against
-self-mint. The tests could not see it because their fixtures SIMULATED an
-adoption using self-mint machinery: thirteen rows called
-``aot_serve.note_aot_key(key)`` by hand — production's single missing line.
+THE BUG CLASS. The boot-adopt path structurally differs from the self-mint path
+(it arms BEFORE setup, its compute child holds no JWT, and it is fed by
+``arm_ordered`` rather than by the self-produced routes), so a gate written and
+validated against self-mint alone misses it. Tests cannot see that when their
+fixtures SIMULATE an adoption using self-mint machinery — calling
+``aot_serve.note_aot_key(key)`` by hand, production's single missing line.
 
 Two things close that class, and both are asserted here:
 
-1. :mod:`harness.adopt_rig` — the real vehicle, promoted out of
-   ``test_adopted_arm_lane_pgw1141b.py``. This file proves it by making it
-   RE-FIND pgw#1141b: delete the landed fix and the rig reproduces POD PROOF
-   #4's four-row chain verbatim. A rig that cannot re-find a bug we already
+1. :mod:`harness.adopt_rig` — the real vehicle. This file proves it by making it
+   RE-FIND a fixed bug: delete the landed fix and the rig reproduces the
+   four-row failure chain verbatim. A rig that cannot re-find a bug we already
    fixed proves nothing.
 2. ``scripts/lint_arm_state_feeders.py`` — the fence. Every production feeder of
-   arming/serving process-global state is classified by enclosing function
-   (pgw#1122's ``lint_credential_identity.py`` shape), unclassified is red,
-   stale is red, and a TEST that hand-feeds one is red with no label to write
-   down. The rows below drive the lint over synthetic trees, so proving it goes
-   red never requires writing the bug into this repo.
+   arming/serving process-global state is classified by enclosing function,
+   unclassified is red, stale is red, and a TEST that hand-feeds one is red with
+   no label to write down. The rows below drive the lint over synthetic trees, so
+   proving it goes red never requires writing the bug into this repo.
 
 Run: uv run pytest tests/test_adopt_rig_pgw1152.py -q
 """

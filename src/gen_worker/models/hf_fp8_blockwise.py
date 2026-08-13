@@ -29,7 +29,7 @@ re-blocking rowwise scales into a 128x128 grid is a RE-QUANTIZATION with new
 numerics, so the pair is PRODUCIBLE-not-CONVERTIBLE — a priced production job
 from a named higher-precision source, never a silent load-time repack.
 
-**No quantization happens here** (Paul, 2026-08-11): quantization is done
+**No quantization happens here**: quantization is done
 ahead of time by a conversion endpoint and served as an artifact. This module
 only READS a pre-quantized tree. There is deliberately no quantize-if-missing
 fallback.

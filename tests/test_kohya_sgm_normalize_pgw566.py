@@ -1,26 +1,20 @@
-"""pgw#566 — a converter that half-converts must not outrank the raw keys.
+"""A converter that half-converts must not outrank the raw keys.
 
-Live find on the 5090 rig (real `StableDiffusionXLPipeline` on a w8a8 tree,
-nerijs/pixel-art-xl r32 kohya adapter): `normalize_adapter_state_dict` ->
-`StableDiffusionXLPipeline.lora_state_dict` emitted HALF-converted keys —
-`unet.down_blocks.4.1.proj_in.lora.down.weight`, an SGM block index RENAMED
-but never REMAPPED (SDXL has down_blocks 0-2) — so `map_adapter` failed loud
-with 2166 unresolved keys and the w8a8-lane request died typed. The RAW dict
-through `map_adapter`'s own kohya/SGM grammar mapped 722/722 modules on the
-same model.
+`normalize_adapter_state_dict` -> `StableDiffusionXLPipeline.lora_state_dict`
+can emit HALF-converted keys — e.g. `unet.down_blocks.4.1.proj_in.lora.down.
+weight`, an SGM block index RENAMED but never REMAPPED (SDXL has down_blocks
+0-2) — which fails `map_adapter` loud while the RAW dict through
+`map_adapter`'s own kohya/SGM grammar maps every module.
 
 Two causes, both closed here:
 
 1. `unet_config` reached only converters with a NAMED `unet_config` parameter.
    SDXL's takes `**kwargs`, so the SGM block remap never ran on the one class
-   that needs it. (Covered by the un-xfailed row in
-   `tests/convert/test_p8_convert_publish_contract.py`.)
-2. The only guard on a bad conversion was gw#627's `.processor.` NAME test,
-   which catches the family it was written from and nothing else. Half-
-   converted SGM indices contain no `.processor.` and sailed through. The
-   general question — does the converted dict actually RESOLVE against this
-   model — is asked here with `map_adapter`'s own oracle, so the check and the
-   mapper cannot drift.
+   that needs it.
+2. A `.processor.` NAME test catches only the family it was written from;
+   half-converted SGM indices contain no `.processor.`. The general question —
+   does the converted dict actually RESOLVE against this model — is asked here
+   with `map_adapter`'s own oracle, so the check and the mapper cannot drift.
 """
 
 from __future__ import annotations

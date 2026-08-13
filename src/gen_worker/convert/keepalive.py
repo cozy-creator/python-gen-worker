@@ -1,9 +1,9 @@
 """Touch the hub while the job is busy elsewhere.
 
 A clone spends ~58 minutes downloading from HuggingFace and makes NOT ONE hub
-request in that time. Both recorded losses of a paid 53 GiB download landed on
-the very first upload after such a gap, with an HTML 503 — the proxy in front
-of the hub, not the hub. That timing is the whole reason this module exists:
+request in that time. Losses of a paid 53 GiB download land on the very first
+upload after such a gap, with an HTML 503 from the proxy in front of the hub,
+not the hub itself. That timing is the whole reason this module exists:
 
   * The recorded hypothesis is an idle tunnel. A worker->hub path that carries
     no traffic for an hour has NAT entries, tunnel circuits and pooled sockets

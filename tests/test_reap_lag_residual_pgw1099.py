@@ -1,38 +1,21 @@
-"""pgw#1099: ``reap_lag_s`` is a MEASURED span, never the outer partition's
-catch-all.
+"""``reap_lag_s`` is a MEASURED span, never the outer partition's catch-all.
 
-The defect
-----------
-``EntryCompilePool._close_entry_partition`` closed ``compile_s`` with three
-members. When a child reported no ``report_epoch`` — pgw#840's case: a child
-too old for the span table, or one that died between writing its report and
-being reaped — the parent computed
+When a child reports no ``report_epoch`` (too old for the span table, or dead
+between writing its report and being reaped),
+``EntryCompilePool._close_entry_partition`` must NOT sweep the unattributable
+remainder into ``reap_lag_s``, whose name means "the child's exit plus the
+parent's poll granularity". ``RESIDUALS`` does not list ``reap_lag_s``, so
+``dark_fraction`` would then report those entries as **fully attributed**. The
+remainder is its own declared residual, ``parent_other_s``, recorded on every
+entry so ``check`` covers it and ``dark_fraction`` counts it.
 
-    reap_lag_s = compile_s - child_boot_s - child_wall_s
+Two readings of ``reap_lag_s`` that are category errors, and were made:
 
-and wrote the whole unattributable remainder under a name that means "the
-child's exit plus the parent's poll granularity". ``aot_compile_pool``'s own
-``EntryReport.code_digest`` comment already said this happened ("the parent
-absorbed its whole compile into ``reap_lag_s``"), and ``RESIDUALS`` never
-listed ``reap_lag_s``, so ``dark_fraction`` reported those entries as **fully
-attributed**.
-
-What it cost, measured
-----------------------
-pgw#1085 §5c's 36-entry sdxl-on-L40S mint recorded a ``reap_lag_s`` median of
-259.6 s (max 403.4 s) summing to 164.5 min. pgw#1099 was filed on that number
-as "the single largest unclaimed block of time in the run, and no pgw#1051
-lever addresses it". Both halves of the reading were wrong, and this file pins
-both corrections:
-
-1. ``reap_lag_s`` is a SUB-SPAN of ``compile_s``, so summing it over entries
-   compiled at K=3 and comparing that to the pool's wall is a category error —
-   ``compile_s`` itself sums to 3.35x the same wall.
-2. A 259.6 s median with a 403.4 s max is the signature of the residual branch
-   firing, not of poll granularity.
-
-The fix is a declared residual of its own, ``parent_other_s``, recorded on
-every entry so ``check`` covers it and ``dark_fraction`` counts it.
+1. it is a SUB-SPAN of ``compile_s``, so summing it over entries compiled at
+   K=3 and comparing that against the pool's wall proves nothing —
+   ``compile_s`` itself sums to 3.35x the same wall;
+2. a large median with a much larger max is the signature of the residual
+   branch firing, not of poll granularity.
 """
 
 from __future__ import annotations
