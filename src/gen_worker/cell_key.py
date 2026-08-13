@@ -252,6 +252,30 @@ def is_key(value: str) -> bool:
     )
 
 
+def _refuse_key_shaped(where: str, name: str, value: str) -> None:
+    """A KEY where a DIGEST belongs is a category error, not a bad value.
+
+    pgw#1176: `ck1-`/`ek1-` and the 16-hex fact digests are all `str`, so
+    nothing in the type system distinguishes them — that is the honest reason
+    a whole class of confusion type-checks cleanly. An opaque `NewType` cannot
+    close it either at the places that matter: `is_key` is a BOUNDARY
+    VALIDATOR whose entire job is to rule on untrusted strings, so it must
+    take `str`.
+
+    What IS closeable is the inverse direction, cheaply and here: an axis
+    value, a class hash and a manifest input are all fact digests, and a
+    key-shaped value in any of them means a caller passed the identity where
+    the ingredient belongs. Refuse it by name at the constructor rather than
+    letting it hash into a key nobody can restate.
+    """
+    if is_key(value):
+        raise CellKeyError(
+            f"{where}: {name}={value!r} is an ENTRY KEY where a fact digest "
+            f"belongs. A key is the OUTPUT of this computation, never an "
+            f"input to it — passing one here would hash an identity into "
+            f"another identity and produce a key no artifact can restate.")
+
+
 def from_axes(axes: Mapping[str, str]) -> CellKey:
     """Canonicalize an axes mapping into a :class:`CellKey`.
 
@@ -273,6 +297,7 @@ def from_axes(axes: Mapping[str, str]) -> CellKey:
                 "fact provably alters the compiled artifact and cannot ride "
                 "an existing axis's fact block")
         if text:
+            _refuse_key_shaped("cell key axes", name, text)
             clean[name] = text
     missing = [name for name in _REQUIRED if not clean.get(name)]
     if missing:
@@ -477,6 +502,8 @@ def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
             f"entry {str(entry.get('name') or '')!r} carries no class_hash; a "
             "class the key cannot name is a class a mismatch cannot name "
             "(pgw#716)")
+    _refuse_key_shaped(
+        f"entry {str(entry.get('name') or '')!r}", "class_hash", graph)
     toolchain = meta.get("toolchain")
     if not isinstance(toolchain, dict) or not toolchain:
         raise CellKeyError(
@@ -510,7 +537,10 @@ def manifest_digest(class_hashes: Iterable[str]) -> str:
     A manifest is a VIEW. The moment it becomes something a pod downloads or
     a hub hands back as one row, the wrong atom is back.
     """
-    joined = "\n".join(sorted(str(h) for h in class_hashes))
+    rows = [str(h) for h in class_hashes]
+    for row in rows:
+        _refuse_key_shaped("manifest digest", "class_hash", row)
+    joined = "\n".join(sorted(rows))
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 

@@ -112,7 +112,10 @@ def test_ek1_axes_are_the_recipe(pinned_runtime: None,
     # 36-entry all-or-nothing cell this runtime cannot arm at all, so it does
     # not even parse. That is what makes an orphaned ref fail at the
     # comparison rather than late, inside a per-entry code path.
-    assert not ck.is_key("ek1-" + "a" * 56)
+    # fence-symbol-exempt: `ck1` is the SUPERSEDED scheme and naming it IS the
+    # assertion — the sixth instance of a blanket rename eating the one line
+    # whose job is to name the old vocabulary. Do not sweep this.
+    assert not ck.is_key("ck1-" + "a" * 56)
     # Version-string axes are rejected outright.
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(axes, torch="2.13.0"))
