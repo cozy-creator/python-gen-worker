@@ -71,49 +71,14 @@ def effective_vram_requirement_gb(recommended_gb: float) -> float:
     """
     return max(0.0, float(recommended_gb) - GPU_VRAM_OVERHEAD_GB)
 
-# Modes that spill model weights to system RAM and run parts of inference on CPU.
-_CPU_OFFLOAD_MODES = ("model_offload", "group_offload", "sequential")
-
-# The reactive (degraded-mode) half of the fit ladder, shallowest first
-# (gw#463). A load-time CUDA OOM rolls back and retries one rung lower. A
-# mid-inference OOM records the next rung, quarantines the live object, and
-# applies that rung only during a clean reload.
-OFFLOAD_LADDER: tuple[str, ...] = _CPU_OFFLOAD_MODES
-
-
-def keeps_weights_in_host_ram(mode: Optional[str]) -> bool:
-    """True when this placement rung leaves the model's weights RESIDENT IN
-    HOST RAM (pgw#1063).
-
-    Every CPU-offload rung does: that is what offloading IS — the weights
-    live on the host and stream to the card per forward. So an offloaded
-    pipeline's host-RAM requirement is its WHOLE TREE, and any accounting
-    that charges it less (pgw#1026's per-component staging discount, which
-    is admissible only because each component LEAVES the host for the card)
-    is admitting a load the host cannot hold."""
-    return str(mode or "") in _CPU_OFFLOAD_MODES
-
-
-def next_offload_rung(mode: Optional[str]) -> Optional[str]:
-    """The next rung down the offload ladder from ``mode``.
-
-    Resident modes (''/off/vae_only/auto) fall to model_offload; each offload
-    mode falls to the next deeper one; None when already terminal.
-    """
-    cur = str(mode or "")
-    if cur not in OFFLOAD_LADDER:
-        return OFFLOAD_LADDER[0]
-    idx = OFFLOAD_LADDER.index(cur) + 1
-    return OFFLOAD_LADDER[idx] if idx < len(OFFLOAD_LADDER) else None
-
-
-def deeper_offload_mode(a: Optional[str], b: Optional[str]) -> str:
-    """The more-degraded of two placement modes ('' / non-ladder = shallowest)."""
-    def rank(m: Optional[str]) -> int:
-        m = str(m or "")
-        return OFFLOAD_LADDER.index(m) + 1 if m in OFFLOAD_LADDER else 0
-    a_s, b_s = str(a or ""), str(b or "")
-    return a_s if rank(a_s) >= rank(b_s) else b_s
+# The ladder itself lives in rung.py (pgw#1206 A2): one ordered Rung, one
+# walk, one price. This module keeps the probes and the appliers.
+from .rung import (
+    PLACEMENT_LADDER,
+    descend as _descend_rung,
+    touches_host_ram,
+    transition_line,
+)
 
 
 def is_cuda_oom(exc: Optional[BaseException]) -> bool:
@@ -133,37 +98,6 @@ def is_cuda_oom(exc: Optional[BaseException]) -> bool:
             or "cudnn_status_alloc_failed" in text
         )
     return False
-
-
-def degraded_log_line(
-    *,
-    event: str,
-    fn: str = "",
-    model: str = "",
-    phase: str = "",
-    from_rung: str = "",
-    to_rung: str = "",
-    needed_gb: float = 0.0,
-    free_gb: float = 0.0,
-    detail: str = "",
-) -> str:
-    """The ONE degraded-mode log format (gw#463; quality bar: ie#369's ltx
-    DEGRADED_MODE lines). event: planned | engaged | serving."""
-    parts = [f"DEGRADED_MODE={event}"]
-    if fn:
-        parts.append(f"fn={fn}")
-    if model:
-        parts.append(f"model={model}")
-    if phase:
-        parts.append(f"phase={phase}")
-    if from_rung or to_rung:
-        parts.append(f"rung={from_rung or '?'}->{to_rung or '?'}")
-    if needed_gb > 0:
-        parts.append(f"needed_gb={needed_gb:.1f}")
-    if free_gb > 0:
-        parts.append(f"free_gb={free_gb:.1f}")
-    line = " ".join(parts)
-    return f"{line}: {detail}" if detail else line
 
 
 # ---------------------------------------------------------------------------
@@ -986,7 +920,7 @@ def select_auto_mode(
             # cohorts (VRAM-posture-dependent proof_failed roulette). The
             # FIT decisions above/below stay free-VRAM-based (safety); a
             # card that later runs tight degrades reactively down
-            # OFFLOAD_LADDER instead of choosing a nondeterministic mint
+            # PLACEMENT_LADDER instead of choosing a nondeterministic mint
             # posture up front. pgw#1025 does NOT touch this comparison: it
             # is the GROSS requirement against a per-SKU constant, and
             # netting out live residency here would restore exactly the
@@ -1234,7 +1168,7 @@ def _gguf_resident_override(
     pipeline: Any, effective: Mode, log: logging.Logger,
 ) -> Mode:
     """Keep a selected GGUF rung resident when its remaining weights fit."""
-    if effective not in _CPU_OFFLOAD_MODES or not getattr(
+    if not touches_host_ram(effective) or not getattr(
         pipeline, "_cozy_gguf_quant", None
     ):
         return effective
@@ -1302,7 +1236,7 @@ def place_pipeline(
     # author's opt-out with no OOM and no error — the th#1043 shape
     # ("shared-component lanes require resident placement") reached serving as
     # a silent 5-10x tax. Refuse here too, with the same typed message.
-    if strict_vram and effective in _CPU_OFFLOAD_MODES:
+    if strict_vram and touches_host_ram(effective):
         raise RuntimeError(
             f"placement selected {effective!r} for "
             f"{ref or type(pipeline).__name__!r} "
@@ -1325,10 +1259,11 @@ def place_pipeline(
         except BaseException as exc:
             if not is_cuda_oom(exc):
                 raise
-            nxt = next_offload_rung(effective)
+            nxt_rung = _descend_rung(effective)
+            nxt = nxt_rung.name if nxt_rung is not None else None
             if nxt is None:
                 raise
-            if strict_vram and nxt in _CPU_OFFLOAD_MODES:
+            if strict_vram and touches_host_ram(nxt):
                 raise RuntimeError(
                     f"CUDA OOM placing {ref or type(pipeline).__name__!r} at "
                     f"{effective!r} ({estimate_pipeline_size_gb(pipeline):.1f} GB, "
@@ -1349,7 +1284,7 @@ def place_pipeline(
                     f"failed ({missed[:5]!r})"
                 ) from exc
             flush_memory()
-            log.warning(degraded_log_line(
+            log.warning(transition_line(
                 event="engaged", model=ref, phase="load",
                 from_rung=effective, to_rung=nxt,
                 needed_gb=estimate_pipeline_size_gb(pipeline),
@@ -1589,12 +1524,10 @@ __all__ = [
     "low_vram_mode",
     "rearm_offload",
     "place_pipeline",
-    "next_offload_rung",
-    "deeper_offload_mode",
-    "keeps_weights_in_host_ram",
+    "touches_host_ram",
     "is_cuda_oom",
-    "degraded_log_line",
-    "OFFLOAD_LADDER",
+    "transition_line",
+    "PLACEMENT_LADDER",
     "select_auto_mode",
     "device_mismatches",
     "repair_device_placement",

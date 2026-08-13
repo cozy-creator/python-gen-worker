@@ -524,7 +524,7 @@ def test_an_unlanded_nf4_rung_is_a_rung_OUTCOME_not_the_absence_of_one() -> None
 
 def test_the_unlanded_rung_reaches_placement_through_SlotLoad() -> None:
     """An event alone would not be enough: every sibling rung reaches
-    ServePlan/FnDegraded via SlotLoad.rung -> `_record_adaptive_rung`, and a
+    ServePlan/FnDegraded via SlotLoad.rung -> `_record_rung_transition`, and a
     fix that only logged-but-typed would still leave placement blind."""
     import inspect
 

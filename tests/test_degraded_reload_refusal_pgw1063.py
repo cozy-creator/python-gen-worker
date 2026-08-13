@@ -45,9 +45,9 @@ from gen_worker.models.loading import (
     decide_streamed_hydration,
     plan_streamed_hydration,
 )
-from gen_worker.models.memory import (
-    OFFLOAD_LADDER,
-    keeps_weights_in_host_ram,
+from gen_worker.models.rung import (
+    PLACEMENT_LADDER,
+    touches_host_ram,
 )
 from gen_worker.models.residency import HostRamHeadroom
 
@@ -87,7 +87,7 @@ def _h3(**over: Any):
 
 def test_an_offload_rung_never_takes_the_per_component_discount() -> None:
     assert _h3().engaged, "the resident shape must still engage"
-    for rung in OFFLOAD_LADDER:
+    for rung in PLACEMENT_LADDER:
         plan = _h3(placement_mode=rung)
         assert not plan.engaged, rung
         assert "host RAM" in plan.reason and rung in plan.reason
@@ -96,7 +96,7 @@ def test_an_offload_rung_never_takes_the_per_component_discount() -> None:
 def test_the_resident_rungs_are_untouched() -> None:
     for rung in ("", "auto", "off", "vae_only"):
         assert _h3(placement_mode=rung).engaged, rung
-        assert not keeps_weights_in_host_ram(rung)
+        assert not touches_host_ram(rung)
 
 
 def test_the_rung_travels_with_the_plan(tmp_path, monkeypatch) -> None:
