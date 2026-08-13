@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import author_ci, rigcheck, serve_posture
+from gen_worker import author_ci, cell_key, rigcheck, serve_posture
 from gen_worker.api.decorators import Compile
 
 import test_numerics_gate_pgw868 as rig  # noqa: E402
@@ -285,7 +285,12 @@ def test_a_healthy_cell_records_the_gates_own_cosine(
     assert report.parity is not None and report.parity.passed
     proof = tomllib.loads(record.read_text(encoding="utf-8"))["proof"]
     assert proof["cosine"] >= 0.999
-    assert proof["cell"] == "cell868", "the record names WHICH cell was measured"
+    # pgw#1176: the record names the ENTRY KEY that was measured, computed
+    # from the artifact's own facts. `"cell868"` was a harness placeholder
+    # from when the key was a literal; asserting it now would assert the mint
+    # failed to key its own product.
+    assert cell_key.is_key(proof["cell"]), (
+        f"the record names WHICH entry was measured: {proof['cell']!r}")
 
 
 def test_the_declared_numerics_floor_reaches_the_gate_at_all(declared):
