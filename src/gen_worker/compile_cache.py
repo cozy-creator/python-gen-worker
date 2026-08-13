@@ -98,11 +98,23 @@ from .models import loading as _loading
 
 logger = logging.getLogger(__name__)
 
+# The JIT/torch-inductor-cache PRODUCER format, and NOTHING ELSE — it is an
+# ingredient of the semantic cache tag (`_semantic_cache_tag`) and is not the
+# AOT cell metadata schema, which is `aot_serve.ARTIFACT_FORMAT`.
+#
+# pgw#1230 RENAMED it from `ARTIFACT_FORMAT`. Two different facts shared that
+# name across two modules; `fleet_cells.arm_identity` read THIS one to compute
+# the `format` axis it compares against what the child stamped from
+# `aot_serve`'s. They were both 2, so the comparison passed by coincidence
+# until pgw#1176 moved the cell schema to 3 — after which every freshly minted
+# cell failed to arm with `key_axis_divergence`. The value is unchanged, so no
+# cache tag moves; only the name that made the confusion possible does.
+#
 # 2 (gw#391): key gained the producer gen-worker version. ie#496 extends its
 # metadata with the canonical module graph, shape/target table and weight-lane
 # schema without gratuitously invalidating proven non-W8A8 cells. New W8A8
 # consumers require those fields; checkpoint bytes remain deliberately absent.
-ARTIFACT_FORMAT = 2
+SEMANTIC_TAG_FORMAT = 2
 _MARKER_ATTR = "_cozy_compile"
 _LOCK_TYPE = type(threading.Lock())
 
@@ -1163,7 +1175,7 @@ def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
         pipeline_weight_lane(pipeline),
         int(getattr(cfg, "lora_bucket", 0) or 0))
     payload = "|".join((
-        str(ARTIFACT_FORMAT), "inductor",
+        str(SEMANTIC_TAG_FORMAT), "inductor",
         str(getattr(cfg, "family", "") or ""), execution_lane,
         "regional" if bool(getattr(cfg, "regional", False)) else "whole",
         cell_key.facts_digest(declared_compile_facts(cfg)),
@@ -3030,11 +3042,11 @@ def arm_jit_intake(pipe: Any, cfg: Any) -> None:
 
 
 __all__ = [
-    "ARTIFACT_FORMAT",
     "AdoptError",
     "CellSelectionBugError",
     "CompileArmRefused",
     "CompiledExecutionLaneUnavailableError",
+    "SEMANTIC_TAG_FORMAT",
     "apply",
     "apply_lora_execution_lane",
     "arming_block",
