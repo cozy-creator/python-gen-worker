@@ -16,7 +16,7 @@ import time
 import torch
 
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, guard_closure, hot_swap
+from gen_worker import fleet_cells, hot_swap
 
 
 def _wait(predicate, timeout=30.0):
@@ -340,12 +340,11 @@ def _pin_identity(monkeypatch):
     # pgw#681 gate at its torch boundary, simmed: these republish rigs
     # never compile through dynamo, so extraction would honestly report
     # closure unprovable and refuse the republish.
-    monkeypatch.setattr(
-        guard_closure, "closure_manifest",
-        lambda pipe, cfg, label="": {
-            "v": 1, "graphs": [{"target": "transformer", "code": "sim",
-                                "entry": 0, "guards": []}],
-            "verdicts": {}, "leaks": []})
+    # pgw#1181: the pgw#681 mint gate this simmed is deleted.
+    # `guard_closure.closure_manifest` classified every compiled graph at
+    # the MINT and wrote the result into the cell's metadata; it went with
+    # the `torch-inductor-cache` format that carried it, so a rig whose
+    # compiles never touch dynamo has no gate left to satisfy.
 
 
 def test_the_shape_warm_has_no_republish_backend_since_pgw1010() -> None:

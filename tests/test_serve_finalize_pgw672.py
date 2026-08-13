@@ -46,9 +46,8 @@ import msgspec
 import pytest
 
 import gen_worker.executor as executor_mod
-from gen_worker import Compile, cell_key as cell_key_mod
+from gen_worker import Compile
 from gen_worker import compile_cache as cc
-from gen_worker import guard_closure
 from gen_worker import fleet_cells, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
@@ -261,12 +260,11 @@ class _Rig:
         # pgw#681 gate at its torch boundary, simmed like apply's compile
         # leaf: _Sim never touches dynamo, so extraction would honestly
         # report closure unprovable and refuse every finalize.
-        monkeypatch.setattr(
-            guard_closure, "closure_manifest",
-            lambda pipe, cfg, label="": {
-                "v": 1, "graphs": [{"target": "transformer", "code": "sim",
-                                    "entry": 0, "guards": []}],
-                "verdicts": {}, "leaks": []})
+        # pgw#1181: the pgw#681 mint gate this simmed is deleted.
+        # `guard_closure.closure_manifest` classified every compiled graph at
+        # the MINT and wrote the result into the cell's metadata; it went with
+        # the `torch-inductor-cache` format that carried it, so a rig whose
+        # compiles never touch dynamo has no gate left to satisfy.
         monkeypatch.setattr(
             cc, "inductor_counters", lambda: dict(self.sim.counters))
         monkeypatch.setattr(fleet_cells, "arm_identity", _fake_arm_identity)

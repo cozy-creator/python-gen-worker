@@ -147,9 +147,14 @@ def test_artifact_manifest_records_disk_identity(
     mismatch names the library), never the phase-dependent mapped set —
     and the host driver never appears in it (pgw#745)."""
     _phase(monkeypatch, tmp_path, "warm", _COLD_LIBS + _WARM_EXTRA)
-    meta = cc.artifact_metadata(family="sdxl", shapes=((64, 64),),
-                                targets=("unet",))
-    libs = meta["loaded_libs"]
+    # pgw#1181: read the manifest from its PRODUCER, `env_seal`, rather than
+    # from `compile_cache.artifact_metadata`, which embedded it in a
+    # `torch-inductor-cache` cell and is deleted with that format. `aot_mint`
+    # records the same call's output under the same `loaded_libs` key, so the
+    # fact under test is the fact the live cell carries.
+    from gen_worker import env_seal
+
+    libs = dict(env_seal.frozen_library_digests())
     assert "libtriton.so" in libs  # shipped on disk, phase-independent
     assert "libcudnn.so.9" in libs
     assert not any(base.startswith("libcuda.so") for base in libs), libs

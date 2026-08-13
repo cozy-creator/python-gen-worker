@@ -148,45 +148,41 @@ gen_worker.aot_serve.realigned_inputs()
 gen_worker.aot_serve.served_entry_calls()
 gen_worker.boot_phases.BootSpan.skipped()
 gen_worker.boot_phases.servable_ms()
-#   THE JIT PRODUCER DIED, AND THREE SYMBOLS BEHIND IT SURFACED (pgw#1178,
-#   2026-08-12). `compile_cache.mint_artifact` — the last producer of a
-#   `torch-inductor-cache` artifact anywhere in this tree — was deleted with
-#   `local_cells.py`, the only module that called it. Its three callees
-#   immediately became production-unreached, which is not a regression: it is
-#   the ratchet REPORTING the deletion's real reach, and it answers the
-#   question the `seed_artifact` note above has been holding open since
-#   2026-08-08 — *"whether anything still PRODUCES a delivered
-#   torch-inductor-cache artifact for that path to consume."* **Nothing does.**
-#   The adopt lane `enable` -> `stage_artifact` -> `unpack`/`verify` ->
-#   `_activate_staged` is therefore consuming a format with no producer.
+#   shape_growth.coverage_line — ✅ DELISTED 2026-08-12 (pgw#1181), by the
+#   ratchet turning the RIGHT way: it acquired a production caller and the
+#   landing lane did not remove its row, which left `master` itself red on
+#   this guard. Removed here because every PR inherits that red; the symbol
+#   is not this lane's and nothing about it changed.
 #
-#   They are LISTED and not deleted here, deliberately, because deleting them
-#   is not free and is not this lane's call:
-#     * `pack` and `artifact_metadata` are the construction vehicle for ~40
-#       test call sites that drive the still-live `unpack`/`verify`/
-#       `stage_artifact` transaction with REAL tarballs. Deleting the producer
-#       and leaving the consumer means those proofs are rebuilt on hand-rolled
-#       fixtures — shapes production cannot produce — which is worse coverage
-#       than the debt.
-#     * `artifact_metadata`'s output FORMAT is a cross-repo contract:
-#       cozy-local's `internal/cli/cells.go` parses `metadata.json` and names
-#       this function as its owner.
-#     * `guard_closure.closure_manifest` is the guard-closure dependency dump
-#       that rode the cell; the guard-miss doctrine it belongs to is KEPT.
-#   OWNER: the per-entry atom (compile-loop greenfield Phase 1, `pgw#1176`),
-#   which deletes the multi-entry tarball, `pack`/`unpack`'s fixed member set
-#   and `combined_graph_hash` as identity in one coherent change.
-#   EXPIRY, restated 2026-08-12 rather than copied: these rows die when
-#   `pgw1176-per-entry-atom` lands. That PR (#718) is OPEN and holding on a
-#   proto-window reply, not on work — so this baseline is short-lived BY
-#   CONSTRUCTION, and if Phase 1 lands with these five still here, the consumer
-#   half was never re-based and this note was wrong.
+#   THE JIT PRODUCER DIED AND THE FORMAT FOLLOWED IT — ✅ DELISTED 2026-08-12
+#   (pgw#1181) by DELETION, five rows in one cut, three of them listed by
+#   pgw#1178 the same day with OWNER: Phase 1 and EXPIRY: the per-entry atom.
+#   Phase 1 traced the ~82 `compile_cache.pack` call sites and reported they
+#   are not its tail: they exercise the JIT lane's OWN format, and format 3 is
+#   one graph class keyed by `ek1` while `torch-inductor-cache` is a whole-cell
+#   FX-cache tarball with no per-class identity — so porting it is a category
+#   error, not a task, and the format DIES. That re-assigned the three rows
+#   back to this lane, and the expiry was discharged by deleting rather than
+#   by waiting.
 #
-gen_worker.compile_cache.seed_artifact()
-gen_worker.compile_cache.artifact_metadata()
-gen_worker.compile_cache.pack()
-gen_worker.guard_closure.closure_manifest()
-gen_worker.guard_closure.manifest_digest()
+#   The original finding, kept because it is the clearest statement of what a
+#   writer-less format looks like from inside the ratchet: pgw#1178 deleted
+#   `compile_cache.mint_artifact`, the LAST producer of a
+#   `torch-inductor-cache` artifact anywhere in this tree, and `pack`,
+#   `artifact_metadata` and `guard_closure.closure_manifest` went unreached
+#   the same instant. That answered the question the `seed_artifact` note
+#   above had held open since 2026-08-08 — "whether anything still PRODUCES a
+#   delivered torch-inductor-cache artifact for that path to consume" —
+#   with: nothing does. The live adopt lane was consuming a format with no
+#   writer, and had been for four days without anything going red.
+#
+#   `seed_artifact` itself is delisted here too, LISTED 2026-08-08 (pgw#1035)
+#   and kept twice on the reasoning that the adopt lane it entered was still
+#   reached. It was. The lane was reachable and the format was not writable,
+#   which is a distinction this ratchet cannot see and a reader must.
+#   `guard_closure.manifest_digest` — listed 2026-08-01, never explained —
+#   digested the manifest `closure_manifest` produced, and went with it.
+#
 
 # ---------------------------------------------------------------------------
 # IN FLIGHT — a seam that landed AHEAD of its caller. Not 2026-08-01 debt.

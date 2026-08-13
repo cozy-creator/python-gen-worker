@@ -133,13 +133,18 @@ class _BurstCfg:
     guidance_scales = (0.0, 5.0)
 
 
-def _verdict(weight_lane: str) -> str:
-    """The one adoption verdict (pgw#1059: `cc.local_cell_mismatch`, the
-    fact-by-fact replacement for the retired computed key) at a given
-    resolved base lane."""
-    return cc.local_cell_mismatch(
-        dict(_BURST_META), family="sdxl", weight_lane=weight_lane,
-        cfg=_BurstCfg())
+def _lane(weight_lane: str) -> str:
+    """The cell-identity LANE label a worker on ``weight_lane`` would ask for.
+
+    pgw#1181: the adoption verdict this used to call —
+    `compile_cache.local_cell_mismatch`, the fact-by-fact check a delivered
+    `torch-inductor-cache` cell was admitted by — is deleted with that format.
+    The burst's mechanism does not need it: the divergence WAS the lane, and
+    the lane label is the axis every cell-identity surface is keyed on.
+    A worker asking on the wrong lane asks for a different cell — which is the
+    same conclusion the verdict used to reach one step later, reached by
+    construction instead of by comparison."""
+    return cc.execution_lane_label(weight_lane, _BurstCfg.lora_bucket)
 
 
 class _Denoiser:
@@ -171,11 +176,10 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
     lane named a cell nobody advertised. Adoption was structurally
     impossible. Re-asserted post-pgw#1059 on the fact-by-fact verdict: the
     lane fact alone flips the verdict, and the refusal NAMES the lane."""
-    assert _verdict("w8a8") == ""
-    assert _verdict("w8a8-lora64") == ""  # canonical-lane fold
+    published = _lane("w8a8")
+    assert _lane("w8a8-lora64") == published  # canonical-lane fold
     for wrong in ("", "fp8-hooks"):
-        reason = _verdict(wrong)
-        assert reason.startswith("execution lane"), reason
+        assert _lane(wrong) != published, wrong
     # pgw#691/pgw#958: the recorded ck2 burst keys are dead — a
     # torch-inductor-cache artifact has no key identity at all any more
     # (pgw#1059), so an old key can only MISS. They stay key-SHAPED
@@ -193,9 +197,9 @@ def test_cell_base_execution_lane_sees_w8a8_mode(burst_runtime: None) -> None:
     pipe = _Pipe()
     assert w8a8_lora.effective_base_execution_lane(pipe) == "w8a8"
     assert cc.cell_base_execution_lane(pipe) == "w8a8"
-    # An identical worker's verdict now admits exactly the cell the mint
-    # published — one lane derivation on both sides.
-    assert _verdict(cc.cell_base_execution_lane(pipe)) == ""
+    # An identical worker now asks on exactly the lane the mint published on
+    # — one lane derivation on both sides, which is the whole of pgw#686.
+    assert _lane(cc.cell_base_execution_lane(pipe)) == _lane("w8a8")
 
 
 def test_cell_base_execution_lane_precedence() -> None:

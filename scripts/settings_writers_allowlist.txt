@@ -21,5 +21,4 @@ src/gen_worker/host_canary.py::os.environ[<dynamic>]  SCOPED  the probe's restor
 # Cache-dir redirects: where compile bytes land, never what bytes are
 # generated (inductor entries are content-addressed). The sanctioned window
 # is post-scrub (env_seal docstring).
-src/gen_worker/compile_cache.py::os.environ[<dynamic>]  PLUMBING  capture_env's TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR redirect (gw#391)
 src/gen_worker/entrypoint.py::os.environ[<dynamic>]  PLUMBING  pgw#783 per-group inductor/triton cache isolation dirs

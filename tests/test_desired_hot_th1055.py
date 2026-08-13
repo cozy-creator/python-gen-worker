@@ -141,19 +141,24 @@ def _snapshot(digest: str) -> pb.Snapshot:
 
 
 def _cell_artifact(tmp_path: Path) -> Path:
-    cap = tmp_path / "cap"
-    (cap / "inductor" / "g").mkdir(parents=True)
-    (cap / "inductor" / "g" / "code.py").write_text("x")
-    (cap / "triton").mkdir()
-    cfg = Compile(shapes=((768, 768),), family=FAMILY)
-    signature, weight_contract = cc.execution_contract(_Pipe(), cfg)
-    meta = cc.artifact_metadata(
-        family=FAMILY, shapes=cfg.shapes, targets=cfg.targets,
-        graph_signature=signature, weight_contract=weight_contract,
-    )
+    """A real packed cell tarball, in the format this repository can WRITE.
+
+    pgw#1181 retargeted this from `compile_cache.pack` (the whole-cell
+    `torch-inductor-cache` tarball, no writer since pgw#1178, deleted here)
+    onto the exported `aot-inductor` cell, through the same shared harness the
+    publish-path tests use. What the rows below need is a cell ON DISK that
+    the executor's snapshot/selection plumbing carries; building it out of a
+    format nothing writes made them fixtures constructing a shape production
+    cannot produce (§4.34)."""
+    from gen_worker import aot_serve
+    from harness.cell_meta import exported_cell_meta
+
+    work = tmp_path / "cap"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
     out = tmp_path / "minted"
     out.mkdir(exist_ok=True)
-    return cc.pack(cap, out / "inductor-rtx-4090-torch2.9-w8a8.tar.gz", meta)
+    return aot_serve.pack(work, out / "cell.tar.gz", exported_cell_meta(family=FAMILY))
 
 
 def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):

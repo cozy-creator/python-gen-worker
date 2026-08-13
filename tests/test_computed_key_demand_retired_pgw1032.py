@@ -137,12 +137,19 @@ def test_no_adopt_compile_cache_handler_survives() -> None:
 def test_the_strict_hot_adopt_arm_entry_point_is_gone() -> None:
     """``compile_cache.arm_staged_artifact`` existed ONLY for hot adoption —
     the strict twin of ``enable`` whose mismatch raises instead of falling back
-    to eager. ``stage_artifact`` itself stays: ``seed_artifact`` and ``enable``
-    are live callers."""
+    to eager.
+
+    pgw#1181: ``stage_artifact`` is gone too, and the note this row used to
+    carry — *"``stage_artifact`` itself stays: ``seed_artifact`` and ``enable``
+    are live callers"* — is exactly the reasoning the ratchet could not see
+    through. Both callers were real, and the FORMAT they staged had no writer
+    from the moment pgw#1178 deleted ``mint_artifact``. A lane is not alive
+    because it is reachable; it is alive because something feeds it."""
     from gen_worker import compile_cache as cc
 
-    assert not hasattr(cc, "arm_staged_artifact")
-    assert hasattr(cc, "stage_artifact")
+    for gone in ("arm_staged_artifact", "stage_artifact", "seed_artifact",
+                 "pack", "unpack", "verify", "artifact_metadata"):
+        assert not hasattr(cc, gone), gone
 
 
 def test_the_demand_echoing_build_entry_point_is_gone_entirely() -> None:

@@ -81,14 +81,11 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
         lambda *a, **k: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(fc, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
-    # pgw#681 gate at its torch boundary, simmed: these rigs never compile
-    # through dynamo, so extraction would honestly refuse every finalize.
-    monkeypatch.setattr(
-        guard_closure, "closure_manifest",
-        lambda pipe, cfg, label="": {
-            "v": 1, "graphs": [{"target": "transformer", "code": "sim",
-                                "entry": 0, "guards": []}],
-            "verdicts": {}, "leaks": []})
+    # pgw#1181: the pgw#681 gate that used to be simmed here is gone.
+    # `guard_closure.closure_manifest` ran at the MINT, classified every
+    # compiled graph and wrote the result into the cell's metadata; it is
+    # deleted with the `torch-inductor-cache` format that carried it, so a rig
+    # whose compiles never touch dynamo no longer has a gate to satisfy.
 
     class _Arm:
         token = key

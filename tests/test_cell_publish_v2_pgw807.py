@@ -214,17 +214,22 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    # A real cell tarball packed by the real packer: metadata.json inside the
-    # digested bytes, which is what the receipt gate reads back.
-    from gen_worker import compile_cache as cc
+    """A real cell tarball packed by the real packer: metadata.json inside the
+    digested bytes, which is what the receipt gate reads back.
 
+    pgw#1181: packed by `aot_serve.pack`, not `compile_cache.pack`. `META`
+    below already declares `kind="aot-inductor"` — the packer was the last
+    thing here still writing the `torch-inductor-cache` envelope, whose
+    producer died in pgw#1178 and whose format is deleted. Same bytes, same
+    sizes (the chunked-upload and republish-identical rows depend on them),
+    written into the member set the exported cell actually has.
+    """
     root = tmp_path / "capture"
-    (root / "inductor" / "fxgraph").mkdir(parents=True)
-    (root / "triton").mkdir(parents=True)
-    for i in range(6):
-        (root / "inductor" / "fxgraph" / f"e{i}.bin").write_bytes(_blob(20_000, i))
+    root.mkdir(parents=True, exist_ok=True)
+    (root / aot_serve.PACKAGE_NAME).write_bytes(
+        b"".join(_blob(20_000, i) for i in range(6)))
     out = tmp_path / "cell.tar.gz"
-    cc.pack(root, out, dict(META))
+    aot_serve.pack(root, out, dict(META))
     return out
 
 

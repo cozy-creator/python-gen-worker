@@ -18,6 +18,17 @@ from typing import Any, Dict, Iterator
 
 import pytest
 
+# pgw#1181: `guard_closure.MANIFEST_KEY` went with `closure_manifest`, the
+# only writer of this block, when the `torch-inductor-cache` format was
+# deleted. The BLOCK NAME stays spelled out here because
+# `fleet_cells._UNBOUNDED_ENVELOPE_BLOCKS` still lists it as a literal:
+# the control-plane cap is a defensive filter over whatever an envelope
+# carries, and what these rows prove — that an unbounded block is dropped
+# before the hub sees it, and that a 200 MB cell still publishes — is a
+# property of the CAP, not of any one producer.
+GUARD_MANIFEST_BLOCK = "guard_manifest"
+
+
 torch = pytest.importorskip("torch")
 
 from gen_worker import cell_key as ck
@@ -126,15 +137,11 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     legacy = {k: v for k, v in meta.items() if k != "toolchain"}
     with pytest.raises(ck.CellKeyError, match="recipe"):
         ck.from_exported_artifact_metadata(legacy)
-    # pgw#990: `code_closure` is a MEMO, not identity — a local JIT
-    # artifact records it, and drifting it moves no key because the local
-    # kind has no key at all (pgw#1059).
-    local = cc.artifact_metadata(
-        family=FAMILY, shapes=((64, 64),), targets=("transformer",),
-        declared_compile_contract=cc.declared_compile_facts(_cfg()),
-    )
-    assert local["code_closure"], "the closure is still recorded"
-    assert "cell_key" not in local
+    # pgw#990's memo half is GONE with its subject (pgw#1181): the local JIT
+    # kind that recorded `code_closure` and carried no `cell_key` was the
+    # `torch-inductor-cache` artifact, and there is no longer any kind without
+    # a key. What survives is the statement below — on the exported kind,
+    # which is the only kind.
     # A TOOLCHAIN drift is identity on the exported kind.
     retooled = json.loads(json.dumps(meta))
     retooled["toolchain"]["torch"] = "0" * 16
@@ -167,7 +174,7 @@ def _manifest() -> Dict[str, Any]:
                                 "expr": "e", "verdict": gc.CANONICALIZED,
                                 "axis": "ingress"}]}],
         "verdicts": {}, "leaks": [],
-        gc.POSTURE_KEY: dict(gc.CANONICAL_POSTURE),
+        "posture": dict(gc.CANONICAL_POSTURE),
     }
 
 
@@ -195,7 +202,7 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
     # pgw#1046: a real exported-cell envelope — publish recomputes the key from
     # the recorded blocks and refuses a cell that cannot state one.
     meta = exported_cell_meta(family=FAMILY, sku="l4", gen_worker="1.0.0",
-                              **{gc.MANIFEST_KEY: _manifest()})
+                              **{GUARD_MANIFEST_BLOCK: _manifest()})
     key = meta["cell_key"]
 
     class _FakeResp:

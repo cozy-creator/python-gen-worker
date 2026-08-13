@@ -734,14 +734,11 @@ def enable_compiled(
                 return aot
             refused = aot
             artifact = None  # unusable artifact: fall through to eager policy
-    try:
-        armed = compile_cache.enable(pipe, cfg, cache_dir, artifact)
-    except compile_cache.CellSelectionBugError:
-        # th#883: the loud invariant propagates, but the caller continuing
-        # eager must not inherit the branch-bearing lane.
-        if bucket:
-            compile_cache.drop_lora_execution_lane(pipe)
-        raise
+    # pgw#1181: `compile_cache.enable` no longer takes an artifact — the
+    # `torch-inductor-cache` format it seeded has had no writer since pgw#1178
+    # and is deleted. Everything delivered is dispatched above by
+    # `metadata.json`'s `kind`; what reaches here is the JIT lane.
+    armed = compile_cache.enable(pipe, cfg)
     if bucket and not armed:
         compile_cache.drop_lora_execution_lane(pipe)
     if armed:

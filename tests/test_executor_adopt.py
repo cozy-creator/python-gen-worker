@@ -209,20 +209,28 @@ def _spec(compile_cfg=None) -> EndpointSpec:
 def _artifact(
     tmp_path: Path, *, family: str = FAMILY, **meta_overrides,
 ) -> Path:
-    cap = tmp_path / "cap"
-    (cap / "inductor" / "g").mkdir(parents=True)
-    (cap / "inductor" / "g" / "code.py").write_text("x")
-    (cap / "triton").mkdir()
-    cfg = Compile(shapes=((768, 768),), family=family)
-    signature, weight_contract = cc.execution_contract(_Pipe(), cfg)
-    meta = cc.artifact_metadata(
-        family=family, shapes=cfg.shapes, targets=cfg.targets,
-        graph_signature=signature, weight_contract=weight_contract,
-    )
+    """A delivered cell on disk, in the format this repository can WRITE.
+
+    pgw#1181 retargeted this from `compile_cache.pack` — the whole-cell
+    `torch-inductor-cache` tarball, whose last producer died with
+    `mint_artifact` (pgw#1178) and which is now deleted — onto the exported
+    `aot-inductor` cell, through the same shared harness the publish-path
+    tests use. The rows below stub `_enable_compiled`, so what they need from
+    this file is that it EXISTS at a path the executor's snapshot plumbing
+    carries; building it out of a format nothing writes made every one of
+    them a fixture constructing a shape production cannot produce (§4.34).
+    """
+    from gen_worker import aot_serve
+    from harness.cell_meta import exported_cell_meta
+
+    meta = exported_cell_meta(family=family)
     meta.update(meta_overrides)
+    work = tmp_path / "cap"
+    work.mkdir(exist_ok=True)
+    (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
     snapdir = tmp_path / "snap"
     snapdir.mkdir(exist_ok=True)
-    return cc.pack(cap, snapdir / "inductor-rtx-4090-torch2.9.tar.gz", meta)
+    return aot_serve.pack(work, snapdir / "cell.tar.gz", meta)
 
 
 #: pgw#1148: the w8a8 lane no longer arrives as a `#fp8-w8a8` ref TOKEN
@@ -2395,14 +2403,13 @@ def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_pa
     assert _Endpoint.runs == 0
 
 
-def test_seeding_an_explicit_artifact_writes_the_live_cache(tmp_path):
-    """pgw#1035: `cc.prepare` — a None-returning wrapper with no production
-    caller — is gone. `seed_artifact` is what the adopt lane calls, and it is
-    the same transaction: stage, verify in isolation, activate under the lock."""
-    artifact = _artifact(tmp_path)
-    meta = cc.seed_artifact(artifact, FAMILY, cache_dir=tmp_path / "cache")
-    assert meta is not None and meta["family"] == FAMILY
-    assert (tmp_path / "cache" / "compile-cache" / "inductor" / "g" / "code.py").exists()
+# pgw#1181 REMOVED `test_seeding_an_explicit_artifact_writes_the_live_cache`.
+# `cc.seed_artifact` — stage, verify in isolation, activate the delivered
+# inductor tree under the lock — is deleted with the `torch-inductor-cache`
+# format it was the entry point of. Nothing has written that format since
+# pgw#1178 removed `mint_artifact`, so this row proved a transaction no pod
+# can enter. The live delivered-cell transaction is `aot_serve`'s, and
+# `test_aot_serve_pgw721` / `test_aot_selfmint_pgw805` drive it.
 
 
 def test_manifest_carries_compile_block():

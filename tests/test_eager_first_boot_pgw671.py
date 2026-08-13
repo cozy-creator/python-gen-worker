@@ -169,15 +169,8 @@ class _Harness:
         # flipping only when the mint lands.
         monkeypatch.setattr(
             mint_delegate, "build_cell", self._fake_build_cell)
-        # pgw#681 gate at its torch boundary, simmed: this rig's compiles
-        # never touch dynamo, so extraction would honestly report closure
-        # unprovable and refuse every finalize.
-        monkeypatch.setattr(
-            guard_closure, "closure_manifest",
-            lambda pipe, cfg, label="": {
-                "v": 1, "graphs": [{"target": "transformer", "code": "sim",
-                                    "entry": 0, "guards": []}],
-                "verdicts": {}, "leaks": []})
+        # pgw#1181: the pgw#681 mint gate this simmed is deleted with the
+        # `torch-inductor-cache` format whose metadata carried its manifest.
         self.ex = Executor(self.specs, _send, store=store)
 
     # -- the child, minus the process ---------------------------------------

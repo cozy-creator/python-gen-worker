@@ -125,53 +125,17 @@ def test_class_hash_absence_was_already_correct_and_stays_so() -> None:
 # ---------------------------------------------------------------------------
 
 
-_ELF64 = b"\x7fELF" + b"\x02" + b"\x00" * 0x2B + (89).to_bytes(4, "little")
-
-
-def _kernel_dir(tmp_path: Path, *, cubin: bytes | None, ptx: bool = True) -> Path:
-    root = tmp_path / "cache"
-    root.mkdir(parents=True, exist_ok=True)
-    if ptx:
-        (root / "k.ptx").write_bytes(b"// ptx")
-    if cubin is not None:
-        (root / "k.cubin").write_bytes(cubin)
-    return root
-
-
-def test_a_matching_cubin_still_passes(tmp_path: Path) -> None:
-    from gen_worker import compile_cache
-
-    root = _kernel_dir(tmp_path, cubin=_ELF64)
-    assert compile_cache._ptx_jit_gaps(sorted(root.iterdir()), root, "sm_89") == []
-
-
-def test_an_unreadable_cubin_is_a_gap_not_a_skip(tmp_path: Path) -> None:
-    """`_cubin_arch` returned 0 on `OSError` or a non-ELF header, and
-    `if cubin is not None and want_arch:` then skipped the comparison — so
-    pgw#698's gate disappeared for exactly the kernel it could not read."""
-    from gen_worker import compile_cache
-
-    root = _kernel_dir(tmp_path, cubin=b"not an elf at all")
-    gaps = compile_cache._ptx_jit_gaps(sorted(root.iterdir()), root, "sm_89")
-    assert len(gaps) == 1 and "not an ELF" in gaps[0], gaps
-
-
-def test_an_unparseable_sm_refuses_the_pack(tmp_path: Path) -> None:
-    """A malformed `metadata["sm"]` set `want_arch = 0` and the arch gate
-    vanished for EVERY kernel at once."""
-    from gen_worker import compile_cache
-
-    root = _kernel_dir(tmp_path, cubin=_ELF64)
-    gaps = compile_cache._ptx_jit_gaps(sorted(root.iterdir()), root, "sm_wat")
-    assert gaps and "names no comparable architecture" in gaps[0], gaps
-
-
-def test_a_ptx_with_no_cubin_is_still_the_original_gap(tmp_path: Path) -> None:
-    from gen_worker import compile_cache
-
-    root = _kernel_dir(tmp_path, cubin=None)
-    gaps = compile_cache._ptx_jit_gaps(sorted(root.iterdir()), root, "sm_89")
-    assert len(gaps) == 1 and "PTX only" in gaps[0], gaps
+# pgw#1181 REMOVED the four `_ptx_jit_gaps` rows (pgw#939 site 2: an unreadable
+# cubin must be a GAP, not a skip). The gate they cover ran inside
+# `compile_cache.pack`, over the inductor/triton capture a
+# `torch-inductor-cache` cell was built from — a completeness check on kernels
+# packed into that artifact. The format has had no writer since pgw#1178 and is
+# deleted here, so there is no capture to walk and no pack to refuse.
+#
+# The pgw#939 PRINCIPLE this file exists for is untouched and the other 19 rows
+# still assert it on live sites: absent evidence is an integrity verdict, never
+# a disabled check. On the exported lane the same principle is enforced by the
+# key — a cell that cannot state an axis has no identity and never resolves.
 
 
 # ---------------------------------------------------------------------------

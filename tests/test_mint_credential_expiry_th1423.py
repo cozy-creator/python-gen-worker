@@ -125,14 +125,19 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    from gen_worker import compile_cache as cc
+    # pgw#1181: packed by the exported packer. `compile_cache.pack` wrote the
+    # `torch-inductor-cache` envelope, whose producer died in pgw#1178 and
+    # whose format is deleted; what a pod publishes is an exported cell, and
+    # what this file is about is the CREDENTIAL on the publish leg, not the
+    # bytes underneath it.
+    from gen_worker import aot_serve
 
     root = tmp_path / "capture"
-    (root / "inductor" / "fxgraph").mkdir(parents=True)
-    (root / "inductor" / "fxgraph" / "e0.bin").write_bytes(b"\x11" * 4096)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / aot_serve.PACKAGE_NAME).write_bytes(b"\x11" * 4096)
     out = tmp_path / "mintdir" / "cell.tar.gz"
     out.parent.mkdir()
-    cc.pack(root, out, dict(META))
+    aot_serve.pack(root, out, dict(META))
     return out
 
 

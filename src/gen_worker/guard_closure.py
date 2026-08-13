@@ -90,19 +90,13 @@ from __future__ import annotations
 
 import ast
 import functools
-import hashlib
-import json
 import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Tuple)
 
-from . import activity as activity_mod
-from . import artifact_meta
 from . import torch_capability
-import argparse
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +105,6 @@ logger = logging.getLogger(__name__)
 # shape is the one the old v3 reached (posture process-seal block, advisory
 # gate, "unproven" rows).
 MANIFEST_VERSION = 1
-MANIFEST_KEY = "guard_manifest"
-POSTURE_KEY = "posture"
 GATE_KEY = "gate"
 GATE_ADVISORY = "advisory"
 
@@ -821,15 +813,6 @@ def establish_posture() -> Dict[str, str]:
     return dict(CANONICAL_POSTURE)
 
 
-def assert_posture(sealed: Mapping[str, Any], label: str = "") -> None:
-    """The live process must present exactly ``sealed`` (a cell's recorded
-    posture) — every differing fact is named in the raise."""
-    diffs = _posture_diff(sealed, posture_snapshot())
-    if diffs:
-        raise PostureError(
-            f"process posture drift ({label or 'arm'}): " + "; ".join(diffs))
-
-
 # ---------------------------------------------------------------------------
 # The advisory closure audit (pgw#756: no veto) + armed-cell audit
 # ---------------------------------------------------------------------------
@@ -838,67 +821,6 @@ def assert_posture(sealed: Mapping[str, Any], label: str = "") -> None:
 def audit_armed(pipeline: Any, cfg: Any) -> ClosureReport:
     """The auditable diagnostics view of an armed pipeline's guard closure."""
     return extract(pipeline, cfg)
-
-
-def closure_manifest(pipeline: Any, cfg: Any, label: str = "") -> Dict[str, Any]:
-    """Classify every compiled graph's guard set against the declared
-    contract and return the deterministic manifest to embed in the cell
-    metadata.
-
-    **ADVISORY (pgw#756).** Suspected leaks and unreadable entries are
-    logged, recorded in the returned manifest, and emitted as a countable
-    ``guard_leak`` event — the mint CONTINUES. Rationale: the consumer
-    re-evaluates these very guards on every call, so an unpinned dependency
-    fails there and degrades to explicit eager with a named reason
-    (pgw#680); a classifier bug, by contrast, refuses every mint on every
-    family (pgw#691, pgw#733). The classification is diagnosis, not a gate.
-
-    Two refusals survive, because each PROVES a defect rather than inferring
-    one:
-
-    * **no compiled graphs at all** — nothing was compiled, so the cell
-      would be empty; the mint is broken independently of any guard;
-    * **non-canonical process posture** (pgw#695) — a measurement of live
-      torch state against exact canonical values, not a classification. Such
-      a mint would arm nowhere, since every canonical consumer refuses its
-      seal.
-    """
-    report = audit_armed(pipeline, cfg)
-    name = label or type(pipeline).__name__
-    if not report.graphs:
-        raise GuardClosureError(
-            f"guard-closure ({name}): no compiled graphs extractable from "
-            "the armed targets — nothing was compiled, refusing to publish "
-            "an empty cell")
-    if report.leaks or report.unproven:
-        lines = list(report.leaks) + [f"UNPROVEN {u}" for u in report.unproven]
-        detail = (
-            f"guard-closure ADVISORY ({name}): {len(report.leaks)} "
-            f"guard(s) outside the declared envelope, {len(report.unproven)} unreadable "
-            f"entrie(s) — recorded in the cell manifest, mint continues "
-            f"(pgw#756; the consumer's own guard evaluation is the real "
-            f"check):\n  " + "\n  ".join(lines))
-        logger.warning("%s", detail)
-        phase = "+".join(
-            t for t, on in (("leak", report.leaks), ("unproven", report.unproven))
-            if on)
-        activity_mod.emit_event(
-            activity_mod.KIND_GUARD_LEAK, detail, phase=phase)
-    else:
-        logger.info(
-            "guard-closure (%s): CLOSED — %d graph(s), verdicts=%s",
-            name, len(report.graphs), report.verdict_counts())
-    # pgw#695: a mint in a non-canonical posture would arm nowhere (every
-    # canonical consumer refuses its seal) — fail THIS mint red instead.
-    posture = posture_snapshot()
-    canonical_diffs = _posture_diff(CANONICAL_POSTURE, posture)
-    if canonical_diffs:
-        raise PostureError(
-            f"guard-closure ({name}): minted in a non-canonical "
-            "process posture: " + "; ".join(canonical_diffs))
-    manifest = report.manifest()
-    manifest[POSTURE_KEY] = posture
-    return manifest
 
 
 # ---------------------------------------------------------------------------
@@ -977,158 +899,6 @@ def canonical_ingress(fn: Callable[..., Any], label: str) -> Callable[..., Any]:
     return wrapper
 
 
-# ---------------------------------------------------------------------------
-# Fleet consolidation: the N-cold-pod zero-miss closure check
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class FleetAudit:
-    """Consolidated closure audit across N cells/pods of one release."""
-
-    names: Tuple[str, ...]
-    leaks: Tuple[str, ...]          # "name: leak line"
-    divergence: Tuple[str, ...]     # guards not present in every manifest
-    guard_total: int
-
-    @property
-    def ok(self) -> bool:
-        return bool(self.names) and not self.leaks and not self.divergence
-
-    def text(self) -> str:
-        lines = [
-            f"fleet guard audit: {len(self.names)} manifest(s), "
-            f"{self.guard_total} guard row(s), {len(self.leaks)} leak(s), "
-            f"{len(self.divergence)} divergent row(s)",
-        ]
-        lines.extend(f"  LEAK {v}" for v in self.leaks)
-        lines.extend(f"  DIVERGENT {v}" for v in self.divergence)
-        if self.ok:
-            lines.append("  CLOSED: every guard is contract-covered and "
-                         "identical across all manifests")
-        return "\n".join(lines)
-
-
-def _comparison_key(target: str, guard: Mapping[str, Any]) -> Tuple[str, ...]:
-    guard_type = str(guard.get("type") or "")
-    source = str(guard.get("source") or "")
-    # Ambient state dumps embed per-host facts (num_threads); their
-    # PRESENCE is compared across pods, their content stays in the dump.
-    if guard_type in _AMBIENT_COVERED:
-        return (target, guard_type, source)
-    return (target, guard_type, source, str(guard.get("expr") or ""))
-
-
-def consolidate(manifests: Mapping[str, Mapping[str, Any]]) -> FleetAudit:
-    """Compare N cells' guard manifests: closure (no leaks anywhere) and
-    determinism (every guard row present in every manifest)."""
-    leaks: List[str] = []
-    per_name: Dict[str, set] = {}
-    postures: Dict[str, Dict[str, str]] = {}
-    total = 0
-    for name, manifest in sorted(manifests.items()):
-        keys: set = set()
-        for leak in manifest.get("leaks") or ():
-            leaks.append(f"{name}: {leak}")
-        for graph in manifest.get("graphs") or ():
-            target = str(graph.get("target") or "")
-            for guard in graph.get("guards") or ():
-                total += 1
-                keys.add(_comparison_key(target, guard))
-        per_name[name] = keys
-        sealed = manifest.get(POSTURE_KEY)
-        if isinstance(sealed, dict) and sealed:
-            postures[name] = {k: str(v) for k, v in sealed.items()}
-    divergence: List[str] = []
-    # pgw#695: the sealed posture must be identical across every pod's
-    # mint of one release — a divergent posture is a divergent guard
-    # environment even when the guard rows happen to agree.
-    if postures and len(postures) < len(per_name):
-        missing_seal = sorted(set(per_name) - set(postures))
-        divergence.append(f"posture seal absent from {missing_seal}")
-    if len(postures) > 1:
-        facts: set = set()
-        for sealed in postures.values():
-            facts.update(sealed)
-        for fact in sorted(facts):
-            values = {n: p.get(fact, "<absent>") for n, p in postures.items()}
-            if len(set(values.values())) > 1:
-                divergence.append(f"posture/{fact} differs: {values}")
-    if len(per_name) > 1:
-        union: set = set().union(*per_name.values())
-        for key in sorted(union):
-            missing = sorted(n for n, keys in per_name.items() if key not in keys)
-            if missing:
-                divergence.append(f"{'/'.join(map(str, key))} absent from {missing}")
-    return FleetAudit(
-        names=tuple(sorted(per_name)), leaks=tuple(leaks),
-        divergence=tuple(divergence), guard_total=total)
-
-
-def manifest_digest(manifest: Mapping[str, Any]) -> str:
-    """Canonical digest of one guard manifest — the comparison unit for the
-    pgw#711 confirmation gate (a key is confirmed when a second independent
-    publish carries the same artifact + manifest digests)."""
-    encoded = json.dumps(
-        dict(manifest), sort_keys=True, separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-
-def load_manifest(path: Path) -> Dict[str, Any]:
-    """A guard manifest from a raw ``.json`` dump or a cell ``.tar.gz``
-    (the ``guard_manifest`` block of its metadata.json)."""
-    path = Path(path)
-    if path.suffix == ".json":
-        data = json.loads(path.read_text())
-        found = data.get(MANIFEST_KEY, data) if isinstance(data, dict) else None
-    else:
-        # `artifact_meta` is stdlib-only, which is why the read is a plain
-        # top-level import here: the function-local `compile_cache` import this
-        # replaces existed to keep the
-        # env_seal -> guard_closure -> compile_cache -> registry -> cell_key
-        # -> env_seal cycle out of module scope, and the shared reader closes
-        # that edge outright.
-        found = artifact_meta.read_metadata(path).get(MANIFEST_KEY)
-    if not isinstance(found, dict) or not found.get("graphs"):
-        raise GuardClosureError(
-            f"{path} carries no guard manifest — pre-pgw#681 cell or bare "
-            "dump; the closure of this cell is unproven")
-    return found
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    """``python -m gen_worker.guard_closure <cell.tar.gz|manifest.json>...``
-    — the runnable N-cold-pod closure check. Exit 0 closed+consistent,
-    2 leaks, 3 divergence (or unreadable manifests)."""
-
-    parser = argparse.ArgumentParser(
-        prog="gen_worker.guard_closure",
-        description="Audit guard-closure manifests across N cells/pods.")
-    parser.add_argument("paths", nargs="+", type=Path)
-    args = parser.parse_args(list(argv) if argv is not None else None)
-    manifests: Dict[str, Mapping[str, Any]] = {}
-    broken = False
-    for p in args.paths:
-        try:
-            manifests[str(p)] = load_manifest(p)
-        except Exception as exc:  # noqa: BLE001 — named per input, audit continues
-            broken = True
-            print(f"UNREADABLE {p}: {exc}")
-    audit = consolidate(manifests)
-    print(audit.text())
-    if audit.leaks:
-        return 2
-    if broken or audit.divergence or not manifests:
-        return 3
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
-
-
 __all__ = [
     "CANONICALIZED",
     "CANONICAL_POSTURE",
@@ -1140,33 +910,24 @@ __all__ = [
     "GATE_ADVISORY",
     "GATE_KEY",
     "ContractPins",
-    "FleetAudit",
     "GraphGuards",
     "GuardBoundaryError",
     "GuardClosureError",
     "GuardRecord",
     "LEAK",
-    "MANIFEST_KEY",
     "MANIFEST_VERSION",
     "MODULE_STRUCTURE",
-    "POSTURE_KEY",
     "PostureError",
     "RUNTIME_STATE",
     "STRUCTURAL",
     "UNPROVEN",
-    "assert_posture",
     "audit_armed",
     "canonical_ingress",
     "canonical_strides",
     "classify",
-    "closure_manifest",
-    "consolidate",
     "contract_pins",
     "establish_posture",
     "extract",
     "extract_target_guards",
-    "load_manifest",
-    "main",
-    "manifest_digest",
     "posture_snapshot",
 ]

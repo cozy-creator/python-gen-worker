@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import pytest
 
-from gen_worker import Compile
 from gen_worker import cell_key as ck
 from gen_worker import compile_cache as cc
 
@@ -113,130 +112,24 @@ def test_execution_lane_canonicalization():
     assert cc.execution_lane_label("w8a8") != cc.execution_lane_label("")
 
 
-def test_local_cell_has_no_key_stamp(fixed_runtime):
-    """pgw#1059: a torch-inductor-cache artifact records facts, never a
-    cell key — the ck1 key names exported cells only."""
-    meta = cc.artifact_metadata(
-        family="sdxl", shapes=((768, 768),), targets=("transformer",),
-        declared_compile_contract=cc.declared_compile_facts(_ContractCfg()),
-    )
-    assert "cell_key" not in meta
-    with pytest.raises(ck.CellKeyError, match="has no cell-key identity"):
-        ck.from_exported_artifact_metadata(meta)
-
-
-def test_local_verdict_ignores_sku_and_pins_sm(fixed_runtime):
-    """pgw#691's collapse survives the key's retirement: the local verdict
-    never rules on sku (two SKUs of one sm share cells), and sm stays a
-    refusing fact."""
-    facts = cc.declared_compile_facts(_ContractCfg())
-    meta = cc.artifact_metadata(
-        family="sdxl", shapes=((768, 768),), targets=("transformer",),
-        declared_compile_contract=facts,
-    )
-    meta["sku"] = "a40"  # minted elsewhere, same sm
-    assert cc.local_cell_mismatch(
-        dict(meta), family="sdxl", weight_lane="",
-        cfg=_ContractCfg()) == ""
-    drifted = dict(meta, sm="sm_89")
-    reason = cc.local_cell_mismatch(
-        drifted, family="sdxl", weight_lane="", cfg=_ContractCfg())
-    assert reason.startswith("sm ")
-
-
-def test_declared_contract_fences_newer_contract(fixed_runtime):
-    """pgw#647's fence survives the key's retirement: a worker on a newer
-    declared contract never consumes an older cell, and the refusal NAMES
-    the first differing fact instead of a fused digest."""
-    facts_a = cc.declared_compile_facts(_ContractCfg(text_len=0))
-    facts_b = cc.declared_compile_facts(_ContractCfg(text_len=512))
-    assert facts_a != facts_b
-
-    meta = cc.artifact_metadata(
-        family="ltx-2.3", shapes=((768, 768),), targets=("transformer",),
-        declared_compile_contract=facts_a,
-    )
-    assert cc.local_cell_mismatch(
-        dict(meta), family="ltx-2.3", weight_lane="",
-        cfg=_ContractCfg(text_len=0)) == ""
-    reason = cc.local_cell_mismatch(
-        dict(meta), family="ltx-2.3", weight_lane="",
-        cfg=_ContractCfg(text_len=512))
-    assert "declared compile contract mismatch" in reason
-
-    # A cell recording NO block is refused, never silently admitted
-    # (stricter than the old keyless fallback — pgw#950's posture).
-    legacy = cc.artifact_metadata(
-        family="ltx-2.3", shapes=((768, 768),), targets=("transformer",))
-    reason = cc.local_cell_mismatch(
-        dict(legacy), family="ltx-2.3", weight_lane="",
-        cfg=_ContractCfg(text_len=0))
-    assert "declared_compile_contract" in reason
-
-
-class _Target:
-    def forward(self, value):
-        return value
-
-
-class _Pipeline:
-    def __init__(self):
-        self.transformer = _Target()
-
-
-def _self_cell(tmp_path, drift: str = ""):
-    """Pack a cell whose recorded facts describe exactly this (pinned)
-    runtime."""
-    pipe = _Pipeline()
-    cfg = Compile(
-        shapes=((768, 768),), family="sd15", targets=("transformer",),
-    )
-    signature, contract = cc.execution_contract(pipe, cfg)
-    meta = cc.artifact_metadata(
-        family="sd15", shapes=cfg.shapes, targets=cfg.targets,
-        graph_signature=signature, weight_contract=contract,
-        declared_compile_contract=cc.declared_compile_facts(cfg),
-    )
-    if drift:
-        meta["graph_signature"] = drift
-    source = tmp_path / "candidate"
-    for sub in ("inductor", "triton"):
-        (source / sub).mkdir(parents=True, exist_ok=True)
-    (source / "inductor" / "graph.py").write_text("x")
-    artifact = cc.pack(source, tmp_path / "cell.tar.gz", meta)
-    return pipe, cfg, artifact
-
-
-def test_self_requested_drift_is_selection_bug(
-    tmp_path, monkeypatch, fixed_runtime,
-):
-    """A cell whose recorded facts ARE this runtime's own must never
-    silently fall back to eager on parity drift — that's the bug class
-    (th#883)."""
-    pipe, cfg, artifact = _self_cell(tmp_path, drift="different-module-graph")
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: False)
-    with pytest.raises(cc.CellSelectionBugError) as exc:
-        cc.enable(pipe, cfg, tmp_path / "cache", artifact)
-    assert "refused to arm" in str(exc.value)
-
-
-def test_self_requested_no_target_is_selection_bug(
-    tmp_path, monkeypatch, fixed_runtime,
-):
-    pipe, cfg, artifact = _self_cell(tmp_path)
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: False)
-    with pytest.raises(cc.CellSelectionBugError) as exc:
-        cc.enable(pipe, cfg, tmp_path / "cache", artifact)
-    assert "armed no compile target" in str(exc.value)
-
-
-def test_foreign_cell_drift_stays_eager(
-    tmp_path, monkeypatch, fixed_runtime,
-):
-    """The identical drift on a NON-self cell keeps the legacy silent
-    eager policy — compatibility outcomes are not bugs."""
-    pipe, cfg, artifact = _self_cell(tmp_path, drift="different-module-graph")
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: False)
-    monkeypatch.setattr(
-        cc, "gen_worker_version", lambda: "9.9.9")  # not my cell anymore
-    assert cc.enable(pipe, cfg, tmp_path / "cache", artifact) is False
+# pgw#1181 REMOVED the six local-cell-verdict rows:
+# `test_local_cell_has_no_key_stamp`, `test_local_verdict_ignores_sku_and_pins_sm`,
+# `test_declared_contract_fences_newer_contract`,
+# `test_self_requested_drift_is_selection_bug`,
+# `test_self_requested_no_target_is_selection_bug` and
+# `test_foreign_cell_drift_stays_eager`.
+#
+# Their subject is the `torch-inductor-cache` store verdict —
+# `compile_cache.local_cell_mismatch` over `artifact_metadata`, and the
+# `cell_selection_bug` a self-requested cell of that format raised when it then
+# refused to arm. The format has had no writer since pgw#1178 deleted
+# `mint_artifact`, and pgw#1181 deleted the format: there is no local kind, no
+# verdict to render on one, and `enable` no longer takes a cell to reject.
+#
+# Every property they fenced survives on the exported lane BY CONSTRUCTION
+# rather than by comparison, which is the point of a content-addressed key:
+# sm, the declared contract, the env seal and the lane are all axes of `ck1`,
+# so a cell that disagrees on any of them has a different key and never
+# resolves. `tests/test_cell_key_pgw1059.py` is where that is stated, with the
+# staleness matrix naming each axis. What is left here is the key itself —
+# determinism, axis sensitivity, the ck1 scheme, and lane canonicalization.
