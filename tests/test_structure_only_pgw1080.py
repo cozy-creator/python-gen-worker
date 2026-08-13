@@ -125,35 +125,35 @@ def test_the_structure_EXPORTS_and_AOT_COMPILES(tree: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The pgw#984 warm proof runs on RANDOM values, and gives them back
+# The structure NEVER holds values — not even for the pgw#984 proof (pgw#1199)
 # ---------------------------------------------------------------------------
 
 
-def test_random_values_are_defined_and_are_released_again(tree: Path) -> None:
+def test_nothing_in_this_module_can_put_values_back_on_a_structure(
+    tree: Path,
+) -> None:
+    """Two rows used to live here: the pgw#984 warm proof materialised REAL
+    random values for every virtual parameter and then released them again.
+
+    That was one full checkpoint at compute dtype, allocated in the process
+    this slice exists to keep empty — 56.2 GB on wan-2.2 against 15.5 GiB free
+    (pod `729431an6ugbvq`), and the number §4.33's "~8 GiB" was really
+    measuring. pgw#1199 moved the proof onto the RESIDENT parent, which already
+    holds the weights, and deleted the materialiser rather than leaving it
+    where a future caller could reach for it.
+
+    So the property is now absolute and is asserted as such: this module offers
+    no way to give a virtual structure real values.
+    """
     module, facts = so.build_component(tree, "transformer", device="cpu")
-
-    materialized = so.materialize_random(module, device="cpu")
-    assert materialized == facts.virtual_param_bytes
-    values = torch.cat([p.detach().reshape(-1) for p in module.parameters()])
-    assert not mi.is_virtual(next(module.parameters()))
-    assert torch.isfinite(values).all(), (
-        "a NaN/inf init would make every downstream cosine undefined")
-    assert float(values.abs().max()) > 0.0
-
-    so.restore_virtual(module, device="cpu")
+    assert facts.virtual_param_bytes > 0
     assert all(mi.is_virtual(p) for p in module.parameters())
 
-
-def test_the_random_values_are_REPRODUCIBLE(tree: Path) -> None:
-    """A proof that behaves differently on two runs of the same cell is not a
-    proof, so the seed is fixed rather than clock-derived."""
-    first, _ = so.build_component(tree, "decoder", device="cpu")
-    second, _ = so.build_component(tree, "decoder", device="cpu")
-    so.materialize_random(first, device="cpu")
-    so.materialize_random(second, device="cpu")
-    for (name, a), (_n, b) in zip(first.named_parameters(),
-                                  second.named_parameters()):
-        assert torch.equal(a, b), name
+    for gone in ("materialize_random", "restore_virtual", "stray_real_tensors",
+                 "proof_cost_bytes"):
+        assert not hasattr(so, gone), (
+            f"{gone} is back: a weight-free mint must have no route to real "
+            f"values, and every one of these was such a route")
 
 
 # ---------------------------------------------------------------------------

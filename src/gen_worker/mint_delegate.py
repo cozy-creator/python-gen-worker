@@ -95,6 +95,12 @@ class MintTask:
     #: knows (``local_serve``) states it and every other caller gets ``FLEET``
     #: by construction — there is no ambient value to forget to set.
     posture: compile_posture.CompilePosture = compile_posture.FLEET
+    #: pgw#1199: how this process proved the endpoint's handler RUNS, on the
+    #: resident pipeline, before delegating. Declared by the caller because
+    #: only the caller knows — the executor gets it for free from the boot warm
+    #: plan it has already run; `local_serve` runs one forward for it after
+    #: setup. An empty string is honest and the child refuses on it.
+    handler_proof: str = ""
 
 
 @dataclass(frozen=True)
@@ -181,6 +187,7 @@ def build_request(
         execution_lane=task.execution_lane,
         configs={k: dict(v) for k, v in task.configs.items()},
         posture=task.posture,
+        handler_proof=str(task.handler_proof or ""),
     )
 
 

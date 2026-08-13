@@ -52,6 +52,7 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
+from gen_worker import handler_proof
 from gen_worker import mint_child, mint_delegate, registry, warmup
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef, wire_ref
@@ -196,16 +197,16 @@ def test_a_rediscovered_catalog_slot_carries_no_ref_at_all() -> None:
 
 def test_the_production_traceback_reproduced(tmp_path: Path) -> None:
     """The pod's sentence, byte-for-byte, from an unbound warm context — the
-    exact ``_run_warm_job`` -> handler -> ``ctx.slots`` frame that crashed."""
+    exact ``run_warm_job`` -> handler -> ``ctx.slots`` frame that crashed."""
     spec = next(
         s for s in registry.collect_endpoints([CATALOG_MODULE])
         if s.name == "catalog-generate")
     instance = spec.cls()
     instance.pipeline_path = str(tmp_path)
-    job = next(j for j in mint_child._warm_jobs([spec])
+    job = next(j for j in handler_proof.warm_jobs([spec])
                if j.spec.name == spec.name)
     with pytest.raises(ValueError) as exc:
-        mint_child._run_warm_job(instance, job, {}, "w8a8-lora64")
+        handler_proof.run_warm_job(instance, job, {}, "w8a8-lora64")
     assert "slot 'pipeline': no resolved model ref for this request" in str(exc.value)
 
 
@@ -237,8 +238,8 @@ def test_the_child_warms_the_checkpoint_THE_PARENT_SERVED(
     assert loaded["pipeline"] == str(tree)
 
     catalog.RESOLVED_REFS.clear()
-    for job in mint_child._warm_jobs(siblings):
-        mint_child._run_warm_job(
+    for job in handler_proof.warm_jobs(siblings):
+        handler_proof.run_warm_job(
             instance, job, {}, request.execution_lane,
             origin=mint_child.mint_identity(request))
 

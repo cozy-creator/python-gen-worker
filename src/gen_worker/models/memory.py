@@ -724,9 +724,12 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
       so every rung read "off").
 
     It still COUNTS toward the requirement (``cuda_only=False``): the shape and
-    dtype it declares are the bytes a real load — or ``materialize_random`` in
-    the mint child — will go on to allocate. The two estimates below are the
-    two questions, and virtuality answers them differently.
+    dtype it declares are the bytes a real load will go on to allocate. The two
+    estimates below are the two questions, and virtuality answers them
+    differently. (Until pgw#1199 the mint child was a second such allocator —
+    it materialised random values for the pgw#984 proof. It does not any more:
+    the proof runs on the resident parent, so nothing downstream of a
+    structure-only build allocates a checkpoint.)
     """
     import torch
 

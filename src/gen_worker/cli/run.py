@@ -668,12 +668,20 @@ def run_setup(
     mint = _local_mint_context(
         instance, resolved_models, wanted,
         component_paths=component_paths, selected=selected)
+    # pgw#1199: a mint this load OWES is collected, not run. Arming from the
+    # local store still happens inside the load (the endpoint's `setup()` must
+    # receive an armed pipeline), but the MINT waits until `setup()` and
+    # `warmup()` have returned — because the mint child no longer proves the
+    # endpoint's handler itself, and proving it needs an instance whose
+    # pipeline is bound. Same order the fleet boots in (pgw#671).
+    deferred: List[Any] = []
     loaded = {
         k: _load_injected_model(
             hints.get(k), v, decl=decl, slot=k, device=device,
             arm_compile=arm_compile, place=place,
             overrides=dict((component_paths or {}).get(k) or {}),
-            structure_only=tuple(structure_only), mint=mint)
+            structure_only=tuple(structure_only), mint=mint,
+            defer=deferred)
         for k, v in resolved_models.items()
         if k in wanted
     }
@@ -682,6 +690,11 @@ def run_setup(
     warmup_fn = getattr(instance, "warmup", None)
     if callable(warmup_fn):
         warmup_fn()
+    if deferred and selected is not None:
+        from .. import local_serve
+
+        local_serve.run_deferred(
+            deferred, instance=instance, specs=[selected.spec])
     return loaded if return_loaded else None
 
 
@@ -818,6 +831,7 @@ def _load_injected_model(
     overrides: Optional[Dict[str, str]] = None,
     structure_only: Sequence[str] = (),
     mint: Optional["local_serve.LocalMintContext"] = None,
+    defer: Optional[List[Any]] = None,
 ) -> Any:
     """Load one setup slot via the shared core, with a per-process warm cache
     (so ``serve`` and repeated local dispatches never reload weights).
@@ -909,7 +923,8 @@ def _load_injected_model(
         # pgw#1086 wave 1's deletion of that module would have taken compiled
         # serving off cozy-local outright.
         local_serve.enable_compiled(
-            sl.obj, compile_cfg, Path(tensorhub_cas_dir()), mint=mint)
+            sl.obj, compile_cfg, Path(tensorhub_cas_dir()), mint=mint,
+            defer=defer)
     _INJECTED_CACHE[key] = sl.obj
     return sl.obj
 
