@@ -1250,9 +1250,14 @@ class Lifecycle:
             if not plan.degraded or name in self.executor.unavailable:
                 continue
             ran = plan.ran or plan.run_mode
-            if self._emitted_degraded.get(name) == ran:
+            # pgw#1206 A2: `ran` now stays inside the hub's exact-match
+            # RunMode vocabulary (the placement sub-rung no longer decorates
+            # it), so a deeper demotion re-reports via the WARNING text —
+            # dedupe on both or an escalation inside one run mode goes silent.
+            emitted_key = f"{ran}\x1f{plan.warning}"
+            if self._emitted_degraded.get(name) == emitted_key:
                 continue
-            self._emitted_degraded[name] = ran
+            self._emitted_degraded[name] = emitted_key
             await self._send_state_message(
                 pb.WorkerMessage(
                     fn_degraded=pb.FnDegraded(

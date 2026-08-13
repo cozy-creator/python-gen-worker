@@ -31,10 +31,10 @@ from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
 from .tensor_layout_contract import CONTRACT_PLAIN_BF16, implements_contract
 from .fp8_storage import restructure_fp8_storage
+from .rung import touches_host_ram
 from .memory import (
     flush_memory,
     get_available_vram_gb,
-    keeps_weights_in_host_ram,
     meta_tensors,
     probe_host_ram,
 )
@@ -1879,7 +1879,7 @@ def decide_streamed_hydration(
         device_free_bytes=int(device_free_bytes),
         placement_mode=str(placement_mode or ""),
     )
-    if keeps_weights_in_host_ram(placement_mode):
+    if touches_host_ram(placement_mode):
         # pgw#1063: the discount is admissible ONLY because each component
         # leaves the host for the card. An offload rung puts it back — the
         # weights live on the host by definition — so the honest requirement

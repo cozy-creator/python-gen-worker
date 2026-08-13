@@ -112,18 +112,16 @@ from .models import residency as residency_mod
 from .models import staging as staging_mod
 from .models.memory import (
     aflush_memory,
-    deeper_offload_mode,
-    degraded_log_line,
     estimate_cuda_resident_gb,
     estimate_pipeline_size_gb,
     flush_memory,
     get_available_vram_gb,
     is_cuda_oom,
-    keeps_weights_in_host_ram,
     low_vram_mode,
-    next_offload_rung,
     release_unused_pinned_host_cache,
 )
+from .models import rung as rungspec
+from .models.rung import touches_host_ram, transition_line
 from .models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from .models.download import ensure_local, lookup_provider_for_ref
 from .models.envelope import ArtifactEnvelopeExceeded
@@ -179,11 +177,10 @@ from .compile_cache import CompiledExecutionLaneUnavailableError
 from .preload import Preloader
 from .api.binding import rebind_pick
 from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
-from .models.serve_fit import RUN_CPU, RUN_OFFLOAD, plan_serve
+from .models.serve_fit import (RUN_CPU, RUN_EMERGENCY, RUN_FP8_STORAGE,
+                                   RUN_OFFLOAD, plan_serve)
 from . import postmortem
-from .models.serve_fit import demoted
-from .models.serve_fit import load_rung_engaged
-from .models.serve_fit import cast_dropped
+from .models.serve_fit import replan
 from .models.loading import pipeline_weight_lane
 from .models import attention_modes as attnspec
 from .models import execution_lanes as lanespec
@@ -4111,71 +4108,48 @@ class Executor:
                 self._gate_owned.add(name)
                 continue
             if plan.degraded:
-                logger.warning(degraded_log_line(
+                logger.warning(transition_line(
                     event="planned", fn=name, phase="gate",
                     from_rung=plan.wanted, to_rung=plan.ran or plan.run_mode,
                     free_gb=free_vram_gb,
                     detail=f"~{plan.est_latency_multiplier:.1f}x latency: {plan.warning}",
                 ))
 
-    def _record_demotion(
+    def _record_rung_transition(
         self,
         spec: EndpointSpec,
         *,
         ref: str,
         phase: str,
-        from_rung: str,
-        to_rung: str,
+        from_rung: str = "",
+        to_rung: str = "",
+        run_mode: str = "",
+        wanted: str = "",
+        ran: str = "",
         needed_gb: float = 0.0,
-        detail: str = "",
+        detail: str,
     ) -> None:
-        """One ladder-demotion bookkeeper (gw#463): learned per-ref floor +
-        updated ServePlan + loud DEGRADED_MODE warning + FnDegraded re-emit
-        via the state-delta path."""
+        """THE ladder-transition bookkeeper (pgw#1206 A2; folds gw#463
+        demotion, gw#491 load-rung engagement and th#737 cast-drop): learned
+        per-ref placement floor + updated ServePlan via serve_fit.replan +
+        loud DEGRADED_MODE line + FnDegraded re-emit via the state-delta
+        path — never a log-line-only fallback."""
 
-        if ref:
-            self.degraded_floor[ref] = deeper_offload_mode(
+        if ref and rungspec.touches_host_ram(to_rung):
+            self.degraded_floor[ref] = rungspec.floor_of(
                 self.degraded_floor.get(ref, ""), to_rung)
-        line = degraded_log_line(
+        line = transition_line(
             event="engaged", fn=spec.name, model=ref, phase=phase,
-            from_rung=from_rung, to_rung=to_rung,
-            needed_gb=needed_gb, free_gb=get_available_vram_gb(),
-            detail=(detail or "CUDA OOM") + " — sticky for this worker until "
-                   "reload; fix capacity/config, do not rely on this mode",
+            from_rung=from_rung, to_rung=to_rung or run_mode,
+            needed_gb=needed_gb,
+            free_gb=get_available_vram_gb() if (from_rung or to_rung) else 0.0,
+            detail=detail,
         )
         logger.warning(line)
-        self.serve_plans[spec.name] = demoted(
-            self.serve_plans.get(spec.name), detail=line, placement_mode=to_rung)
-        self._on_state_change()
-
-    def _record_adaptive_rung(self, spec: EndpointSpec, *, ref: str,
-                              rung: str, detail: str) -> None:
-        """gw#491: the load-time adaptive fit ladder engaged an emergency
-        rung (runtime fp8 storage / nf4). Surface it exactly like the
-        plan-time rungs — updated ServePlan + FnDegraded via the state-delta
-        path — never as a log-line-only fallback."""
-
-        logger.warning(
-            "LOAD_RUNG_ENGAGED fn=%s model=%s rung=%s detail=%s",
-            spec.name, ref, rung, detail)
-        self.serve_plans[spec.name] = load_rung_engaged(
-            self.serve_plans.get(spec.name), rung=rung, detail=detail)
-        self._on_state_change()
-
-    def _record_cast_drop(self, spec: EndpointSpec, *, ref: str,
-                          wanted: str, detail: str, ran: str = "bf16") -> None:
-        """th#737: a resolved cast (storage_dtype) cannot apply — the
-        pipeline has no denoiser/cast surface. Serve at base precision but
-        surface it STRUCTURALLY (FnDegraded wanted=fp8 ran=bf16 via the
-        state-delta path), never as a silent log-line fallback: the recipe
-        budgeted the cast's VRAM headroom."""
-
-        logger.warning(
-            "CAST_DROPPED fn=%s model=%s wanted=%s ran=%s detail=%s",
-            spec.name, ref, wanted or "fp8", ran or "bf16", detail)
-        self.serve_plans[spec.name] = cast_dropped(
-            self.serve_plans.get(spec.name), wanted=wanted, detail=detail,
-            ran=ran)
+        self.serve_plans[spec.name] = replan(
+            self.serve_plans.get(spec.name),
+            run_mode=run_mode, wanted=wanted, ran=ran, detail=line,
+        )
         self._on_state_change()
 
     def available_functions(self) -> List[str]:
@@ -8762,7 +8736,7 @@ class Executor:
         ) else "auto"
         floor = self.degraded_floor.get(ref, "")
         if floor:
-            mode = deeper_offload_mode("" if mode == "auto" else mode, floor)
+            mode = rungspec.floor_of("" if mode == "auto" else mode, floor)
         return mode
 
     @staticmethod
@@ -9106,22 +9080,28 @@ class Executor:
                     # the state-delta path — the shared core decides WHAT
                     # degraded (details non-empty), the executor reports it.
                     if sl.pre_drop_detail:
-                        self._record_cast_drop(
-                            spec, ref=ref, wanted=sl.pre_drop_wanted,
-                            ran=sl.ran, detail=sl.pre_drop_detail)
+                        self._record_rung_transition(
+                            spec, ref=ref, phase="load",
+                            wanted=sl.pre_drop_wanted, ran=sl.ran,
+                            detail=sl.pre_drop_detail)
                     if sl.rung_detail:
-                        self._record_adaptive_rung(
-                            spec, ref=ref, rung=sl.rung, detail=sl.rung_detail)
+                        self._record_rung_transition(
+                            spec, ref=ref, phase="load",
+                            run_mode=(RUN_FP8_STORAGE if sl.rung == "fp8"
+                                      else RUN_EMERGENCY),
+                            detail=sl.rung_detail)
                     elif sl.cast_fail_detail:
-                        self._record_cast_drop(
-                            spec, ref=ref, wanted=sl.cast_fail_wanted,
-                            ran=sl.ran, detail=sl.cast_fail_detail)
+                        self._record_rung_transition(
+                            spec, ref=ref, phase="load",
+                            wanted=sl.cast_fail_wanted, ran=sl.ran,
+                            detail=sl.cast_fail_detail)
                     placed = sl.placed
                     if placed.get("oom_demotions"):
-                        self._record_demotion(
+                        self._record_rung_transition(
                             spec, ref=ref, phase="load",
                             from_rung=str(placed.get("requested_mode") or mode),
                             to_rung=str(placed.get("mode") or ""),
+                            run_mode=RUN_OFFLOAD,
                             needed_gb=estimate_pipeline_size_gb(pipe),
                             detail="CUDA OOM at load; pipeline placed offloaded",
                         )
@@ -9360,9 +9340,9 @@ class Executor:
             return False
         # Offload-hooked objects book the RAM tier (their VRAM is hook-owned).
         self.store.residency.track_vram(ref, pipe)
-        self._record_demotion(
+        self._record_rung_transition(
             spec, ref=ref, phase="serve", from_rung="resident",
-            to_rung="model_offload",
+            to_rung="model_offload", run_mode=RUN_OFFLOAD,
             needed_gb=estimate_pipeline_size_gb(pipe),
             detail="VRAM promote could not fit after LRU demotions; serving "
                    "CPU-offloaded (gw#551)",
@@ -12406,7 +12386,8 @@ class Executor:
             )):
                 continue
             before = low_vram_mode(obj)
-            after = next_offload_rung(before)
+            after_rung = rungspec.descend(before)
+            after = after_rung.name if after_rung is not None else None
             if after is not None:
                 transitions.append(
                     (ref, before, after, estimate_pipeline_size_gb(obj))
@@ -12415,10 +12396,10 @@ class Executor:
         if refused:
             transitions = []
         for ref, from_mode, to_mode, needed_gb in transitions:
-            self._record_demotion(
+            self._record_rung_transition(
                 spec, ref=ref, phase="inference",
                 from_rung=from_mode or "resident", to_rung=to_mode,
-                needed_gb=needed_gb,
+                run_mode=RUN_OFFLOAD, needed_gb=needed_gb,
                 detail=f"CUDA OOM mid-inference ({type(exc).__name__}); "
                        "quarantining this instance for a clean offloaded reload",
             )
@@ -12440,7 +12421,7 @@ class Executor:
                 pass
             return
         if not transitions:
-            logger.warning(degraded_log_line(
+            logger.warning(transition_line(
                 event="engaged", fn=spec.name, phase="inference",
                 free_gb=get_available_vram_gb(),
                 detail="CUDA OOM with no worker-owned pipeline rung; "
@@ -12485,7 +12466,7 @@ class Executor:
         res = self.store.residency
         worst: Tuple[int, str] = (0, "")
         for ref, _from_mode, to_mode, _needed_gb in transitions:
-            if not keeps_weights_in_host_ram(to_mode):
+            if not touches_host_ram(to_mode):
                 continue
             local = res.local_path(ref)
             if local is None:
@@ -12516,7 +12497,7 @@ class Executor:
                 available_after_bytes=headroom.available_bytes,
                 total_bytes=headroom.total_bytes,
             ))
-            logger.warning(degraded_log_line(
+            logger.warning(transition_line(
                 event="engaged", fn=spec.name, model=ref, phase="inference",
                 from_rung="resident", to_rung="model_offload",
                 free_gb=get_available_vram_gb(),
@@ -12543,7 +12524,7 @@ class Executor:
             f"{headroom.required_bytes / float(1 << 30):.1f}GiB against a "
             f"{headroom.total_bytes / float(1 << 30):.1f}GiB host total"
         )
-        logger.error(degraded_log_line(
+        logger.error(transition_line(
             event="refused", fn=spec.name, model=ref, phase="inference",
             from_rung="resident", to_rung="model_offload",
             free_gb=get_available_vram_gb(),

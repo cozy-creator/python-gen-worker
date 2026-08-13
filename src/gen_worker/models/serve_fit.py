@@ -59,25 +59,16 @@ from .hub_policy import (
     variant_fit,
 )
 
-# Run modes, cheapest(fastest)-first. Mirrors the profiling.RunMode vocabulary
-# on the hub side so the two speak the same language.
-RUN_NATIVE = "native"
-RUN_FP8_STORAGE = "fp8_storage"
-RUN_EMERGENCY = "emergency_quant"
-RUN_OFFLOAD = "offload"
-RUN_CPU = "cpu"
-
-# Coarse latency multipliers vs a native GPU run, for honest-guidance. These are
-# order-of-magnitude guides (the hub's measured fit-matrix latency is the
-# authoritative source when available); they exist so the worker never stays
-# silent about a slow trade.
-_LATENCY_MULTIPLIER = {
-    RUN_NATIVE: 1.0,
-    RUN_FP8_STORAGE: 1.05,  # per-layer upcast overhead; near-native quality
-    RUN_EMERGENCY: 1.1,     # quality hit, not much slower
-    RUN_OFFLOAD: 2.5,       # weights stream from CPU/disk
-    RUN_CPU: 40.0,          # no GPU: dramatically slower
-}
+# Run modes and prices are the One Rung ladder's (pgw#1206 A2); re-exported
+# here because this module is the hub-vocabulary projection.
+from .rung import (
+    RUN_CPU as RUN_CPU,
+    RUN_EMERGENCY as RUN_EMERGENCY,
+    RUN_FP8_STORAGE as RUN_FP8_STORAGE,
+    RUN_NATIVE as RUN_NATIVE,
+    RUN_OFFLOAD as RUN_OFFLOAD,
+    price as price,
+)
 
 # The FIT verdicts that run natively: full residency at the binding's own
 # stored precision on supported silicon.
@@ -162,7 +153,7 @@ def plan_serve(
             run_mode=RUN_CPU,
             fit=FIT_INCOMPATIBLE,
             warning=_honest_warning(RUN_CPU, recommended),
-            est_latency_multiplier=_LATENCY_MULTIPLIER[RUN_CPU],
+            est_latency_multiplier=price(RUN_CPU),
             recommended_vram_gb=recommended,
             wanted=wanted,
             ran=RUN_CPU,
@@ -220,85 +211,43 @@ def plan_serve(
         run_mode=run_mode,
         fit=verdict,
         warning=_honest_warning(run_mode, recommended, detail),
-        est_latency_multiplier=_LATENCY_MULTIPLIER[run_mode],
+        est_latency_multiplier=price(run_mode),
         recommended_vram_gb=recommended,
         wanted=wanted,
         ran=run_mode,
     )
 
 
-def demoted(
+def replan(
     plan: Optional[ServePlan],
     *,
+    run_mode: str = "",
+    wanted: str = "",
+    ran: str = "",
     detail: str,
-    placement_mode: str = "",
 ) -> ServePlan:
-    """The reactive ladder transition (gw#463): a runtime CUDA OOM demoted this
-    function to the offload rung. Produces the updated ServePlan so plan-time
-    and reactive degradation share one vocabulary, warning, and FnDegraded
-    shape. ``placement_mode`` (model_offload/group_offload/sequential) rides
-    ``ran`` as ``offload:<mode>`` so each deeper sub-rung re-reports."""
+    """The ONE runtime re-projection (pgw#1206 A2; folds gw#463 demotion,
+    gw#491 load-rung engagement and th#737 cast-drop into one seam).
+
+    A runtime ladder transition re-prices the plan at ``run_mode`` and reports
+    it structurally (FnDegraded) with the SAME vocabulary as plan-time.
+    ``ran`` stays inside the hub's exact-match RunMode vocabulary — placement
+    detail travels in ``detail``/``warning``, never decorates the token
+    tensorhub switches on (degradation_reschedule.go). A cast that could not
+    apply passes ``wanted``/``ran`` dtype tokens with no ``run_mode`` change.
+    """
     base = plan if plan is not None else ServePlan(
         serveable=True, run_mode=RUN_NATIVE, fit="", wanted="bf16", ran="bf16",
     )
-    ran = f"{RUN_OFFLOAD}:{placement_mode}" if placement_mode else RUN_OFFLOAD
+    mode = run_mode or base.run_mode
     return replace(
         base,
         serveable=True,
-        run_mode=RUN_OFFLOAD,
+        run_mode=mode,
+        wanted=(wanted or base.wanted),
+        ran=(ran or (mode if run_mode else base.ran)),
         warning=detail,
-        est_latency_multiplier=_LATENCY_MULTIPLIER[RUN_OFFLOAD],
-        ran=ran,
-    )
-
-
-def cast_dropped(
-    plan: Optional[ServePlan],
-    *,
-    wanted: str,
-    detail: str,
-    ran: str = "bf16",
-) -> ServePlan:
-    """th#737: a resolved cast (``storage_dtype``) could not be applied —
-    the pipeline has no denoiser/cast surface (latent upsamplers, VAE-only
-    repos). The function still runs natively at base precision (``ran``,
-    default bf16), but the recipe budgeted the cast's VRAM: report it
-    structurally (FnDegraded wanted=fp8 ran=bf16), never as a silent
-    fallback."""
-    base = plan if plan is not None else ServePlan(
-        serveable=True, run_mode=RUN_NATIVE, fit="", wanted="", ran="",
-    )
-    return replace(
-        base,
-        serveable=True,
-        wanted=(wanted or base.wanted or "fp8"),
-        ran=(ran or "bf16"),
-        warning=detail,
-    )
-
-
-def load_rung_engaged(
-    plan: Optional[ServePlan],
-    *,
-    rung: str,
-    detail: str,
-) -> ServePlan:
-    """gw#491: the load-time adaptive fit ladder engaged an emergency rung
-    (runtime fp8 storage or nf4) because free VRAM at load was tighter than
-    gate-time planning assumed. Same ServePlan/FnDegraded shape as the
-    plan-time emergency rungs — a 4-bit pipeline must never report
-    RUN_NATIVE wanted==ran."""
-    run_mode = RUN_FP8_STORAGE if rung == "fp8" else RUN_EMERGENCY
-    base = plan if plan is not None else ServePlan(
-        serveable=True, run_mode=RUN_NATIVE, fit="", wanted="bf16", ran="bf16",
-    )
-    return replace(
-        base,
-        serveable=True,
-        run_mode=run_mode,
-        warning=detail,
-        est_latency_multiplier=_LATENCY_MULTIPLIER[run_mode],
-        ran=run_mode,
+        est_latency_multiplier=price(mode),
     )
 
 
@@ -308,7 +257,7 @@ def _honest_warning(run_mode: str, recommended_vram_gb: Optional[float], detail:
         if recommended_vram_gb
         else ""
     )
-    mult = _LATENCY_MULTIPLIER.get(run_mode, 1.0)
+    mult = price(run_mode)
     if run_mode == RUN_CPU:
         return (
             "running on CPU (no GPU detected): expect dramatically slower "

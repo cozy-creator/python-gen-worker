@@ -1,0 +1,155 @@
+"""THE degrade ladder (pgw#1206 A2) — one ordered ``Rung``, one walk, one price.
+
+Degrade-don't-OOM (Paul, 2026-07-10) used to span three vocabularies in five
+files, joined by f-strings: plan-time ``serve_fit.RUN_*`` (hub wire), placement
+modes in ``memory`` (``model_offload``/``group_offload``/``sequential``), and
+bare ``"fp8"``/``"nf4"`` load-rung strings through the executor's bookkeepers.
+This module is the single ordered ladder they all project from.
+
+``off``/``vae_only``/``auto`` are NOT rungs — they are resident-placement
+flavors ``memory.select_auto_mode`` picks *inside* the native rung.
+
+The wire contract: ``ServePlan.ran``/``run_mode`` carry ONLY the
+``RUN_MODES`` vocabulary. tensorhub matches ``FnDegraded.ran`` EXACTLY
+(``degradation_reschedule.go``: ``case "offload","cpu","emergency_quant"``),
+so a decorated value like ``offload:model_offload`` silently misses the
+VRAM-driven-drain arm — placement detail travels in ``reason``, never in
+``ran``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class Rung:
+    """One step of the degrade ladder.
+
+    ``placement`` is the ``memory`` placement mode this rung implies ("" for
+    rungs that keep full residency); ``storage`` the runtime weight-storage
+    transform ("", "fp8", "nf4"); ``run_mode`` the hub-wire projection
+    (``serve_fit.RUN_*``); ``latency`` the honest price vs a native run;
+    ``touches_host_ram`` whether weights become host-resident (the
+    ``strict_vram`` opt-out boundary, and the pgw#1063 host-RAM pricing
+    trigger)."""
+
+    name: str
+    placement: str
+    storage: str
+    run_mode: str
+    latency: float
+    touches_host_ram: bool
+
+
+# Wire run modes (Go-mirrored: tensorhub profiling.RunMode). Values are the
+# contract; tensorhub matches them EXACTLY.
+RUN_NATIVE = "native"
+RUN_FP8_STORAGE = "fp8_storage"
+RUN_EMERGENCY = "emergency_quant"
+RUN_OFFLOAD = "offload"
+RUN_CPU = "cpu"
+
+NATIVE = Rung("native", "", "", RUN_NATIVE, 1.0, False)
+FP8_STORAGE = Rung("fp8_storage", "", "fp8", RUN_FP8_STORAGE, 1.05, False)
+NF4 = Rung("nf4", "", "nf4", RUN_EMERGENCY, 1.1, False)
+MODEL_OFFLOAD = Rung("model_offload", "model_offload", "", RUN_OFFLOAD, 2.5, True)
+GROUP_OFFLOAD = Rung("group_offload", "group_offload", "", RUN_OFFLOAD, 3.0, True)
+SEQUENTIAL = Rung("sequential", "sequential", "", RUN_OFFLOAD, 4.0, True)
+CPU = Rung("cpu", "cpu", "", RUN_CPU, 40.0, False)
+
+#: The ONE ordering, best first. ``descend`` walks it; nothing else may.
+LADDER: tuple[Rung, ...] = (
+    NATIVE, FP8_STORAGE, NF4, MODEL_OFFLOAD, GROUP_OFFLOAD, SEQUENTIAL, CPU,
+)
+
+#: The reactive placement tail, shallowest first (gw#463): a load-time CUDA
+#: OOM rolls back and retries one rung lower; a mid-inference OOM records the
+#: next rung and applies it only during a clean reload.
+PLACEMENT_LADDER: tuple[str, ...] = tuple(
+    r.name for r in LADDER if r.touches_host_ram
+)
+
+_BY_NAME = {r.name: r for r in LADDER}
+
+
+def descend(current: Optional[str], *, strict_vram: bool = False) -> Optional[Rung]:
+    """The next rung down from ``current``; None when the ladder ends.
+
+    ``strict_vram`` truncates the ladder before the first host-RAM-touching
+    rung (the author's ``Resources(strict_vram=True)`` opt-out). The reactive
+    OOM path descends only through the PLACEMENT tail (a storage transform
+    cannot be applied to an already-loaded object), so from any resident
+    token the next reactive rung is ``model_offload``.
+    """
+    cur = str(current or "")
+    if cur not in PLACEMENT_LADDER:
+        nxt: Optional[Rung] = MODEL_OFFLOAD
+    else:
+        idx = LADDER.index(_BY_NAME[cur]) + 1
+        nxt = LADDER[idx] if idx < len(LADDER) else None
+        if nxt is CPU:
+            nxt = None  # the reactive walk ends at sequential; CPU is plan-time only
+    if nxt is not None and strict_vram and nxt.touches_host_ram:
+        return None
+    return nxt
+
+
+def price(run_mode: str) -> float:
+    """Honest latency multiplier vs a native run, by wire run mode. Coarse
+    order-of-magnitude guidance (the hub's measured fit-matrix latency is
+    authoritative when available); monotonic down the ladder."""
+    for r in LADDER:
+        if r.run_mode == run_mode:
+            return r.latency
+    return 1.0
+
+
+def touches_host_ram(mode: Optional[str]) -> bool:
+    """True when this placement token leaves weights RESIDENT IN HOST RAM
+    (pgw#1063): that is what offloading IS — the whole tree lives on the host
+    and streams to the card per forward, so host-RAM accounting must charge
+    the full tree."""
+    return str(mode or "") in PLACEMENT_LADDER
+
+
+def floor_of(a: Optional[str], b: Optional[str]) -> str:
+    """The more-degraded of two placement tokens ('' / non-ladder =
+    shallowest). The learned per-ref floor (gw#463) only ever deepens."""
+    def rank(m: Optional[str]) -> int:
+        token = str(m or "")
+        return PLACEMENT_LADDER.index(token) + 1 if token in PLACEMENT_LADDER else 0
+    a_s, b_s = str(a or ""), str(b or "")
+    return a_s if rank(a_s) >= rank(b_s) else b_s
+
+
+def transition_line(
+    *,
+    event: str,
+    fn: str = "",
+    model: str = "",
+    phase: str = "",
+    from_rung: str = "",
+    to_rung: str = "",
+    needed_gb: float = 0.0,
+    free_gb: float = 0.0,
+    detail: str = "",
+) -> str:
+    """The ONE degraded-mode log format (gw#463; quality bar: ie#369's ltx
+    DEGRADED_MODE lines). event: planned | engaged | serving | refused."""
+    parts = [f"DEGRADED_MODE={event}"]
+    if fn:
+        parts.append(f"fn={fn}")
+    if model:
+        parts.append(f"model={model}")
+    if phase:
+        parts.append(f"phase={phase}")
+    if from_rung or to_rung:
+        parts.append(f"rung={from_rung or '?'}->{to_rung or '?'}")
+    if needed_gb > 0:
+        parts.append(f"needed_gb={needed_gb:.1f}")
+    if free_gb > 0:
+        parts.append(f"free_gb={free_gb:.1f}")
+    line = " ".join(parts)
+    return f"{line}: {detail}" if detail else line
