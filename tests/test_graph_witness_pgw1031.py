@@ -305,7 +305,12 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
         publisher_tier = "platform"
 
     monkeypatch.setattr(boot_key, "derive", lambda **_kw: derived)
-    monkeypatch.setattr(cell_resolve, "resolve", lambda *_a, **_k: _Cell())
+    monkeypatch.setattr(
+        cell_resolve, "resolve_batch",
+        lambda _f, keys, **_k: tuple(
+            cell_resolve.ResolveAnswer(
+                compiled_graph_key=k, status="hit", cell=_Cell())
+            for k in keys))
     monkeypatch.setattr(
         cell_resolve, "materialize", lambda *_a, **_k: artifact)
 

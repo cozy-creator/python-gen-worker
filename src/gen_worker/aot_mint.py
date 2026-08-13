@@ -4628,29 +4628,6 @@ class _CallableTarget:
 # ---------------------------------------------------------------------------
 
 
-def publish_entry(
-    row: MintedArtifact, publisher: Any, mint_duration_ms: int = 0,
-) -> str:
-    """Publish ONE minted entry through a ``fleet_cells.CellPublisher``.
-
-    Receipts are the HUB's business: it adds them at publish-finalize (#709),
-    so the producer's whole obligation is a keyed ``metadata.json`` inside the
-    tar — which :func:`mint` has already stamped and proven. Refuses before the
-    wire when the artifact carries no key, since an unaddressable entry would
-    be stored under a flavor nothing can request.
-
-    pgw#1176: publish is PER ENTRY, and a failure is per entry. Nothing waits
-    for a set; nothing is rolled back because a sibling failed.
-    """
-    if not row.key:
-        raise MintRefused("cannot publish an artifact with no cell_key")
-    family = str(row.metadata.get("family") or "")
-    if not family:
-        raise MintRefused("cannot publish an artifact with no family")
-    return str(publisher.publish(
-        family, row.artifact, dict(row.metadata), int(mint_duration_ms)))
-
-
 def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
     """Publish every compiled graph a mint produced. ``{key -> checkpoint}``.
 
@@ -4661,11 +4638,20 @@ def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
     stay per entry because the grants are — a token for entry 5 cannot publish
     entry 6's bytes.
 
-    Failures are NOT swallowed and not collected: the first refusal raises, so
-    a caller that wants best-effort per-entry publishing drives
-    :func:`publish_entry` itself and decides what a partial set means. What
-    changed under pgw#1176 is that a partial set is now a coherent outcome
-    rather than a broken cell.
+    Failures are NOT swallowed and not collected: the first refusal raises. A
+    caller that wants best-effort per-entry publishing drives the two halves
+    itself — one ``publish_intent`` for the batch, then ``publish_granted`` per
+    entry — and decides what a partial set means. (``publish_entry`` used to be
+    that seam and is DELETED with the per-entry intent it wrapped: under the
+    batch wire it would have issued one attested intent per artifact, which is
+    the cost this change exists to remove.) What changed under pgw#1176 is that
+    a partial set is now a coherent outcome rather than a broken cell.
+
+    Receipts are the HUB's business: it adds them at publish-finalize (#709),
+    so the producer's whole obligation is a keyed ``metadata.json`` inside the
+    tar — which :func:`mint` has already stamped and proven. An artifact with
+    no key is refused before the wire, since an unaddressable entry would be
+    stored under a flavor nothing can request.
     """
     from . import fleet_cells
 
@@ -4923,7 +4909,6 @@ __all__ = [
     "MINT_COMPILE_THREADS",
     "MintResult",
     "MintedArtifact",
-    "publish_entry",
     "autotune_posture",
     "bench_step",
     "cell_identity",

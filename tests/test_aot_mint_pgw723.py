@@ -1069,11 +1069,30 @@ def test_key_scheme_is_cg_key_v1_and_the_axes_are_the_three(
 
 
 class _RecordingPublisher:
+    """The batch publisher's surface (pgw#1224): ONE attested intent for the
+    whole mint, then one transfer per entry under that entry's OWN grant."""
+
     def __init__(self) -> None:
         self.calls: list = []
+        self.intents: list = []
 
-    def publish(self, family: str, artifact: Path, meta: dict,
-                mint_duration_ms: int = 0) -> str:
+    def publish_intent(self, family: str, entries: Any, *, sku: str = "",
+                       gen_worker: str = "") -> Any:
+        from gen_worker import fleet_cells as fc
+
+        asked = list(entries)
+        self.intents.append((family, asked, sku, gen_worker))
+        return fc.PublishIntentBatch(
+            repo=f"root/family-{family}", family=family,
+            grants=tuple(
+                fc.PublishGrant(
+                    compiled_graph_key=e.compiled_graph_key,
+                    status=fc.PUBLISH_STATUS_GRANTED,
+                    capability_token=f"cap-{i}")
+                for i, e in enumerate(asked)))
+
+    def publish_granted(self, family: str, artifact: Path, meta: dict,
+                        grant: Any, *, repo: str) -> str:
         self.calls.append((family, artifact, meta))
         return "checkpoint-1"
 
@@ -1096,6 +1115,11 @@ def test_publish_passes_the_keyed_metadata_through(
     family, _artifact, sent = publisher.calls[0]
     assert family == "tiny"
     assert sent["cell_key"] == meta["cell_key"]
+    # pgw#1224: ONE attested intent for the whole mint, and the entry restates
+    # its own key. A per-entry intent loop reds here.
+    assert len(publisher.intents) == 1
+    _fam, asked, _sku, _gw = publisher.intents[0]
+    assert [e.compiled_graph_key for e in asked] == [meta["cell_key"]]
 
 
 def test_publish_refuses_an_unkeyed_artifact(tmp_path: Path) -> None:
