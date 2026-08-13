@@ -97,9 +97,15 @@ class AotFamily:
         # the rig says so — the unexercised direction models an armed .pt2
         # the warm plan never actually invoked.
         if RIG.get("exercise"):
+            # pgw#1176: `execution_count` sums the RUNNERS' own calls, so
+            # "the artifact ran" means an artifact's counter moved — not a
+            # state field production no longer reads. Bumping the old field
+            # would model an exercise that never happened.
             marker = getattr(self.pipe, aot_serve._MARKER_ATTR, None)
-            if marker is not None:
-                marker["state"]["successful_calls"] += 1
+            for row in ((marker or {}).get("targets") or {}).values():
+                runner = (row.get("state") or {}).get("runner")
+                for _name, art in getattr(runner, "runners", ()) or ():
+                    art.calls += 1
         return Out()
 
 
@@ -111,8 +117,15 @@ def _fake_arm(key: str, ref: str):
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
                 publisher: Any = None) -> "fleet_cells.ArmOutcome":
         unet = pipe.unet
+        # pgw#1176: production wraps a REGISTRY; `is_armed` reads it.
+        _runner = aot_serve.ArtifactRunner(
+            package=None,
+            contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
+            constants=(), module_name="unet", entry="unet/main")
+        _dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
+        _dispatch.add("unet/main", _runner)
         state = {"successful_calls": 0, "failed": False,
-                 "original": unet.forward}
+                 "original": unet.forward, "runner": _dispatch}
         # pgw#1176: the two markers are DIFFERENT SHAPES in production and
         # this rig now models that honestly. `wrap_module` writes a bare
         # `state` on the MODULE; `arm_entry` writes `targets` (+ `entries`) on

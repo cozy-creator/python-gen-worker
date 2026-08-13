@@ -2836,7 +2836,7 @@ ADOPT_OOM_REASON = "insufficient_adopt_vram"
 
 
 @contextlib.contextmanager
-def _bind_headroom(what: str, index: int, total: int) -> Iterator[None]:
+def _bind_headroom(what: str, armed: int, declared: int) -> Iterator[None]:
     """Turn a CUDA OOM inside one bind into a typed adopt refusal (pgw#1175).
 
     §4.33 step 4 loads the cell into the LIVE pipeline and keeps it or rejects
@@ -2851,6 +2851,18 @@ def _bind_headroom(what: str, index: int, total: int) -> Iterator[None]:
     anything about the cell. It also runs strictly BEFORE the first live
     mutation (:func:`wrap_module` is called after every entry binds), so a
     refusal leaves the pipeline exactly as eager as it found it.
+
+    pgw#1176 CHANGED WHAT THE POSITION MEANS, and the change is the whole
+    forensic point. It used to be ``(index+1 of total)`` — where in a
+    bind-all-then-wrap sequence the OOM landed — which measured "how far
+    through the cell did we get" and was the only handle th#1825 had. Under
+    the atom that sequence does not exist: each class binds alone, so the
+    index is always 1 of 1 and says nothing. What distinguishes "one class too
+    big" from "wholly unadoptable" NOW is **how many siblings are already
+    armed and still serving**, so that is what the refusal carries. The
+    question the old number answered is answered better, because the armed
+    count is a fact about what the pod is currently doing rather than about a
+    loop it happened to be in.
 
     THE CHAIN IS WALKED, not just the top frame. ``ArtifactRunner.bind`` wraps
     every ``RuntimeError`` out of ``load_constants`` as
@@ -2869,11 +2881,12 @@ def _bind_headroom(what: str, index: int, total: int) -> Iterator[None]:
         flush_memory()
         raise AdoptError(
             ADOPT_OOM_REASON,
-            f"{what} ({index + 1} of {total}) ran out of device memory while "
-            f"binding ({type(oom).__name__}: {oom}) — this pod cannot hold the "
-            f"cell beside what it is already serving, so it serves EAGER and "
-            f"stays up. Nothing is armed. The cell is not condemned: another "
-            f"pod, or this one with less resident, may bind it fine",
+            f"{what} ({armed} of {declared} already armed) ran out of device "
+            f"memory while binding ({type(oom).__name__}: {oom}) — this pod "
+            f"cannot hold THIS CLASS beside what it is already serving. It "
+            f"serves eager; the {armed} class(es) already armed keep serving "
+            f"COMPILED. Neither the class nor the declaration is condemned: "
+            f"another pod, or this one with less resident, may bind it fine",
         ) from exc
 
 
@@ -3041,7 +3054,10 @@ def arm_entry(
         pool = pools.setdefault(target, {})
         # pgw#1175, carried: the pool grows by reference, so an OOM here is a
         # CARD fact and gets the card's own verdict rather than the cell's.
-        with _bind_headroom(f"target {target!r} pool", 0, 1):
+        _armed_here = len(dispatch.runners)
+        _declared_here = len(dispatch.declared) or (_armed_here + 1)
+        with _bind_headroom(
+                f"target {target!r} pool", _armed_here, _declared_here):
             target_constant_pool(
                 [constants], resident_constants(module), into=pool)
 
@@ -3057,7 +3073,8 @@ def arm_entry(
             # full card would otherwise condemn a correct cell, and a contract
             # verdict is the kind that quarantines a key (th#1819). Capacity
             # is never a contract verdict.
-            with _bind_headroom(f"entry {name!r}", 0, 1):
+            with _bind_headroom(
+                    f"entry {name!r}", _armed_here, _declared_here):
                 package = _load_package(staged.root / PACKAGE_NAME, name)
                 runner = ArtifactRunner(
                     package=package, contract=contract, constants=constants,
