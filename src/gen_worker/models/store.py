@@ -1,9 +1,7 @@
 """The on-disk/CAS model store: resolve -> materialize -> reference-count.
 
-pgw#1206 C1 lifted this out of ``executor.py`` unchanged. It is the longest-lived
-thing the worker owns — a pod's store outlives every job on it — which is why it
-splits off first and by LIFETIME rather than by topic. The job engine keeps
-``executor.py``; nothing here reads a wire message.
+The longest-lived thing the worker owns — a pod's store outlives every job on
+it. The job engine keeps ``executor.py``; nothing here reads a wire message.
 """
 
 from __future__ import annotations
@@ -58,13 +56,13 @@ __all__ = ["ModelStore"]
 _GiB = 1024 ** 3
 _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
-# how long a cold tensorhub ref waits for the hub's re-minted
-# snapshot after reporting missing_snapshot. The FAILED event triggers an
-# immediate hub-side re-mint (resolve + DOWNLOAD push), so arrival is
-# seconds; the bound only caps a hub that never answers.
+# How long a cold tensorhub ref waits for the hub's re-minted snapshot after
+# reporting missing_snapshot. The FAILED event triggers an immediate hub-side
+# re-mint (resolve + DOWNLOAD push), so arrival is seconds; the bound only
+# caps a hub that never answers.
 _MISSING_SNAPSHOT_WAIT_S = 60.0
 
-# Disk headroom preserved beyond a download's known size (#370).
+# Disk headroom preserved beyond a download's known size.
 _DISK_GC_MARGIN_BYTES = 2 * _GiB
 # Refs used within the grace window are not disk-GC candidates.
 _DISK_GC_GRACE_S = 300.0
@@ -73,8 +71,8 @@ def _snapshot_files_without_components(
     snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
 ) -> "List[pb.SnapshotFile]":
     """``snapshot.files`` minus every entry under an excluded ``<comp>/``
-    subfolder (th#1330 B2). The one place the worker's byte accounting agrees
-    with what the downloader will actually fetch."""
+    subfolder. The one place the worker's byte accounting agrees with what the
+    downloader will actually fetch."""
     files = list(snapshot.files) if snapshot is not None else []
     drop = {str(c).strip() for c in exclude if str(c or "").strip()}
     if not drop:
@@ -102,7 +100,7 @@ def _snapshot_without_components(
 
 # ---------------------------------------------------------------------------
 # Model seam: models.download (ensure-local) + models.residency (tier map),
-# with ModelEvent emission. Single-loop, per-ref asyncio locks — no
+# with ModelEvent emission. Single-loop, per-ref asyncio locks.
 
 def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
     """pb.Snapshot -> the typed resolved-manifest struct: the ONE
