@@ -1,13 +1,14 @@
 """TensorHub upload client.
 
 Upload flow (one file):
-  1. Client computes BLAKE3 hash of the file.
-  2. POST {base_url}{endpoint_path} with {path, blake3, size_bytes}.
-  3. For repo/model uploads, TensorHub returns a scoped R2/S3 transfer grant;
-     the worker uploads through boto3/s3transfer and completes with transfer
-     metadata.
-  4. Older non-model platform uploads may still return presigned multipart
-     URLs; those are uploaded part-by-part and completed with part ETags.
+  1. Client computes BLAKE3 hash of the file (and declares sha256 at create —
+     th#1795 — so the hub can presign into the final content-addressed key).
+  2. POST {base_url}{endpoint_path} with {path, blake3, size_bytes, sha256}.
+  3. TensorHub answers dedup, a store-enforced single PUT (th#1795), or
+     presigned multipart part URLs uploaded part-by-part and completed with
+     part ETags. The worker NEVER holds store credentials (pgw#1206 B: the
+     credentialed grant lane had zero hub producers and is gone, boto3 with
+     it); an expired presign is a RE-PLAN, never terminal.
 
 Used by worker callers via ctx.save_file / ctx.save_checkpoint. Tensorhub also
 exposes the same upload protocol to
@@ -46,11 +47,11 @@ ratified safety property — do not blur it:
     being down, not staleness, and inventing a retry there would change a
     behaviour nobody measured.
   * data plane (part PUTs, worker -> R2) — one
-    ``_upload_transport.PutPool`` per save, torn down with it, NEVER
+    ``hubio.transport.PutPool`` per save, torn down with it, NEVER
     process-scoped. Retry attempts always get a fresh
     ``urllib3.PoolManager`` — the structural guard against the
     stale-socket ``SSLV3_ALERT_BAD_RECORD_MAC`` R2 incident (see
-    ``_upload_transport``). That incident is why per-save scoping exists
+    ``hubio.transport``). That incident is why per-save scoping exists
     at all; it was an R2 edge behaviour, and the control plane is a
     different peer with a different failure history.
 
@@ -84,7 +85,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from blake3 import blake3
 
-from ._upload_transport import (
+from .hubio.transport import (
     STREAM_CHUNK_BYTES,
     PutPool,
     TransportError,
@@ -171,7 +172,6 @@ _presigned_put_slots = threading.BoundedSemaphore(_PRESIGNED_PUT_BUDGET)
 __all__ = [
     "STREAM_CHUNK_BYTES",
     "PresignedUploadResult",
-    "blake3_hash_file",
     "control_plane_session",
     "presigned_upload_file",
     "reset_control_plane_sessions",
@@ -310,11 +310,6 @@ def _parse_json_response(resp: requests.Response, *, phase: str) -> Dict[str, An
     return parsed
 
 
-def _is_tensorhub_model_weight_upload(endpoint_path: str) -> bool:
-    path = str(endpoint_path or "")
-    return "/api/v1/repos/" in path and "/uploads" in path
-
-
 @contextmanager
 def _presigned_put_slot() -> Iterator[None]:
     _presigned_put_slots.acquire()
@@ -324,21 +319,6 @@ def _presigned_put_slot() -> Iterator[None]:
         _presigned_put_slots.release()
 
 
-def blake3_hash_file(path: str | Path, chunk_size: int = STREAM_CHUNK_BYTES) -> str:
-    """Compute BLAKE3 hash of a file without loading it into memory.
-
-    Fans BLAKE3 internals across available CPU cores via
-    ``max_threads=blake3.AUTO`` — on a 16-core host this is ~5-8× the
-    single-threaded throughput. (Issue #269.)
-    """
-    h = blake3(max_threads=blake3.AUTO)
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
 
 
 @contextmanager
@@ -412,24 +392,44 @@ def presigned_upload_file(
     # Two scopes, deliberately different (see the module docstring): the R2
     # PUT pool lives exactly as long as this save and then closes, while the
     # hub control-plane session is process-scoped and survives it.
+    #
+    # pgw#1206 B — ONE grant-expiry behavior: an expired presign is a
+    # RE-PLAN, never terminal (the policy chunk-CAS has had since pgw#1004).
+    # The media create response carries no expires_at, so the discrimination
+    # here is behavioral: on a terminal 403 from the PUT leg, re-create the
+    # session ONCE (fresh presigns) and re-drive; a substituted-claim 403
+    # recurs on the fresh presigns and stays terminal. A duplicate create is
+    # bounded and safe for the same reasons _post_create's retry is.
     session, session_is_fresh = control_plane_session(base_url)
-    with PutPool() as put_pool:
-        return _presigned_upload_file_scoped(
-            file_path=file_path,
-            base_url=base_url,
-            endpoint_path=endpoint_path,
-            headers=headers,
-            create_payload=create_payload,
-            blake3_hex=blake3_hex,
-            size_bytes=size_bytes,
-            on_progress=on_progress,
-            cancel_check=cancel_check,
-            complete_extra=complete_extra,
-            on_phase=on_phase,
-            session=session,
-            session_is_fresh=session_is_fresh,
-            put_pool=put_pool,
-        )
+    for grant_attempt in (1, 2):
+        with PutPool() as put_pool:
+            try:
+                return _presigned_upload_file_scoped(
+                    file_path=file_path,
+                    base_url=base_url,
+                    endpoint_path=endpoint_path,
+                    headers=headers,
+                    create_payload=create_payload,
+                    blake3_hex=blake3_hex,
+                    size_bytes=size_bytes,
+                    on_progress=on_progress,
+                    cancel_check=cancel_check,
+                    complete_extra=complete_extra,
+                    on_phase=on_phase,
+                    session=session,
+                    session_is_fresh=session_is_fresh,
+                    put_pool=put_pool,
+                )
+            except ArtifactTransferError as exc:
+                if (grant_attempt == 1 and exc.phase == "put"
+                        and getattr(exc, "status_code", None) == 403):
+                    logger.warning(
+                        "presigned PUT answered 403; re-planning the upload "
+                        "session once (expired presign is a re-plan, not a "
+                        "failure of the bytes): %s", exc)
+                    continue
+                raise
+    raise AssertionError("unreachable")  # the loop returns or raises
 
 
 def _post_create(
@@ -576,51 +576,6 @@ def _presigned_upload_file_scoped(
     if not upload_id:
         raise ArtifactTransferError(
             "tensorhub upload create response missing upload_id",
-            provider="tensorhub",
-            phase="create",
-            retryable=False,
-        )
-
-    transfer_grant = parsed.get("transfer_grant") or parsed.get("s3_transfer_grant")
-    if isinstance(transfer_grant, dict):
-        from .s3_transfer import S3TransferGrant, upload_file_with_grant
-
-        grant = S3TransferGrant.from_mapping(transfer_grant)
-        with _phase(on_phase, "put"):
-            sdk_result = upload_file_with_grant(
-                file_path=file_path,
-                grant=grant,
-                blake3_hex=blake3_hex,
-                size_bytes=size_bytes,
-                on_progress=on_progress,
-            )
-        complete_payload: Dict[str, Any] = {
-            "transfer": {
-                "mode": "s3_sdk",
-                "bucket": sdk_result.bucket,
-                "key": sdk_result.key,
-                "size_bytes": sdk_result.size_bytes,
-                "blake3": sdk_result.blake3,
-                "etag": sdk_result.etag,
-            }
-        }
-        if complete_extra:
-            for k, v in complete_extra.items():
-                if v is not None and k != "transfer":
-                    complete_payload[k] = v
-        with _phase(on_phase, "complete"):
-            result_meta = _complete_upload_session(
-                complete_url=f"{url}/{upload_id}/complete",
-                headers=headers,
-                payload=complete_payload,
-                cancel_check=cancel_check,
-                session=session,
-            )
-        return PresignedUploadResult(meta=result_meta, dedup=False)
-
-    if _is_tensorhub_model_weight_upload(endpoint_path):
-        raise ArtifactTransferError(
-            "tensorhub model upload response missing transfer_grant",
             provider="tensorhub",
             phase="create",
             retryable=False,
@@ -921,7 +876,7 @@ def _upload_parts_to_s3(
 ) -> List[Tuple[int, str]]:
     """Upload file parts to S3 using presigned URLs. Returns list of (part_number, etag).
 
-    Each part PUT is dispatched through ``_upload_transport`` which
+    Each part PUT is dispatched through ``hubio.transport`` which
     owns the pool lifecycle (save-scoped keepalive pool for first
     attempts, fresh pool per retry), exponential-backoff retry
     classification, and TLS-pool isolation. This function just fans

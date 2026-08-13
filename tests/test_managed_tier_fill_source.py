@@ -68,7 +68,7 @@ def _stub_r2(monkeypatch, calls: list) -> None:
         if on_bytes is not None:
             on_bytes(len(_PAYLOAD))
 
-    monkeypatch.setattr(snap_mod, "_download_one_file", _public_get)
+    monkeypatch.setattr(snap_mod, "afetch_verified", _public_get)
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +285,7 @@ def test_network_bytes_is_a_running_total_on_downloading_ticks(
                     on_bytes(len(chunk))
                     await asyncio.sleep(0)  # let the executor's callback run
 
-    monkeypatch.setattr(snap_mod, "_download_one_file", _chunked_get)
+    monkeypatch.setattr(snap_mod, "afetch_verified", _chunked_get)
 
     local = tmp_path / "local"
     sent: list = []
@@ -350,7 +350,7 @@ def test_downloading_progress_reports_populated_bytes_done_and_total(
                     on_bytes(len(chunk))
                     await asyncio.sleep(0)
 
-    monkeypatch.setattr(snap_mod, "_download_one_file", _chunked_get)
+    monkeypatch.setattr(snap_mod, "afetch_verified", _chunked_get)
 
     local = tmp_path / "local"
     sent: list = []

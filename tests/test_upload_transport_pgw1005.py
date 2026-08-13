@@ -24,8 +24,8 @@ import pytest
 import urllib3
 from urllib3.exceptions import MaxRetryError, ProtocolError, SSLError
 
-from gen_worker import _upload_transport as tr
-from gen_worker._upload_transport import (
+from gen_worker.hubio import transport as tr
+from gen_worker.hubio.transport import (
     PutPool,
     TransportError,
     _BoundedFileReader,
@@ -130,7 +130,7 @@ def test_bounded_reader_serves_exactly_its_span_and_caps_each_read(tmp_path):
 
 
 def test_a_retry_re_reads_the_part_FROM_ITS_TRUE_OFFSET(s3, tmp_path, no_sleep):
-    """The entire reason the reader class exists (`_upload_transport:29-32`).
+    """The entire reason the reader class exists (`hubio/transport.py:29-32`).
     The first attempt is severed mid-stream; the retry must send the part's
     full bytes starting at its own offset, not resume where a stalled
     generator left off."""

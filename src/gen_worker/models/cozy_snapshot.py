@@ -25,7 +25,7 @@ from .chunk_cas import (
     verify_file_digest,
     volume_chunk_dir,
 )
-from .cozy_cas import _download_one_file as _download_one_file
+from ..hubio.fetch import afetch_verified
 from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
 from .download import components_present, select_component_paths
 from .errors import PickleWeightRefused
@@ -942,7 +942,7 @@ class CozySnapshotDownloader:
                     # i.e. two vacuous guards guarding one set of bytes.
                     parse_cas_ref(digest)  # refuse an undigestable entry early
                     assert f.url is not None  # validated in _ensure_blobs
-                    await _download_one_file(
+                    await afetch_verified(
                         f.url,
                         dst,
                         expected_size=int(f.size_bytes or 0),

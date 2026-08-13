@@ -518,11 +518,11 @@ def test_the_downloader_refuses_an_ABSENT_digest_before_fetching(tmp_path, store
     """
     import asyncio
 
-    from gen_worker.models.cozy_cas import _download_one_file
+    from gen_worker.hubio.fetch import afetch_verified
 
     data = body(64)
     url = put(store, data)
     dst = tmp_path / "x.bin"
     with pytest.raises(ValueError, match="no expected digest"):
-        asyncio.run(_download_one_file(url, dst, len(data), "", None))
+        asyncio.run(afetch_verified(url, dst, expected_size=len(data), expected_digest=""))
     assert not dst.exists(), "nothing may be published under no digest at all"

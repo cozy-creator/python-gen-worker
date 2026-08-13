@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..api.errors import AuthError, SnapshotBuildFailedError
 from ..bounded_stream import copy_bounded, free_space_bound
+from ..hubio.fetch import fetch_once
 from ..stall import SilenceWindow
 import requests
 
@@ -309,37 +310,24 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     destination filesystem, which is what an unbounded shard exhausts.
     """
 
-    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=dest.name + ".",
-                                    suffix=".part")
-    os.close(fd)
-    tmp = Path(tmp_name)
+    # pgw#1206 B: ONE verified-download discipline (`hubio.fetch.fetch_once`)
+    # — writer-unique `.part` staging, the byte cap inside the stream loop,
+    # tag-dispatched digest verification, durable atomic rename. This
+    # wrapper keeps the dataset policy: `_expected_digest` upstream already
+    # refused absent/untagged/unsupported checksums, and a shard that
+    # declares no size is bounded by the destination filesystem — the
+    # resource an unbounded shard actually exhausts.
     algo = expected_digest.partition(":")[0]
-    # Not `.get(...) or None`: an unverifiable download must be unreachable,
-    # and the way that guarantee dies is a hasher that is allowed to be absent.
-    hasher = _DIGEST_HASHERS[algo]()
+    if algo not in _DIGEST_HASHERS:  # unreachable after _expected_digest; keep the refusal local too
+        raise RuntimeError(f"unsupported digest algorithm {algo!r}")
     declared = int(expected_size) if expected_size is not None else 0
-    cap = declared if declared > 0 else free_space_bound(tmp.parent)
-    with requests.get(url, stream=True, timeout=300) as resp:
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise RuntimeError(f"shard download failed ({resp.status_code}) url={url[:128]}")
-        try:
-            with open(tmp, "wb") as f:
-                total = copy_bounded(
-                    resp.iter_content(chunk_size=_CHUNK_BYTES), f.write,
-                    limit_bytes=cap, what=f"dataset shard {dest.name}",
-                    hasher=hasher,
-                )
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
-    if expected_size is not None and total != int(expected_size):
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"shard size mismatch: got {total}, want {expected_size}")
-    got = f"{algo}:{hasher.hexdigest()}"
-    if got != expected_digest:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"shard digest mismatch: got {got}, want {expected_digest}")
-    tmp.replace(dest)
+    fetch_once(
+        url, dest,
+        expected_digest=expected_digest,
+        expected_size=declared,
+        cap_bytes=0 if declared > 0 else free_space_bound(dest.parent),
+        resume=False,
+    )
 
 
 def download_entries(

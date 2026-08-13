@@ -402,7 +402,7 @@ banned = [
     m for m in sys.modules
     if m in ("httpx", "requests", "urllib3", "boto3", "aiohttp")
     or m.startswith(("gen_worker.convert", "gen_worker.presigned_upload",
-                     "gen_worker._upload_transport", "gen_worker.transport"))
+                     "gen_worker.hubio.transport", "gen_worker.transport"))
 ]
 print(",".join(sorted(banned)))
 """

@@ -350,15 +350,6 @@ def test_the_file_api_timeouts_are_gone() -> None:
     assert hits == []
 
 
-def test_the_sdk_upload_backoff_states_its_single_pause() -> None:
-    """`min(2 ** (attempt - 1), 4)` could only ever evaluate to 1: the loop
-    breaks before the second sleep once `_SDK_TRANSFER_ATTEMPTS` became 2."""
-    from gen_worker import s3_transfer
-
-    assert s3_transfer._SDK_TRANSFER_ATTEMPTS == 2
-    assert s3_transfer._SDK_RETRY_PAUSE_S == 1.0
-
-
 def test_the_mediated_action_ceiling_is_the_allowlists_own() -> None:
     """`_ACTION_HARD_TIMEOUT_S = 120.0` sat in a `min()` beside
     `action.timeout_s`, whose largest declared value is 60 s — so the third
