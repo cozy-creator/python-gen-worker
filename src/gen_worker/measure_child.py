@@ -1,111 +1,61 @@
-"""pgw#1134: the MEASURE-ONLY child — ``python -m gen_worker.measure_child``.
+"""The MEASURE-ONLY child — ``python -m gen_worker.measure_child``.
 
     python -m gen_worker.measure_child <request>.mint.json [<report>.json]
 
-It runs the mint's own load and the mint's own export loop — optionally with
-the INDUCTOR compile — against ONE declared class set, records what the run
-cost on the card, and produces **nothing else**. No cell, no artifact, no
-package, no hub call, no advertisement.
+Runs the mint's own load and export loop — optionally with the INDUCTOR compile
+— against ONE declared class set, records what it cost on the card, and
+produces **nothing else**: no cell, no artifact, no package, no hub call, no
+advertisement.
 
-What ``<request>.mint.json`` actually IS
---------------------------------------------------
-The file an operator holds is the one an endpoint repo COMMITS — e.g.
-``ltx-video-2.3/aot/transformer-b200-tv261120-ta126-tat1.mint.json``. That is a
-DECLARATION payload: a flattened compile contract (``family``, ``shapes``,
-``text_lens``, ``specialization``, ``declaration_module``, ``source_ref``)
-generated from the ``@endpoint(compile=...)`` block. It is NOT a runtime
-``MintRequest``, which the hub-driven parent builds in a work root and which
-additionally carries ``function``, ``modules`` and RESOLVED ``slots``.
+``<request>.mint.json`` is the DECLARATION payload an endpoint repo commits
+(``family``, ``shapes``, ``text_lens``, ``specialization``,
+``declaration_module``, ``source_ref``), not the runtime ``MintRequest`` the
+hub-driven parent builds. Both decode through :func:`load_document` ->
+:func:`resolve_job`, so there is ONE decoder. From the committed shape:
+``modules`` <- ``declaration_module``; ``function`` <- the endpoint whose
+``Compile(family=)`` is the payload's ``family`` (``--function`` disambiguates);
+``targets`` <- that endpoint's own ``Compile(targets=)`` when the payload names
+none; ``slots`` <- ``source_ref`` plus ``--slot NAME=...``. Anything the payload
+cannot supply is refused BY NAME before a weight is read, naming the flag that
+supplies it.
 
-pgw#1134 documented the committed file and decoded the runtime one, so the
-documented command — quoted in ltx's OQ-3 ``resolves_when``, i.e. in production
-endpoint source — died on ``ValidationError: Object missing required field
-'function'`` in the first millisecond of a bought B200. This module now reads
-the committed shape, because that is the artifact that exists:
+**Slots resolve OFFLINE** — a ref is looked up in the local store and never
+downloaded, inheriting ``mint_process``'s rule that a mint process which could
+download is one that can stall on a lemon host.
 
-* ``modules``   <- the payload's ``declaration_module``;
-* ``function``  <- the endpoint whose ``Compile(family=)`` IS the payload's
-  ``family`` (``--function`` overrides, and is required only when that is
-  ambiguous across classes);
-* ``targets``   <- the chosen endpoint's own ``Compile(targets=)`` when the
-  payload names none, which since pgw#1107 is every committed file;
-* ``slots``     <- the payload's ``source_ref``, bound to the slot that owns
-  the declared targets, plus ``--slot NAME=...`` for anything else the
-  endpoint's ``setup()`` requires.
+Why a second child exists: a blocker's exit criterion is often a MEASUREMENT,
+and both front doors are shut against the run that answers it —
+``mint_child._assert_family_mintable`` refuses while any blocker is open, and
+``boot_trace_child`` composes structure-only, whose
+``_refuse_artifact_lanes`` refuses a w8a8/w4a4/svdq tree by name. Without this
+child the only moves are to guess, or to resolve a blocker in order to unblock
+its own run.
 
-Both shapes decode through :func:`load_document` -> :func:`resolve_job`, so
-there is ONE decoder and no second opinion about what a request file is. Every
-piece the payload cannot supply is refused BY NAME, before a weight is read,
-naming the flag that supplies it — the failure this issue exists for is a
-command that could not start, and a typed refusal on a laptop is worth a rented
-hour.
+The three properties that make that safe:
 
-**Slots resolve OFFLINE.** A ref named by the payload or a flag is looked up in
-this machine's local store and never downloaded: ``mint_process`` states the
-rule for the mint child (*"the child never touches the network: a mint is
-compute, and a mint process that could download is one that can stall on a
-lemon host"*) and a measurement of a mint inherits it. On a pod the serving
-process has already materialized every slot; ``--slot NAME=/path`` names a tree
-directly.
-
-Why a second child exists at all
---------------------------------
-A blocker is a declared refusal whose exit criterion is often a
-MEASUREMENT, and ltx-video-2.3's OQ-3 is the worked example: *"is a whole-graph
-export of the served w8a8 lane bigger than the card?"*. Both front doors were
-shut against the run that answers it:
-
-* ``mint_child._assert_family_mintable`` refuses while ANY blocker is open —
-  correct, and deliberately so. The measurement that would close OQ-3 was
-  refused BY OQ-3.
-* ``boot_trace_child`` is ungated, but it composes structure-only, and
-  ``structure_only._refuse_artifact_lanes`` refuses a w8a8 / w4a4 / svdq
-  artifact tree BY NAME. The boot child treats that as a hard refusal (it must:
-  §4.27 step 1 forbids weights for identity, and a boot that quietly downloaded
-  42 GiB to state its key would satisfy the letter of the derivation and
-  destroy its purpose).
-
-So the blocker could never gather the evidence that resolves it, and the only
-remaining moves were to guess or to resolve the blocker in order to unblock its
-own run — the circularity pgw#1115 exists to prevent.
-
-The three properties that make this safe
-----------------------------------------
-1. **It is an explicit invocation, never an ambient bypass.** Nothing spawns
-   this child: an operator or a harness runs it, at a request file, on purpose.
+1. **Explicit invocation, never an ambient bypass.** Nothing spawns this child.
    ``_assert_family_mintable`` is untouched and every real mint still fails
-   closed — this module does not call it because it cannot mint, not because it
-   is exempt.
+   closed.
 2. **It cannot produce an artifact, structurally.** :class:`MeasureJob` is a
-   DIFFERENT wire struct from ``MintRequest`` and it declares none of the
+   DIFFERENT wire struct from ``MintRequest`` and declares none of the
    output-side fields (:data:`WITHHELD_FIELDS` — ``target``, ``work_root``,
    ``resume``, ``report``, ``arm_token``). msgspec drops what a struct does not
-   declare, so the artifact destination, the resume bank and the mint's report
-   path never enter this process's memory even when the operator hands it the
-   very same ``*.mint.json`` file. There is no publish call to audit because
-   there is nothing here to publish TO.
-3. **The real-weight fallback is scoped to HERE.** ``mint_child``'s pgw#1080
-   invariants are untouched: ``StructureNotHonored`` still fails a mint closed,
-   and the boot trace still refuses a stranded family rather than downloading
-   its checkpoint. This child accepts real weights because a measurement of the
-   served lane is exactly what it is for — and it REPORTS which lane it
-   measured (:attr:`MeasureReport.weights`), read off the composed pipeline, so
-   a weightless claim can never be implied by a run that was not.
+   declare, so the artifact destination, resume bank and report path never
+   enter this process even when handed the same ``*.mint.json``.
+3. **The real-weight fallback is scoped to HERE**, and the run REPORTS which
+   lane it measured (:attr:`MeasureReport.weights`), read off the composed
+   pipeline, so a weightless claim can never be implied by a run that was not.
 
-What it measures, and against what vocabulary
----------------------------------------------
 ``export_peak_device_bytes`` / ``export_peak_device_reserved_bytes`` are the
-mint's own names for the same two counters (``aot_mint._mint_cell``), read on
-the same allocator, so a number from this child and a number from a real mint
-are comparable without translation. The per-entry figure is the RUNNING
-high-water after that entry — the counter is reset once, before the first row,
-exactly as the mint resets it once before its export phase — so the row that
-raised the water line is the row named beside it.
+mint's own names for the same two counters (``aot_mint._mint_cell``) on the
+same allocator, so numbers are comparable without translation. The per-entry
+figure is the RUNNING high-water after that entry — the counter is reset once
+before the first row, exactly as the mint resets it once before its export
+phase — so the row that raised the water line is the row named beside it.
 
-With ``--export-only`` the inductor half is skipped. That is a cheaper first
-pass and a WEAKER answer: an export-only trace never exercises the whole-graph
-planner an OOM blocker is usually about, which is why the compile runs by
-default.
+``--export-only`` skips the inductor half: cheaper, and a WEAKER answer, since
+an export-only trace never exercises the whole-graph planner an OOM blocker is
+usually about.
 """
 
 from __future__ import annotations

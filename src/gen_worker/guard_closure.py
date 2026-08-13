@@ -1,89 +1,75 @@
-"""Guard-closure ADVISORY audit + boundary canonicalization (pgw#681, demoted pgw#756).
+"""Guard-closure ADVISORY audit + boundary canonicalization.
 
 Dynamo's guard set for a compiled graph IS the exhaustive list of everything
-that graph depends on — so closure against the declared compile contract is
+that graph depends on, so closure against the declared compile contract is
 machine-checkable. Three pieces, all SDK-generic (parameterized ONLY by the
 declared ``CompileCell`` contract — never per-endpoint or per-family code):
 
-1. **Extraction** (:func:`extract`): post-mint, walk every compiled graph's
-   live guard tree. The robust torch 2.13 surface (probed on 2.13.0+cu130):
-   ``torch._dynamo.eval_frame._debug_get_cache_entry_list(code)`` →
-   ``entry.guard_manager.root`` → recursive ``get_child_managers()`` (each
-   carries ``get_source()``) + ``get_leaf_guards()`` (each carries its type
-   name and ``verbose_code_parts()``). A repr parse of the guard manager's
+1. **Extraction** (:func:`extract`): post-mint, walk every compiled graph's live
+   guard tree. The robust torch 2.13 surface (probed on 2.13.0+cu130):
+   ``torch._dynamo.eval_frame._debug_get_cache_entry_list(code)`` ->
+   ``entry.guard_manager.root`` -> recursive ``get_child_managers()`` (each
+   carries ``get_source()``) + ``get_leaf_guards()``. A repr parse of the
    ``TREE_GUARD_MANAGER`` dump is the fallback when the structured walk is
    unavailable. An entry whose guards cannot be read records an
-   :data:`UNPROVEN` row (never silent — it is logged and rides the manifest),
-   because that is a fact about our diagnostic surface on this torch build,
-   not about the mint.
+   :data:`UNPROVEN` row (never silent) — that is a fact about our diagnostic
+   surface on this torch build, not about the mint.
 
 2. **Closure classifier** (:func:`classify`): the RelationalGuard family
-   (aliasing, symbolic shapes) is judged by TYPE first — torch attaches it
-   to input managers, never predictably to one root. Every other
-   guard is classified by its SOURCE ROOT — module-rooted (``L['self']…``)
-   guards are the weights/structure identity (covered by family +
-   graph_signature + weight_contract key axes) and global-rooted (``G[…]``) guards are the
-   code identity (covered by gen_worker/diffusers/transformers/image_digest
+   (aliasing, symbolic shapes) is judged by TYPE first — torch attaches it to
+   input managers, never predictably to one root. Every other guard is
+   classified by its SOURCE ROOT: module-rooted (``L['self']…``) guards are the
+   weights/structure identity (covered by the family + graph_signature +
+   weight_contract key axes) and global-rooted (``G[…]``) guards are the code
+   identity (covered by the gen_worker/diffusers/transformers/image_digest
    axes); neither can vary per request. Cross-request variance enters ONLY
    through call inputs and ambient process state, so those two roots form a
-   CLOSED WORLD: every input/ambient guard type must be explicitly covered
-   by the contract (declared shapes/dynamic dims, pinned scalars, structural
-   constants) or canonicalized away at the ingress — anything else is
-   reported as a LEAK.
+   CLOSED WORLD: every input/ambient guard type must be explicitly covered by
+   the contract or canonicalized away at the ingress — anything else is a LEAK.
 
-   **The classifier has NO VETO (pgw#756, Paul's ruling).** It protects
-   against WASTED REUSE, not incorrectness: dynamo re-evaluates its own
-   guards on every call at the consumer, so a cell depending on unpinned
-   state fails its guards THERE — and with pgw#680 fail-on-recompile armed
-   that raises, serves eager, and reports the reason as a countable
-   ``guard_miss``. A missed leak therefore degrades gracefully and loudly;
-   it can never produce a wrong result. A CLASSIFIER BUG, by contrast,
-   refuses every mint on every family — which happened twice fleet-wide
-   (pgw#691's NO_TENSOR_ALIASING root dispatch, pgw#733's ``_source_root``
-   prefix match) while the gate caught zero real leaks in production. So
-   :func:`closure_manifest` classifies, records, emits a typed
-   ``guard_leak`` event, and CONTINUES the mint. Hard refusals survive only
-   where a defect is PROVEN rather than inferred: zero compiled graphs
-   (nothing was compiled — the cell would be empty) and posture drift
-   (:func:`assert_posture` — a measurement against exact canonical values).
+   **The classifier has NO VETO** (Paul's ruling). It protects against WASTED
+   REUSE, not incorrectness: dynamo re-evaluates its own guards on every call at
+   the consumer, so a cell depending on unpinned state fails its guards THERE —
+   and with fail-on-recompile armed that raises, serves eager, and reports a
+   countable ``guard_miss``. A missed leak degrades gracefully and loudly and can
+   never produce a wrong result. A CLASSIFIER BUG, by contrast, refuses every
+   mint on every family — which happened twice fleet-wide while the gate caught
+   zero real leaks in production. So :func:`closure_manifest` classifies,
+   records, emits a typed ``guard_leak`` event, and CONTINUES the mint. Hard
+   refusals survive only where a defect is PROVEN rather than inferred: zero
+   compiled graphs, and posture drift (:func:`assert_posture`).
 
    **Never rebuild this classifier.** torch's own ``guard_filter_fn`` /
-   ``GuardFilterEntry`` is the supported structured hook (typed entries, no
-   C++ manager walk and no repr parsing — where BOTH fleet-wide bugs lived),
-   and upstream's precompile work already maintains a versioned
-   ``UNSUPPORTED_SERIALIZATION_GUARD_TYPES`` classification. torch.export /
-   AOTI removes the question entirely — which is why step 2 of pgw#756
-   DELETES this module when the last family migrates to AOT. If a
-   JIT-resident family ever genuinely needs the check, implement it as a
-   thin call into ``guard_filter_fn`` plus upstream's serializability list.
+   ``GuardFilterEntry`` is the supported structured hook (typed entries, no C++
+   manager walk and no repr parsing — where BOTH fleet-wide bugs lived), and
+   upstream maintains a versioned ``UNSUPPORTED_SERIALIZATION_GUARD_TYPES``
+   classification. torch.export / AOTI removes the question entirely, and this
+   module is DELETED when the last family migrates to AOT. If a JIT-resident
+   family ever needs the check, implement it as a thin call into
+   ``guard_filter_fn`` plus upstream's serializability list.
 
-3. **Boundary canonicalization** (:func:`canonical_ingress`): one wrapper at
-   the single compiled-graph ingress (installed by ``compile_cache.apply``
-   for every target, mint and consumer alike, so the traced guards and the
-   serving inputs see the SAME canonical form). Tensor strides are pinned to
-   the canonical contiguous layout — ``.contiguous()`` alone is NOT the pin:
-   a size-1 dim makes ``is_contiguous()`` true under an arbitrary stride and
-   ``.contiguous()`` a no-op while TENSOR_MATCH still guards the exact
-   stride tuple (ie#544, reproduced: entries 1→2 on ``stride=(8,999,1)`` for
-   size ``(4,1,8)``), so the residue case rebuilds via ``as_strided``.
-   Tensor dtypes are memo-asserted per argument path — a drift raises a
-   NAMED :class:`GuardBoundaryError` instead of a silent recompile. Scalar
-   policy is REPORTED by the classifier (only contract-pinned scalars belong
-   in guards; declared dynamism rides ``mark_dynamic``) — the ingress never
-   rewrites scalar values.
+3. **Boundary canonicalization** (:func:`canonical_ingress`): one wrapper at the
+   single compiled-graph ingress (installed by ``compile_cache.apply`` for every
+   target, mint and consumer alike, so traced guards and serving inputs see the
+   SAME canonical form). Tensor strides are pinned to the canonical contiguous
+   layout — ``.contiguous()`` alone is NOT the pin: a size-1 dim makes
+   ``is_contiguous()`` true under an arbitrary stride and ``.contiguous()`` a
+   no-op while TENSOR_MATCH still guards the exact stride tuple (reproduced:
+   entries 1->2 on ``stride=(8,999,1)`` for size ``(4,1,8)``), so the residue
+   case rebuilds via ``as_strided``. Tensor dtypes are memo-asserted per
+   argument path — a drift raises a NAMED :class:`GuardBoundaryError` instead of
+   a silent recompile. Scalar policy is REPORTED by the classifier; the ingress
+   never rewrites scalar values.
 
-The full guard dump rides the cell as ``metadata.json``'s
-``guard_manifest`` block (deterministic: comments stripped, ASLR ids
-scrubbed, rows sorted) — every armed cell carries its complete dependency
-manifest into CAS and the publish-intent metadata. The audit surface
-(:func:`audit_armed` for a live armed pipeline, :func:`consolidate` +
-``python -m gen_worker.guard_closure`` over N pods' cells/manifests) is the
-N-cold-pod zero-miss closure check: exit 0 = closed and consistent, 2 =
-leaks, 3 = cross-pod divergence.
+The full guard dump rides the cell as ``metadata.json``'s ``guard_manifest``
+block (deterministic: comments stripped, ASLR ids scrubbed, rows sorted). The
+audit surface (:func:`audit_armed`, :func:`consolidate` + ``python -m
+gen_worker.guard_closure``) is the N-cold-pod zero-miss closure check: exit 0 =
+closed and consistent, 2 = leaks, 3 = cross-pod divergence.
 
-Note: ``_debug_get_cache_entry_list`` keys on the class-shared ``__code__``
-, so a warm process's dump can include same-family sibling entries;
-classification is source-based, so siblings classify identically.
+Note: ``_debug_get_cache_entry_list`` keys on the class-shared ``__code__``, so
+a warm process's dump can include same-family sibling entries; classification is
+source-based, so siblings classify identically.
 """
 
 from __future__ import annotations
