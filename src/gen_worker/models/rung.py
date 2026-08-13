@@ -96,6 +96,42 @@ def descend(current: Optional[str], *, strict_vram: bool = False) -> Optional[Ru
     return nxt
 
 
+#: The typed reason a reactive descent stopped, when it stopped at a rung this
+#: build cannot execute rather than at a genuine end of the ladder.
+#: th#1867/pgw#1212: `cpu` is declared in LADDER and is plan-time only — the
+#: reactive walk refuses to hand it out — so `sequential` is the real floor.
+FLOOR_CPU_RUNG_UNEXECUTABLE = "cpu_rung_unexecutable"
+
+#: The ladder genuinely ran out: nothing is declared below the current rung.
+FLOOR_LADDER_EXHAUSTED = "placement_ladder_exhausted"
+
+
+def descent_floor(current: Optional[str], *, strict_vram: bool = False) -> Optional[str]:
+    """Why ``descend`` returned None — the typed floor, or None if it did not.
+
+    th#1867: A DESCENT THAT RUNS OUT MUST NAME ITS FLOOR. Deleting the
+    proactive fit ladder (``Resources.vram_gb_hint``, an ESTIMATE deciding
+    placement before anything is measured — §4.33) makes this reactive walk
+    the only ladder, so its bottom rung stops being theoretical. The failure
+    mode that must not happen is the descent silently falling into a rung
+    nothing can run: that converts a loud estimate-error into a quiet
+    execution-error, which is the trade §1.35 and §1.36 keep rejecting.
+
+    The refusal this feeds names OUR CODE ("this build cannot execute a CPU
+    rung"), never the card — the legitimate species under §1.35's second
+    amendment. It also makes pgw#1212's gap visible in production rather than
+    latent, which is the fastest way it gets prioritised on evidence.
+    """
+    if descend(current, strict_vram=strict_vram) is not None:
+        return None
+    cur = str(current or "")
+    if cur in PLACEMENT_LADDER:
+        idx = LADDER.index(_BY_NAME[cur]) + 1
+        if idx < len(LADDER) and LADDER[idx] is CPU:
+            return FLOOR_CPU_RUNG_UNEXECUTABLE
+    return FLOOR_LADDER_EXHAUSTED
+
+
 def price(run_mode: str) -> float:
     """Honest latency multiplier vs a native run, by wire run mode. Coarse
     order-of-magnitude guidance (the hub's measured fit-matrix latency is
