@@ -89,11 +89,11 @@ def test_static_closure_reaches_the_composition_code() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ek1_axes_are_the_recipe(pinned_runtime: None,
+def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
     meta = exported_cell_meta()
     key = ck.from_entry_metadata(meta)
-    assert key.digest.startswith("ek1-")
+    assert key.digest.startswith("cg-key-v1-")
     axes = key.axes_dict()
     assert set(axes) == {"graph", "sm", "toolchain"}
     # Version strings and image identity are GONE from the key: a
@@ -102,11 +102,14 @@ def test_ek1_axes_are_the_recipe(pinned_runtime: None,
     bumped = dict(meta, gen_worker="99.0.0", torch="9.9.9",
                   image_digest="sha256:other")
     assert ck.from_entry_metadata(bumped).digest == key.digest
-    # Foreign schemes can never collide with a current key; they stay
-    # key-SHAPED (pgw#990 — is_key mirrors tensorhub's scheme-agnostic
-    # IsCellKey) and are ruled on by axes, not by their label.
-    for dead in ("ek2-", "ek3-", "ek4-", "ek5-", "ek6-"):
-        assert ck.is_key(dead + "a" * 56)
+    # pgw#1213: the grammar is scheme-PINNED, superseding pgw#990's
+    # scheme-agnostic reading. Agnosticism existed so an entry of an OLDER
+    # scheme would be ruled on by its axes rather than its label; `cg-key-v1`
+    # is the first scheme any published artifact is addressed by, so there is
+    # no such corpus, and a foreign scheme now names a digest over axes this
+    # runtime cannot restate.
+    for dead in ("ek1-", "ek2-", "cg-key-v2-"):
+        assert not ck.is_key(dead + "a" * 56)
         assert key.digest != dead + "a" * 56
     # pgw#1176: a ``ck`` key is NOT merely a foreign scheme — it names a
     # 36-entry all-or-nothing cell this runtime cannot arm at all, so it does
@@ -198,7 +201,7 @@ def test_marked_cell_never_republishes(monkeypatch: pytest.MonkeyPatch,
     artifact.write_bytes(b"bytes")
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
-    meta = {"cell_key": "ek1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
+    meta = {"cell_key": "cg-key-v1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
     with pytest.raises(fc.CellPublishRefused, match="pgw#712"):
         pub.publish(FAMILY, artifact, meta)
 

@@ -59,7 +59,7 @@ def _arm(pipe, *, calls: int, failed: bool = False) -> None:
                 "runner": _dispatch(calls, failed),
             },
         }},
-        "entries": {"unet/main": {"key": "ek1-" + "0" * 56}},
+        "entries": {"unet/main": {"key": "cg-key-v1-" + "0" * 56}},
     })
 
 

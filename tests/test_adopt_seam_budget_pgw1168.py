@@ -36,7 +36,7 @@ _GIB = 1 << 30
 _META: Dict[str, Any] = {
     "family": "sdxl",
     "weight_lane": "w8a8",
-    "cell_key": "ek1-" + "0" * 56,
+    "cell_key": "cg-key-v1-" + "0" * 56,
     "entry": {"name": "unet/e0", "target": "unet"},
 }
 

@@ -210,8 +210,8 @@ class _Harness:
         capture = mint_root / "capture"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
         pending = fleet_cells.PendingSelfMint(
-            family=FAMILY, arm_token="ek1-" + "a" * 56,
-            ref=f"{cc.system_repo(FAMILY)}#ek1-{'a' * 56}",
+            family=FAMILY, arm_token="cg-key-v1-" + "a" * 56,
+            ref=f"{cc.system_repo(FAMILY)}#cg-key-v1-{'a' * 56}",
             cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,
         )

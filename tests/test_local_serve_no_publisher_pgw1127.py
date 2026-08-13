@@ -40,7 +40,7 @@ from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.cli import run as cli_run
 from gen_worker.child_contract import MintSlot
 
-KEY_A = "ek1-" + "a" * 56
+KEY_A = "cg-key-v1-" + "a" * 56
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
 
 SRC = Path(fleet_cells.__file__).parent

@@ -49,7 +49,7 @@ from gen_worker import fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
 MODE = sys.argv[1]
-KEY = "ek1-" + "c" * 56
+KEY = "cg-key-v1-" + "c" * 56
 ARM = fleet_cells.ARM_SCHEME + "-" + "9" * 56
 FAMILY = "micro-diffusion"
 
@@ -180,10 +180,10 @@ def test_run_one_mints_and_keeps_run_two_reuses_with_no_mint(
     assert two["mints_opened"] == 0, (
         "the second run opened a mint — compile-once-run-forever is the whole "
         "product promise and this is what breaking it looks like")
-    assert two["cell_key"] == "ek1-" + "c" * 56
+    assert two["cell_key"] == "cg-key-v1-" + "c" * 56
     assert two["artifact"].startswith(str(store)), (
         "run 2 must serve the STORE's bytes, not a leftover from the mint")
-    assert two["resident"] == ["ek1-" + "c" * 56]
+    assert two["resident"] == ["cg-key-v1-" + "c" * 56]
 
 
 def test_a_cold_run_with_an_EMPTY_store_mints_rather_than_inventing_a_hit(

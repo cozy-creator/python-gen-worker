@@ -36,6 +36,7 @@ from gen_worker.models.chunk_cas import parse_cas_ref
 from gen_worker.models.hub_client import HubResolveError, parse_chunk_list, resolved_entry_digest
 from gen_worker.models.refs import (
     DEFAULT_REF_TAG,
+    MAX_FRAGMENT_LEN,
     format_model_ref,
     normalize_model_ref,
     parse_model_ref,
@@ -53,7 +54,11 @@ def _ref_seeds() -> list[str]:
     seeds = [
         "", " ", "/", "//", "a/", "/b", "owner/repo", "owner/repo:", "owner/repo:prod",
         "owner/repo:latest", "owner/repo#fp8", "owner/repo#FP8", "owner/repo#",
-        "owner/repo#a#b", "owner/repo#fp8?attr=1", "owner/repo#" + "a" * 65,
+        "owner/repo#a#b", "owner/repo#fp8?attr=1",
+        # An over-long fragment. pgw#1213 widened the cap to MAX_FRAGMENT_LEN
+        # so a `cg-key-v1` key (66 chars) fits, so the seed tracks the cap
+        # rather than the old literal 64 — its job is to be one too long.
+        "owner/repo#" + "a" * (MAX_FRAGMENT_LEN + 1),
         f"owner/repo@sha256:{HEX64}", f"owner/repo@blake3:{'b' * 64}",
         f"owner/repo@SHA256:{HEX64.upper()}", "owner/repo@sha256:", "owner/repo@deadbeef",
         "owner/repo@v1", f"owner/repo:tag@sha256:{HEX64}#fp8",
@@ -127,7 +132,7 @@ def test_ref_acceptance_implies_well_formed_components(raw: str) -> None:
     assert th.tag, f"{raw!r} accepted with an empty tag; the default is {DEFAULT_REF_TAG!r}"
     if th.flavor is not None:
         assert th.flavor == th.flavor.lower()
-        assert 1 <= len(th.flavor) <= 64
+        assert 1 <= len(th.flavor) <= MAX_FRAGMENT_LEN
     if th.digest is not None:
         # A digest that reached a parsed ref is used to ADDRESS CAS objects, so
         # "present" is not enough — it must name its algorithm. An inferred

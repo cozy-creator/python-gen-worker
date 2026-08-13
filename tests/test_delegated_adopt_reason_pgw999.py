@@ -78,7 +78,7 @@ def _sealed_cell(path: Path, **over: Any) -> Path:
     import tarfile as _tarfile
 
     meta = {"format": 2, "kind": "aot-inductor", "family": FAMILY,
-            "cell_key": "ek1-" + "e" * 56, "entries": {}, **over}
+            "cell_key": "cg-key-v1-" + "e" * 56, "entries": {}, **over}
     payload = _json.dumps(meta).encode()
     with _tarfile.open(path, mode="w:gz") as tar:
         info = _tarfile.TarInfo("metadata.json")
@@ -99,7 +99,7 @@ def pending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(fleet_cells, "mark_terminus", lambda p, t, **_kw: None)
     artifact = _sealed_cell(tmp_path / "cell.tar.gz")
     return fleet_cells.PendingSelfMint(
-        family=FAMILY, arm_token="ek1-sealed", ref=f"root/family-{FAMILY}#ek1-sealed",
+        family=FAMILY, arm_token="cg-key-v1-sealed", ref=f"root/family-{FAMILY}#cg-key-v1-sealed",
         cfg=_Cfg(), target=artifact, mint_root=tmp_path / "root", publisher=None, delegated=True,)
 
 
@@ -166,7 +166,7 @@ def test_every_classified_reason_survives_verbatim(
         _arm_returns(monkeypatch, AdoptOutcome.miss(reason, f"detail for {reason}"))
         artifact = _sealed_cell(tmp_path / f"cell-{i}.tar.gz")
         p = fleet_cells.PendingSelfMint(
-            family=FAMILY, arm_token=f"ek1-{i}", ref=f"root/family-{FAMILY}#ek1-{i}",
+            family=FAMILY, arm_token=f"cg-key-v1-{i}", ref=f"root/family-{FAMILY}#cg-key-v1-{i}",
             cfg=_Cfg(), target=artifact, mint_root=tmp_path / f"root{i}", publisher=None, delegated=True,)
         assert fleet_cells.adopt_delegated_mint(_Pipe(), p, [artifact]) is None
         phase, _detail = _abort(seen)
@@ -267,7 +267,7 @@ def test_a_pending_that_never_refused_reports_no_reason(
     an always-non-empty reason is as useless as an always-empty one."""
     _arm_returns(monkeypatch, AdoptOutcome.hit("family=x key=y"))
     monkeypatch.setattr(
-        fleet_cells, "_packed_metadata", lambda a: {"cell_key": "ek1-sealed"})
+        fleet_cells, "_packed_metadata", lambda a: {"cell_key": "cg-key-v1-sealed"})
     monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
 
     assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target]) is not None

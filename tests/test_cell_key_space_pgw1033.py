@@ -54,7 +54,7 @@ FAMILY = "sdxl"
 ARM_KEY = "arm1-" + "a" * 56
 #: What the child's envelope is STAMPED with — the cell identity, unknowable
 #: until the export finishes. A different digest, always.
-STAMPED_KEY = "ek1-" + "b" * 56
+STAMPED_KEY = "cg-key-v1-" + "b" * 56
 
 
 class _Pipe:
@@ -348,7 +348,7 @@ def test_an_owed_mint_advertises_no_artifact_identity(
         "pgw#1010 deleted the recipe axis; a guard that reads one is dead")
 
     delivered = executor._CompileArtifactSelection(
-        path=Path("/dev/null"), ref=f"root/family-{FAMILY}#ek1-" + "c" * 56,
+        path=Path("/dev/null"), ref=f"root/family-{FAMILY}#cg-key-v1-" + "c" * 56,
         snapshot_digest="sha256:c", self_mint=False)
 
     assert executor._selection_for(None, pending) is None

@@ -412,7 +412,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str,
          revoke: bool = False, dispatch: bool = False) -> Tuple[str, str]:
     RIG.clear()
     RIG["dispatch"] = dispatch
-    key = "ek1-" + (seed * 56)[:56]
+    key = "cg-key-v1-" + (seed * 56)[:56]
     ref = f"root/family-{FAMILY}#{key}"
     monkeypatch.setattr(
         fleet_cells, "enable_compiled",

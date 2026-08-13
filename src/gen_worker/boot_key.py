@@ -1,8 +1,8 @@
-"""pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``ek1`` entry
+"""pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``cg-key-v1`` entry
 key SET AT BOOT, from CODE ALONE, before a single weight byte is resident.
 
 pgw#1176: §4.27 said "THE cell key" (singular). It is a KEY SET plus a derived
-contract manifest now — one ``ek1`` per declared graph class. Every property
+contract manifest now — one ``cg-key-v1`` per declared graph class. Every property
 the ruling wanted survives STRENGTHENED, because a partial resolve now helps:
 a pod that resolves 30 of 36 keys arms 30 classes and compiles 6, where the
 cell key made that same outcome a total miss and a full re-mint.
@@ -243,7 +243,7 @@ class DerivedKey:
     PARTIAL resolve now helps instead of falling back to a full re-mint.
     """
 
-    #: entry name -> that class's ``ek1`` key. THE thing resolve asks for.
+    #: entry name -> that class's ``cg-key-v1`` key. THE thing resolve asks for.
     entry_keys: Mapping[str, str]
     #: entry name -> that class's 16-hex ``class_hash``. THE memoizable half.
     class_hashes: Mapping[str, str]
