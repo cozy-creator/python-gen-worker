@@ -24,7 +24,7 @@ compatibility).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from .svdq import SVDQ_FP4_SMS, SVDQ_INT4_SMS
 

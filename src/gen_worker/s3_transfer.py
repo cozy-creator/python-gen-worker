@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -12,8 +10,6 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from .api.errors import ArtifactTransferError
-from .models.chunk_cas import DigestMismatch, verify_file_digest
-from .models.cozy_cas import fsync_dir, fsync_file
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 import boto3
