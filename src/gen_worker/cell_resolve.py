@@ -20,9 +20,9 @@ NEVER a second admission brain
 ------------------------------
 This module builds an :class:`aot_identity.ExpectedIdentity` from the answer and
 hands the transport to ``aot_delivery.materialize_named_artifact``. That is a
-RE-SITING of ``expected_from_plan``'s source — the Plan named the artifact, now
-the hub's resolve answer does — and nothing else. Every gate downstream is the
-one the Plan path already runs: ``receipts.refuse_untrusted_publisher``,
+RE-SITING of the expectation's source — the hub's resolve answer names the
+artifact — and nothing else. Every gate downstream is the one the deleted Plan
+path ran: ``receipts.refuse_untrusted_publisher``,
 ``aot_serve.verify_contract``, pgw#903's pre-dlopen graph-contract fence. The
 answer's field set is not arbitrary; it is exactly ``ExpectedIdentity``'s five
 axes plus ``materialize_named_artifact``'s two arguments.
@@ -70,10 +70,9 @@ REFUSAL_CODES = (
     "cell_resolve_client_supplied_field",
 )
 
-#: Every field an accepted answer must NAME, and why. The Plan path
-#: ``_require``s each of its counterparts (``plan._artifact``), so an answer
-#: omitting one states an expectation the Plan route could never produce — and
-#: the gate that would catch it sits AFTER the whole cell is downloaded.
+#: Every field an accepted answer must NAME, and why. An answer omitting one
+#: states an expectation nothing downstream can check — and the gate that
+#: would catch it sits AFTER the whole cell is downloaded.
 #: ``cell_resolve_incomplete`` is the hub's own code for this fact: the pod
 #: reaches the same verdict from the same evidence, so it reports it under the
 #: same name rather than inventing a second word for one condition.
@@ -156,10 +155,10 @@ class ResolvedCell:
     def expected_identity(self) -> aot_identity.ExpectedIdentity:
         """The admission expectation this answer states.
 
-        Built by the SAME map ``expected_from_plan`` uses, so the artifact
-        reaching ``aot_identity.verify_declared_identity`` cannot tell whether
-        it was named by a Plan or pulled by key — which is the property that
-        keeps this from being a second admission brain.
+        Built by THE map (``ExpectedIdentity.named_by``), so what reaches
+        ``aot_identity.verify_declared_identity`` is the same object shape any
+        naming source produces — which is the property that keeps this from
+        being a second admission brain.
         """
         return aot_identity.ExpectedIdentity.named_by(self, self.graph_contract)
 

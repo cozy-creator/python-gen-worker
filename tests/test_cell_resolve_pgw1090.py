@@ -14,7 +14,6 @@ import pytest
 
 from gen_worker import aot_identity, cell_key as ck, cell_resolve, env_seal
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.plan import AttemptRef, PlanFactory
 from gen_worker.procsplit import actions as actions_mod
 
 KEY = "ck1-" + "ab" * 28
@@ -164,10 +163,9 @@ def test_an_incomplete_answer_is_refused_before_the_cell_is_paid_for(
 ) -> None:
     """A 200 hit that leaves an admission field unnamed is REFUSED here.
 
-    The Plan route cannot reach the identity gate incomplete — ``plan._artifact``
-    ``_require``s every counterpart — so before pgw#1152 this route was the only
-    one that could, and the gate that would have caught it runs after
-    ``materialize`` has already downloaded the whole cell.
+    The gate that would otherwise catch it runs after ``materialize`` has
+    already downloaded the whole cell, so an unnamed admission field has to
+    refuse HERE or it is paid for first.
     """
     _sent, resp = stub
     resp["r"] = _Resp(200, _hit_body(**{field: ""}))
@@ -216,13 +214,17 @@ def test_a_missing_family_is_refused_before_the_hub_is_dialled(stub) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_hit_builds_the_same_expected_identity_the_plan_path_builds(
+def test_a_hit_builds_the_expected_identity_the_arm_gate_COMPARES(
     stub,
 ) -> None:
-    """``ExpectedIdentity`` is the type ``aot_identity.expected_from_plan``
-    produces, so an artifact reaching ``verify_declared_identity`` cannot tell
-    whether it was named by a Plan or pulled by key. That is the property that
-    keeps this from being a second admission brain."""
+    """``ExpectedIdentity`` is what ``verify_declared_identity`` compares, and
+    a resolve answer produces it through THE one map — which is what keeps this
+    from being a second admission brain.
+
+    Until pgw#1206 D this row read "the same object the Plan path builds"; the
+    Plan head is gone and this is the only naming source left, so the guard is
+    the pinned VALUE below plus the ``named_by`` equality: a new axis copied
+    wrong, or silently defaulted, reds here."""
     _sent, resp = stub
     resp["r"] = _Resp(200, _hit_body())
     cell = cell_resolve.resolve("sdxl", KEY)
@@ -236,6 +238,9 @@ def test_a_hit_builds_the_same_expected_identity_the_plan_path_builds(
     assert expected.env_seal_digest == "seal000000000000"
     assert expected.graph_contract_digest == "c0ffee0000000000"
     assert expected.publisher_org == "org-a"
+    # ...and it is THE map that built it, not a second one written here.
+    assert expected == aot_identity.ExpectedIdentity.named_by(
+        cell, "c0ffee0000000000")
 
     # And it is COMPARABLE: an artifact whose recorded facts match passes the
     # existing gate, and one that does not is refused BY AXIS.
@@ -255,56 +260,6 @@ def test_a_hit_builds_the_same_expected_identity_the_plan_path_builds(
             graph_contract_digest="c0ffee0000000000",
             publisher_org="org-a"))
     assert reason == ""
-
-
-def _plan_naming_the_same_artifact() -> Any:
-    """A Plan whose arm names the artifact ``_hit_body`` describes."""
-    arm = pb.Arm(
-        graph_contract_digest="c0ffee0000000000",
-        shape=pb.ARM_SHAPE_BRANCHLESS,
-        backend=pb.STEADY_BACKEND_AOT_CELL,
-    )
-    arm.artifact.CopyFrom(pb.ArtifactIdentity(
-        cell_ref=f"root/family-sdxl#{KEY}",
-        content_digest="sha256:" + "11" * 32,
-        cell_key=KEY,
-        publisher_org="org-a",
-        toolchain_digest="toolch0000000000",
-        env_seal_digest="seal000000000000",
-    ))
-    spec = pb.ExecutionSpec(
-        digest="sha256:" + "a" * 64,
-        spec_version=1,
-        release=pb.EndpointRelease(
-            org="org-a", endpoint="sdxl", release_id="r1",
-            image_digest="sha256:img", code_closure_id="clo_01"),
-        function_name="txt2img",
-        numerical_lane=pb.ExecutionLane(weights=pb.WEIGHT_LANE_BF16),
-        arm=arm,
-        topology=pb.Topology(accelerator="cuda", gpu_count=1, execution_groups=1),
-        components=pb.ComponentManifest(slots=[pb.SlotBinding(
-            slot="unet", ref="org-a/sdxl@v1", snapshot_digest="sha256:d")]),
-    )
-    return PlanFactory.from_execution_spec(AttemptRef("req", 1), spec)
-
-
-def test_both_expectation_sources_produce_an_EQUAL_object(stub) -> None:
-    """Not "the same type" — the same VALUE, compared whole.
-
-    pgw#1150's defect was a field that reached one map and not the other while
-    both still produced the right type. Since pgw#1152 there is one map
-    (``ExpectedIdentity.named_by``), so this row is what proves the two sources
-    have not drifted apart again: a new axis copied on one side only reds here
-    without anyone remembering to extend an assertion list.
-    """
-    _sent, resp = stub
-    resp["r"] = _Resp(200, _hit_body())
-    cell = cell_resolve.resolve("sdxl", KEY)
-    assert cell is not None
-
-    from_plan = aot_identity.expected_from_plan(_plan_naming_the_same_artifact())
-    assert from_plan is not None
-    assert cell.expected_identity() == from_plan
 
 
 def test_the_receipt_rides_the_answer_and_is_never_re_fetched(stub) -> None:

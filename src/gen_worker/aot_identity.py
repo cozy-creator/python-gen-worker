@@ -45,16 +45,14 @@ from typing import Any, Mapping, Protocol
 import msgspec
 
 from . import cell_key, env_seal
-from .plan import Plan
 
 
 class NamesAnArtifact(Protocol):
     """A source that NAMES one compiled cell, by the axes it already carries.
 
-    Both expectation sources satisfy it: the Plan's ``ArtifactRef`` (the hub
-    named the artifact) and ``cell_resolve.ResolvedCell`` (the hub answered a
-    pull by derived key). They are DIFFERENT sources of the same expectation,
-    which is why there is one map and not two.
+    ``cell_resolve.ResolvedCell`` (the hub answered a pull by derived key) is
+    the source today; the Protocol stays because the map must not learn a
+    second shape when a second source appears.
     """
 
     @property
@@ -73,8 +71,8 @@ class NamesAnArtifact(Protocol):
 class ExpectedIdentity(msgspec.Struct, frozen=True):
     """What the current ExecutionSpec says the armed artifact must be.
 
-    Projected from the immutable Plan, so it cannot drift from the execution
-    identity the hub digested. Every field is a digest that some producer
+    Projected from what the hub already digested, so it cannot drift from the
+    execution identity. Every field is a digest that some producer
     already committed to; none is probed from this runtime (the runtime axes
     are ``aot_serve.verify``'s job and stay there).
 
@@ -114,8 +112,8 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
         """THE map from a source that named an artifact to the expectation.
 
         The graph contract is passed rather than read off ``named`` because it
-        is a property of the ARM, not of the artifact: the Plan carries it on
-        ``arm``, the resolve answer carries it as ``graph_contract``. Every
+        is a property of the ARM, not of the artifact — the resolve answer
+        carries it as ``graph_contract``. Every
         other axis is the artifact's own and is copied by name, so a new axis
         cannot reach one source and not the other.
         """
@@ -126,21 +124,6 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
             graph_contract_digest=graph_contract_digest,
             publisher_org=named.publisher_org,
         )
-
-
-def expected_from_plan(plan: Plan) -> ExpectedIdentity | None:
-    """The expectation for a plan's arm, or ``None`` when it names no artifact.
-
-    ``None`` is a complete answer, not a gap: an ``eager_only`` or ``dynamo``
-    arm has no artifact to verify because since pgw#1010 dynamo cells are
-    neither sealed nor published. A caller that arms an artifact anyway on a
-    ``None`` expectation has re-introduced the resolver by another route —
-    pgw#904 owns that refusal, at the arming site where it can be enforced.
-    """
-    artifact = plan.arm.artifact
-    if artifact is None:
-        return None
-    return ExpectedIdentity.named_by(artifact, plan.arm.graph_contract_digest)
 
 
 def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
@@ -321,7 +304,6 @@ __all__ = [
     "ExpectedIdentity",
     "NamesAnArtifact",
     "artifact_identity",
-    "expected_from_plan",
     "verify_declared_identity",
     "verify_graph_witness",
 ]
