@@ -269,6 +269,46 @@ def cell_cfg(decl: Any, **enrichments: Any) -> Any:
     return CompileCell.from_declaration(decl, **enrichments)
 
 
+class ArmOutcomes(tuple):
+    """One :class:`AdoptOutcome` PER GRAPH CLASS, in ``rows`` order.
+
+    pgw#1176: the arm is per entry, so there is no single verdict — and a
+    plain tuple is what this should be. The two aggregate properties below
+    exist because the tests that use them are asking a question the aggregate
+    genuinely answers: *"did this whole DECLARATION arm?"*, which is a
+    property of a test's fixture, not a claim a pod makes about itself.
+
+    They are DELIBERATELY not what production reports. A pod reports
+    per-entry serve state (`aot_serve.entry_states`) precisely because a
+    cell-level boolean can advertise more than it serves. Nothing here is
+    wired to production; index this to assert per class, which is what the
+    per-entry rows do.
+    """
+
+    @property
+    def armed(self) -> bool:
+        """True only when EVERY class of this declaration armed."""
+        # len(), never bool() — __bool__ delegates here, so bool(self)
+        # would recurse.
+        return len(self) > 0 and all(o.armed for o in self)
+
+    @property
+    def reason(self) -> str:
+        """The first refusal's classified reason, or ""."""
+        return next((o.reason for o in self if not o.armed), "")
+
+    @property
+    def detail(self) -> str:
+        return next((o.detail for o in self if not o.armed), "")
+
+    @property
+    def identity(self) -> str:
+        return self[0].identity if self else ""
+
+    def __bool__(self) -> bool:
+        return self.armed
+
+
 def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
         packages: Dict[str, ProbePackage],
         meta: Dict[str, Any] | None = None,
@@ -324,7 +364,7 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
             tmp_path / "cache", artifact(tmp_path, block), 0,
             verify_numerics=verify_numerics,
             declared=declared_names(use_rows)))
-    return pipeline, module, outcomes
+    return pipeline, module, ArmOutcomes(outcomes)
 
 
 def numerics_rows(said: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:
