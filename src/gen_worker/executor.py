@@ -12193,6 +12193,34 @@ class Executor:
                 pass
             return
         if not transitions:
+            # th#1867: A DESCENT THAT RUNS OUT MUST NAME ITS FLOOR. With the
+            # proactive fit ladder deleted (an estimate deciding placement
+            # before anything is measured — §4.33), this reactive walk is the
+            # only ladder, so falling off its bottom must be a typed, visible
+            # refusal naming OUR code — never a silent slide into a rung
+            # nothing can run, which would convert a loud estimate-error into a
+            # quiet execution-error.
+            floors = {
+                rungspec.descent_floor(low_vram_mode(obj))
+                for obj in (self._slot_pipeline(spec, slot) for slot in spec.models)
+                if obj is not None
+            }
+            floors.discard(None)
+            if rungspec.FLOOR_CPU_RUNG_UNEXECUTABLE in floors:
+                activity_mod.emit_event(
+                    activity_mod.KIND_SERVE_DEGRADE,
+                    detail=(
+                        f"fn={spec.name}: the placement ladder descended to its "
+                        f"last executable rung (sequential) and the next one is "
+                        f"`cpu`, which THIS BUILD CANNOT EXECUTE — the reactive "
+                        f"walk treats it as plan-time only (pgw#1212). This is a "
+                        f"limitation of our worker, not of the card: §1.35 "
+                        f"requires every model to run on every device, CPU "
+                        f"included. The request returns retryable and the hub "
+                        f"re-places it."
+                    ),
+                    phase=rungspec.FLOOR_CPU_RUNG_UNEXECUTABLE,
+                )
             logger.warning(transition_line(
                 event="engaged", fn=spec.name, phase="inference",
                 free_gb=get_available_vram_gb(),

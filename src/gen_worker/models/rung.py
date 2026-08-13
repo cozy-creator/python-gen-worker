@@ -80,6 +80,46 @@ PLACEMENT_LADDER: tuple[str, ...] = tuple(
 _BY_NAME = {r.name: r for r in LADDER}
 
 
+#: Stopped one rung above ``cpu``: it is declared in LADDER and priced, and
+#: this build cannot execute it — the reactive walk treats it as plan-time
+#: only (pgw#1212). Names OUR code, never the card.
+FLOOR_CPU_RUNG_UNEXECUTABLE = "cpu_rung_unexecutable"
+
+#: Standing on the last rung the ladder declares. Nothing is below it.
+FLOOR_LADDER_EXHAUSTED = "placement_ladder_exhausted"
+
+#: The author's ``Resources(strict_vram=True)`` opt-out cut the ladder before
+#: the next rung, which touches host RAM. A DECLARATION stopped the walk, not
+#: the ladder's end — the two are opposite findings and must not share a token.
+FLOOR_STRICT_VRAM_TRUNCATED = "strict_vram_truncated"
+
+
+def _walk(current: Optional[str], strict_vram: bool) -> tuple[Optional[Rung], Optional[str]]:
+    """The ONE verdict :func:`descend` and :func:`descent_floor` both read.
+
+    th#1867 §3.0: a diagnosis and an action that answer the same question from
+    two implementations drift into disagreeing about what was said. Exactly one
+    of the two returns is ever non-None.
+    """
+    cur = str(current or "")
+    if cur == CPU.name:
+        # The bottom rung itself. The walk must not climb back into the
+        # placement tail, which the resident-token arm below would do.
+        return None, FLOOR_LADDER_EXHAUSTED
+    if cur not in PLACEMENT_LADDER:
+        nxt: Optional[Rung] = MODEL_OFFLOAD
+    else:
+        idx = LADDER.index(_BY_NAME[cur]) + 1
+        nxt = LADDER[idx] if idx < len(LADDER) else None
+    if nxt is None:
+        return None, FLOOR_LADDER_EXHAUSTED
+    if nxt is CPU:
+        return None, FLOOR_CPU_RUNG_UNEXECUTABLE
+    if strict_vram and nxt.touches_host_ram:
+        return None, FLOOR_STRICT_VRAM_TRUNCATED
+    return nxt, None
+
+
 def descend(current: Optional[str], *, strict_vram: bool = False) -> Optional[Rung]:
     """The next rung down from ``current``; None when the ladder ends.
 
@@ -89,17 +129,26 @@ def descend(current: Optional[str], *, strict_vram: bool = False) -> Optional[Ru
     cannot be applied to an already-loaded object), so from any resident
     token the next reactive rung is ``model_offload``.
     """
-    cur = str(current or "")
-    if cur not in PLACEMENT_LADDER:
-        nxt: Optional[Rung] = MODEL_OFFLOAD
-    else:
-        idx = LADDER.index(_BY_NAME[cur]) + 1
-        nxt = LADDER[idx] if idx < len(LADDER) else None
-        if nxt is CPU:
-            nxt = None  # the reactive walk ends at sequential; CPU is plan-time only
-    if nxt is not None and strict_vram and nxt.touches_host_ram:
-        return None
-    return nxt
+    return _walk(current, strict_vram)[0]
+
+
+def descent_floor(current: Optional[str], *, strict_vram: bool = False) -> Optional[str]:
+    """Why ``descend`` returned None — the typed floor, or None if it did not.
+
+    th#1867: A DESCENT THAT RUNS OUT MUST NAME ITS FLOOR. Deleting the
+    proactive fit ladder (``Resources.vram_gb_hint``, an ESTIMATE deciding
+    placement before anything is measured — §4.33) makes this reactive walk
+    the only ladder, so its bottom rung stops being theoretical. The failure
+    mode that must not happen is the descent silently falling into a rung
+    nothing can run: that converts a loud estimate-error into a quiet
+    execution-error, which is the trade §1.35 and §1.36 keep rejecting.
+
+    The refusal this feeds names OUR CODE ("this build cannot execute a CPU
+    rung"), never the card — the legitimate species under §1.35's second
+    amendment. It also makes pgw#1212's gap visible in production rather than
+    latent, which is the fastest way it gets prioritised on evidence.
+    """
+    return _walk(current, strict_vram)[1]
 
 
 def price(run_mode: str) -> float:
