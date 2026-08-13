@@ -1172,6 +1172,101 @@ def _measured_precision(pipeline: Any, rows: Sequence[Tuple[Any, Any]]) -> str:
     return "mixed(" + "+".join(sorted(labels)) + ")"
 
 
+#: pgw#1208: the phase token an unexportable class reports under. One kind, so
+#: the hub can COUNT them per family — a class that cannot be exported is a
+#: standing authoring/toolchain fact, not a transient, and the fleet's answer to
+#: "which classes never compile" should be a query rather than a log hunt.
+KIND_ENTRY_EXPORT_UNSUPPORTED = "entry_export_unsupported"
+
+
+def _export_skippable(exc: BaseException) -> bool:
+    """Whether ONE class's export failure may be skipped, leaving the rest.
+
+    Skippable means DETERMINISTIC, LOCAL, and TORCH'S OWN: this graph class
+    contains a construct `torch.export` refuses, and it will refuse identically
+    on every retry, on every pod, forever. Skipping it costs one class and
+    saves the other thirty-five.
+
+    NOT skippable, and the distinction is the whole safety of this:
+
+    * a RESOURCE shortfall (CUDA OOM, host memory) — it says nothing about the
+      class, it says the pod is out of room, and the mint must abort so the
+      parent can retry narrower. Skipping here would silently publish a partial
+      cell whose missing classes are an artifact of memory pressure and would
+      have exported fine on the retry.
+    * a ``BaseException`` that is not an ``Exception`` (KeyboardInterrupt,
+      SystemExit) — a shutdown is not a property of the graph.
+    * ``MintResourceExhausted`` and anything else carrying the duck-typed
+      ``mint_resource_shortfall`` marker, for the same reason as the first.
+    """
+    from .models.memory import is_cuda_oom
+
+    if not isinstance(exc, Exception):
+        return False
+    if is_cuda_oom(exc):
+        return False
+    if getattr(exc, "mint_resource_shortfall", False) is True:
+        return False
+    # ...and it must be TORCH'S OWN export refusal, not any deterministic
+    # exception that happened to surface during the export step.
+    #
+    # `_export_entry` resolves, feeds, WARMS, exports, GATES and compiles. Only
+    # the export's own "I cannot trace this construct" is a property of the
+    # graph class. The others are not, and skipping them would be the silent
+    # failure this issue exists to remove, wearing a new hat:
+    #
+    #   * a declared WARM that blows up says the class cannot RUN — pgw#758
+    #     made that a named refusal deliberately, and a cell whose classes were
+    #     never warm-proven must not publish;
+    #   * a MintRefused from our own gates (the folding fence, ingress
+    #     admission, identity) is a CORRECTNESS verdict, and a correctness gate
+    #     that can be skipped is not a gate;
+    #   * a plain exception from the module's own forward is a broken forward,
+    #     not an unsupported construct.
+    #
+    # So the test is the exception's ORIGIN: torch's dynamo/export namespace.
+    module = type(exc).__module__ or ""
+    return module.startswith(("torch._dynamo", "torch._export", "torch.export",
+                              "torch.fx.experimental"))
+
+
+def _unsupported_construct(exc: BaseException) -> str:
+    """The CONSTRUCT that refused, named, in one line.
+
+    A skipped class is only actionable if the reason names the thing an author
+    or a toolchain bump has to change. Dynamo says it precisely and then buries
+    it in a page of traceback, so the useful lines are lifted out: its own
+    ``Explanation:`` and ``Developer debug context:`` when present, else the
+    first line of the message. Never the whole traceback — this rides an event.
+    """
+    text = str(exc).strip()
+    picked = [
+        line.strip() for line in text.splitlines()
+        if line.strip().startswith(("Explanation:", "Developer debug context:"))
+    ]
+    head = text.splitlines()[0].strip() if text else type(exc).__name__
+    out = f"{type(exc).__name__}: {head}"
+    if picked:
+        out += " — " + " ".join(picked[:2])
+    return out[:600]
+
+
+def _emit_entry_export_unsupported(
+    entry: str, detail: str, *, family: str = "",
+) -> None:
+    """Tell the hub which class was skipped and why. Never fails a mint."""
+    try:
+        activity_mod.emit_event(
+            KIND_ENTRY_EXPORT_UNSUPPORTED,
+            f"family={family} entry={entry}: torch.export refused this graph "
+            f"class and it is SKIPPED — {detail}. The remaining classes still "
+            f"mint and publish; this class serves eager.",
+            phase=PHASE_TRACE_GRAPH,
+        )
+    except Exception:  # noqa: BLE001 — telemetry never fails a mint
+        logger.debug("aot-mint: entry-skip event dropped", exc_info=True)
+
+
 def _export_entry(
     pipeline: Any,
     spec: ExportSpec,
@@ -2258,6 +2353,11 @@ def _mint_cell(
     progress.width = width
 
     minted = progress.minted
+    #: pgw#1208: classes this mint could not export, each with the construct
+    #: that refused. They are NOT packed and NOT published — they are recorded,
+    #: so a cell that covers 35 of 36 classes says which one it does not and
+    #: why, instead of the whole mint disappearing behind one refusal.
+    skipped: List[Tuple[str, str]] = []
     # pgw#822: the adapter-BEARING classes are exported from the lifted
     # forward. Arming it is this function's job, not the caller's — see
     # `_arm_branches`.
@@ -2313,11 +2413,42 @@ def _mint_cell(
                 progress.beat(
                     PHASE_TRACE_GRAPH, index, len(rows),
                     _decl.plan_entry_name(plan))
-                with export_footprint.row():
-                    entry = _export_entry(
-                        pipeline, spec, plan, decl,
-                        inductor_configs=inductor_configs,
-                        compile_now=not parallel)
+                name = _decl.plan_entry_name(plan)
+                try:
+                    with export_footprint.row():
+                        entry = _export_entry(
+                            pipeline, spec, plan, decl,
+                            inductor_configs=inductor_configs,
+                            compile_now=not parallel)
+                except BaseException as exc:  # noqa: BLE001 — classified below
+                    # pgw#1208: ONE class that cannot export must not cost the
+                    # other 35. Before this, a single deterministic refusal
+                    # anywhere in the row loop aborted the whole mint and threw
+                    # away every class that had already exported clean — the
+                    # per-entry atom's own philosophy (pgw#718: the entry is
+                    # the unit of identity and of publish) applied everywhere
+                    # EXCEPT to the loop that produces the entries.
+                    #
+                    # Fail-closed stays fail-closed AT THE ENTRY: this class
+                    # proved nothing, so it is never packed and never
+                    # published, and serving covers it eager by the same
+                    # mechanism that covers any shape outside a cell's declared
+                    # envelope (pgw#844 — refused BY NAME, served eager, still
+                    # armed). What changes is only the blast radius.
+                    if not _export_skippable(exc):
+                        raise
+                    detail = _unsupported_construct(exc)
+                    skipped.append((name, detail))
+                    logger.warning(
+                        "aot-mint: entry %s cannot be exported and is SKIPPED "
+                        "— %s. The remaining classes still mint; this one "
+                        "serves eager.", name, detail)
+                    _emit_entry_export_unsupported(
+                        name, detail, family=str(spec.family or ""))
+                    progress.beat(
+                        PHASE_TRACE_GRAPH, index, len(rows),
+                        f"{name}: SKIPPED ({detail})")
+                    continue
                 minted.append(entry)
                 yield entry
         finally:
@@ -2435,6 +2566,20 @@ def _mint_cell(
         # correct either way — the parallel path refuses at ARRIVAL
         # (pgw#1052), which is where it matters.
         minted, class_aliases = canonicalize_dispatch_classes(minted)
+    # pgw#1208: what this cell does NOT cover, and why. Recorded on the mint's
+    # own timings so it reaches the phase table (and therefore the hub) beside
+    # the classes that did export — a partial cell must be able to say which
+    # classes are missing, or "35 of 36" is indistinguishable from "36 of 36".
+    #
+    # A cell with NO entries still refuses: `_pack` raises `cannot package a
+    # cell with no entries`, so "every class was skipped" fails closed on the
+    # path it already failed closed on rather than through a second check here.
+    timings["skipped_entries"] = float(len(skipped))
+    if skipped:
+        logger.warning(
+            "aot-mint: %d of %d declared class(es) could not be exported and "
+            "are absent from this cell: %s", len(skipped), len(rows),
+            "; ".join(f"{n} ({d})" for n, d in skipped[:4]))
     timings["canonicalized_entries"] = float(
         sum(len(rows) for rows in class_aliases.values()))
     timings["entry_workers"] = float(width.workers)
