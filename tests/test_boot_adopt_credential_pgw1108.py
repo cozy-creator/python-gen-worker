@@ -66,7 +66,11 @@ def wired(monkeypatch, tmp_path):
 
     def _attempt(**kw: Any) -> Any:
         calls.append(kw)
-        return executor_mod.boot_adopt.BootAdoptOutcome(reason="miss")
+        # pgw#1176: `attempt` returns ONE outcome per declared graph class.
+        # `cell_plans` above sizes exactly one, so the double returns a
+        # one-element TUPLE — a double still handing back a bare outcome would
+        # let this suite pass against a contract production does not have.
+        return (executor_mod.boot_adopt.BootAdoptOutcome(reason="miss"),)
 
     # Everything before the gate: a declaration exists and sizes one class.
     monkeypatch.setattr(executor_mod.aot_mint, "export_declaration",
@@ -89,7 +93,11 @@ def wired(monkeypatch, tmp_path):
 
 
 def _run_boot_adopt(ex: Any) -> Any:
-    return ex._boot_adopt(_Spec(), {})[0]
+    # pgw#1176: one outcome per declared class, and this suite declares one —
+    # so the unpack ASSERTS that arity rather than indexing past a set nobody
+    # checked. Every gate below is about the ONE declaration.
+    (out,) = ex._boot_adopt(_Spec(), {})
+    return out
 
 
 def test_split_child_with_seam_up_resolves_though_it_holds_no_jwt(wired):

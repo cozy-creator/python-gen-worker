@@ -202,8 +202,15 @@ def test_full_mint_with_release_packs_and_keys_identically(
     released = aot_mint.mint(
         surrendered, spec, tmp_path / "released", release_residents=True)
 
-    assert kept.cell_key == released.cell_key, (
-        "the release re-keyed the cell — the projection leaked into identity "
+    # pgw#1176: a mint produces N independently keyed artifacts, not "a cell",
+    # so the pgw#846 claim is now per ENTRY. The declaration above traces two
+    # graph classes; the length assert is what stops an empty `entries` from
+    # making the comparison below pass vacuously.
+    kept_keys = {r.entry: r.key for r in kept.entries}
+    released_keys = {r.entry: r.key for r in released.entries}
+    assert len(kept_keys) == 2, kept_keys
+    assert kept_keys == released_keys, (
+        "the release re-keyed an entry — the projection leaked into identity "
         "(pgw#846)")
     assert all(
         p.device.type == "meta" for p in surrendered.unet.parameters()), (

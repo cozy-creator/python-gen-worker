@@ -639,22 +639,27 @@ def test_hand_dynamic_rows_are_refused_at_declaration_time() -> None:
 
 def test_fork_and_row_reach_the_cell_identity() -> None:
     """A fork is a DISTINCT graph class in #716's hash; a static row is the
-    artifact's identity. Both now travel through the per-class hash into
-    the combined hash the key folds (pgw#758)."""
+    artifact's identity. Both travel through the per-class hash, which pgw#1176
+    made the key's `graph` axis DIRECTLY — the fold into a combined hash is
+    gone, so a fork that did not reach `class_hash` would no longer be
+    disguised by a set-wide digest."""
     from gen_worker import aot_serve, cell_key
 
     def _identity(fork: list, class_dims: list) -> str:
         entry = {
+            "name": "unet/main",
             "target": "unet", "fork": fork, "class_dims": class_dims,
             "range_digest": "r1", "graph": {"v": 2},
         }
         ch = aot_serve.class_hash(entry, strict=True, lora_bucket=0)
         entry["class_hash"] = ch
         meta = {
-            "sm": "sm_89", "format": 2, "family": "sdxl-shaped",
+            "sm": "sm_89", "format": 3, "family": "sdxl-shaped",
             "kind": aot_serve.ARTIFACT_KIND,
-            "entries": {"unet/main": entry},
-            "combined_graph_hash": cell_key.manifest_digest([ch]),
+            # pgw#1176: ONE entry block, which NAMES its class. The manifest
+            # digest rides beside it as a coverage label, never as identity.
+            cell_key.ENTRY_BLOCK_KEY: entry,
+            "manifest_digest": cell_key.manifest_digest([ch]),
             # pgw#1046: every key input is now a RECORDED block, so this
             # fixture states them rather than relying on an empty-dict digest.
             "env_seal": {"v": 1}, "toolchain": {"torch": "2.9.0"},
