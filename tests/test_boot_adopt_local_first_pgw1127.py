@@ -50,8 +50,13 @@ from gen_worker import (
 from gen_worker import executor as executor_mod
 from gen_worker.cell_adopt import AdoptOutcome
 
-KEY_A = "ck1-" + "a" * 56
-KEY_B = "ck1-" + "b" * 56
+# pgw#1176: `ek1`, because `local_cell_store.store` refuses anything that is
+# not an entry key and a `ck1`-keyed cell is orphaned by the re-key. These
+# fixtures stored under `ck1-` and the store silently declined them, so
+# `no_cell_source` short-circuited a machine that WAS holding cells — the §1.34
+# orphaning the re-key predicts, surfacing exactly where it should.
+KEY_A = "ek1-" + "a" * 56
+KEY_B = "ek1-" + "b" * 56
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
 
 
@@ -113,21 +118,27 @@ def _cell(
     tmp_path: Path, *, key: str = KEY_A, name: str = "cell",
     witnesses: Optional[Dict[str, str]] = None,
 ) -> Path:
-    """A cell with a READABLE envelope AND a recorded graph witness.
+    """An ENTRY artifact with a READABLE envelope AND a recorded graph witness.
 
     `_arm_exported_cell` and the boot's own pgw#1031 floor both read the packed
-    metadata, and a cell that records no witness is refused — correctly — so a
+    metadata, and an entry that records no witness is refused — correctly — so a
     fixture without one could only ever test the refusal.
+
+    pgw#1176: one artifact carries ONE class, so this records an `entry` block.
+    A multi-witness fixture is deliberately unrepresentable here: production
+    cannot pack one, and a fixture that could would be asserting against a
+    shape nothing can produce.
     """
+    rows = dict(WITNESSES if witnesses is None else witnesses)
+    if len(rows) != 1:
+        raise AssertionError(
+            f"an entry artifact carries ONE graph class; got {sorted(rows)!r}")
+    (entry, digest), = rows.items()
     p = tmp_path / name / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({
         "kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion",
-        "entries": {
-            entry: {"graph_witness": digest}
-            for entry, digest in (
-                WITNESSES if witnesses is None else witnesses).items()
-        },
+        "entry": {"name": entry, "graph_witness": digest},
     }).encode()
     with tarfile.open(p, mode="w:gz") as tar:
         info = tarfile.TarInfo("metadata.json")
@@ -186,17 +197,23 @@ def _derived(witnesses: Optional[Dict[str, str]] = None) -> Any:
     from gen_worker import cell_key as ck
 
     return boot_key.DerivedKey(
-        key=ck.from_axes({
-            "graph": "c0ffee0000000000", "envelope": "e" * 16,
-            "sm": "sm_89", "toolchain": "t" * 16}),
-        class_hashes={"a": "0" * 16}, combined="c0ffee0000000000",
+        entry_keys={"a": ck.from_axes({
+            "graph": "c0ffee0000000000",
+            "sm": "sm_89", "toolchain": "t" * 16}).digest},
+        class_hashes={"a": "c0ffee0000000000"},
+        manifest=ck.manifest_digest(["c0ffee0000000000"]),
         workers=2, width_reason="test", traced=1, memo="miss", wall_ms=7,
         graph_witnesses=dict(WITNESSES if witnesses is None else witnesses))
 
 
 #: The key that derivation actually produces — what the local store must be
 #: addressed by for a boot to find its own cell.
-KEY_DERIVED = _derived().digest
+#:
+#: pgw#1176: a boot derives a key SET. This declaration traces to one class, so
+#: the set has one member; a caller that wants "the address" takes it from
+#: `keys`, never from a `digest` property that no longer exists because there
+#: is no single key to have one.
+KEY_DERIVED = _derived().keys[0]
 
 
 @pytest.fixture()
@@ -231,7 +248,10 @@ def test_an_empty_store_and_no_hub_still_skips_the_derivation(
         boot_key, "derive",
         lambda **kw: pytest.fail("nobody could answer; the derive is latency"))
 
-    out = _executor(tmp_path)._boot_adopt(_Spec(), {})
+    # pgw#1176: a boot returns ONE outcome per declared graph class. This
+    # declaration traces to one, so the unpack ASSERTS that arity rather than
+    # indexing past a set nobody checked.
+    (out,) = _executor(tmp_path)._boot_adopt(_Spec(), {})
 
     assert out.reason == "no_cell_source"
     assert not out.derived_key
@@ -251,7 +271,10 @@ def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
         _cell(tmp_path), key=KEY_B, family="other", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
-    out = _executor(tmp_path)._boot_adopt(_Spec(), {})
+    # pgw#1176: a boot returns ONE outcome per declared graph class. This
+    # declaration traces to one, so the unpack ASSERTS that arity rather than
+    # indexing past a set nobody checked.
+    (out,) = _executor(tmp_path)._boot_adopt(_Spec(), {})
 
     assert out.derived_key == KEY_DERIVED, "the key was not derived at all"
     assert out.reason == "local_miss_no_hub"
@@ -286,7 +309,7 @@ def test_a_populated_store_and_an_unreachable_hub_makes_zero_http_attempts(
     ex.file_base_url = "http://127.0.0.1:9"   # discard port: nothing listens
     ex.worker_jwt_provider = lambda: "worker-jwt"
 
-    out = ex._boot_adopt(_Spec(), {})
+    (out,) = ex._boot_adopt(_Spec(), {})
 
     assert not no_wire, (
         "the boot reached for the wire while holding the answer on disk: "
@@ -316,7 +339,7 @@ def test_the_local_store_is_asked_BEFORE_a_perfectly_reachable_hub(
     ex.file_base_url = "http://hub.local"
     ex.worker_jwt_provider = lambda: "worker-jwt"
 
-    assert ex._boot_adopt(_Spec(), {}).reason == boot_adopt.LOCAL_HIT
+    assert ex._boot_adopt(_Spec(), {})[0].reason == boot_adopt.LOCAL_HIT
 
 
 def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
@@ -332,7 +355,7 @@ def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
         family="micro-diffusion", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
-    out = boot_adopt.attempt(
+    (out,) = boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
         slots={}, declared_hint=1, envelope={}, work_root=tmp_path,
         hub_absent="nobody to ask")
@@ -366,7 +389,7 @@ def test_a_local_cell_whose_graphs_are_not_this_pods_graphs_is_refused(
     monkeypatch.setattr(
         boot_key, "derive", lambda **kw: _derived({"transformer": "aa" * 8}))
 
-    out = boot_adopt.attempt(
+    (out,) = boot_adopt.attempt(
         function="generate", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=1, envelope={}, work_root=tmp_path,
         hub_absent="nobody to ask")
@@ -564,10 +587,10 @@ def test_a_key_that_missed_locally_is_distinguishable_from_one_never_derived(
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
     ex = _executor(tmp_path)
 
-    never = ex._boot_adopt(_Spec(), {})
+    (never,) = ex._boot_adopt(_Spec(), {})
     local_cell_store.store(
         _cell(tmp_path, name="b"), key=KEY_B, family="other", arm_token="")
-    missed = ex._boot_adopt(_Spec(), {})
+    (missed,) = ex._boot_adopt(_Spec(), {})
 
     assert never.reason == "no_cell_source" and not never.derived_key
     assert missed.reason == "local_miss_no_hub"

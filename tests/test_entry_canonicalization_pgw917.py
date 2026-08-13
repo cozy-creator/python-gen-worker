@@ -36,7 +36,7 @@ torch = pytest.importorskip("torch")
 
 import torch.nn as nn  # noqa: E402
 
-from gen_worker import aot_flatten, aot_mint  # noqa: E402
+from gen_worker import aot_flatten, aot_mint, cell_key  # noqa: E402
 
 FAMILY = "sdxl"
 DIM = 640
@@ -197,20 +197,25 @@ def test_a_merged_cell_declares_one_dispatchable_entry_and_keeps_the_names():
         "symbols": {},
         "constants": [],
     }
-    bare = aot_serve.artifact_metadata(
+    bare = aot_serve.entry_metadata(
         family=FAMILY, precision="w8a8", cell_key="",
-        entries={survivor.name: dict(block)})
+        name=survivor.name, entry=dict(block))
     with_aliases = dict(block)
     with_aliases["aliases"] = [
         {"name": row.name,
          "class_dims": [[str(n), int(v)] for n, v in sorted(row.spec.class_dims)]}
         for row in sorted(aliases[survivor.name], key=lambda r: r.name)
     ]
-    stamped = aot_serve.artifact_metadata(
+    stamped = aot_serve.entry_metadata(
         family=FAMILY, precision="w8a8", cell_key="",
-        entries={survivor.name: with_aliases})
+        name=survivor.name, entry=with_aliases)
 
-    assert len(stamped["entries"]) == 1
-    assert (stamped["combined_graph_hash"] == bare["combined_graph_hash"]), (
-        "recording the merged declared-class names must not re-key the cell")
-    assert len(stamped["entries"][survivor.name]["aliases"]) == 3
+    # pgw#1176: one artifact, one class — and the claim that mattered is
+    # sharper per entry: recording the merged declared-class names must not
+    # move THIS class's identity, which is now the key itself rather than a
+    # digest over a collection.
+    assert stamped[cell_key.ENTRY_BLOCK_KEY]["class_hash"] == \
+        bare[cell_key.ENTRY_BLOCK_KEY]["class_hash"], (
+            "recording the merged declared-class names must not re-key the "
+            "entry")
+    assert len(stamped[cell_key.ENTRY_BLOCK_KEY]["aliases"]) == 3

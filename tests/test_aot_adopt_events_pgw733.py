@@ -38,7 +38,7 @@ from gen_worker import activity, aot_serve
 FAMILY = "sdxl"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
            "cuda": "13.0"}
-KEY = "ck1-" + "a" * 56
+KEY = "ek1-" + "a" * 56
 
 INPUTS = [
     {"name": "sample", "position": 0, "dtype": "bfloat16",
@@ -106,6 +106,9 @@ class Cfg:
 
 def _entry(**over: Any) -> Dict[str, Any]:
     e: Dict[str, Any] = {
+        # pgw#1176: an entry block NAMES its class — that is what makes a
+        # refusal bisectable to the thing that failed.
+        "name": ENTRY,
         "target": "unet", "fork": [], "class_dims": [],
         "inputs": [dict(r) for r in INPUTS], "symbols": {},
         "constants": [dict(r) for r in CONSTANTS], "graph": {},
@@ -120,11 +123,13 @@ def _entry(**over: Any) -> Dict[str, Any]:
 
 
 def _meta(**over: Any) -> Dict[str, Any]:
-    entries = over.pop("entries", None) or {ENTRY: _entry()}
+    # pgw#1176: ONE entry per artifact. No `entries=` override, because a
+    # multi-entry envelope is a shape production cannot produce.
+    entry = over.pop("entry", None) or _entry()
     m: Dict[str, Any] = {
         "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
         **RUNTIME, "family": FAMILY, "precision": "w8a8",
-        "cell_key": KEY, "entries": entries,
+        "cell_key": KEY, cell_key_mod.ENTRY_BLOCK_KEY: entry,
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
         # pgw#1097: no weight BYTES in the .so (above) and no weight VALUES in
@@ -146,12 +151,11 @@ def _meta(**over: Any) -> Dict[str, Any]:
         "declared_envelope": {"shapes": [[1024, 1024]], "text_lens": [77],
                               "guidance": [7.5]},
     }
-    m["combined_graph_hash"] = aot_serve.combined_graph_hash(
-        str((b or {}).get("class_hash") or "")
-        for b in entries.values() if isinstance(b, dict))
+    m["manifest_digest"] = cell_key_mod.manifest_digest(
+        [str((entry or {}).get("class_hash") or "")])
     m.update(over)
     try:
-        m["cell_key"] = cell_key_mod.from_exported_artifact_metadata(m).digest
+        m["cell_key"] = cell_key_mod.from_entry_metadata(m).digest
     except cell_key_mod.CellKeyError:
         pass  # deliberately-malformed variants keep the placeholder stamp
     return m
@@ -225,7 +229,7 @@ def test_artifact_invalid_named_on_the_wire(
     assert "corrupt.tar.gz" in out.detail
 
     # Malformed entries classify the same, with the reason in the detail.
-    malformed = _tar(tmp_path, _meta(entries={ENTRY: {"target": "unet"}}))
+    malformed = _tar(tmp_path, _meta(entry={"name": ENTRY, "target": "unet"}))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=malformed)
     assert not out.armed and out.reason == "artifact_invalid"
     assert "declares no inputs" in out.detail

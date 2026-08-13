@@ -28,7 +28,7 @@ WHAT RUNS FOR REAL. The whole chain from the ordered arm to the target install::
       -> fleet_cells.arm_ordered
       -> the real receipt gate, against a real RSA-signed receipt from a real
             HTTP hub (harness.receipt_hub)
-      -> provision.arm_aot -> aot_serve.load_and_wrap on a real packed cell
+      -> provision.arm_aot -> aot_serve.arm_entry on a real packed cell
             (harness.exported_cell) whose ck1 key is restatable from its own
             recorded facts
       -> the real boot warmup, the real per-object proof pass, the real
@@ -176,7 +176,7 @@ def cell_metadata() -> Dict[str, Any]:
     # The REAL key, restated from the artifact's own recorded facts — the same
     # recomputation admission runs (pgw#1059), so nothing here is a stamp the
     # bytes cannot back up.
-    meta["cell_key"] = cell_key.from_exported_artifact_metadata(meta).digest
+    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
     return meta
 
 
@@ -231,8 +231,10 @@ def production_cfgs() -> Dict[str, Any]:
 
 def _derived(digest: str) -> boot_key.DerivedKey:
     return boot_key.DerivedKey(
-        key=cell_key.CellKey(axes=(("adopted", digest),)),
-        class_hashes={}, combined="", workers=1, width_reason="rig",
+        # pgw#1176: the rig's derived manifest — one entry key per declared
+        # class. `digest` stands in for the traced graph, as it always did.
+        entry_keys={"rig": "ek1-" + (digest * 56)[:56]},
+        class_hashes={}, manifest="", workers=1, width_reason="rig",
         traced=len(ROWS), memo="miss", wall_ms=10_291,
     )
 
@@ -321,7 +323,7 @@ class AdoptRig:
                         viewer identity this process does not hold (pgw#1122).
     ``warm_dispatches`` the handler really calls the wrapped forward N times.
     ``after_arm``       called with the pipeline immediately after the real
-                        ``load_and_wrap`` returns — an observation point at the
+                        ``arm_entry`` returns — an observation point at the
                         exact moment production has one, for driving real
                         dispatches before setup's proof snapshot. It may not
                         write state the arm did not.
@@ -426,7 +428,7 @@ class AdoptRig:
         mp.setattr(provision, "arm_aot", _record_cfg)
 
         if self.after_arm is not None:
-            real_wrap = aot_serve.load_and_wrap
+            real_wrap = aot_serve.arm_entry
             hook = self.after_arm
 
             def _wrap_then_observe(pipeline: Any, *a: Any, **k: Any) -> Any:
@@ -434,20 +436,30 @@ class AdoptRig:
                 hook(pipeline)
                 return meta
 
-            mp.setattr(aot_serve, "load_and_wrap", _wrap_then_observe)
+            mp.setattr(aot_serve, "arm_entry", _wrap_then_observe)
 
     def _install_boot_adopt(
         self, cell: cell_resolve.ResolvedCell, artifact: Path,
     ) -> None:
         """SEAM 1: the derive+resolve half, whose own coverage is pgw#1116's."""
 
-        def _adopt(_self: Any, spec: Any, slots: Any) -> boot_adopt.BootAdoptOutcome:
-            return boot_adopt.report(boot_adopt.BootAdoptOutcome(
+        def _adopt(
+            _self: Any, spec: Any, slots: Any,
+        ) -> Tuple[boot_adopt.BootAdoptOutcome, ...]:
+            """pgw#1176: `_boot_adopt` answers ONE outcome PER DECLARED CLASS.
+
+            The double must return the shape production returns — a tuple —
+            or every caller downstream is exercised against a contract the
+            worker does not have. Lane 2 found two doubles lying this exact
+            way and fixed them at the double rather than the assertion; this
+            is the same fix at the rig.
+            """
+            return (boot_adopt.report(boot_adopt.BootAdoptOutcome(
                 adoption=boot_adopt.BootAdoption(
                     derived=_derived(cell.cell_key), cell=cell,
                     artifact=artifact),
                 reason=boot_adopt.HIT, derived_key=cell.cell_key,
-                derive_ms=10_291, family=FAMILY, function="generate"))
+                derive_ms=10_291, family=FAMILY, function="generate")),)
 
         self.monkeypatch.setattr(Executor, "_boot_adopt", _adopt)
 
@@ -524,7 +536,7 @@ class AdoptRig:
 def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
     """Put the tree back where ``f3ab710e`` found it, both halves.
 
-    1. ``load_and_wrap`` stops registering the key it just armed, so
+    1. ``arm_entry`` stops registering the key it just armed, so
        ``_KNOWN_AOT_KEYS`` goes back to being fed only by the two SELF-PRODUCED
        routes — which the ordered/boot-adopt arm is not one of.
     2. ``executor._exported_arm`` goes back to asking the REF STRING through
@@ -533,7 +545,7 @@ def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
     Both are DELETIONS of the fix, not additions of a fault: this is master
     before the fix, reached by removing what the fix added.
     """
-    real_wrap = aot_serve.load_and_wrap
+    real_wrap = aot_serve.arm_entry
     real_note = aot_serve.note_aot_key
 
     def _wrap_without_registering(pipeline: Any, *a: Any, **k: Any) -> Any:
@@ -543,7 +555,7 @@ def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
         finally:
             aot_serve.note_aot_key = real_note  # type: ignore[assignment]
 
-    monkeypatch.setattr(aot_serve, "load_and_wrap", _wrap_without_registering)
+    monkeypatch.setattr(aot_serve, "arm_entry", _wrap_without_registering)
     monkeypatch.setattr(
         ex_mod, "_exported_arm",
         lambda pipeline, ref="": bool(ref) and aot_serve.is_aot_ref(ref))

@@ -154,7 +154,9 @@ def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
             if isinstance(toolchain, dict) else ""),
         env_seal_digest=(
             env_seal.seal_digest(dict(seal)) if isinstance(seal, dict) else ""),
-        graph_contract_digest=str(meta.get("combined_graph_hash") or ""),
+        # pgw#1176: the DECLARATION-wide coverage label, not identity.
+        # Identity is `cell_key` above, per entry.
+        graph_contract_digest=str(meta.get("manifest_digest") or ""),
         publisher_org="",
     )
 
@@ -269,12 +271,12 @@ def verify_graph_witness(
         return (
             "this pod derived no graph witnesses, so the cell's compiled "
             "graphs cannot be shown to be the graphs it traced (pgw#1031)")
-    entries = meta.get("entries")
-    if not isinstance(entries, Mapping) or not entries:
-        return "artifact records no entries map; it has no graph witness"
+    entry = meta.get("entry")
+    if not isinstance(entry, Mapping) or not entry:
+        return "artifact records no entry block; it has no graph witness"
     recorded = {
-        str(name): str((block or {}).get(GRAPH_WITNESS_FIELD) or "")
-        for name, block in entries.items()
+        str(entry.get("name") or ""):
+            str(entry.get(GRAPH_WITNESS_FIELD) or ""),
     }
     silent = sorted(name for name, value in recorded.items() if not value)
     if silent:

@@ -16,8 +16,8 @@ from gen_worker import aot_identity, cell_key as ck, cell_resolve, env_seal
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.procsplit import actions as actions_mod
 
-KEY = "ck1-" + "ab" * 28
-OTHER_KEY = "ck1-" + "cd" * 28
+KEY = "ek1-" + "ab" * 28
+OTHER_KEY = "ek1-" + "cd" * 28
 
 
 class _Resp:
@@ -196,7 +196,13 @@ def test_an_incomplete_answer_is_a_typed_refusal_not_a_miss() -> None:
 
 def test_a_non_key_is_refused_before_the_hub_is_dialled(stub) -> None:
     sent, _resp = stub
-    for bad in ("", "sdxl", "arm1-" + "ab" * 28, "ck1-short"):
+    # `ck1-short` is refused for its LENGTH, which is why the WELL-FORMED ck1
+    # key sits beside it: pgw#1176 re-keyed the grammar, and a `ck1` key names
+    # a 36-entry all-or-nothing cell this runtime cannot arm at all. It must
+    # fail HERE, at the comparison, rather than late inside a per-entry path —
+    # so the prefix, not the shape, has to be what refuses it.
+    for bad in ("", "sdxl", "arm1-" + "ab" * 28, "ck1-short",
+                "ck1-" + "0" * 56):
         with pytest.raises(cell_resolve.CellResolveRefused):
             cell_resolve.resolve("sdxl", bad)
     assert not sent  # nothing was sent
@@ -248,7 +254,10 @@ def test_a_hit_builds_the_expected_identity_the_arm_gate_COMPARES(
         "cell_key": KEY,
         "toolchain": {"torch": "x"},
         "env_seal": {"a": 1},
-        "combined_graph_hash": "c0ffee0000000000",
+        # pgw#1176: the declaration-wide coverage label. Same arithmetic as
+        # `combined_graph_hash`, demoted from identity — identity is
+        # `cell_key`, per entry.
+        "manifest_digest": "c0ffee0000000000",
     }
     meta["toolchain_digest_expected"] = ck.facts_digest(meta["toolchain"])
     reason = aot_identity.verify_declared_identity(
@@ -366,22 +375,30 @@ def _attempt(monkeypatch, tmp_path, *, derive=None, resolve=None,
         guidance_scales = (7.5,)
         lora_bucket = 0
 
-    return boot_adopt.attempt(
+    # pgw#1176: `attempt` returns ONE outcome per declared graph class, and a
+    # derivation failure is a single-element tuple. Every declaration below
+    # traces one class, so the unpack ASSERTS that arity for all five callers
+    # rather than indexing past a set nobody checked.
+    (out,) = boot_adopt.attempt(
         function="txt2img", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=3,
         envelope={"shapes": [[1024, 1024]], "text_lens": [77],
                   "guidance": [7.5]},
         work_root=tmp_path)
+    return out
 
 
 def _derived(digest: str = KEY) -> Any:
     from gen_worker import boot_key, cell_key as ck
 
     return boot_key.DerivedKey(
-        key=ck.from_axes({
-            "graph": "c0ffee0000000000", "envelope": "e" * 16,
-            "sm": "sm_89", "toolchain": "t" * 16}),
-        class_hashes={"a": "0" * 16}, combined="c0ffee0000000000",
+        # pgw#1176: a boot derives a KEY SET. These declarations trace to one
+        # class, so the set has one member and callers take it from `keys`.
+        entry_keys={"a": ck.from_axes({
+            "graph": "c0ffee0000000000",
+            "sm": "sm_89", "toolchain": "t" * 16}).digest},
+        class_hashes={"a": "c0ffee0000000000"},
+        manifest=ck.manifest_digest(["c0ffee0000000000"]),
         workers=2, width_reason="test", traced=1, memo="miss", wall_ms=1234)
 
 
@@ -412,7 +429,7 @@ def test_a_hub_refusal_degrades_but_keeps_its_own_token(
         derive=lambda **_kw: _derived(), resolve=_refuse)
     assert not out.adopted
     assert out.reason == "cell_resolve_ambiguous"
-    assert out.derived_key.startswith("ck1-")
+    assert out.derived_key.startswith("ek1-")
     assert out.derive_ms == 1234
 
 
@@ -422,7 +439,7 @@ def test_a_miss_degrades_as_miss_not_as_a_failure(monkeypatch, tmp_path) -> None
         derive=lambda **_kw: _derived(), resolve=lambda *_a, **_k: None)
     assert not out.adopted
     assert out.reason == "miss"
-    assert out.derived_key.startswith("ck1-")
+    assert out.derived_key.startswith("ek1-")
 
 
 def test_a_failed_materialize_degrades_and_is_never_fatal(

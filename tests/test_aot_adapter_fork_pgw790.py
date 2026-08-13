@@ -42,6 +42,7 @@ from gen_worker import (  # noqa: E402
     aot_declaration,
     aot_mint,
     aot_serve,
+    cell_key,
     compile_cache,
 )
 from gen_worker.api.decorators import Compile  # noqa: E402
@@ -112,7 +113,13 @@ def _fresh_registry():
 
 @pytest.fixture(scope="module")
 def cell(tmp_path_factory, request) -> Dict[str, Any]:
-    """ONE real two-arm mint, shared (an AOTI compile costs ~10s per entry)."""
+    """ONE real two-arm mint, shared (an AOTI compile costs ~10s per entry).
+
+    pgw#1176: the mint yields TWO independently keyed artifacts rather than
+    one two-entry cell. ``by_entry`` indexes them by the class each one names,
+    which is the addressing every row below wants — an entry NAMES its class,
+    and that is what makes a per-class refusal bisectable.
+    """
     from _pytest.monkeypatch import MonkeyPatch
 
     mp = MonkeyPatch()
@@ -124,7 +131,27 @@ def cell(tmp_path_factory, request) -> Dict[str, Any]:
     result = aot_mint.mint(
         pipe, _spec(), tmp / "out")
     reset_export_declarations()
-    return {"pipe": pipe, "result": result, "tmp": tmp}
+    by_entry = {row.entry: row for row in result.entries}
+    assert len(by_entry) == len(result.entries), "two entries collided on one name"
+    return {"pipe": pipe, "result": result, "tmp": tmp, "by_entry": by_entry}
+
+
+#: The two graph classes this declaration forks into.
+LEAN = "unet/adapter=false/B=2"
+FAT = "unet/adapter=true/B=2"
+
+
+def _entry_block(cell: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """One class's recorded entry block, off ITS OWN artifact's metadata.
+
+    pgw#1176 replaced the ``entries`` MAP with one ``entry`` block per
+    artifact, so a class is addressed by picking its artifact rather than by
+    indexing a map that could silently be missing the key.
+    """
+    row = cell["by_entry"][name]
+    block = dict(row.metadata[cell_key.ENTRY_BLOCK_KEY])
+    assert block["name"] == name, block.get("name")
+    return block
 
 
 # ---------------------------------------------------------------------------
@@ -189,15 +216,19 @@ def test_the_arm_is_a_fork_coordinate_and_lands_in_the_class_hash() -> None:
 
 
 def test_one_mint_packages_both_arms(cell) -> None:
-    meta = cell["result"].metadata
-    assert sorted(meta["entries"]) == [
-        "unet/adapter=false/B=2", "unet/adapter=true/B=2"]
+    """pgw#1176: "one cell, two graph classes" became "one mint, two
+    independently keyed ARTIFACTS" — the fork is unchanged, what it packages
+    into is not. Each artifact carries one class and is keyed by it, so the
+    two must also be keyed DIFFERENTLY."""
+    result = cell["result"]
+    assert sorted(row.entry for row in result.entries) == [LEAN, FAT]
+    assert len({row.key for row in result.entries}) == 2
+    assert len({row.artifact for row in result.entries}) == 2
 
 
 def test_the_branchless_arm_has_no_adapter_inputs_and_says_so(cell) -> None:
-    meta = cell["result"].metadata
-    lean = meta["entries"]["unet/adapter=false/B=2"]
-    fat = meta["entries"]["unet/adapter=true/B=2"]
+    lean = _entry_block(cell, LEAN)
+    fat = _entry_block(cell, FAT)
     lean_names = {row["name"] for row in lean["inputs"]}
     fat_names = {row["name"] for row in fat["inputs"]}
     assert set(lora_lifted.LIFTED_INPUT_NAMES) <= fat_names
@@ -211,9 +242,8 @@ def test_the_branchless_arm_has_no_adapter_inputs_and_says_so(cell) -> None:
 def test_the_branchless_graph_actually_dropped_the_branch(cell) -> None:
     """Not just the signature: the adapter must be gone from the traced
     program, or the fork bought nothing."""
-    meta = cell["result"].metadata
-    lean = meta["entries"]["unet/adapter=false/B=2"]["graph"]
-    fat = meta["entries"]["unet/adapter=true/B=2"]["graph"]
+    lean = _entry_block(cell, LEAN)["graph"]
+    fat = _entry_block(cell, FAT)["graph"]
     assert lean["lifted_inputs"] == []
     assert fat["lifted_inputs"] == sorted(lora_lifted.LIFTED_INPUT_NAMES)
     assert lean["specialization"]["fork.adapter"] is False
@@ -237,8 +267,15 @@ def test_the_pipeline_is_left_armed_after_the_branchless_exports(cell) -> None:
 
 
 def test_the_stamped_key_is_recomputable_from_the_recorded_facts(cell) -> None:
-    meta = dict(cell["result"].metadata)
-    assert aot_mint.cell_identity(meta).digest == meta["cell_key"]
+    """pgw#1176: recomputable PER ENTRY, off that entry's own artifact. The
+    two classes must also recompute to two DIFFERENT keys, or the fork is not
+    addressable and a serve path could fetch either for either."""
+    rows = cell["result"].entries
+    assert len(rows) == 2
+    for row in rows:
+        meta = dict(row.metadata)
+        assert aot_mint.cell_identity(meta).digest == meta["cell_key"] == row.key
+    assert len({row.key for row in rows}) == 2
 
 
 def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(
@@ -268,10 +305,14 @@ def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(
         out = tmp_path / f"active{int(active)}"
         result = aot_mint.mint(
             pipe, _spec(), out)
-        keys.append(result.metadata["cell_key"])
-        names.append(sorted(result.metadata["entries"]))
+        # pgw#1176: the key SET, per entry name. One comparison now carries
+        # both halves this row used to assert apart (same classes, same keys),
+        # and the length assert is what stops an empty mint passing it
+        # vacuously.
+        keys.append({row.entry: row.key for row in result.entries})
+        names.append(sorted(row.entry for row in result.entries))
         reset_export_declarations()
-    assert names[0] == names[1]
+    assert names[0] == names[1] == [LEAN, FAT]
     assert keys[0] == keys[1]
 
 
@@ -306,16 +347,32 @@ def test_an_exclusion_free_contract_digests_exactly_as_before() -> None:
 
 @pytest.fixture
 def armed(cell, monkeypatch) -> Dict[str, Any]:
-    """The real cell, armed on a fresh pipeline through the real
-    `aot_serve.load_and_wrap` (stage -> verify -> load every entry -> bind ->
-    wrap)."""
+    """Both classes armed on a fresh pipeline through the real
+    `aot_serve.arm_entry` — stage -> verify -> load -> bind -> register, ONE
+    graph class per call.
+
+    pgw#1176: this is the accretion loop, and it is the production shape
+    rather than a test convenience. Each entry arms whole or not at all and
+    JOINS the target's registry, so the two classes below reach the dispatch
+    through two independent arms — which is exactly what makes a single
+    class's refusal cost one class instead of the whole fork.
+    """
     _fake_sm(monkeypatch)
     pipe = _armed_pipe()
     cfg = types.SimpleNamespace(family=FAMILY)
-    meta = aot_serve.load_and_wrap(
-        pipe, cfg, Path(cell["result"].artifact),
-        cache_dir=cell["tmp"] / "stage")
-    return {"pipe": pipe, "meta": meta}
+    metas = {}
+    for row in cell["result"].entries:
+        metas[row.entry] = aot_serve.arm_entry(
+            pipe, cfg, Path(row.artifact),
+            cache_dir=cell["tmp"] / "stage")
+    assert set(metas) == {LEAN, FAT}
+    # Both classes are SERVING — the rows below distinguish which one served,
+    # so an arm that silently dropped one would make them pass for the wrong
+    # reason.
+    assert set(aot_serve.entry_states(pipe)) == {LEAN, FAT}
+    assert all(s["state"] == "armed"
+               for s in aot_serve.entry_states(pipe).values())
+    return {"pipe": pipe, "metas": metas}
 
 
 def _call(pipe: Any) -> Any:
@@ -386,12 +443,12 @@ def test_without_the_exclusion_the_dispatch_cannot_discriminate(cell) -> None:
     adapter-bearing call is admitted by BOTH classes, which the dispatch
     refuses as ``entry_ambiguous`` — i.e. the whole attach lane would fall
     back to eager."""
-    meta = json.loads(json.dumps(cell["result"].metadata))
-    lean = dict(meta["entries"]["unet/adapter=false/B=2"])
+    lean_block = json.loads(json.dumps(_entry_block(cell, LEAN)))
+    fat_block = json.loads(json.dumps(_entry_block(cell, FAT)))
+    lean = dict(lean_block)
     lean.pop("excluded_inputs")
     lean_contract = aot_serve.contract_from_meta(lean)
-    fat_contract = aot_serve.contract_from_meta(
-        meta["entries"]["unet/adapter=true/B=2"])
+    fat_contract = aot_serve.contract_from_meta(fat_block)
     dispatch = aot_serve.EntryDispatch((
         ("unet/adapter=false/B=2", aot_serve.ArtifactRunner(
             package=None, contract=lean_contract, constants=())),
@@ -407,12 +464,11 @@ def test_without_the_exclusion_the_dispatch_cannot_discriminate(cell) -> None:
 
     # With the declaration as minted, the same call routes deterministically.
     good = aot_serve.EntryDispatch((
-        ("unet/adapter=false/B=2", aot_serve.ArtifactRunner(
+        (LEAN, aot_serve.ArtifactRunner(
             package=None,
-            contract=aot_serve.contract_from_meta(
-                meta["entries"]["unet/adapter=false/B=2"]),
+            contract=aot_serve.contract_from_meta(lean_block),
             constants=())),
-        ("unet/adapter=true/B=2", aot_serve.ArtifactRunner(
+        (FAT, aot_serve.ArtifactRunner(
             package=None, contract=fat_contract, constants=())),
     ))
     assert good.select(call, pair)[0] == "unet/adapter=true/B=2"

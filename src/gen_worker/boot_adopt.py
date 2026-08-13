@@ -413,8 +413,13 @@ def attempt(
     bearer: str = "",
     device: int = -1,
     hub_absent: str = "",
-) -> BootAdoptOutcome:
-    """Derive, ask THIS MACHINE, ask the hub, materialize. Never raises.
+) -> Tuple[BootAdoptOutcome, ...]:
+    """Derive the KEY SET, then for each key ask THIS MACHINE, ask the hub and
+    materialize. Never raises.
+
+    pgw#1176: returns ONE outcome per declared graph class. A derivation
+    failure is a single-element tuple, because it is the one failure that is
+    genuinely about the declaration rather than about a class.
 
     ``declared_hint`` is ``len(aot_declaration.cell_plans(decl))`` — it sizes
     the trace pool and nothing else. ``envelope`` is
@@ -462,20 +467,68 @@ def attempt(
         # `slots_unresolvable` are the two that name a family the boot path
         # cannot key at all, and they are the whole point of not collapsing
         # this to "derive failed".
-        return report(BootAdoptOutcome(
+        return (report(BootAdoptOutcome(
             reason=exc.reason, detail=exc.detail,
-            family=family, function=fn))
+            family=family, function=fn)),)
     except Exception as exc:  # noqa: BLE001 — never fatal, see the docstring
         logger.debug("boot-adopt: key derivation failed", exc_info=True)
-        return report(BootAdoptOutcome(
+        return (report(BootAdoptOutcome(
             reason="derive_failed", detail=f"{type(exc).__name__}: {exc}",
-            family=family, function=fn))
+            family=family, function=fn)),)
 
-    key = derived.digest
+    # ── pgw#1176: a boot derives a KEY SET, and asks per key ──────────────
+    #
+    # §4.27 ruled "THE cell key" (singular). It is a derived SET plus a
+    # manifest now, and every property that ruling wanted survives
+    # STRENGTHENED, because a PARTIAL result is useful: a pod that resolves 30
+    # of 36 keys arms 30 classes and compiles 6, where the cell key made that
+    # same outcome a total miss and a full re-mint.
+    #
+    # One outcome PER CLASS, in sorted key order. There is deliberately no
+    # combined verdict — the object that could report one was the wrong atom,
+    # and a "the boot adopted" boolean over 36 classes is exactly the claim
+    # that could lie.
+    #
+    # PHASE 2 slots the batch resolve in HERE: the loop below issues one
+    # `cell_resolve.resolve` per key, which is correct and is what the hub
+    # answers today; when the hub grows `POST /v1/worker/cells/resolve`
+    # {family, keys[]} -> one signed answer per key, this becomes one call and
+    # the per-key bodies consume its answers unchanged.
+    keys = derived.keys
+    if not keys:
+        return (report(BootAdoptOutcome(
+            reason="derive_failed",
+            detail="the declaration traced to no graph class at all",
+            derive_ms=derived.wall_ms, family=family, function=fn)),)
+    return tuple(
+        _attempt_key(
+            key, derived, family=family, fn=fn, cache_dir=cache_dir,
+            base_url=base_url, bearer=bearer, hub_absent=hub_absent)
+        for key in keys)
+
+
+def _attempt_key(
+    key: str,
+    derived: "boot_key.DerivedKey",
+    *,
+    family: str,
+    fn: str,
+    cache_dir: Optional[Path],
+    base_url: str,
+    bearer: str,
+    hub_absent: str,
+) -> BootAdoptOutcome:
+    """Ask this machine, then the hub, for ONE derived entry key.
+
+    A miss, a refusal or a witness mismatch here costs THIS graph class. Its
+    siblings are resolved by their own keys and are not affected — which is
+    what makes a partial hit useful instead of a total miss.
+    """
     logger.info(
-        "boot-adopt: %s derived %s in %d ms (%d class(es), K=%d, memo=%s)",
-        family, key, derived.wall_ms, derived.traced, derived.workers,
-        derived.memo)
+        "boot-adopt: %s asking for %s (manifest %s, %d class(es), K=%d, "
+        "memo=%s, derived in %d ms)",
+        family, key, derived.manifest, derived.traced, derived.workers,
+        derived.memo, derived.wall_ms)
 
     # ── §4.28 / pgw#1127: THIS MACHINE, before the wire ────────────────────
     # The derived key is the local store's own address. A machine that minted

@@ -13,7 +13,7 @@ were fine — stickily, for the life of the process. Two call sites ran it:
 ``provision.arm_aot`` (every arm route) and ``fleet_cells.adopt_delegated_mint``
 (the self-mint route). Both are gone.
 
-What refuses now is the bind itself. ``aot_serve.load_and_wrap`` attempts every
+What refuses now is the bind itself. ``aot_serve.arm_entry`` attempts every
 entry inside ``_bind_headroom``; a real CUDA OOM comes back as a typed
 ``insufficient_adopt_vram`` ``AdoptError`` that NAMES the entry, before the
 first live mutation, so the pod serves eager and stays up.
@@ -126,7 +126,14 @@ def test_the_refusal_names_the_entry_that_did_not_fit(
         f"nothing on the wire names entry {OOM_ENTRY!r}, so a reader cannot "
         f"tell a cell that is one entry too big from one that is wholly "
         f"unadoptable. Saw: {said!r}")
-    assert "(2 of 2)" in said, (
+    # pgw#1176 RE-BASED THE POSITION, and the claim is sharper for it. The old
+    # "(2 of 2)" measured how far through a bind-all-then-wrap sequence the OOM
+    # landed — the only handle th#1825 had. Each class binds ALONE now, so that
+    # index is always 1 of 1 and says nothing. What distinguishes "one class
+    # too big" from "wholly unadoptable" is how many siblings are ALREADY
+    # ARMED and still serving, which is a fact about what the pod is doing
+    # rather than about a loop it happened to be in.
+    assert "already armed)" in said, (
         "the refusal does not say WHERE in the bind it happened; an entry "
         "index is what makes 'nearly fit' measurable")
 

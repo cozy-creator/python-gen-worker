@@ -56,6 +56,14 @@ def _cell(path: Path, meta: Dict[str, Any], *, pad_to: int = 0) -> Path:
 
 #: The shape row 7's envelope had: entries whose `target` is the denoiser, and
 #: a stamped key. Everything the two skipped gates needed was right here.
+#:
+#: DELIBERATELY PRE-pgw#1176, and left that way: `format: 2`, an `entries` MAP
+#: and a `ck1` key. This fixture's job is to reproduce a REAL artifact from the
+#: row 7 incident so the metadata SIZE bound is measured against bytes that
+#: actually existed. Migrating it to a one-entry `ek1` envelope would shrink
+#: the very thing under test — a 36-entry cell is what made the envelope
+#: exceed 16 MiB — and would assert the bound against a shape that never
+#: overflowed it.
 _ROW7_META: Dict[str, Any] = {
     "format": 2,
     "kind": "aot-inductor",
@@ -229,7 +237,7 @@ def test_adopt_delegated_mint_refuses_an_unreadable_envelope_by_name(
         ref="repo#arm1", cfg=_Cfg(), target=target, mint_root=mint_root,
         publisher=None, cache_dir=tmp_path / "cache", arm_key=None)
 
-    minted = fleet_cells.adopt_delegated_mint(object(), pending, produced)
+    minted = fleet_cells.adopt_delegated_mint(object(), pending, [produced])
 
     assert minted is None
     reason, why = fleet_cells.adopt_refusal(pending)

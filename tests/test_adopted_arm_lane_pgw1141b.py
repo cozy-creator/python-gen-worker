@@ -42,7 +42,7 @@ entered one gate east of the bug — twice.
 THE FIX, in two parts, because one of them is a convention and the other is a
 structure:
 
-1. ``aot_serve.load_and_wrap`` registers the key AT THE WRAP — the single seam
+1. ``aot_serve.arm_entry`` registers the key AT THE WRAP — the single seam
    every arm route passes, and the moment the fact becomes true;
 2. the executor's three lane readers ask the OBJECT
    (``aot_serve.holds_exported_cell`` via ``executor._exported_arm``), so the
@@ -53,7 +53,7 @@ WHAT RUNS FOR REAL HERE. The whole chain from the ordered arm to the install:
 ``Executor.ensure_setup`` -> ``_injection_kwargs`` -> ``_enable_compiled`` with
 a real ``_ArmOrder(adopt=…)`` -> ``fleet_cells.arm_ordered`` -> the real
 receipt gate against a real RSA-signed receipt from a real HTTP hub ->
-``provision.arm_aot`` -> ``aot_serve.load_and_wrap`` on a real packed artifact
+``provision.arm_aot`` -> ``aot_serve.arm_entry`` on a real packed artifact
 -> the real boot warmup -> the real proof pass -> the real
 ``_install_compile_targets`` and ``_assert_armed_targets_installed``.
 
@@ -90,7 +90,7 @@ from gen_worker import executor as ex_mod
 # the DEFAULT rig for anything arming-adjacent. It is the same chain, verbatim
 # — real `ensure_setup` -> real `_enable_compiled` -> a real `_ArmOrder(adopt=…)`
 # -> real `arm_ordered` -> the real receipt gate against a real RSA-signed
-# receipt from a real HTTP hub -> `provision.arm_aot` -> `load_and_wrap` on a
+# receipt from a real HTTP hub -> `provision.arm_aot` -> `arm_entry` on a
 # real packed cell -> real warmup, proof pass and target install.
 from harness.adopt_rig import FAMILY, AdoptRig  # noqa: F401
 from harness.receipt_hub import HubStub, hub, pub_map, rsa_key  # noqa: F401
@@ -252,7 +252,7 @@ def test_the_registration_lives_at_the_wrap_not_at_the_call_sites() -> None:
     """The fence against a FOURTH reader. ``note_aot_key`` was a convention
     ("whoever reads a cell_key off an aot-inductor envelope registers it") and
     the ordered arm simply did not keep it. Registration now happens inside
-    ``load_and_wrap``, the one function every arm route passes, so a new route
+    ``arm_entry``, the one function every arm route passes, so a new route
     inherits it instead of having to remember it.
 
     pgw#1152 made this a repo-wide lint (``scripts/lint_arm_state_feeders.py``)
@@ -261,7 +261,7 @@ def test_the_registration_lives_at_the_wrap_not_at_the_call_sites() -> None:
     """
     import inspect
 
-    body = inspect.getsource(aot_serve.load_and_wrap)
+    body = inspect.getsource(aot_serve.arm_entry)
     assert "note_aot_key(" in body, (
         "the wrap no longer registers the key it just armed; a new arm route "
         "is one convention away from pgw#1141b happening again")
@@ -277,8 +277,13 @@ def test_a_wrapped_object_answers_the_lane_question_itself(
     pipe = boot.pipeline
 
     assert aot_serve.holds_exported_cell(pipe) is True
-    for state in aot_serve._marker_states(pipe):
-        state["failed"] = True
+    # pgw#1176: REVOKING is de-arming every entry, not setting a flag.
+    # `is_armed` asks the REGISTRY what is armed — deliberately, because a
+    # boolean can claim more than the pod serves — so a fixture that flipped
+    # `state["failed"]` was revoking a cell-level thing that no longer exists.
+    # `disarm_entry` is what production calls, and it is sticky for the boot.
+    for name in list(aot_serve.armed_entries(pipe)):
+        aot_serve.disarm_entry(pipe, name, "revoked by the lane-question row")
     assert aot_serve.is_armed(pipe) is False
     assert aot_serve.holds_exported_cell(pipe) is True, (
         "a revoked cell stopped being recognizable as an exported one, which "

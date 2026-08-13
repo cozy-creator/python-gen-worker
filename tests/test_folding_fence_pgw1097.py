@@ -214,9 +214,9 @@ def test_the_fence_does_not_use_always_keep_tensor_constants() -> None:
 
 
 def _meta(**over: object) -> dict:
-    meta = aot_serve.artifact_metadata(
+    meta = aot_serve.entry_metadata(
         family="micro-diffusion", precision="bf16", cell_key="ck1-test",
-        entries={ENTRY: {
+        name=ENTRY, entry={
             "target": "transformer", "fork": [], "class_dims": [],
             "inputs": [{"name": "latent", "position": 0, "dtype": "float32",
                         "shape": [1, 16, "s0"], "path": []}],
@@ -224,7 +224,7 @@ def _meta(**over: object) -> dict:
             "constants": [{"fqn": n, "source": aot_serve.SOURCE_STATE_DICT,
                            "dtype": "float32", "shape": [16]}
                           for n in WEIGHTS],
-        }},
+        },
     )
     meta.update(aot_serve.runtime_key())
     meta.update(over)

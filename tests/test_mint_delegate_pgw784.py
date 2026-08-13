@@ -100,7 +100,7 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
         lambda *a, **k: AdoptOutcome.miss("no_cell"))
     monkeypatch.setattr(cc, "has_compile_target", lambda *a, **k: True)
     monkeypatch.setattr(cc, "mandatory_serving", lambda pipe: False)
-    monkeypatch.setattr(cc, "apply_lora_execution_lane", lambda pipe, bucket: True)
+    monkeypatch.setattr(cc, "apply_lora_execution_lane", lambda pipe, bucket, **_kw: True)
     monkeypatch.setattr(cc, "drop_lora_execution_lane", lambda pipe: True)
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
@@ -187,7 +187,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
 def _task(tmp_path: Path, **over: Any) -> mint_delegate.MintTask:
     pending = fleet_cells.PendingSelfMint(
         family="sdxl", arm_token="ck1-abc",
-        ref="root/family-sdxl#ck1-abc", cfg=_cfg(),
+        ref="root/family-sdxl#ek1-abc", cfg=_cfg(),
         target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
     fields: Dict[str, Any] = dict(
@@ -215,10 +215,10 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
     seen: List[tuple] = []
     monkeypatch.setattr(
         mint_delegate.activity_mod, "emit_event",
-        lambda kind, detail, phase="": seen.append((kind, phase, detail)))
+        lambda kind, detail, phase="", **_kw: seen.append((kind, phase, detail)))
     monkeypatch.setattr(
         fleet_cells.activity_mod, "emit_event",
-        lambda kind, detail, phase="": seen.append((kind, phase, detail)))
+        lambda kind, detail, phase="", **_kw: seen.append((kind, phase, detail)))
     return seen
 
 
@@ -229,11 +229,15 @@ def test_a_minted_child_is_adopted_through_the_delivered_cell_path(
     _fake_card(monkeypatch, total_gib=80, resident_gib=6)
     adopted: List[Path] = []
 
-    def _adopt(pipe: Any, pending: Any, artifact: Path) -> Any:
-        adopted.append(Path(artifact))
+    def _adopt(pipe: Any, pending: Any, artifacts: Any) -> Any:
+        # pgw#1176: the adopt takes the SET the child produced, one artifact
+        # per graph class. A double taking a single Path models a call
+        # production does not make.
+        rows = [Path(a) for a in artifacts]
+        adopted.extend(rows)
         return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ck1-abc", ref="r#k",
-            snapshot_digest="blake3:x", artifact=Path(artifact))
+            family="sdxl", cell_key="ek1-abc", ref="r#k",
+            snapshot_digest="blake3:x", artifact=rows[0])
 
     monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
     act = _Act()
@@ -334,9 +338,9 @@ def test_a_mint_spawns_a_child_with_no_pre_flight_verdict(
     _fake_card(monkeypatch, total_gib=80, resident_gib=54)
     monkeypatch.setattr(
         fleet_cells, "adopt_delegated_mint",
-        lambda pipe, pending, artifact: fleet_cells.SelfMint(
+        lambda pipe, pending, artifacts: fleet_cells.SelfMint(
             family="sdxl", cell_key="k", ref="r", snapshot_digest="d",
-            artifact=Path(artifact)))
+            artifact=Path(list(artifacts)[0])))
     result = asyncio.run(mint_delegate.build_cell(
         _task(tmp_path, weight_lane="w8a8"), act=_Act()))
     assert result.status == mint_delegate.ADOPTED, (

@@ -26,6 +26,7 @@ import pytest
 import torch
 from torch import nn
 
+from gen_worker import cell_key
 from gen_worker import compile_cache as cc
 from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.models import lora_lifted, provision
@@ -73,20 +74,20 @@ class _Pipe:
         self.decoder = _Decoder().eval()
 
 
-def _meta_with_entries_only() -> Dict[str, Any]:
-    """The shape a REAL packed multi-entry cell has: targets recorded PER
-    ENTRY, and NO top-level `targets`/`module` at all.
+def _meta_with_entry_only() -> Dict[str, Any]:
+    """The shape a REAL packed entry artifact has: ONE entry block naming its
+    own target, and NO top-level `targets`/`module` at all.
 
     Measured on a real 5-entry lora64 cell: `meta["targets"] is None` and
-    `meta["module"] is None`, every entry `target='transformer'`. `decoder`
-    sorts first, which is what makes defect 2 bite once defect 1 is fixed.
+    `meta["module"] is None`, every entry `target='transformer'`. pgw#1176
+    kept the ABSENCE — which is what defect 1 is about — and removed the MAP:
+    one artifact, one entry, one target.
     """
     return {
         "lora_bucket": BUCKET,
-        "entries": {
-            "decoder": {"target": "decoder"},
-            "transformer/adapter=true,cfg=false": {"target": "transformer"},
-            "transformer/adapter=true,cfg=true": {"target": "transformer"},
+        cell_key.ENTRY_BLOCK_KEY: {
+            "name": "transformer/adapter=true,cfg=true",
+            "target": "transformer",
         },
     }
 
@@ -98,7 +99,7 @@ def armed(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 
     monkeypatch.setattr(
         artifact_meta, "try_read_metadata",
-        lambda p: _meta_with_entries_only())
+        lambda p: _meta_with_entry_only())
     monkeypatch.setattr(provision, "arm_route", lambda mode: object())
     monkeypatch.setattr(
         aot_serve, "enable", lambda *a, **k: AdoptOutcome.hit("armed"))
@@ -117,7 +118,17 @@ def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
     """RED at HEAD: `targets` came only from `meta["targets"]`, which a packed
     cell does not carry, so `module_name` was "" and the install was SILENTLY
     SKIPPED — leaving `aot_serve.enable` to refuse the artifact it had just
-    been handed with `lifted_inputs_unbindable`."""
+    been handed with `lifted_inputs_unbindable`.
+
+    pgw#1176 CONSOLIDATED defect 2 into this row. It read: *"`decoder` sorts
+    first among the entry names, and installing a lifted forward on a module
+    with no branch container fails by name"* — a premise that needed ONE
+    artifact carrying SEVERAL entries so there was a set to sort and a wrong
+    first element to pick. An artifact now carries one graph class, so that
+    shape is unconstructible and a row that built it would assert against
+    nothing real. What survives of it is the second assert below: the install
+    lands on the branch-capable denoiser and nowhere else.
+    """
     pipe = _Pipe()
     cc.apply_lora_execution_lane(pipe, BUCKET)
     artifact = tmp_path / "cell.tar.gz"
@@ -127,31 +138,8 @@ def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
 
     assert outcome.armed
     assert lora_lifted.lifted_binding(pipe.transformer) is not None, (
-        "the lifted binding was never installed — the artifact's targets live "
-        "per ENTRY and this call site only looked at the top level")
-
-
-# ---------------------------------------------------------------------------
-# Defect 2 — `targets[0]` is the wrong target
-# ---------------------------------------------------------------------------
-
-
-def test_the_lifted_target_is_the_BRANCH_CAPABLE_one_not_the_first(
-    armed: List[Any], tmp_path: Path,
-) -> None:
-    """`decoder` sorts first among the entry names. Installing a lifted
-    forward on a module with no branch container fails by name
-    (`branch-capable module 'proj_in' carries no branch container`), which at
-    HEAD was caught, logged and discarded — so the refusal still read
-    `lifted_inputs_unbindable` with no root."""
-    pipe = _Pipe()
-    cc.apply_lora_execution_lane(pipe, BUCKET)
-    artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"cell")
-
-    provision.arm_aot(pipe, _Cfg(), None, artifact, BUCKET)
-
-    assert lora_lifted.lifted_binding(pipe.transformer) is not None
+        "the lifted binding was never installed — the artifact's target lives "
+        "in its ENTRY block and this call site only looked at the top level")
     assert lora_lifted.lifted_binding(pipe.decoder) is None, (
         "the lifted forward landed on the DECODER — `branch_targets` is the "
         "authority on which module is the denoiser")

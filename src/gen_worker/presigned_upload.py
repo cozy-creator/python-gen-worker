@@ -83,7 +83,6 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
-from blake3 import blake3
 
 from .hubio.transport import (
     STREAM_CHUNK_BYTES,

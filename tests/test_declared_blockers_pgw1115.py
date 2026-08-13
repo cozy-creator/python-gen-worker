@@ -272,9 +272,9 @@ def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
-    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
+    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
+    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
     monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(fleet_cells, "_PENDING", {})
@@ -284,7 +284,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
             "token": "arm1-" + "a" * 56,
             "facts_dict": lambda self: {}})())
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
-    monkeypatch.setattr(fleet_cells.cc, "arm_jit_intake", lambda p, c: None)
+    monkeypatch.setattr(fleet_cells.cc, "arm_jit_intake", lambda p, c, **_kw: None)
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     reset_export_declarations()
@@ -298,7 +298,7 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     seen: List[Tuple[str, str, str]] = []
     monkeypatch.setattr(
         fleet_cells.activity_mod, "emit_event",
-        lambda kind, detail, phase="", duration_ms=0: seen.append(
+        lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append(
             (kind, phase, detail)))
     return seen
 

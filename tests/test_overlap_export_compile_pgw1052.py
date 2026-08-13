@@ -285,7 +285,11 @@ def test_overlapped_and_serial_mints_share_one_cell_key(
     serial = _mint(tmp_path / "serial", entry_workers=1)
     overlapped = _mint(tmp_path / "overlapped")
 
-    assert serial.cell_key == overlapped.cell_key, (
+    # pgw#1176: a mint produces a KEY SET, so "same cell key" becomes "the
+    # same classes, keyed identically" — which is the stronger claim the row
+    # always meant. An overlapped mint that agreed on a combined digest while
+    # one class differed would have passed the old assertion.
+    assert serial.keys == overlapped.keys, (
         "the overlapped mint re-keyed the cell — pgw#1052 must be "
         "byte-invisible in the artifact")
     assert overlapped.timings.get("entry_workers", 0) > 1, (
@@ -294,7 +298,11 @@ def test_overlapped_and_serial_mints_share_one_cell_key(
     assert "export_all_s" in overlapped.timings, (
         "the export phase's own wall must survive the overlap (the pgw#1052 "
         "acceptance names it)")
-    pool_block = (overlapped.metadata.get("mint_phases") or {}).get("pool") or {}
+    # pgw#1176: the phase table is a property of the MINT RUN, carried on
+    # every entry's metadata. Read it off one entry rather than off a result
+    # that no longer has a single metadata.
+    pool_block = ((overlapped.entries[0].metadata.get("mint_phases") or {})
+                  .get("pool") or {})
     assert "idle_source_s" in pool_block, (
         "the pool ledger must charge producer time to its named bucket")
 

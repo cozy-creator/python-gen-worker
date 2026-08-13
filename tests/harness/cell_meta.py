@@ -9,9 +9,14 @@ is therefore no longer a publishable cell in any tree, and a test that ships one
 proves only that an unarmable row still uploads.
 
 This is the minimal envelope that IS one: the same blocks ``aot_mint`` records
-(``aot_serve.artifact_metadata`` + ``shared_identity_blocks``), at fixture
+(``aot_serve.entry_metadata`` + ``shared_identity_blocks``), at fixture
 scale. The ``cell_key`` is COMPUTED, never invented, so the stamp and the axes
 agree — which is itself one of the publish path's refusals.
+
+pgw#1176: one artifact is ONE graph class, so this builds an ``entry`` block
+and no ``entries`` map. There is deliberately no way to ask this harness for a
+multi-entry artifact: production cannot pack one any more, and a fixture that
+could would be testing a shape nothing can produce.
 """
 
 from __future__ import annotations
@@ -39,16 +44,18 @@ def exported_cell_meta(
         "kind": aot_serve.ARTIFACT_KIND, "format": "pt2",
         "weight_lane": weight_lane, "lora_bucket": int(lora_bucket),
         "strict_export": True,
-        "entries": {"unet/main": {
+        cell_key.ENTRY_BLOCK_KEY: {
+            "name": "unet/main",
             "target": "unet", "fork": [], "class_dims": [],
             "range_digest": "r1", "class_hash": CLASS_HASH, "graph": {"v": 2},
-        }},
-        "combined_graph_hash": aot_serve.combined_graph_hash([CLASS_HASH]),
+        },
+        # The declaration-wide coverage LABEL. Telemetry, never identity —
+        # `_identity_axes` publishes it as `graph_contract`, and it may repeat
+        # across the entries of one declaration by construction.
+        "manifest_digest": cell_key.manifest_digest([CLASS_HASH]),
         "env_seal": {"v": 1, "torch": "2.9.0"},
         "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
-        "declared_envelope": {
-            "shapes": [[1024, 1024]], "text_lens": [77], "guidance": [7.5]},
     }
     meta.update(extra)
-    meta["cell_key"] = cell_key.from_exported_artifact_metadata(meta).digest
+    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
     return meta
