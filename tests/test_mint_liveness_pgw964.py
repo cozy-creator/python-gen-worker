@@ -1,17 +1,17 @@
-"""pgw#964: finishing an entry is not dying.
+"""pgw#964: finishing an compiled graph is not dying.
 
 The mint stall monitor sampled its child's process-tree CPU by summing
 ``user + system`` over the LIVE members of the tree. On Linux a process's CPU
 leaves its own ``utime/stime`` and enters its parent's ``cutime/cstime`` the
 instant the parent reaps it, so that sum goes DOWN by a whole child's lifetime
 every time a child finishes — and ``_observe`` compares against a high-water
-mark. An AOT mint whose compile pool completes one ~390-second entry therefore
-falls into a hole one entry deep and is SIGTERMed for making progress.
+mark. An AOT mint whose compile pool completes one ~390-second compiled graph therefore
+falls into a hole one compiled graph deep and is SIGTERMed for making progress.
 
 Not hypothetical: it killed pgw#868 attempt eighteen twice, on two independent
 L40S pods 2.5 h apart, with a byte-identical abort string — while the very
 pool ledger the dying process was writing recorded ``peak_concurrency: 2`` and
-``idle_other_s: 0.069``, i.e. two live entry compile children and essentially
+``idle_other_s: 0.069``, i.e. two live compiled graph compile children and essentially
 zero free slots across the whole 301-second "no process-tree CPU" window.
 
 Both tapes below run REAL processes and a REAL grandchild that burns REAL CPU
@@ -49,7 +49,7 @@ import os, subprocess, sys
 
 state, iters = sys.argv[1], sys.argv[2]
 
-# The entry compile child: burns hard, then EXITS. Its exit is the event the
+# The compiled graph compile child: burns hard, then EXITS. Its exit is the event the
 # old monitor read as death.
 g = subprocess.Popen([
     sys.executable, "-c",
@@ -58,7 +58,7 @@ g = subprocess.Popen([
 g.wait()   # reaped -> the grandchild's CPU moves into OUR cutime/cstime
 open(os.path.join(state, "reaped"), "w").write("1")
 
-# The replacement entry the pool spawns straight after. Still working — and
+# The replacement compiled graph the pool spawns straight after. Still working — and
 # under the old sampler still invisible, because the tree total is sitting in
 # a hole as deep as the grandchild that just finished.
 x = 0
@@ -182,7 +182,7 @@ async def _await(
                 f"last saw {mark!r}")
 
 
-def test_observe_does_not_kill_a_pool_that_finished_an_entry(
+def test_observe_does_not_kill_a_pool_that_finished_an_compiled_graph(
     tmp_path: Path,
 ) -> None:
     """The real ``_observe`` against a real tree that reaps a real grandchild.
@@ -209,17 +209,17 @@ def test_observe_does_not_kill_a_pool_that_finished_an_entry(
                 reaped.exists, lambda: len(seen), watch, proc,
                 what="the grandchild to be reaped")
             assert not watch.done(), (
-                "_observe killed the mint before its entry even finished: "
+                "_observe killed the mint before its compiled_graph even finished: "
                 f"{watch.result()!r}")
 
             floor = len(seen) + 5
             await _await(
                 lambda: len(seen) >= floor, lambda: len(seen), watch, proc,
-                what="evidence to advance again after the entry finished")
+                what="evidence to advance again after the compiled_graph finished")
 
             assert not watch.done(), (
                 "FALSE KILL: _observe SIGTERM'd a mint whose replacement "
-                "entry was burning real CPU the whole time — "
+                "compiled_graph was burning real CPU the whole time — "
                 f"{watch.result()!r}")
         finally:
             watch.cancel()

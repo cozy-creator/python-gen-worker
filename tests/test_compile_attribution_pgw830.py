@@ -49,7 +49,7 @@ def _program(seed: int) -> Any:
     return torch.export.export(Tiny(), (torch.randn(4, _HIDDEN),))
 
 
-def _entries(n: int) -> List[Tuple[str, Any]]:
+def _compiled_graphs(n: int) -> List[Tuple[str, Any]]:
     return [(f"unet/adapter=true/dim={i}", _program(i)) for i in range(n)]
 
 
@@ -59,31 +59,31 @@ def _entries(n: int) -> List[Tuple[str, Any]]:
 
 
 def test_every_second_of_a_pooled_compile_is_attributed(tmp_path: Path) -> None:
-    """Three nested partitions reconcile, per entry, on a real pool run.
+    """Three nested partitions reconcile, per compiled graph, on a real pool run.
 
     This is the test that makes the 44 % un-re-openable. If someone adds a
-    step to the entry child and does not name it, ``child_other_s`` grows and
+    step to the compiled graph child and does not name it, ``child_other_s`` grows and
     the residual assertion fires; if someone removes a phase, the partition
     stops summing and :func:`aot_compile_spans.check` fires.
     """
-    entries = _entries(4)
-    width = pool.entry_workers(
-        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
+    compiled_graphs = _compiled_graphs(4)
+    width = pool.compiled_graph_workers(
+        len(compiled_graphs), limit=2, vcpus=16, available_bytes=64 * 1024**3,
         device_lock=True)
     assert width.workers == 2
-    box = pool.EntryCompilePool(
+    box = pool.CompiledGraphCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
         cache_dir=str(tmp_path / "cache"))
 
-    out = box.compile(entries)
-    assert set(out) == {name for name, _ in entries}
+    out = box.compile(compiled_graphs)
+    assert set(out) == {name for name, _ in compiled_graphs}
 
-    for name, _ in entries:
-        table = box.entry_phases[name]
+    for name, _ in compiled_graphs:
+        table = box.compiled_graph_phases[name]
         violations = spans.check(table)
         assert not violations, (
-            f"entry {name!r}: the compile attribution no longer partitions "
+            f"compiled_graph {name!r}: the compile attribution no longer partitions "
             f"its own total — {violations}. Every interval between the "
             f"recorded marks must have a name (pgw#830); a table that does "
             f"not add up is how 44 % went dark on attempt nine.\n"
@@ -92,33 +92,33 @@ def test_every_second_of_a_pooled_compile_is_attributed(tmp_path: Path) -> None:
         # The recorded compile_s must equal the parent's own measurement,
         # not something the child computed about itself.
         assert table["compile_s"] == pytest.approx(
-            box.entry_seconds[name], abs=0.05)
+            box.compiled_graph_seconds[name], abs=0.05)
 
         # Named, not merely present: the spans that were literally invisible
-        # before this issue. Each is real work paid once PER ENTRY because the
+        # before this issue. Each is real work paid once PER COMPILED_GRAPH because the
         # pool's unit of parallelism is a process that exits — 72 times on
         # attempt nine — so a zero here means the measurement broke.
         for label in ("child_boot_s", "child_program_load_s", "child_seal_s",
                       "compile_wall_s"):
             assert table.get(label, 0.0) > 0.0, (
-                f"entry {name!r}: {label} is not being measured. It is inside "
+                f"compiled_graph {name!r}: {label} is not being measured. It is inside "
                 f"the recorded compile_s whether or not anyone names it")
 
         # The single largest named non-compile span on attempt nine's shape,
         # and the reason this issue found something: `env_seal.establish()`
-        # re-hashes every toolchain .so in the image, per entry child. It must
+        # re-hashes every toolchain .so in the image, per compiled graph child. It must
         # stay broken out — folded back into an anonymous `child_seal_s` it
         # would be indistinguishable from unavoidable process setup.
-        seal = box.entry_overlays[name]
+        seal = box.compiled_graph_overlays[name]
         assert "seal_libhash_s" in seal and "seal_config_s" in seal, (
-            f"entry {name!r}: the seal's own split is gone ({seal}) — "
+            f"compiled_graph {name!r}: the seal's own split is gone ({seal}) — "
             f"`child_seal_s` on its own cannot tell a 4 GB SHA-256 pass "
             f"apart from an unavoidable setup cost")
         assert sum(
             v for k, v in seal.items()
             if k.startswith("seal_") and k != "seal_libhash_s"
         ) == pytest.approx(table["child_seal_s"], abs=0.25), (
-            f"entry {name!r}: the seal split no longer covers child_seal_s "
+            f"compiled_graph {name!r}: the seal split no longer covers child_seal_s "
             f"({seal} vs {table['child_seal_s']})")
 
         # The residuals are what the whole issue is about: they are allowed to
@@ -127,7 +127,7 @@ def test_every_second_of_a_pooled_compile_is_attributed(tmp_path: Path) -> None:
         # error.
         dark = spans.dark_fraction(table)
         assert dark <= 0.15, (
-            f"entry {name!r}: {dark:.1%} of compile_s is in an unnamed "
+            f"compiled_graph {name!r}: {dark:.1%} of compile_s is in an unnamed "
             f"residual (child_other_s={table.get('child_other_s')}, "
             f"compile_other_s={table.get('compile_other_s')}). pgw#830's "
             f"whole point is that this number stays small and named — go "
@@ -136,8 +136,8 @@ def test_every_second_of_a_pooled_compile_is_attributed(tmp_path: Path) -> None:
 
     # The overlays must NOT be summed into the partition. Asserted rather than
     # commented, because the double-count is invisible in a rendered table.
-    for name, _ in entries:
-        table = box.entry_phases[name]
+    for name, _ in compiled_graphs:
+        table = box.compiled_graph_phases[name]
         members = spans.PARTITIONS["compile_wall_s"]
         assert sum(table[m] for m in members) == pytest.approx(
             table["compile_wall_s"], abs=0.05)
@@ -159,22 +159,22 @@ def test_pool_idle_is_accounted_separately_from_compile_seconds(
     These two numbers have OPPOSITE fixes. Serial dark time inside
     ``compile_s`` is compile work on the critical path — the target of
     instrumentation and then optimization. Pool idle is workers with nothing
-    to run; it shrinks when the entry count or the straggler spread changes
+    to run; it shrinks when the compiled graph count or the straggler spread changes
     (pgw#829) and not at all when the compiler gets faster. A table that adds
     them into one "dark" figure aims the next lane at the wrong term.
     """
-    entries = _entries(4)
-    width = pool.entry_workers(
-        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
+    compiled_graphs = _compiled_graphs(4)
+    width = pool.compiled_graph_workers(
+        len(compiled_graphs), limit=2, vcpus=16, available_bytes=64 * 1024**3,
         device_lock=True)
-    box = pool.EntryCompilePool(
+    box = pool.CompiledGraphCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
         cache_dir=str(tmp_path / "cache"))
-    box.compile(entries)
+    box.compile(compiled_graphs)
 
     led = box.ledger
-    assert led.workers == 2 and led.entries == 4
+    assert led.workers == 2 and led.compiled_graphs == 4
     assert led.capacity_s == pytest.approx(led.wall_s * led.workers, abs=0.01)
     # The identity that makes "75 % pool efficiency" a measured statement
     # rather than a ratio someone divided out afterwards.
@@ -189,12 +189,12 @@ def test_pool_idle_is_accounted_separately_from_compile_seconds(
         facts["idle_staging_s"] + facts["idle_drain_s"]
         + facts["idle_spawn_s"] + facts["idle_other_s"], abs=0.01)
     # Staging is parent-serial and really does hold a freed slot: with 4
-    # entries at K=2 there is always a stage between reaps.
+    # compiled graphs at K=2 there is always a stage between reaps.
     assert facts["stage_total_s"] > 0.0
 
-    # And the crossing claim: pool idle is NOT inside any entry's compile_s.
-    busy_from_entries = sum(box.entry_seconds.values())
-    assert busy_from_entries == pytest.approx(led.busy_s, abs=0.01)
+    # And the crossing claim: pool idle is NOT inside any compiled graph's compile_s.
+    busy_from_compiled_graphs = sum(box.compiled_graph_seconds.values())
+    assert busy_from_compiled_graphs == pytest.approx(led.busy_s, abs=0.01)
 
 
 # ---------------------------------------------------------------------------

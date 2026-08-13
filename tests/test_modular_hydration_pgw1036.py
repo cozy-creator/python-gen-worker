@@ -149,7 +149,7 @@ def test_component_trees_on_non_modular_class_refuses_typed(tmp_path) -> None:
 
 
 def test_load_slot_carries_component_trees(tmp_path) -> None:
-    """The production entry the executor calls: provision.load_slot routes
+    """The production compiled graph the executor calls: provision.load_slot routes
     component_trees through to the hydration guard."""
     tree = build_base_tree(tmp_path / "base", fill=1.0)
     override = build_override_vae_tree(tmp_path / "ovr", fill=4.0)

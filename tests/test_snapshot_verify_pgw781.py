@@ -2,14 +2,14 @@
 
 This drives the REAL call site — `ModelStore._verify_snapshot_tree` — over real
 files on disk, because the bug is not in the hashing helper (that was always
-correct) but in what the call site READS off the manifest entry.
+correct) but in what the call site READS off the manifest compiled graph.
 
 The defect: `_verify_snapshot_tree` took the digest from `f.blake3`. Under
 manifest v2 that field is EMPTY and the digest lives in `f.digest` as
 `"sha256:<hex>"`. So `digest` was `""`, the `if digest and ...` hash check was
 skipped, and the tree was reported CLEAN WITHOUT BEING HASHED — while a real
 verification and a vacuous one produce byte-identical "ok" results. That is the
-whole `entries`-vs-`files` lesson pointed at a security control: pgw#769's fill
+whole `compiled graphs`-vs-`files` lesson pointed at a security control: pgw#769's fill
 check is what the NFS/shared-volume verdict rests on, so a no-op that reports
 success is a hole, not a cosmetic gap.
 
@@ -101,7 +101,7 @@ def test_a_v2_snapshot_is_actually_hashed_not_merely_declared_clean(tmp_path, co
     ])
 
     assert ok and bad == []
-    assert counted, "the v2 entry produced NO verification call at all"
+    assert counted, "the v2 compiled_graph produced NO verification call at all"
     rep = counted[-1]
     assert rep.expected == 1 and rep.examined == 1
     assert rep.hashed == 1
@@ -130,10 +130,10 @@ def test_a_corrupt_v2_file_is_caught_and_named_for_quarantine(tmp_path, counted)
     assert counted[-1].examined == 1
 
 
-def test_an_entry_carrying_only_the_legacy_mirror_is_SKIPPED_not_passed(tmp_path, counted):
+def test_an_compiled_graph_carrying_only_the_legacy_mirror_is_SKIPPED_not_passed(tmp_path, counted):
     """th#1303 S1 replaces `test_legacy_blake3_snapshots_still_verify`.
 
-    The blake3 fallback is gone, so a mirror-only entry names no digest. It
+    The blake3 fallback is gone, so a mirror-only compiled graph names no digest. It
     must be reported as skipped and hash NOTHING — and the denominator is the
     point: 1 expected, 0 hashed is a different verdict from 1 expected,
     1 hashed, and only the denominator can tell them apart.
@@ -149,7 +149,7 @@ def test_an_entry_carrying_only_the_legacy_mirror_is_SKIPPED_not_passed(tmp_path
 
 
 def test_a_mixed_tree_hashes_every_covered_file(tmp_path, counted):
-    """Two entries in one snapshot: BOTH must be hashed. Any per-entry
+    """Two compiled graphs in one snapshot: BOTH must be hashed. Any per-compiled graph
     algorithm assumption drops one of them silently."""
     a = b"sha-side" * 300
     b = b"blake-side" * 300

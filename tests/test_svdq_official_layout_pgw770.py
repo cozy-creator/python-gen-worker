@@ -233,7 +233,7 @@ def test_unpack_lowrank_inverts_upstream_pack_lowrank(out_f, in_f, rank):
 
 def _upstream_linear(out_f: int, in_f: int, *, rank: int, per_channel: bool,
                      smooth: bool, seed: int = 0):
-    """A checkpoint entry written the way deepcompressor writes one, plus the
+    """A checkpoint compiled graph written the way deepcompressor writes one, plus the
     float weight it encodes. Mirrors convert_to_nunchaku_w4x4y16_linear_weight:
     W_smoothed = W * diag(s), lora_down pre-divided by s, two-level nvfp4."""
     gen = torch.Generator().manual_seed(seed)

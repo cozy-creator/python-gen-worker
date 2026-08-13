@@ -461,11 +461,11 @@ def w4a4_linear_class() -> type:
 
 def _denoiser_class(root: Path, component: str) -> Any:
     index = json.loads((root / "model_index.json").read_text("utf-8"))
-    entry = index.get(component)
-    if not (isinstance(entry, list) and len(entry) == 2):
+    compiled_graph = index.get(component)
+    if not (isinstance(compiled_graph, list) and len(compiled_graph) == 2):
         raise W4a4SnapshotError(
-            f"model_index.json has no [library, class] entry for {component!r}")
-    lib, name = str(entry[0]), str(entry[1])
+            f"model_index.json has no [library, class] compiled_graph for {component!r}")
+    lib, name = str(compiled_graph[0]), str(compiled_graph[1])
     try:
         mod = importlib.import_module(lib)
     except ImportError:
@@ -493,7 +493,7 @@ def _dequant_into(sd: Dict[str, Any], name: str, compute: Any) -> None:
 
 
 # NO `@implements_contract` HERE, deliberately (th#1590): this flat nvfp4 layout
-# has no registry entry yet, and it is NOT `bfl.nvfp4-preswizzled@1` — that one is
+# has no registry compiled graph yet, and it is NOT `bfl.nvfp4-preswizzled@1` — that one is
 # HIGH-nibble with pre-swizzled scales, and conflating them measured LPIPS 1.11
 # (te#151). Registering ours needs a real artifact to read; none has ever passed
 # the publish gate (gw#540), so this decoder contributes no execution lane.

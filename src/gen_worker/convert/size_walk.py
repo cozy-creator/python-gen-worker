@@ -64,15 +64,15 @@ def compute_size_facts(snapshot_path: Path | str) -> dict[str, Any]:
     components: dict[str, dict[str, int]] = {}
 
     # Diffusers layout: per-component subdirs.
-    diffusers_entries = [
-        entry for entry in path.iterdir()
-        if entry.is_dir() and entry.name in _diffusers_weight_component_dirs()
+    diffusers_compiled_graphs = [
+        compiled_graph for compiled_graph in path.iterdir()
+        if compiled_graph.is_dir() and compiled_graph.name in _diffusers_weight_component_dirs()
     ]
-    if diffusers_entries:
-        for entry in sorted(diffusers_entries):
+    if diffusers_compiled_graphs:
+        for compiled_graph in sorted(diffusers_compiled_graphs):
             total = 0
             count = 0
-            for f in entry.rglob("*"):
+            for f in compiled_graph.rglob("*"):
                 if f.is_file() and f.suffix.lower() in _WEIGHT_EXTS:
                     try:
                         total += f.stat().st_size
@@ -80,7 +80,7 @@ def compute_size_facts(snapshot_path: Path | str) -> dict[str, Any]:
                     except OSError:
                         continue
             if total > 0:
-                components[entry.name] = {"total_bytes": total, "file_count": count}
+                components[compiled_graph.name] = {"total_bytes": total, "file_count": count}
     elif (path / "config.json").is_file():
         # Transformers-style singlefile snapshot — whole snapshot is one component.
         total = 0

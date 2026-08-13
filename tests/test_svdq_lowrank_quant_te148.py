@@ -57,10 +57,10 @@ def _factors(out_f: int, in_f: int, rank: int, seed: int = 0):
     return down, up
 
 
-def _synth_entry(out_f: int, in_f: int, *, second_key: str = "wtscale",
+def _synth_compiled_graph(out_f: int, in_f: int, *, second_key: str = "wtscale",
                  rank: int = 128, lowrank: str = "bf16", seed: int = 0,
                  smooth: bool = True) -> tuple[dict, Any, Any]:
-    """A checkpoint entry (nunchaku layout, branch per ``lowrank``) plus the
+    """A checkpoint compiled graph (nunchaku layout, branch per ``lowrank``) plus the
     logical bf16 branch factors it was built from."""
     gen = torch.Generator().manual_seed(seed)
     w = torch.randn(out_f, in_f, generator=gen)
@@ -156,8 +156,8 @@ def test_decode_quantized_branch_matches_bf16_branch(scheme: str) -> None:
     logical branch and its forward must agree within the quant budget, and
     everything OUTSIDE the branch must be bit-identical."""
     out_f, in_f, rank = 3072, 3072, 128
-    ref_t, down, up = _synth_entry(out_f, in_f, lowrank="bf16", seed=3)
-    q_t, _, _ = _synth_entry(out_f, in_f, lowrank=scheme, seed=3)
+    ref_t, down, up = _synth_compiled_graph(out_f, in_f, lowrank="bf16", seed=3)
+    q_t, _, _ = _synth_compiled_graph(out_f, in_f, lowrank=scheme, seed=3)
 
     ref = decode_linear(ref_t, out_f, in_f)
     dec = decode_linear(q_t, out_f, in_f)
@@ -186,8 +186,8 @@ def test_fold_to_dense_parity(scheme: str) -> None:
     """The any-hardware fold of a quantized-branch linear differs from the
     bf16-branch fold ONLY by the branch quantization error."""
     out_f, in_f = 3072, 3072
-    ref_t, down, up = _synth_entry(out_f, in_f, lowrank="bf16", seed=5)
-    q_t, _, _ = _synth_entry(out_f, in_f, lowrank=scheme, seed=5)
+    ref_t, down, up = _synth_compiled_graph(out_f, in_f, lowrank="bf16", seed=5)
+    q_t, _, _ = _synth_compiled_graph(out_f, in_f, lowrank=scheme, seed=5)
     ref = native.fold_to_dense(decode_linear(ref_t, out_f, in_f),
                                compute_dtype=torch.float32)
     got = native.fold_to_dense(decode_linear(q_t, out_f, in_f),
@@ -200,7 +200,7 @@ def test_fold_to_dense_parity(scheme: str) -> None:
 
 def test_split_fused_qkv_carries_the_quantized_branch() -> None:
     out_f, in_f = 9216, 3072
-    q_t, down, _ = _synth_entry(out_f, in_f, second_key="wcscales",
+    q_t, down, _ = _synth_compiled_graph(out_f, in_f, second_key="wcscales",
                                 lowrank="int8", seed=6)
     dec = decode_linear(q_t, out_f, in_f)
     parts = split_decoded(dec, (3072, 3072, 3072))
@@ -217,7 +217,7 @@ def test_split_fused_qkv_carries_the_quantized_branch() -> None:
 
 def test_decode_refuses_malformed_quantized_branches() -> None:
     out_f, in_f = 3072, 3072
-    q_t, _, _ = _synth_entry(out_f, in_f, lowrank="int8", seed=7)
+    q_t, _, _ = _synth_compiled_graph(out_f, in_f, lowrank="int8", seed=7)
 
     half = dict(q_t)
     half.pop("proj_up_scale")
@@ -229,7 +229,7 @@ def test_decode_refuses_malformed_quantized_branches() -> None:
     with pytest.raises(SvdqLayoutError, match="mixes schemes"):
         decode_linear(mixed, out_f, in_f)
 
-    bf16_t, _, _ = _synth_entry(out_f, in_f, lowrank="bf16", seed=7)
+    bf16_t, _, _ = _synth_compiled_graph(out_f, in_f, lowrank="bf16", seed=7)
     stray = dict(bf16_t)
     stray["proj_down_scale"] = q_t["proj_down_scale"]
     with pytest.raises(SvdqLayoutError, match="not.*quantized dtype"):
@@ -245,8 +245,8 @@ def test_declaration_and_bytes_must_agree() -> None:
     """The __metadata__ flag is the contract: bytes in any other scheme
     refuse, in BOTH directions — no silent fallback."""
     out_f, in_f = 3072, 3072
-    q_t, _, _ = _synth_entry(out_f, in_f, lowrank="int8", seed=8)
-    bf16_t, _, _ = _synth_entry(out_f, in_f, lowrank="bf16", seed=8)
+    q_t, _, _ = _synth_compiled_graph(out_f, in_f, lowrank="int8", seed=8)
+    bf16_t, _, _ = _synth_compiled_graph(out_f, in_f, lowrank="bf16", seed=8)
 
     with pytest.raises(SvdqLayoutError, match="declares lowrank_quant='bf16'"):
         decode_linear(q_t, out_f, in_f, lowrank_quant="bf16")
@@ -268,7 +268,7 @@ def test_bf16_execution_lane_is_byte_identical_to_before() -> None:
     """Backward compatibility: a bf16-branch checkpoint decodes exactly as it
     did before te#148, with or without the declaration."""
     out_f, in_f = 3072, 3072
-    t, down, up = _synth_entry(out_f, in_f, lowrank="bf16", seed=9)
+    t, down, up = _synth_compiled_graph(out_f, in_f, lowrank="bf16", seed=9)
     a = decode_linear(t, out_f, in_f)
     b = decode_linear(t, out_f, in_f, lowrank_quant="bf16")
     assert a.lowrank_quant == b.lowrank_quant == "bf16"
@@ -302,7 +302,7 @@ def _write_checkpoint(tmp_path, *, lowrank: str, flag: bool):
     model = _tiny_qwen()
     dim = 128
     prefix = "transformer_blocks.0.attn"
-    entry, down, up = _synth_entry(3 * dim, dim, second_key="wcscales",
+    compiled_graph, down, up = _synth_compiled_graph(3 * dim, dim, second_key="wcscales",
                                    lowrank=lowrank, seed=10)
     state: dict[str, Any] = {}
     for key, val in model.state_dict().items():
@@ -310,7 +310,7 @@ def _write_checkpoint(tmp_path, *, lowrank: str, flag: bool):
             continue
         state[key] = (val.to(torch.bfloat16).contiguous()
                       if val.is_floating_point() else val.contiguous())
-    for leaf, val in entry.items():
+    for leaf, val in compiled_graph.items():
         state[f"{prefix}.to_qkv.{leaf}"] = val.contiguous()
 
     cfg = {k: v for k, v in dict(model.config).items()

@@ -131,7 +131,7 @@ def test_flex_attention_still_breaks_at_the_save_handoff() -> None:
     share a process — but ``torch.export.save`` refuses the flex HOP's
     block-mask tuple argument (``torch/_export/serde/serialize.py``:
     ``SerializeError: Unsupported list/tuple argument type``). The mint
-    stages every entry across exactly that save/load boundary
+    stages every compiled graph across exactly that save/load boundary
     (``aot_compile_pool._stage``), so flex cannot ride the pipeline today.
 
     IF THIS TEST FAILS because the save SUCCEEDED: upstream fixed HOP serde.

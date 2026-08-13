@@ -32,7 +32,7 @@ from typing import Any, ClassVar, Dict, List, Tuple
 #: The canonical create route. Clients build this and nothing else.
 MEDIA_UPLOADS_PATH = "/api/v1/media/uploads"
 
-#: The org-less media-upload family, one entry per tensorhub route. Kept as
+#: The org-less media-upload family, one compiled graph per tensorhub route. Kept as
 #: patterns rather than prefixes so `/api/v1/media/<org>/uploads` — one extra
 #: segment — cannot match by accident.
 _ORG_LESS_ROUTES: Tuple[re.Pattern[str], ...] = tuple(

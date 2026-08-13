@@ -220,7 +220,7 @@ def generate(n: int, rng: random.Random) -> list[str]:
 # Suppression is by CLASS, not by exact string, because each class has thousands
 # of concrete witnesses. A non-zero exit from this driver means "a disagreement
 # nobody has ruled on" — with nothing suppressed, that is now simply "any
-# disagreement". Add a class here ONLY alongside a fixture `divergent` entry and
+# disagreement". Add a class here ONLY alongside a fixture `divergent` compiled graph and
 # a tracker issue that owns the fix.
 def known_divergence_class(go: dict[str, Any], py: dict[str, Any]) -> str:
     return ""

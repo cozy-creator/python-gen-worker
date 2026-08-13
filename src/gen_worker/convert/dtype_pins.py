@@ -101,12 +101,12 @@ def model_index_classes(tree: Path | str) -> Dict[str, str]:
         return out
     if not isinstance(index, dict):
         return out
-    for key, entry in index.items():
+    for key, compiled_graph in index.items():
         if str(key).startswith("_"):
             continue
-        if (isinstance(entry, (list, tuple)) and len(entry) == 2
-                and all(isinstance(e, str) and e for e in entry)):
-            out[str(key)] = entry[1]
+        if (isinstance(compiled_graph, (list, tuple)) and len(compiled_graph) == 2
+                and all(isinstance(e, str) and e for e in compiled_graph)):
+            out[str(key)] = compiled_graph[1]
     return out
 
 
@@ -163,11 +163,11 @@ def component_dtypes_on_disk(tree: Path | str) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if not root.is_dir():
         return out
-    for entry in sorted(root.iterdir()):
-        if entry.is_dir() and any(entry.rglob("*.safetensors")):
-            dt = component_dtype(entry)
+    for compiled_graph in sorted(root.iterdir()):
+        if compiled_graph.is_dir() and any(compiled_graph.rglob("*.safetensors")):
+            dt = component_dtype(compiled_graph)
             if dt:
-                out[entry.name] = dt
+                out[compiled_graph.name] = dt
     if not out and any(p.is_file() for p in root.glob("*.safetensors")):
         dt = component_dtype(root)
         if dt:

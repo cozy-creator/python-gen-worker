@@ -74,10 +74,10 @@ def test_a_report_inside_the_scope_carries_k_and_the_measured_density():
         assert provision.report_applied_attention(
             "transformer", "sparse-k16", block_size=128, density=0.0826,
             selector="indexer", index_ref="tensorhub/h3:v1#sparse-index")
-    (entry,) = scope.applied
-    assert entry.mode == "sparse-k16" and entry.k_blocks == 16
-    assert entry.density == pytest.approx(0.0826)
-    detail = entry.detail()
+    (compiled_graph,) = scope.applied
+    assert compiled_graph.mode == "sparse-k16" and compiled_graph.k_blocks == 16
+    assert compiled_graph.density == pytest.approx(0.0826)
+    detail = compiled_graph.detail()
     assert "attention=sparse-k16" in detail and "k=16" in detail
     assert "density=0.0826" in detail and "selector=indexer" in detail
     # The scope closes; a later report is unattributed.

@@ -305,7 +305,7 @@ def _die_with_rank0(rank0_pid: int) -> None:
 
 def _follower_main(
     spec: RankSpec,
-    entry: Callable[[RankSpec, FollowerChannel], None],
+    compiled_graph: Callable[[RankSpec, FollowerChannel], None],
     channel: FollowerChannel,
     error_q: Any,
     rank0_pid: int = 0,
@@ -317,7 +317,7 @@ def _follower_main(
     """
     _die_with_rank0(rank0_pid)
     try:
-        entry(spec, channel)
+        compiled_graph(spec, channel)
     except BaseException as exc:  # noqa: BLE001 — the whole point is to report
         try:
             error_q.put((spec.rank, f"{type(exc).__name__}: {exc}"))
@@ -340,14 +340,14 @@ class RankGroup:
         devices: Sequence[int],
         *,
         backend: str = "nccl",
-        entry: Optional[Callable[[RankSpec, FollowerChannel], None]] = None,
+        compiled_graph: Optional[Callable[[RankSpec, FollowerChannel], None]] = None,
         collective_timeout_s: float = _COLLECTIVE_TIMEOUT_S,
     ) -> None:
         self.devices: Tuple[int, ...] = tuple(int(d) for d in devices)
         if not self.devices:
             raise ValueError("a rank group needs at least one device")
         self.backend = backend
-        self._entry = entry
+        self._compiled_graph = compiled_graph
         self._collective_timeout_s = float(collective_timeout_s)
         self._procs: List[Any] = []
         #: pid -> high-water evidence mark (pgw#892).
@@ -381,8 +381,8 @@ class RankGroup:
 
         import torch.distributed as dist
 
-        if self._entry is None:
-            raise RankGroupError("a degree>1 group needs a follower entry point")
+        if self._compiled_graph is None:
+            raise RankGroupError("a degree>1 group needs a follower compiled_graph point")
 
         ctx = mp.get_context("spawn")
         self._error_q = ctx.Queue()
@@ -415,7 +415,7 @@ class RankGroup:
                 # pgw#820: the follower's death is tied to THIS process (rank
                 # 0) in its own bootstrap — daemon=True cannot survive an
                 # abort, and the pgw#783 parent must not know about ranks.
-                args=(spec, self._entry, channel, self._error_q, os.getpid()),
+                args=(spec, self._compiled_graph, channel, self._error_q, os.getpid()),
                 name=f"sp-{group_name}-rank{spec.rank}",
                 daemon=True,
             )

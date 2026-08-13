@@ -1,13 +1,13 @@
-"""pgw#842: the entry pool's width must be EXPLAINABLE and MONOTONE.
+"""pgw#842: the compiled graph pool's width must be EXPLAINABLE and MONOTONE.
 
-Two real L4 mints of the same 72-entry sdxl regional compiled graph, back to back, are
+Two real L4 mints of the same 72-compiled graph sdxl regional compiled graph, back to back, are
 the specimen this file is written against:
 
     attempt ten  (0.86.0, 16 vcpu / 62 GB): K=5, compile_s 1314.94, wall 347.94
     attempt eleven (0.89.0, 21 vcpu / 83 GB): K=3, compile_s 1327.23, wall 554.78
 
 Identical compile work (+0.9 %), 59 % more wall, on a BIGGER host — the whole
-regression is the width. And nothing hub-side recorded why: `entry_workers`
+regression is the width. And nothing hub-side recorded why: `compiled_graph_workers`
 was the only pool number that ever reached a hub row, so the binding
 constraint on those two pods is unrecoverable and the pods are gone.
 
@@ -109,7 +109,7 @@ def test_the_ram_bound_is_monotone_in_the_pods_ram(tmp_path: Path) -> None:
 # The VRAM reading — DELETED WITH ITS BOUND (pgw#1175)
 # ---------------------------------------------------------------------------
 #
-# pgw#842's third bound divided free VRAM by a per-entry device ask, and this
+# pgw#842's third bound divided free VRAM by a per-compiled graph device ask, and this
 # section covered the READING behind it: a single `mem_get_info` taken beside
 # a live tenant forward reads that forward's activation set as gone, so the
 # figure was sampled over a short window and every sample kept. Correct, and
@@ -153,7 +153,7 @@ def test_a_bigger_host_never_yields_a_narrower_pool(
         avail = pool.memory_facts(
             meminfo=_meminfo(tmp_path, 200 * 1024 * 1024),
             cgroup_root=root).available_bytes
-        width = pool.entry_workers(
+        width = pool.compiled_graph_workers(
             72, vcpus=vcpus, available_bytes=avail,
             device_lock=True)
         widths.append(((vcpus, ram_gb), width.workers))
@@ -168,26 +168,26 @@ def test_a_bigger_host_never_yields_a_narrower_pool(
 
 def test_the_width_names_its_binding_constraint_and_its_readings() -> None:
     """A K nobody can explain is a K nobody can fix."""
-    # 13 GiB available - 4 GiB tenant reserve = 9 GiB / 3 GiB per entry -> 3.
-    width = pool.entry_workers(
+    # 13 GiB available - 4 GiB tenant reserve = 9 GiB / 3 GiB per compiled graph -> 3.
+    width = pool.compiled_graph_workers(
         72, vcpus=21, available_bytes=13 * _GIB, device_lock=True)
     facts = width.facts()
     assert width.binding == "host-memory", width.reason
     assert facts["underwidth"] == 5, facts
     # Every reading that fed a bound, and what KIND of reading it was.
     for key in ("binding", "underwidth", "ceiling", "cpu_basis", "mem_basis",
-                "per_entry_rss_basis",
+                "per_compiled_graph_rss_basis",
                 "cgroup_reclaimable_bytes", "host_available_bytes",
                 "os_cpu_count", "affinity_cpus", "quota_cores"):
         assert key in facts, f"{key} missing from {sorted(facts)}"
     # pgw#877's three DEVICE provenances died with the axis (pgw#1175). The
-    # one per-entry footprint left still says whether it was measured or
+    # one per-compiled graph footprint left still says whether it was measured or
     # defaulted, because a default must never read like a measurement.
     common: Dict[str, Any] = dict(
-        entries=72, vcpus=21, available_bytes=60 * _GIB, device_lock=True)
-    assert pool.entry_workers(**common).per_entry_rss_basis == "default"
-    assert pool.entry_workers(
-        peak_rss_bytes=2 * _GIB, **common).per_entry_rss_basis == "measured"
+        compiled_graphs=72, vcpus=21, available_bytes=60 * _GIB, device_lock=True)
+    assert pool.compiled_graph_workers(**common).per_compiled_graph_rss_basis == "default"
+    assert pool.compiled_graph_workers(
+        peak_rss_bytes=2 * _GIB, **common).per_compiled_graph_rss_basis == "measured"
 
 
 def test_the_advertised_cores_are_not_the_ones_the_pool_believes() -> None:
@@ -259,17 +259,17 @@ def test_a_real_pools_width_and_ledger_land_hub_side(tmp_path: Path) -> None:
     neither had the width block, which `_mint_phase_table` has always built
     and `emit_phase_events` never emitted. Both now ride the parent's relay.
     """
-    entries = [(f"unet/adapter=true/dim={i}", _program(i)) for i in range(2)]
-    width = pool.entry_workers(
-        len(entries), vcpus=16, available_bytes=64 * _GIB,
+    compiled_graphs = [(f"unet/adapter=true/dim={i}", _program(i)) for i in range(2)]
+    width = pool.compiled_graph_workers(
+        len(compiled_graphs), vcpus=16, available_bytes=64 * _GIB,
         device_lock=True, limit=2)
     assert width.workers == 2, width.reason
-    box = pool.EntryCompilePool(
+    box = pool.CompiledGraphCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
         cache_dir=str(tmp_path / "cache"))
-    out = box.compile(entries)
-    assert set(out) == {name for name, _ in entries}
+    out = box.compile(compiled_graphs)
+    assert set(out) == {name for name, _ in compiled_graphs}
 
     ledger = {
         **box.ledger.facts(),
@@ -288,7 +288,7 @@ def test_a_real_pools_width_and_ledger_land_hub_side(tmp_path: Path) -> None:
         f"the width decision did not reach the hub: "
         f"{[(u.kind, u.phase) for u in updates]}")
     detail = pool_events[0].detail
-    assert f"entry_workers={width.workers}" in detail
+    assert f"compiled_graph_workers={width.workers}" in detail
     assert f"binding={width.binding}" in detail
     for key in ("cpu_workers", "mem_workers",
                 "pool_efficiency", "pool_idle_s", "peak_concurrency",
@@ -304,7 +304,7 @@ def test_a_narrow_pool_says_so_in_the_first_line() -> None:
     """The standing rule: no silent decisions. A pool held below what the
     compiled graph could use names the shortfall and its cause up front — attempt
     eleven's 59 % was invisible precisely because nothing did."""
-    width = pool.entry_workers(
+    width = pool.compiled_graph_workers(
         72, vcpus=21, available_bytes=13 * _GIB, device_lock=True)
     assert width.workers == 3 and width.underwidth == 5, width.reason
     table = aot_mint._mint_phase_table([], {"total_s": 554.78}, None, width,

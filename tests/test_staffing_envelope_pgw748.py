@@ -23,7 +23,7 @@ import msgspec
 import pytest
 
 from gen_worker import RequestContext, Resources, endpoint
-from gen_worker.discovery.discover import _extract_entries
+from gen_worker.discovery.discover import _extract_compiled_graphs
 from gen_worker.families import GenerationDefaults
 
 
@@ -53,7 +53,7 @@ class PlainEndpoint:
 
 
 def _resources(cls: type) -> Dict[str, Any]:
-    (fn,) = _extract_entries(cls, "testmod")
+    (fn,) = _extract_compiled_graphs(cls, "testmod")
     return fn["resources"]
 
 

@@ -2,7 +2,7 @@
 
 The rig (pgw#978) was written against one toy endpoint living in this harness
 directory. That endpoint proved the machinery, but it is not an org worker: it
-declares one target, one graph class and therefore ONE export entry, and it is
+declares one target, one graph class and therefore ONE export compiled graph, and it is
 authored inside the SDK's own test tree rather than as a package a build could
 consume.
 
@@ -18,7 +18,7 @@ A vehicle answers six questions and nothing else:
     where its checkpoint comes from (always GENERATED, never fetched)
     which ``CompileCompiledGraph`` the parent hands across the delegation boundary
     which hub ref names the checkpoint
-    which sys.path entries both interpreters need
+    which sys.path compiled graphs both interpreters need
     how a SECOND process rebuilds enough pipeline to adopt the compiled graph
 """
 
@@ -47,7 +47,7 @@ class Vehicle:
     family: str
     #: The hub ref the parent's ``MintSlot`` claims.
     ref_path: str
-    #: Extra sys.path entries the parent and BOTH children need.
+    #: Extra sys.path compiled graphs the parent and BOTH children need.
     syspath: Tuple[str, ...]
     #: (root) -> the generated checkpoint tree.
     build_checkpoint: Callable[[Path], Path]
@@ -81,7 +81,7 @@ class Vehicle:
 
 
 # ---------------------------------------------------------------------------
-# tiny — the pgw#978 plumbing vehicle. One target, one entry, no packaging.
+# tiny — the pgw#978 plumbing vehicle. One target, one compiled graph, no packaging.
 # ---------------------------------------------------------------------------
 
 
@@ -163,12 +163,12 @@ TINY = Vehicle(
     checkpoint_bytes=_tiny_checkpoint_bytes,
     compile_compiled_graph=_tiny_compiled_graph,
     adopt_source=_tiny_adopt_source,
-    covers="plumbing: one target, one entry, no container inputs, no packaging",
+    covers="plumbing: one target, one compiled_graph, no container inputs, no packaging",
 )
 
 
 # ---------------------------------------------------------------------------
-# micro — the pgw#997 org-worker vehicle. Three entries, container inputs.
+# micro — the pgw#997 org-worker vehicle. Three compiled graphs, container inputs.
 # ---------------------------------------------------------------------------
 
 
@@ -244,7 +244,7 @@ def _feed(arity, tokens):
     return x, t, cond, lat
 
 
-# ARMS: every declared entry. The rows deliberately differ from the seed row
+# ARMS: every declared compiled graph. The rows deliberately differ from the seed row
 # the mint traced, so the artifact is exercised through its DERIVED range
 # rather than at the one coordinate it was built at.
 ARMS = [("transformer/cfg=true", CFG_ARITY, TOKEN_ROWS[0]),
@@ -293,7 +293,7 @@ if compiled graph is not None:
         "compiled_graph_key": compiled graph.compiled_graph_key, "family": compiled graph.family, "ref": compiled graph.ref,
         "snapshot_digest": compiled graph.snapshot_digest,
         "artifact_bytes": Path(compiled graph.artifact).stat().st_size,
-        "entries": sorted((meta.get("entries") or {})),
+        "compiled graphs": sorted((meta.get("compiled graphs") or {})),
     })
     # PARITY. Adoption that is never CALLED proves the filter, not the compiled graph —
     # and the serve-side call is exactly where pgw#994 lives: a container
@@ -321,7 +321,7 @@ if compiled graph is not None:
                        else pipe.transformer(x, t, cond))
                 deltas[name] = float((got - eager[name]).abs().max())
         out["parity_max_abs"] = deltas
-        out["served_entry_calls"] = dict(aot_serve.served_entry_calls(pipe))
+        out["served_compiled_graph_calls"] = dict(aot_serve.served_compiled_graph_calls(pipe))
         out["execution_count"] = int(aot_serve.execution_count(pipe))
         out["ingress_refusals"] = int(aot_serve.ingress_refusals(pipe))
         # A tolerance, not equality: AOTI fuses and reassociates, so bitwise
@@ -414,7 +414,7 @@ MICRO = Vehicle(
     compile_compiled_graph=_micro_compiled_graph,
     adopt_source=_micro_adopt_source_for(0),
     parent_pipe=_micro_parent_for(0),
-    covers=("org-worker packaging: 3 export entries (2 fork arms + a second "
+    covers=("org-worker packaging: 3 export compiled_graphs (2 fork arms + a second "
             "target), CONTAINER inputs with a plain input after them "
             "(pgw#993/pgw#994), a derived dynamic range, generated weights"),
 )
@@ -573,7 +573,7 @@ if compiled graph is not None:
         "compiled_graph_key": compiled graph.compiled_graph_key, "family": compiled graph.family, "ref": compiled graph.ref,
         "snapshot_digest": compiled graph.snapshot_digest,
         "artifact_bytes": Path(compiled graph.artifact).stat().st_size,
-        "entries": sorted((meta.get("entries") or {})),
+        "compiled graphs": sorted((meta.get("compiled graphs") or {})),
     })
     outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(compiled graph.artifact), 0)
     out["armed"] = bool(outcome)
@@ -660,7 +660,7 @@ MICRO_LORA16 = Vehicle(
 
 # ---------------------------------------------------------------------------
 # micro-conv — pgw#1073: the STATIC-ROWS class (sdxl's strategy) at micro
-# scale. Conv-bearing, 4 static entries (2 rows x cfg fork), an int64
+# scale. Conv-bearing, 4 static compiled graphs (2 rows x cfg fork), an int64
 # timestep (mixed dtype, wan-2.2's shape), deeper module nesting, a named
 # persistent buffer (the H3 pattern).
 # ---------------------------------------------------------------------------
@@ -715,9 +715,9 @@ def _feed(batch, grid):
     return sample, timestep, cond
 
 
-# THREE of the four static entries, spanning both declared axes (row and
-# fork). static-rows means each (row, cfg) coordinate is its own entry — the
-# serve side must land each call on ITS entry, which is exactly the
+# THREE of the four static compiled graphs, spanning both declared axes (row and
+# fork). static-rows means each (row, cfg) coordinate is its own compiled graph — the
+# serve side must land each call on ITS compiled graph, which is exactly the
 # label-vs-ask identity pgw#1058 broke on.
 ARMS = [("unet/cfg=true@24", CFG_ARITY, LATENT_ROWS[0]),
         ("unet/cfg=false@24", 1, LATENT_ROWS[0]),
@@ -750,7 +750,7 @@ if compiled graph is not None:
         "compiled_graph_key": compiled graph.compiled_graph_key, "family": compiled graph.family, "ref": compiled graph.ref,
         "snapshot_digest": compiled graph.snapshot_digest,
         "artifact_bytes": Path(compiled graph.artifact).stat().st_size,
-        "entries": sorted((meta.get("entries") or {})),
+        "compiled graphs": sorted((meta.get("compiled graphs") or {})),
     })
     outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(compiled graph.artifact), 0)
     out["armed"] = bool(outcome)
@@ -780,7 +780,7 @@ if compiled graph is not None:
             out["parity_ok"] = all(v <= 3e-3 for v in rel.values())
         else:
             out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
-        out["served_entry_calls"] = dict(aot_serve.served_entry_calls(pipe))
+        out["served_compiled_graph_calls"] = dict(aot_serve.served_compiled_graph_calls(pipe))
         out["execution_count"] = int(aot_serve.execution_count(pipe))
         out["ok"] = bool(out["parity_ok"]) and out["execution_count"] > 0
     else:
@@ -808,7 +808,7 @@ MICRO_CONV = Vehicle(
     adopt_source=_micro_conv_adopt_source,
     parent_pipe=_micro_parent_for(0, "MicroConvPipeline", _micro_conv_compiled_graph),
     covers=("pgw#1073: the STATIC-ROWS class at micro scale — conv-bearing "
-            "(so #730 forces the strategy), 4 static entries (2 rows x cfg "
+            "(so #730 forces the strategy), 4 static compiled_graphs (2 rows x cfg "
             "fork, the sdxl generator), an INT64 timestep indexing an "
             "embedding (mixed dtype, wan-2.2's shape), three-deep module "
             "nesting, and a named PERSISTENT buffer (the H3 pattern, the "
@@ -914,7 +914,7 @@ if compiled graph is not None:
         "compiled_graph_key": compiled graph.compiled_graph_key, "family": compiled graph.family, "ref": compiled graph.ref,
         "snapshot_digest": compiled graph.snapshot_digest,
         "artifact_bytes": Path(compiled graph.artifact).stat().st_size,
-        "entries": sorted((meta.get("entries") or {})),
+        "compiled graphs": sorted((meta.get("compiled graphs") or {})),
         "precision": meta.get("precision"),
     })
     outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(compiled graph.artifact), BUCKET)
@@ -1083,7 +1083,7 @@ if compiled graph is not None:
         "compiled_graph_key": compiled graph.compiled_graph_key, "family": compiled graph.family, "ref": compiled graph.ref,
         "snapshot_digest": compiled graph.snapshot_digest,
         "artifact_bytes": Path(compiled graph.artifact).stat().st_size,
-        "entries": sorted((meta.get("entries") or {})),
+        "compiled graphs": sorted((meta.get("compiled graphs") or {})),
     })
     outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(compiled graph.artifact), 0)
     out["armed"] = bool(outcome)
@@ -1274,7 +1274,7 @@ if compiled graph is not None:
         "compiled_graph_key": compiled graph.compiled_graph_key, "family": compiled graph.family, "ref": compiled graph.ref,
         "snapshot_digest": compiled graph.snapshot_digest,
         "artifact_bytes": Path(compiled graph.artifact).stat().st_size,
-        "entries": sorted((meta.get("entries") or {})),
+        "compiled graphs": sorted((meta.get("compiled graphs") or {})),
     })
     outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(compiled graph.artifact), 0)
     out["armed"] = bool(outcome)

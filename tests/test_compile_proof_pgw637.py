@@ -89,7 +89,7 @@ def test_inmemory_probe_reports_dynamo_truth_not_the_registry() -> None:
     assert cc.has_inmemory_compiled_code(pipe) is False
 
 
-def test_inmemory_probe_sees_a_live_dynamo_cache_entry(
+def test_inmemory_probe_sees_a_live_dynamo_cache_compiled_graph(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The real mechanism: dynamo keys its code cache on the target's
@@ -100,11 +100,11 @@ def test_inmemory_probe_sees_a_live_dynamo_cache_entry(
     pipe = _armed_pipe()
     seen: List[Any] = []
 
-    def _entries(code: Any) -> List[Any]:
+    def _compiled_graphs(code: Any) -> List[Any]:
         seen.append(code)
         return [object()]
 
-    monkeypatch.setattr(eval_frame, "_debug_get_cache_entry_list", _entries)
+    monkeypatch.setattr(eval_frame, "_debug_get_cache_compiled_graph_list", _compiled_graphs)
     assert cc.has_inmemory_compiled_code(pipe) is True
     assert seen and seen[0] is _Mod.forward.__code__
 

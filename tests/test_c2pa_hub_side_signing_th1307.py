@@ -154,7 +154,7 @@ def test_private_key_in_pod_env_is_refused(chain, monkeypatch, env_name):
 
 @pytest.mark.parametrize("env_name", ["GEN_WORKER_C2PA_KEY_PEM", "GEN_WORKER_C2PA_KEY_PATH"])
 def test_key_bearing_pod_is_refused_even_if_configure_was_never_called(chain, monkeypatch, env_name):
-    """The refusal belongs to the POD, not to one entry point.
+    """The refusal belongs to the POD, not to one compiled graph point.
 
     pgw#931 removed `_active_config`'s lazy `configure()` fallback. That is the
     right call on its own terms — a signing module must not resolve its own

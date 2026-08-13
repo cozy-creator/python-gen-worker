@@ -45,11 +45,11 @@ shape no production pod ever has. So the chain that actually delivers env to a
 pod was invisible to it, and to every other test in this repo:
 
     worker function declares env -> release_env_declarations
-    operator sets a value        -> endpoint_env_entries
+    operator sets a value        -> endpoint_env_compiled_graphs
     pod launch                   -> EndpointEnvService.Resolve -> pod env -> Settings
 
 That chain is what took `GEN_WORKER_PREFER_AOT` dark: a release rebuild stopped
-declaring the name, the hub withheld the live entry SILENTLY, and three pod
+declaring the name, the hub withheld the live compiled graph SILENTLY, and three pod
 attempts went by. `--hub-env` boots the mint child through it instead — the
 child's environment is what the hub's rule would have delivered, ambient values
 are STRIPPED so a developer's shell cannot stand in for a delivered one, and any
@@ -102,8 +102,8 @@ MAX_START_LOAD_1MIN = 24.0
 MAX_WEIGHTS_BYTES = 500 * 1000 * 1000
 
 #: pgw#997: WHAT the rig mints is now a choice. `tiny` is pgw#978's original
-#: one-entry plumbing toy; `micro` is the org-worker-shaped
-#: `examples/micro-diffusion` package — three export entries, container inputs,
+#: one-compiled graph plumbing toy; `micro` is the org-worker-shaped
+#: `examples/micro-diffusion` package — three export compiled graphs, container inputs,
 #: generated weights, a Dockerfile. See `tests/harness/rig_vehicles.py`.
 DEFAULT_VEHICLE = "tiny"
 
@@ -272,7 +272,7 @@ def _mint_request(
     Not a hand-written `MintRequest`: the thing under test is the handoff, and
     a hand-written request is the one shape the handoff can never produce.
 
-    pgw#1175: the banked per-entry DEVICE peak this used to forward is gone
+    pgw#1175: the banked per-compiled graph DEVICE peak this used to forward is gone
     with the bound it opened. K is f(cores, one measured child RSS), so a rig
     cycle takes the pool path on its own cores without an operator priming a
     device basis.
@@ -306,7 +306,7 @@ RIG_STRIPPED_ENV = ("HF_TOKEN",)
 
 
 def hub_delivered_env(
-    base: Dict[str, str], entries: Optional[Dict[str, str]] = None,
+    base: Dict[str, str], compiled_graphs: Optional[Dict[str, str]] = None,
 ) -> tuple:
     """(env, withheld) as the hub would resolve them for this rig's release."""
     sys.path.insert(0, str(REPO / "tests"))
@@ -314,7 +314,7 @@ def hub_delivered_env(
 
     delivery = _hub.resolve(
         _hub.declared_by(list(RIG_DECLARED_ENV)),
-        _hub.EndpointEnvEntries(dict(entries or {})))
+        _hub.EndpointEnvCompiledGraphs(dict(compiled_graphs or {})))
     env = _hub.pod_environ(base, delivery, strip=RIG_STRIPPED_ENV)
     return env, [
         {"name": w.name, "reason": w.reason, "detail": w.detail}
@@ -326,14 +326,14 @@ def run_cycle(
     root: Path, *, stage: str = "all", force_load: bool = False,
     device: str = "auto", vehicle: str = DEFAULT_VEHICLE,
     hub_env_mode: bool = False,
-    hub_env_entries: Optional[Dict[str, str]] = None,
+    hub_env_compiled_graphs: Optional[Dict[str, str]] = None,
 ) -> RigResult:
     from harness import rig_vehicles
 
     veh = rig_vehicles.vehicle(vehicle)
-    for entry in veh.syspath:
-        if entry not in sys.path:
-            sys.path.insert(0, entry)
+    for compiled_graph in veh.syspath:
+        if compiled_graph not in sys.path:
+            sys.path.insert(0, compiled_graph)
     result = RigResult()
     t0 = time.monotonic()
 
@@ -385,14 +385,14 @@ def run_cycle(
     request = _mint_request(
         workdir, tree, veh, ordinal=int(dev["device_ordinal"]))
     leg.ok, leg.seconds = True, time.monotonic() - g0
-    entries = _declared_entries(veh)
+    compiled_graphs = _declared_compiled_graphs(veh)
     leg.facts = {"family": request.family,
                  "slots": sorted(request.slots),
                  "arm_token": request.arm_token,
-                 "declared_entries": entries}
+                 "declared_compiled_graphs": compiled_graphs}
     leg.detail = (f"family={request.family} "
                   f"slots={sorted(request.slots)} "
-                  f"entries={len(entries)}")
+                  f"compiled_graphs={len(compiled_graphs)}")
 
     # -- the child -----------------------------------------------------------
     from gen_worker import mint_process as mp
@@ -407,7 +407,7 @@ def run_cycle(
         # It boots with what the HUB would have delivered for this release —
         # so a name the release stops declaring disappears here, locally, the
         # way it disappeared on the pod nobody was watching.
-        env, hub_withheld = hub_delivered_env(env, hub_env_entries)
+        env, hub_withheld = hub_delivered_env(env, hub_env_compiled_graphs)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(REPO / "tests"), str(REPO / "src"), *veh.syspath,
          env.get("PYTHONPATH", "")])
@@ -447,17 +447,17 @@ def run_cycle(
     from gen_worker import aot_serve as _serve
 
     packed = sorted(
-        (_serve.unpack_metadata(Path(outcome.artifact or "")).get("entries") or {}))
-    leg.facts["packed_entries"] = packed
+        (_serve.unpack_metadata(Path(outcome.artifact or "")).get("compiled_graphs") or {}))
+    leg.facts["packed_compiled_graphs"] = packed
     # pgw#999: the guard is a SUBSET check, not equality. A bucket-bearing
     # mint adds adapter arms whose exact set depends on composed
     # branch-capability; what must never happen is a packed compiled graph MISSING a
-    # declared class, which is the silent loss the entry vocabulary exists to
+    # declared class, which is the silent loss the compiled graph vocabulary exists to
     # prevent. An extra packed arm is the adapter fork doing its job.
-    missing = [n for n in _branchless(packed) if n not in set(entries)]
-    if entries and missing:
+    missing = [n for n in _branchless(packed) if n not in set(compiled_graphs)]
+    if compiled_graphs and missing:
         leg.ok = False
-        leg.detail = (f"declared entries {sorted(entries)!r} but the packed "
+        leg.detail = (f"declared compiled_graphs {sorted(compiled_graphs)!r} but the packed "
                       f"compiled_graph is MISSING {missing!r} (packed: {packed!r})")
         result.total_s = time.monotonic() - t0
         return result
@@ -465,7 +465,7 @@ def run_cycle(
         f"minted {Path(outcome.artifact or '').name} "
         f"key={(report.compiled_graph_key if report else '')[:20]} "
         f"warm={warm:.2f}s peak={leg.facts['peak_vram_bytes'] / 1e9:.2f}GB "
-        f"entries={len(packed)}")
+        f"compiled_graphs={len(packed)}")
 
     if stage == "mint":
         result.total_s = time.monotonic() - t0
@@ -576,8 +576,8 @@ def run_cycle(
             f"pid={adopted.get('pid')} adopted "
             f"{str(adopted.get('compiled_graph_key'))[:20]} "
             f"({adopted.get('artifact_bytes', 0) / 1e6:.1f} MB"
-            + (f", {len(adopted['entries'])} entries"
-               if adopted.get("entries") else "") + ")"
+            + (f", {len(adopted['compiled_graphs'])} compiled_graphs"
+               if adopted.get("compiled_graphs") else "") + ")"
             + (f" parity max|delta|="
                f"{max(parity.values()):.2e} over {len(parity)} arms"
                if parity else "")
@@ -611,8 +611,8 @@ def _publish(hub: Any, request: Any, artifact: Path) -> str:
     return publisher.publish(request.family, artifact, meta)
 
 
-def _declared_entries(veh: Any) -> List[str]:
-    """The entry names this vehicle's declaration says to mint.
+def _declared_compiled_graphs(veh: Any) -> List[str]:
+    """The compiled graph names this vehicle's declaration says to mint.
 
     Reported by the handoff leg so a cycle states its own SIZE: the whole
     point of the micro vehicle is that this list has three rows and sdxl's
@@ -632,11 +632,11 @@ def _declared_entries(veh: Any) -> List[str]:
     # is composed truth this function has no pipeline for. So the declaration
     # stays the branchless authority and the guard compares against it after
     # stripping the adapter coordinate — see `_branchless`.
-    return [ad.plan_entry_name(p) for p in ad.compiled_graph_plans(decl)]
+    return [ad.plan_compiled_graph_name(p) for p in ad.compiled_graph_plans(decl)]
 
 
 def _branchless(names: List[str]) -> List[str]:
-    """Packed entry names with any ``adapter=…`` coordinate dropped, so a
+    """Packed compiled graph names with any ``adapter=…`` coordinate dropped, so a
     bucket-bearing compiled graph's arms compare against the declared class set."""
     out = []
     for name in names:
@@ -715,7 +715,7 @@ def _adopt_miss_log(stderr: str) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     # pgw#1049: the rig parent seals as a worker boot does (establish below),
     # and establish now fail-closes on an interpreter outside the declared
-    # env — this is the STANDALONE entry's sanctioned imposition (one
+    # env — this is the STANDALONE compiled graph's sanctioned imposition (one
     # re-exec, same as the worker entrypoint's).
     from gen_worker.settings_authority import ensure_interpreter_env
 
@@ -741,17 +741,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="discard the scratch root first")
     parser.add_argument(
         "--vehicle", default=os.environ.get("PGW997_VEHICLE", DEFAULT_VEHICLE),
-        help="WHAT to mint: 'tiny' (pgw#978's one-entry plumbing toy) or "
+        help="WHAT to mint: 'tiny' (pgw#978's one-compiled_graph plumbing toy) or "
              "'micro' (pgw#997's org-worker-shaped examples/micro-diffusion — "
-             "3 entries, container inputs, generated weights)")
+             "3 compiled_graphs, container inputs, generated weights)")
     parser.add_argument(
         "--hub-env", action="store_true",
         help="boot the mint child through the hub's env-delivery rule "
-             "(declarations x entries) instead of this process's environment; "
+             "(declarations x compiled_graphs) instead of this process's environment; "
              "ambient values are stripped and withholdings are reported")
     parser.add_argument(
-        "--hub-env-entry", action="append", default=[], metavar="NAME=VALUE",
-        help="an endpoint_env_entries row the operator has set; repeatable. "
+        "--hub-env-compiled_graph", action="append", default=[], metavar="NAME=VALUE",
+        help="an endpoint_env_compiled_graphs row the operator has set; repeatable. "
              "Only names the release DECLARES are delivered.")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -761,16 +761,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     root.mkdir(parents=True, exist_ok=True)
 
     try:
-        entries: Dict[str, str] = {}
-        for raw in args.hub_env_entry:
+        compiled_graphs: Dict[str, str] = {}
+        for raw in args.hub_env_compiled_graph:
             name, sep, value = str(raw).partition("=")
             if not sep:
-                parser.error(f"--hub-env-entry expects NAME=VALUE, got {raw!r}")
-            entries[name.strip()] = value
+                parser.error(f"--hub-env-compiled_graph expects NAME=VALUE, got {raw!r}")
+            compiled_graphs[name.strip()] = value
         result = run_cycle(root, stage=args.stage, force_load=args.force_load,
                            device=args.device, vehicle=args.vehicle,
                            hub_env_mode=args.hub_env,
-                           hub_env_entries=entries)
+                           hub_env_compiled_graphs=compiled_graphs)
     except RigRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2

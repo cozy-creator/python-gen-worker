@@ -149,7 +149,7 @@ def build_block_mask(scores: Any, k_blocks: int, geom: BlockGeometry,
         mark[..., NB - 1] = 0
 
     # Ascending scatter. Unmarked columns go to a DUMP slot that is sliced off;
-    # routing them to slot 0 would clobber a real entry, which is exactly what
+    # routing them to slot 0 would clobber a real compiled graph, which is exactly what
     # the reference paid a full-width sort to avoid.
     pos = mark.cumsum(-1) - 1
     full_num = mark.sum(-1).to(torch.int32)

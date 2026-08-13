@@ -1,13 +1,13 @@
 """pgw#1058 — the artifact-identity gate on ADMISSION facts.
 
 Attempt 30 published the first-ever aot-inductor compiled graph and every adopting pod
-refused all 36 entries. The filed hypothesis was a lying label (entry says
+refused all 36 compiled graphs. The filed hypothesis was a lying label (compiled graph says
 H_lat=80,W_lat=192, program specialized differently). Pulling the published
 compiled graph apart off-pod ($0) FALSIFIED that: the labels and the packed manifest
 faithfully describe the program. The program itself was minted for a call
 class real traffic never presents — sdxl's declaration omitted `dtype` on its
 scalar `timestep` row and the SDK silently defaulted it to the MODULE's weight
-dtype (bfloat16), while every real scheduler presents float32. 36 entries,
+dtype (bfloat16), while every real scheduler presents float32. 36 compiled graphs,
 zero admissible calls, published.
 
 Two defect classes die here:
@@ -22,7 +22,7 @@ Two defect classes die here:
    never served), through ONE function: `aot_package.admission_drift`.
 
 The fixtures under tests/fixtures/pgw1058/ are extracted verbatim from the
-REAL published compiled graph (compiled_graph_store `ck1-9ae7bbea…` → `sha256:82efc111…`, entry
+REAL published compiled graph (compiled_graph_store `ck1-9ae7bbea…` → `sha256:82efc111…`, compiled graph
 `unet/adapter=false,cfg=false/B=1,H_lat=80,T_txt=77,W_lat=192`): its packed
 manifest rows and its wrapper's generated input checks. The tests below rule
 on the actual bytes the fleet refused.
@@ -47,7 +47,7 @@ from gen_worker.api.export_contract import (
 FIXTURES = Path(__file__).parent / "fixtures" / "pgw1058"
 
 #: The ingress class the adopt pod's REAL warmup presented, verbatim from the
-#: attempt-30 `shape_gap/no_entry_admits` event:
+#: attempt-30 `shape_gap/no_compiled_graph_admits` event:
 #:   class=unet/#0=bfloat16[1,4,80,192],#1=float32[],…
 #: shaped the way the pipeline actually calls (added_cond_kwargs is ONE dict
 #: argument; the contract's leaf paths replay into it, pgw#994).
@@ -71,8 +71,8 @@ class _Tensor:
         self.dtype = dtype
 
 
-def _entry_meta() -> dict:
-    return json.loads((FIXTURES / "attempt30_entry_meta.json").read_text())
+def _compiled_graph_meta() -> dict:
+    return json.loads((FIXTURES / "attempt30_compiled_graph_meta.json").read_text())
 
 
 def _guards() -> tuple:
@@ -154,19 +154,19 @@ def test_the_labels_were_honest_the_filed_hypothesis_is_false():
     """pgw#1058's filed hypothesis — label vs packaged static dims diverged —
     is FALSIFIED from the bytes: the packed manifest rows agree with the
     artifact's own guards on every input, every dim, every dtype."""
-    assert aot_package.input_guard_drift(_entry_meta()["inputs"], _guards()) == []
+    assert aot_package.input_guard_drift(_compiled_graph_meta()["inputs"], _guards()) == []
 
 
 def test_the_real_compiled_graph_refuses_the_real_warmup_call_on_timestep_dtype():
     """The $0 reproduction of the field failure: the serve path's own
     admission (`assert_ingress` on the packed contract) against the exact
-    warmup class the adopt pod presented. The shape-matching entry's true
+    warmup class the adopt pod presented. The shape-matching compiled graph's true
     refusal is `dtype_mismatch` on timestep — the `static_dim_mismatch`
     36/36 reading came from `select()`'s reasons[:6] truncation over the
-    34 wrong-shape entries."""
+    34 wrong-shape compiled graphs."""
     from gen_worker import aot_serve
 
-    contract = aot_serve.contract_from_meta(_entry_meta())
+    contract = aot_serve.contract_from_meta(_compiled_graph_meta())
     with pytest.raises(aot_serve.IngressContractError) as excinfo:
         aot_serve.assert_ingress(contract, (), _real_warmup_call())
     assert excinfo.value.reason == "dtype_mismatch"
@@ -178,7 +178,7 @@ def test_the_corrected_declaration_catches_the_real_compiled_graph_by_name():
     against the PUBLISHED compiled graph's own bytes now names the defect instead of
     36 opaque admission misses: the manifest a float32 mint would carry
     drifts from this artifact's bfloat16 guard."""
-    rows = [dict(r) for r in _entry_meta()["inputs"]]
+    rows = [dict(r) for r in _compiled_graph_meta()["inputs"]]
     for row in rows:
         if row["name"] == "timestep":
             row["dtype"] = "float32"
@@ -270,7 +270,7 @@ def test_a_corrupted_label_fails_closed(real_package, corrupt, expect):
 
 
 def test_the_mint_package_gate_runs_the_check(real_package, monkeypatch):
-    """`_gate_and_declare_entry` — the produce half — refuses a package whose
+    """`_gate_and_declare_compiled_graph` — the produce half — refuses a package whose
     guards diverge from the program-derived manifest. Wiring proof: the same
     package with a program whose placeholders disagree must raise
     MintRefused naming the drift."""
@@ -292,7 +292,7 @@ def test_the_mint_package_gate_runs_the_check(real_package, monkeypatch):
         module, (torch.randn(4, 8),
                  torch.full((), 100.0, dtype=torch.float32)), strict=True)
     _program, path = real_package
-    row = aot_mint._MintedEntry(
+    row = aot_mint._MintedCompiledGraph(
         name="", spec=aot_mint.ExportSpec(family="pgw1058", target="unet"),
         module=module, owner=module, program=other,
         input_names=("x", "t"),
@@ -302,7 +302,7 @@ def test_the_mint_package_gate_runs_the_check(real_package, monkeypatch):
         ),
         files=[], timings={})
     with pytest.raises(aot_mint.MintRefused, match="admission drift"):
-        aot_mint._gate_and_declare_entry(row, path)
+        aot_mint._gate_and_declare_compiled_graph(row, path)
 
 
 def test_the_arm_gate_is_the_same_derivation(real_package):
@@ -316,6 +316,6 @@ def test_the_arm_gate_is_the_same_derivation(real_package):
     rows = [dict(r, shape=list(r["shape"])) for r in _honest_rows(program)]
     rows[1]["dtype"] = "bfloat16"
     with pytest.raises(AdoptError) as excinfo:
-        aot_serve._entry_admission_drift(path, "", rows)
+        aot_serve._compiled_graph_admission_drift(path, "", rows)
     assert excinfo.value.reason == "admission_drift"
-    aot_serve._entry_admission_drift(path, "", _honest_rows(program))
+    aot_serve._compiled_graph_admission_drift(path, "", _honest_rows(program))

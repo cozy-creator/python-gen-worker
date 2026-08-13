@@ -1,11 +1,11 @@
-"""pgw#809: the entry-compile pool — two scenarios, driven for real.
+"""pgw#809: the compiled graph-compile pool — two scenarios, driven for real.
 
 Scenario-shaped rather than per-behaviour: ONE integration test drives the
-real :class:`EntryCompilePool` through a real multi-entry mint-to-completion
+real :class:`CompiledGraphCompilePool` through a real multi-compiled graph mint-to-completion
 (real ``torch.export`` programs, real ``aot_compile`` children, real
 ``package_aoti`` assembly) and asserts everything that must hold about a
 successful pool run at once; a second drives a real mint-WITH-FAILURE and
-asserts everything that must hold when one entry dies mid-pool. The width
+asserts everything that must hold when one compiled graph dies mid-pool. The width
 policy is the one piece that must be exercised across pods the box cannot
 be, so it is a table.
 
@@ -52,8 +52,8 @@ def _program(seed: int) -> Any:
     return torch.export.export(Tiny(), (torch.randn(4, _HIDDEN),))
 
 
-def _entries(n: int) -> List[Tuple[str, Any]]:
-    # Deliberately NOT in sorted order: the pool must assemble by entry name,
+def _compiled_graphs(n: int) -> List[Tuple[str, Any]]:
+    # Deliberately NOT in sorted order: the pool must assemble by compiled graph name,
     # and a list that was already sorted could not tell the difference.
     names = [f"unet/adapter=true/dim={i}" for i in range(n)]
     return [(names[i], _program(i)) for i in reversed(range(n))]
@@ -62,11 +62,11 @@ def _entries(n: int) -> List[Tuple[str, Any]]:
 def _descendants(pid: int) -> List[int]:
     """Every live process whose group is this pid's — the orphan sweep."""
     out: List[int] = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
+    for compiled_graph in Path("/proc").iterdir():
+        if not compiled_graph.name.isdigit():
             continue
         try:
-            stat = (entry / "stat").read_text()
+            stat = (compiled_graph / "stat").read_text()
         except OSError:
             continue
         # ... pid (comm) state ppid pgrp ...
@@ -75,7 +75,7 @@ def _descendants(pid: int) -> List[int]:
             continue
         try:
             if int(tail[2]) == pid:      # pgrp
-                out.append(int(entry.name))
+                out.append(int(compiled_graph.name))
         except ValueError:
             continue
     return out
@@ -86,45 +86,45 @@ def _descendants(pid: int) -> List[int]:
 # ---------------------------------------------------------------------------
 
 
-def test_pool_mints_a_multi_entry_compiled_graph(tmp_path: Path) -> None:
-    """Four entries, K=2, through the real children and into one ``.pt2``.
+def test_pool_mints_a_multi_compiled_graph_compiled_graph(tmp_path: Path) -> None:
+    """Four compiled graphs, K=2, through the real children and into one ``.pt2``.
 
-    Asserts, in one run: every entry comes back; the loose files exist and
+    Asserts, in one run: every compiled graph comes back; the loose files exist and
     are readable by the PARENT (the shared cache dir is the whole reason
-    they are); assembly is ordered by entry NAME and not by completion; the
+    they are); assembly is ordered by compiled graph NAME and not by completion; the
     pool really did run K children at once (structurally, not by clock);
     the staged programs are swept; the
-    per-entry seconds and the child peak RSS are recorded (the memory bound
+    per-compiled graph seconds and the child peak RSS are recorded (the memory bound
     is measured, not assumed); and ``package_aoti`` accepts the result.
     """
     from torch._inductor.package import package_aoti
 
-    entries = _entries(4)
+    compiled_graphs = _compiled_graphs(4)
     # The width is STATED, not derived: a 4-vCPU CI runner honestly derives
     # K=1, and this scenario would then pass while exercising no pool at all.
-    width = pool.entry_workers(
-        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
+    width = pool.compiled_graph_workers(
+        len(compiled_graphs), limit=2, vcpus=16, available_bytes=64 * 1024**3,
         device_lock=True)
     assert width.workers == 2
-    box = pool.EntryCompilePool(
+    box = pool.CompiledGraphCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
         cache_dir=str(tmp_path / "cache"))
 
-    out = box.compile(entries)
+    out = box.compile(compiled_graphs)
 
-    assert set(out) == {name for name, _ in entries}
+    assert set(out) == {name for name, _ in compiled_graphs}
     assert list(out) == sorted(out), (
-        "the compiled_graph must assemble by entry NAME; a dict ordered by completion "
+        "the compiled_graph must assemble by compiled_graph NAME; a dict ordered by completion "
         "makes the artifact depend on which child finished first")
     for name, files in out.items():
-        assert files, f"entry {name!r} came back with no files"
+        assert files, f"compiled_graph {name!r} came back with no files"
         for path in files:
             assert Path(path).exists(), (
                 f"{name}: {path} is not visible to the parent — the pool's "
                 f"shared TORCHINDUCTOR_CACHE_DIR is how loose files travel")
 
-    assert set(box.entry_seconds) == set(out)
+    assert set(box.compiled_graph_seconds) == set(out)
     # Overlap is asserted STRUCTURALLY — K processes really were alive at
     # once — never as a wall-clock speedup. A `wall < serial_sum` assertion
     # measures the runner's spare CPU, not this code: on a 4-vCPU CI box it
@@ -134,7 +134,7 @@ def test_pool_mints_a_multi_entry_compiled_graph(tmp_path: Path) -> None:
         f"pool never reached its own width: saw {box.peak_concurrency} "
         f"concurrent children, K={width.workers}")
     assert box.peak_rss_bytes > 0, (
-        "per-entry peak RSS is what bounds K by memory; an unmeasured peak "
+        "per-compiled_graph peak RSS is what bounds K by memory; an unmeasured peak "
         "makes the width policy a guess")
 
     staged = list((tmp_path / "pool").rglob("program.pt2"))
@@ -145,48 +145,48 @@ def test_pool_mints_a_multi_entry_compiled_graph(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 2: a mint where one entry dies
+# Scenario 2: a mint where one compiled graph dies
 # ---------------------------------------------------------------------------
 
 
-def test_one_failing_entry_fails_the_mint_and_takes_its_siblings(
+def test_one_failing_compiled_graph_fails_the_mint_and_takes_its_siblings(
     tmp_path: Path,
 ) -> None:
-    """One entry cannot compile. The mint must fail NAMING it, the siblings
+    """One compiled graph cannot compile. The mint must fail NAMING it, the siblings
     must be torn down group-wide, and nothing may survive the call.
 
     The failure is injected the only honest way: a job whose exported program
     is corrupt, so the real child really does exit non-zero on the real code
     path. Everything else in the run is real.
     """
-    entries = _entries(4)
-    doomed = entries[1][0]
-    width = pool.entry_workers(
-        len(entries), limit=4, vcpus=16, available_bytes=64 * 1024**3,
+    compiled_graphs = _compiled_graphs(4)
+    doomed = compiled_graphs[1][0]
+    width = pool.compiled_graph_workers(
+        len(compiled_graphs), limit=4, vcpus=16, available_bytes=64 * 1024**3,
         device_lock=True)
-    box = pool.EntryCompilePool(
+    box = pool.CompiledGraphCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
         cache_dir=str(tmp_path / "cache"))
 
     real_stage = box._stage
 
-    def stage(entry: str, program: Any, index: int) -> Any:
-        job, job_path = real_stage(entry, program, index)
-        if entry == doomed:
+    def stage(compiled_graph: str, program: Any, index: int) -> Any:
+        job, job_path = real_stage(compiled_graph, program, index)
+        if compiled_graph == doomed:
             Path(job.program).write_bytes(b"not an exported program")
         return job, job_path
 
     box._stage = stage           # type: ignore[method-assign]
 
     before = set(_descendants(os.getpid()))
-    with pytest.raises(pool.EntryCompileFailed) as caught:
-        box.compile(entries)
+    with pytest.raises(pool.CompiledGraphCompileFailed) as caught:
+        box.compile(compiled_graphs)
 
     exc = caught.value
-    assert exc.entry == doomed
+    assert exc.compiled_graph == doomed
     assert doomed in str(exc), (
-        "a pool of 18 that fails anonymously is undebuggable — the entry "
+        "a pool of 18 that fails anonymously is undebuggable — the compiled_graph "
         "name is the whole diagnostic on a pod with no logs")
     assert "exited" in str(exc)
 
@@ -211,15 +211,15 @@ def test_one_failing_entry_fails_the_mint_and_takes_its_siblings(
 def test_a_named_child_refusal_is_reported_not_swallowed(tmp_path: Path) -> None:
     """``aot_compile_child`` run by hand on a bad job: non-zero exit, a typed
     report, and the refusal sentence on disk. The boundary is a file exactly
-    so a mint that fails on entry 13 of 18 is reproducible without the
+    so a mint that fails on compiled graph 13 of 18 is reproducible without the
     pipeline."""
     slot = tmp_path / "slot"
     slot.mkdir()
     (slot / "program.pt2").write_bytes(b"garbage")
-    job = pool.EntryJob(
-        entry="unet/adapter=true/dim=0",
+    job = pool.CompiledGraphJob(
+        compiled_graph="unet/adapter=true/dim=0",
         program=str(slot / "program.pt2"),
-        report=str(slot / pool.ENTRY_REPORT_NAME),
+        report=str(slot / pool.COMPILED_GRAPH_REPORT_NAME),
         inductor_configs={"compile_threads": 1},
         cache_dir=str(tmp_path / "cache"))
     job_path = slot / "job.json"
@@ -232,9 +232,9 @@ def test_a_named_child_refusal_is_reported_not_swallowed(tmp_path: Path) -> None
         env=pool.child_env(str(tmp_path / "cache")))
     assert proc.returncode == pool.EXIT_REFUSED, proc.stderr[-2000:]
     report = msgspec.json.decode(
-        (slot / pool.ENTRY_REPORT_NAME).read_bytes(), type=pool.EntryReport)
+        (slot / pool.COMPILED_GRAPH_REPORT_NAME).read_bytes(), type=pool.CompiledGraphReport)
     assert report.status == pool.REFUSED
-    assert report.entry == job.entry
+    assert report.compiled_graph == job.compiled_graph
     assert "exported program" in report.detail
     assert not report.files
 
@@ -256,7 +256,7 @@ def test_a_malformed_job_is_a_wiring_defect_not_a_retry(tmp_path: Path) -> None:
 #: can isolate the ONE bound it is about.
 #
 # pgw#1175 / §4.33: the third bound is GONE. K used to divide free VRAM by a
-# per-entry device ask whose only production source was
+# per-compiled graph device ask whose only production source was
 # `mint_budget.co_residency().need_bytes` — the mint child's whole
 # co-residency estimate, led by the PARENT's resident weights, for a child
 # that has held no weights since `fc77b923`. The rows that exercised it are
@@ -269,21 +269,21 @@ _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3, device_lock=True)
     "case,over,expect",
     [
         # A 4-vCPU pod is honestly SERIAL: 2 cores after serving headroom, 2
-        # cores per entry. pgw#809 predicted this; it must not be papered over.
+        # cores per compiled graph. pgw#809 predicted this; it must not be papered over.
         ("cpu-bound 4 vCPU", dict(vcpus=4), 1),
         ("cpu-bound 8 vCPU", dict(vcpus=8), 3),
         ("cpu-bound 16 vCPU", dict(vcpus=16), 7),
         # Ceiling, not a bigger number, on a very fat host.
-        ("fat host hits the ceiling", {}, pool.MAX_ENTRY_WORKERS),
+        ("fat host hits the ceiling", {}, pool.MAX_COMPILED_GRAPH_WORKERS),
         # Host RAM: 10 GiB available - 4 GiB reserve = 6 GiB / 3 GiB.
         ("host-RAM-bound", dict(available_bytes=10 * 1024**3), 2),
-        # Never wider than there are entries to compile.
-        ("3 entries", dict(entries=3), 3),
-        # A single-entry compiled graph never pays for a pool.
-        ("1 entry", dict(entries=1), 1),
-        # pgw#1175: a MEASURED per-entry RSS narrower than the 3 GiB default
-        # buys width — the one per-entry footprint that still divides.
-        ("measured 1 GiB per entry",
+        # Never wider than there are compiled graphs to compile.
+        ("3 compiled_graphs", dict(compiled_graphs=3), 3),
+        # A single-compiled graph compiled graph never pays for a pool.
+        ("1 compiled_graph", dict(compiled_graphs=1), 1),
+        # pgw#1175: a MEASURED per-compiled graph RSS narrower than the 3 GiB default
+        # buys width — the one per-compiled graph footprint that still divides.
+        ("measured 1 GiB per compiled_graph",
          dict(available_bytes=14 * 1024**3, peak_rss_bytes=1024**3), 8),
     ],
 )
@@ -291,9 +291,9 @@ def test_width_is_derived_from_the_pod_not_the_host(
     case: str, over: dict, expect: int,
 ) -> None:
     kwargs = dict(_ROOMY)
-    entries = over.pop("entries", 18)
+    compiled_graphs = over.pop("compiled_graphs", 18)
     kwargs.update(over)
-    width = pool.entry_workers(entries, **kwargs)   # type: ignore[arg-type]
+    width = pool.compiled_graph_workers(compiled_graphs, **kwargs)   # type: ignore[arg-type]
     assert width.workers == expect, f"{case}: {width.reason}"
     assert width.reason
 
@@ -301,7 +301,7 @@ def test_width_is_derived_from_the_pod_not_the_host(
 def test_an_unreadable_host_does_not_license_a_wide_pool() -> None:
     """No memory answer means K=1. A pool that widened on ignorance would
     OOM-kill the serving process it is supposed to be sharing with."""
-    width = pool.entry_workers(
+    width = pool.compiled_graph_workers(
         18, vcpus=64, available_bytes=0, device_lock=True)
     assert width.workers == 1
     # pgw#877: the footprint is supplied so this pins the MEMORY bound alone.
@@ -314,7 +314,7 @@ def test_without_the_gpu_benchmark_lock_a_gpu_compiled_graph_stays_serial() -> N
     """The pool's safety interlock, as a WIDTH decision.
 
     An AOTI compile picks kernel configs by timing them on the card. Two
-    entries timing at once measure each other's contention and bake the loser
+    compiled graphs timing at once measure each other's contention and bake the loser
     into an artifact whose compiled graph key does not move — a silently slower compiled graph
     under a good compiled graph's identity. If torch cannot serialize those timings, the
     only safe width is 1.
@@ -328,33 +328,33 @@ def test_without_the_gpu_benchmark_lock_a_gpu_compiled_graph_stays_serial() -> N
     real_card = pool._has_card
     try:
         pool._has_card = lambda: True
-        assert pool.entry_workers(18, **kwargs).workers == 1  # type: ignore[arg-type]
-        assert "benchmark" in pool.entry_workers(
+        assert pool.compiled_graph_workers(18, **kwargs).workers == 1  # type: ignore[arg-type]
+        assert "benchmark" in pool.compiled_graph_workers(
             18, **kwargs).reason                              # type: ignore[arg-type]
         # ... and a card-less (CPU) compiled graph is not held back by it: there is no
         # device to benchmark on and nothing to perturb.
         pool._has_card = lambda: False
-        assert pool.entry_workers(
+        assert pool.compiled_graph_workers(
             18, **kwargs).workers > 1                         # type: ignore[arg-type]
     finally:
         pool._has_card = real_card
 
 
 def test_the_cap_narrows_and_never_widens() -> None:
-    wide = pool.entry_workers(18, **_ROOMY)               # type: ignore[arg-type]
-    assert pool.entry_workers(
+    wide = pool.compiled_graph_workers(18, **_ROOMY)               # type: ignore[arg-type]
+    assert pool.compiled_graph_workers(
         18, limit=2, **_ROOMY).workers == 2               # type: ignore[arg-type]
-    assert pool.entry_workers(
+    assert pool.compiled_graph_workers(
         18, limit=99, **_ROOMY).workers == wide.workers   # type: ignore[arg-type]
 
 
 def test_the_width_and_its_inputs_ride_the_telemetry() -> None:
     """pgw#809 constraint 6: a mint's wall clock is uninterpretable without
     the K it ran at — two mints of the same compiled graph legitimately differ 4x."""
-    facts = pool.entry_workers(18, **_ROOMY).facts()      # type: ignore[arg-type]
-    assert facts["entry_workers"] >= 1
-    for key in ("entries", "vcpus", "cpu_workers", "mem_workers",
-                "available_bytes", "per_entry_rss_bytes",
+    facts = pool.compiled_graph_workers(18, **_ROOMY).facts()      # type: ignore[arg-type]
+    assert facts["compiled_graph_workers"] >= 1
+    for key in ("compiled_graphs", "vcpus", "cpu_workers", "mem_workers",
+                "available_bytes", "per_compiled_graph_rss_bytes",
                 "device_lock", "width_reason"):
         assert key in facts
     # pgw#1175: and the deleted terms must not creep back as telemetry that
@@ -376,7 +376,7 @@ def test_the_gpu_benchmark_lock_serializes_real_processes(
     section that appends to a shared file. If the lock works, the file's
     enter/leave markers nest perfectly; if it does not, they interleave.
     ``flock`` (not a multiprocessing primitive) is what makes a SIGKILLed
-    child release by dying — the OOM killer is how an entry child is expected
+    child release by dying — the OOM killer is how an compiled graph child is expected
     to go.
     """
     from gen_worker import aot_device_lock
@@ -410,7 +410,7 @@ def test_the_gpu_benchmark_lock_serializes_real_processes(
         if line.startswith("+"):
             assert held == "", (
                 f"{line} entered while {held} still held it — the pool would "
-                f"be benchmarking two entries against each other")
+                f"be benchmarking two compiled_graphs against each other")
             held = line[1:]
         else:
             assert held == line[1:]
@@ -450,7 +450,7 @@ def test_the_autotune_posture_the_mint_actually_compiles_under() -> None:
     V.aot_compilation`` — True for AOTI. So the mint takes the ONE-pass
     autotune-block path, not the two-pass "run the whole model on real
     inputs" path below it. Both benchmark on the card; only the second holds
-    a full activation set. If a torch bump flips this default, the per-entry
+    a full activation set. If a torch bump flips this default, the per-compiled graph
     VRAM figure in the width policy is wrong and this test says so.
     """
     import torch._inductor.config as inductor_config
@@ -459,7 +459,7 @@ def test_the_autotune_posture_the_mint_actually_compiles_under() -> None:
     assert inductor_config.triton.autotune_at_compile_time is None, (
         "the pin no longer leaves autotune_at_compile_time unset — re-read "
         "compile_fx.get_cpp_wrapper_config before trusting the VRAM policy")
-    resolved = aot_mint._entry_configs(None)
+    resolved = aot_mint._compiled_graph_configs(None)
     assert "triton.autotune_at_compile_time" not in resolved, (
         "the mint must not pin this: the resolution is torch's, and pinning "
         "it False switches on the whole-model-on-real-inputs pass")
@@ -468,12 +468,12 @@ def test_the_autotune_posture_the_mint_actually_compiles_under() -> None:
 def test_parallelism_is_not_sealed(tmp_path: Path) -> None:
     """pgw#757 established ``compile_threads`` as outside compiled graph identity; the
     same argument covers K, and the digest check is how it is VERIFIED rather
-    than argued. The pool changes WHEN entries compile, never what."""
+    than argued. The pool changes WHEN compiled graphs compile, never what."""
     from gen_worker import env_seal
 
-    # pgw#929: the loop that used to sit here set GEN_WORKER_AOT_ENTRY_WORKERS
+    # pgw#929: the loop that used to sit here set GEN_WORKER_AOT_COMPILED_GRAPH_WORKERS
     # and asserted the digest was unmoved. NOTHING IN src/ HAS EVER READ THAT
-    # NAME — the live width constant is `aot_compile_pool.MAX_ENTRY_WORKERS` —
+    # NAME — the live width constant is `aot_compile_pool.MAX_COMPILED_GRAPH_WORKERS` —
     # so the assertion held for the one reason that proves nothing (C1: a test
     # exercising a knob that does not exist). The real property, that the
     # shared cache DIR is a location and not a recipe, is asserted below

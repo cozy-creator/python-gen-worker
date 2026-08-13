@@ -22,7 +22,7 @@ from gen_worker.mint_process import CompileCompiledGraphSpec
 
 
 # ---------------------------------------------------------------------------
-# Synthetic entry blocks — the shape `aot_mint.keying_block` produces
+# Synthetic compiled graph blocks — the shape `aot_mint.keying_block` produces
 # ---------------------------------------------------------------------------
 
 
@@ -77,9 +77,9 @@ _ENVELOPE = {"shapes": [[1024, 1024]], "text_lens": [77], "guidance": [7.5]}
 
 def _stamped(blocks: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """The blocks as the mint stamps them — pgw#1176: one call per class,
-    through `stamp_entry`, which is the mint's own function."""
+    through `stamp_compiled_graph`, which is the mint's own function."""
     return {
-        name: aot_serve.stamp_entry(
+        name: aot_serve.stamp_compiled_graph(
             name, dict(block), strict=True, lora_bucket=0)
         for name, block in blocks.items()
     }
@@ -117,24 +117,24 @@ def test_the_fold_is_the_mints_own_stamp_not_a_second_arithmetic() -> None:
     # agree while an individual class's hash disagreed underneath it.
     minted = {}
     for name, block in blocks.items():
-        meta = aot_serve.entry_metadata(
+        meta = aot_serve.compiled_graph_metadata(
             family="tiny", precision="bf16", compiled_graph_key="",
-            name=name, entry=dict(block), strict_export=True, lora_bucket=0)
+            name=name, compiled_graph=dict(block), strict_export=True, lora_bucket=0)
         meta["toolchain"] = dict(cc.toolchain_digest())
         meta[env_seal.SEAL_KEY] = env_seal.effective_seal()
         minted[name] = aot_mint.compiled_graph_identity(meta).digest
 
-    entry_keys, class_hashes, manifest = _fold(blocks)
+    compiled_graph_keys, class_hashes, manifest = _fold(blocks)
 
-    assert entry_keys == minted
+    assert compiled_graph_keys == minted
     assert manifest == compiled_graph_key.manifest_digest(class_hashes.values())
     assert set(class_hashes) == set(blocks)
     assert all(len(h) == 16 for h in class_hashes.values())
 
 
 def test_every_key_is_an_ek1_key_over_exactly_three_axes() -> None:
-    entry_keys, _hashes, _manifest = _fold({"a": _block()})
-    (key,) = entry_keys.values()
+    compiled_graph_keys, _hashes, _manifest = _fold({"a": _block()})
+    (key,) = compiled_graph_keys.values()
     assert key.startswith("ek1-")
     assert compiled_graph_key.is_key(key)
     # The axes are the key's, and `from_axes` is the only way to build one —
@@ -155,7 +155,7 @@ def test_class_order_and_assignment_do_not_move_the_key() -> None:
     is assigned. Both are structurally incapable of moving the key —
     ``manifest_digest`` sorts by hash and the fold takes a dict — and
     "structurally incapable" is exactly the claim that must be pinned, because
-    the compile pool's equivalent discipline (assembly by entry NAME, never by
+    the compile pool's equivalent discipline (assembly by compiled graph NAME, never by
     completion) had to be stated to be kept.
     """
     names = [f"forward/x@{d}" for d in (64, 128, 192, 256, 320)]
@@ -237,7 +237,7 @@ def test_no_env_decides_the_width(monkeypatch) -> None:
     monkeypatch.setattr(boot_key, "cpu_quota_cores", lambda: 4.0)
     before = boot_key.trace_workers(36).workers
     for name in ("GEN_WORKER_TRACE_WORKERS", "GEN_WORKER_BOOT_KEY_K",
-                 "OMP_NUM_THREADS", "GEN_WORKER_ENTRY_WORKERS"):
+                 "OMP_NUM_THREADS", "GEN_WORKER_COMPILED_GRAPH_WORKERS"):
         monkeypatch.setenv(name, "1")
     assert boot_key.trace_workers(36).workers == before
 
@@ -257,12 +257,12 @@ def test_the_memo_never_holds_the_folded_key(tmp_path: Path) -> None:
     """
     digest = "closure0123"
     blocks = {"a": _block(), "b": _block(dim=128)}
-    entry_keys, _hashes, _combined = _fold(blocks)
+    compiled_graph_keys, _hashes, _combined = _fold(blocks)
     assert boot_key.write_memo(tmp_path, digest, blocks)
 
     doc = json.loads((tmp_path / boot_key.MEMO_FILENAME).read_text())
     blob = json.dumps(doc)
-    for key in entry_keys.values():
+    for key in compiled_graph_keys.values():
         assert key not in blob
     assert "ek1-" not in blob
     assert set(doc["closures"][digest]["blocks"]) == {"a", "b"}
@@ -294,7 +294,7 @@ def test_the_memo_round_trips_and_a_foreign_closure_is_a_miss(
     assert boot_key.read_memo(None, "closureA") == {}
 
 
-def test_one_unreadable_block_invalidates_the_WHOLE_memo_entry(
+def test_one_unreadable_block_invalidates_the_WHOLE_memo_compiled_graph(
     tmp_path: Path,
 ) -> None:
     """A partial class set is not a narrower key, it is a wrong one
@@ -377,7 +377,7 @@ def test_a_dishonest_memo_is_caught_at_mint_and_invalidated(
     assert boot_key.assert_memo_honest(tmp_path, digest, minted) == ""
     assert boot_key.read_memo(tmp_path, digest) == blocks
 
-    # A mint whose traced class hashes DISAGREE: named, and the entry is gone.
+    # A mint whose traced class hashes DISAGREE: named, and the compiled graph is gone.
     lying = {name: dict(row) for name, row in minted.items()}
     lying["a"]["class_hash"] = "0" * 16
     reason = boot_key.assert_memo_honest(tmp_path, digest, lying)

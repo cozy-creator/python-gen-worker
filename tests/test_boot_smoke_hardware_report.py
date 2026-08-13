@@ -15,7 +15,7 @@ from harness.hardware_report_hub import closed_port_addr, recording_hub
 from harness.subprocess_runner import (
     BLACKHOLE_ADDR,
     assert_no_unhandled_crash,
-    gpu_manifest_entry,
+    gpu_manifest_compiled_graph,
     run_entrypoint,
     startup_phase_lines,
 )
@@ -25,7 +25,7 @@ def test_probe_failure_boot_dials_hub_sends_report_and_exits_cleanly(tmp_path: P
     with recording_hub() as (servicer, addr):
         result = run_entrypoint(
             tmp_path,
-            functions=[gpu_manifest_entry()],
+            functions=[gpu_manifest_compiled_graph()],
             env_overrides={
                 "ORCHESTRATOR_PUBLIC_ADDR": addr,
                 "WORKER_ID": "gw619-smoke-worker",
@@ -67,7 +67,7 @@ def test_probe_failure_hub_unreachable_still_exits_without_hanging(tmp_path: Pat
     start = time.monotonic()
     result = run_entrypoint(
         tmp_path,
-        functions=[gpu_manifest_entry()],
+        functions=[gpu_manifest_compiled_graph()],
         env_overrides={"ORCHESTRATOR_PUBLIC_ADDR": closed_port_addr()},
         timeout=90.0,
     )
@@ -113,7 +113,7 @@ def test_probe_failure_silent_hub_exits_on_the_report_budget_not_a_hang(
     """
     result = run_entrypoint(
         tmp_path,
-        functions=[gpu_manifest_entry()],
+        functions=[gpu_manifest_compiled_graph()],
         env_overrides={"ORCHESTRATOR_PUBLIC_ADDR": BLACKHOLE_ADDR},
         timeout=60.0,
     )
@@ -139,7 +139,7 @@ def test_probe_failure_is_terminal_no_respawn_exits_1(tmp_path: Path) -> None:
     the CI job (no silence window can end it: every respawn prints)."""
     result = run_entrypoint(
         tmp_path,
-        functions=[gpu_manifest_entry()],
+        functions=[gpu_manifest_compiled_graph()],
         env_overrides={
             "ORCHESTRATOR_PUBLIC_ADDR": closed_port_addr(),
         },
@@ -171,7 +171,7 @@ def test_probe_failure_parent_relays_the_typed_report(tmp_path: Path) -> None:
     with recording_hub() as (servicer, addr):
         result = run_entrypoint(
             tmp_path,
-            functions=[gpu_manifest_entry()],
+            functions=[gpu_manifest_compiled_graph()],
             env_overrides={
                 "ORCHESTRATOR_PUBLIC_ADDR": addr,
                 "WORKER_ID": "pgw826-split-worker",

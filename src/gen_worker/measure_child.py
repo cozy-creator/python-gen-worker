@@ -97,8 +97,8 @@ What it measures, and against what vocabulary
 ``export_peak_device_bytes`` / ``export_peak_device_reserved_bytes`` are the
 mint's own names for the same two counters (``aot_mint._mint_compiled_graph``), read on
 the same allocator, so a number from this child and a number from a real mint
-are comparable without translation. The per-entry figure is the RUNNING
-high-water after that entry — the counter is reset once, before the first row,
+are comparable without translation. The per-compiled graph figure is the RUNNING
+high-water after that compiled graph — the counter is reset once, before the first row,
 exactly as the mint resets it once before its export phase — so the row that
 raised the water line is the row named beside it.
 
@@ -155,9 +155,9 @@ REASONS: Tuple[str, ...] = (
     # The family ships no export declaration, so there is no class set to
     # measure.
     "no_declaration",
-    # An entry refused (a mint refusal, or the device saying no). THE ANSWER
+    # An compiled graph refused (a mint refusal, or the device saying no). THE ANSWER
     # for an OOM blocker, not an error: the peaks measured up to that row are
-    # in the report, and the refusing entry is named.
+    # in the report, and the refusing compiled graph is named.
     "export_refused",
     # Anything else, classified rather than lost at the process boundary.
     "child_error",
@@ -243,20 +243,20 @@ class MeasureRefused(Exception):
         self.detail = detail
 
 
-class EntryMeasurement(msgspec.Struct, frozen=True, kw_only=True):
+class CompiledGraphMeasurement(msgspec.Struct, frozen=True, kw_only=True):
     """One declared graph class, and what exporting (and compiling) it cost."""
 
-    entry: str
+    compiled_graph: str
     ok: bool = False
     nodes: int = 0
     export_ms: int = 0
     compile_ms: int = 0
-    #: This process's device high-water AFTER this entry — cumulative, because
+    #: This process's device high-water AFTER this compiled graph — cumulative, because
     #: the counter is reset once before the first row. The row where it JUMPS
     #: is the row that sizes the mint.
     running_peak_device_bytes: int = 0
     running_peak_device_reserved_bytes: int = 0
-    #: Loose inductor files this entry compiled. Counted, then DELETED — see
+    #: Loose inductor files this compiled graph compiled. Counted, then DELETED — see
     #: :func:`_discard`. A measure run leaves no code behind.
     compiled_files: int = 0
     refusal: str = ""
@@ -289,7 +289,7 @@ class MeasureReport(msgspec.Struct, frozen=True, kw_only=True):
     structure_only_components: Tuple[str, ...] = ()
     weight_lane: str = ""
     precision: str = ""
-    entries: Tuple[EntryMeasurement, ...] = ()
+    compiled_graphs: Tuple[CompiledGraphMeasurement, ...] = ()
     declared_classes: int = 0
     #: The mint's own two names for the phase high-water, on the mint's own
     #: counters (``aot_mint._mint_compiled_graph``), so these numbers are comparable
@@ -348,7 +348,7 @@ def _device_label(job: MeasureJob) -> str:
 
 
 def _discard(files: Sequence[str]) -> int:
-    """Delete an entry's compiled output and return how much there was.
+    """Delete an compiled graph's compiled output and return how much there was.
 
     The compile is the half of the question that matters, and its OUTPUT is
     the half that must not survive: a measure run that left loose ``.so``
@@ -629,7 +629,7 @@ def _fail(
 
 
 def run(
-    job: MeasureJob, report_path: Path, *, compile_entries: bool = True,
+    job: MeasureJob, report_path: Path, *, compile_compiled_graphs: bool = True,
 ) -> int:
     """Measure this job's declared class set. Never raises, never publishes."""
     from . import aot_declaration, aot_mint, compile_cache as cc, fleet_compiled_graphs
@@ -723,7 +723,7 @@ def run(
         structure_only_components=tuple(virtual),
         weight_lane=str(spec.weight_lane or ""),
         precision=str(spec.precision or ""),
-        compiled=bool(compile_entries),
+        compiled=bool(compile_compiled_graphs),
         setup_ms=int((time.monotonic() - t_setup) * 1000))
 
     decl = aot_mint.export_declaration(str(spec.family or family))
@@ -740,7 +740,7 @@ def run(
     # evidence anybody can act on.
     try:
         ordered = [
-            aot_declaration.plan_entry_name(plan)
+            aot_declaration.plan_compiled_graph_name(plan)
             for plan, _arm in aot_mint.declared_class_rows(pipeline, spec, decl)]
     except Exception as exc:  # noqa: BLE001 — an unreadable class set is one
         return _fail(
@@ -748,7 +748,7 @@ def run(
             f"family {spec.family!r} declares a class set that will not "
             f"enumerate ({type(exc).__name__}): {exc}", partial=partial)
 
-    entries: List[EntryMeasurement] = []
+    compiled_graphs: List[CompiledGraphMeasurement] = []
     declared = len(ordered)
     reason = ""
     detail = ""
@@ -756,17 +756,17 @@ def run(
     # phase, and a per-row reset would report N unrelated windows where the
     # question is a single high-water.
     _reset_peak()
-    t_entry = time.monotonic()
+    t_compiled_graph = time.monotonic()
     try:
         for traced in aot_mint.trace_for_key(
-                pipeline, spec, decl, compile_now=bool(compile_entries)):
+                pipeline, spec, decl, compile_now=bool(compile_compiled_graphs)):
             allocated, reserved = _peaks()
             timings = dict(traced.timings or {})
             # ONE enumeration: `ordered` above and this count both come from
             # `declared_class_rows`, so they cannot disagree.
             declared = int(traced.declared) or declared
-            entries.append(EntryMeasurement(
-                entry=traced.name, ok=True, nodes=int(traced.nodes),
+            compiled_graphs.append(CompiledGraphMeasurement(
+                compiled_graph=traced.name, ok=True, nodes=int(traced.nodes),
                 export_ms=int(float(timings.get("export_s", 0.0)) * 1000),
                 compile_ms=int(float(timings.get("compile_s", 0.0)) * 1000),
                 running_peak_device_bytes=allocated,
@@ -775,13 +775,13 @@ def run(
             # The program is the largest object this child holds and nothing
             # downstream reads it.
             traced.program = None
-            t_entry = time.monotonic()
+            t_compiled_graph = time.monotonic()
     except BaseException as exc:  # noqa: BLE001 — an OOM here IS the answer
         allocated, reserved = _peaks()
-        in_flight = ordered[len(entries)] if len(entries) < len(ordered) else ""
-        entries.append(EntryMeasurement(
-            entry=in_flight, ok=False,
-            export_ms=int((time.monotonic() - t_entry) * 1000),
+        in_flight = ordered[len(compiled_graphs)] if len(compiled_graphs) < len(ordered) else ""
+        compiled_graphs.append(CompiledGraphMeasurement(
+            compiled_graph=in_flight, ok=False,
+            export_ms=int((time.monotonic() - t_compiled_graph) * 1000),
             running_peak_device_bytes=allocated,
             running_peak_device_reserved_bytes=reserved,
             refusal=f"{type(exc).__name__}: {exc}"[:2000]))
@@ -792,25 +792,25 @@ def run(
     allocated, reserved = _peaks()
     report = msgspec.structs.replace(
         partial, ok=not reason, reason=reason, detail=detail[:4000],
-        entries=tuple(entries), declared_classes=declared,
+        compiled_graphs=tuple(compiled_graphs), declared_classes=declared,
         export_peak_device_bytes=allocated,
         export_peak_device_reserved_bytes=reserved,
         wall_ms=int((time.monotonic() - started) * 1000))
     _write(report_path, report)
     activity.emit_event(
         activity.KIND_MEASURE_ONLY,
-        phase=reason or ("measured" if compile_entries else "measured_export"),
+        phase=reason or ("measured" if compile_compiled_graphs else "measured_export"),
         duration_ms=report.wall_ms,
         detail=(
             f"family={report.family} function={report.function} "
             f"weights={report.weights} device={report.device} "
-            f"entries={len(entries)}/{declared} "
+            f"compiled_graphs={len(compiled_graphs)}/{declared} "
             f"export_peak_device_bytes={report.export_peak_device_bytes} "
             f"export_peak_device_reserved_bytes="
             f"{report.export_peak_device_reserved_bytes} "
             f"compiled={report.compiled}"))
     print(
-        f"MEASURED {report.family} {len(entries)}/{declared} entr(ies) "
+        f"MEASURED {report.family} {len(compiled_graphs)}/{declared} entr(ies) "
         f"weights={report.weights} compiled={report.compiled} "
         f"export_peak_device_bytes={report.export_peak_device_bytes} "
         f"export_peak_device_reserved_bytes="
@@ -865,7 +865,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except MeasureRefused as exc:
         return _fail(report_path, exc.reason, exc.detail)
     try:
-        return run(job, report_path, compile_entries=not args.export_only)
+        return run(job, report_path, compile_compiled_graphs=not args.export_only)
     except BaseException as exc:  # noqa: BLE001 — every terminus is reported
         logger.exception("measure: child failed")
         return _fail(report_path, "child_error", f"{type(exc).__name__}: {exc}")
@@ -875,6 +875,6 @@ if __name__ == "__main__":  # pragma: no cover — process entrypoint
     raise SystemExit(main())
 
 
-__all__ = ["EntryMeasurement", "MeasureDocument", "MeasureJob",
+__all__ = ["CompiledGraphMeasurement", "MeasureDocument", "MeasureJob",
            "MeasureRefused", "MeasureReport", "REASONS", "WITHHELD_FIELDS",
            "load_document", "main", "resolve_job", "run"]

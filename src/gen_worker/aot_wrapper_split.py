@@ -308,15 +308,15 @@ def _reinline(source: str) -> str:
 #: pgw#995 KEEPS this one, and the asymmetry with its deleted sibling above is
 #: the finding rather than an oversight: this name is LIVE — five SDXL releases
 #: (0.2.111/112/113/116/117) declare it and one endpoint carries a non-deleted
-#: `endpoint_env_entries` row (verified on the standing hub 2026-08-03). Deleting
+#: `endpoint_env_compiled_graphs` row (verified on the standing hub 2026-08-03). Deleting
 #: a live switch changes a running endpoint's behaviour; deleting a never-thrown
 #: one cannot. "Zero declarations" is the fact that licenses a deletion, and it
 #: is a fact you MEASURE, not one you assume from the code.
 DISABLE_V2_ENV = "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"
 
 #: How many of the K+1 part compiles may run at once. pgw#809's pool owns
-#: the pod's CPU budget ACROSS entries; it sets this to its per-entry share
-#: so the two levers compose (split-within-entry x pool-across-entries)
+#: the pod's CPU budget ACROSS compiled graphs; it sets this to its per-compiled graph share
+#: so the two levers compose (split-within-compiled graph x pool-across-compiled graphs)
 #: instead of oversubscribing. Unset: derive from the pod's own budget.
 JOBS_ENV = "GEN_WORKER_AOT_HOST_COMPILE_JOBS"
 

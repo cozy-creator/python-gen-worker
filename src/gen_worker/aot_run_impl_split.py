@@ -628,7 +628,7 @@ def reconstruct(main: str, parts: Sequence[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Public compiled graph point
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)

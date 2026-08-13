@@ -32,7 +32,7 @@ You satisfy three contract points; everything else is up to you.
 3. **The entrypoint runs `gen_worker.entrypoint`.**
 
    ```dockerfile
-   ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+   CompiledGraphPOINT ["python", "-m", "gen_worker.entrypoint"]
    ```
 
    The entrypoint reads `endpoint.lock`, connects to the orchestrator, and
@@ -49,7 +49,7 @@ COPY . /app
 RUN pip install -e .
 RUN mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+CompiledGraphPOINT ["python", "-m", "gen_worker.entrypoint"]
 ```
 
 No `ARG BASE_IMAGE`, no version pass-throughs. The endpoint's `pyproject.toml`
@@ -81,7 +81,7 @@ COPY . /app
 RUN pip install -e .
 RUN mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+CompiledGraphPOINT ["python", "-m", "gen_worker.entrypoint"]
 ```
 
 Use a common upstream default matching the profile so local builds behave like
@@ -336,7 +336,7 @@ RUN uv pip install --no-cache --link-mode copy \
     && mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+CompiledGraphPOINT ["python", "-m", "gen_worker.entrypoint"]
 ```
 
 Use this shape for GPU endpoints. For CPU-only endpoints, `python:3.12-slim`

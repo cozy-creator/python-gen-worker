@@ -8,8 +8,8 @@ Deliberate structural choices, each with a reason the mint can read:
   conv-free graphs and ``static-rows`` for conv-bearing ones — its 6.9% AOTI
   gap was root-caused as inductor's channels-last layout opt bailing when a
   convolution carries a free symbol. A conv here would force the declaration
-  onto ``static-rows``, which is the strategy that makes sdxl 36 entries.
-  Conv-free is what buys the 3-entry declaration.
+  onto ``static-rows``, which is the strategy that makes sdxl 36 compiled graphs.
+  Conv-free is what buys the 3-compiled graph declaration.
 * **The denoiser takes a python ``list`` of latents**, z-image's real shape:
   CFG is batched by concatenating the list, so the pytree ARITY doubles and
   N=1/N=2 are two graphs. This is what puts a CONTAINER input, and a plain
@@ -36,7 +36,7 @@ class MicroConfig:
     """The config object the export declaration reads widths off.
 
     A plain attribute holder rather than a dataclass: declaration files are
-    exec'd by path without a ``sys.modules`` entry, and ``@dataclass``
+    exec'd by path without a ``sys.modules`` compiled graph, and ``@dataclass``
     resolves annotations through ``sys.modules[cls.__module__].__dict__``.
     """
 

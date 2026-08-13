@@ -211,9 +211,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # `gen_worker` unambiguous. Here the rig supplies the same thing an image
     # would, through the PYTHONPATH `child_env` already preserves.
     extra = [str(REPO / "tests"), *(str(p) for p in veh.syspath)]
-    for entry in extra:
-        if entry not in sys.path:
-            sys.path.insert(0, entry)
+    for compiled_graph in extra:
+        if compiled_graph not in sys.path:
+            sys.path.insert(0, compiled_graph)
     inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
     os.environ["PYTHONPATH"] = os.pathsep.join(
         [p for p in extra if p not in inherited] + inherited)

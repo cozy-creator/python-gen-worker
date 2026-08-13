@@ -5,7 +5,7 @@ divisor the author passes to `derive.cfg_image_classes(latent_scale=…)`.
 Nothing checked that divisor against the checkpoint, so a wrong one produced a
 whole compiled graph of correctly-shaped, permanently unusable artifacts — silent, and
 paid for at full mint price. On the census of accepted-but-wrong declarations
-it was the only entry that costs a FULL MINT.
+it was the only compiled graph that costs a FULL MINT.
 
 WHY IT IS CHECKED AT `mint()` AND NOWHERE EARLIER
 

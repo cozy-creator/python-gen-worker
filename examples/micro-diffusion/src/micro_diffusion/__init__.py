@@ -1,8 +1,8 @@
 """micro-diffusion — the fleet's smallest REAL endpoint family.
 
 Its reason to exist is cycle time: a full production-path AOT mint against
-sdxl is 36 export entries and ~95 minutes on a pod, which makes every mint
-change a multi-hour experiment. This family declares THREE entries over a
+sdxl is 36 export compiled graphs and ~95 minutes on a pod, which makes every mint
+change a multi-hour experiment. This family declares THREE compiled graphs over a
 generated toy checkpoint and runs the identical machinery.
 """
 

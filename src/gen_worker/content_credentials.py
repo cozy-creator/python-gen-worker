@@ -348,11 +348,11 @@ def _refuse_pod_private_key_material(settings: Any = None) -> None:
     of the signing state rather than once at ``configure()``. pgw#931 removed
     ``_active_config``'s lazy ``configure()`` fallback — correctly, since a
     signing module must not go and find its own config — but the refusal rode
-    along inside that call, so it became reachable only from the one entry that
+    along inside that call, so it became reachable only from the one compiled graph that
     calls ``configure()``. Anything else (a library embed, a compute child, an
     endpoint importing the module directly) got a quiet ``enabled() == False``
     and shipped unsigned media beside a key that was sitting right there in the
-    environment. The presence of the key is the fact; no entry point owns it.
+    environment. The presence of the key is the fact; no compiled graph point owns it.
 
     ``settings`` is checked too when supplied, so a field smuggled back into
     Settings is refused on the same breath as the env.
@@ -387,7 +387,7 @@ def _active_config() -> Optional[_SignerConfig]:
     # pgw#931 (§1.18): this used to resolve lazily from the cached Settings
     # loader, i.e. a signing module that could go and find its own signing
     # config from the environment at first use. It cannot: `configure()` is
-    # called by the process entry with the entry's `Settings`, and a process
+    # called by the process compiled graph with the compiled graph's `Settings`, and a process
     # that never configured signing is a process where signing is OFF.
     #
     # That is also the honest answer. th#1307 makes cert material's PRESENCE

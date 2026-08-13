@@ -120,7 +120,7 @@ def test_the_structure_EXPORTS_and_AOT_COMPILES(tree: Path) -> None:
     assert so.fake_mode_of_program(program) is mode, (
         "the compile has to find the program's own mode — `aot_compile` "
         "asserts every input belongs to ONE mode")
-    files = aot_mint.compile_entry_files(program, "decoder")
+    files = aot_mint.compile_compiled_graph_files(program, "decoder")
     assert files, "AOTInductor produced no loose files for the fake structure"
 
 
@@ -260,9 +260,9 @@ def test_the_real_load_seam_raises_NOT_HONORED_on_a_swallowed_injection(
 def test_the_micro_tree_names_its_component_classes(tree: Path) -> None:
     """Without a component class map there is nothing to build from config;
     this is the packaging half of the contract and it is part of the tree."""
-    from gen_worker.models.loading import model_index_entry
+    from gen_worker.models.loading import model_index_compiled_graph
 
-    assert model_index_entry(tree, "transformer") == (
+    assert model_index_compiled_graph(tree, "transformer") == (
         "micro_diffusion.model", "MicroDenoiser")
-    assert model_index_entry(tree, "decoder") == (
+    assert model_index_compiled_graph(tree, "decoder") == (
         "micro_diffusion.model", "MicroDecoder")

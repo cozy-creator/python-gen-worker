@@ -112,7 +112,7 @@ _LOCK_TYPE = type(threading.Lock())
 # Compiled graph keys carry no checkpoint digest, so arming a SECOND checkpoint of an
 # already-proven family creates a new pipeline whose target forward shares
 # the class ``__code__`` dynamo already compiled — on torch 2.13 (inlined
-# nn-modules) the cached entry's guards match the new instance and the
+# nn-modules) the cached compiled graph's guards match the new instance and the
 # warmup call runs COMPILED with zero FX/AOT counter movement
 # (calls>0, hits=0, misses=0). That signature against a compiled graph this process
 # already proved is service, not silence: disproving it bricked the
@@ -204,7 +204,7 @@ def has_inmemory_compiled_code(pipeline: Any) -> bool:
     exactly why a 2nd checkpoint of an already-minted family serves compiled
     with zero FX/AOT counter movement. Regional compiles (ie#381) live on
     per-block forwards rather than the wrapped target, so those fall back to
-    dynamo's total live-entry count.
+    dynamo's total live-compiled graph count.
     """
     marker = getattr(pipeline, _MARKER_ATTR, None)
     if not marker:
@@ -222,21 +222,21 @@ def has_inmemory_compiled_code(pipeline: Any) -> bool:
             exc_info=True)
         return False
 
-    def _has_entries(fn: Any) -> bool:
+    def _has_compiled_graphs(fn: Any) -> bool:
         code = getattr(getattr(fn, "__func__", fn), "__code__", None)
         if code is None:
             return False
         try:
-            return bool(eval_frame._debug_get_cache_entry_list(code))
+            return bool(eval_frame._debug_get_cache_compiled_graph_list(code))
         except Exception:
             logger.warning(
-                "compile-cache: dynamo cache-entry probe failed for %s — "
+                "compile-cache: dynamo cache-compiled_graph probe failed for %s — "
                 "counted as NOT compiled", getattr(fn, "__qualname__", fn),
                 exc_info=True)
             return False
 
     for _owner, _attr, fn in marker.get("originals") or ():
-        if _has_entries(fn):
+        if _has_compiled_graphs(fn):
             return True
     for mod in marker.get("regional_mods") or ():
         # ie#381 regional compile puts the graphs on the repeated BLOCK
@@ -250,7 +250,7 @@ def has_inmemory_compiled_code(pipeline: Any) -> bool:
                 type(mod).__name__, exc_info=True)
             continue
         for child in children:
-            if _has_entries(getattr(type(child), "forward", None)):
+            if _has_compiled_graphs(getattr(type(child), "forward", None)):
                 return True
     return False
 
@@ -268,7 +268,7 @@ def reset_target_code(pipeline: Any) -> int:
     cache_misses=0`` live loop. Calling this immediately before a proof
     window forces the warmup through the real lookup path: a mint truly
     compiles into its capture dir, an adoption truly hits its seeded FX
-    entries.
+    compiled graphs.
 
     Sibling safety: the live cache root is an ADDITIVE union
     (:func:`_merge_staged_cache`), so a healthy sibling whose in-memory
@@ -350,8 +350,8 @@ def reset_target_code(pipeline: Any) -> int:
 #      process-wide eval-frame callback: it would fail every concurrent
 #      warm/mint compile for the duration of a tenant call.
 #   2. Semantics. ``error_on_recompile`` raises only on a genuine RECOMPILE
-#      (existing cache entries, none matching — the guard-miss), composing
-#      with the multi-graph cache: warm entries keep serving under it, and a
+#      (existing cache compiled graphs, none matching — the guard-miss), composing
+#      with the multi-graph cache: warm compiled graphs keep serving under it, and a
 #      first-ever compile of a new code object never trips it.
 #      ``fail_on_recompile``'s callback raises for ANY tensor frame reaching
 #      dynamo while set, first compiles included.
@@ -528,7 +528,7 @@ def _emit_compiled_degrade_event(
 class GuardMiss:
     """One tenant request that hit fail-on-recompile on a compiled target.
 
-    ``reason`` is torch's verbatim message — per cached entry, the exact
+    ``reason`` is torch's verbatim message — per cached compiled graph, the exact
     guard that failed (size/stride/scalar specialization, …): the confession
     is the data for the compiled graph-reusability investigation (Paul's GPU-A/B
     hypothesis). ``sig`` is the request's shape/axis identity as the hot-swap
@@ -547,7 +547,7 @@ _GUARD_REASON_LINE_RE = re.compile(r"^\s*-\s*(?:\d+/\d+:\s*)?(.+)$")
 def guard_miss_reason_class(reason: str) -> str:
     """A short, stable class token for one verbatim guard-miss reason.
 
-    The first per-entry failure line, entry index stripped, whitespace
+    The first per-compiled graph failure line, compiled graph index stripped, whitespace
     collapsed, clipped — so top-N reasons are one ``sort | uniq -c`` away on
     the hub's activity log (per pgw#680 the reasons ARE the instrument)."""
     for line in str(reason or "").splitlines():
@@ -882,7 +882,7 @@ def declared_compile_facts(cfg: Any, *, lora_bucket_override: Optional[int] = No
 # (top-of-file imports, no runtime imports) is what makes the static graph
 # sound in the first place.
 
-_CLOSURE_ENTRYPOINTS = (
+_CLOSURE_CompiledGraphPOINTS = (
     "gen_worker.compile_cache",
     "gen_worker.guard_closure",
     "gen_worker.compiled_graph_key",
@@ -956,7 +956,7 @@ def static_code_closure() -> Tuple[Tuple[str, str], ...]:
     pgw#1034 deleted, and the completeness gate that read it.
     """
     packages = {"gen_worker"}
-    queue: List[str] = list(_CLOSURE_ENTRYPOINTS)
+    queue: List[str] = list(_CLOSURE_CompiledGraphPOINTS)
     seen: set[str] = set()
     out: Dict[str, str] = {}
     while queue:
@@ -1153,7 +1153,7 @@ def _install_fx_system_shim() -> None:
 def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
     """Digest of the SEMANTIC identity (format|kind|family|lane|mode|
     contract) — bound into every inner torch.compile key via
-    ``cache_key_tag`` (review §6.3), so a delivered compiled graph's entries are
+    ``cache_key_tag`` (review §6.3), so a delivered compiled graph's compiled graphs are
     mechanically unconsumable by a process whose declared semantic identity
     differs. Environment facts are deliberately excluded: the inner FX key
     already hashes them natively (system info, config, dtypes) and the
@@ -1385,10 +1385,10 @@ def cxx_toolchain_present() -> bool:
 # ---------------------------------------------------------------------------
 # FX-key forensics (gw#608)
 #
-# torch 2.13 CompiledFxGraph entries embed ``_fx_graph_cache_debug_lines`` —
+# torch 2.13 CompiledFxGraph compiled graphs embed ``_fx_graph_cache_debug_lines`` —
 # the complete FxGraphHashDetails per-component dump behind their own key.
 # A store-served boot that recompiles (the gw#608 signature) SAVES its fresh
-# entries into the live cache dir before the warmup proof fails, so at
+# compiled graphs into the live cache dir before the warmup proof fails, so at
 # failure time both sides of the divergence are on disk: the seeded compiled graph's
 # key inputs (inside the artifact tar) and this boot's (freshly written).
 # Diffing them names the exact diverging key component in the wire-visible
@@ -1415,12 +1415,12 @@ def fx_cache_failure_report() -> str:
     classification.** The report used to name B1 (*"the boot computed
     different keys"*), B2 (*"the keys matched and the miss is in torch's
     candidate-load path"*) or *"unreadable artifact"* — every one of them a
-    difference measured against FX entries read out of a
+    difference measured against FX compiled graphs read out of a
     `torch-inductor-cache` tarball's `inductor/fxgraph/` tree. pgw#1178
     deleted that format's last writer and pgw#1181 deleted the format, so the
     tar walk could only ever yield nothing, and the arithmetic did not degrade
     gracefully — it INVERTED. `fresh = live_keys - seeded` became EVERY live
-    key, so **B1 was named on every boot with any FX entry at all**, while B2
+    key, so **B1 was named on every boot with any FX compiled graph at all**, while B2
     was structurally unreportable and `compiled_graph_keys=0` (*"unreadable"*) was the
     normal case. Measured on the real function: handed an exported compiled graph — what
     the caller passes today — the output was byte-identical to passing
@@ -1440,13 +1440,13 @@ def fx_cache_failure_report() -> str:
             if not keydir.is_dir():
                 continue
             try:
-                entries = [
+                compiled_graphs = [
                     p for p in keydir.iterdir()
                     if p.is_file() and not p.name.startswith(".")
                 ]
             except OSError:
                 continue
-            if entries:
+            if compiled_graphs:
                 live_keys += 1
     else:
         out.append(f"live_dir_missing={str(fx_root) or '<unset>'}")
@@ -1732,19 +1732,19 @@ def _module_hooks(module: Any) -> Dict[str, int]:
     return out
 
 
-def _module_entry(path: str, module: Any) -> Dict[str, Any]:
+def _module_compiled_graph(path: str, module: Any) -> Dict[str, Any]:
     """One module's composition facts: class, tensor schema, hook presence.
     Exactly what the graph signature hashes and what the pgw#697 per-module
     fingerprint digests — one builder so the two can never disagree."""
-    entry: Dict[str, Any] = {
+    compiled_graph: Dict[str, Any] = {
         "path": path,
         "type": _type_name(module),
         "tensors": _direct_tensor_schema(module),
     }
     hooks = _module_hooks(module)
     if hooks:
-        entry["hooks"] = hooks
-    return entry
+        compiled_graph["hooks"] = hooks
+    return compiled_graph
 
 
 def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
@@ -1782,7 +1782,7 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
         module_rows = list(named()) if callable(named) else [("", owner)]
         for name, module in module_rows:
             path = f"{target}:{name}" if name else str(target)
-            modules.append(_module_entry(path, module))
+            modules.append(_module_compiled_graph(path, module))
             # A target such as vae.decode can overlap another declaration;
             # record each module once in the W8A8 manifest.
             if id(module) in seen_modules:
@@ -2146,7 +2146,7 @@ def _guarded(
         try:
             # pgw#680: tenant serve windows run fail-on-recompile — a guard
             # miss raises instead of paying dynamo's inline recompile in the
-            # request. Warm cache entries serve normally under the stance;
+            # request. Warm cache compiled graphs serve normally under the stance;
             # proof/warm/mint windows never arm it (see _fail_on_recompile).
             with _fail_on_recompile():
                 result = compiled(*args, **kwargs)
@@ -2261,7 +2261,7 @@ def _guarded_regional(
         Regional blocks have no separable eager callable — the compiled
         impls live ON the blocks — so the guard-miss eager serve runs the
         original with dynamo disabled for this thread/call: existing
-        compiled entries are bypassed, nothing recompiles, block state is
+        compiled compiled graphs are bypassed, nothing recompiles, block state is
         untouched (verified on torch 2.13: ``config.disable`` is the same
         thread-local ContextVar surface as the stance)."""
         try:
@@ -2623,8 +2623,8 @@ def apply(
             # differed from the boot warmup's (minimax-h3, ie#632).
             if declared_dynamic:
                 _mark_regional_blocks(owner, declared_dynamic)
-            # pgw#681: regional entry crosses the same canonical boundary as
-            # whole-graph entry — block guards mint over canonical inputs.
+            # pgw#681: regional compiled graph crosses the same canonical boundary as
+            # whole-graph compiled graph — block guards mint over canonical inputs.
             ingress = guard_closure.canonical_ingress(fn, target)
             if guard:
                 setattr(owner, attr, _guarded_regional(
@@ -2855,7 +2855,7 @@ def unwrap(pipeline: Any) -> bool:
 
 
 def enable(pipeline: Any, cfg: Any) -> bool:
-    """The one consumer entry point (executor + local CLI) for the JIT lane:
+    """The one consumer compiled graph point (executor + local CLI) for the JIT lane:
     arm compile under the safety policy.
 
     It used to also SEED a delivered ``torch-inductor-cache`` artifact —
@@ -2864,7 +2864,7 @@ def enable(pipeline: Any, cfg: Any) -> bool:
     with the format. Nothing has produced such an artifact since pgw#1178
     removed `mint_artifact`, its last writer, so every parameter of that
     branch (`cache_dir`, `artifact`) named a file that could not exist.
-    Delivered compiled graphs arrive as AOT ``.pt2`` entries, and
+    Delivered compiled graphs arrive as AOT ``.pt2`` compiled graphs, and
     `models.provision.arm_compiled` dispatches those on `metadata.json`'s
     `kind` BEFORE this call; what reaches here is the no-artifact lane, which
     is JIT intake (§4.34 keeps that) and cold compile.

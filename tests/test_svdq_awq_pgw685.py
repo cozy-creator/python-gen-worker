@@ -95,7 +95,7 @@ def _awq_params(w: Any, group_size: int) -> tuple[Any, Any]:
 
 def _synth_awq(oc: int, ic: int, *, group_size: int = 64, splits: int = 1,
                seed: int = 0) -> tuple[dict, Any, Any]:
-    """A checkpoint entry in the exporter's layout + the ORIGINAL weight/bias."""
+    """A checkpoint compiled graph in the exporter's layout + the ORIGINAL weight/bias."""
     gen = torch.Generator().manual_seed(seed)
     w = torch.randn(oc, ic, generator=gen).to(torch.bfloat16).float()
     b = torch.randn(oc, generator=gen).to(torch.bfloat16).float()

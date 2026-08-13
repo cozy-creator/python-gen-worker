@@ -761,7 +761,7 @@ class ConfigParam(msgspec.Struct, frozen=True):
             force(self, "default", float(self.default))
         choices = tuple(self.choices)
         for c in choices:
-            self._check_value("choices entry", c)
+            self._check_value("choices compiled_graph", c)
         if choices:
             if len(set(choices)) != len(choices):
                 raise ValueError(f"ConfigParam {name!r}: choices must be unique")
@@ -846,7 +846,7 @@ def _validate_config_decl(owner: str, config: Any) -> Tuple[ConfigParam, ...]:
     for p in config:
         if not isinstance(p, ConfigParam):
             raise TypeError(
-                f"@endpoint {owner}: config= entries must be ConfigParam, "
+                f"@endpoint {owner}: config= compiled_graphs must be ConfigParam, "
                 f"got {type(p).__name__}"
             )
         if p.name in seen:
@@ -1041,7 +1041,7 @@ class Compile(msgspec.Struct, frozen=True):
     # verifies. Undeclared (the default) resolves `bar_undeclared` at publish —
     # a named refusal, never a default number. A PAIR: see `validate_speed_bar`.
     # Deliberately NOT a contract axis — declaring or raising a bar must not
-    # re-key a compiled graph — but it IS a `derive.OVERRIDE_FACTS` entry, so a migration
+    # re-key a compiled graph — but it IS a `derive.OVERRIDE_FACTS` compiled graph, so a migration
     # cannot drop it silently.
     speed_metric: str = ""
     min_speedup: Optional[float] = None
@@ -1210,7 +1210,7 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     kind: str = "inference"
     resources: Resources = msgspec.field(default_factory=Resources)
     models: Mapping[str, Binding] = msgspec.field(default_factory=dict)
-    # Slot-declared entries in `models=`/`model=` (pgw#520): a subset of
+    # Slot-declared compiled graphs in `models=`/`model=` (pgw#520): a subset of
     # `models`' keys, carrying the Slot's selected_by/default_checkpoint
     # metadata that `models` (a plain Binding map every model-injection
     # call site understands) can't hold.
@@ -1647,7 +1647,7 @@ def _expand_formula_map(
         if len(formulas) > 1:
             raise ValueError(
                 f"@endpoint {owner}: runtime= cannot mix a bare RuntimeFormula "
-                f"with per-handler entries"
+                f"with per-handler compiled_graphs"
             )
         return {attr: formulas["*"] for attr in handler_attrs}
     unknown = [a for a in formulas if a not in handler_attrs]

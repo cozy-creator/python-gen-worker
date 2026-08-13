@@ -400,14 +400,14 @@ def drop_volume_chunks(directory: Path) -> int:
     """
     removed = 0
     try:
-        entries = list(directory.iterdir())
+        compiled_graphs = list(directory.iterdir())
     except OSError:
         return 0
-    for entry in entries:
-        if entry.name.startswith("."):
+    for compiled_graph in compiled_graphs:
+        if compiled_graph.name.startswith("."):
             continue  # another writer's staged chunk, still being written
         try:
-            entry.unlink()
+            compiled_graph.unlink()
             removed += 1
         except OSError:
             pass
@@ -677,7 +677,7 @@ def _fetch_chunk_to_offset(
 @contextlib.contextmanager
 def _cas_fetch_lock(dst: Path) -> Iterator[None]:
     """pgw#783: an OS ``flock`` on a per-digest lock file so G compute children
-    sharing ONE container filesystem dedup a fetch of the same CAS entry to ONE
+    sharing ONE container filesystem dedup a fetch of the same CAS compiled graph to ONE
     download instead of G. The in-process ``threading.Lock`` cannot: the groups
     are separate PROCESSES. The first child to arrive holds the lock and
     fetches; the rest block on ``flock`` and, when it releases, find ``dst``
@@ -776,7 +776,7 @@ def download_chunked_file(
             raise ValueError(f"chunk {i} has no URL")
 
     # pgw#783: G compute children share ONE container filesystem, so serialise
-    # the fetch of this exact CAS entry across processes — the in-process dedup
+    # the fetch of this exact CAS compiled graph across processes — the in-process dedup
     # cannot, the groups are separate processes. The first child fetches under
     # the flock; the rest block, then find dst already present and skip (G x
     # egress -> 1x). The lock is a COST optimisation: the writer-unique tmp path
@@ -1025,7 +1025,7 @@ def _download_chunked_locked(
     (``download_chunked_file`` does the shape checks and the dedup)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     # The part file name is STABLE, which is what makes resume reachable at all.
-    # It is safe because writers of one CAS entry write IDENTICAL bytes to
+    # It is safe because writers of one CAS compiled graph write IDENTICAL bytes to
     # IDENTICAL offsets — positional writes make concurrent assembly of the same
     # digest convergent rather than corrupting, where the old append stream had
     # to hide behind a per-call uuid (and thereby never resumed).

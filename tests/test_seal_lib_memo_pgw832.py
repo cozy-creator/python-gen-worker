@@ -1,10 +1,10 @@
-"""pgw#832: pooled entry children stop re-paying the toolchain hash.
+"""pgw#832: pooled compiled graph children stop re-paying the toolchain hash.
 
 ``env_seal.establish()`` SHA-256s every toolchain ``.so`` the image ships
 (measured on this box: 36 files, 3.96 GB, 8.13 s). The memo that made it
 "once" was per PROCESS, and pgw#809's pool made the unit of parallelism a
-process that compiles one entry and exits — so a 72-entry mint re-paid the
-pass 72 times, K-wide (pgw#830 measured it at 28 % of per-entry compile_s).
+process that compiles one compiled graph and exits — so a 72-compiled graph mint re-paid the
+pass 72 times, K-wide (pgw#830 measured it at 28 % of per-compiled graph compile_s).
 
 The fix is a parent-seeded on-disk memo keyed by ``(path, mtime_ns, size)``.
 This file holds it to two standards:
@@ -56,7 +56,7 @@ def _program(seed: int) -> Any:
     return torch.export.export(Tiny(), (torch.randn(4, _HIDDEN),))
 
 
-def _entries(n: int) -> List[Tuple[str, Any]]:
+def _compiled_graphs(n: int) -> List[Tuple[str, Any]]:
     return [(f"unet/adapter=true/dim={i}", _program(i)) for i in range(n)]
 
 
@@ -226,10 +226,10 @@ def test_memo_file_is_versioned_and_keyed_by_the_triple(
 # ---------------------------------------------------------------------------
 
 
-def test_pooled_entries_stop_repaying_the_toolchain_hash(
+def test_pooled_compiled_graphs_stop_repaying_the_toolchain_hash(
     tmp_path: Path,
 ) -> None:
-    """Every pooled entry's ``seal_libhash_s`` collapses to metadata cost.
+    """Every pooled compiled graph's ``seal_libhash_s`` collapses to metadata cost.
 
     pgw#830's attribution test asserts the span EXISTS; this is the sibling
     that asserts the MAGNITUDE dropped. Real pool, real children, real
@@ -256,25 +256,25 @@ def test_pooled_entries_stop_repaying_the_toolchain_hash(
     assert manifest, "no toolchain libs found — the reference is meaningless"
     threshold = max(0.25 * cold_s, 0.75)
 
-    entries = _entries(3)
-    width = pool.entry_workers(
-        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
+    compiled_graphs = _compiled_graphs(3)
+    width = pool.compiled_graph_workers(
+        len(compiled_graphs), limit=2, vcpus=16, available_bytes=64 * 1024**3,
         device_lock=True)
     assert width.workers == 2
-    box = pool.EntryCompilePool(
+    box = pool.CompiledGraphCompilePool(
         tmp_path / "pool", width=width,
         inductor_configs={"compile_threads": 2},
         cache_dir=str(tmp_path / "cache"))
-    out = box.compile(entries)
-    assert set(out) == {name for name, _ in entries}
+    out = box.compile(compiled_graphs)
+    assert set(out) == {name for name, _ in compiled_graphs}
 
-    for name, _ in entries:
-        seal = box.entry_overlays[name]
+    for name, _ in compiled_graphs:
+        seal = box.compiled_graph_overlays[name]
         assert "seal_libhash_s" in seal, seal
-        # EVERY entry, not just entries after the first: the parent seeds the
+        # EVERY compiled graph, not just compiled graphs after the first: the parent seeds the
         # memo before any child spawns, so no child ever pays the pass.
         assert seal["seal_libhash_s"] <= threshold, (
-            f"entry {name!r}: seal_libhash_s={seal['seal_libhash_s']:.2f}s "
+            f"compiled_graph {name!r}: seal_libhash_s={seal['seal_libhash_s']:.2f}s "
             f"exceeds {threshold:.2f}s (25 % of this box's measured "
             f"{cold_s:.2f}s cold pass) — the child re-paid the toolchain "
             f"hash the pgw#832 memo exists to remove")
@@ -289,5 +289,5 @@ def test_pooled_entries_stop_repaying_the_toolchain_hash(
     # must keep covering child_seal_s.
     from gen_worker import aot_compile_spans as spans
 
-    for name, _ in entries:
-        assert not spans.check(box.entry_phases[name])
+    for name, _ in compiled_graphs:
+        assert not spans.check(box.compiled_graph_phases[name])

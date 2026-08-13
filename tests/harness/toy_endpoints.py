@@ -255,7 +255,7 @@ class ToyComposedPipeline:
 
 
 COMPOSED_DECLARED = Hub("harness/composed-base", tag="prod")
-COMPOSED_SETUPS: list = []  # one entry per setup() run (identity-change proof)
+COMPOSED_SETUPS: list = []  # one compiled graph per setup() run (identity-change proof)
 
 
 @endpoint(models={
@@ -297,7 +297,7 @@ class ToyCheckpointPipeline:
 
 
 JUGGLE_DECLARED = Hub("harness/juggle-base", tag="prod")
-JUGGLE_SETUPS: list = []  # one entry per setup() run, in order
+JUGGLE_SETUPS: list = []  # one compiled graph per setup() run, in order
 
 
 @endpoint(models={

@@ -61,7 +61,7 @@ def test_the_term_is_the_item_count() -> None:
         assert got == {"1": 1.0, "num_inference_steps": 20.0, "references": float(n)}
 
 
-def test_a_map_counts_its_entries() -> None:
+def test_a_map_counts_its_compiled_graphs() -> None:
     """`maxProperties` is the hub's twin of `maxItems`; a name->value map is a
     countable container on both sides."""
     rf = RuntimeFormula("a + b*knobs")

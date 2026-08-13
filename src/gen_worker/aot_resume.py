@@ -1,19 +1,19 @@
-"""pgw#848 item 5: crash-only mint — a finished entry survives the attempt.
+"""pgw#848 item 5: crash-only mint — a finished compiled graph survives the attempt.
 
 A mint is ~74 min of serial export (MEASURED: 2.06 and 2.07 min/row across two
-independent pods, 36 sdxl entries) followed by ~626 s of AOTI compile PER
-ENTRY. Today a crash at entry 30 of 36 discards all of it: ``build_compiled_graph``
+independent pods, 36 sdxl compiled graphs) followed by ~626 s of AOTI compile PER
+COMPILED_GRAPH. Today a crash at compiled graph 30 of 36 discards all of it: ``build_compiled_graph``
 gives every attempt a fresh ``child-<n>`` workdir, the pool's inductor cache
 lives inside it, and ``abandon_self_mint`` rmtree's the mint root. Attempt 2
 shares nothing with attempt 1 — not the compiled files, not even a cache hit.
 
-This module is the store that survives. It banks one entry's compiled files
+This module is the store that survives. It banks one compiled graph's compiled files
 under a root that is STABLE across attempts, and it re-admits them on a later
-attempt ONLY when the entry's identity is RE-DERIVED and matches.
+attempt ONLY when the compiled graph's identity is RE-DERIVED and matches.
 
 The safety property, which everything else here is subordinate to
 -----------------------------------------------------------------
-**A finished entry is admissible only because its identity re-derives, never
+**A finished compiled graph is admissible only because its identity re-derives, never
 because a file exists at a path.** Under pgw#846 a path-trusted resume is a
 way to pack a stale artifact into a compiled graph that then verifies, arms, and is
 wrong — the worst failure this program has available. So:
@@ -29,18 +29,18 @@ wrong — the worst failure this program has available. So:
   admits — "unknown" and "none" are recorded as different values, because
   collapsing them is how a check that reads as fail-closed quietly admits;
 * the ledger is written LAST and atomically, after the files are copied, so a
-  crash mid-bank leaves nothing admissible rather than a short entry.
+  crash mid-bank leaves nothing admissible rather than a short compiled graph.
 
 What this does NOT cover, stated rather than papered over
 ---------------------------------------------------------
 **The EXPORT is not resumable under this rule, and is deliberately excluded.**
-An entry's identity is its traced graph; re-deriving it requires the traced
+An compiled graph's identity is its traced graph; re-deriving it requires the traced
 graph, and producing the traced graph IS the export. A resume that skipped the
 export could only compare a hash the artifact records about itself, which is
 exactly the path-trust this rule forbids. So an attempt re-exports (~2.06
 min/row) and that is what BUYS the strong check: the freshly exported program
 is the independent re-derivation. The recovered half is the compile — ~5.2 h of
-the ~6.4 h a 36-entry sdxl mint spends at K=1.
+the ~6.4 h a 36-compiled graph sdxl mint spends at K=1.
 
 Threat model: staleness, corruption and skew (a stale bank from an earlier
 declaration, a half-written file, a toolchain that moved under us). NOT a local
@@ -72,18 +72,18 @@ ENV_RESUME_DIR = "GEN_WORKER_MINT_RESUME_DIR"
 #: not read for "the parts we understand".
 BANK_V = 1
 
-LEDGER_NAME = "entry.json"
+LEDGER_NAME = "compiled_graph.json"
 FILES_DIR = "files"
-ENTRIES_DIR = "entries"
+COMPILED_GRAPHS_DIR = "compiled_graphs"
 CACHE_DIR = "inductor-cache"
 
-#: Typed refusal reasons. Every one of these means "recompile this entry",
+#: Typed refusal reasons. Every one of these means "recompile this compiled graph",
 #: never "fail the mint" — a bank is an optimization and must never be able to
 #: cost a compiled graph. They are counted onto the pool ledger so a bank that never
 #: admits anything is VISIBLE rather than merely slow.
-MISS = "cold"                      # nothing banked for this entry
+MISS = "cold"                      # nothing banked for this compiled graph
 REFUSE_FORMAT = "bank_format"      # ledger from another BANK_V / unreadable
-REFUSE_ENTRY = "entry_mismatch"    # the slot holds a different entry name
+REFUSE_COMPILED_GRAPH = "compiled_graph_mismatch"    # the slot holds a different compiled graph name
 REFUSE_GRAPH = "graph_hash"        # THE one that matters: a different graph
 REFUSE_CONTEXT = "context"         # sm / toolchain / seal / code / configs
 REFUSE_UNSTATED = "context_unstated"   # an axis this runtime cannot state
@@ -103,10 +103,10 @@ REFUSE_FILE_CONTENT = "file_content"   # size or sha256 moved under us
 RESUME_DIRNAME = ".mint-resume"
 
 #: A capacity bound on the whole resume area, enforced oldest-first at open.
-#: A BYTE cap rather than a count: an entry's compiled files are code-only
+#: A BYTE cap rather than a count: an compiled graph's compiled files are code-only
 #: (pgw#704 B1) and small, but "small" is a property of the graph, so a count
 #: would bound the wrong thing. Whole key-scopes are dropped, never parts of
-#: one — half a bank is a bank whose remaining entries still admit, which is
+#: one — half a bank is a bank whose remaining compiled graphs still admit, which is
 #: fine, but a partial drop wastes the copy for no recovery.
 ENV_MAX_BYTES = "GEN_WORKER_MINT_RESUME_MAX_BYTES"
 DEFAULT_MAX_BYTES = 4 * 1024**3
@@ -120,7 +120,7 @@ def bank_root(scope: str) -> Path:
     ``scope`` is the pending's ``compiled_graph_key``. For an AOT pending that is a
     CAPTURE HANDLE, not the published compiled graph's key (a real AOT key folds the
     combined graph hash and is unknowable until the export finishes) — which is
-    exactly right here: this is a SCOPE, and identity is the per-entry check
+    exactly right here: this is a SCOPE, and identity is the per-compiled graph check
     that runs inside it. A colliding scope cannot admit anything wrong; it can
     only produce a graph-hash refusal.
     """
@@ -177,7 +177,7 @@ def sweep(keep: Path, *, max_bytes: Optional[int] = None) -> int:
 
     ``keep`` is never dropped. Everything else is ordered by mtime and whole
     scopes are removed OLDEST FIRST until the total fits. An actively-running
-    mint's bank is the newest thing in the area (every banked entry touches
+    mint's bank is the newest thing in the area (every banked compiled graph touches
     it), so the loser is an abandoned mint nobody came back for — and the cost
     of getting that wrong is one recompile, never a wrong compiled graph.
 
@@ -231,7 +231,7 @@ def set_root(path: Any) -> None:
     """Install the process-wide resume root.
 
     Process-global on purpose and NOT an env var: the bank lives entirely in
-    the pool's own process, and an inherited env var would follow every entry
+    the pool's own process, and an inherited env var would follow every compiled graph
     child into a directory it has no business writing.
     """
     global _ROOT
@@ -266,7 +266,7 @@ UNSTATED = "?"
 
 
 def context_facts(inductor_configs: Optional[Mapping[str, Any]] = None) -> Dict[str, str]:
-    """The non-graph identity axes an admitted entry must match.
+    """The non-graph identity axes an admitted compiled graph must match.
 
     Deliberately the SAME axes ``aot_mint.compiled_graph_identity`` keys a compiled graph on
     (``sm``, ``toolchain``, ``env_seal``) plus the two that are specific to who
@@ -333,16 +333,16 @@ class Admission:
 
 
 @dataclass
-class EntryBank:
-    """Compiled entries banked under a root that outlives one mint attempt."""
+class CompiledGraphBank:
+    """Compiled compiled graphs banked under a root that outlives one mint attempt."""
 
     root: Path
     context: Dict[str, str] = field(default_factory=dict)
-    #: entry -> reason, for the pool ledger. Cold misses included, so "the bank
-    #: was empty" and "the bank refused 36 entries" are distinguishable.
+    #: compiled graph -> reason, for the pool ledger. Cold misses included, so "the bank
+    #: was empty" and "the bank refused 36 compiled graphs" are distinguishable.
     outcomes: Dict[str, str] = field(default_factory=dict)
     resumed: List[str] = field(default_factory=list)
-    #: entry -> the graph hash RE-DERIVED from this attempt's own program at
+    #: compiled graph -> the graph hash RE-DERIVED from this attempt's own program at
     #: admission. The only value ``put`` will bank under, so a file can never
     #: be banked under a hash that came from a file.
     graphs: Dict[str, str] = field(default_factory=dict)
@@ -363,17 +363,17 @@ class EntryBank:
         """
         return self.root / CACHE_DIR
 
-    def _slot(self, entry: str) -> Path:
-        # Entry names carry '/' and '=' (``unet/adapter=true/dim=3``), so the
+    def _slot(self, compiled_graph: str) -> Path:
+        # Compiled graph names carry '/' and '=' (``unet/adapter=true/dim=3``), so the
         # directory is a digest and the NAME is recorded in the ledger and
-        # checked — a slot that holds someone else's entry refuses.
-        return self.root / ENTRIES_DIR / hashlib.sha256(
-            entry.encode()).hexdigest()[:32]
+        # checked — a slot that holds someone else's compiled graph refuses.
+        return self.root / COMPILED_GRAPHS_DIR / hashlib.sha256(
+            compiled_graph.encode()).hexdigest()[:32]
 
     # -- admission --------------------------------------------------------
 
-    def admit(self, entry: str, program: Any) -> Admission:
-        """Re-admit a banked entry, or say why not.
+    def admit(self, compiled_graph: str, program: Any) -> Admission:
+        """Re-admit a banked compiled graph, or say why not.
 
         ``program`` is THIS attempt's freshly exported program. Its graph hash
         is computed here, from the object in memory — that is the independent
@@ -383,39 +383,39 @@ class EntryBank:
 
         t0 = time.monotonic()
         try:
-            self.graphs[entry] = graph = graph_hash_mod.graph_hash(program)
-            return self._admit(entry, graph)
+            self.graphs[compiled_graph] = graph = graph_hash_mod.graph_hash(program)
+            return self._admit(compiled_graph, graph)
         except Exception as exc:  # noqa: BLE001 — a bank never fails a mint
             logger.warning(
                 "aot-resume: admission for %r failed (%s: %s) — compiling it",
-                entry, type(exc).__name__, exc)
-            return self._record(entry, Admission(False, REFUSE_FORMAT, str(exc)))
+                compiled_graph, type(exc).__name__, exc)
+            return self._record(compiled_graph, Admission(False, REFUSE_FORMAT, str(exc)))
         finally:
             self.admit_s = round(self.admit_s + (time.monotonic() - t0), 3)
 
-    def _admit(self, entry: str, graph: str) -> Admission:
-        slot = self._slot(entry)
+    def _admit(self, compiled_graph: str, graph: str) -> Admission:
+        slot = self._slot(compiled_graph)
         ledger_path = slot / LEDGER_NAME
         if not ledger_path.exists():
-            return self._record(entry, Admission(False, MISS))
+            return self._record(compiled_graph, Admission(False, MISS))
         try:
             ledger = json.loads(ledger_path.read_text())
         except (OSError, ValueError) as exc:
             return self._record(
-                entry, Admission(False, REFUSE_FORMAT, str(exc)))
+                compiled_graph, Admission(False, REFUSE_FORMAT, str(exc)))
         if int(ledger.get("v") or 0) != BANK_V:
-            return self._record(entry, Admission(
+            return self._record(compiled_graph, Admission(
                 False, REFUSE_FORMAT,
                 f"ledger v={ledger.get('v')!r}, this build banks v={BANK_V}"))
-        if str(ledger.get("entry") or "") != entry:
-            return self._record(entry, Admission(
-                False, REFUSE_ENTRY,
-                f"slot holds {ledger.get('entry')!r}"))
+        if str(ledger.get("compiled_graph") or "") != compiled_graph:
+            return self._record(compiled_graph, Admission(
+                False, REFUSE_COMPILED_GRAPH,
+                f"slot holds {ledger.get('compiled_graph')!r}"))
 
         # THE check. Recomputed from the live program above; the banked value is
         # only ever the thing being compared AGAINST.
         if str(ledger.get("graph_hash") or "") != graph:
-            return self._record(entry, Admission(
+            return self._record(compiled_graph, Admission(
                 False, REFUSE_GRAPH,
                 f"banked graph {ledger.get('graph_hash')!r} != this attempt's "
                 f"{graph!r} — the banked artifact is not this graph's"))
@@ -423,13 +423,13 @@ class EntryBank:
         banked_context = dict(ledger.get("context") or {})
         for axis, value in sorted(self.context.items()):
             if value == UNSTATED or banked_context.get(axis) == UNSTATED:
-                return self._record(entry, Admission(
+                return self._record(compiled_graph, Admission(
                     False, REFUSE_UNSTATED,
                     f"{axis!r} could not be stated ({'now' if value == UNSTATED else 'when it was banked'}); "
                     f"an artifact whose runtime we cannot name is not "
                     f"admissible"))
             if str(banked_context.get(axis, "")) != value:
-                return self._record(entry, Admission(
+                return self._record(compiled_graph, Admission(
                     False, REFUSE_CONTEXT,
                     f"{axis}: banked {banked_context.get(axis)!r} != "
                     f"{value!r}"))
@@ -438,56 +438,56 @@ class EntryBank:
         for row in ledger.get("files") or ():
             path = slot / FILES_DIR / str(row.get("name") or "")
             if not path.is_file():
-                return self._record(entry, Admission(
+                return self._record(compiled_graph, Admission(
                     False, REFUSE_FILE_MISSING, str(path)))
             if path.stat().st_size != int(row.get("size") or -1):
-                return self._record(entry, Admission(
+                return self._record(compiled_graph, Admission(
                     False, REFUSE_FILE_CONTENT,
                     f"{path.name}: size {path.stat().st_size} != banked "
                     f"{row.get('size')}"))
             if _sha256_file(path) != str(row.get("sha256") or ""):
-                return self._record(entry, Admission(
+                return self._record(compiled_graph, Admission(
                     False, REFUSE_FILE_CONTENT,
                     f"{path.name}: sha256 moved since it was banked"))
             files.append(str(path))
         if not files:
-            return self._record(entry, Admission(
+            return self._record(compiled_graph, Admission(
                 False, REFUSE_FORMAT, "ledger records no files"))
-        self.resumed.append(entry)
-        return self._record(entry, Admission(True, files=tuple(files)))
+        self.resumed.append(compiled_graph)
+        return self._record(compiled_graph, Admission(True, files=tuple(files)))
 
-    def _record(self, entry: str, admission: Admission) -> Admission:
-        self.outcomes[entry] = "resumed" if admission.ok else admission.reason
+    def _record(self, compiled_graph: str, admission: Admission) -> Admission:
+        self.outcomes[compiled_graph] = "resumed" if admission.ok else admission.reason
         if admission.refused:
-            # A cold bank is expected. A bank that HELD this entry and would
+            # A cold bank is expected. A bank that HELD this compiled graph and would
             # not hand it over is evidence — of a stale bank, a moved
             # toolchain, or a corrupted artifact — and it must not be silent.
             logger.warning(
-                "aot-resume: REFUSED the banked entry %r (%s): %s — "
-                "recompiling it", entry, admission.reason, admission.detail)
+                "aot-resume: REFUSED the banked compiled_graph %r (%s): %s — "
+                "recompiling it", compiled_graph, admission.reason, admission.detail)
         elif admission.ok:
             logger.info(
-                "aot-resume: entry %r re-admitted from the bank (%d file(s)) "
-                "— identity re-derived and matched", entry, len(admission.files))
+                "aot-resume: compiled_graph %r re-admitted from the bank (%d file(s)) "
+                "— identity re-derived and matched", compiled_graph, len(admission.files))
         return admission
 
     # -- banking ----------------------------------------------------------
 
-    def put(self, entry: str, graph: str, files: Sequence[str]) -> None:
-        """Bank one finished entry. Never raises — a bank that cannot write is
+    def put(self, compiled_graph: str, graph: str, files: Sequence[str]) -> None:
+        """Bank one finished compiled graph. Never raises — a bank that cannot write is
         a lost optimization, not a lost mint."""
         try:
-            self._put(entry, graph, files)
+            self._put(compiled_graph, graph, files)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "aot-resume: could not bank entry %r (%s: %s) — the mint is "
+                "aot-resume: could not bank compiled_graph %r (%s: %s) — the mint is "
                 "unaffected, a later attempt will recompile it",
-                entry, type(exc).__name__, exc)
+                compiled_graph, type(exc).__name__, exc)
 
-    def _put(self, entry: str, graph: str, files: Sequence[str]) -> None:
+    def _put(self, compiled_graph: str, graph: str, files: Sequence[str]) -> None:
         if not graph:
             raise ValueError(
-                "refusing to bank an entry with no graph hash — it could only "
+                "refusing to bank an compiled_graph with no graph hash — it could only "
                 "ever be re-admitted on path trust")
         unstated = sorted(a for a, v in self.context.items() if v == UNSTATED)
         if unstated:
@@ -495,7 +495,7 @@ class EntryBank:
                 f"refusing to bank under a runtime this process cannot state "
                 f"({unstated!r}) — it could never be re-admitted, so the copy "
                 f"would be cost with no recovery")
-        slot = self._slot(entry)
+        slot = self._slot(compiled_graph)
         files_dir = slot / FILES_DIR
         if slot.exists():
             shutil.rmtree(slot, ignore_errors=True)
@@ -518,16 +518,16 @@ class EntryBank:
                 "sha256": _sha256_file(dest),
             })
         if not rows:
-            raise ValueError("nothing to bank: the entry reported no files")
+            raise ValueError("nothing to bank: the compiled_graph reported no files")
         payload = {
             "v": BANK_V,
-            "entry": entry,
+            "compiled_graph": compiled_graph,
             "graph_hash": graph,
             "context": dict(self.context),
             "files": rows,
         }
         # LAST, and atomic. A crash between the copies and this leaves a slot
-        # with no ledger, which is a cold miss — never a short entry that
+        # with no ledger, which is a cold miss — never a short compiled graph that
         # admits.
         handle, tmp = tempfile.mkstemp(dir=str(slot), suffix=".tmp")
         with os.fdopen(handle, "w") as out:
@@ -537,8 +537,8 @@ class EntryBank:
         os.replace(tmp, slot / LEDGER_NAME)
         self.banked_bytes += total
         logger.info(
-            "aot-resume: banked entry %r (%d file(s), %.1f MB) under %s",
-            entry, len(rows), total / 1e6, slot)
+            "aot-resume: banked compiled_graph %r (%d file(s), %.1f MB) under %s",
+            compiled_graph, len(rows), total / 1e6, slot)
 
     # -- telemetry --------------------------------------------------------
 
@@ -546,7 +546,7 @@ class EntryBank:
         """The bank's contribution to the pool's ``phase=pool`` row.
 
         Refusals are reported BY REASON and by count: "the bank was cold" and
-        "the bank refused every entry on a moved toolchain" are the same wall
+        "the bank refused every compiled graph on a moved toolchain" are the same wall
         clock and completely different facts.
         """
         refused: Dict[str, int] = {}
@@ -572,7 +572,7 @@ def open_bank(
     resume_root: str = "",
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
-) -> Optional[EntryBank]:
+) -> Optional[CompiledGraphBank]:
     """The bank for this mint, or ``None`` when this process must not resume.
 
     ``None`` is the untouched pre-pgw#848 behaviour, exactly: no admission
@@ -583,9 +583,9 @@ def open_bank(
         return None
     try:
         path = Path(where)
-        (path / ENTRIES_DIR).mkdir(parents=True, exist_ok=True)
+        (path / COMPILED_GRAPHS_DIR).mkdir(parents=True, exist_ok=True)
         sweep(path)
-        return EntryBank(
+        return CompiledGraphBank(
             root=path, context=context_facts(inductor_configs))
     except Exception as exc:  # noqa: BLE001 — never fail a mint for a cache
         logger.warning(
@@ -602,7 +602,7 @@ __all__ = [
     "RESUME_DIRNAME",
     "MISS",
     "REFUSE_CONTEXT",
-    "REFUSE_ENTRY",
+    "REFUSE_COMPILED_GRAPH",
     "REFUSE_FILE_CONTENT",
     "REFUSE_FILE_MISSING",
     "REFUSE_FORMAT",
@@ -610,7 +610,7 @@ __all__ = [
     "REFUSE_UNSTATED",
     "UNSTATED",
     "Admission",
-    "EntryBank",
+    "CompiledGraphBank",
     "bank_root",
     "context_facts",
     "discard",

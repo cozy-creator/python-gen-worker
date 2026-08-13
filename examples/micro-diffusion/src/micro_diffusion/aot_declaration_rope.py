@@ -1,7 +1,7 @@
-"""The pgw#1080 RED-control declaration: the pinned-rope graph, one entry.
+"""The pgw#1080 RED-control declaration: the pinned-rope graph, one compiled graph.
 
 Deliberately identical in SHAPE to the escape variant's — one target,
-fork-free, batch fixed, two token rows collapsing to a single entry — so the
+fork-free, batch fixed, two token rows collapsing to a single compiled graph — so the
 only variable against the base family is the pinned lazy table in the
 denoiser's forward. A difference in outcome is therefore a statement about
 the meta-instantiation gate and about nothing else.

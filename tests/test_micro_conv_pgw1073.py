@@ -3,7 +3,7 @@ asserted where CI can see them.
 
 The full mint cycle needs a compiler and is LOCAL-ONLY (the rig). What does
 NOT need one is every structural claim the new members make — the strategy,
-the entry multiplicity, the int64 input, the persistent buffer, and the
+the compiled graph multiplicity, the int64 input, the persistent buffer, and the
 determinism of the derived conv weights. Each test goes RED if the property
 it names stops holding.
 """
@@ -49,19 +49,19 @@ def declaration():
 # ---------------------------------------------------------------------------
 
 
-def test_static_rows_yields_four_static_entries(declaration) -> None:
-    """2 rows x the cfg fork = 4 entries, each a STATIC graph. Under
-    static-rows an entry's dims ARE its coordinate — no dynamic dims, which
+def test_static_rows_yields_four_static_compiled_graphs(declaration) -> None:
+    """2 rows x the cfg fork = 4 compiled graphs, each a STATIC graph. Under
+    static-rows an compiled graph's dims ARE its coordinate — no dynamic dims, which
     is the difference from every other micro member and the surface pgw#1058
-    broke on (per-row entry labels vs serve-side asks)."""
+    broke on (per-row compiled graph labels vs serve-side asks)."""
     assert declaration.shape_strategy == "static-rows"
     plans = ad.compiled_graph_plans(declaration)
     assert len(plans) == 4
-    names = sorted(ad.plan_entry_name(p) for p in plans)
+    names = sorted(ad.plan_compiled_graph_name(p) for p in plans)
     assert len(set(names)) == 4
     for plan in plans:
         assert plan.dynamic == (), (
-            f"{ad.plan_entry_name(plan)} carries dynamic dims under "
+            f"{ad.plan_compiled_graph_name(plan)} carries dynamic dims under "
             f"static-rows — the strategy's whole point is that it does not")
 
 

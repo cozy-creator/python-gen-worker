@@ -286,9 +286,9 @@ def worker_fn_unavailable(
     **THE CONTRACT THE CALLER MUST NOT GET BACKWARDS (pgw#937): a value of
     ``None`` means "this group SERVES it", so a group whose child is DOWN is
     EXCLUDED from the mapping — never entered as ``None``.** Popping a dead
-    group's entry without also dropping the group would make the dead group read
+    group's compiled graph without also dropping the group would make the dead group read
     as serving every function there is, which is strictly worse than the stale
-    entry it replaced. Absence-of-a-value is the live-group default; absence of
+    compiled graph it replaced. Absence-of-a-value is the live-group default; absence of
     the *group* is "unknown, because there is nobody there". See "down-group
     semantics" in ``parent.py``.
     """

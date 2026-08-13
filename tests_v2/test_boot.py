@@ -25,14 +25,14 @@ from harness.hardware_report_hub import recording_hub
 from harness.hub_double import is_ready
 from harness.subprocess_runner import (
     assert_no_unhandled_crash,
-    cpu_manifest_entry,
-    gpu_manifest_entry,
+    cpu_manifest_compiled_graph,
+    gpu_manifest_compiled_graph,
     run_entrypoint,
     startup_phase_lines,
 )
 
 from tests_v2 import catalog
-from tests_v2.conftest import manifest_entry, spawn_entrypoint, standalone_scheduler
+from tests_v2.conftest import manifest_compiled_graph, spawn_entrypoint, standalone_scheduler
 
 
 def _boot_rows(conn) -> List[pb.BootPhase]:
@@ -181,7 +181,7 @@ def test_real_entrypoint_seals_dials_and_dumps_stacks(tmp_path: Path) -> None:
     with standalone_scheduler() as (scheduler, port):
         proc = spawn_entrypoint(
             tmp_path,
-            functions=[manifest_entry(name="echo")],
+            functions=[manifest_compiled_graph(name="echo")],
             env_overrides={
                 "ORCHESTRATOR_PUBLIC_ADDR": f"127.0.0.1:{port}",
                 "WORKER_ID": "v2-subprocess",
@@ -214,7 +214,7 @@ def test_real_entrypoint_seals_dials_and_dumps_stacks(tmp_path: Path) -> None:
             # memo's saving is a subtraction between two real rows. This is the
             # ONLY boot shape that produces these — `env_seal.establish` is an
             # entrypoint/mint-child call, not something an embedded worker
-            # does, which is why `boot_phases.SHAPE_ENTRYPOINT` is a shape of
+            # does, which is why `boot_phases.SHAPE_CompiledGraphPOINT` is a shape of
             # its own.
             conn.wait_for(
                 lambda m: m.WhichOneof("msg") == "boot_phase"
@@ -267,7 +267,7 @@ def test_torchless_boot_seals_the_absence_and_still_dials(tmp_path: Path) -> Non
     with standalone_scheduler() as (scheduler, port):
         proc = spawn_entrypoint(
             tmp_path,
-            functions=[manifest_entry(name="echo")],
+            functions=[manifest_compiled_graph(name="echo")],
             env_overrides={
                 "ORCHESTRATOR_PUBLIC_ADDR": f"127.0.0.1:{port}",
                 "WORKER_ID": "v2-torchless",
@@ -306,7 +306,7 @@ def test_gpu_boot_refusal_is_typed_and_reaches_the_hub(tmp_path: Path) -> None:
     wire path that ended the th#986 silent pod_exited blindness."""
     with recording_hub() as (servicer, addr):
         result = run_entrypoint(
-            tmp_path, functions=[gpu_manifest_entry()],
+            tmp_path, functions=[gpu_manifest_compiled_graph()],
             env_overrides={
                 "ORCHESTRATOR_PUBLIC_ADDR": addr,
                 "WORKER_ID": "v2-gpu-refusal",
@@ -351,7 +351,7 @@ def test_boot_refusals_are_structured_never_crashes(tmp_path: Path, case: str) -
     """Every remaining boot gate refuses structured: named phase, nonzero
     exit, no raw-traceback crash, and the absent thing is NAMED."""
     if case == "import":
-        result = run_entrypoint(tmp_path, functions=[cpu_manifest_entry()])
+        result = run_entrypoint(tmp_path, functions=[cpu_manifest_compiled_graph()])
     elif case == "bad_kind":
         result = run_entrypoint(
             tmp_path,
@@ -361,7 +361,7 @@ def test_boot_refusals_are_structured_never_crashes(tmp_path: Path, case: str) -
         result = run_entrypoint(tmp_path, functions=[])
     else:
         result = run_entrypoint(
-            tmp_path, functions=[cpu_manifest_entry()],
+            tmp_path, functions=[cpu_manifest_compiled_graph()],
             env_overrides={"ENDPOINT_LOCK_PATH": str(tmp_path / "missing.lock")},
         )
     combined = result.stdout + result.stderr

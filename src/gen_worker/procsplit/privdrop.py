@@ -165,7 +165,7 @@ def plan_drop(home: str) -> Optional[DropPlan]:
 
 
 def _ensure_account(uid: int, gid: int, user: str, home: str) -> None:
-    """Best-effort ``/etc/passwd`` + ``/etc/group`` entry for a numeric target.
+    """Best-effort ``/etc/passwd`` + ``/etc/group`` compiled graph for a numeric target.
 
     Not required — the drop works on a uid with no account at all, and the
     child's env carries HOME/USER/LOGNAME so the common lookups do not need
@@ -187,10 +187,10 @@ def _append_line(path: str, line: str) -> None:
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(line)
-        logger.info("added %s entry for the compute child", path)
+        logger.info("added %s compiled_graph for the compute child", path)
     except OSError as exc:
         logger.info(
-            "could not add a %s entry (%s); the compute child runs on a "
+            "could not add a %s compiled_graph (%s); the compute child runs on a "
             "numeric uid, which is sufficient", path, exc,
         )
 
@@ -224,7 +224,7 @@ def writable_paths(plan: DropPlan, extra: Iterable[str] = ()) -> List[str]:
     """Every directory the compute child must be able to write.
 
     Deliberately explicit and small — the answer to a permission error is
-    another entry here, never giving the child root back."""
+    another compiled graph here, never giving the child root back."""
     env = child_env(plan)
     paths = [plan.home, env["TMPDIR"], env["XDG_CACHE_HOME"], env["PYTHONPYCACHEPREFIX"]]
     paths.extend(p for p in extra if p)

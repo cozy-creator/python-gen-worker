@@ -384,7 +384,7 @@ def load_svdq_pipeline(cls: Any, path: Path, art: SvdqArtifact, *,
 
     Engine choice is :func:`select_svdq_engine` (native preferred for fp4);
     ``engine`` pins it explicitly. Callers need no engine awareness — this is
-    the single entry point the loading layer already uses."""
+    the single compiled graph point the loading layer already uses."""
     chosen, reasons = select_svdq_engine(art.precision, override=engine)
     if not chosen:
         detail = "; ".join(f"{k}: {v}" for k, v in sorted(reasons.items()))

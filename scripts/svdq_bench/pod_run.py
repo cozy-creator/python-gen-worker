@@ -296,12 +296,12 @@ def main() -> int:
                         .read_text().strip()}}
 
         def entrypoint_post(armed):
-            # RunPod treats dockerEntrypoint=[] as unset; ship the armed
+            # RunPod treats dockercompiledgraphpoint=[] as unset; ship the armed
             # command AS the entrypoint so sshd (not the worker) runs.
             armed = dict(armed)
             sc = armed.pop("dockerStartCmd", None)
             if sc:
-                armed["dockerEntrypoint"] = sc
+                armed["dockercompiledgraphpoint"] = sc
             return rest(api, "POST", "/pods", armed)
 
         lease = podguard.rent(api, body, execution_lane=f"svdq-bench-{args.gpu}",

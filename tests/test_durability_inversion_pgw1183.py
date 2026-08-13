@@ -190,7 +190,7 @@ def test_an_arm_refusal_QUARANTINES_the_bytes_instead_of_deleting_them(
     store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     quiet: List[Tuple[str, str]],
 ) -> None:
-    """§1.3.4: a refused entry is *kept quarantined-local for forensics*. On
+    """§1.3.4: a refused compiled graph is *kept quarantined-local for forensics*. On
     master the refusal path rmtree'd the mint root, so the one artifact that
     could explain the refusal was destroyed by the code reporting it."""
     _arming(monkeypatch, ok=False)

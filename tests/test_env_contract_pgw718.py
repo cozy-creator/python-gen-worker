@@ -28,7 +28,7 @@ def _reset_boot_seal(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _restore_global_matmul_flags() -> Iterator[None]:
     """The canonical imposition is deliberately process-global; the SUITE
-    must not leak it across files (entries compiled under one TF32 state
+    must not leak it across files (compiled graphs compiled under one TF32 state
     GlobalStateGuard-miss under another — the flux hit-counter tests)."""
     precision = torch.get_float32_matmul_precision()
     matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
@@ -205,9 +205,9 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
     compiled(torch.randn(2, 4, 8), 1.0)
 
     capture = tmp_path / "capture"
-    fx_entry = capture / "inductor" / "fxgraph" / "aa" / "bb"
-    fx_entry.mkdir(parents=True)
-    (fx_entry / "entry").write_bytes(b"fx")
+    fx_compiled_graph = capture / "inductor" / "fxgraph" / "aa" / "bb"
+    fx_compiled_graph.mkdir(parents=True)
+    (fx_compiled_graph / "compiled_graph").write_bytes(b"fx")
 
     # pgw#1010: the seal this drove was `finish_fleet_mint`'s, which packed a
     # DYNAMO compiled graph and is deleted with that artifact class. The RULE is

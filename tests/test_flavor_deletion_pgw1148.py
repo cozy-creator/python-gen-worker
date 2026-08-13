@@ -93,7 +93,7 @@ def test_the_flavor_axis_is_gone_from_the_binding() -> None:
 
 
 def test_hf_refs_have_no_flavor_and_no_cache_key_fold() -> None:
-    """The fold gave two "flavors" of one HF repo two residency entries."""
+    """The fold gave two "flavors" of one HF repo two residency compiled graphs."""
     assert not hasattr(HuggingFaceRef("owner/repo"), "flavor")
     assert HuggingFaceRef("owner/repo", "main").canonical() == "owner/repo@main"
 

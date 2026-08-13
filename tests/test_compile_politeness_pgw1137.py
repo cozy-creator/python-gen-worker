@@ -12,7 +12,7 @@ is now a shipping product behaviour and not a hypothetical.
 
 WHAT IS PROVEN HERE, and what each section would have looked like before
 
-1. **The posture is DECLARED.** ``local_serve`` — the one entry that knows —
+1. **The posture is DECLARED.** ``local_serve`` — the one compiled graph that knows —
    states it; it is not sniffed off ``trust_class()`` or off ``publisher is
    None`` (both are facts about the SINK, and a rented community-cloud pod
    matches them while having nobody sitting at it), and it is not an env var
@@ -20,7 +20,7 @@ WHAT IS PROVEN HERE, and what each section would have looked like before
    ``MintRequest`` had no posture field and ``compile_posture`` did not exist.
 2. **CPU.** The pool halves its core budget and the mint child drops its own
    scheduling priority — by the CHILD, on itself, never through a
-   ``preexec_fn``. RED: ``entry_workers`` had no posture parameter and nothing
+   ``preexec_fn``. RED: ``compiled_graph_workers`` had no posture parameter and nothing
    in ``src/`` called ``os.nice``.
 3. **Memory.** More host RAM is left alone, because ``MemAvailable`` counts the
    user's page cache as free and a mint that OOMs a desktop is worse than a
@@ -66,17 +66,17 @@ def _no_installed_posture() -> Iterator[None]:
 
 
 def _width(
-    entries: int, *, vcpus: int, avail_gib: float, posture: CompilePosture,
+    compiled_graphs: int, *, vcpus: int, avail_gib: float, posture: CompilePosture,
     free_vram_gib: float = 0.0, device_gib: float = 0.0, limit: int = 0,
 ) -> aot_compile_pool.PoolWidth:
-    """``entry_workers`` driven off SUPPLIED facts only.
+    """``compiled_graph_workers`` driven off SUPPLIED facts only.
 
     Every reading the function would otherwise probe (cores, cgroup, card) is
     passed in, so these cases describe a laptop and a workstation from a
     32-core CI-less box without simulating anything the policy decides.
     """
-    return aot_compile_pool.entry_workers(
-        entries, vcpus=vcpus,
+    return aot_compile_pool.compiled_graph_workers(
+        compiled_graphs, vcpus=vcpus,
         available_bytes=int(avail_gib * 1024**3),
         device_lock=True, posture=posture, limit=limit)
 
@@ -124,7 +124,7 @@ class _Pending:
     cfg = _Cfg()
 
 
-def test_the_local_serve_entry_DECLARES_the_user_machine_posture(
+def test_the_local_serve_compiled_graph_DECLARES_the_user_machine_posture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§4.30's input, stated at the one site that knows.
@@ -245,20 +245,20 @@ def test_a_fleet_mint_declares_nothing_and_gets_the_fleet_posture() -> None:
 
 
 def test_a_user_machine_pool_takes_at_most_HALF_the_cores() -> None:
-    """``CPUS_PER_ENTRY_WORKER`` is an AVERAGE (one core for ~71 % of an entry,
+    """``CPUS_PER_COMPILED_GRAPH_WORKER`` is an AVERAGE (one core for ~71 % of an compiled graph,
     up to ``compile_threads`` for the rest), so a pod deliberately overcommits:
     at the burst K*compile_threads asks for ~2x the box, which is right when
     the box is ours and idle. Halving the budget makes the burst ask for the
     machine instead of double it.
 
-    RED: ``entry_workers`` had no posture, so a 32-core desktop sized K off
+    RED: ``compiled_graph_workers`` had no posture, so a 32-core desktop sized K off
     (32-2)//2 = 15 exactly as a 32-core pod did.
     """
     pod = _width(36, vcpus=32, avail_gib=256, posture=FLEET)
     desk = _width(36, vcpus=32, avail_gib=256, posture=USER_MACHINE)
     assert pod.cpu_workers == 15
     assert desk.cpu_workers == 8, (
-        "half of 32 cores, over 2 cores per entry worker — a quarter of the "
+        "half of 32 cores, over 2 cores per compiled_graph worker — a quarter of the "
         "machine's cores as a steady ask, one whole machine at the burst")
 
 
@@ -283,18 +283,18 @@ def test_a_four_core_laptop_compiles_SERIALLY() -> None:
         36, vcpus=4, avail_gib=16, posture=USER_MACHINE).workers == 1
 
 
-def test_the_entry_CEILING_halves_on_a_user_machine() -> None:
+def test_the_compiled_graph_CEILING_halves_on_a_user_machine() -> None:
     """K children mean K concurrent ``cc1plus``, K inductor caches being
     written and K working sets in the page cache — and here that disk and that
     page cache are the user's own. RED: one ceiling, 8, for every machine."""
     fat = _width(36, vcpus=128, avail_gib=512, posture=USER_MACHINE)
-    assert fat.ceiling == compile_posture.USER_MACHINE_MAX_ENTRY_WORKERS == 4
+    assert fat.ceiling == compile_posture.USER_MACHINE_MAX_COMPILED_GRAPH_WORKERS == 4
     assert fat.workers == 4, (
         "a workstation big enough to ignore every other bound still stops at "
         "the posture ceiling")
     assert _width(
         36, vcpus=128, avail_gib=512,
-        posture=FLEET).ceiling == aot_compile_pool.MAX_ENTRY_WORKERS
+        posture=FLEET).ceiling == aot_compile_pool.MAX_COMPILED_GRAPH_WORKERS
 
 
 def test_a_caller_cap_below_the_posture_ceiling_still_wins() -> None:
@@ -393,11 +393,11 @@ def test_the_nice_is_applied_by_the_CHILD_and_never_through_a_preexec_fn(
 
     Nicing in the mint child also covers strictly MORE. Since pgw#1080 every
     production mint is weight-free and ``aot_mint`` forces ``parallel=False``
-    for those — so the entry pool spawns no children at all today and the
+    for those — so the compiled graph pool spawns no children at all today and the
     compile runs in the mint child itself. A ``preexec_fn`` on the pool's spawn
     would nice a path that does not currently run; nice is inherited across
     ``fork``/``exec``, so one call in the child covers the serial compile, the
-    entry children when parallelism returns, inductor's compile workers and
+    compiled graph children when parallelism returns, inductor's compile workers and
     every ``cc1plus`` under them.
     """
     for name in ("aot_compile_pool.py", "mint_process.py", "mint_child.py"):
@@ -435,7 +435,7 @@ def test_a_user_machine_leaves_more_HOST_RAM_alone() -> None:
 
 def test_a_sixteen_gig_desktop_under_load_mints_serially() -> None:
     """The case this bound exists for: a laptop with a browser open. 10 GiB
-    available minus the reserve leaves nothing for a second entry."""
+    available minus the reserve leaves nothing for a second compiled graph."""
     assert _width(
         36, vcpus=16, avail_gib=10, posture=USER_MACHINE).workers == 1
 
@@ -446,9 +446,9 @@ def test_a_sixteen_gig_desktop_under_load_mints_serially() -> None:
 
 
 def _fleet_width(
-    entries: int, *, vcpus: int, avail: int, limit: int = 0,
+    compiled_graphs: int, *, vcpus: int, avail: int, limit: int = 0,
 ) -> Dict[str, int]:
-    """``entry_workers``' arithmetic, restated independently.
+    """``compiled_graph_workers``' arithmetic, restated independently.
 
     Deliberately a re-implementation and not a call into the code under test:
     a non-regression test that asks the new code whether it changed can only
@@ -460,23 +460,23 @@ def _fleet_width(
     """
     cpu_workers = max(
         1, (vcpus - aot_compile_pool.SERVING_HEADROOM_CPUS)
-        // aot_compile_pool.CPUS_PER_ENTRY_WORKER)
-    per_entry = aot_compile_pool.DEFAULT_ENTRY_PEAK_RSS_BYTES
+        // aot_compile_pool.CPUS_PER_COMPILED_GRAPH_WORKER)
+    per_compiled_graph = aot_compile_pool.DEFAULT_COMPILED_GRAPH_PEAK_RSS_BYTES
     mem_workers = max(
-        1, max(0, avail - aot_compile_pool.ENTRY_RSS_RESERVE_BYTES)
-        // per_entry) if avail > 0 else 1
+        1, max(0, avail - aot_compile_pool.COMPILED_GRAPH_RSS_RESERVE_BYTES)
+        // per_compiled_graph) if avail > 0 else 1
     ceiling = (
-        min(aot_compile_pool.MAX_ENTRY_WORKERS, limit) if limit > 0
-        else aot_compile_pool.MAX_ENTRY_WORKERS)
+        min(aot_compile_pool.MAX_COMPILED_GRAPH_WORKERS, limit) if limit > 0
+        else aot_compile_pool.MAX_COMPILED_GRAPH_WORKERS)
     return {
         "cpu_workers": cpu_workers, "mem_workers": mem_workers,
         "ceiling": ceiling,
-        "workers": max(1, min(cpu_workers, mem_workers, ceiling, entries)),
+        "workers": max(1, min(cpu_workers, mem_workers, ceiling, compiled_graphs)),
     }
 
 
 @pytest.mark.parametrize(
-    "entries,vcpus,avail_gib,limit", [
+    "compiled_graphs,vcpus,avail_gib,limit", [
         (18, 8, 32, 0),      # a modest serving pod
         (36, 64, 200, 0),    # a fat H100 pod
         (36, 128, 500, 0),   # the widest real pod
@@ -485,14 +485,14 @@ def _fleet_width(
         (4, 4, 8, 0),        # a small pod where RAM binds
     ])
 def test_a_POD_width_is_arithmetically_the_plain_policy(
-    entries: int, vcpus: int, avail_gib: float, limit: int,
+    compiled_graphs: int, vcpus: int, avail_gib: float, limit: int,
 ) -> None:
     """§4.30's constraint the other way round: *"aggressive on a dedicated
     serving pod"*. Every bound, over a matrix spanning the real fleet."""
     got = _width(
-        entries, vcpus=vcpus, avail_gib=avail_gib, posture=FLEET, limit=limit)
+        compiled_graphs, vcpus=vcpus, avail_gib=avail_gib, posture=FLEET, limit=limit)
     want = _fleet_width(
-        entries, vcpus=vcpus, avail=int(avail_gib * 1024**3), limit=limit)
+        compiled_graphs, vcpus=vcpus, avail=int(avail_gib * 1024**3), limit=limit)
     assert {
         "cpu_workers": got.cpu_workers, "mem_workers": got.mem_workers,
         "ceiling": got.ceiling, "workers": got.workers,
@@ -506,7 +506,7 @@ def test_the_DEFAULT_posture_is_the_fleet_one_when_nothing_installed() -> None:
     assert compile_posture.current() == FLEET
     assert _width(
         36, vcpus=32, avail_gib=256, posture=FLEET).cpu_workers \
-        == aot_compile_pool.entry_workers(
+        == aot_compile_pool.compiled_graph_workers(
             36, vcpus=32, available_bytes=256 * 1024**3, device_lock=True).cpu_workers
 
 
@@ -553,7 +553,7 @@ def test_the_user_is_told_what_the_compile_COSTS_before_it_starts() -> None:
 
 def test_progress_reaches_the_user_WHILE_the_compile_runs() -> None:
     """A cadence, not a burst: the frames arrive at wildly different rates (one
-    per export, one per compiled entry, then silence through a single long link
+    per export, one per compiled compiled graph, then silence through a single long link
     step) and a user watching a machine they can no longer type on needs a
     steady "still working" line."""
     clock = [0.0]
@@ -566,11 +566,11 @@ def test_progress_reaches_the_user_WHILE_the_compile_runs() -> None:
     assert len(lines) == 1 and "micro-diffusion" in lines[0]
 
     clock[0] = 3.0
-    watch(MintFrame(phase="compile_entries", step=1, total=18))
+    watch(MintFrame(phase="compile_compiled_graphs", step=1, total=18))
     assert len(lines) == 1, "throttled: three seconds is not a new line"
 
     clock[0] = 45.0
-    watch(MintFrame(phase="compile_entries", step=7, total=18))
+    watch(MintFrame(phase="compile_compiled_graphs", step=7, total=18))
     assert len(lines) == 2
     assert "7/18" in lines[1] and "0m45s" in lines[1], (
         "how far along, and how long it has been — the two numbers a user "
@@ -591,13 +591,13 @@ def test_the_terminal_watcher_never_displaces_the_HUB_activity() -> None:
             notes.append(n)
 
     seen: List[MintFrame] = []
-    frame = MintFrame(phase="compile_entries", step=2, total=18, note="hi")
+    frame = MintFrame(phase="compile_compiled_graphs", step=2, total=18, note="hi")
 
     mint_delegate._on_frame(_Act())(frame)          # the fleet shape
-    assert phases == [("compile_entries", 2, 18)] and notes == ["hi"]
+    assert phases == [("compile_compiled_graphs", 2, 18)] and notes == ["hi"]
 
     mint_delegate._on_frame(_Act(), seen.append)(frame)
-    assert phases == [("compile_entries", 2, 18)] * 2
+    assert phases == [("compile_compiled_graphs", 2, 18)] * 2
     assert seen == [frame]
 
 
@@ -618,7 +618,7 @@ def test_a_user_machine_mint_child_DIES_WITH_ITS_PARENT(
     tree running with nobody left to reap it. That is precisely the "my machine
     is at a crawl and I don't know why" ticket this issue exists to prevent.
 
-    RED: ``arm_parent_death_signal`` had exactly one caller, the entry-pool
+    RED: ``arm_parent_death_signal`` had exactly one caller, the compiled graph-pool
     child, and the mint child armed nothing.
     """
     _, armed = _drive_child_posture(monkeypatch, USER_MACHINE)
@@ -641,10 +641,10 @@ def test_a_stopped_local_mint_does_not_WASTE_what_it_finished() -> None:
             modules=("m",), posture=USER_MACHINE),
         workdir=workdir)
     bank = Path(request.resume)
-    assert str(bank), "a local mint must bank its finished entries"
+    assert str(bank), "a local mint must bank its finished compiled_graphs"
     assert workdir not in bank.parents and bank != workdir, (
         "the resume bank must outlive the attempt AND the pending, or a "
-        "cancelled compile throws away every entry it had already finished")
+        "cancelled compile throws away every compiled_graph it had already finished")
 
 
 def test_the_local_notice_and_the_local_posture_cannot_drift(
@@ -674,10 +674,10 @@ def _module_names(path: Path) -> List[str]:
     return out
 
 
-def test_the_politeness_wiring_adds_no_transport_to_the_local_serve_entry(
+def test_the_politeness_wiring_adds_no_transport_to_the_local_serve_compiled_graph(
 ) -> None:
     """pgw#1127 §4's fence, re-asserted against THIS issue's imports: the local
-    serve entry gained ``aot_compile_pool``, ``compile_posture`` and
+    serve compiled graph gained ``aot_compile_pool``, ``compile_posture`` and
     ``local_compiled_graph_store``, and none of them may drag a publisher in."""
     names = _module_names(SRC / "local_serve.py")
     assert "compile_posture" in names and "aot_compile_pool" in names
@@ -692,8 +692,8 @@ def test_the_posture_module_holds_POLICY_and_nothing_else() -> None:
     the child cannot each grow their own idea of what polite means."""
     posture = CompilePosture(user_machine=True)
     assert posture.nice_level() == 19
-    assert posture.entry_ceiling(8) == 4
-    assert posture.entry_ceiling(2) == 2, "never widens"
+    assert posture.compiled_graph_ceiling(8) == 4
+    assert posture.compiled_graph_ceiling(2) == 2, "never widens"
     assert posture.rss_reserve_bytes(4 * 1024**3) == 8 * 1024**3
     assert posture.rss_reserve_bytes(16 * 1024**3) == 16 * 1024**3, \
         "never shrinks"
@@ -702,7 +702,7 @@ def test_the_posture_module_holds_POLICY_and_nothing_else() -> None:
 
     fleet = CompilePosture()
     assert fleet.nice_level() == 0
-    assert fleet.entry_ceiling(8) == 8
+    assert fleet.compiled_graph_ceiling(8) == 8
     assert fleet.rss_reserve_bytes(4 * 1024**3) == 4 * 1024**3
     assert fleet.cpu_budget_cores(32, headroom=2) == 30
 

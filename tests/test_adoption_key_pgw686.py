@@ -185,14 +185,14 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
     # (pgw#1059), so an old key can only MISS.
     #
     # pgw#1176 SHARPENS the miss and this row records the change: a `ck` key
-    # is no longer merely key-SHAPED-but-dead. It names a 36-entry
+    # is no longer merely key-SHAPED-but-dead. It names a 36-compiled graph
     # all-or-nothing compiled graph this runtime cannot arm at all, so it does not
     # parse — which is what makes an orphaned ref fail at the comparison
-    # rather than late inside a per-entry code path.
+    # rather than late inside a per-compiled graph code path.
     for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
         assert not ck.is_key(old)
-    with pytest.raises(ck.CompiledGraphKeyError, match="has no entry-key identity"):
-        ck.from_entry_metadata(_BURST_META)
+    with pytest.raises(ck.CompiledGraphKeyError, match="has no compiled_graph-key identity"):
+        ck.from_compiled_graph_metadata(_BURST_META)
 
 
 # --- the fix: one base-lane resolution for every compiled graph-identity surface -----

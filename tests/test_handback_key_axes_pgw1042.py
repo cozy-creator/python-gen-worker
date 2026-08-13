@@ -9,17 +9,17 @@ pins:
    — but every pre-trace FACT the two sides share must be byte-identical
    across the process boundary, and one measurably was not:
    `torch._inductor.aot_compile` mutates the global `aot_inductor.metadata`
-   config entry as a side effect, so a child that has compiled seals a
+   config compiled graph as a side effect, so a child that has compiled seals a
    different `env_seal` than its own boot (and than every other process on
-   the pod). The seal digest now excludes that entry, and
+   the pod). The seal digest now excludes that compiled graph, and
    `adopt_delegated_mint` refuses BY FACT NAME when any shared fact diverges.
 
 2. The artifact failed `update_constant_buffer_func_(... ) API call failed at
    model_container_runner.cpp:289` on the parent runtime. Reproduced locally
-   byte-for-byte: the per-entry copying bind allocates the target's FULL
-   constant set once per entry, so a 36-entry sdxl compiled graph demanded ~N x 2.6 GB
+   byte-for-byte: the per-compiled graph copying bind allocates the target's FULL
+   constant set once per compiled graph, so a 36-compiled graph sdxl compiled graph demanded ~N x 2.6 GB
    at arm and the failing cudaMalloc surfaced as that anonymous C++ error.
-   Entries now bind BY REFERENCE against one marker-owned pool per target,
+   Compiled graphs now bind BY REFERENCE against one marker-owned pool per target,
    and any residual AOTI failure is a typed `injection_failed` refusal
    carrying live device-memory context.
 """
@@ -115,7 +115,7 @@ def test_the_envelope_is_deliberately_NOT_compared_at_this_seam() -> None:
 
     This used to be a sixth `test_every_shared_axis_is_guarded` case asserting
     a diverging `EXPORT_ENVELOPE_KEY` is refused `envelope: ...`. `envelope`
-    left `ARM_ENVIRONMENT_FACTS` with the key: a per-entry artifact records no
+    left `ARM_ENVIRONMENT_FACTS` with the key: a per-compiled graph artifact records no
     declared envelope — that is a manifest fact about the whole declaration,
     not about one graph class — so comparing it here would test a value the
     child can no longer state, and refuse every handback by construction.
@@ -226,14 +226,14 @@ class _RefusingPackage:
 
 def test_cpp_bind_failure_is_typed_injection_failed() -> None:
     """The pod's anonymous `API call failed` becomes a NAMED refusal with the
-    entry and live device-memory context — pgw#999's rule, one frame deeper."""
+    compiled graph and live device-memory context — pgw#999's rule, one frame deeper."""
     spec = aot_serve.ConstantSpec(
         fqn="lin.weight", source=aot_serve.SOURCE_STATE_DICT,
         dtype="torch.bfloat16", shape=(2, 2))
     runner = aot_serve.ArtifactRunner(
         package=_RefusingPackage(),
         contract=None,  # bind never reads it
-        constants=(spec,), entry="transformer/cfg=true")
+        constants=(spec,), compiled_graph="transformer/cfg=true")
     with pytest.raises(aot_serve.ConstantsUnboundError) as exc:
         runner.bind({"lin.weight": _FakeTensor()}, {})
     assert exc.value.reason == "injection_failed"
@@ -242,14 +242,14 @@ def test_cpp_bind_failure_is_typed_injection_failed() -> None:
 
 
 def test_target_constant_pool_is_one_REFERENCE_per_fqn() -> None:
-    """N entries share ONE pool slot per FQN — the N x constants VRAM demand
-    that OOM'd the 36-entry sdxl arm must not be reconstructible.
+    """N compiled graphs share ONE pool slot per FQN — the N x constants VRAM demand
+    that OOM'd the 36-compiled graph sdxl arm must not be reconstructible.
 
     INVERTED by pgw#1177. This row asserted `pool["w"] is not resident`
     ("owned, not aliased", pgw#812 D3). That clone was the ONLY copy in the
     system — one full duplicate of the target's weights held for the life of
     the arm, ~5.1 GiB on sdxl's single `unet` target — in direct contradiction
-    of §4.33 step 4, *"the compiled entries bind constants BY REFERENCE
+    of §4.33 step 4, *"the compiled compiled graphs bind constants BY REFERENCE
     against the resident weights; there is no second copy of the model"*. The
     dedup this row actually guards is unchanged; only the ownership claim
     inverted.

@@ -5,7 +5,7 @@ code; we should only load it from our config pipeline and then pass it around."*
 
 Three properties, each of which was previously true of nothing:
 
-1. `config.current()` RAISES when no process entry published `Settings`. The
+1. `config.current()` RAISES when no process compiled graph published `Settings`. The
    deleted `get_settings()` answered this case by reading the environment there
    and then, which is how a module running before bootstrap got config nobody
    had validated — and why nothing in the tree could say what a process was
@@ -95,7 +95,7 @@ def test_a_typo_in_dotenv_is_refused(tmp_path: Path, monkeypatch) -> None:
 
 def test_foreign_keys_in_dotenv_are_still_ignored(tmp_path: Path, monkeypatch) -> None:
     """Scoped to the namespaces we own, deliberately. A real `.env` carries
-    hundreds of entries belonging to other tools; refusing those would make the
+    hundreds of compiled graphs belonging to other tools; refusing those would make the
     worker unusable and the rule would be turned off within a day."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
@@ -184,8 +184,8 @@ def test_parent_control_installs_the_boot_credential(monkeypatch) -> None:
     `test_procsplit_security_pgw763` after the merge.
 
     The lesson is §4.22's: a fact and its carrier must be established together,
-    at the seam the fact's owner is constructed, not at one convenient entry
-    point. This asserts the seam rather than the entry point.
+    at the seam the fact's owner is constructed, not at one convenient compiled graph
+    point. This asserts the seam rather than the compiled graph point.
     """
     from gen_worker import worker_credential
     from gen_worker.procsplit.parent import ParentControl

@@ -1,4 +1,4 @@
-"""The micro family's export declaration — THREE entries, on purpose.
+"""The micro family's export declaration — THREE compiled graphs, on purpose.
 
 sdxl declares 36 (10 aspect rows x static-rows x targets) and a mint cycle
 against it costs ~95 minutes on a pod. Nothing about the MACHINERY needs 36:
@@ -7,7 +7,7 @@ dynamic range, the fork coordinate, the seal, the publish wire, the adopt
 filter — are all exercised by three. This declaration is the smallest set that
 still exercises every one of them.
 
-The three entries
+The three compiled graphs
 -----------------
 
     transformer/cfg=true     the guided arm; the container arity is 2
@@ -21,8 +21,8 @@ Why each declared fact is what it is
   convenient: #730 ratified the strategy for conv-free graphs, and
   :mod:`micro_diffusion.model` contains zero ``nn.Conv*`` layers by
   construction. It is also the strategy that makes the two declared latent
-  rows COLLAPSE into one artifact per arm instead of multiplying entries,
-  which is the difference between 3 entries and 6.
+  rows COLLAPSE into one artifact per arm instead of multiplying compiled graphs,
+  which is the difference between 3 compiled graphs and 6.
 
 * ``cfg`` is a FORK, not a dim. The pipeline batches CFG into ONE forward by
   building a two-element list, so the pytree ARITY changes and N=1 / N=2 are

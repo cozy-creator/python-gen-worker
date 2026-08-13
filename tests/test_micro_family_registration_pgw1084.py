@@ -90,7 +90,7 @@ def _manifest_families(manifest: Dict[str, Any]) -> Set[str]:
 def declared() -> Set[str]:
     """The REAL build-time scan, not a grep over the source.
 
-    `discover_manifest` is the exact entry point the image's build step runs
+    `discover_manifest` is the exact compiled graph point the image's build step runs
     (`python -m gen_worker.discover`), so a member this fence cannot see is a
     member the hub cannot see either. It needs no GPU and no network.
     """
@@ -117,7 +117,7 @@ def test_families_declared_equal_the_shared_constant(declared: Set[str]) -> None
     assert not dead, (
         f"{dead} are listed in {FAMILIES_FILE.relative_to(REPO)} but no longer "
         f"reach the discovery manifest. Delete the line here and the matching "
-        f"entry in {PEER_REGISTRY}, or the hub keeps a family nothing declares.")
+        f"compiled_graph in {PEER_REGISTRY}, or the hub keeps a family nothing declares.")
 
 
 def test_the_shared_constant_is_sorted_and_unique() -> None:

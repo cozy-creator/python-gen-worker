@@ -547,7 +547,7 @@ class SendQueue:
             state=pb.ActivityState.ACTIVITY_STATE_RUNNING,
             detail=(
                 f"outbox shed {self._shed_total} undelivered fact(s) at the "
-                f"{self._evidence_max}-entry bound — the hub was unreachable "
+                f"{self._evidence_max}-compiled_graph bound — the hub was unreachable "
                 f"long enough that this worker could not keep every "
                 f"measurement it produced (pgw#869)"
             ),
@@ -677,7 +677,7 @@ class SendQueue:
                 and in_flight_generation < generation
             ):
                 # HelloAck's active-failure/undelivered-progress snapshot is
-                # authoritative even when the exact entries were already
+                # authoritative even when the exact compiled graphs were already
                 # pending in the opposite insertion order.
                 self._remove_reconnect_identity(identity)
                 self._reconnect_seen.pop(identity, None)

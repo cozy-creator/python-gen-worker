@@ -11,7 +11,7 @@ an ``sm``, this box has no usable GPU, and no test design changes that.
 ``_gpu_runtime`` patches the PROBES and nothing else — every gate, digest, and
 pack path exercised below is the production one.
 
-Envelope ownership: ``aot_serve`` owns ``entry_metadata``/``pack``/``verify``
+Envelope ownership: ``aot_serve`` owns ``compiled_graph_metadata``/``pack``/``verify``
 (#721 S1) and this lane imports it. ``aot_package`` owns the mint-side ``.pt2``
 introspection and the B1 gate. ``lora_lifted`` owns the no-baked-adapter gate,
 which must run on the ExportedProgram — see the test that proves the
@@ -218,17 +218,17 @@ class CompiledGraphModule(torch.nn.Module):
         return self.proj(x) + self.scale_table.sum()
 
 
-COMPILED_GRAPH_ENTRY = "unet/B=4"
+COMPILED_GRAPH_COMPILED_GRAPH = "unet/B=4"
 
 
 def _only(result):
-    """The ONE entry a single-class mint produced.
+    """The ONE compiled graph a single-class mint produced.
 
     pgw#1176: a mint returns a SET of independently keyed artifacts. These
     vehicles declare one class, so unpacking asserts that arity instead of
     indexing past a set nobody checked.
     """
-    (row,) = result.entries
+    (row,) = result.compiled_graphs
     return row
 
 
@@ -325,7 +325,7 @@ def test_declared_constants_parses_the_full_table(
 
 def test_manifest_rows_carry_the_source_class(packages: Dict[str, Path]) -> None:
     """``aot_serve.constants_from_meta`` refuses a row whose ``source`` is not
-    one of its two classes, so the producer must classify every entry."""
+    one of its two classes, so the producer must classify every compiled graph."""
     rows = aot_package.constants_manifest(packages["code_only"])
     assert rows
     for row in rows:
@@ -379,7 +379,7 @@ def test_lrodata_proof_is_independent_of_the_rendered_flag(
     with proof 1 forced to agree with the regression.
     """
     monkeypatch.setattr(
-        aot_package, "constants_in_so", lambda _p, _entry="": False)
+        aot_package, "constants_in_so", lambda _p, _compiled_graph="": False)
     reasons = aot_package.code_only_violations(packages["baked"])
     assert reasons, ".lrodata proof must refuse a baked package unaided"
     assert ".lrodata" in " ".join(reasons)
@@ -456,12 +456,12 @@ def test_mint_refuses_a_package_wanting_undeclared_constants(
     tmp_path: Path, _gpu_runtime: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wired into the mint, not merely available — and the refusal NAMES the
-    entry (pgw#758)."""
+    compiled graph (pgw#758)."""
     monkeypatch.setattr(
         aot_package, "program_constant_fqns", lambda _p: ())
     with pytest.raises(aot_mint.MintRefused, match="constant-set drift") as err:
         _mint_compiled_graph(tmp_path)
-    assert COMPILED_GRAPH_ENTRY in str(err.value)
+    assert COMPILED_GRAPH_COMPILED_GRAPH in str(err.value)
     assert not list(tmp_path.glob("*.tar.gz"))
 
 
@@ -472,7 +472,7 @@ def test_mint_reports_fused_constants_without_refusing_and_without_KEYING_them(
     """Compiler fusion must be observable, never fatal — and since pgw#1089,
     never KEYED.
 
-    v2 folded ``fused_constants`` into the entry's ``class_hash``, which made
+    v2 folded ``fused_constants`` into the compiled graph's ``class_hash``, which made
     the compiler's folding decisions part of compiled graph identity. Two consequences,
     one of them already live: identity could not be stated before a compile (so
     §4.27 step 1's boot-time derivation was impossible), and a weightless mint
@@ -496,12 +496,12 @@ def test_mint_reports_fused_constants_without_refusing_and_without_KEYING_them(
 
     # 1. NEVER FATAL — the mint completed and produced an artifact.
     meta = aot_serve.unpack_metadata(_only(result).artifact)
-    entry = meta[compiled_graph_key.ENTRY_BLOCK_KEY]
+    compiled_graph = meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]
 
     # 2. NEVER KEYED — the graph block does not carry it at all, and the block
     #    is v3 (program-only).
-    assert "fused_constants" not in entry["graph"]
-    assert entry["graph"]["v"] == 3
+    assert "fused_constants" not in compiled_graph["graph"]
+    assert compiled_graph["graph"]["v"] == 3
 
     # 3. STILL OBSERVABLE — reported where a surprising jump in the count is
     #    visible, rather than silently discarded.
@@ -514,7 +514,7 @@ def test_mint_reports_fused_constants_without_refusing_and_without_KEYING_them(
 
 def test_minted_metadata_pins_the_trace_mode(compiled_graph: Dict[str, Any]) -> None:
     """Recorded on the artifact, and BINDING: the mode is an input to every
-    entry's ``class_hash``, so drift the env seal cannot see (both modes run
+    compiled graph's ``class_hash``, so drift the env seal cannot see (both modes run
     identically sealed, identical toolchain) is still refused on staged bytes.
 
     pgw#1034 replaced ``aot_package.strict_mode_drift`` with this. That gate
@@ -531,7 +531,7 @@ def test_minted_metadata_pins_the_trace_mode(compiled_graph: Dict[str, Any]) -> 
     drifted["strict_export"] = False
     reason = aot_serve.verify_contract(drifted)
     assert "class_hash does not match its recorded facts" in reason
-    assert COMPILED_GRAPH_ENTRY in reason  # the refusal NAMES the class (pgw#716)
+    assert COMPILED_GRAPH_COMPILED_GRAPH in reason  # the refusal NAMES the class (pgw#716)
 
 
 # ---------------------------------------------------------------------------
@@ -762,8 +762,8 @@ def _spec(**over: Any) -> aot_mint.ExportSpec:
 
 def test_mint_produces_a_packed_keyed_gated_compiled_graph(compiled_graph: Dict[str, Any]) -> None:
     """The whole produce half on a real declared family: plans -> export ->
-    ep gates -> code-only AOTI -> package_aoti -> B1 gate per entry ->
-    declared contract per entry -> keyed pack."""
+    ep gates -> code-only AOTI -> package_aoti -> B1 gate per compiled graph ->
+    declared contract per compiled graph -> keyed pack."""
     result = compiled_graph["result"]
     row = _only(result)
     assert row.artifact.exists()
@@ -778,7 +778,7 @@ def test_mint_produces_a_packed_keyed_gated_compiled_graph(compiled_graph: Dict[
     assert meta["strict_export"] is True
     assert meta["weight_lane"] == "w8a8"
     assert meta["compiled_graph_key"] == row.key
-    assert meta[compiled_graph_key.ENTRY_BLOCK_KEY]["name"] == COMPILED_GRAPH_ENTRY
+    assert meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["name"] == COMPILED_GRAPH_COMPILED_GRAPH
     # pgw#1176: the manifest label rides the artifact as telemetry; identity
     # is `compiled_graph_key`, which is this ONE class's.
     assert meta["manifest_digest"]
@@ -786,19 +786,19 @@ def test_mint_produces_a_packed_keyed_gated_compiled_graph(compiled_graph: Dict[
     # The envelope's own parsers accept what the producer wrote — the two lanes
     # agree about the bytes, verified rather than assumed.
     assert aot_serve.verify(meta, family=COMPILED_GRAPH_FAMILY) == ""
-    entry = meta[compiled_graph_key.ENTRY_BLOCK_KEY]
-    contract = aot_serve.contract_from_meta(entry)
+    compiled_graph = meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]
+    contract = aot_serve.contract_from_meta(compiled_graph)
     assert [s.name for s in contract.inputs] == ["x"]
     assert contract.inputs[0].shape == (4, WIDTH)  # static row: exact dims
-    specs = aot_serve.constants_from_meta(entry)
+    specs = aot_serve.constants_from_meta(compiled_graph)
     fqns = {s.fqn for s in specs}
     assert "proj.weight" in fqns and "scale_table" in fqns
 
     # The identity blocks the key is recomputed FROM ride the metadata,
-    # per entry (graph) and compiled graph-wide (toolchain/closure/sm).
-    assert entry["class_hash"] and entry["range_digest"]
-    assert entry["graph"]["specialization"]["gemm_mode"] == "pertensor"
-    assert entry["graph"]["specialization"]["shape_strategy"] == "static-rows"
+    # per compiled graph (graph) and compiled graph-wide (toolchain/closure/sm).
+    assert compiled_graph["class_hash"] and compiled_graph["range_digest"]
+    assert compiled_graph["graph"]["specialization"]["gemm_mode"] == "pertensor"
+    assert compiled_graph["graph"]["specialization"]["shape_strategy"] == "static-rows"
     assert meta["toolchain"] and meta["sm"] == "sm_89"
     # pgw#1034: the envelope records NO `code_closure` — nothing ever read it.
     assert "code_closure" not in meta
@@ -809,11 +809,11 @@ def test_mint_produces_a_packed_keyed_gated_compiled_graph(compiled_graph: Dict[
     # tar must stay byte-deterministic for the #699 double-mint compare).
     assert "mint_phases" not in meta
     # pgw#1176: the phase table is a property of the MINT RUN, so every
-    # entry's metadata carries the same one — it is the run's record, not an
+    # compiled graph's metadata carries the same one — it is the run's record, not an
     # artifact's identity.
     table = _only(result).metadata["mint_phases"]
-    assert table["n_entries"] == 1
-    assert table["entries"][COMPILED_GRAPH_ENTRY]["compile_s"] > 0
+    assert table["n_compiled_graphs"] == 1
+    assert table["compiled_graphs"][COMPILED_GRAPH_COMPILED_GRAPH]["compile_s"] > 0
 
 
 def test_minted_artifact_stages_on_the_consumer_side(
@@ -828,7 +828,7 @@ def test_minted_artifact_stages_on_the_consumer_side(
         assert staged.metadata["compiled_graph_key"] == _only(result).key
         assert (staged.root / aot_serve.PACKAGE_NAME).exists()
         assert aot_package.constants_in_so(
-            staged.root / aot_serve.PACKAGE_NAME, COMPILED_GRAPH_ENTRY) is False
+            staged.root / aot_serve.PACKAGE_NAME, COMPILED_GRAPH_COMPILED_GRAPH) is False
     finally:
         staged.close()
 
@@ -844,7 +844,7 @@ def test_mint_cannot_be_talked_out_of_code_only(
     dest = tmp_path / "dest"
     aot_serve.unpack(_only(result).artifact, dest)
     assert aot_package.constants_in_so(
-        dest / aot_serve.PACKAGE_NAME, COMPILED_GRAPH_ENTRY) is False
+        dest / aot_serve.PACKAGE_NAME, COMPILED_GRAPH_COMPILED_GRAPH) is False
 
 
 def test_mint_metadata_is_byte_deterministic(
@@ -860,7 +860,7 @@ def test_mint_metadata_is_byte_deterministic(
     b = _mint_compiled_graph(tmp_path / "b")
     assert _only(a).key == _only(b).key
     # Telemetry is on the RESULT metadata...
-    assert _only(a).metadata["mint_phases"]["n_entries"] >= 1
+    assert _only(a).metadata["mint_phases"]["n_compiled_graphs"] >= 1
 
     meta_a = aot_serve.unpack_metadata(_only(a).artifact)
     meta_b = aot_serve.unpack_metadata(_only(b).artifact)
@@ -870,7 +870,7 @@ def test_mint_metadata_is_byte_deterministic(
     # Weights differ between the two module instances, so the PACKAGE bytes may
     # differ; the recorded contract and identity must not.
     for field_name in (
-        "entry", "manifest_digest", "toolchain",
+        "compiled_graph", "manifest_digest", "toolchain",
         "compiled_graph_key", "package_constants_in_so",
     ):
         assert meta_a[field_name] == meta_b[field_name], field_name
@@ -880,7 +880,7 @@ def test_mint_refuses_a_class_the_graph_cannot_make_dynamic(
     tmp_path: Path, _gpu_runtime: None,
 ) -> None:
     """A dynamic-collapse family whose module SPECIALIZES the collapsed dim
-    must fail the mint, naming the entry — the artifact would serve one
+    must fail the mint, naming the compiled graph — the artifact would serve one
     shape while its declared class set claims two."""
 
     class Pinned(torch.nn.Module):
@@ -905,7 +905,7 @@ def test_mint_refuses_a_class_the_graph_cannot_make_dynamic(
         _mint_compiled_graph(
             tmp_path, module=Pinned().eval(), family="pinned723", decl=decl,
             spec=_compiled_graph_spec("pinned723"))
-    assert "entry 'unet'" in str(err.value)
+    assert "compiled_graph 'unet'" in str(err.value)
     assert not list(tmp_path.glob("*.tar.gz"))
 
 
@@ -914,12 +914,12 @@ def test_mint_refuses_an_unbindable_constant(
 ) -> None:
     """A compiled graph whose declared constants cannot bind from the resident module is
     refused on the mint pod, not by every serving pod in turn — naming the
-    entry AND the tensor."""
+    compiled graph AND the tensor."""
     monkeypatch.setattr(
         aot_mint, "_state_dict_keys", lambda _m: ("proj.weight", "proj.bias"))
     with pytest.raises(aot_mint.MintRefused, match="bindability gate") as err:
         _mint_compiled_graph(tmp_path)
-    assert COMPILED_GRAPH_ENTRY in str(err.value)
+    assert COMPILED_GRAPH_COMPILED_GRAPH in str(err.value)
     assert "scale_table" in str(err.value)
 
 
@@ -928,27 +928,27 @@ def test_mint_refuses_an_unbindable_constant(
 # ---------------------------------------------------------------------------
 
 
-ENTRY = "forward/x"
+COMPILED_GRAPH = "forward/x"
 
 
 def _meta_for(program: Any, package: Path, spec: aot_mint.ExportSpec) -> Dict[str, Any]:
     """A format-3 envelope around ONE compiled program — the session
-    packages are single-model archives, read with ``entry=""``, which is
+    packages are single-model archives, read with ``compiled graph=""``, which is
     exactly the shape pgw#1176 made the only shape."""
     inputs, symbols = aot_package.input_contract(
         program, _leaves("x", "lora_a", "lora_b"))
-    entry = {
+    compiled_graph = {
         "target": "forward",
         "fork": [[str(n), v] for n, v in sorted(spec.fork)],
         "class_dims": [[str(n), int(v)] for n, v in sorted(spec.class_dims)],
         "inputs": inputs,
         "symbols": symbols,
         "constants": aot_package.constants_manifest(package),
-        "graph": aot_mint.entry_graph_block(program, spec),
+        "graph": aot_mint.compiled_graph_graph_block(program, spec),
     }
-    meta = aot_serve.entry_metadata(
+    meta = aot_serve.compiled_graph_metadata(
         family="tiny", precision="bf16", compiled_graph_key="",
-        name=ENTRY, entry=entry, strict_export=spec.strict,
+        name=COMPILED_GRAPH, compiled_graph=compiled_graph, strict_export=spec.strict,
         lora_bucket=spec.lora_bucket,
     )
     meta.update(aot_mint.shared_identity_blocks(spec))
@@ -970,12 +970,12 @@ def test_compiled_graph_key_differs_when_ONLY_the_declared_range_differs(
     spec = _spec()
     narrow = _meta_for(_export_lifted(lo=8, hi=16), packages["code_only"], spec)
     wide = _meta_for(_export_lifted(lo=8, hi=32), packages["code_only"], spec)
-    assert (narrow[compiled_graph_key.ENTRY_BLOCK_KEY]["range_digest"]
-            != wide[compiled_graph_key.ENTRY_BLOCK_KEY]["range_digest"])
+    assert (narrow[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["range_digest"]
+            != wide[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["range_digest"])
     # The range digest folds into the per-class hash, the class hash into the
     # combined hash, the combined hash into the key (pgw#716/#758).
-    assert (narrow[compiled_graph_key.ENTRY_BLOCK_KEY]["class_hash"]
-            != wide[compiled_graph_key.ENTRY_BLOCK_KEY]["class_hash"])
+    assert (narrow[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["class_hash"]
+            != wide[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["class_hash"])
     # pgw#1176: the graph axis IS this class's hash, so a declared-range
     # change moves the key directly rather than through a combined digest.
     assert narrow["compiled_graph_key"] != wide["compiled_graph_key"]
@@ -1017,19 +1017,19 @@ def test_compiled_graph_key_differs_between_strict_and_non_strict(
     assert a["compiled_graph_key"] != b["compiled_graph_key"]
 
 
-def test_entry_identity_refuses_an_artifact_that_cannot_name_its_class(
+def test_compiled_graph_identity_refuses_an_artifact_that_cannot_name_its_class(
     _gpu_runtime: None, packages: Dict[str, Path],
 ) -> None:
-    """An exported entry must not be keyable without its class — and an entry
+    """An exported compiled graph must not be keyable without its class — and an compiled graph
     with no class hash is a class a mismatch could never name."""
     spec = _spec()
     meta = _meta_for(_export_lifted(), packages["code_only"], spec)
     hollow = dict(meta)
-    hollow[compiled_graph_key.ENTRY_BLOCK_KEY] = {}
-    with pytest.raises(aot_mint.MintRefused, match="entry"):
+    hollow[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY] = {}
+    with pytest.raises(aot_mint.MintRefused, match="compiled_graph"):
         aot_mint.compiled_graph_identity(hollow)
     unhashed = json.loads(json.dumps(meta))
-    unhashed[compiled_graph_key.ENTRY_BLOCK_KEY]["class_hash"] = ""
+    unhashed[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["class_hash"] = ""
     with pytest.raises(aot_mint.MintRefused, match="class_hash"):
         aot_mint.compiled_graph_identity(unhashed)
 
@@ -1047,7 +1047,7 @@ def test_compiled_graph_identity_refuses_an_artifact_with_no_sm(
 def test_key_scheme_is_ek1_and_the_axes_are_the_three(
     _gpu_runtime: None, packages: Dict[str, Path],
 ) -> None:
-    """pgw#1176: the exported ENTRY keys on exactly graph x sm x toolchain
+    """pgw#1176: the exported COMPILED_GRAPH keys on exactly graph x sm x toolchain
     under the ek1 scheme — `kind` is a metadata fact the compat gates read,
     never an axis, and `envelope` is a manifest fact for the same reason."""
     spec = _spec()
@@ -1056,7 +1056,7 @@ def test_key_scheme_is_ek1_and_the_axes_are_the_three(
     assert set(key.axes_dict()) == {"graph", "sm", "toolchain"}
     # The graph axis is THIS class's hash, not a digest over a collection.
     assert (key.axes_dict()["graph"]
-            == meta[compiled_graph_key.ENTRY_BLOCK_KEY]["class_hash"])
+            == meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["class_hash"])
     assert key.digest.startswith(compiled_graph_key.KEY_SCHEME + "-")
     assert compiled_graph_key.KEY_SCHEME == "ek1"
     assert compiled_graph_key.is_key(key.digest)
@@ -1084,12 +1084,12 @@ def test_publish_passes_the_keyed_metadata_through(
     obligation is a keyed ``metadata.json`` in the tar."""
     meta = _meta_for(_export_lifted(), packages["code_only"], _spec())
     result = aot_mint.MintResult(
-        entries=(aot_mint.MintedArtifact(
-            key=meta["compiled_graph_key"], entry=ENTRY,
+        compiled_graphs=(aot_mint.MintedArtifact(
+            key=meta["compiled_graph_key"], compiled_graph=COMPILED_GRAPH,
             artifact=tmp_path / "compiled_graph.tar.gz", metadata=meta),),
         manifest="m0", timings={})
     publisher = _RecordingPublisher()
-    # pgw#1176: publish is PER ENTRY and answers {key -> checkpoint}.
+    # pgw#1176: publish is PER COMPILED_GRAPH and answers {key -> checkpoint}.
     assert aot_mint.publish(result, publisher) == {
         meta["compiled_graph_key"]: "checkpoint-1"}
     family, _artifact, sent = publisher.calls[0]
@@ -1098,11 +1098,11 @@ def test_publish_passes_the_keyed_metadata_through(
 
 
 def test_publish_refuses_an_unkeyed_artifact(tmp_path: Path) -> None:
-    """An unaddressable entry would be stored under a flavor nothing
+    """An unaddressable compiled graph would be stored under a flavor nothing
     requests."""
     result = aot_mint.MintResult(
-        entries=(aot_mint.MintedArtifact(
-            key="", entry=ENTRY, artifact=tmp_path / "compiled_graph.tar.gz",
+        compiled_graphs=(aot_mint.MintedArtifact(
+            key="", compiled_graph=COMPILED_GRAPH, artifact=tmp_path / "compiled_graph.tar.gz",
             metadata={"family": "tiny"}),),
         manifest="m0", timings={})
     with pytest.raises(aot_mint.MintRefused, match="compiled_graph_key"):

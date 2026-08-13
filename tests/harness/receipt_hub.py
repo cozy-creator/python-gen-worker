@@ -125,8 +125,8 @@ def make_artifact(tmp_path: Path, *, compiled_graph_key: str = COMPILED_GRAPH_KE
         ti = tarfile.TarInfo("metadata.json")
         ti.size = len(raw)
         tar.addfile(ti, io.BytesIO(raw))
-        payload = b"fake-inductor-entry" * 64
-        ti = tarfile.TarInfo("inductor/aa/entry.py")
+        payload = b"fake-inductor-compiled_graph" * 64
+        ti = tarfile.TarInfo("inductor/aa/compiled_graph.py")
         ti.size = len(payload)
         tar.addfile(ti, io.BytesIO(payload))
     return target

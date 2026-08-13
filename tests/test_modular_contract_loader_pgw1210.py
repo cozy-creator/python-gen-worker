@@ -1,5 +1,5 @@
 """pgw#1210: a component declaring a layout contract loads through that
-contract's registered loader — on BOTH entry points, or it is a typed refusal.
+contract's registered loader — on BOTH compiled graph points, or it is a typed refusal.
 
 THE FAULT (filed by the ie#681/ie#699 lane; minimax-h3 0.4.34, two releases,
 three pods, same signature):
@@ -16,12 +16,12 @@ MODULAR pipeline hydrates through `ComponentSpec.load()` -> plain
 on one path kill the pod on the other, forever (`deterministic_fault_loop`).
 
 THE INVARIANT, and why the fix is a shared dispatch rather than a second copy:
-one artifact shape has two entry points, and two dispatches that agree today
+one artifact shape has two compiled graph points, and two dispatches that agree today
 are two dispatches that will disagree later. `contract_loaded_component` is now
 the only place that decides, and both callers ask it.
 
 wan-2.2's fp8 lane (ie#702) is the sibling consumer — it binds a produced fp8
-tree on the non-modular path — which is why "keep both entry points on one
+tree on the non-modular path — which is why "keep both compiled graph points on one
 dispatch" was the filing's own requirement.
 """
 
@@ -149,7 +149,7 @@ def test_a_PLAIN_tree_is_left_to_the_generic_loader(tmp_path: Path) -> None:
 
 
 def test_BOTH_entry_points_ask_the_SAME_dispatch(tmp_path: Path) -> None:
-    """One artifact shape, two entry points. Two dispatches that agree today
+    """One artifact shape, two compiled graph points. Two dispatches that agree today
     are two dispatches that will disagree later — so there is only one, and
     this asserts both callers reach it rather than trusting they do."""
     import inspect

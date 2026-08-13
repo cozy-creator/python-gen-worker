@@ -174,10 +174,10 @@ def compose(root_dir: Path = CUDA_ROOT) -> Composition:
 
     include_dir = root_dir / "include"
     include_dir.mkdir(parents=True, exist_ok=True)
-    for entry in sorted((wheel_path / "include").iterdir()):
-        link = include_dir / entry.name
+    for compiled_graph in sorted((wheel_path / "include").iterdir()):
+        link = include_dir / compiled_graph.name
         if not link.exists():
-            link.symlink_to(entry)
+            link.symlink_to(compiled_graph)
     for libdir in ("lib64", "lib"):
         src = wheel_path / libdir
         if src.is_dir() and not (root_dir / libdir).exists():

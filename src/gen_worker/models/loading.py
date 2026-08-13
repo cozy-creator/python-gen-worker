@@ -746,7 +746,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
     if not shard_names:
         raise ValueError(f"empty weight_map in {index_path}")
 
-    entries: List[tuple[str, dict, Path, int, int]] = []  # name, info, shard, start, end
+    compiled_graphs: List[tuple[str, dict, Path, int, int]] = []  # name, info, shard, start, end
     for shard in shard_names:
         shard_path = snapshot_dir / shard
         with open(shard_path, "rb") as f:
@@ -759,11 +759,11 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
         header.pop("__metadata__", None)
         for name, info in header.items():
             s, e = info["data_offsets"]
-            entries.append((name, info, shard_path, data_start + s, data_start + e))
+            compiled_graphs.append((name, info, shard_path, data_start + s, data_start + e))
 
     out_header: Dict[str, Any] = {}
     offset = 0
-    for name, info, _, start, end in entries:
+    for name, info, _, start, end in compiled_graphs:
         size = end - start
         out_header[name] = {"dtype": info["dtype"], "shape": info["shape"],
                             "data_offsets": [offset, offset + size]}
@@ -775,7 +775,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
     with open(tmp, "wb") as out:
         out.write(struct.pack("<Q", len(header_bytes)))
         out.write(header_bytes)
-        for _, _, shard_path, start, end in entries:
+        for _, _, shard_path, start, end in compiled_graphs:
             with open(shard_path, "rb") as src:
                 src.seek(start)
                 remaining = end - start
@@ -790,7 +790,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
         os.fsync(out.fileno())  # durable before rename (gw#408)
     tmp.rename(merged)
     logger.info("reassembled sharded single-file checkpoint: %s (%d shards, %d tensors, %d bytes)",
-                merged.name, len(shard_names), len(entries), offset)
+                merged.name, len(shard_names), len(compiled_graphs), offset)
     return merged
 
 
@@ -918,12 +918,12 @@ def model_index_component_classes(path: str | Path) -> Dict[str, str]:
         return out
     if not isinstance(index, dict):
         return out
-    for key, entry in index.items():
+    for key, compiled_graph in index.items():
         if str(key).startswith("_"):
             continue
-        if (isinstance(entry, (list, tuple)) and len(entry) == 2
-                and all(isinstance(e, str) and e for e in entry)):
-            out[str(key)] = entry[1]
+        if (isinstance(compiled_graph, (list, tuple)) and len(compiled_graph) == 2
+                and all(isinstance(e, str) and e for e in compiled_graph)):
+            out[str(key)] = compiled_graph[1]
     return out
 
 
@@ -945,16 +945,16 @@ def component_load_dtypes(
     ))
 
 
-def model_index_entry(path: str | Path, component: str) -> Optional[tuple]:
+def model_index_compiled_graph(path: str | Path, component: str) -> Optional[tuple]:
     """``(library, class_name)`` the tree's model_index.json declares for
     ``component``, or None when absent/unreadable."""
     try:
         with open(Path(path) / "model_index.json", "r", encoding="utf-8") as f:
             index = json.load(f)
-        entry = index.get(component)
-        if (isinstance(entry, (list, tuple)) and len(entry) == 2
-                and all(isinstance(e, str) and e for e in entry)):
-            return (entry[0], entry[1])
+        compiled_graph = index.get(component)
+        if (isinstance(compiled_graph, (list, tuple)) and len(compiled_graph) == 2
+                and all(isinstance(e, str) and e for e in compiled_graph)):
+            return (compiled_graph[0], compiled_graph[1])
     except Exception:
         pass
     return None
@@ -1346,14 +1346,14 @@ def load_component(
 
     base = Path(tree)
     root = Path(weights_tree) if weights_tree is not None else base
-    entry = model_index_entry(base, component)
-    if entry is None:
+    compiled_graph = model_index_compiled_graph(base, component)
+    if compiled_graph is None:
         raise ValueError(
             f"component {component!r} is not in the base composition "
             f"(model_index components: "
             f"{sorted(model_index_components(base))})"
         )
-    library, class_name = entry
+    library, class_name = compiled_graph
     module = importlib.import_module(library)
     cls = getattr(module, class_name, None)
     if cls is None or not callable(getattr(cls, "from_pretrained", None)):
@@ -1412,7 +1412,7 @@ def contract_loaded_component(
     plain `from_pretrained` and died inside `DiffusersAutoQuantizer` on the
     tree's own `quantization_config` — minimax-h3 0.4.34, two releases, three
     pods, `deterministic_fault_loop`, serving nothing. The fp8 lane that
-    wan-2.2 (ie#702) binds is the same artifact shape on the other entry
+    wan-2.2 (ie#702) binds is the same artifact shape on the other compiled graph
     point, so the two had to become ONE dispatch rather than two that agree
     today.
 
@@ -1737,7 +1737,7 @@ def modular_staging_units(
     :func:`hydrate_modular_pipeline` loads one component at a time from that
     component's own source dir, so the unit of host-RAM staging is a
     component dir — never the tree. This reads the same sources the hydration
-    loop will: each ``modular_model_index.json`` entry's subfolder under
+    loop will: each ``modular_model_index.json`` compiled graph's subfolder under
     ``base`` (falling back to the component name), and each override tree in
     ``component_trees`` in place of the base dir it replaces.
 
@@ -1745,19 +1745,19 @@ def modular_staging_units(
     per-component knowledge" and keep whole-tree accounting."""
     index = Path(base) / "modular_model_index.json"
     try:
-        entries = json.loads(index.read_text())
+        compiled_graphs = json.loads(index.read_text())
     except (OSError, ValueError):
         return {}
-    if not isinstance(entries, dict):
+    if not isinstance(compiled_graphs, dict):
         return {}
     trees = dict(component_trees or {})
     units: Dict[str, int] = {}
-    for name, entry in entries.items():
+    for name, compiled_graph in compiled_graphs.items():
         if str(name).startswith("_") or name in trees:
             continue
         sub = ""
-        if isinstance(entry, list) and len(entry) >= 3 and isinstance(entry[2], dict):
-            sub = str(entry[2].get("subfolder") or "")
+        if isinstance(compiled_graph, list) and len(compiled_graph) >= 3 and isinstance(compiled_graph[2], dict):
+            sub = str(compiled_graph[2].get("subfolder") or "")
         src = None
         for cand in (sub, str(name)):
             if cand and (Path(base) / cand).is_dir():
@@ -1969,7 +1969,7 @@ def _contract_component_for_spec(
     The class is NOT required to expose ``from_pretrained``. The contract
     loaders build through ``load_config`` + ``from_config`` (that is the whole
     point — they do not go through the generic loader), so demanding the
-    generic entry point here would refuse exactly the classes this path exists
+    generic compiled graph point here would refuse exactly the classes this path exists
     to serve. Caught by `test_a_MODULAR_component_routes_through_the_contract_loader`,
     which went red on a denoiser that has no `from_pretrained` at all.
     """
@@ -2155,7 +2155,7 @@ def hydrate_modular_pipeline(
                 # `quantization_config` — minimax-h3 0.4.34, two releases,
                 # three pods, serving nothing — while the NON-modular path
                 # loaded the identical bytes correctly through
-                # `load_w8a8_denoiser`. One artifact shape, two entry points,
+                # `load_w8a8_denoiser`. One artifact shape, two compiled graph points,
                 # one of them blind; wan-2.2's fp8 lane (ie#702) is the other
                 # consumer of exactly this.
                 #

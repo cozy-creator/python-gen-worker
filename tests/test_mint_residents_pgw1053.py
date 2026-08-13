@@ -74,9 +74,9 @@ class _WithLiteral(nn.Module):
         return self.lin(x) * self.scale + self.table
 
 
-def _minted_entry(module: nn.Module) -> Any:
+def _minted_compiled_graph(module: nn.Module) -> Any:
     program = torch.export.export(module.eval(), (torch.randn(2, 8),))
-    return aot_mint._MintedEntry(
+    return aot_mint._MintedCompiledGraph(
         name="unet/B=2", spec=aot_mint.ExportSpec(family="f", target="unet"),
         module=None, owner=module, program=program,
         input_names=("x",),
@@ -86,7 +86,7 @@ def _minted_entry(module: nn.Module) -> Any:
 
 def test_release_projects_programs_code_only() -> None:
     module = _WithLiteral()
-    row = _minted_entry(module)
+    row = _minted_compiled_graph(module)
     program = row.program
 
     weights_before = aot_package.program_state_dict_fqns(program)
@@ -175,13 +175,13 @@ def _wide_pool(monkeypatch) -> None:
     """The width is STATED, not derived (the pgw#809 discipline): a 4-vCPU CI
     runner honestly derives K=1 and the release below only runs on the pooled
     path. The REAL policy runs on pinned resource inputs."""
-    real = pool_mod.entry_workers
+    real = pool_mod.compiled_graph_workers
 
-    def _wide(entries: int, **kw: Any) -> Any:
+    def _wide(compiled_graphs: int, **kw: Any) -> Any:
         kw.update(vcpus=16, available_bytes=64 * _GIB, device_lock=True)
-        return real(entries, **kw)
+        return real(compiled_graphs, **kw)
 
-    monkeypatch.setattr(pool_mod, "entry_workers", _wide)
+    monkeypatch.setattr(pool_mod, "compiled_graph_workers", _wide)
 
 
 def test_full_mint_with_release_packs_and_keys_identically(
@@ -203,20 +203,20 @@ def test_full_mint_with_release_packs_and_keys_identically(
         surrendered, spec, tmp_path / "released", release_residents=True)
 
     # pgw#1176: a mint produces N independently keyed artifacts, not "a compiled graph",
-    # so the pgw#846 claim is now per ENTRY. The declaration above traces two
-    # graph classes; the length assert is what stops an empty `entries` from
+    # so the pgw#846 claim is now per COMPILED_GRAPH. The declaration above traces two
+    # graph classes; the length assert is what stops an empty `compiled graphs` from
     # making the comparison below pass vacuously.
-    kept_keys = {r.entry: r.key for r in kept.entries}
-    released_keys = {r.entry: r.key for r in released.entries}
+    kept_keys = {r.compiled_graph: r.key for r in kept.compiled_graphs}
+    released_keys = {r.compiled_graph: r.key for r in released.compiled_graphs}
     assert len(kept_keys) == 2, kept_keys
     assert kept_keys == released_keys, (
-        "the release re-keyed an entry — the projection leaked into identity "
+        "the release re-keyed an compiled_graph — the projection leaked into identity "
         "(pgw#846)")
     assert all(
         p.device.type == "meta" for p in surrendered.unet.parameters()), (
         "release_residents=True did not release the pipeline")
     assert "residents_release_s" in released.timings
-    assert released.timings.get("entry_workers", 0) > 1, (
+    assert released.timings.get("compiled_graph_workers", 0) > 1, (
         "the release path only runs on the pooled path; this mint went "
         "serial and proved nothing")
 
@@ -227,7 +227,7 @@ def test_full_mint_with_release_packs_and_keys_identically(
 #
 # Four rows stood here. They drove the incident pod's real numbers (44.39 GiB
 # card, 9.54 GiB serving parent, 16.20 GiB mint-child pipeline, 6.02 GiB
-# measured entry peak) through `card_census` -> `entry_budget_bytes` ->
+# measured compiled graph peak) through `card_census` -> `compiled_graph_budget_bytes` ->
 # `_apply_simultaneity_bound` / `_spawn_admitted` / `_rewiden`, and asserted
 # that handing 16.2 GiB back moved K. Every one of those functions is deleted:
 # §4.33 forbids predicting VRAM, and K is f(cores, one measured child RSS).

@@ -21,14 +21,14 @@ class _Pipe:
     """A pipeline carrying only what the proof reads."""
 
 
-def _dispatch(calls: int, failed: bool) -> aot_serve.EntryDispatch:
-    """One armed entry, or a de-armed one — the registry state `is_armed`
+def _dispatch(calls: int, failed: bool) -> aot_serve.CompiledGraphDispatch:
+    """One armed compiled graph, or a de-armed one — the registry state `is_armed`
     and `execution_count` actually read."""
     runner = aot_serve.ArtifactRunner(
         package=None, contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
-        constants=(), module_name="unet", entry="unet/main")
+        constants=(), module_name="unet", compiled_graph="unet/main")
     runner.calls = calls
-    dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
+    dispatch = aot_serve.CompiledGraphDispatch(declared=("unet/main",))
     dispatch.add("unet/main", runner)
     if failed:
         dispatch.remove("unet/main", "revoked")
@@ -36,10 +36,10 @@ def _dispatch(calls: int, failed: bool) -> aot_serve.EntryDispatch:
 
 
 def _arm(pipe, *, calls: int, failed: bool = False) -> None:
-    """The marker shape `arm_entry` ACTUALLY publishes.
+    """The marker shape `arm_compiled_graph` ACTUALLY publishes.
 
     pgw#1176: this used to build a bare pipeline-level ``state``, a shape no
-    production path has ever written — `arm_entry` writes ``targets`` and
+    production path has ever written — `arm_compiled_graph` writes ``targets`` and
     `wrap_module` writes the bare ``state`` on the MODULE. `_marker_states`
     carried a fallback for it whose own docstring said "the legacy
     single-``state`` shape tests use", i.e. a production branch kept alive by
@@ -59,7 +59,7 @@ def _arm(pipe, *, calls: int, failed: bool = False) -> None:
                 "runner": _dispatch(calls, failed),
             },
         }},
-        "entries": {"unet/main": {"key": "ek1-" + "0" * 56}},
+        "compiled_graphs": {"unet/main": {"key": "ek1-" + "0" * 56}},
     })
 
 
@@ -88,13 +88,13 @@ def test_exported_kind_compiled_graph_key_refusals_are_named():
     refusal names the missing fact instead of failing opaquely."""
     for kind in ("torch-inductor-cache", "an-unknown-kind", ""):
         with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as unknown:
-            compiled_graph_key.from_entry_metadata({"kind": kind})
-        assert "no entry-key identity" in str(unknown.value)
+            compiled_graph_key.from_compiled_graph_metadata({"kind": kind})
+        assert "no compiled_graph-key identity" in str(unknown.value)
 
     with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as no_sm:
-        compiled_graph_key.from_entry_metadata({"kind": "aot-inductor"})
+        compiled_graph_key.from_compiled_graph_metadata({"kind": "aot-inductor"})
     assert "sm" in str(no_sm.value)
 
-    with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as no_entry:
-        compiled_graph_key.from_entry_metadata({"kind": "aot-inductor", "sm": "sm_89"})
-    assert "entry" in str(no_entry.value)
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as no_compiled_graph:
+        compiled_graph_key.from_compiled_graph_metadata({"kind": "aot-inductor", "sm": "sm_89"})
+    assert "compiled_graph" in str(no_compiled_graph.value)

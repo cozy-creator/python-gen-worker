@@ -18,10 +18,10 @@ CONFIGURATION, not a response to memory pressure. This module therefore asks
 about HOOKS and never about capacity, which is also what §1.35 requires: every
 model runs on every GPU, feasibility is never asked.
 
-WHY A PRE-EXPORT CHECK RATHER THAN LETTING THE PER-ENTRY SKIP HANDLE IT.
+WHY A PRE-EXPORT CHECK RATHER THAN LETTING THE PER-COMPILED_GRAPH SKIP HANDLE IT.
 pgw#1208's blast-radius fix would dutifully skip all 36 and publish nothing:
 thirty-six typed refusals and an hour of wall clock to say once what is knowable
-before the first export begins. The per-entry skip is for a class that is
+before the first export begins. The per-compiled graph skip is for a class that is
 individually unexportable; this is the whole PIPELINE being untraceable as
 loaded, which is a different fact and deserves its own sentence.
 

@@ -3,7 +3,7 @@
 Composes the compile target STRUCTURE-ONLY (pgw#1080's builder, reached through
 the loader's own ``components=`` seam), exports its assigned graph classes on
 fake tensors, and writes each class's keying block. It holds no checkpoint
-value, opens no socket, and returns no artifact — only the facts an entry's
+value, opens no socket, and returns no artifact — only the facts an compiled graph's
 ``class_hash`` is computed from.
 
 **This is pgw#1080's owed widening**, discharged the only way that keeps ONE

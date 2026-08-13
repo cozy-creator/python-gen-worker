@@ -20,7 +20,7 @@ These tests run the REAL executor ensure_setup codepath and the REAL
 fleet_compiled_graphs miss policy (miss -> `compile_cache.arm_jit_intake` -> executor
 proof), faking only the torch boundary: ``compile_cache.apply``'s torch.compile leaf is a
 simulator with dynamo-in-memory-code semantics, ``inductor_counters`` reads
-the simulator, and ``torch._dynamo.reset_code`` drops simulator entries.
+the simulator, and ``torch._dynamo.reset_code`` drops simulator compiled graphs.
 
 Fix under test (pgw#672):
   (a) honesty — a scoped per-code dynamo reset before every proof window
@@ -107,7 +107,7 @@ class _Sim:
     torch 2.13 mechanism). A call whose code is resident serves WITHOUT any
     counter movement or capture write. Otherwise the FX cache dir named by
     ``TORCHINDUCTOR_CACHE_DIR`` is consulted: an existing content-addressed
-    entry is a HIT, a missing one is a compile (entry written + MISS).
+    compiled graph is a HIT, a missing one is a compile (compiled graph written + MISS).
     """
 
     def __init__(self) -> None:
@@ -129,11 +129,11 @@ class _Sim:
             repr((label, args, sorted(kwargs))).encode()).hexdigest()[:16]
         fx_dir = Path(os.environ["TORCHINDUCTOR_CACHE_DIR"]) / "fxgraph"
         fx_dir.mkdir(parents=True, exist_ok=True)
-        entry = fx_dir / f"{graph}.bin"
-        if entry.exists():
+        compiled_graph = fx_dir / f"{graph}.bin"
+        if compiled_graph.exists():
             self.counters["fxgraph_cache_hit"] += 1
         else:
-            entry.write_bytes(b"graph")
+            compiled_graph.write_bytes(b"graph")
             self.counters["fxgraph_cache_miss"] += 1
             self.compiles.append(graph)
         self.inmem.add(code)
@@ -269,7 +269,7 @@ class _Rig:
             cc, "inductor_counters", lambda: dict(self.sim.counters))
         monkeypatch.setattr(fleet_compiled_graphs, "arm_identity", _fake_arm_identity)
         # torch boundary of the fix: the scoped reset drops the simulator's
-        # in-memory code entries, exactly like torch._dynamo.reset_code.
+        # in-memory code compiled graphs, exactly like torch._dynamo.reset_code.
         import torch._dynamo
 
         monkeypatch.setattr(

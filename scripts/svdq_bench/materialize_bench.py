@@ -112,7 +112,7 @@ def fp8_from_manifest(manifest: Path) -> None:
         # in order. Small ones carry a single "url".
         urls = f.get("chunk_urls") or ([f["url"]] if f.get("url") else [])
         if not urls:
-            raise KeyError(f"{f['path']}: manifest entry has no url/chunk_urls")
+            raise KeyError(f"{f['path']}: manifest compiled_graph has no url/chunk_urls")
         tmp = dest.with_suffix(dest.suffix + ".part")
         for attempt in range(3):
             try:

@@ -67,7 +67,7 @@ def _rope(theta: float, n: int = 64) -> Any:
 
 
 def _graph_block(program: _Program, *, with_fix: bool) -> Dict[str, Any]:
-    """The entry graph block, with and without pgw#857's field — so the
+    """The compiled graph graph block, with and without pgw#857's field — so the
     collision can be shown rather than asserted."""
     block: Dict[str, Any] = {
         # v3 (pgw#1089): program-only. `fused_constants` is gone from the block
@@ -88,7 +88,7 @@ def _graph_block(program: _Program, *, with_fix: bool) -> Dict[str, Any]:
     return block
 
 
-def _entry(program: _Program, *, with_fix: bool) -> Dict[str, Any]:
+def _compiled_graph(program: _Program, *, with_fix: bool) -> Dict[str, Any]:
     return {
         "target": "transformer",
         "fork": [],
@@ -99,7 +99,7 @@ def _entry(program: _Program, *, with_fix: bool) -> Dict[str, Any]:
 
 
 def _key(program: _Program, *, with_fix: bool) -> str:
-    return class_hash(_entry(program, with_fix=with_fix), strict=True, lora_bucket=0)
+    return class_hash(_compiled_graph(program, with_fix=with_fix), strict=True, lora_bucket=0)
 
 
 # ---------------------------------------------------------------------------

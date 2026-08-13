@@ -104,7 +104,7 @@ class RefIndex:
             e = self._data.get(ref)
             return float(e.get("last_used") or 0.0) if e else 0.0
 
-    def entries(self) -> Dict[str, Dict[str, Any]]:
+    def compiled_graphs(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             return {k: dict(v) for k, v in self._data.items()}
 

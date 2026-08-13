@@ -5,7 +5,7 @@ each requested output flavor becomes one local file tree and one Tensorhub
 commit (``POST /commits`` + part PUTs + finalize). ``overwrite_repo`` maps to
 ``mode="replace"`` — no enumerate-prior-and-delete.
 
-Entry points: :func:`from_huggingface` / :func:`from_civitai` (payload-shaped)
+Compiled graph points: :func:`from_huggingface` / :func:`from_civitai` (payload-shaped)
 and :func:`run_clone` (keyword-explicit).
 """
 
@@ -285,7 +285,7 @@ def build_flavor_tree(
         if source_layout == "singlefile":
             groups = snapshot_weight_groups(source_dir, "singlefile")
             if not groups:
-                raise ValueError("no safetensors entry for repackage")
+                raise ValueError("no safetensors compiled_graph for repackage")
             singlefile_to_diffusers(
                 groups[0][1], repack_dir, model_family=family, output_dtype=spec.dtype)
         else:
@@ -339,7 +339,7 @@ def build_flavor_tree(
     pin_exempt = cast_exempt_components(work_root, spec.dtype)
     skipped_pins: dict[str, str] = {}
     converted: set[str] = set()
-    for comp, entry in groups:
+    for comp, compiled_graph in groups:
         comp_dir = (work_root / comp) if comp else work_root
         size = sum(f.stat().st_size for f in comp_dir.glob("*.safetensors") if f.is_file())
         # Quant targets only the requested components; casts apply everywhere.
@@ -358,13 +358,13 @@ def build_flavor_tree(
                         comp, fact.dtype, spec.dtype, fact.reason)
             continue
         dest = (out_dir / comp) if comp else out_dir
-        stem = entry.name
+        stem = compiled_graph.name
         for suffix in (".safetensors.index.json", ".safetensors"):
             if stem.endswith(suffix):
                 stem = stem[: -len(suffix)]
                 break
         result = run_inline_conversion(
-            source_path=entry, out_dir=dest, target_dtype=spec.dtype,
+            source_path=compiled_graph, out_dir=dest, target_dtype=spec.dtype,
             target_file_type="safetensors", output_stem=stem or "model",
             source_repo_dir=comp_dir, fp8_block_scope=fp8_block_scope,
         )
@@ -610,18 +610,18 @@ def _reusable_flavor_tree(
     """The flavor attrs of a retained tree this run may re-publish as-is, or None.
 
     pgw#1003. A publish that failed on a retryable error leaves its session
-    live and its journal entry behind, and ``run_clone``'s ``finally`` then
+    live and its journal compiled graph behind, and ``run_clone``'s ``finally`` then
     RETAINS the workdir instead of deleting it. This is the other half: on the
     retry, a tree the predecessor already finished casting is re-published
     rather than re-cast — which is the whole point, since the cast is the $10
     and the two hours.
 
     Three conditions, all cheap and all necessary:
-      * a journal entry exists for this spec label (so the predecessor got as
+      * a journal compiled graph exists for this spec label (so the predecessor got as
         far as DECLARING, which happens only after the tree was complete and
-        every file hashed — a run that died mid-cast leaves no entry);
-      * the tree on disk still yields exactly the file set that entry declared;
-      * the entry carries the flavor attrs, so nothing has to be re-derived.
+        every file hashed — a run that died mid-cast leaves no compiled graph);
+      * the tree on disk still yields exactly the file set that compiled graph declared;
+      * the compiled graph carries the flavor attrs, so nothing has to be re-derived.
 
     Bytes are re-proven for free downstream: ``publish_v2`` re-hashes every
     file and adopts the journalled session only if the artifact key matches,
@@ -631,21 +631,21 @@ def _reusable_flavor_tree(
     if not flavor_dir.is_dir():
         return None
     journal = PublishJournal.open(workdir / JOURNAL_NAME)
-    entry = journal.for_producer(spec_label=str(spec_label), tree=str(flavor_dir))
-    if entry is None:
+    compiled_graph = journal.for_producer(spec_label=str(spec_label), tree=str(flavor_dir))
+    if compiled_graph is None:
         return None
-    attrs = entry.producer_state.get("attrs")
+    attrs = compiled_graph.producer_state.get("attrs")
     if not isinstance(attrs, dict):
         return None
-    if not entry.declares([f.path for f in files_from_tree(flavor_dir)]):
+    if not compiled_graph.declares([f.path for f in files_from_tree(flavor_dir)]):
         logger.info(
             "flavor-%s: retained tree no longer matches publish %s's declaration; "
-            "rebuilding", spec_label, entry.publish_id)
+            "rebuilding", spec_label, compiled_graph.publish_id)
         return None
     logger.warning(
         "flavor-%s: REUSING the retained cast output for publish %s — "
         "re-uploading rather than re-casting (pgw#1003)",
-        spec_label, entry.publish_id)
+        spec_label, compiled_graph.publish_id)
     return {str(k): str(v) for k, v in attrs.items()}
 
 
@@ -655,12 +655,12 @@ def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
     A long-running conversion worker otherwise accumulates each crashed job's
     scratch until any disk fills (gw#462)."""
     try:
-        entries = sorted(base.glob("clone-*"))
+        compiled_graphs = sorted(base.glob("clone-*"))
     except OSError:
         return
     ttl_s = float(os.environ.get("COZY_CONVERT_SCRATCH_TTL_S", "") or 3600.0)
     now = time.time()
-    for d in entries:
+    for d in compiled_graphs:
         if not d.is_dir() or (keep is not None and d == keep):
             continue
         try:
@@ -984,14 +984,14 @@ def run_clone(
                 # "gguf-q4_k_m"; the hub's dtype column takes the dash form.
                 dtype_label = _dtype_token(dtype_label)
             except InlineConversionNotPossible as exc:
-                entry: dict[str, Any] = {
+                compiled_graph: dict[str, Any] = {
                     "spec_label": spec.label, "dtype": spec.dtype,
                     "file_type": spec.file_type, "reason": exc.reason,
                 }
                 deferred = getattr(exc, "deferred_requirement", None)
                 if deferred is not None:
-                    entry["deferred_requirement"] = deferred.as_dict()
-                result.failed_flavors.append(entry)
+                    compiled_graph["deferred_requirement"] = deferred.as_dict()
+                result.failed_flavors.append(compiled_graph)
                 continue
             except Exception as exc:  # noqa: BLE001 — partial success per flavor
                 result.failed_flavors.append({
@@ -1160,7 +1160,7 @@ def run_clone(
         # leaks scratch (the gw#462 defect this cleanup exists for).
         #
         # pgw#1003 makes ONE exception, and it is not a debugging one: a
-        # publish that failed with its session still live has a journal entry
+        # publish that failed with its session still live has a journal compiled graph
         # naming it, and the produced tree is the only copy of bytes that cost
         # hours of GPU. Deleting it means the retry re-runs the cast to redo an
         # upload. So the tree survives exactly as long as there is a session to
@@ -1170,7 +1170,7 @@ def run_clone(
         # the start of the next clone, and the hub's own staging lifecycle
         # (th#1319) bounds how long resuming is possible anyway.
         resumable = 0 if succeeded else len(
-            PublishJournal.open(workdir / JOURNAL_NAME).entries)
+            PublishJournal.open(workdir / JOURNAL_NAME).compiled_graphs)
         if resumable:
             logger.warning(
                 "clone failed with %d publish session(s) still resumable; "

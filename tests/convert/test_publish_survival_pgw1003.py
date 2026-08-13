@@ -102,7 +102,7 @@ def test_a_TERMINAL_repudiation_aborts_the_session_and_clears_the_journal(
 ):
     """The other side of the rule. A refusal the hub itself classified terminal
     IS a statement that these bytes can never be useful, so the staging prefix
-    is released and the journal entry goes with it."""
+    is released and the journal compiled graph goes with it."""
     st = _FakeHub.state
     st["complete_failure"] = {
         "code": "invalid_manifest_for_kind", "retryable": False,
@@ -118,7 +118,7 @@ def test_a_TERMINAL_repudiation_aborts_the_session_and_clears_the_journal(
     assert err.value.retryable is False
     assert err.value.code == "invalid_manifest_for_kind"
     assert st.get("aborted_publishes") == ["pub-1"]
-    assert PublishJournal.open(journal).entries == []
+    assert PublishJournal.open(journal).compiled_graphs == []
 
 
 def test_a_RETRYABLE_completion_refusal_keeps_everything(
@@ -140,8 +140,8 @@ def test_a_RETRYABLE_completion_refusal_keeps_everything(
     assert err.value.retryable is True
     assert st.get("aborts", []) == []
     assert len(st["v2_cas"]) == 2, "staged objects must survive a retryable refusal"
-    entries = PublishJournal.open(journal).entries
-    assert [e.publish_id for e in entries] == ["pub-1"]
+    compiled_graphs = PublishJournal.open(journal).compiled_graphs
+    assert [e.publish_id for e in compiled_graphs] == ["pub-1"]
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +164,7 @@ def test_the_journal_is_written_BEFORE_the_first_PUT_and_cleared_on_success(
     real = cu.upload_grants
 
     def _spy(*a, **kw):
-        seen.append([e.publish_id for e in PublishJournal.open(journal).entries])
+        seen.append([e.publish_id for e in PublishJournal.open(journal).compiled_graphs])
         return real(*a, **kw)
 
     cu_upload = cu.upload_grants
@@ -177,8 +177,8 @@ def test_the_journal_is_written_BEFORE_the_first_PUT_and_cleared_on_success(
 
     assert seen == [["pub-1"]], "the id must be on disk before any byte moves"
     assert res.checkpoint_id
-    assert PublishJournal.open(journal).entries == []
-    assert json.loads(journal.read_text())["entries"] == []
+    assert PublishJournal.open(journal).compiled_graphs == []
+    assert json.loads(journal.read_text())["compiled_graphs"] == []
 
 
 def test_a_retry_RESUMES_the_journalled_session_instead_of_declaring_a_new_one(
@@ -200,7 +200,7 @@ def test_a_retry_RESUMES_the_journalled_session_instead_of_declaring_a_new_one(
     with pytest.raises(HubPublishError):
         _client(fake_hub).publish_v2(
             destination_repo="acme/model", files=[f], journal_path=journal)
-    assert [e.publish_id for e in PublishJournal.open(journal).entries] == ["pub-1"]
+    assert [e.publish_id for e in PublishJournal.open(journal).compiled_graphs] == ["pub-1"]
     landed = set(st["v2_cas"])
     assert len(landed) == 2
 
@@ -217,14 +217,14 @@ def test_a_retry_RESUMES_the_journalled_session_instead_of_declaring_a_new_one(
     assert [s for s, _ in stages][0] == "resumed"
     # Every object the first attempt staged is still staged.
     assert landed <= set(st["v2_cas"])
-    assert PublishJournal.open(journal).entries == []
+    assert PublishJournal.open(journal).compiled_graphs == []
 
 
 def test_a_session_the_hub_no_longer_knows_falls_back_to_a_fresh_declare(
     fake_hub, tmp_path, small_chunks,
 ):
     """Resuming is an optimization; it must never be a way to fail. A stale
-    journal entry (expired staging, wiped session) costs one round trip."""
+    journal compiled graph (expired staging, wiped session) costs one round trip."""
     journal = tmp_path / JOURNAL_NAME
     f = write(tmp_path, "w.safetensors", payload(CS * 2, seed=11))
     from gen_worker.hubio.client import CommitFile as _CF  # noqa: F401
@@ -242,7 +242,7 @@ def test_a_session_the_hub_no_longer_knows_falls_back_to_a_fresh_declare(
         destination_repo="acme/model", files=[f], journal_path=journal)
 
     assert res.revision_id == "pub-1", "a dead session must not block the publish"
-    assert PublishJournal.open(journal).entries == []
+    assert PublishJournal.open(journal).compiled_graphs == []
 
 
 def test_a_DIFFERENT_artifact_never_adopts_another_publishs_session(
@@ -354,7 +354,7 @@ def test_a_retained_cast_output_is_republished_instead_of_rebuilt(
 
 
 def test_a_run_that_died_MID_CAST_leaves_nothing_to_reuse(tmp_path):
-    """No journal entry means the predecessor never got as far as declaring,
+    """No journal compiled graph means the predecessor never got as far as declaring,
     which happens only after the tree is complete and every file hashed. A
     partial tree from a crash is not resumable and never was."""
     from gen_worker.convert import clone

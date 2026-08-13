@@ -6,7 +6,7 @@ the very first upload after such a gap, with an HTML 503 — the proxy in front
 of the hub, not the hub. That timing is the whole reason this module exists:
 
   * The recorded hypothesis is an idle tunnel. A worker->hub path that carries
-    no traffic for an hour has NAT entries, tunnel circuits and pooled sockets
+    no traffic for an hour has NAT compiled graphs, tunnel circuits and pooled sockets
     expiring underneath it, and the first request afterwards pays for it. A
     periodic touch means there is never an hour-old idle path to be surprised
     by, and the touch — not a multi-GB upload — is what pays if there is.

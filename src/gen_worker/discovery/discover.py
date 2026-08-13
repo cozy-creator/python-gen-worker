@@ -418,7 +418,7 @@ def _slot_to_manifest(
     name: str, slot: Slot[Any], *, family: str,
     components: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    """One ``functions[].slots[]`` entry (pgw#520 / th#767, SDK v2): the
+    """One ``functions[].slots[]`` compiled graph (pgw#520 / th#767, SDK v2): the
     hub-side mapping/resolution contract for a Slot-declared model slot.
 
     v2 publishes the DERIVED component tree (``components``: ordered
@@ -511,7 +511,7 @@ def discover_functions(
     extra_heavy_deps: Tuple[str, ...] = (),
 ) -> List[Dict[str, Any]]:
     """Discover every @endpoint object under ``main_module``'s top-level
-    package and return the manifest ``functions`` entries.
+    package and return the manifest ``functions`` compiled graphs.
 
     Build-time discovery arms :func:`stub_missing_heavy_deps` around the walk:
     heavy roots (torch, ...) missing from the environment are stubbed so
@@ -554,19 +554,19 @@ def discover_functions(
         functions: List[Dict[str, Any]] = []
         seen: Set[Tuple[str, str, str, str]] = set()
         for f in found:
-            for entry in _extract_entries(f.obj, f.walked_module):
+            for compiled_graph in _extract_compiled_graphs(f.obj, f.walked_module):
                 # (module, class, python_name, name) dedups objects re-found under
                 # multiple walked packages; name is one handler per method now.
                 key = (
-                    entry.get("declared_module", entry.get("module", "")),
-                    entry.get("class_name", ""),
-                    entry.get("python_name", ""),
-                    entry.get("name", ""),
+                    compiled_graph.get("declared_module", compiled_graph.get("module", "")),
+                    compiled_graph.get("class_name", ""),
+                    compiled_graph.get("python_name", ""),
+                    compiled_graph.get("name", ""),
                 )
                 if key in seen:
                     continue
                 seen.add(key)
-                functions.append(entry)
+                functions.append(compiled_graph)
 
     _assert_unique_function_names(functions)
     _validate_variant_targets(functions)
@@ -596,7 +596,7 @@ def _audit_source_only_imports(
     """Fail the bake when the walk leaned on source-tree-only modules.
 
     Applies only when the walked project is INSTALLED (its top-level package
-    resolves with the injected ``root``/``root/src`` entries removed) — an
+    resolves with the injected ``root``/``root/src`` compiled graphs removed) — an
     uninstalled dev tree keeps working, since there the source tree IS the
     module set. In installed mode, every top-level module that was imported
     from under ``root`` must also resolve from the installed environment;
@@ -697,8 +697,8 @@ def _validate_variant_targets(functions: List[Dict[str, Any]]) -> None:
             )
 
 
-def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
-    """Manifest entries for one @endpoint class or function.
+def _extract_compiled_graphs(obj: Any, module_name: str) -> List[Dict[str, Any]]:
+    """Manifest compiled graphs for one @endpoint class or function.
 
     Signature inspection lives in ``gen_worker.registry`` — the one walker
     shared with the worker runtime and the CLI. This adds only the
@@ -1059,8 +1059,8 @@ def main() -> None:
     """Write the build-time endpoint manifest to stdout.
 
     #328: bake-time validation gate. After ``discover_manifest`` produces
-    the ``functions`` list, ``validate_endpoint_lock`` confirms every entry
-    is a class-shape declaration (post-#322). An old function-shape entry
+    the ``functions`` list, ``validate_endpoint_lock`` confirms every compiled graph
+    is a class-shape declaration (post-#322). An old function-shape compiled graph
     that slipped past the discovery refactor hard-fails the build with a
     pointer to the migration guide.
 
@@ -1082,9 +1082,9 @@ def main() -> None:
             traceback.print_exc(file=sys.stderr)
         _fail_build_input(f"error: {e}")
 
-    # #328 bake-time validation gate. Old function-shape entries trip the
+    # #328 bake-time validation gate. Old function-shape compiled graphs trip the
     # missing-class_name check; same-class slug collisions trip the route
-    # uniqueness check; non-class shapes (an entry without archetype/kind)
+    # uniqueness check; non-class shapes (an compiled graph without archetype/kind)
     # are caught by the required-field check. All errors flow out at once
     # so the build surfaces every problem rather than one-at-a-time.
 

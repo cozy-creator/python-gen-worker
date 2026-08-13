@@ -62,7 +62,7 @@ _provider_by_ref: Mapping[str, str] = {}
 def _provider_index_keys(ref: str) -> tuple[str, str]:
     """THE keying function for the provider index: ``(exact, base)`` where
     ``exact`` is the ref's normal form without digest/revision (they never
-    appear on manifest binding entries) and ``base`` is the repo identity
+    appear on manifest binding compiled graphs) and ``base`` is the repo identity
     (``owner/repo``). Tries the tensorhub grammar first, then the HF form
     (which allows a non-digest ``@revision``); refs outside both key as
     their stripped raw string (e.g. civitai numeric ids)."""
@@ -114,22 +114,22 @@ def lookup_provider_for_ref(ref: str, *, default: str = "tensorhub") -> str:
     return hit if hit is not None else default
 
 
-def _collect_binding_entries(bindings: Any) -> list[dict[str, Any]]:
+def _collect_binding_compiled_graphs(bindings: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     if not isinstance(bindings, dict):
         return out
-    for entry in bindings.values():
-        if not isinstance(entry, dict):
+    for compiled_graph in bindings.values():
+        if not isinstance(compiled_graph, dict):
             continue
-        if entry.get("ref"):
-            out.append(entry)
+        if compiled_graph.get("ref"):
+            out.append(compiled_graph)
     return out
 
 
 def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) -> dict[str, str]:
     """{normal_form_ref: provider} from a loaded endpoint.lock manifest.
 
-    The entry ``tag`` side-channel field folds into the ref via the ONE
+    The compiled graph ``tag`` side-channel field folds into the ref via the ONE
     grammar module before keying; ``set_provider_index`` adds the
     repo-identity fallback keys."""
     index: dict[str, str] = {}
@@ -141,15 +141,15 @@ def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) ->
     for fn in functions:
         if not isinstance(fn, dict):
             continue
-        for entry in _collect_binding_entries(fn.get("bindings")):
-            ref = str(entry.get("ref") or "").strip()
+        for compiled_graph in _collect_binding_compiled_graphs(fn.get("bindings")):
+            ref = str(compiled_graph.get("ref") or "").strip()
             if not ref:
                 continue
-            provider = str(entry.get("provider") or "").strip() or "tensorhub"
+            provider = str(compiled_graph.get("provider") or "").strip() or "tensorhub"
             try:
                 key = str(fold_ref(
                     ref,
-                    tag=str(entry.get("tag") or ""),
+                    tag=str(compiled_graph.get("tag") or ""),
                     provider=provider
                     if provider in ("tensorhub", "hf", "civitai", "modelscope")
                     else "tensorhub",
@@ -161,7 +161,7 @@ def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) ->
 
 
 # ---------------------------------------------------------------------------
-# ensure_local: the ONE entry point
+# ensure_local: the ONE compiled graph point
 # ---------------------------------------------------------------------------
 
 
@@ -786,7 +786,7 @@ def fetch_civitai_model_version(version_id: int, *, api_key: str = "") -> dict[s
     return _civitai_get_json(f"{_CIVITAI_API}/model-versions/{int(version_id)}", api_key)
 
 
-def _civitai_file_entry(raw: Mapping[str, Any]) -> dict[str, Any]:
+def _civitai_file_compiled_graph(raw: Mapping[str, Any]) -> dict[str, Any]:
     size = raw.get("sizeBytes")
     if not isinstance(size, int) or size <= 0:
         kb = raw.get("sizeKB")
@@ -846,14 +846,14 @@ def _civitai_select_files(
     for raw in payload.get("files") or []:
         if not isinstance(raw, Mapping):
             continue
-        entry = _civitai_file_entry(raw)
-        if not entry["url"] or not entry["name"]:
+        compiled_graph = _civitai_file_compiled_graph(raw)
+        if not compiled_graph["url"] or not compiled_graph["name"]:
             continue
-        lower = entry["name"].lower()
+        lower = compiled_graph["name"].lower()
         if lower.endswith(".safetensors"):
-            st.append(entry)
+            st.append(compiled_graph)
         elif lower.endswith(".gguf"):
-            gg.append(entry)
+            gg.append(compiled_graph)
     if st:
         st.sort(key=lambda f: (0 if f["primary"] else 1, f["id"], f["name"]))
         unique: dict[str, dict[str, Any]] = {}

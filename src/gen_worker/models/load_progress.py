@@ -19,7 +19,7 @@ no parallel heartbeat systems):
   is then attributed by the surviving parent as "died at
   hydrate:transformer, N/M GiB" instead of a blank.
 * every phase transition emits a typed, DURABLE activity event naming the
-  component — ``load_phase`` on entry, ``load_phase_done`` on exit with the
+  component — ``load_phase`` on compiled graph, ``load_phase_done`` on exit with the
   measured span in ``duration_ms``. The counter says a number is moving; the
   events say WHAT the worker is doing, which is the half WORKER-CONTRACTS §1
   asks for and the half a 94-minute load needs while it is still ALIVE. The

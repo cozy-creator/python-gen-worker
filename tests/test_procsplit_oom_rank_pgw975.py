@@ -1,6 +1,6 @@
 """pgw#975: the pgw#763 split's OOM victim order, declared instead of emergent.
 
-Every assertion here is read back off a REAL process's ``/proc`` entry — never
+Every assertion here is read back off a REAL process's ``/proc`` compiled graph — never
 from the value we passed in — because "we called the setter" is exactly the
 claim that was true of nothing before this issue.
 """
@@ -77,7 +77,7 @@ def test_a_real_compute_child_outranks_the_control_parent(split):
 
 @linux_only
 def test_the_whole_compute_subtree_inherits_it(tmp_path):
-    """The mint child (pgw#784) and the AOT pool's entry children are spawned
+    """The mint child (pgw#784) and the AOT pool's compiled graph children are spawned
     BELOW a compute child and get no call of their own. That is only correct if
     the value survives fork and exec, so prove it on a real grandchild rather
     than asserting the man page."""
@@ -108,7 +108,7 @@ def test_the_whole_compute_subtree_inherits_it(tmp_path):
     assert mine == min(1000, _read_oom_score_adj(os.getpid()) + delta)
     assert grandchild == mine, (
         "a grandchild did not inherit the rank — the mint child and every "
-        "inductor entry child would be unranked"
+        "inductor compiled_graph child would be unranked"
     )
 
 

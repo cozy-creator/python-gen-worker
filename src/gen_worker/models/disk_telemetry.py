@@ -2,7 +2,7 @@
 
 statvfs on the REAL mount points the worker uses (CAS root on the container
 disk; the attached endpoint volume when mounted; a shared NFS mount when one
-exists), plus per-tier "safely reclaimable" bytes: ref-index entries that are
+exists), plus per-tier "safely reclaimable" bytes: ref-index compiled graphs that are
 inactive AND not in the current desired set — exactly the disk-GC LRU's
 eligible set, i.e. evictions the hub may cause without touching live work.
 
@@ -70,23 +70,23 @@ def _device_of(path: str) -> Optional[int]:
 
 def measure_tiers(
     mounts: Sequence[MountSpec],
-    reclaimable_entries: Sequence[Tuple[str, int]],
+    reclaimable_compiled_graphs: Sequence[Tuple[str, int]],
 ) -> List[TierUsage]:
-    """Measure each mount and attribute reclaimable (path, bytes) entries to
+    """Measure each mount and attribute reclaimable (path, bytes) compiled graphs to
     the mount whose device holds them (first mount wins ties/unknowns)."""
     devices: List[Optional[int]] = [_device_of(m.path) for m in mounts]
     reclaimable = [0] * len(mounts)
-    for entry_path, entry_bytes in reclaimable_entries:
-        if entry_bytes <= 0 or not mounts:
+    for compiled_graph_path, compiled_graph_bytes in reclaimable_compiled_graphs:
+        if compiled_graph_bytes <= 0 or not mounts:
             continue
-        dev = _device_of(entry_path)
+        dev = _device_of(compiled_graph_path)
         target = 0
         if dev is not None:
             for i, mount_dev in enumerate(devices):
                 if mount_dev == dev:
                     target = i
                     break
-        reclaimable[target] += int(entry_bytes)
+        reclaimable[target] += int(compiled_graph_bytes)
 
     out: List[TierUsage] = []
     for i, mount in enumerate(mounts):

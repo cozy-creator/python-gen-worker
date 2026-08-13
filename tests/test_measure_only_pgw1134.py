@@ -15,7 +15,7 @@ Both doors are reproduced here on a REAL vehicle (micro-diffusion, a real
 declaration, a real tree carrying a real fp8 weight table), and the third door
 — ``gen_worker.measure_child`` — is driven through the same production seams:
 ``run_setup`` -> the real loader -> ``aot_mint.trace_for_key`` -> the real
-``_export_entry``. Nothing about the export is stubbed.
+``_export_compiled_graph``. Nothing about the export is stubbed.
 
 The properties, one section each:
 
@@ -218,7 +218,7 @@ def test_both_front_doors_are_shut_and_the_measure_child_runs_anyway(
 
     report_path = tmp_path / "measure.json"
     rc = measure_child.run(
-        _measure_job(w8a8_tree), report_path, compile_entries=False)
+        _measure_job(w8a8_tree), report_path, compile_compiled_graphs=False)
     report = msgspec.json.decode(
         report_path.read_bytes(), type=measure_child.MeasureReport)
 
@@ -230,12 +230,12 @@ def test_both_front_doors_are_shut_and_the_measure_child_runs_anyway(
         "artifact's bytes")
     assert report.structure_refusal_token == "structure_unsupported"
     assert "w8a8 artifact" in report.structure_refusal
-    assert report.declared_classes == 3 and len(report.entries) == 3
-    assert [e.entry for e in report.entries] == [
+    assert report.declared_classes == 3 and len(report.compiled_graphs) == 3
+    assert [e.compiled_graph for e in report.compiled_graphs] == [
         "decoder", "transformer/cfg=false", "transformer/cfg=true"], (
         "the rows must arrive in the MINT's own order — the measurement is "
         "worth nothing if it measures a different traversal than the mint")
-    assert all(e.ok and e.nodes > 0 for e in report.entries), report.entries
+    assert all(e.ok and e.nodes > 0 for e in report.compiled_graphs), report.compiled_graphs
     assert report.compiled is False, "--export-only was asked for"
     assert report.device == "cpu" and report.cuda is False, (
         "a cardless run reports a MEASURED zero under a named device, which "
@@ -256,7 +256,7 @@ def test_the_mint_gate_is_UNTOUCHED_by_a_measurement(
     and closing it stays a REVIEWABLE declaration edit that cites the number
     (the SDK refuses an uncited ``resolved=True``, by design)."""
     measure_child.run(
-        _measure_job(w8a8_tree), tmp_path / "m.json", compile_entries=False)
+        _measure_job(w8a8_tree), tmp_path / "m.json", compile_compiled_graphs=False)
 
     with pytest.raises(mint_child.MintChildRefused) as refusal:
         mint_child._assert_family_mintable(FAMILY)
@@ -419,7 +419,7 @@ def test_an_end_to_end_run_never_touches_a_publish_seam(
 
     report_path = tmp_path / "out" / "measure.json"
     rc = measure_child.run(
-        _measure_job(w8a8_tree), report_path, compile_entries=False)
+        _measure_job(w8a8_tree), report_path, compile_compiled_graphs=False)
 
     assert touched == []
     assert rc == measure_child.EXIT_OK
@@ -436,7 +436,7 @@ def test_an_end_to_end_run_never_touches_a_publish_seam(
 def fake_compiler(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> List[Tuple[str, Path]]:
-    """AOTInductor, faked at the ONE seam ``_export_entry`` compiles through.
+    """AOTInductor, faked at the ONE seam ``_export_compiled_graph`` compiles through.
 
     Everything before it is real — the export, the gates, the branch-arm
     ordering. This box does not compile (mints and compiles run on remote
@@ -446,18 +446,18 @@ def fake_compiler(
     """
     made: List[Tuple[str, Path]] = []
 
-    def _compile(program: Any, entry: str, **_kw: Any) -> List[str]:
-        out = tmp_path / "inductor" / entry.replace("/", "_")
+    def _compile(program: Any, compiled_graph: str, **_kw: Any) -> List[str]:
+        out = tmp_path / "inductor" / compiled_graph.replace("/", "_")
         out.mkdir(parents=True, exist_ok=True)
         files = []
         for suffix in (".so", ".cpp"):
             path = out / f"model{suffix}"
             path.write_bytes(b"\x00" * 16)
             files.append(str(path))
-            made.append((entry, path))
+            made.append((compiled_graph, path))
         return files
 
-    monkeypatch.setattr(aot_mint, "compile_entry_files", _compile)
+    monkeypatch.setattr(aot_mint, "compile_compiled_graph_files", _compile)
     return made
 
 
@@ -467,7 +467,7 @@ def test_the_compile_half_runs_and_leaves_nothing_behind(
 ) -> None:
     """OQ-3's own words: *"the INDUCTOR half is the half that matters — an
     export-only trace never exercises the whole-graph planner this blocker
-    names"*. So the compile runs by default, is measured per entry, and its
+    names"*. So the compile runs by default, is measured per compiled graph, and its
     output is counted and deleted before the report is written."""
     report_path = tmp_path / "measure.json"
     rc = measure_child.run(_measure_job(w8a8_tree), report_path)
@@ -478,14 +478,14 @@ def test_the_compile_half_runs_and_leaves_nothing_behind(
     assert report.compiled is True
     assert len(fake_compiler) == 6, (
         f"every declared class must reach the compiler: {fake_compiler}")
-    assert [e.compiled_files for e in report.entries] == [2, 2, 2]
+    assert [e.compiled_files for e in report.compiled_graphs] == [2, 2, 2]
     assert [str(p) for _e, p in fake_compiler if p.exists()] == [], (
         "a measure run that leaves loose .so files behind is one packaging "
         "step away from the artifact it may not produce")
     assert _measure_events(events)[-1].phase == "measured"
 
 
-def test_an_entry_that_runs_out_of_memory_IS_the_measurement(
+def test_an_compiled_graph_that_runs_out_of_memory_IS_the_measurement(
     tmp_path: Path, w8a8_tree: Path, blocked_declaration: None, on_path: None,
     monkeypatch: pytest.MonkeyPatch, events: List[Any],
 ) -> None:
@@ -496,10 +496,10 @@ def test_an_entry_that_runs_out_of_memory_IS_the_measurement(
     The compiler is faked into raising — a real OOM is a pod fact, and this is
     the classification path, which is cardless.
     """
-    def _oom(_program: Any, entry: str, **_kw: Any) -> List[str]:
-        raise MemoryError(f"entry {entry!r}: OUT OF DEVICE MEMORY")
+    def _oom(_program: Any, compiled_graph: str, **_kw: Any) -> List[str]:
+        raise MemoryError(f"compiled_graph {compiled_graph!r}: OUT OF DEVICE MEMORY")
 
-    monkeypatch.setattr(aot_mint, "compile_entry_files", _oom)
+    monkeypatch.setattr(aot_mint, "compile_compiled_graph_files", _oom)
 
     report_path = tmp_path / "measure.json"
     rc = measure_child.run(_measure_job(w8a8_tree), report_path)
@@ -509,8 +509,8 @@ def test_an_entry_that_runs_out_of_memory_IS_the_measurement(
     assert rc == measure_child.EXIT_REFUSED and not report.ok
     assert report.reason == "export_refused"
     assert "OUT OF DEVICE MEMORY" in report.detail
-    assert len(report.entries) == 1 and not report.entries[0].ok
-    assert report.entries[0].entry == "decoder", (
+    assert len(report.compiled_graphs) == 1 and not report.compiled_graphs[0].ok
+    assert report.compiled_graphs[0].compiled_graph == "decoder", (
         "an exception escaping a generator carries no row identity, and "
         "'something ran out of memory' is not evidence anybody can act on")
     assert _measure_events(events)[-1].phase == "export_refused"

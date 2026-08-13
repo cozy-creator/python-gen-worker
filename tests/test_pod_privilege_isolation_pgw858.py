@@ -387,7 +387,7 @@ def test_the_dropped_child_can_write_every_path_it_was_granted(dropped, tmp_path
     for path in (home["home"], home["tmpdir"], str(tmp_path / "cache")):
         assert _probe(dropped, "write-probe", path) == "ok", (
             f"the compute child cannot write {path} — it is in the grant list "
-            "(pgw#858). The answer is another entry there, never root."
+            "(pgw#858). The answer is another compiled_graph there, never root."
         )
 
 

@@ -6,10 +6,10 @@ as ``rig868`` — and the adopt-path rig (:mod:`harness.adopt_rig`) needs the sa
 artifact, so the shared thing now lives where shared things live.
 
 What is REAL here: the ``Compile`` declaration, the packed ``compiled graph.tar.gz`` with
-its recorded entry blocks, the class/range digests, the constants manifest, and
+its recorded compiled graph blocks, the class/range digests, the constants manifest, and
 a genuine ``nn.Module`` whose eager output the compiled subject is compared
 against. The ONE substitution is :class:`ProbePackage`, which stands in for an
-entry's ``AOTICompiledModel`` — an AOTI ``.so`` needs a GPU, and it is the only
+compiled graph's ``AOTICompiledModel`` — an AOTI ``.so`` needs a GPU, and it is the only
 piece deferred to a pod. It reproduces the eager maths from the constants it was
 BOUND with, so the comparison is genuinely compiled-vs-eager on identical
 weights, then rotates the result to an exactly declared cosine.
@@ -39,7 +39,7 @@ from gen_worker.api.export_contract import (
 FAMILY = "pgw868-probe"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130", "cuda": "13.0"}
 TARGET = "denoiser"
-#: Two declared shape rows -> two packaged entries. The second row is what
+#: Two declared shape rows -> two packaged compiled graphs. The second row is what
 #: makes "one shape row" a real axis rather than a word in a docstring.
 ROWS = ((8, 8), (16, 16))
 #: sdxl's declared band, used verbatim: pgw#868 was a measurement plus wiring,
@@ -90,7 +90,7 @@ class ProbePipeline:
 
 
 class ProbePackage:
-    """Stands in for one entry's `AOTICompiledModel` — the ONE deferred piece.
+    """Stands in for one compiled graph's `AOTICompiledModel` — the ONE deferred piece.
 
     Reproduces the eager maths from the constants it was BOUND with (so the
     comparison is genuinely compiled-vs-eager on identical weights) and then
@@ -102,7 +102,7 @@ class ProbePackage:
         self.cosine = float(cosine)
         self.raises = raises
         self.drop_output = drop_output
-        #: pgw#1175: this entry's constant bind really runs the card out of
+        #: pgw#1175: this compiled graph's constant bind really runs the card out of
         #: memory. Breaking a REAL input (the bind is the device work an adopt
         #: does), never supplying a fact — the rig's own doctrine.
         self.bind_oom = bool(bind_oom)
@@ -151,11 +151,11 @@ def declaration(floor: float = FLOOR, warn: float = WARN) -> Compile:
     )
 
 
-def entry_name(h: int, w: int) -> str:
+def compiled_graph_name(h: int, w: int) -> str:
     return f"{TARGET}/h={h},w={w}"
 
 
-def _entry(h: int, w: int) -> Dict[str, Any]:
+def _compiled_graph(h: int, w: int) -> Dict[str, Any]:
     block = {
         "target": TARGET,
         "fork": [],
@@ -176,8 +176,8 @@ def _entry(h: int, w: int) -> Dict[str, Any]:
     return block
 
 
-#: The toolchain block every entry of this declaration shares. Recorded because
-#: the ``toolchain`` axis is REQUIRED (pgw#1176): an entry that cannot state it
+#: The toolchain block every compiled graph of this declaration shares. Recorded because
+#: the ``toolchain`` axis is REQUIRED (pgw#1176): an compiled graph that cannot state it
 #: has no identity, so a fixture that omitted it would be un-keyable and could
 #: never be published, resolved or armed — a shape production cannot produce.
 TOOLCHAIN = {"torch": "2.13.0+cu130-record", "triton": "3.6.0-record"}
@@ -187,30 +187,30 @@ def metadata(
     row: Tuple[int, int] = ROWS[0],
     rows: Tuple[Tuple[int, int], ...] = ROWS,
 ) -> Dict[str, Any]:
-    """ONE entry artifact's metadata (format 3, pgw#1176).
+    """ONE compiled graph artifact's metadata (format 3, pgw#1176).
 
     ``row`` is the class this artifact carries; ``rows`` is only the
     declaration it belongs to, and reaches the metadata solely through the
     ``manifest_digest`` coverage label — never through identity. Widening
-    ``rows`` therefore leaves every existing entry's key untouched, which is
+    ``rows`` therefore leaves every existing compiled graph's key untouched, which is
     the property pgw#1176 exists for.
     """
-    name = entry_name(*row)
-    meta = aot.entry_metadata(
+    name = compiled_graph_name(*row)
+    meta = aot.compiled_graph_metadata(
         family=FAMILY, precision="w8a8", compiled_graph_key="",
-        name=name, entry=_entry(*row),
+        name=name, compiled_graph=_compiled_graph(*row),
         strict_export=True, lora_bucket=0,
         manifest_digest=compiled_graph_key_mod.manifest_digest(
-            _entry(h, w)["class_hash"] for h, w in rows),
+            _compiled_graph(h, w)["class_hash"] for h, w in rows),
     )
     meta.update(RUNTIME)
-    # pgw#950: every mint stamps a host-ISA requirement, and an entry that
+    # pgw#950: every mint stamps a host-ISA requirement, and an compiled graph that
     # stamps none is refused rather than sniffed from the .pt2. Satisfiable
     # anywhere: this host's machine, no ISA level.
     meta["host_isa"] = {"machine": platform.machine(), "march": "",
                         "simdlen": 0, "level": ""}
     meta["toolchain"] = dict(TOOLCHAIN)
-    meta["compiled_graph_key"] = compiled_graph_key_mod.from_entry_metadata(meta).digest
+    meta["compiled_graph_key"] = compiled_graph_key_mod.from_compiled_graph_metadata(meta).digest
     return meta
 
 
@@ -218,13 +218,13 @@ def declared_names(rows: Tuple[Tuple[int, int], ...] = ROWS) -> Tuple[str, ...]:
     """Every class name this declaration traces to — what a pod hands the
     dispatch so an unarmed class reads as ``pending compile`` rather than as a
     shape gap."""
-    return tuple(entry_name(h, w) for h, w in rows)
+    return tuple(compiled_graph_name(h, w) for h, w in rows)
 
 
 def artifact(tmp_path: Path, meta: Dict[str, Any] | None = None) -> Path:
-    """Pack ONE entry artifact. Named after its key, as the mint names it."""
+    """Pack ONE compiled graph artifact. Named after its key, as the mint names it."""
     meta = meta or metadata()
-    name = str((meta.get(compiled_graph_key_mod.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+    name = str((meta.get(compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY) or {}).get("name") or "")
     work = tmp_path / "work" / hashlib.sha256(name.encode()).hexdigest()[:16]
     work.mkdir(parents=True, exist_ok=True)
     (work / aot.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
@@ -272,17 +272,17 @@ def compiled_graph_cfg(decl: Any, **enrichments: Any) -> Any:
 class ArmOutcomes(tuple):
     """One :class:`AdoptOutcome` PER GRAPH CLASS, in ``rows`` order.
 
-    pgw#1176: the arm is per entry, so there is no single verdict — and a
+    pgw#1176: the arm is per compiled graph, so there is no single verdict — and a
     plain tuple is what this should be. The two aggregate properties below
     exist because the tests that use them are asking a question the aggregate
     genuinely answers: *"did this whole DECLARATION arm?"*, which is a
     property of a test's fixture, not a claim a pod makes about itself.
 
     They are DELIBERATELY not what production reports. A pod reports
-    per-entry serve state (`aot_serve.entry_states`) precisely because a
+    per-compiled graph serve state (`aot_serve.compiled_graph_states`) precisely because a
     compiled graph-level boolean can advertise more than it serves. Nothing here is
     wired to production; index this to assert per class, which is what the
-    per-entry rows do.
+    per-compiled graph rows do.
     """
 
     @property
@@ -320,7 +320,7 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
     ``(pipeline, module, outcomes)``.
 
     pgw#1176: ``outcomes`` is one :class:`AdoptOutcome` PER GRAPH CLASS, in
-    ``rows`` order, because the arm is per entry — one artifact, one class,
+    ``rows`` order, because the arm is per compiled graph — one artifact, one class,
     one verdict. A caller that wants "did the whole declaration arm" asks
     ``all(outcomes)``; a caller that wants "did THIS class arm" indexes it.
     There is no combined verdict, deliberately: the object that could report
@@ -348,9 +348,9 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
 
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
     monkeypatch.setattr(
-        aot, "_entry_admission_drift", lambda *a, **k: None)
+        aot, "_compiled_graph_admission_drift", lambda *a, **k: None)
     monkeypatch.setattr(
-        aot, "_load_package", lambda path, entry="model": packages[entry])
+        aot, "_load_package", lambda path, compiled_graph="model": packages[compiled_graph])
     module = ProbeDenoiser()
     pipeline = ProbePipeline(module)
     use_rows = ROWS if rows is None else rows

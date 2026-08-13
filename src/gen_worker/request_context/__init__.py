@@ -199,7 +199,7 @@ def _parse_cas_digest(digest: str, *, origin: str) -> str:
 def _cas_hasher(algo: str) -> Any:
     """A hasher for a CAS algorithm ``_parse_cas_digest`` already accepted.
 
-    Every entry in :data:`_CAS_DIGEST_WIDTHS` must be constructible here: a
+    Every compiled graph in :data:`_CAS_DIGEST_WIDTHS` must be constructible here: a
     digest this repo can address but not hash is a download it would have to
     take on trust, which is the shape pgw#882 and th#1303 S1 both refused.
     """
@@ -442,7 +442,7 @@ class RequestContext(Generic[D]):
 
     @property
     def slots(self) -> Mapping[str, "ResolvedSlot[Any]"]:
-        """One entry per ``Slot``-declared model slot:
+        """One compiled graph per ``Slot``-declared model slot:
         ``ctx.slots["pipeline"].ref`` / ``.defaults`` / ``.objective`` /
         ``.distilled`` — the
         catalog-resolved recipe decoded against the handler's derived
@@ -1896,7 +1896,7 @@ class _PublisherMixin:
         """Local snapshot roots of resolved datasets, keyed by ref.
 
         Populated by ``resolve_dataset`` (the executor calls it for every
-        ``payload.datasets`` entry before the handler runs).
+        ``payload.datasets`` compiled graph before the handler runs).
         """
         d = getattr(self, "_dataset_paths", None)
         if d is None:
@@ -1919,15 +1919,15 @@ class _PublisherMixin:
         1. Slash-less ref → dataset_id verbatim; otherwise
            ``GET /api/v1/datasets?tenant=<owner>`` → the row's ``dataset_id``.
         2. ``GET /api/v1/datasets/:id/materialize?format=files&include_urls=true``
-           → a rows.jsonl-style entry index (raw CAS blobs by digest) with
+           → a rows.jsonl-style compiled graph index (raw CAS blobs by digest) with
            presigned URLs, sizes and blake3 checksums. A 202 (async snapshot
            build, th#691) is polled for as long as the hub keeps answering —
            there is no wall-clock budget (gw#666); a typed
            ``snapshot_build_failed`` raises ``SnapshotBuildFailedError``, and
            ``hub_silence_window_s`` bounds only how long a hub that answers
            NOTHING is tolerated.
-        3. Stream each entry to disk (bounded memory), digest-verified, with
-           bounded retries. Entries lacking a presigned URL fall back to the
+        3. Stream each compiled graph to disk (bounded memory), digest-verified, with
+           bounded retries. Compiled graphs lacking a presigned URL fall back to the
            repo-CAS by-digest reader.
 
         The REF is caller-supplied, so a ref that resolves to nothing raises
@@ -1939,7 +1939,7 @@ class _PublisherMixin:
         # Deferred: _datasets is +129 modules on the `import gen_worker` path.
         from ._datasets import (
             DatasetRefNotFound,
-            download_entries,
+            download_compiled_graphs,
             fetch_materialize_manifest,
             lookup_dataset_id,
         )
@@ -1969,7 +1969,7 @@ class _PublisherMixin:
                 if not dataset_id:
                     raise DatasetRefNotFound("empty ref")
                 cache_key = ("by-id", dataset_id)
-            snapshot_id, entries = fetch_materialize_manifest(
+            snapshot_id, compiled_graphs = fetch_materialize_manifest(
                 base, token, dataset_id, **fetch_kwargs,
             )
         except DatasetRefNotFound as exc:
@@ -1978,8 +1978,8 @@ class _PublisherMixin:
         cache_root = Path(tempfile.gettempdir()) / "gen_worker_datasets"
         target_root = cache_root.joinpath(*cache_key) / (snapshot_id or dataset_id)
         target_root.mkdir(parents=True, exist_ok=True)
-        download_entries(
-            entries, target_root,
+        download_compiled_graphs(
+            compiled_graphs, target_root,
             # th#1259: these digests come from the HUB's own manifest, not
             # from the payload — a miss is a platform fault, not the caller's.
             fetch_blob=self._fetch_platform_blob,

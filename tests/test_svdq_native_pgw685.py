@@ -46,7 +46,7 @@ QWEN_CASES = (
 def _synth_nunchaku_linear(out_f: int, in_f: int, *, second_key: str,
                            rank: int, seed: int = 0,
                            smooth: bool = True) -> tuple[dict, torch.Tensor]:
-    """A checkpoint entry in nunchaku's layout + the float weight behind it."""
+    """A checkpoint compiled graph in nunchaku's layout + the float weight behind it."""
     gen = torch.Generator().manual_seed(seed)
     w = torch.randn(out_f, in_f, generator=gen)
 

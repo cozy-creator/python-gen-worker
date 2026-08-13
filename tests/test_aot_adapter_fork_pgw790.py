@@ -113,11 +113,11 @@ def _fresh_registry():
 
 @pytest.fixture(scope="module")
 def compiled_graph(tmp_path_factory, request) -> Dict[str, Any]:
-    """ONE real two-arm mint, shared (an AOTI compile costs ~10s per entry).
+    """ONE real two-arm mint, shared (an AOTI compile costs ~10s per compiled graph).
 
     pgw#1176: the mint yields TWO independently keyed artifacts rather than
-    one two-entry compiled graph. ``by_entry`` indexes them by the class each one names,
-    which is the addressing every row below wants — an entry NAMES its class,
+    one two-compiled graph compiled graph. ``by_compiled_graph`` indexes them by the class each one names,
+    which is the addressing every row below wants — an compiled graph NAMES its class,
     and that is what makes a per-class refusal bisectable.
     """
     from _pytest.monkeypatch import MonkeyPatch
@@ -131,9 +131,9 @@ def compiled_graph(tmp_path_factory, request) -> Dict[str, Any]:
     result = aot_mint.mint(
         pipe, _spec(), tmp / "out")
     reset_export_declarations()
-    by_entry = {row.entry: row for row in result.entries}
-    assert len(by_entry) == len(result.entries), "two entries collided on one name"
-    return {"pipe": pipe, "result": result, "tmp": tmp, "by_entry": by_entry}
+    by_compiled_graph = {row.compiled_graph: row for row in result.compiled_graphs}
+    assert len(by_compiled_graph) == len(result.compiled_graphs), "two compiled_graphs collided on one name"
+    return {"pipe": pipe, "result": result, "tmp": tmp, "by_compiled_graph": by_compiled_graph}
 
 
 #: The two graph classes this declaration forks into.
@@ -141,15 +141,15 @@ LEAN = "unet/adapter=false/B=2"
 FAT = "unet/adapter=true/B=2"
 
 
-def _entry_block(compiled_graph: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """One class's recorded entry block, off ITS OWN artifact's metadata.
+def _compiled_graph_block(compiled_graph: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """One class's recorded compiled graph block, off ITS OWN artifact's metadata.
 
-    pgw#1176 replaced the ``entries`` MAP with one ``entry`` block per
+    pgw#1176 replaced the ``compiled graphs`` MAP with one ``compiled graph`` block per
     artifact, so a class is addressed by picking its artifact rather than by
     indexing a map that could silently be missing the key.
     """
-    row = compiled_graph["by_entry"][name]
-    block = dict(row.metadata[compiled_graph_key.ENTRY_BLOCK_KEY])
+    row = compiled_graph["by_compiled_graph"][name]
+    block = dict(row.metadata[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY])
     assert block["name"] == name, block.get("name")
     return block
 
@@ -164,7 +164,7 @@ def test_a_bucket_family_forks_every_branch_capable_target() -> None:
     pipe = _armed_pipe()
     rows = aot_mint.adapter_arm_plans(
         aot_declaration.compiled_graph_plans(decl), pipe, _spec())
-    names = [aot_declaration.plan_entry_name(p) for p, _arm in rows]
+    names = [aot_declaration.plan_compiled_graph_name(p) for p, _arm in rows]
     assert names == ["unet/adapter=true/B=2", "unet/adapter=false/B=2"]
     # Adapter-bearing FIRST: the composed pipeline arrives lifted, so the
     # branch machinery is toggled off exactly once.
@@ -178,7 +178,7 @@ def test_a_bucket_zero_family_forks_into_nothing() -> None:
     rows = aot_mint.adapter_arm_plans(
         aot_declaration.compiled_graph_plans(decl), pipe, spec)
     assert [arm for _p, arm in rows] == [None]
-    assert aot_declaration.plan_entry_name(rows[0][0]) == "unet/B=2"
+    assert aot_declaration.plan_compiled_graph_name(rows[0][0]) == "unet/B=2"
 
 
 def test_a_target_with_no_branch_capable_module_does_not_fork() -> None:
@@ -195,15 +195,15 @@ def test_a_target_with_no_branch_capable_module_does_not_fork() -> None:
 
 
 def test_the_arm_is_a_fork_coordinate_and_lands_in_the_class_hash() -> None:
-    entry = {
+    compiled_graph = {
         "target": "unet",
         "fork": [["adapter", True]],
         "class_dims": [["B", 2]],
         "range_digest": "abc",
         "graph": {"specialization": {"fork.adapter": True}},
     }
-    with_adapter = aot_serve.class_hash(entry, strict=True, lora_bucket=BUCKET)
-    branchless = copy.deepcopy(entry)
+    with_adapter = aot_serve.class_hash(compiled_graph, strict=True, lora_bucket=BUCKET)
+    branchless = copy.deepcopy(compiled_graph)
     branchless["fork"] = [["adapter", False]]
     branchless["graph"] = {"specialization": {"fork.adapter": False}}
     assert aot_serve.class_hash(
@@ -221,14 +221,14 @@ def test_one_mint_packages_both_arms(compiled_graph) -> None:
     into is not. Each artifact carries one class and is keyed by it, so the
     two must also be keyed DIFFERENTLY."""
     result = compiled_graph["result"]
-    assert sorted(row.entry for row in result.entries) == [LEAN, FAT]
-    assert len({row.key for row in result.entries}) == 2
-    assert len({row.artifact for row in result.entries}) == 2
+    assert sorted(row.compiled_graph for row in result.compiled_graphs) == [LEAN, FAT]
+    assert len({row.key for row in result.compiled_graphs}) == 2
+    assert len({row.artifact for row in result.compiled_graphs}) == 2
 
 
 def test_the_branchless_arm_has_no_adapter_inputs_and_says_so(compiled_graph) -> None:
-    lean = _entry_block(compiled_graph, LEAN)
-    fat = _entry_block(compiled_graph, FAT)
+    lean = _compiled_graph_block(compiled_graph, LEAN)
+    fat = _compiled_graph_block(compiled_graph, FAT)
     lean_names = {row["name"] for row in lean["inputs"]}
     fat_names = {row["name"] for row in fat["inputs"]}
     assert set(lora_lifted.LIFTED_INPUT_NAMES) <= fat_names
@@ -242,8 +242,8 @@ def test_the_branchless_arm_has_no_adapter_inputs_and_says_so(compiled_graph) ->
 def test_the_branchless_graph_actually_dropped_the_branch(compiled_graph) -> None:
     """Not just the signature: the adapter must be gone from the traced
     program, or the fork bought nothing."""
-    lean = _entry_block(compiled_graph, LEAN)["graph"]
-    fat = _entry_block(compiled_graph, FAT)["graph"]
+    lean = _compiled_graph_block(compiled_graph, LEAN)["graph"]
+    fat = _compiled_graph_block(compiled_graph, FAT)["graph"]
     assert lean["lifted_inputs"] == []
     assert fat["lifted_inputs"] == sorted(lora_lifted.LIFTED_INPUT_NAMES)
     assert lean["specialization"]["fork.adapter"] is False
@@ -267,10 +267,10 @@ def test_the_pipeline_is_left_armed_after_the_branchless_exports(compiled_graph)
 
 
 def test_the_stamped_key_is_recomputable_from_the_recorded_facts(compiled_graph) -> None:
-    """pgw#1176: recomputable PER ENTRY, off that entry's own artifact. The
+    """pgw#1176: recomputable PER COMPILED_GRAPH, off that compiled graph's own artifact. The
     two classes must also recompute to two DIFFERENT keys, or the fork is not
     addressable and a serve path could fetch either for either."""
-    rows = compiled_graph["result"].entries
+    rows = compiled_graph["result"].compiled_graphs
     assert len(rows) == 2
     for row in rows:
         meta = dict(row.metadata)
@@ -305,12 +305,12 @@ def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(
         out = tmp_path / f"active{int(active)}"
         result = aot_mint.mint(
             pipe, _spec(), out)
-        # pgw#1176: the key SET, per entry name. One comparison now carries
+        # pgw#1176: the key SET, per compiled graph name. One comparison now carries
         # both halves this row used to assert apart (same classes, same keys),
         # and the length assert is what stops an empty mint passing it
         # vacuously.
-        keys.append({row.entry: row.key for row in result.entries})
-        names.append(sorted(row.entry for row in result.entries))
+        keys.append({row.compiled_graph: row.key for row in result.compiled_graphs})
+        names.append(sorted(row.compiled_graph for row in result.compiled_graphs))
         reset_export_declarations()
     assert names[0] == names[1] == [LEAN, FAT]
     assert keys[0] == keys[1]
@@ -348,11 +348,11 @@ def test_an_exclusion_free_contract_digests_exactly_as_before() -> None:
 @pytest.fixture
 def armed(compiled_graph, monkeypatch) -> Dict[str, Any]:
     """Both classes armed on a fresh pipeline through the real
-    `aot_serve.arm_entry` — stage -> verify -> load -> bind -> register, ONE
+    `aot_serve.arm_compiled_graph` — stage -> verify -> load -> bind -> register, ONE
     graph class per call.
 
     pgw#1176: this is the accretion loop, and it is the production shape
-    rather than a test convenience. Each entry arms whole or not at all and
+    rather than a test convenience. Each compiled graph arms whole or not at all and
     JOINS the target's registry, so the two classes below reach the dispatch
     through two independent arms — which is exactly what makes a single
     class's refusal cost one class instead of the whole fork.
@@ -361,17 +361,17 @@ def armed(compiled_graph, monkeypatch) -> Dict[str, Any]:
     pipe = _armed_pipe()
     cfg = types.SimpleNamespace(family=FAMILY)
     metas = {}
-    for row in compiled_graph["result"].entries:
-        metas[row.entry] = aot_serve.arm_entry(
+    for row in compiled_graph["result"].compiled_graphs:
+        metas[row.compiled_graph] = aot_serve.arm_compiled_graph(
             pipe, cfg, Path(row.artifact),
             cache_dir=compiled_graph["tmp"] / "stage")
     assert set(metas) == {LEAN, FAT}
     # Both classes are SERVING — the rows below distinguish which one served,
     # so an arm that silently dropped one would make them pass for the wrong
     # reason.
-    assert set(aot_serve.entry_states(pipe)) == {LEAN, FAT}
+    assert set(aot_serve.compiled_graph_states(pipe)) == {LEAN, FAT}
     assert all(s["state"] == "armed"
-               for s in aot_serve.entry_states(pipe).values())
+               for s in aot_serve.compiled_graph_states(pipe).values())
     return {"pipe": pipe, "metas": metas}
 
 
@@ -385,7 +385,7 @@ def test_an_adapter_free_request_is_served_by_the_branchless_class(
     pipe = armed["pipe"]
     assert not lora_lifted.adapter_active(pipe.unet)
     _call(pipe)
-    assert aot_serve.served_entry_calls(pipe) == {
+    assert aot_serve.served_compiled_graph_calls(pipe) == {
         "unet/adapter=false/B=2": 1, "unet/adapter=true/B=2": 0}
     assert aot_serve.ingress_refusals(pipe) == 0
 
@@ -398,7 +398,7 @@ def test_an_active_adapter_is_served_by_the_branch_bearing_class(armed) -> None:
     }
     lora_lifted.lifted_binding(pipe.unet).swap([(adapter, 1.0, "turbo")])
     _call(pipe)
-    assert aot_serve.served_entry_calls(pipe) == {
+    assert aot_serve.served_compiled_graph_calls(pipe) == {
         "unet/adapter=false/B=2": 0, "unet/adapter=true/B=2": 1}
     assert aot_serve.ingress_refusals(pipe) == 0
 
@@ -435,21 +435,21 @@ def test_the_active_adapter_actually_changes_the_output(armed) -> None:
     with torch.no_grad():
         cleared = pipe.unet(sample)
     assert torch.allclose(base, cleared, atol=1e-4)
-    assert aot_serve.served_entry_calls(pipe)["unet/adapter=false/B=2"] >= 2
+    assert aot_serve.served_compiled_graph_calls(pipe)["unet/adapter=false/B=2"] >= 2
 
 
 def test_without_the_exclusion_the_dispatch_cannot_discriminate(compiled_graph) -> None:
     """RED for the negative declaration: strip ``excluded_inputs`` and an
     adapter-bearing call is admitted by BOTH classes, which the dispatch
-    refuses as ``entry_ambiguous`` — i.e. the whole attach lane would fall
+    refuses as ``compiled_graph_ambiguous`` — i.e. the whole attach lane would fall
     back to eager."""
-    lean_block = json.loads(json.dumps(_entry_block(compiled_graph, LEAN)))
-    fat_block = json.loads(json.dumps(_entry_block(compiled_graph, FAT)))
+    lean_block = json.loads(json.dumps(_compiled_graph_block(compiled_graph, LEAN)))
+    fat_block = json.loads(json.dumps(_compiled_graph_block(compiled_graph, FAT)))
     lean = dict(lean_block)
     lean.pop("excluded_inputs")
     lean_contract = aot_serve.contract_from_meta(lean)
     fat_contract = aot_serve.contract_from_meta(fat_block)
-    dispatch = aot_serve.EntryDispatch((
+    dispatch = aot_serve.CompiledGraphDispatch((
         ("unet/adapter=false/B=2", aot_serve.ArtifactRunner(
             package=None, contract=lean_contract, constants=())),
         ("unet/adapter=true/B=2", aot_serve.ArtifactRunner(
@@ -460,10 +460,10 @@ def test_without_the_exclusion_the_dispatch_cannot_discriminate(compiled_graph) 
             "lora_b": torch.zeros(BUCKET * BUCKET)}
     with pytest.raises(aot_serve.IngressContractError) as err:
         dispatch.select(call, pair)
-    assert err.value.reason == "entry_ambiguous"
+    assert err.value.reason == "compiled_graph_ambiguous"
 
     # With the declaration as minted, the same call routes deterministically.
-    good = aot_serve.EntryDispatch((
+    good = aot_serve.CompiledGraphDispatch((
         (LEAN, aot_serve.ArtifactRunner(
             package=None,
             contract=aot_serve.contract_from_meta(lean_block),

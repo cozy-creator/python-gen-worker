@@ -3,7 +3,7 @@ catch-all.
 
 The defect
 ----------
-``EntryCompilePool._close_entry_partition`` closed ``compile_s`` with three
+``CompiledGraphCompilePool._close_compiled_graph_partition`` closed ``compile_s`` with three
 members. When a child reported no ``report_epoch`` — pgw#840's case: a child
 too old for the span table, or one that died between writing its report and
 being reaped — the parent computed
@@ -12,27 +12,27 @@ being reaped — the parent computed
 
 and wrote the whole unattributable remainder under a name that means "the
 child's exit plus the parent's poll granularity". ``aot_compile_pool``'s own
-``EntryReport.code_digest`` comment already said this happened ("the parent
+``CompiledGraphReport.code_digest`` comment already said this happened ("the parent
 absorbed its whole compile into ``reap_lag_s``"), and ``RESIDUALS`` never
-listed ``reap_lag_s``, so ``dark_fraction`` reported those entries as **fully
+listed ``reap_lag_s``, so ``dark_fraction`` reported those compiled graphs as **fully
 attributed**.
 
 What it cost, measured
 ----------------------
-pgw#1085 §5c's 36-entry sdxl-on-L40S mint recorded a ``reap_lag_s`` median of
+pgw#1085 §5c's 36-compiled graph sdxl-on-L40S mint recorded a ``reap_lag_s`` median of
 259.6 s (max 403.4 s) summing to 164.5 min. pgw#1099 was filed on that number
 as "the single largest unclaimed block of time in the run, and no pgw#1051
 lever addresses it". Both halves of the reading were wrong, and this file pins
 both corrections:
 
-1. ``reap_lag_s`` is a SUB-SPAN of ``compile_s``, so summing it over entries
+1. ``reap_lag_s`` is a SUB-SPAN of ``compile_s``, so summing it over compiled graphs
    compiled at K=3 and comparing that to the pool's wall is a category error —
    ``compile_s`` itself sums to 3.35x the same wall.
 2. A 259.6 s median with a 403.4 s max is the signature of the residual branch
    firing, not of poll granularity.
 
 The fix is a declared residual of its own, ``parent_other_s``, recorded on
-every entry so ``check`` covers it and ``dark_fraction`` counts it.
+every compiled graph so ``check`` covers it and ``dark_fraction`` counts it.
 """
 
 from __future__ import annotations
@@ -43,12 +43,12 @@ from typing import Dict
 import pytest
 
 from gen_worker import aot_compile_spans as spans
-from gen_worker.aot_compile_pool import EntryCompilePool, EntryReport, _Running
+from gen_worker.aot_compile_pool import CompiledGraphCompilePool, CompiledGraphReport, _Running
 
 
-def _running(entry: str = "unet", *, spawn_epoch: float = 1000.0) -> _Running:
+def _running(compiled_graph: str = "unet", *, spawn_epoch: float = 1000.0) -> _Running:
     row = _Running(
-        entry=entry,
+        compiled_graph=compiled_graph,
         proc=None,  # type: ignore[arg-type]  # never touched by this seam
         job=None,  # type: ignore[arg-type]
         program_path=Path("/nonexistent/program.pt2"),
@@ -60,15 +60,15 @@ def _running(entry: str = "unet", *, spawn_epoch: float = 1000.0) -> _Running:
 
 
 def _close(
-    report: EntryReport, *, elapsed: float, reap_epoch: float,
+    report: CompiledGraphReport, *, elapsed: float, reap_epoch: float,
 ) -> Dict[str, float]:
-    """Drive the REAL `_close_entry_partition`. Nothing about the partition
+    """Drive the REAL `_close_compiled_graph_partition`. Nothing about the partition
     arithmetic touches the pool's construction, so the seam is entered
     directly rather than through a pool double that could disagree with it."""
-    pool = EntryCompilePool.__new__(EntryCompilePool)
-    pool.entry_stage_seconds = {}
-    pool.entry_spawn_seconds = {}
-    return pool._close_entry_partition(
+    pool = CompiledGraphCompilePool.__new__(CompiledGraphCompilePool)
+    pool.compiled_graph_stage_seconds = {}
+    pool.compiled_graph_spawn_seconds = {}
+    return pool._close_compiled_graph_partition(
         _running(), report, elapsed=elapsed, reap_epoch=reap_epoch)
 
 
@@ -118,8 +118,8 @@ def test_a_reporting_child_measures_reap_lag_and_leaves_the_residual_empty(
 ) -> None:
     """The good branch is unchanged: an epoch-reporting child's poll lag is
     still measured and named, and nothing lands in the residual."""
-    report = EntryReport(
-        entry="unet",
+    report = CompiledGraphReport(
+        compiled_graph="unet",
         spans={"child_wall_s": 8.6},
         run_start_epoch=1001.0,
         module_import_epoch=1000.5,
@@ -135,13 +135,13 @@ def test_a_reporting_child_measures_reap_lag_and_leaves_the_residual_empty(
 
 def test_a_SILENT_child_puts_the_gap_in_the_residual_not_in_reap_lag() -> None:
     """THE ROW THIS ISSUE EXISTS FOR. A child that reports no epochs — the
-    pgw#840 case ``EntryReport.code_digest`` documents — must not have its
+    pgw#840 case ``CompiledGraphReport.code_digest`` documents — must not have its
     unattributable time written under a measured span's name.
 
     RED on master: ``reap_lag_s`` came back as the full 259.6 s remainder,
     exactly the shape pgw#1085 §5c misread as poll lag.
     """
-    report = EntryReport(entry="unet", spans={}, run_start_epoch=0.0, report_epoch=0.0)
+    report = CompiledGraphReport(compiled_graph="unet", spans={}, run_start_epoch=0.0, report_epoch=0.0)
     table = _close(report, elapsed=259.6, reap_epoch=1259.6)
 
     assert table["reap_lag_s"] == 0.0, (
@@ -158,10 +158,10 @@ def test_a_SILENT_child_puts_the_gap_in_the_residual_not_in_reap_lag() -> None:
 
 def test_the_silent_child_is_now_visible_to_dark_fraction() -> None:
     """The second half of the defect: because ``reap_lag_s`` was never in
-    ``RESIDUALS``, an entry whose ENTIRE compile was unattributed reported
+    ``RESIDUALS``, an compiled graph whose ENTIRE compile was unattributed reported
     ``dark_fraction == 0.0`` — fully attributed. pgw#830's whole contract is
     that unnamed time is loud."""
-    report = EntryReport(entry="unet", spans={}, run_start_epoch=0.0, report_epoch=0.0)
+    report = CompiledGraphReport(compiled_graph="unet", spans={}, run_start_epoch=0.0, report_epoch=0.0)
     table = _close(report, elapsed=259.6, reap_epoch=1259.6)
 
     assert spans.dark_fraction(table) == pytest.approx(1.0)
@@ -171,8 +171,8 @@ def test_a_partial_report_keeps_what_it_measured_and_banks_only_the_gap(
 ) -> None:
     """A child that wrote its report epoch but whose inner ledger is missing
     must keep its real poll lag; only the genuinely unclaimed seconds move."""
-    report = EntryReport(
-        entry="unet",
+    report = CompiledGraphReport(
+        compiled_graph="unet",
         spans={"child_wall_s": 200.0},
         run_start_epoch=1002.0,
         report_epoch=1250.0,
@@ -185,13 +185,13 @@ def test_a_partial_report_keeps_what_it_measured_and_banks_only_the_gap(
     assert spans.check(table) == []
 
 
-def test_every_entry_records_the_residual_so_check_can_see_it() -> None:
+def test_every_compiled_graph_records_the_residual_so_check_can_see_it() -> None:
     """``check`` reports a partition member that was never recorded. If
     ``parent_other_s`` were written only on the silent branch, every healthy
-    entry would trip that rule — which is why it is recorded always, as 0.0
+    compiled graph would trip that rule — which is why it is recorded always, as 0.0
     when the named members already close the level."""
-    report = EntryReport(
-        entry="unet",
+    report = CompiledGraphReport(
+        compiled_graph="unet",
         spans={"child_wall_s": 9.0},
         run_start_epoch=1000.5,
         report_epoch=1009.9,
@@ -207,16 +207,16 @@ def test_every_entry_records_the_residual_so_check_can_see_it() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_subspan_sum_across_entries_is_not_comparable_to_the_pool_wall(
+def test_a_subspan_sum_across_compiled_graphs_is_not_comparable_to_the_pool_wall(
 ) -> None:
     """pgw#1099's headline — "``reap_lag_s`` sums to 164.5 min on a 92-min
     wall" — is not evidence of anything. ``reap_lag_s`` is INSIDE
-    ``compile_s``, and at K entries in flight the per-entry totals sum to
+    ``compile_s``, and at K compiled graphs in flight the per-compiled graph totals sum to
     roughly K times the wall by construction. On the same row-7 table
     ``compile_s`` sums to 308.1 min against the same 92.0-minute wall.
     """
     wall_min = 92.0
-    compile_s_sum_min = 308.1          # pgw#1085 §5c, row 7, 36 entries, K=3
+    compile_s_sum_min = 308.1          # pgw#1085 §5c, row 7, 36 compiled graphs, K=3
     reap_lag_sum_min = 164.5
 
     assert "reap_lag_s" in spans.PARTITIONS["compile_s"]

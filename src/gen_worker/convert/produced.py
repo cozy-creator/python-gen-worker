@@ -1,6 +1,6 @@
 """ProducedFlavor — what a tenant transform hands to ``publish_flavors``.
 
-A producer endpoint builds ``list[ProducedFlavor]`` — one entry per flavor
+A producer endpoint builds ``list[ProducedFlavor]`` — one compiled graph per flavor
 the job produces into the destination checkpoint — and calls
 ``gen_worker.convert.publish_flavors(ctx, flavors)``. The library uploads each
 flavor's ``path`` (file OR directory) as one Tensorhub commit and attaches
@@ -58,7 +58,7 @@ class ProducedFlavor(msgspec.Struct):
         against the safetensors header — th#1580/§1.33).
 
     A job that emits several artifacts hands over several ``ProducedFlavor``
-    entries: N publishes joining ONE tag group. There is no flavor-label set
+    compiled graphs: N publishes joining ONE tag group. There is no flavor-label set
     on a single publish (``flavors`` was deleted with the wire field).
     """
 

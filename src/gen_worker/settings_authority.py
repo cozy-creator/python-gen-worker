@@ -59,7 +59,7 @@ AUTHORITY_MODULES: Tuple[str, ...] = (
 
 #: Process env WE impose, re-imposed after ``env_seal.scrub_env`` erases the
 #: behavior namespaces — an ambient value is deleted, never honored, and the
-#: value below is what every child (mint child, AOT entry child, torch's own
+#: value below is what every child (mint child, AOT compiled graph child, torch's own
 #: compile subprocesses) inherits.
 #:
 #: PYTHONHASHSEED=0: the pgw#1034 / HUMAN_MUST_DO decision, EXECUTED here per
@@ -67,7 +67,7 @@ AUTHORITY_MODULES: Tuple[str, ...] = (
 #: cost note said to bundle it with a seal change, and seal v4 is that
 #: change). CPython reads it at interpreter start, so imposition for the
 #: CURRENT interpreter is :func:`ensure_interpreter_env`'s re-exec; children
-#: inherit it from this table. REVERT = delete the entry here and its census
+#: inherit it from this table. REVERT = delete the compiled graph here and its census
 #: row — nothing else refers to the seed.
 #:
 #: PYTORCH_CUDA_ALLOC_CONF: pgw#1049 found the entrypoint's old ``setdefault``
@@ -193,12 +193,12 @@ def impose_process_env() -> None:
     """Write :data:`DECLARED_ENV` into ``os.environ`` — unconditionally, so
     an ambient value never survives. Called at entrypoint import (pre-torch,
     covers children) and again by ``env_seal.establish`` after the scrub
-    (the scrub erases the whole namespace, including our own entries)."""
+    (the scrub erases the whole namespace, including our own compiled graphs)."""
     os.environ.update(DECLARED_ENV)
 
 
 def _interpreter_env_diffs() -> List[str]:
-    """Declared entries CPython consumed at interpreter start, checked by
+    """Declared compiled graphs CPython consumed at interpreter start, checked by
     their EFFECT — the env var alone proves nothing once the interpreter is
     running. PYTHONHASHSEED=0 must have disabled hash randomization."""
     diffs: List[str] = []
@@ -318,14 +318,14 @@ def impose_config_default(
     precedence chain to ``default``, which is the layer this writes. Nothing
     else in the chain is settable at runtime: ``alias`` and the two
     ``env_value_*`` layers are resolved once at config install."""
-    entry = getattr(config_module, "_config", {}).get(key)
-    if entry is None:
+    compiled_graph = getattr(config_module, "_config", {}).get(key)
+    if compiled_graph is None:
         raise SettingsImpositionError(
             f"declared setting cannot reach a process-wide target: torch's "
-            f"config has no {key!r} entry to set a default on. torch's "
+            f"config has no {key!r} compiled_graph to set a default on. torch's "
             f"config internals changed; re-seat the authority before any "
             f"compile can be trusted.")
-    entry.default = value
+    compiled_graph.default = value
 
 
 def read_in_fresh_thread(fn: Callable[[], Any]) -> Any:
@@ -393,9 +393,9 @@ def disable_autograd_cache() -> None:
 
     Process-global disable needs BOTH halves: the pre-torch-import env
     (:data:`DECLARED_ENV`, fresh processes incl. compile-worker subprocesses)
-    and, torch already imported, the installed config entry's
+    and, torch already imported, the installed config compiled graph's
     ``env_value_force`` — user overrides are thread-local ContextVars in
-    torch>=2.13, and the entry-level env force is consulted by every thread
+    torch>=2.13, and the compiled graph-level env force is consulted by every thread
     with top precedence (the 0.40.5 live disproof: the assignment ran on the
     arming thread while the warmup compile ran on another)."""
     os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = (

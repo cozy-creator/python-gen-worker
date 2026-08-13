@@ -810,7 +810,7 @@ class HubClient:
                     publish_id, type(exc).__name__)
             raise
 
-        # Promoted. The produced tree and this journal entry have no further
+        # Promoted. The produced tree and this journal compiled graph have no further
         # job: the bytes are in the CAS.
         if journal is not None:
             journal.clear(publish_id)
@@ -837,7 +837,7 @@ class HubClient:
 
 
 def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
-    """Build CommitFile entries for every regular file under ``tree``.
+    """Build CommitFile compiled graphs for every regular file under ``tree``.
 
     ``.cache/huggingface/**`` is skipped: huggingface_hub's local-dir download
     metadata is cache-layout junk, never repo content. So is a publish journal

@@ -45,8 +45,8 @@ class BudgetGate:
     total budget; the server would reject them mid-upload, leaving partial
     parts.
 
-    The gate sits between the pool and the upload entry points
-    (``save_file``, ``save_checkpoint``, ``save_file_create``). Each entry
+    The gate sits between the pool and the upload compiled graph points
+    (``save_file``, ``save_checkpoint``, ``save_file_create``). Each compiled graph
     point computes ``size = os.path.getsize(src)`` and wraps its upload
     work in ``with gate.reserve(size): ...``.
 

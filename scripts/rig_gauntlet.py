@@ -116,7 +116,7 @@ def run_one(
         for leg in data.get("legs") or ():
             facts = leg.get("facts") or {}
             if leg["name"] == "mint-child":
-                row["entries"] = len(facts.get("packed_entries") or ())
+                row["compiled_graphs"] = len(facts.get("packed_compiled_graphs") or ())
                 row["peak_gb"] = round(
                     float(facts.get("peak_vram_bytes") or 0) / 2 ** 30, 3)
                 row["synthetic_sm"] = bool(facts.get("synthetic_runtime"))
@@ -173,7 +173,7 @@ def table(rows: List[Dict[str, Any]], vehicles: Dict[str, Any]) -> str:
         lines.append(
             f"{row['vehicle']:<26} {veh.expect:<5} {got:<5} {verdict:<9} "
             f"{(row.get('cycle_s') or row['wall_s']):>6.1f}s "
-            f"{row.get('entries', 0):>4} {row.get('peak_gb', 0):>8.3f} "
+            f"{row.get('compiled_graphs', 0):>4} {row.get('peak_gb', 0):>8.3f} "
             f"{(f'{parity:.2e}' if parity else '—'):>10}  {note}")
     return "\n".join(lines)
 

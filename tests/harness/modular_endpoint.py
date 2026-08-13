@@ -103,7 +103,7 @@ def tiny_vae(fill: float) -> AutoencoderKL:
     return m
 
 
-def _spec_entry(class_name: str, subfolder: str) -> list:
+def _spec_compiled_graph(class_name: str, subfolder: str) -> list:
     return ["diffusers", class_name, {
         "pretrained_model_name_or_path": UPSTREAM_REPO_ID,
         "subfolder": subfolder,
@@ -130,10 +130,10 @@ def build_base_tree(root: Path, *, fill: float = 1.0) -> Path:
         "_class_name": "TinyModularPipeline",
         "_diffusers_version": diffusers.__version__,
         "_blocks_class_name": "TinyBlocks",
-        "unet": _spec_entry("UNet2DConditionModel", "unet"),
-        "vae": _spec_entry("AutoencoderKL", "vae"),
-        "vae_ref": _spec_entry("AutoencoderKL", "vae_ref"),
-        "scheduler": _spec_entry("DDPMScheduler", "scheduler"),
+        "unet": _spec_compiled_graph("UNet2DConditionModel", "unet"),
+        "vae": _spec_compiled_graph("AutoencoderKL", "vae"),
+        "vae_ref": _spec_compiled_graph("AutoencoderKL", "vae_ref"),
+        "scheduler": _spec_compiled_graph("DDPMScheduler", "scheduler"),
     }
     (root / "modular_model_index.json").write_text(json.dumps(index))
     # model_index.json too — the executor's override-name validation and the
@@ -172,12 +172,12 @@ def build_mixed_precision_tree(
 
     index = json.loads((tree / "modular_model_index.json").read_text())
     model_index = json.loads((tree / "model_index.json").read_text())
-    index["unet"] = _spec_entry("KeepFp32Unet", "unet")
+    index["unet"] = _spec_compiled_graph("KeepFp32Unet", "unet")
     model_index["unet"] = ["diffusers", "KeepFp32Unet"]
     for i in range(extra_fp32_parts):
         name = f"vae_x{i}"
         tiny_vae(fill).to(torch.float32).save_pretrained(tree / name)
-        index[name] = _spec_entry("AutoencoderKL", name)
+        index[name] = _spec_compiled_graph("AutoencoderKL", name)
         model_index[name] = ["diffusers", "AutoencoderKL"]
     (tree / "modular_model_index.json").write_text(json.dumps(index))
     (tree / "model_index.json").write_text(json.dumps(model_index))

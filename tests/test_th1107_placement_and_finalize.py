@@ -25,7 +25,7 @@ class _FakeVAE:
 
 
 class _FakePipeline:
-    """Diffusers-shaped pipeline exposing the memory-saver entry points."""
+    """Diffusers-shaped pipeline exposing the memory-saver compiled graph points."""
 
     def __init__(self) -> None:
         self.vae = _FakeVAE()

@@ -465,7 +465,7 @@ def test_mint_refuses_kwarg_example_feeds_by_name(tmp_path) -> None:
     Declared Input rows are positionalized by construction, so the kwarg
     shape can only arrive via a HAND-REGISTERED builder (the escape hatch
     for families whose declaration is still being written) — which is
-    exactly where the mint must still refuse it, naming the entry."""
+    exactly where the mint must still refuse it, naming the compiled graph."""
     from types import SimpleNamespace
 
     from gen_worker import aot_inputs
@@ -608,13 +608,13 @@ def test_compiled_graph_plans_span_every_target_and_derive_the_contract() -> Non
     assert decode == {("z", 3), ("z", 4)}
 
 
-def test_compiled_graph_plan_entry_names_are_deterministic_coordinates() -> None:
+def test_compiled_graph_plan_compiled_graph_names_are_deterministic_coordinates() -> None:
     decl = _wan_a14b_decl()
     names = sorted(
-        aot_declaration.plan_entry_name(p)
+        aot_declaration.plan_compiled_graph_name(p)
         for p in aot_declaration.compiled_graph_plans(decl))
     # Dynamic-collapse plans span their rows, so the dims segment is empty
-    # and the fork coordinate alone names the entry.
+    # and the fork coordinate alone names the compiled graph.
     assert names == [
         "transformer/expand_timesteps=false,use_tiling=false",
         "transformer_2/expand_timesteps=false,use_tiling=false",
@@ -646,19 +646,19 @@ def test_fork_and_row_reach_the_compiled_graph_identity() -> None:
     from gen_worker import aot_serve, compiled_graph_key
 
     def _identity(fork: list, class_dims: list) -> str:
-        entry = {
+        compiled_graph = {
             "name": "unet/main",
             "target": "unet", "fork": fork, "class_dims": class_dims,
             "range_digest": "r1", "graph": {"v": 2},
         }
-        ch = aot_serve.class_hash(entry, strict=True, lora_bucket=0)
-        entry["class_hash"] = ch
+        ch = aot_serve.class_hash(compiled_graph, strict=True, lora_bucket=0)
+        compiled_graph["class_hash"] = ch
         meta = {
             "sm": "sm_89", "format": 3, "family": "sdxl-shaped",
             "kind": aot_serve.ARTIFACT_KIND,
-            # pgw#1176: ONE entry block, which NAMES its class. The manifest
+            # pgw#1176: ONE compiled graph block, which NAMES its class. The manifest
             # digest rides beside it as a coverage label, never as identity.
-            compiled_graph_key.ENTRY_BLOCK_KEY: entry,
+            compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY: compiled_graph,
             "manifest_digest": compiled_graph_key.manifest_digest([ch]),
             # pgw#1046: every key input is now a RECORDED block, so this
             # fixture states them rather than relying on an empty-dict digest.

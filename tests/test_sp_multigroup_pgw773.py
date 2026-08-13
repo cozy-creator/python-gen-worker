@@ -1,7 +1,7 @@
 """pgw#773: two sequence-parallel groups must never share a process group.
 
 Layer exercised: `topology.delivered_topology` (the worker's single boot
-entry for the packing it will execute) and `parallel.group`/`parallel.runtime`
+compiled graph for the packing it will execute) and `parallel.group`/`parallel.runtime`
 (the rank plumbing itself, on the gloo CPU rig).
 """
 

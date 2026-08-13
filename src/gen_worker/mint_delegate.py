@@ -1,19 +1,19 @@
 """pgw#784: the serving worker's side of an out-of-process mint.
 
-One function, ``build_cell``, is the whole of step 2 of Paul's contract:
+One function, ``build_compiled_graph``, is the whole of step 2 of Paul's contract:
 
-    "...if miss then begin compiling and serve eager until the local cell is
+    "...if miss then begin compiling and serve eager until the local compiled graph is
     available; then switch over to using that."
 
 It spawns a child, watches it with MEASURED evidence, retries by CLASS, and
-adopts the finished artifact through the ordinary delivered-cell path. It
+adopts the finished artifact through the ordinary delivered-compiled graph path. It
 budgets NOTHING: §4.33 / pgw#1175 deleted the pre-flight VRAM verdict, whose
 central term charged a weight-free child for the parent's resident weights. It is `async` and every wait inside it is
 loop-native, so the caller's 10s beat and its eager serving keep running for
 the whole mint — which is the entire point of th#1299.
 
 Kept out of ``executor.py`` deliberately: the executor's job is to decide WHEN
-a mint is owed and to advertise the result; how a cell gets built in another
+a mint is owed and to advertise the result; how a compiled graph gets built in another
 process is its own concern, and Go-style free functions over an explicit task
 struct make that testable without standing up an executor.
 
@@ -25,7 +25,7 @@ What the caller still owns
   background)" messaging keep working with no protocol change;
 * phase 4, advertising the adopted identity on the live compile targets;
 * the miss policy on failure — which is unchanged, because a failed mint has
-  always meant "keep serving eager, leave the cell absent".
+  always meant "keep serving eager, leave the compiled graph absent".
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 #: pgw#1010: ``GEN_WORKER_MINT_IN_PROCESS`` is GONE, with the shape it
 #: selected. In-process minting existed only to capture and pack a dynamo
-#: cell; a dynamo miss now serves JIT intake and packs nothing, so "mint in
+#: compiled graph; a dynamo miss now serves JIT intake and packs nothing, so "mint in
 #: this process" is not a state this worker can be in. pgw#995 recorded the
 #: env as the last deletable behaviour switch and named its blocker (ten test
 #: sites forcing the shape through the executor) — the shape's removal
@@ -91,7 +91,7 @@ class MintTask:
     configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     device: Optional[int] = None
     #: §4.30 / pgw#1137: whose machine this mint will run on. DECLARED here by
-    #: the caller rather than read off a process global, so the one entry that
+    #: the caller rather than read off a process global, so the one compiled graph that
     #: knows (``local_serve``) states it and every other caller gets ``FLEET``
     #: by construction — there is no ambient value to forget to set.
     posture: compile_posture.CompilePosture = compile_posture.FLEET
@@ -116,7 +116,7 @@ class DelegatedResult:
     detail: str = ""
     minted: Optional[Any] = None      # fleet_compiled_graphs.SelfMint
     attempts: int = 0
-    #: pgw#999: the CLASSIFIED reason the child's cell did not adopt, carried
+    #: pgw#999: the CLASSIFIED reason the child's compiled graph did not adopt, carried
     #: up so the executor's decline names the same token the abort event did.
     #: Empty for every outcome that is not an adopt refusal.
     reason: str = ""
@@ -131,8 +131,8 @@ FAILED = "failed"
 ABANDONED = mint_process.ABANDONED
 
 
-def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
-    """Flatten the parent's ``CompileCell`` for the wire.
+def cfg_spec(cfg: Any) -> mint_process.CompileCompiledGraphSpec:
+    """Flatten the parent's ``CompileCompiledGraph`` for the wire.
 
     The parent states the contract because the class-scoped guidance/text-len
     unions live on the spec rather than the decorator: a child re-deriving this
@@ -140,7 +140,7 @@ def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
     parent asked for. It carries what the child READS and nothing else
     (pgw#1034) — the child computes no key, so this is not a key-parity wire.
     """
-    return mint_process.CompileCellSpec(
+    return mint_process.CompileCompiledGraphSpec(
         shapes=tuple(tuple(int(v) for v in row) for row in (cfg.shapes or ())),
         targets=tuple(str(t) for t in (cfg.targets or ())),
         family=str(getattr(cfg, "family", "") or ""),
@@ -152,17 +152,17 @@ def cfg_spec(cfg: Any) -> mint_process.CompileCellSpec:
 
 
 def build_request(
-    task: MintTask, *, workdir: Path, entry_peak_rss_bytes: int = 0,
+    task: MintTask, *, workdir: Path, compiled_graph_peak_rss_bytes: int = 0,
     device: Optional[int] = None,
 ) -> MintRequest:
     pending = task.pending
     return MintRequest(
-        entry_peak_rss_bytes=int(entry_peak_rss_bytes),
+        compiled_graph_peak_rss_bytes=int(compiled_graph_peak_rss_bytes),
         function=task.function,
         modules=tuple(task.modules),
         family=str(pending.family),
         arm_token=str(pending.arm_token),
-        target=str(Path(workdir) / "cell.tar.gz"),
+        target=str(Path(workdir) / "compiled_graph.tar.gz"),
         work_root=str(workdir),
         report=str(Path(workdir) / mint_process.REPORT_NAME),
         # pgw#848: where the child writes its LIVE table. `report` is written
@@ -177,8 +177,8 @@ def build_request(
         # `mint_root`, and abandonment is how a crashed mint ends, so a bank
         # sited there would be deleted on its way out of the one case it
         # exists for. Keyed by the pending's `compiled_graph_key` as a SCOPE (identity is
-        # the per-entry re-derivation inside it), so a mint child restarted in
-        # place on the same pod — or a whole new pending for the same cell on a
+        # the per-compiled graph re-derivation inside it), so a mint child restarted in
+        # place on the same pod — or a whole new pending for the same compiled graph on a
         # later boot — finds the same bank.
         resume=str(aot_resume.bank_root(pending.arm_token)),
         cfg=cfg_spec(pending.cfg),
@@ -222,7 +222,7 @@ def _bank_device_peaks(phases: Any, *, weight_lane: str) -> int:
     Called on EVERY outcome, from the report AND from the snapshot, for the
     reason pgw#848 gives about the host half and which is sharper here: the
     attempt that ran out of device memory is the one whose reading the next
-    attempt most needs, and it is exactly the attempt that seals no cell and
+    attempt most needs, and it is exactly the attempt that seals no compiled graph and
     writes no manifest. A bank whose writer only runs on success is not a bank.
 
     ``weight_lane`` is the parent's own fact — the same axis it keys the RSS
@@ -231,7 +231,7 @@ def _bank_device_peaks(phases: Any, *, weight_lane: str) -> int:
     """
     try:
         block = (phases or {}).get("pool") or {}
-        rows = block.get("entry_device_peaks") or {}
+        rows = block.get("compiled_graph_device_peaks") or {}
         prov = block.get("device_peak_provenance") or {}
         if not isinstance(rows, dict) or not isinstance(prov, dict):
             return 0
@@ -251,7 +251,7 @@ def _bank_device_peaks(phases: Any, *, weight_lane: str) -> int:
                 weight_lane=str(weight_lane or ""),
                 phase=str(prov.get("phase") or ""),
             )
-            mint_workers.record_entry_device_peak(
+            mint_workers.record_compiled_graph_device_peak(
                 key,
                 int(reading.get("allocated_bytes") or 0),
                 int(reading.get("reserved_bytes") or 0))
@@ -285,7 +285,7 @@ def _on_frame(act: Any, watch: Optional[Watcher] = None) -> Any:
 #: counter uses. It was plain `mint_child_evidence` (pgw#1157): `window_for`
 #: splits on ":" and falls back to DEFAULT_STALL_WINDOW_S, so the mint's
 #: patience was the generic 300 s by ACCIDENT rather than the 600 s the
-#: `compile` family declares for exactly this work. An AOTI entry that spends
+#: `compile` family declares for exactly this work. An AOTI compiled graph that spends
 #: minutes inside one inductor call is the case that window exists for.
 EVIDENCE_COUNTER = "compile:mint_child_evidence"
 
@@ -329,7 +329,7 @@ def _on_evidence(act: Any) -> Any:
         # WITHOUT emitting, and the hub got nothing but counterless beats.
         # Measured on RunPod A40 `bgmdxhazxsugmk` (0.112.0): 62 minutes in
         # `trace_graph` with no counter, no rate and no self-diagnosis
-        # possible, over a mint that was in fact advancing (16 of 36 entries).
+        # possible, over a mint that was in fact advancing (16 of 36 compiled graphs).
         # `progress.counter` is register-or-get, so re-acquiring costs a dict
         # lookup and re-registers under whatever phase is current — which is
         # exactly the contract `Activity.counter()` documents for producers.
@@ -346,7 +346,7 @@ def _on_evidence(act: Any) -> Any:
 Watcher = Callable[[mint_process.MintFrame], None]
 
 
-async def build_cell(
+async def build_compiled_graph(
     task: MintTask,
     *,
     act: Any,
@@ -354,7 +354,7 @@ async def build_cell(
     max_attempts: int = mint_process.MAX_ATTEMPTS,
     watch: Optional[Watcher] = None,
 ) -> DelegatedResult:
-    """Build and adopt one cell in a child process. Never raises for a mint
+    """Build and adopt one compiled graph in a child process. Never raises for a mint
     failure — the worker must never die with its mint."""
     from . import fleet_compiled_graphs
 
@@ -380,11 +380,11 @@ async def build_cell(
         workdir.mkdir(parents=True, exist_ok=True)
         request = build_request(
             task, workdir=workdir, device=device,
-            # The one banked measurement that survives: what a previous entry
+            # The one banked measurement that survives: what a previous compiled graph
             # child on this pod really peaked at, in HOST RSS. It is K's
             # divisor and nothing else. Read here rather than in the child
             # because the child is the thing that dies.
-            entry_peak_rss_bytes=mint_workers.entry_peak_rss(
+            compiled_graph_peak_rss_bytes=mint_workers.compiled_graph_peak_rss(
                 family, task.weight_lane))
         act.phase(activity_mod.PHASE_LOAD)
         outcome = await mint_process.run_mint(
@@ -394,25 +394,25 @@ async def build_cell(
 
         if outcome.report is not None:
             # pgw#848: banked on EVERY outcome, not just a minted one — an
-            # aborted mint's entries still peaked where they peaked, and the
+            # aborted mint's compiled graphs still peaked where they peaked, and the
             # attempt that follows is exactly the one that needs the fact.
             # pgw#1175: the three DEVICE banks that stood beside this one are
             # gone; this is the only measurement any decision still reads.
-            mint_workers.record_entry_peak_rss(
+            mint_workers.record_compiled_graph_peak_rss(
                 family, task.weight_lane,
                 _pool_stat(outcome.report.mint_phases,
                            "peak_child_rss_bytes"))
         # ...and from the SNAPSHOT when the child never wrote a report at all,
         # which is every killed and every abandoned mint.
-        mint_workers.record_entry_peak_rss(
+        mint_workers.record_compiled_graph_peak_rss(
             family, task.weight_lane,
             _pool_stat(outcome.partial_phases, "peak_child_rss_bytes"))
         # pgw#1205: the DEVICE reading, per graph class, from both sources for
         # the same reason — the report when the child reached a terminus, the
         # snapshot when it was killed. The rows are banked HERE, on this
         # machine, because the consumer is local (K is decided in the mint
-        # child) and because a cell manifest cannot carry them: a mint that
-        # OOMs seals no cell. The identical rows ride `aot_mint_phases` to the
+        # child) and because a compiled graph manifest cannot carry them: a mint that
+        # OOMs seals no compiled graph. The identical rows ride `aot_mint_phases` to the
         # hub below, so the two sinks cannot disagree — they are the same bytes.
         if outcome.report is not None:
             _bank_device_peaks(
@@ -454,10 +454,10 @@ async def build_cell(
             return DelegatedResult(
                 status=FAILED, attempts=attempts, reason=reason,
                 detail=(
-                    f"the child's cell did not adopt on this runtime "
+                    f"the child's compiled_graph did not adopt on this runtime "
                     f"({reason}{': ' + why if why else ''})"
                     if reason else
-                    "the child's cell did not adopt on this runtime"))
+                    "the child's compiled_graph did not adopt on this runtime"))
 
         _emit_abort(outcome, family, pending.arm_token, attempts)
         if not (outcome.retryable and attempts < max(1, max_attempts)):
@@ -480,7 +480,7 @@ def _emit_boot_trace_rows(table: Mapping[str, Any], *, family: str) -> None:
     been a single blob event — readable by a human, joinable by nothing. The
     per-class trace cost was the biggest thing pgw#1087 could not answer ("10-20
     s/class, guessed, never measured"), and the number already exists: the child
-    measures `export_s` per entry and hands it back in the report. Re-emitting
+    measures `export_s` per compiled graph and hands it back in the report. Re-emitting
     it here — parent-side, where the stream is — puts one `trace_for_key` row
     per graph CLASS in the same table as the fetch and admission phases, so a
     boot's compile half and its I/O half are finally comparable.
@@ -493,15 +493,15 @@ def _emit_boot_trace_rows(table: Mapping[str, Any], *, family: str) -> None:
     that kept compiling after it went servable, not a broken ladder.
 
     OWED (pgw#1087, deliberately not taken here): the node count per class. It
-    is one line in `aot_mint._export_entry` — `timings["nodes"] =
+    is one line in `aot_mint._export_compiled_graph` — `timings["nodes"] =
     len(program.graph_module.graph.nodes)` — and that function is being edited
     by the pgw#1080 lane in the same window, so this lane does not race it. The
     row already carries the shape the count will ride (`nodes=` in `detail`).
     """
-    entries = table.get("entries")
-    if not isinstance(entries, Mapping):
+    compiled_graphs = table.get("compiled_graphs")
+    if not isinstance(compiled_graphs, Mapping):
         return
-    for name, timings in sorted(entries.items()):
+    for name, timings in sorted(compiled_graphs.items()):
         if not isinstance(timings, Mapping):
             continue
         export_s = float(timings.get("export_s") or 0.0)
@@ -528,7 +528,7 @@ def _emit_boot_trace_rows(table: Mapping[str, Any], *, family: str) -> None:
                 boot_phases.PHASE_KEY_FOLD,
                 duration_ms=int(round(declare_s * 1000.0)),
                 ref=family,
-                detail=f"classes={len(entries)}",
+                detail=f"classes={len(compiled_graphs)}",
             )
 
 
@@ -543,9 +543,9 @@ def _emit_aot_phases(
     is what finally puts rows in a table that has been empty on both stacks
     since th#1322 shipped the column.
 
-    A mint that produced NO cell still reports its total, under
+    A mint that produced NO compiled graph still reports its total, under
     `phase=aborted`: the seconds are real and worth recording, and they must
-    not enter an AOT-vs-JIT comparison as if a cell came out.
+    not enter an AOT-vs-JIT comparison as if a compiled graph came out.
     """
     from . import aot_mint
 
@@ -556,8 +556,8 @@ def _emit_aot_phases(
         # pgw#848: the ABANDONED path. `f9c1b2d` gave the aborted path its
         # measurements back; this is the same code with a different exit, and
         # it never got them. Attempt sixteen compiled for 29 minutes and
-        # reported ONE row — `status=abandoned total_s=1741.33 — no cell
-        # produced`, zero `entry:` rows, no `pool` row — because the child was
+        # reported ONE row — `status=abandoned total_s=1741.33 — no compiled graph
+        # produced`, zero `compiled graph:` rows, no `pool` row — because the child was
         # group-killed before it could write a report. The snapshot is what
         # survives a signal.
         table = dict(outcome.partial_phases)
@@ -595,7 +595,7 @@ def _emit_aot_phases(
         activity_mod.emit_event(
             activity_mod.KIND_AOT_MINT,
             f"family={family} lane={execution_lane or 'plain'} status={outcome.status} "
-            f"total_s={round(total_s, 2)} — no cell produced",
+            f"total_s={round(total_s, 2)} — no compiled_graph produced",
             phase="aborted",
             duration_ms=int(round(total_s * 1000)),
         )
@@ -637,7 +637,7 @@ __all__ = [
     "FAILED",
     "DelegatedResult",
     "MintTask",
-    "build_cell",
+    "build_compiled_graph",
     "build_request",
     "cfg_spec",
     "scratch_root",

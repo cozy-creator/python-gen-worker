@@ -48,7 +48,7 @@ Measured on torch 2.13.0, not assumed (four variants, cardless rig):
 WHAT IS REFUSED RATHER THAN GUESSED
 -----------------------------------
 A compile-target class with no ``load_config``/``from_config`` surface, a tree
-with no ``model_index.json`` entry naming the component's class, and the
+with no ``model_index.json`` compiled graph naming the component's class, and the
 quantized artifact lanes whose denoiser is built from an artifact's own weight
 table. Each refuses typed, naming the class and what it lacks — honest partial
 coverage beats total coverage that lies.
@@ -214,10 +214,10 @@ class _Collected:
 
 
 def _component_class(tree: Path, component: str) -> Any:
-    from .loading import model_index_components, model_index_entry
+    from .loading import model_index_components, model_index_compiled_graph
 
-    entry = model_index_entry(tree, component)
-    if entry is None:
+    compiled_graph = model_index_compiled_graph(tree, component)
+    if compiled_graph is None:
         known = sorted(model_index_components(tree))
         raise StructureOnlyUnsupported(
             component=component, cls_name="", tree=str(tree),
@@ -225,7 +225,7 @@ def _component_class(tree: Path, component: str) -> Any:
                 f"the tree names no class for it — model_index.json declares "
                 f"{known or 'nothing (no readable model_index.json)'}"),
         )
-    library, class_name = entry
+    library, class_name = compiled_graph
     try:
         module = importlib.import_module(library)
     except Exception as exc:  # noqa: BLE001 — a missing library is a refusal
@@ -827,10 +827,10 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 
 # ---------------------------------------------------------------------------
 # pgw#1111: the META round-trip that lets a weight-free program cross the
-# entry-compile pool's process boundary
+# compiled graph-compile pool's process boundary
 # ---------------------------------------------------------------------------
 #
-# The parallel entry pool hands each ExportedProgram to a compile CHILD by
+# The parallel compiled graph pool hands each ExportedProgram to a compile CHILD by
 # ``torch.export.save`` in the parent and ``torch.export.load`` in the child
 # (pgw#809). A structure-only program's PARAMETERS are FAKE tensors, and a fake
 # tensor has no storage to serialize — the child dies deserializing it

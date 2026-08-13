@@ -73,9 +73,9 @@ def test_floor_hook_keeps_explicit_timeouts_and_floors_infinite_ones() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _mounts(tmp_path, entries):
+def _mounts(tmp_path, compiled_graphs):
     p = tmp_path / "mounts"
-    p.write_text("".join(f"dev {point} {fstype} rw 0 0\n" for point, fstype in entries))
+    p.write_text("".join(f"dev {point} {fstype} rw 0 0\n" for point, fstype in compiled_graphs))
     return p
 
 

@@ -4,7 +4,7 @@ The incident is measured, not hypothetical. RunPod A40 ``bgmdxhazxsugmk``,
 release ``6ee9b4d4df2697a53da6f43a``, gen-worker **0.112.0** — every piece of
 pgw#824's instrumentation present and shipped — spent 62 minutes inside
 ``trace_graph`` and sent the hub not one counter-carrying beat. The mint was
-advancing the whole time (16 of 36 declared entries packed, ``export_s``
+advancing the whole time (16 of 36 declared compiled graphs packed, ``export_s``
 1378.52, ``compile_s`` 2065.36), and the lane that paid for the pod correctly
 reported that it could not tell that from a wedge.
 
@@ -170,7 +170,7 @@ def test_evidence_counter_takes_the_compile_family_s_patience() -> None:
         progress_mod.STALL_WINDOW_S["compile"])
     assert (progress_mod.window_for(mint_delegate.EVIDENCE_COUNTER)
             > progress_mod.DEFAULT_STALL_WINDOW_S), (
-        "an entry that spends minutes inside one inductor call is exactly "
+        "an compiled_graph that spends minutes inside one inductor call is exactly "
         "what the compile family's longer patience exists for")
 
 

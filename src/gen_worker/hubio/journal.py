@@ -126,7 +126,7 @@ class JournalEntry:
         )
 
     def declares(self, paths: Sequence[str]) -> bool:
-        """Does ``paths`` name exactly the file set this entry declared?
+        """Does ``paths`` name exactly the file set this compiled graph declared?
 
         The cheap half of "is the retained tree still the artifact this session
         is about". The expensive half is free: ``publish_v2`` re-hashes every
@@ -142,13 +142,13 @@ class PublishJournal:
     """Durable record of the publishes in flight beside one produced tree.
 
     Every mutation is a full durable rewrite: the file holds at most a handful
-    of entries (one per flavor of one conversion job), and a torn journal is
+    of compiled graphs (one per flavor of one conversion job), and a torn journal is
     worse than a slightly slower one. Nothing here may raise into a publish —
     a journal that cannot be written costs a resume, never the job.
     """
 
     path: Path
-    entries: List[JournalEntry] = field(default_factory=list)
+    compiled_graphs: List[JournalEntry] = field(default_factory=list)
 
     @classmethod
     def open(cls, path: Path | str) -> "PublishJournal":
@@ -159,49 +159,49 @@ class PublishJournal:
         except (OSError, ValueError):
             logger.warning("publish journal at %s is unreadable; starting fresh", p)
             return journal
-        for item in (raw.get("entries") if isinstance(raw, dict) else None) or []:
-            entry = JournalEntry.from_wire(item)
-            if entry is not None:
-                journal.entries.append(entry)
+        for item in (raw.get("compiled_graphs") if isinstance(raw, dict) else None) or []:
+            compiled_graph = JournalEntry.from_wire(item)
+            if compiled_graph is not None:
+                journal.compiled_graphs.append(compiled_graph)
         return journal
 
     def find(self, *, destination_repo: str, mode: str, key: str) -> Optional[JournalEntry]:
         """The session a re-run of THIS publish should try to resume."""
-        for entry in self.entries:
-            if (entry.artifact_key == key
-                    and entry.destination_repo == destination_repo
-                    and entry.mode == mode):
-                return entry
+        for compiled_graph in self.compiled_graphs:
+            if (compiled_graph.artifact_key == key
+                    and compiled_graph.destination_repo == destination_repo
+                    and compiled_graph.mode == mode):
+                return compiled_graph
         return None
 
     def for_producer(self, **match: Any) -> Optional[JournalEntry]:
-        """The in-flight entry whose ``producer_state`` carries these facts."""
-        for entry in self.entries:
-            if all(entry.producer_state.get(k) == v for k, v in match.items()):
-                return entry
+        """The in-flight compiled graph whose ``producer_state`` carries these facts."""
+        for compiled_graph in self.compiled_graphs:
+            if all(compiled_graph.producer_state.get(k) == v for k, v in match.items()):
+                return compiled_graph
         return None
 
-    def record(self, entry: JournalEntry) -> None:
-        self.entries = [
-            e for e in self.entries
-            if not (e.destination_repo == entry.destination_repo
-                    and e.mode == entry.mode
-                    and e.artifact_key == entry.artifact_key)
+    def record(self, compiled_graph: JournalEntry) -> None:
+        self.compiled_graphs = [
+            e for e in self.compiled_graphs
+            if not (e.destination_repo == compiled_graph.destination_repo
+                    and e.mode == compiled_graph.mode
+                    and e.artifact_key == compiled_graph.artifact_key)
         ]
-        self.entries.append(entry)
+        self.compiled_graphs.append(compiled_graph)
         self._flush()
 
     def clear(self, publish_id: str) -> None:
         """Drop one session — called when it PROMOTED. What remains in the file
         is exactly the set a successor should try to resume."""
-        before = len(self.entries)
-        self.entries = [e for e in self.entries if e.publish_id != publish_id]
-        if len(self.entries) != before:
+        before = len(self.compiled_graphs)
+        self.compiled_graphs = [e for e in self.compiled_graphs if e.publish_id != publish_id]
+        if len(self.compiled_graphs) != before:
             self._flush()
 
     def _flush(self) -> None:
         payload = json.dumps(
-            {"version": 1, "entries": [e.to_wire() for e in self.entries]},
+            {"version": 1, "compiled_graphs": [e.to_wire() for e in self.compiled_graphs]},
             separators=(",", ":"),
         ).encode("utf-8")
         try:

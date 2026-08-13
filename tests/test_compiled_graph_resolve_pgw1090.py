@@ -198,8 +198,8 @@ def test_a_non_key_is_refused_before_the_hub_is_dialled(stub) -> None:
     sent, _resp = stub
     # `ck1-short` is refused for its LENGTH, which is why the WELL-FORMED ck1
     # key sits beside it: pgw#1176 re-keyed the grammar, and a `ck1` key names
-    # a 36-entry all-or-nothing compiled graph this runtime cannot arm at all. It must
-    # fail HERE, at the comparison, rather than late inside a per-entry path —
+    # a 36-compiled graph all-or-nothing compiled graph this runtime cannot arm at all. It must
+    # fail HERE, at the comparison, rather than late inside a per-compiled graph path —
     # so the prefix, not the shape, has to be what refuses it.
     for bad in ("", "sdxl", "arm1-" + "ab" * 28, "ck1-short",
                 "ck1-" + "0" * 56):
@@ -256,7 +256,7 @@ def test_a_hit_builds_the_expected_identity_the_arm_gate_COMPARES(
         "env_seal": {"a": 1},
         # pgw#1176: the declaration-wide coverage label. Same arithmetic as
         # `combined_graph_hash`, demoted from identity — identity is
-        # `compiled_graph_key`, per entry.
+        # `compiled_graph_key`, per compiled graph.
         "manifest_digest": "c0ffee0000000000",
     }
     meta["toolchain_digest_expected"] = ck.facts_digest(meta["toolchain"])
@@ -299,11 +299,11 @@ def test_the_transport_is_shaped_for_the_existing_delivery_path(stub) -> None:
 
     files = list(compiled_graph.transport.files)
     assert len(files) == 1
-    entry = files[0]
+    compiled_graph = files[0]
     for attr in ("path", "size_bytes", "digest", "url", "chunks",
                  "chunk_size_bytes"):
-        assert hasattr(entry, attr), attr
-    assert str(entry.path).endswith(".tar.gz")
+        assert hasattr(compiled_graph, attr), attr
+    assert str(compiled_graph.path).endswith(".tar.gz")
 
 
 def test_a_chunked_transport_carries_the_chunk_attributes(stub) -> None:
@@ -394,7 +394,7 @@ def _derived(digest: str = KEY) -> Any:
     return boot_key.DerivedKey(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
         # class, so the set has one member and callers take it from `keys`.
-        entry_keys={"a": ck.from_axes({
+        compiled_graph_keys={"a": ck.from_axes({
             "graph": "c0ffee0000000000",
             "sm": "sm_89", "toolchain": "t" * 16}).digest},
         class_hashes={"a": "c0ffee0000000000"},

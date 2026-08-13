@@ -228,7 +228,7 @@ def test_the_hydration_event_carries_the_dtype_each_component_landed_at(
 
 
 # ---------------------------------------------------------------------------
-# the token map, including the one entry that is not identity
+# the token map, including the one compiled graph that is not identity
 # ---------------------------------------------------------------------------
 
 

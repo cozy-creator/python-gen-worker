@@ -59,7 +59,7 @@ def http_timeouts() -> tuple[float, float]:
 
 
 def _floor_timeout_hook(request: Any) -> None:
-    """httpx request event hook: entries in request.extensions['timeout'] are
+    """httpx request event hook: compiled graphs in request.extensions['timeout'] are
     None when infinite — replace only those; explicit numbers win."""
     connect, read = http_timeouts()
     defaults = {"connect": connect, "read": read, "write": read, "pool": connect}
@@ -171,7 +171,7 @@ def _install_requests_backend() -> None:
 
 def hf() -> Any:
     """THE sanctioned huggingface_hub accessor (gw#467): installs the timeout
-    floor, then returns the module. Every network entry point (HfApi,
+    floor, then returns the module. Every network compiled graph point (HfApi,
     snapshot_download, hf_hub_download, ...) must be reached through here —
     the CI guard (scripts/lint_http_timeouts.py) rejects direct imports
     anywhere else in src/, so the floor is structurally unskippable.

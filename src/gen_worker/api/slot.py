@@ -266,7 +266,7 @@ def _apply_lora_overrides(
     Only fields ``base``'s own struct declares participate — a lora's
     LoRA-only fields (``trigger_words``, ``recommended_weight``: no
     checkpoint-recipe analog) and ``schema_version`` are never merged in.
-    Missing/empty entries are skipped. A lora family with no registered
+    Missing/empty compiled graphs are skipped. A lora family with no registered
     ``kind="lora"`` vocabulary is skipped silently (best-effort enhancement:
     an unmerged lora override never blocks the checkpoint's own resolved
     recipe). A present-but-MALFORMED lora metadata document (tensorhub

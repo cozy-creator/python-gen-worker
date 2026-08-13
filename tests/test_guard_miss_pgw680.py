@@ -336,7 +336,7 @@ class _Pipe:
 
 @pytest.fixture(autouse=True)
 def _clean_registries() -> Any:
-    # _Mod.forward.__code__ is class-shared: dynamo entries from one test's
+    # _Mod.forward.__code__ is class-shared: dynamo compiled graphs from one test's
     # compiles would serve (or guard-miss) another's. Fresh guard state per
     # test.
     torch._dynamo.reset()
@@ -363,8 +363,8 @@ def _clean_registries() -> Any:
 class _Sim:
     """Dynamo/inductor semantics at the torch boundary, with guard EPOCHS.
 
-    Entries are recorded at ``guard_epoch``; a call whose entry matches the
-    current epoch is a HIT. An entry from an older epoch is a guard miss —
+    Compiled graphs are recorded at ``guard_epoch``; a call whose compiled graph matches the
+    current epoch is a HIT. An compiled graph from an older epoch is a guard miss —
     dynamo must RECOMPILE: inside the tenant serve window the stance raises
     torch's real RecompileError (what error_on_recompile does); outside it
     the recompile happens inline (warm/mint windows, the warm thread's
@@ -381,7 +381,7 @@ class _Sim:
         self.window_seen: List[bool] = []
         self.served_compiled: List[str] = []
 
-    def _entry(self, graph: str) -> Path:
+    def _compiled_graph(self, graph: str) -> Path:
         import os
 
         fx_dir = Path(os.environ["TORCHINDUCTOR_CACHE_DIR"]) / "fxgraph"
@@ -392,10 +392,10 @@ class _Sim:
                       args: tuple, kwargs: dict) -> Any:
         graph = "g-" + hashlib.blake2s(
             repr((label, args, sorted(kwargs))).encode()).hexdigest()[:16]
-        entry = self._entry(graph)
+        compiled_graph = self._compiled_graph(graph)
         epoch: Optional[int] = None
-        if entry.exists():
-            epoch = int(entry.read_text() or 0)
+        if compiled_graph.exists():
+            epoch = int(compiled_graph.read_text() or 0)
         if epoch == self.guard_epoch:
             self.counters["fxgraph_cache_hit"] += 1
             self.served_compiled.append(graph)
@@ -408,7 +408,7 @@ class _Sim:
                 f"expected 4096, actual 1 (epoch {epoch} != "
                 f"{self.guard_epoch})")
         self.window_seen.append(cc._SERVE_WINDOW.get())
-        entry.write_text(str(self.guard_epoch))
+        compiled_graph.write_text(str(self.guard_epoch))
         self.counters["fxgraph_cache_miss"] += 1
         self.compiles.append((graph, self.guard_epoch))
         return original(*args, **kwargs)
@@ -489,7 +489,7 @@ class _Rig:
         # about. It mints and publishes nothing, which is orthogonal to this
         # file's subject and asserted below where it shows.
         #
-        # The sim keys its entries under TORCHINDUCTOR_CACHE_DIR. The retired
+        # The sim keys its compiled graphs under TORCHINDUCTOR_CACHE_DIR. The retired
         # capture used to point that at a mint dir; an intake arm moves no env
         # (that was gw#608's whole root cause), so the rig states the cache
         # root itself — production leaves it wherever the image/worker set it.
@@ -681,7 +681,7 @@ def test_tenant_guard_miss_end_to_end(
     assert res2.status == pb.JOB_STATUS_OK, res2.safe_message
     assert cc._proof_count(pipe, "guard_misses") == 1
     assert len(rig.sim.served_compiled) > served_before, (
-        "the healed entry must serve the second request compiled")
+        "the healed compiled_graph must serve the second request compiled")
     events_after = [m.activity_update for m in rig.sent
                     if m.WhichOneof("msg") == "activity_update"
                     and m.activity_update.kind == activity_mod.KIND_GUARD_MISS]
@@ -695,10 +695,10 @@ def test_tenant_guard_miss_end_to_end(
 # Dynamo's GLOBAL_STATE guard snapshots torch.get_num_threads() on the thread
 # that COMPILES, and the OpenMP intra-op ICV is per-thread and sticky once
 # initialized. hot_swap runs ONE process-global warm thread, so if it was
-# created before something narrowed the serving thread's count, every entry it
+# created before something narrowed the serving thread's count, every compiled graph it
 # compiled carried a guard the serving thread could never satisfy
 # ("GLOBAL_STATE changed: num_threads") — the heal marked the signature warm
-# while its entry was unservable, the next request missed again, and
+# while its compiled graph was unservable, the next request missed again, and
 # _GUARD_MISS_HEAL_LIMIT made the signature permanently volatile.
 #
 # Latent rather than live on today's production ordering (both
@@ -732,7 +732,7 @@ def test_warm_job_carries_the_requesting_threads_intra_op_count() -> None:
 
 def test_the_warm_compile_imposes_that_count_before_compiling() -> None:
     """The whole point: the compile runs at the requesting thread's value, so
-    the entry's GLOBAL_STATE guard matches the thread that will serve it."""
+    the compiled graph's GLOBAL_STATE guard matches the thread that will serve it."""
     router = hot_swap.Router()
     seen: List[int] = []
 

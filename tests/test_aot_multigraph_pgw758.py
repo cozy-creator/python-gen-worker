@@ -1,5 +1,5 @@
 """pgw#758 — multi-graph compiled graphs: one .pt2 per (family x lane x contract),
-every declared graph class a NAMED ENTRY.
+every declared graph class a NAMED COMPILED_GRAPH.
 
 Paul's ruling: "generate and generate_turbo are separate functions, they
 have separate graphs, but they are COMBINED TOGETHER INTO ONE FILE."
@@ -96,7 +96,7 @@ def _mint(tmp_path: Path, pipe: Any = None) -> Tuple[Any, aot_mint.MintResult]:
 @pytest.fixture(scope="module")
 def minted_compiled_graph(tmp_path_factory, request) -> Dict[str, Any]:
     """ONE real mint shared by the read-only assertions (an AOTI compile
-    costs ~10s/entry on CPU; the mutating tests mint their own)."""
+    costs ~10s/compiled graph on CPU; the mutating tests mint their own)."""
     from _pytest.monkeypatch import MonkeyPatch
 
     mp = MonkeyPatch()
@@ -115,19 +115,19 @@ def minted_compiled_graph(tmp_path_factory, request) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Entry naming — deterministic, declaration-derived
+# Compiled graph naming — deterministic, declaration-derived
 # ---------------------------------------------------------------------------
 
 
-def test_entry_names_derive_from_declaration_coordinates() -> None:
+def test_compiled_graph_names_derive_from_declaration_coordinates() -> None:
     decl = _declare()
     plans = aot_declaration.compiled_graph_plans(decl)
-    names = sorted(aot_declaration.plan_entry_name(p) for p in plans)
+    names = sorted(aot_declaration.plan_compiled_graph_name(p) for p in plans)
     assert names == ["unet/cfg=false/B=1", "unet/cfg=true/B=2"]
 
 
-def test_dynamic_collapse_entry_omits_the_dims_segment() -> None:
-    name = aot_declaration.entry_name(
+def test_dynamic_collapse_compiled_graph_omits_the_dims_segment() -> None:
+    name = aot_declaration.compiled_graph_name(
         "transformer", (("expand_timesteps", False),), ())
     assert name == "transformer/expand_timesteps=false"
 
@@ -154,26 +154,26 @@ def test_the_manifest_digest_keeps_the_verbatim_ck6_formula() -> None:
 
 
 def test_per_class_hashes_ride_metadata_and_name_the_class(minted_compiled_graph) -> None:
-    row = sorted(minted_compiled_graph["result"].entries, key=lambda r: r.entry)[0]
+    row = sorted(minted_compiled_graph["result"].compiled_graphs, key=lambda r: r.compiled_graph)[0]
     meta = json.loads(json.dumps(row.metadata))
-    block = meta[compiled_graph_key.ENTRY_BLOCK_KEY]
+    block = meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]
     assert block["class_hash"]
     block["class_hash"] = "f" * 16
     reason = aot_serve.verify(meta, family=FAMILY)
-    assert row.entry in reason and "class_hash" in reason
+    assert row.compiled_graph in reason and "class_hash" in reason
 
 
 def test_range_digest_is_folded_per_class() -> None:
-    entry = {
+    compiled_graph = {
         "target": "unet",
         "fork": [["cfg", True]],
         "class_dims": [["B", 2]],
         "range_digest": "abc",
         "graph": {},
     }
-    one = aot_serve.class_hash(entry, strict=True, lora_bucket=0)
-    entry["range_digest"] = "def"
-    assert aot_serve.class_hash(entry, strict=True, lora_bucket=0) != one
+    one = aot_serve.class_hash(compiled_graph, strict=True, lora_bucket=0)
+    compiled_graph["range_digest"] = "def"
+    assert aot_serve.class_hash(compiled_graph, strict=True, lora_bucket=0) != one
 
 
 # ---------------------------------------------------------------------------
@@ -189,37 +189,37 @@ def test_one_mint_packages_EVERY_declared_class_AS_ITS_OWN_ARTIFACT(
     does not, because that unit is what forbade incremental adoption.
     """
     result = minted_compiled_graph["result"]
-    assert sorted(r.entry for r in result.entries) == [
+    assert sorted(r.compiled_graph for r in result.compiled_graphs) == [
         "unet/cfg=false/B=1", "unet/cfg=true/B=2"]
     # Independently keyed — two classes, two identities, no shared unit.
-    assert len({r.key for r in result.entries}) == 2
-    assert all(compiled_graph_key.is_key(r.key) for r in result.entries)
+    assert len({r.key for r in result.compiled_graphs}) == 2
+    assert all(compiled_graph_key.is_key(r.key) for r in result.compiled_graphs)
     # ...and ONE manifest label over the set, which is telemetry not identity.
     assert result.manifest
     assert all(r.metadata["manifest_digest"] == result.manifest
-               for r in result.entries)
-    for i, row in enumerate(result.entries):
+               for r in result.compiled_graphs)
+    for i, row in enumerate(result.compiled_graphs):
         assert row.metadata["format"] == 3
-        assert "entries" not in row.metadata
+        assert "compiled_graphs" not in row.metadata
         with tarfile.open(row.artifact) as tar:
             tar.extractall(minted_compiled_graph["tmp"] / f"x{i}", filter="data")
-        names = aot_package.package_entry_names(
+        names = aot_package.package_compiled_graph_names(
             minted_compiled_graph["tmp"] / f"x{i}" / aot_serve.PACKAGE_NAME)
-        assert list(names) == [row.entry], (
-            "an entry artifact carries ONE named model")
+        assert list(names) == [row.compiled_graph], (
+            "an compiled_graph artifact carries ONE named model")
 
 
-def test_package_gates_run_per_entry(minted_compiled_graph) -> None:
-    for i, row in enumerate(minted_compiled_graph["result"].entries):
+def test_package_gates_run_per_compiled_graph(minted_compiled_graph) -> None:
+    for i, row in enumerate(minted_compiled_graph["result"].compiled_graphs):
         with tarfile.open(row.artifact) as tar:
             tar.extractall(minted_compiled_graph["tmp"] / f"g{i}", filter="data")
         package = minted_compiled_graph["tmp"] / f"g{i}" / aot_serve.PACKAGE_NAME
-        assert aot_package.code_only_violations(package, row.entry) == []
-        assert aot_package.declared_constants(package, row.entry)
+        assert aot_package.code_only_violations(package, row.compiled_graph) == []
+        assert aot_package.declared_constants(package, row.compiled_graph)
 
 
-def test_entry_scoped_reads_refuse_an_unknown_entry(minted_compiled_graph) -> None:
-    with tarfile.open(minted_compiled_graph["result"].entries[0].artifact) as tar:
+def test_compiled_graph_scoped_reads_refuse_an_unknown_compiled_graph(minted_compiled_graph) -> None:
+    with tarfile.open(minted_compiled_graph["result"].compiled_graphs[0].artifact) as tar:
         tar.extractall(minted_compiled_graph["tmp"] / "u", filter="data")
     package = minted_compiled_graph["tmp"] / "u" / aot_serve.PACKAGE_NAME
     with pytest.raises(aot_package.PackageIntrospectionError) as err:
@@ -252,7 +252,7 @@ def test_mint_request_refuses_coordinate_subsets(tmp_path) -> None:
             aot_mint._load_spec(p)
 
 
-def test_export_failure_names_the_entry(tmp_path, fake_sm) -> None:
+def test_export_failure_names_the_compiled_graph(tmp_path, fake_sm) -> None:
     _declare()
 
     class Broken(nn.Module):
@@ -337,9 +337,9 @@ def test_declared_warm_family_mints_the_warmed_graph(tmp_path, fake_sm) -> None:
     # The pre-warm RAN before export (the cache branch is warm at trace time),
     # and the mint recorded its cost.
     assert module.warm_calls == 1
-    entry = next(iter(
-        result.entries[0].metadata["mint_phases"]["entries"].values()))
-    assert "warm_s" in entry
+    compiled_graph = next(iter(
+        result.compiled_graphs[0].metadata["mint_phases"]["compiled_graphs"].values()))
+    assert "warm_s" in compiled_graph
 
 
 def test_undeclared_warm_family_is_not_warmed(tmp_path, fake_sm) -> None:
@@ -350,9 +350,9 @@ def test_undeclared_warm_family_is_not_warmed(tmp_path, fake_sm) -> None:
     result = aot_mint.mint(pipe, spec, tmp_path)
     # Export itself traces the cold branch; no separate warm forward ran and
     # none was recorded.
-    entry = next(iter(
-        result.entries[0].metadata["mint_phases"]["entries"].values()))
-    assert "warm_s" not in entry
+    compiled_graph = next(iter(
+        result.compiled_graphs[0].metadata["mint_phases"]["compiled_graphs"].values()))
+    assert "warm_s" not in compiled_graph
 
 
 def test_failed_declared_warm_is_a_named_refusal(tmp_path, fake_sm) -> None:
@@ -384,18 +384,18 @@ def test_failed_declared_warm_is_a_named_refusal(tmp_path, fake_sm) -> None:
 def test_mint_records_the_phase_table(minted_compiled_graph) -> None:
     result = minted_compiled_graph["result"]
     # The phase table is a property of the MINT, not of one artifact, so every
-    # entry's metadata carries the same one — it is the run's record.
-    table = result.entries[0].metadata["mint_phases"]
-    assert table["n_entries"] == 2
-    assert set(table["entries"]) == {r.entry for r in result.entries}
-    for row in table["entries"].values():
+    # compiled graph's metadata carries the same one — it is the run's record.
+    table = result.compiled_graphs[0].metadata["mint_phases"]
+    assert table["n_compiled_graphs"] == 2
+    assert set(table["compiled_graphs"]) == {r.compiled_graph for r in result.compiled_graphs}
+    for row in table["compiled_graphs"].values():
         assert row["export_s"] >= 0 and row["compile_s"] > 0
     # The host C++ compile+link phase — the stage the JIT path skips — is a
     # labeled number, not folklore.
     assert table["phases"].get("host_compile_s", 0) > 0
     assert "max_autotune" in table["autotune"]
     assert table["totals"]["compile_s"] > 0
-    # The ONE resolved inductor config every entry compiled under is
+    # The ONE resolved inductor config every compiled graph compiled under is
     # recorded verbatim (#757's open per-call seal-bypass concern), and the
     # #757-measured mint default rides it: compile_threads 32 -> 4 is FREE
     # (-2% wall) and identity-inert.
@@ -410,21 +410,21 @@ def test_mint_records_the_phase_table(minted_compiled_graph) -> None:
 
 
 def _armed(minted_compiled_graph) -> Any:
-    """Arm EVERY minted entry onto one pipeline, one artifact at a time.
+    """Arm EVERY minted compiled graph onto one pipeline, one artifact at a time.
 
     pgw#1176: this is what accretion looks like from the outside — the second
     call joins the first's registry, the first's target pool and the first's
-    live wrap. The old shape (one `arm_entry` over a multi-entry compiled graph) is
+    live wrap. The old shape (one `arm_compiled_graph` over a multi-compiled graph compiled graph) is
     gone with the compiled graph.
     """
     pipe = minted_compiled_graph["pipe"]
     if not aot_serve.is_armed(pipe):
         cfg = types.SimpleNamespace(family=FAMILY, lora_bucket=0)
-        for row in minted_compiled_graph["result"].entries:
-            aot_serve.arm_entry(
+        for row in minted_compiled_graph["result"].compiled_graphs:
+            aot_serve.arm_compiled_graph(
                 pipe, cfg, row.artifact,
                 cache_dir=minted_compiled_graph["tmp"] / "cache",
-                declared=[r.entry for r in minted_compiled_graph["result"].entries])
+                declared=[r.compiled_graph for r in minted_compiled_graph["result"].compiled_graphs])
     return pipe
 
 
@@ -470,17 +470,17 @@ def test_dispatch_refuses_ambiguity_by_name() -> None:
         def __call__(self, *feeds):
             return feeds[0]
 
-    def runner(entry: str) -> aot_serve.ArtifactRunner:
+    def runner(compiled_graph: str) -> aot_serve.ArtifactRunner:
         r = aot_serve.ArtifactRunner(
-            package=_Pkg(), contract=contract, constants=(), entry=entry)
+            package=_Pkg(), contract=contract, constants=(), compiled_graph=compiled_graph)
         r.bind({}, {})
         return r
 
-    dispatch = aot_serve.EntryDispatch(
+    dispatch = aot_serve.CompiledGraphDispatch(
         (("unet/a", runner("unet/a")), ("unet/b", runner("unet/b"))))
     with pytest.raises(aot_serve.IngressContractError) as err:
         dispatch(torch.randn(2, 4))
-    assert err.value.reason == "entry_ambiguous"
+    assert err.value.reason == "compiled_graph_ambiguous"
     assert "unet/a" in str(err.value) and "unet/b" in str(err.value)
 
 
@@ -498,19 +498,19 @@ def test_unwrap_restores_every_target(minted_compiled_graph) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Envelope v2 — refusals name the entry
+# Envelope v2 — refusals name the compiled graph
 # ---------------------------------------------------------------------------
 
 
-def test_verify_names_a_malformed_entry(minted_compiled_graph) -> None:
-    row = sorted(minted_compiled_graph["result"].entries, key=lambda r: r.entry)[0]
+def test_verify_names_a_malformed_compiled_graph(minted_compiled_graph) -> None:
+    row = sorted(minted_compiled_graph["result"].compiled_graphs, key=lambda r: r.compiled_graph)[0]
     meta = json.loads(json.dumps(row.metadata))
-    meta[compiled_graph_key.ENTRY_BLOCK_KEY]["inputs"] = []
+    meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["inputs"] = []
     reason = aot_serve.verify(meta, family=FAMILY)
-    assert row.entry in reason
+    assert row.compiled_graph in reason
 
 
-def test_literals_are_namespaced_per_entry() -> None:
+def test_literals_are_namespaced_per_compiled_graph() -> None:
     split = aot_serve.split_literals({
         "unet/cfg=true/B=2::pos.table": 1,
         "unet/cfg=false/B=1::pos.table": 2,
@@ -521,9 +521,9 @@ def test_literals_are_namespaced_per_entry() -> None:
         aot_serve.split_literals({"pos.table": 3})
 
 
-def test_entry_names_reserving_the_literal_separator_are_refused() -> None:
+def test_compiled_graph_names_reserving_the_literal_separator_are_refused() -> None:
     with pytest.raises(ValueError, match="reserves"):
-        aot_serve.entry_from_meta({compiled_graph_key.ENTRY_BLOCK_KEY: {
+        aot_serve.compiled_graph_from_meta({compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY: {
             "name": "unet::x", "target": "unet", "inputs": [
                 {"name": "s", "position": 0, "dtype": "float32", "shape": [1]}],
             "symbols": {}, "constants": []}})

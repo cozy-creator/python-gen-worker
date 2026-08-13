@@ -88,14 +88,14 @@ def detected_capabilities() -> Dict[str, Any]:
     return out
 
 
-def function_entries(
+def function_compiled_graphs(
     candidates: List["_SelectedFunction"],
     *,
     detected: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """The stable ``functions`` array, shared by ``run --list`` and
     ``serve --list-functions --json``. With ``detected`` (the
-    ``detected_capabilities()`` block), each entry carries a ``fit`` verdict
+    ``detected_capabilities()`` block), each compiled graph carries a ``fit`` verdict
     (``fits | offload | incompatible``) computed from its ``Resources``."""
 
     caps: Optional[TensorhubWorkerCapabilities] = None
@@ -112,7 +112,7 @@ def function_entries(
     out: List[Dict[str, Any]] = []
     for c in sorted(candidates, key=lambda c: c.fn_name):
         output_type = getattr(c, "output_type", None)
-        entry: Dict[str, Any] = {
+        compiled_graph: Dict[str, Any] = {
             "name": c.fn_name,
             "class": getattr(c.cls, "__name__", None) if c.cls is not None else None,
             "method": getattr(c, "attr_name", None) or None,
@@ -128,29 +128,29 @@ def function_entries(
         resources = getattr(c, "resources", None)
         res_dict = _describe_resources(resources)
         if res_dict:
-            entry["resources"] = res_dict
+            compiled_graph["resources"] = res_dict
         if caps is not None:
             from ..models.serve_fit import plan_serve
 
             primary = next(iter((getattr(c, "bindings", {}) or {}).values()), None)
             fit, reason = variant_fit(resources, caps, free_gb, binding=primary)
-            entry["fit"] = fit
+            compiled_graph["fit"] = fit
             if reason:
-                entry["fit_reason"] = reason
+                compiled_graph["fit_reason"] = reason
             # th#683 P3 honest-guidance: how it will actually run on this card +
             # the realistic latency trade + the ideal hardware.
             plan = plan_serve(resources, caps, free_gb, binding=primary)
-            entry["serveable"] = plan.serveable
-            entry["run_mode"] = plan.run_mode
+            compiled_graph["serveable"] = plan.serveable
+            compiled_graph["run_mode"] = plan.run_mode
             if plan.est_latency_multiplier and plan.est_latency_multiplier != 1.0:
-                entry["est_latency_multiplier"] = round(plan.est_latency_multiplier, 2)
+                compiled_graph["est_latency_multiplier"] = round(plan.est_latency_multiplier, 2)
             if plan.recommended_vram_gb:
-                entry["recommended_vram_gb"] = plan.recommended_vram_gb
+                compiled_graph["recommended_vram_gb"] = plan.recommended_vram_gb
             if plan.warning:
-                entry["advisory"] = plan.warning
+                compiled_graph["advisory"] = plan.warning
             elif plan.reason and not plan.serveable:
-                entry["advisory"] = plan.reason
-        out.append(entry)
+                compiled_graph["advisory"] = plan.reason
+        out.append(compiled_graph)
     return out
 
 
@@ -175,5 +175,5 @@ def build_description(
             "kind": kinds[0] if len(kinds) == 1 else kinds,
             "classes": classes,
         },
-        "functions": function_entries(candidates, detected=detected),
+        "functions": function_compiled_graphs(candidates, detected=detected),
     }

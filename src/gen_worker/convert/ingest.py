@@ -33,12 +33,12 @@ from ..net import hf, install_hf_http_timeouts
 from ..models.safetensors_header import header_len_ok
 from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
-from huggingface_hub.errors import EntryNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError
+from huggingface_hub.errors import CompiledGraphNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError
 
 
 def _hf_access_error_classes() -> tuple[type[Exception], ...]:
 
-    return (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError)
+    return (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError, CompiledGraphNotFoundError)
 
 
 def _raise_input_refusal(exc: BaseException) -> NoReturn:
@@ -215,20 +215,20 @@ def _hf_classification_inputs(
     paths: list[str] = []
     sizes: dict[str, int] = {}
     content_ids: dict[str, str] = {}
-    for entry in api.list_repo_tree(repo_id, revision=revision, recursive=True):
-        path = str(getattr(entry, "path", "") or "")
-        size = getattr(entry, "size", None)
+    for compiled_graph in api.list_repo_tree(repo_id, revision=revision, recursive=True):
+        path = str(getattr(compiled_graph, "path", "") or "")
+        size = getattr(compiled_graph, "size", None)
         if not path or size is None:
             continue  # skip directory rows
         paths.append(path)
         sizes[path] = int(size or 0)
-        lfs = getattr(entry, "lfs", None)
+        lfs = getattr(compiled_graph, "lfs", None)
         sha = ""
         if lfs is not None:
             sha = str(getattr(lfs, "sha256", "") or "").strip().lower()
             if not sha and isinstance(lfs, dict):
                 sha = str(lfs.get("sha256") or lfs.get("oid") or "").strip().lower()
-        blob_id = str(getattr(entry, "blob_id", "") or "").strip()
+        blob_id = str(getattr(compiled_graph, "blob_id", "") or "").strip()
         if sha:
             content_ids[path] = f"sha256:{sha}"
         elif blob_id:
@@ -516,7 +516,7 @@ def _snapshot_download_with_retries(
             )
             return
         except (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,
-                EntryNotFoundError) as exc:
+                CompiledGraphNotFoundError) as exc:
             _raise_input_refusal(exc)  # permanent + user-caused (th#1084)
         except (ValueError, TypeError):
             raise  # permanent — retrying cannot help
@@ -761,7 +761,7 @@ def ingest_civitai(
     # th#611: gguf-only civitai versions publish AS-IS (single unshardable
     # artifact; the hub classifies family + flavor from the header). Without
     # a classification the clone falls into the safetensors repackage path
-    # and dies with "no safetensors entry for repackage".
+    # and dies with "no safetensors compiled graph for repackage".
     classification: RepoClassification | None = None
     gguf_names = [f for f in files if f.lower().endswith(".gguf")]
     st_names = [f for f in files if f.lower().endswith(".safetensors")]

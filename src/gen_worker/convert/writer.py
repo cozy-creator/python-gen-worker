@@ -311,25 +311,25 @@ def iter_component_tensors(component_dir: Path) -> Iterator[tuple[str, "torch.Te
     """
     from safetensors import safe_open
 
-    entry: Optional[Path] = None
+    compiled_graph: Optional[Path] = None
     for p in sorted(component_dir.iterdir()):
         if p.name.endswith(".safetensors.index.json"):
-            entry = p
+            compiled_graph = p
             break
-    if entry is None:
+    if compiled_graph is None:
         st = sorted(component_dir.glob("*.safetensors"))
         if st:
-            entry = st[0]
-    if entry is None:
+            compiled_graph = st[0]
+    if compiled_graph is None:
         for ext in _PICKLE_EXTS:
             found = sorted(component_dir.glob(f"*{ext}"))
             if found:
-                entry = materialize_pickle_to_safetensors(
+                compiled_graph = materialize_pickle_to_safetensors(
                     found[0], component_dir / PICKLE_CACHE_DIR)
                 break
-    if entry is None:
+    if compiled_graph is None:
         return
-    for shard in _resolve_input_shards(entry):
+    for shard in _resolve_input_shards(compiled_graph):
         with safe_open(str(shard), framework="pt") as f:
             for name in f.keys():
                 yield name, f.get_tensor(name)
@@ -346,13 +346,13 @@ def iter_source_tensors(
         for name, tensor in iter_component_tensors(root):
             yield "", name, tensor
         return
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir() or entry.name not in _weight_component_dirs():
+    for compiled_graph in sorted(root.iterdir()):
+        if not compiled_graph.is_dir() or compiled_graph.name not in _weight_component_dirs():
             continue
-        if components_filter is not None and entry.name not in components_filter:
+        if components_filter is not None and compiled_graph.name not in components_filter:
             continue
-        for name, tensor in iter_component_tensors(entry):
-            yield entry.name, name, tensor
+        for name, tensor in iter_component_tensors(compiled_graph):
+            yield compiled_graph.name, name, tensor
 
 
 # ---------------------------------------------------------------------------
@@ -747,7 +747,7 @@ def fp8_default_components() -> tuple[str, ...]:
 
 
 def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Path]]:
-    """(component, entry_path) per weight set. entry is the index.json for
+    """(component, compiled_graph_path) per weight set. compiled graph is the index.json for
     sharded sets, else the safetensors file. A singlefile-layout source can
     still carry several root weight files (civitai bundles ship the
     diffusion model + text encoder + VAE side by side) — every one is its
@@ -755,7 +755,7 @@ def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Pat
     copy would silently drop the rest."""
     groups: list[tuple[str, Path]] = []
 
-    def _entries_for(d: Path) -> list[Path]:
+    def _compiled_graphs_for(d: Path) -> list[Path]:
         idx = sorted(d.glob("*.safetensors.index.json"))
         sharded_members: set[str] = set()
         for i in idx:
@@ -769,14 +769,14 @@ def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Pat
         return idx + loose
 
     if layout == "diffusers":
-        for entry in sorted(source_dir.iterdir()):
-            if entry.is_dir():
-                found = _entries_for(entry)
+        for compiled_graph in sorted(source_dir.iterdir()):
+            if compiled_graph.is_dir():
+                found = _compiled_graphs_for(compiled_graph)
                 if found:
-                    groups.append((entry.name, found[0]))
+                    groups.append((compiled_graph.name, found[0]))
     else:
-        for entry_path in _entries_for(source_dir):
-            groups.append(("", entry_path))
+        for compiled_graph_path in _compiled_graphs_for(source_dir):
+            groups.append(("", compiled_graph_path))
     return groups
 
 
@@ -861,8 +861,8 @@ def apply_objective_scheduler_config(
     cfg_path.write_text(json.dumps(cfg, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def component_output_stem(entry: Path) -> str:
-    stem = entry.name
+def component_output_stem(compiled_graph: Path) -> str:
+    stem = compiled_graph.name
     for suffix in (".safetensors.index.json", ".safetensors"):
         if stem.endswith(suffix):
             return stem[: -len(suffix)] or "model"
@@ -885,11 +885,11 @@ def streaming_cast_snapshot(
         raise ConversionImplementationError("no safetensors weights found to cast")
     tensor_count = converted = 0
     done: set[str] = set()
-    for comp, entry in groups:
+    for comp, compiled_graph in groups:
         result = streaming_dtype_cast(
-            entry, (out_dir / comp) if comp else out_dir,
+            compiled_graph, (out_dir / comp) if comp else out_dir,
             target_dtype=target_dtype,
-            output_stem=component_output_stem(entry),
+            output_stem=component_output_stem(compiled_graph),
         )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -1085,10 +1085,10 @@ def streaming_fp8_snapshot(
                 "layout, or a single root weight set (transformers "
                 f"backbone) — found {len(root_groups)} weight set(s) in "
                 f"{file_layout!r} layout")
-        entry = root_groups[0][1]
+        compiled_graph = root_groups[0][1]
         result = streaming_fp8_storage_cast(
-            entry, out_dir,
-            output_stem=component_output_stem(entry),
+            compiled_graph, out_dir,
+            output_stem=component_output_stem(compiled_graph),
             block_scope=True,
         )
         if not int(result["converted_count"]):
@@ -1108,17 +1108,17 @@ def streaming_fp8_snapshot(
             f"(looked for {sorted(denoiser_set | te_set)})")
     tensor_count = converted = 0
     done: set[str] = set()
-    for comp, entry in groups:
+    for comp, compiled_graph in groups:
         if comp in te_set:
             result = streaming_fp8_te_cast(
-                entry, out_dir / comp,
+                compiled_graph, out_dir / comp,
                 castable_keys=te_fp8_castable_keys(source_dir / comp),
-                output_stem=component_output_stem(entry),
+                output_stem=component_output_stem(compiled_graph),
             )
         else:
             result = streaming_fp8_storage_cast(
-                entry, out_dir / comp,
-                output_stem=component_output_stem(entry),
+                compiled_graph, out_dir / comp,
+                output_stem=component_output_stem(compiled_graph),
             )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -1129,8 +1129,8 @@ def streaming_fp8_snapshot(
 
 
 def _nested_weight_sets(d: Path) -> list[tuple[str, Path, tuple[Path, ...]]]:
-    """(rel entry, entry path, member files) per weight set, at the root
-    and under nested dirs (split-checkpoint layouts). entry is the shard
+    """(rel compiled graph, compiled graph path, member files) per weight set, at the root
+    and under nested dirs (split-checkpoint layouts). compiled graph is the shard
     index for sharded sets, else the safetensors file; members are the
     set's on-disk files (index + shards, or the single file). Hidden dirs
     (``.cache`` download metadata) are skipped."""
@@ -1181,7 +1181,7 @@ def streaming_w8a8_snapshot(
     (root and nested — split-checkpoint layouts keep component files under
     subdirs). Exactly the denoiser set(s) get the requant: a single
     discovered set is unambiguous; with several, ``weight_set_patterns``
-    (globs over each set's rel entry path) must select — other sets pass
+    (globs over each set's rel compiled graph path) must select — other sets pass
     through byte-identical, so text encoders/VAEs never grow scale twins
     (their quantized keys could never resolve in the denoiser at swap
     time). No component config exists; the headers alone carry
@@ -1226,10 +1226,10 @@ def streaming_w8a8_snapshot(
                 "denoiser set(s); the rest pass through byte-identical")
         tensor_count = converted = 0
         skip_rel: set[str] = set()
-        for rel, entry, members in selected:
+        for rel, compiled_graph, members in selected:
             result = streaming_w8a8_cast(
-                entry, out_dir / Path(rel).parent,
-                output_stem=component_output_stem(entry),
+                compiled_graph, out_dir / Path(rel).parent,
+                output_stem=component_output_stem(compiled_graph),
                 skip_patterns=skip_patterns,
             )
             tensor_count += int(result["tensor_count"])
@@ -1268,11 +1268,11 @@ def streaming_w8a8_snapshot(
     tensor_count = converted = 0
     done: set[str] = set()
     quantized_components: list[str] = []
-    for comp, entry in groups:
+    for comp, compiled_graph in groups:
         if comp in denoiser_set:
             result = streaming_w8a8_cast(
-                entry, out_dir / comp,
-                output_stem=component_output_stem(entry),
+                compiled_graph, out_dir / comp,
+                output_stem=component_output_stem(compiled_graph),
                 skip_patterns=skip_patterns,
             )
             if not int(result["converted_count"]):
@@ -1283,9 +1283,9 @@ def streaming_w8a8_snapshot(
             quantized_components.append(comp)
         else:
             result = streaming_fp8_te_cast(
-                entry, out_dir / comp,
+                compiled_graph, out_dir / comp,
                 castable_keys=te_fp8_castable_keys(source_dir / comp),
-                output_stem=component_output_stem(entry),
+                output_stem=component_output_stem(compiled_graph),
             )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
@@ -1489,8 +1489,8 @@ def read_safetensors_header(fd: int) -> tuple[dict, int]:
     return header, _HEADER_LEN_PREFIX + header_len
 
 
-def shard_tensor_entries(path: Path) -> list[tuple[str, dict]]:
-    """Every ``(name, header entry)`` of one shard, in DATA order."""
+def shard_tensor_compiled_graphs(path: Path) -> list[tuple[str, dict]]:
+    """Every ``(name, header compiled graph)`` of one shard, in DATA order."""
     with open(path, "rb") as fh:
         header, _ = read_safetensors_header(fh.fileno())
     rows: list[tuple[str, dict]] = []
@@ -1619,17 +1619,17 @@ def rewrite_safetensors_keys(
     """
     source, target = Path(source), Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    entries = shard_tensor_entries(source)
-    missing = [name for name, _ in entries if name not in key_map]
+    compiled_graphs = shard_tensor_compiled_graphs(source)
+    missing = [name for name, _ in compiled_graphs if name not in key_map]
     if missing and key_map:
         raise ValueError(
             f"rewrite_safetensors_keys: {len(missing)} key(s) have no mapping "
             f"({missing[:5]}). An unmapped key is a REFUSAL, never a silent "
             "skip — a partial rename produces a file that loads as neither "
             "layout.")
-    renamed = [(key_map.get(name, name), meta) for name, meta in entries]
+    renamed = [(key_map.get(name, name), meta) for name, meta in compiled_graphs]
     seen: dict[str, str] = {}
-    for (new, _meta), (old, _m) in zip(renamed, entries):
+    for (new, _meta), (old, _m) in zip(renamed, compiled_graphs):
         if new in seen:
             raise ValueError(
                 f"rewrite_safetensors_keys: {old!r} and {seen[new]!r} both map "
@@ -1756,7 +1756,7 @@ def merge_safetensors_by_offset(
 
     fds: list[int] = []
     try:
-        entries: list[tuple[str, dict, int, int, int, int]] = []
+        compiled_graphs: list[tuple[str, dict, int, int, int, int]] = []
         merged_md: dict[str, str] = {}
         seen: dict[str, Path] = {}
         for shard in shard_paths:
@@ -1787,13 +1787,13 @@ def merge_safetensors_by_offset(
                 seen[name] = shard
                 rows.append((name, meta, fd, data_base, int(offs[0]), int(offs[1])))
             rows.sort(key=lambda r: r[4])  # sequential source reads
-            entries.extend(rows)
+            compiled_graphs.extend(rows)
 
         new_header: dict[str, Any] = {}
         if merged_md:
             new_header["__metadata__"] = merged_md
         cursor = 0
-        for name, meta, _fd, _base, s, e in entries:
+        for name, meta, _fd, _base, s, e in compiled_graphs:
             new_header[name] = {
                 "dtype": meta["dtype"],
                 "shape": list(meta["shape"]),
@@ -1807,7 +1807,7 @@ def merge_safetensors_by_offset(
         try:
             os.write(dst, len(blob).to_bytes(_HEADER_LEN_PREFIX, "little"))
             os.write(dst, blob)
-            for name, _meta, fd, base, s, e in entries:
+            for name, _meta, fd, base, s, e in compiled_graphs:
                 remaining = e - s
                 src_abs = base + s
                 while remaining > 0:

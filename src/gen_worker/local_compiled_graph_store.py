@@ -250,7 +250,7 @@ def store(
     record — which carries the digest every later lookup is checked against —
     is written LAST, so a crash mid-store leaves a directory with no record
     and the next lookup treats it as absent rather than as a short compiled graph. Same
-    ordering rule ``aot_resume`` banks entries under, for the same reason.
+    ordering rule ``aot_resume`` banks compiled graphs under, for the same reason.
 
     ``verdict`` defaults to :data:`VERDICT_ADMITTED` — "the caller vouches for
     these bytes", which is what every route that finds an already-proven compiled graph
@@ -359,7 +359,7 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCompiledGraph
     The recorded ``content_digest`` is RECOMPUTED over the bytes on disk, so a
     truncated, half-written or edited artifact refuses here instead of being
     handed to the arm — the ``aot_resume`` rule (*"a bank cannot vouch for
-    itself"*) applied to the store. A refusing entry is dropped, which turns a
+    itself"*) applied to the store. A refusing compiled graph is dropped, which turns a
     corrupted compiled graph into exactly one honest re-mint.
 
     pgw#1183: a compiled graph whose verdict is not :data:`VERDICT_ADMITTED` is absent
@@ -428,7 +428,7 @@ def note_memo(
 def sweep_superseded_memos(
     scheme: str, root: Optional[Path] = None,
 ) -> int:
-    """Delete every memo entry written under a SUPERSEDED token scheme.
+    """Delete every memo compiled graph written under a SUPERSEDED token scheme.
 
     pgw#1113: the arm token's scheme digit is its fact-set schema, so when
     the fact set gains an axis (``arm1`` -> ``arm2``, which added the compile
@@ -440,25 +440,25 @@ def sweep_superseded_memos(
 
     Only the memo is swept. The COMPILED GRAPHS keep their ``ck1`` keys, which did not
     move: an arm-token change re-derives the shortcut, never the identity.
-    Returns the number of entries removed.
+    Returns the number of compiled graphs removed.
     """
     prefix = str(scheme or "").strip() + "-"
     memo_dir = compiled_graphs_root(root) / MEMO_DIRNAME
     if len(prefix) < 2 or not memo_dir.is_dir():
         return 0
     removed = 0
-    for entry in sorted(memo_dir.glob("*.json")):
-        if entry.name.startswith(prefix):
+    for compiled_graph in sorted(memo_dir.glob("*.json")):
+        if compiled_graph.name.startswith(prefix):
             continue
         try:
-            entry.unlink()
+            compiled_graph.unlink()
             removed += 1
         except OSError:
-            logger.debug("local-compiled_graph-store: could not drop %s", entry,
+            logger.debug("local-compiled_graph-store: could not drop %s", compiled_graph,
                          exc_info=True)
     if removed:
         logger.info(
-            "local-compiled_graph-store: dropped %d memo entry/entries written under a "
+            "local-compiled_graph-store: dropped %d memo compiled_graph/compiled_graphs written under a "
             "superseded arm-token schema (current %s) — this machine re-mints "
             "each affected family ONCE and memoizes the answer again",
             removed, prefix.rstrip("-"))
@@ -507,15 +507,15 @@ def stored_compiled_graphs(root: Optional[Path] = None) -> List[LocalCompiledGra
     base = compiled_graphs_root(root)
     if not base.is_dir():
         return out
-    for entry in sorted(base.iterdir()):
-        if not entry.is_dir() or entry.name == MEMO_DIRNAME:
+    for compiled_graph in sorted(base.iterdir()):
+        if not compiled_graph.is_dir() or compiled_graph.name == MEMO_DIRNAME:
             continue
-        record = _read_json(entry / RECORD_NAME)
-        artifact = entry / ARTIFACT_NAME
+        record = _read_json(compiled_graph / RECORD_NAME)
+        artifact = compiled_graph / ARTIFACT_NAME
         if record is None or not artifact.is_file():
             continue
         out.append(_compiled_graph_of(
-            str(record.get("compiled_graph_key") or entry.name), record, artifact,
+            str(record.get("compiled_graph_key") or compiled_graph.name), record, artifact,
             str(record.get("content_digest") or "")))
     return out
 

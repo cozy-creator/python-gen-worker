@@ -399,8 +399,8 @@ def test_a_component_the_class_does_not_declare_is_not_judged(
     assert excinfo.value.missing == ("unet",)
 
 
-def test_null_index_entries_are_not_components(tmp_path: Path) -> None:
-    """``[null, null]`` entries (feature_extractor, image_encoder, safety
+def test_null_index_compiled_graphs_are_not_components(tmp_path: Path) -> None:
+    """``[null, null]`` compiled graphs (feature_extractor, image_encoder, safety
     checker) are declared ABSENT by the index itself."""
     tree = tmp_path / "nulls"
     (tree / "unet").mkdir(parents=True)

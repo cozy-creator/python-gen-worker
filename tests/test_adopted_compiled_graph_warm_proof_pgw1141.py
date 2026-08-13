@@ -72,7 +72,7 @@ from gen_worker.registry import extract_specs
 
 # The rig of the REAL arm path (real artifact, real gate, real ladder).
 import test_numerics_gate_pgw868 as rig868  # noqa: E402
-from test_numerics_gate_pgw868 import ROWS, ProbePackage, arm, entry_name  # noqa: E402
+from test_numerics_gate_pgw868 import ROWS, ProbePackage, arm, compiled_graph_name  # noqa: E402
 
 #: pgw#868's fixtures, re-exported so this module collects them: `declared`
 #: registers the real export declaration the probe feed is built from, and
@@ -94,7 +94,7 @@ def test_the_MINTING_pod_proves_its_own_bytes_before_they_ship(
     eager forward it was traced from, on the same feed, and only then does the
     arm succeed — which is what `adopt_delegated_mint` needs to be true before
     `publish_self_mint` can ship anything."""
-    packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage() for h, w in ROWS}
     pipeline, _module, outcome = arm(
         tmp_path, monkeypatch, declared, packages, verify_numerics=True)
 
@@ -102,7 +102,7 @@ def test_the_MINTING_pod_proves_its_own_bytes_before_they_ship(
     assert aot_serve.is_armed(pipeline) is True
     rows = [(p, d) for k, d, p in events if k == activity.KIND_COMPILED_GRAPH_NUMERICS]
     # pgw#1176: ONE row per graph class — the gate runs at the moment that
-    # entry exists, never "after all N" (DESIGN-RULINGS 4.32).
+    # compiled graph exists, never "after all N" (DESIGN-RULINGS 4.32).
     assert [p for p, _d in rows] == ["checked", "checked"], rows
     # pgw#1176: ONE axis per artifact, so the report is 1/1 twice, never
     # 2/2 once. A report over a collection is what the atom removed.
@@ -114,7 +114,7 @@ def test_the_MINT_gate_is_strict_a_gray_band_compiled_graph_does_not_ship(
     """§4.32: identical or refuse, no DEGRADED-publish band. An adopter runs no
     gate that could re-check what ships, so a gray-band publish would export an
     unmeasured degradation to every pod that pulls the key."""
-    packages = {entry_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
     pipeline, _module, outcome = arm(
         tmp_path, monkeypatch, declared, packages, verify_numerics=True)
 
@@ -136,7 +136,7 @@ def test_the_MINT_gate_refuses_a_compiled_graph_below_its_floor(
     """Unchanged by both rulings, and the reason the gate still exists at all:
     try-serve catches ERRORS, never wrong OUTPUT. A compiled graph that runs cleanly and
     renders a bad image raises nothing."""
-    packages = {entry_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
     pipeline, _module, outcome = arm(
         tmp_path, monkeypatch, declared, packages, verify_numerics=True)
 
@@ -165,8 +165,8 @@ def _delegated_mint(tmp_path, monkeypatch, decl, packages, events):
     from gen_worker import aot_serve as aot
 
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(rig868.RUNTIME))
-    monkeypatch.setattr(aot, "_entry_admission_drift", lambda *a, **k: None)
-    monkeypatch.setattr(aot, "_load_package", lambda path, entry="model": packages[entry])
+    monkeypatch.setattr(aot, "_compiled_graph_admission_drift", lambda *a, **k: None)
+    monkeypatch.setattr(aot, "_load_package", lambda path, compiled_graph="model": packages[compiled_graph])
     monkeypatch.setattr(fleet_compiled_graphs, "arm_axis_divergence", lambda a, m, **_kw: "")
     monkeypatch.setattr(fleet_compiled_graphs.activity_mod, "emit_event",
                         lambda kind, detail="", **kw: events.append(
@@ -195,7 +195,7 @@ def test_a_DIVERGENT_compiled_graph_is_not_published_by_the_pod_that_minted_it(
     satisfies it on purpose, with the check aimed at the mint and nothing left
     on the adopt path. The rows that go RED are the ones that distinguish those
     two worlds: the gray band (master ships it), and every adopt row."""
-    packages = {rig868.entry_name(h, w): ProbePackage(cosine=0.99)
+    packages = {rig868.compiled_graph_name(h, w): ProbePackage(cosine=0.99)
                 for h, w in ROWS}
     minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
 
@@ -214,7 +214,7 @@ def test_a_FAITHFUL_compiled_graph_passes_the_mint_gate_and_is_publishable(
         tmp_path, monkeypatch, declared, events):
     """The control, without which the row above could pass for the wrong
     reason (an unreadable envelope, a divergence gate, a missing stamp)."""
-    packages = {rig868.entry_name(h, w): ProbePackage() for h, w in ROWS}
+    packages = {rig868.compiled_graph_name(h, w): ProbePackage() for h, w in ROWS}
     minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
 
     assert minted is not None, "a faithful compiled_graph was refused by the mint gate"
@@ -224,7 +224,7 @@ def test_a_FAITHFUL_compiled_graph_passes_the_mint_gate_and_is_publishable(
     # key its own product.
     assert compiled_graph_key.is_key(minted.compiled_graph_key), minted.compiled_graph_key
     # pgw#1176: ONE gate row here, and the count is load-bearing rather than
-    # incidental — the DELEGATED mint adopts a single entry artifact, so one
+    # incidental — the DELEGATED mint adopts a single compiled graph artifact, so one
     # class is gated. (My own "one row per class" sweep over-applied to this
     # row and expected two; the rows that DO see two arm two artifacts. A
     # blanket edit is a sweep, and sweeps damage the case that is different.)
@@ -252,7 +252,7 @@ def test_ADOPTION_arms_a_compiled_graph_the_mint_gate_would_have_REFUSED(
     compiled graph it had just verified at `cos=1.00000`. Deliberately parametrized over
     a compiled graph that would FAIL: the point is not that adoption is lucky, it is that
     adoption does not ASK."""
-    packages = {entry_name(h, w): ProbePackage(cosine=cosine) for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage(cosine=cosine) for h, w in ROWS}
     pipeline, _module, outcome = arm(
         tmp_path, monkeypatch, declared, packages, verify_numerics=False)
 
@@ -324,7 +324,7 @@ class AdoptedFamily:
     @worker_function()
     def generate(self, ctx: RequestContext, p: GenIn) -> Out:
         # The pod shape: the boot warmup runs, and its payload lands on no
-        # packaged entry of the adopted compiled graph — so the artifact's own execution
+        # packaged compiled graph of the adopted compiled graph — so the artifact's own execution
         # counter does not move. `RIG["dispatch"]` models the OTHER arm, where
         # a warm dispatch does land.
         if RIG.get("dispatch"):
@@ -356,8 +356,8 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
                 publisher: Any = None, **_kw: Any) -> "fleet_compiled_graphs.ArmOutcome":
         unet = pipe.unet
-        # pgw#1176: production's `arm_entry` puts an `EntryDispatch` REGISTRY
-        # in `state["runner"]`, and `is_armed`/`armed_entries` read it — a
+        # pgw#1176: production's `arm_compiled_graph` puts an `CompiledGraphDispatch` REGISTRY
+        # in `state["runner"]`, and `is_armed`/`armed_compiled_graphs` read it — a
         # boolean was deleted precisely because it can claim more than the pod
         # serves. A double that sets the marker but no registry models a
         # pipeline production cannot produce, and every `is_armed` assertion
@@ -365,15 +365,15 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
         _runner = aot_serve.ArtifactRunner(
             package=None,
             contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
-            constants=(), module_name="unet", entry="unet/main")
+            constants=(), module_name="unet", compiled_graph="unet/main")
         _runner.calls = PROBE_CALLS
-        _dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
+        _dispatch = aot_serve.CompiledGraphDispatch(declared=("unet/main",))
         _dispatch.add("unet/main", _runner)
         state = {"successful_calls": PROBE_CALLS, "failed": False,
                  "original": unet.forward, "runner": _dispatch}
         # pgw#1176: the two markers are DIFFERENT SHAPES in production and
         # this rig now models that honestly. `wrap_module` writes a bare
-        # `state` on the MODULE; `arm_entry` writes `targets` (+ `entries`) on
+        # `state` on the MODULE; `arm_compiled_graph` writes `targets` (+ `compiled graphs`) on
         # the PIPELINE. Sharing one dict between them was what kept a
         # `_marker_states` fallback alive for a shape nothing produces.
         setattr(unet, aot_serve._MARKER_ATTR, {
@@ -382,13 +382,13 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
             "meta": {"compiled_graph_key": key},
             "targets": {"unet": {
                 "module": unet, "attr": "forward", "state": state}},
-            "entries": {"unet/main": {"key": key, "target": "unet"}},
+            "compiled_graphs": {"unet/main": {"key": key, "target": "unet"}},
         })
         marker = getattr(pipe, aot_serve._MARKER_ATTR)
         # pgw#1152: an `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
-        # marker set above is what `arm_entry` publishes, so
+        # marker set above is what `arm_compiled_graph` publishes, so
         # `holds_exported_compiled_graph` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
         if revoke:
@@ -546,7 +546,7 @@ def test_a_REVOKED_artifact_is_not_re_armed_by_the_setup_pass(
 
 
 class _Runner:
-    """One entry's artifact runner: counts calls, raises what it is told to."""
+    """One compiled graph's artifact runner: counts calls, raises what it is told to."""
 
     def __init__(self, exc: Exception | None = None) -> None:
         self.calls = 0

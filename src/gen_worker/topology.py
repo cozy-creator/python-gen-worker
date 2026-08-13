@@ -213,7 +213,7 @@ KEY_PARALLEL = "parallel"
 # th#1376 is the deletion, and TENSORHUB GOES FIRST: drop the legacy fields
 # from ``wireValue``, collapse it back into ``ExecutionTopology``, delete
 # ``reconcileAlias`` and the ``LegacyKey*`` constants. Once that ships, delete
-# these two names, ``_aliased``, and the two ``_KNOWN_KEYS`` entries — after
+# these two names, ``_aliased``, and the two ``_KNOWN_KEYS`` compiled graphs — after
 # which they fall through to ``topology_unknown_field`` by construction.
 LEGACY_KEY_GPUS_PER_GROUP = "group_degree"
 LEGACY_KEY_EXECUTION_GROUPS = "groups"

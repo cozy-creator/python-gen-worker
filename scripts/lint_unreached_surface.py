@@ -3,7 +3,7 @@
 reaches. Whole-package since pgw#1182.
 
 This program's dominant defect class is *wiring*, not logic: correct code, green
-unit tests, no production caller. ``entry_workers(peak_rss_bytes=…)`` handled a
+unit tests, no production caller. ``compiled_graph_workers(peak_rss_bytes=…)`` handled a
 measurement no caller ever passed, so RAM was divided by a 3 GiB constant on
 every mint ever run. ``aot_serve.set_guard_failure_callback`` was never called,
 so every AOT arm ever built was unadvertisable, for weeks. A unit test is
@@ -84,7 +84,7 @@ POD_ROOTS = (SRC,)
 
 # Operator harnesses. A symbol only these reach is still not on the pod's
 # production path, so it is reported — annotated, not cleared. Calling a
-# benchmark script "production" is how `entry_workers(peak_rss_bytes=…)` would
+# benchmark script "production" is how `compiled_graph_workers(peak_rss_bytes=…)` would
 # have been argued away.
 TOOL_ROOTS = (REPO / "scripts", REPO / "examples", REPO / "agents",
               REPO / "benchmarks")
@@ -93,9 +93,9 @@ TOOL_ROOTS = (REPO / "scripts", REPO / "examples", REPO / "agents",
 # as reach would exempt half the tree.
 SELF = Path(__file__).resolve()
 
-# The RATCHET. Every entry is a live hit measured on 2026-08-01 (pgw#849) and
+# The RATCHET. Every compiled graph is a live hit measured on 2026-08-01 (pgw#849) and
 # recorded rather than silently tolerated: the guard fails on anything NEW, and
-# equally on an entry that has since been wired up and not removed. A baseline
+# equally on an compiled graph that has since been wired up and not removed. A baseline
 # nobody has to shrink is a baseline nobody reads.
 BASELINE = REPO / "scripts" / "unreached_surface_baseline.txt"
 
@@ -395,7 +395,7 @@ class _FileScan(ast.NodeVisitor):
     # counts — see `visit_Call`.
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        # `__all__` entries are re-exports, not call sites.
+        # `__all__` compiled graphs are re-exports, not call sites.
         if any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
             return
         self.generic_visit(node)
@@ -939,7 +939,7 @@ def rewrite_baseline(current: Set[str]) -> None:
     dropped = documented - current
     BASELINE.write_text("\n".join(header) + "\n\n" + "\n".join(tail) + "\n",
                         encoding="utf-8")
-    print(f"wrote {len(tail)} entries + {len(documented & current)} already "
+    print(f"wrote {len(tail)} compiled_graphs + {len(documented & current)} already "
           f"listed in the documented sections = {len(current)} to "
           f"{BASELINE.name}", file=sys.stderr)
     for label in sorted(dropped):

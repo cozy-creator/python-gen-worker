@@ -61,7 +61,7 @@ from gen_worker.convert.repack_spec import DeclarationError, RenameRule
 from gen_worker.convert.writer import (
     rewrite_safetensors_keys,
     shard_payload_digests,
-    shard_tensor_entries,
+    shard_tensor_compiled_graphs,
 )
 from gen_worker.families.base import GenerationDefaults
 from gen_worker.models.tensor_layout_contract import (
@@ -257,7 +257,7 @@ def test_the_byte_rewriter_refuses_a_non_injective_map(tmp_path: Path) -> None:
     primitive's only safety check untested.
     """
     source = materialize_case(DIT_CASE, tmp_path / "src.safetensors")
-    keys = [name for name, _ in shard_tensor_entries(source)]
+    keys = [name for name, _ in shard_tensor_compiled_graphs(source)]
     collide = {k: "one.key.for.all" for k in keys}
     with pytest.raises(ValueError, match="not injective"):
         rewrite_safetensors_keys(source, tmp_path / "out.safetensors", collide)
@@ -267,7 +267,7 @@ def test_the_byte_rewriter_refuses_a_partial_map(tmp_path: Path) -> None:
     """An unmapped key is a REFUSAL, never a silent passthrough: a partial
     rename produces a file that loads as neither layout."""
     source = materialize_case(DIT_CASE, tmp_path / "src.safetensors")
-    keys = [name for name, _ in shard_tensor_entries(source)]
+    keys = [name for name, _ in shard_tensor_compiled_graphs(source)]
     partial = {keys[0]: "renamed.only.this"}
     with pytest.raises(ValueError, match="no mapping"):
         rewrite_safetensors_keys(source, tmp_path / "out.safetensors", partial)
@@ -287,7 +287,7 @@ def test_the_conversion_engine_never_touches_a_payload_byte(tmp_path: Path) -> N
     before = sorted(shard_payload_digests(source).values())
     after = sorted(shard_payload_digests(result.path).values())
     assert before == after
-    assert [name for name, _ in shard_tensor_entries(result.path)] == [
+    assert [name for name, _ in shard_tensor_compiled_graphs(result.path)] == [
         "transformer.blocks.0.attn.to_q.weight",
         "transformer.blocks.0.attn.to_k.weight",
         "transformer.blocks.0.ff.net.0.proj.weight",
@@ -610,7 +610,7 @@ def _run_fence(*argv: str) -> subprocess.CompletedProcess:
 def test_the_fence_fires_on_a_key_axis_that_reads_the_layout(
     tmp_path: Path,
 ) -> None:
-    """THE GATE'S OWN RED, through the ENTRY POINT CI invokes.
+    """THE GATE'S OWN RED, through the COMPILED_GRAPH POINT CI invokes.
 
     Deliberately not a call to `_violations()`. The delete-the-call-site
     experiment on this very file found that disconnecting the detector from

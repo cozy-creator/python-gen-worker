@@ -412,7 +412,7 @@ def install_lifted_lora_forward(model: Any, bucket: int = 0) -> LiftedLoraBindin
             # supplied pair is still a caller error and refuses below.
             #
             # Tracing the branchless arm with no operands is CORRECT (that arm
-            # is what an `adapter=false` entry is), so this is not gated on a
+            # is what an `adapter=false` compiled graph is), so this is not gated on a
             # compiling-check — and one would not work anyway:
             # `is_compiling()` reads False under strict export. The adapter
             # arm's feed is asserted at the mint instead.

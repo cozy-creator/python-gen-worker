@@ -1,7 +1,7 @@
 """pgw#882: a dataset shard download is never accepted on size alone.
 
 Real path, no mocks: a stdlib HTTP server stands in for the presigned URL and
-``download_entries`` is driven exactly as ``resolve_dataset`` drives it. What
+``download_compiled_graphs`` is driven exactly as ``resolve_dataset`` drives it. What
 is under test is the digest decision, so the bytes are real and the server is
 real; only the hub is absent (it contributes the manifest, which is the test
 input).
@@ -22,7 +22,7 @@ from pathlib import Path
 import blake3
 import pytest
 
-from gen_worker.request_context._datasets import download_entries
+from gen_worker.request_context._datasets import download_compiled_graphs
 
 GOOD = b"pgw882 dataset shard bytes" * 64
 EVIL = GOOD[:-1] + b"X"  # SAME LENGTH, one byte different
@@ -56,23 +56,23 @@ def serve():
     return _serve
 
 
-def _entry(url: str, checksum: str) -> dict:
+def _compiled_graph(url: str, checksum: str) -> dict:
     # size_bytes is DELIBERATELY correct in every case: if a test goes green
     # because the size disagreed, it proved nothing about the digest.
     return {"path": "shard.bin", "url": url, "checksum": checksum, "size_bytes": len(GOOD)}
 
 
 def test_sha256_checksum_rejects_wrong_bytes(serve, tmp_path: Path):
-    """THE defect: a sha256 entry served the wrong bytes used to succeed."""
+    """THE defect: a sha256 compiled graph served the wrong bytes used to succeed."""
     url = serve(EVIL)
     with pytest.raises(RuntimeError, match="of bytes is"):  # DigestMismatch wording (hubio.fetch)
-        download_entries([_entry(url, f"sha256:{SHA_GOOD}")], tmp_path)
+        download_compiled_graphs([_compiled_graph(url, f"sha256:{SHA_GOOD}")], tmp_path)
     assert not (tmp_path / "shard.bin").exists(), "unverified bytes must not survive"
 
 
 def test_sha256_checksum_accepts_right_bytes(serve, tmp_path: Path):
     url = serve(GOOD)
-    download_entries([_entry(url, f"sha256:{SHA_GOOD}")], tmp_path)
+    download_compiled_graphs([_compiled_graph(url, f"sha256:{SHA_GOOD}")], tmp_path)
     assert (tmp_path / "shard.bin").read_bytes() == GOOD
 
 
@@ -84,7 +84,7 @@ def test_blake3_checksum_is_now_refused(serve, tmp_path: Path):
     purpose: the refusal must come from the ALGORITHM, not from a mismatch."""
     url = serve(GOOD)
     with pytest.raises(RuntimeError, match="unsupported digest algorithm"):
-        download_entries([_entry(url, f"blake3:{B3_GOOD}")], tmp_path)
+        download_compiled_graphs([_compiled_graph(url, f"blake3:{B3_GOOD}")], tmp_path)
     assert not (tmp_path / "shard.bin").exists()
 
 
@@ -96,19 +96,19 @@ def test_untagged_checksum_is_refused_not_guessed(serve, tmp_path: Path):
     """
     url = serve(GOOD)
     with pytest.raises(RuntimeError, match="untagged"):
-        download_entries([_entry(url, SHA_GOOD)], tmp_path)
+        download_compiled_graphs([_compiled_graph(url, SHA_GOOD)], tmp_path)
 
 
 def test_unknown_algorithm_is_refused(serve, tmp_path: Path):
     url = serve(GOOD)
     with pytest.raises(RuntimeError, match="unsupported digest algorithm"):
-        download_entries([_entry(url, f"md5:{'0' * 32}")], tmp_path)
+        download_compiled_graphs([_compiled_graph(url, f"md5:{'0' * 32}")], tmp_path)
 
 
 def test_missing_checksum_is_refused(serve, tmp_path: Path):
     """An absent checksum used to mean 'no verification'. It now means refuse."""
     url = serve(GOOD)
-    entry = _entry(url, "")
-    del entry["checksum"]
+    compiled_graph = _compiled_graph(url, "")
+    del compiled_graph["checksum"]
     with pytest.raises(RuntimeError, match="no checksum"):
-        download_entries([entry], tmp_path)
+        download_compiled_graphs([compiled_graph], tmp_path)

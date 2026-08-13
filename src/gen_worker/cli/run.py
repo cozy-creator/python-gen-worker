@@ -482,7 +482,7 @@ class _SigintHandler:
         )
         sys.stderr.flush()
         try:
-            # Same entry point the production worker uses for an
+            # Same compiled graph point the production worker uses for an
             # orchestrator cancel (#352).
             self._ctx._cancel()
         except Exception:
@@ -847,7 +847,7 @@ def _load_injected_model(
         str(local_path) + "".join(
             f"|{c}={p}" for c, p in sorted((overrides or {}).items()))
         # A structure-only composition is a DIFFERENT object from the
-        # real-weight one; sharing a cache entry between them would hand a
+        # real-weight one; sharing a cache compiled graph between them would hand a
         # weightless pipeline to a caller that asked for weights.
         + ("|structure=" + ",".join(sorted(structure_only))
            if structure_only else "")

@@ -41,7 +41,7 @@ from typing import Any, Dict, Tuple
 import pytest
 
 from gen_worker import aot_shape_hints
-from gen_worker.aot_compile_pool import EntryJob
+from gen_worker.aot_compile_pool import CompiledGraphJob
 
 torch = pytest.importorskip("torch")
 
@@ -161,18 +161,18 @@ def test_the_job_carries_them_across_the_process_boundary() -> None:
     import msgspec
 
     program = _export(multiple_of=2)
-    job = EntryJob(
-        entry="denoiser/cfg=false", program="/tmp/p.pt2", report="/tmp/r.json",
+    job = CompiledGraphJob(
+        compiled_graph="denoiser/cfg=false", program="/tmp/p.pt2", report="/tmp/r.json",
         symbol_values=aot_shape_hints.symbol_values(program))
 
-    decoded = msgspec.json.decode(msgspec.json.encode(job), type=EntryJob)
+    decoded = msgspec.json.decode(msgspec.json.encode(job), type=CompiledGraphJob)
 
     assert decoded.symbol_values == job.symbol_values
     assert decoded.symbol_values, "the job shipped an empty map"
 
 
 def test_a_program_with_no_symbols_is_a_no_op() -> None:
-    """A fully static entry — sdxl's shape — must not acquire machinery."""
+    """A fully static compiled graph — sdxl's shape — must not acquire machinery."""
     program = torch.export.export(
         _Grid().eval(), (torch.randn(4, 32, 32),), {}, strict=True)
 

@@ -1,14 +1,14 @@
-"""pgw#848 item 4: an OOM-killed entry child is a RESOURCE shortfall.
+"""pgw#848 item 4: an OOM-killed compiled graph child is a RESOURCE shortfall.
 
-The bug, in one sentence: every entry-pool failure converged on
-``EntryCompileFailed -> MintRefused -> EXIT_REFUSED``, which ``mint_process``
+The bug, in one sentence: every compiled graph-pool failure converged on
+``CompiledGraphCompileFailed -> MintRefused -> EXIT_REFUSED``, which ``mint_process``
 documents as *"typed, deterministic (gate/toolchain/decl) — terminal"* and
 never retries — so **the one failure class a narrower K would have fixed was
 the one class that could never try a narrower K**, and the hub was told
 "refused" when the truth was "insufficient resources".
 
-The reproduction is a REAL kernel OOM kill of a REAL entry child: a cgroup v2
-memory cap on the child, the real ``EntryCompilePool``, the real
+The reproduction is a REAL kernel OOM kill of a REAL compiled graph child: a cgroup v2
+memory cap on the child, the real ``CompiledGraphCompilePool``, the real
 ``gen_worker.aot_compile_child``, a real ``torch.export`` program. No mocks,
 no simulated signal, no pod, $0.
 """
@@ -89,12 +89,12 @@ class _Tiny(torch.nn.Module):
 
 @pytest.mark.filterwarnings("ignore::FutureWarning")
 @pytest.mark.filterwarnings("ignore::UserWarning")
-def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the_retry(
+def test_a_real_oom_killed_compiled_graph_child_is_a_retryable_shortfall_that_teaches_the_retry(
     tmp_path: Path,
 ) -> None:
     """The whole loop, over real machinery, end to end.
 
-    kernel OOM kill -> classified RESOURCE (not a refusal) -> the dead entry's
+    kernel OOM kill -> classified RESOURCE (not a refusal) -> the dead compiled graph's
     MEASURED high-water survives in the aborted phase table -> the parent
     banks it -> the next width is narrower.
 
@@ -126,9 +126,9 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
             f'exec "{sys.executable}" "$@"\n')
         launcher.chmod(0o755)
 
-        width = pool.entry_workers(
+        width = pool.compiled_graph_workers(
             2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=1)
-        box = pool.EntryCompilePool(
+        box = pool.CompiledGraphCompilePool(
             tmp_path / "pool", width=width,
             inductor_configs={"compile_threads": 2},
             cache_dir=str(tmp_path / "cache"), python=str(launcher))
@@ -137,14 +137,14 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         # not the same as that cgroup ENFORCING `memory.max` on this process
         # tree, and the difference is invisible until the child calmly
         # succeeds. Measured on GitHub CI: no raise at all, i.e. the cap never
-        # killed anything — reported as `DID NOT RAISE EntryCompileFailed`,
+        # killed anything — reported as `DID NOT RAISE CompiledGraphCompileFailed`,
         # which reads as a pgw#848 classification regression and is nothing of
         # the kind. The kernel's own counter is the arbiter, so ask it before
         # concluding anything: no OOM means no OOM to classify, which is a
         # missing capability (skip), not a wrong verdict (fail).
         try:
-            box.compile([("probe/entry", program)])
-        except pool.EntryCompileFailed as exc:
+            box.compile([("probe/compiled_graph", program)])
+        except pool.CompiledGraphCompileFailed as exc:
             failure = exc
         else:
             if _oom_kills(cgroup) == kills_before:
@@ -169,7 +169,7 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         assert failure.basis in ("cgroup", "sigkill"), failure.basis
         # 2. the measurement survived a child that wrote no report at all
         assert failure.peak_rss_bytes > _CAP_MIB * _MIB // 2, (
-            f"the dead entry's high-water is the only measurement of it that "
+            f"the dead compiled_graph's high-water is the only measurement of it that "
             f"will ever exist, and it did not survive: "
             f"{failure.peak_rss_bytes}")
         assert "MEMORY SHORTFALL" in failure.detail
@@ -178,7 +178,7 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         # 3. the mint turns it into the resource type, NOT MintRefused
         with pytest.raises(aot_mint.MintResourceExhausted) as raised:
             raise aot_mint.MintResourceExhausted(
-                failure.detail, entry=failure.entry, basis=failure.basis,
+                failure.detail, compiled_graph=failure.compiled_graph, basis=failure.basis,
                 peak_rss_bytes=failure.peak_rss_bytes)
         assert not isinstance(raised.value, aot_mint.MintRefused), (
             "subclassing MintRefused would put it straight back on the "
@@ -189,37 +189,37 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
 
         # 4. the aborted phase table carries the actionable half
         facts = aot_mint._pool_facts(box)
-        assert facts["oom_entry"] == "probe/entry"
+        assert facts["oom_compiled_graph"] == "probe/compiled_graph"
         assert facts["oom_basis"] == failure.basis
         assert facts["peak_child_rss_bytes"] == box.peak_rss_bytes > 0
         table = aot_mint._mint_phase_table([], {"total_s": 1.0}, None, width,
                                            facts)
-        assert table["pool"]["oom_entry"] == "probe/entry"
+        assert table["pool"]["oom_compiled_graph"] == "probe/compiled_graph"
 
         # 5. ...and the parent banks it, so the RETRY is narrower
         fam, execution_lane = "pgw848-oom", "w8a8-lora64"
-        mint_workers.record_entry_peak_rss(
+        mint_workers.record_compiled_graph_peak_rss(
             fam, execution_lane, int(table["pool"]["peak_child_rss_bytes"]))
-        banked = mint_workers.entry_peak_rss(fam, execution_lane)
+        banked = mint_workers.compiled_graph_peak_rss(fam, execution_lane)
         assert banked > 0
         common = dict(vcpus=16, available_bytes=8 * _GIB, device_lock=True)
-        before = pool.entry_workers(18, **common)
-        after = pool.entry_workers(18, peak_rss_bytes=banked, **common)
-        assert after.per_entry_rss_bytes == banked
-        assert after.per_entry_rss_basis == "measured"
-        assert before.per_entry_rss_basis == "default"
+        before = pool.compiled_graph_workers(18, **common)
+        after = pool.compiled_graph_workers(18, peak_rss_bytes=banked, **common)
+        assert after.per_compiled_graph_rss_bytes == banked
+        assert after.per_compiled_graph_rss_basis == "measured"
+        assert before.per_compiled_graph_rss_basis == "default"
         assert after.workers != before.workers, (
             f"the OOM taught the retry nothing — the width did not move off "
             f"the constant: {before.reason!r} -> {after.reason!r}")
-        # DIRECTION, recorded rather than asserted: this fixture's entry is a
+        # DIRECTION, recorded rather than asserted: this fixture's compiled graph is a
         # 256x256 Linear, and its measured ask comes out BELOW the 3 GiB
         # constant — so here the constant was OVER-reserving and the
         # measurement WIDENS the pool. That is the finding, not a wrinkle:
         # the constant is not "conservative", it is simply unrelated to the
         # family, and which way it is wrong depends on the family. The
-        # narrowing direction (a real entry that asks for MORE than the
+        # narrowing direction (a real compiled graph that asks for MORE than the
         # constant) is pinned by
-        # test_mint_memory_fit_pgw848::test_a_measured_per_entry_ask_actually_narrows_the_pool.
+        # test_mint_memory_fit_pgw848::test_a_measured_per_compiled_graph_ask_actually_narrows_the_pool.
     finally:
         _destroy(cgroup)
 
@@ -246,11 +246,11 @@ def test_a_child_that_wrote_its_own_verdict_is_never_reclassified(
     that wrote a report classified ITSELF — a named refusal is deterministic
     however it exited, and re-running it burns a pod for the same sentence.
     """
-    box = pool.EntryCompilePool(
+    box = pool.CompiledGraphCompilePool(
         tmp_path / "pool",
-        width=pool.entry_workers(
+        width=pool.compiled_graph_workers(
             2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=1))
-    report = pool.EntryReport(entry="e", status=pool.REFUSED, detail="no")
+    report = pool.CompiledGraphReport(compiled_graph="e", status=pool.REFUSED, detail="no")
     assert box._memory_verdict(-9, report) == (False, "")
     assert box._memory_verdict(-9, None)[0] is True
     # An ordinary non-zero exit is not a memory verdict either.

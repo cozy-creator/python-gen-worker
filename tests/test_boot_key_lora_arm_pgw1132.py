@@ -10,14 +10,14 @@ first export in ``mint_targets``).
 §4.27 step 1's loop — ``aot_mint.trace_for_key``, driven by
 ``boot_trace_child`` — was left with the arm only in its ``finally`` (the
 re-arm after the branchless group), so the FIRST adapter-bearing row of every
-bucket-bearing family met ``_export_entry``'s pgw#822 gate on a container-only
+bucket-bearing family met ``_export_compiled_graph``'s pgw#822 gate on a container-only
 pipeline and refused. ``boot_trace_child`` turns that into ``trace_refused``,
 so the derivation dies and the pod never issues a resolve — AOT adoption is
 100 % unreachable for every family that declares a bucket (qwen-image and
 qwen-image-edit 128, z-image 128, wan-2.2 128/64, sdxl 64, sd15 64, anima 32).
 
 Every test here runs the REAL loop over the REAL gate: no stub stands in for
-``_export_entry``, which is the thing under test.
+``_export_compiled_graph``, which is the thing under test.
 """
 
 from __future__ import annotations

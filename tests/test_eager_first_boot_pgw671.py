@@ -235,7 +235,7 @@ class _Harness:
 
         def compiled(*args: Any, **kwargs: Any) -> Any:
             # First call per signature = the (simulated) inductor compile:
-            # burn wall clock and write a capture entry; later calls serve
+            # burn wall clock and write a capture compiled graph; later calls serve
             # from the "in-memory code cache", like the real thing.
             if self.compile_raises:
                 raise RuntimeError("synthetic inductor failure")

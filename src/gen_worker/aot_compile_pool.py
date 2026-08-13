@@ -1,13 +1,13 @@
-"""pgw#809: compile a compiled graph's entries K-wide instead of one at a time.
+"""pgw#809: compile a compiled graph's compiled graphs K-wide instead of one at a time.
 
-A pgw#758 compiled graph is N independent graph-class entries; an sdxl compiled graph is 18.
+A pgw#758 compiled graph is N independent graph-class compiled graphs; an sdxl compiled graph is 18.
 ``aot_mint`` exports them from the live pipeline (serial by construction —
 one pipeline, one card, and the branch arm is toggled once for the whole
 branchless group) and then AOTI-compiles each one at ~420 s. The compiles
 share nothing: each is ``aot_compile(ep.module(), ...)`` over its own
 ExportedProgram, producing its own loose files, combined afterwards by
 ``package_aoti``. Serially that is ~2 h; K-wide it is ``ceil(N/K)`` x
-per-entry.
+per-compiled graph.
 
 Why processes, and not threads
 ------------------------------
@@ -37,14 +37,14 @@ init, pgw#784), so it arrives on disk: ``torch.export.save`` in the parent,
 The parent keeps its own in-memory program regardless — every package-side
 gate (``program_package_drift``, ``eliminated_constants``, ``input_contract``)
 runs against the parent's real program and the child's package, so a child
-that diverged is caught by gates that already exist, named by entry.
+that diverged is caught by gates that already exist, named by compiled graph.
 
 What this does NOT change
 -------------------------
 Compiled graph identity. Parallelism is not sealed (pgw#757 established
 ``compile_threads`` as non-identity by the same argument, and the digest check
-is re-run here): the pool changes WHEN entries compile, never what they
-compile. Assembly is ordered by ENTRY NAME, not completion, so a compiled graph minted
+is re-run here): the pool changes WHEN compiled graphs compile, never what they
+compile. Assembly is ordered by COMPILED_GRAPH NAME, not completion, so a compiled graph minted
 at K=4 is byte-identical to one minted at K=1.
 """
 
@@ -75,10 +75,10 @@ import hashlib
 
 logger = logging.getLogger(__name__)
 
-ENTRY_CHILD_MODULE = "gen_worker.aot_compile_child"
+COMPILED_GRAPH_CHILD_MODULE = "gen_worker.aot_compile_child"
 
-#: Report file each entry child writes before exiting.
-ENTRY_REPORT_NAME = "report.json"
+#: Report file each compiled graph child writes before exiting.
+COMPILED_GRAPH_REPORT_NAME = "report.json"
 
 #: pgw#840: the directory that must be on the child's path for
 #: ``-m gen_worker.aot_compile_child`` to mean THIS gen_worker.
@@ -95,7 +95,7 @@ def _code_digest() -> str:
 
     pgw#840: the pool spawns ``sys.executable -m gen_worker.aot_compile_child``
     and lets the child's import system decide which ``gen_worker`` that is. It
-    can legitimately be a different one — a ``PYTHONPATH`` entry, a ``gen_worker``
+    can legitimately be a different one — a ``PYTHONPATH`` compiled graph, a ``gen_worker``
     in the cwd, a second checkout, a stale wheel in the interpreter's
     site-packages, or the same tree edited between the parent's import and the
     child's spawn. The child then compiles the very files the compiled graph publishes
@@ -132,17 +132,17 @@ CODE_DIGEST = _code_digest()
 #: is the in-process serial path and adds nothing).
 SERVING_HEADROOM_CPUS = 2
 
-#: Cores one entry child occupies ON AVERAGE over its life. NOT
+#: Cores one compiled graph child occupies ON AVERAGE over its life. NOT
 #: ``compile_threads``: pgw#793 measured that an AOTI compile is dominated by
 #: two strictly SINGLE-THREADED phases — inductor's Python codegen (25 %) and
 #: the one g++ invocation on the wrapper TU (46 %) — with ``compile_threads``
 #: parallelism confined to the Triton kernel compiles in between. So the
-#: instantaneous ask is 1 core for ~71 % of the entry and up to
+#: instantaneous ask is 1 core for ~71 % of the compiled graph and up to
 #: ``compile_threads`` for the rest; 2 is that average, rounded up.
 #: ``K * compile_threads`` is deliberately ALLOWED to exceed the budget —
 #: clamping on the peak would size the pool for a phase that is a quarter of
 #: the work and leave the box idle through the other three quarters.
-CPUS_PER_ENTRY_WORKER = 2
+CPUS_PER_COMPILED_GRAPH_WORKER = 2
 
 #: Hard ceiling regardless of how fat the pod is.
 #:
@@ -151,7 +151,7 @@ CPUS_PER_ENTRY_WORKER = 2
 #: ``aot_mint._block_device_fraction``, a function that no longer exists. A
 #: constant defended by a deleted function and a retired feature is undefended.
 #:
-#: THE THREAT this bounds, named: K entry children compile CONCURRENTLY into
+#: THE THREAT this bounds, named: K compiled graph children compile CONCURRENTLY into
 #: ONE shared inductor cache directory, each linking its own wrapper TU. Past
 #: some K the contention is not the compile — it is the cache directory's
 #: write amplification, the page cache thrashing between N saved programs, and
@@ -159,58 +159,58 @@ CPUS_PER_ENTRY_WORKER = 2
 #: also uses. Nothing here has ever been measured failing at 8; what HAS been
 #: measured is the other side of the trade, and it is what fixes the number.
 #:
-#: WHY 8 AND NOT MORE: K only buys whole ROUNDS. sdxl's 18 entries take
+#: WHY 8 AND NOT MORE: K only buys whole ROUNDS. sdxl's 18 compiled graphs take
 #: ceil(18/8) = 3 rounds; K=6 also takes 3. The next round-boundary win for 18
-#: entries is K=9, and the serial terms K never touches (export, package,
+#: compiled graphs is K=9, and the serial terms K never touches (export, package,
 #: pack) already dominate what that would save. 8 is one step above the point
 #: where rounds stop improving for the largest real family.
 #:
-#: WHAT WOULD FALSIFY IT: a family whose entry count makes ceil(N/K) strictly
-#: decrease past K=8 AND whose per-entry compile still dominates the serial
+#: WHAT WOULD FALSIFY IT: a family whose compiled graph count makes ceil(N/K) strictly
+#: decrease past K=8 AND whose per-compiled graph compile still dominates the serial
 #: terms. Measure ``mint_phases`` on that family before raising this; do not
 #: raise it because a pod looks idle.
-MAX_ENTRY_WORKERS = 8
+MAX_COMPILED_GRAPH_WORKERS = 8
 
 #: Host RAM the pool must leave alone: the serving process's own resident set
 #: is already counted (we read AVAILABLE, not total), this is the margin on
 #: top so that a tenant request arriving mid-mint does not meet an OOM killer.
-ENTRY_RSS_RESERVE_BYTES = 4 * 1024**3
+COMPILED_GRAPH_RSS_RESERVE_BYTES = 4 * 1024**3
 
-#: Per-entry peak RSS assumed before this (family, lane) has banked one.
+#: Per-compiled graph peak RSS assumed before this (family, lane) has banked one.
 #:
 #: §4.24, re-derived pgw#1035 against the row it was accused of contradicting.
-#: THE THREAT: K entry children whose summed peak RSS exceeds available host
+#: THE THREAT: K compiled graph children whose summed peak RSS exceeds available host
 #: RAM, and the OOM killer takes the SERVING process mid-request — the mint's
 #: whole premise is that the worker keeps serving (pgw#784).
 #:
 #: WHY THIS IS NOT pgw#877 #5's REFUSE-TO-WIDEN CASE, which deleted the DEVICE
 #: twin of this constant. Two differences, both load-bearing:
 #:
-#: * That branch fires when the per-entry device footprint is genuinely
-#:   UNKNOWN — no number, from anywhere, for the entry about to run. This one
+#: * That branch fires when the per-compiled graph device footprint is genuinely
+#:   UNKNOWN — no number, from anywhere, for the compiled graph about to run. This one
 #:   is a MEASURED number: 2.09 GiB, on the real sdxl wrapper TU (codegen holds
 #:   the generated source plus inductor's IR; ``cc1plus`` on the wrapper TU is
 #:   the peak), carried at a 1.43x margin. "Not yet banked for this
 #:   (family, lane)" is not "unmeasured".
 #: * Overshooting the card is a hard CUDA OOM with no soft landing.
-#:   Overshooting host RAM lands first in ``ENTRY_RSS_RESERVE_BYTES`` (4 GiB,
-#:   deliberately larger than one entry) and then in reclaim, which is why host
+#:   Overshooting host RAM lands first in ``COMPILED_GRAPH_RSS_RESERVE_BYTES`` (4 GiB,
+#:   deliberately larger than one compiled graph) and then in reclaim, which is why host
 #:   RAM has been the LOOSEST of the three bounds on every pod measured.
 #:
 #: Refusing to widen here would therefore not buy safety; it would pin K=1 on
 #: every cold pod's first mint, which is every mint of a new (family, lane).
 #:
-#: WHAT WOULD FALSIFY IT: an entry child measured above 3 GiB peak RSS, or any
-#: mint-time host OOM — the answer then is to make the FIRST entry serial and
+#: WHAT WOULD FALSIFY IT: an compiled graph child measured above 3 GiB peak RSS, or any
+#: mint-time host OOM — the answer then is to make the FIRST compiled graph serial and
 #: bank its peak, not to guess a larger constant.
 #:
-#: Banked per (family, lane) once measured (``mint_workers.entry_peak_rss``).
-#: pgw#1175: this is now the ONLY per-entry footprint K divides by.
-DEFAULT_ENTRY_PEAK_RSS_BYTES = 3 * 1024**3
+#: Banked per (family, lane) once measured (``mint_workers.compiled_graph_peak_rss``).
+#: pgw#1175: this is now the ONLY per-compiled graph footprint K divides by.
+DEFAULT_COMPILED_GRAPH_PEAK_RSS_BYTES = 3 * 1024**3
 
 #: Programs staged AHEAD of the running set. The export loop hands the pool
-#: every entry at once; staging them all would put ~46 GB of exported programs
-#: on disk for an 18-entry sdxl compiled graph. One spare per pool is enough to keep a
+#: every compiled graph at once; staging them all would put ~46 GB of exported programs
+#: on disk for an 18-compiled graph sdxl compiled graph. One spare per pool is enough to keep a
 #: freed slot from waiting on a multi-GB write.
 INFLIGHT_PROGRAM_SLACK = 1
 
@@ -271,12 +271,12 @@ class PoolWidth:
     answer "why this width" without re-deriving anything."""
 
     workers: int
-    entries: int
+    compiled_graphs: int
     vcpus: int
     cpu_workers: int
     mem_workers: int
     available_bytes: int
-    per_entry_rss_bytes: int
+    per_compiled_graph_rss_bytes: int
     device_lock: bool
     reason: str
     #: pgw#842: the constraint that ACTUALLY held K down, by name, plus the
@@ -284,17 +284,17 @@ class PoolWidth:
     #: carry is a performance defect, and it has to be legible from one record
     #: rather than inferred by diffing two pods that no longer exist.
     binding: str = ""
-    ceiling: int = MAX_ENTRY_WORKERS
-    #: The caller's own cap (``entry_workers(limit=)``), 0 when uncapped. An
+    ceiling: int = MAX_COMPILED_GRAPH_WORKERS
+    #: The caller's own cap (``compiled_graph_workers(limit=)``), 0 when uncapped. An
     #: INPUT that chose K, carried so an operator who forced the serial path
     #: can see from the record that they did.
     limit: int = 0
     cpu: Optional[CpuFacts] = None
     memory: Optional[MemoryFacts] = None
-    #: ``"measured"`` here is literal: the value is one entry child's VmHWM
+    #: ``"measured"`` here is literal: the value is one compiled graph child's VmHWM
     #: summed over its real descendant tree (``_peak_rss_bytes``), banked by
-    #: the serving parent (``mint_workers.record_entry_peak_rss``).
-    per_entry_rss_basis: str = "default"
+    #: the serving parent (``mint_workers.record_compiled_graph_peak_rss``).
+    per_compiled_graph_rss_basis: str = "default"
     #: §4.30 / pgw#1137: whose MACHINE this is. Distinct from the goals above,
     #: which say what the pod was bought to do — a K held down for a human at
     #: a keyboard and a K held down for a tenant are different decisions and a
@@ -305,23 +305,23 @@ class PoolWidth:
     def underwidth(self) -> int:
         """Workers the pod would have run had the binding constraint not
         bound — 0 when K is already the most this compiled graph can use."""
-        return max(0, min(self.entries, self.ceiling) - self.workers)
+        return max(0, min(self.compiled_graphs, self.ceiling) - self.workers)
 
     def facts(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
-            "entry_workers": int(self.workers),
-            "entries": int(self.entries),
+            "compiled_graph_workers": int(self.workers),
+            "compiled_graphs": int(self.compiled_graphs),
             "vcpus": int(self.vcpus),
             "cpu_workers": int(self.cpu_workers),
             "mem_workers": int(self.mem_workers),
             "available_bytes": int(self.available_bytes),
-            "per_entry_rss_bytes": int(self.per_entry_rss_bytes),
+            "per_compiled_graph_rss_bytes": int(self.per_compiled_graph_rss_bytes),
             "device_lock": bool(self.device_lock),
             "binding": self.binding,
             "ceiling": int(self.ceiling),
             "limit": int(self.limit),
             "underwidth": int(self.underwidth),
-            "per_entry_rss_basis": self.per_entry_rss_basis,
+            "per_compiled_graph_rss_basis": self.per_compiled_graph_rss_basis,
             "width_reason": self.reason,
             **self.posture.facts(),
         }
@@ -442,7 +442,7 @@ def cpu_facts() -> CpuFacts:
 
 
 def _has_card() -> bool:
-    """Is there a CUDA device at all — the ONLY question :func:`entry_workers`
+    """Is there a CUDA device at all — the ONLY question :func:`compiled_graph_workers`
     asks the card (pgw#1175).
 
     It gates the device-LOCK bound, which is about whether two concurrent
@@ -459,8 +459,8 @@ def _has_card() -> bool:
         return True
 
 
-def entry_workers(
-    entries: int,
+def compiled_graph_workers(
+    compiled_graphs: int,
     *,
     peak_rss_bytes: int = 0,
     vcpus: int = 0,
@@ -469,34 +469,34 @@ def entry_workers(
     device_lock: Optional[bool] = None,
     posture: Optional[CompilePosture] = None,
 ) -> PoolWidth:
-    """How many entries this pod may compile at once.
+    """How many compiled graphs this pod may compile at once.
 
     **K = f(cores, one measured child RSS)** (§4.33, pgw#1175). Two bounds,
     both read off the HOST, and neither predicts VRAM:
 
     * **vCPU**, from :func:`cpu_facts` (cgroup quota AND affinity mask AND
       host cores, whichever is narrowest) minus
-      :data:`SERVING_HEADROOM_CPUS`. ~94 % of an entry compile is ONE core of
+      :data:`SERVING_HEADROOM_CPUS`. ~94 % of an compiled graph compile is ONE core of
       serial host work, so this bound is generous and scales near-perfectly.
-    * **Host RAM** over one entry child's MEASURED peak RSS
-      (``mint_workers.entry_peak_rss``, banked by the serving parent from a
-      previous entry on this pod). Read via :func:`memory_facts`, whose cgroup
+    * **Host RAM** over one compiled graph child's MEASURED peak RSS
+      (``mint_workers.compiled_graph_peak_rss``, banked by the serving parent from a
+      previous compiled graph on this pod). Read via :func:`memory_facts`, whose cgroup
       half counts the WORKING SET rather than everything the pod has ever
       paged in.
 
     WHAT LEFT, AND WHY (pgw#1175). A third bound divided free VRAM by a
-    per-entry device ask, and the only source that ask ever had in production
+    per-compiled graph device ask, and the only source that ask ever had in production
     was ``mint_budget.co_residency().need_bytes`` — the MINT CHILD's whole
     co-residency estimate, whose leading term was the PARENT's resident
     weights. Compiles are weight-free since ``fc77b923``; the estimate
     described a process that no longer exists, and the machinery built on top
     of it (a card census, a simultaneity budget, a per-spawn re-ask and a
-    mid-mint re-widen) was all arithmetic over that one wrong number. An entry
+    mid-mint re-widen) was all arithmetic over that one wrong number. An compiled graph
     child that genuinely runs out of device memory dies in its own process and
     is classified there — the attempt is the signal, and it costs ~2 minutes.
 
     ``device_lock=False`` FORCES K=1 on a GPU compiled graph: without torch's
-    ``set_gpu_benchmark_lock_context`` hook the pool cannot stop two entries
+    ``set_gpu_benchmark_lock_context`` hook the pool cannot stop two compiled graphs
     benchmarking at once, and a compiled graph whose kernel configs were chosen under
     self-inflicted contention publishes under an unchanged key. Refusing to
     widen is the only safe answer. This is a CORRECTNESS bound on the artifact
@@ -515,7 +515,7 @@ def entry_workers(
     doubled (:mod:`gen_worker.compile_posture` holds the derivation for both).
     The default posture is ``FLEET``.
     """
-    entries = max(0, int(entries))
+    compiled_graphs = max(0, int(compiled_graphs))
     if posture is None:
         posture = compile_posture.current()
     # §4.28 / pgw#1092: both of this policy's reserves are UNCONDITIONAL. They
@@ -523,28 +523,28 @@ def entry_workers(
     # deleted that pod class: the only mint left is the one a SERVING pod runs
     # in the background on a compiled graph miss (pgw#784), so there is always a tenant
     # to protect. `SERVING_HEADROOM_CPUS` keeps cores for an eager forward and
-    # a heartbeat; `ENTRY_RSS_RESERVE_BYTES` keeps host RAM so a request
+    # a heartbeat; `COMPILED_GRAPH_RSS_RESERVE_BYTES` keeps host RAM so a request
     # arriving mid-mint does not meet the OOM killer.
     cpu_headroom = SERVING_HEADROOM_CPUS
-    rss_reserve = posture.rss_reserve_bytes(ENTRY_RSS_RESERVE_BYTES)
+    rss_reserve = posture.rss_reserve_bytes(COMPILED_GRAPH_RSS_RESERVE_BYTES)
     locked = aot_device_lock.supported() if device_lock is None \
         else bool(device_lock)
-    if entries <= 1:
-        # pgw#877: the entry count alone decides this, so no bound is READ —
+    if compiled_graphs <= 1:
+        # pgw#877: the compiled graph count alone decides this, so no bound is READ —
         # and the row must not report unread bounds as zeros. It used to say
         # `available_bytes=0`: a row whose entire job is to explain K=1,
         # telling its reader the pod has no RAM. `-1` is this module's existing
         # "not read" (`cgroup_available_bytes`, `quota_cores`), and the bases
         # say so in words.
         return PoolWidth(
-            workers=1, entries=entries, vcpus=0, cpu_workers=1, mem_workers=1,
-            available_bytes=-1, per_entry_rss_bytes=0,
-            per_entry_rss_basis="not-read",
-            device_lock=locked, binding="entries", ceiling=1,
+            workers=1, compiled_graphs=compiled_graphs, vcpus=0, cpu_workers=1, mem_workers=1,
+            available_bytes=-1, per_compiled_graph_rss_bytes=0,
+            per_compiled_graph_rss_basis="not-read",
+            device_lock=locked, binding="compiled_graphs", ceiling=1,
             limit=max(0, int(limit)), posture=posture,
             reason=(
-                f"{entries} entr{'y' if entries == 1 else 'ies'}: serial "
-                f"(no cpu/memory bound was read — the entry count "
+                f"{compiled_graphs} entr{'y' if compiled_graphs == 1 else 'ies'}: serial "
+                f"(no cpu/memory bound was read — the compiled_graph count "
                 f"decides this width on its own)"))
 
     if vcpus > 0:
@@ -553,7 +553,7 @@ def entry_workers(
         cpu = cpu_facts()
     vcpus = cpu.vcpus
     budget = posture.cpu_budget_cores(vcpus, headroom=cpu_headroom)
-    cpu_workers = max(1, budget // CPUS_PER_ENTRY_WORKER)
+    cpu_workers = max(1, budget // CPUS_PER_COMPILED_GRAPH_WORKER)
 
     if available_bytes >= 0:
         memory = MemoryFacts(
@@ -561,50 +561,50 @@ def entry_workers(
     else:
         memory = memory_facts()
     avail = memory.available_bytes
-    per_entry = int(peak_rss_bytes) if peak_rss_bytes > 0 \
-        else DEFAULT_ENTRY_PEAK_RSS_BYTES
+    per_compiled_graph = int(peak_rss_bytes) if peak_rss_bytes > 0 \
+        else DEFAULT_COMPILED_GRAPH_PEAK_RSS_BYTES
     if avail <= 0:
         # An unreadable host does not get to license a wide pool.
         mem_workers = 1
     else:
         mem_workers = max(
-            1, int(max(0, avail - rss_reserve) // per_entry))
+            1, int(max(0, avail - rss_reserve) // per_compiled_graph))
 
-    # A caller cap NARROWS. `limit` above MAX_ENTRY_WORKERS is a caller
+    # A caller cap NARROWS. `limit` above MAX_COMPILED_GRAPH_WORKERS is a caller
     # asking for more than the ceiling allows, and the ceiling wins.
     # ...and so does the POSTURE (§4.30): a user's machine caps at half the
     # fleet ceiling, and a caller cap below that still wins. Both narrow;
     # neither can widen.
-    ceiling = posture.entry_ceiling(
-        min(MAX_ENTRY_WORKERS, int(limit)) if limit > 0 else MAX_ENTRY_WORKERS)
+    ceiling = posture.compiled_graph_ceiling(
+        min(MAX_COMPILED_GRAPH_WORKERS, int(limit)) if limit > 0 else MAX_COMPILED_GRAPH_WORKERS)
     rss_basis = "measured" if peak_rss_bytes > 0 else "default"
 
     def _width(
         workers: int, *, binding: str, reason: str, lock: bool,
     ) -> PoolWidth:
         return PoolWidth(
-            workers=workers, entries=entries, vcpus=vcpus,
+            workers=workers, compiled_graphs=compiled_graphs, vcpus=vcpus,
             cpu_workers=cpu_workers, mem_workers=mem_workers,
-            available_bytes=avail, per_entry_rss_bytes=per_entry,
+            available_bytes=avail, per_compiled_graph_rss_bytes=per_compiled_graph,
             device_lock=lock,
             reason=reason, binding=binding, ceiling=ceiling, cpu=cpu,
             memory=memory,
-            per_entry_rss_basis=rss_basis,
+            per_compiled_graph_rss_basis=rss_basis,
             limit=max(0, int(limit)), posture=posture)
 
-    workers = max(1, min(cpu_workers, mem_workers, ceiling, entries))
+    workers = max(1, min(cpu_workers, mem_workers, ceiling, compiled_graphs))
     if workers > 1 and _has_card() and not locked:
         return _width(
             1, binding="device-lock", lock=False,
             reason=(
                 "serial: this torch has no GPU-benchmark lock hook, so a wide "
-                "pool would let entries benchmark against each other and bake "
+                "pool would let compiled_graphs benchmark against each other and bake "
                 "contention-chosen kernel configs into a compiled_graph whose key would "
                 "not move"))
     binding = min(
         (cpu_workers, "cpu"), (mem_workers, "host-memory"),
         (ceiling, "ceiling"),
-        (entries, "entries"))[1]
+        (compiled_graphs, "compiled_graphs"))[1]
     polite = (
         " [§4.30 user-machine: half the cores, "
         f"{USER_MACHINE_RSS_RESERVE_BYTES // 1024**3} GiB RAM left alone, "
@@ -614,7 +614,7 @@ def entry_workers(
         f"K={workers} ({binding}-bound{polite}): "
         f"{vcpus} vCPU ({cpu.basis}) -> "
         f"{cpu_workers}, {avail / 1024**3:.1f} GiB RAM ({memory.basis}) "
-        f"/ {per_entry / 1024**3:.1f} GiB per entry ({rss_basis}) -> "
+        f"/ {per_compiled_graph / 1024**3:.1f} GiB per compiled_graph ({rss_basis}) -> "
         f"{mem_workers}")
     return _width(workers, binding=binding, reason=reason, lock=locked)
 
@@ -624,10 +624,10 @@ def entry_workers(
 # ---------------------------------------------------------------------------
 
 
-class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
-    """One entry's compile, as a file a human can re-run by hand."""
+class CompiledGraphJob(msgspec.Struct, frozen=True, kw_only=True):
+    """One compiled graph's compile, as a file a human can re-run by hand."""
 
-    entry: str
+    compiled_graph: str
     program: str
     report: str
     inductor_configs: Dict[str, Any] = {}
@@ -647,8 +647,8 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     symbol_labels: Dict[str, str] = {}
 
 
-class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
-    entry: str
+class CompiledGraphReport(msgspec.Struct, frozen=True, kw_only=True):
+    compiled_graph: str
     status: str = ""
     files: List[str] = []
     detail: str = ""
@@ -657,7 +657,7 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     #: pgw#868 A4: the child's DEVICE high-water, allocated and reserved.
     #: Defaulted so an older child's report still decodes. TELEMETRY (pgw#1175)
     #: — it rides the phase table to the hub as `peak_child_device_bytes`, and
-    #: is the only honest answer to "what does one entry compile cost a card".
+    #: is the only honest answer to "what does one compiled graph compile cost a card".
     #: It sizes nothing: K is f(cores, measured child RSS).
     peak_device_bytes: int = 0
     peak_device_reserved_bytes: int = 0
@@ -687,7 +687,7 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     #: naming whatever `compile_other_s` turns out to contain — a residual
     #: nobody can look inside is only half an attribution.
     metrics_raw: Dict[str, float] = {}
-    #: pgw#840: WHICH gen_worker compiled this entry. ``code_digest`` is the
+    #: pgw#840: WHICH gen_worker compiled this compiled graph. ``code_digest`` is the
     #: contract-source digest the child computed at ITS import; ``code_dir`` is
     #: where it imported from, which is the actionable half of the message. An
     #: empty digest means a child too old to answer — which is the case that
@@ -706,8 +706,8 @@ EXIT_REFUSED = 2
 EXIT_BAD_JOB = 4
 
 
-class EntryCompileFailed(RuntimeError):
-    """One entry's compile failed. Carries the entry name — a pool of 18 that
+class CompiledGraphCompileFailed(RuntimeError):
+    """One compiled graph's compile failed. Carries the compiled graph name — a pool of 18 that
     fails anonymously is undebuggable — and its CLASSIFICATION.
 
     pgw#848: ``resource`` is the difference between a mint that is retried at
@@ -721,11 +721,11 @@ class EntryCompileFailed(RuntimeError):
     """
 
     def __init__(
-        self, entry: str, detail: str, *,
+        self, compiled_graph: str, detail: str, *,
         resource: bool = False, basis: str = "", peak_rss_bytes: int = 0,
     ) -> None:
         super().__init__(detail)
-        self.entry = entry
+        self.compiled_graph = compiled_graph
         self.detail = detail
         self.resource = bool(resource)
         self.basis = str(basis)
@@ -734,13 +734,13 @@ class EntryCompileFailed(RuntimeError):
 
 @dataclass
 class _Running:
-    entry: str
+    compiled_graph: str
     proc: subprocess.Popen
-    job: EntryJob
+    job: CompiledGraphJob
     program_path: Path
     started: float
     stderr_path: Path
-    #: pgw#848: THIS entry's own high-water, sampled while it lives. The
+    #: pgw#848: THIS compiled graph's own high-water, sampled while it lives. The
     #: pool-wide max cannot answer "how big was the one that died", and a
     #: child killed by the OOM killer writes no report — so the parent's
     #: live sample is the only measurement that survives it, and it is
@@ -753,13 +753,13 @@ class _Running:
 
 @dataclass
 class PoolLedger:
-    """pgw#830: where the POOL's seconds went, as against where the entries'
+    """pgw#830: where the POOL's seconds went, as against where the compiled graphs'
     seconds went. The two are different questions with opposite fixes.
 
-    ``compile_s`` (the sum of entry walls) is SERIAL work: shrinking it means
+    ``compile_s`` (the sum of compiled graph walls) is SERIAL work: shrinking it means
     compiling less or compiling faster. ``pool_idle_s`` is SCHEDULING loss:
     workers with nothing to run. Attempt nine's 75 % pool efficiency at K=5 is
-    the second number, and collapsing the entry count (pgw#829) moves it
+    the second number, and collapsing the compiled graph count (pgw#829) moves it
     without touching a single compile — so a table that adds the two into one
     "dark 44 %" figure would send that work at the wrong target.
 
@@ -774,7 +774,7 @@ class PoolLedger:
     #: future width change must stay readable as a delta from one row.
     workers_initial: int = 1
     wall_s: float = 0.0
-    #: Sum of the per-entry Popen-to-reap walls (== the mint's ``compile_s``).
+    #: Sum of the per-compiled graph Popen-to-reap walls (== the mint's ``compile_s``).
     busy_s: float = 0.0
     #: ``workers * wall_s`` — the seconds the pool COULD have compiled for.
     capacity_s: float = 0.0
@@ -782,10 +782,10 @@ class PoolLedger:
     #: The pool refills a freed slot only after staging the next program, so
     #: this is export-vs-compile SERIALIZATION, measured.
     idle_staging_s: float = 0.0
-    #: pgw#1052: free-slot seconds while the parent was PULLING the entry
+    #: pgw#1052: free-slot seconds while the parent was PULLING the compiled graph
     #: source — which, on the overlapped mint path, is the export itself
     #: (``torch.export`` runs in the parent when the pool asks for the next
-    #: entry). This is the producer-side half of the serialization
+    #: compiled graph). This is the producer-side half of the serialization
     #: ``idle_staging_s`` measures on the save side: it prices exactly how
     #: much the single-threaded producer starved the pool, which is the
     #: number that says when the fused export child (pgw#1000) is owed.
@@ -805,12 +805,12 @@ class PoolLedger:
     #: Near-zero in a sealed parent; one full hashing pass in a cold one —
     #: which is the pass every CHILD used to pay.
     seal_seed_s: float = 0.0
-    entries: int = 0
+    compiled_graphs: int = 0
     #: pgw#848 item 5: the resume bank's own row (``resume_root``, ``resumed``,
     #: ``resume_cold``, ``resume_refused`` by reason, ``resume_admit_s``).
     #: Empty on every mint that runs without a bank, so a pod with no resume
     #: root reads exactly as it did before. It rides the LEDGER rather than a
-    #: second event because "N of 36 entries were recovered" is the first thing
+    #: second event because "N of 36 compiled graphs were recovered" is the first thing
     #: that explains a pool wall, and a reader who has to join two rows to
     #: learn it will price a resumed mint as a fast compile.
     resume: Dict[str, Any] = field(default_factory=dict)
@@ -840,7 +840,7 @@ class PoolLedger:
             "stage_total_s": round(self.stage_total_s, 3),
             "spawn_total_s": round(self.spawn_total_s, 3),
             "seal_seed_s": round(self.seal_seed_s, 3),
-            "pool_entries": int(self.entries),
+            "pool_compiled_graphs": int(self.compiled_graphs),
             "pool_workers": int(self.workers),
             "pool_workers_initial": int(self.workers_initial),
             **dict(self.resume),
@@ -848,14 +848,14 @@ class PoolLedger:
 
 
 def child_argv(job_path: Path, *, python: str = "") -> List[str]:
-    return [python or sys.executable, "-m", ENTRY_CHILD_MODULE, str(job_path)]
+    return [python or sys.executable, "-m", COMPILED_GRAPH_CHILD_MODULE, str(job_path)]
 
 
 def child_env(
     cache_dir: str, *, base: Optional[Mapping[str, str]] = None,
     seal_memo: str = "",
 ) -> Dict[str, str]:
-    """The entry child's environment.
+    """The compiled graph child's environment.
 
     The parent's env verbatim (the seal must not move between parent and
     child — pgw#784's rule, and here the child produces the very bytes the
@@ -866,7 +866,7 @@ def child_env(
       digests it, and the compile's output is byte-identical wherever it
       lands (measured — the same graph hashes to the same cache subdirectory
       from any process). Sharing it is what lets children recover the
-      cross-entry kernel dedup a serial loop got from one warm process, and
+      cross-compiled graph kernel dedup a serial loop got from one warm process, and
       it is how the parent reads the loose files the children produced.
     * ``GEN_WORKER_SEAL_LIB_MEMO`` (pgw#832), when the pool seeded one: the
       parent's toolchain digests, so the child's ``env_seal.establish()``
@@ -884,7 +884,7 @@ def child_env(
       backstop that proves it rather than assuming it.
     """
     env = dict(os.environ if base is None else base)
-    # (pgw#1030: the GEN_WORKER_AOT_ENTRY_CHILD marker is deleted — written
+    # (pgw#1030: the GEN_WORKER_AOT_COMPILED_GRAPH_CHILD marker is deleted — written
     # for four months, read by nothing.)
     if cache_dir:
         env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_dir)
@@ -900,7 +900,7 @@ def child_env(
 def _terminate_group(proc: subprocess.Popen, *, grace_s: float = _KILL_GRACE_S) -> None:
     """SIGTERM then SIGKILL the child's process GROUP.
 
-    The GROUP, not the process: an entry child spawns inductor's own compile
+    The GROUP, not the process: an compiled graph child spawns inductor's own compile
     workers and g++ underneath it, and a pool that killed only the direct
     children would leave orphan cc1plus processes burning a serving pod's CPU
     against a compiled graph nobody will adopt. Every child is started with
@@ -931,7 +931,7 @@ _PR_SET_PDEATHSIG = 1
 def arm_parent_death_signal() -> bool:
     """Ask the kernel to SIGKILL THIS process when its parent dies.
 
-    Called by the entry child on itself, never by the parent through
+    Called by the compiled graph child on itself, never by the parent through
     ``preexec_fn``. Two reasons, and the second is the expensive one:
 
     * ``preexec_fn`` runs in the forked child of a process that has threads,
@@ -947,7 +947,7 @@ def arm_parent_death_signal() -> bool:
 
     Why it exists at all: the pool runs INSIDE pgw#784's mint child, and the
     serving worker reaps that child by process GROUP when a mint is abandoned.
-    Entry children hold their OWN session — so the worker's group kill does
+    Compiled graph children hold their OWN session — so the worker's group kill does
     not reach them, and without this an abandoned mint would leave K compiles
     burning a serving pod's CPU with nothing left to notice.
     """
@@ -962,9 +962,9 @@ def arm_parent_death_signal() -> bool:
     return True
 
 
-def _read_report(path: Path) -> Optional[EntryReport]:
+def _read_report(path: Path) -> Optional[CompiledGraphReport]:
     try:
-        return msgspec.json.decode(path.read_bytes(), type=EntryReport)
+        return msgspec.json.decode(path.read_bytes(), type=CompiledGraphReport)
     except (OSError, msgspec.DecodeError, msgspec.ValidationError):
         return None
 
@@ -984,7 +984,7 @@ def _descendants(root: int) -> List[int]:
 
     pgw#848: the previous reading walked ``/proc/<pid>/task/<pid>/children``
     once — direct children of the main thread, one level, and only that
-    thread's. MEASURED on a real AOTI compile: the entry child's direct
+    thread's. MEASURED on a real AOTI compile: the compiled graph child's direct
     children are ``g++`` (a driver that allocates nothing) and inductor's
     ``async_compile`` subprocess workers; **``cc1plus`` — the 2.04 GiB — is at
     depth 2**, and ``as``/``collect2``/``ld`` sit beside it. So the one number
@@ -1009,7 +1009,7 @@ def cgroup_oom_kills(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
     """How many processes this cgroup's memory limit has killed, ever.
 
     pgw#848: the kernel's own counter, and the only NON-inferential evidence
-    that a dead entry child died of memory. A SIGKILL with no report is the
+    that a dead compiled graph child died of memory. A SIGKILL with no report is the
     OOM killer far more often than anything else — the pool has said so in
     ``_exit_note`` since pgw#809 — but "far more often" is not a
     classification, and the retry policy branches on it. ``-1`` = unreadable,
@@ -1042,11 +1042,11 @@ def _peak_rss_bytes(proc: subprocess.Popen) -> int:
     return sum(_vmhwm_bytes(pid) for pid in _descendants(proc.pid))
 
 
-class EntryCompilePool:
+class CompiledGraphCompilePool:
     """Compile N exported programs K-wide, out of process.
 
     Not a general executor: it exists to hold pgw#809's three invariants —
-    entry-named failure, group-wide sibling teardown, and assembly by entry
+    compiled graph-named failure, group-wide sibling teardown, and assembly by compiled graph
     NAME rather than completion order.
     """
 
@@ -1074,10 +1074,10 @@ class EntryCompilePool:
         # admission pass, no hashing, no copies.
         self.bank = aot_resume.open_bank(
             inductor_configs=self.inductor_configs)
-        #: entry -> the graph hash re-derived at admission, so `_collect` can
+        #: compiled graph -> the graph hash re-derived at admission, so `_collect` can
         #: bank the finished files under an identity the parent computed from
         #: the program it exported (never one read back from an artifact).
-        self._entry_graph: Dict[str, str] = {}
+        self._compiled_graph_graph: Dict[str, str] = {}
         # The inductor cache follows the bank when there is one. A per-attempt
         # cache dir is why a killed mint got not even a cache hit on retry;
         # inductor's key is the graph, not the process (measured — see this
@@ -1087,8 +1087,8 @@ class EntryCompilePool:
             cache_dir
             or (self.bank.cache_dir if self.bank is not None else "")
             or (self.workdir / "inductor-cache"))
-        # pgw#809: ONE lock file for the whole pool. Every entry child routes
-        # its inductor GPU benchmarks through it, so no two entries ever time
+        # pgw#809: ONE lock file for the whole pool. Every compiled graph child routes
+        # its inductor GPU benchmarks through it, so no two compiled graphs ever time
         # a kernel on the card at the same moment.
         self.device_lock_path = self.workdir / aot_device_lock.LOCK_NAME
         # pgw#832: the parent's toolchain digests, seeded once per pool so N
@@ -1098,55 +1098,55 @@ class EntryCompilePool:
         self.seal_seed_s = 0.0
         self.python = python
         self.peak_rss_bytes = 0
-        #: pgw#877 #2: the widest DEVICE high-water any entry child reported.
+        #: pgw#877 #2: the widest DEVICE high-water any compiled graph child reported.
         #: MEASUREMENT ONLY (pgw#1175) — it rides the phase table to the hub as
-        #: `peak_child_device_bytes` and decides nothing here. What one entry
+        #: `peak_child_device_bytes` and decides nothing here. What one compiled graph
         #: child really costs a card is exactly the question P0-E/P0-F ask; it
         #: is not, and was never, a licence to divide free VRAM by it.
         self.peak_device_bytes = 0
-        #: pgw#1205: the same reading, kept PER ENTRY instead of collapsed.
+        #: pgw#1205: the same reading, kept PER COMPILED_GRAPH instead of collapsed.
         #: `peak_device_bytes` above answers "how big was the biggest compile"
         #: — one number for a whole compiled graph, which is the wrong granularity for
         #: the only question anyone asks of it ("what does THIS graph class
         #: cost a card"). Both survive: the max is what the existing phase-table
         #: field publishes, and these rows are what gets banked with their
-        #: provenance. entry name -> (allocated, reserved).
-        self.entry_device_peaks: Dict[str, Tuple[int, int]] = {}
+        #: provenance. compiled graph name -> (allocated, reserved).
+        self.compiled_graph_device_peaks: Dict[str, Tuple[int, int]] = {}
         self.peak_concurrency = 0
         # pgw#848: the kernel's OOM-kill counter as it stood before this pool
         # ran. A DELTA over the pool's own wall is evidence; the absolute
         # number is a pod's whole history and means nothing here.
         self.oom_kills_at_start = cgroup_oom_kills()
-        #: Set when an entry died of memory, so the mint's aborted phase
+        #: Set when an compiled graph died of memory, so the mint's aborted phase
         #: table carries the actionable half rather than a bare "refused".
-        self.oom_entry = ""
+        self.oom_compiled_graph = ""
         self.oom_basis = ""
-        self.entry_seconds: Dict[str, float] = {}
-        self.entry_phases: Dict[str, Dict[str, float]] = {}
-        # pgw#830: parent-side per-entry spans (staging + spawn) and the
-        # pool-level idle split. Kept separate from `entry_phases` because
+        self.compiled_graph_seconds: Dict[str, float] = {}
+        self.compiled_graph_phases: Dict[str, Dict[str, float]] = {}
+        # pgw#830: parent-side per-compiled graph spans (staging + spawn) and the
+        # pool-level idle split. Kept separate from `compiled_graph_phases` because
         # they are NOT inside `compile_s`: staging happens in the parent while
         # other children run, so summing it into the compile total would
         # invent seconds nobody spent compiling.
-        self.entry_stage_seconds: Dict[str, float] = {}
-        #: pgw#1111: how many entries crossed the process boundary as META
+        self.compiled_graph_stage_seconds: Dict[str, float] = {}
+        #: pgw#1111: how many compiled graphs crossed the process boundary as META
         #: (a weight-free mint). A pool that ran a structure-only compiled graph and
         #: reports 0 here staged real weights and the round-trip never fired.
-        self.meta_staged_entries = 0
-        self.entry_spawn_seconds: Dict[str, float] = {}
-        self.entry_overlays: Dict[str, Dict[str, float]] = {}
-        self.entry_metrics_raw: Dict[str, Dict[str, float]] = {}
+        self.meta_staged_compiled_graphs = 0
+        self.compiled_graph_spawn_seconds: Dict[str, float] = {}
+        self.compiled_graph_overlays: Dict[str, Dict[str, float]] = {}
+        self.compiled_graph_metrics_raw: Dict[str, Dict[str, float]] = {}
         self.ledger = PoolLedger(
             workers=int(width.workers), workers_initial=int(width.workers))
 
     # -- staging ----------------------------------------------------------
 
-    def _stage(self, entry: str, program: Any, index: int) -> Tuple[EntryJob, Path]:
+    def _stage(self, compiled_graph: str, program: Any, index: int) -> Tuple[CompiledGraphJob, Path]:
         import torch
 
         from .models import structure_only
 
-        slot = self.workdir / f"entry-{index:03d}"
+        slot = self.workdir / f"compiled_graph-{index:03d}"
         slot.mkdir(parents=True, exist_ok=True)
         program_path = slot / "program.pt2"
         t0 = time.monotonic()
@@ -1160,17 +1160,17 @@ class EntryCompilePool:
         with structure_only.as_meta_for_save(program) as meta_params:
             torch.export.save(program, program_path)
         if meta_params:
-            self.meta_staged_entries += 1
-        self.entry_stage_seconds[entry] = round(time.monotonic() - t0, 3)
+            self.meta_staged_compiled_graphs += 1
+        self.compiled_graph_stage_seconds[compiled_graph] = round(time.monotonic() - t0, 3)
         self.ledger.stage_total_s = round(
-            self.ledger.stage_total_s + self.entry_stage_seconds[entry], 3)
+            self.ledger.stage_total_s + self.compiled_graph_stage_seconds[compiled_graph], 3)
         logger.info(
             "aot-pool: staged %r (%.1f MB) in %.1fs",
-            entry, program_path.stat().st_size / 1e6, time.monotonic() - t0)
-        job = EntryJob(
-            entry=entry,
+            compiled_graph, program_path.stat().st_size / 1e6, time.monotonic() - t0)
+        job = CompiledGraphJob(
+            compiled_graph=compiled_graph,
             program=str(program_path),
-            report=str(slot / ENTRY_REPORT_NAME),
+            report=str(slot / COMPILED_GRAPH_REPORT_NAME),
             inductor_configs=dict(self.inductor_configs),
             cache_dir=self.cache_dir,
             device_lock=str(self.device_lock_path),
@@ -1181,7 +1181,7 @@ class EntryCompilePool:
         job_path.write_bytes(msgspec.json.encode(job))
         return job, job_path
 
-    def _spawn(self, job: EntryJob, job_path: Path, program_path: Path) -> _Running:
+    def _spawn(self, job: CompiledGraphJob, job_path: Path, program_path: Path) -> _Running:
         stderr_path = job_path.parent / "stderr.log"
         handle = stderr_path.open("wb")
         t0 = time.monotonic()
@@ -1196,30 +1196,30 @@ class EntryCompilePool:
         finally:
             handle.close()
         started, spawn_epoch = time.monotonic(), time.time()
-        self.entry_spawn_seconds[job.entry] = round(started - t0, 3)
+        self.compiled_graph_spawn_seconds[job.compiled_graph] = round(started - t0, 3)
         self.ledger.spawn_total_s = round(
             self.ledger.spawn_total_s + (started - t0), 3)
-        logger.info("aot-pool: entry %r -> pid %s", job.entry, proc.pid)
+        logger.info("aot-pool: compiled_graph %r -> pid %s", job.compiled_graph, proc.pid)
         return _Running(
-            entry=job.entry, proc=proc, job=job, program_path=program_path,
+            compiled_graph=job.compiled_graph, proc=proc, job=job, program_path=program_path,
             started=started, stderr_path=stderr_path, spawn_epoch=spawn_epoch)
 
     # -- the run ----------------------------------------------------------
 
     def compile(
-        self, entries: Iterable[Tuple[str, Any]],
-        *, on_entry: Optional[Callable[[str, int, int], None]] = None,
+        self, compiled_graphs: Iterable[Tuple[str, Any]],
+        *, on_compiled_graph: Optional[Callable[[str, int, int], None]] = None,
         expected_total: int = 0,
     ) -> Dict[str, List[str]]:
-        """``[(entry, ExportedProgram)] -> {entry: [file, ...]}``.
+        """``[(compiled graph, ExportedProgram)] -> {compiled graph: [file, ...]}``.
 
-        Raises :class:`EntryCompileFailed` naming the FIRST entry to fail,
+        Raises :class:`CompiledGraphCompileFailed` naming the FIRST compiled graph to fail,
         after tearing down every sibling group. Returns a dict ordered by
-        entry NAME, never by completion, so the packaged compiled graph cannot depend
+        compiled graph NAME, never by completion, so the packaged compiled graph cannot depend
         on which child finished first.
 
-        ``entries`` may be a SEQUENCE (every entry already exported — the
-        pre-pgw#1052 shape, unchanged) or an ITERATOR that produces entries
+        ``compiled graphs`` may be a SEQUENCE (every compiled graph already exported — the
+        pre-pgw#1052 shape, unchanged) or an ITERATOR that produces compiled graphs
         as they become ready. Pulling from an iterator runs the PRODUCER's
         own work on this thread — on the overlapped mint path that is a
         ``torch.export`` of the next declared row — while the children keep
@@ -1232,41 +1232,41 @@ class EntryCompilePool:
         producer's best count for progress reporting; the ledger records the
         REAL count once the source is exhausted.
 
-        ``on_entry(name, done, total)`` (pgw#824) fires as each entry lands.
-        This loop is the longest wire-silent stretch of a mint — an 18-entry
+        ``on_compiled_graph(name, done, total)`` (pgw#824) fires as each compiled graph lands.
+        This loop is the longest wire-silent stretch of a mint — an 18-compiled graph
         sdxl compiled graph spends the bulk of its wall clock right here — and until now
         it reported nothing between "compiling" and "packed". Progress
         reporting is best-effort by construction: a raising callback must never
-        cost the mint the entries it already has.
+        cost the mint the compiled graphs it already has.
         """
-        staged: List[Tuple[EntryJob, Path]] = []
+        staged: List[Tuple[CompiledGraphJob, Path]] = []
         running: List[_Running] = []
         done: Dict[str, List[str]] = {}
         # One program staged AHEAD of the running set, and no more. Staging is
         # a multi-GB write (~16 s at 2.5 GB) and a freed slot that had to wait
         # for one would idle a core through every round; one spare removes
-        # that without turning an 18-entry sdxl compiled graph into ~46 GB on disk.
-        failure: Optional[EntryCompileFailed] = None
+        # that without turning an 18-compiled graph sdxl compiled graph into ~46 GB on disk.
+        failure: Optional[CompiledGraphCompileFailed] = None
         # pgw#832: seed BEFORE the pool wall starts, so the cost is its own
         # named line (`seal_seed_s`) and never inside the capacity identity.
         self._seed_seal_memo()
-        streamed = not isinstance(entries, (list, tuple))
+        streamed = not isinstance(compiled_graphs, (list, tuple))
         if streamed:
-            source: Iterator[Tuple[str, Any]] = iter(entries)
+            source: Iterator[Tuple[str, Any]] = iter(compiled_graphs)
             total = max(0, int(expected_total))
             pulled = 0
         else:
             pending = [(i, name, prog)
-                       for i, (name, prog) in enumerate(entries)]
+                       for i, (name, prog) in enumerate(compiled_graphs)]
             total = len(pending)
-            self.ledger.entries = total
+            self.ledger.compiled_graphs = total
             # pgw#848 item 5: admission BEFORE the wall on the sequence path.
             # It is parent-serial and occupies no worker slot, so charging it
-            # to the pool's capacity would price a recovered 626 s entry as
+            # to the pool's capacity would price a recovered 626 s compiled graph as
             # pool idle. (The streamed path admits per pull instead — the
-            # entry does not exist before the pull, and the pull is already
+            # compiled graph does not exist before the pull, and the pull is already
             # inside the wall by construction.)
-            pending = self._admit_banked(pending, done, on_entry, total)
+            pending = self._admit_banked(pending, done, on_compiled_graph, total)
             source = iter([(name, prog) for _i, name, prog in pending])
             pulled = total - len(pending)
         exhausted = False
@@ -1277,12 +1277,12 @@ class EntryCompilePool:
             return pulled if exhausted else max(total, pulled)
 
         def _cb(name: str) -> None:
-            if on_entry is not None:
+            if on_compiled_graph is not None:
                 try:
-                    on_entry(name, len(done), _known_total())
+                    on_compiled_graph(name, len(done), _known_total())
                 except Exception:  # noqa: BLE001 — telemetry never fails a mint
                     logger.debug(
-                        "entry-pool progress callback failed", exc_info=True)
+                        "compiled_graph-pool progress callback failed", exc_info=True)
 
         # pgw#830: exact idle accounting. Every wall second is multiplied by
         # the number of FREE worker slots at that moment and charged to
@@ -1317,7 +1317,7 @@ class EntryCompilePool:
                     running.append(
                         self._spawn(job, job_path, Path(job.program)))
                     charge("idle_spawn_s", free)
-                # PULL one entry when there is stage room. The pull IS the
+                # PULL one compiled graph when there is stage room. The pull IS the
                 # producer's work (pgw#1052); the fresh program spawns at the
                 # top of the next iteration.
                 if not exhausted and not failure \
@@ -1327,13 +1327,13 @@ class EntryCompilePool:
                         name, program = next(source)
                     except StopIteration:
                         exhausted = True
-                        self.ledger.entries = pulled
+                        self.ledger.compiled_graphs = pulled
                         charge("idle_source_s", free)
                         continue
                     charge("idle_source_s", free)
                     pulled += 1
                     if streamed:
-                        self.ledger.entries = pulled
+                        self.ledger.compiled_graphs = pulled
                         if self.bank is not None:
                             # pgw#848 item 5 on the streamed path: per-pull
                             # admission, same order-of-operations safety (the
@@ -1358,7 +1358,7 @@ class EntryCompilePool:
                 free = self.width.workers - len(running)
                 # Nothing left to start: the free slots are the straggler
                 # tail, which is a SCHEDULING loss and not a compile cost.
-                # pgw#829's entry collapse moves this number; nothing about
+                # pgw#829's compiled graph collapse moves this number; nothing about
                 # the compiler does.
                 bucket = "idle_drain_s" if exhausted and not staged \
                     else "idle_other_s"
@@ -1370,11 +1370,11 @@ class EntryCompilePool:
                 charge(bucket, free)
                 running.remove(finished)
                 try:
-                    done[finished.entry] = self._collect(finished)
-                except EntryCompileFailed as exc:
+                    done[finished.compiled_graph] = self._collect(finished)
+                except CompiledGraphCompileFailed as exc:
                     failure = exc
                     break
-                _cb(finished.entry)
+                _cb(finished.compiled_graph)
                 # Collection (report read, program unlink) and pgw#824's
                 # progress callback both run with the slot ALREADY FREE, so
                 # they are charged as idle rather than left outside the split
@@ -1385,7 +1385,7 @@ class EntryCompilePool:
                 raise failure
         finally:
             self.ledger.wall_s = round(time.monotonic() - pool_t0, 3)
-            self.ledger.busy_s = round(sum(self.entry_seconds.values()), 3)
+            self.ledger.busy_s = round(sum(self.compiled_graph_seconds.values()), 3)
             # Closed at the LIVE width for the final interval, then rounded —
             # `charge` has been accumulating it all along (see there).
             charge("idle_other_s", 0)
@@ -1403,14 +1403,14 @@ class EntryCompilePool:
         self,
         pending: List[Tuple[int, str, Any]],
         done: Dict[str, List[str]],
-        on_entry: Optional[Callable[[str, int, int], None]],
+        on_compiled_graph: Optional[Callable[[str, int, int], None]],
         total: int,
     ) -> List[Tuple[int, str, Any]]:
-        """pgw#848 item 5: hand back the entries a previous attempt finished.
+        """pgw#848 item 5: hand back the compiled graphs a previous attempt finished.
 
         The order of operations is the safety property: the graph hash is
         re-derived from the ExportedProgram THIS attempt exported and handed to
-        the bank, which compares it against what it recorded. An entry is never
+        the bank, which compares it against what it recorded. An compiled graph is never
         admitted because a file exists at a path — under pgw#846 that is how a
         stale artifact gets packed into a compiled graph that verifies, arms, and is
         wrong.
@@ -1427,12 +1427,12 @@ class EntryCompilePool:
                 remaining.append((index, name, program))
                 continue
             done[name] = list(admission.files)
-            if on_entry is not None:
+            if on_compiled_graph is not None:
                 try:
-                    on_entry(name, len(done), total)
+                    on_compiled_graph(name, len(done), total)
                 except Exception:  # noqa: BLE001 — telemetry never fails a mint
                     logger.debug(
-                        "entry-pool progress callback failed", exc_info=True)
+                        "compiled_graph-pool progress callback failed", exc_info=True)
         self._refresh_resume_facts()
         if self.bank.resumed:
             logger.info(
@@ -1446,7 +1446,7 @@ class EntryCompilePool:
     def _refresh_resume_facts(self) -> None:
         """Keep the LIVE ledger carrying the bank's row.
 
-        pgw#848 refreshes `progress.pool_ledger` on every completed entry, so
+        pgw#848 refreshes `progress.pool_ledger` on every completed compiled graph, so
         the phase snapshot an abandoned mint leaves behind already carries K
         and its binding. The resume row belongs in the same place for the same
         reason: an abandoned attempt's most useful fact is how much of it the
@@ -1456,11 +1456,11 @@ class EntryCompilePool:
             self.ledger.resume = self.bank.facts()
 
     def _seed_seal_memo(self) -> None:
-        """pgw#832: write the parent's toolchain digests where every entry
+        """pgw#832: write the parent's toolchain digests where every compiled graph
         child can verify-and-reuse them instead of re-hashing ~4 GB apiece.
 
         Near-free in a sealed parent (warm cache -> stats only); pays the
-        full pass exactly once in a cold one — instead of once per ENTRY.
+        full pass exactly once in a cold one — instead of once per COMPILED_GRAPH.
         Failure is not a mint problem (children fall back to the full rehash,
         which is the safe path), but a systematically unusable snapshot is a
         cost regression somebody must see, so it emits the typed event the
@@ -1473,16 +1473,16 @@ class EntryCompilePool:
             self.seal_memo = ""
             logger.warning(
                 "aot-pool: pgw#832 seal memo seeding failed (%s) — every "
-                "entry child will re-pay the full toolchain hash", detail)
+                "compiled_graph child will re-pay the full toolchain hash", detail)
             try:
                 from . import activity as activity_mod
 
                 activity_mod.emit_event(
                     activity_mod.KIND_AOT_MINT,
                     "seal library memo seeding failed (pgw#832): "
-                    f"{detail} — entry children fall back to a full "
+                    f"{detail} — compiled_graph children fall back to a full "
                     "per-child toolchain rehash (correct, but re-pays a "
-                    "multi-GB SHA-256 pass once per entry)",
+                    "multi-GB SHA-256 pass once per compiled_graph)",
                     phase="pool",
                 )
             except Exception:  # pragma: no cover — telemetry never fails a mint
@@ -1498,10 +1498,10 @@ class EntryCompilePool:
         """Emit K, its binding and the underwidth THE MOMENT THEY ARE DECIDED.
 
         th#1359: these facts are settled at pool construction, before the first
-        entry compiles — and they were reported with the phase table, which is
+        compiled graph compiles — and they were reported with the phase table, which is
         flushed at the TERMINUS. Three mints have now died before producing
         them: pgw#846 attempt sixteen emitted exactly one row
-        (``status=abandoned total_s=1741.33``), zero ``entry:`` rows and no
+        (``status=abandoned total_s=1741.33``), zero ``compiled graph:`` rows and no
         ``pool`` row, and 29 minutes of measurement went with it. A datum that
         only survives a successful run is not a measurement of a regime where
         runs keep dying. Moving the emission — not adding a harness read —
@@ -1570,8 +1570,8 @@ class EntryCompilePool:
                 return row
         return None
 
-    def observe_entry_device(self, report: EntryReport) -> None:
-        """Bank one entry child's DEVICE high-water (pgw#877 #2).
+    def observe_compiled_graph_device(self, report: CompiledGraphReport) -> None:
+        """Bank one compiled graph child's DEVICE high-water (pgw#877 #2).
 
         RESERVED in preference to allocated, on the child's own argument:
         allocated is what the compile needed, reserved is what the caching
@@ -1585,17 +1585,17 @@ class EntryCompilePool:
         if peak > 0:
             self.peak_device_bytes = max(self.peak_device_bytes, peak)
         # pgw#1205: and the per-class row, both readings kept apart. Maxed per
-        # field so a retry of the same entry widens rather than replaces.
-        entry = str(report.entry or "").strip()
-        if entry and (allocated > 0 or reserved > 0):
-            held_a, held_r = self.entry_device_peaks.get(entry, (0, 0))
-            self.entry_device_peaks[entry] = (
+        # field so a retry of the same compiled graph widens rather than replaces.
+        compiled_graph = str(report.compiled_graph or "").strip()
+        if compiled_graph and (allocated > 0 or reserved > 0):
+            held_a, held_r = self.compiled_graph_device_peaks.get(compiled_graph, (0, 0))
+            self.compiled_graph_device_peaks[compiled_graph] = (
                 max(held_a, allocated), max(held_r, reserved))
 
     def _collect(self, row: _Running) -> List[str]:
         elapsed = time.monotonic() - row.started
         reap_epoch = time.time()
-        self.entry_seconds[row.entry] = round(elapsed, 2)
+        self.compiled_graph_seconds[row.compiled_graph] = round(elapsed, 2)
         code = row.proc.returncode
         report = _read_report(Path(row.job.report))
         # The program is the biggest thing on disk and is dead the moment the
@@ -1606,7 +1606,7 @@ class EntryCompilePool:
             # path too — pgw#848's rule for the host half applies unchanged
             # here: the attempt that FAILED is exactly the attempt whose
             # measurement the next one has to size against.
-            self.observe_entry_device(report)
+            self.observe_compiled_graph_device(report)
             self._verify_child_code(row, report)
         if code == EXIT_COMPILED and report is not None and report.files:
             if report.peak_rss_bytes:
@@ -1614,27 +1614,27 @@ class EntryCompilePool:
                     self.peak_rss_bytes, int(report.peak_rss_bytes))
             missing = [f for f in report.files if not Path(f).exists()]
             if missing:
-                raise EntryCompileFailed(
-                    row.entry,
-                    f"entry {row.entry!r}: child reported {len(report.files)} "
+                raise CompiledGraphCompileFailed(
+                    row.compiled_graph,
+                    f"compiled_graph {row.compiled_graph!r}: child reported {len(report.files)} "
                     f"compiled file(s) but {len(missing)} do not exist "
                     f"(first: {missing[0]}) — the pool's shared inductor cache "
                     f"dir {self.cache_dir!r} is not visible to this process")
-            self.entry_phases[row.entry] = self._close_entry_partition(
+            self.compiled_graph_phases[row.compiled_graph] = self._close_compiled_graph_partition(
                 row, report, elapsed=elapsed, reap_epoch=reap_epoch)
-            self.entry_overlays[row.entry] = dict(report.overlays or {})
-            self.entry_metrics_raw[row.entry] = dict(report.metrics_raw or {})
+            self.compiled_graph_overlays[row.compiled_graph] = dict(report.overlays or {})
+            self.compiled_graph_metrics_raw[row.compiled_graph] = dict(report.metrics_raw or {})
             logger.info(
-                "aot-pool: entry %r compiled in %.1fs (%d file(s)) spans=%s",
-                row.entry, elapsed, len(report.files),
-                self.entry_phases[row.entry])
+                "aot-pool: compiled_graph %r compiled in %.1fs (%d file(s)) spans=%s",
+                row.compiled_graph, elapsed, len(report.files),
+                self.compiled_graph_phases[row.compiled_graph])
             if self.bank is not None:
-                # pgw#848 item 5: banked HERE, the moment the entry is finished
+                # pgw#848 item 5: banked HERE, the moment the compiled graph is finished
                 # and verified, never at the end of the pool — a mint that is
-                # SIGKILLed at entry 30 of 36 runs no `finally`, and an
+                # SIGKILLed at compiled graph 30 of 36 runs no `finally`, and an
                 # end-of-run bank would be exactly the thing the crash takes.
                 self.bank.put(
-                    row.entry, self.bank.graphs.get(row.entry, ""),
+                    row.compiled_graph, self.bank.graphs.get(row.compiled_graph, ""),
                     list(report.files))
                 self._refresh_resume_facts()
             return list(report.files)
@@ -1643,27 +1643,27 @@ class EntryCompilePool:
             detail = _stderr_tail(row.stderr_path)
         resource, basis = self._memory_verdict(code, report)
         if resource:
-            self.oom_entry, self.oom_basis = row.entry, basis
-        raise EntryCompileFailed(
-            row.entry,
-            f"entry {row.entry!r}: compile child exited {code} after "
+            self.oom_compiled_graph, self.oom_basis = row.compiled_graph, basis
+        raise CompiledGraphCompileFailed(
+            row.compiled_graph,
+            f"compiled_graph {row.compiled_graph!r}: compile child exited {code} after "
             f"{elapsed:.0f}s ({_exit_note(code)}): {detail or 'no detail'}"
             + (
                 f" [pgw#848 classification: MEMORY SHORTFALL, basis={basis}; "
-                f"this entry's measured high-water was "
+                f"this compiled_graph's measured high-water was "
                 f"{row.peak_rss_bytes / 1024**3:.2f} GiB and the pool ran "
                 f"K={self.width.workers} against a "
-                f"{self.width.per_entry_rss_bytes / 1024**3:.2f} GiB/entry "
-                f"({self.width.per_entry_rss_basis}) ask — this is retryable "
+                f"{self.width.per_compiled_graph_rss_bytes / 1024**3:.2f} GiB/compiled_graph "
+                f"({self.width.per_compiled_graph_rss_basis}) ask — this is retryable "
                 f"at a narrower K, NOT a deterministic refusal]"
                 if resource else ""),
             resource=resource, basis=basis,
             peak_rss_bytes=row.peak_rss_bytes)
 
     def _memory_verdict(
-        self, code: Optional[int], report: Optional[EntryReport],
+        self, code: Optional[int], report: Optional[CompiledGraphReport],
     ) -> Tuple[bool, str]:
-        """Did this entry die of MEMORY, and on what evidence?
+        """Did this compiled graph die of MEMORY, and on what evidence?
 
         pgw#848. Two bases, and they are not equivalent:
 
@@ -1689,15 +1689,15 @@ class EntryCompilePool:
             return True, "cgroup"
         return True, "sigkill"
 
-    def _verify_child_code(self, row: _Running, report: EntryReport) -> None:
-        """pgw#840: the child that compiled this entry must BE the parent.
+    def _verify_child_code(self, row: _Running, report: CompiledGraphReport) -> None:
+        """pgw#840: the child that compiled this compiled graph must BE the parent.
 
         Not a telemetry check. The child produces the loose files
         ``package_aoti`` packs and the compiled graph publishes, while every gate runs in
         the parent against the parent's program — an assignment that is only
         sound while both are the same code. A skewed child was invisible: it
         compiled successfully, returned files that exist, and differed only in
-        what it reported. MEASURED on this box: of 236 preserved entry reports,
+        what it reported. MEASURED on this box: of 236 preserved compiled graph reports,
         150 were written by a child that predates pgw#830's span table, several
         of them under a parent that had it (the pool workdir holds the pgw#832
         seal memo only a post-pgw#832 parent writes). That is the whole of
@@ -1711,21 +1711,21 @@ class EntryCompilePool:
             return  # no source to compare (zipimport) — cannot prove either way
         if report.code_digest == CODE_DIGEST:
             return
-        raise EntryCompileFailed(
-            row.entry,
-            f"entry {row.entry!r}: the compile child ran a DIFFERENT "
+        raise CompiledGraphCompileFailed(
+            row.compiled_graph,
+            f"compiled_graph {row.compiled_graph!r}: the compile child ran a DIFFERENT "
             f"gen_worker than this parent — child code "
             f"{report.code_digest or '<too old to report one>'} from "
             f"{report.code_dir or '<unknown>'}, parent code {CODE_DIGEST} from "
-            f"{PACKAGE_ROOT}. `python -m {ENTRY_CHILD_MODULE}` resolves "
+            f"{PACKAGE_ROOT}. `python -m {COMPILED_GRAPH_CHILD_MODULE}` resolves "
             f"whatever the interpreter's path yields (a second checkout, an "
             f"inherited PYTHONPATH, a stale wheel, or this tree edited between "
             f"the parent's import and this spawn), and that child compiled the "
             f"files this compiled_graph would publish while every gate ran against the "
             f"parent's program")
 
-    def _close_entry_partition(
-        self, row: _Running, report: EntryReport, *,
+    def _close_compiled_graph_partition(
+        self, row: _Running, report: CompiledGraphReport, *,
         elapsed: float, reap_epoch: float,
     ) -> Dict[str, float]:
         """pgw#830: close the outermost partition — the one that spans the
@@ -1733,7 +1733,7 @@ class EntryCompilePool:
 
         ``compile_s = child_boot_s + child_wall_s + reap_lag_s
         + parent_other_s``, where ``child_boot_s`` is interpreter startup plus
-        this package's import (paid once per ENTRY, because the pool's unit of
+        this package's import (paid once per COMPILED_GRAPH, because the pool's unit of
         parallelism is a process that exits) and ``reap_lag_s`` is the child's
         exit plus the parent's poll granularity.
 
@@ -1758,7 +1758,7 @@ class EntryCompilePool:
                 report.module_import_epoch - row.spawn_epoch, 3)
         if report.report_epoch:
             spans["reap_lag_s"] = round(reap_epoch - report.report_epoch, 3)
-        # The outer partition's residual: recorded on EVERY entry (0.0 when the
+        # The outer partition's residual: recorded on EVERY compiled graph (0.0 when the
         # named members closed it), so `check` covers it and `dark_fraction`
         # counts it instead of a measured span silently absorbing the gap.
         spans["child_boot_s"] = spans.get("child_boot_s", 0.0)
@@ -1772,22 +1772,22 @@ class EntryCompilePool:
             # Named, loud, and non-fatal: an attribution defect must never
             # fail a mint, and must never be silent either (pgw#824's class).
             logger.warning(
-                "aot-pool: pgw#830 attribution defect on entry %r: %s",
-                row.entry, "; ".join(violations))
+                "aot-pool: pgw#830 attribution defect on compiled_graph %r: %s",
+                row.compiled_graph, "; ".join(violations))
         spans["child_interp_s"] = spans.get("child_interp_s", 0.0)
-        # Parent-side work for THIS entry. Prefixed, and listed in
+        # Parent-side work for THIS compiled graph. Prefixed, and listed in
         # `aot_compile_spans.SUBSPANS`, because it is not inside `compile_s`:
         # staging overlaps other children, so summing it into the compile
         # total would invent seconds nobody spent compiling. Its idle FRACTION
-        # is `ledger.idle_staging_s`, which is a pool number, not an entry one.
-        spans["parent_stage_s"] = self.entry_stage_seconds.get(row.entry, 0.0)
-        spans["parent_spawn_s"] = self.entry_spawn_seconds.get(row.entry, 0.0)
+        # is `ledger.idle_staging_s`, which is a pool number, not an compiled graph one.
+        spans["parent_stage_s"] = self.compiled_graph_stage_seconds.get(row.compiled_graph, 0.0)
+        spans["parent_spawn_s"] = self.compiled_graph_spawn_seconds.get(row.compiled_graph, 0.0)
         return spans
 
     def _sweep(self) -> None:
         """Every staged program, gone. The loose compiled files stay: they
         live in the inductor cache dir and are what ``package_aoti`` reads."""
-        for slot in sorted(self.workdir.glob("entry-*")):
+        for slot in sorted(self.workdir.glob("compiled_graph-*")):
             with_suppress_unlink(slot / "program.pt2")
 
 
@@ -1831,20 +1831,20 @@ def _exit_note(code: Optional[int]) -> str:
 __all__ = [
     "CODE_DIGEST",
     "COMPILED",
-    "CPUS_PER_ENTRY_WORKER",
-    "DEFAULT_ENTRY_PEAK_RSS_BYTES",
-    "ENTRY_CHILD_MODULE",
-    "ENTRY_REPORT_NAME",
-    "ENTRY_RSS_RESERVE_BYTES",
+    "CPUS_PER_COMPILED_GRAPH_WORKER",
+    "DEFAULT_COMPILED_GRAPH_PEAK_RSS_BYTES",
+    "COMPILED_GRAPH_CHILD_MODULE",
+    "COMPILED_GRAPH_REPORT_NAME",
+    "COMPILED_GRAPH_RSS_RESERVE_BYTES",
     "EXIT_BAD_JOB",
     "EXIT_COMPILED",
     "EXIT_REFUSED",
-    "EntryCompileFailed",
-    "EntryCompilePool",
+    "CompiledGraphCompileFailed",
+    "CompiledGraphCompilePool",
     "arm_parent_death_signal",
-    "EntryJob",
-    "EntryReport",
-    "MAX_ENTRY_WORKERS",
+    "CompiledGraphJob",
+    "CompiledGraphReport",
+    "MAX_COMPILED_GRAPH_WORKERS",
     "PACKAGE_ROOT",
     "REFUSED",
     "SERVING_HEADROOM_CPUS",
@@ -1855,6 +1855,6 @@ __all__ = [
     "child_argv",
     "child_env",
     "cpu_facts",
-    "entry_workers",
+    "compiled_graph_workers",
     "memory_facts",
 ]

@@ -13,15 +13,15 @@ were fine — stickily, for the life of the process. Two call sites ran it:
 ``provision.arm_aot`` (every arm route) and ``fleet_compiled_graphs.adopt_delegated_mint``
 (the self-mint route). Both are gone.
 
-What refuses now is the bind itself. ``aot_serve.arm_entry`` attempts every
-entry inside ``_bind_headroom``; a real CUDA OOM comes back as a typed
-``insufficient_adopt_vram`` ``AdoptError`` that NAMES the entry, before the
+What refuses now is the bind itself. ``aot_serve.arm_compiled_graph`` attempts every
+compiled graph inside ``_bind_headroom``; a real CUDA OOM comes back as a typed
+``insufficient_adopt_vram`` ``AdoptError`` that NAMES the compiled graph, before the
 first live mutation, so the pod serves eager and stays up.
 
 Three claims, and each is a DIFFERENT thing the deleted gate got wrong:
 
 1. the refusal is CLASSIFIED (the deleted gate's token, on evidence);
-2. it NAMES the entry that did not fit (the gate could not — it never got far
+2. it NAMES the compiled graph that did not fit (the gate could not — it never got far
    enough to know, which is why th#1825 read as "1.9 MB free of 47.7 GB" with
    nothing to attribute it to);
 3. it is NOT STICKY — a second arm of the same family re-attempts and succeeds
@@ -32,7 +32,7 @@ And the control: an adopt that fits still arms, so the guard is not a blanket
 refusal wearing a classification.
 
 The vehicle is :mod:`harness.adopt_rig` — the real boot-adopt chain onto a real
-packed compiled graph. The OOM is forced by BREAKING A REAL INPUT (the packaged entry's
+packed compiled graph. The OOM is forced by BREAKING A REAL INPUT (the packaged compiled graph's
 constant load really raises ``torch.OutOfMemoryError``, which is the device
 work an adopt does), never by supplying a fact.
 
@@ -69,11 +69,11 @@ from harness import exported_compiled_graph as compiledgraph868
 from harness.adopt_rig import AdoptRig, production_cfgs
 from harness.receipt_hub import HubStub, hub, pub_map, rsa_key  # noqa: F401
 
-# The SECOND of the compiled graph's two entries IN BIND ORDER (``sorted(entries)``, so
-# h=8 follows h=16): a refusal must be attributable to the entry that did not
-# fit, and picking the first could not tell "named the entry" apart from
+# The SECOND of the compiled graph's two compiled graphs IN BIND ORDER (``sorted(compiled graphs)``, so
+# h=8 follows h=16): a refusal must be attributable to the compiled graph that did not
+# fit, and picking the first could not tell "named the compiled graph" apart from
 # "named the first thing it saw".
-OOM_ENTRY = compiledgraph868.entry_name(8, 8)
+OOM_COMPILED_GRAPH = compiledgraph868.compiled_graph_name(8, 8)
 
 #: The classification, written LITERALLY so every row below is behavioural on
 #: an unmodified tree — an assertion that reads a constant the fix introduces
@@ -83,10 +83,10 @@ OOM_REASON = "insufficient_adopt_vram"
 
 def _adopt_with_oom(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
-    entry: str = OOM_ENTRY
+    compiled_graph: str = OOM_COMPILED_GRAPH
 ) -> object:
-    """One real boot-adopt whose ``entry``'s bind really OOMs the card."""
-    return AdoptRig(tmp_path, monkeypatch, hub, bind_oom_on=entry).boot()
+    """One real boot-adopt whose ``compiled graph``'s bind really OOMs the card."""
+    return AdoptRig(tmp_path, monkeypatch, hub, bind_oom_on=compiled_graph).boot()
 
 
 # ===========================================================================
@@ -113,18 +113,18 @@ def test_a_bind_that_ooms_is_a_classified_adopt_refusal(
         "card would condemn a correct compiled_graph")
 
 
-def test_the_refusal_names_the_entry_that_did_not_fit(
+def test_the_refusal_names_the_compiled_graph_that_did_not_fit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """The deleted gate could not do this: it refused BEFORE the load, so it
-    never knew which entry it was protecting the card from. th#1825's whole
+    never knew which compiled graph it was protecting the card from. th#1825's whole
     forensic problem in one line."""
     boot = _adopt_with_oom(tmp_path, monkeypatch, hub)
 
     said = " ".join(d for _k, _p, d in boot.events)
-    assert OOM_ENTRY in said, (
-        f"nothing on the wire names entry {OOM_ENTRY!r}, so a reader cannot "
-        f"tell a compiled_graph that is one entry too big from one that is wholly "
+    assert OOM_COMPILED_GRAPH in said, (
+        f"nothing on the wire names compiled_graph {OOM_COMPILED_GRAPH!r}, so a reader cannot "
+        f"tell a compiled_graph that is one compiled_graph too big from one that is wholly "
         f"unadoptable. Saw: {said!r}")
     # pgw#1176 RE-BASED THE POSITION, and the claim is sharper for it. The old
     # "(2 of 2)" measured how far through a bind-all-then-wrap sequence the OOM
@@ -134,7 +134,7 @@ def test_the_refusal_names_the_entry_that_did_not_fit(
     # ARMED and still serving, which is a fact about what the pod is doing
     # rather than about a loop it happened to be in.
     assert "already armed)" in said, (
-        "the refusal does not say WHERE in the bind it happened; an entry "
+        "the refusal does not say WHERE in the bind it happened; an compiled_graph "
         "index is what makes 'nearly fit' measurable")
 
 
@@ -231,14 +231,14 @@ def test_no_module_predicts_adopt_vram(
         assert not hasattr(mod, "mint_budget"), (
             f"{mod.__name__} still holds a budget module")
 
-    width = aot_compile_pool.entry_workers(36, vcpus=32, available_bytes=64 * 1024**3,
+    width = aot_compile_pool.compiled_graph_workers(36, vcpus=32, available_bytes=64 * 1024**3,
         peak_rss_bytes=2 * 1024**3, device_lock=True)
     facts = width.facts()
     assert not [k for k in facts if "device" in k and k != "device_lock"], (
         f"K still reports a device term: {sorted(facts)!r}")
     assert width.workers > 1, (
         "a 32-core pod with 64 GiB and a 2 GiB measured child still compiles "
-        "serially — the §4.33 arithmetic (36 entries / K) needs K to move")
+        "serially — the §4.33 arithmetic (36 compiled_graphs / K) needs K to move")
 
 
 def test_the_constant_is_the_token_downstream_already_reads() -> None:

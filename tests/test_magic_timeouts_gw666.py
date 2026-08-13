@@ -607,17 +607,17 @@ def test_a_building_snapshot_is_polled_for_as_long_as_the_hub_answers(
     building = _json_body({"status": "building", "state_version": 7, "retry_after": 0})
     ready = _json_body({
         "snapshot_id": "dsnap-1",
-        "entries": [{"path": "rows.jsonl", "inline_text": "{}"}],
+        "compiled_graphs": [{"path": "rows.jsonl", "inline_text": "{}"}],
     })
     with _Server(_n_then_ok(
         20, (202, building, None), (200, ready, {"Content-Type": "application/json"}),
     )) as srv:
         start = time.monotonic()
-        snapshot_id, entries = _materialize(srv.base, 0.3)
+        snapshot_id, compiled_graphs = _materialize(srv.base, 0.3)
         # The build outran the give-up window several times over: a 202 is the
         # hub saying the build is LIVE, so it refreshes the window.
         assert time.monotonic() - start > 0.3 * 2
-    assert snapshot_id == "dsnap-1" and len(entries) == 1
+    assert snapshot_id == "dsnap-1" and len(compiled_graphs) == 1
 
 
 def test_materialize_gives_up_only_when_the_hub_says_nothing_definite(
@@ -753,7 +753,7 @@ _DEADLINE_BURNDOWN = {
 
 #: Assertions that compare measured time to a constant. Each survives review as
 #: a HANG bound (class 3 above) with at least an order of magnitude of headroom
-#: over the observed value — except the two mint_reopen entries, which are
+#: over the observed value — except the two mint_reopen compiled graphs, which are
 #: latency budgets and are the next ones to anchor to the harness's own
 #: configured quantities the way pgw#677's were.
 _ELAPSED_ASSERT_BURNDOWN = {

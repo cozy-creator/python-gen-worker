@@ -64,9 +64,9 @@ def test_pgw1042_mutation_cannot_move_the_seal(_restore_inductor: None) -> None:
     sealed = env_seal.seal_digest(env_seal.effective_seal())
     readback_before = env_seal.inductor_config_digest()
 
-    # The mutation class: a global entry OUTSIDE _PORTABLE_VOLATILE (the
-    # pgw#1042 fix excluded exactly one entry; the DISEASE was never that
-    # one entry — this is the cure for the class).
+    # The mutation class: a global compiled graph OUTSIDE _PORTABLE_VOLATILE (the
+    # pgw#1042 fix excluded exactly one compiled graph; the DISEASE was never that
+    # one compiled graph — this is the cure for the class).
     ic.max_autotune = True
 
     # v3's seal would have moved: the read-back digest demonstrably does.
@@ -83,7 +83,7 @@ def test_torch_owned_compile_output_is_not_drift(_restore_inductor: None) -> Non
     """The OTHER half of pgw#1042: ``aot_compile`` legitimately writes
     machine facts into ``aot_inductor.metadata``. That torch-owned output
     must neither move the seal NOR trip the wire — a mint that has compiled
-    once must still be able to trace its next entry."""
+    once must still be able to trace its next compiled graph."""
     import torch._inductor.config as ic
 
     env_seal.establish()
@@ -197,7 +197,7 @@ def test_ensure_interpreter_env_reexecs_once() -> None:
 
 def test_children_inherit_the_declared_seed() -> None:
     """impose_process_env is what every spawned child inherits — the mint
-    child and AOT entry children boot with the seed already at interpreter
+    child and AOT compiled graph children boot with the seed already at interpreter
     start, so their establish() verifies instead of re-exec'ing."""
     sa.impose_process_env()
     assert os.environ["PYTHONHASHSEED"] == "0"
@@ -208,15 +208,15 @@ def test_children_inherit_the_declared_seed() -> None:
     assert child.stdout.strip() == "0"
 
 
-def test_revert_is_one_declaration_entry() -> None:
+def test_revert_is_one_declaration_compiled_graph() -> None:
     """The HUMAN_MUST_DO record promises the imposition is trivially
-    revertible: with the entry removed, ensure/verify have nothing to check
+    revertible: with the compiled graph removed, ensure/verify have nothing to check
     and impose nothing — no second site knows about the seed."""
     saved = dict(sa.DECLARED_ENV)
     try:
         del sa.DECLARED_ENV["PYTHONHASHSEED"]
         assert sa._interpreter_env_diffs() == []
-        sa.verify_interpreter_env()  # no refusal without the entry
+        sa.verify_interpreter_env()  # no refusal without the compiled graph
     finally:
         sa.DECLARED_ENV.clear()
         sa.DECLARED_ENV.update(saved)
@@ -245,7 +245,7 @@ def test_census_namespaces_are_actually_scrubbed(
 
 def test_scrub_then_impose_keeps_declared_env() -> None:
     """The order establish() runs: scrub erases the whole namespace
-    (including our own entries), impose puts the DECLARED values back — so
+    (including our own compiled graphs), impose puts the DECLARED values back — so
     the allocator conf is REAL (the old entrypoint setdefault died at the
     scrub and expandable_segments was silently off, found by pgw#1049)."""
     seal = env_seal.establish()

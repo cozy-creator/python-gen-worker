@@ -1,4 +1,4 @@
-"""pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``ek1`` entry
+"""pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``ek1`` compiled graph
 key SET AT BOOT, from CODE ALONE, before a single weight byte is resident.
 
 pgw#1176: §4.27 said "THE compiled graph key" (singular). It is a KEY SET plus a derived
@@ -21,8 +21,8 @@ Two things had to be true, and only one of them was:
    CHILD only. Widening it to the boot path is the gate pgw#1080's own owed
    list names, and it is discharged here by the simplest honest route: the boot
    derivation runs the mint child's own load, in its own processes.
-2. **An entry's ``class_hash`` must be statable from the exported program.**
-   It was NOT. ``aot_mint.entry_graph_block`` v2 read ``constant_fqns`` and
+2. **An compiled graph's ``class_hash`` must be statable from the exported program.**
+   It was NOT. ``aot_mint.compiled_graph_graph_block`` v2 read ``constant_fqns`` and
    ``fused_constants`` off the COMPILED PACKAGE, so identity could not be
    stated until after the compile it was supposed to let us skip. v3 makes the
    block program-only — see that function for why those two facts carry zero
@@ -54,8 +54,8 @@ inside that child exactly as the mint orders them inside its one process.
 
 Parallelism is not an identity axis
 -----------------------------------
-Blocks are assembled by ENTRY NAME, never by completion, and the fold is over
-``aot_serve.stamp_entry`` — the mint's own stamping code, called with the
+Blocks are assembled by COMPILED_GRAPH NAME, never by completion, and the fold is over
+``aot_serve.stamp_compiled_graph`` — the mint's own stamping code, called with the
 mint's own blocks. K-wide and 1-wide therefore produce the identical key by
 construction rather than by care, and ``test_boot_key_pgw1089`` pins it.
 
@@ -73,13 +73,13 @@ this: *"a memo, never identity"*).
 **A memo hit SKIPS THE TRACES.** That is the point of having one — the memo
 path is milliseconds, and pgw#1089 says so. It stores the blocks rather than
 the finished class hashes for one reason: the hashes are stamped by
-``aot_serve.stamp_entry``, and a memo that stored them would make this
+``aot_serve.stamp_compiled_graph``, and a memo that stored them would make this
 module recompute a class hash itself, which is the second derivation
 the whole design forbids. Stored blocks re-fold through the mint's own code.
 
 Honesty is enforced, not trusted: when this pod goes on to MINT, the freshly
 traced per-class hashes are compared against whatever the memo answered
-(:func:`assert_memo_honest`), and a mismatch invalidates the memo entry and
+(:func:`assert_memo_honest`), and a mismatch invalidates the memo compiled graph and
 re-traces on the next boot. A wrong key is never produced — at worst a memo is
 thrown away, and the pod that threw it away is the pod that proved it wrong.
 """
@@ -192,7 +192,7 @@ class TraceJob(msgspec.Struct, frozen=True, kw_only=True):
 class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
     """What one child measured and derived.
 
-    ``blocks`` carries each entry's keying block as CANONICAL JSON rather than
+    ``blocks`` carries each compiled graph's keying block as CANONICAL JSON rather than
     a decoded object: the parent hands it straight to
     ``aot_serve.artifact_metadata``, and a re-encode on either side is a place
     for two canonicalizations to disagree about the thing being hashed.
@@ -237,15 +237,15 @@ class DerivedKey:
     """The KEY SET this boot derived — the contract manifest — and the
     measurements that produced it.
 
-    pgw#1176: ``entry_keys`` replaces the single ``key``. §4.27 ruled "THE
+    pgw#1176: ``compiled_graph_keys`` replaces the single ``key``. §4.27 ruled "THE
     compiled graph key" (singular); it is now a derived key SET plus a manifest, and
     every property that ruling wanted survives strengthened, because a
     PARTIAL resolve now helps instead of falling back to a full re-mint.
     """
 
-    #: entry name -> that class's ``ek1`` key. THE thing resolve asks for.
-    entry_keys: Mapping[str, str]
-    #: entry name -> that class's 16-hex ``class_hash``. THE memoizable half.
+    #: compiled graph name -> that class's ``ek1`` key. THE thing resolve asks for.
+    compiled_graph_keys: Mapping[str, str]
+    #: compiled graph name -> that class's 16-hex ``class_hash``. THE memoizable half.
     class_hashes: Mapping[str, str]
     #: the declaration-wide coverage LABEL (``compiled_graph_key.manifest_digest``) —
     #: telemetry, never identity, never an adoption unit.
@@ -257,7 +257,7 @@ class DerivedKey:
     wall_ms: int
     trace_ms: Mapping[str, int] = field(default_factory=dict)
     nodes: Mapping[str, int] = field(default_factory=dict)
-    #: pgw#1031: entry name -> the NODE-level digest of the graph this boot
+    #: pgw#1031: compiled graph name -> the NODE-level digest of the graph this boot
     #: traced (``aot_mint.keying_block``'s ``graph_witness``). Since option a it
     #: is FOLDED into ``class_hash`` (so the key now separates two bodies behind
     #: one declaration) AND kept here for the adopt backstop, which compares it
@@ -267,8 +267,8 @@ class DerivedKey:
 
     @property
     def keys(self) -> Tuple[str, ...]:
-        """Every derived entry key, sorted — the batch a resolve carries."""
-        return tuple(sorted(set(self.entry_keys.values())))
+        """Every derived compiled graph key, sorted — the batch a resolve carries."""
+        return tuple(sorted(set(self.compiled_graph_keys.values())))
 
 
 @dataclass(frozen=True)
@@ -348,7 +348,7 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
 #: Memo file schema. Bumped when the MEANING of a stored hash changes; a
 #: reader that finds an older version treats the whole file as absent, which
 #: is a miss and a re-trace, never a wrong key.
-#: v3 (pgw#1031): the stored blocks now carry ``graph_witness``, and a v2 entry
+#: v3 (pgw#1031): the stored blocks now carry ``graph_witness``, and a v2 compiled graph
 #: has none — which the adopt-side floor reads as "this pod cannot state its
 #: own graph" and refuses. Bumped so a stale memo is a re-trace rather than a
 #: refusal nobody can explain.
@@ -439,7 +439,7 @@ def read_memo(
         try:
             parsed = json.loads(canon)
         except (TypeError, ValueError):
-            # One unreadable block invalidates the WHOLE entry: a partial class
+            # One unreadable block invalidates the WHOLE compiled graph: a partial class
             # set is not a narrower key, it is a wrong one (pgw#716).
             return {}
         if not isinstance(parsed, dict):
@@ -481,7 +481,7 @@ def write_memo(
 
 
 def invalidate_memo(memo_dir: Optional[Path], digest: str) -> bool:
-    """Drop one closure's memoized hashes (a proven-dishonest entry)."""
+    """Drop one closure's memoized hashes (a proven-dishonest compiled graph)."""
     if not memo_dir or not digest:
         return False
     path = _memo_path(Path(memo_dir))
@@ -503,13 +503,13 @@ def invalidate_memo(memo_dir: Optional[Path], digest: str) -> bool:
 def assert_memo_honest(
     memo_dir: Optional[Path],
     digest: str,
-    minted_entries: Mapping[str, Mapping[str, Any]],
+    minted_compiled_graphs: Mapping[str, Mapping[str, Any]],
 ) -> str:
     """THE honesty gate: what the memo answered must equal what the mint traced.
 
-    Called from the publish path with the freshly minted artifact's own entry
+    Called from the publish path with the freshly minted artifact's own compiled graph
     blocks. Returns ``''`` when the memo agreed (or held nothing for this
-    closure), otherwise the reason — and the offending entry is invalidated so
+    closure), otherwise the reason — and the offending compiled graph is invalidated so
     the next boot re-traces rather than re-reading a hash that has been proven
     wrong.
 
@@ -533,7 +533,7 @@ def assert_memo_honest(
             f"({type(exc).__name__}: {exc}) and has been invalidated")
     had_witnesses = graph_witnesses_of(memoized)
     disagreements: List[str] = []
-    for name, block in sorted(minted_entries.items()):
+    for name, block in sorted(minted_compiled_graphs.items()):
         want = str((block or {}).get("class_hash") or "")
         had = had_hashes.get(str(name))
         if had and want and had != want:
@@ -548,8 +548,8 @@ def assert_memo_honest(
             disagreements.append(
                 f"{name}: memo graph_witness {had_w or '<absent>'} != traced "
                 f"{want_w}")
-    extra = sorted(set(had_hashes) - set(minted_entries))
-    missing = sorted(set(minted_entries) - set(had_hashes))
+    extra = sorted(set(had_hashes) - set(minted_compiled_graphs))
+    missing = sorted(set(minted_compiled_graphs) - set(had_hashes))
     if extra or missing:
         disagreements.append(
             f"class set differs (memo-only {extra[:3]!r}, "
@@ -570,7 +570,7 @@ def assert_memo_honest(
 def graph_witnesses_of(
     blocks: Mapping[str, Mapping[str, Any]],
 ) -> Dict[str, str]:
-    """``{entry: graph_witness}`` for one set of keying blocks (pgw#1031).
+    """``{compiled graph: graph_witness}`` for one set of keying blocks (pgw#1031).
 
     Read off the blocks rather than recomputed: the witness is stamped where
     the program is, by ``aot_mint.keying_block``, and a second derivation here
@@ -587,9 +587,9 @@ def graph_witnesses_of(
 def class_hashes_of(
     blocks: Mapping[str, Mapping[str, Any]],
 ) -> Dict[str, str]:
-    """``{entry: class_hash}`` for one set of keying blocks.
+    """``{compiled graph: class_hash}`` for one set of keying blocks.
 
-    Stamped by ``aot_serve.stamp_entry`` — the mint's own function — so a
+    Stamped by ``aot_serve.stamp_compiled_graph`` — the mint's own function — so a
     hash computed here and a hash the mint stamped are the same computation.
     The precision/family arguments do not reach ``class_hash`` (it folds
     target/fork/class_dims/range_digest/graph/graph_witness/strict/
@@ -602,7 +602,7 @@ def class_hashes_of(
     strict = bool(spec.get("strict", True))
     bucket = int(spec.get("lora_bucket", 0) or 0)
     return {
-        str(name): str(aot_serve.stamp_entry(
+        str(name): str(aot_serve.stamp_compiled_graph(
             str(name), dict(block), strict=strict,
             lora_bucket=bucket).get("class_hash") or "")
         for name, block in blocks.items()
@@ -618,7 +618,7 @@ def fold(
     lora_bucket: int,
     envelope: Mapping[str, Any],
 ) -> Tuple[Dict[str, str], Dict[str, str], str]:
-    """``({entry: entry_key}, {entry: class_hash}, manifest_digest)`` for one
+    """``({compiled graph: compiled_graph_key}, {compiled graph: class_hash}, manifest_digest)`` for one
     declaration's class set — THE derived contract manifest (pgw#1176).
 
     §4.27 asked for "THE compiled graph key" (singular). This returns a KEY SET plus a
@@ -629,8 +629,8 @@ def fold(
     resolves 30 of 36 keys arms 30 classes and compiles 6, where the compiled graph key
     made that outcome a total miss and a full re-mint.
 
-    The fold is ``aot_serve.stamp_entry`` followed by
-    ``compiled_graph_key.from_entry_metadata`` — i.e. the mint's own stamp and the
+    The fold is ``aot_serve.stamp_compiled_graph`` followed by
+    ``compiled_graph_key.from_compiled_graph_metadata`` — i.e. the mint's own stamp and the
     publish path's own recomputation, reached through the identical
     functions. There is deliberately no ``class_hash`` arithmetic in this
     module: a second implementation of the fold is exactly the attempt-28
@@ -654,23 +654,23 @@ def fold(
     with boot_phases.span(
         boot_phases.PHASE_KEY_FOLD, function=str(family or ""),
     ) if boot_phases.in_boot() else _null() as span:
-        entry_keys: Dict[str, str] = {}
+        compiled_graph_keys: Dict[str, str] = {}
         class_hashes: Dict[str, str] = {}
         for name, block in blocks.items():
-            stamped = aot_serve.stamp_entry(
+            stamped = aot_serve.stamp_compiled_graph(
                 str(name), dict(block), strict=bool(strict),
                 lora_bucket=int(lora_bucket or 0))
             class_hashes[str(name)] = str(stamped.get("class_hash") or "")
-            entry_keys[str(name)] = compiled_graph_key.from_entry_metadata({
+            compiled_graph_keys[str(name)] = compiled_graph_key.from_compiled_graph_metadata({
                 "kind": aot_serve.ARTIFACT_KIND,
                 **runtime,
-                compiled_graph_key.ENTRY_BLOCK_KEY: stamped,
+                compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY: stamped,
                 "toolchain": toolchain,
                 env_seal.SEAL_KEY: seal,
             }).digest
         if span is not None:
             span.note(f"classes={len(blocks)}")
-    return entry_keys, class_hashes, compiled_graph_key.manifest_digest(
+    return compiled_graph_keys, class_hashes, compiled_graph_key.manifest_digest(
         class_hashes.values())
 
 
@@ -702,7 +702,7 @@ def child_env(base: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
 
 
 def shares(classes: int, workers: int) -> List[Tuple[int, int]]:
-    """``[(share_index, share_count)]`` — one entry per child that has work.
+    """``[(share_index, share_count)]`` — one compiled graph per child that has work.
 
     Round-robin (``rows[i::K]``), never contiguous chunks: the declaration
     lists a family's rows grouped by TARGET, and a family's denoiser rows cost
@@ -745,7 +745,7 @@ def concurrency_budget(
 
     ``per_child_bytes`` is the child's WHOLE PROCESS footprint on the card and
     must stay that. The th#1825 lane bounded the same question for finalize's
-    adopt and ruled out per-entry literals as the dominant term by three
+    adopt and ruled out per-compiled graph literals as the dominant term by three
     independent measurements (literals live inside the artifact — 4.19 MB); the
     real cost is the loaded AOTI packages, plus device code, per-runner
     workspace and load-time buffers, **none of which appear in the artifact**.
@@ -846,7 +846,7 @@ def _run_children(
     an absent measurement must not be able to throttle a pod.
 
     Deliberately NOT a serialization. `c9fb5d4a` is the cautionary case: the
-    mint's entry pool ran at K=1 fleet-wide for weeks, cost every mint 2.4x, and
+    mint's compiled graph pool ran at K=1 fleet-wide for weeks, cost every mint 2.4x, and
     survived because nothing asserted the achieved width. So the width reached
     here is reported (`wave_widths`) and asserted in tests, and the probe costs
     exactly one child's latency — on a card with room, wave 2 carries the whole
@@ -936,16 +936,16 @@ def derive(
     # by `assert_memo_honest`, which is the only moment this pod holds a traced
     # truth to compare against.
     if memoized:
-        entry_keys, class_hashes, manifest = fold(
+        compiled_graph_keys, class_hashes, manifest = fold(
             memoized, family=family,
             precision=str(precision or ""), strict=strict,
             lora_bucket=int(cfg.lora_bucket or 0), envelope=envelope)
         wall_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
             "boot-key: manifest %s from MEMO in %d ms — %d key(s), no trace "
-            "(closure %s)", manifest, wall_ms, len(entry_keys), digest)
+            "(closure %s)", manifest, wall_ms, len(compiled_graph_keys), digest)
         return DerivedKey(
-            entry_keys=entry_keys, class_hashes=class_hashes,
+            compiled_graph_keys=compiled_graph_keys, class_hashes=class_hashes,
             manifest=manifest, workers=0,
             width_reason="memo hit — no trace child was spawned",
             traced=0, memo="hit", wall_ms=wall_ms,
@@ -1025,7 +1025,7 @@ def derive(
             f"produces — the shares do not reconstruct the class set")
 
     head = reports[0]
-    entry_keys, class_hashes, manifest = fold(
+    compiled_graph_keys, class_hashes, manifest = fold(
         blocks,
         family=family,
         precision=head.precision,
@@ -1060,9 +1060,9 @@ def derive(
     wall_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
         "boot-key: manifest %s in %d ms — %s, %d key(s), memo=%s",
-        manifest, wall_ms, width.reason, len(entry_keys), memo_state)
+        manifest, wall_ms, width.reason, len(compiled_graph_keys), memo_state)
     return DerivedKey(
-        entry_keys=entry_keys,
+        compiled_graph_keys=compiled_graph_keys,
         class_hashes=class_hashes,
         manifest=manifest,
         workers=width.workers,

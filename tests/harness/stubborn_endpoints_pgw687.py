@@ -26,7 +26,7 @@ from gen_worker import RequestContext, endpoint
 STUBBORN_RUNNING = threading.Event()
 #: Released by the test when (if ever) the wedged handler may return.
 STUBBORN_RELEASE = threading.Event()
-#: Every handler entry, in order — proves which jobs actually EXECUTED.
+#: Every handler compiled graph, in order — proves which jobs actually EXECUTED.
 CALLS: List[str] = []
 
 _MAX_BLOCK_S = 120.0

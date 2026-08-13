@@ -1,9 +1,9 @@
 """The pgw#1073 conv variant: the STATIC-ROWS graph class, at micro scale.
 
 Every existing micro member is conv-free by construction, which buys the
-3-entry ``dynamic-collapse`` declaration — and leaves the OTHER strategy,
-``static-rows``, exercised by nothing smaller than sdxl (36 entries, ~95 min
-per pod cycle). static-rows is the class pgw#1058 broke in: entry LABELS are
+3-compiled graph ``dynamic-collapse`` declaration — and leaves the OTHER strategy,
+``static-rows``, exercised by nothing smaller than sdxl (36 compiled graphs, ~95 min
+per pod cycle). static-rows is the class pgw#1058 broke in: compiled graph LABELS are
 per-row static facts, and drift between the labels and the serve-side asks
 admits nothing. This module is the smallest member that keeps that class
 under test on every gauntlet run.

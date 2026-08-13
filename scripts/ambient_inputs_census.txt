@@ -27,7 +27,7 @@ PYTHONHASHSEED  IMPOSED  interpreter hash seed; entrypoint re-execs (pgw#1049, e
 PYTORCH_CUDA_ALLOC_CONF  IMPOSED  allocator layout; declared expandable_segments
 TORCHINDUCTOR_AUTOGRAD_CACHE  IMPOSED  gw#608 AOT autograd cache off (portable FxGraphCache is the lookup surface)
 NCCL_NVLS_ENABLE  IMPOSED  pgw#929: NVLS cannot bind in our containers; nobody's choice
-TORCHINDUCTOR_CACHE_DIR  PLUMBING  SDK-imposed capture/seed redirect (compile_cache.capture_env, entrypoint pgw#783); content-addressed entries
+TORCHINDUCTOR_CACHE_DIR  PLUMBING  SDK-imposed capture/seed redirect (compile_cache.capture_env, entrypoint pgw#783); content-addressed compiled graphs
 TRITON_CACHE_DIR  PLUMBING  same redirect, triton half
 
 # ── NEUTRALIZED namespaces (verified against env_seal.SCRUB_PREFIXES) ─────────

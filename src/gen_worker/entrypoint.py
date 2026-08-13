@@ -1,7 +1,7 @@
 """
 Worker entrypoint module.
 
-This is the main entry point for running a Cozy worker. It loads the manifest,
+This is the main compiled graph point for running a Cozy worker. It loads the manifest,
 discovers user functions, and starts the worker loop.
 
 Usage:
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     # under 4 oom_score_adj points out of 1000 on a real pod and NEGATIVE for
     # the seconds this child spends pre-torch. Declare it here, first thing and
     # before any import of ours, so a child that dies during its own boot is
-    # already ranked. Descendants (mint child, AOT entry children) inherit.
+    # already ranked. Descendants (mint child, AOT compiled graph children) inherit.
     from .procsplit.oom_rank import raise_own_oom_score_adj  # noqa: E402
 
     raise_own_oom_score_adj()
@@ -93,7 +93,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger("WorkerEntrypoint")
+logger = logging.getLogger("Workercompiledgraphpoint")
 
 # FILE-WIDE IMPORT RULE (the one sanctioned exception to top-of-file imports):
 # this module runs as TWO process roles. The control parent must stay a bare
@@ -369,12 +369,12 @@ def _impose_group_host_policy() -> None:
 
 
 def _bootstrap_configuration() -> config.Settings:
-    """THE bootstrap-owned load for this process entry (§1.18), and the one
+    """THE bootstrap-owned load for this process compiled graph (§1.18), and the one
     place derived process facts are published from it.
 
     One function rather than four lines in `_run_main` because these must not
     drift apart: the goal set and the boot credential are DERIVED from these
-    exact `Settings`, so a second entry that loaded config without publishing
+    exact `Settings`, so a second compiled graph that loaded config without publishing
     them would leave the process holding two answers (§4.22).
     """
     settings = config.install(config.load_settings())

@@ -9,7 +9,7 @@ A. pgw#648 — DeviceGroup accounting. VRAM is never summed across groups: a
    3x24GB pod is three 24GB pools, not one 72GB pool (the live admission
    bug that admitted a 30GB model fitting on no single card).
 B. pgw#641 Stage 2 — admission leases. A job's refs are victim-protected
-   from admission (including refs with no entry yet — the executing() pin
+   from admission (including refs with no compiled graph yet — the executing() pin
    no-op'd on those), and not-yet-loaded bytes are RESERVED so concurrent
    admissions cannot double-book free VRAM. ``fits`` is the cheap honest
    "can this worker serve this now?" query.
@@ -161,13 +161,13 @@ def _budget_residency(gib: int) -> Residency:
     return Residency(vram_budget_bytes=gib * _GiB, move_fn=move)
 
 
-def test_lease_protects_refs_with_no_entry_yet() -> None:
+def test_lease_protects_refs_with_no_compiled_graph_yet() -> None:
     """The structural gw#409 gap: executing() no-op'd on refs without
-    entries, so an entry created mid-job was demotable until the inner pin.
-    A lease protects the REF from admission on, whenever its entry appears."""
+    compiled graphs, so an compiled graph created mid-job was demotable until the inner pin.
+    A lease protects the REF from admission on, whenever its compiled graph appears."""
     res = _budget_residency(24)
     lease = res.admit({"cold-pick": 5 * _GiB})
-    assert res.in_use("cold-pick")  # leased, even with no entry yet
+    assert res.in_use("cold-pick")  # leased, even with no compiled graph yet
     res.track_vram("cold-pick", _FakeModule(), vram_bytes=5 * _GiB)
     assert res.demote("cold-pick") is False
     assert res.evict("cold-pick") is False
@@ -223,7 +223,7 @@ def test_track_vram_consumes_the_reservation() -> None:
     try:
         assert res.fits({"query-y": 13 * _GiB}) is False  # claim outstanding
         # The load lands: bytes are now IN the measured pool, claim consumed
-        # — no double count (24 - 10 tracked = 14 free; leased entry is not
+        # — no double count (24 - 10 tracked = 14 free; leased compiled graph is not
         # reclaimable; 13 + 2 > 14 stays an honest NO, 12 + 2 fits).
         res.track_vram("incoming-x", _FakeModule(), vram_bytes=10 * _GiB)
         assert res.fits({"query-y": 12 * _GiB}) is True
@@ -435,7 +435,7 @@ def test_make_room_protects_other_requests_activation_not_its_own() -> None:
         # loader's own is not => 14 GiB usable, so 11 + 2 needs no demotion...
         assert res.make_room(11 * _GiB, for_refs=("incoming",)) is True
         assert res.tier("idle-victim") is Tier.VRAM
-        # ...but 13 + 2 does, and the unleased idle entry is the victim.
+        # ...but 13 + 2 does, and the unleased idle compiled graph is the victim.
         assert res.make_room(13 * _GiB, for_refs=("incoming",)) is True
         assert res.tier("idle-victim") is Tier.RAM
     finally:

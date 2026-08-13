@@ -3,7 +3,7 @@
 The toy endpoints echo text, so none of them can prove that the executed
 ``num_inference_steps``/``width``/``height`` reach ``JobMetrics``. This module
 exists only to give that assertion a real endpoint to run through — a real
-registry entry, real msgspec decoding (so struct defaults are applied exactly
+registry compiled graph, real msgspec decoding (so struct defaults are applied exactly
 as in production), real dispatch. It lives in its own file so no sibling lane's
 uncommitted work in ``toy_endpoints.py`` is disturbed.
 """

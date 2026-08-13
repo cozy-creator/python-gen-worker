@@ -240,8 +240,8 @@ class CompiledGraphAdoption:
     #: pgw#1176: WHICH graph class this attempt was about, and the ``ek1`` key
     #: it was about. A boot resolves a KEY SET, so an attempt that MISSED has
     #: no artifact ``ref`` BY CONSTRUCTION — and a miss is the most common
-    #: per-entry outcome there is. These two carry the identity a ref-less
+    #: per-compiled graph outcome there is. These two carry the identity a ref-less
     #: attempt would otherwise have no way to state, so it can still be
     #: reported instead of dropped.
-    entry: str = ""
+    compiled_graph: str = ""
     compiled_graph_key: str = ""

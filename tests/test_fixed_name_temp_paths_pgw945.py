@@ -173,7 +173,7 @@ def test_two_ref_index_writers_leave_a_whole_document(tmp_path):
 
     doc = json.loads((cache / "ref-index.json").read_text("utf-8"))
     # A torn write is not a partial dict — it is unparseable, or a document
-    # holding entries whose refs came from two different writers' states.
+    # holding compiled graphs whose refs came from two different writers' states.
     owners = {ref.split("/", 1)[0] for ref in doc}
     assert owners in ({"a"}, {"b"}), f"the index mixes two writers: {sorted(doc)}"
     assert not [p for p in cache.iterdir() if p.name != "ref-index.json"], \

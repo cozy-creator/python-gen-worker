@@ -17,10 +17,10 @@ Treat this table as the authorization surface it is:
 * **The child never names a host.** ``base_url`` is the parent's, taken from the
   HelloAck it relayed. A child that could name the host could point the pod's
   credential at an attacker's server (th#1312's base-URL item).
-* **The child never names a free-form path.** Every request must match one entry
+* **The child never names a free-form path.** Every request must match one compiled graph
   below by method AND full-path regex.
 * **The child never names a header.** Authorization is the parent's to add.
-* **Query and body keys are enumerated per entry**, so an allowlisted path
+* **Query and body keys are enumerated per compiled graph**, so an allowlisted path
   cannot be used to smuggle a parameter the action was never meant to carry.
 * Semantic narrowing that needs parent state (is this request actually in
   flight? is this capability token scoped to it?) lives in ``parent.py``, which

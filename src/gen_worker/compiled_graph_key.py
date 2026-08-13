@@ -1,4 +1,4 @@
-"""Worker-owned compiled-ENTRY identity (gw#581, th#883; pgw#1059; pgw#1176).
+"""Worker-owned compiled-COMPILED_GRAPH identity (gw#581, th#883; pgw#1059; pgw#1176).
 
 ONE compatibility brain: the worker computes the exact key of one compiled
 GRAPH CLASS from that artifact's OWN recorded facts, with this module — and
@@ -8,13 +8,13 @@ path (``fleet_compiled_graphs._identity_axes``) recomputes the same key from the
 facts before a byte moves.
 
 THE ATOM IS ONE GRAPH CLASS (pgw#1176, Paul-directed 2026-08-12). What used
-to be keyed here was a 36-entry all-or-nothing transaction whose identity,
+to be keyed here was a 36-compiled graph all-or-nothing transaction whose identity,
 adoption, durability, verification, arming and advertisement were the SAME
 unit; weight-free compile removed every reason for that unit to be big and
 the design never renegotiated. The unit of identity, storage, transfer,
-verification, arming and de-arming is now the **entry**: one graph class,
+verification, arming and de-arming is now the **compiled graph**: one graph class,
 compiled whole. "The compiled graph" survives only as a derived, artifact-less
-CONTRACT MANIFEST — the set of entry keys one declaration traces to. A
+CONTRACT MANIFEST — the set of compiled graph keys one declaration traces to. A
 manifest is a view; it is never downloaded, verified or armed, and
 :func:`manifest_digest` is a telemetry/coverage label, never identity.
 
@@ -23,12 +23,12 @@ contains exactly what determines the compiled artifact — nothing else.**
 "Don't key on parameters that don't require us to recompile." Applied at the
 honest granularity that test admits THREE axes and no more:
 
-    graph         this entry's own ``class_hash`` — 16 hex folding the
-                  entry's target, fork coordinate, class dims, declared-range
+    graph         this compiled graph's own ``class_hash`` — 16 hex folding the
+                  compiled graph's target, fork coordinate, class dims, declared-range
                   digest, graph-INTERFACE block, the node-level
                   ``graph_witness`` body digest, trace mode and lora bucket
                   (``aot_serve.class_hash`` — stamped by
-                  ``aot_serve.entry_metadata``, proven at admission by
+                  ``aot_serve.compiled_graph_metadata``, proven at admission by
                   ``aot_serve.verify_contract``, READ — never re-derived —
                   here).
 
@@ -41,7 +41,7 @@ honest granularity that test admits THREE axes and no more:
                   ``micro-pad32-branchy``: 112- and 102-node graphs,
                   byte-identical keying block, one key, two artifacts; post-fix
                   two keys. A residual collision (a witness-blind or hash-broken
-                  entry) is still caught belt-and-braces: every entry records a
+                  compiled graph) is still caught belt-and-braces: every compiled graph records a
                   ``graph_witness`` top-level sibling and the adopt path refuses
                   a compiled graph whose witness is not the graph this pod traced
                   (``aot_identity.verify_graph_witness``).
@@ -62,10 +62,10 @@ Axes deliberately NOT in the key, each because it fails the axiom:
 * ``envelope`` — **EVICTED by pgw#1176, and it is the whole point.**
   ``envelope_facts`` digests the UNION of shapes / text_lens / guidance
   ACROSS THE BUNDLE — a property of the collection, not of any computation
-  — so adding one aspect ratio re-keyed all 36 sdxl entries although 35 of
+  — so adding one aspect ratio re-keyed all 36 sdxl compiled graphs although 35 of
   them trace byte-identically (measured on origin/master @ ``4dfdcd60``:
   two byte-identical classes moved ``ck1-c4c134db…`` -> ``ck1-48512ea3…``
-  for one extra shape row). Per entry the shape facts that genuinely affect
+  for one extra shape row). Per compiled graph the shape facts that genuinely affect
   tracing are ALREADY inputs to that class's ``class_hash``, through
   ``range_digest`` and ``class_dims``. The one real edge is honest under
   this split rather than lost by it: widening a DYNAMIC dim's range does
@@ -118,7 +118,7 @@ facts beside the STAMPED ``aot-inductor`` key from traced facts — is
 retired with the ``contract`` axis that made it necessary: attempt 28 read
 the two as one diverging key, which is exactly the fused-axis failure
 pgw#1059 splits away. A mint obligation is named by
-``fleet_compiled_graphs.arm_identity`` (NOT an entry key, never ek-prefixed), and the
+``fleet_compiled_graphs.arm_identity`` (NOT an compiled graph key, never ek-prefixed), and the
 cozy-local store verdict compares recorded facts directly
 (``compile_cache.local_compiled_graph_mismatch``).
 
@@ -135,17 +135,17 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
-# pgw#1176: ``ck1`` (the 36-entry COMPILED GRAPH key) is REPLACED by ``ek1`` (one graph
+# pgw#1176: ``ck1`` (the 36-compiled graph COMPILED GRAPH key) is REPLACED by ``ek1`` (one graph
 # class). This is a §1.34 third-category change — a name persisted as an
 # ADDRESS — so it is a COORDINATED FLEET RE-KEY, never a quiet rename: every
-# stored compiled graph is orphaned by it, and the cut carries scheme + per-entry store
+# stored compiled graph is orphaned by it, and the cut carries scheme + per-compiled graph store
 # schema + resolve/publish wire + pack format + the
 # ``Arm.graph_contract_digest`` proto change + the corpus purge together.
 # Priced today: the adoptable corpus is ONE toy family, so the re-key costs
 # one re-mint of a 3-class toy — effectively free, and never this cheap
 # again. The scheme-prefix machinery STAYS: post-launch, the identical change
 # would be ek2 with strand-by-name. New identity FACTS ride the content
-# digests (toolchain entries), never new axes and never a new scheme number.
+# digests (toolchain compiled graphs), never new axes and never a new scheme number.
 KEY_SCHEME = "ek1"
 _PREFIX = KEY_SCHEME + "-"
 # The key digest doubles as the store flavor token, whose shared grammar
@@ -154,7 +154,7 @@ _PREFIX = KEY_SCHEME + "-"
 _DIGEST_HEX = 56
 
 # THE three axes, all required — see THE MEMBERSHIP AXIOM in the module
-# docstring. There are no optional axes: an exported entry that cannot state
+# docstring. There are no optional axes: an exported compiled graph that cannot state
 # one of these has no identity. Adding a name here is adding an axis, which
 # the axiom forbids unless the new fact provably alters the compiled
 # artifact AND cannot ride an existing axis's fact block
@@ -162,7 +162,7 @@ _DIGEST_HEX = 56
 _REQUIRED = ("graph", "sm", "toolchain")
 _OPTIONAL: tuple = ()
 
-#: The `kind` METADATA value of an exported .pt2 entry — the only publishable
+#: The `kind` METADATA value of an exported .pt2 compiled graph — the only publishable
 #: kind since pgw#1010, and since pgw#1059 a compat-gate fact rather than a
 #: key axis (`aot_serve.verify_declared` refuses on it by name).
 EXPORTED_KIND = "aot-inductor"
@@ -173,7 +173,7 @@ EXPORTED_KIND = "aot-inductor"
 #:
 #: pgw#1176: this is a MANIFEST fact and NEVER a key axis. It rides the
 #: derived contract manifest (the declaration that produced the key set), not
-#: the per-entry artifact, because it is a property of the COLLECTION: the
+#: the per-compiled graph artifact, because it is a property of the COLLECTION: the
 #: union of every class's shapes. Keying on it re-minted 35 unchanged classes
 #: every time an author added an aspect ratio.
 #:
@@ -183,8 +183,8 @@ EXPORTED_KIND = "aot-inductor"
 #: appear, write "the artifact-metadata envelope" vs "the declared envelope".
 EXPORT_ENVELOPE_KEY = "declared_envelope"
 
-#: The per-entry artifact's block naming the ONE graph class it carries.
-ENTRY_BLOCK_KEY = "entry"
+#: The per-compiled graph artifact's block naming the ONE graph class it carries.
+COMPILED_GRAPH_BLOCK_KEY = "compiled_graph"
 
 
 class CompiledGraphKeyError(ValueError):
@@ -193,10 +193,10 @@ class CompiledGraphKeyError(ValueError):
 
 @dataclass(frozen=True)
 class CompiledGraphKey:
-    """A computed ENTRY identity: canonical axes + their digest.
+    """A computed COMPILED_GRAPH identity: canonical axes + their digest.
 
     One instance = one compiled graph class. The name is kept (rather than
-    churned to ``EntryKey``) because every consumer of this type wants "the
+    churned to ``CompiledGraphKey``) because every consumer of this type wants "the
     identity of the compiled thing", and pgw#1176 changed WHAT the compiled
     thing is, not what identity means.
     """
@@ -219,21 +219,21 @@ class CompiledGraphKey:
 
 
 def is_key(value: str) -> bool:
-    """True when ``value`` has entry-key SHAPE: ``ek`` + 1-2 scheme digits +
+    """True when ``value`` has compiled graph-key SHAPE: ``ek`` + 1-2 scheme digits +
     ``-`` + 56 lowercase hex.
 
     Scheme-AGNOSTIC, byte-for-byte the grammar tensorhub's
     ``compilecache.IsCompiledGraphKey`` must enforce after the pgw#1176 cut, and for
     the same reason it gives (th#1183): pinning the current scheme here turns
-    every other-scheme entry into ``unreadable_compiled_graph_key``, which is both a
-    lie and a filter no axis justifies. An entry of an older scheme is
+    every other-scheme compiled graph into ``unreadable_compiled_graph_key``, which is both a
+    lie and a filter no axis justifies. An compiled graph of an older scheme is
     admitted to the candidate list and then ruled on by the axes that
     actually decide whether this runtime can execute it — the identity axes
     and the ingress contract — not by the label on it.
 
-    NOTE the ``ck`` prefix is NOT accepted. A ck1 key names a 36-entry
+    NOTE the ``ck`` prefix is NOT accepted. A ck1 key names a 36-compiled graph
     all-or-nothing compiled graph, which is not a thing this runtime can arm at all; a
-    grammar that admitted both would let a compiled graph ref reach a per-entry code
+    grammar that admitted both would let a compiled graph ref reach a per-compiled graph code
     path and fail late instead of at the comparison.
     """
     v = str(value or "")
@@ -270,7 +270,7 @@ def _refuse_key_shaped(where: str, name: str, value: str) -> None:
     """
     if is_key(value):
         raise CompiledGraphKeyError(
-            f"{where}: {name}={value!r} is an ENTRY KEY where a fact digest "
+            f"{where}: {name}={value!r} is an COMPILED_GRAPH KEY where a fact digest "
             f"belongs. A key is the OUTPUT of this computation, never an "
             f"input to it — passing one here would hash an identity into "
             f"another identity and produce a key no artifact can restate.")
@@ -324,12 +324,12 @@ def envelope_facts(block: Mapping[str, Any]) -> Dict[str, Any]:
 
     pgw#1176: a MANIFEST fact, never a key axis. It digests the UNION of the
     ladder across the whole declaration, which is a property of the
-    collection; per entry the tracing-relevant half of it is already inside
+    collection; per compiled graph the tracing-relevant half of it is already inside
     ``class_hash`` via ``range_digest`` and ``class_dims``.
 
     ``overlay`` is the behavior-posture slot (pgw#1059 amendment 5): a
     typed, allowlisted author-settings overlay digested into the envelope
-    when one is declared. The menu is EMPTY today — no entry has passed the
+    when one is declared. The menu is EMPTY today — no compiled graph has passed the
     §4.25 justification gate — so the slot is omitted whenever falsy, which
     keeps every current declaration's canonical form free of a field that
     says "unchanged" (the ``excluded``/``literal_values`` discipline).
@@ -407,7 +407,7 @@ def toolchain_axis_digest(block: Mapping[str, Any]) -> str:
 # never hashed — see graph_hash's module docstring), and keying on the
 # checkpoint would put every fine-tune in its own key space.  What the subject
 # does is stop two DIFFERENT checkpoints sharing one pending mint, one
-# local-store memo entry or one boot-key memo row on the strength of an
+# local-store memo compiled graph or one boot-key memo row on the strength of an
 # assumption nothing checked.
 
 
@@ -455,55 +455,55 @@ def subject_digest(subjects: Iterable[SlotSubject]) -> str:
     return facts_digest(subject_facts(subs))
 
 
-def from_entry_metadata(meta: Mapping[str, Any]) -> CompiledGraphKey:
-    """The key an EXPORTED (``aot-inductor``) ENTRY's OWN recorded facts
-    describe — THE single implementation of entry identity: ``aot_mint``
+def from_compiled_graph_metadata(meta: Mapping[str, Any]) -> CompiledGraphKey:
+    """The key an EXPORTED (``aot-inductor``) COMPILED_GRAPH's OWN recorded facts
+    describe — THE single implementation of compiled graph identity: ``aot_mint``
     stamps what this returns and the publish path recomputes it, so the axes
-    an entry is published under cannot drift from the axes its key was
+    an compiled graph is published under cannot drift from the axes its key was
     minted from.
 
     Every axis is read from a recorded block, never from a probe and never
     from the ``compiled_graph_key`` stamp. Raises :class:`CompiledGraphKeyError` when a fact is
-    missing: an entry that cannot name an axis has no identity, and must not
+    missing: an compiled graph that cannot name an axis has no identity, and must not
     be published under a partial one.
 
-    ``graph`` is READ from the entry's ``class_hash``, never re-derived here
+    ``graph`` is READ from the compiled graph's ``class_hash``, never re-derived here
     — the one derivation lives in ``aot_serve.class_hash``, stamped by
-    ``aot_serve.entry_metadata``, and admission
+    ``aot_serve.compiled_graph_metadata``, and admission
     (``aot_serve.verify_contract``) recomputes it from the staged bytes so a
     forged stamp is refused before it can arm.
 
-    Pre-pgw#1176 artifacts fail here STRUCTURALLY: they record an ``entries``
-    MAP and a ``combined_graph_hash`` rather than one ``entry`` block, so a
-    36-entry compiled graph can never restate a per-entry identity. That is what makes
+    Pre-pgw#1176 artifacts fail here STRUCTURALLY: they record an ``compiled graphs``
+    MAP and a ``combined_graph_hash`` rather than one ``compiled graph`` block, so a
+    36-compiled graph compiled graph can never restate a per-compiled graph identity. That is what makes
     the ck1 corpus purge hygiene rather than a correctness precondition.
     """
     kind = str(meta.get("kind") or "")
     if kind != EXPORTED_KIND:
         raise CompiledGraphKeyError(
-            f"artifact kind {kind!r} has no entry-key identity: only exported "
-            f"{EXPORTED_KIND!r} entries are keyed (pgw#1010/pgw#1059 — JIT is "
+            f"artifact kind {kind!r} has no compiled_graph-key identity: only exported "
+            f"{EXPORTED_KIND!r} compiled_graphs are keyed (pgw#1010/pgw#1059 — JIT is "
             "intake, local torch-inductor-cache artifacts compare facts via "
             "compile_cache.local_compiled_graph_mismatch)")
     sm = str(meta.get("sm") or "")
     if not sm:
         raise CompiledGraphKeyError(
             "cannot state the compute capability (sm) of this runtime; an "
-            "exported entry has no identity without it — mint on the target GPU")
-    entry = meta.get(ENTRY_BLOCK_KEY)
-    if not isinstance(entry, Mapping) or not entry:
+            "exported compiled_graph has no identity without it — mint on the target GPU")
+    compiled_graph = meta.get(COMPILED_GRAPH_BLOCK_KEY)
+    if not isinstance(compiled_graph, Mapping) or not compiled_graph:
         raise CompiledGraphKeyError(
-            f"artifact records no {ENTRY_BLOCK_KEY!r} block; the atom is ONE "
+            f"artifact records no {COMPILED_GRAPH_BLOCK_KEY!r} block; the atom is ONE "
             "graph class (pgw#1176) and an artifact that cannot name its "
             "class has no identity")
-    graph = str(entry.get("class_hash") or "")
+    graph = str(compiled_graph.get("class_hash") or "")
     if not graph:
         raise CompiledGraphKeyError(
-            f"entry {str(entry.get('name') or '')!r} carries no class_hash; a "
+            f"compiled_graph {str(compiled_graph.get('name') or '')!r} carries no class_hash; a "
             "class the key cannot name is a class a mismatch cannot name "
             "(pgw#716)")
     _refuse_key_shaped(
-        f"entry {str(entry.get('name') or '')!r}", "class_hash", graph)
+        f"compiled_graph {str(compiled_graph.get('name') or '')!r}", "class_hash", graph)
     toolchain = meta.get("toolchain")
     if not isinstance(toolchain, dict) or not toolchain:
         raise CompiledGraphKeyError(
@@ -532,7 +532,7 @@ def manifest_digest(class_hashes: Iterable[str]) -> str:
       class (§1.7). It is deliberately sm- and toolchain-FREE so that tuple
       is not degenerate;
     * nothing resolves, downloads, verifies or arms it. An artifact is one
-      entry, addressed by :func:`from_entry_metadata`.
+      compiled graph, addressed by :func:`from_compiled_graph_metadata`.
 
     A manifest is a VIEW. The moment it becomes something a pod downloads or
     a hub hands back as one row, the wrong atom is back.
@@ -548,7 +548,7 @@ __all__ = [
     "KEY_SCHEME",
     "EXPORTED_KIND",
     "EXPORT_ENVELOPE_KEY",
-    "ENTRY_BLOCK_KEY",
+    "COMPILED_GRAPH_BLOCK_KEY",
     "CompiledGraphKey",
     "CompiledGraphKeyError",
     "SlotSubject",
@@ -560,7 +560,7 @@ __all__ = [
     "manifest_digest",
     "toolchain_axis_digest",
     "toolchain_facts",
-    "from_entry_metadata",
+    "from_compiled_graph_metadata",
     "from_axes",
     "is_key",
 ]

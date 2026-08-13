@@ -188,7 +188,7 @@ def test_real_image_tree_derives_its_own_set():
     assert CONTRACT_COZY_FP8_ROWWISE in by_contract
     assert "plain.bf16@1" in by_contract
     # Our own flat-nvfp4 w4a4 decoder claims nothing: the registry has no
-    # entry for it yet (ours is LOW-nibble + unswizzled scales, which is NOT
+    # compiled graph for it yet (ours is LOW-nibble + unswizzled scales, which is NOT
     # bfl.nvfp4-preswizzled@1 — te#151 measured what conflating them costs).
     # An unclaimed decoder contributes no lane, which is the honest answer.
     assert "bfl.nvfp4-preswizzled@1" not in by_contract

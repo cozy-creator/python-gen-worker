@@ -3,7 +3,7 @@
 WHAT HAPPENED. The first sdxl full-circle leg reached the compile phase and
 died there, deterministically, on pod ``fry7suf4xgycie`` (RTX A4000, 0.113.2):
 
-    entry 'unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192':
+    compiled graph 'unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192':
     torch.export(strict=True) failed for UNet2DConditionModel:
     Unsupported: Skip inlining `torch.compiler.disable()`d function
       Explanation: … <function ModuleGroup.onload_> … wrapped with
@@ -16,11 +16,11 @@ serving parent was already resident on that card), and the offload hooks put a
 ``torch.export(strict=True)`` refuses, fatally.
 
 THE CONTROLLED COMPARISON, which is what makes the diagnosis rather than a
-guess: the SAME entry name, on the SAME wheel (0.113.2), exported in **91.07 s**
+guess: the SAME compiled graph name, on the SAME wheel (0.113.2), exported in **91.07 s**
 on an A4500 (`ft5vr2zg86jwmi`) and was `Unsupported` on the A4000. Six
-adapter-bearing entries exported clean there. The adapter axis is exonerated —
+adapter-bearing compiled graphs exported clean there. The adapter axis is exonerated —
 rows are ordered adapter-bearing first (`aot_mint._rows_source`), so the
-adapter entry was simply the first one tried.
+adapter compiled graph was simply the first one tried.
 
 TWO FIXES, AND THE SECOND IS THE MORE IMPORTANT
 -----------------------------------------------
@@ -28,13 +28,13 @@ TWO FIXES, AND THE SECOND IS THE MORE IMPORTANT
    the pgw#1124 seam, applied one door over. The ladder is for a pipeline that
    will run a forward, and this one only ever exports. The hooks are never
    installed rather than stripped afterwards, which is why this is small.
-2. **A deterministic per-entry export failure no longer kills the mint.** That
-   pod threw away nothing (it died on its first entry), but the A4500 shows the
+2. **A deterministic per-compiled graph export failure no longer kills the mint.** That
+   pod threw away nothing (it died on its first compiled graph), but the A4500 shows the
    shape that matters: 6 classes exported clean, and under the old code a
-   refusal at row 7 would have discarded all six. The entry is already the unit
+   refusal at row 7 would have discarded all six. The compiled graph is already the unit
    of identity and of publish (pgw#718); it is now the unit of FAILURE too.
 
-Fail-closed stays fail-closed AT THE ENTRY: a skipped class is never packed and
+Fail-closed stays fail-closed AT THE COMPILED_GRAPH: a skipped class is never packed and
 never published, and serving covers it eager by the same mechanism that covers
 any shape outside a compiled graph's declared envelope (pgw#844). Only the blast radius
 changed.
@@ -112,24 +112,24 @@ def _mint(tmp: Path) -> aot_mint.MintResult:
     spec = aot_mint.ExportSpec(family=FAMILY, target="")
     # K=1: this file is about the export loop, and the serial path exercises
     # the same `_rows_source` the overlapped one does (one body, by design).
-    return aot_mint.mint(pipe, spec, tmp, entry_workers=1)
+    return aot_mint.mint(pipe, spec, tmp, compiled_graph_workers=1)
 
 
 def _fail_one(monkeypatch: pytest.MonkeyPatch, *, on: str, exc: BaseException) -> List[str]:
     """Make ONE declared class refuse at export. Returns the names attempted."""
-    real = aot_mint._export_entry
+    real = aot_mint._export_compiled_graph
     seen: List[str] = []
 
     def _patched(pipeline: Any, spec: Any, plan: Any, decl: Any, **kw: Any) -> Any:
         from gen_worker import aot_declaration as _decl
 
-        name = _decl.plan_entry_name(plan)
+        name = _decl.plan_compiled_graph_name(plan)
         seen.append(name)
         if on in name:
             raise exc
         return real(pipeline, spec, plan, decl, **kw)
 
-    monkeypatch.setattr(aot_mint, "_export_entry", _patched)
+    monkeypatch.setattr(aot_mint, "_export_compiled_graph", _patched)
     return seen
 
 
@@ -152,17 +152,17 @@ def test_a_deterministic_refusal_skips_ONE_class_and_mints_the_rest(
     result = _mint(tmp_path)
 
     assert len(seen) == 2, "both classes must be ATTEMPTED — one refusing must not stop the loop"
-    assert result.timings.get("skipped_entries") == 1.0
-    # pgw#1176: a mint produces a SET of independently keyed entry artifacts,
-    # not one compiled graph with an `entries` map — so the surviving class is a packed
+    assert result.timings.get("skipped_compiled_graphs") == 1.0
+    # pgw#1176: a mint produces a SET of independently keyed compiled graph artifacts,
+    # not one compiled graph with an `compiled graphs` map — so the surviving class is a packed
     # ARTIFACT rather than a member of a bundle. The claim is unchanged and
-    # sharper: fail-closed is per ENTRY, and the refusing class simply has no
+    # sharper: fail-closed is per COMPILED_GRAPH, and the refusing class simply has no
     # artifact.
-    names = [row.entry for row in result.entries]
+    names = [row.compiled_graph for row in result.compiled_graphs]
     assert len(names) == 1, "the surviving class must still be packed"
     assert not any("B=1" in name for name in names), (
         "the class that refused must NOT have been packed — fail-closed is "
-        "per ENTRY, not abandoned")
+        "per COMPILED_GRAPH, not abandoned")
 
 
 def test_the_skipped_class_is_NAMED_with_the_construct_that_refused(
@@ -184,11 +184,11 @@ def test_the_skipped_class_is_NAMED_with_the_construct_that_refused(
 
     _mint(tmp_path)
 
-    skips = [e for e in events if e[0] == aot_mint.KIND_ENTRY_EXPORT_UNSUPPORTED]
+    skips = [e for e in events if e[0] == aot_mint.KIND_COMPILED_GRAPH_EXPORT_UNSUPPORTED]
     assert len(skips) == 1, "the hub must be told, once, which class was skipped"
     detail = skips[0][1]
     assert "ModuleGroup.onload_" in detail, (
-        "the event must name the CONSTRUCT that refused, not just the entry")
+        "the event must name the CONSTRUCT that refused, not just the compiled_graph")
     assert "B=1" in detail
 
 
@@ -214,13 +214,13 @@ def test_a_RESOURCE_shortfall_still_aborts_the_WHOLE_mint(
 def test_every_class_skipped_still_REFUSES(
     tmp_path: Path, fake_sm: Dict[str, str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A compiled graph with no entries is not a partial compiled graph, it is not a compiled graph. It fails
+    """A compiled graph with no compiled graphs is not a partial compiled graph, it is not a compiled graph. It fails
     closed on the path it already failed closed on (`_pack`), rather than
     through a second check."""
     _declare()
     _fail_one(monkeypatch, on="B=", exc=Unsupported("nope"))
 
-    with pytest.raises(aot_mint.MintRefused, match="no entries"):
+    with pytest.raises(aot_mint.MintRefused, match="no compiled_graphs"):
         _mint(tmp_path)
 
 
@@ -233,7 +233,7 @@ def test_only_deterministic_local_failures_are_skippable() -> None:
     assert aot_mint._export_skippable(Unsupported("whatever")), (
         "torch's own export refusal is the skippable case")
 
-    # ...and ONLY torch's own. `_export_entry` also warms, gates and compiles;
+    # ...and ONLY torch's own. `_export_compiled_graph` also warms, gates and compiles;
     # skipping any of those would be this issue's own defect in a new hat.
     assert not aot_mint._export_skippable(RuntimeError("boom in forward")), (
         "a broken forward is not an unsupported construct")
@@ -478,7 +478,7 @@ def test_real_group_offloading_is_detected_and_the_function_is_NAMED() -> None:
 
 
 def test_the_mint_refuses_ONCE_before_export_naming_the_construct() -> None:
-    """(a). Without it, pgw#1208's per-entry skip would dutifully skip all 36
+    """(a). Without it, pgw#1208's per-compiled graph skip would dutifully skip all 36
     classes and publish nothing — thirty-six typed refusals and an hour of wall
     clock to say once what was knowable before the first export began."""
     pytest.importorskip("diffusers")

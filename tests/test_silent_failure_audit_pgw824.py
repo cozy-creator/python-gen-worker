@@ -340,7 +340,7 @@ def _mint(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
         family=_FAMILY,
         targets=("unet",),
         dims=(Dim("B", carried_by=(("sample", 0),)),),
-        # TWO classes, so "entry i of N" has something to count.
+        # TWO classes, so "compiled graph i of N" has something to count.
         classes=(GraphClass(dims={"B": 1}), GraphClass(dims={"B": 2})),
         inputs=(Input("sample", shape=("B", _WIDTH), dtype="model"),),
         shape_strategy="static-rows",
@@ -355,7 +355,7 @@ def _mint(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
         reset_export_declarations()
 
 
-def test_a_multi_entry_mint_reports_every_entry_before_it_runs(
+def test_a_multi_compiled_graph_mint_reports_every_compiled_graph_before_it_runs(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """RED before pgw#824: `aot_mint.mint` was one opaque call over the
@@ -387,37 +387,37 @@ def test_a_multi_entry_mint_reports_every_entry_before_it_runs(
     assert [b[1] for b in trace] == [0, 1, 2], beats
     assert all(b[2] == 2 for b in trace), "a step with no total is not progress"
     assert trace[0][0] == activity.PHASE_TRACE_GRAPH
-    # Each row NAMES its entry, or "12 of 18" says nothing about which 12.
+    # Each row NAMES its compiled graph, or "12 of 18" says nothing about which 12.
     assert all(b[3] for b in trace[1:]), trace
     # And the mint's tail phase reports too, so a reader can tell "still
     # exporting" from "packing".
     assert [b[0] for b in beats][-1] == aot_mint.PHASE_SEAL_PUBLISH, beats
 
 
-def test_an_aborted_mint_reports_the_entry_it_died_ON(
+def test_an_aborted_mint_reports_the_compiled_graph_it_died_ON(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The reconciliation of pgw#824's live beat with pgw#825's abort table.
 
-    pgw#825 made an aborted mint report where it SPENT — per-entry rows for the
-    entries that finished. That is the wrong half of the question when a mint
-    dies mid-entry: 11 rows and no twelfth, and the twelfth is the one being
+    pgw#825 made an aborted mint report where it SPENT — per-compiled graph rows for the
+    compiled graphs that finished. That is the wrong half of the question when a mint
+    dies mid-compiled graph: 11 rows and no twelfth, and the twelfth is the one being
     asked about. Because both halves now read one `MintProgress`, the abort
     table carries the last position the live beat reported, as `at`.
     """
     from gen_worker import aot_mint
 
     def _refuse(row: Any, package: Any) -> Any:
-        raise aot_mint.MintRefused(f"entry {row.name!r}: bindability gate: nope")
+        raise aot_mint.MintRefused(f"compiled_graph {row.name!r}: bindability gate: nope")
 
-    monkeypatch.setattr(aot_mint, "_gate_and_declare_entry", _refuse)
+    monkeypatch.setattr(aot_mint, "_gate_and_declare_compiled_graph", _refuse)
     with pytest.raises(aot_mint.MintRefused) as excinfo:
         _mint(tmp_path, monkeypatch)
 
     table = getattr(excinfo.value, "mint_phases", {})
     assert table.get("terminus") == "aborted"
     # pgw#825's half, unchanged.
-    assert table["n_entries"] == 2 and table["totals"]["export_s"] > 0
+    assert table["n_compiled_graphs"] == 2 and table["totals"]["export_s"] > 0
     # pgw#824's half, on the SAME record.
     assert table["at"]["phase"] == aot_mint.PHASE_SEAL_PUBLISH
     assert table["at"]["total"] == 2
@@ -432,15 +432,15 @@ def test_the_position_is_recorded_even_with_no_sink_and_a_raising_one() -> None:
     from gen_worker import aot_mint
 
     quiet = aot_mint.MintProgress()
-    quiet.beat(aot_mint.PHASE_TRACE_GRAPH, 3, 18, "entry-c")
+    quiet.beat(aot_mint.PHASE_TRACE_GRAPH, 3, 18, "compiled_graph-c")
     assert quiet.at == {
-        "phase": "trace_graph", "step": 3, "total": 18, "note": "entry-c"}
+        "phase": "trace_graph", "step": 3, "total": 18, "note": "compiled_graph-c"}
 
     def _explode(*_: Any) -> None:
         raise RuntimeError("the sink is not the mint")
 
     loud = aot_mint.MintProgress(on_progress=_explode)
-    loud.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 12, 18, "entry-l")
+    loud.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 12, 18, "compiled_graph-l")
     assert loud.at["step"] == 12
 
 
@@ -455,16 +455,16 @@ def test_the_mint_progress_tokens_are_the_hubs_own_phase_vocabulary() -> None:
     assert aot_mint.PHASE_SEAL_PUBLISH == activity.PHASE_SEAL_PUBLISH
 
 
-def test_the_entry_compile_pool_reports_each_entry_as_it_lands() -> None:
-    """The pool loop is the longest wire-silent stretch of a mint (an 18-entry
+def test_the_compiled_graph_compile_pool_reports_each_compiled_graph_as_it_lands() -> None:
+    """The pool loop is the longest wire-silent stretch of a mint (an 18-compiled graph
     sdxl compiled graph spends the bulk of its wall clock there) and reported nothing
     between "compiling" and "packed"."""
     import inspect
 
     from gen_worker import aot_compile_pool
 
-    src = inspect.getsource(aot_compile_pool.EntryCompilePool.compile)
-    assert "on_entry" in src
+    src = inspect.getsource(aot_compile_pool.CompiledGraphCompilePool.compile)
+    assert "on_compiled_graph" in src
     assert "len(done), _known_total()" in src, (
         "progress must carry BOTH a step and a total — a bare step is not "
         "progress, it is a counter (pgw#1052: the total is the producer's "
@@ -473,7 +473,7 @@ def test_the_entry_compile_pool_reports_each_entry_as_it_lands() -> None:
 
 def test_progress_reporting_never_costs_the_mint_its_work() -> None:
     """Telemetry must never fail the work it reports on: a raising callback
-    would otherwise throw away entries that already compiled."""
+    would otherwise throw away compiled graphs that already compiled."""
     from gen_worker import mint_delegate
 
     class _ActNoCounter:
@@ -543,7 +543,7 @@ def test_a_failed_eviction_stays_booked_in_vram(
 
     The booking was unconditional, so a failed eviction still wrote
     `tier=RAM, vram_bytes=0` while `_move_verified`'s own rollback had just put
-    the object back on CUDA. The registry then believed the entry held ZERO
+    the object back on CUDA. The registry then believed the compiled graph held ZERO
     VRAM, `make_room` handed out headroom that does not exist, and the OOM
     landed on an unrelated `promote()` later with nothing tying it back here.
     """

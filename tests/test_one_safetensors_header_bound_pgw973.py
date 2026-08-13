@@ -9,7 +9,7 @@ It used to be stated six times — five readers at 100 MiB and
 accepted headers the loader would refuse, so the re-shard path could emit a
 shard the serving path could not open. Same bytes, two verdicts.
 
-These tests drive every real entry point against real files on disk — no
+These tests drive every real compiled graph point against real files on disk — no
 mocks, no monkeypatching of the bound. They prove the surviving bound still
 refuses the runaway everywhere the deleted copies used to, and that writer and
 loader now agree.
@@ -90,7 +90,7 @@ def test_the_bound_is_stated_exactly_once():
 
 
 # --------------------------------------------------------------------------
-# Every entry point that used to carry its own copy
+# Every compiled graph point that used to carry its own copy
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("declared", [2**63 - 1, MAX_HEADER_BYTES + 1, 0])

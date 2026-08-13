@@ -284,17 +284,17 @@ class SequenceRuntime:
     """One armed degree-D group. Owned by the executor record it serves."""
 
     def __init__(
-        self, devices: Tuple[int, ...], *, entry: Optional[Any] = None,
+        self, devices: Tuple[int, ...], *, compiled_graph: Optional[Any] = None,
         backend: str = "nccl",
         collective_timeout_s: Optional[float] = None,
     ) -> None:
         self.devices = tuple(int(d) for d in devices)
         self.degree = len(self.devices)
-        # The follower entry point and gloo backend are overridable ONLY so
+        # The follower compiled graph point and gloo backend are overridable ONLY so
         # an acceptance probe or the CPU rig can drive the shipped rank group
         # against a bare model (no endpoint, no CAS) — production always uses
         # `sequence_rank_main` over NCCL.
-        self._entry = entry or sequence_rank_main
+        self._compiled_graph = compiled_graph or sequence_rank_main
         self._backend = backend
         self._collective_timeout_s = collective_timeout_s
         self._group: Optional[RankGroup] = None
@@ -328,7 +328,7 @@ class SequenceRuntime:
         plan.refuse_unless_cp_safe()
         refuse_unless_shard_invariant_quant(pipe, degree=self.degree)
 
-        kwargs: dict = {"backend": self._backend, "entry": self._entry}
+        kwargs: dict = {"backend": self._backend, "compiled_graph": self._compiled_graph}
         if self._collective_timeout_s is not None:
             kwargs["collective_timeout_s"] = self._collective_timeout_s
         self._group = RankGroup(self.devices, **kwargs)

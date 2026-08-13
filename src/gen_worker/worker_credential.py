@@ -64,7 +64,7 @@ def install(token: str, expires_at_unix: float = 0.0) -> None:
 
 
 def install_bootstrap(settings: "Settings") -> None:
-    """Hand this module the boot token, from the process entry's `Settings`.
+    """Hand this module the boot token, from the process compiled graph's `Settings`.
 
     pgw#931 (§1.18): `current()` used to reach for `get_settings()` itself,
     inside `getattr(..., "bootstrap_worker_jwt", "")` inside a bare
@@ -85,7 +85,7 @@ def current() -> str:
     Falls back to the boot token when no rotation has arrived yet, which is
     the correct answer for the first ~24 minutes of a pod's life and the only
     answer available before the stream is up. The boot token is HANDED to this
-    module by the process entry (`install_bootstrap`), never fetched by it: a
+    module by the process compiled graph (`install_bootstrap`), never fetched by it: a
     module that can go and find its own credential is a module that can find a
     different one than the rest of the process is using.
     """

@@ -187,9 +187,9 @@ def compiled_graph(tmp_path_factory, request) -> Dict[str, Any]:
     # pgw#1176: the mint yields one independently keyed artifact per graph
     # class. Index them by the class each NAMES — the addressing the atom
     # makes natural, and what keeps a per-class assertion bisectable.
-    by_entry = {row.entry: row for row in result.entries}
-    assert len(by_entry) == len(result.entries), "two entries collided on one name"
-    return {"pipe": pipe, "result": result, "by_entry": by_entry}
+    by_compiled_graph = {row.compiled_graph: row for row in result.compiled_graphs}
+    assert len(by_compiled_graph) == len(result.compiled_graphs), "two compiled_graphs collided on one name"
+    return {"pipe": pipe, "result": result, "by_compiled_graph": by_compiled_graph}
 
 
 #: The two graph classes this declaration forks into.
@@ -197,9 +197,9 @@ LEAN = "unet/adapter=false/B=2"
 FAT = "unet/adapter=true/B=2"
 
 
-def _entry_block(compiled_graph: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """One class's recorded entry block, off ITS OWN artifact's metadata."""
-    block = dict(compiled_graph["by_entry"][name].metadata[compiled_graph_key.ENTRY_BLOCK_KEY])
+def _compiled_graph_block(compiled_graph: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """One class's recorded compiled graph block, off ITS OWN artifact's metadata."""
+    block = dict(compiled_graph["by_compiled_graph"][name].metadata[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY])
     assert block["name"] == name, block.get("name")
     return block
 
@@ -209,16 +209,16 @@ def test_a_container_only_pipeline_mints_both_graph_classes(compiled_graph) -> N
     independently keyed artifacts" — the fork is unchanged, what it packages
     into is not."""
     result = compiled_graph["result"]
-    assert sorted(row.entry for row in result.entries) == [LEAN, FAT]
-    assert len({row.key for row in result.entries}) == 2
+    assert sorted(row.compiled_graph for row in result.compiled_graphs) == [LEAN, FAT]
+    assert len({row.key for row in result.compiled_graphs}) == 2
 
 
 def test_the_two_classes_were_prepared_DIFFERENTLY(compiled_graph) -> None:
     """The pgw#790 fork survives the pgw#822 arm: the adapter-bearing class
     carries the lifted pair, the branchless one is exported from the PLAIN
     module and says so. A one-size wrapper would break this."""
-    fat = _entry_block(compiled_graph, FAT)
-    lean = _entry_block(compiled_graph, LEAN)
+    fat = _compiled_graph_block(compiled_graph, FAT)
+    lean = _compiled_graph_block(compiled_graph, LEAN)
     assert set(lora_lifted.LIFTED_INPUT_NAMES) <= {
         row["name"] for row in fat["inputs"]}
     assert not set(lora_lifted.LIFTED_INPUT_NAMES) & {
@@ -237,7 +237,7 @@ def test_the_pipeline_is_left_lifted_after_the_mint(compiled_graph) -> None:
 
 
 def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
-    """The permanent guard. If a future caller reaches ``_export_entry`` with
+    """The permanent guard. If a future caller reaches ``_export_compiled_graph`` with
     the lift missing, the sentence must point at the pipeline's PREPARATION —
     the measured run's sentence pointed at the endpoint's contract, which is
     where the first investigation went."""
@@ -247,7 +247,7 @@ def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
         aot_declaration.compiled_graph_plans(decl), pipe, _spec())[0]
     assert arm is True
     with pytest.raises(aot_mint.MintRefused, match="carries no lifted forward"):
-        aot_mint._export_entry(pipe, _spec(), plan, decl, compile_now=False)
+        aot_mint._export_compiled_graph(pipe, _spec(), plan, decl, compile_now=False)
 
 
 # ---------------------------------------------------------------------------

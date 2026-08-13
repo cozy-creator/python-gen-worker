@@ -11,9 +11,9 @@ Red-verified here through the REAL paths:
 
 * the boot clamp (``env_seal.establish`` -> ``host_isa.impose``) pins
   ``cpp.march``/``cpp.simdlen`` to the portable target, seal-visibly;
-* the mint's compile path (``aot_mint.compile_entry_files`` +
+* the mint's compile path (``aot_mint.compile_compiled_graph_files`` +
   ``package_compiled_graph`` — the clamp is process-global inductor config, so it
-  binds every entry of a multi-graph compiled graph identically) emits NO
+  binds every compiled graph of a multi-graph compiled graph identically) emits NO
   instruction above the target (objdump assertion on the produced ``.so``)
   and the package still loads via ``aoti_load_package`` — portable by
   construction;
@@ -127,7 +127,7 @@ def test_clamped_compile_package_is_portable_and_loads(
     monkeypatch.setattr(inductor_config.cpp, "simdlen", 128)
 
     program = torch.export.export(_Glue(), (torch.randn(4, 8),))
-    files = aot_mint.compile_entry_files(program, "model")
+    files = aot_mint.compile_compiled_graph_files(program, "model")
     package = aot_mint.package_compiled_graph({"model": files}, tmp_path / "model.pt2")
 
     with zipfile.ZipFile(package) as zf:
@@ -157,9 +157,9 @@ def test_clamped_compile_package_is_portable_and_loads(
 
 
 def _artifact(tmp_path: Path, pt2_bytes: bytes) -> tuple[Path, dict]:
-    meta = aot_serve.entry_metadata(
+    meta = aot_serve.compiled_graph_metadata(
         family="sdxl", precision="bf16", compiled_graph_key="",
-        name="unet/main", entry={
+        name="unet/main", compiled_graph={
             "target": "unet",
             "inputs": [{
                 "name": "x", "position": 0, "dtype": "float32",
@@ -336,9 +336,9 @@ def test_impose_refuses_if_it_cannot_reach_a_process_wide_target() -> None:
     """A torch internals change must fail LOUDLY at boot, not silently go
     back to per-thread clamping."""
 
-    class _NoEntries:
+    class _NoCompiledGraphs:
         _config: dict = {}
 
     with pytest.raises(host_isa.HostIsaError) as exc_info:
-        host_isa._impose_default(_NoEntries(), "cpp.march", "x86-64-v3")
+        host_isa._impose_default(_NoCompiledGraphs(), "cpp.march", "x86-64-v3")
     assert "process-wide" in str(exc_info.value)

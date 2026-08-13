@@ -13,7 +13,7 @@ are:
 * a compiled graph BETWEEN floor and warn arms *with the warning on the wire*;
 * a compiled graph that cannot be MEASURED does not arm either — "nobody could ask" is
   not "it passed";
-* and the verdict is bisectable to ONE named axis (one entry x one shape row x
+* and the verdict is bisectable to ONE named axis (one compiled graph x one shape row x
   one lane), because a whole-compiled graph fail nobody can split is the artifact that
   produced three wrong confident diagnoses in this program.
 
@@ -46,7 +46,7 @@ from gen_worker.api.export_contract import reset_export_declarations
 from harness.exported_compiled_graph import (  # noqa: F401 — `declared`/`events` are fixtures
     FAMILY, FLOOR, ROWS, RUNTIME, TARGET, WARN,
     ProbeDenoiser, ProbePackage, ProbePipeline,
-    arm, artifact, blend, declaration, declared, entry_name, events,
+    arm, artifact, blend, declaration, declared, compiled_graph_name, events,
     metadata, numerics_rows,
 )
 
@@ -65,17 +65,17 @@ def test_a_compiled_graph_below_its_declared_floor_REFUSES_TO_ARM(
     `provision.arm_aot`, this test fails on its first assertion — `arm_aot`
     returns True and the 0.99-cosine compiled graph serves every subsequent request.
     """
-    packages = {entry_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
     pipeline, module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
     # pgw#1176: one verdict PER GRAPH CLASS. Every class here is 1% off, so
     # every class refuses — and the pipeline serves nothing compiled, which is
-    # now a CONSEQUENCE of every entry refusing rather than a rule that one
+    # now a CONSEQUENCE of every compiled graph refusing rather than a rule that one
     # refusal condemns the rest.
     assert [o.armed for o in outcomes] == [False, False], (
         "a compiled_graph that lost 1% of the output's direction armed")
     assert aot.is_armed(pipeline) is False
-    assert aot.armed_entries(pipeline) == {}
+    assert aot.armed_compiled_graphs(pipeline) == {}
     assert isinstance(module.forward(torch.zeros(8, 8), torch.tensor(1.0)),
                       torch.Tensor)
 
@@ -94,7 +94,7 @@ def test_a_compiled_graph_below_its_declared_floor_REFUSES_TO_ARM(
     # The verdict carries its inputs: the floor, its source, and the AXIS.
     assert "floor=0.995" in detail and "warn=0.999" in detail
     assert "source=declared" in detail
-    assert entry_name(*ROWS[0]) in detail or entry_name(*ROWS[1]) in detail
+    assert compiled_graph_name(*ROWS[0]) in detail or compiled_graph_name(*ROWS[1]) in detail
     assert "0.99" in detail
 
 
@@ -108,15 +108,15 @@ def test_the_gray_band_CONFESSES_AND_REFUSES_TO_PUBLISH(
     runs no quality gate at all), so publishing it would export an unmeasured
     degradation to every pod that pulls the key. Before that ruling this exact
     compiled graph armed and shipped."""
-    packages = {entry_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
     pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
     assert not any(o.armed for o in outcomes), (
         "a gray-band compiled_graph was published to the fleet")
     assert aot.is_armed(pipeline) is False
     rows = numerics_rows(events)
-    # One row per ENTRY, each on its own single axis: the gate runs at the
-    # moment that entry exists, never "after all 36" (pgw#1176 / §4.32).
+    # One row per COMPILED_GRAPH, each on its own single axis: the gate runs at the
+    # moment that compiled graph exists, never "after all 36" (pgw#1176 / §4.32).
     assert [p for _d, p in rows] == ["degraded", "degraded"], rows
     detail = rows[0][0]
     assert "cosine=0.997" in detail
@@ -128,13 +128,13 @@ def test_a_faithful_compiled_graph_arms_AND_THE_PASS_IS_ANNOUNCED(
     """A silent pass is indistinguishable from a gate that never ran, which is
     this program's signature failure. So the pass is a hub row too, carrying
     every axis it was taken on."""
-    packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage() for h, w in ROWS}
     pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
     assert all(o.armed for o in outcomes)
     assert aot.is_armed(pipeline) is True
-    assert set(aot.armed_entries(pipeline)) == {
-        entry_name(h, w) for h, w in ROWS}
+    assert set(aot.armed_compiled_graphs(pipeline)) == {
+        compiled_graph_name(h, w) for h, w in ROWS}
     rows = numerics_rows(events)
     assert [p for _d, p in rows] == ["checked", "checked"], rows
     # Per-axis readings, named — the PoolWidth discipline. One row per class,
@@ -142,7 +142,7 @@ def test_a_faithful_compiled_graph_arms_AND_THE_PASS_IS_ANNOUNCED(
     for (detail, _phase), (h, w) in zip(rows, ROWS):
         assert "axes=1/1" in detail
         assert f"family={FAMILY}" in detail and "key=ek1-" in detail
-        assert entry_name(h, w) in detail
+        assert compiled_graph_name(h, w) in detail
         assert "cos=1.00000" in detail
 
 
@@ -160,7 +160,7 @@ def test_a_compiled_graph_that_cannot_be_MEASURED_does_not_arm(
     """"Nobody could ask" must never collapse into "it passed". Staying eager
     is the ordinary miss policy of every other adopt gate, so the cost of a
     probe defect is an un-armed compiled graph — never a silently degraded one."""
-    packages = {entry_name(h, w): package for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): package for h, w in ROWS}
     pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
     assert not any(o.armed for o in outcomes)
@@ -176,7 +176,7 @@ def test_an_undeclared_family_cannot_be_probed_AND_THEREFORE_CANNOT_ARM(
     """No export declaration => no feed => no comparison. That is exactly the
     state the whole fleet was in, and it must read as a refusal."""
     reset_export_declarations()
-    packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage() for h, w in ROWS}
     _pipeline, _module, outcomes = arm(
         tmp_path, monkeypatch, declaration(), packages)
 
@@ -203,7 +203,7 @@ def test_the_report_cannot_report_a_pass_it_did_not_take():
     from gen_worker.numerics_probe import AxisVerdict, CompiledGraphNumerics, ProbeAxis
 
     thresholds = numerics_probe.numerics_ladder.DEFAULT_THRESHOLDS
-    axis = ProbeAxis(entry="e", target=TARGET)
+    axis = ProbeAxis(compiled_graph="e", target=TARGET)
     empty = CompiledGraphNumerics(FAMILY, "k", thresholds, "declared", (), 2)
     assert empty.measured is False
     assert empty.comparison() is None
@@ -216,7 +216,7 @@ def test_the_report_cannot_report_a_pass_it_did_not_take():
 
 
 # ---------------------------------------------------------------------------
-# bisectability: one entry x one shape row x one lane
+# bisectability: one compiled graph x one shape row x one lane
 # ---------------------------------------------------------------------------
 
 
@@ -229,21 +229,21 @@ def test_the_verdict_is_bisectable_to_ONE_named_axis(
     names the class, because a verdict that did not would be unbisectable
     however small its subject.
     """
-    good, bad = entry_name(*ROWS[0]), entry_name(*ROWS[1])
+    good, bad = compiled_graph_name(*ROWS[0]), compiled_graph_name(*ROWS[1])
     packages = {good: ProbePackage(), bad: ProbePackage(cosine=0.90)}
     pipeline, module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
     # THE point of the whole change: one bad class costs itself.
     assert outcomes[0].armed is True
     assert outcomes[1].armed is False
-    assert set(aot.armed_entries(pipeline)) == {good}
-    assert aot.entry_states(pipeline)[bad]["state"] == "de_armed"
-    assert aot.entry_states(pipeline)[bad]["reason"] == "numerics_refused"
+    assert set(aot.armed_compiled_graphs(pipeline)) == {good}
+    assert aot.compiled_graph_states(pipeline)[bad]["state"] == "de_armed"
+    assert aot.compiled_graph_states(pipeline)[bad]["reason"] == "numerics_refused"
 
     rows = numerics_rows(events)
     assert [p for _d, p in rows] == ["checked", "refused"], rows
     detail = rows[-1][0]
-    assert f"worst axis: entry={bad}" in detail
+    assert f"worst axis: compiled_graph={bad}" in detail
     assert "row=h=16,w=16" in detail
     assert "cosine=0.90" in detail
     # The healthy class's reading is on the record too, in its OWN row.
@@ -256,7 +256,7 @@ def test_the_verdict_is_bisectable_to_ONE_named_axis(
     assert packages[good].invocations == 2  # the gate's forward, then a serve
 
 
-def test_an_axis_names_its_entry_row_execution_lane_and_seed_and_reproduces():
+def test_an_axis_names_its_compiled_graph_row_execution_lane_and_seed_and_reproduces():
     """Every verdict carries its inputs. The seed is DERIVED from the axis, so
     two rows of one compiled graph are never fed the same latent and any reader can
     rebuild the exact feed."""
@@ -267,14 +267,14 @@ def test_an_axis_names_its_entry_row_execution_lane_and_seed_and_reproduces():
     # the axis, so two artifacts of one declaration still never share a feed.
     (a,) = axes_from_meta(metadata(ROWS[0]))
     (b,) = axes_from_meta(metadata(ROWS[1]))
-    assert [a.name, b.name] == [entry_name(*ROWS[0]), entry_name(*ROWS[1])]
+    assert [a.name, b.name] == [compiled_graph_name(*ROWS[0]), compiled_graph_name(*ROWS[1])]
     assert a.execution_lane == "w8a8" and a.target == TARGET
     assert {a.shape_row, b.shape_row} == {"h=8,w=8", "h=16,w=16"}
     assert a.seed != b.seed, "two axes share a seed; a shape-independent bug " \
                              "would read as agreement"
     # Reproducible across processes: the seed is a pure function of the axis.
-    assert ProbeAxis(entry=a.entry, target=a.target, execution_lane=a.execution_lane).seed == a.seed
-    assert str(a).startswith(f"entry={a.entry} target={TARGET}")
+    assert ProbeAxis(compiled_graph=a.compiled_graph, target=a.target, execution_lane=a.execution_lane).seed == a.seed
+    assert str(a).startswith(f"compiled_graph={a.compiled_graph} target={TARGET}")
 
 
 def test_the_probe_does_not_disturb_the_serving_RNG(
@@ -284,7 +284,7 @@ def test_the_probe_does_not_disturb_the_serving_RNG(
     order to check a compiled graph."""
     torch.manual_seed(4242)
     before = torch.get_rng_state().clone()
-    packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage() for h, w in ROWS}
     _pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
     assert all(o.armed for o in outcomes)
     assert torch.equal(torch.get_rng_state(), before)
@@ -304,7 +304,7 @@ def test_a_REAL_arm_reaches_the_gate(tmp_path, monkeypatch, declared, events):
     RED when `gate_compiled_graph_numerics(pipe, cfg)` is removed from `arm_aot`:
     `invocations` stays 0 and `armed` is True.
     """
-    packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
+    packages = {compiled_graph_name(h, w): ProbePackage() for h, w in ROWS}
     _pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
     assert all(o.armed for o in outcomes)
     assert all(p.invocations == 1 for p in packages.values()), (

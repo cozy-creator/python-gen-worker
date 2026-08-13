@@ -4,7 +4,7 @@ The parent's three per-group fan-in dicts (`_group_activities`,
 `_group_fn_unavail`, `_group_fn_degraded`) plus `slot.last_state_delta` are
 GENERATION-SCOPED facts: they say what the CURRENT incarnation of a group
 reported. Before this issue nothing ever cleaned them, and nothing ever asked
-whether the group behind an entry was still alive — so a group that died mid
+whether the group behind an compiled graph was still alive — so a group that died mid
 activity could pin that activity RUNNING forever, veto a live group's
 `self_stalled` confession, and retire a function a live group was serving.
 
@@ -118,10 +118,10 @@ def test_a_dead_groups_open_activity_is_terminated_for_the_worker(g2):
 def test_the_dead_generation_is_retired_and_the_respawn_starts_a_new_one(g2):
     """The parent-side state behind the observable, measured on the live object.
 
-    The dead group's fan-in entry is gone, its participation is over, and the
+    The dead group's fan-in compiled graph is gone, its participation is over, and the
     respawned child comes back as a NEW generation with empty state — so
     "absent" means the live-group default again (§4.15), not an inherited fact.
-    The surviving group's own entry is untouched throughout.
+    The surviving group's own compiled graph is untouched throughout.
     """
     conn = g2.scheduler.wait_connection(0)
     conn.wait_for(is_ready)
@@ -140,7 +140,7 @@ def test_the_dead_generation_is_retired_and_the_respawn_starts_a_new_one(g2):
     died = conn.wait_for(is_result_for("r-die-g1"))
     assert died.job_result.status == pb.JOB_STATUS_FATAL
 
-    # The dead group's fan-in entry is gone; the LIVE group still holds the kind.
+    # The dead group's fan-in compiled graph is gone; the LIVE group still holds the kind.
     assert 1 not in pc._group_activities or HOLD_KIND not in pc._group_activities[1]
     assert HOLD_KIND in pc._group_activities.get(0, {})
 
@@ -267,7 +267,7 @@ def test_a_respawned_group_does_not_inherit_the_dead_ones_unavailability():
 
 
 def test_a_down_group_is_excluded_from_the_merge_not_defaulted_to_serving():
-    """The reason a bare `.pop()` is WORSE than the stale entry.
+    """The reason a bare `.pop()` is WORSE than the stale compiled graph.
 
     `worker_fn_unavailable` reads a `None` value as "this group serves it". With
     g1 DOWN, g0's unavailability is the whole worker's truth and the hub must

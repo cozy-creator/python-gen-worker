@@ -408,7 +408,7 @@ def test_shape_lies_are_refused_before_any_byte_moves(tmp_path):
 
 def test_volume_check_is_prefix_dispatched_and_never_silently_skips(tmp_path):
     """The regression this exists for: reading `blake3` FIRST yields nothing on
-    a v2 entry, and the old call site read that as 'nothing to check' — a clean
+    a v2 compiled graph, and the old call site read that as 'nothing to check' — a clean
     verdict over an unhashed tree. The DENOMINATOR is the assertion: a verifier
     that examines nothing looks exactly like one that passes."""
     a = tmp_path / "a.safetensors"
@@ -489,8 +489,8 @@ def test_verify_file_digest_uses_the_declared_algorithm(tmp_path):
 
 
 class _FakePBFile:
-    """Duck-typed pb.SnapshotFile. A v2 entry has an EMPTY blake3 field and its
-    digest in `digest`; a v1 entry is the other way around."""
+    """Duck-typed pb.SnapshotFile. A v2 compiled graph has an EMPTY blake3 field and its
+    digest in `digest`; a v1 compiled graph is the other way around."""
 
     def __init__(self, path, size_bytes, digest="", blake3=""):
         self.path = path
@@ -502,7 +502,7 @@ class _FakePBFile:
 def test_snapshot_targets_read_the_tagged_digest_and_account_for_every_input(tmp_path):
     """th#1303 S1: `snapshot_verify_targets` reads `digest` and NOTHING else.
 
-    The legacy `blake3` fallback is gone, so an entry that carries only the
+    The legacy `blake3` fallback is gone, so an compiled graph that carries only the
     mirror produces NO target — and it must land in `skipped`, never vanish.
     Restoring the fallback turns the `config.json` assertions below red.
     """
@@ -527,8 +527,8 @@ def test_snapshot_targets_read_the_tagged_digest_and_account_for_every_input(tmp
 # ---------------------------------------------------------------- pgw#783 dedup
 
 
-def test_a_second_call_for_a_present_entry_skips_the_fetch(tmp_path):
-    """pgw#783: G children share one filesystem. Once the entry is materialised,
+def test_a_second_call_for_a_present_compiled_graph_skips_the_fetch(tmp_path):
+    """pgw#783: G children share one filesystem. Once the compiled graph is materialised,
     a sibling asking for the same dst must NOT re-fetch it (G x egress -> 1x).
     Deterministic form: fetch once, then again — the server sees no new hits."""
     data = make_file(CS * 3 + 5, seed=11)
@@ -542,7 +542,7 @@ def test_a_second_call_for_a_present_entry_skips_the_fetch(tmp_path):
         assert srv.hits == {i: 1 for i in range(len(parts))}
         # The sibling call: present already, so ZERO new fetches.
         download_chunked_file(specs_for(srv, parts), dst, **kw)
-        assert srv.hits == {i: 1 for i in range(len(parts))}, "re-fetched a present entry"
+        assert srv.hits == {i: 1 for i in range(len(parts))}, "re-fetched a present compiled_graph"
         assert dst.read_bytes() == data
     finally:
         srv.close()
@@ -551,7 +551,7 @@ def test_a_second_call_for_a_present_entry_skips_the_fetch(tmp_path):
 def test_concurrent_callers_dedup_to_one_fetch_via_flock(tmp_path):
     """The cross-process guarantee, exercised with threads (same flock code
     path): four callers race for the same dst; the flock serialises them so the
-    entry is fetched ONCE total, not four times."""
+    compiled graph is fetched ONCE total, not four times."""
     import threading as _t
 
     data = make_file(CS * 2 + 9, seed=13)

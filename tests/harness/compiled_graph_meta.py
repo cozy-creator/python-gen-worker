@@ -9,13 +9,13 @@ is therefore no longer a publishable compiled graph in any tree, and a test that
 proves only that an unarmable row still uploads.
 
 This is the minimal envelope that IS one: the same blocks ``aot_mint`` records
-(``aot_serve.entry_metadata`` + ``shared_identity_blocks``), at fixture
+(``aot_serve.compiled_graph_metadata`` + ``shared_identity_blocks``), at fixture
 scale. The ``compiled_graph_key`` is COMPUTED, never invented, so the stamp and the axes
 agree — which is itself one of the publish path's refusals.
 
-pgw#1176: one artifact is ONE graph class, so this builds an ``entry`` block
-and no ``entries`` map. There is deliberately no way to ask this harness for a
-multi-entry artifact: production cannot pack one any more, and a fixture that
+pgw#1176: one artifact is ONE graph class, so this builds an ``compiled graph`` block
+and no ``compiled graphs`` map. There is deliberately no way to ask this harness for a
+multi-compiled graph artifact: production cannot pack one any more, and a fixture that
 could would be testing a shape nothing can produce.
 """
 
@@ -44,18 +44,18 @@ def exported_compiled_graph_meta(
         "kind": aot_serve.ARTIFACT_KIND, "format": "pt2",
         "weight_lane": weight_lane, "lora_bucket": int(lora_bucket),
         "strict_export": True,
-        compiled_graph_key.ENTRY_BLOCK_KEY: {
+        compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY: {
             "name": "unet/main",
             "target": "unet", "fork": [], "class_dims": [],
             "range_digest": "r1", "class_hash": CLASS_HASH, "graph": {"v": 2},
         },
         # The declaration-wide coverage LABEL. Telemetry, never identity —
         # `_identity_axes` publishes it as `graph_contract`, and it may repeat
-        # across the entries of one declaration by construction.
+        # across the compiled graphs of one declaration by construction.
         "manifest_digest": compiled_graph_key.manifest_digest([CLASS_HASH]),
         "env_seal": {"v": 1, "torch": "2.9.0"},
         "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
     }
     meta.update(extra)
-    meta["compiled_graph_key"] = compiled_graph_key.from_entry_metadata(meta).digest
+    meta["compiled_graph_key"] = compiled_graph_key.from_compiled_graph_metadata(meta).digest
     return meta

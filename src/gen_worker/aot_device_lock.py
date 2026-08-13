@@ -1,4 +1,4 @@
-"""pgw#809: one GPU timing at a time, across the whole entry-compile pool.
+"""pgw#809: one GPU timing at a time, across the whole compiled graph-compile pool.
 
 The hazard, stated exactly
 -------------------------
@@ -7,12 +7,12 @@ On the pin (torch 2.13.0+cu130) the mint leaves
 ``triton.autotune_at_compile_time`` unset, and ``get_cpp_wrapper_config``
 (``compile_fx.py:2237-2242``) resolves an unset value to ``has_triton() and
 V.aot_compilation`` — i.e. **True for AOTI** ("Default to True for AOTI",
-verbatim). So a mint's CUDA entries take the ONE-pass autotune-block path at
+verbatim). So a mint's CUDA compiled graphs take the ONE-pass autotune-block path at
 ``graph.py:2549``, not the two-pass "run the whole model on real inputs" path
 below it — that branch is reached only when the flag is explicitly False.
 Either way, kernel configs are chosen by TIMING KERNELS ON THE CARD.
 
-Which makes concurrency a CORRECTNESS problem, not a speed one: two entries
+Which makes concurrency a CORRECTNESS problem, not a speed one: two compiled graphs
 benchmarking at once measure each other's contention, pick worse configs, and
 bake them into the artifact. Nothing downstream can see it — the compiled graph key
 digests the traced graph, the sm, the toolchain and the env seal, none of
@@ -27,7 +27,7 @@ decorates EVERY ``benchmark_gpu`` / ``benchmark_gpu_with_cuda_graph``
 implementation with ``@gpu_benchmark_lock``. Registering a cross-process file
 lock as that context serializes every GPU timing the pool performs, whatever
 path inductor takes, with no monkeypatching and no version-specific internals.
-Upstream's own note — "harness contexts should support nested entry from the
+Upstream's own note — "harness contexts should support nested compiled graph from the
 same thread" — is why :class:`DeviceBenchmarkLock` is reentrant.
 
 What this does NOT fix, and must be said
@@ -64,7 +64,7 @@ class DeviceBenchmarkLock:
     ``flock`` is the right primitive here and a ``multiprocessing.Lock`` is
     not: the holders are spawned children of a spawned child, they come and
     go, and a child that is SIGKILLed mid-benchmark (the OOM killer is the
-    expected way an entry dies) must release the lock by dying. The kernel
+    expected way an compiled graph dies) must release the lock by dying. The kernel
     drops an ``flock`` when the fd closes, so crash-release is free and there
     is no stale-lock state for anyone to reason about.
     """
@@ -87,7 +87,7 @@ class DeviceBenchmarkLock:
     @contextlib.contextmanager
     def hold(self) -> Iterator[None]:
         if self._depth() > 0:
-            # Nested entry from the same thread: inductor's benchmark helpers
+            # Nested compiled graph from the same thread: inductor's benchmark helpers
             # delegate to one another, and re-taking a held flock from the
             # same process is a no-op anyway. Counted, not re-acquired.
             self._set_depth(self._depth() + 1)
@@ -136,7 +136,7 @@ def install(path: Path) -> Optional[DeviceBenchmarkLock]:
 
     Returns the lock, or ``None`` when the running torch has no such hook —
     in which case the caller must NOT run a wide pool on a GPU compiled graph, because
-    nothing would keep two entries from benchmarking at once. Never raises:
+    nothing would keep two compiled graphs from benchmarking at once. Never raises:
     a mint that died installing a safety interlock would be a worse outcome
     than a mint that reports it could not install one.
     """
@@ -152,7 +152,7 @@ def install(path: Path) -> Optional[DeviceBenchmarkLock]:
     if setter is None:
         logger.warning(
             "pgw#809: this torch has no set_gpu_benchmark_lock_context — GPU "
-            "autotune timings CANNOT be serialized across the entry pool, so "
+            "autotune timings CANNOT be serialized across the compiled_graph pool, so "
             "a wide pool would silently benchmark against itself")
         return None
     lock = DeviceBenchmarkLock(Path(path))

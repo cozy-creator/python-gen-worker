@@ -83,11 +83,11 @@ def _enumerate_components(path: Path) -> dict[str, Component]:
     result: dict[str, Component] = {}
     if not path.is_dir():
         return result
-    for entry in sorted(path.iterdir()):
-        if not entry.is_dir():
+    for compiled_graph in sorted(path.iterdir()):
+        if not compiled_graph.is_dir():
             continue
-        if entry.name in _diffusers_component_dirs():
-            result[entry.name] = Component(entry.name, entry)
+        if compiled_graph.name in _diffusers_component_dirs():
+            result[compiled_graph.name] = Component(compiled_graph.name, compiled_graph)
     return result
 
 
@@ -429,11 +429,11 @@ def _iter_diffusers_components(
         return
 
     seen: set[str] = set()
-    for entry in sorted(snapshot_path.iterdir()):
-        if not entry.is_dir() or entry.name not in _diffusers_component_dirs():
+    for compiled_graph in sorted(snapshot_path.iterdir()):
+        if not compiled_graph.is_dir() or compiled_graph.name not in _diffusers_component_dirs():
             continue
-        seen.add(entry.name)
-        if entry.name in quant_set and quantization_config is not None:
+        seen.add(compiled_graph.name)
+        if compiled_graph.name in quant_set and quantization_config is not None:
             # device_map shape — when the caller passed an offload_folder the
             # intent is "spill to CPU/disk if needed", so use accelerate's
             # auto-placement. When no offload_folder is set, the caller has
@@ -449,14 +449,14 @@ def _iter_diffusers_components(
                 # Per-component subdir under the shared offload root, so
                 # parallel components don't clobber each other if accelerate
                 # uses identical layer-key names across submodules.
-                comp_offload = offload_folder / entry.name
+                comp_offload = offload_folder / compiled_graph.name
                 comp_offload.mkdir(parents=True, exist_ok=True)
                 kwargs["offload_folder"] = str(comp_offload)
             else:
                 kwargs["device_map"] = {"": 0}
-            module = load_component_module(entry, _read_component_config(entry), **kwargs)
+            module = load_component_module(compiled_graph, _read_component_config(compiled_graph), **kwargs)
             yield LoadedComponent(
-                name=entry.name,
+                name=compiled_graph.name,
                 kind="quantized",
                 _module=module,
                 metadata={
@@ -471,9 +471,9 @@ def _iter_diffusers_components(
         # documentation-only; the absence of quant intent is what triggers
         # the copy.
         yield LoadedComponent(
-            name=entry.name,
+            name=compiled_graph.name,
             kind="passthrough",
-            _source_path=entry,
+            _source_path=compiled_graph,
             metadata={"loader": "passthrough_copy"},
         )
 

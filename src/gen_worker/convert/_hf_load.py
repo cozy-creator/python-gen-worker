@@ -15,7 +15,7 @@ def load_component_module(component_dir: Path, config: dict, **kwargs: Any) -> A
         ``"class_name"``) names the diffusers Python class (e.g.
         ``"FluxTransformer2DModel"``, ``"AutoencoderKLFlux2"``).
       - **transformers**: ``config["architectures"]`` is a list whose first
-        entry names the transformers Python class (e.g.
+        compiled graph names the transformers Python class (e.g.
         ``"Qwen3ForCausalLM"``, ``"CLIPTextModel"``). No ``_class_name``.
 
     Components like ``transformer`` / ``unet`` / ``vae`` follow the diffusers

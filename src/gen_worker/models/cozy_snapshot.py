@@ -123,7 +123,7 @@ _DISK_HEADROOM_BYTES = 1 << 30
 # Snapshot build coordination (threading-based, works across event loops)
 # ---------------------------------------------------------------------------
 
-class _SnapshotEntry:
+class _SnapshotCompiledGraph:
     """One builder, zero-or-more waiters."""
 
     def __init__(self) -> None:
@@ -132,7 +132,7 @@ class _SnapshotEntry:
 
 
 _SNAP_LOCK = threading.Lock()
-_SNAP_ENTRIES: Dict[str, _SnapshotEntry] = {}
+_SNAP_COMPILED_GRAPHS: Dict[str, _SnapshotCompiledGraph] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +313,7 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
         if not path:
             continue
         # th#1303: the algorithm-tagged ref FIRST. `cas_ref()` raises on an
-        # entry that carries no readable digest, so an unreadable manifest can
+        # compiled graph that carries no readable digest, so an unreadable manifest can
         # never degrade into "download it unverified".
         try:
             ref_tagged = f.cas_ref()
@@ -322,7 +322,7 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
         parse_cas_ref(ref_tagged)  # shape-check; the tag travels with the ref
         url = (f.url or "").strip() or None
         chunks = tuple(f.chunks or ())
-        # A chunked entry's bytes exist ONLY as chunks — it legitimately has no
+        # A chunked compiled graph's bytes exist ONLY as chunks — it legitimately has no
         # whole-file url. Requiring one is how every v2 snapshot would be
         # rejected as untransferable.
         if not chunks and not url:
@@ -501,19 +501,19 @@ class CozySnapshotDownloader:
         with _SNAP_LOCK:
             if snap_dir.exists() and trust_key in _TRUSTED_SNAPSHOTS:
                 return snap_dir
-            entry = _SNAP_ENTRIES.get(key)
-            if entry is None:
-                entry = _SnapshotEntry()
-                _SNAP_ENTRIES[key] = entry
+            compiled_graph = _SNAP_COMPILED_GRAPHS.get(key)
+            if compiled_graph is None:
+                compiled_graph = _SnapshotCompiledGraph()
+                _SNAP_COMPILED_GRAPHS[key] = compiled_graph
                 is_builder = True
             else:
                 is_builder = False
 
         if not is_builder:
             _log.info("snapshot_waiting key=%s (another builder active)", key[:24])
-            await loop.run_in_executor(None, entry.event.wait)
-            if entry.exception is not None:
-                raise RuntimeError("concurrent snapshot build failed") from entry.exception
+            await loop.run_in_executor(None, compiled_graph.event.wait)
+            if compiled_graph.exception is not None:
+                raise RuntimeError("concurrent snapshot build failed") from compiled_graph.exception
             return snap_dir
 
         # pgw#971: volume write-throughs that could not be teed run in the
@@ -563,7 +563,7 @@ class CozySnapshotDownloader:
             _log.info("snapshot_build_done key=%s", key[:24])
             return snap_dir
         except BaseException as exc:
-            entry.exception = exc
+            compiled_graph.exception = exc
             raise
         finally:
             # Join the background write-throughs unconditionally: they are
@@ -574,12 +574,12 @@ class CozySnapshotDownloader:
                 await asyncio.gather(*publishes, return_exceptions=True)
             # Digest-poisoning fix (#358): a FAILED build must not park a
             # set-event + stale exception under this digest forever. Evict the
-            # entry so the next request creates a fresh builder and retries;
-            # waiters already holding this entry still see its exception once.
+            # compiled graph so the next request creates a fresh builder and retries;
+            # waiters already holding this compiled graph still see its exception once.
             with _SNAP_LOCK:
-                if _SNAP_ENTRIES.get(key) is entry:
-                    del _SNAP_ENTRIES[key]
-            entry.event.set()
+                if _SNAP_COMPILED_GRAPHS.get(key) is compiled_graph:
+                    del _SNAP_COMPILED_GRAPHS[key]
+            compiled_graph.event.set()
 
     def _materialize_snapshot(
         self,
@@ -649,7 +649,7 @@ class CozySnapshotDownloader:
                 seen.add(digest)
                 unique.append(f)
 
-        _log.info("ensure_blobs total_entries=%d unique_blobs=%d", len(files), len(unique))
+        _log.info("ensure_blobs total_compiled_graphs=%d unique_blobs=%d", len(files), len(unique))
 
         cached_digests = {
             f.cas_ref() for f in unique
@@ -940,7 +940,7 @@ class CozySnapshotDownloader:
                     # whichever transport understood it and re-hashed the file
                     # afterwards for the other — with an `if` in front of each,
                     # i.e. two vacuous guards guarding one set of bytes.
-                    parse_cas_ref(digest)  # refuse an undigestable entry early
+                    parse_cas_ref(digest)  # refuse an undigestable compiled graph early
                     assert f.url is not None  # validated in _ensure_blobs
                     await afetch_verified(
                         f.url,
@@ -1140,7 +1140,7 @@ def _quarantine_materialized(snap_dir: Path, blobs_root: Path, bad: Any) -> None
         try:
             _blob_path(blobs_root, str(raw or "")).unlink(missing_ok=True)
         except (OSError, ValueError):
-            continue  # path-shaped entry (structural failure), not a digest
+            continue  # path-shaped compiled graph (structural failure), not a digest
     fsync_dir(snap_dir.parent)
 
 

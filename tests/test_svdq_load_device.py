@@ -49,7 +49,7 @@ def _tiny_qwen(dim_heads: int = 4, head_dim: int = 32, layers: int = 1):
         joint_attention_dim=128, axes_dims_rope=(8, 12, 12))
 
 
-def _w4a4_entry(out_f: int, in_f: int, *, rank: int, seed: int,
+def _w4a4_compiled_graph(out_f: int, in_f: int, *, rank: int, seed: int,
                 second_key: str = "wcscales", smooth: bool = True) -> dict:
     gen = torch.Generator().manual_seed(seed)
     w = torch.randn(out_f, in_f, generator=gen)
@@ -65,25 +65,25 @@ def _w4a4_entry(out_f: int, in_f: int, *, rank: int, seed: int,
     codes = cast_e2m1(
         (blocks / (bs.float().unsqueeze(-1) * second_bcast.unsqueeze(-1))
          ).reshape(out_f, in_f))
-    entry: dict[str, Any] = {
+    compiled_graph: dict[str, Any] = {
         "qweight": pack_qweight(codes),
         "wscales": pack_wscales(bs, out_f, in_f),
     }
-    entry[second_key] = (pack_vector(second.to(torch.bfloat16), out_f)
+    compiled_graph[second_key] = (pack_vector(second.to(torch.bfloat16), out_f)
                          if second_key == "wcscales"
                          else second.to(torch.bfloat16))
     down = (torch.randn(in_f, rank, generator=gen) * in_f ** -0.5
             ).to(torch.bfloat16)
     up = (torch.randn(out_f, rank, generator=gen) * rank ** -0.5
           ).to(torch.bfloat16)
-    entry["proj_down"] = pack_lowrank(down.t().contiguous(), down=True)
-    entry["proj_up"] = pack_lowrank(up, down=False)
+    compiled_graph["proj_down"] = pack_lowrank(down.t().contiguous(), down=True)
+    compiled_graph["proj_up"] = pack_lowrank(up, down=False)
     if smooth:
-        entry["smooth_factor"] = pack_vector(
+        compiled_graph["smooth_factor"] = pack_vector(
             (torch.rand(in_f, generator=gen) + 0.5).to(torch.bfloat16), in_f)
-    entry["bias"] = pack_vector(
+    compiled_graph["bias"] = pack_vector(
         torch.randn(out_f, generator=gen).to(torch.bfloat16), out_f)
-    return entry
+    return compiled_graph
 
 
 class _Art:
@@ -116,10 +116,10 @@ def _write_multiunit(tmp_path, *, dim_heads: int = 4, head_dim: int = 32,
                           if val.is_floating_point() else val.contiguous())
     for blk in range(layers):
         p = f"transformer_blocks.{blk}"
-        for leaf, t in _w4a4_entry(3 * dim, dim, rank=rank,
+        for leaf, t in _w4a4_compiled_graph(3 * dim, dim, rank=rank,
                                    seed=10 + blk).items():
             state[f"{p}.attn.to_qkv.{leaf}"] = t.contiguous()
-        for leaf, t in _w4a4_entry(dim, dim, rank=rank, seed=40 + blk,
+        for leaf, t in _w4a4_compiled_graph(dim, dim, rank=rank, seed=40 + blk,
                                    second_key="wtscale",
                                    smooth=False).items():
             state[f"{p}.attn.to_out.0.{leaf}"] = t.contiguous()
@@ -162,7 +162,7 @@ def _bit_equal(a: Any, b: Any) -> bool:
 
 def test_cpu_load_bytes_match_direct_decode(tmp_path) -> None:
     """The loader's device plumbing changes nothing: every SvdqLinear buffer
-    equals a direct convert_linear of the same entry, and the AWQ modulation
+    equals a direct convert_linear of the same compiled graph, and the AWQ modulation
     Linear equals a direct decode_awq_linear — bit for bit."""
     path, state, dim = _write_multiunit(tmp_path)
     model = native.load_svdq_native_denoiser(

@@ -18,7 +18,7 @@ assertion can fail, not that your fixture resembles production.
 So: **a test may not construct anything production constructs differently.** No
 hand-registration, no stubbed accessor, no hand-set marker. Where a test needs
 to force an outcome it does so by REMOVING or BREAKING a real input — a hub that
-serves no receipt, a package whose entry raises, a compiled graph whose subject really
+serves no receipt, a package whose compiled graph raises, a compiled graph whose subject really
 diverges — never by supplying a fact.
 
 WHAT RUNS FOR REAL. The whole chain from the ordered arm to the target install::
@@ -28,7 +28,7 @@ WHAT RUNS FOR REAL. The whole chain from the ordered arm to the target install::
       -> fleet_compiled_graphs.arm_ordered
       -> the real receipt gate, against a real RSA-signed receipt from a real
             HTTP hub (harness.receipt_hub)
-      -> provision.arm_aot -> aot_serve.arm_entry on a real packed compiled graph
+      -> provision.arm_aot -> aot_serve.arm_compiled_graph on a real packed compiled graph
             (harness.exported_compiled_graph) whose ck1 key is restatable from its own
             recorded facts
       -> the real boot warmup, the real per-object proof pass, the real
@@ -85,7 +85,7 @@ from gen_worker.registry import extract_specs
 from harness import exported_compiled_graph as compiledgraph868
 from harness.exported_compiled_graph import (
     ROWS, RUNTIME, ProbeDenoiser, ProbePackage, ProbePipeline, declaration,
-    entry_name,
+    compiled_graph_name,
 )
 
 #: The publishing org. PLATFORM tier by default, so the trust rule needs no
@@ -143,7 +143,7 @@ class AdoptedFamily:
     @worker_function()
     def generate(self, ctx: RequestContext, p: GenIn) -> Out:
         """The pod's default shape: the boot warmup runs and its payload lands
-        on NO packaged entry of the adopted compiled graph, so the artifact's own counter
+        on NO packaged compiled graph of the adopted compiled graph, so the artifact's own counter
         does not move.
 
         With ``warm_dispatches`` the handler really calls the wrapped forward
@@ -176,7 +176,7 @@ def compiled_graph_metadata() -> Dict[str, Any]:
     # The REAL key, restated from the artifact's own recorded facts — the same
     # recomputation admission runs (pgw#1059), so nothing here is a stamp the
     # bytes cannot back up.
-    meta["compiled_graph_key"] = compiled_graph_key.from_entry_metadata(meta).digest
+    meta["compiled_graph_key"] = compiled_graph_key.from_compiled_graph_metadata(meta).digest
     return meta
 
 
@@ -208,7 +208,7 @@ def production_cfgs() -> Dict[str, Any]:
     pgw#1150 (second pass): raw ``Compile`` never travels past the registry, and
     a suite that only ever passes one is testing a shape no fleet path builds —
     deleting ``registry.py``'s two ``numerics_floor=`` lines left that suite
-    green. Both entries below come from a real production call site:
+    green. Both compiled graphs below come from a real production call site:
 
     * ``registry`` — ``EndpointSpec.compile_compiled_graph()``, what the executor hands
       ``_enable_compiled`` on every serving pod;
@@ -231,9 +231,9 @@ def production_cfgs() -> Dict[str, Any]:
 
 def _derived(digest: str) -> boot_key.DerivedKey:
     return boot_key.DerivedKey(
-        # pgw#1176: the rig's derived manifest — one entry key per declared
+        # pgw#1176: the rig's derived manifest — one compiled graph key per declared
         # class. `digest` stands in for the traced graph, as it always did.
-        entry_keys={"rig": "ek1-" + (digest * 56)[:56]},
+        compiled_graph_keys={"rig": "ek1-" + (digest * 56)[:56]},
         class_hashes={}, manifest="", workers=1, width_reason="rig",
         traced=len(ROWS), memo="miss", wall_ms=10_291,
     )
@@ -311,9 +311,9 @@ class AdoptRig:
     ``cosine``          the packaged subject really diverges from eager by that
                         much (adoption runs no quality gate — §4.32 — so this
                         must NOT refuse; it is here so a test can prove that).
-    ``package_raises``  the packaged entry really raises when dispatched, which
+    ``package_raises``  the packaged compiled graph really raises when dispatched, which
                         is how a compiled graph revokes itself for real.
-    ``bind_oom_on``     that entry's constant bind really runs the card out of
+    ``bind_oom_on``     that compiled graph's constant bind really runs the card out of
                         device memory (pgw#1175) — the ONLY evidence a pod
                         cannot hold a compiled graph, now that the estimate that used to
                         guess it is deleted.
@@ -323,7 +323,7 @@ class AdoptRig:
                         viewer identity this process does not hold (pgw#1122).
     ``warm_dispatches`` the handler really calls the wrapped forward N times.
     ``after_arm``       called with the pipeline immediately after the real
-                        ``arm_entry`` returns — an observation point at the
+                        ``arm_compiled_graph`` returns — an observation point at the
                         exact moment production has one, for driving real
                         dispatches before setup's proof snapshot. It may not
                         write state the arm did not.
@@ -389,9 +389,9 @@ class AdoptRig:
 
     def _packages(self) -> Dict[str, ProbePackage]:
         return {
-            entry_name(h, w): ProbePackage(
+            compiled_graph_name(h, w): ProbePackage(
                 cosine=self.cosine, raises=self.package_raises,
-                bind_oom=entry_name(h, w) == self.bind_oom_on)
+                bind_oom=compiled_graph_name(h, w) == self.bind_oom_on)
             for h, w in ROWS
         }
 
@@ -400,10 +400,10 @@ class AdoptRig:
         # SEAM 3 (GPU) + the runtime axes a cardless box cannot state —
         # pgw#868's substitutions, verbatim.
         mp.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
-        mp.setattr(aot_serve, "_entry_admission_drift", lambda *a, **k: None)
+        mp.setattr(aot_serve, "_compiled_graph_admission_drift", lambda *a, **k: None)
         mp.setattr(
             aot_serve, "_load_package",
-            lambda path, entry="model": packages[entry])
+            lambda path, compiled_graph="model": packages[compiled_graph])
 
         # SEAM 2: the class-annotated slot's weights load. `_inject_models`
         # arms whatever this returns, through the real ordered path.
@@ -428,7 +428,7 @@ class AdoptRig:
         mp.setattr(provision, "arm_aot", _record_cfg)
 
         if self.after_arm is not None:
-            real_wrap = aot_serve.arm_entry
+            real_wrap = aot_serve.arm_compiled_graph
             hook = self.after_arm
 
             def _wrap_then_observe(pipeline: Any, *a: Any, **k: Any) -> Any:
@@ -436,7 +436,7 @@ class AdoptRig:
                 hook(pipeline)
                 return meta
 
-            mp.setattr(aot_serve, "arm_entry", _wrap_then_observe)
+            mp.setattr(aot_serve, "arm_compiled_graph", _wrap_then_observe)
 
     def _install_boot_adopt(
         self, compiled_graph: compiled_graph_resolve.ResolvedCompiledGraph, artifact: Path,
@@ -536,7 +536,7 @@ class AdoptRig:
 def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
     """Put the tree back where ``f3ab710e`` found it, both halves.
 
-    1. ``arm_entry`` stops registering the key it just armed, so
+    1. ``arm_compiled_graph`` stops registering the key it just armed, so
        ``_KNOWN_AOT_KEYS`` goes back to being fed only by the two SELF-PRODUCED
        routes — which the ordered/boot-adopt arm is not one of.
     2. ``executor._exported_arm`` goes back to asking the REF STRING through
@@ -545,7 +545,7 @@ def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
     Both are DELETIONS of the fix, not additions of a fault: this is master
     before the fix, reached by removing what the fix added.
     """
-    real_wrap = aot_serve.arm_entry
+    real_wrap = aot_serve.arm_compiled_graph
     real_note = aot_serve.note_aot_key
 
     def _wrap_without_registering(pipeline: Any, *a: Any, **k: Any) -> Any:
@@ -555,7 +555,7 @@ def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
         finally:
             aot_serve.note_aot_key = real_note  # type: ignore[assignment]
 
-    monkeypatch.setattr(aot_serve, "arm_entry", _wrap_without_registering)
+    monkeypatch.setattr(aot_serve, "arm_compiled_graph", _wrap_without_registering)
     monkeypatch.setattr(
         ex_mod, "_exported_arm",
         lambda pipeline, ref="": bool(ref) and aot_serve.is_aot_ref(ref))
@@ -571,7 +571,7 @@ def reintroduce(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     """Remove a landed fix so the rig can be asked to re-find its bug.
 
     A rig is only worth what it can catch, and the only honest evidence of that
-    is a bug we ALREADY know the shape of. Every entry here is a deletion of
+    is a bug we ALREADY know the shape of. Every compiled graph here is a deletion of
     production code, never an injected fault.
     """
     try:

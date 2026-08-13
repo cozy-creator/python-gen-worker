@@ -54,7 +54,7 @@ CLASSES = ("CI-MUST-RUN", "CI-SKIPPED", "LOCAL-ONLY", "STAGED")
 
 def load_census() -> Tuple[Dict[str, str], List[str]]:
     """``{key: disposition}`` plus any malformed lines."""
-    entries: Dict[str, str] = {}
+    compiled_graphs: Dict[str, str] = {}
     bad: List[str] = []
     for raw in CENSUS.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -65,8 +65,8 @@ def load_census() -> Tuple[Dict[str, str], List[str]]:
         if head not in CLASSES or not key:
             bad.append(raw)
             continue
-        entries[key] = head
-    return entries, bad
+        compiled_graphs[key] = head
+    return compiled_graphs, bad
 
 
 def main() -> int:

@@ -31,9 +31,9 @@ _TOOLCHAIN = {"cc": "sha256:aaa", "ld": "sha256:bbb"}
 _SEAL = {"config": "cfg16", "inductor": "ind16", "loaded_libs": "libs16"}
 _CLOSURE = {"gen_worker/executor.py": "sha256:ccc"}
 
-#: One well-formed entry, so `unpack` can parse the envelope. Identity is a
+#: One well-formed compiled graph, so `unpack` can parse the envelope. Identity is a
 #: metadata question — none of these values participate in it.
-_ENTRIES = {
+_COMPILED_GRAPHS = {
     "unet": {
         "target": "unet",
         "inputs": [{"name": "x", "dtype": "bfloat16", "shape": [1, 4]}],
@@ -51,7 +51,7 @@ def _meta(**over: Any) -> dict[str, Any]:
         "family": "micro",
         "compiled_graph_key": "aot-inductor:k1",
         "manifest_digest": "gc_01",
-        "entry": {"name": "unet", **dict(_ENTRIES["unet"])},
+        "compiled_graph": {"name": "unet", **dict(_COMPILED_GRAPHS["unet"])},
         env_seal.SEAL_KEY: dict(_SEAL),
         "toolchain": dict(_TOOLCHAIN),
         "code_closure": dict(_CLOSURE),
@@ -308,7 +308,7 @@ def test_an_internally_corrupt_artifact_keeps_its_own_distinct_refusal(
     monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
     monkeypatch.setattr(
         aot_serve, "verify",
-        lambda meta, **kw: "entry 'unet': class_hash does not match its recorded facts")
+        lambda meta, **kw: "compiled_graph 'unet': class_hash does not match its recorded facts")
     with pytest.raises(aot_serve.AdoptError) as exc:
         aot_serve.stage_artifact(
             _artifact(tmp_path, _meta()), "micro",
@@ -342,7 +342,7 @@ def test_each_axis_verified_elsewhere_names_a_gate_that_really_reads_it() -> Non
     The checked property is that the named gate **is handed the axis** — it
     takes it as a parameter — because "this gate verifies the expectation"
     means the expectation reaches it. Merely *mentioning* the axis is too weak
-    to discriminate: this entry first named
+    to discriminate: this compiled graph first named
     `receipts.refuse_untrusted_publisher`, whose body does mention
     `publisher_org` while asking a different question (is this producer trusted
     AT ALL, rather than is it the one the spec NAMED). It takes no

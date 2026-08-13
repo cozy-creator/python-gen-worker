@@ -74,18 +74,18 @@ class _Pipe:
         self.decoder = _Decoder().eval()
 
 
-def _meta_with_entry_only() -> Dict[str, Any]:
-    """The shape a REAL packed entry artifact has: ONE entry block naming its
+def _meta_with_compiled_graph_only() -> Dict[str, Any]:
+    """The shape a REAL packed compiled graph artifact has: ONE compiled graph block naming its
     own target, and NO top-level `targets`/`module` at all.
 
-    Measured on a real 5-entry lora64 compiled graph: `meta["targets"] is None` and
-    `meta["module"] is None`, every entry `target='transformer'`. pgw#1176
+    Measured on a real 5-compiled graph lora64 compiled graph: `meta["targets"] is None` and
+    `meta["module"] is None`, every compiled graph `target='transformer'`. pgw#1176
     kept the ABSENCE — which is what defect 1 is about — and removed the MAP:
-    one artifact, one entry, one target.
+    one artifact, one compiled graph, one target.
     """
     return {
         "lora_bucket": BUCKET,
-        compiled_graph_key.ENTRY_BLOCK_KEY: {
+        compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY: {
             "name": "transformer/adapter=true,cfg=true",
             "target": "transformer",
         },
@@ -99,7 +99,7 @@ def armed(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 
     monkeypatch.setattr(
         artifact_meta, "try_read_metadata",
-        lambda p: _meta_with_entry_only())
+        lambda p: _meta_with_compiled_graph_only())
     monkeypatch.setattr(provision, "arm_route", lambda mode: object())
     monkeypatch.setattr(
         aot_serve, "enable", lambda *a, **k: AdoptOutcome.hit("armed"))
@@ -112,7 +112,7 @@ def armed(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
+def test_the_lifted_target_is_resolved_from_the_per_compiled_graph_targets(
     armed: List[Any], tmp_path: Path,
 ) -> None:
     """RED at HEAD: `targets` came only from `meta["targets"]`, which a packed
@@ -121,9 +121,9 @@ def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
     been handed with `lifted_inputs_unbindable`.
 
     pgw#1176 CONSOLIDATED defect 2 into this row. It read: *"`decoder` sorts
-    first among the entry names, and installing a lifted forward on a module
+    first among the compiled graph names, and installing a lifted forward on a module
     with no branch container fails by name"* — a premise that needed ONE
-    artifact carrying SEVERAL entries so there was a set to sort and a wrong
+    artifact carrying SEVERAL compiled graphs so there was a set to sort and a wrong
     first element to pick. An artifact now carries one graph class, so that
     shape is unconstructible and a row that built it would assert against
     nothing real. What survives of it is the second assert below: the install
@@ -139,7 +139,7 @@ def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
     assert outcome.armed
     assert lora_lifted.lifted_binding(pipe.transformer) is not None, (
         "the lifted binding was never installed — the artifact's target lives "
-        "in its ENTRY block and this call site only looked at the top level")
+        "in its COMPILED_GRAPH block and this call site only looked at the top level")
     assert lora_lifted.lifted_binding(pipe.decoder) is None, (
         "the lifted forward landed on the DECODER — `branch_targets` is the "
         "authority on which module is the denoiser")
@@ -191,7 +191,7 @@ def test_a_half_supplied_adapter_pair_is_still_refused() -> None:
 
 def test_the_branchless_arm_is_TRACEABLE_without_operands() -> None:
     """The flip side of the invariant, and the reason the old refusal had to
-    go rather than be gated: an `adapter=false` entry IS the branchless graph,
+    go rather than be gated: an `adapter=false` compiled graph IS the branchless graph,
     so capturing it with no operands is CORRECT, not a substitution. Before
     this change that capture was impossible — the wrapper refused it.
     """

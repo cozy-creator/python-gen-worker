@@ -164,7 +164,7 @@ def contract_delta(standing: Compile, migrated: Compile) -> Dict[str, Tuple[Any,
     identical contract digest ⟹ identical ``combined_graph_hash`` (the trace
     is a pure function of the declaration under fixed code + toolchain), so
     the standing ``aot_declaration.py`` can be deleted with no re-key. Any
-    entry is a STOP.
+    compiled graph is a STOP.
     """
     a = standing.contract_axes()
     b = migrated.contract_axes()

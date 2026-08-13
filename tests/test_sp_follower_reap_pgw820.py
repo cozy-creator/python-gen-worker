@@ -16,7 +16,7 @@ Reverting ``_die_with_rank0`` (or the ``rank0_pid`` plumbing in
 
 The ready signal is a FILE, not an mp queue, deliberately: the assertion must
 only fire once the follower is provably past spawn bootstrap and inside
-``entry`` (a follower killed mid-bootstrap dies of its half-built pipes and
+``compiled graph`` (a follower killed mid-bootstrap dies of its half-built pipes and
 would fake a reap), and a file does not put semaphores in the spawn payload —
 the channel object is not what this test is about.
 """
@@ -40,7 +40,7 @@ _SRC = str(Path(__file__).resolve().parent.parent / "src")
 
 # Rank 0's stand-in: spawns ONE follower through the real _follower_main with
 # the real spawn context and the real rank0_pid plumbing, then parks until the
-# test SIGKILLs it. The entry reports ready (via the file channel) and parks —
+# test SIGKILLs it. The compiled graph reports ready (via the file channel) and parks —
 # the property under test is the bootstrap, not the rendezvous.
 _DRIVER = textwrap.dedent(
     """
@@ -63,7 +63,7 @@ _DRIVER = textwrap.dedent(
             os.replace(tmp, self.path)
 
 
-    def entry(spec, channel):
+    def compiled graph(spec, channel):
         channel.report_ready(spec.rank)
         time.sleep(120)
 
@@ -73,7 +73,7 @@ _DRIVER = textwrap.dedent(
         spec = RankSpec(1, 2, 1, "127.0.0.1", 0, "gloo", group_name="pgw820")
         proc = ctx.Process(
             target=_follower_main,
-            args=(spec, entry, FileChannel(sys.argv[1]), None, os.getpid()),
+            args=(spec, compiled graph, FileChannel(sys.argv[1]), None, os.getpid()),
             name="sp-pgw820-rank1",
             daemon=True,
         )
@@ -95,12 +95,12 @@ def test_a_follower_is_reaped_when_rank0_aborts(tmp_path):
         stdout=subprocess.PIPE, env=env)
     try:
         follower_pid = int(rank0.stdout.readline().decode().strip())
-        # Only a follower that is provably past bootstrap and inside `entry`
+        # Only a follower that is provably past bootstrap and inside `compiled graph`
         # (pdeathsig armed) proves anything about surviving an abort.
         progress_wait.await_progress(
             ready.exists,
             lambda seen: seen,
-            what="follower past bootstrap (ready file written from entry)",
+            what="follower past bootstrap (ready file written from compiled_graph)",
             cadence=progress_wait.Cadence(),
             gone=lambda: (
                 None if rank0.poll() is None

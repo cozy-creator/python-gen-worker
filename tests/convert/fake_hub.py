@@ -99,10 +99,10 @@ class _FakeHub(BaseHTTPRequestHandler):
                     results.append({"key": key, "found": False, "ready": False})
                     continue
                 ready = all(f["blake3"] in blobs for f in payload.get("files") or [])
-                entry = {"key": key, "found": True, "ready": ready}
+                compiled_graph = {"key": key, "found": True, "ready": ready}
                 if ready:
-                    entry["payload"] = payload
-                results.append(entry)
+                    compiled_graph["payload"] = payload
+                results.append(compiled_graph)
             self._send(200, {"results": results})
             return
         if self.path.endswith("/clone-manifests"):

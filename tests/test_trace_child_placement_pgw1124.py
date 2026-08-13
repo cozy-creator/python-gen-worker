@@ -47,7 +47,7 @@ MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
 
 
 class _Composed:
-    """A diffusers-shaped composition: `.components` is the walk's own entry
+    """A diffusers-shaped composition: `.components` is the walk's own compiled graph
     point, and `.to()` moves each component exactly as the pipeline class
     does — including declining to move the frozen structure-only one."""
 
@@ -279,7 +279,7 @@ def test_the_boot_trace_child_never_runs_the_serving_placement_ladder(
     def _traced(pipeline: Any, spec: Any, decl: Any, **_: Any) -> Any:
         composed.append(pipeline)
         return iter([aot_mint.TracedClass(
-            name="transformer", block={"entry": "transformer"}, nodes=1,
+            name="transformer", block={"compiled_graph": "transformer"}, nodes=1,
             program=None, declared=1)])
 
     monkeypatch.setattr(aot_mint, "trace_for_key", _traced)

@@ -13,7 +13,7 @@ instead of trusting the changelog — and so that if it ever regresses, it does
 so on a 1.1 MB toy in 20 seconds rather than on a rented A100.
 
 Deliberately kept to ONE target and ONE fork-free class set: the point is the
-nonlinear EXTENT, not entry count, and a second target would only add wall
+nonlinear EXTENT, not compiled graph count, and a second target would only add wall
 clock to a variant whose whole job is a single lowering question.
 """
 

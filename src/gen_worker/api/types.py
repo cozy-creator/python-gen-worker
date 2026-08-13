@@ -232,7 +232,7 @@ class SourceRepo(msgspec.Struct):
 class DatasetRef(msgspec.Struct):
     """Reserved-name dataset descriptor for transform-kind job payloads.
 
-    The executor materializes each ``payload.datasets`` entry into a local
+    The executor materializes each ``payload.datasets`` compiled graph into a local
     dataset snapshot before the handler runs (``ctx.dataset_paths[ref]`` /
     ``ctx.resolve_dataset``). Used by calibration-based quant, pruning with
     gradient scoring, distillation, and fine-tuning.
@@ -258,7 +258,7 @@ class DatasetRef(msgspec.Struct):
 class OutputSpec(msgspec.Struct):
     """Describes one variant a conversion endpoint will emit into the destination checkpoint.
 
-    Every entry in ``payload.outputs`` produces one variant on the destination
+    Every compiled graph in ``payload.outputs`` produces one variant on the destination
     repo's new checkpoint. Tenant code may augment ``attributes`` at upload time
     (e.g. record runtime-discovered provenance like quant_library_version);
     the final stored attribute bag is OutputSpec.attributes ∪ tenant-augmented.

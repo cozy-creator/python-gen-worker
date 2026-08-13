@@ -141,7 +141,7 @@ class ConfigStore:
             parameters: Dict[str, Dict[str, Any]] = {}
             for function_name, values in decoded.items():
                 if not isinstance(function_name, str) or not isinstance(values, dict):
-                    raise TypeError("parameter snapshot entries must be maps")
+                    raise TypeError("parameter snapshot compiled_graphs must be maps")
                 parameters[function_name] = {str(name): value for name, value in values.items()}
         except Exception as exc:
             raise ConfigSnapshotWriteError("invalid config parameter snapshot") from exc

@@ -81,7 +81,7 @@ from .writer import (
     rewrite_safetensors_keys,
     shard_content_digest,
     shard_payload_digests,
-    shard_tensor_entries,
+    shard_tensor_compiled_graphs,
     write_safetensors_shard,
 )
 
@@ -243,14 +243,14 @@ class ConversionIO:
         return tuple(k for k in self._header if k != "__metadata__")
 
     def spec(self, key: str) -> CorpusTensor:
-        meta = self._entry(key)
+        meta = self._compiled_graph(key)
         shape = meta["shape"]
         assert isinstance(shape, (list, tuple))
         return CorpusTensor(
             dtype=str(meta["dtype"]), shape=tuple(int(d) for d in shape))
 
     def read(self, key: str) -> bytes:
-        meta = self._entry(key)
+        meta = self._compiled_graph(key)
         offsets = meta["data_offsets"]
         assert isinstance(offsets, (list, tuple))
         start, end = int(offsets[0]), int(offsets[1])
@@ -284,7 +284,7 @@ class ConversionIO:
     def set_metadata(self, key: str, value: str) -> None:
         self._metadata[str(key)] = str(value)
 
-    def _entry(self, key: str) -> Mapping[str, object]:
+    def _compiled_graph(self, key: str) -> Mapping[str, object]:
         meta = self._header.get(key)
         if not isinstance(meta, dict):
             raise KeyError(f"no tensor {key!r} in this shard")
@@ -732,7 +732,7 @@ def _apply_hop(
     never decodes; quant goes through the streaming IO."""
     if isinstance(spec, TopologyConversion):
         rules = spec.rules if forward else spec.inverse_rules
-        keys = tuple(name for name, _ in shard_tensor_entries(source))
+        keys = tuple(name for name, _ in shard_tensor_compiled_graphs(source))
         rewrite_safetensors_keys(
             source, target, apply_rename_rules(keys, rules))
         return
@@ -747,8 +747,8 @@ def _apply_hop(
 def _prove_keys(
     spec: LayoutConversion, case: ConversionCase, source: Path, target: Path,
 ) -> None:
-    src_keys = [name for name, _ in shard_tensor_entries(source)]
-    dst_keys = [name for name, _ in shard_tensor_entries(target)]
+    src_keys = [name for name, _ in shard_tensor_compiled_graphs(source)]
+    dst_keys = [name for name, _ in shard_tensor_compiled_graphs(target)]
     if len(dst_keys) != len(set(dst_keys)):
         raise ConversionProofError(
             f"{spec.axis} {spec.from_id} -> {spec.to_id}: corpus case "

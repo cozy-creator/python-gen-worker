@@ -87,8 +87,8 @@ def _follower_dies_after_joining(spec: RankSpec, chan: FollowerChannel) -> None:
     raise RuntimeError("this rank's card fell off the bus")
 
 
-def _cpu_group(entry: Any, degree: int = 2) -> RankGroup:
-    return RankGroup(devices=tuple(range(degree)), backend="gloo", entry=entry)
+def _cpu_group(compiled_graph: Any, degree: int = 2) -> RankGroup:
+    return RankGroup(devices=tuple(range(degree)), backend="gloo", compiled_graph=compiled_graph)
 
 
 def test_rank_zero_decides_and_every_rank_obeys() -> None:

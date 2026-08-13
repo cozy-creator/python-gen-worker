@@ -52,8 +52,8 @@ DECLARED_BYTES = 1 << 20
 # Content-Length itself and stops reading at it, so a server that UNDER-declares
 # cannot be used to demonstrate anything — the excess never reaches our code.
 # The runaway that actually exists is the one these tests build: the transport
-# is honest about a large body, and it is the MANIFEST (the dataset entry, the
-# civitai `sizeBytes`, the compiled graph entry's `size_bytes`) that says the file is
+# is honest about a large body, and it is the MANIFEST (the dataset compiled graph, the
+# civitai `sizeBytes`, the compiled graph compiled graph's `size_bytes`) that says the file is
 # small. That declaration is what the four sites compared against after the
 # loop and now compare against inside it.
 #
@@ -410,7 +410,7 @@ def test_shard_legitimate_transfer_is_unaffected(rig: _Rig, tmp_path: Path) -> N
 
 
 def test_shard_oversized_stream_is_abandoned_mid_transfer(rig: _Rig, tmp_path: Path) -> None:
-    """The manifest entry says 1 MiB; the presigned URL hands back 32 MiB. The
+    """The manifest compiled graph says 1 MiB; the presigned URL hands back 32 MiB. The
     old code wrote all 32 and then said so."""
     url = _serve(rig, "/shard-big", b"\0" * BODY_BYTES)
     dest = tmp_path / "big.jsonl"
@@ -425,7 +425,7 @@ def test_shard_oversized_stream_is_abandoned_mid_transfer(rig: _Rig, tmp_path: P
 
 
 def test_shard_without_a_declared_size_is_still_bounded(rig: _Rig, tmp_path: Path) -> None:
-    """`size_bytes` is optional on a manifest entry, so refusing is not
+    """`size_bytes` is optional on a manifest compiled graph, so refusing is not
     available — the destination filesystem is the bound instead, and the
     digest still has the final word."""
     url = _serve(rig, "/shard-nosize", SHARD)
@@ -501,12 +501,12 @@ ARTIFACT = b"compiled_graph-tarball-bytes" * 64
 ARTIFACT_DIGEST = "sha256:" + hashlib.sha256(ARTIFACT).hexdigest()
 
 
-def _resolve_route(rig: _Rig, repo: str, entry: Dict[str, Any]) -> None:
-    body = json.dumps({"files": [entry]}).encode()
+def _resolve_route(rig: _Rig, repo: str, compiled_graph: Dict[str, Any]) -> None:
+    body = json.dumps({"files": [compiled_graph]}).encode()
     rig.routes[f"/api/v1/repos/{repo}/resolve"] = _Route(body)
 
 
-def _fetch_compiled_graph(rig: _Rig, cache: Path, entry: Dict[str, Any],
+def _fetch_compiled_graph(rig: _Rig, cache: Path, compiled_graph: Dict[str, Any],
                 digest: str) -> Optional[Path]:
     """pgw#904: compiled graph bytes arrive as the EXACT named artifact from the
     grant's transport (`aot_delivery`), never a discovery fetch — the same
@@ -516,10 +516,10 @@ def _fetch_compiled_graph(rig: _Rig, cache: Path, entry: Dict[str, Any],
     from gen_worker import aot_delivery
 
     presigned = SimpleNamespace(files=[SimpleNamespace(
-        path=str(entry.get("path") or ""),
-        size_bytes=int(entry.get("size_bytes") or 0),
-        digest=str(entry.get("digest") or ""),
-        url=str(entry.get("url") or ""),
+        path=str(compiled_graph.get("path") or ""),
+        size_bytes=int(compiled_graph.get("size_bytes") or 0),
+        digest=str(compiled_graph.get("digest") or ""),
+        url=str(compiled_graph.get("url") or ""),
         chunk_size_bytes=0,
         chunks=(),
     )])
@@ -539,21 +539,21 @@ def _repo_for(family: str = "fam") -> str:
 
 def test_compiled_graph_artifact_legitimate_transfer_is_unaffected(rig: _Rig, tmp_path: Path) -> None:
     url = _serve(rig, "/compiled_graph.tar.gz", ARTIFACT)
-    entry = {"path": "compiled_graph.tar.gz", "url": url,
+    compiled_graph = {"path": "compiled_graph.tar.gz", "url": url,
              "digest": ARTIFACT_DIGEST, "size_bytes": len(ARTIFACT)}
-    out = _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST)
+    out = _fetch_compiled_graph(rig, tmp_path, compiled_graph, ARTIFACT_DIGEST)
     assert out is not None and out.read_bytes() == ARTIFACT
 
 
 def test_compiled_graph_artifact_without_size_bytes_is_a_typed_miss(rig: _Rig, tmp_path: Path) -> None:
     """The chunked sibling branch passes this exact field to
     `download_chunked_file` as `total_size`; the whole-file branch had it and
-    ignored it. An entry that cannot say how big it is now costs the pilot lane
+    ignored it. An compiled graph that cannot say how big it is now costs the pilot lane
     a miss rather than an unbounded fetch — a compiled graph miss self-mints, so failing
     closed here is free."""
     url = _serve(rig, "/compiled_graph-nosize.tar.gz", ARTIFACT)
-    entry = {"path": "compiled_graph-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST}
-    assert _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
+    compiled_graph = {"path": "compiled_graph-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST}
+    assert _fetch_compiled_graph(rig, tmp_path, compiled_graph, ARTIFACT_DIGEST) is None
     assert _served(rig, "/compiled_graph-nosize.tar.gz") == 0, "no bytes fetched at all"
 
 
@@ -561,10 +561,10 @@ def test_compiled_graph_artifact_oversized_stream_is_abandoned_mid_transfer(
     rig: _Rig, tmp_path: Path
 ) -> None:
     url = _serve(rig, "/compiled_graph-big.tar.gz", b"\0" * BODY_BYTES)
-    entry = {"path": "compiled_graph-big.tar.gz", "url": url,
+    compiled_graph = {"path": "compiled_graph-big.tar.gz", "url": url,
              "digest": ARTIFACT_DIGEST, "size_bytes": DECLARED_BYTES}
 
-    assert _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
+    assert _fetch_compiled_graph(rig, tmp_path, compiled_graph, ARTIFACT_DIGEST) is None
     _aborted_early(rig, "/compiled_graph-big.tar.gz")
     hexname = ARTIFACT_DIGEST.split(":", 1)[-1]
     assert not (tmp_path / "aot-compiled_graphs" / f"{hexname}.tar.gz").exists()

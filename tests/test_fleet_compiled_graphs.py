@@ -158,7 +158,7 @@ def _adopted(monkeypatch, pending):
     # bypass EXPLICIT, not adding one. These tests are about the publish path;
     # the gate's own verdict is `test_handback_key_axes_pgw1042`'s.
     monkeypatch.setattr(fc, "arm_axis_divergence", lambda arm_key, meta, **_kw: "")
-    # pgw#1176: the adopt takes the SET of entry artifacts.
+    # pgw#1176: the adopt takes the SET of compiled graph artifacts.
     return fc.adopt_delegated_mint(_Pipe(), pending, [child])
 
 
@@ -583,7 +583,7 @@ def test_a_seeded_delivered_compiled_graph_no_longer_blocks_a_later_mint(
     that says so deliberately rather than by silence.
 
     The gate existed only because an in-process capture moved the ONE global
-    inductor cache dir away from the seeded entries. No capture, no move, no
+    inductor cache dir away from the seeded compiled graphs. No capture, no move, no
     hazard — so a sibling whose own compiled graph is missing mints it instead of being
     eager for the rest of the pod's life because an unrelated slot got a
     delivered compiled graph first.

@@ -68,12 +68,12 @@ logger = logging.getLogger(__name__)
 ARM_AOT = "aot"
 ARM_DYNAMO = "dynamo"
 
-#: Ingress reasons that mean "this class is not covered". ``no_entry_admits``
-#: is a genuine coverage hole; ``entry_ambiguous`` is a DECLARATION defect
+#: Ingress reasons that mean "this class is not covered". ``no_compiled_graph_admits``
+#: is a genuine coverage hole; ``compiled_graph_ambiguous`` is a DECLARATION defect
 #: (pgw#917) that growth must never try to compile its way out of — it is
 #: recorded and reported, never submitted.
-REASON_UNCOVERED = "no_entry_admits"
-REASON_AMBIGUOUS = "entry_ambiguous"
+REASON_UNCOVERED = "no_compiled_graph_admits"
+REASON_AMBIGUOUS = "compiled_graph_ambiguous"
 
 
 class TurnGateClosed(Exception):
@@ -115,7 +115,7 @@ class ShapeGap:
     @property
     def growable(self) -> bool:
         """An ambiguous dispatch is a declaration defect, not a coverage hole:
-        compiling another entry cannot fix it and pgw#917 already refuses it
+        compiling another compiled graph cannot fix it and pgw#917 already refuses it
         at mint."""
         return self.reason != REASON_AMBIGUOUS
 

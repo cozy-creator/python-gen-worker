@@ -43,14 +43,14 @@ METADATA_NAME = "metadata.json"
 #: original derivation was "4x ``fleet_compiled_graphs.COMPILED_GRAPH_DECLARE_MAX_BYTES``", which
 #: sizes an ARTIFACT-plane read off the CONTROL-plane bound. Those are
 #: deliberately different planes: ``_UNBOUNDED_ENVELOPE_BLOCKS``
-#: (``entries``/``guard_manifest``/``composition``/``weight_contract``) are
+#: (``compiled graphs``/``guard_manifest``/``composition``/``weight_contract``) are
 #: STRIPPED from the declare precisely because they "belong in the artifact,
 #: not in the declare" — so this member is by design the place the unbounded
 #: blocks live, and bounding it at the declare's scale refuses the shape the
 #: design demands. Measured, in this tree: a real published sdxl compiled graph's
 #: metadata is 13,377,167 bytes on a 69 MB artifact (see
 #: ``fleet_compiled_graphs._UNBOUNDED_ENVELOPE_BLOCKS``), and it grows with the
-#: artifact — row 7's 36-entry AOT compiled graph was ~141 MB and its envelope did not
+#: artifact — row 7's 36-compiled graph AOT compiled graph was ~141 MB and its envelope did not
 #: fit 16 MiB, so a 92-minute mint was discarded.
 #:
 #: This is a MEMORY-SAFETY bound and nothing else: what a pod can decode into

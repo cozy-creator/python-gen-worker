@@ -38,29 +38,29 @@ class WorkerResolvedRepoFile:
     size_bytes: int
     url: Optional[str]
     #: Algorithm-tagged whole-file digest ("sha256:<hex>"). Every resolved
-    #: entry carries one; an entry that does not is refused, not skipped.
+    #: compiled graph carries one; an compiled graph that does not is refused, not skipped.
     digest: str = ""
     #: Present only when the file is stored as chunks (size > chunk_size).
     chunks: tuple["WorkerResolvedChunk", ...] = ()
     chunk_size_bytes: int = 0
 
     def cas_ref(self) -> str:
-        """The algorithm-tagged digest of this entry.
+        """The algorithm-tagged digest of this compiled graph.
 
         Raises rather than returning a bare or empty string, because every
         caller of this is an integrity check and an unreadable digest must
         fail closed, never degrade into "no check".
         """
-        return resolved_entry_digest(
+        return resolved_compiled_graph_digest(
             {"digest": self.digest},
             what=f"resolved file {self.path!r}",
         )
 
 
-def resolved_entry_digest(
-    ent: Mapping[str, Any], *, what: str = "manifest entry"
+def resolved_compiled_graph_digest(
+    ent: Mapping[str, Any], *, what: str = "manifest compiled_graph"
 ) -> str:
-    """The algorithm-tagged digest of one RAW resolve-manifest entry.
+    """The algorithm-tagged digest of one RAW resolve-manifest compiled graph.
 
     Callers that never build a ``WorkerResolvedRepoFile`` — anything reading
     ``/resolve`` JSON directly, e.g. AOT compiled graph discovery — must go through here
@@ -68,8 +68,8 @@ def resolved_entry_digest(
     digest: an integrity check with no digest is a REFUSAL, never a skip.
 
     th#1303 S1: the legacy ``blake3`` mirror is no longer read. Before the
-    repoint an entry could carry bare blake3 hex and nothing else; after it,
-    an entry with no ``digest`` is a stale pointer, and the only safe answer
+    repoint an compiled graph could carry bare blake3 hex and nothing else; after it,
+    an compiled graph with no ``digest`` is a stale pointer, and the only safe answer
     is to refuse it. Reinstating the mirror arm here re-opens the vacuous
     guard this whole program exists to close.
     """
@@ -79,7 +79,7 @@ def resolved_entry_digest(
     if ":" not in d:
         raise ValueError(
             f"{what}: digest {d[:16]}… is untagged; "
-            "every entry must carry an algorithm prefix"
+            "every compiled_graph must carry an algorithm prefix"
         )
     return d
 
@@ -125,7 +125,7 @@ def hub_base_url(base_url: Optional[str] = None) -> str:
 def parse_chunk_list(
     what: str, path: str, raw: Any, urls: Any = None
 ) -> tuple[WorkerResolvedChunk, ...]:
-    """Parse a v2 entry's ordered chunk list. Order is the file's byte order.
+    """Parse a v2 compiled graph's ordered chunk list. Order is the file's byte order.
 
     THE WIRE SHAPE, read off the hub's serializer rather than assumed:
     `catalog.SnapshotManifestFile` carries `chunks: [{digest, len}]` — the
@@ -262,12 +262,12 @@ def resolve_repo(
         chunks = parse_chunk_list(
             f"tensorhub resolve for {ref.canonical()}", path,
             ent.get("chunks"), ent.get("chunk_urls"))
-        # A chunked entry has NO whole-file url — its bytes only exist as
+        # A chunked compiled graph has NO whole-file url — its bytes only exist as
         # chunks. Requiring `url` here is what would classify every v2
         # snapshot as unresolvable.
         if not path or not tagged or (not u and not chunks):
             raise HubResolveError(
-                f"tensorhub resolve for {ref.canonical()}: manifest entry "
+                f"tensorhub resolve for {ref.canonical()}: manifest compiled_graph "
                 f"missing path/digest/url ({ent.get('path')!r})"
             )
         files.append(WorkerResolvedRepoFile(

@@ -459,7 +459,7 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
 def _snapshot_files_without_components(
     snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
 ) -> "List[pb.SnapshotFile]":
-    """``snapshot.files`` minus every entry under an excluded ``<comp>/``
+    """``snapshot.files`` minus every compiled graph under an excluded ``<comp>/``
     subfolder (th#1330 B2). The one place the worker's byte accounting agrees
     with what the downloader will actually fetch."""
     files = list(snapshot.files) if snapshot is not None else []
@@ -576,7 +576,7 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
 
 
 #: Setup phases in which the worker drives its OWN synthetic forwards. No
-#: request payload reaches any of them — that is the entry condition, and the
+#: request payload reaches any of them — that is the compiled graph condition, and the
 #: reason a fault raised here is the RELEASE's whoever reads it. ``load`` is
 #: deliberately absent: a caller-routed slot can fail to resolve there, and
 #: th#1259's rule is that nothing a payload participates in producing may be
@@ -1254,7 +1254,7 @@ class ModelStore:
             if zero is not None:
                 # Group 0's registry predates the topology (it is created in
                 # __init__ so a topology-less worker is never registry-less).
-                # Retarget it rather than replace it: its entries and leases
+                # Retarget it rather than replace it: its compiled graphs and leases
                 # are already the live bookkeeping.
                 zero.device_group = self._residency_groups[0]
         # pgw#780 item 1: the pinned-host fair share was DEAD code — the pool's
@@ -1364,17 +1364,17 @@ class ModelStore:
         sizes: Dict[str, int] = {}
         for f in snap.files:
             # th#1303 S1: the tagged digest and nothing else. The legacy
-            # `blake3` fallback was empty on every v2 entry, so this used to
+            # `blake3` fallback was empty on every v2 compiled graph, so this used to
             # bail to {} — sizes unknown — on exactly the manifests it was
-            # written for. Zero entries is a REFUSAL ({}), never a silent 0.
+            # written for. Zero compiled graphs is a REFUSAL ({}), never a silent 0.
             digest = str(getattr(f, "digest", "") or "").strip()
             if not digest:
                 return {}
             sizes[digest.lower()] = int(f.size_bytes)
         return sizes
 
-    def _reclaimable_entries(
-        self, keep: set, entries: Dict[str, Any],
+    def _reclaimable_compiled_graphs(
+        self, keep: set, compiled_graphs: Dict[str, Any],
     ) -> List[Tuple[str, int]]:
         """(path, bytes) the disk GC could ACTUALLY free (th#1330 B4).
 
@@ -1396,7 +1396,7 @@ class ModelStore:
         for ref in self.disk_refs():
             if ref in keep or self.disk_ref_in_use(ref):
                 continue
-            ent = entries.get(ref)
+            ent = compiled_graphs.get(ref)
             if not ent:
                 continue
             path = str(ent.get("path") or "")
@@ -1418,7 +1418,7 @@ class ModelStore:
         """Blocking measurement — statvfs on the real mounts (CAS root =
         container tier; attached endpoint volume = volume tier; a shared
         NFS mount joins as TIER_NFS when the worker grows one) plus safely-
-        reclaimable bytes: ref-index entries at DISK tier that are inactive
+        reclaimable bytes: ref-index compiled graphs at DISK tier that are inactive
         AND not in the desired set — the disk-GC LRU's eligible set. Reuses
         ref-index bytes; never a tree rescan. capacity_generation bumps
         only on a measured shape change.
@@ -1430,12 +1430,12 @@ class ModelStore:
         whole worker, INCLUDING the th#965 heartbeat that shares the same
         loop (boothang: 0.40.7's post-seal_publish LTX hang)."""
         keep = set(self.keep)
-        entries = self._index.entries()
+        compiled_graphs = self._index.compiled_graphs()
         # pgw#748: the CAS is ONE tree with one page cache, hardlinked
         # across every group, so the preserve set is the UNION across groups —
         # dropping clean pages one group is done with would drop the pages a
         # sibling group is still mmapping (§4.3 caveat 3).
-        reclaimable = self._reclaimable_entries(keep, entries)
+        reclaimable = self._reclaimable_compiled_graphs(keep, compiled_graphs)
         mounts = [disk_telemetry.MountSpec(
             tier=disk_telemetry.TIER_CONTAINER, path=str(self._cache_dir),
         )]
@@ -1550,7 +1550,7 @@ class ModelStore:
         preload, a stale spec, a retry — could materialize OBSOLETE bytes off
         a manifest the hub stopped asking for, with no hub prompting and no
         way to notice. ``_verified``/``_snapshot_generations`` carried the same
-        stale entries.
+        stale compiled graphs.
 
         The conditions are deliberately conservative: on disk, in use, or mid
         materialization all keep the manifest, so nothing in flight can lose
@@ -1691,7 +1691,7 @@ class ModelStore:
         for f in snap.files:
             rel = str(f.path).strip().lstrip("/")
             # th#1303: this read `f.blake3`, which is EMPTY on every v2
-            # entry, so every file of a v2 snapshot was skipped and component
+            # compiled graph, so every file of a v2 snapshot was skipped and component
             # sharing was silently OFF fleet-wide — the fail-CLOSED half of
             # the empty-guard class (the fail-open half is
             # `if want and got != want`). pgw#821 made it a dual-read; S1
@@ -1738,7 +1738,7 @@ class ModelStore:
         Also sweeps abandoned writer-unique CAS temp artifacts (th#850): on
         pod-local disk those died with the pod, but a CAS root pointed at a
         persistent volume keeps them until swept."""
-        for ref, ent in self._index.entries().items():
+        for ref, ent in self._index.compiled_graphs().items():
             p = Path(str(ent.get("path") or ""))
             if p.exists():
                 # Every group's registry learns the shared disk tier at boot.
@@ -1817,19 +1817,19 @@ class ModelStore:
     # behavior, byte-for-byte.
     @staticmethod
     def _default_disk_eviction_order(
-        entries: List[Tuple[float, str]], include_keep: bool, keep_rank: Dict[str, int],
+        compiled_graphs: List[Tuple[float, str]], include_keep: bool, keep_rank: Dict[str, int],
     ) -> List[str]:
         if include_keep:
-            ordered = sorted(entries, key=lambda item: (-keep_rank[item[1]], item[0], item[1]))
+            ordered = sorted(compiled_graphs, key=lambda item: (-keep_rank[item[1]], item[0], item[1]))
         else:
-            ordered = sorted(entries)
+            ordered = sorted(compiled_graphs)
         return [ref for _, ref in ordered]
 
     _disk_eviction_order = _default_disk_eviction_order
 
     def _evict_disk_ref(self, ref: str) -> None:
         path = self.residency.local_path(ref) or self._index.path(ref)
-        if not self.residency.evict(ref):  # refuses in-use entries; emits EVICTED
+        if not self.residency.evict(ref):  # refuses in-use compiled graphs; emits EVICTED
             return
         if path is not None:
             # th#1330 B4: snapshot trees are keyed by DIGEST, so two refs that
@@ -2066,7 +2066,7 @@ class ModelStore:
         def complete(path: Path) -> _MaterializedLocal:
             # pgw#748: the bytes are pod-wide but each group keeps its own
             # ledger, so the group that asked must ALSO book the shared disk
-            # entry — otherwise a group riding a sibling's materialization
+            # compiled graph — otherwise a group riding a sibling's materialization
             # never sees the ref in its own LRU, preserve set or eviction.
             if self.residency.tier(ref) is None:
                 self.residency.track_disk(ref, path)
@@ -2465,7 +2465,7 @@ class ModelStore:
             # was then reported CLEAN WITHOUT BEING HASHED. On a volume shared
             # across releases and pods that is a security hole, not a cosmetic
             # gap, and it is the same false-clean shape as reading
-            # manifest["files"] when the key is "entries": a verifier that
+            # manifest["files"] when the key is "compiled graphs": a verifier that
             # examines nothing looks exactly like one that passes.
             targets, skipped = snapshot_verify_targets(files, p)
             for rel in skipped:
@@ -2618,10 +2618,10 @@ class _ArmOrder:
     expected: Optional["aot_identity.ExpectedIdentity"] = None
     publisher_org: str = ""
     adopt: Optional["boot_adopt.BootAdoptOutcome"] = None
-    #: pgw#1176: the OTHER entries this boot resolved. A boot derives a key SET
+    #: pgw#1176: the OTHER compiled graphs this boot resolved. A boot derives a key SET
     #: and coverage ACCRETES, so several hits are the expected shape — each is
     #: armed into the same registry, the same target pool and the same live
-    #: wrap after the first. A failure on one of these is a per-entry degrade
+    #: wrap after the first. A failure on one of these is a per-compiled graph degrade
     #: (that class serves eager), never terminal: the first arm already proved
     #: the pod can serve compiled.
     extra: Tuple[Tuple[Path, Optional["aot_identity.ExpectedIdentity"], str],
@@ -2850,7 +2850,7 @@ class _ClassRecord:
     # it via a joined to_thread so the loop never blocks.
     turn_mutex: threading.Lock = dc_field(default_factory=threading.Lock)
     # Content-keyed shared components this record holds (gw#479): released
-    # (refcount--) at vacate so the entries become LRU/drain candidates.
+    # (refcount--) at vacate so the compiled graphs become LRU/drain candidates.
     shared_keys: List[Any] = dc_field(default_factory=list)
     # gw#494: the wire refs this record's instance BOOKED at load time —
     # teardown releases exactly these (never a re-derivation from the
@@ -2865,7 +2865,7 @@ class _ClassRecord:
     # freezes these facts so two same-family SDXL checkpoints cannot
     # cross-certify merely because their graph/lane contracts match.
     held_bindings: List[Tuple[str, str, str]] = dc_field(default_factory=list)
-    # The per-record object behind each booking. Residency has one entry per
+    # The per-record object behind each booking. Residency has one compiled graph per
     # wire ref, so a multiply-held ref needs this map to transfer its strong
     # representative when the latest owner leaves.
     held_objects: Dict[str, Any] = dc_field(default_factory=dict)
@@ -3031,7 +3031,7 @@ class _InjectionResult:
     """What one setup injection produced (gw#479): the setup kwargs, the
     per-slot residency objects+bytes, which slots were lane-registered
     inline, the shared keys this record now holds, and the VRAM booked on
-    shared:: entries (counted once, excluded from per-slot residuals)."""
+    shared:: compiled graphs (counted once, excluded from per-slot residuals)."""
 
     kwargs: Dict[str, Any]
     loaded: Dict[str, Tuple[Any, int]]
@@ -3066,7 +3066,7 @@ class _InjectionResult:
     # gw#587 CORRECT FIX: id(pipeline) -> fleet_compiled_graphs.PendingSelfMint for
     # objects armed from a fresh self-mint capture, not yet proven or
     # packed. The warmup-proof loop finalizes (packs + publishes) exactly
-    # the proven entries and abandons the rest — never before the proof.
+    # the proven compiled graphs and abandons the rest — never before the proof.
     pending_self_mints: Dict[int, Any] = dc_field(default_factory=dict)
     # pgw#824: the arming brain's classified reason for every compile object
     # that ended this setup WITHOUT an armed compiled graph. Carried into the record, so
@@ -3593,7 +3593,7 @@ class Executor:
         self._compile_failure_owners: Dict[
             str, Tuple[_ClassRecord, str]
         ] = {}
-        # gw#494: entries in `unavailable` that gate_functions owns — cleared
+        # gw#494: compiled graphs in `unavailable` that gate_functions owns — cleared
         # and re-derived on every (re-)gate so gating is idempotent; setup
         # failures (owned by _mark_setup_failed) survive re-gates.
         self._gate_owned: set = set()
@@ -5608,11 +5608,11 @@ class Executor:
         if not applied:
             return
         bound = self._bound_execution_body(spec)
-        for entry in applied:
+        for compiled_graph in applied:
             activity_mod.emit_event(
                 activity_mod.KIND_APPLIED_LANE,
-                detail=f"{entry.detail()} bound={bound}",
-                phase=entry.component)
+                detail=f"{compiled_graph.detail()} bound={bound}",
+                phase=compiled_graph.component)
 
     def _record_applied_attention(
         self, rec: _ClassRecord, applied: Tuple[Any, ...],
@@ -5621,11 +5621,11 @@ class Executor:
         per component. Reporting nothing is dense — the absence is the default,
         not a gap, so silence emits nothing."""
         rec.applied_attention = list(applied)
-        for entry in applied:
+        for compiled_graph in applied:
             activity_mod.emit_event(
                 activity_mod.KIND_APPLIED_ATTENTION,
-                detail=entry.detail(),
-                phase=entry.component)
+                detail=compiled_graph.detail(),
+                phase=compiled_graph.component)
 
     def _served_attention_mode(self, spec: EndpointSpec) -> str:
         """The attention mode `metrics.attention_mode` reports for a request on
@@ -5635,10 +5635,10 @@ class Executor:
         if spec.cls is None:
             return ""
         rec = self._classes.get(spec.instance_key)
-        entries = list(getattr(rec, "applied_attention", []) or []) if rec else []
-        if not entries:
+        compiled_graphs = list(getattr(rec, "applied_attention", []) or []) if rec else []
+        if not compiled_graphs:
             return ""
-        return attnspec.most_sparse_mode([e.mode for e in entries])
+        return attnspec.most_sparse_mode([e.mode for e in compiled_graphs])
 
     def _served_attention_detail(self, spec: EndpointSpec) -> str:
         """The full applied-attention row for this instance (k, block, measured
@@ -5647,8 +5647,8 @@ class Executor:
         if spec.cls is None:
             return ""
         rec = self._classes.get(spec.instance_key)
-        entries = list(getattr(rec, "applied_attention", []) or []) if rec else []
-        return "; ".join(e.detail() for e in entries)
+        compiled_graphs = list(getattr(rec, "applied_attention", []) or []) if rec else []
+        return "; ".join(e.detail() for e in compiled_graphs)
 
     def _bound_execution_body(self, spec: EndpointSpec) -> str:
         """The most-quantized lane BODY this spec's BINDINGS resolve to — what
@@ -5688,7 +5688,7 @@ class Executor:
         ]
         # The applied report is validated against the lane table at report
         # time (`report_applied_lane`), so it can only name a real lane body.
-        bodies.extend(entry.body for entry in applied)
+        bodies.extend(compiled_graph.body for compiled_graph in applied)
         return lanespec.most_quantized_body(bodies)
 
     def _served_execution_lane(
@@ -5833,8 +5833,8 @@ class Executor:
         """Refs a job pins for its whole lifetime: every routed slot EXCEPT
         lane refs (gw#551 — the LaneGate pins those around the actual
         pipeline call, so the idle sibling stays LRU-demotable), PLUS the
-        record's shared-component entries (pgw#636: holders alone no longer
-        block demotion, so an executing job must pin the TE/VAE entries its
+        record's shared-component compiled graphs (pgw#636: holders alone no longer
+        block demotion, so an executing job must pin the TE/VAE compiled graphs its
         pipeline aliases)."""
         rec = self._classes.get(spec.instance_key) if spec.cls is not None else None
         execution_lane_refs = rec.execution_lane_refs if rec is not None else set()
@@ -6652,9 +6652,9 @@ class Executor:
             proven = proven_keys.get(obj_id, set())
             # pgw#844's ORIGINAL FINDING, now answered at the lane instead of
             # per class (pgw#1184). The measured shape (attempt twelve, pod
-            # o0legpgj5olhic): a regional sdxl compiled graph armed all 72 entries,
+            # o0legpgj5olhic): a regional sdxl compiled graph armed all 72 compiled graphs,
             # dispatched 1024x1024 correctly, and refused the other eight
-            # aspect buckets `entry_ambiguous`. Those eight classes went
+            # aspect buckets `compiled_graph_ambiguous`. Those eight classes went
             # unproven, the all-or-nothing rule attributed NO alias, the
             # target was omitted `target_applicability_incomplete`, and the
             # boot ended `boot_ended_uncompiled` — so the ONE bucket that was
@@ -7008,7 +7008,7 @@ class Executor:
             # hits are NOT dropped quietly — they are named on the wire below,
             # and the fix is to carry them on the order so `_enable_compiled`
             # arms each into the same registry after the pipeline is up, which
-            # is what `aot_serve.arm_entry` already supports. A silent subset
+            # is what `aot_serve.arm_compiled_graph` already supports. A silent subset
             # here would be the exact defect this whole change deletes.
             resolved = [o for o in adopts if o.adoption is not None]
             adopt = resolved[0] if resolved else (
@@ -7371,7 +7371,7 @@ class Executor:
             # as a dynamo arm; only the per-object scoring differs.
             proves_exported = bool(aot_proof_before)
             # pgw#815: every mint obligation this boot opened, snapshotted
-            # BEFORE the proof pass pops entries. The assertion after the
+            # BEFORE the proof pass pops compiled graphs. The assertion after the
             # block below reads it — a pending that reaches readiness having
             # touched none of {sealed, publishing, withheld, aborted,
             # abandoned} was never resolved by anything, which is exactly the
@@ -7480,7 +7480,7 @@ class Executor:
                         # for every object under proof so the warmup MUST go
                         # through the real lookup path — a mint truly compiles
                         # into its capture, an adoption truly hits its seeded
-                        # FX entries. In a warm process, dynamo's class-keyed
+                        # FX compiled graphs. In a warm process, dynamo's class-keyed
                         # code cache otherwise serves these calls
                         # counter-silently (calls>0, hits=0, misses=0) and the
                         # proof disproves a healthy lane. No sibling GPU work
@@ -7774,12 +7774,12 @@ class Executor:
                         f"compile_seconds={compile_seconds:.1f}{per_object})"
                     )
                     # gw#608 FX-cache census: this boot's recompiles already
-                    # saved their entries into the live cache dir, so the
+                    # saved their compiled graphs into the live cache dir, so the
                     # report says how many keys exist and what extern-libs key
                     # this process presents.
                     # pgw#1200 removed the COMPILED GRAPH side and the B1/B2
                     # classification with it — every class was a difference
-                    # against FX entries read from a `torch-inductor-cache`
+                    # against FX compiled graphs read from a `torch-inductor-cache`
                     # tarball, and that format has no writer and is deleted, so
                     # B1 was being named on every boot. The report no longer
                     # takes the artifact; passing one carried no information.
@@ -8137,7 +8137,7 @@ class Executor:
         tenant loaded inside setup() split the residual delta — no object,
         so their VRAM is only reclaimable by record teardown. Lane slots
         (gw#479) were registered inline during injection — their bytes and
-        the shared-entry bytes still reduce the residual, but re-tracking
+        the shared-compiled graph bytes still reduce the residual, but re-tracking
         them here would clobber a mid-setup demotion."""
         res = self.store.residency
         execution_lanes = execution_lane_slots or set()
@@ -8200,7 +8200,7 @@ class Executor:
             r for s in setup_slots
             if (r := wire_ref(spec.models[s])) not in execution_lane_refs
         ]
-        # pgw#636: shared-component entries (TE/VAE) the record's pipelines
+        # pgw#636: shared-component compiled graphs (TE/VAE) the record's pipelines
         # alias are independently demotable now — swap any that went warm
         # back in before this job executes, alongside the setup refs.
         if rec is not None and rec.shared_keys:
@@ -8221,7 +8221,7 @@ class Executor:
                             # Promote refused/rolled back (gw#409): fail the
                             # job RETRYABLE at promote time — never hand a
                             # handler a pipeline that fatals mid-denoise.
-                            # Non-movable entries (object-less ledger refs,
+                            # Non-movable compiled graphs (object-less ledger refs,
                             # offload-hooked pipelines) can never promote —
                             # promote-or-die on them livelocks (gw#417).
                             raise RetryableError(
@@ -8491,7 +8491,7 @@ class Executor:
         ``_ClassRecord``. Clearing only the Residency reference reports
         ON_DISK while ``record.instance`` still owns every tensor. Evict
         record-owned victims through ``_vacate_record``; only ownerless
-        entries may use ``release_to_disk`` directly. Re-probe observed RAM
+        compiled graphs may use ``release_to_disk`` directly. Re-probe observed RAM
         after every teardown and fail RETRYABLE if the real headroom still
         cannot cover the incoming bytes plus the derived floor.
 
@@ -8791,11 +8791,11 @@ class Executor:
         content address (pgw#647 deleted the ``Slot.share_components``
         opt-in — an endpoint can no longer forget to share): every
         component of a hub-resolvable (Slot-declared) pipeline slot becomes
-        an independent content-keyed residency entry, so later picks with
+        an independent content-keyed residency compiled graph, so later picks with
         equal bytes alias it and unequal bytes stay honestly exclusive. A
         component also participates when its content key appears under 2+
         pipeline slots of THIS record (the multi-lane z-image/qwen shape)
-        or when an entry for the key is ALREADY resident in the shared
+        or when an compiled graph for the key is ALREADY resident in the shared
         cache (a sibling pick's record seeded it). None when nothing
         qualifies — loading then stays monolithic."""
         pipe_slots = [
@@ -8825,7 +8825,7 @@ class Executor:
             # flavor of a ref answered "" and byte-identical non-denoiser
             # components (a quantizer only rewrites the denoiser, so the VAE and
             # text encoders of `X` and `X#fp8-w8a8` are the SAME bytes) shared
-            # ONE cache entry across compositions that compute at DIFFERENT
+            # ONE cache compiled graph across compositions that compute at DIFFERENT
             # dtypes: a quant-artifact tree computes bf16, a plain fp16-stored
             # mirror computes fp16. Whichever pick loaded first won, and the
             # loser aliased a foreign-precision module into its own
@@ -8927,7 +8927,7 @@ class Executor:
         byte-identical components (content keys), the first lane loads them
         and registers them in the shared cache; later lanes inject the very
         same module objects into ``from_pretrained`` and load only their
-        exclusive weights. Each lane's residency entry is then the exclusive
+        exclusive weights. Each lane's residency compiled graph is then the exclusive
         module set — LRU swap moves ONLY the transformer, never the shared
         encoder. Lane slots are residency-registered inline (per slot) so
         make_room can demote lane N-1 while lane N loads."""
@@ -9282,7 +9282,7 @@ class Executor:
     ) -> Tuple[Any, int]:
         """Book one lane's residency (gw#479): freshly loaded shared
         components go into the content-keyed cache (VRAM counted once, held
-        by refcount); the lane's own entry is its EXCLUSIVE module set, so
+        by refcount); the lane's own compiled graph is its EXCLUSIVE module set, so
         LRU demote/promote swaps only lane-owned weights (the transformer),
         never the shared encoder."""
         import torch.nn as nn
@@ -9333,7 +9333,7 @@ class Executor:
         self, pipe: Any, ref: str, spec: Optional[EndpointSpec] = None,
     ) -> bool:
         """gw#551: wrap a worker-constructed pipeline's ``__call__`` so a
-        demoted/incomplete residency entry is promoted (pinned, idle sibling
+        demoted/incomplete residency compiled graph is promoted (pinned, idle sibling
         LRU-swapped out) before it executes — a cpu-resident lane must never
         run. No-op for offload-hooked pipelines (they own their placement).
         Monolithic pipelines (``spec`` given) additionally get the last-resort
@@ -10145,7 +10145,7 @@ class Executor:
                 # pgw#1176: THE ACCRETION LOOP. Every other class this boot
                 # resolved arms into the SAME registry, target pool and live
                 # wrap. A failure here costs that class and nothing else —
-                # the pod is already serving compiled, so degrading one entry
+                # the pod is already serving compiled, so degrading one compiled graph
                 # to eager is the design's normal state, not a fallback.
                 for extra_path, extra_expected, extra_org in arm.extra:
                     try:
@@ -10158,8 +10158,8 @@ class Executor:
                         )
                     except Exception as extra_exc:  # noqa: BLE001
                         activity_mod.emit_event(
-                            "aot_entry_arm_failed",
-                            f"a sibling entry of an armed compiled_graph would not arm "
+                            "aot_compiled_graph_arm_failed",
+                            f"a sibling compiled_graph of an armed compiled_graph would not arm "
                             f"({type(extra_exc).__name__}: {extra_exc}); that "
                             f"CLASS serves eager and every armed sibling keeps "
                             f"serving compiled",
@@ -10317,8 +10317,8 @@ class Executor:
                 #
                 # Under ck1 it was sound: one compiled graph, one ref, and no ref meant
                 # there was nothing anyone could attribute. Under a resolved
-                # KEY SET it swallows the commonest per-entry outcome there
-                # is — an entry that MISSED has no artifact ref BY
+                # KEY SET it swallows the commonest per-compiled graph outcome there
+                # is — an compiled graph that MISSED has no artifact ref BY
                 # CONSTRUCTION, so a pod resolving 30 of 36 keys would have
                 # reported the 30 and silently discarded the six that are the
                 # actual news. That is exactly how `compile_cache_adopt` went
@@ -10329,7 +10329,7 @@ class Executor:
                 # typed activity event, whose family/compiled_graph_key/graph_class
                 # fields (proto 18-20) land in the hub's own columns.
                 activity_mod.emit_event(
-                    "aot_entry_missed",
+                    "aot_compiled_graph_missed",
                     f"this pod derived the key and nothing entitled answered "
                     f"it ({adoption.reason or 'no_compiled_graph'}"
                     f"{': ' + adoption.detail if adoption.detail else ''}); "
@@ -10337,7 +10337,7 @@ class Executor:
                     phase=adoption.reason or "no_compiled_graph",
                     family=str(getattr(inj, "family", "") or ""),
                     compiled_graph_key=adoption.compiled_graph_key,
-                    graph_class=adoption.entry,
+                    graph_class=adoption.compiled_graph,
                 )
                 continue
             calls, hits, misses = proof_by_obj.get(adoption.pipeline_id, (0, 0, 0))
@@ -10509,7 +10509,7 @@ class Executor:
         rec.stale = False
         if rec.shared_keys:
             # Drop this record's holds on content-keyed shared components
-            # (gw#479). pgw#636: entries no other record references are NOT
+            # (gw#479). pgw#636: compiled graphs no other record references are NOT
             # drained eagerly — a hot GPU keeps them resident as ordinary LRU
             # candidates so the next pick that matches their bytes aliases
             # them for free; real pressure reclaims them through make_room.
@@ -10859,8 +10859,8 @@ class Executor:
         if self._unwind_stuck:
             return  # another wedged cancel still open
         for name in list(self._unwind_quarantined):
-            entry = self.unavailable.get(name)
-            if entry is not None and entry[0] == _CANCEL_UNWIND_REASON:
+            compiled_graph = self.unavailable.get(name)
+            if compiled_graph is not None and compiled_graph[0] == _CANCEL_UNWIND_REASON:
                 self.unavailable.pop(name, None)
         restored = len(self._unwind_quarantined)
         self._unwind_quarantined.clear()
@@ -11287,8 +11287,8 @@ class Executor:
         # Admission lease over this job's model refs for its WHOLE lifetime
         # (pgw#641 Stage 2, superseding the gw#409 whole-job executing() pin):
         # from admission on, no eviction/demotion path may victim these refs —
-        # including refs whose entries do not exist yet (the executing() pin
-        # no-op'd on those, leaving a freshly created entry demotable between
+        # including refs whose compiled graphs do not exist yet (the executing() pin
+        # no-op'd on those, leaving a freshly created compiled graph demotable between
         # its track_vram and the execution-time pin) — and bytes for
         # not-yet-loaded refs are RESERVED so concurrent admissions cannot
         # book the same free VRAM and OOM each other mid-load. Lane refs are
@@ -11884,7 +11884,7 @@ class Executor:
 
     async def _materialize_datasets(self, ctx: Any, payload: Any) -> None:
         """Reserved-datasets contract (gw#425): materialize every
-        ``payload.datasets`` entry (DatasetRef) into a local dataset snapshot
+        ``payload.datasets`` compiled graph (DatasetRef) into a local dataset snapshot
         before the handler runs. Paths land in ``ctx.dataset_paths``."""
         datasets = getattr(payload, "datasets", None)
         if not datasets:
@@ -11895,10 +11895,10 @@ class Executor:
                 "payload.datasets requires a producer-kind endpoint "
                 "(conversion/dataset/training)"
             )
-        for entry in datasets:
-            ref = str(getattr(entry, "ref", "") or "").strip()
+        for compiled_graph in datasets:
+            ref = str(getattr(compiled_graph, "ref", "") or "").strip()
             if not ref:
-                raise ValidationError("payload.datasets entries need a non-empty ref")
+                raise ValidationError("payload.datasets compiled_graphs need a non-empty ref")
             await asyncio.to_thread(resolve, ref)
 
     async def _handler_kwargs(
@@ -11991,7 +11991,7 @@ class Executor:
 
         pgw#678: this is NOT ``residency.obj(ref)``. A shared-component lane
         books its EXCLUSIVE module set (an ``nn.ModuleDict``) as the residency
-        entry so LRU demote/promote moves only lane-owned weights — and
+        compiled graph so LRU demote/promote moves only lane-owned weights — and
         ``exclusive`` is non-empty exactly when some component does NOT ride
         the shared cache, which a th#980 ``components.*`` deploy override
         guarantees (the overridden component's bytes differ from the base's,
@@ -12009,7 +12009,7 @@ class Executor:
         if pipe is not None:
             return pipe
         # Tenant-loaded slots have no worker-constructed pipeline; a
-        # monolithic worker-loaded slot's residency entry IS the pipeline.
+        # monolithic worker-loaded slot's residency compiled graph IS the pipeline.
         return self.store.residency.obj(wire_ref(spec.models[slot]))
 
     def _adapter_target(self, spec: EndpointSpec, slot: str) -> Any:
@@ -12143,7 +12143,7 @@ class Executor:
         transitions: List[Tuple[str, str, str, float]] = []
         for slot in spec.models:
             ref = wire_ref(spec.models[slot])
-            # pgw#678: a shared-component lane's residency entry is an
+            # pgw#678: a shared-component lane's residency compiled graph is an
             # nn.ModuleDict, which carries none of the offload methods below —
             # the OOM rung would silently skip every lane slot.
             obj = self._slot_pipeline(spec, slot)
@@ -12779,7 +12779,7 @@ class Executor:
             detail=str(kw.get("safe_message", ""))[:512],
         )
         # Keep finished records so a RunJob retransmission doesn't re-execute;
-        # prune oldest finished entries beyond a small window.
+        # prune oldest finished compiled graphs beyond a small window.
         finished = [k for k, j in self.jobs.items() if j.finished]
         if len(finished) > 1024:
             for k in finished[: len(finished) - 1024]:

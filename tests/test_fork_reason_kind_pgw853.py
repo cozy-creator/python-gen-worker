@@ -124,11 +124,11 @@ def test_an_unannotated_fork_serialises_exactly_as_before() -> None:
     assert set(row) == {"name", "served", "unserved", "source", "targets"}
 
 
-def test_annotating_changes_neither_the_entries_nor_the_compiled_graph_contract() -> None:
+def test_annotating_changes_neither_the_compiled_graphs_nor_the_compiled_graph_contract() -> None:
     """The two mechanisms that make annotation admissible under pgw#846:
-    entry names carry fork COORDINATES (from `served`), and the ck2 contract
+    compiled graph names carry fork COORDINATES (from `served`), and the ck2 contract
     axis digests no fork rows at all."""
-    from gen_worker.aot_declaration import compiled_graph_plans, plan_entry_name
+    from gen_worker.aot_declaration import compiled_graph_plans, plan_compiled_graph_name
     from gen_worker.compile_cache import declared_compile_facts
 
     plain = _decl(Fork("kv_cache", served=(False,), unserved=(True,),
@@ -136,8 +136,8 @@ def test_annotating_changes_neither_the_entries_nor_the_compiled_graph_contract(
     annotated = _decl(Fork("kv_cache", served=(False,), unserved=(True,),
                            reason="unpassed_arg", why="prose"))
 
-    assert [plan_entry_name(p) for p in compiled_graph_plans(plain)] == \
-        [plan_entry_name(p) for p in compiled_graph_plans(annotated)]
+    assert [plan_compiled_graph_name(p) for p in compiled_graph_plans(plain)] == \
+        [plan_compiled_graph_name(p) for p in compiled_graph_plans(annotated)]
     assert declared_compile_facts(plain) == declared_compile_facts(annotated)
 
 

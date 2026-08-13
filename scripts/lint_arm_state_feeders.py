@@ -16,11 +16,11 @@ scored on the dynamo ledger, disarmed, and the pod served eager for life.
 That was the FOURTH gate in a row with the same shape (pgw#1108, pgw#1122,
 pgw#1141, pgw#1141b): a rule written against the self-mint path, and an adopt
 path that does not take it. So the rule is now structural — the registration
-happens inside ``aot_serve.arm_entry``, the one function every arm route
+happens inside ``aot_serve.arm_compiled_graph``, the one function every arm route
 passes — and this script keeps it that way.
 
 pgw#1176 MOVED that seam and did not weaken it. ``load_and_wrap`` armed a whole
-36-entry compiled graph; ``arm_entry`` arms ONE graph class, and every arm route still
+36-compiled graph compiled graph; ``arm_compiled_graph`` arms ONE graph class, and every arm route still
 passes through it exactly once per class. The convention is unchanged: the
 registration is a property of the function that arms, never of a caller
 remembering to announce.
@@ -86,7 +86,7 @@ CLASSIFICATIONS = {"VERDICT", "OWNER", "RECOGNIZER", "PROJECTION"}
 #: and hand-feeds is standing in for an adoption, which is the bug class.
 ARM_DRIVERS = frozenset({
     "ensure_setup", "arm_aot", "arm_ordered", "enable_compiled",
-    "_enable_compiled", "arm_entry", "adopt_delegated_mint",
+    "_enable_compiled", "arm_compiled_graph", "adopt_delegated_mint",
     "arm_from_local_store", "self_mint",
 })
 
@@ -116,7 +116,7 @@ FEEDERS: Tuple[Feeder, ...] = (
     Feeder(
         dotted="aot_serve.note_aot_key", owner="aot_serve.py",
         state="aot_serve._KNOWN_AOT_KEYS (which lane a compiled_graph ref is on)",
-        seam=("aot_serve.py", "arm_entry"),
+        seam=("aot_serve.py", "arm_compiled_graph"),
     ),
     Feeder(
         dotted="compile_cache.record_compiled_graph_proven", owner="compile_cache.py",

@@ -4,7 +4,7 @@
 Fails when any file (except the sanctioned gen_worker/net.py, where the
 COZY_HTTP_*_TIMEOUT_S floor lives) does one of:
 
-  1. import huggingface_hub network entry points — HfApi, snapshot_download,
+  1. import huggingface_hub network compiled graph points — HfApi, snapshot_download,
      hf_hub_download, ... must be reached via gen_worker.net.hf(), which
      installs the timeout floor first. Non-network submodules
      (huggingface_hub.errors / .constants) stay importable.
@@ -27,7 +27,7 @@ from pathlib import Path
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 SANCTIONED = SRC_ROOT / "net.py"
 
-# huggingface_hub submodules with no network entry points.
+# huggingface_hub submodules with no network compiled graph points.
 HF_ALLOWED_SUBMODULES = {"errors", "constants"}
 
 HTTPX_NEEDS_TIMEOUT = {

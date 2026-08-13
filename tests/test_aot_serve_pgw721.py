@@ -128,16 +128,16 @@ class Cfg:
     regional = False
 
 
-#: The single entry name every fixture compiled graph carries (format 2: one entry is
+#: The single compiled graph name every fixture compiled graph carries (format 2: one compiled graph is
 #: simply the N=1 case of a multi-graph compiled graph).
-ENTRY = "unet/g"
+COMPILED_GRAPH = "unet/g"
 
 
-def _entry(**over):
-    """One format-3 entry block, range_digest/class_hash stamped the way
+def _compiled_graph(**over):
+    """One format-3 compiled graph block, range_digest/class_hash stamped the way
     the mint stamps them (best effort for deliberately-malformed blocks)."""
     e = {
-        "name": ENTRY,
+        "name": COMPILED_GRAPH,
         "target": "unet", "fork": [], "class_dims": [],
         "inputs": [dict(r) for r in INPUTS],
         "symbols": {k: list(v) for k, v in SYMBOLS.items()},
@@ -154,22 +154,22 @@ def _entry(**over):
 
 
 def _meta(**over):
-    """ONE entry artifact's metadata (format 3, pgw#1176).
+    """ONE compiled graph artifact's metadata (format 3, pgw#1176).
 
-    There is deliberately no way to ask this helper for several entries: one
-    artifact is one graph class, so a fixture that could build a multi-entry
+    There is deliberately no way to ask this helper for several compiled graphs: one
+    artifact is one graph class, so a fixture that could build a multi-compiled graph
     envelope would be asserting against a shape production cannot produce.
     """
-    entry_over = {
+    compiled_graph_over = {
         k: over.pop(k) for k in ("inputs", "symbols", "constants")
         if k in over}
-    entry = over.pop("entry", None) or _entry(**entry_over)
+    compiled_graph = over.pop("compiled_graph", None) or _compiled_graph(**compiled_graph_over)
     m = {
         "format": aot.ARTIFACT_FORMAT, "kind": aot.ARTIFACT_KIND, **RUNTIME,
         "family": FAMILY, "precision": "w8a8",
-        "compiled_graph_key": "deadbeef", compiled_graph_key_mod.ENTRY_BLOCK_KEY: entry,
+        "compiled_graph_key": "deadbeef", compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY: compiled_graph,
         "manifest_digest": compiled_graph_key_mod.manifest_digest(
-            [str((entry or {}).get("class_hash") or "")]),
+            [str((compiled_graph or {}).get("class_hash") or "")]),
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
         # pgw#1097: the folding fence, declared (see the fixture note in
@@ -184,18 +184,18 @@ def _meta(**over):
 
 def _contract(meta=None):
     return aot.contract_from_meta(
-        (meta or _meta())[compiled_graph_key_mod.ENTRY_BLOCK_KEY])
+        (meta or _meta())[compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY])
 
 
 def _specs(meta=None):
     return aot.constants_from_meta(
-        (meta or _meta())[compiled_graph_key_mod.ENTRY_BLOCK_KEY])
+        (meta or _meta())[compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY])
 
 
 def _runner(package=None, meta=None):
     return aot.ArtifactRunner(
         package=package or FakePackage(), contract=_contract(meta),
-        constants=_specs(meta), module_name="unet", entry=ENTRY)
+        constants=_specs(meta), module_name="unet", compiled_graph=COMPILED_GRAPH)
 
 
 def _in_range_call(h=128, w=128):
@@ -222,7 +222,7 @@ def stub_runtime(monkeypatch):
     no generated wrapper to read. The gate has its own real-package tests
     (test_admission_identity_pgw1058)."""
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
-    monkeypatch.setattr(aot, "_entry_admission_drift", lambda *a, **k: None)
+    monkeypatch.setattr(aot, "_compiled_graph_admission_drift", lambda *a, **k: None)
 
 
 # ---------------------------------------------------------------------------
@@ -464,12 +464,12 @@ def test_swap_serves_out_of_contract_requests_eagerly_and_stays_armed():
     meta = _meta()
     # pgw#1176: production wraps a REGISTRY, never a bare runner — `is_armed`
     # asks it what is armed. A fixture wrapping a bare runner was modelling a
-    # call shape `arm_entry` does not make.
-    dispatch = aot.EntryDispatch(declared=(ENTRY,))
-    dispatch.add(ENTRY, runner)
+    # call shape `arm_compiled_graph` does not make.
+    dispatch = aot.CompiledGraphDispatch(declared=(COMPILED_GRAPH,))
+    dispatch.add(COMPILED_GRAPH, runner)
     aot.wrap_module(module, dispatch, meta)
-    # pgw#1176: the PIPELINE marker `arm_entry` publishes — `targets` plus one
-    # `entries` row per armed graph class. The bare `{"module": …, "state": …}`
+    # pgw#1176: the PIPELINE marker `arm_compiled_graph` publishes — `targets` plus one
+    # `compiled graphs` row per armed graph class. The bare `{"module": …, "state": …}`
     # this used to build is a pipeline shape nothing produces; `is_armed` asks
     # the REGISTRY what is armed rather than reading a flag, so a fixture that
     # wants an armed pipeline has to carry one.
@@ -478,7 +478,7 @@ def test_swap_serves_out_of_contract_requests_eagerly_and_stays_armed():
         "targets": {"unet": {
             "module": module, "attr": "forward",
             "state": getattr(module, "_cozy_aot")["state"]}},
-        "entries": {ENTRY: {"key": meta["compiled_graph_key"], "target": "unet"}},
+        "compiled_graphs": {COMPILED_GRAPH: {"key": meta["compiled_graph_key"], "target": "unet"}},
     })
 
     # in-contract: the artifact serves
@@ -512,7 +512,7 @@ def test_swap_falls_permanently_eager_and_revokes_proof_on_artifact_error():
     runner.bind(module.state_dict(), {})
     meta = _meta()
     aot.wrap_module(module, runner, meta)
-    # pgw#1176: the PIPELINE marker `arm_entry` publishes — `targets`, not a
+    # pgw#1176: the PIPELINE marker `arm_compiled_graph` publishes — `targets`, not a
     # bare `module`/`state`. The old shape is one nothing in production writes;
     # `_marker_states`' pipeline-level fallback for it is deleted, and this was
     # the last fixture building it.
@@ -521,7 +521,7 @@ def test_swap_falls_permanently_eager_and_revokes_proof_on_artifact_error():
         "targets": {"unet": {
             "module": module, "attr": "forward",
             "state": getattr(module, "_cozy_aot")["state"]}},
-        "entries": {ENTRY: {"key": meta["compiled_graph_key"], "target": "unet"}},
+        "compiled_graphs": {COMPILED_GRAPH: {"key": meta["compiled_graph_key"], "target": "unet"}},
     })
     seen: list[str] = []
     assert aot.set_guard_failure_callback(pipeline, seen.append) is True
@@ -615,46 +615,46 @@ def test_verify_rejects_malformed_contract(stub_runtime):
 
 
 def test_verify_rejects_tampered_range_digest(stub_runtime):
-    meta = aot.entry_metadata(
+    meta = aot.compiled_graph_metadata(
         family=FAMILY, precision="w8a8", compiled_graph_key="k",
-        name=ENTRY, entry=_entry_arg())
+        name=COMPILED_GRAPH, compiled_graph=_compiled_graph_arg())
     assert aot.verify(meta) == ""
-    meta[compiled_graph_key_mod.ENTRY_BLOCK_KEY]["symbols"]["h"] = [64, 4096]
+    meta[compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY]["symbols"]["h"] = [64, 4096]
     reason = aot.verify(meta)
-    assert "range_digest" in reason and ENTRY in reason
+    assert "range_digest" in reason and COMPILED_GRAPH in reason
 
 
-def _entry_arg(**entry_over):
+def _compiled_graph_arg(**compiled_graph_over):
     block = {
         "target": "unet", "fork": [], "class_dims": [],
         "inputs": [dict(r) for r in INPUTS],
         "symbols": {k: list(v) for k, v in SYMBOLS.items()},
         "constants": [dict(r) for r in CONSTANTS],
         "graph": {}}
-    block.update(entry_over)
+    block.update(compiled_graph_over)
     return block
 
 
-def test_entry_metadata_validates_at_mint():
+def test_compiled_graph_metadata_validates_at_mint():
     """A malformed contract must fail on the pod, not on a paid request."""
     with pytest.raises(ValueError, match="no declared range"):
-        aot.entry_metadata(
+        aot.compiled_graph_metadata(
             family=FAMILY, precision="w8a8", compiled_graph_key="k",
-            name=ENTRY, entry=_entry_arg(symbols={"h": [64, 160]}))
+            name=COMPILED_GRAPH, compiled_graph=_compiled_graph_arg(symbols={"h": [64, 160]}))
     with pytest.raises(ValueError, match="unknown source"):
-        aot.entry_metadata(
-            family=FAMILY, precision="w8a8", compiled_graph_key="k", name=ENTRY,
-            entry=_entry_arg(
+        aot.compiled_graph_metadata(
+            family=FAMILY, precision="w8a8", compiled_graph_key="k", name=COMPILED_GRAPH,
+            compiled_graph=_compiled_graph_arg(
                 constants=[{"fqn": "a", "source": "guess", "shape": []}]))
-    meta = aot.entry_metadata(
+    meta = aot.compiled_graph_metadata(
         family=FAMILY, precision="w8a8", compiled_graph_key="k",
-        name=ENTRY, entry=_entry_arg())
+        name=COMPILED_GRAPH, compiled_graph=_compiled_graph_arg())
     assert meta["package_constants_in_so"] is False
-    entry = meta[compiled_graph_key_mod.ENTRY_BLOCK_KEY]
-    assert entry["name"] == ENTRY
-    assert entry["range_digest"] == aot.range_digest(entry)
-    assert entry["class_hash"] == aot.class_hash(
-        entry, strict=True, lora_bucket=0)
+    compiled_graph = meta[compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY]
+    assert compiled_graph["name"] == COMPILED_GRAPH
+    assert compiled_graph["range_digest"] == aot.range_digest(compiled_graph)
+    assert compiled_graph["class_hash"] == aot.class_hash(
+        compiled_graph, strict=True, lora_bucket=0)
 
 
 def test_constant_manifest_rejects_duplicates():
@@ -738,7 +738,7 @@ def test_enable_stays_eager_on_any_miss(tmp_path, monkeypatch, stub_runtime):
         pipeline, Cfg(), tmp_path / "c",
         _tar(tmp_path, _meta(torch="2.12.0"), name="old.tar.gz")).armed is False
     # package will not load
-    def _boom(path, entry="model"):
+    def _boom(path, compiled_graph="model"):
         raise RuntimeError("dlopen failed: undefined symbol")
     monkeypatch.setattr(aot, "_load_package", _boom)
     assert aot.enable(pipeline, Cfg(), tmp_path / "c", _tar(tmp_path)).armed is False
@@ -792,7 +792,7 @@ def test_provision_falls_through_to_inductor_when_the_pt2_is_unusable(
     from gen_worker import compile_cache as cc
     from gen_worker.models import provision
 
-    def _boom(path, entry="model"):
+    def _boom(path, compiled_graph="model"):
         raise RuntimeError("dlopen failed")
     monkeypatch.setattr(aot, "_load_package", _boom)
     seen: list = []

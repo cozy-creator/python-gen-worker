@@ -118,19 +118,19 @@ def _materialize_named_artifact(
             f"{what}: the grant carries no transport for the named compiled_graph "
             f"{compiled_graph_ref!r} (content digest {digest})")
     files = list(presigned.files)
-    entry = next(
+    compiled_graph = next(
         (f for f in files if str(f.path or "").endswith(".tar.gz")),
         files[0] if len(files) == 1 else None)
-    if entry is None:
+    if compiled_graph is None:
         raise NamedArtifactUnavailable(
             "missing_content",
             f"{what}: the grant's transport for {compiled_graph_ref!r} names no "
             "artifact tarball")
 
-    declared_size = int(entry.size_bytes or 0)
-    chunks = list(entry.chunks or ())
+    declared_size = int(compiled_graph.size_bytes or 0)
+    chunks = list(compiled_graph.chunks or ())
     if not chunks and declared_size <= 0:
-        # A compiled graph artifact is compiled code fetched before serving; an entry
+        # A compiled graph artifact is compiled code fetched before serving; an compiled graph
         # that cannot say how big it is cannot be sized against disk
         # (pgw#1013) — refuse rather than an unbounded write.
         raise NamedArtifactUnavailable(
@@ -150,12 +150,12 @@ def _materialize_named_artifact(
                 whole_digest=digest,
                 total_size=declared_size,
                 chunk_size_bytes=(
-                    int(entry.chunk_size_bytes or 0) or CAS_CHUNK_SIZE_BYTES),
+                    int(compiled_graph.chunk_size_bytes or 0) or CAS_CHUNK_SIZE_BYTES),
             )
         else:
-            url = str(entry.url or "")
+            url = str(compiled_graph.url or "")
             if not url:
-                raise ValueError("transport entry has no URL")
+                raise ValueError("transport compiled_graph has no URL")
             with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
                 dl.raise_for_status()
                 with open(tmp, "wb") as f:

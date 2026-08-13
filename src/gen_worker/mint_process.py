@@ -4,9 +4,9 @@ reports throughout.
 Paul's contract (``WORKER-CONTRACTS.md`` §2, verbatim)::
 
     "the process for mint is: 1. compute key 2. try to fetch from hub, if
-    miss then begin compiling and serve eager until the local cell is
+    miss then begin compiling and serve eager until the local compiled graph is
     available; then switch over to using that. 2b. if cache-hit, then load
-    the AOT/JIT cell and serve compiled. that's it. THE WORKER IS AVAILABLE
+    the AOT/JIT compiled graph and serve compiled. that's it. THE WORKER IS AVAILABLE
     THE ENTIRE TIME WHILE IT IS MINTING!"
 
 The defect this closes (th#1299)
@@ -77,7 +77,7 @@ from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
 
-#: The child entry point. Kept as a module so the boundary is argv+files.
+#: The child compiled graph point. Kept as a module so the boundary is argv+files.
 MINT_CHILD_MODULE = "gen_worker.mint_child"
 
 #: Every child progress frame is one stdout line with this prefix. Anything
@@ -90,8 +90,8 @@ REPORT_NAME = "report.json"
 #: pgw#848: the mint's phase table AS IT RUNS, rewritten atomically on every
 #: beat. `REPORT_NAME` is written once, at a terminus the child reaches under
 #: its own power — a child that is KILLED never writes one, and until this
-#: existed a 29-minute abandoned mint reported `total_s=1741.33 — no cell
-#: produced` with zero entry rows and no pool row. The measurements were all
+#: existed a 29-minute abandoned mint reported `total_s=1741.33 — no compiled graph
+#: produced` with zero compiled graph rows and no pool row. The measurements were all
 #: made; nothing carried them out of the process.
 PHASES_SNAPSHOT_NAME = "mint_phases.json"
 
@@ -141,7 +141,7 @@ _REAP_GRACE_S = 15.0
 MAX_ATTEMPTS = 2
 
 
-class CompileCellSpec(msgspec.Struct, frozen=True, kw_only=True):
+class CompileCompiledGraphSpec(msgspec.Struct, frozen=True, kw_only=True):
     """The declared compile contract, flattened — exactly the facts the CHILD
     reads.
 
@@ -182,7 +182,7 @@ class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
     cannot be decoded.
 
     A slot the parent did not resolve is ABSENT from the map — never a present
-    entry with a hole in it. ``mint_child.assert_slots_resolvable`` still
+    compiled graph with a hole in it. ``mint_child.assert_slots_resolvable`` still
     refuses one that the endpoint declares and does not mark optional.
 
     * ``ref`` — WHICH checkpoint. ``ctx.slots`` is built from bindings, and a
@@ -243,7 +243,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     modules: Tuple[str, ...]
     family: str
     #: The parent's ArmIdentity token (``arm1-…``) — the obligation this
-    #: child discharges. NOT a cell key (pgw#1059): the cell's key is
+    #: child discharges. NOT a compiled graph key (pgw#1059): the compiled graph's key is
     #: stamped by the mint itself and returned in ``MintReport.compiled_graph_key``.
     arm_token: str
     target: str          # artifact the child writes (.tar.gz), atomically
@@ -253,7 +253,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: never wrote a byte into, so that signal read 0 for every real mint.
     work_root: str
     report: str          # typed terminal report the child writes
-    cfg: CompileCellSpec
+    cfg: CompileCompiledGraphSpec
     #: The parent's resolution, whole — slot -> identity + bytes + composition.
     #: See ``MintSlot``: the three views this replaced could disagree.
     slots: Dict[str, MintSlot] = {}
@@ -263,11 +263,11 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     phases_snapshot: str = ""
     #: pgw#848 item 5: the CROSS-ATTEMPT resume bank root (``aot_resume``).
     #: Deliberately NOT under the per-attempt ``child-<n>`` workdir — that is
-    #: precisely why a crash at entry 30 of 36 used to discard ~5.2 h of
+    #: precisely why a crash at compiled graph 30 of 36 used to discard ~5.2 h of
     #: compile. Empty = this mint does not resume and behaves as it did before.
     resume: str = ""
-    #: pgw#848: one ENTRY child's measured host high-water, banked by the
-    #: parent from a previous mint on this pod (``mint_workers.entry_peak_rss``).
+    #: pgw#848: one COMPILED_GRAPH child's measured host high-water, banked by the
+    #: parent from a previous mint on this pod (``mint_workers.compiled_graph_peak_rss``).
     #: 0 = never measured here, and the pool's width falls back to its
     #: constant. It has to travel on the request because the width is computed
     #: INSIDE the mint child, whose memory dies with it — and a bank read in a
@@ -276,7 +276,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: pgw#1175: the last of the four peak banks, and the ONLY one. Its three
     #: device siblings, and the ``vram_cap_bytes`` ceiling that used to ride
     #: beside it, are deleted — nothing predicts VRAM (§4.33).
-    entry_peak_rss_bytes: int = 0
+    compiled_graph_peak_rss_bytes: int = 0
     #: The hub-resolved execution lane (``ctx.lane``) and the effective
     #: declared-parameter values per function (th#1087). Both STEER the warm
     #: forwards, so both must be the parent's values — a child warming at
@@ -284,7 +284,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     execution_lane: str = ""
     configs: Dict[str, Dict[str, Any]] = {}
     #: §4.30 / pgw#1137: WHOSE MACHINE this mint runs on, declared by the
-    #: process entry that knows (``local_serve`` says user-machine; nothing
+    #: process compiled graph that knows (``local_serve`` says user-machine; nothing
     #: else says anything, so every fleet mint gets the ``FLEET`` default).
     #:
     #: It has to travel on the request for the same reason the RSS bank does
@@ -300,7 +300,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: compute dtype in a process that holds none (56.2 GB on wan-2.2, against
     #: 15.5 GiB free), which is the allocation §4.33's "~8 GiB" was actually
     #: measuring. The string is PROVENANCE, not a boolean, so the child's
-    #: report says which proof stood behind the cell it sealed.
+    #: report says which proof stood behind the compiled graph it sealed.
     handler_proof: str = ""
 
 
@@ -321,11 +321,11 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     """
 
     status: str
-    #: pgw#1176: EVERY entry the child packed — ``(key, artifact path, sha256)``
+    #: pgw#1176: EVERY compiled graph the child packed — ``(key, artifact path, sha256)``
     #: per graph class. A mint produces N independently keyed artifacts, so a
     #: report that named one would be reporting a subset of its own work. The
     #: parent arms and publishes each; a failure on one costs that one.
-    entries: Tuple[Tuple[str, str, str], ...] = ()
+    compiled_graphs: Tuple[Tuple[str, str, str], ...] = ()
     artifact: str = ""
     digest: str = ""
     compiled_graph_key: str = ""
@@ -338,8 +338,8 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     #: pgw#877: there was a `peak_rss_bytes` beside it, written from
     #: `getrusage(SELF)+getrusage(CHILDREN)` on both minted termini and read by
     #: NOTHING — the parent banks the host high-water from
-    #: `mint_phases["pool"]["peak_child_rss_bytes"]`, which is a per-entry
-    #: VmHWM tree sum and the number `entry_workers` actually divides by.
+    #: `mint_phases["pool"]["peak_child_rss_bytes"]`, which is a per-compiled graph
+    #: VmHWM tree sum and the number `compiled_graph_workers` actually divides by.
     peak_vram_bytes: int = 0
     elapsed_s: float = 0.0
     #: th#1322: per-phase seconds, measured by the CHILD (`load`,
@@ -372,7 +372,7 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     warm_proof_peak_bytes: int = 0
     warm_proof_values: str = ""
     export_peak_bytes: int = 0
-    #: pgw#805: the AOT recipe's per-entry phase TABLE
+    #: pgw#805: the AOT recipe's per-compiled graph phase TABLE
     #: (``aot_mint._mint_phase_table``). The child emits it too, but a mint
     #: child holds no orchestrator session, so the child's events go nowhere —
     #: the parent re-emits from this, exactly as it does for `jit_compile`.
@@ -385,7 +385,7 @@ class MintOutcome:
 
     status: str
     detail: str = ""
-    #: pgw#1176: every entry artifact the child produced, in report order.
+    #: pgw#1176: every compiled graph artifact the child produced, in report order.
     artifacts: Tuple[Path, ...] = ()
     report: Optional[MintReport] = None
     exit_code: Optional[int] = None
@@ -491,11 +491,11 @@ def _tree_cpu_seconds(pid: int) -> Optional[float]:
     its own ``utime/stime`` and lands in its parent's ``cutime/cstime`` the
     instant the parent reaps it (recursively — a reaped subtree rolls all the
     way up). Summing only the live members' ``user + system`` therefore makes
-    this quantity a SAWTOOTH: an entry compile child that FINISHES subtracts
+    this quantity a SAWTOOTH: an compiled graph compile child that FINISHES subtracts
     its entire lifetime CPU from the total.
 
     That is not a cosmetic wobble. ``_observe`` ratchets against a high-water
-    mark, so a finishing entry digs a hole one whole entry deep, and the mint
+    mark, so a finishing compiled graph digs a hole one whole compiled graph deep, and the mint
     is killed for the crime of completing something (pgw#964; it killed
     pgw#868 attempt eighteen twice, byte-identically, on two independent pods).
     Adding the reaped-children counters makes the total monotonic for as long
@@ -532,7 +532,7 @@ def _tree_cpu_seconds(pid: int) -> Optional[float]:
 def _work_root_mib(work_root: Path) -> Optional[float]:
     """MiB the child has written into its work root.
 
-    Generated sources, compiled objects and the packed cell — not a stdio
+    Generated sources, compiled objects and the packed compiled graph — not a stdio
     buffer. It grows in BURSTS: sources land, then a single-threaded ``g++``
     chews on them for minutes writing nothing. So its growth proves work and
     its silence proves nothing, which is why ``_observe`` treats it as an
@@ -554,7 +554,7 @@ def _work_root_mib(work_root: Path) -> Optional[float]:
 #: The measured signals, sampled together. Deliberately a PAIR and never a
 #: sum: they have different failure modes and different units, and adding them
 #: lets a fall in one cancel a rise in the other. That is precisely how a
-#: healthy mint died — a reaped entry's CPU drop swallowed the work-root bytes
+#: healthy mint died — a reaped compiled graph's CPU drop swallowed the work-root bytes
 #: its successor was writing.
 def _evidence(pid: int, work_root: Path) -> Tuple[Optional[float], Optional[float]]:
     return _tree_cpu_seconds(pid), _work_root_mib(work_root)
@@ -592,7 +592,7 @@ def child_env(
     """The child's environment.
 
     The seal is re-established by the child from this env, so it must be the
-    parent's env — a child that sealed differently would stamp a cell the
+    parent's env — a child that sealed differently would stamp a compiled graph the
     parent's ``verify()`` rejects. Two deliberate additions:
 
     * ``CUDA_VISIBLE_DEVICES`` pins the child to the mint device, so a
@@ -706,7 +706,7 @@ def _terminate_group(pid: int, *, grace_s: float = 10.0) -> None:
 
     The group, not the process: inductor's compile workers are children of
     the child, and a mint that left them behind would keep burning the pod's
-    CPU against a cell nobody will adopt.
+    CPU against a compiled graph nobody will adopt.
     """
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -737,11 +737,11 @@ async def run_mint(
     python: str = "",
     env: Optional[Mapping[str, str]] = None,
 ) -> MintOutcome:
-    """Build one cell in a child process. Never raises for a failed mint.
+    """Build one compiled graph in a child process. Never raises for a failed mint.
 
     A failed mint is an OUTCOME, not an exception, because the caller's
     correct response is identical in every branch: keep serving eager, report
-    the failure, and leave the cell absent. The one thing this function must
+    the failure, and leave the compiled graph absent. The one thing this function must
     never do is take the worker with it — so the only exception it propagates
     is ``asyncio.CancelledError`` (the parent's own shutdown), and even that
     reaps the child's process group on the way out.
@@ -825,16 +825,16 @@ async def run_mint(
         return _out(CRASHED, killed_reason)
 
     if code == EXIT_MINTED:
-        # pgw#1176: a mint's product is a SET of independently keyed entry
+        # pgw#1176: a mint's product is a SET of independently keyed compiled graph
         # artifacts. A report naming none is a crash; a report naming some is
-        # a mint — a subset is a coherent outcome now, not a broken cell.
+        # a mint — a subset is a coherent outcome now, not a broken compiled graph.
         rows = [Path(path) for _key, path, _digest in (
-            report.entries if report else ())]
+            report.compiled_graphs if report else ())]
         present = [path for path in rows if path.is_file()]
         if not present:
             return _out(
                 CRASHED,
-                "the mint process exited 0 but wrote no entry artifact "
+                "the mint process exited 0 but wrote no compiled_graph artifact "
                 f"(report={'present' if report else 'absent'}, "
                 f"named={len(rows)})")
         return _out(MINTED, report.detail if report else "", present)
@@ -860,7 +860,7 @@ async def run_mint(
 __all__ = [
     "ABANDONED",
     "CRASHED",
-    "CompileCellSpec",
+    "CompileCompiledGraphSpec",
     "EXIT_BAD_REQUEST",
     "EXIT_MINTED",
     "EXIT_REFUSED",

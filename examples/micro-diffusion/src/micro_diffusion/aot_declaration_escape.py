@@ -1,11 +1,11 @@
-"""The pgw#1062 declaration: the escape-hatch graph, one entry.
+"""The pgw#1062 declaration: the escape-hatch graph, one compiled graph.
 
 Deliberately the smallest declaration that still puts every author-defined-op
 surface inside a minted compiled graph: ONE target, fork-free, batch fixed, two token
-rows collapsing under ``dynamic-collapse`` into a single entry. The variable
+rows collapsing under ``dynamic-collapse`` into a single compiled graph. The variable
 under test is the OPS in the graph — a custom op with a fake kernel, a
-``triton_op`` kernel, a raw ``@triton.jit`` call — not entry count, so
-anything that would multiply entries is pinned.
+``triton_op`` kernel, a raw ``@triton.jit`` call — not compiled graph count, so
+anything that would multiply compiled graphs is pinned.
 """
 
 from __future__ import annotations

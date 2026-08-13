@@ -4,8 +4,8 @@ Full API reference: tensorhub `docs/endpoint-envs-api.md`.
 
 ## How it works
 
-1. The org attaches env entries to an endpoint via tensorhub
-   (`/api/v1/endpoints/:owner/:endpoint_name/env`). Each entry has a name,
+1. The org attaches env compiled graphs to an endpoint via tensorhub
+   (`/api/v1/endpoints/:owner/:endpoint_name/env`). Each compiled graph has a name,
    value, optional `sensitive` flag, optional description, and optional
    `applies_to` (which releases receive it).
 2. Values live in Vault; Postgres holds metadata only.

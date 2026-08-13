@@ -8,8 +8,8 @@ for those 29 minutes was one row::
 
     status=abandoned total_s=1741.33 — no compiled graph produced
 
-**Zero `entry:` rows. No `pool` row.** K, its binding constraint, every
-per-entry timing and every peak were measured and thrown away, and the
+**Zero `compiled graph:` rows. No `pool` row.** K, its binding constraint, every
+per-compiled graph timing and every peak were measured and thrown away, and the
 K-and-binding answer had to be re-bought with another pod.
 
 The mechanism: `report.json` is written ONCE, at a terminus the child reaches
@@ -40,9 +40,9 @@ _GIB = 1 << 30
 
 
 def _progress_midflight(tmp_path: Path) -> aot_mint.MintProgress:
-    """A mint that has finished some entries and is inside another — exactly
+    """A mint that has finished some compiled graphs and is inside another — exactly
     the state attempt sixteen was killed in."""
-    width = pool.entry_workers(
+    width = pool.compiled_graph_workers(
         36, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=4)
     progress = aot_mint.MintProgress()
     progress.t_mint = 0.0
@@ -72,11 +72,11 @@ def test_a_killed_mints_measurements_are_on_disk_before_it_dies(
     aot_mint.write_phase_snapshot(snapshot, progress)
     table = json.loads(snapshot.read_text())
 
-    assert table["pool"]["entry_workers"] == progress.width.workers
+    assert table["pool"]["compiled_graph_workers"] == progress.width.workers
     assert table["pool"]["binding"] == progress.width.binding
     assert table["pool"]["peak_child_rss_bytes"] == 3 * _GIB
     assert table["at"]["step"] == 30, (
-        "the entry a mint DIES ON is the one a reader most needs named")
+        "the compiled_graph a mint DIES ON is the one a reader most needs named")
     assert table["terminus"] == "in_flight"
     assert not list(tmp_path.glob("*.tmp")), (
         "the atomic write must leave no temp file behind")
@@ -96,7 +96,7 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
     """THE REGRESSION, over the real parent-side relay.
 
     A child that wrote no report at all — which is every abandoned and every
-    killed mint — must still put its entry rows and its pool row on the wire.
+    killed mint — must still put its compiled graph rows and its pool row on the wire.
     """
     snapshot = tmp_path / mint_process.PHASES_SNAPSHOT_NAME
     progress = _progress_midflight(tmp_path)
@@ -132,7 +132,7 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
         "an abandoned mint emitted NO phase table — this is attempt sixteen, "
         "29 minutes reported as one row")
     table = emitted[0]["table"]
-    assert table["pool"]["entry_workers"] == progress.width.workers, (
+    assert table["pool"]["compiled_graph_workers"] == progress.width.workers, (
         "the K-and-binding answer is the one the coordinator had to re-buy "
         "with another pod")
     assert table["pool"]["binding"] == progress.width.binding
@@ -152,8 +152,8 @@ def test_a_report_beats_a_snapshot_when_both_exist(tmp_path: Path) -> None:
         report=mint_process.MintReport(
             status="refused", elapsed_s=10.0,
             mint_phases={"v": 1, "terminus": "aborted",
-                         "pool": {"entry_workers": 7}}),
-        partial_phases={"v": 1, "pool": {"entry_workers": 99}})
+                         "pool": {"compiled_graph_workers": 7}}),
+        partial_phases={"v": 1, "pool": {"compiled_graph_workers": 99}})
 
     emitted: list[Dict[str, Any]] = []
     original = aot_mint.emit_phase_events
@@ -164,7 +164,7 @@ def test_a_report_beats_a_snapshot_when_both_exist(tmp_path: Path) -> None:
     finally:
         aot_mint.emit_phase_events = original  # type: ignore[assignment]
 
-    assert emitted[0]["table"]["pool"]["entry_workers"] == 7
+    assert emitted[0]["table"]["pool"]["compiled_graph_workers"] == 7
     assert "recovered_from" not in emitted[0]["table"]
 
 
@@ -219,14 +219,14 @@ def test_the_pool_ledger_is_live_not_end_of_run(tmp_path: Path) -> None:
     a wiring claim proven by reading the file is not proven, and
     `inspect.getsource` goes stale the moment the file is edited under a
     running session (which is exactly how it failed — I edited `aot_mint.py`
-    mid-gate). This drives the REAL `_compile_entries_parallel` over a REAL
-    two-entry pool and reads `progress.pool_ledger` from inside the per-entry
-    callback: if it is already populated when entry 1 lands, the ledger is
+    mid-gate). This drives the REAL `_compile_compiled_graphs_parallel` over a REAL
+    two-compiled graph pool and reads `progress.pool_ledger` from inside the per-compiled graph
+    callback: if it is already populated when compiled graph 1 lands, the ledger is
     live, and no amount of refactoring can make that pass falsely.
     """
     import torch
 
-    from gen_worker.aot_mint import _MintedEntry
+    from gen_worker.aot_mint import _MintedCompiledGraph
 
     class Tiny(torch.nn.Module):
         def __init__(self, seed: int) -> None:
@@ -238,26 +238,26 @@ def test_the_pool_ledger_is_live_not_end_of_run(tmp_path: Path) -> None:
             return torch.tanh(self.a(x)) * (1.0 + self.seed)
 
     minted = [
-        _MintedEntry(
+        _MintedCompiledGraph(
             name=f"unet/row={i}", spec=None, module=None, owner=None,
             program=torch.export.export(Tiny(i), (torch.randn(4, 64),)),
             input_names=(), flat_leaves=(), files=[], timings={})
         for i in range(2)
     ]
-    width = pool.entry_workers(
+    width = pool.compiled_graph_workers(
         2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
     progress = aot_mint.MintProgress()
     seen: list[Dict[str, Any]] = []
 
-    aot_mint._compile_entries_parallel(
+    aot_mint._compile_compiled_graphs_parallel(
         minted, tmp_path / "work", width, progress=progress,
         inductor_configs={"compile_threads": 2},
-        on_entry=lambda name, done, total: seen.append(
+        on_compiled_graph=lambda name, done, total: seen.append(
             dict(progress.pool_ledger)))
 
-    assert seen, "the pool never reported a completed entry"
+    assert seen, "the pool never reported a completed compiled_graph"
     assert seen[0], (
-        "the ledger was still EMPTY when the first entry landed — it is being "
+        "the ledger was still EMPTY when the first compiled_graph landed — it is being "
         "written at the end of the run, which is the one moment an abandoned "
         "mint never reaches")
     assert seen[0].get("pool_workers") == width.workers
@@ -337,7 +337,7 @@ def test_every_mint_beat_feeds_both_survivors(
 
     def _one_beat(pipeline, spec, out_dir, **kw):  # type: ignore[no-untyped-def]
         progress = kw["progress"]
-        progress.width = pool.entry_workers(
+        progress.width = pool.compiled_graph_workers(
             2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
         progress.timings["export_all_s"] = 1.0
         progress.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 1, 36, "unet/row=0")

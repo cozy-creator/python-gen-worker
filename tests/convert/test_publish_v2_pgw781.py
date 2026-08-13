@@ -124,7 +124,7 @@ class _Hub(http.server.BaseHTTPRequestHandler):
             plan = self._plan(srv, srv.sessions[pid])
             if plan["need"]:
                 return self._send(409, {"error": {"code": "upload_incomplete"}})
-            manifest = {"version": 2, "entries": srv.sessions[pid]}
+            manifest = {"version": 2, "compiled_graphs": srv.sessions[pid]}
             srv.manifests[pid] = manifest
             return self._send(200, {
                 "stage": "promoted", "terminal": True,
@@ -219,15 +219,15 @@ def test_the_declaration_carries_per_chunk_DIGEST_AND_LENGTH(hub, tmp_path, monk
         destination_repo="org/model",
         files=[write(tmp_path, "w.safetensors", data)], tags=["prod"],
     )
-    entry = hub.declared_bodies[0]["files"][0]
-    assert entry["digest"] == "sha256:" + sha(data)
-    assert entry["size_bytes"] == len(data)
-    lens = [c["len"] for c in entry["chunks"]]
+    compiled_graph = hub.declared_bodies[0]["files"][0]
+    assert compiled_graph["digest"] == "sha256:" + sha(data)
+    assert compiled_graph["size_bytes"] == len(data)
+    lens = [c["len"] for c in compiled_graph["chunks"]]
     assert lens == [CS, CS, 7]
     assert sum(lens) == len(data)
     # Cumulative offsets are readable from the manifest alone.
     off = 0
-    for c in entry["chunks"]:
+    for c in compiled_graph["chunks"]:
         assert sha(data[off:off + c["len"]]) == c["digest"]
         off += c["len"]
 

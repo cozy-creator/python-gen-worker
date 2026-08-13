@@ -16,7 +16,7 @@ Measures, per shape, with no checkpoint and no model:
   cublas        the shipped hybrid: quant + _scaled_mm + fused epilogue
   triton        the fused alternative: quant + dot_scaled GEMM w/ lora epilogue
 plus the quant kernel alone at several warp counts, because _WARPS_BY_SM's
-sm_100 entry (4) was never swept on real sm_100 silicon.
+sm_100 compiled graph (4) was never swept on real sm_100 silicon.
 
   bench_gemm.py --out DIR
 """
@@ -136,7 +136,7 @@ def main() -> int:
               f"quant={row.get('quant_ms')} "
               f"rel={row.get('rel_cublas_vs_triton')}", flush=True)
 
-    # quant-kernel warp sweep: the sm_100 entry in _WARPS_BY_SM was a guess.
+    # quant-kernel warp sweep: the sm_100 compiled graph in _WARPS_BY_SM was a guess.
     warp_rows = []
     from gen_worker.models import svdq_fused as sf
     m, k = 7401, 3072

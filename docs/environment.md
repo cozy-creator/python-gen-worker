@@ -6,10 +6,10 @@ loaded by `config/loader.py` with precedence env → `./.env` → `/run/secrets`
 → yaml → struct defaults.
 
 **Ruling §1.18: exactly one component in this process reads the environment.**
-Each process entry performs one bootstrap-owned `load_settings()` and the
+Each process compiled graph performs one bootstrap-owned `load_settings()` and the
 resulting `Settings` is **passed by parameter**. `get_settings()` — the
 `lru_cache`d process-global — was DELETED in pgw#931; where a module is too
-deep to be handed a parameter it reads what the entry published
+deep to be handed a parameter it reads what the compiled graph published
 (`config.current()`), which raises rather than silently loading if nothing was
 installed.
 

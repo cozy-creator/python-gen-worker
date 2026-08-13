@@ -77,7 +77,7 @@ def _contract() -> aot_serve.ArtifactContract:
 def _runner(package: Any) -> aot_serve.ArtifactRunner:
     runner = aot_serve.ArtifactRunner(
         package=package, contract=_contract(), constants=(),
-        module_name="unet", entry="unet/adapter=false", family="tiny791")
+        module_name="unet", compiled_graph="unet/adapter=false", family="tiny791")
     # Constants are baked in a locally compiled package (this test is about
     # ingress, not B1), so the bind proof has nothing to prove here.
     runner.bound = True
@@ -254,10 +254,10 @@ def test_realignment_emits_one_typed_event_naming_the_input(
         for _ in range(5):
             runner(sample, _unaligned_timestep())
     events = _realign_events(sink)
-    assert len(events) == 1, "one event per (entry, input, reason), not per call"
+    assert len(events) == 1, "one event per (compiled_graph, input, reason), not per call"
     detail = events[0].detail
     assert "input=timestep" in detail
-    assert "entry=unet/adapter=false" in detail
+    assert "compiled_graph=unet/adapter=false" in detail
     assert "family=tiny791" in detail
     assert events[0].phase == "unaligned_16b"
     # Coalesced, but never lost: the count carries every occurrence.
@@ -278,7 +278,7 @@ def test_realignments_surface_on_the_wrapped_pipeline(package, sink) -> None:
     module = TinyDenoiser().eval()
     pipe = types.SimpleNamespace(unet=module)
     runner = _runner(package)
-    dispatch = aot_serve.EntryDispatch((("unet/adapter=false", runner),))
+    dispatch = aot_serve.CompiledGraphDispatch((("unet/adapter=false", runner),))
     aot_serve.wrap_module(module, dispatch, {"family": "tiny791"}, target="unet")
     setattr(pipe, "_cozy_aot", {
         "meta": {}, "targets": {"unet": {
@@ -288,7 +288,7 @@ def test_realignments_surface_on_the_wrapped_pipeline(package, sink) -> None:
         module(torch.randn(2, 8), _unaligned_timestep())
         module(torch.randn(2, 8), _unaligned_timestep())
     assert aot_serve.realigned_inputs(pipe) == {"timestep/unaligned_16b": 2}
-    assert aot_serve.served_entry_calls(pipe) == {"unet/adapter=false": 2}
+    assert aot_serve.served_compiled_graph_calls(pipe) == {"unet/adapter=false": 2}
 
 
 def test_the_realignment_counter_is_not_a_refusal(package, sink) -> None:

@@ -144,7 +144,7 @@ class HuggingFaceRef:
         separately.
 
         pgw#1148: the `#flavor` tail and the CACHE-KEY FOLD that gave two
-        flavors of one HF repo two distinct residency entries are DELETED.
+        flavors of one HF repo two distinct residency compiled graphs are DELETED.
         HF has no flavor axis of its own — it never did; the tail was the
         orchestrator's per-flavor routing convention, and §1.32(d) deleted
         the flavor as an address. File selection is binding metadata

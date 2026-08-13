@@ -7,7 +7,7 @@ it works is driving it against trees that MUST fail.
 
 Both failure directions are covered, because they are different defects:
 a NEW call site is the surface growing (the thing the gate exists to stop), and
-a STALE allowlist entry is an exemption outliving its site — which would
+a STALE allowlist compiled graph is an exemption outliving its site — which would
 silently re-permit that site if it ever came back.
 """
 
@@ -61,7 +61,7 @@ def test_the_same_site_passes_once_classified(tmp_path: Path) -> None:
     assert mod.main() == 0
 
 
-def test_a_stale_allowlist_entry_fails(tmp_path: Path) -> None:
+def test_a_stale_allowlist_compiled_graph_fails(tmp_path: Path) -> None:
     """The site is gone; the exemption must not outlive it."""
     mod = _tree(
         tmp_path, "def f():\n    return 1\n",

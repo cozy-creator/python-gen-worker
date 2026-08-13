@@ -429,7 +429,7 @@ class Preloader:
                     load_component_override, local, comp, local, dtype=dtype,
                 )
                 pinned = await self._in_stage_thread(prestage_module, module)
-                # Seed-then-release: the entry becomes an ordinary LRU RAM
+                # Seed-then-release: the compiled graph becomes an ordinary LRU RAM
                 # candidate until a setup consumes it (acquire_shared hit ->
                 # holders>0), so host pressure can always reclaim it.
                 def _loader(m: Any = module) -> Any:

@@ -144,7 +144,7 @@ name: CI
 # tensorhub this repo keeps its full suite pre-merge because it is public,
 # unmetered, and ~10m rather than ~18m.
 # pgw#1209 (2026-08-13): `master` has a MERGE QUEUE. A queued PR is validated on
-# a `gh-readonly-queue/master/...` ref carrying master's tip plus every entry
+# a `gh-readonly-queue/master/...` ref carrying master's tip plus every compiled graph
 # ahead of it — which is the only place the "two PRs green alone, red together"
 # collision is visible. Two lines below are what make that work, and BOTH are
 # load-bearing:
@@ -166,11 +166,11 @@ name: CI
 #
 #   * **GitHub reads workflows from the MERGE-GROUP ref, not from `master`.**
 #     Verified: with the queue switched on before this trigger had landed, four
-#     entries were queued and exactly ONE run existed — the group for the entry
+#     compiled graphs were queued and exactly ONE run existed — the group for the compiled graph
 #     that carried this file's own edit. The three ahead of it showed
 #     `statusCheckRollup: none` and would have sat until the 60-minute timeout
 #     evicted them. So **enable the queue only AFTER the `merge_group:` trigger
-#     is already on `master`**, or the first entries queued cannot pass.
+#     is already on `master`**, or the first compiled graphs queued cannot pass.
 #     (Corollary, and the reason the ordering is easy to get wrong: a PR that
 #     ADDS the trigger can validate itself in the queue, because its own group
 #     contains its own edit. That works and still leaves everyone else stuck.)

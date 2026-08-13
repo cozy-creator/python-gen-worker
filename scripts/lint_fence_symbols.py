@@ -11,7 +11,7 @@ them was exactly this:
 
 * ``lint_compiled_graph_key_layout_fence.py`` listed ``from_exported_artifact_metadata``
   in ``AXIS_PRODUCERS`` after that symbol was deleted. A module computing an
-  entry key through the real producer was no longer detected as an axis
+  compiled graph key through the real producer was no longer detected as an axis
   producer at all — and the gate exited 0 the whole time. **No amount of
   running things finds that**, because nothing was failing;
 * ``test_compiled_graph_key_pgw1059``'s one-derivation fence guarded
@@ -74,7 +74,7 @@ kinds, handled differently on purpose:
    These are NOT filtered automatically — they carry
    ``# fence-symbol-exempt: <reason>`` on the line. The reason is mandatory,
    because the whole point is that somebody looked. Turning a false positive
-   into a written record is the same move as an allowlist entry that says
+   into a written record is the same move as an allowlist compiled graph that says
    WHICH it is; silent suppression is what lets the real ones through.
 """
 
@@ -104,7 +104,7 @@ FENCES: Tuple[str, ...] = (
 #: Only literals that LOOK like this repo's identity/arm vocabulary are
 #: candidates. Without this every English word in a docstring is a symbol.
 VOCABULARY = re.compile(
-    r"compiled_graph|entry|entries|graph|arm|mint|artifact|key|manifest|adopt|axis|axes")
+    r"compiled_graph|compiled_graph|compiled_graphs|graph|arm|mint|artifact|key|manifest|adopt|axis|axes")
 
 #: `"name"` or `"name("` — the two shapes a fence names a symbol in.
 LITERAL = re.compile(r'"([a-zA-Z_][a-zA-Z0-9_]{3,})\(?"')
@@ -193,7 +193,7 @@ def main() -> int:
             "\nThat fence still runs and still exits 0 — and guards NOTHING "
             "for this symbol.\nA green fence is not evidence after a rename. "
             "Either retarget it to the symbol\nthat replaced this one, or "
-            "delete the entry in the same commit that deleted\nthe symbol. "
+            "delete the compiled_graph in the same commit that deleted\nthe symbol. "
             "Suppressing it here is the one option that is never right.",
             file=sys.stderr)
         return 1

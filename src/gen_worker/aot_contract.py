@@ -39,10 +39,10 @@ class MintRefused(RuntimeError):
     say what went wrong is the silent-failure path the doctrine forbids.
 
     ``mint_phases`` carries the PARTIAL phase table of the mint that refused
-    (pgw#825): the entries that did export and compile before the refusal
+    (pgw#825): the compiled graphs that did export and compile before the refusal
     spent real minutes on a real pod, and a terminus that reports only a
     wall-clock total is a measurement lost to a pod that no longer exists.
-    Populated by :func:`mint`; empty for a refusal raised before any entry.
+    Populated by :func:`mint`; empty for a refusal raised before any compiled graph.
     """
 
     def __init__(self, *args: Any, mint_phases: Optional[Mapping[str, Any]] = None) -> None:

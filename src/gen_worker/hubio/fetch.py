@@ -241,7 +241,7 @@ def fetch_once(
     # NAMESPACE — a pod hard-kill after the rename but before writeback
     # persisted a complete-looking blob with truncated/zero data pages,
     # which then poisoned every snapshot built from it. fsync data before
-    # the rename and the directory entry after.
+    # the rename and the directory compiled graph after.
     from ..models.cozy_cas import fsync_dir, fsync_file  # local: avoids a module cycle
 
     fsync_file(tmp)

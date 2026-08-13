@@ -51,7 +51,7 @@ from gen_worker import executor as executor_mod
 from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 # pgw#1176: `ek1`, because `local_compiled_graph_store.store` refuses anything that is
-# not an entry key and a `ck1`-keyed compiled graph is orphaned by the re-key. These
+# not an compiled graph key and a `ck1`-keyed compiled graph is orphaned by the re-key. These
 # fixtures stored under `ck1-` and the store silently declined them, so
 # `no_compiled_graph_source` short-circuited a machine that WAS holding compiled graphs — the §1.34
 # orphaning the re-key predicts, surfacing exactly where it should.
@@ -109,7 +109,7 @@ def no_wire(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 
 
 #: The graphs this pod "traced". Real values in the pgw#1031 sense: the boot's
-#: witnesses and the compiled graph's recorded ones are compared entry by entry, and the
+#: witnesses and the compiled graph's recorded ones are compared compiled graph by compiled graph, and the
 #: floor is fail-closed in both directions (a silent compiled graph is a refusal too).
 WITNESSES = {"transformer": "9f" * 8}
 
@@ -118,13 +118,13 @@ def _compiled_graph(
     tmp_path: Path, *, key: str = KEY_A, name: str = "compiled_graph",
     witnesses: Optional[Dict[str, str]] = None,
 ) -> Path:
-    """An ENTRY artifact with a READABLE envelope AND a recorded graph witness.
+    """An COMPILED_GRAPH artifact with a READABLE envelope AND a recorded graph witness.
 
     `_arm_exported_compiled_graph` and the boot's own pgw#1031 floor both read the packed
-    metadata, and an entry that records no witness is refused — correctly — so a
+    metadata, and an compiled graph that records no witness is refused — correctly — so a
     fixture without one could only ever test the refusal.
 
-    pgw#1176: one artifact carries ONE class, so this records an `entry` block.
+    pgw#1176: one artifact carries ONE class, so this records an `compiled graph` block.
     A multi-witness fixture is deliberately unrepresentable here: production
     cannot pack one, and a fixture that could would be asserting against a
     shape nothing can produce.
@@ -132,13 +132,13 @@ def _compiled_graph(
     rows = dict(WITNESSES if witnesses is None else witnesses)
     if len(rows) != 1:
         raise AssertionError(
-            f"an entry artifact carries ONE graph class; got {sorted(rows)!r}")
-    (entry, digest), = rows.items()
+            f"an compiled_graph artifact carries ONE graph class; got {sorted(rows)!r}")
+    (compiled_graph, digest), = rows.items()
     p = tmp_path / name / "compiled_graph.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({
         "kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion",
-        "entry": {"name": entry, "graph_witness": digest},
+        "compiled_graph": {"name": compiled_graph, "graph_witness": digest},
     }).encode()
     with tarfile.open(p, mode="w:gz") as tar:
         info = tarfile.TarInfo("metadata.json")
@@ -197,7 +197,7 @@ def _derived(witnesses: Optional[Dict[str, str]] = None) -> Any:
     from gen_worker import compiled_graph_key as ck
 
     return boot_key.DerivedKey(
-        entry_keys={"a": ck.from_axes({
+        compiled_graph_keys={"a": ck.from_axes({
             "graph": "c0ffee0000000000",
             "sm": "sm_89", "toolchain": "t" * 16}).digest},
         class_hashes={"a": "c0ffee0000000000"},

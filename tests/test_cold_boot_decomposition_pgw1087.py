@@ -264,17 +264,17 @@ def test_sdk_ready_is_cumulative_and_precedes_every_span(ladder) -> None:
 
 
 def test_the_entrypoint_shape_is_a_superset_and_is_proven_elsewhere() -> None:
-    """The seal derivation belongs to the ENTRYPOINT shape, not to every boot.
+    """The seal derivation belongs to the CompiledGraphPOINT shape, not to every boot.
 
     Stated here as a structural assertion so the split cannot silently
     collapse: an embedded worker must not be asked for `env_establish`, and a
     POD boot must still be. The pod half is asserted, off the wire, in
     `tests_v2/test_boot.py::test_real_entrypoint_seals_dials_and_dumps_stacks`.
     """
-    assert boot_phases.SHAPE_EAGER < boot_phases.SHAPE_ENTRYPOINT
-    assert boot_phases.SHAPE_ENTRYPOINT - boot_phases.SHAPE_EAGER == {
+    assert boot_phases.SHAPE_EAGER < boot_phases.SHAPE_CompiledGraphPOINT
+    assert boot_phases.SHAPE_CompiledGraphPOINT - boot_phases.SHAPE_EAGER == {
         boot_phases.PHASE_ENV_ESTABLISH, boot_phases.PHASE_LIB_MEMO}
-    assert boot_phases.SHAPE_ENTRYPOINT < boot_phases.SHAPE_ADOPT
+    assert boot_phases.SHAPE_CompiledGraphPOINT < boot_phases.SHAPE_ADOPT
 
 
 # ---------------------------------------------------------------------------

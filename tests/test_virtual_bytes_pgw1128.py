@@ -43,7 +43,7 @@ from _declared_residency import (  # noqa: E402
 
 
 class _Pipeline:
-    """A diffusers-shaped composition: ``.components`` is the walk's own entry
+    """A diffusers-shaped composition: ``.components`` is the walk's own compiled graph
     point."""
 
     def __init__(self, **parts: Any) -> None:

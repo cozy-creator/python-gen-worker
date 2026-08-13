@@ -1,17 +1,17 @@
-"""pgw#809: one entry's AOTI compile, one process, then exit.
+"""pgw#809: one compiled graph's AOTI compile, one process, then exit.
 
 ``python -m gen_worker.aot_compile_child <job.json>``
 
-Run by :class:`aot_compile_pool.EntryCompilePool` K-wide while the mint child
-(pgw#784) goes on exporting the rest of the compiled graph's entries and the serving
+Run by :class:`aot_compile_pool.CompiledGraphCompilePool` K-wide while the mint child
+(pgw#784) goes on exporting the rest of the compiled graph's compiled graphs and the serving
 process goes on serving eager. The boundary is a file for the same reason
-pgw#784's is: a mint that fails on entry 13 of 18 leaves the job behind and
+pgw#784's is: a mint that fails on compiled graph 13 of 18 leaves the job behind and
 the compile is reproducible by hand, on the same box, without the pipeline.
 
 What it does NOT do is as important as what it does. It does not load the
 endpoint, does not touch the hub, does not warm anything and does not decide
 anything about the compiled graph. It loads ONE exported program, calls the SAME
-``aot_mint.compile_entry_files`` the serial path calls, and reports where the
+``aot_mint.compile_compiled_graph_files`` the serial path calls, and reports where the
 loose files landed. Every gate — code-only, bindability, constant-set drift,
 declared range — stays in the parent, running against the parent's own
 in-memory program, which is what makes a divergent child a caught defect
@@ -48,8 +48,8 @@ from .aot_compile_pool import (
     EXIT_COMPILED,
     EXIT_REFUSED,
     REFUSED,
-    EntryJob,
-    EntryReport,
+    CompiledGraphJob,
+    CompiledGraphReport,
 )
 from . import aot_device_lock
 from . import aot_shape_hints
@@ -61,7 +61,7 @@ from .models import structure_only
 logger = logging.getLogger(__name__)
 
 
-def _write(path: Path, report: EntryReport) -> None:
+def _write(path: Path, report: CompiledGraphReport) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_bytes(msgspec.json.encode(report))
@@ -69,15 +69,15 @@ def _write(path: Path, report: EntryReport) -> None:
 
 
 def _peak_rss() -> int:
-    """This entry's host high-water — the interpreter AND the compiler it ran.
+    """This compiled graph's host high-water — the interpreter AND the compiler it ran.
 
-    pgw#848, MEASURED: ``RUSAGE_SELF`` alone is not this entry's peak, it is
+    pgw#848, MEASURED: ``RUSAGE_SELF`` alone is not this compiled graph's peak, it is
     the peak of everything EXCEPT the peak. The real sdxl wrapper TU compiled
     with the production flags on a quiet box peaks at **2.04 GiB in cc1plus**,
     a process this interpreter never allocates a byte for — ``RUSAGE_SELF``
     read 0.012 GiB across the same 177 s. The number feeds
-    ``aot_compile_pool.entry_workers(peak_rss_bytes=...)``, which bounds K, so
-    an instrument that cannot see the largest allocation in the entry is the
+    ``aot_compile_pool.compiled_graph_workers(peak_rss_bytes=...)``, which bounds K, so
+    an instrument that cannot see the largest allocation in the compiled graph is the
     difference between a pool that fits and a pool the OOM killer sizes.
 
     SUM, not max: the two overlap by construction — this process is holding
@@ -99,7 +99,7 @@ def _device_lock_wait_s() -> float:
 
     pgw#809 has counted it since the lock existed (``DeviceBenchmarkLock``
     tracks ``waited_s``) and nobody ever read the counter. At K=5 it is time
-    inside ``compile_s`` during which the entry is doing nothing at all — the
+    inside ``compile_s`` during which the compiled graph is doing nothing at all — the
     single most misleading second in the table if it stays anonymous, because
     it looks like compile cost and is actually pool contention.
     """
@@ -109,9 +109,9 @@ def _device_lock_wait_s() -> float:
 
 
 def _peak_device() -> tuple:
-    """This entry child's DEVICE high-water — allocated and reserved.
+    """This compiled graph child's DEVICE high-water — allocated and reserved.
 
-    pgw#868 A4. The pool's per-entry device ask used to be
+    pgw#868 A4. The pool's per-compiled graph device ask used to be
     `mint_budget.co_residency().need_bytes` — `resident_weights * 1.25 + 5 GiB`,
     i.e. sdxl's 4.87 GiB of weights (which the compile does not hold at all
     since `fc77b923`) plus an activation term that module's own docstring
@@ -143,7 +143,7 @@ def _device_fields() -> dict:
             "peak_device_reserved_bytes": reserved}
 
 
-def load_program(job: EntryJob) -> Any:
+def load_program(job: CompiledGraphJob) -> Any:
     """The child's half of the pool's process boundary: ``torch.export.load``
     plus the two repairs the round trip needs before anything reads a shape.
 
@@ -159,7 +159,7 @@ def load_program(job: EntryJob) -> Any:
     # program crossed as META (fake tensors have no storage to serialize);
     # re-virtualize META -> FAKE inside the mode the load rebuilt the example
     # inputs in, so `aot_compile`'s one-fake-mode precondition holds and
-    # `compile_entry_files` reads `weightless=True` off the program exactly as
+    # `compile_compiled_graph_files` reads `weightless=True` off the program exactly as
     # the serial path does. A real-weight program carries no meta: a no-op.
     if structure_only.has_meta_params(program):
         if structure_only.revirtualize_from_meta(program) is None:
@@ -178,12 +178,12 @@ def load_program(job: EntryJob) -> Any:
     return program
 
 
-def run(job: EntryJob) -> int:
+def run(job: CompiledGraphJob) -> int:
     from . import aot_mint, env_seal
 
     started = time.monotonic()
     # pgw#830: the child's own wall, partitioned. `close()` at every exit,
-    # including the refusal paths — an entry that died still spent its
+    # including the refusal paths — an compiled graph that died still spent its
     # seconds somewhere, and an aborted mint's table is the one a reader
     # needs most.
     ledger = aot_compile_spans.SpanLedger()
@@ -205,15 +205,15 @@ def run(job: EntryJob) -> int:
         env_seal.establish()
     seal_detail = dict(env_seal.LAST_ESTABLISH_SPANS)
     # Before ANY compile touches the card: every inductor GPU benchmark in
-    # this process goes through the pool-wide lock, so K concurrent entries
+    # this process goes through the pool-wide lock, so K concurrent compiled graphs
     # cannot time kernels against each other and bake contention-chosen
     # configs into a compiled graph whose key would not move (pgw#809).
     with ledger.span("child_devlock_s"):
         if job.device_lock:
             aot_device_lock.install(Path(job.device_lock))
     try:
-        # Timed SEPARATELY from the program load. On a 72-entry mint this is
-        # paid 72 times — one cold interpreter per entry — and the pool's
+        # Timed SEPARATELY from the program load. On a 72-compiled graph mint this is
+        # paid 72 times — one cold interpreter per compiled graph — and the pool's
         # process boundary is the reason it exists at all, so it has to be a
         # line item before anyone can argue about a persistent worker.
         with ledger.span("child_torch_import_s"):
@@ -226,8 +226,8 @@ def run(job: EntryJob) -> int:
         with ledger.span("child_program_load_s"):
             program = load_program(job)
     except Exception as exc:  # noqa: BLE001
-        _write(report_path, EntryReport(
-            entry=job.entry, status=REFUSED,
+        _write(report_path, CompiledGraphReport(
+            compiled_graph=job.compiled_graph, status=REFUSED,
             detail=(
                 f"could not load the exported program from {job.program!r}: "
                 f"{type(exc).__name__}: {exc}"),
@@ -239,7 +239,7 @@ def run(job: EntryJob) -> int:
 
     # pgw#757's phase split is read from dynamo's IN-PROCESS counters, so it
     # has to be measured here, in the process that does the compiling.
-    # pgw#868 A4: reset so the high-water below is this ENTRY'S COMPILE, not
+    # pgw#868 A4: reset so the high-water below is this COMPILED_GRAPH'S COMPILE, not
     # whatever `torch.export.load` or the seal's own torch import allocated
     # first. A probe: it reads and clears a counter and decides nothing.
     try:
@@ -255,10 +255,10 @@ def run(job: EntryJob) -> int:
     unhinted = aot_shape_hints.unhinted_extents(
         program, job.symbol_labels)
     if unhinted:
-        _write(report_path, EntryReport(
-            entry=job.entry, status=REFUSED,
+        _write(report_path, CompiledGraphReport(
+            compiled_graph=job.compiled_graph, status=REFUSED,
             detail=(
-                f"entry {job.entry!r}: the export handoff did not carry a "
+                f"compiled_graph {job.compiled_graph!r}: the export handoff did not carry a "
                 f"value for every symbol: " + "; ".join(unhinted) +
                 " — inductor cannot lower a size it cannot evaluate "
                 "(pgw#998)"),
@@ -271,13 +271,13 @@ def run(job: EntryJob) -> int:
     before = aot_compile_spans.phase_snapshot()
     try:
         with ledger.span("compile_wall_s"):
-            files = aot_mint.compile_entry_files(
-                program, job.entry, inductor_configs=job.inductor_configs)
+            files = aot_mint.compile_compiled_graph_files(
+                program, job.compiled_graph, inductor_configs=job.inductor_configs)
     except aot_mint.MintRefused as exc:
         partition, overlays, _raw = aot_compile_spans.phase_delta(
             before, aot_compile_spans.phase_snapshot())
-        _write(report_path, EntryReport(
-            entry=job.entry, status=REFUSED, detail=str(exc),
+        _write(report_path, CompiledGraphReport(
+            compiled_graph=job.compiled_graph, status=REFUSED, detail=str(exc),
             elapsed_s=round(time.monotonic() - started, 2),
             peak_rss_bytes=_peak_rss(),
             **_device_fields(),
@@ -286,8 +286,8 @@ def run(job: EntryJob) -> int:
 
     partition, overlays, raw = aot_compile_spans.phase_delta(
         before, aot_compile_spans.phase_snapshot())
-    _write(report_path, EntryReport(
-        entry=job.entry, status=COMPILED, files=[str(f) for f in files],
+    _write(report_path, CompiledGraphReport(
+        compiled_graph=job.compiled_graph, status=COMPILED, files=[str(f) for f in files],
         phases=dict(partition),
         detail=f"{len(files)} loose file(s)",
         elapsed_s=round(time.monotonic() - started, 2),
@@ -304,7 +304,7 @@ def _span_fields(
     overlays: Dict[str, float],
     seal_detail: Dict[str, float],
 ) -> Dict[str, Any]:
-    """Seal the child's ledger and shape it for :class:`EntryReport`.
+    """Seal the child's ledger and shape it for :class:`CompiledGraphReport`.
 
     Order matters: the child's own wall is closed FIRST, against only the
     spans the ledger itself timed, so ``child_other_s`` is a true residual.
@@ -325,7 +325,7 @@ def _span_fields(
     # A split of `child_seal_s`, never a member of any partition: the seal's
     # own steps, published by env_seal. `seal_libhash_s` is the identity
     # manifest's SHA-256 pass over every toolchain .so the image ships — paid
-    # once per ENTRY here, because the pool's worker is a process that exits.
+    # once per COMPILED_GRAPH here, because the pool's worker is a process that exits.
     overlay.update({k: float(v) for k, v in seal_detail.items()})
     waited = _device_lock_wait_s()
     if waited:
@@ -355,7 +355,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return EXIT_BAD_JOB
     try:
-        job = msgspec.json.decode(Path(args[0]).read_bytes(), type=EntryJob)
+        job = msgspec.json.decode(Path(args[0]).read_bytes(), type=CompiledGraphJob)
     except (OSError, msgspec.DecodeError, msgspec.ValidationError) as exc:
         print(f"unreadable job {args[0]!r}: {exc}", file=sys.stderr)
         return EXIT_BAD_JOB

@@ -50,7 +50,7 @@ FAMILY = "sdxl"
 
 
 # ---------------------------------------------------------------------------
-# Doubles — the arming brain's real entry point, everything around it stubbed
+# Doubles — the arming brain's real compiled graph point, everything around it stubbed
 # ---------------------------------------------------------------------------
 
 
@@ -396,10 +396,10 @@ def test_the_parent_reemits_the_childs_aot_phase_table(
             (kind, phase, duration_ms)))
 
     table = {
-        "v": 1, "n_entries": 2,
+        "v": 1, "n_compiled_graphs": 2,
         "totals": {"total_s": 900.0, "export_s": 60.0, "compile_s": 800.0},
         "phases": {}, "autotune": {},
-        "entries": {
+        "compiled_graphs": {
             "unet/cfg": {"export_s": 30.0, "compile_s": 400.0},
             "unet/nocfg": {"export_s": 30.0, "compile_s": 400.0},
         },
@@ -408,8 +408,8 @@ def test_the_parent_reemits_the_childs_aot_phase_table(
 
     kinds = {(k, p) for k, p, _ in rows}
     assert ("aot_mint_phases", "minted") in kinds
-    assert ("aot_mint_phases", "entry:unet/cfg") in kinds
-    assert ("aot_mint_phases", "entry:unet/nocfg") in kinds
+    assert ("aot_mint_phases", "compiled_graph:unet/cfg") in kinds
+    assert ("aot_mint_phases", "compiled_graph:unet/nocfg") in kinds
     # Durations are NUMERIC (th#1322), never interpolated prose.
     assert dict(((k, p), ms) for k, p, ms in rows)[
         ("aot_mint_phases", "minted")] == 900_000
@@ -441,7 +441,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     from gen_worker import mint_child
 
     target = tmp_path / "compiled_graph.tar.gz"
-    # pgw#1176: a `ck1` key names a 36-entry all-or-nothing compiled graph, which this
+    # pgw#1176: a `ck1` key names a 36-compiled graph all-or-nothing compiled graph, which this
     # runtime cannot arm at all — `compiled_graph_key.is_key` refuses the prefix
     # deliberately, so a fixture keyed that way tests a shape nothing produces.
     key = "ek1-" + "a" * 56
@@ -454,11 +454,11 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         seen["lifted"] = spec.lifted_inputs
         packed.parent.mkdir(parents=True, exist_ok=True)
         packed.write_bytes(b"packed-compiled_graph")
-        # pgw#1176: a mint returns N independently keyed entry artifacts plus a
+        # pgw#1176: a mint returns N independently keyed compiled graph artifacts plus a
         # manifest digest, never "a compiled graph". This declaration traces one class.
         return aot_mint.MintResult(
-            entries=(aot_mint.MintedArtifact(
-                key=key, entry="unet/cfg", artifact=packed,
+            compiled_graphs=(aot_mint.MintedArtifact(
+                key=key, compiled_graph="unet/cfg", artifact=packed,
                 metadata={"compiled_graph_key": key,
                           "mint_phases": {"totals": {"total_s": 1.0}}}),),
             manifest="c0ffee0000000000",
@@ -481,12 +481,12 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         started=0.0, sha256_file=lambda p: "deadbeef")
 
     assert report.status == "minted"
-    # pgw#1176: the child moves EVERY entry it packed into the parent's
+    # pgw#1176: the child moves EVERY compiled graph it packed into the parent's
     # directory, one file per graph class NAMED BY ITS OWN `ek1` key — so the
     # parent addresses each by identity rather than by position, and `target`
     # names the directory rather than the single file it used to be. The
     # one-element unpack asserts this declaration's arity.
-    (moved_key, moved_path, _sha), = report.entries
+    (moved_key, moved_path, _sha), = report.compiled_graphs
     assert moved_key == key
     assert Path(moved_path) == target.parent / f"{key}.tar.gz"
     assert Path(moved_path).read_bytes() == b"packed-compiled_graph"
@@ -545,7 +545,7 @@ def test_a_self_minted_aot_compiled_graph_arms_through_the_aot_gates(
         fleet_compiled_graphs.cc, "enable",
         lambda *a, **k: (calls.append("dynamo"), True)[1])
     # pgw#1010: `cc.enable` is not merely unused on this path — the branch that
-    # called it is deleted, so a "dynamo" entry below would mean an inductor
+    # called it is deleted, so a "dynamo" compiled graph below would mean an inductor
     # seed adopt has grown back for an exported compiled graph.
     monkeypatch.setattr(
         fleet_compiled_graphs, "_packed_metadata",

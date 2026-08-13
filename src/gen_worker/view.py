@@ -56,9 +56,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # sampler tables must not exist — two endpoints defining "euler_trailing"
 # differently would make one recipe mean different math depending on which
 # endpoint serves it. Per-setting rulings folded in:
-# - solver_order=2 on the dpm++ multistep entries: part of the sampler's
+# - solver_order=2 on the dpm++ multistep compiled graphs: part of the sampler's
 #   DEFINITION ("2M" means second order), not a family preference.
-# - final_sigmas_type="zero" on the dpm++ multistep entries: diffusers' own
+# - final_sigmas_type="zero" on the dpm++ multistep compiled graphs: diffusers' own
 #   guidance for stable final steps; definition, not family recipe.
 # - "euler_trailing" (Euler + timestep_spacing="trailing"): the documented
 #   SDXL-Lightning recipe, family-neutral by construction.

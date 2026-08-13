@@ -67,7 +67,7 @@ def test_a_16gb_a4000_derives_instead_of_refusing() -> None:
 
 
 def test_a_card_with_room_keeps_its_FULL_width() -> None:
-    """THE anti-collapse assertion. `c9fb5d4a`: the mint's entry pool ran K=1
+    """THE anti-collapse assertion. `c9fb5d4a`: the mint's compiled graph pool ran K=1
     fleet-wide for weeks, cost every mint 2.4x, and survived because no test
     asserted the achieved width. This is that test for the trace pool."""
     width, _ = boot_key.concurrency_budget(
@@ -157,7 +157,7 @@ def test_the_child_reports_its_whole_process_footprint() -> None:
 
 
 def test_the_budget_is_sized_on_the_PROCESS_not_the_artifact() -> None:
-    """th#1825's lane ruled out per-entry literals as the dominant term by three
+    """th#1825's lane ruled out per-compiled graph literals as the dominant term by three
     independent bounds — they live inside the artifact, measured at 4.19 MB —
     and found the real cost is the loaded AOTI packages plus device code,
     per-runner workspace and load-time buffers, none of which appear in the

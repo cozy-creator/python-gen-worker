@@ -38,7 +38,7 @@ def _fresh_dynamo() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _restore_global_matmul_flags() -> Iterator[None]:
     """The canonical imposition is deliberately process-global; the SUITE
-    must not leak it across files (entries compiled under one TF32 state
+    must not leak it across files (compiled graphs compiled under one TF32 state
     GlobalStateGuard-miss under another — the flux hit-counter tests)."""
     precision = torch.get_float32_matmul_precision()
     matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
@@ -231,7 +231,7 @@ def _capture(tmp_path: Path, *, ptx: bool, cubin_arch: int = 0) -> Path:
     root = tmp_path / "capture"
     fx = root / "inductor" / "fxgraph" / "aa" / "bb"
     fx.mkdir(parents=True)
-    (fx / "entry").write_bytes(b"fx")
+    (fx / "compiled_graph").write_bytes(b"fx")
     kdir = root / "triton" / "k1"
     kdir.mkdir(parents=True)
     if ptx:
@@ -315,7 +315,7 @@ def test_upstream_get_system_shape_is_pinned() -> None:
 
 def test_semantic_cache_tag_binds_semantic_axes_only() -> None:
     """Review 6.3: the tag digests format|kind|family|lane|mode|contract —
-    a foreign semantic identity can never consume delivered entries; the
+    a foreign semantic identity can never consume delivered compiled graphs; the
     environment axes stay OUT so pgw#700 equivalence adoption survives."""
     import torch.compiler.config as compiler_config
 

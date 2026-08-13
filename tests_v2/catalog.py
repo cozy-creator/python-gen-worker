@@ -4,7 +4,7 @@ This single module replaces the old per-issue harness endpoint modules
 (`mint_endpoints_pgw784.py`, `shape_endpoints_pgw789.py`, ...). Scenarios never
 declare their own endpoints: they SELECT rows from :data:`CATALOG`, and the
 worker loads this one module (:data:`MODULE`). A new behavior is a new row —
-a small endpoint method plus one `Row` entry — never a new module.
+a small endpoint method plus one `Row` compiled graph — never a new module.
 
 Contract (kept stable for every later suite):
 
@@ -395,17 +395,17 @@ def _verify_catalog() -> None:
             f"catalog table drifted from the registry: only-in-table="
             f"{sorted(declared - extracted)} only-in-code={sorted(extracted - declared)}"
         )
-    for name, entry in CATALOG.items():
+    for name, compiled_graph in CATALOG.items():
         spec = specs[name]
         want_shape = "stream" if spec.output_mode == "stream" else "unary"
-        if entry.shape != want_shape:
+        if compiled_graph.shape != want_shape:
             raise RuntimeError(
-                f"catalog row {name!r} declares shape={entry.shape!r} but the "
+                f"catalog row {name!r} declares shape={compiled_graph.shape!r} but the "
                 f"registry extracted output_mode={spec.output_mode!r}"
             )
-        if set(entry.slots) - set(spec.models):
+        if set(compiled_graph.slots) - set(spec.models):
             raise RuntimeError(
-                f"catalog row {name!r} declares slots {sorted(entry.slots)} the "
+                f"catalog row {name!r} declares slots {sorted(compiled_graph.slots)} the "
                 f"registry does not know: {sorted(spec.models)}"
             )
 

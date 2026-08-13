@@ -128,7 +128,7 @@ def test_one_pass_produces_the_whole_hash_and_every_chunk(tmp_path):
         assert c.sha256 == sha(span)
         assert c.length == (CS if i < 3 else 11)
     assert sum(c.length for c in d.chunks) == len(data)
-    # And the wire shape matches the hub's manifest v2 entry.
+    # And the wire shape matches the hub's manifest v2 compiled graph.
     wire = d.to_wire()
     assert wire["digest"].startswith("sha256:")
     assert wire["chunks"][0] == {"digest": d.chunks[0].sha256, "len": CS}
@@ -246,7 +246,7 @@ def test_bytes_that_disagree_with_the_digest_never_leave_the_client(tmp_path):
 
 def test_shared_chunks_upload_once(tmp_path):
     """Chunk-granular dedup is local too: identical spans resolve to one
-    source entry, so the same bytes are never PUT twice."""
+    source compiled graph, so the same bytes are never PUT twice."""
     block = make(CS, seed=23)
     a = tmp_path / "a.bin"
     b = tmp_path / "b.bin"

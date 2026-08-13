@@ -3,12 +3,12 @@ snapshot, and every integrity check on that path actually runs.
 
 Before this, ``cozy_snapshot`` was blake3-only end to end: ``_blob_path``
 hardcoded ``blobs/blake3/…``, ``chunk_cas`` was not imported by the fill path
-at all, and a v2 entry died at ``missing blake3 for <path>``. So a v2 publish
+at all, and a v2 compiled graph died at ``missing blake3 for <path>``. So a v2 publish
 was unconsumable — which makes "publish v2" untestable as an outcome.
 
 th#1303 S1 deleted the v1 arm these also used to pin (the two
 ``test_v1_*`` cases): after the repoint nothing resolves to a blake3
-manifest, so a v1 entry is a stale pointer and is REFUSED, not filled.
+manifest, so a v1 compiled graph is a stale pointer and is REFUSED, not filled.
 
 These drive the REAL ``ensure_snapshot_async`` over a real localhost HTTP
 server: sockets, threads, files, the actual reassembly. The assertions are
@@ -110,8 +110,8 @@ def put(store, blob: bytes) -> str:
     return f"{store.base}/{d}"
 
 
-def chunked_entry(store, path: str, data: bytes, chunk_size: int = CS):
-    """Publish `data` as chunks and return the v2 resolved entry."""
+def chunked_compiled_graph(store, path: str, data: bytes, chunk_size: int = CS):
+    """Publish `data` as chunks and return the v2 resolved compiled graph."""
     chunks = []
     for off in range(0, len(data), chunk_size):
         piece = data[off : off + chunk_size]
@@ -128,7 +128,7 @@ def chunked_entry(store, path: str, data: bytes, chunk_size: int = CS):
     )
 
 
-def whole_entry(store, path: str, data: bytes):
+def whole_compiled_graph(store, path: str, data: bytes):
     return WorkerResolvedRepoFile(
         path=path,
         size_bytes=len(data),
@@ -158,8 +158,8 @@ def test_v2_chunked_snapshot_materializes_byte_identically(tmp_path, store):
     snap = fill(
         tmp_path,
         [
-            chunked_entry(store, "transformer/weights.safetensors", big),
-            whole_entry(store, "config.json", small),
+            chunked_compiled_graph(store, "transformer/weights.safetensors", big),
+            whole_compiled_graph(store, "config.json", small),
         ],
     )
 
@@ -173,7 +173,7 @@ def test_chunks_land_under_the_sha256_root_not_the_blake3_one(tmp_path, store):
     """The algorithm is a PATH SEGMENT. A sha256 blob under blobs/blake3/ would
     collide with a blake3 blob of different bytes at the same hex."""
     data = body(CS * 2)
-    fill(tmp_path, [chunked_entry(store, "w.safetensors", data)])
+    fill(tmp_path, [chunked_compiled_graph(store, "w.safetensors", data)])
     blobs = tmp_path / "local" / "blobs"
     assert (blobs / "sha256").is_dir()
     assert not (blobs / "blake3").exists()
@@ -195,11 +195,11 @@ def test_lying_whole_file_digest_on_a_chunked_file_refuses_to_install(tmp_path, 
     thing the store cannot vouch for, so the fused reassembly hash is the only
     place a wrong label is caught — and it must fail closed."""
     data = body(CS * 2 + 3)
-    entry = chunked_entry(store, "w.safetensors", data)
+    compiled_graph = chunked_compiled_graph(store, "w.safetensors", data)
     lying = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=entry.size_bytes, url=None,
+        path=compiled_graph.path, size_bytes=compiled_graph.size_bytes, url=None,
         digest="sha256:" + sha(b"something else entirely"),
-        chunks=entry.chunks, chunk_size_bytes=CS,
+        chunks=compiled_graph.chunks, chunk_size_bytes=CS,
     )
     with pytest.raises(DigestMismatch):
         fill(tmp_path, [lying])
@@ -229,11 +229,11 @@ def test_a_permuted_chunk_list_is_caught(tmp_path, store):
     catch an order swap. This is the test that a per-chunk check is not
     mistaken for a whole-file check."""
     data = body(CS * 3)
-    entry = chunked_entry(store, "w.safetensors", data)
-    swapped = (entry.chunks[1], entry.chunks[0]) + tuple(entry.chunks[2:])
+    compiled_graph = chunked_compiled_graph(store, "w.safetensors", data)
+    swapped = (compiled_graph.chunks[1], compiled_graph.chunks[0]) + tuple(compiled_graph.chunks[2:])
     permuted = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=entry.size_bytes, url=None,
-        digest=entry.digest, chunks=swapped, chunk_size_bytes=CS,
+        path=compiled_graph.path, size_bytes=compiled_graph.size_bytes, url=None,
+        digest=compiled_graph.digest, chunks=swapped, chunk_size_bytes=CS,
     )
     with pytest.raises(DigestMismatch):
         fill(tmp_path, [permuted])
@@ -245,10 +245,10 @@ def test_reuse_verification_hashes_a_v2_tree(tmp_path, store):
     zero bytes. Assert the opposite direction: a same-size one-byte corruption
     must be caught, which is only possible if the bytes were read."""
     data = body(CS * 2)
-    entry = chunked_entry(store, "w.safetensors", data)
-    snap = fill(tmp_path, [entry])
+    compiled_graph = chunked_compiled_graph(store, "w.safetensors", data)
+    snap = fill(tmp_path, [compiled_graph])
 
-    ok, bad = _verify_materialized_tree(snap, [entry])
+    ok, bad = _verify_materialized_tree(snap, [compiled_graph])
     assert ok and not bad
 
     target = snap / "w.safetensors"
@@ -257,56 +257,56 @@ def test_reuse_verification_hashes_a_v2_tree(tmp_path, store):
     target.unlink()  # break the hardlink; corrupt the tree copy only
     target.write_bytes(bytes(raw))
 
-    ok, bad = _verify_materialized_tree(snap, [entry])
+    ok, bad = _verify_materialized_tree(snap, [compiled_graph])
     assert not ok
-    assert bad == [entry.digest]  # ALGORITHM-TAGGED, so quarantine can find it
+    assert bad == [compiled_graph.digest]  # ALGORITHM-TAGGED, so quarantine can find it
 
 
 def test_quarantine_unlinks_the_sha256_blob(tmp_path, store):
     """A stripped tag would aim the unlink at blobs/blake3/<sha256hex> — at
     nothing — leaving the corrupt blob to be re-linked by the next fill."""
     data = body(CS * 2, seed=11)
-    entry = chunked_entry(store, "w.safetensors", data)
-    snap = fill(tmp_path, [entry])
+    compiled_graph = chunked_compiled_graph(store, "w.safetensors", data)
+    snap = fill(tmp_path, [compiled_graph])
     blobs = tmp_path / "local" / "blobs"
     d = sha(data)
     blob = blobs / "sha256" / d[:2] / d[2:4] / d
     assert blob.exists()
 
-    snap_mod._quarantine_materialized(snap, blobs, [entry.digest])
+    snap_mod._quarantine_materialized(snap, blobs, [compiled_graph.digest])
     assert not blob.exists()
 
 
-def test_an_entry_with_no_readable_digest_is_refused(tmp_path, store):
+def test_an_compiled_graph_with_no_readable_digest_is_refused(tmp_path, store):
     """Fail closed. An unreadable manifest must never degrade into an
     unverified download — that is how "no digest" becomes "no check"."""
     data = body(100)
-    entry = WorkerResolvedRepoFile(
+    compiled_graph = WorkerResolvedRepoFile(
         path="x.json", size_bytes=len(data), url=put(store, data),
     )
     with pytest.raises(ValueError, match="no digest"):
-        fill(tmp_path, [entry])
+        fill(tmp_path, [compiled_graph])
 
 
 def test_untagged_v2_digest_is_a_hard_error(tmp_path, store):
     """A bare hex in the `digest` field must not be guessed at. Guessing is how
     a sha256 gets hashed with blake3."""
     data = body(100, seed=4)
-    entry = WorkerResolvedRepoFile(
+    compiled_graph = WorkerResolvedRepoFile(
         path="x.json", size_bytes=len(data), url=put(store, data),
         digest=sha(data),  # untagged
     )
     with pytest.raises(ValueError, match="untagged"):
-        fill(tmp_path, [entry])
+        fill(tmp_path, [compiled_graph])
 
 
 def test_chunk_lengths_must_sum_to_the_declared_size(tmp_path, store):
     """Refused BEFORE any byte moves — a shape lie costs zero transfer."""
     data = body(CS * 2)
-    entry = chunked_entry(store, "w.safetensors", data)
+    compiled_graph = chunked_compiled_graph(store, "w.safetensors", data)
     lying = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=len(data) + 1000, url=None,
-        digest=entry.digest, chunks=entry.chunks, chunk_size_bytes=CS,
+        path=compiled_graph.path, size_bytes=len(data) + 1000, url=None,
+        digest=compiled_graph.digest, chunks=compiled_graph.chunks, chunk_size_bytes=CS,
     )
     with pytest.raises(ValueError, match="chunk lengths sum"):
         fill(tmp_path, [lying])
@@ -318,7 +318,7 @@ def test_network_bytes_counts_chunked_transfer(tmp_path, store):
     chunked fill that reported zero would make a cold boot look warm."""
     data = body(CS * 3 + 11)
     with NetworkBytesScope() as scope:
-        fill(tmp_path, [chunked_entry(store, "w.safetensors", data)])
+        fill(tmp_path, [chunked_compiled_graph(store, "w.safetensors", data)])
     assert scope.network_bytes == len(data)
 
 
@@ -332,7 +332,7 @@ def test_network_bytes_counts_chunked_transfer(tmp_path, store):
 # ---------------------------------------------------------------------------
 
 
-def _entry(n_chunks=2, **over):
+def _compiled_graph(n_chunks=2, **over):
     e = {
         "path": "model.safetensors", "size_bytes": 100,
         "digest": "sha256:" + "a" * 64,
@@ -344,16 +344,16 @@ def _entry(n_chunks=2, **over):
     return e
 
 
-def _parse(entry):
+def _parse(compiled_graph):
     from gen_worker.models.hub_client import parse_chunk_list
-    return parse_chunk_list("tensorhub resolve for o/r", entry["path"],
-                            entry.get("chunks"), entry.get("chunk_urls"))
+    return parse_chunk_list("tensorhub resolve for o/r", compiled_graph["path"],
+                            compiled_graph.get("chunks"), compiled_graph.get("chunk_urls"))
 
 
 def test_chunk_urls_is_a_SEPARATE_index_aligned_array():
     """`catalog.SnapshotManifestFile` cannot put URLs inside `chunks` — those
     bytes ARE the content-addressed identity. The URLs ride alongside."""
-    got = _parse(_entry())
+    got = _parse(_compiled_graph())
     assert [c.url for c in got] == ["https://r2.invalid/0", "https://r2.invalid/1"]
     assert [c.sha256[:2] for c in got] == ["00", "01"]
     assert [c.length for c in got] == [50, 50]
@@ -362,7 +362,7 @@ def test_chunk_urls_is_a_SEPARATE_index_aligned_array():
 def test_a_nested_url_still_works_for_the_grpc_shape():
     """The proto's ChunkRef carries sha256/url/len together, so both forms
     must parse — one client library, two transports."""
-    e = _entry()
+    e = _compiled_graph()
     e["chunk_urls"] = None
     for i, c in enumerate(e["chunks"]):
         c["url"] = f"https://grpc.invalid/{i}"
@@ -374,7 +374,7 @@ def test_a_MISALIGNED_url_list_is_fatal():
     """Index alignment is the only thing binding a URL to its digest. A short
     list must never silently mean 'fetch fewer chunks'."""
     from gen_worker.models.hub_client import HubResolveError
-    e = _entry(n_chunks=3)
+    e = _compiled_graph(n_chunks=3)
     e["chunk_urls"] = ["https://r2.invalid/0"]
     with pytest.raises(HubResolveError, match="index alignment"):
         _parse(e)
@@ -383,7 +383,7 @@ def test_a_MISALIGNED_url_list_is_fatal():
 def test_a_chunk_with_no_url_anywhere_is_fatal():
     """Unreachable bytes must fail loudly at parse, not at byte 0 of a fetch."""
     from gen_worker.models.hub_client import HubResolveError
-    e = _entry()
+    e = _compiled_graph()
     e["chunk_urls"] = None
     with pytest.raises(HubResolveError, match="missing digest/url/len"):
         _parse(e)
@@ -454,7 +454,7 @@ def test_the_grpc_conversion_carries_chunks_through():
 # ---------------------------------------------------------------------------
 
 
-def test_a_v1_blake3_entry_is_now_REFUSED_not_filled(tmp_path, store):
+def test_a_v1_blake3_compiled_graph_is_now_REFUSED_not_filled(tmp_path, store):
     """The corpus is repointed: a blake3 ref can only be a stale pointer.
 
     WHICH ARM THIS PINS, stated because a guard whose claim is untested is this
@@ -463,35 +463,35 @@ def test_a_v1_blake3_entry_is_now_REFUSED_not_filled(tmp_path, store):
     deleted arm — verified by execution: restoring `hash_file`'s arm alone
     leaves this GREEN, because the pre-check refuses first. `hash_file` has its
     own guard (`test_hash_file_refuses_blake3_instead_of_hashing_it`). Two
-    independent arms refuse a v1 entry and each is pinned separately; this
+    independent arms refuse a v1 compiled graph and each is pinned separately; this
     replaces the deleted `test_v1_blake3_snapshot_still_fills_unchanged`.
     """
     data = body(900, seed=5)
-    entry = WorkerResolvedRepoFile(
+    compiled_graph = WorkerResolvedRepoFile(
         path="model.safetensors",
         size_bytes=len(data),
         url=put(store, data),
         digest="blake3:" + "b" * 64,
     )
     with pytest.raises(ValueError, match="no longer\n?\\s*verifiable|blake3"):
-        fill(tmp_path, [entry], sub="v1")
+        fill(tmp_path, [compiled_graph], sub="v1")
     # The path may be staged, but no BYTES were published under a name this
     # worker cannot verify.
     root = tmp_path / "v1" / "blobs" / "blake3"
     assert [q for q in root.rglob("*") if q.is_file()] == []
 
 
-def test_an_entry_carrying_ONLY_the_legacy_mirror_is_refused(tmp_path, store):
+def test_an_compiled_graph_carrying_ONLY_the_legacy_mirror_is_refused(tmp_path, store):
     """The empty-guard shape, driven end to end.
 
-    ``resolved_entry_digest`` used to fall back to ``ent["blake3"]``. With the
-    fallback gone, a raw manifest entry that names only the legacy mirror
+    ``resolved_compiled_graph_digest`` used to fall back to ``ent["blake3"]``. With the
+    fallback gone, a raw manifest compiled graph that names only the legacy mirror
     carries NO digest — and "no digest" must be a refusal, never a skip.
     """
-    from gen_worker.models.hub_client import resolved_entry_digest
+    from gen_worker.models.hub_client import resolved_compiled_graph_digest
 
     with pytest.raises(ValueError, match="carries no digest"):
-        resolved_entry_digest({"blake3": "c" * 64, "size_bytes": 10})
+        resolved_compiled_graph_digest({"blake3": "c" * 64, "size_bytes": 10})
 
 
 def test_hash_file_refuses_blake3_instead_of_hashing_it(tmp_path):
@@ -512,7 +512,7 @@ def test_the_downloader_refuses_an_ABSENT_digest_before_fetching(tmp_path, store
     """The vacuous guard, pinned at the transport itself.
 
     `_download_one_file` used to take `expected_blake3: str = ""` and compare
-    only `if expected_blake3:` — so an entry naming no digest was downloaded
+    only `if expected_blake3:` — so an compiled graph naming no digest was downloaded
     and published with no check at all. The precondition is now mandatory and
     fires BEFORE a byte moves. Deleting it turns this red.
     """

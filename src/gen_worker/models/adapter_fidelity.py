@@ -50,7 +50,7 @@ arithmetic.
 * fuse — :func:`gate_fuse` is the seam any fuse must call. gen-worker ships no
   fuse today (pgw#794 §8's platform ruling: never fuse into a denoiser that
   serves quantized), so this is the gate that makes the ruling enforceable
-  rather than remembered, and the entry point for the produce-time fuse in
+  rather than remembered, and the compiled graph point for the produce-time fuse in
   ``training-endpoints`` (te#86) to adopt.
 * peft — the remaining adapter surface (text-encoder halves, and the plain-lane
   whole-adapter fallback) stores A/B as separate module parameters exactly like

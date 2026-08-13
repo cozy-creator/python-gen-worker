@@ -62,14 +62,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """Entry point for the ``gen-worker`` console_script.
+    """Compiled graph point for the ``gen-worker`` console_script.
 
     Returns the integer exit code so tests can call ``main([...])`` directly
     without spawning a subprocess. The console_script wrapper turns the
     returned int into the process exit code via ``sys.exit(main())``.
     """
-    # §1.18: the bootstrap-owned load for the STANDALONE CLI process entry.
-    # Acceptance is one load PER PROCESS ENTRY, and this is the third (after
+    # §1.18: the bootstrap-owned load for the STANDALONE CLI process compiled graph.
+    # Acceptance is one load PER PROCESS COMPILED_GRAPH, and this is the third (after
     # `entrypoint._run_main` and `procsplit.parent.run_parent`). Without it the
     # `models/` helpers would fall back to their zero-value standalone defaults
     # and a `gen-worker run` would silently lose TENSORHUB_URL / _TOKEN /

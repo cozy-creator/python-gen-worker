@@ -39,11 +39,11 @@ def _cfg(**overrides: Any) -> CompileCompiledGraph:
     return CompileCompiledGraph(**base)
 
 
-def _entries(fn: Any) -> int:
-    from torch._dynamo.eval_frame import _debug_get_cache_entry_list
+def _compiled_graphs(fn: Any) -> int:
+    from torch._dynamo.eval_frame import _debug_get_cache_compiled_graph_list
 
     code = getattr(getattr(fn, "__func__", fn), "__code__", None)
-    return len(_debug_get_cache_entry_list(code))
+    return len(_debug_get_cache_compiled_graph_list(code))
 
 
 def _arm_marker(pipe: Any, module: Any, fn: Any) -> None:
@@ -235,10 +235,10 @@ def test_stride_perturbed_input_recompiles_without_the_ingress() -> None:
 
     compiled = torch.compile(f, backend="eager", dynamic=None)
     compiled(torch.randn(4, 1, 8))
-    assert _entries(f) == 1
+    assert _compiled_graphs(f) == 1
     for t in _perturbed_inputs():
         compiled(t)
-    assert _entries(f) == 3
+    assert _compiled_graphs(f) == 3
 
 
 def test_stride_perturbed_input_canonicalizes_and_hits() -> None:
@@ -249,11 +249,11 @@ def test_stride_perturbed_input_canonicalizes_and_hits() -> None:
         torch.compile(f, backend="eager", dynamic=None), "transformer")
     warm = torch.randn(4, 1, 8)
     compiled(warm)
-    assert _entries(f) == 1
+    assert _compiled_graphs(f) == 1
     for t in _perturbed_inputs():
         out = compiled(t)
         assert torch.equal(out, t.contiguous() * 2 + 1)
-    assert _entries(f) == 1  # zero recompiles: both perturbations HIT
+    assert _compiled_graphs(f) == 1  # zero recompiles: both perturbations HIT
 
 
 def test_ingress_pins_size1_dim_strides_not_just_contiguous() -> None:
@@ -314,7 +314,7 @@ def _toy_manifest(**mutate: Any) -> Dict[str, Any]:
     ]
     manifest: Dict[str, Any] = {
         "v": 1,
-        "graphs": [{"target": "transformer", "code": "forward", "entry": 0,
+        "graphs": [{"target": "transformer", "code": "forward", "compiled_graph": 0,
                     "guards": guards}],
         "verdicts": {}, "leaks": [],
     }

@@ -77,7 +77,7 @@ needs is reachable through `state_dict()`. **The tensor-binding contract**
 (formerly "weight-binding") is that rule — the artifact's LINKING rule for
 tensors. A tensor your module holds is either:
 
-- **bound by name at load** (DYNAMIC) — a named `state_dict` entry the CAS
+- **bound by name at load** (DYNAMIC) — a named `state_dict` compiled graph the CAS
   delivers and rebinds. It is an opaque slot the compiler must never
   value-specialize, and that opacity is exactly what makes a compiled graph
   CHECKPOINT-AGNOSTIC;
@@ -157,7 +157,7 @@ Two things close it, and you need neither in your model code:
 - every mint compiles under `aot_mint.CONSTANT_BINDING_CONFIGS`
   (`aot_inductor.use_runtime_constant_folding=True`), which defers the fold to
   load so nothing is inlined; and
-- `aot_package.folded_weights` PROVES it per entry against the artifact's own
+- `aot_package.folded_weights` PROVES it per compiled graph against the artifact's own
   constant table, and a mint that lifted a weight the package does not declare
   is **refused by name**. A compiled graph minted before the fence is refused at adoption
   too — `constant_folding_fenced` is a declared axis, like
@@ -532,7 +532,7 @@ assert rec.progress[-1].payload["step"] == 28           # ctx.progress
 ```
 
 `rec.saved` holds every `save_*` in order (`images` / `audio` / `videos` /
-`files` filter it); each entry carries the typed asset the handler received,
+`files` filter it); each compiled graph carries the typed asset the handler received,
 with its real `sha256` and `size_bytes`. `ctx.log` and `ctx.progress` are
 captured at the emitter seam, so neither needs an override either.
 
@@ -559,7 +559,7 @@ had to be found by hand.
 A class binding 2+ pipeline slots whose snapshots share byte-identical
 components (content-keyed by the files' blake3 digests) loads the shared set
 ONCE; each slot's exclusive weights (its transformer) are an independent
-residency entry the worker LRU-swaps under VRAM pressure:
+residency compiled graph the worker LRU-swaps under VRAM pressure:
 
 ```python
 @endpoint(models={"t2i": Hub("org/base"), "edit": Hub("org/edit")})

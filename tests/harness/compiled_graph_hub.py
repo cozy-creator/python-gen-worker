@@ -279,22 +279,22 @@ class LocalCompiledGraphHub:
         for f in plan.get("files") or []:
             digest = str(f.get("digest") or "")
             chunks = f.get("chunks") or []
-            entry: Dict[str, Any] = {
+            compiled_graph: Dict[str, Any] = {
                 "path": str(f.get("path") or ""),
                 "size_bytes": int(f.get("size_bytes") or 0),
                 "sha256": digest.split(":", 1)[-1] if digest else "",
                 "digest": digest,
             }
             if chunks:
-                entry["chunks"] = [
+                compiled_graph["chunks"] = [
                     {"sha256": c["digest"], "len": int(c["len"]),
                      "url": f"{self.base}/cas/{c['digest']}"}
                     for c in chunks
                 ]
-                entry["chunk_size_bytes"] = int(chunks[0]["len"])
+                compiled_graph["chunk_size_bytes"] = int(chunks[0]["len"])
             else:
-                entry["url"] = f"{self.base}/cas/{digest.split(':', 1)[-1]}"
-            files.append(entry)
+                compiled_graph["url"] = f"{self.base}/cas/{digest.split(':', 1)[-1]}"
+            files.append(compiled_graph)
         self._seq += 1
         checkpoint_id = "sha256:" + hashlib.sha256(
             f"{repo}/{plan.get('flavor')}/{self._seq}".encode()).hexdigest()

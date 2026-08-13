@@ -315,7 +315,7 @@ def _set_module(model: Any, path: str, new: Any) -> None:
 def plan_targets(model: Any, prefix: str) -> tuple[tuple[str, int], ...]:
     """Where one nunchaku linear prefix lands in ``model``.
 
-    ``((path, out_features), ...)`` — one entry for a 1:1 name, three for a
+    ``((path, out_features), ...)`` — one compiled graph for a 1:1 name, three for a
     fused ``to_qkv``-style prefix. The split is validated against the target
     modules' ACTUAL ``out_features``; an unknown or mismatched layout raises
     rather than guessing."""
@@ -431,7 +431,7 @@ def adanorm_splits_for(model_class: str, prefix: str) -> int:
         f"unknown adaLN split count for AWQ layer {prefix!r} in "
         f"{model_class} — the exporter's adanorm transform cannot be inferred "
         f"from the tensors, and a wrong count corrupts output silently; add "
-        f"the (class, suffix) entry to _ADANORM_SPLITS after verifying it")
+        f"the (class, suffix) compiled_graph to _ADANORM_SPLITS after verifying it")
 
 
 def native_denoiser_class(model_class: str) -> Any:

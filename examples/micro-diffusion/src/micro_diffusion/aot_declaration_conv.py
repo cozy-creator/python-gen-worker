@@ -1,9 +1,9 @@
 """The pgw#1073 conv declaration — STATIC-ROWS, the sdxl class at micro scale.
 
-Four static entries: 2 latent rows x the 2 CFG regimes, one target. That is
+Four static compiled graphs: 2 latent rows x the 2 CFG regimes, one target. That is
 sdxl's exact declaration shape (aspect rows x cfg x static-rows) with the row
-count cut to the smallest set that still produces MULTIPLE static entries per
-compiled graph — the artifact-identity surface pgw#1058 broke on (entry labels are
+count cut to the smallest set that still produces MULTIPLE static compiled graphs per
+compiled graph — the artifact-identity surface pgw#1058 broke on (compiled graph labels are
 per-row static facts under this strategy, and label/ask drift admits nothing).
 
 What this member declares that no other micro member does:
@@ -32,8 +32,8 @@ from gen_worker import (
 
 FAMILY = "micro-conv"
 
-#: Two latent rows -> with the cfg fork, FOUR static entries. Enough to make
-#: "multiple entries per compiled graph" real; few enough that the cycle stays seconds.
+#: Two latent rows -> with the cfg fork, FOUR static compiled graphs. Enough to make
+#: "multiple compiled graphs per compiled graph" real; few enough that the cycle stays seconds.
 LATENT_ROWS = (24, 32)
 VAE_SCALE = 8
 PIXEL_ROWS = tuple((n * VAE_SCALE, n * VAE_SCALE) for n in LATENT_ROWS)
@@ -68,7 +68,7 @@ def build_declaration() -> Compile:
             Fork("cfg", served=(True, False),
                  why="CFG is ONE batch-2 forward, turbo pins the batch-1 "
                      "graph — sdxl's fork, kept so static-rows x fork "
-                     "(the 36-entry generator) stays under test at 4"),
+                     "(the 36-compiled_graph generator) stays under test at 4"),
         ),
         classes=_classes(),
         inputs=(

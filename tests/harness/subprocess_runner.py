@@ -35,14 +35,14 @@ def write_manifest(path: Path, functions: List[Dict[str, Any]]) -> None:
     path.write_bytes(msgspec.toml.encode({"functions": functions}))
 
 
-def gpu_manifest_entry(*, module: str = "harness_smoke_nonexistent_module") -> Dict[str, Any]:
+def gpu_manifest_compiled_graph(*, module: str = "harness_smoke_nonexistent_module") -> Dict[str, Any]:
     return {
         "name": "gen", "module": module, "kind": "inference",
         "resources": {"gpu": True},
     }
 
 
-def cpu_manifest_entry(*, module: str = "harness_smoke_nonexistent_module") -> Dict[str, Any]:
+def cpu_manifest_compiled_graph(*, module: str = "harness_smoke_nonexistent_module") -> Dict[str, Any]:
     return {"name": "gen", "module": module, "kind": "inference", "resources": {}}
 
 

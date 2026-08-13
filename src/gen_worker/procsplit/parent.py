@@ -1187,7 +1187,7 @@ class ParentControl:
         # building a control parent — the split harness, the group-process
         # tests, any embedder — got a parent with no credential, and the
         # mediated C2PA sign refused with "this pod holds no worker JWT".
-        # Deriving a fact at ONE of several entry points is the §4.22 defect:
+        # Deriving a fact at ONE of several compiled graph points is the §4.22 defect:
         # the fact and its carrier have to be established together.
         worker_credential.install_bootstrap(settings)
         env_cmd = os.environ.get(ENV_CHILD_CMD, "").strip()
@@ -1326,7 +1326,7 @@ class ParentControl:
 
         The list is deliberately explicit (``privdrop.writable_paths`` plus the
         pod's cache roots): the answer to a permission error the child hits is
-        another entry here, never giving the child root back. Anything NOT in
+        another compiled graph here, never giving the child root back. Anything NOT in
         it stays root-owned and read-only to tenant code, which is the point.
         """
         try:
@@ -1781,8 +1781,8 @@ class ParentControl:
     # class this fixes is the §4.22 one — a *default* being made to carry a
     # missing *fact*:
     #
-    #   present entry -> a fact the live incarnation reported
-    #   absent entry  -> the live-group DEFAULT (serves it / no activity open)
+    #   present compiled graph -> a fact the live incarnation reported
+    #   absent compiled graph  -> the live-group DEFAULT (serves it / no activity open)
     #   not a member  -> UNKNOWN: this group has no live child
     #
     # so the identity element of a down group is **exclusion from the merge**,
@@ -1795,7 +1795,7 @@ class ParentControl:
     #                         NOT set to None: None means "this group serves
     #                         it", so popping alone would make a dead group
     #                         read as serving EVERYTHING — strictly worse than
-    #                         the stale entry it replaced.
+    #                         the stale compiled graph it replaced.
     #   _group_fn_degraded -> dropped from both the mapping and the
     #                         `served_native_somewhere` scan, for the same
     #                         reason (absence there means "serves it native").
@@ -2588,7 +2588,7 @@ class ParentControl:
 
 
 def run_parent() -> int:
-    """Production entry (called from entrypoint BEFORE any heavy import)."""
+    """Production compiled graph (called from entrypoint BEFORE any heavy import)."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -2599,10 +2599,10 @@ def run_parent() -> int:
     report_previous_container_death()
     postmortem.clear_all_inflight()
     postmortem.write_boot_record()
-    # §1.18: the bootstrap-owned load for the CONTROL-PARENT process entry.
+    # §1.18: the bootstrap-owned load for the CONTROL-PARENT process compiled graph.
     settings = config.install(config.load_settings())
     # The boot credential is installed by ParentControl.__init__, which is the
-    # seam every parent goes through — not just this entry point.
+    # seam every parent goes through — not just this compiled graph point.
     code = ParentControl(settings).run()
     if code == 0:
         postmortem.clear_boot_record()

@@ -156,7 +156,7 @@ def _supported_types() -> Tuple[type, ...]:
 def _forwards() -> Dict[str, Any]:
     """One ``forward`` per layer KIND. Each is the stock torch forward with
     the weight (and bias) upcast at the use site — upstream's own
-    weight-parameterized entry point where one exists (``_conv_forward``), so
+    weight-parameterized compiled graph point where one exists (``_conv_forward``), so
     padding modes and output-padding math are never reimplemented."""
     import torch.nn.functional as F
 

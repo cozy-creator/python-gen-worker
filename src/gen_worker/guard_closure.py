@@ -7,12 +7,12 @@ declared ``CompileCompiledGraph`` contract — never per-endpoint or per-family 
 
 1. **Extraction** (:func:`extract`): post-mint, walk every compiled graph's
    live guard tree. The robust torch 2.13 surface (probed on 2.13.0+cu130):
-   ``torch._dynamo.eval_frame._debug_get_cache_entry_list(code)`` →
-   ``entry.guard_manager.root`` → recursive ``get_child_managers()`` (each
+   ``torch._dynamo.eval_frame._debug_get_cache_compiled_graph_list(code)`` →
+   ``compiled graph.guard_manager.root`` → recursive ``get_child_managers()`` (each
    carries ``get_source()``) + ``get_leaf_guards()`` (each carries its type
    name and ``verbose_code_parts()``). A repr parse of the guard manager's
    ``TREE_GUARD_MANAGER`` dump is the fallback when the structured walk is
-   unavailable. An entry whose guards cannot be read records an
+   unavailable. An compiled graph whose guards cannot be read records an
    :data:`UNPROVEN` row (never silent — it is logged and rides the manifest),
    because that is a fact about our diagnostic surface on this torch build,
    not about the mint.
@@ -48,7 +48,7 @@ declared ``CompileCompiledGraph`` contract — never per-endpoint or per-family 
    (:func:`assert_posture` — a measurement against exact canonical values).
 
    **Never rebuild this classifier.** torch's own ``guard_filter_fn`` /
-   ``GuardFilterEntry`` is the supported structured hook (typed entries, no
+   ``GuardFilterCompiledGraph`` is the supported structured hook (typed compiled graphs, no
    C++ manager walk and no repr parsing — where BOTH fleet-wide bugs lived),
    and upstream's precompile work already maintains a versioned
    ``UNSUPPORTED_SERIALIZATION_GUARD_TYPES`` classification. torch.export /
@@ -64,7 +64,7 @@ declared ``CompileCompiledGraph`` contract — never per-endpoint or per-family 
    the canonical contiguous layout — ``.contiguous()`` alone is NOT the pin:
    a size-1 dim makes ``is_contiguous()`` true under an arbitrary stride and
    ``.contiguous()`` a no-op while TENSOR_MATCH still guards the exact
-   stride tuple (ie#544, reproduced: entries 1→2 on ``stride=(8,999,1)`` for
+   stride tuple (ie#544, reproduced: compiled graphs 1→2 on ``stride=(8,999,1)`` for
    size ``(4,1,8)``), so the residue case rebuilds via ``as_strided``.
    Tensor dtypes are memo-asserted per argument path — a drift raises a
    NAMED :class:`GuardBoundaryError` instead of a silent recompile. Scalar
@@ -81,8 +81,8 @@ manifest into CAS and the publish-intent metadata. The audit surface
 N-cold-pod zero-miss closure check: exit 0 = closed and consistent, 2 =
 leaks, 3 = cross-pod divergence.
 
-Note: ``_debug_get_cache_entry_list`` keys on the class-shared ``__code__``
-(pgw#637), so a warm process's dump can include same-family sibling entries;
+Note: ``_debug_get_cache_compiled_graph_list`` keys on the class-shared ``__code__``
+(pgw#637), so a warm process's dump can include same-family sibling compiled graphs;
 classification is source-based, so siblings classify identically.
 """
 
@@ -229,11 +229,11 @@ class GuardRecord:
 
 @dataclass(frozen=True)
 class GraphGuards:
-    """The complete guard set of one compiled graph (one cache entry)."""
+    """The complete guard set of one compiled graph (one cache compiled graph)."""
 
     target: str
     code: str
-    entry: int
+    compiled_graph: int
     guards: Tuple[GuardRecord, ...]
 
 
@@ -256,11 +256,11 @@ class ClosureReport:
 
     @property
     def unproven(self) -> Tuple[str, ...]:
-        """Entries whose guards could not be read (pgw#756). Reported, never
+        """Compiled graphs whose guards could not be read (pgw#756). Reported, never
         fatal: this is a fact about the torch build's guard debug surface,
         not about the mint."""
         return tuple(
-            f"target={g.target} entry={g.entry}: {r.expr}"
+            f"target={g.target} compiled_graph={g.compiled_graph}: {r.expr}"
             for g in self.graphs for r in g.guards if r.verdict == UNPROVEN)
 
     @property
@@ -280,7 +280,7 @@ class ClosureReport:
             "v": MANIFEST_VERSION,
             "graphs": [
                 {
-                    "target": g.target, "code": g.code, "entry": g.entry,
+                    "target": g.target, "code": g.code, "compiled_graph": g.compiled_graph,
                     "guards": [r.row() for r in g.guards],
                 }
                 for g in self.graphs
@@ -402,11 +402,11 @@ def _code_of(fn: Any) -> Optional[Any]:
     return getattr(getattr(fn, "__func__", fn), "__code__", None)
 
 
-def _entry_guard_rows(entry: Any) -> List[Tuple[str, str, str]]:
-    manager = getattr(entry, "guard_manager", None)
+def _compiled_graph_guard_rows(compiled_graph: Any) -> List[Tuple[str, str, str]]:
+    manager = getattr(compiled_graph, "guard_manager", None)
     if manager is None:
         raise GuardClosureError(
-            "dynamo cache entry exposes no guard_manager — the guard debug "
+            "dynamo cache compiled_graph exposes no guard_manager — the guard debug "
             "surface changed; closure is unprovable on this torch")
     root = getattr(manager, "root", None)
     if root is not None:
@@ -422,7 +422,7 @@ def _entry_guard_rows(entry: Any) -> List[Tuple[str, str, str]]:
     rows = _parse_tree_repr(str(manager))
     if not rows:
         raise GuardClosureError(
-            "no guards extractable from a live cache entry (structured walk "
+            "no guards extractable from a live cache compiled_graph (structured walk "
             "and repr parse both empty) — closure is unprovable")
     return rows
 
@@ -434,19 +434,19 @@ def extract_target_guards(
     code = _code_of(fn)
     if code is None:
         return []
-    from torch._dynamo.eval_frame import _debug_get_cache_entry_list
+    from torch._dynamo.eval_frame import _debug_get_cache_compiled_graph_list
 
     pins = contract_pins(cfg, getattr(code, "co_freevars", ()) or ())
     graphs: List[GraphGuards] = []
-    for index, entry in enumerate(_debug_get_cache_entry_list(code)):
+    for index, compiled_graph in enumerate(_debug_get_cache_compiled_graph_list(code)):
         try:
-            rows = _entry_guard_rows(entry)
+            rows = _compiled_graph_guard_rows(compiled_graph)
         except Exception as exc:  # noqa: BLE001 — recorded, never fatal
             # pgw#756: the guards of a LIVE compiled graph were unreadable.
             # That is a torch-surface fact, not a mint defect, so it is
             # recorded as an UNPROVEN row and the mint continues.
             logger.warning(
-                "guard-closure: %s entry %d guards unreadable (%s: %s) — "
+                "guard-closure: %s compiled_graph %d guards unreadable (%s: %s) — "
                 "recorded UNPROVEN, mint continues",
                 target, index, type(exc).__name__, exc)
             records = [GuardRecord(
@@ -463,7 +463,7 @@ def extract_target_guards(
             )
         graphs.append(GraphGuards(
             target=str(target), code=str(getattr(code, "co_qualname", code.co_name)),
-            entry=index, guards=tuple(records),
+            compiled_graph=index, guards=tuple(records),
         ))
     return graphs
 
@@ -501,7 +501,7 @@ def extract(pipeline: Any, cfg: Any) -> ClosureReport:
             seen_codes.add(id(code))
             graphs.extend(extract_target_guards(
                 fwd, f"{type(child).__name__}.forward", cfg))
-    graphs.sort(key=lambda g: (g.target, g.code, g.entry))
+    graphs.sort(key=lambda g: (g.target, g.code, g.compiled_graph))
     return ClosureReport(graphs=tuple(graphs))
 
 
@@ -791,7 +791,7 @@ def _posture_diff(sealed: Mapping[str, Any], live: Mapping[str, str]) -> List[st
 
 
 def establish_posture() -> Dict[str, str]:
-    """Set the canonical posture explicitly (boot entry). Settable facts are
+    """Set the canonical posture explicitly (boot compiled graph). Settable facts are
     SET (grad mode, deterministic algos); ambient contexts that library code
     must not pop from under the embedding process (an active autocast, a
     foreign torch-function mode, a moved default device) REFUSE with a named
@@ -876,7 +876,7 @@ def _canonical_value(
 
 
 def canonical_ingress(fn: Callable[..., Any], label: str) -> Callable[..., Any]:
-    """Wrap the compiled callable so every entry crosses one canonical
+    """Wrap the compiled callable so every compiled graph crosses one canonical
     boundary: contiguous-canonical strides (stride-perturbed inputs HIT the
     minted graph instead of recompiling) and per-path dtype asserts.
     Installed symmetrically for mint capture and consumer serving, so the

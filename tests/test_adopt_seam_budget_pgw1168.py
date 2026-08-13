@@ -3,7 +3,7 @@ route passes, and its two terms are reported apart.
 
 pgw#1164 put the measurement in `fleet_compiled_graphs.adopt_delegated_mint`, i.e. on the
 SELF-MINT adopt only. The boot adopt, the local-store adopt and the re-arm run
-the identical `aot_serve.enable` -> `arm_entry` and reported nothing — the
+the identical `aot_serve.enable` -> `arm_compiled_graph` and reported nothing — the
 "emitter wired on one of N paths" shape this program keeps producing. It lives
 in `provision.arm_aot` now, which owns both the load and the §4.32 gate.
 
@@ -37,7 +37,7 @@ _META: Dict[str, Any] = {
     "family": "sdxl",
     "weight_lane": "w8a8",
     "compiled_graph_key": "ek1-" + "0" * 56,
-    "entry": {"name": "unet/e0", "target": "unet"},
+    "compiled_graph": {"name": "unet/e0", "target": "unet"},
 }
 
 
@@ -143,14 +143,14 @@ def test_load_and_verify_are_reported_SEPARATELY(monkeypatch, tmp_path) -> None:
     assert "adopt_device_peak=23.000GiB" in detail, detail
 
 
-def test_the_row_names_ONE_entry_because_that_is_all_an_artifact_carries(
+def test_the_row_names_ONE_compiled_graph_because_that_is_all_an_artifact_carries(
     monkeypatch, tmp_path,
 ) -> None:
-    """INVERTED by pgw#1176. It read: *"36 entries and 3 entries must never be
-    pooled — the whole fit question is about how the cost scales with entry
-    count"*, and asserted `entries=36`. An artifact now carries ONE graph
-    class, so a 36-entry envelope is a shape production cannot construct and
-    this row is always `entries=1` — the point, not a degenerate case.
+    """INVERTED by pgw#1176. It read: *"36 compiled graphs and 3 compiled graphs must never be
+    pooled — the whole fit question is about how the cost scales with compiled graph
+    count"*, and asserted `compiled graphs=36`. An artifact now carries ONE graph
+    class, so a 36-compiled graph envelope is a shape production cannot construct and
+    this row is always `compiled graphs=1` — the point, not a degenerate case.
 
     The count is still READ from the metadata rather than printed as a
     constant, which is what the row below pins."""
@@ -158,13 +158,13 @@ def test_the_row_names_ONE_entry_because_that_is_all_an_artifact_carries(
     _install(monkeypatch, events,
              watermarks=[(0, 0), (0, 5 * _GIB), (0, 5 * _GIB)])
     _arm(tmp_path, verify_numerics=False)
-    assert "entries=1" in _row(events)
+    assert "compiled_graphs=1" in _row(events)
 
 
 def test_each_armed_CLASS_gets_ITS_OWN_row_never_a_pooled_one(
     monkeypatch, tmp_path,
 ) -> None:
-    """The surviving guard from the inversion above. *"36 entries and 3 entries
+    """The surviving guard from the inversion above. *"36 compiled graphs and 3 compiled graphs
     must never be pooled"* is still true and is now structural rather than a
     field: N classes arm through N `arm_aot` calls and emit N rows, so a
     refused class shows up as its own missing row instead of disappearing into
@@ -177,7 +177,7 @@ def test_each_armed_CLASS_gets_ITS_OWN_row_never_a_pooled_one(
 
     rows = [d for k, _p, d in events if k == "compiled_graph_adopt_budget"]
     assert len(rows) == 2, rows
-    assert all("entries=1" in r for r in rows), rows
+    assert all("compiled_graphs=1" in r for r in rows), rows
 
 
 # --------------------------------------------------------------------------

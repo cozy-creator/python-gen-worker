@@ -1,9 +1,9 @@
 """pgw#995 deliverable 2 — hub-shaped env delivery reaches `Settings`.
 
 The `GEN_WORKER_PREFER_AOT` postmortem was not a bug in any component. The flag
-was declared, the entry was set, the loader worked, the gate worked. What broke
+was declared, the compiled graph was set, the loader worked, the gate worked. What broke
 was the DELIVERY between them: a release rebuild stopped declaring the name, the
-hub withheld the entry silently, and the worker booted without it. Three pod
+hub withheld the compiled graph silently, and the worker booted without it. Three pod
 attempts.
 
 Nothing in this repo could have caught that, because the local rig constructs
@@ -45,7 +45,7 @@ def os_environ_names() -> list:
 
 
 # ---------------------------------------------------------------------------
-# The seam: a DECLARED entry is delivered and reaches the typed struct
+# The seam: a DECLARED compiled graph is delivered and reaches the typed struct
 # ---------------------------------------------------------------------------
 
 
@@ -65,14 +65,14 @@ def test_a_hub_delivered_env_value_reaches_settings(
     `load_settings()` is the function the worker's own entrypoint calls.
     """
     declarations = hub_env.declared_by(["HF_TOKEN"])
-    entries = hub_env.EndpointEnvEntries(
+    compiled_graphs = hub_env.EndpointEnvCompiledGraphs(
         {"HF_TOKEN": "hf_operator_set_token"})
 
-    delivery = hub_env.resolve(declarations, entries)
+    delivery = hub_env.resolve(declarations, compiled_graphs)
     assert delivery.env == {"HF_TOKEN": "hf_operator_set_token"}
     assert delivery.withheld == ()
 
-    # The pod boots with image env + delivered entries, and NOTHING the test
+    # The pod boots with image env + delivered compiled graphs, and NOTHING the test
     # process happened to be carrying.
     _boot(monkeypatch, hub_env.pod_environ({}, delivery))
 
@@ -94,25 +94,25 @@ def test_a_rebuild_that_stops_declaring_a_name_withholds_it_and_says_so(
 
     Release N declares the name and the value arrives. Release N+1 is rebuilt
     from worker code that no longer declares it — the operator changed nothing,
-    the entry is untouched — and the value stops arriving. The point is not that
+    the compiled graph is untouched — and the value stops arriving. The point is not that
     it stops (that is the declaration contract working); the point is that the
     delivery SAYS SO, which is the half that was missing on both sides.
     """
-    entries = hub_env.EndpointEnvEntries(
+    compiled_graphs = hub_env.EndpointEnvCompiledGraphs(
         {"HF_TOKEN": "hf_operator_set_token"})
 
     before = hub_env.resolve(
-        hub_env.declared_by(["HF_TOKEN"]), entries)
+        hub_env.declared_by(["HF_TOKEN"]), compiled_graphs)
     _boot(monkeypatch, hub_env.pod_environ({}, before))
     assert load_settings().hf_token == "hf_operator_set_token"
 
-    # The rebuild. Nobody edited the entry; the worker function's env list
+    # The rebuild. Nobody edited the compiled graph; the worker function's env list
     # changed, so the release declares nothing.
-    after = hub_env.resolve(hub_env.declared_by([]), entries)
+    after = hub_env.resolve(hub_env.declared_by([]), compiled_graphs)
 
     assert after.env == {}, "an undeclared name must not be injected"
     assert after.withheld_names() == ["HF_TOKEN"], (
-        "the rebuild dropped a configured entry and reported NOTHING — this is "
+        "the rebuild dropped a configured compiled_graph and reported NOTHING — this is "
         "precisely the silence that cost three pod attempts (th#1650)")
     assert after.withheld[0].reason == hub_env.WITHHELD_UNDECLARED
     assert "0 env name(s)" in after.withheld[0].detail, (
@@ -139,7 +139,7 @@ def test_an_ambient_export_cannot_stand_in_for_a_hub_delivered_value(
 
     delivery = hub_env.resolve(
         hub_env.declared_by([]),
-        hub_env.EndpointEnvEntries({"HF_TOKEN": "hf_operator_set_token"}))
+        hub_env.EndpointEnvCompiledGraphs({"HF_TOKEN": "hf_operator_set_token"}))
 
     env = hub_env.pod_environ(ambient, delivery, strip=["HF_TOKEN"])
     _boot(monkeypatch, env)
@@ -158,7 +158,7 @@ def test_a_release_cannot_declare_its_way_into_the_platform_namespace(
     of the boundary that contains it."""
     delivery = hub_env.resolve(
         hub_env.declared_by(["GEN_WORKER_COMPUTE_CHILD"]),
-        hub_env.EndpointEnvEntries({"GEN_WORKER_COMPUTE_CHILD": "1"}))
+        hub_env.EndpointEnvCompiledGraphs({"GEN_WORKER_COMPUTE_CHILD": "1"}))
     assert delivery.env == {}
     assert delivery.withheld[0].reason == hub_env.WITHHELD_RESERVED
 
@@ -200,7 +200,7 @@ def test_rig_hub_env_mode_delivers_declared_and_strips_ambient() -> None:
     """`--hub-env` boots the mint child the way a pod is booted.
 
     Two properties, and the second is the one that makes the mode worth having:
-    a DECLARED entry is delivered, and an AMBIENT value of the same name is
+    a DECLARED compiled graph is delivered, and an AMBIENT value of the same name is
     stripped rather than inherited. Without the strip, a developer with the
     variable exported in their shell gets a green rig for a release that would
     have booted without it on a pod — which is not a weaker test, it is a test
@@ -216,10 +216,10 @@ def test_rig_hub_env_mode_delivers_declared_and_strips_ambient() -> None:
     assert withheld == []
 
 
-def test_rig_hub_env_mode_reports_an_undeclared_entry_instead_of_dropping_it(
+def test_rig_hub_env_mode_reports_an_undeclared_compiled_graph_instead_of_dropping_it(
 ) -> None:
     """The rig's whole reason to exist is turning a pod-only failure into a
-    local one. An entry the release does not declare must show up as a FACT the
+    local one. An compiled graph the release does not declare must show up as a FACT the
     rig reports, not as a variable that quietly is not there."""
     rig = _rig()
     env, withheld = rig.hub_delivered_env(

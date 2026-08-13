@@ -2,7 +2,7 @@
 consumer on the compile-cache rails (gw#384 / th#569 / #390).
 
 ``compile_cache`` serves the dynamo lane (a JIT warmed from seeded FX
-entries); this module serves ``torch.export`` ->
+compiled graphs); this module serves ``torch.export`` ->
 ``aoti_compile_and_package`` artifacts. Same trust model, storage,
 delivery, and arming seam — compiled graphs live as flavors
 of ``root/family-<family>``::
@@ -13,38 +13,38 @@ Artifact = deterministic ``.tar.gz`` (the receipts gate reads
 ``metadata.json`` straight out of the digested bytes)::
 
     metadata.json           kind/format, runtime key (sm, torch, cuda + sku),
-                            family, compiled_graph_key, and the ENTRY block — the ONE
+                            family, compiled_graph_key, and the COMPILED_GRAPH block — the ONE
                             NAMED GRAPH CLASS this artifact carries, with
                             its target, fork/class-dim coordinate, INPUT
                             CONTRACT, SYMBOL RANGES, declared CONSTANT
                             manifest, and class hash
-    model.pt2               ONE AOTI package holding that entry as its named
-                            model (``data/aotinductor/<entry>/``) — CODE ONLY
+    model.pt2               ONE AOTI package holding that compiled graph as its named
+                            model (``data/aotinductor/<compiled graph>/``) — CODE ONLY
     constants.safetensors   optional: non-weight lifted constants, keys
-                            namespaced ``<entry>::<fqn>``
+                            namespaced ``<compiled graph>::<fqn>``
 
 Format 3 — the atom is ONE GRAPH CLASS (pgw#1176, Paul-directed)
 ----------------------------------------------------------------
 Format 2 packed EVERY declared class into one artifact under one key, and
 made identity, adoption, durability, verification, arming and advertisement
-the same 36-entry unit. That unit is what forbade the incremental
+the same 36-compiled graph unit. That unit is what forbade the incremental
 compile-and-adopt Paul asked for, forced ~32 GiB of all-runners-resident
-arming, and destroyed a 1 h 37 m mint when the 36th entry segfaulted.
+arming, and destroyed a 1 h 37 m mint when the 36th compiled graph segfaulted.
 
-Format 3 is one entry per artifact. What used to be "a compiled graph" is a derived
+Format 3 is one compiled graph per artifact. What used to be "a compiled graph" is a derived
 CONTRACT MANIFEST (``compiled_graph_key.manifest_digest``) — a view, never a thing you
-download, verify or arm. Entries accrete: each arms whole or not at all, and
-an entry IS one graph, so that is atomic by nature. Serve-side dispatch is
+download, verify or arm. Compiled graphs accrete: each arms whole or not at all, and
+an compiled graph IS one graph, so that is atomic by nature. Serve-side dispatch is
 unchanged in kind — it was already built at the right granularity: the call
-routes to the entry whose DECLARED ingress contract admits it, zero
-admitting entries is a named refusal (eager service), and more than one is
-``entry_ambiguous``. What changed is that :class:`EntryDispatch` is a
-REGISTRY entries join as they arm, not a frozen tuple built from a complete
-compiled graph. Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER ENTRY —
-the unbound-entry segfault was re-measured per named model on the pin.
+routes to the compiled graph whose DECLARED ingress contract admits it, zero
+admitting compiled graphs is a named refusal (eager service), and more than one is
+``compiled_graph_ambiguous``. What changed is that :class:`CompiledGraphDispatch` is a
+REGISTRY compiled graphs join as they arm, not a frozen tuple built from a complete
+compiled graph. Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER COMPILED_GRAPH —
+the unbound-compiled graph segfault was re-measured per named model on the pin.
 
 **Truthfulness is structural.** The pod never claims "compiled graph X armed"; it
-reports per-entry serve state. There is no unit left that CAN advertise more
+reports per-compiled graph serve state. There is no unit left that CAN advertise more
 than it serves, so the old all-or-nothing invariant ("a compiled graph that cannot arm
 one of its graph classes arms none of them") is not weakened — it is
 vacuous.
@@ -132,12 +132,12 @@ ARTIFACT_KIND = "aot-inductor"
 #: ``run_impl`` copies the input on EVERY call and says so on the worker's
 #: stderr, which is unreachable on hub-spawned pods — a fleet paying the tax
 #: was indistinguishable from one that was not. Coalesced: once per
-#: (entry, input, reason).
+#: (compiled graph, input, reason).
 REALIGN_EVENT = "aot_input_realigned"
 #: pgw#1074: a rank-0 input arrived in an INTEGER dtype where the graph is
 #: specialized on float32/float64, and this ingress recast it. Same shape and
 #: same doctrine as :data:`REALIGN_EVENT` — the ingress normalizes the feed to
-#: the artifact's contract and SAYS so, once per (entry, input, dtype pair).
+#: the artifact's contract and SAYS so, once per (compiled graph, input, dtype pair).
 RECAST_EVENT = "aot_input_recast"
 #: AOTInductor generates its aligned-input fast path at 16 bytes
 #: (``torch._inductor.codegen.aoti_runtime``'s ALIGNMENT). An input whose
@@ -146,12 +146,12 @@ RECAST_EVENT = "aot_input_recast"
 #: runner clone it per call. Not a knob: it is the compiler's constant.
 AOTI_ALIGNMENT = 16
 #: Format 3 = ONE graph class per artifact (pgw#1176): the metadata carries
-#: one ``entry`` block instead of an ``entries`` map. Formats 1 and 2 are
-#: RETIRED — a format-2 compiled graph cannot restate a per-entry identity, so the ck1
+#: one ``compiled graph`` block instead of an ``compiled graphs`` map. Formats 1 and 2 are
+#: RETIRED — a format-2 compiled graph cannot restate a per-compiled graph identity, so the ck1
 #: corpus is purged in the coordinated re-key rather than migrated.
 ARTIFACT_FORMAT = 3
-#: Separator between the entry name and the constant FQN in
-#: ``constants.safetensors`` keys. Entry names never contain it (targets are
+#: Separator between the compiled graph name and the constant FQN in
+#: ``constants.safetensors`` keys. Compiled graph names never contain it (targets are
 #: dotted identifiers; coordinate values are ints/bools/identifiers).
 LITERAL_SEP = "::"
 _MARKER_ATTR = "_cozy_aot"
@@ -322,7 +322,7 @@ def is_aot_ref(ref: str, family: str = "") -> bool:
 class InputContract:
     """One declared graph input.
 
-    ``shape`` entries are either an ``int`` (statically specialized — the
+    ``shape`` compiled graphs are either an ``int`` (statically specialized — the
     call must match EXACTLY) or a ``str`` naming a symbol whose range lives
     in :attr:`ArtifactContract.symbols`. ``position`` is the positional
     index in the exported call convention; ``name`` is the keyword the
@@ -382,8 +382,8 @@ class ArtifactContract:
     #: negative one, because "input absent" is what discriminates a
     #: BRANCHLESS class from a branch-bearing one whose extra inputs a
     #: name-keyed bind would simply ignore. Without it both classes admit an
-    #: adapter-bearing call and :class:`EntryDispatch` refuses
-    #: ``entry_ambiguous`` — a declaration that cannot discriminate two graph
+    #: adapter-bearing call and :class:`CompiledGraphDispatch` refuses
+    #: ``compiled_graph_ambiguous`` — a declaration that cannot discriminate two graph
     #: classes by ingress, which its own contract calls a defect.
     excluded: Tuple[str, ...] = ()
 
@@ -525,8 +525,8 @@ def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
 
 
 def range_digest(meta: Mapping[str, Any]) -> str:
-    """Canonical digest of one entry's DECLARED ENVELOPE slice — the input
-    ranges the entry admits.
+    """Canonical digest of one compiled graph's DECLARED ENVELOPE slice — the input
+    ranges the compiled graph admits.
 
     Owed to the exact-identity lane (pgw#716/#717): declared dim ranges live
     in ``ep.range_constraints``, NOT in the graph nodes — three exports
@@ -579,15 +579,15 @@ def range_digest(meta: Mapping[str, Any]) -> str:
 
 
 def class_hash(
-    entry: Mapping[str, Any], *, strict: bool, lora_bucket: int,
+    compiled_graph: Mapping[str, Any], *, strict: bool, lora_bucket: int,
 ) -> str:
-    """The per-class graph hash of one packaged entry (pgw#716/#758).
+    """The per-class graph hash of one packaged compiled graph (pgw#716/#758).
 
-    Folds the entry's coordinate (target, fork, class dims), its
+    Folds the compiled graph's coordinate (target, fork, class dims), its
     ``range_digest`` (the MEASURED node-only-collision fix: three exports
     differing only in declared range hashed identically), its graph
     interface block, the node-level ``graph_witness`` body digest, and the
-    trace-mode/lora facts. 16-hex, recomputable from the entry block alone —
+    trace-mode/lora facts. 16-hex, recomputable from the compiled graph block alone —
     so a consumer can prove the stamp and a mismatch NAMES the class (the
     receipts principle).
 
@@ -603,26 +603,26 @@ def class_hash(
     outcome. The witness stays recorded as a top-level sibling for the adopt
     backstop (``aot_identity.verify_graph_witness``) — defense-in-depth. The
     fold is tolerant of a missing witness (folds ``""``) so a pre-witness
-    entry is body-blind rather than unhashable; production entries always
+    compiled graph is body-blind rather than unhashable; production compiled graphs always
     carry it (``keying_block``), and such stale compiled graphs are refused by the
     envelope/structure gates and the witness backstop regardless.
 
-    ``placement`` (pgw#1113) folds in only when the entry states MORE THAN ONE
+    ``placement`` (pgw#1113) folds in only when the compiled graph states MORE THAN ONE
     distinct device — see the comment at the fold.
     """
     facts = {
         "v": 3,
-        "target": str(entry.get("target") or ""),
-        "fork": [[str(n), v] for n, v in (entry.get("fork") or [])],
+        "target": str(compiled_graph.get("target") or ""),
+        "fork": [[str(n), v] for n, v in (compiled_graph.get("fork") or [])],
         "class_dims": [
-            [str(n), int(v)] for n, v in (entry.get("class_dims") or [])],
-        "range_digest": str(entry.get("range_digest") or ""),
-        "graph": dict(entry.get("graph") or {}),
-        "graph_witness": str(entry.get("graph_witness") or ""),
+            [str(n), int(v)] for n, v in (compiled_graph.get("class_dims") or [])],
+        "range_digest": str(compiled_graph.get("range_digest") or ""),
+        "graph": dict(compiled_graph.get("graph") or {}),
+        "graph_witness": str(compiled_graph.get("graph_witness") or ""),
         "strict": bool(strict),
         "lora_bucket": int(lora_bucket or 0),
     }
-    placement = sorted({str(d) for d in (entry.get("placement") or ()) if d})
+    placement = sorted({str(d) for d in (compiled_graph.get("placement") or ()) if d})
     if len(placement) > 1:
         # pgw#1113, closing pgw#819 at the key: a program whose own device map
         # spans several cards has that placement baked into its kernels, and
@@ -632,35 +632,35 @@ def class_hash(
         # precedent — because a single-device placement is what every compiled graph the
         # fleet has published states, and a field that says "unchanged" would
         # strand all of them. No `v` bump for the same reason: the fact is
-        # absent from every existing entry and its absence must stay the
+        # absent from every existing compiled graph and its absence must stay the
         # canonical form.
         facts["placement"] = placement
     blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def stamp_entry(
+def stamp_compiled_graph(
     name: str, block: Mapping[str, Any], *, strict: bool, lora_bucket: int,
 ) -> Dict[str, Any]:
-    """One validated + stamped ENTRY block: ``name`` folded in, contract and
+    """One validated + stamped COMPILED_GRAPH block: ``name`` folded in, contract and
     constants parsed, ``range_digest`` and ``class_hash`` stamped.
 
     THE one place a class hash is stamped, so the mint's stamp, the boot
     key's fold and the admission recomputation are the same computation.
-    Raises :class:`ValueError` naming the entry — a malformed contract must
+    Raises :class:`ValueError` naming the compiled graph — a malformed contract must
     fail at MINT, on the pod, not at serve time on a paying request.
     """
     label = str(name or "").strip()
     if not label:
-        raise ValueError("entry block carries no name")
+        raise ValueError("compiled_graph block carries no name")
     if LITERAL_SEP in label:
         raise ValueError(
-            f"entry name {label!r} contains {LITERAL_SEP!r}, which the "
+            f"compiled_graph name {label!r} contains {LITERAL_SEP!r}, which the "
             f"literal namespace reserves")
     if not isinstance(block, Mapping):
-        raise ValueError(f"entry {label!r} is not an object")
+        raise ValueError(f"compiled_graph {label!r} is not an object")
     if not str(block.get("target") or "").strip():
-        raise ValueError(f"entry {label!r} declares no target")
+        raise ValueError(f"compiled_graph {label!r} declares no target")
     # Deep copy: the stamped block must not alias the caller's nested
     # containers (a later caller-side mutation would silently rewrite the
     # recorded contract).
@@ -670,58 +670,58 @@ def stamp_entry(
         contract_from_meta(row)
         constants_from_meta(row)
     except ValueError as exc:
-        raise ValueError(f"entry {label!r}: {exc}") from exc
+        raise ValueError(f"compiled_graph {label!r}: {exc}") from exc
     row["range_digest"] = range_digest(row)
     row["class_hash"] = class_hash(
         row, strict=bool(strict), lora_bucket=int(lora_bucket or 0))
     return row
 
 
-def entry_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
-    """The validated ``entry`` block of a format-3 artifact.
+def compiled_graph_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
+    """The validated ``compiled graph`` block of a format-3 artifact.
 
     The block must parse as a full contract (inputs, symbols, constants),
-    carry a target and carry a name — an entry the dispatch cannot route or
+    carry a target and carry a name — an compiled graph the dispatch cannot route or
     assert is B2 with extra steps. Raises :class:`ValueError` naming the
-    entry.
+    compiled graph.
 
-    pgw#1176: the plural ``entries_from_meta`` is GONE with the multi-entry
-    artifact. A caller that wants several entries holds several artifacts.
+    pgw#1176: the plural ``compiled_graphs_from_meta`` is GONE with the multi-compiled graph
+    artifact. A caller that wants several compiled graphs holds several artifacts.
     """
-    raw = meta.get(compiled_graph_key_mod.ENTRY_BLOCK_KEY)
+    raw = meta.get(compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY)
     if not isinstance(raw, Mapping) or not raw:
-        raise ValueError("metadata declares no entry block")
+        raise ValueError("metadata declares no compiled_graph block")
     label = str(raw.get("name") or "").strip()
     if not label:
-        raise ValueError("entry block carries no name")
+        raise ValueError("compiled_graph block carries no name")
     if LITERAL_SEP in label:
         raise ValueError(
-            f"entry name {label!r} contains {LITERAL_SEP!r}, which the "
+            f"compiled_graph name {label!r} contains {LITERAL_SEP!r}, which the "
             f"literal namespace reserves")
     if not str(raw.get("target") or "").strip():
-        raise ValueError(f"entry {label!r} declares no target")
+        raise ValueError(f"compiled_graph {label!r} declares no target")
     try:
         contract_from_meta(raw)
         constants_from_meta(raw)
     except ValueError as exc:
-        raise ValueError(f"entry {label!r}: {exc}") from exc
+        raise ValueError(f"compiled_graph {label!r}: {exc}") from exc
     return dict(raw)
 
 
-def entry_metadata(
+def compiled_graph_metadata(
     *,
     family: str,
     precision: str,
     compiled_graph_key: str,
     name: str,
-    entry: Mapping[str, Any],
+    compiled_graph: Mapping[str, Any],
     strict_export: bool = True,
     lora_bucket: int = 0,
     source_ref: str = "",
     source_digest: str = "",
     manifest_digest: str = "",
 ) -> Dict[str, Any]:
-    """Build ONE entry artifact's ``metadata.json`` (format 3).
+    """Build ONE compiled graph artifact's ``metadata.json`` (format 3).
 
     THE single source of truth for the artifact-metadata envelope: the mint
     lane calls this rather than hand-rolling a dict, so producer and consumer
@@ -729,12 +729,12 @@ def entry_metadata(
 
     ``manifest_digest`` is the declaration-wide coverage LABEL
     (``compiled_graph_key.manifest_digest``) — telemetry only, never identity. It is
-    optional precisely because it is not identity: an entry minted by a pod
+    optional precisely because it is not identity: an compiled graph minted by a pod
     that has not folded its whole declaration is still a complete, keyable,
     armable artifact.
     """
-    stamped = stamp_entry(
-        name, entry, strict=bool(strict_export),
+    stamped = stamp_compiled_graph(
+        name, compiled_graph, strict=bool(strict_export),
         lora_bucket=int(lora_bucket or 0))
     meta: Dict[str, Any] = {
         "format": ARTIFACT_FORMAT,
@@ -743,7 +743,7 @@ def entry_metadata(
         "family": str(family or ""),
         "precision": str(precision or ""),
         "compiled_graph_key": str(compiled_graph_key or ""),
-        compiled_graph_key_mod.ENTRY_BLOCK_KEY: stamped,
+        compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY: stamped,
         "manifest_digest": str(manifest_digest or ""),
         "strict_export": bool(strict_export),
         "lora_bucket": int(lora_bucket or 0),
@@ -764,7 +764,7 @@ def entry_metadata(
         # first and SIGILL second.
         "host_isa": host_isa.stamp(),
     }
-    entry_from_meta(meta)
+    compiled_graph_from_meta(meta)
     return meta
 
 
@@ -774,7 +774,7 @@ def entry_metadata(
 #:
 #: pgw#988: this set and ``fleet_compiled_graphs.control_plane_metadata`` are two halves
 #: of ONE contract, and they used to be two independent computations of it.
-#: th#1645 moved ``entries`` out of the declare (correctly — it is unbounded in
+#: th#1645 moved ``compiled graphs`` out of the declare (correctly — it is unbounded in
 #: the model and the declare is control-plane) while the pre-download filter
 #: still demanded it, so every AOT compiled graph published for the next day was rejected
 #: as ``malformed declared contract`` by every pod, and a pod that finds no compiled graph
@@ -854,9 +854,9 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
 def verify_contract(
     meta: Dict[str, Any],
     *,
-    entry: Optional[Mapping[str, Any]] = None,
+    compiled_graph: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """'' when the artifact's ``entry`` contract is self-consistent, else
+    """'' when the artifact's ``compiled graph`` contract is self-consistent, else
     the reason.
 
     The post-download half of :func:`verify`. The contract rides INSIDE the
@@ -865,43 +865,43 @@ def verify_contract(
     staged bytes, and never against a control-plane declare that is not
     required to carry it (pgw#988).
 
-    ``entry`` is the already-validated block from :func:`_unpack` when the
+    ``compiled graph`` is the already-validated block from :func:`_unpack` when the
     arm path has one (pgw#1040 — same pure parse, threaded rather than
     repeated); ``None`` parses it here, which is what a caller holding only a
     metadata dict does.
     """
-    if entry is None:
+    if compiled_graph is None:
         try:
-            entry = entry_from_meta(meta)
+            compiled_graph = compiled_graph_from_meta(meta)
         except ValueError as exc:
             return f"malformed declared contract: {exc}"
     strict = bool(meta.get("strict_export", True))
     bucket = int(meta.get("lora_bucket") or 0)
-    name = str(entry.get("name") or "")
+    name = str(compiled_graph.get("name") or "")
     # pgw#939: absence is a verdict, not a skipped check. `class_hash` below
     # was already written this way and is the model the other axis is brought
     # to — `compile_cache.verify` is strict on every IDENTITY_AXES field for
     # the same reason, and `compile_cache.py` names this exact
     # `if want and want != have` shape as JAX PR #27814's one documented
     # wrong-cache-hit.
-    stamped = str(entry.get("range_digest") or "")
+    stamped = str(compiled_graph.get("range_digest") or "")
     if not stamped:
-        return f"entry {name!r}: no range_digest stamped"
-    if stamped != range_digest(entry):
-        return f"entry {name!r}: range_digest does not match its contract"
-    stamped_hash = str(entry.get("class_hash") or "")
+        return f"compiled_graph {name!r}: no range_digest stamped"
+    if stamped != range_digest(compiled_graph):
+        return f"compiled_graph {name!r}: range_digest does not match its contract"
+    stamped_hash = str(compiled_graph.get("class_hash") or "")
     if not stamped_hash:
-        return f"entry {name!r}: no class_hash stamped"
-    if stamped_hash != class_hash(entry, strict=strict, lora_bucket=bucket):
+        return f"compiled_graph {name!r}: no class_hash stamped"
+    if stamped_hash != class_hash(compiled_graph, strict=strict, lora_bucket=bucket):
         # The receipts principle (pgw#716): a hash mismatch NAMES the class.
-        return f"entry {name!r}: class_hash does not match its recorded facts"
+        return f"compiled_graph {name!r}: class_hash does not match its recorded facts"
     # pgw#1059/pgw#1176: the stamped key must be exactly the key the
     # artifact's OWN recorded facts describe — the same recomputation the
     # mint stamped and the publish path corroborated, now proven at ADMISSION
     # on the staged bytes. Two consequences, both deliberate: a forged /
     # hand-edited stamp is refused by name, and a PRE-ATOM compiled graph is refused
-    # STRUCTURALLY (its metadata records an `entries` MAP and a
-    # `combined_graph_hash`, no per-entry identity, so the recomputation
+    # STRUCTURALLY (its metadata records an `compiled graphs` MAP and a
+    # `combined_graph_hash`, no per-compiled graph identity, so the recomputation
     # raises rather than matching) — which is what makes the ck1 corpus purge
     # hygiene rather than a correctness precondition.
     # Gated on key SHAPE: an ek-shaped stamp is an identity claim and must
@@ -911,7 +911,7 @@ def verify_contract(
     stamped_key = str(meta.get("compiled_graph_key") or "")
     if stamped_key and compiled_graph_key_mod.is_key(stamped_key):
         try:
-            recomputed = compiled_graph_key_mod.from_entry_metadata(meta)
+            recomputed = compiled_graph_key_mod.from_compiled_graph_metadata(meta)
         except compiled_graph_key_mod.CompiledGraphKeyError as exc:
             return (
                 f"stamped compiled_graph_key {stamped_key} is not restatable from the "
@@ -927,19 +927,19 @@ def verify(
     meta: Dict[str, Any],
     *,
     family: str = "",
-    entry: Optional[Mapping[str, Any]] = None,
+    compiled_graph: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """'' when an entry's FULL metadata matches this runtime, else the reason.
+    """'' when an compiled graph's FULL metadata matches this runtime, else the reason.
 
     Both halves, for callers holding an artifact's own ``metadata.json``
     (:func:`stage_artifact`). Discovery, which holds only a declare, calls
     :func:`verify_declared` and reaches this one after the fetch.
 
-    ``entry`` threads the already-validated block through to
+    ``compiled graph`` threads the already-validated block through to
     :func:`verify_contract` (pgw#1040).
     """
     return (verify_declared(meta, family=family)
-            or verify_contract(meta, entry=entry))
+            or verify_contract(meta, compiled_graph=compiled_graph))
 
 
 #: :func:`host_isa_reason`'s refusal for a compiled graph that stamped no requirement.
@@ -1065,12 +1065,12 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
 def _unpack(
     artifact: Path, dest_root: Path,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """:func:`unpack`, also handing back the ``entry`` block it had to parse.
+    """:func:`unpack`, also handing back the ``compiled graph`` block it had to parse.
 
-    pgw#1040: one arm used to run the entry parse three times over the same
+    pgw#1040: one arm used to run the compiled graph parse three times over the same
     bytes — here for the literal-payload check, again in
     :func:`verify_contract`, and a third time in the arm — and each pass
-    re-parses the entry's full contract and constant table. The parse is the
+    re-parses the compiled graph's full contract and constant table. The parse is the
     same pure function of the same dict every time, so the arm path threads
     ONE result from here instead.
     """
@@ -1100,17 +1100,17 @@ def _unpack(
     if not meta:
         raise ValueError(f"{ARTIFACT_KIND} artifact {artifact} has no {METADATA_NAME}")
     # A literal-sourced constant with no payload member would only be
-    # discovered at bind time, mid-arm. Name it (and its entry) here.
-    entry = entry_from_meta(meta)
-    name = str(entry.get("name") or "")
+    # discovered at bind time, mid-arm. Name it (and its compiled graph) here.
+    compiled_graph = compiled_graph_from_meta(meta)
+    name = str(compiled_graph.get("name") or "")
     literals = [
         f"{name}{LITERAL_SEP}{s.fqn}"
-        for s in constants_from_meta(entry) if s.source == SOURCE_LITERAL]
+        for s in constants_from_meta(compiled_graph) if s.source == SOURCE_LITERAL]
     if literals and LITERALS_NAME not in seen:
         raise ValueError(
             f"{ARTIFACT_KIND} artifact {artifact} declares literal constants "
             f"{sorted(literals)[:4]!r} but carries no {LITERALS_NAME}")
-    return meta, entry
+    return meta, compiled_graph
 
 
 #: Read the packed envelope without unpacking the compiled graph.
@@ -1150,9 +1150,9 @@ def unpack_metadata(artifact: Path) -> Dict[str, Any]:
 @dataclass
 class _StagedAotArtifact:
     metadata: Dict[str, Any]
-    #: The validated ``entry`` block of :attr:`metadata`, parsed ONCE while
+    #: The validated ``compiled graph`` block of :attr:`metadata`, parsed ONCE while
     #: staging (pgw#1040) and threaded to every consumer in the arm.
-    entry: Dict[str, Any]
+    compiled_graph: Dict[str, Any]
     root: Path
     temporary: "tempfile.TemporaryDirectory[str]"
 
@@ -1182,13 +1182,13 @@ def stage_artifact(
     temporary = tempfile.TemporaryDirectory(prefix="aot-stage-", dir=base)
     root = Path(temporary.name)
     try:
-        meta, entry = _unpack(Path(artifact), root)
+        meta, compiled_graph = _unpack(Path(artifact), root)
         # pgw#754: rule on host-CPU executability FIRST and by name — the
         # one failure mode that must never reach dlopen.
         isa_reason = host_isa_reason(meta)
         if isa_reason:
             raise AdoptError("host_isa_unsupported", isa_reason)
-        reason = verify(meta, family=family, entry=entry)
+        reason = verify(meta, family=family, compiled_graph=compiled_graph)
         if reason:
             raise AdoptError("key_mismatch", reason)
         # pgw#903: "can this runtime execute it" is answered above; this
@@ -1207,7 +1207,7 @@ def stage_artifact(
         sm_reason = verify_package_compute_capability(root / PACKAGE_NAME)
         if sm_reason:
             raise AdoptError("sm_mismatch", sm_reason)
-        return _StagedAotArtifact(meta, entry, root, temporary)
+        return _StagedAotArtifact(meta, compiled_graph, root, temporary)
     except AdoptError:
         temporary.cleanup()
         raise
@@ -1390,7 +1390,7 @@ def recast_gap(spec: InputContract, value: Any) -> str:
     ``.to(dtype=torch.int64)``). sdxl's compiled graph was minted float32 (ie#627, and
     correct — it is what the graph is specialized on), so its turbo arm
     (``euler_trailing``) served from the compiled graph and its base arm, on an int64
-    sampler, was refused ``no_entry_admits`` by an entry that covered it in
+    sampler, was refused ``no_compiled_graph_admits`` by an compiled graph that covered it in
     every other respect. No single declared dtype can be right for a family
     whose sampler is per-request VIEW state, and the sampler is deliberately
     not a compile axis — so the normalization belongs at the boundary that
@@ -1527,8 +1527,8 @@ def aligned_feeds(
     return out
 
 
-#: pgw#1074: how far each refusal reason puts an entry from the call. Dims
-#: LAST, so an entry that matches every declared dimension sorts to the front
+#: pgw#1074: how far each refusal reason puts an compiled graph from the call. Dims
+#: LAST, so an compiled graph that matches every declared dimension sorts to the front
 #: of a refusal listing whatever its remaining complaint is. The rungs are
 #: ordinal only — nothing reads their absolute values.
 MISS_RUNGS: Mapping[str, int] = {
@@ -1546,22 +1546,22 @@ MISS_RUNGS: Mapping[str, int] = {
     "input_missing": 6,
 }
 _MISS_RUNG_DEFAULT = 9
-#: How many non-closest entries a refusal names individually before it
-#: switches to a per-reason count. The closest entry is ALWAYS named in full
+#: How many non-closest compiled graphs a refusal names individually before it
+#: switches to a per-reason count. The closest compiled graph is ALWAYS named in full
 #: and always first: this detail is truncated by the hub at ~573 chars, and
-#: pgw#1074 is what happens when the one informative entry falls past that.
+#: pgw#1074 is what happens when the one informative compiled graph falls past that.
 _MISS_SAMPLE = 3
 
 
 @dataclass(frozen=True)
 class IngressMiss:
-    """ONE reason one entry refuses one call (pgw#1074).
+    """ONE reason one compiled graph refuses one call (pgw#1074).
 
-    :attr:`rung` is how FAR that reason puts the entry from the call, and it
+    :attr:`rung` is how FAR that reason puts the compiled graph from the call, and it
     exists because a refusal listing has to be ORDERED by something. The
-    ordering is dims-first: an entry the call matches in every declared
-    dimension and misses only on dtype is the entry a reader is looking for,
-    and listing entries in iteration order buried exactly that one (36 tried,
+    ordering is dims-first: an compiled graph the call matches in every declared
+    dimension and misses only on dtype is the compiled graph a reader is looking for,
+    and listing compiled graphs in iteration order buried exactly that one (36 tried,
     6 listed, the dims-matching one not among them — the pgw#1074 filing).
     """
 
@@ -1576,10 +1576,10 @@ def _rung(reason: str) -> int:
 
 
 def miss_distance(misses: Sequence[IngressMiss]) -> Tuple[int, ...]:
-    """Sort key over one entry's misses — lower is CLOSER to the call.
+    """Sort key over one compiled graph's misses — lower is CLOSER to the call.
 
-    The sorted rung tuple, so that (a) an entry whose only complaint is a
-    shallow one beats an entry with a deep one, and (b) among entries with
+    The sorted rung tuple, so that (a) an compiled graph whose only complaint is a
+    shallow one beats an compiled graph with a deep one, and (b) among compiled graphs with
     the same shallowest complaint, the one with FEWER complaints wins (a
     prefix sorts before its extension). Deterministic and total.
     """
@@ -1596,15 +1596,15 @@ def ingress_report(
     """EVERY way this call misses this contract, plus the symbol bindings.
 
     The one implementation of the pgw#704 B2 check. :func:`assert_ingress`
-    raises this function's FIRST miss and :meth:`EntryDispatch.select` ranks
-    whole entries by all of them, so an admission decision and the sentence
+    raises this function's FIRST miss and :meth:`CompiledGraphDispatch.select` ranks
+    whole compiled graphs by all of them, so an admission decision and the sentence
     that explains it can never be computed by two different rules.
 
     ``first_only`` returns as soon as one miss is found. It is an early EXIT
     from this same walk, never a second rule — every ADMISSION decision takes
     it (an admitted call has no misses, so the two are identical there), and
     the exhaustive walk is paid only on the refusal path, which is already
-    falling back to eager. A 36-entry compiled graph is asked this per denoise step.
+    falling back to eager. A 36-compiled graph compiled graph is asked this per denoise step.
 
     Misses are collected in declaration order, per input in
     dtype -> rank -> dims order, which is the order the raising check used
@@ -1623,7 +1623,7 @@ def ingress_report(
         bound = bind_call_inputs(contract, args, kwargs)
     except IngressContractError as exc:
         # An input the call does not carry at all: nothing further about this
-        # entry can be measured, so it is one miss and the deepest rung.
+        # compiled graph can be measured, so it is one miss and the deepest rung.
         return ((IngressMiss(exc.reason, str(exc)),), {})
     misses: List[IngressMiss] = []
     symbols: Dict[str, int] = {}
@@ -1717,13 +1717,13 @@ def assert_ingress(
 # ---------------------------------------------------------------------------
 
 
-def _load_package(path: Path, entry: str = "model") -> Any:
-    """Load one NAMED model out of a ``.pt2`` (the sole torch entry point
+def _load_package(path: Path, compiled_graph: str = "model") -> Any:
+    """Load one NAMED model out of a ``.pt2`` (the sole torch compiled graph point
     for the load path — tests substitute this). ``"model"`` is torch's own
     default name for a single-model package."""
     from torch._inductor.package import load_package
 
-    return load_package(str(path), model_name=str(entry or "model"))
+    return load_package(str(path), model_name=str(compiled_graph or "model"))
 
 
 def _load_literals(path: Path, device: str) -> Dict[str, Any]:
@@ -1733,19 +1733,19 @@ def _load_literals(path: Path, device: str) -> Dict[str, Any]:
 
 
 def split_literals(literals: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Split a namespaced literal payload into per-entry tables.
+    """Split a namespaced literal payload into per-compiled graph tables.
 
-    Keys are ``<entry>::<fqn>`` (:data:`LITERAL_SEP`); a key with no
+    Keys are ``<compiled graph>::<fqn>`` (:data:`LITERAL_SEP`); a key with no
     namespace is refused by name — a literal the dispatch cannot attribute
-    to an entry could bind to the wrong graph."""
+    to an compiled graph could bind to the wrong graph."""
     out: Dict[str, Dict[str, Any]] = {}
     for key, value in literals.items():
-        entry, sep, fqn = str(key).partition(LITERAL_SEP)
-        if not sep or not entry or not fqn:
+        compiled_graph, sep, fqn = str(key).partition(LITERAL_SEP)
+        if not sep or not compiled_graph or not fqn:
             raise ValueError(
                 f"literal key {key!r} is not namespaced "
-                f"'<entry>{LITERAL_SEP}<fqn>'")
-        out.setdefault(entry, {})[fqn] = value
+                f"'<compiled_graph>{LITERAL_SEP}<fqn>'")
+        out.setdefault(compiled_graph, {})[fqn] = value
     return out
 
 
@@ -1857,17 +1857,17 @@ NONCONTIGUOUS_CONSTANT = "constant_noncontiguous"
 
 
 def target_constant_pool(
-    entry_constants: Iterable[Sequence[ConstantSpec]],
+    compiled_graph_constants: Iterable[Sequence[ConstantSpec]],
     state_dict: Mapping[str, Any],
     into: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The target's state_dict-sourced constants, BY REFERENCE, accreted into
     ``into`` (pgw#1042, pgw#1176, pgw#1177).
 
-    ``into`` is the marker-owned pool an earlier entry already built for this
-    target. Entries JOIN a target's pool as they arm — the pool is not a
+    ``into`` is the marker-owned pool an earlier compiled graph already built for this
+    target. Compiled graphs JOIN a target's pool as they arm — the pool is not a
     frozen product of a complete compiled graph — and an FQN already present is left
-    alone, so N entries of one target cost ONE pool whatever their number and
+    alone, so N compiled graphs of one target cost ONE pool whatever their number and
     whatever ORDER they arrive in.
 
     **THE CLONE IS GONE (pgw#1177, measured).** This function used to hand
@@ -1875,11 +1875,11 @@ def target_constant_pool(
     user_managed=True)`` makes no copy of its own, so that clone was **the
     only copy in the system**: one full duplicate of the target's weights,
     held for the life of the arm — ~5.1 GiB on sdxl's single ``unet`` target
-    — in direct contradiction of §4.33 step 4 ("the compiled entries bind
+    — in direct contradiction of §4.33 step 4 ("the compiled compiled graphs bind
     constants BY REFERENCE against the resident weights; there is no second
     copy of the model"). Its stated justification, "a post-arm resident
     mutation cannot silently change an armed compiled graph", is BACKWARDS: eager sees
-    such a mutation immediately, so it is the un-mutated compiled entry that
+    such a mutation immediately, so it is the un-mutated compiled compiled graph that
     would silently diverge from the pipeline it serves.
 
     What the clone ALSO did, and what therefore survives explicitly: it
@@ -1889,13 +1889,13 @@ def target_constant_pool(
     whole pool being cloned for their sake.
     """
     out: Dict[str, Any] = {} if into is None else into
-    for specs in entry_constants:
+    for specs in compiled_graph_constants:
         for spec in specs:
             if spec.source != SOURCE_STATE_DICT or spec.fqn in out:
                 continue
             value = state_dict.get(spec.fqn)
             if value is None:
-                continue  # resolve_constants names the miss, typed, per entry
+                continue  # resolve_constants names the miss, typed, per compiled graph
             try:
                 contiguous = bool(value.is_contiguous())
             except Exception:  # noqa: BLE001 — duck-typed rigs hand non-tensors
@@ -1943,7 +1943,7 @@ class ArtifactRunner:
     contract: ArtifactContract
     constants: Tuple[ConstantSpec, ...]
     module_name: str = ""
-    entry: str = ""
+    compiled_graph: str = ""
     bound: bool = False
     #: pgw#817/D3: True when :meth:`bind` bound BY REFERENCE. Recorded rather
     #: than inferred so an arm report can state whether N instances cost N
@@ -1984,7 +1984,7 @@ class ArtifactRunner:
         keeps pointers to the caller's tensors instead of copying them into
         its own constant buffer. A copying bind is one duplicate of the
         weights PER RUNNER — and pgw#758's multi-graph compiled graphs bind every
-        entry up front, so an N-entry compiled graph paid N duplicates and OOM'd the
+        compiled graph up front, so an N-compiled graph compiled graph paid N duplicates and OOM'd the
         sdxl arm (pgw#1042). The whole-graph arm therefore binds by
         reference against ONE marker-owned pool per target
         (:func:`target_constant_pool`). The caller that passes True is
@@ -2013,12 +2013,12 @@ class ArtifactRunner:
         # artifact. AOTInductor folds ONLY under
         # ``aot_inductor.use_runtime_constant_folding=True`` (default never
         # folds — measured on 3 constant-expression module shapes AND the
-        # real sdxl compiled graph), and when it does, the ``_FOLDED_CONST_*`` entries
+        # real sdxl compiled graph), and when it does, the ``_FOLDED_CONST_*`` compiled graphs
         # (``from_folded=True``) are EXEMPT from the full-update check and
         # RECOMPUTED from the freshly bound originals (mutate-arm proven:
         # binding values 3x off compile time tracks eager bit-exactly). So
         # strict is safe for both artifact classes. NOTE our own mint cannot
-        # ship a folding artifact today: folded entries classify as literals
+        # ship a folding artifact today: folded compiled graphs classify as literals
         # with no ``ep.constants`` value, so ``_write_literals`` refuses the
         # mint by name — and if runtime folding is ever deliberately enabled,
         # the change is to EXCLUDE from_folded constants from the manifest
@@ -2035,9 +2035,9 @@ class ArtifactRunner:
         # sdxl mint died at publish as an anonymous `RuntimeError:
         # update_constant_buffer_func_(...) API call failed at
         # model_container_runner.cpp:289` — the real message (a cudaMalloc
-        # OOM from per-entry constant copies) went to a stderr no pod
+        # OOM from per-compiled graph constant copies) went to a stderr no pod
         # exposes. Every failure inside the AOTI update is now a typed
-        # ConstantsUnboundError carrying the entry, the constants' size and
+        # ConstantsUnboundError carrying the compiled graph, the constants' size and
         # the card's live free/total, so the hub row names the failure class.
         try:
             if user_managed:
@@ -2051,7 +2051,7 @@ class ArtifactRunner:
                         "user_managed_unsupported",
                         f"this torch's load_constants has no user_managed "
                         f"parameter, so every constant would be COPIED — one "
-                        f"copy of the target weights per bound entry "
+                        f"copy of the target weights per bound compiled_graph "
                         f"({type(exc).__name__}: {exc})") from exc
             else:
                 self.package.load_constants(values, check_full_update=True)
@@ -2060,7 +2060,7 @@ class ArtifactRunner:
         except RuntimeError as exc:
             raise ConstantsUnboundError(
                 "injection_failed",
-                f"entry {self.entry or self.module_name or 'unknown'}: the "
+                f"compiled_graph {self.compiled_graph or self.module_name or 'unknown'}: the "
                 f"artifact refused the constant update inside AOTI "
                 f"({type(exc).__name__}: {exc}); {len(values)} constants, "
                 f"{_tensor_bytes(values.values()) / (1 << 20):.0f} MiB, "
@@ -2070,13 +2070,13 @@ class ArtifactRunner:
         self.bound = True
 
     def assert_ready(self) -> None:
-        """The gate that keeps the segfault unreachable — per ENTRY: the
+        """The gate that keeps the segfault unreachable — per COMPILED_GRAPH: the
         unbound-call segfault was re-measured per named model (pgw#758)."""
         if not self.bound:
             raise ConstantsUnboundError(
                 "constants_unbound",
-                f"refusing to invoke code-only artifact entry "
-                f"({self.entry or self.module_name or 'unknown'}) with "
+                f"refusing to invoke code-only artifact compiled_graph "
+                f"({self.compiled_graph or self.module_name or 'unknown'}) with "
                 f"{len(self.constants)} unbound constant(s): calling before "
                 f"load_constants segfaults the worker process")
 
@@ -2093,26 +2093,26 @@ class ArtifactRunner:
         self.realigned[key] = seen + 1
         if seen:
             return
-        entry = self.entry or self.module_name
+        compiled_graph = self.compiled_graph or self.module_name
         if event == RECAST_EVENT:
             logger.warning(
-                "aot-serve: input %r arrived %s for entry %r; recasting to "
+                "aot-serve: input %r arrived %s for compiled_graph %r; recasting to "
                 "the declared dtype at ingress (the sampler, not the family, "
-                "decides this dtype)", name, reason, entry)
+                "decides this dtype)", name, reason, compiled_graph)
             detail = (
-                f"family={self.family} entry={entry} "
+                f"family={self.family} compiled_graph={compiled_graph} "
                 f"target={self.module_name} input={name}: {reason} — recast "
                 f"at ingress to the dtype this graph is specialized on "
                 f"(pgw#1074: a scalar timestep's dtype is a per-request "
                 f"SAMPLER fact, not a family one)")
         else:
             logger.warning(
-                "aot-serve: input %r arrived %s for entry %r; realigning into "
+                "aot-serve: input %r arrived %s for compiled_graph %r; realigning into "
                 "an owned aligned buffer at ingress (the artifact would "
                 "otherwise copy it on every call and report only on stderr)",
-                name, reason, entry)
+                name, reason, compiled_graph)
             detail = (
-                f"family={self.family} entry={entry} "
+                f"family={self.family} compiled_graph={compiled_graph} "
                 f"target={self.module_name} input={name}: {reason} — "
                 f"realigned at ingress into an owned {AOTI_ALIGNMENT}-byte "
                 f"aligned buffer (AOTInductor would otherwise copy it on "
@@ -2136,27 +2136,27 @@ class ArtifactRunner:
         return out
 
 
-def no_entry_detail(
+def no_compiled_graph_detail(
     tried: int,
     missed: Sequence[Tuple[Tuple[int, ...], str, Tuple[IngressMiss, ...]]],
 ) -> str:
-    """The ``no_entry_admits`` sentence, CLOSEST ENTRY FIRST (pgw#1074).
+    """The ``no_compiled_graph_admits`` sentence, CLOSEST COMPILED_GRAPH FIRST (pgw#1074).
 
     The refusal this replaces said "36 tried" and then listed six in iteration
-    order — and the one entry whose dims matched the call was not among them,
+    order — and the one compiled graph whose dims matched the call was not among them,
     so diagnosing a live refusal meant pulling the published compiled graph apart off-pod
-    to find out what the covering entry actually objected to. A refusal that
+    to find out what the covering compiled graph actually objected to. A refusal that
     hides the one relevant miss is the pgw#1058 lesson repeating one layer up,
     in the diagnostics.
 
-    So: rank by :func:`miss_distance`, name the closest entry and its FULL
+    So: rank by :func:`miss_distance`, name the closest compiled graph and its FULL
     reason first (it survives any downstream truncation), then account for
-    every other entry by reason COUNT rather than by naming an arbitrary few.
+    every other compiled graph by reason COUNT rather than by naming an arbitrary few.
     Nothing is silently dropped — ``tried`` and the counts always add up.
     """
     if not missed:
         return (
-            f"request out of declared envelope: no packaged entry admits "
+            f"request out of declared envelope: no packaged compiled_graph admits "
             f"this call ({tried} tried), so the request is served EAGER "
             f"and named at ingress")
     ranked = sorted(missed, key=lambda row: (row[0], row[1]))
@@ -2164,16 +2164,16 @@ def no_entry_detail(
     dims_ok = all(_rung(m.reason) < MISS_RUNGS["static_dim_mismatch"]
                   for m in misses)
     head = (
-        f"request out of declared envelope — no packaged entry admits this "
-        f"call, served EAGER ({tried} tried); CLOSEST entry "
+        f"request out of declared envelope — no packaged compiled_graph admits this "
+        f"call, served EAGER ({tried} tried); CLOSEST compiled_graph "
         f"{closest!r}"
         f"{' — every declared dim MATCHES' if dims_ok else ''}: "
         + "; ".join(f"{m.reason} ({m.detail})" for m in misses[:2]))
     rest = ranked[1:]
     if not rest:
         return head
-    # ONE count per entry, under its own closest reason, so the counts sum to
-    # exactly the number of entries tried and "36 tried" can be checked
+    # ONE count per compiled graph, under its own closest reason, so the counts sum to
+    # exactly the number of compiled graphs tried and "36 tried" can be checked
     # against the sentence that follows it.
     tally: Dict[str, int] = {}
     for _d, _name, other in rest:
@@ -2185,21 +2185,21 @@ def no_entry_detail(
     counted = ", ".join(
         f"{reason} x{count}" for reason, count in
         sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))
-    return f"{head}. Other {len(rest)} entries [{counted}] — next: {named}"
+    return f"{head}. Other {len(rest)} compiled_graphs [{counted}] — next: {named}"
 
 
 @dataclass
-class EntryDispatch:
-    """The REGISTRY of armed entries serving ONE target, behind one call site
-    (pgw#758, re-based per entry by pgw#1176).
+class CompiledGraphDispatch:
+    """The REGISTRY of armed compiled graphs serving ONE target, behind one call site
+    (pgw#758, re-based per compiled graph by pgw#1176).
 
-    Dispatch is the declared contract itself: the call routes to the entry
-    whose ingress contract ADMITS it. No admitting entry is a named
+    Dispatch is the declared contract itself: the call routes to the compiled graph
+    whose ingress contract ADMITS it. No admitting compiled graph is a named
     per-request refusal (the caller serves eagerly); more than one is
-    ``entry_ambiguous`` — the declaration failed to discriminate two graph
+    ``compiled_graph_ambiguous`` — the declaration failed to discriminate two graph
     classes by ingress, which is a defect to surface, never a coin to flip.
 
-    pgw#1176: entries JOIN as they arm and LEAVE when they de-arm. The tuple
+    pgw#1176: compiled graphs JOIN as they arm and LEAVE when they de-arm. The tuple
     that used to be built once, from a complete compiled graph, was the arming half of
     the wrong atom. A registry has a further property the tuple could not:
     a subset is a legitimate STEADY STATE, not merely a stage on the way to
@@ -2216,14 +2216,14 @@ class EntryDispatch:
 
     runners: Tuple[Tuple[str, ArtifactRunner], ...] = ()
     declared: Tuple[str, ...] = ()
-    #: entry name -> the reason it left. A de-armed entry is REMEMBERED, not
+    #: compiled graph name -> the reason it left. A de-armed compiled graph is REMEMBERED, not
     #: forgotten: §4.31's de-arm is sticky for the boot, and a re-arm of a
     #: class that failed for cause would be the thing that rule forbids.
     de_armed: Dict[str, str] = field(default_factory=dict)
-    #: The entry :meth:`select` last routed to — the only way the fail-soft
+    #: The compiled graph :meth:`select` last routed to — the only way the fail-soft
     #: wrapper one frame up can name the graph class that raised.
     last_selected: str = ""
-    #: Calls served by entries that have since DE-ARMED. Banked rather than
+    #: Calls served by compiled graphs that have since DE-ARMED. Banked rather than
     #: discarded: those executions happened, and `execution_count` is the
     #: adoption proof's evidence — dropping them when a sibling de-arms would
     #: make a pod that served 5,000 compiled requests and then lost one class
@@ -2231,13 +2231,13 @@ class EntryDispatch:
     retired_calls: int = 0
 
     def add(self, name: str, runner: ArtifactRunner) -> None:
-        """Register one armed entry. Replaces an entry of the same name (a
+        """Register one armed compiled graph. Replaces an compiled graph of the same name (a
         re-arm), and refuses one this dispatch de-armed for cause."""
         label = str(name)
         if label in self.de_armed:
             raise AdoptError(
-                "entry_de_armed",
-                f"entry {label!r} was de-armed this boot "
+                "compiled_graph_de_armed",
+                f"compiled_graph {label!r} was de-armed this boot "
                 f"({self.de_armed[label]}); §4.31's de-arm is sticky, so it "
                 f"must not be re-armed without a new process")
         rows = [(n, r) for n, r in self.runners if n != label]
@@ -2245,7 +2245,7 @@ class EntryDispatch:
         self.runners = tuple(sorted(rows, key=lambda row: row[0]))
 
     def remove(self, name: str, reason: str) -> bool:
-        """De-arm ONE entry, sticky for the boot. True when it was armed.
+        """De-arm ONE compiled graph, sticky for the boot. True when it was armed.
 
         This is the whole replacement for the old compiled graph-wide revoke: a
         compiled graph-attributable failure in one graph class costs that class, and
@@ -2271,7 +2271,7 @@ class EntryDispatch:
             if n not in armed and n not in self.de_armed)
 
     def assert_ready(self) -> None:
-        """B1 for every entry — an unbound one is a segfault, not a miss."""
+        """B1 for every compiled graph — an unbound one is a segfault, not a miss."""
         for _name, runner in self.runners:
             runner.assert_ready()
 
@@ -2282,7 +2282,7 @@ class EntryDispatch:
 
     @property
     def user_managed(self) -> bool:
-        """True only when EVERY entry bound by reference — one copying entry
+        """True only when EVERY compiled graph bound by reference — one copying compiled graph
         is one copy of the block's weights per instance."""
         return bool(self.runners) and all(
             runner.user_managed for _n, runner in self.runners)
@@ -2321,27 +2321,27 @@ class EntryDispatch:
                 # the growth path would submit a class the declaration
                 # already contains.
                 raise IngressContractError(
-                    "entry_pending_compile",
-                    f"no ARMED entry admits this call ({len(self.runners)} "
+                    "compiled_graph_pending_compile",
+                    f"no ARMED compiled_graph admits this call ({len(self.runners)} "
                     f"armed, {len(pending)} declared classes still pending "
                     f"compile) — served EAGER while the background compile "
                     f"reaches them: {list(pending)[:4]!r}. "
-                    + no_entry_detail(len(self.runners), ranked))
+                    + no_compiled_graph_detail(len(self.runners), ranked))
             raise IngressContractError(
-                "no_entry_admits", no_entry_detail(len(self.runners), ranked))
+                "no_compiled_graph_admits", no_compiled_graph_detail(len(self.runners), ranked))
         if len(admitted) > 1:
             names = sorted(name for name, _ in admitted)
             raise IngressContractError(
-                "entry_ambiguous",
-                f"{len(admitted)} entries admit this call ({names[:6]!r}) — "
+                "compiled_graph_ambiguous",
+                f"{len(admitted)} compiled_graphs admit this call ({names[:6]!r}) — "
                 f"the declaration does not discriminate these graph classes "
                 f"by ingress contract")
         return admitted[0]
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         name, runner = self.select(args, kwargs)
-        # Recorded BEFORE the call so a raising entry can be de-armed BY NAME
-        # (§4.31 per entry): the wrapper catches the exception a frame up and
+        # Recorded BEFORE the call so a raising compiled graph can be de-armed BY NAME
+        # (§4.31 per compiled graph): the wrapper catches the exception a frame up and
         # has no other way to know which of N graph classes produced it.
         self.last_selected = name
         return runner(*args, **kwargs)
@@ -2365,12 +2365,12 @@ class EntryDispatch:
                 out[key] = out.get(key, 0) + count
         return out
 
-    def entry_calls(self) -> Dict[str, int]:
-        """Per-entry served-call counts — which graph class actually served."""
+    def compiled_graph_calls(self) -> Dict[str, int]:
+        """Per-compiled graph served-call counts — which graph class actually served."""
         return {name: runner.calls for name, runner in self.runners}
 
     def excludes(self, names: Sequence[str]) -> bool:
-        """True when some packaged entry REFUSES every one of ``names``.
+        """True when some packaged compiled graph REFUSES every one of ``names``.
 
         The adapter-free routing question, asked of the declaration rather
         than of a flag: is there a class in this compiled graph that serves calls
@@ -2401,7 +2401,7 @@ def ingress_class_name(
     pods agree they are missing the SAME thing.
 
     Deliberately independent of any artifact: the whole point is that the
-    call arrived at a class no packaged entry declares, so there is no entry
+    call arrived at a class no packaged compiled graph declares, so there is no compiled graph
     block to read it off.
     """
     parts: List[str] = []
@@ -2451,7 +2451,7 @@ def lifted_call_kwargs(module: Any) -> Dict[str, Any]:
 
 
 def adapter_call_kwargs(
-    module: Any, runner: "ArtifactRunner | EntryDispatch",
+    module: Any, runner: "ArtifactRunner | CompiledGraphDispatch",
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """``(artifact kwargs, eager kwargs)`` for one call's adapter inputs.
 
@@ -2518,7 +2518,7 @@ def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
 
 def wrap_module(
     module: Any,
-    runner: "ArtifactRunner | EntryDispatch",
+    runner: "ArtifactRunner | CompiledGraphDispatch",
     meta: Dict[str, Any],
     *,
     attr: str = "forward",
@@ -2532,7 +2532,7 @@ def wrap_module(
     synchronously revokes scheduler-visible compiled proof and permanently
     routes to eager; the module object (config, dtype, device, weights)
     stays untouched, and its weights remain the constant-binding source.
-    ``runner`` is one target's :class:`EntryDispatch` (or a bare
+    ``runner`` is one target's :class:`CompiledGraphDispatch` (or a bare
     :class:`ArtifactRunner` in focused tests — both are callable and count
     calls); ``attr`` generalizes the swap beyond ``forward`` for dotted
     targets like ``vae.decode`` (pgw#758).
@@ -2541,7 +2541,7 @@ def wrap_module(
     counted, per-request contract refusal — the request serves eagerly and
     the artifact stays armed for traffic inside the declared envelope,
     because one
-    out-of-range request (or an entry-dispatch miss/ambiguity) says nothing
+    out-of-range request (or an compiled graph-dispatch miss/ambiguity) says nothing
     about the artifact's health.
 
     pgw#725 LoRA seam: when the denoiser carries a lifted adapter, both
@@ -2566,7 +2566,7 @@ def wrap_module(
     }
 
     def _de_arm(reason: str, detail: str) -> None:
-        """§4.31 PER ENTRY (pgw#1176): a compiled graph-attributable failure de-arms the
+        """§4.31 PER COMPILED_GRAPH (pgw#1176): a compiled graph-attributable failure de-arms the
         GRAPH CLASS that produced it, sticky for the boot, and every sibling
         keeps serving compiled. The target's compiled lane is revoked only
         when the registry empties — that is the moment, and the only moment,
@@ -2577,7 +2577,7 @@ def wrap_module(
         if name and callable(remove):
             remove(name, reason)
             activity_mod.emit_event(
-                "aot_entry_de_armed",
+                "aot_compiled_graph_de_armed",
                 f"target={label}: {detail}",
                 phase=reason,
                 family=str(meta.get("family") or ""),
@@ -2587,7 +2587,7 @@ def wrap_module(
             siblings = tuple(getattr(runner, "runners", ()) or ())
             if siblings:  # siblings still serve
                 logger.warning(
-                    "aot-serve: %s de-armed entry %s (%s); %d sibling "
+                    "aot-serve: %s de-armed compiled_graph %s (%s); %d sibling "
                     "entr%s still armed", label, name, reason, len(siblings),
                     "y" if len(siblings) == 1 else "ies")
                 return
@@ -2650,7 +2650,7 @@ def wrap_module(
                 phase=exc.reason,
             )
             report_ingress_refusal(state, exc.reason, str(exc))
-            if exc.reason == "entry_pending_compile":
+            if exc.reason == "compiled_graph_pending_compile":
                 # pgw#1176: the class IS declared; the background compile has
                 # not reached it. Submitting a shape gap here would ask the
                 # growth path to add a class the declaration already carries.
@@ -2706,10 +2706,10 @@ def wrap_module(
                     phase="cuda_oom",
                 )
                 return original(*args, **eager_kwargs)
-            entry_name = str(getattr(runner, "last_selected", "") or "")
+            compiled_graph_name = str(getattr(runner, "last_selected", "") or "")
             detail = (
                 f"AOTI artifact {label}"
-                + (f" entry {entry_name}" if entry_name else "")
+                + (f" compiled_graph {compiled_graph_name}" if compiled_graph_name else "")
                 + f" failed: {type(exc).__name__}: {exc}")
             _de_arm("artifact_failed", detail)
             logger.warning(
@@ -2778,7 +2778,7 @@ def set_ingress_refusal_callback(pipeline: Any, callback: Any) -> bool:
 
 
 def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
-    """``(owner module, attribute)`` one entry target names on a pipeline:
+    """``(owner module, attribute)`` one compiled graph target names on a pipeline:
     ``"unet"`` -> ``(pipeline.unet, "forward")``; ``"vae.decode"`` ->
     ``(pipeline.vae, "decode")``; ``"vae.decoder"`` ->
     ``(pipeline.vae.decoder, "forward")``.
@@ -2790,7 +2790,7 @@ def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
     ``(pipeline.vae, "decoder")`` and the arm would have replaced a
     SUBMODULE with a wrapped function, while the mint resolved the same
     string to the decoder's ``forward`` and exported that. A compiled graph whose
-    entries are traced from one callable and armed onto another is the
+    compiled graphs are traced from one callable and armed onto another is the
     silent-wrongness class every gate in this stack exists to prevent, and
     nothing would have caught it: ``vae.decode`` (a bound method) is the
     only dotted target any family has ever named, and for it the two agreed.
@@ -2803,10 +2803,10 @@ def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
     return module, attr
 
 
-def _entry_admission_drift(
-    package_path: Path, entry: str, inputs_rows: Sequence[Mapping[str, Any]],
+def _compiled_graph_admission_drift(
+    package_path: Path, compiled_graph: str, inputs_rows: Sequence[Mapping[str, Any]],
 ) -> None:
-    """The pgw#1058 arm-side identity check: one entry's declared manifest
+    """The pgw#1058 arm-side identity check: one compiled graph's declared manifest
     rows verified against the artifact's OWN generated input guards, through
     the SAME ``aot_package.admission_drift`` the mint's package gate ran.
 
@@ -2818,12 +2818,12 @@ def _entry_admission_drift(
 
     try:
         drift = aot_package.admission_drift(
-            Path(package_path), entry, inputs_rows)
+            Path(package_path), compiled_graph, inputs_rows)
     except aot_package.PackageIntrospectionError as exc:
-        raise AdoptError("admission_drift", f"entry {entry!r}: {exc}") from exc
+        raise AdoptError("admission_drift", f"compiled_graph {compiled_graph!r}: {exc}") from exc
     if drift:
         raise AdoptError(
-            "admission_drift", f"entry {entry!r}: " + "; ".join(drift[:6]))
+            "admission_drift", f"compiled_graph {compiled_graph!r}: " + "; ".join(drift[:6]))
 
 
 #: The classified refusal a bind that ran out of device memory produces. Same
@@ -2848,7 +2848,7 @@ def _bind_headroom(what: str, armed: int, declared: int) -> Iterator[None]:
     exception keeps its own classification, because "the artifact is broken"
     and "this pod is full" are different verdicts and only one of them says
     anything about the compiled graph. It also runs strictly BEFORE the first live
-    mutation (:func:`wrap_module` is called after every entry binds), so a
+    mutation (:func:`wrap_module` is called after every compiled graph binds), so a
     refusal leaves the pipeline exactly as eager as it found it.
 
     pgw#1176 CHANGED WHAT THE POSITION MEANS, and the change is the whole
@@ -2904,29 +2904,29 @@ def _oom_in_chain(exc: BaseException) -> Optional[BaseException]:
 def _marker(pipeline: Any) -> Dict[str, Any]:
     """The pipeline's arm marker, created empty on first use.
 
-    pgw#1176: the marker is the pod's per-entry serve-state record, not a
+    pgw#1176: the marker is the pod's per-compiled graph serve-state record, not a
     snapshot of one compiled graph. It carries the wrapped targets, the by-reference
     constant pools that must outlive their runners, the literal tables, and
-    one row per entry ever armed on this object.
+    one row per compiled graph ever armed on this object.
     """
     marker = getattr(pipeline, _MARKER_ATTR, None)
     if not isinstance(marker, dict):
         marker = {
             "meta": {}, "targets": {},
             "bound_constants": {"pools": {}, "literals": {}},
-            "entries": {},
+            "compiled_graphs": {},
         }
         setattr(pipeline, _MARKER_ATTR, marker)
     return marker
 
 
-def _dispatch_for(marker: Dict[str, Any], target: str) -> Optional[EntryDispatch]:
+def _dispatch_for(marker: Dict[str, Any], target: str) -> Optional[CompiledGraphDispatch]:
     row = (marker.get("targets") or {}).get(target) or {}
     runner = (row.get("state") or {}).get("runner")
-    return runner if isinstance(runner, EntryDispatch) else None
+    return runner if isinstance(runner, CompiledGraphDispatch) else None
 
 
-def arm_entry(
+def arm_compiled_graph(
     pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None,
     *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
     declared: Sequence[str] = (),
@@ -2934,19 +2934,19 @@ def arm_entry(
     """Stage + verify + load + BIND + register ONE compiled graph class.
 
     THE ATOM (pgw#1176). What this replaces — ``load_and_wrap``'s
-    stage-verify-load-EVERY-entry-then-bind-ALL-then-wrap shape — carried the
+    stage-verify-load-EVERY-compiled graph-then-bind-ALL-then-wrap shape — carried the
     invariant "a compiled graph that cannot arm one of its graph classes arms none of
     them, because a partially served contract would be a silent subset of
     what the compiled graph key advertises". That invariant was locally correct and
     globally the disease: it was a faithful guard on the premise that the
     advertising unit is a 36-class set. Shrink the unit to one graph and
-    nothing is left that CAN lie — an entry arms whole or not at all, and an
-    entry is one graph, so that is atomic by nature.
+    nothing is left that CAN lie — an compiled graph arms whole or not at all, and an
+    compiled graph is one graph, so that is atomic by nature.
 
     Consequences that fall out rather than being engineered:
 
-    * an entry that cannot arm costs THAT class. Its siblings keep serving
-      compiled, and the pod reports per-entry serve state rather than a
+    * an compiled graph that cannot arm costs THAT class. Its siblings keep serving
+      compiled, and the pod reports per-compiled graph serve state rather than a
       compiled graph-level claim;
     * coverage ACCRETES. A second call arms a second class into the same
       registry, the same target pool and the same live wrap. There is no
@@ -2959,7 +2959,7 @@ def arm_entry(
       which is §4.33's ~8 GiB achieved by construction rather than by budget.
 
     ``declared`` is every class name this pod's declaration traces to. It
-    feeds :attr:`EntryDispatch.declared`, so a call that no ARMED entry
+    feeds :attr:`CompiledGraphDispatch.declared`, so a call that no ARMED compiled graph
     admits can say "pending compile" instead of reporting a shape gap for a
     class the declaration already contains.
 
@@ -2978,14 +2978,14 @@ def arm_entry(
     21.48 GiB free). What refuses now is the bind: ``_load_package`` + ``bind``
     run inside a CUDA-OOM guard, so a card that genuinely cannot hold the
     runner returns a typed ``insufficient_adopt_vram`` refusal NAMING the
-    entry — before the first live mutation, so the pipeline is untouched and
+    compiled graph — before the first live mutation, so the pipeline is untouched and
     the pod serves eager. The attempt is the measurement.
 
     **The atom makes that refusal cheaper and more honest than it could be
     under the compiled graph.** A bind OOM here costs exactly ONE graph class: its
     siblings stay armed and keep serving compiled, and the refused class is
     retried by nobody and condemned by nothing — another pod, or this one with
-    less resident, may bind it fine. Under the 36-entry compiled graph the same OOM
+    less resident, may bind it fine. Under the 36-compiled graph compiled graph the same OOM
     discarded every class.
 
     Raises :class:`AdoptError` with a classified reason on any failure, and
@@ -2994,7 +2994,7 @@ def arm_entry(
     family = str(getattr(cfg, "family", "") or "")
     # pgw#1087: admission splits in two and the halves have different owners.
     # `compiled_graph_verify` is unpack + identity + contract verification on inert
-    # bytes (disk + hashing); `entry_admit` below is dlopen, constant bind and
+    # bytes (disk + hashing); `compiled_graph_admit` below is dlopen, constant bind and
     # ingress-assertion arming (device).
     with boot_phases.span(
         boot_phases.PHASE_COMPILED_GRAPH_VERIFY, ref=family,
@@ -3004,7 +3004,7 @@ def arm_entry(
             Path(artifact), family, cache_dir=cache_dir, expected=expected)
     try:
         meta = staged.metadata
-        block = staged.entry  # parsed and validated once, while staging
+        block = staged.compiled_graph  # parsed and validated once, while staging
         name = str(block.get("name") or "")
         target = str(block.get("target") or "")
         module, attr = _target_owner(pipeline, target)
@@ -3013,7 +3013,7 @@ def arm_entry(
         dispatch = _dispatch_for(marker, target)
         first_for_target = dispatch is None
         if dispatch is None:
-            dispatch = EntryDispatch(declared=tuple(str(d) for d in declared))
+            dispatch = CompiledGraphDispatch(declared=tuple(str(d) for d in declared))
         elif declared:
             dispatch.declared = tuple(str(d) for d in declared)
 
@@ -3036,17 +3036,17 @@ def arm_entry(
             assert_lifted_contract(module, contract)
         except ValueError as exc:
             raise AdoptError(
-                "contract_invalid", f"entry {name!r}: {exc}") from exc
+                "contract_invalid", f"compiled_graph {name!r}: {exc}") from exc
         # pgw#1058: the admission contract this dispatch will enforce must BE
         # the one the artifact's own generated guards enforce — the same
         # derivation the mint's package gate ran, re-run where the bytes
         # arrive, so a label that drifted between publish and adopt is a named
         # refusal here and never an opaque per-call admission miss.
-        _entry_admission_drift(
+        _compiled_graph_admission_drift(
             staged.root / PACKAGE_NAME, name, list(block.get("inputs") or []))
 
         # The target's by-reference pool, ACCRETED (pgw#1176/pgw#1177): this
-        # entry's state-dict constants join whatever earlier entries already
+        # compiled graph's state-dict constants join whatever earlier compiled graphs already
         # registered. The pool rides the marker because user_managed binds
         # hold raw pointers, so the bound values must outlive the runners.
         pools = marker["bound_constants"]["pools"]
@@ -3061,7 +3061,7 @@ def arm_entry(
                 [constants], resident_constants(module), into=pool)
 
         with boot_phases.span(
-            boot_phases.PHASE_ENTRY_ADMIT, ref=family, function=name,
+            boot_phases.PHASE_COMPILED_GRAPH_ADMIT, ref=family, function=name,
             artifact_kind="aot-inductor",
         ) if boot_phases.in_boot() else contextlib.nullcontext() as sp:
             # pgw#1175 + pgw#1176: THE ATTEMPT IS THE MEASUREMENT, and under
@@ -3073,22 +3073,22 @@ def arm_entry(
             # verdict is the kind that quarantines a key (th#1819). Capacity
             # is never a contract verdict.
             with _bind_headroom(
-                    f"entry {name!r}", _armed_here, _declared_here):
+                    f"compiled_graph {name!r}", _armed_here, _declared_here):
                 package = _load_package(staged.root / PACKAGE_NAME, name)
                 runner = ArtifactRunner(
                     package=package, contract=contract, constants=constants,
-                    module_name=target, entry=name, family=family)
+                    module_name=target, compiled_graph=name, family=family)
                 try:
                     runner.bind(pool, literals, user_managed=True)
                 except ConstantsUnboundError as exc:
                     raise AdoptError(
                         f"constants_{exc.reason}",
-                        f"entry {name!r}: {exc}") from exc
+                        f"compiled_graph {name!r}: {exc}") from exc
             if sp is not None:
                 sp.note(f"target={target} constants={len(constants)}")
 
-        # FIRST LIVE MUTATION, and it is exactly one entry wide. Everything
-        # above is proven for THIS entry: complete artifact, matching runtime
+        # FIRST LIVE MUTATION, and it is exactly one compiled graph wide. Everything
+        # above is proven for THIS compiled graph: complete artifact, matching runtime
         # key, restated key, resolved target, loaded named model, constant
         # table proven bound against its manifest.
         dispatch.add(name, runner)
@@ -3103,13 +3103,13 @@ def arm_entry(
                 "attr": attr,
                 "state": module_marker.get("state", {}),
             }
-        # `meta` on the marker is the DECLARE half every entry of this
+        # `meta` on the marker is the DECLARE half every compiled graph of this
         # pipeline shares by construction (`verify_declared` refuses any
         # artifact whose sm/torch/cuda/family disagree), kept so callers that
         # ask the live object what it is armed with get an answer without
-        # re-reading a tarball. Per-entry facts live in `entries`.
+        # re-reading a tarball. Per-compiled graph facts live in `compiled graphs`.
         marker["meta"] = meta
-        marker["entries"][name] = {
+        marker["compiled_graphs"][name] = {
             "key": str(meta.get("compiled_graph_key") or ""),
             "target": target,
             "class_hash": str(block.get("class_hash") or ""),
@@ -3118,21 +3118,21 @@ def arm_entry(
         # pgw#1141b: THE registration, at the one seam every arm route passes.
         note_aot_key(str(meta.get("compiled_graph_key") or ""))
         logger.info(
-            "aot-serve: armed entry %s on target %s in %.1fs (%d declared "
+            "aot-serve: armed compiled_graph %s on target %s in %.1fs (%d declared "
             "constants, key=%s); %d entr%s now armed on this pipeline",
             name, target, time.monotonic() - t0, len(constants),
-            meta.get("compiled_graph_key"), len(marker["entries"]),
-            "y" if len(marker["entries"]) == 1 else "ies")
+            meta.get("compiled_graph_key"), len(marker["compiled_graphs"]),
+            "y" if len(marker["compiled_graphs"]) == 1 else "ies")
         return meta
     finally:
         staged.close()
 
 
-def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
+def disarm_compiled_graph(pipeline: Any, name: str, reason: str) -> bool:
     """De-arm ONE graph class, sticky for the boot. True when it was armed.
 
-    The per-entry half of §4.31, reachable from outside a serve call: the
-    mint's parity gate refuses an entry here rather than un-arming a compiled graph,
+    The per-compiled graph half of §4.31, reachable from outside a serve call: the
+    mint's parity gate refuses an compiled graph here rather than un-arming a compiled graph,
     and an LRU eviction of a cold container is the same operation.
     """
     marker = getattr(pipeline, _MARKER_ATTR, None)
@@ -3149,17 +3149,17 @@ def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
             # callable rather than leaving a wrapper that only ever falls back.
             state = row.get("state") or {}
             state["failed"] = True
-    marker.get("entries", {}).pop(str(name), None)
+    marker.get("compiled_graphs", {}).pop(str(name), None)
     marker["bound_constants"]["literals"].pop(str(name), None)
     return dropped
 
 
-def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
-    """Per-entry SERVE STATE — what this pod actually serves, per graph class.
+def compiled_graph_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
+    """Per-compiled graph SERVE STATE — what this pod actually serves, per graph class.
 
-    pgw#1176 §1.4: the pod never claims "compiled graph X armed". It reports, per entry,
+    pgw#1176 §1.4: the pod never claims "compiled graph X armed". It reports, per compiled graph,
     ``armed`` / ``de_armed(reason)`` / ``pending`` — so there is no unit left
-    that can advertise more than it serves. This is the record the per-entry
+    that can advertise more than it serves. This is the record the per-compiled graph
     hub events (§1.7) are built from.
     """
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
@@ -3197,7 +3197,7 @@ def enable(
     expected: "Optional[aot_identity.ExpectedIdentity]" = None,
     declared: Sequence[str] = (),
 ) -> AdoptOutcome:
-    """Consumer entry point: verify + load + bind + register ONE entry.
+    """Consumer compiled graph point: verify + load + bind + register ONE compiled graph.
 
     Falsy (staying eager) on ANY miss — the caller's ordinary miss policy
     (fleet self-mint / eager / typed refusal) takes over. Truthy IS the HIT:
@@ -3216,27 +3216,27 @@ def enable(
     if artifact is None:
         return AdoptOutcome.miss("no_artifact")
     try:
-        meta = arm_entry(
+        meta = arm_compiled_graph(
             pipeline, cfg, Path(artifact), cache_dir=cache_dir,
             expected=expected, declared=declared)
     except Exception as exc:
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
         identity = _adopt_identity(Path(artifact))
         logger.warning(
-            "aot-serve: entry unusable (%s: %s); this class serves eager",
+            "aot-serve: compiled_graph unusable (%s: %s); this class serves eager",
             reason, exc)
         return AdoptOutcome.miss(
             reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
-    entry = dict(meta.get(compiled_graph_key_mod.ENTRY_BLOCK_KEY) or {})
-    armed = len(armed_entries(pipeline))
+    compiled_graph = dict(meta.get(compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY) or {})
+    armed = len(armed_compiled_graphs(pipeline))
     logger.info(
-        "aot-serve: armed %s entry %s (sku=%s torch=%s precision=%s, "
+        "aot-serve: armed %s compiled_graph %s (sku=%s torch=%s precision=%s, "
         "constants bound BY REFERENCE from resident weights); %d armed",
-        meta.get("family"), entry.get("name"),
+        meta.get("family"), compiled_graph.get("name"),
         meta.get("sku"), meta.get("torch"), meta.get("precision"), armed)
     return AdoptOutcome.hit(
         f"family={meta.get('family')} key={meta.get('compiled_graph_key')} "
-        f"entry={entry.get('name')} armed={armed} sku={meta.get('sku')} "
+        f"compiled_graph={compiled_graph.get('name')} armed={armed} sku={meta.get('sku')} "
         f"torch={meta.get('torch')} precision={meta.get('precision')}")
 
 
@@ -3253,7 +3253,7 @@ def _marker_states(subject: Any) -> List[Dict[str, Any]]:
 
     So the branch is not legacy and stays; what it reads is named. The two
     markers are different objects and always were: :func:`wrap_module` writes
-    ``state`` on the MODULE it swapped, :func:`arm_entry` writes ``targets``
+    ``state`` on the MODULE it swapped, :func:`arm_compiled_graph` writes ``targets``
     on the PIPELINE that owns it.
     """
     marker = getattr(subject, _MARKER_ATTR, None) or {}
@@ -3294,7 +3294,7 @@ def realigned_inputs(pipeline: Any) -> Dict[str, int]:
 
     pgw#1035 audited this for deletion and KEPT it. It has no fleet reader —
     but neither do its two siblings :func:`ingress_refusals` and
-    :func:`served_entry_calls` (the mint rig drives the latter), and deleting
+    :func:`served_compiled_graph_calls` (the mint rig drives the latter), and deleting
     one of three sibling measurements would make the #791 tax unobservable
     while leaving the machinery that computes it. This is the built-but-UNWIRED
     class, whose fix is a caller — a JobMetrics or activity field carrying all
@@ -3310,17 +3310,17 @@ def realigned_inputs(pipeline: Any) -> Dict[str, int]:
     return out
 
 
-def served_entry_calls(pipeline: Any) -> Dict[str, int]:
-    """``entry -> served calls`` across every wrapped target (pgw#790).
+def served_compiled_graph_calls(pipeline: Any) -> Dict[str, int]:
+    """``compiled graph -> served calls`` across every wrapped target (pgw#790).
 
     Which GRAPH CLASS served, not just that something did: an adapter-forked
     compiled graph is only doing its job when adapter-free traffic lands on the
-    branchless entry.
+    branchless compiled graph.
     """
     out: Dict[str, int] = {}
     for state in _marker_states(pipeline):
         runner = state.get("runner")
-        getter = getattr(runner, "entry_calls", None)
+        getter = getattr(runner, "compiled_graph_calls", None)
         rows = getter() if callable(getter) else {}
         for name, count in dict(rows or {}).items():
             out[name] = out.get(name, 0) + int(count)
@@ -3346,7 +3346,7 @@ def armed_targets(pipeline: Any) -> Dict[str, Dict[str, Any]]:
 
     Each row carries ``module``, ``attr`` and the wrap ``state`` — whose
     ``original`` is the EAGER callable the compiled graph replaced and whose ``runner``
-    is that target's :class:`EntryDispatch`. The pgw#868 numerics probe needs
+    is that target's :class:`CompiledGraphDispatch`. The pgw#868 numerics probe needs
     exactly those two to run the compiled graph and its own reference on one feed, and a
     private marker read from another module would be a second interpretation
     of this one's format. ``{}`` when nothing is armed.
@@ -3370,15 +3370,15 @@ def armed_metadata(pipeline: Any) -> Dict[str, Any]:
     return dict(meta) if isinstance(meta, dict) else {}
 
 
-def armed_entries(pipeline: Any) -> Dict[str, str]:
-    """``entry name -> entry key`` for every graph class ARMED right now.
+def armed_compiled_graphs(pipeline: Any) -> Dict[str, str]:
+    """``compiled graph name -> compiled graph key`` for every graph class ARMED right now.
 
     pgw#1176: this — not a compiled graph-level boolean — is what the pod may claim. A
     subset is a legitimate steady state, so "how many, and which" is the only
     honest answer to "what does this pod serve compiled".
     """
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    rows = dict(marker.get("entries") or {})
+    rows = dict(marker.get("compiled_graphs") or {})
     out: Dict[str, str] = {}
     for target in (marker.get("targets") or {}):
         dispatch = _dispatch_for(marker, target)
@@ -3397,16 +3397,16 @@ def is_armed(pipeline: Any) -> bool:
     the arming half of the wrong atom: a key that advertised 36 classes made
     partial service a lie, so the guard was locally correct — and it is what
     forbade the incremental compile-and-adopt this design exists to deliver.
-    A key now advertises ONE class, an entry arms whole or not at all, and a
-    de-armed entry costs itself. Mixed compiled/eager service is not a
+    A key now advertises ONE class, an compiled graph arms whole or not at all, and a
+    de-armed compiled graph costs itself. Mixed compiled/eager service is not a
     degraded state; it is the design's normal one, and it is numerically as
-    proven as full coverage because every armed entry passed the same mint
+    proven as full coverage because every armed compiled graph passed the same mint
     parity gate against the same eager reference.
 
-    Ask :func:`armed_entries` / :func:`entry_states` when you need to know
+    Ask :func:`armed_compiled_graphs` / :func:`compiled_graph_states` when you need to know
     WHAT is served rather than WHETHER anything is.
     """
-    return bool(armed_entries(pipeline))
+    return bool(armed_compiled_graphs(pipeline))
 
 
 def holds_exported_compiled_graph(pipeline: Any) -> bool:
@@ -3442,7 +3442,7 @@ def unwrap(pipeline: Any) -> bool:
     """Restore every wrapped target's eager callable — rotation/eviction
     and the unproven-adoption rollback both go through here."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    # pgw#1176: one shape, the one `arm_entry` writes. The `module`/`state`
+    # pgw#1176: one shape, the one `arm_compiled_graph` writes. The `module`/`state`
     # fallback that stood here read a pipeline marker no production path
     # produces — see :func:`_marker_states`.
     targets = marker.get("targets")
@@ -3478,7 +3478,7 @@ __all__ = [
     "ConstantSpec",
     "ConstantsUnboundError",
     "DECLARED_AXES",
-    "EntryDispatch",
+    "CompiledGraphDispatch",
     "IDENTITY_AXES",
     "IngressContractError",
     "InputContract",
@@ -3491,8 +3491,8 @@ __all__ = [
     "SOURCE_STATE_DICT",
     "armed_metadata",
     "armed_targets",
-    "arm_entry",
-    "armed_entries",
+    "arm_compiled_graph",
+    "armed_compiled_graphs",
     "assert_bindable",
     "assert_lifted_contract",
     "assert_ingress",
@@ -3501,10 +3501,10 @@ __all__ = [
     "constants_from_meta",
     "contract_from_meta",
     "enable",
-    "entry_from_meta",
-    "entry_metadata",
-    "entry_states",
-    "disarm_entry",
+    "compiled_graph_from_meta",
+    "compiled_graph_metadata",
+    "compiled_graph_states",
+    "disarm_compiled_graph",
     "execution_count",
     "proven_since",
     "holds_exported_compiled_graph",

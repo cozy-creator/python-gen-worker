@@ -159,7 +159,7 @@ def test_corrupt_volume_blob_falls_through_to_r2(tmp_path: Path, monkeypatch) ->
 # tensorhub_fill_source_dir(): ismount-guarded, Settings-driven
 #
 # pgw#931: "env-driven" was the old description and it is no longer accurate.
-# The value reaches this helper through the `Settings` the process entry
+# The value reaches this helper through the `Settings` the process compiled graph
 # published, so a test that changes the environment must RELOAD — the same step
 # a real deployment performs exactly once, at boot. Under the deleted
 # `get_settings()` these tests passed without it, because a cleared cache would

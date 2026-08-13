@@ -1,19 +1,19 @@
 """pgw#1111: the META round-trip that lets a WEIGHT-FREE program cross the
-entry-compile pool's process boundary.
+compiled graph-compile pool's process boundary.
 
 Why this exists, measured rather than asserted
 ----------------------------------------------
 ``fc77b923`` (pgw#1080) made every production mint weight-free, and
 ``aot_mint`` then FORCED ``parallel = False`` for exactly those mints because a
 fake-parameter ``ExportedProgram`` could not survive ``torch.export.save`` ->
-``load``. So the entry pool became dead code fleet-wide and every mint ran K=1,
+``load``. So the compiled graph pool became dead code fleet-wide and every mint ran K=1,
 in-process, with export and compile strictly sequential.
 
 The cost is on the record, hub-side: the sdxl A40 mint
 (release ``6ee9b4d4df2697a53da6f43a``, pod ``bgmdxhazxsugmk``, gen-worker
 0.112.0) reported ``export_s`` 1378.52 + ``compile_s`` 2065.36 = 3443.88 s
 against ``total_s`` 3463.84 s — **0.6 % apart**, which is what "no overlap at
-all" looks like. Its ``pool`` row said ``entry_workers=3`` and carried NO
+all" looks like. Its ``pool`` row said ``compiled_graph_workers=3`` and carried NO
 ledger (no ``pool_wall_s``, no ``pool_efficiency``, no ``peak_concurrency``),
 because ``progress.width`` is recorded whether or not the width is used: the
 3 was the width the override threw away.
@@ -152,7 +152,7 @@ def test_the_round_tripped_program_shares_ONE_fake_mode(
     tree: Path, tmp_path: Path,
 ) -> None:
     """``aot_compile`` asserts every input belongs to one mode, and
-    ``compile_entry_files`` reads that mode off the program itself. Params
+    ``compile_compiled_graph_files`` reads that mode off the program itself. Params
     re-virtualized into a mode of their own would fail that assertion — or
     worse, pass it while ``fake_mode_of_program`` returned None."""
     program = _weightless_program(tree)
@@ -173,7 +173,7 @@ def test_a_meta_program_that_was_NOT_revirtualized_flips_the_INDUCTOR_CONFIG(
 ) -> None:
     """The severance that says why the child's call site is load-bearing.
 
-    ``compile_entry_files`` selects its inductor options with
+    ``compile_compiled_graph_files`` selects its inductor options with
     ``weightless=fake_mode_of_program(program) is not None``. A program left on
     META answers None, so skipping the re-virtualization does not merely fail —
     it compiles the *weight-bearing* config for a weight-free graph and
@@ -203,7 +203,7 @@ def test_the_POOLS_OWN_STAGE_writes_a_program_the_CHILDS_OWN_LOAD_can_read(
     tree: Path, tmp_path: Path,
 ) -> None:
     """End to end across the process boundary, through the real
-    ``EntryCompilePool._stage`` and the real ``aot_compile_child.load_program``
+    ``CompiledGraphCompilePool._stage`` and the real ``aot_compile_child.load_program``
     — no re-implementation of either. Everything short of the inductor compile,
     which is not a cheap test on any machine.
 
@@ -218,13 +218,13 @@ def test_the_POOLS_OWN_STAGE_writes_a_program_the_CHILDS_OWN_LOAD_can_read(
     expected = _graph_text(program)
     original = dict(program.state_dict)
 
-    width = aot_compile_pool.entry_workers(
+    width = aot_compile_pool.compiled_graph_workers(
         1, available_bytes=1 << 36, vcpus=8,
         device_lock=True)
-    pool = aot_compile_pool.EntryCompilePool(tmp_path / "pool", width=width)
+    pool = aot_compile_pool.CompiledGraphCompilePool(tmp_path / "pool", width=width)
     job, _job_path = pool._stage("decoder", program, 0)
 
-    assert pool.meta_staged_entries == 1, "the stage must have cast to META"
+    assert pool.meta_staged_compiled_graphs == 1, "the stage must have cast to META"
     assert Path(job.program).exists()
     # The parent's copy survives the cast, objects and all.
     for name, tensor in original.items():
@@ -236,7 +236,7 @@ def test_the_POOLS_OWN_STAGE_writes_a_program_the_CHILDS_OWN_LOAD_can_read(
     assert not so.has_meta_params(loaded)
     assert _graph_text(loaded) == expected
     assert so.fake_mode_of_program(loaded) is not None, (
-        "the child must hand `compile_entry_files` a program whose own fake "
+        "the child must hand `compile_compiled_graph_files` a program whose own fake "
         "mode it can find — that is what selects the weight-free config")
 
 

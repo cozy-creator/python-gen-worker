@@ -188,8 +188,8 @@ def test_a_wheel_that_still_sends_the_retired_fields_is_not_refused() -> None:
     assert fresh.gpu_count == 4 and fresh.gpu_sm == "90"
     assert not hasattr(fresh, "worker_mode")
 
-    # Same for the CompileTarget half: field 11 was a map, whose entries are
-    # also length-delimited, so a single entry is the honest shape to feed it.
+    # Same for the CompileTarget half: field 11 was a map, whose compiled graphs are
+    # also length-delimited, so a single compiled graph is the honest shape to feed it.
     target = pb.CompileTarget(family="sdxl", requested_compiled_graph_key="ck1-abc")
     twire = bytearray(target.SerializeToString())
     _append_unknown_string(twire, 11, b"\n\x03sku\x12\x04L40S")

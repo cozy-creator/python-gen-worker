@@ -12,7 +12,7 @@ declarations (``"vae": Slot(AutoencoderKL)``, ``"turbo_lora": Slot(str)``)
 are deleted, not migrated.
 
 Derived parts are classified WEIGHT-BEARING (residency-relevant: shareable,
-evictable, a memory-pool entry — unet/vae/text encoders) vs CONFIG-ISH
+evictable, a memory-pool compiled graph — unet/vae/text encoders) vs CONFIG-ISH
 (scheduler settings, tokenizers, processors). Only the former enter the
 pool. The derived tree is published at BUILD time into the release manifest
 (``functions[].slots[].components``): the hub needs the path vocabulary for

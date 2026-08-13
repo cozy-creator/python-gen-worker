@@ -27,12 +27,12 @@ def fetch_named_compiled_graph(
         params={"digest": checkpoint_id}, timeout=30)
     resp.raise_for_status()
     files = (resp.json() or {}).get("files") or []
-    entry: Any = next(
+    compiled_graph: Any = next(
         f for f in files if str(f.get("path") or "").endswith(".tar.gz"))
     dest_dir = Path(cache_dir) / "aot-compiled_graphs"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    raw = requests.get(str(entry["url"]), timeout=120).content
-    want = str(entry.get("digest") or "")
+    raw = requests.get(str(compiled_graph["url"]), timeout=120).content
+    want = str(compiled_graph.get("digest") or "")
     got = "sha256:" + hashlib.sha256(raw).hexdigest()
     if want and got != want:
         raise RuntimeError(

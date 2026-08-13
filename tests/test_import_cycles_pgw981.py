@@ -1,7 +1,7 @@
 """pgw#981 — every module must import when it is the FIRST module imported.
 
 An import cycle is invisible to any harness that imports the package once and
-then walks it in a single process: the first entry order pre-warms the package,
+then walks it in a single process: the first compiled graph order pre-warms the package,
 and every later import is a cache hit. pgw#976's first sweep did exactly that,
 passed 0/230, and hid two real cycles. Only one fresh interpreter PER MODULE
 sees them, so that is what this does.
@@ -103,7 +103,7 @@ def outcomes() -> List[Outcome]:
 
 
 def test_no_module_is_unimportable_as_a_first_import(outcomes: List[Outcome]) -> None:
-    """The whole-package form: no cycle, from any entry order."""
+    """The whole-package form: no cycle, from any compiled graph order."""
     cycles = [o for o in outcomes if o.cycle]
     if cycles:
         detail = "\n\n".join(f"--- {o.module} ---\n{o.stderr.strip()}" for o in cycles)
@@ -134,8 +134,8 @@ def test_no_module_fails_to_import_for_any_other_reason(outcomes: List[Outcome])
     "module",
     ["gen_worker.cli.serve", "gen_worker.cli.run", "gen_worker.cli.invoke", "gen_worker.cli"],
 )
-def test_cli_entry_orders(module: str) -> None:
-    """The four entry orders into the cli package, named individually.
+def test_cli_compiled_graph_orders(module: str) -> None:
+    """The four compiled graph orders into the cli package, named individually.
 
     `cli/__init__` reaching `run` before `serve` is what masked the original
     defect, so "the CLI works" was never evidence about `cli.serve`.

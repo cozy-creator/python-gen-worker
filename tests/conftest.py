@@ -105,7 +105,7 @@ from gen_worker import worker_goals as gw_worker_goals  # noqa: E402
 @pytest.fixture(autouse=True)
 def _fresh_process_settings():
     """pgw#931: `get_settings()` is gone, and so is the cache this fixture used
-    to clear. `Settings` are now PUBLISHED by a process entry
+    to clear. `Settings` are now PUBLISHED by a process compiled graph
     (`config.install`), so a test starts from "nothing installed" and installs
     what it needs — the same shape production uses, instead of poking a cache.
 

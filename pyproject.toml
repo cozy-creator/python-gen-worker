@@ -102,7 +102,7 @@ dev = [
     "ruff>=0.6.0",
     "pytest>=9.0.0",
     # pgw#867: property-based tests over the decode boundaries (topology wire,
-    # ref grammar, chunked-manifest entries). hypothesis rather than atheris —
+    # ref grammar, chunked-manifest compiled graphs). hypothesis rather than atheris —
     # these decoders are shallow, so libFuzzer coverage feedback buys little,
     # and `@example(...)` puts the seed corpus in the source as ordinary
     # always-run cases instead of opaque corpus blobs.
@@ -500,7 +500,7 @@ module = [
   "tests.test_fit_to_native_pgw664",
   "tests.test_flatten_contract_pgw994",
   "tests.test_fleet_compiled_graphs",
-  "tests.test_fold_per_entry_pgw1189",
+  "tests.test_fold_per_compiled_graph_pgw1189",
   "tests.test_folding_fence_pgw1097",
   "tests.test_fork_arm_guards_pgw1158",
   "tests.test_formula_conformance_th1534",
@@ -533,7 +533,7 @@ module = [
   "tests.test_hot_gpu_pgw636",
   "tests.test_hot_swap_pgw622",
   "tests.test_image_encoding_default",
-  "tests.test_ingress_recast_and_closest_entry_pgw1074",
+  "tests.test_ingress_recast_and_closest_compiled_graph_pgw1074",
   "tests.test_inline_envelope_pgw767",
   "tests.test_input_less_target_pgw1158",
   "tests.test_input_manifest_v4",

@@ -240,13 +240,13 @@ def artifact(tmp_path: Path) -> Path:
 _CLASS_HASH = "a" * 16
 #: pgw#1176: the DECLARATION-wide coverage label, published as
 #: `graph_contract`. No longer a copy of the graph axis — `graph` is this
-#: entry's class hash (identity), this names the class set it belongs to.
+#: compiled graph's class hash (identity), this names the class set it belongs to.
 GRAPH_CONTRACT = compiled_graph_key.manifest_digest([_CLASS_HASH])
 META = {
     "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "weight_lane": "w8a8", "lora_bucket": 64, "strict_export": True,
-    compiled_graph_key.ENTRY_BLOCK_KEY: {
+    compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY: {
         "name": "unet/main",
         "target": "unet", "fork": [], "class_dims": [],
         "range_digest": "r1", "class_hash": _CLASS_HASH, "graph": {"v": 2},
@@ -255,7 +255,7 @@ META = {
     "env_seal": {"v": 1, "torch": "2.9.0"},
     "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
 }
-COMPILED_GRAPH_KEY = compiled_graph_key.from_entry_metadata(META).digest
+COMPILED_GRAPH_KEY = compiled_graph_key.from_compiled_graph_metadata(META).digest
 META["compiled_graph_key"] = COMPILED_GRAPH_KEY
 
 #: The shape every compiled graph in the corpus was published under before pgw#1046 —
@@ -384,7 +384,7 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
                          fc.GRAPH_CONTRACT_AXIS, fc.ENV_SEAL_AXIS,
                          "family", "lane"}
     # pgw#1176: `graph` and `graph_contract` are NO LONGER THE SAME VALUE, and
-    # that separation is the whole change. `graph` is THIS entry's class hash
+    # that separation is the whole change. `graph` is THIS compiled graph's class hash
     # (identity); `graph_contract` names the class SET it belongs to
     # (coverage). Fusing them is what re-minted 35 unchanged classes every
     # time an author added an aspect ratio.
@@ -430,12 +430,12 @@ def test_a_compiled_graph_with_no_manifest_digest_PUBLISHES(hub, artifact):
     reasoning that pgw#903's pre-dlopen fence compares
     `Arm.graph_contract_digest` against it and a compiled graph without one can never
     pass. That reasoning held while `graph_contract` WAS the identity. It is
-    now the declaration-wide MANIFEST digest — a coverage label — and an entry
+    now the declaration-wide MANIFEST digest — a coverage label — and an compiled graph
     minted by a pod that has not folded its whole declaration is a complete,
     keyable, armable artifact. Refusing it would reintroduce the COLLECTION as
     a precondition for the atom, which is the entire disease.
 
-    What must still be refused is an entry with no IDENTITY, and the row below
+    What must still be refused is an compiled graph with no IDENTITY, and the row below
     this one asserts exactly that.
     """
     hollow = dict(META)
@@ -445,12 +445,12 @@ def test_a_compiled_graph_with_no_manifest_digest_PUBLISHES(hub, artifact):
 
 
 def test_a_compiled_graph_with_no_class_hash_is_refused(hub, artifact):
-    """The refusal that survives the inversion above: an entry that cannot
+    """The refusal that survives the inversion above: an compiled graph that cannot
     state its own graph axis has no identity, so it would be stored under a
     flavor nothing can request."""
     hollow = dict(META)
-    hollow[compiled_graph_key.ENTRY_BLOCK_KEY] = {
-        **META[compiled_graph_key.ENTRY_BLOCK_KEY], "class_hash": ""}
+    hollow[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY] = {
+        **META[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY], "class_hash": ""}
     with pytest.raises(fc.CompiledGraphPublishRefused):
         _publisher(hub).publish(FAMILY, artifact, hollow)
     assert not hub.httpd.calls

@@ -33,7 +33,7 @@ digests, and finalization; R2 is only the byte store.
 - **ModelScope**: fetched directly via `modelscope.snapshot_download`.
 - **Tensorhub**: presigned R2 GETs against the resolved snapshot manifest,
   digest-verified into the local CAS. The algorithm comes from the manifest
-  entry's tagged `digest` (`sha256:<hex>` — v2, th#1303) and falls back to the
+  compiled graph's tagged `digest` (`sha256:<hex>` — v2, th#1303) and falls back to the
   legacy bare-hex `blake3` field only when `digest` is absent. Blobs land under
   `blobs/{algo}/{xx}/{yy}/{hex}`, so the two namespaces never collide.
 

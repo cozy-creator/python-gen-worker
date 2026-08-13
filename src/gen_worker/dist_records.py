@@ -197,16 +197,16 @@ def digest_for(path: str, mtime_ns: int, size: int) -> Optional[str]:
     docstring). ``None`` is the instruction to HASH the file — never a reason
     to skip it."""
     index = native_index()
-    entry = index.get(os.path.normpath(path))
-    if entry is None:
-        entry = index.get(os.path.realpath(path))
-    if entry is None:
+    compiled_graph = index.get(os.path.normpath(path))
+    if compiled_graph is None:
+        compiled_graph = index.get(os.path.realpath(path))
+    if compiled_graph is None:
         return None
-    if entry.size != size:
+    if compiled_graph.size != size:
         return None  # rewritten to a different length: RECORD is stale
-    if mtime_ns > entry.record_mtime_ns:
+    if mtime_ns > compiled_graph.record_mtime_ns:
         return None  # written after the claim was made: RECORD is stale
-    return entry.digest
+    return compiled_graph.digest
 
 
 def coverage() -> Tuple[int, int]:

@@ -112,7 +112,7 @@ def _undeclare(cfg: Any) -> Any:
 
 def _arm(tmp_path, monkeypatch, cfg: Any, cosine: float,
          *, verify_numerics: bool) -> Any:
-    packages = {rig.entry_name(h, w): rig.ProbePackage(cosine=cosine)
+    packages = {rig.compiled_graph_name(h, w): rig.ProbePackage(cosine=cosine)
                 for h, w in rig.ROWS}
     _pipe, _module, outcome = rig.arm(
         tmp_path, monkeypatch, cfg, packages,
@@ -191,7 +191,7 @@ def test_gate_compiled_graph_numerics_refuses_on_the_declared_floor_alone(
     from gen_worker.models import provision
 
     cfg = CFGS[name]()
-    packages = {rig.entry_name(h, w): rig.ProbePackage(cosine=BETWEEN)
+    packages = {rig.compiled_graph_name(h, w): rig.ProbePackage(cosine=BETWEEN)
                 for h, w in rig.ROWS}
     pipe, _module, outcome = rig.arm(
         tmp_path, monkeypatch, cfg, packages, verify_numerics=False)
@@ -238,7 +238,7 @@ def test_a_warn_only_declaration_is_reported_as_DECLARED(
 
     # Armed without the gate, then gated explicitly, so the report read below
     # is THIS row's and never a stale one from the process.
-    packages = {rig.entry_name(h, w): rig.ProbePackage(cosine=0.9995)
+    packages = {rig.compiled_graph_name(h, w): rig.ProbePackage(cosine=0.9995)
                 for h, w in rig.ROWS}
     pipe, _module, outcome = rig.arm(
         tmp_path, monkeypatch, cfg, packages, verify_numerics=False)

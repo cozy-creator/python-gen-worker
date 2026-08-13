@@ -14,8 +14,8 @@ import pytest
 
 from harness.subprocess_runner import (
     assert_no_unhandled_crash,
-    cpu_manifest_entry,
-    gpu_manifest_entry,
+    cpu_manifest_compiled_graph,
+    gpu_manifest_compiled_graph,
     run_entrypoint,
     startup_phase_lines,
 )
@@ -25,7 +25,7 @@ def test_gpu_manifest_fails_cleanly_without_gpu(tmp_path: Path) -> None:
     """th#874 signature: a GPU-required manifest on a GPU-less/driver-
     incompatible host exits nonzero via the structured cuda_probe fatal
     path, never a crash, never reaching the network hello."""
-    result = run_entrypoint(tmp_path, functions=[gpu_manifest_entry()])
+    result = run_entrypoint(tmp_path, functions=[gpu_manifest_compiled_graph()])
     combined = result.stdout + result.stderr
     phases = startup_phase_lines(combined)
     assert_no_unhandled_crash(result, phases)
@@ -49,7 +49,7 @@ def test_cpu_manifest_reaches_module_import_with_no_gpu_probe(tmp_path: Path) ->
     """An accelerator=none manifest skips CUDA probing entirely and fails
     cleanly at module import (the deliberately-missing user module) — never
     a crash, never a GPU touch, never a network call."""
-    result = run_entrypoint(tmp_path, functions=[cpu_manifest_entry()])
+    result = run_entrypoint(tmp_path, functions=[cpu_manifest_compiled_graph()])
     combined = result.stdout + result.stderr
     phases = startup_phase_lines(combined)
     assert_no_unhandled_crash(result, phases)

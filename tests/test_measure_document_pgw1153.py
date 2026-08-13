@@ -12,7 +12,7 @@ end to end against a real committed file.
 This file is the fence that makes that impossible to reintroduce:
 
 1. **Every committed ``aot/*.mint.json`` in the fleet parses through the real
-   entry** — the corpus under ``tests/fixtures/fleet_mint_requests/`` is a
+   compiled graph** — the corpus under ``tests/fixtures/fleet_mint_requests/`` is a
    verbatim copy of all 24 of them, and each
    one is driven through :func:`measure_child.load_document`, which is the ONE
    decoder ``main()`` uses. On the pre-fix tree the same corpus raises
@@ -73,7 +73,7 @@ def _committed() -> List[Path]:
 
 
 # ---------------------------------------------------------------------------
-# 1. THE FENCE: every committed file, through the real entry.
+# 1. THE FENCE: every committed file, through the real compiled graph.
 # ---------------------------------------------------------------------------
 
 
@@ -87,7 +87,7 @@ def test_the_corpus_is_the_whole_fleet() -> None:
 
 @pytest.mark.parametrize(
     "path", _committed(), ids=lambda p: f"{p.parent.name}/{p.name}")
-def test_every_committed_mint_request_parses_through_the_documented_entry(
+def test_every_committed_mint_request_parses_through_the_documented_compiled_graph(
     path: Path,
 ) -> None:
     """RED on the pre-fix tree, on file one.
@@ -350,14 +350,14 @@ def faked_inductor(monkeypatch: pytest.MonkeyPatch) -> None:
     call is stood in for, at the one seam pgw#1134's own suite fakes it."""
     from gen_worker import aot_mint
 
-    real = aot_mint._export_entry
+    real = aot_mint._export_compiled_graph
 
     def _fake(*a: Any, **kw: Any) -> Any:
         kw = dict(kw)
         kw["compile_now"] = False
         return real(*a, **kw)
 
-    monkeypatch.setattr(aot_mint, "_export_entry", _fake, raising=True)
+    monkeypatch.setattr(aot_mint, "_export_compiled_graph", _fake, raising=True)
 
 
 def test_the_documented_command_measures_a_committed_shape_file(
@@ -381,8 +381,8 @@ def test_the_documented_command_measures_a_committed_shape_file(
     assert rc == measure_child.EXIT_OK, f"{report.reason}: {report.detail[:600]}"
     assert report.ok and report.family == FAMILY
     assert report.function == "generate-w8a8"
-    assert report.declared_classes == 3 and len(report.entries) == 3
-    assert all(e.ok and e.nodes > 0 for e in report.entries), report.entries
+    assert report.declared_classes == 3 and len(report.compiled_graphs) == 3
+    assert all(e.ok and e.nodes > 0 for e in report.compiled_graphs), report.compiled_graphs
     assert report.weights == "real"
 
 

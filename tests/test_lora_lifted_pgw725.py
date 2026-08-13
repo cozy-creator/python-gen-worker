@@ -416,7 +416,7 @@ def test_a_plain_call_TAKES_THE_PLAIN_BRANCH_at_serving_time() -> None:
     `model.forward` wholesale, so a plain call that worked the instant before
     the install raised the instant after it, and a branchless request falling
     back to eager on an ARMED pod hit it in production. Measured on the
-    pgw#997 rig; it is what refused a whole 5-entry lora compiled graph as
+    pgw#997 rig; it is what refused a whole 5-compiled graph lora compiled graph as
     `numerics_refused`.
 
     The invariant: **arming a bucket must not alter the semantics of calls
@@ -425,7 +425,7 @@ def test_a_plain_call_TAKES_THE_PLAIN_BRANCH_at_serving_time() -> None:
     The old assertion also doubled as a belt-and-braces against CAPTURING an
     adapter class without its operands. That is retired deliberately: tracing
     the BRANCHLESS arm with no operands is correct (it is what an
-    `adapter=false` entry is), and a compiling-guard to separate the two reads
+    `adapter=false` compiled graph is), and a compiling-guard to separate the two reads
     False under STRICT export — the mint's own mode — so it would ship unable
     to fire. The real protection belongs at the mint, on the adapter arm's
     feed. See pgw#1001.

@@ -51,7 +51,7 @@ def _compiled_graph(tmp_path: Path, meta_bytes: bytes, name: str = "compiled_gra
 
 
 def test_a_legitimate_envelope_still_reads(tmp_path: Path):
-    meta = {"kind": "aot", "entries": {f"e{i}": {"shape": [1, 4, 128, 128]}
+    meta = {"kind": "aot", "compiled_graphs": {f"e{i}": {"shape": [1, 4, 128, 128]}
                                        for i in range(64)}}
     raw = json.dumps(meta).encode()
     assert len(raw) < artifact_meta.MAX_METADATA_BYTES
@@ -81,7 +81,7 @@ def test_the_verifier_itself_refuses_the_bomb_with_a_typed_reason(
     """The read that matters is the one INSIDE `verify_delivered_artifact`;
     it must surface as a named refusal, not as a dead pod."""
     # pgw#1098 raised the bound from 16 MiB to 64 MiB (the 16 MiB one refused
-    # a REAL 36-entry sdxl envelope and cost a 92-minute mint). The bomb has
+    # a REAL 36-compiled graph sdxl envelope and cost a 92-minute mint). The bomb has
     # to stay above the bound for this test to mean anything; its size was
     # always incidental, the typed refusal is the point.
     artifact = _compiled_graph(tmp_path, b"\0" * (128 << 20))

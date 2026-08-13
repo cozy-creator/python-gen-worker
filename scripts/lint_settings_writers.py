@@ -34,7 +34,7 @@ Classifications:
                GlobalStateGuard + the pgw#680 guard-miss doctrine
     PLUMBING   a cache/path redirect (TORCHINDUCTOR_CACHE_DIR, ...) —
                points where bytes land, never what bytes are generated;
-               inductor entries are content-addressed
+               inductor compiled graphs are content-addressed
     SCRUB      an erase (``os.environ.pop`` in a scrub loop) — removal of
                ambient input, the opposite of a second writer
 

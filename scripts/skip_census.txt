@@ -166,7 +166,7 @@ LOCAL-ONLY tests/test_author_ci_harness_pgw1150.py|inference-endpoints is not ch
 LOCAL-ONLY tests/test_micro_mint_rig_pgw978.py|the pgw#978 micro-mint rig is opt-in: it runs a full local mint cycle (set pgw#_rig=#)
 
 # ─── STAGED ───────────────────────────────────────────────────────────────────
-# pgw#1179 (§4.34) DELETED four of the five entries that were here, plus the two
+# pgw#1179 (§4.34) DELETED four of the five compiled graphs that were here, plus the two
 # topology rows above. A skip conditioned on work that never landed is not a
 # gate: the pgw#605 row raised `unreachable` under a hard `@skip`, pgw#764's and
 # pgw#738's rows waited on a "sibling lane's uncommitted WIP" that has not

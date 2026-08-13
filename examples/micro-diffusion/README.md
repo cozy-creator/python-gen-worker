@@ -1,9 +1,9 @@
 # micro-diffusion — the fleet's smallest REAL endpoint family
 
 **Why it exists.** AOT-mint iteration has been using sdxl as its test vehicle:
-6.9 GB of weights, **36 export entries**, ~95 minutes per pod cycle. Nothing
+6.9 GB of weights, **36 export compiled graphs**, ~95 minutes per pod cycle. Nothing
 about the mint MACHINERY needs any of that. This family runs the identical
-machinery over a 1.1 MB generated checkpoint with **3 export entries**, so a
+machinery over a 1.1 MB generated checkpoint with **3 export compiled graphs**, so a
 change to the mint path can be proven in minutes instead of hours.
 
 It is a real org worker, not a fixture: its own `pyproject.toml`,
@@ -16,12 +16,12 @@ src/micro_diffusion/
   model.py            MicroDenoiser (tiny DiT) + MicroDecoder — conv-free, register_buffer table
   weights.py          deterministic seed -> checkpoint; `python -m micro_diffusion.weights`
   pipeline.py         MicroPipeline: .transformer / .decoder, from_pretrained
-  aot_declaration.py  the Compile declaration — 3 entries, container inputs
+  aot_declaration.py  the Compile declaration — 3 compiled graphs, container inputs
   main.py             @endpoint Generate: generate (cfg on) / generate_turbo (cfg off)
   *_4d.py             micro-4d: the pgw#998 nonlinear-extent (z-image) shape
   *_escape.py         micro-escape: author-defined ops (pgw#1062), GPU-only
   *_conv.py           micro-conv: STATIC-ROWS (sdxl's strategy) — conv-bearing,
-                      4 static entries, int64 timestep, persistent named buffer (pgw#1073)
+                      4 static compiled graphs, int64 timestep, persistent named buffer (pgw#1073)
   *_pad32.py          micro-pad32: ie#637's PAD-TO-32 shape — the token extent is
                       `32*FloorDiv(H*W+31, 32)`, and one collapsed artifact serves
                       three L values whose pads are 0, 16 and 28
@@ -48,7 +48,7 @@ uploaded, which is too late and costs a lane its leg.
    runs the REAL discovery scan and goes RED until you do; it also goes red on a
    line here whose member is gone.
 3. **The tensorhub registration** — `internal/modelfamily/modelfamily.go`:
-   `canonicalFamilies`, plus a `rootOverrides` entry to `micro-diffusion` when
+   `canonicalFamilies`, plus a `rootOverrides` compiled graph to `micro-diffusion` when
    the member loads the base transformer's `state_dict` (all of them so far do,
    which is why ONE seeded checkpoint satisfies every slot). Update the vendored
    `internal/modelfamily/MICRO_EXAMPLE_FAMILIES` in the same commit — its
@@ -63,7 +63,7 @@ uploaded, which is too late and costs a lane its leg.
    (pgw#1084 §8.4.2). Bindings are stack state, not repo state — nothing in any
    repository seeds them, so a fresh stack owes step 0 for every family here.
 
-## The three entries, and why exactly three
+## The three compiled graphs, and why exactly three
 
 ```
 transformer/cfg=true     the guided arm; container arity 2
@@ -73,7 +73,7 @@ decoder               a SECOND target, its own dims, no fork
 
 That set is the smallest one that still exercises every decision the mint path
 makes: plan selection, a fork coordinate, a **derived dynamic range** (two
-latent rows collapse into one artifact per arm), a second target, entry naming,
+latent rows collapse into one artifact per arm), a second target, compiled graph naming,
 the seal, the publish wire, and the cross-process adopt filter.
 
 Two declared facts are there specifically to keep a known defect class under
@@ -115,7 +115,7 @@ package on this box — no pod, no RunPod, no hub.
 ```bash
 task rig:micro                      # the full cycle against micro-diffusion
 task rig:mint -- --vehicle micro    # same thing, long form
-task rig:mint                       # pgw#978's original one-entry plumbing toy
+task rig:mint                       # pgw#978's original one-compiled graph plumbing toy
 ```
 
 Legs: gates → weights → handoff → mint-child (a REAL spawned interpreter doing
@@ -221,7 +221,7 @@ satisfies every slot the package declares.
 
 A checkpoint that resolves is not a binding. Every function here declares
 `Slot(..., selected_by="model")` with **no code default**, so each one needs its
-own entry, and the build refuses per function:
+own compiled graph, and the build refuses per function:
 
 ```
 declared slot has no binding: function "generate-conv" slot "pipeline" has no
@@ -360,7 +360,7 @@ GET /v1/admin/fleet-status | .compile_compiled_graphs
 | pod boot + image pull | ~2 min | ~1-2 min | much smaller image |
 | weights download | minutes (6.9 GB) | **0 s** | generated into the image |
 | load + warm | ~1 min | seconds | 1.1 MB, 2 steps |
-| export + AOTI compile | ~90 min / 36 entries | ~2-3 min / 3 entries | 12x fewer entries, tiny graphs |
+| export + AOTI compile | ~90 min / 36 compiled graphs | ~2-3 min / 3 compiled graphs | 12x fewer compiled graphs, tiny graphs |
 | seal + publish | ~1 min | seconds | the compiled graph is small |
 
 ### 7. Adopt

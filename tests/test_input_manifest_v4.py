@@ -63,7 +63,7 @@ def b3(data: bytes) -> str:
     return blake3.blake3(data).hexdigest()
 
 
-def make_entry(ref: str, body: bytes, kind: str, mime: str, **overrides: Any) -> InputManifestEntry:
+def make_compiled_graph(ref: str, body: bytes, kind: str, mime: str, **overrides: Any) -> InputManifestEntry:
     fields: dict[str, Any] = {
         "asset_id": f"asset-{ref.rsplit('/', 1)[-1]}",
         "source_ref": ref,
@@ -240,8 +240,8 @@ def test_reverse_insertion_map_keys_traverse_sorted(http_root: HTTPRoot) -> None
     assert [a.ref for a in input_assets._iter_assets(payload)] == [REF_A, REF_B]
 
     manifest = (
-        make_entry(REF_A, PNG_A, "media", "image/png"),
-        make_entry(REF_B, PNG_B, "media", "image/png"),
+        make_compiled_graph(REF_A, PNG_A, "media", "image/png"),
+        make_compiled_graph(REF_B, PNG_B, "media", "image/png"),
     )
     resolver = FakeResolver(
         manifest=manifest,
@@ -310,7 +310,7 @@ def test_zero_assets_zero_manifest() -> None:
 
 
 def test_zero_assets_with_manifest_rejected() -> None:
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     with pytest.raises(ValidationError, match="^input_asset_manifest_mismatch"):
         materialize(Payload(prompt="text"), "req-zero-extra", manifest=manifest)
 
@@ -337,7 +337,7 @@ def test_dispatch_manifest_count_order_fenced(
 ) -> None:
     bodies = {REF_A: PNG_A, REF_B: PNG_B}
     payload = Payload(extra=[Asset(ref=r) for r in payload_refs])
-    manifest = tuple(make_entry(r, bodies[r], "media", "image/png") for r in manifest_refs)
+    manifest = tuple(make_compiled_graph(r, bodies[r], "media", "image/png") for r in manifest_refs)
     resolver = FakeResolver(manifest=manifest)
     with pytest.raises(ValidationError, match="^input_asset_manifest_mismatch") as caught:
         materialize(payload, f"req-{case}", manifest=manifest, resolver=resolver)
@@ -347,7 +347,7 @@ def test_dispatch_manifest_count_order_fenced(
 
 def test_dispatch_kind_mismatch_fenced() -> None:
     payload = Payload(image=ImageAsset(ref=REF_A))
-    manifest = (make_entry(REF_A, PNG_A, "video", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "video", "image/png"),)
     resolver = FakeResolver(manifest=manifest)
     with pytest.raises(ValidationError, match="^input_asset_manifest_mismatch"):
         materialize(payload, "req-kindfence", manifest=manifest, resolver=resolver)
@@ -366,7 +366,7 @@ def test_dispatch_kind_mismatch_fenced() -> None:
 )
 def test_invalid_manifest_metadata_fenced(overrides: dict[str, Any]) -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png", **overrides),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png", **overrides),)
     resolver = FakeResolver(manifest=manifest)
     with pytest.raises(ValidationError, match="^input_asset_manifest_invalid"):
         materialize(payload, "req-meta", manifest=manifest, resolver=resolver)
@@ -375,7 +375,7 @@ def test_invalid_manifest_metadata_fenced(overrides: dict[str, Any]) -> None:
 
 def test_private_inputs_require_positive_attempt() -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     with pytest.raises(ValidationError, match="^input_asset_attempt_invalid"):
         materialize(payload, "req-attempt", attempt=0, manifest=manifest)
 
@@ -392,9 +392,9 @@ def test_exactly_one_strict_resolver_post(http_root: HTTPRoot) -> None:
         audio=AudioAsset(ref=REF_C),
     )
     manifest = (
-        make_entry(REF_A, PNG_A, "image", "image/png"),
-        make_entry(REF_B, PNG_B, "media", "image/png"),
-        make_entry(REF_C, MP3, "audio", "audio/mpeg"),
+        make_compiled_graph(REF_A, PNG_A, "image", "image/png"),
+        make_compiled_graph(REF_B, PNG_B, "media", "image/png"),
+        make_compiled_graph(REF_C, MP3, "audio", "audio/mpeg"),
     )
     resolver = FakeResolver(
         manifest=manifest,
@@ -423,7 +423,7 @@ def test_one_private_asset_preserves_all_fields(http_root: HTTPRoot) -> None:
         sha256="caller-provided-sha",
     )
     payload = Payload(image=asset)
-    manifest = (make_entry(REF_A, PNG_A, "image", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "image", "image/png"),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
     assert materialize(payload, "req-priv-one", manifest=manifest, resolver=resolver) == 1
     assert asset.ref == REF_A  # opaque ref NEVER rewritten
@@ -442,8 +442,8 @@ def test_duplicate_private_occurrences_share_one_download(http_root: HTTPRoot) -
     a1, b, a2 = Asset(ref=REF_A), Asset(ref=REF_B), Asset(ref=REF_A)
     payload = Payload(extra=[a1, b, a2])
     manifest = (
-        make_entry(REF_A, PNG_A, "media", "image/png"),
-        make_entry(REF_B, PNG_B, "media", "image/png"),
+        make_compiled_graph(REF_A, PNG_A, "media", "image/png"),
+        make_compiled_graph(REF_B, PNG_B, "media", "image/png"),
     )
     resolver = FakeResolver(
         manifest=manifest,
@@ -459,7 +459,7 @@ def test_mixed_private_and_public(http_root: HTTPRoot) -> None:
     private = ImageAsset(ref=REF_A)
     public = ImageAsset(ref=http_root.url("b.png"))
     payload = Payload(image=private, extra=[public])
-    manifest = (make_entry(REF_A, PNG_A, "image", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "image", "image/png"),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
     assert materialize(payload, "req-mixed", manifest=manifest, resolver=resolver) == 2
     assert len(resolver.calls) == 1
@@ -471,7 +471,7 @@ def test_mixed_private_and_public(http_root: HTTPRoot) -> None:
 
 def test_resolver_409_cancels_attempt() -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     resolver = FakeResolver(manifest=manifest, status=409)
     with pytest.raises(CanceledError):
         materialize(payload, "req-409", manifest=manifest, resolver=resolver)
@@ -481,7 +481,7 @@ def test_resolver_409_cancels_attempt() -> None:
 @pytest.mark.parametrize("status", [400, 403, 500, 503])
 def test_resolver_failure_statuses_are_retryable(status: int) -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     resolver = FakeResolver(manifest=manifest, status=status)
     with pytest.raises(RetryableError, match="^input_asset_resolution_unavailable") as caught:
         materialize(payload, f"req-{status}", manifest=manifest, resolver=resolver)
@@ -491,7 +491,7 @@ def test_resolver_failure_statuses_are_retryable(status: int) -> None:
 
 def test_resolver_network_failure_is_retryable() -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     resolver = FakeResolver(manifest=manifest, exc=ConnectionError("boom"))
     with pytest.raises(RetryableError, match="^input_asset_resolution_unavailable"):
         materialize(payload, "req-net", manifest=manifest, resolver=resolver)
@@ -499,7 +499,7 @@ def test_resolver_network_failure_is_retryable() -> None:
 
 def test_missing_resolver_credentials_is_retryable() -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     with pytest.raises(RetryableError, match="^input_asset_resolution_unavailable"):
         materialize_input_assets(
             payload, "req-nocreds", attempt=1, manifest=manifest, file_base_url="",
@@ -518,7 +518,7 @@ def test_missing_resolver_credentials_is_retryable() -> None:
 )
 def test_malformed_resolver_response_is_retryable(raw: bytes) -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     resolver = FakeResolver(manifest=manifest, raw_body=raw)
     with pytest.raises(RetryableError, match="^input_asset_response_mismatch"):
         materialize(payload, "req-malformed", manifest=manifest, resolver=resolver)
@@ -526,7 +526,7 @@ def test_malformed_resolver_response_is_retryable(raw: bytes) -> None:
 
 def test_unknown_response_field_is_rejected(http_root: HTTPRoot) -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
 
     def add_unknown(assets: list[dict]) -> list[dict]:
         assets[0]["surprise"] = True
@@ -553,8 +553,8 @@ def test_response_count_order_rejected(
 ) -> None:
     payload = Payload(extra=[Asset(ref=REF_A), Asset(ref=REF_B)])
     manifest = (
-        make_entry(REF_A, PNG_A, "media", "image/png"),
-        make_entry(REF_B, PNG_B, "media", "image/png"),
+        make_compiled_graph(REF_A, PNG_A, "media", "image/png"),
+        make_compiled_graph(REF_B, PNG_B, "media", "image/png"),
     )
     resolver = FakeResolver(
         manifest=manifest,
@@ -583,7 +583,7 @@ def test_changed_immutable_response_field_rejected(
     http_root: HTTPRoot, field_name: str, value: Any
 ) -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
 
     def change(assets: list[dict]) -> list[dict]:
         assets[0][field_name] = value
@@ -600,7 +600,7 @@ def test_changed_immutable_response_field_rejected(
 def test_cancel_observed_at_resolve_boundary() -> None:
     canceled = threading.Event()
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: "http://127.0.0.1:1/a"})
     resolver.on_call = canceled.set
     with pytest.raises(CanceledError):
@@ -620,7 +620,7 @@ def test_blocked_resolved_url_rejected_without_download(
 ) -> None:
     monkeypatch.setattr(input_assets, "_url_is_blocked", lambda _url: True)
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
     with pytest.raises(ValidationError, match="^input_asset_url_not_allowed") as caught:
         materialize(payload, "req-blocked", manifest=manifest, resolver=resolver)
@@ -636,7 +636,7 @@ def test_internal_object_host_allowlist_only_for_resolver_minted(
     monkeypatch.setattr(input_assets, "_url_is_blocked", lambda _url: True)
     host = "127.0.0.1"
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
 
     monkeypatch.delenv("GEN_WORKER_INTERNAL_OBJECT_HOSTS", raising=False)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
@@ -673,7 +673,7 @@ def test_internal_object_host_never_unblocks_caller_public_urls(
 def test_size_mismatch_is_retryable_integrity_failure(http_root: HTTPRoot) -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
     manifest = (
-        make_entry(REF_A, PNG_A, "media", "image/png", size_bytes=len(PNG_A) + 1),
+        make_compiled_graph(REF_A, PNG_A, "media", "image/png", size_bytes=len(PNG_A) + 1),
     )
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
     with pytest.raises(RetryableError, match="^input_asset_integrity_failed"):
@@ -683,7 +683,7 @@ def test_size_mismatch_is_retryable_integrity_failure(http_root: HTTPRoot) -> No
 
 def test_blake3_mismatch_is_retryable_integrity_failure(http_root: HTTPRoot) -> None:
     payload = Payload(extra=[Asset(ref=REF_A)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png", blake3="0" * 64),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png", blake3="0" * 64),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
     with pytest.raises(RetryableError, match="^input_asset_integrity_failed") as caught:
         materialize(payload, "req-hash", manifest=manifest, resolver=resolver)
@@ -693,7 +693,7 @@ def test_blake3_mismatch_is_retryable_integrity_failure(http_root: HTTPRoot) -> 
 def test_private_kind_and_mime_limits_enforced(http_root: HTTPRoot) -> None:
     # Declared AudioAsset (manifest kind audio) but the stored bytes are a PNG.
     payload = Payload(audio=AudioAsset(ref=REF_A))
-    manifest = (make_entry(REF_A, PNG_A, "audio", "audio/mpeg"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "audio", "audio/mpeg"),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
     with pytest.raises(ValidationError, match="^input_asset_kind_mismatch"):
         materialize(payload, "req-kind", manifest=manifest, resolver=resolver)
@@ -702,7 +702,7 @@ def test_private_kind_and_mime_limits_enforced(http_root: HTTPRoot) -> None:
     payload2 = Payload(
         extra=[Asset(ref=REF_A, url_allowed_mime_types=("audio/*",))]
     )
-    manifest2 = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest2 = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     resolver2 = FakeResolver(manifest=manifest2, urls={REF_A: http_root.url("a.png")})
     with pytest.raises(ValidationError, match="^input_asset_kind_mismatch"):
         materialize(payload2, "req-allow", manifest=manifest2, resolver=resolver2)
@@ -710,7 +710,7 @@ def test_private_kind_and_mime_limits_enforced(http_root: HTTPRoot) -> None:
 
 def test_private_caller_byte_cap_precedes_download(http_root: HTTPRoot) -> None:
     payload = Payload(extra=[Asset(ref=REF_A, url_max_bytes=8)])
-    manifest = (make_entry(REF_A, PNG_A, "media", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, PNG_A, "media", "image/png"),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("a.png")})
     with pytest.raises(ValidationError, match="^input_asset_too_large"):
         materialize(payload, "req-cap", manifest=manifest, resolver=resolver)
@@ -719,7 +719,7 @@ def test_private_caller_byte_cap_precedes_download(http_root: HTTPRoot) -> None:
 
 def test_private_corrupt_image_fails_decode(http_root: HTTPRoot) -> None:
     payload = Payload(image=ImageAsset(ref=REF_A))
-    manifest = (make_entry(REF_A, CORRUPT_PNG, "image", "image/png"),)
+    manifest = (make_compiled_graph(REF_A, CORRUPT_PNG, "image", "image/png"),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("corrupt.png")})
     with pytest.raises(ValidationError, match="^input_asset_decode_failed"):
         materialize(payload, "req-decode", manifest=manifest, resolver=resolver)
@@ -729,7 +729,7 @@ def test_private_corrupt_image_fails_decode(http_root: HTTPRoot) -> None:
 def test_private_download_cancel_cleans_partial_file(http_root: HTTPRoot) -> None:
     asset = Asset(ref=REF_A)
     payload = Payload(extra=[asset])
-    manifest = (make_entry(REF_A, SLOW_BODY, "media", "application/octet-stream"),)
+    manifest = (make_compiled_graph(REF_A, SLOW_BODY, "media", "application/octet-stream"),)
     resolver = FakeResolver(manifest=manifest, urls={REF_A: http_root.url("slow.bin")})
     canceled = threading.Event()
 
@@ -756,8 +756,8 @@ def test_download_failure_cleans_prior_private_success(http_root: HTTPRoot) -> N
     ok, failing = Asset(ref=REF_A), Asset(ref=REF_B)
     payload = Payload(extra=[ok, failing])
     manifest = (
-        make_entry(REF_A, PNG_A, "media", "image/png"),
-        make_entry(REF_B, PNG_B, "media", "image/png"),
+        make_compiled_graph(REF_A, PNG_A, "media", "image/png"),
+        make_compiled_graph(REF_B, PNG_B, "media", "image/png"),
     )
     resolver = FakeResolver(
         manifest=manifest,

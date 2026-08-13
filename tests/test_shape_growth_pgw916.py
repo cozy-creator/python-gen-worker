@@ -100,7 +100,7 @@ def test_an_aot_shape_gap_is_a_countable_typed_fact(events):
         compiled_graph_key="ck1-0d945144")
     assert shape_growth.report(gap) is True
     kinds = [(k, p) for k, p, _d in events]
-    assert (activity_mod.KIND_SHAPE_GAP, "no_entry_admits") in kinds
+    assert (activity_mod.KIND_SHAPE_GAP, "no_compiled_graph_admits") in kinds
     detail = next(d for k, _p, d in events if k == activity_mod.KIND_SHAPE_GAP)
     assert "arm=aot" in detail and "class=unet/sample=" in detail
 

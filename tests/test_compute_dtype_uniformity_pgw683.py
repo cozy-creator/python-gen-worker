@@ -34,12 +34,12 @@ Hub bindings declare none, and prod's binding is flavor-unpinned
 (`ref=tensorhub/wai-illustrious`, `tag=prod`), so the flavor is resolved per
 pod/per pick. A quantizer only rewrites the DENOISER, so the VAE and text
 encoders of `X` and `X#fp8-w8a8` are byte-identical — same content digest,
-same empty declared dtype, therefore ONE cache entry — while the two
+same empty declared dtype, therefore ONE cache compiled graph — while the two
 compositions compute at DIFFERENT dtypes (`#fp8-w8a8` -> bf16 by pgw#675's own
 lane rule; a plain fp16-stored mirror -> fp16). Whichever pick loaded first
-won the entry; the other aliased a foreign-precision module into its
+won the compiled graph; the other aliased a foreign-precision module into its
 composition. That is per-pod non-deterministic by ARRIVAL ORDER, needs no
-override, and — because injection only happens once an entry already EXISTS —
+override, and — because injection only happens once an compiled graph already EXISTS —
 lands in a LATER window, which is exactly what the live pod showed: `generate`
 served 3/3 at 11.1s and reached `compiled` BEFORE the mint that died.
 
@@ -128,7 +128,7 @@ def _binding(path: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# 1. The identity hole: two lanes, one shared entry.
+# 1. The identity hole: two lanes, one shared compiled graph.
 # ---------------------------------------------------------------------------
 
 
@@ -148,7 +148,7 @@ def test_the_two_flavors_really_do_compute_at_different_dtypes(
 
 def test_effective_dtype_identity_separates_the_execution_lanes(tmp_path: Path) -> None:
     """GREEN: keyed on the EFFECTIVE compute dtype — what the executor passes
-    now — the same bytes under two lanes are two entries, so a bf16
+    now — the same bytes under two lanes are two compiled graphs, so a bf16
     composition can never be handed the fp16 lane's module."""
     plain, w8a8 = _plain_fp16_tree(tmp_path), _w8a8_tree(tmp_path)
     shared_digest = "same-text-encoder-bytes"
@@ -223,7 +223,7 @@ def test_the_share_plan_itself_keys_on_the_effective_dtype(
     assert set(te_ids) == {"plain", "quant"}
     assert te_ids["plain"] != te_ids["quant"], (
         "byte-identical components of an fp16 tree and a bf16 quant lane must "
-        "NOT share one entry — that alias is the pgw#683 fatal"
+        "NOT share one compiled_graph — that alias is the pgw#683 fatal"
     )
 
 

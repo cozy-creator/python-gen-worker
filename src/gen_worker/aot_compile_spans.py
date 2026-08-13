@@ -1,16 +1,16 @@
-"""pgw#830: complete span coverage over one entry's compile.
+"""pgw#830: complete span coverage over one compiled graph's compile.
 
 The defect this closes
 ----------------------
 pgw#757 named FIVE phases by reading dynamo's ``compilation_time_metrics``
 (lowering / codegen / graph passes / host C++ / triton). On attempt nine's
-72-entry regional mint those five summed to **742.6 s of a recorded
+72-compiled graph regional mint those five summed to **742.6 s of a recorded
 ``compile_s`` of 1331.72 s — 56 %.** The other 44 % had no name, and a
 number with no name cannot be optimized, argued about, or defended.
 
 The reason the gap existed is structural, not a missing metric key:
 ``compile_s`` in the pooled path is the parent's Popen-to-reap wall of an
-entry CHILD PROCESS, while ``phases`` only ever measured the inside of
+compiled graph CHILD PROCESS, while ``phases`` only ever measured the inside of
 ``aot_compile``. Everything the child does before and after that call —
 interpreter boot, ``import torch``, ``env_seal.establish``, the device-lock
 install, ``torch.export.load`` of the staged program, the report write, the
@@ -38,7 +38,7 @@ Overlays vs partition members
 -----------------------------
 ``triton_s``, ``autotune_s`` and ``device_lock_wait_s`` are OVERLAYS, not
 partition members: they are known to nest inside the members above them (the
-triton keys sit inside codegen / host compile on a CUDA entry; a
+triton keys sit inside codegen / host compile on a CUDA compiled graph; a
 device-benchmark flock wait happens inside ``aot_compile``). Summing them with
 the partition was the second attribution bug — it inflates "attributed" while
 leaving the residual unexplained. They are reported under their own names so a
@@ -49,7 +49,7 @@ reader can attribute WITHIN a member without double-counting the total.
 INSIDE ``GraphLowering.codegen``. It is named because it decides two separate
 questions and both were being answered from a residual: how much of a mint a
 shared autotune cache could ever return (measured 3.1 % of a 390 s w8a8 SDXL
-UNet entry — 12.1 s over 96 calls), and whether the selected config, which is
+UNet compiled graph — 12.1 s over 96 calls), and whether the selected config, which is
 baked into the generated wrapper's grid expression and ``num_warps``, moved
 between two mints of the same key.
 
@@ -72,7 +72,7 @@ from typing import Dict, Iterator, List, Mapping, Tuple
 #: NAME meant two things — "the child's exit plus the parent's poll
 #: granularity" on a reporting child, and "everything nobody could attribute"
 #: on a silent one. A reader could not tell which, and one did not: pgw#1085
-#: §5c read the residual branch as poll lag on a 36-entry sdxl mint.
+#: §5c read the residual branch as poll lag on a 36-compiled graph sdxl mint.
 SPANS_V = 2
 
 #: Disjoint ``compilation_time_metrics`` leaves. These partition the inside of
@@ -82,7 +82,7 @@ SPANS_V = 2
 #: reading them against ``compile_s`` is the trap this program fell into twice.
 #: ``compile_s`` is the parent's Popen-to-reap wall, which also contains the
 #: child's interpreter boot, seal, program load and reap lag. MEASURED on the
-#: standing hub over 20 recorded sdxl entries (pgw#1189, 2026-08-12):
+#: standing hub over 20 recorded sdxl compiled graphs (pgw#1189, 2026-08-12):
 #: ``compile_s - sum(leaves)`` has median 37.7 s and **minimum −2.9 s**. A
 #: NEGATIVE residual is proof the leaves also OVERLAP each other, so their sum
 #: is not a breakdown of anything and "the unattributed remainder" is not a
@@ -131,8 +131,8 @@ PARTITIONS: Dict[str, Tuple[str, ...]] = {
 #: members did not claim. Named so the invariant can say WHICH bucket grew.
 #: Every level has exactly one, and no MEASURED span is ever used as another
 #: level's residual (pgw#1099): a name that means "what I measured" on one
-#: entry and "what nobody could measure" on the next is unreadable, and a
-#: reader who sums it across entries is measuring the instrument.
+#: compiled graph and "what nobody could measure" on the next is unreadable, and a
+#: reader who sums it across compiled graphs is measuring the instrument.
 RESIDUALS = ("parent_other_s", "child_other_s", "compile_other_s")
 
 #: Recorded alongside the partition but NOT a member of it: each is a split of
@@ -140,7 +140,7 @@ RESIDUALS = ("parent_other_s", "child_other_s", "compile_other_s")
 #: ``child_interp_s`` is the part of ``child_boot_s`` a persistent pool worker
 #: would delete; ``triton_s`` / ``device_lock_wait_s`` nest inside
 #: ``compile_wall_s``. Anything listed here must be excluded by a reader
-#: summing the table. NOTE the two ``parent_*`` entries here are OUTSIDE
+#: summing the table. NOTE the two ``parent_*`` compiled graphs here are OUTSIDE
 #: ``compile_s`` (parent work that overlaps other children); ``parent_other_s``
 #: is not one of them — it is the residual INSIDE ``compile_s``.
 SUBSPANS = ("child_interp_s", "triton_s", "autotune_s", "device_lock_wait_s",

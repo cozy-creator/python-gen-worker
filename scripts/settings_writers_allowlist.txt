@@ -19,6 +19,6 @@ src/gen_worker/host_canary.py::os.environ.pop(NCCL_P2P_DISABLE)  SCOPED  the pro
 src/gen_worker/host_canary.py::os.environ[<dynamic>]  SCOPED  the probe's restore loop writing the SAVED values back
 
 # Cache-dir redirects: where compile bytes land, never what bytes are
-# generated (inductor entries are content-addressed). The sanctioned window
+# generated (inductor compiled graphs are content-addressed). The sanctioned window
 # is post-scrub (env_seal docstring).
 src/gen_worker/entrypoint.py::os.environ[<dynamic>]  PLUMBING  pgw#783 per-group inductor/triton cache isolation dirs

@@ -1021,13 +1021,13 @@ def _serve_inner(args: argparse.Namespace) -> int:
         if getattr(args, "json_output", False):
             # Thin alias of `gen-worker run --list`'s functions array — one
             # shared builder, one shape (incl. detected caps + fit verdicts).
-            from .listing import detected_capabilities, function_entries
+            from .listing import detected_capabilities, function_compiled_graphs
 
             detected = detected_capabilities()
             sys.stdout.write(
                 json.dumps({
                     "detected": detected,
-                    "functions": function_entries(candidates, detected=detected),
+                    "functions": function_compiled_graphs(candidates, detected=detected),
                 }) + "\n"
             )
             sys.stdout.flush()

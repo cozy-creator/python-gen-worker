@@ -205,7 +205,7 @@ def check(census_path: Path = CENSUS) -> List[str]:
         if not any(stem.startswith(p) for p in prefixes):
             problems.append(
                 f"census row {pattern!r} claims NEUTRALIZED but no "
-                f"env_seal.SCRUB_PREFIXES entry covers stem {stem!r} — "
+                f"env_seal.SCRUB_PREFIXES compiled_graph covers stem {stem!r} — "
                 "'erased before torch imports' must be a fact")
 
     for name, where in sorted(src_watched_literals().items()):

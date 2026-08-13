@@ -1,4 +1,4 @@
-"""WHOSE machine this mint is running on — declared by the entry point.
+"""WHOSE machine this mint is running on — declared by the compiled graph point.
 
 DESIGN-RULINGS §4.30 (Paul, 2026-08-11), verbatim: *"Be nice, especially on
 cozy-local — never saturate the user's only machine. Compile parallelism K is
@@ -7,7 +7,7 @@ cozy-local, accepting a slower local mint to stay polite."*
 
 Every clamp in :mod:`gen_worker.aot_compile_pool` is written for a SERVING POD
 with a co-resident tenant: ``SERVING_HEADROOM_CPUS`` keeps two cores for an
-asyncio beat and an eager forward, ``ENTRY_RSS_RESERVE_BYTES`` keeps host RAM
+asyncio beat and an eager forward, ``COMPILED_GRAPH_RSS_RESERVE_BYTES`` keeps host RAM
 so a tenant request does not meet the OOM killer. Those are the right terms for
 a datacenter box we bought. They are the wrong terms for a desktop, where the
 co-resident workload is a human — who outranks the mint, cannot be scheduled
@@ -31,8 +31,8 @@ a DIFFERENT question:
 
 pgw#1127 §2 named the failure mode this codebase keeps hitting: *"two
 derivations of one fact"*. So this is not derived at all. It is DECLARED, once,
-by the process entry that knows: :mod:`gen_worker.local_serve` — the cozy-local
-CLI's only arming entry — passes :data:`USER_MACHINE`, and everything else gets
+by the process compiled graph that knows: :mod:`gen_worker.local_serve` — the cozy-local
+CLI's only arming compiled graph — passes :data:`USER_MACHINE`, and everything else gets
 :data:`FLEET` by construction because that is the struct's default.
 
 And it is deliberately not an environment variable. §1.17, verbatim: *"Envs are
@@ -56,12 +56,12 @@ and the four terms cannot drift apart:
 * :meth:`cpu_budget_cores` — nice does nothing for the things that are not CPU
   time. K children mean K concurrent ``cc1plus``, K inductor caches being
   written, and K working sets in the page cache; that pressure is felt as
-  stutter whatever the priority. ``CPUS_PER_ENTRY_WORKER`` is an AVERAGE (one
-  core for ~71 % of an entry, up to ``compile_threads`` for the rest), so a pod
+  stutter whatever the priority. ``CPUS_PER_COMPILED_GRAPH_WORKER`` is an AVERAGE (one
+  core for ~71 % of an compiled graph, up to ``compile_threads`` for the rest), so a pod
   deliberately overcommits: at the burst it asks for ~2x the box, which is
   correct when the box is ours and otherwise idle. Halving the budget makes the
   BURST ask for the machine instead of double it.
-* :meth:`entry_ceiling` — the disk and the page cache being contended are the
+* :meth:`compiled_graph_ceiling` — the disk and the page cache being contended are the
   user's own. Half the fleet ceiling.
 * :meth:`rss_reserve_bytes` — **a mint that OOMs a desktop is worse than a slow
   one.** ``MemAvailable`` counts reclaimable page cache as free, so a pool sized
@@ -81,7 +81,7 @@ yield, implemented by the scheduler, for free.
 **No ionice.** It would be the right instinct — priority for I/O the way nice
 is for CPU — but ``ioprio_set`` has no stdlib wrapper (a ctypes syscall), and
 on the ``none``/``mq-deadline`` schedulers that ship on modern desktops it is a
-no-op. The RAM reserve and the entry ceiling bound the I/O instead, by bounding
+no-op. The RAM reserve and the compiled graph ceiling bound the I/O instead, by bounding
 the number of concurrent writers. Revisit only with a measurement showing disk
 contention, not on instinct.
 
@@ -105,16 +105,16 @@ USER_MACHINE_NICE = 19
 #: See :meth:`CompilePosture.cpu_budget_cores` for the derivation.
 USER_MACHINE_CPU_SHARE = 2
 
-#: Entry children a user's machine may run at once, against
-#: ``aot_compile_pool.MAX_ENTRY_WORKERS`` (8) on a pod. Half, because the disk
+#: Compiled graph children a user's machine may run at once, against
+#: ``aot_compile_pool.MAX_COMPILED_GRAPH_WORKERS`` (8) on a pod. Half, because the disk
 #: whose write amplification that constant bounds is the user's own — and
 #: because K only buys whole ROUNDS, so the difference between 4 and 8 is one
 #: extra round on the largest real family, paid in wall-clock a desktop mint
 #: is already trading away.
-USER_MACHINE_MAX_ENTRY_WORKERS = 4
+USER_MACHINE_MAX_COMPILED_GRAPH_WORKERS = 4
 
 #: Host RAM a user's machine keeps for its owner, against
-#: ``aot_compile_pool.ENTRY_RSS_RESERVE_BYTES`` (4 GiB) on a pod. Sized as one
+#: ``aot_compile_pool.COMPILED_GRAPH_RSS_RESERVE_BYTES`` (4 GiB) on a pod. Sized as one
 #: browser plus one editor plus the page cache they are both living in — the
 #: things whose eviction IS the experience of a machine "getting slow", and
 #: which ``MemAvailable`` cheerfully reports as free.
@@ -125,7 +125,7 @@ class CompilePosture(msgspec.Struct, frozen=True, kw_only=True):
     """Whose machine a mint runs on. Passed, never inferred.
 
     Travels on ``mint_process.MintRequest`` so the process that sizes the
-    compile pool — the mint child, three frames below the entry that knows — is
+    compile pool — the mint child, three frames below the compiled graph that knows — is
     told rather than left to guess.
     """
 
@@ -139,7 +139,7 @@ class CompilePosture(msgspec.Struct, frozen=True, kw_only=True):
         """Scheduling-priority increment for the mint process tree.
 
         Applied by the mint child TO ITSELF and inherited by every descendant
-        — the entry-pool children, inductor's compile workers, and every
+        — the compiled graph-pool children, inductor's compile workers, and every
         ``cc1plus`` under them. 0 on a pod: a mint there competes with a tenant
         whose reserves are already held back explicitly, and de-prioritising it
         on top of that would slow paid work for no gain.
@@ -161,10 +161,10 @@ class CompilePosture(msgspec.Struct, frozen=True, kw_only=True):
             budget = min(budget, int(vcpus) // USER_MACHINE_CPU_SHARE)
         return budget
 
-    def entry_ceiling(self, default: int) -> int:
-        """The hard cap on concurrent entry children. Never widens."""
+    def compiled_graph_ceiling(self, default: int) -> int:
+        """The hard cap on concurrent compiled graph children. Never widens."""
         if self.user_machine:
-            return min(int(default), USER_MACHINE_MAX_ENTRY_WORKERS)
+            return min(int(default), USER_MACHINE_MAX_COMPILED_GRAPH_WORKERS)
         return int(default)
 
     def rss_reserve_bytes(self, default: int) -> int:
@@ -214,7 +214,7 @@ def current() -> CompilePosture:
 
 
 __all__ = [
-    "USER_MACHINE_MAX_ENTRY_WORKERS",
+    "USER_MACHINE_MAX_COMPILED_GRAPH_WORKERS",
     "USER_MACHINE_NICE",
     "USER_MACHINE_RSS_RESERVE_BYTES",
     "CompilePosture",

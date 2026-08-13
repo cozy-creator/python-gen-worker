@@ -30,10 +30,10 @@ class _Out(msgspec.Struct):
 
 
 def test_manifest_emits_config_and_env_blocks() -> None:
-    from gen_worker.discovery.discover import _extract_entries
+    from gen_worker.discovery.discover import _extract_compiled_graphs
     from harness import toy_endpoints
 
-    (fn,) = _extract_entries(
+    (fn,) = _extract_compiled_graphs(
         toy_endpoints.ConfigKnobsEndpoint, "harness.toy_endpoints"
     )
     assert fn["config_params"] == [
@@ -46,7 +46,7 @@ def test_manifest_emits_config_and_env_blocks() -> None:
         {"name": "default_steps", "type": "int", "default": 30, "ge": 1, "le": 150},
     ]
     assert fn["env"] == ["TOY_API_BASE"]
-    plain = _extract_entries(toy_endpoints.Basics, "harness.toy_endpoints")
+    plain = _extract_compiled_graphs(toy_endpoints.Basics, "harness.toy_endpoints")
     assert all("config_params" not in f and "env" not in f for f in plain)
 
 
@@ -85,7 +85,7 @@ def test_decoration_validation_errors() -> None:
                 return _Out()
         return E
 
-    with pytest.raises(TypeError, match="config= entries must be ConfigParam"):
+    with pytest.raises(TypeError, match="config= compiled_graphs must be ConfigParam"):
         _decl(config=["not-a-param"])
     with pytest.raises(ValueError, match="repeats 'steps'"):
         _decl(config=[ConfigParam("steps", int, 1), ConfigParam("steps", int, 2)])

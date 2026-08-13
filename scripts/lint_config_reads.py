@@ -78,7 +78,7 @@ class EnvVisitor(ast.NodeVisitor):
         #: `.get(...)` / `[...]`. Without this, `os.environ.get("X")` records
         #: BOTH ("X", from the call) and an unnamed bare binding (from the
         #: attribute), which double-counts the census and invents
-        #: `<unresolved>` entries for sites whose variable is right there.
+        #: `<unresolved>` compiled graphs for sites whose variable is right there.
         self._consumed: Set[int] = set()
 
     def load_consts(self, tree: ast.AST) -> None:
@@ -266,9 +266,9 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "carrier than the environment it was exec'd with.",
     ("src/gen_worker/supervisor.py", "GEN_WORKER_SUPERVISOR"):
         "BOOTSTRAP. Pre-fork supervisor predicate, runs before the process "
-        "entry. Same identity-not-policy reasoning.",
+        "compiled_graph. Same identity-not-policy reasoning.",
     ("src/gen_worker/supervisor.py", "GEN_WORKER_SUPERVISED"):
-        "BOOTSTRAP. Pre-fork re-entry guard; without it the supervisor forks "
+        "BOOTSTRAP. Pre-fork re-compiled_graph guard; without it the supervisor forks "
         "itself forever.",
     ("src/gen_worker/models/memory.py", "GEN_WORKER_FORBID_CPU_OFFLOAD"):
         "TRIPWIRE at the real placement boundary. Read as env rather than "
@@ -276,7 +276,7 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "config in sight. Threat: a CPU-offloading run on the shared dev box.",
     ("src/gen_worker/aot_wrapper_split.py", "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"):
         "LIVE ON THE FLEET, and that is why it survives its deleted sibling: 5 "
-        "SDXL releases declare it and 1 endpoint carries a non-deleted entry "
+        "SDXL releases declare it and 1 endpoint carries a non-deleted compiled_graph "
         "(standing hub, 2026-08-03). Deleting a live switch changes a running "
         "endpoint. Threat: the pgw#811 run_impl split regressing a family, with "
         "no way to unstick it short of a release.",
@@ -390,7 +390,7 @@ def check_behaviour_gates() -> List[str]:
         path, name = key
         errors.append(
             f"BEHAVIOUR_GATES lists ('{path}', '{name}') but no such conditional "
-            f"env read exists any more. Delete the entry — a stale exemption is "
+            f"env read exists any more. Delete the compiled_graph — a stale exemption is "
             f"the second carrier this whole gate exists to prevent (§4.22).")
     for key, threat in BEHAVIOUR_GATES.items():
         if len(threat.strip()) < 40:

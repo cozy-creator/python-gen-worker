@@ -41,7 +41,7 @@ class _Out(msgspec.Struct):
 
 # The incident's exception, verbatim.
 _REFS_REFUSAL = (
-    "each references[] entry carries exactly one of image / video / audio, got none"
+    "each references[] compiled_graph carries exactly one of image / video / audio, got none"
 )
 
 

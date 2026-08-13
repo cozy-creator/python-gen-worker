@@ -85,7 +85,7 @@ GATE_REASONS: Tuple[str, ...] = (
     # export declaration, so no key can name its class set.
     "no_export_declaration",
     # The declaration exists but `aot_declaration.compiled_graph_plans` will not enumerate
-    # it (colliding entry names, no targets).
+    # it (colliding compiled graph names, no targets).
     "declaration_unreadable",
     # pgw#1127: NOBODY could answer this key — no hub (no HelloAck base URL
     # yet, or an embedded single-process worker with neither a local bearer nor
@@ -107,7 +107,7 @@ GATE_REASONS: Tuple[str, ...] = (
     "operator_eager_only",
 )
 
-#: The reason token for :data:`GATE_REASONS`' operator entry. Named so the
+#: The reason token for :data:`GATE_REASONS`' operator compiled graph. Named so the
 #: executor references the vocabulary instead of re-typing the literal — the
 #: drift channel `EagerPhase` was created to close, one module over.
 OPERATOR_EAGER_ONLY = "operator_eager_only"
@@ -518,7 +518,7 @@ def _attempt_key(
     bearer: str,
     hub_absent: str,
 ) -> BootAdoptOutcome:
-    """Ask this machine, then the hub, for ONE derived entry key.
+    """Ask this machine, then the hub, for ONE derived compiled graph key.
 
     A miss, a refusal or a witness mismatch here costs THIS graph class. Its
     siblings are resolved by their own keys and are not affected — which is

@@ -158,7 +158,7 @@ def _parse_expires_at(raw: str) -> float:
 
 @dataclass(frozen=True)
 class UploadGrant:
-    """One `need` entry from the hub: where to PUT, and with which headers.
+    """One `need` compiled graph from the hub: where to PUT, and with which headers.
 
     ``expires_at`` is the hub's ``ObjectGrant.ExpiresAt`` (RFC3339). It was on
     the wire and dropped on the floor before pgw#1004; reading it is what makes

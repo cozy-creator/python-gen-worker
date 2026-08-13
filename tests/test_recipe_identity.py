@@ -74,7 +74,7 @@ def pinned_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_static_closure_reaches_the_composition_code() -> None:
     closure = dict(cc.static_code_closure())
-    # Entrypoints and their import graph (root-imports makes this sound).
+    # compiledgraphpoints and their import graph (root-imports makes this sound).
     for probe in ("gen_worker/compile_cache.py", "gen_worker/compiled_graph_key.py",
                   "gen_worker/guard_closure.py", "gen_worker/env_seal.py",
                   "gen_worker/models/loading.py", "gen_worker/__init__.py"):
@@ -92,7 +92,7 @@ def test_static_closure_reaches_the_composition_code() -> None:
 def test_ek1_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
     meta = exported_compiled_graph_meta()
-    key = ck.from_entry_metadata(meta)
+    key = ck.from_compiled_graph_metadata(meta)
     assert key.digest.startswith("ek1-")
     axes = key.axes_dict()
     assert set(axes) == {"graph", "sm", "toolchain"}
@@ -101,7 +101,7 @@ def test_ek1_axes_are_the_recipe(pinned_runtime: None,
     # decide) — they are not even inputs to the derivation.
     bumped = dict(meta, gen_worker="99.0.0", torch="9.9.9",
                   image_digest="sha256:other")
-    assert ck.from_entry_metadata(bumped).digest == key.digest
+    assert ck.from_compiled_graph_metadata(bumped).digest == key.digest
     # Foreign schemes can never collide with a current key; they stay
     # key-SHAPED (pgw#990 — is_key mirrors tensorhub's scheme-agnostic
     # IsCompiledGraphKey) and are ruled on by axes, not by their label.
@@ -109,9 +109,9 @@ def test_ek1_axes_are_the_recipe(pinned_runtime: None,
         assert ck.is_key(dead + "a" * 56)
         assert key.digest != dead + "a" * 56
     # pgw#1176: a ``ck`` key is NOT merely a foreign scheme — it names a
-    # 36-entry all-or-nothing compiled graph this runtime cannot arm at all, so it does
+    # 36-compiled graph all-or-nothing compiled graph this runtime cannot arm at all, so it does
     # not even parse. That is what makes an orphaned ref fail at the
-    # comparison rather than late, inside a per-entry code path.
+    # comparison rather than late, inside a per-compiled graph code path.
     # fence-symbol-exempt: `ck1` is the SUPERSEDED scheme and naming it IS the
     # assertion — the sixth instance of a blanket rename eating the one line
     # whose job is to name the old vocabulary. Do not sweep this.
@@ -123,28 +123,28 @@ def test_ek1_axes_are_the_recipe(pinned_runtime: None,
 
 def test_recipe_change_changes_the_key(pinned_runtime: None) -> None:
     meta = exported_compiled_graph_meta()
-    base = ck.from_entry_metadata(meta).digest
+    base = ck.from_compiled_graph_metadata(meta).digest
     # Toolchain content change -> new identity.
     retooled = json.loads(json.dumps(meta))
     retooled["toolchain"]["torch"] = "f" * 16
-    assert ck.from_entry_metadata(retooled).digest != base
+    assert ck.from_compiled_graph_metadata(retooled).digest != base
     # A deliberate settings-declaration change re-keys THROUGH toolchain
     # (pgw#1059 amendment 4) — the axis it honestly belongs to.
     reconfigured = json.loads(json.dumps(meta))
     reconfigured["toolchain"]["settings_declaration"] = "e" * 16
-    assert ck.from_entry_metadata(reconfigured).digest != base
+    assert ck.from_compiled_graph_metadata(reconfigured).digest != base
 
 
 def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     """Mint stamp == publish recompute, from the recorded recipe blocks —
     never trusted as a stamp."""
     meta = exported_compiled_graph_meta()
-    want = ck.from_entry_metadata(meta)
+    want = ck.from_compiled_graph_metadata(meta)
     assert meta["compiled_graph_key"] == want.digest
     # A compiled graph with no toolchain block has no recipe identity.
     legacy = {k: v for k, v in meta.items() if k != "toolchain"}
     with pytest.raises(ck.CompiledGraphKeyError, match="recipe"):
-        ck.from_entry_metadata(legacy)
+        ck.from_compiled_graph_metadata(legacy)
     # pgw#990's memo half is GONE with its subject (pgw#1181): the local JIT
     # kind that recorded `code_closure` and carried no `compiled_graph_key` was the
     # `torch-inductor-cache` artifact, and there is no longer any kind without
@@ -153,7 +153,7 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     # A TOOLCHAIN drift is identity on the exported kind.
     retooled = json.loads(json.dumps(meta))
     retooled["toolchain"]["torch"] = "0" * 16
-    assert ck.from_entry_metadata(retooled).digest != want.digest
+    assert ck.from_compiled_graph_metadata(retooled).digest != want.digest
 
 
 def test_toolchain_covers_the_compiler_and_not_the_model_libraries() -> None:
@@ -177,7 +177,7 @@ def test_toolchain_covers_the_compiler_and_not_the_model_libraries() -> None:
 def _manifest() -> Dict[str, Any]:
     return {
         "v": 2,
-        "graphs": [{"target": "transformer", "code": "forward", "entry": 0,
+        "graphs": [{"target": "transformer", "code": "forward", "compiled_graph": 0,
                     "guards": [{"type": "TENSOR_MATCH", "source": "L['x']",
                                 "expr": "e", "verdict": gc.CANONICALIZED,
                                 "axis": "ingress"}]}],

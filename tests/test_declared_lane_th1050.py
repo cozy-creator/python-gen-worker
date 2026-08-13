@@ -34,12 +34,12 @@ def _decode(res: "pb.JobResult") -> dict:
 
 
 def test_manifest_emits_handles_block() -> None:
-    from gen_worker.discovery.discover import _extract_entries
+    from gen_worker.discovery.discover import _extract_compiled_graphs
     from harness import toy_endpoints
 
-    (fn,) = _extract_entries(toy_endpoints.LaneAwareEndpoint, "harness.toy_endpoints")
+    (fn,) = _extract_compiled_graphs(toy_endpoints.LaneAwareEndpoint, "harness.toy_endpoints")
     assert fn["handles"] == ["fp8-w8a8-dynamic"]
-    plain = _extract_entries(toy_endpoints.Basics, "harness.toy_endpoints")
+    plain = _extract_compiled_graphs(toy_endpoints.Basics, "harness.toy_endpoints")
     assert all("handles" not in f for f in plain)
 
 

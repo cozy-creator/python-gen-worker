@@ -188,7 +188,7 @@ def test_child_report_carries_the_phase_table() -> None:
 def test_both_mint_routes_report_duration_over_real_grpc() -> None:
     """The headline assertion: an AOT mint and a JIT mint each land a numeric
     `duration_ms` on the hub, under the same `phase=minted` roll-up, with their
-    per-entry / per-phase spans as their own events.
+    per-compiled graph / per-phase spans as their own events.
 
     That is what makes "AOT vs JIT mint duration" one grouped query over
     `worker_activity_events` instead of a regex over one side's prose and a grep
@@ -201,10 +201,10 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
 
         # ---- AOT route: the REAL _emit_phase_event over a REAL phase table.
         # The table shape is aot_mint._mint_phase_table's own output contract
-        # (v1: totals + phases + per-entry timings), not an invention.
+        # (v1: totals + phases + per-compiled graph timings), not an invention.
         table = {
             "v": 1,
-            "n_entries": 2,
+            "n_compiled_graphs": 2,
             "autotune": {"mode": "max-autotune-no-cudagraphs"},
             "inductor_configs": {"compile_threads": 8},
             "totals": {
@@ -212,7 +212,7 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
                 "package_s": 12.0, "declare_s": 3.0, "total_s": 1101.5,
             },
             "phases": {"inductor_compile": 900.0},
-            "entries": {
+            "compiled_graphs": {
                 "unet_cfg": {"export_s": 80.0, "compile_s": 700.0, "warm_s": 40.0},
                 "vae_decode": {"export_s": 40.0, "compile_s": 200.0, "warm_s": 20.0},
             },
@@ -237,7 +237,7 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
 
         aot = _wait_for_phases(
             conn, aot_mint.MINT_PHASES_KIND,
-            {"minted", "entry:unet_cfg", "entry:vae_decode"})
+            {"minted", "compiled_graph:unet_cfg", "compiled_graph:vae_decode"})
         jit = _wait_for_phases(
             conn, activity_mod.KIND_JIT_COMPILE, {"minted", "shape:boot"})
 
@@ -246,15 +246,15 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
     assert aot["minted"].duration_ms == 1_101_500
     assert jit["minted"].duration_ms == 612_500
 
-    # The per-entry / per-phase spans: Paul's "why is AOT mint so much slower
+    # The per-compiled graph / per-phase spans: Paul's "why is AOT mint so much slower
     # than JIT mint?" is answered by these, not by the totals.
-    assert aot["entry:unet_cfg"].duration_ms == 820_000   # 80 + 700 + 40
-    assert aot["entry:vae_decode"].duration_ms == 260_000  # 40 + 200 + 20
-    # Entry spans deliberately do NOT reconstruct total_s: package/declare/pack
-    # are per-mint, not per-entry, so a reader must never sum children into a
+    assert aot["compiled_graph:unet_cfg"].duration_ms == 820_000   # 80 + 700 + 40
+    assert aot["compiled_graph:vae_decode"].duration_ms == 260_000  # 40 + 200 + 20
+    # Compiled graph spans deliberately do NOT reconstruct total_s: package/declare/pack
+    # are per-mint, not per-compiled graph, so a reader must never sum children into a
     # roll-up.
-    assert (aot["entry:unet_cfg"].duration_ms
-            + aot["entry:vae_decode"].duration_ms) < aot["minted"].duration_ms
+    assert (aot["compiled_graph:unet_cfg"].duration_ms
+            + aot["compiled_graph:vae_decode"].duration_ms) < aot["minted"].duration_ms
 
     assert jit["shape:boot"].duration_ms == 612_500
     assert "route=intake" in jit["minted"].detail

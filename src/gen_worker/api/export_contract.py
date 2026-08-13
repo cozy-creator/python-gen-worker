@@ -58,7 +58,7 @@ _logger = logging.getLogger(__name__)
 #: arity ``N``).
 ForkValue = Union[bool, int, str]
 
-#: One entry of an :class:`Input` shape template: a literal size, the NAME of
+#: One compiled graph of an :class:`Input` shape template: a literal size, the NAME of
 #: a declared :class:`Dim` (resolved from the class row), or ``("config",
 #: field)`` — read off the resolved module's own config so a family member
 #: with a different width exports correctly instead of failing in the trace.
@@ -176,7 +176,7 @@ class MintBlocker(msgspec.Struct, frozen=True):
 
     It exports (and, unless ``--export-only``, AOT-compiles) the declared class
     set and writes ``export_peak_device_bytes`` /
-    ``export_peak_device_reserved_bytes`` and a per-entry outcome. Cite that
+    ``export_peak_device_reserved_bytes`` and a per-compiled graph outcome. Cite that
     report in ``resolution=`` — measuring resolves nothing by itself, and a
     ``resolved=True`` with no citation is refused here.
     """
@@ -335,7 +335,7 @@ def _identifier(kind: str, name: Any) -> str:
     return text
 
 
-def _axis_spec(entry: Any, what: str) -> AxisSpec:
+def _axis_spec(compiled_graph: Any, what: str) -> AxisSpec:
     """Validate and canonicalise one :data:`AxisSpec`.
 
     Lifted out of ``Input.__post_init__`` (pgw#853) so the SAME three-way
@@ -345,21 +345,21 @@ def _axis_spec(entry: Any, what: str) -> AxisSpec:
     ``Arg.template``. One rule, one error sentence, one resolver
     (``aot_declaration._resolve_axis``) downstream.
     """
-    if isinstance(entry, bool):
+    if isinstance(compiled_graph, bool):
         raise DeclarationError(f"{what}: bool is not an axis spec")
-    if isinstance(entry, int):
-        if entry <= 0:
-            raise DeclarationError(f"{what}: literal {entry} must be positive")
-        return entry
-    if isinstance(entry, str):
-        return _identifier(what, entry)
+    if isinstance(compiled_graph, int):
+        if compiled_graph <= 0:
+            raise DeclarationError(f"{what}: literal {compiled_graph} must be positive")
+        return compiled_graph
+    if isinstance(compiled_graph, str):
+        return _identifier(what, compiled_graph)
     try:
-        ref = tuple(entry)
+        ref = tuple(compiled_graph)
     except TypeError:
         ref = ()
     if len(ref) != 2 or ref[0] != "config" or not str(ref[1]).strip():
         raise DeclarationError(
-            f"{what}: {entry!r} is not an int, a dim name, or "
+            f"{what}: {compiled_graph!r} is not an int, a dim name, or "
             f"(\"config\", field)")
     return ("config", str(ref[1]).strip())
 
@@ -428,11 +428,11 @@ class Dim(msgspec.Struct, frozen=True):
                 f"Dim {self.name!r} declares no (input, axis) bindings — an "
                 f"unbound dim can never reach the traced call")
         bindings: list[Tuple[str, int]] = []
-        for entry in raw:
-            if len(tuple(entry)) != 2:
+        for compiled_graph in raw:
+            if len(tuple(compiled_graph)) != 2:
                 raise DeclarationError(
-                    f"Dim {self.name!r}: binding {entry!r} is not (input, axis)")
-            inp, axis = entry
+                    f"Dim {self.name!r}: binding {compiled_graph!r} is not (input, axis)")
+            inp, axis = compiled_graph
             inp = str(inp or "").strip()
             if not inp:
                 raise DeclarationError(
@@ -584,12 +584,12 @@ def _sorted_pairs(kind: str, owner: str, value: Any) -> Tuple[Tuple[str, Any], .
     if isinstance(value, Mapping):
         items = list(value.items())
     else:
-        items = [tuple(entry) for entry in value]
+        items = [tuple(compiled_graph) for compiled_graph in value]
     out: list[Tuple[str, Any]] = []
-    for entry in items:
-        if len(entry) != 2:
-            raise DeclarationError(f"{owner}: {kind} entry {entry!r} is not (name, value)")
-        out.append((str(entry[0]).strip(), entry[1]))
+    for compiled_graph in items:
+        if len(compiled_graph) != 2:
+            raise DeclarationError(f"{owner}: {kind} compiled_graph {compiled_graph!r} is not (name, value)")
+        out.append((str(compiled_graph[0]).strip(), compiled_graph[1]))
     names = [n for n, _ in out]
     if len(set(names)) != len(names):
         raise DeclarationError(f"{owner}: {kind} repeats a name")
@@ -616,7 +616,7 @@ class GraphClass(msgspec.Struct, frozen=True):
     aspect- and CFG-invariant). Without scoping, ``mint_plans`` hands every
     target the whole class table, so declaring a text encoder alongside the
     denoiser would mint 18 identical text-encoder graphs under 18 different
-    entry names and pay for each. That is why the SDK's own
+    compiled graph names and pay for each. That is why the SDK's own
     ``("transformer", "vae.decode")`` default has never been exercised by a
     fleet family: it was not expressible, only payable.
     """
@@ -668,7 +668,7 @@ class Input(msgspec.Struct, frozen=True):
 
     ``name`` may be dotted for nested container arguments (sdxl's
     ``added_cond_kwargs.text_embeds`` — the container dict is built and fed
-    as ONE argument). ``shape`` entries are :data:`AxisSpec`; a rank-0
+    as ONE argument). ``shape`` compiled graphs are :data:`AxisSpec`; a rank-0
     tensor is ``shape=()`` with ``value`` (sdxl's scalar timestep).
 
     ``dtype`` is REQUIRED (pgw#1058): either a torch dtype name (wan's int64
@@ -678,7 +678,7 @@ class Input(msgspec.Struct, frozen=True):
     dtype of every input is part of the class the compiled graph claims to serve, and
     an omitted dtype used to inherit the module's weight dtype SILENTLY —
     which is how sdxl's scalar timestep was minted bfloat16 while every real
-    scheduler presents float32, and a 36-entry compiled graph admitted nothing it was
+    scheduler presents float32, and a 36-compiled graph compiled graph admitted nothing it was
     published for. A guessed fact is not a declaration.
 
     There is NO args/kwargs choice to declare: all-positional example feeds
@@ -711,8 +711,8 @@ class Input(msgspec.Struct, frozen=True):
             force(self, "repeat",
                   _axis_spec(self.repeat, f"Input {self.name!r} repeat"))
         force(self, "shape", tuple(
-            _axis_spec(entry, f"Input {self.name!r} axis spec")
-            for entry in tuple(self.shape)))
+            _axis_spec(compiled_graph, f"Input {self.name!r} axis spec")
+            for compiled_graph in tuple(self.shape)))
         dtype = str(self.dtype or "").strip()
         if not dtype:
             raise DeclarationError(
@@ -981,7 +981,7 @@ def validate_contract(compile_decl: Any) -> None:
                 f"graph class #{i} is scoped to target(s) {list(cls.targets)!r} "
                 f"and carries fork(s) {extra_f!r} that Compile.forks scopes "
                 f"to other targets — a fork the target does not take splits "
-                f"its entries on nothing")
+                f"its compiled_graphs on nothing")
         for name, value in cls.fork:
             if value in unserved_by_fork.get(name, set()):
                 raise DeclarationError(
@@ -1196,14 +1196,14 @@ def register_export_declaration(
         raise DeclarationError(
             f"export declaration for {fam!r} carries no graph classes — "
             f"there is nothing to derive from")
-    entry: Any = compile_decl
+    compiled_graph: Any = compile_decl
     with _lock:
         existing = _declared.get(fam)
-        if existing is not None and existing != entry and not replace:
+        if existing is not None and existing != compiled_graph and not replace:
             raise DeclarationError(
                 f"family {fam!r} already has a DIFFERENT export "
                 f"declaration registered; pass replace=True only if you own both")
-        _declared[fam] = entry
+        _declared[fam] = compiled_graph
     return compile_decl
 
 
@@ -1220,8 +1220,8 @@ def export_declaration(family: str) -> Optional[Any]:
 
 
 
-def registered_entry(family: str) -> Optional[Any]:
-    """The registry entry as stored — a ``Compile`` or ``None``.
+def registered_compiled_graph(family: str) -> Optional[Any]:
+    """The registry compiled graph as stored — a ``Compile`` or ``None``.
 
     Identical to :func:`export_declaration` since pgw#1107 retired the thunk;
     kept as the name for callers asking about registration IDENTITY (has this
@@ -1343,7 +1343,7 @@ __all__ = [
     "declares_export_contract",
     "export_declaration",
     "has_export_declaration",
-    "registered_entry",
+    "registered_compiled_graph",
     "import_export_declaration",
     "open_blockers",
     "register_export_declaration",

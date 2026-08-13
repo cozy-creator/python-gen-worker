@@ -23,7 +23,7 @@ report it. `test_a_poisoned_bin_cannot_execute_code` runs exactly that.
 
 **pgw#884.** th#1307's guard — "a pod holding C2PA key material refuses to
 start" — read `os.environ` alone. A PEM delivered as
-`/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, or as a `.env` / yaml entry, was
+`/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, or as a `.env` / yaml compiled graph, was
 neither loaded (the loader dropped the name as "not a Settings field") nor
 refused: the pod booted green with a private key sitting world-readable to
 tenant code at a mounted path, which is precisely the scenario th#1307 exists

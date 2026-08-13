@@ -19,7 +19,7 @@ Training functions that quantize weights fall into three buckets:
   fail loudly rather than silently discard.
 
 At runtime, the tenant calls ``resolve_calibration_action(policy, ...)``
-once per spec entry to decide whether to calibrate, skip, or run dummy
+once per spec compiled graph to decide whether to calibrate, skip, or run dummy
 (or raise on invalid combos).
 
 The worker library only decides whether calibration is required, optional, or

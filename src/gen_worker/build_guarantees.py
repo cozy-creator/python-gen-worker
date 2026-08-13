@@ -111,11 +111,11 @@ REGISTRY: Tuple[Guarantee, ...] = (
     ),
     Guarantee(
         id="worker_entrypoint",
-        synthesized="generate_dockerfile.go — the ENTRYPOINT line",
+        synthesized="generate_dockerfile.go — the CompiledGraphPOINT line",
         applies=ALWAYS,
         require=re.compile(r"gen_worker\.entrypoint\b"),
-        line='ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]',
-        verified_by="tensorhub executor.go — matchesWorkerEntrypoint, from the "
+        line='CompiledGraphPOINT ["python", "-m", "gen_worker.entrypoint"]',
+        verified_by="tensorhub executor.go — matchesWorkercompiledgraphpoint, from the "
                     "image config",
         cost="same as discovery_lock: a post-build refusal for a one-line omission",
     ),

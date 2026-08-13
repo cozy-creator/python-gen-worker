@@ -1,5 +1,5 @@
 """pgw#867 / th#1382 — property tests over the ref grammar, the CAS-ref parser,
-and the chunked-manifest entry decode.
+and the chunked-manifest compiled graph decode.
 
 Three decode boundaries, one theme: each turns cross-service bytes into a value
 the worker then acts on, and each has a history of being wrong SILENTLY rather
@@ -16,7 +16,7 @@ than loudly.
   hex string silently defaulted to ``blake3:`` for years. ``len(digest) == 64``
   cannot tell blake3 from sha256 — both are 32 bytes — so a length check is not
   a discriminator, it only looks like one.
-* **chunked entries** (``gen_worker.models.hub_client.parse_chunk_list``): a
+* **chunked compiled graphs** (``gen_worker.models.hub_client.parse_chunk_list``): a
   malformed chunk list must be a hard failure, never a silent empty list. An
   empty list is indistinguishable from "stored whole", and reading a chunked
   file as whole is how a 40 GiB shard becomes a 0-byte one.
@@ -33,7 +33,7 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from gen_worker.models.chunk_cas import parse_cas_ref
-from gen_worker.models.hub_client import HubResolveError, parse_chunk_list, resolved_entry_digest
+from gen_worker.models.hub_client import HubResolveError, parse_chunk_list, resolved_compiled_graph_digest
 from gen_worker.models.refs import (
     DEFAULT_REF_TAG,
     format_model_ref,
@@ -216,14 +216,14 @@ def test_bare_hex_is_refused_pgw871() -> None:
         parse_cas_ref(HEX64)
     # The other CAS-digest reader in this repo, which already refused it.
     with pytest.raises(ValueError):
-        resolved_entry_digest({"digest": HEX64})
+        resolved_compiled_graph_digest({"digest": HEX64})
     # Tagged refs are unaffected, both algorithms.
     assert parse_cas_ref(f"sha256:{HEX64}") == ("sha256", HEX64)
     assert parse_cas_ref(f"blake3:{HEX64}") == ("blake3", HEX64)
 
 
 # ---------------------------------------------------------------------------
-# chunked manifest entries
+# chunked manifest compiled graphs
 # ---------------------------------------------------------------------------
 
 _CHUNK = st.fixed_dictionaries({}, optional={
@@ -280,12 +280,12 @@ def test_chunk_list_is_all_or_typed_refusal(raw: Any, urls: Any) -> None:
 @example({"digest": HEX64})                 # untagged — must refuse
 @example({"digest": f"sha256:{HEX64}"})
 @example({})
-def test_resolved_entry_digest_never_infers(entry: dict[str, Any]) -> None:
+def test_resolved_compiled_graph_digest_never_infers(compiled_graph: dict[str, Any]) -> None:
     """An integrity check with no digest is a REFUSAL, never a skip — and an
     untagged digest is never given an algorithm."""
     try:
-        digest = resolved_entry_digest(entry)
+        digest = resolved_compiled_graph_digest(compiled_graph)
     except ValueError:
         return
-    assert ":" in digest, f"{entry!r} yielded an untagged digest {digest!r}"
+    assert ":" in digest, f"{compiled_graph!r} yielded an untagged digest {digest!r}"
     assert digest == digest.strip().lower()

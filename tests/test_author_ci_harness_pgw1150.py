@@ -102,7 +102,7 @@ def invoke(record: Path, cls: str, *extra: str) -> Tuple[int, Any]:
 def armed_compiled_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
                cosine: float, *, verify_numerics: bool) -> Any:
     """pgw#868's REAL arm, returned as the slot a stubbed `setup()` loads."""
-    packages = {rig.entry_name(h, w): rig.ProbePackage(cosine=cosine)
+    packages = {rig.compiled_graph_name(h, w): rig.ProbePackage(cosine=cosine)
                 for h, w in rig.ROWS}
     pipeline, _module, outcome = rig.arm(
         tmp_path, monkeypatch, decl, packages,
@@ -285,12 +285,12 @@ def test_a_healthy_compiled_graph_records_the_gates_own_cosine(
     assert report.parity is not None and report.parity.passed
     proof = tomllib.loads(record.read_text(encoding="utf-8"))["proof"]
     assert proof["cosine"] >= 0.999
-    # pgw#1176: the record names the ENTRY KEY that was measured, computed
+    # pgw#1176: the record names the COMPILED_GRAPH KEY that was measured, computed
     # from the artifact's own facts. `"compiledgraph868"` was a harness placeholder
     # from when the key was a literal; asserting it now would assert the mint
     # failed to key its own product.
     assert compiled_graph_key.is_key(proof["compiled_graph"]), (
-        f"the record names WHICH entry was measured: {proof['compiled_graph']!r}")
+        f"the record names WHICH compiled_graph was measured: {proof['compiled_graph']!r}")
 
 
 def test_the_declared_numerics_floor_reaches_the_gate_at_all(declared):

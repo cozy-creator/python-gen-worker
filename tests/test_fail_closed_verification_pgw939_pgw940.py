@@ -33,8 +33,8 @@ from gen_worker import aot_serve, compiled_graph_key  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def _entry_block() -> Dict[str, Any]:
-    """A minimal but VALID entry contract — `artifact_metadata` validates
+def _compiled_graph_block() -> Dict[str, Any]:
+    """A minimal but VALID compiled graph contract — `artifact_metadata` validates
     every block it stamps, so a hand-rolled dict would fail before reaching
     the axes under test."""
     return {
@@ -60,9 +60,9 @@ def _entry_block() -> Dict[str, Any]:
 
 def _minted(family: str = "sdxl") -> Dict[str, Any]:
     """A real, fully-stamped artifact envelope from the ONE producer."""
-    return aot_serve.entry_metadata(
+    return aot_serve.compiled_graph_metadata(
         family=family, precision="bf16", compiled_graph_key="",
-        name="unet", entry=_entry_block(),
+        name="unet", compiled_graph=_compiled_graph_block(),
         strict_export=True, lora_bucket=0,
     )
 
@@ -101,15 +101,15 @@ def test_no_family_asked_means_no_family_refused() -> None:
 
 def test_an_unstamped_range_digest_is_refused_by_name() -> None:
     meta = _minted()
-    meta[compiled_graph_key.ENTRY_BLOCK_KEY].pop("range_digest")
+    meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY].pop("range_digest")
     reason = aot_serve.verify_contract(meta)
-    assert reason == "entry 'unet': no range_digest stamped", reason
+    assert reason == "compiled_graph 'unet': no range_digest stamped", reason
 
 
 # pgw#1176 DELETED `test_an_unstamped_combined_graph_hash_is_refused_by_name`.
 # Its subject was `combined_graph_hash` as IDENTITY — an artifact-level fact
 # `verify_contract` had to refuse on. There is no such fact now: the label it
-# became (`manifest_digest`) is coverage telemetry, and an entry minted by a
+# became (`manifest_digest`) is coverage telemetry, and an compiled graph minted by a
 # pod that has not folded its whole declaration is a complete, keyable,
 # armable artifact. Refusing on its absence would reintroduce the collection
 # as a precondition for the atom, which is the disease. The fail-closed claim
@@ -121,8 +121,8 @@ def test_class_hash_absence_was_already_correct_and_stays_so() -> None:
     """`:665-666` proves the author knew the right form; the other axis is
     brought to IT, not the reverse."""
     meta = _minted()
-    meta[compiled_graph_key.ENTRY_BLOCK_KEY]["class_hash"] = ""
-    assert aot_serve.verify_contract(meta) == "entry 'unet': no class_hash stamped"
+    meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY]["class_hash"] = ""
+    assert aot_serve.verify_contract(meta) == "compiled_graph 'unet': no class_hash stamped"
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ def test_a_torn_prior_manifest_is_no_evidence(tmp_path: Path) -> None:
 # pgw#940 §1 — DELETED WITH ITS SUBJECT (pgw#1175)
 # ---------------------------------------------------------------------------
 #
-# pgw#940 §1 covered `entry_workers`' DEVICE bound: an unreadable card used to
+# pgw#940 §1 covered `compiled_graph_workers`' DEVICE bound: an unreadable card used to
 # share the "0 free VRAM" branch with an absent one and licensed 8 concurrent
 # compile children on a card nobody could read. The fix was right and the rows
 # were real; §4.33 then deleted the bound they guarded. K is f(cores, one
@@ -255,7 +255,7 @@ def test_a_torn_prior_manifest_is_no_evidence(tmp_path: Path) -> None:
 # there is no zero left to misread and `DeviceProbeError`, `device_facts` and
 # `CardCensus` are gone with it.
 #
-# The behaviour §1 protected is covered by its ABSENCE: `entry_workers` takes
+# The behaviour §1 protected is covered by its ABSENCE: `compiled_graph_workers` takes
 # no device reading, and `test_aot_compile_pool_pgw809
 # .test_the_width_and_its_inputs_ride_the_telemetry` fails if a device term
 # reappears in the width record. pgw#940 §2 below is a DIFFERENT site (the

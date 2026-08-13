@@ -82,7 +82,7 @@ _COMPUTED_TYPES = ("FoldedConstant",)
 
 @dataclass(frozen=True)
 class DeclaredConstant:
-    """One entry of a package's own constant table.
+    """One compiled graph of a package's own constant table.
 
     ``fqn`` is the ORIGINAL fully-qualified name where AOTInductor recorded one
     — it mangles ``lin.weight`` into the C++ identifier ``lin_weight``, so
@@ -117,27 +117,27 @@ class DeclaredConstant:
         }
 
 
-def _entry_member(name: str, entry: str) -> bool:
+def _compiled_graph_member(name: str, compiled_graph: str) -> bool:
     """Whether a zip member belongs to one named model of a multi-graph
     package. AOTI packages every model under ``data/aotinductor/<name>/``
-    (verified on the pin, pgw#758); entry names may carry ``/`` so the
+    (verified on the pin, pgw#758); compiled graph names may carry ``/`` so the
     whole segment run is matched, not a single path component."""
-    marker = f"data/aotinductor/{entry}/"
+    marker = f"data/aotinductor/{compiled_graph}/"
     return f"/{marker}" in name or name.startswith(marker)
 
 
-def _members(package: Path, suffix: str, entry: str) -> List[str]:
+def _members(package: Path, suffix: str, compiled_graph: str) -> List[str]:
     with zipfile.ZipFile(package) as zf:
         names = [n for n in zf.namelist() if n.endswith(suffix)]
-    if entry:
-        names = [n for n in names if _entry_member(n, entry)]
+    if compiled_graph:
+        names = [n for n in names if _compiled_graph_member(n, compiled_graph)]
     return names
 
 
-def _wrapper_source(package: Path, entry: str = "") -> str:
-    names = _members(package, ".wrapper.cpp", entry)
+def _wrapper_source(package: Path, compiled_graph: str = "") -> str:
+    names = _members(package, ".wrapper.cpp", compiled_graph)
     if len(names) != 1:
-        where = f" for entry {entry!r}" if entry else ""
+        where = f" for compiled_graph {compiled_graph!r}" if compiled_graph else ""
         raise PackageIntrospectionError(
             f"{package}: expected exactly one *.wrapper.cpp in the "
             f"package{where}, found {len(names)}")
@@ -145,7 +145,7 @@ def _wrapper_source(package: Path, entry: str = "") -> str:
         return zf.read(names[0]).decode("utf-8", "replace")
 
 
-def package_entry_names(package: Path) -> Tuple[str, ...]:
+def package_compiled_graph_names(package: Path) -> Tuple[str, ...]:
     """The named models a ``.pt2`` carries, read from its own layout —
     every ``data/aotinductor/<name>/`` directory holding a wrapper."""
     names = set()
@@ -183,15 +183,15 @@ def _last_call_argument(source: str, opening: str) -> str:
     raise PackageIntrospectionError(f"unbalanced {opening!r} argument list")
 
 
-def constants_in_so(package: Path, entry: str = "") -> bool:
+def constants_in_so(package: Path, compiled_graph: str = "") -> bool:
     """Whether the package BAKED its constants into the ``.so`` blob.
 
     Not an inference: this is the ``load_constants_from_blob`` argument
     AOTInductor rendered into its own generated constructor from the
     ``aot_inductor.package_constants_in_so`` config the mint passed.
-    ``entry`` scopes the read to one named model of a multi-graph package.
+    ``compiled graph`` scopes the read to one named model of a multi-graph package.
     """
-    arg = _last_call_argument(_wrapper_source(Path(package), entry), _MODEL_BASE)
+    arg = _last_call_argument(_wrapper_source(Path(package), compiled_graph), _MODEL_BASE)
     if arg not in ("true", "false"):
         raise PackageIntrospectionError(
             f"{package}: could not read load_constants_from_blob from the "
@@ -199,14 +199,14 @@ def constants_in_so(package: Path, entry: str = "") -> bool:
     return arg == "true"
 
 
-def declared_constants(package: Path, entry: str = "") -> Tuple[DeclaredConstant, ...]:
+def declared_constants(package: Path, compiled_graph: str = "") -> Tuple[DeclaredConstant, ...]:
     """The package's declared constant table, in declaration order.
 
     Present and identical whether or not the constants were baked — baking
-    changes where the BYTES live, never the declaration. ``entry`` scopes
+    changes where the BYTES live, never the declaration. ``compiled graph`` scopes
     the read to one named model of a multi-graph package.
     """
-    source = _wrapper_source(Path(package), entry)
+    source = _wrapper_source(Path(package), compiled_graph)
     fields: Dict[int, Dict[str, Any]] = {}
     for idx, field_name, text, number, boolean in _CONSTANT_FIELD.findall(source):
         row = fields.setdefault(int(idx), {})
@@ -244,7 +244,7 @@ def declared_constants(package: Path, entry: str = "") -> Tuple[DeclaredConstant
     return tuple(out)
 
 
-def constants_manifest(package: Path, entry: str = "") -> List[Dict[str, Any]]:
+def constants_manifest(package: Path, compiled_graph: str = "") -> List[Dict[str, Any]]:
     """The declared constant manifest for ``aot_serve.artifact_metadata``.
 
     Derived from the package's OWN table rather than from the pipeline's
@@ -252,10 +252,10 @@ def constants_manifest(package: Path, entry: str = "") -> List[Dict[str, Any]]:
     manifest against the loaded artifact's table — is a genuine cross-check of
     two independent derivations and not a tautology.
     """
-    return [c.as_manifest_row() for c in declared_constants(Path(package), entry)]
+    return [c.as_manifest_row() for c in declared_constants(Path(package), compiled_graph)]
 
 
-def literal_constants(package: Path, entry: str = "") -> Tuple[DeclaredConstant, ...]:
+def literal_constants(package: Path, compiled_graph: str = "") -> Tuple[DeclaredConstant, ...]:
     """Declared constants with no ``state_dict`` counterpart.
 
     Graph literals — folded scalars, sinusoidal tables, shape vectors. They
@@ -265,11 +265,11 @@ def literal_constants(package: Path, entry: str = "") -> Tuple[DeclaredConstant,
     ``aot_serve.LITERALS_NAME``; that is not an optimization, it is what makes a
     code-only artifact loadable at all.
     """
-    return tuple(c for c in declared_constants(Path(package), entry)
+    return tuple(c for c in declared_constants(Path(package), compiled_graph)
                  if c.source == SOURCE_LITERAL)
 
 
-def constant_names(package: Path, entry: str = "") -> Tuple[str, ...]:
+def constant_names(package: Path, compiled_graph: str = "") -> Tuple[str, ...]:
     """ADVISORY package-side FQN read. Never a gate.
 
     Packing erases the FQN of a plain-``__dict__`` tensor (it becomes
@@ -277,7 +277,7 @@ def constant_names(package: Path, entry: str = "") -> Tuple[str, ...]:
     pgw#725's adapter gate takes the ExportedProgram instead. Present for
     diagnostics and for the cross-check against the declared manifest.
     """
-    return tuple(c.fqn for c in declared_constants(Path(package), entry))
+    return tuple(c.fqn for c in declared_constants(Path(package), compiled_graph))
 
 
 # ---------------------------------------------------------------------------
@@ -303,12 +303,12 @@ _ELF_MAGIC = b"\x7fELF"
 _LRODATA = ".lrodata"
 
 
-def packaged_so(package: Path, entry: str = "") -> Tuple[str, bytes]:
+def packaged_so(package: Path, compiled_graph: str = "") -> Tuple[str, bytes]:
     """``(archive name, bytes)`` of one model's ``.so`` inside a ``.pt2``.
-    ``entry`` scopes to one named model of a multi-graph package."""
-    names = _members(Path(package), ".so", entry)
+    ``compiled graph`` scopes to one named model of a multi-graph package."""
+    names = _members(Path(package), ".so", compiled_graph)
     if len(names) != 1:
-        where = f" for entry {entry!r}" if entry else ""
+        where = f" for compiled_graph {compiled_graph!r}" if compiled_graph else ""
         raise PackageIntrospectionError(
             f"{package}: expected exactly one .so in the package{where}, "
             f"found {len(names)}")
@@ -333,8 +333,8 @@ def elf_section_sizes(blob: bytes) -> Dict[str, int]:
     e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", blob, 0x3A)
     if not e_shoff or not e_shnum or e_shstrndx >= e_shnum:
         raise PackageIntrospectionError("packaged .so has no ELF section table")
-    strtab_entry = e_shoff + e_shstrndx * e_shentsize
-    strtab_off, strtab_size = struct.unpack_from("<QQ", blob, strtab_entry + 0x18)
+    strtab_compiled_graph = e_shoff + e_shstrndx * e_shentsize
+    strtab_off, strtab_size = struct.unpack_from("<QQ", blob, strtab_compiled_graph + 0x18)
     strtab = blob[strtab_off:strtab_off + strtab_size]
     sizes: Dict[str, int] = {}
     for i in range(e_shnum):
@@ -347,22 +347,22 @@ def elf_section_sizes(blob: bytes) -> Dict[str, int]:
     return sizes
 
 
-def code_only_violations(package: Path, entry: str = "") -> List[str]:
+def code_only_violations(package: Path, compiled_graph: str = "") -> List[str]:
     """Named reasons ``package`` is NOT code-only; empty when it is.
 
     Every reason names the offending tensors: "constants were baked" is not
     actionable, "these 743 parameters totalling 2.73 GiB were baked, largest
     ``down_blocks.0...``" is. Callers turn a non-empty list into a red refusal,
-    never a warning. ``entry`` scopes the gate to one named model; the multi-
-    graph mint runs it once per entry so a refusal names BOTH the entry and
+    never a warning. ``compiled graph`` scopes the gate to one named model; the multi-
+    graph mint runs it once per compiled graph so a refusal names BOTH the compiled graph and
     the cause (pgw#758).
     """
     package = Path(package)
     reasons: List[str] = []
-    constants = declared_constants(package, entry)
+    constants = declared_constants(package, compiled_graph)
     declared_bytes = sum(c.data_size for c in constants)
 
-    if constants_in_so(package, entry):
+    if constants_in_so(package, compiled_graph):
         worst = sorted(constants, key=lambda c: -c.data_size)[:5]
         shown = ", ".join(f"{c.fqn} ({c.data_size}B)" for c in worst)
         reasons.append(
@@ -371,7 +371,7 @@ def code_only_violations(package: Path, entry: str = "") -> List[str]:
             f"into the .so — largest: {shown}. Compile with "
             f"aot_inductor.package_constants_in_so=False (pgw#704 B1)")
 
-    so_name, blob = packaged_so(package, entry)
+    so_name, blob = packaged_so(package, compiled_graph)
     lrodata = elf_section_sizes(blob).get(_LRODATA, 0)
     if declared_bytes and lrodata >= declared_bytes:
         reasons.append(
@@ -498,7 +498,7 @@ def unbindable_program_constants(
 ) -> List[str]:
     """:func:`unbindable_constants`, asked BEFORE the compile is paid for.
 
-    pgw#825: the packed gate fires per entry AFTER that entry's 4-6 minute
+    pgw#825: the packed gate fires per compiled graph AFTER that compiled graph's 4-6 minute
     AOTI compile, so a declaration/module mismatch cost a whole L4 rental to
     learn. The exported program already names every parameter and buffer it
     lifted, and AOTInductor's constant table is a function of exactly that —
@@ -520,12 +520,12 @@ def unbindable_program_constants(
         f"{len(missing)} constant(s) the exported program lifts from the "
         f"module's state_dict are absent from the resident module's bind "
         f"table, e.g. {missing[:6]!r} — the compiled compiled_graph could never bind "
-        f"them, so the compile would be paid for an unpublishable entry"
+        f"them, so the compile would be paid for an unpublishable compiled_graph"
     ]
 
 
 def program_package_drift(
-    program: Any, package: Path, entry: str = "",
+    program: Any, package: Path, compiled_graph: str = "",
 ) -> List[str]:
     """Named reasons the package's constant table cannot be served.
 
@@ -551,11 +551,11 @@ def program_package_drift(
     :func:`eliminated_constants` and is not an error.
 
     The pgw#728 concern (strict and non-strict traces lift different constant
-    sets) is still covered: a mode mix shows up as package-only entries, because
+    sets) is still covered: a mode mix shows up as package-only compiled graphs, because
     the package would want constants the recorded program never lifted.
     """
     want = set(program_constant_fqns(program))
-    have = {c.fqn for c in declared_constants(Path(package), entry)
+    have = {c.fqn for c in declared_constants(Path(package), compiled_graph)
             if c.source != SOURCE_COMPUTED}
     # pgw#1080: a COMPUTED constant is package-only by design — the runtime
     # fold produces it from the bound constants at load, so "the program never
@@ -573,7 +573,7 @@ def program_package_drift(
 
 
 def eliminated_constants(
-    program: Any, package: Path, entry: str = "",
+    program: Any, package: Path, compiled_graph: str = "",
 ) -> List[str]:
     """Constants the program lifted that the compiled artifact does not want.
 
@@ -589,13 +589,13 @@ def eliminated_constants(
     inductor rendered that checkpoint's four floats into the kernel source.
     """
     want = set(program_constant_fqns(program))
-    have = {c.fqn for c in declared_constants(Path(package), entry)}
+    have = {c.fqn for c in declared_constants(Path(package), compiled_graph)}
     return sorted(want - have)
 
 
 def folded_weights(
     program: Any, package: Path, state_dict_keys: Iterable[str],
-    entry: str = "",
+    compiled_graph: str = "",
 ) -> List[str]:
     """Weights the program lifted that the artifact will NOT let anyone bind.
 
@@ -627,7 +627,7 @@ def folded_weights(
     if not available:
         return []
     lifted = set(program_constant_fqns(program))
-    have = {c.fqn for c in declared_constants(Path(package), entry)}
+    have = {c.fqn for c in declared_constants(Path(package), compiled_graph)}
     folded = sorted((lifted & available) - have)
     if not folded:
         return []
@@ -641,7 +641,7 @@ def folded_weights(
 
 
 def unbindable_constants(
-    package: Path, state_dict_keys: Iterable[str], entry: str = "",
+    package: Path, state_dict_keys: Iterable[str], compiled_graph: str = "",
 ) -> List[str]:
     """Declared state_dict-sourced constants no resident weight could bind.
 
@@ -653,7 +653,7 @@ def unbindable_constants(
     if not available:
         return []
     missing = [
-        c.fqn for c in declared_constants(Path(package), entry)
+        c.fqn for c in declared_constants(Path(package), compiled_graph)
         if c.source == SOURCE_STATE_DICT and c.fqn not in available
     ]
     if not missing:
@@ -677,7 +677,7 @@ def unbindable_constants(
 # artifact. `input_guard_drift` compares them against the declared manifest
 # rows, making the manifest a VERIFIED ECHO of the artifact rather than a
 # carried-alongside label (pgw#1058: attempt 30 published a compiled graph whose every
-# entry was specialized on a dtype real traffic never presents; the label was
+# compiled graph was specialized on a dtype real traffic never presents; the label was
 # honest about the program, so only a reading of the artifact's own guards —
 # or a real call — can rule on what the program admits).
 
@@ -704,7 +704,7 @@ class InputGuard:
         return dict(self.dims)
 
 
-def input_guards(package: Path, entry: str = "") -> Tuple[InputGuard, ...]:
+def input_guards(package: Path, compiled_graph: str = "") -> Tuple[InputGuard, ...]:
     """Every ``check_input_<i>`` of one named model, in input order.
 
     Parsed from the artifact's own generated wrapper — no CUDA, no dlopen —
@@ -713,7 +713,7 @@ def input_guards(package: Path, entry: str = "") -> Tuple[InputGuard, ...]:
     emits them, so their absence means the parse went blind, and a gate that
     silently sees no guards is the pgw#1058 hole reopened.
     """
-    source = _wrapper_source(Path(package), entry)
+    source = _wrapper_source(Path(package), compiled_graph)
     return guards_from_wrapper_source(source, where=str(package))
 
 
@@ -761,7 +761,7 @@ def input_guard_drift(
     """Named reasons the declared manifest rows do NOT describe the program
     whose guards these are; empty when they agree.
 
-    The comparison that makes an entry's label a verified echo (pgw#1058):
+    The comparison that makes an compiled graph's label a verified echo (pgw#1058):
     rows come from the ``ExportedProgram`` (or a packed ``metadata.json``),
     guards from the artifact's own generated wrapper — two independent
     readings that must agree, the same doctrine as the constant manifest.
@@ -816,16 +816,16 @@ def input_guard_drift(
 
 
 def admission_drift(
-    package: Path, entry: str, inputs_rows: Sequence[Mapping[str, Any]],
+    package: Path, compiled_graph: str, inputs_rows: Sequence[Mapping[str, Any]],
 ) -> List[str]:
     """:func:`input_guard_drift` against one named model of a ``.pt2``.
 
     ONE function, two call sites, per the pgw#1058 ruling: the mint's
     package gate (a divergent compiled graph is never published) and the arm's
-    per-entry verification (a corrupted one is never served) must be the
+    per-compiled graph verification (a corrupted one is never served) must be the
     same derivation, or the gate models the arm and drifts from it.
     """
-    return input_guard_drift(inputs_rows, input_guards(Path(package), entry))
+    return input_guard_drift(inputs_rows, input_guards(Path(package), compiled_graph))
 
 
 # ---------------------------------------------------------------------------
@@ -975,7 +975,7 @@ __all__ = [
     "literal_constants",
     "eliminated_constants",
     "folded_weights",
-    "package_entry_names",
+    "package_compiled_graph_names",
     "program_constant_fqns",
     "program_package_drift",
     "packaged_so",

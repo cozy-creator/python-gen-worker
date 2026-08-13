@@ -129,7 +129,7 @@ def test_execution_lane_canonicalization():
 # rather than by comparison, which is the point of a content-addressed key:
 # sm, the declared contract, the env seal and the lane are all axes of `ek1`
 # or fold into one (pgw#1176),
-# so an entry that disagrees on any of them has a different key and never
+# so an compiled graph that disagrees on any of them has a different key and never
 # resolves. `tests/test_compiled_graph_key_pgw1059.py` is where that is stated, with the
 # staleness matrix naming each axis. What is left here is the key itself —
 # determinism, axis sensitivity, the ek1 scheme, and lane canonicalization.

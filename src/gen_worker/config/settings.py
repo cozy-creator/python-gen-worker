@@ -6,7 +6,7 @@ pass it around."* Exactly one component in this process reads the process
 environment — `gen_worker.config` — and it produces exactly one typed struct,
 which is **passed by parameter**.
 
-Each process entry performs one bootstrap-owned `load_settings()`:
+Each process compiled graph performs one bootstrap-owned `load_settings()`:
 `entrypoint._run_main()` for the worker, `procsplit.parent.main()` for the
 control parent, and the `cli/` command group for the standalone CLI. Nothing
 else loads; nothing else reads env. There is deliberately **no** cached

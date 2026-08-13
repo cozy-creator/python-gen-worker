@@ -385,10 +385,10 @@ def test_preload_component_staging_feeds_injection(
         # is not.
         res = ex.store.residency
         stats = res.shared_stats()
-        comps = {e["ref"].split("::")[1] for e in stats["entries"]}
+        comps = {e["ref"].split("::")[1] for e in stats["compiled_graphs"]}
         assert "denoiser" in comps
         assert "vae" not in comps
-        staged = [e for e in stats["entries"] if "denoiser" in e["ref"]]
+        staged = [e for e in stats["compiled_graphs"] if "denoiser" in e["ref"]]
         assert staged[0]["tier"] == "RAM"
         assert staged[0]["holders"] == 0  # seed-then-release: LRU-reclaimable
 
@@ -404,9 +404,9 @@ def test_preload_component_staging_feeds_injection(
             "re-loaded from disk"
         )
         assert pipe.denoiser.content == _DENOISER_BYTES.decode()
-        # Consumption holds the shared entry (acquire_shared handoff).
+        # Consumption holds the shared compiled graph (acquire_shared handoff).
         stats = res.shared_stats()
-        staged = [e for e in stats["entries"] if "denoiser" in e["ref"]]
+        staged = [e for e in stats["compiled_graphs"] if "denoiser" in e["ref"]]
         assert staged[0]["holders"] >= 1
 
         # Idempotent afterward.
@@ -435,7 +435,7 @@ def test_preload_component_staging_skips_quantized_execution_lanes(
         await asyncio.wait_for(ex.preloader._pass(), timeout=60)
         assert DOWNLOADS == [ck]  # tier 1 still happened
         stats = ex.store.residency.shared_stats()
-        assert stats["entries"] == []  # no host staging on the cast lane
+        assert stats["compiled_graphs"] == []  # no host staging on the cast lane
 
     asyncio.run(_run())
 

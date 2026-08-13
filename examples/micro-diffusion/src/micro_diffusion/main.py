@@ -1,7 +1,7 @@
 """The micro-diffusion worker function — a REAL org worker, deliberately small.
 
 It exists so that a full production-path AOT mint cycle costs minutes instead
-of the ~95 that sdxl's 36 entries cost on a pod. Everything about its SHAPE is
+of the ~95 that sdxl's 36 compiled graphs cost on a pod. Everything about its SHAPE is
 production: a catalog slot with no code default, a declaration registered at
 import, two served arms that map onto the two declared fork coordinates, and a
 Dockerfile-first build. The only thing that is small is the model.

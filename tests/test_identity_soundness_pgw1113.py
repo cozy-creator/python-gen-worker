@@ -319,8 +319,8 @@ def test_the_arm_token_scheme_is_its_fact_set(tmp_path: Path) -> None:
     memo_dir.mkdir(parents=True)
     stale = memo_dir / ("arm1-" + "a" * 56 + ".json")
     current = memo_dir / (fleet_compiled_graphs.ARM_SCHEME + "-" + "b" * 56 + ".json")
-    for entry in (stale, current):
-        entry.write_text(json.dumps({"compiled_graph_key": "ek1-" + "c" * 56}))
+    for compiled_graph in (stale, current):
+        compiled_graph.write_text(json.dumps({"compiled_graph_key": "ek1-" + "c" * 56}))
 
     dropped = local_compiled_graph_store.sweep_superseded_memos(
         fleet_compiled_graphs.ARM_SCHEME, tmp_path)
@@ -335,7 +335,7 @@ def test_the_arm_token_scheme_is_its_fact_set(tmp_path: Path) -> None:
 
 
 def _class_hash_before_pgw1113(
-    entry: Mapping[str, Any], *, strict: bool, lora_bucket: int,
+    compiled_graph: Mapping[str, Any], *, strict: bool, lora_bucket: int,
 ) -> str:
     """``aot_serve.class_hash`` VERBATIM as of the parent commit.
 
@@ -345,13 +345,13 @@ def _class_hash_before_pgw1113(
     """
     facts = {
         "v": 3,
-        "target": str(entry.get("target") or ""),
-        "fork": [[str(n), v] for n, v in (entry.get("fork") or [])],
+        "target": str(compiled_graph.get("target") or ""),
+        "fork": [[str(n), v] for n, v in (compiled_graph.get("fork") or [])],
         "class_dims": [
-            [str(n), int(v)] for n, v in (entry.get("class_dims") or [])],
-        "range_digest": str(entry.get("range_digest") or ""),
-        "graph": dict(entry.get("graph") or {}),
-        "graph_witness": str(entry.get("graph_witness") or ""),
+            [str(n), int(v)] for n, v in (compiled_graph.get("class_dims") or [])],
+        "range_digest": str(compiled_graph.get("range_digest") or ""),
+        "graph": dict(compiled_graph.get("graph") or {}),
+        "graph_witness": str(compiled_graph.get("graph_witness") or ""),
         "strict": bool(strict),
         "lora_bucket": int(lora_bucket or 0),
     }
@@ -359,7 +359,7 @@ def _class_hash_before_pgw1113(
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def _entry(**extra: Any) -> Dict[str, Any]:
+def _compiled_graph(**extra: Any) -> Dict[str, Any]:
     block: Dict[str, Any] = {
         "target": "transformer",
         "fork": [["adapter", False]],
@@ -388,9 +388,9 @@ def test_no_live_compiled_graph_re_keys(extra: Dict[str, Any]) -> None:
     """
     from gen_worker import aot_serve
 
-    entry = _entry(**extra)
-    assert aot_serve.class_hash(entry, strict=True, lora_bucket=0) == (
-        _class_hash_before_pgw1113(entry, strict=True, lora_bucket=0))
+    compiled_graph = _compiled_graph(**extra)
+    assert aot_serve.class_hash(compiled_graph, strict=True, lora_bucket=0) == (
+        _class_hash_before_pgw1113(compiled_graph, strict=True, lora_bucket=0))
 
 
 def test_a_multi_device_placement_keys_APART() -> None:
@@ -401,13 +401,13 @@ def test_a_multi_device_placement_keys_APART() -> None:
     directions, and the hub deduped them."""
     from gen_worker import aot_serve
 
-    narrow = aot_serve.class_hash(_entry(), strict=True, lora_bucket=0)
+    narrow = aot_serve.class_hash(_compiled_graph(), strict=True, lora_bucket=0)
     wide = aot_serve.class_hash(
-        _entry(placement=["cuda:0", "cuda:1"]), strict=True, lora_bucket=0)
+        _compiled_graph(placement=["cuda:0", "cuda:1"]), strict=True, lora_bucket=0)
     assert narrow != wide
     # …and the order it was observed in is not information.
     assert wide == aot_serve.class_hash(
-        _entry(placement=["cuda:1", "cuda:0"]), strict=True, lora_bucket=0)
+        _compiled_graph(placement=["cuda:1", "cuda:0"]), strict=True, lora_bucket=0)
 
 
 def test_the_graph_hash_still_scrubs_the_device_index() -> None:

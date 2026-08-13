@@ -7,7 +7,7 @@ callback (the worker maps them to wire ``ModelEvent``s; the local CLI ignores
 them).
 
 Eviction is driven by FREE VRAM, never total capacity: ``make_room(needed)``
-demotes LRU entries until measured free VRAM covers the request. An explicit
+demotes LRU compiled graphs until measured free VRAM covers the request. An explicit
 ``vram_budget_bytes`` (shared-GPU slice, tests) replaces the probe with
 ``budget - tracked``.
 
@@ -178,7 +178,7 @@ class DeviceGroup:
 
 
 @dataclass
-class _Entry:
+class _CompiledGraph:
     ref: str
     tier: Tier
     path: Optional[Path] = None
@@ -259,8 +259,8 @@ class Lease:
     taken BEFORE the job starts and held for its whole lifetime.
 
     While live, every named ref is excluded from eviction/demotion victim
-    selection — including refs whose entries do not exist yet, which closes
-    the window where a freshly created entry could be demoted between its
+    selection — including refs whose compiled graphs do not exist yet, which closes
+    the window where a freshly created compiled graph could be demoted between its
     ``track_vram`` and the execution-time pin. Refs not yet VRAM-resident
     additionally carry a byte RESERVATION so concurrent admissions cannot
     double-book the same free bytes; a reservation is consumed the moment
@@ -325,7 +325,7 @@ class Residency:
         # Called with (ref, obj) before a VRAM->RAM demotion moves the object
         # (executor wires adapter detach here, gw#399). Must never raise.
         self.pre_demote: Optional[Callable[[str, Any], None]] = None
-        self._entries: Dict[str, _Entry] = {}
+        self._compiled_graphs: Dict[str, _CompiledGraph] = {}
         self._lock = threading.RLock()
         self._shared_hits = 0
         self._shared_misses = 0
@@ -367,7 +367,7 @@ class Residency:
     def free_vram_bytes(self) -> int:
         if self._vram_budget is not None:
             with self._lock:
-                used = sum(e.vram_bytes for e in self._entries.values() if e.tier is Tier.VRAM)
+                used = sum(e.vram_bytes for e in self._compiled_graphs.values() if e.tier is Tier.VRAM)
             return max(0, int(self._vram_budget) - used)
         if self._free_vram_fn is not None:
             return int(self._free_vram_fn())
@@ -387,17 +387,17 @@ class Residency:
 
     def tier(self, ref: str) -> Optional[Tier]:
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             return e.tier if e else None
 
     def local_path(self, ref: str) -> Optional[Path]:
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             return e.path if e else None
 
     def obj(self, ref: str) -> Any:
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             return e.obj if e else None
 
     def replace_object(self, ref: str, obj: Any) -> bool:
@@ -408,7 +408,7 @@ class Residency:
         departed typed object when the surviving owner is tenant-loaded.
         """
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e is None:
                 return False
             e.obj = obj
@@ -416,49 +416,49 @@ class Residency:
 
     def vram_bytes(self, ref: str) -> int:
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             return e.vram_bytes if e else 0
 
     def vram_hint(self, ref: str) -> int:
         """Last measured VRAM footprint (survives demotion) — the load-size
         estimate for make_room before a re-load/promotion."""
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             return e.vram_hint if e else 0
 
     def movable(self, ref: str) -> bool:
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             return bool(e and e.movable)
 
     def refs_in(self, tier: Tier) -> List[str]:
         with self._lock:
-            return [r for r, e in self._entries.items() if e.tier is tier]
+            return [r for r, e in self._compiled_graphs.items() if e.tier is tier]
 
     def snapshot(self) -> List[Tuple[str, Tier, int]]:
-        """(ref, tier, vram_bytes) for every tracked entry (Hello.models)."""
+        """(ref, tier, vram_bytes) for every tracked compiled graph (Hello.models)."""
         with self._lock:
-            return [(r, e.tier, e.vram_bytes) for r, e in self._entries.items()]
+            return [(r, e.tier, e.vram_bytes) for r, e in self._compiled_graphs.items()]
 
     # ---- registration / transitions ---------------------------------------------
 
     def touch(self, ref: str) -> None:
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e:
                 e.last_used = time.monotonic()
 
     def track_disk(self, ref: str, path: Path) -> None:
         """Register an on-disk snapshot.
 
-        Updating the disk path of a RAM/VRAM entry is not a tier transition:
+        Updating the disk path of a RAM/VRAM compiled graph is not a tier transition:
         the loaded object remains the highest residency until its owner
         releases it. ``release_to_disk`` emits the later honest demotion.
         """
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e is None:
-                self._entries[ref] = _Entry(ref=ref, tier=Tier.DISK, path=Path(path))
+                self._compiled_graphs[ref] = _CompiledGraph(ref=ref, tier=Tier.DISK, path=Path(path))
             else:
                 e.path = Path(path)
                 e.last_used = time.monotonic()
@@ -468,7 +468,7 @@ class Residency:
     def track_ram(self, ref: str, obj: Any = None, *, path: Optional[Path] = None) -> None:
         """Register a loaded-but-not-VRAM object (CPU-only hosts, warm tier)."""
         with self._lock:
-            e = self._entries.setdefault(ref, _Entry(ref=ref, tier=Tier.RAM))
+            e = self._compiled_graphs.setdefault(ref, _CompiledGraph(ref=ref, tier=Tier.RAM))
             e.tier = Tier.RAM
             if obj is not None:
                 e.obj = obj
@@ -503,7 +503,7 @@ class Residency:
             )
             hint = int(estimate_pipeline_size_gb(obj) * _GiB)
             with self._lock:
-                e = self._entries.setdefault(ref, _Entry(ref=ref, tier=Tier.RAM))
+                e = self._compiled_graphs.setdefault(ref, _CompiledGraph(ref=ref, tier=Tier.RAM))
                 e.tier = Tier.RAM
                 e.obj = obj
                 if path is not None:
@@ -519,7 +519,7 @@ class Residency:
         if measured <= 0 and obj is not None:
             measured = int(estimate_cuda_resident_gb(obj) * _GiB)
         with self._lock:
-            e = self._entries.setdefault(ref, _Entry(ref=ref, tier=Tier.VRAM))
+            e = self._compiled_graphs.setdefault(ref, _CompiledGraph(ref=ref, tier=Tier.VRAM))
             e.tier = Tier.VRAM
             if obj is not None:
                 e.obj = obj
@@ -537,12 +537,12 @@ class Residency:
 
     def demote(self, ref: str) -> bool:
         """VRAM -> RAM warm tier. Only performs transitions it can actually
-        execute: the entry must hold a movable object and host RAM must have
+        execute: the compiled graph must hold a movable object and host RAM must have
         headroom — otherwise it refuses (False) and the OWNER of the memory
         (executor record teardown) must free it and book the result. Never
-        books a state it didn't produce. Refuses pinned / executing entries."""
+        books a state it didn't produce. Refuses pinned / executing compiled graphs."""
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e is None or e.tier is not Tier.VRAM or e.pinned or e.refcount > 0:
                 return False
             if self._leased_locked(ref):
@@ -573,7 +573,7 @@ class Residency:
                 except Exception:
                     logger.exception("pre_demote hook failed for %s", ref)
             if not self._move_verified(e.obj, "cpu", ref=ref):
-                return False  # entry stays VRAM; object restored to cuda
+                return False  # compiled graph stays VRAM; object restored to cuda
             e.tier = Tier.RAM
             e.vram_bytes = 0
             e.demote_count += 1
@@ -659,7 +659,7 @@ class Residency:
         rolled back to CPU and refused instead of booked (gw#409)."""
         device = device or self.vram_device
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e is None or not e.movable:
                 return False
             hint = e.vram_hint
@@ -668,7 +668,7 @@ class Residency:
             if already_vram:
                 e.last_used = time.monotonic()
         if already_vram:
-            # Paranoid fast path: a VRAM-booked entry must actually be device-
+            # Paranoid fast path: a VRAM-booked compiled graph must actually be device-
             # complete (a crashed rollback / out-of-band .to() must not serve
             # a mixed-device pipeline). The clean-case walk is tensor metadata
             # only — no data movement.
@@ -683,7 +683,7 @@ class Residency:
                 return True
             # Unrepairable: book the truth and refuse.
             with self._lock:
-                e = self._entries.get(ref)
+                e = self._compiled_graphs.get(ref)
                 if e is None:
                     return False
                 evicted = self._move_verified(e.obj, "cpu", ref=ref)
@@ -692,7 +692,7 @@ class Residency:
                     # UNCONDITIONAL, so a failed eviction still wrote
                     # `tier=RAM, vram_bytes=0` — while `_move_verified`'s own
                     # rollback had just put the object back on CUDA, where it
-                    # physically remains. The registry then believed this entry
+                    # physically remains. The registry then believed this compiled graph
                     # held ZERO VRAM, so `make_room` handed out headroom that
                     # does not exist and the OOM landed on an unrelated
                     # `promote()` later, with nothing tying it back here.
@@ -706,7 +706,7 @@ class Residency:
                         ref, e.vram_bytes)
                     activity_mod.emit_event(
                         activity_mod.KIND_RESIDENCY_FAULT,
-                        f"ref={ref}: a mixed-device VRAM entry could not be "
+                        f"ref={ref}: a mixed-device VRAM compiled_graph could not be "
                         f"repaired OR evicted to CPU. It stays on the card and "
                         f"stays BOOKED at {e.vram_bytes} bytes — booking it as "
                         f"RAM/0 would hand `make_room` headroom that does not "
@@ -721,7 +721,7 @@ class Residency:
             self._emit(ref, IN_RAM)
             return False
         if hint <= 0:
-            # Never-measured entry: estimate from weights so make_room asks
+            # Never-measured compiled graph: estimate from weights so make_room asks
             # for real headroom instead of 0 (a 0-byte ask promoted 6.9GB
             # pipelines into ~2GB free and OOMed mid-move, gw#409).
             hint = int(estimate_pipeline_size_gb(obj) * _GiB)
@@ -740,11 +740,11 @@ class Residency:
                 )
                 return False
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e is None or not e.movable:
                 return False
             if not self._move_verified(e.obj, device, ref=ref):
-                return False  # entry stays RAM; object restored to cpu
+                return False  # compiled graph stays RAM; object restored to cpu
             e.tier = Tier.VRAM
             e.vram_bytes = int(estimate_cuda_resident_gb(e.obj) * _GiB) or hint
             e.vram_hint = max(e.vram_hint, e.vram_bytes)
@@ -758,9 +758,9 @@ class Residency:
 
     def release_to_disk(self, ref: str) -> bool:
         """Drop the loaded object entirely; disk snapshot kept.
-        Refuses executing/shared-held entries."""
+        Refuses executing/shared-held compiled graphs."""
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e is None:
                 return False
             if e.refcount > 0 or e.holders > 0 or self._leased_locked(ref):
@@ -772,7 +772,7 @@ class Residency:
                 e.tier = Tier.DISK
                 state = ON_DISK
             else:
-                del self._entries[ref]
+                del self._compiled_graphs[ref]
                 state = EVICTED
         if was_loaded:
             flush_memory()
@@ -780,17 +780,17 @@ class Residency:
         return True
 
     def evict(self, ref: str, *, force: bool = False) -> bool:
-        """Remove the entry entirely (fully gone -> EVICTED). Refuses
-        executing/shared-held entries unless ``force``. Does not delete disk
+        """Remove the compiled graph entirely (fully gone -> EVICTED). Refuses
+        executing/shared-held compiled graphs unless ``force``. Does not delete disk
         files — callers own filesystem GC."""
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e is None:
                 return False
             if (e.refcount > 0 or e.holders > 0 or self._leased_locked(ref)) and not force:
                 return False
             was_loaded = e.tier in (Tier.VRAM, Tier.RAM)
-            del self._entries[ref]
+            del self._compiled_graphs[ref]
         if was_loaded:
             flush_memory()
         self._emit(ref, EVICTED)
@@ -800,12 +800,12 @@ class Residency:
 
     @contextmanager
     def executing(self, *refs: str) -> Iterator[None]:
-        """Pin-while-executing: entries named here are not eviction candidates
+        """Pin-while-executing: compiled graphs named here are not eviction candidates
         for the duration (cross-pipeline eviction never yanks a model that a
         handler is actively using)."""
         with self._lock:
             for ref in refs:
-                e = self._entries.get(ref)
+                e = self._compiled_graphs.get(ref)
                 if e:
                     e.refcount += 1
                     e.last_used = time.monotonic()
@@ -814,13 +814,13 @@ class Residency:
         finally:
             with self._lock:
                 for ref in refs:
-                    e = self._entries.get(ref)
+                    e = self._compiled_graphs.get(ref)
                     if e and e.refcount > 0:
                         e.refcount -= 1
 
     def in_use(self, ref: str) -> bool:
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             return bool(e and e.refcount > 0) or self._leased_locked(ref)
 
     # ---- admission leases (pgw#641 Stage 2) -----------------------------------
@@ -903,7 +903,7 @@ class Residency:
             self._leases[lid] = lease
             for ref in lease.refs:
                 expect = max(0, int(sizes.get(ref, 0) or 0))
-                e = self._entries.get(ref)
+                e = self._compiled_graphs.get(ref)
                 if e is not None and e.tier is Tier.VRAM:
                     continue  # already booked in the pool; nothing to claim
                 if e is not None and expect <= 0:
@@ -933,14 +933,14 @@ class Residency:
     def fits(self, sizes: Mapping[str, int], *, activation_bytes: int = 0) -> bool:
         """Cheap honest admission query: could this ref set be served now —
         counting measured free VRAM, minus other jobs' outstanding weight and
-        activation claims, plus what LRU demotion of unprotected entries could
+        activation claims, plus what LRU demotion of unprotected compiled graphs could
         reclaim. ``activation_bytes`` is this request's own transient
         footprint, which must fit alongside its weights. Read only; takes
         nothing."""
         with self._lock:
             needed = max(0, int(activation_bytes))
             for ref, expect in sizes.items():
-                e = self._entries.get(str(ref))
+                e = self._compiled_graphs.get(str(ref))
                 if e is not None and e.tier is Tier.VRAM:
                     continue
                 size = max(0, int(expect or 0))
@@ -954,7 +954,7 @@ class Residency:
             reserved += self._outstanding_activation_bytes()
             ref_leases = self._ref_leases
             reclaimable = sum(
-                e.vram_bytes for e in self._entries.values()
+                e.vram_bytes for e in self._compiled_graphs.values()
                 if e.tier is Tier.VRAM and e.movable and not e.pinned
                 and e.refcount <= 0 and not ref_leases.get(e.ref)
             )
@@ -972,12 +972,12 @@ class Residency:
 
         Genuinely shared components (2+ holders — e.g. a TE/VAE aliased by
         several resident picks, pgw#636) sort LAST: swapping one out costs
-        every sibling a re-promote, so exclusive entries (per-pick UNets,
+        every sibling a re-promote, so exclusive compiled graphs (per-pick UNets,
         single-holder components) always go first."""
         with self._lock:
             ref_leases = self._ref_leases
             candidates = [
-                e for e in self._entries.values()
+                e for e in self._compiled_graphs.values()
                 if e.tier is Tier.VRAM and not e.pinned and e.refcount <= 0
                 and not ref_leases.get(e.ref)
             ]
@@ -987,9 +987,9 @@ class Residency:
     def make_room(
         self, needed_bytes: int, *, for_refs: Iterable[str] = (),
     ) -> bool:
-        """Demote LRU VRAM entries until measured free VRAM covers
+        """Demote LRU VRAM compiled graphs until measured free VRAM covers
         ``needed_bytes`` + margin. True when the headroom was reached.
-        Only movable entries are demoted here; when this returns False the
+        Only movable compiled graphs are demoted here; when this returns False the
         caller (executor) tears down non-movable LRU victims itself.
 
         Free bytes CLAIMED by other admissions' outstanding reservations
@@ -1029,7 +1029,7 @@ class Residency:
         with self._lock:
             ref_leases = self._ref_leases
             candidates = [
-                e for e in self._entries.values()
+                e for e in self._compiled_graphs.values()
                 if e.tier is Tier.RAM and e.obj is not None
                 and not e.pinned and e.refcount <= 0 and e.holders <= 0
                 and not ref_leases.get(e.ref)
@@ -1047,7 +1047,7 @@ class Residency:
         vram_bytes: int = 0,
         pin: bool = False,
     ) -> Any:
-        """Load-once-or-reuse a shared immutable component set. The entry is
+        """Load-once-or-reuse a shared immutable component set. The compiled graph is
         registered ONCE (VRAM counted once) under ``key.cache_id()`` and held
         (``holders``) so evict/release can never drop the registry's handle
         while any pipeline aliases the module. Holders do NOT block VRAM->RAM
@@ -1055,7 +1055,7 @@ class Residency:
         pressure; owners re-promote before executing (pin + promote path)."""
         ref = key.cache_id()
         with self._lock:
-            e = self._entries.get(ref)
+            e = self._compiled_graphs.get(ref)
             if e is not None and e.obj is not None:
                 self._shared_hits += 1
                 e.holders += 1
@@ -1068,7 +1068,7 @@ class Residency:
             measured = int(vram_bytes)
             if measured <= 0:
                 measured = int(estimate_cuda_resident_gb(obj) * _GiB)
-            e = _Entry(
+            e = _CompiledGraph(
                 ref=ref,
                 tier=Tier.VRAM if measured > 0 else Tier.RAM,
                 obj=obj,
@@ -1077,18 +1077,18 @@ class Residency:
                 pinned=pin,
                 holders=1,
             )
-            self._entries[ref] = e
+            self._compiled_graphs[ref] = e
             state, vb = (IN_VRAM, measured) if e.tier is Tier.VRAM else (IN_RAM, 0)
         self._emit(ref, state, vb)
         return obj
 
     def release_shared(self, key: "LoadedComponentKey") -> int:
         """Drop one shared hold; returns the new holder count. The last
-        release makes the entry an ordinary LRU candidate — it is NOT freed
+        release makes the compiled graph an ordinary LRU candidate — it is NOT freed
         eagerly (pgw#636: a hot GPU keeps components resident for the next
         pick; real pressure reclaims them through make_room)."""
         with self._lock:
-            e = self._entries.get(key.cache_id())
+            e = self._compiled_graphs.get(key.cache_id())
             if e is None:
                 return 0
             if e.holders > 0:
@@ -1097,7 +1097,7 @@ class Residency:
 
     def shared_refcount(self, key: "LoadedComponentKey") -> int:
         with self._lock:
-            e = self._entries.get(key.cache_id())
+            e = self._compiled_graphs.get(key.cache_id())
             return e.holders if e else 0
 
     def shared_obj(self, key: "LoadedComponentKey") -> Any:
@@ -1108,17 +1108,17 @@ class Residency:
             return {
                 "hits": self._shared_hits,
                 "misses": self._shared_misses,
-                "entries": [
+                "compiled_graphs": [
                     {"ref": e.ref, "tier": e.tier.value, "refcount": e.refcount,
                      "holders": e.holders, "vram_bytes": e.vram_bytes,
                      "pinned": e.pinned}
-                    for e in self._entries.values() if e.ref.startswith("shared::")
+                    for e in self._compiled_graphs.values() if e.ref.startswith("shared::")
                 ],
             }
 
     def transition_stats(self) -> Dict[str, Dict[str, int]]:
         """Per-ref swap telemetry (gw#479): promote/demote counts + last wall
-        durations for every entry that has ever transitioned."""
+        durations for every compiled graph that has ever transitioned."""
         with self._lock:
             return {
                 e.ref: {
@@ -1127,15 +1127,15 @@ class Residency:
                     "last_promote_ms": e.last_promote_ms,
                     "last_demote_ms": e.last_demote_ms,
                 }
-                for e in self._entries.values()
+                for e in self._compiled_graphs.values()
                 if e.promote_count or e.demote_count
             }
 
     def drain_shared(self, *, force: bool = False) -> int:
-        """Evict shared entries with no holders (or everything when ``force``)."""
+        """Evict shared compiled graphs with no holders (or everything when ``force``)."""
         with self._lock:
             victims = [
-                r for r, e in self._entries.items()
+                r for r, e in self._compiled_graphs.items()
                 if r.startswith("shared::")
                 and (force or (e.holders <= 0 and e.refcount <= 0))
             ]
@@ -1178,7 +1178,7 @@ def content_set_digest(files: Any) -> str:
 @dataclass(frozen=True)
 class LoadedComponentKey:
     """Canonical identity of a loadable immutable component set, keyed by
-    CONTENT (gw#479). Two bindings share one loaded entry IFF the bytes and
+    CONTENT (gw#479). Two bindings share one loaded compiled graph IFF the bytes and
     every load-affecting fact are equal: the file-set content digest plus
     dtype, quant scheme+config, GPU index, placement mode, component name and
     adapter overlays. ref/revision are NOT identity — byte-identical
@@ -1238,7 +1238,7 @@ class LoadedComponentKey:
         )
         digest = hashlib.sha256("\x1f".join(fields).encode("utf-8")).hexdigest()[:16]
         # Readable part comes from IDENTITY fields only: equal keys MUST map
-        # to one cache entry even when their ref labels differ (that is the
+        # to one cache compiled graph even when their ref labels differ (that is the
         # entire point of content keying).
         readable = (self.component_set or "?").replace("/", "--")[:48]
         return f"shared::{readable}::dev{self.device_id}::{digest}"

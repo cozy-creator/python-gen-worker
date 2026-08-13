@@ -279,7 +279,7 @@ def arm_route(mode: str) -> Optional[str]:
     ONE registry, asked by :func:`arm_aot` when it arms and by the mint
     BEFORE it spends anything (``fleet_compiled_graphs.mint_recipe``). pgw#827 is the
     fourth defect in the "a gate that models the arm differently from the
-    arm" class (pgw#816, #822, #825): the regional recipe minted 72 entries
+    arm" class (pgw#816, #822, #825): the regional recipe minted 72 compiled graphs
     in 354 s of L4 and only then discovered that this runtime had no arm
     that could adopt the kind of compiled graph it had just built. "Can this runtime
     adopt the kind of compiled graph I am about to mint?" is answerable at
@@ -303,12 +303,12 @@ def arm_aot(
     verify_numerics: bool = False,
     declared: Sequence[str] = (),
 ) -> AdoptOutcome:
-    """Arm ONE exported ``.pt2`` ENTRY on ``pipe``. The whole AOT arm, in one
+    """Arm ONE exported ``.pt2`` COMPILED_GRAPH on ``pipe``. The whole AOT arm, in one
     place, for every source of such an artifact.
 
     pgw#1176: the unit is one graph class. ``declared`` is every class name
     this pod's declaration traces to, threaded to the dispatch so a call no
-    ARMED entry admits reads as "declared, pending compile" (silent eager)
+    ARMED compiled graph admits reads as "declared, pending compile" (silent eager)
     rather than as an undeclared shape.
 
     ``verify_numerics`` (DESIGN-RULINGS §4.32, pgw#1141) runs the parity gate,
@@ -369,16 +369,16 @@ def arm_aot(
         # install and waste the arm).
         targets = [str(t) for t in ((meta or {}).get("targets") or ())]
         if not targets:
-            # pgw#1001: a packed multi-entry compiled graph records its targets PER
-            # ENTRY and carries no top-level `targets`/`module` (measured:
-            # both None on a real 5-entry lora64 compiled graph). Without this the name
+            # pgw#1001: a packed multi-compiled graph compiled graph records its targets PER
+            # COMPILED_GRAPH and carries no top-level `targets`/`module` (measured:
+            # both None on a real 5-compiled graph lora64 compiled graph). Without this the name
             # resolved to "" and the lifted install was silently skipped.
-            # pgw#1176: one artifact, one entry, one target.
+            # pgw#1176: one artifact, one compiled graph, one target.
             name = str(
-                ((meta or {}).get("entry") or {}).get("target") or "").strip()
+                ((meta or {}).get("compiled_graph") or {}).get("target") or "").strip()
             targets = [name] if name else []
         # ...and among them the BRANCH-CAPABLE one: `decoder` sorts first
-        # among entry names, and a lifted forward on a module with no branch
+        # among compiled graph names, and a lifted forward on a module with no branch
         # container fails by name. `branch_targets` is the authority.
         branch_capable = lora_lifted.branch_targets(pipe)
         module_name = str((meta or {}).get("module") or "")
@@ -437,7 +437,7 @@ def arm_aot(
     # The two terms are measured SEPARATELY because they answer different
     # questions, and the split is what decides whether the COMPILED GRAPH or the GATE is
     # the problem (th#1825):
-    #   load   — every loaded entry runner, which EVERY serving pod pays for the
+    #   load   — every loaded compiled graph runner, which EVERY serving pod pays for the
     #            life of the arm. This is the term that decides whether a compiled graph
     #            fits on the fleet it was built for.
     #   verify — the §4.32 parity gate's two forwards, paid ONLY on the minting
@@ -467,13 +467,13 @@ def arm_aot(
         # The compiled graph's OWN recorded lane.
         lane = str((meta or {}).get("weight_lane") or "")
         # pgw#1176: one artifact, one graph class — so this row is always
-        # `entries=1`, and that is the point rather than a degenerate case.
+        # `compiled graphs=1`, and that is the point rather than a degenerate case.
         # pgw#1175: it MEASURES and sizes nothing; no bank reads it.
-        entries = 1 if (meta or {}).get("entry") else 0
+        compiled_graphs = 1 if (meta or {}).get("compiled_graph") else 0
         gib = 1 << 30
         activity_mod.emit_event(
             "compiled_graph_adopt_budget",
-            f"family={family} lane={lane or '(plain)'} entries={entries} "
+            f"family={family} lane={lane or '(plain)'} compiled_graphs={compiled_graphs} "
             f"adopt_device_peak={total / gib:.3f}GiB "
             f"load={_load_bytes / gib:.3f}GiB "
             f"verify={max(0, int(verify_bytes)) / gib:.3f}GiB "
@@ -493,7 +493,7 @@ def arm_aot(
     # "CANNOT refuse a card that merely cannot hold 36 runners", i.e. it could
     # not refuse the failure it was written for (th#1825) and could refuse
     # cards that were fine. The honest gate is the bind itself:
-    # `aot_serve.arm_entry` attempts THIS entry and returns a typed
+    # `aot_serve.arm_compiled_graph` attempts THIS compiled graph and returns a typed
     # `insufficient_adopt_vram` miss on a real device OOM, before any live
     # mutation, and this pod serves eager exactly as it did — on evidence.
     #
@@ -532,23 +532,23 @@ def arm_aot(
         # Nothing is announced until the arm is final, so the refusal is simply
         # what this function returns; the numbers still ride `compiled_graph_numerics`.
         meta = aot_serve.armed_metadata(pipe)
-        # pgw#1176: THE PARITY REFUSAL IS PER ENTRY. This used to `unwrap` the
+        # pgw#1176: THE PARITY REFUSAL IS PER COMPILED_GRAPH. This used to `unwrap` the
         # whole pipeline, which was correct while the gate's subject was a
         # 36-class compiled graph and is wrong now: the probe measures ONE graph class
         # against the eager callable it was traced from, so a divergence
         # condemns that class and says nothing about its siblings. The refused
-        # entry de-arms sticky, its siblings keep serving compiled, and it is
+        # compiled graph de-arms sticky, its siblings keep serving compiled, and it is
         # not published.
-        entry = str((meta.get(compiled_graph_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
-        aot_serve.disarm_entry(pipe, entry, "numerics_refused")
+        compiled_graph = str((meta.get(compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY) or {}).get("name") or "")
+        aot_serve.disarm_compiled_graph(pipe, compiled_graph, "numerics_refused")
         outcome = AdoptOutcome.miss(
             "numerics_refused",
             f"family={meta.get('family')} key={meta.get('compiled_graph_key')} "
-            f"entry={entry}: this pod MINTED these bytes and they do not "
+            f"compiled_graph={compiled_graph}: this pod MINTED these bytes and they do not "
             f"reproduce the eager forward they were traced from — this CLASS "
             f"is not published and serves eager; sibling classes are "
             f"unaffected (pgw#868, §4.32). Serve state now: "
-            f"{aot_serve.entry_states(pipe)}",
+            f"{aot_serve.compiled_graph_states(pipe)}",
             outcome.identity)
     # An arm that never reached the gate (refused at `enable`) still paid the
     # load, so it still reports — `_emit_adopt_budget` dedupes, so the armed
@@ -652,7 +652,7 @@ def gate_compiled_graph_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -
         if comparison is not None and comparison.healthy:
             activity_mod.emit_event(
                 activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
-                f"CHECKED against eager on every packaged entry — "
+                f"CHECKED against eager on every packaged compiled_graph — "
                 f"{report.context()}",
                 phase="checked", duration_ms=report.elapsed_ms)
     except numerics_probe.CompiledGraphNumericsRefused as exc:

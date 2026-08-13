@@ -14,7 +14,7 @@ the arming import in ``gen_worker.cli`` was ``..local_compiled_graphs``, and
 property held because the local CLI could not reach the publishing module at
 all. After S1 it runs ``fleet_compiled_graphs``, which imports ``CompiledGraphPublisher`` — so
 "cozy-local never publishes" would rest on one keyword argument at one call
-site. Section 2 is the fence that replaces the convention: the local serve entry
+site. Section 2 is the fence that replaces the convention: the local serve compiled graph
 names no publisher, constructs none, and reaches no publish call, read out of
 the source tree rather than asserted about a run. Each of those is RED-provable
 by deleting ``publisher=None`` or adding a ``CompiledGraphPublisher(...)`` — which is the
@@ -45,10 +45,10 @@ ARM_A = fleet_compiled_graphs.ARM_SCHEME + "-" + "1" * 56
 
 SRC = Path(fleet_compiled_graphs.__file__).parent
 
-#: The local serve ENTRY: every file a `cozy serve` / `cozy run` arm passes
+#: The local serve COMPILED_GRAPH: every file a `cozy serve` / `cozy run` arm passes
 #: through on its way to the arming brain. The fence in section 2 reads all of
 #: them, because a publisher constructed one frame up the stack is a publisher.
-LOCAL_SERVE_ENTRY = (
+LOCAL_SERVE_COMPILED_GRAPH = (
     SRC / "local_serve.py",
     SRC / "cli" / "run.py",
     SRC / "cli" / "serve.py",
@@ -166,7 +166,7 @@ def _ctx() -> local_serve.LocalMintContext:
 
 
 def _arming_import(module_file: Path) -> str:
-    """The module `_load_injected_model` imports its arming entry from."""
+    """The module `_load_injected_model` imports its arming compiled graph from."""
     tree = ast.parse(module_file.read_text())
     fn = next(
         n for n in ast.walk(tree)
@@ -194,7 +194,7 @@ def test_the_local_cli_arms_through_the_AOT_sink_and_never_the_JIT_one() -> None
     """
     imported = _arming_import(SRC / "cli" / "run.py")
     assert "local_serve" in imported, (
-        "the local serve entry must arm through `local_serve` — the fleet "
+        "the local serve compiled_graph must arm through `local_serve` — the fleet "
         "arming brain with no sink — so a `cozy serve` miss consults THIS "
         "MACHINE's ck1 store before it mints anything")
     assert "local_compiled_graphs" not in imported, (
@@ -226,14 +226,14 @@ def test_a_second_run_on_this_machine_arms_from_its_own_store_and_never_mints(
     store: Path, tmp_path: Path, machine: None, armable: List[Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Compile-once-run-forever, through the entry `cozy serve` actually calls.
+    """Compile-once-run-forever, through the compiled graph `cozy serve` actually calls.
 
     The whole ordering runs for real: delivered-artifact miss -> in-process
     ledgers -> **this machine's store** -> (never reached) the pending. A mint
     opened here would mean the machine recompiled what it already had, so the
     delegated mint is wired to FAIL the test rather than to be counted.
 
-    RED before pgw#1127: `gen_worker.local_serve` did not exist, and the entry
+    RED before pgw#1127: `gen_worker.local_serve` did not exist, and the compiled graph
     that did exist could not address a ck1-keyed compiled graph at all.
     """
     monkeypatch.setattr(
@@ -249,7 +249,7 @@ def test_a_second_run_on_this_machine_arms_from_its_own_store_and_never_mints(
     assert armable and armable[0] == store / "aot-compiled_graphs" / KEY_A / "compiled_graph.tar.gz"
 
 
-def test_the_local_entry_hands_the_arming_brain_no_sink_at_all(
+def test_the_local_compiled_graph_hands_the_arming_brain_no_sink_at_all(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§4.28 at the seam: ``publisher=None`` is what makes ``local_keep_reason``
@@ -274,19 +274,19 @@ def test_the_local_entry_hands_the_arming_brain_no_sink_at_all(
 # ---------------------------------------------------------------------------
 
 
-def test_the_local_serve_entry_constructs_no_publisher(
+def test_the_local_serve_compiled_graph_constructs_no_publisher(
 ) -> None:
     """The fence pgw#1127 §4 says is owed.
 
     RED-provable in one edit: add ``CompiledGraphPublisher(...)`` anywhere on the local
-    serve entry and this fails. That is the difference between a property and a
+    serve compiled graph and this fails. That is the difference between a property and a
     habit — ``publisher=None`` at one call site is a habit, and after S1 the
     module the local CLI now runs is one that CAN publish.
     """
     banned = {"CompiledGraphPublisher", "publish_self_mint", "_publish_async",
               "publish_intent", "presign", "put_object", "upload"}
     offenders: List[str] = []
-    for path in LOCAL_SERVE_ENTRY:
+    for path in LOCAL_SERVE_COMPILED_GRAPH:
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             name = (
@@ -301,7 +301,7 @@ def test_the_local_serve_entry_constructs_no_publisher(
                         offenders.append(
                             f"{path.name}:{node.lineno} import {alias.name}")
     assert not offenders, (
-        "§4.28: the local serve entry must never name a publish route — "
+        "§4.28: the local serve compiled_graph must never name a publish route — "
         f"{offenders}")
 
 
@@ -320,10 +320,10 @@ def test_the_sinkless_call_is_a_LITERAL_none_and_not_a_variable() -> None:
         if isinstance(call, ast.Call)
         for kw in call.keywords if kw.arg == "publisher"
     ]
-    assert passed, "the local entry must state its sink, not inherit a default"
+    assert passed, "the local compiled_graph must state its sink, not inherit a default"
     for kw in passed:
         assert isinstance(kw.value, ast.Constant) and kw.value.value is None, (
-            "publisher= must be the literal None on the local serve entry")
+            "publisher= must be the literal None on the local serve compiled_graph")
 
 
 def test_the_obligation_ends_at_a_terminus_that_cannot_publish(
@@ -498,7 +498,7 @@ def test_the_mint_child_path_never_opens_a_mint_of_its_own() -> None:
 
 
 def test_the_cli_serve_path_names_the_function_so_it_can_mint() -> None:
-    """The reachability half's other end: without ``selected=`` the local entry
+    """The reachability half's other end: without ``selected=`` the local compiled graph
     can only ADOPT, so a machine with an empty store would stay eager forever
     and §4.28's *"compile ONCE"* would never happen at all."""
     tree = ast.parse((SRC / "cli" / "serve.py").read_text())

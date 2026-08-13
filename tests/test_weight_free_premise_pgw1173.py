@@ -83,7 +83,7 @@ FLEET_TARGETS: Dict[str, tuple] = {
 class _Composed:
     """A diffusers-shaped composition, the same shape
     `test_trace_child_placement_pgw1124` uses: `.components` is the walk's
-    entry point and every part is also a plain attribute."""
+    compiled graph point and every part is also a plain attribute."""
 
     def __init__(self, **parts: Any) -> None:
         self._parts: Dict[str, Any] = dict(parts)
@@ -421,7 +421,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, job: Any, report_path: Path) -> Any:
 
     def _traced(pipeline: Any, spec: Any, decl: Any, **_: Any) -> Any:
         return iter([aot_mint.TracedClass(
-            name="transformer", block={"entry": "transformer"}, nodes=1,
+            name="transformer", block={"compiled_graph": "transformer"}, nodes=1,
             program=None, declared=1)])
 
     monkeypatch.setattr(aot_mint, "trace_for_key", _traced)

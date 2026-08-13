@@ -14,8 +14,8 @@ the environment* just by importing it. Three consequences, all measured:
 
 This module keeps exactly one property of the old accessor — a process-wide
 answer for code too deep to hand a parameter to — and removes the rest. It
-**cannot load**. `install()` is called by a process entry with the `Settings`
-that entry loaded, and `current()` raises if that never happened.
+**cannot load**. `install()` is called by a process compiled graph with the `Settings`
+that compiled graph loaded, and `current()` raises if that never happened.
 
 Prefer a parameter. `Settings` is passed by parameter wherever the caller has
 one, and this is for the residue: leaf helpers in `models/` with wide fan-in
@@ -32,7 +32,7 @@ from .settings import Settings
 
 
 class SettingsNotInstalled(RuntimeError):
-    """`current()` before any process entry published its `Settings`.
+    """`current()` before any process compiled graph published its `Settings`.
 
     Loud on purpose. The old `get_settings()` answered this case by reading the
     environment there and then, which is how a module that ran before bootstrap
@@ -45,7 +45,7 @@ _SETTINGS: Optional[Settings] = None
 
 
 def install(settings: Settings) -> Settings:
-    """Publish the `Settings` this process entry loaded. Returns them, so a
+    """Publish the `Settings` this process compiled graph loaded. Returns them, so a
     bootstrap can write `settings = config.install(load_settings())`."""
     global _SETTINGS
     _SETTINGS = settings
@@ -53,7 +53,7 @@ def install(settings: Settings) -> Settings:
 
 
 def installed() -> bool:
-    """Whether a process entry has published its `Settings` yet."""
+    """Whether a process compiled graph has published its `Settings` yet."""
     return _SETTINGS is not None
 
 
@@ -61,7 +61,7 @@ def current() -> Settings:
     """The published `Settings`. Raises `SettingsNotInstalled` if there are none."""
     if _SETTINGS is None:
         raise SettingsNotInstalled(
-            "no Settings have been installed in this process. A process entry "
+            "no Settings have been installed in this process. A process compiled_graph "
             "must call config.install(load_settings()) before anything reads "
             "configuration — see gen_worker/config/__init__.py (ruling §1.18)."
         )

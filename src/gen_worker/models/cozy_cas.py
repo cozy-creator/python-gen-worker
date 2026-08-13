@@ -34,7 +34,7 @@ def fsync_file(path: Path) -> None:
 
 
 def fsync_dir(path: Path) -> None:
-    """Persist a directory entry (the rename itself) to stable storage."""
+    """Persist a directory compiled graph (the rename itself) to stable storage."""
 
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))

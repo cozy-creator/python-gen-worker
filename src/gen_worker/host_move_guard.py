@@ -120,7 +120,7 @@ def _refuse_if_over_budget(incoming: int, **probe_kwargs: Any) -> None:
 
 def check_host_ram_move(module: Any) -> None:
     """Raise :class:`HostRamMoveRefusedError` when moving ``module`` to CPU
-    cannot fit ``available - floor``. Shared by both patched entry points."""
+    cannot fit ``available - floor``. Shared by both patched compiled graph points."""
     try:
         incoming = _incoming_bytes(module)
     except _Unmeasurable as exc:

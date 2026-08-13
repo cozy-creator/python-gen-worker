@@ -13,7 +13,7 @@ What is proved here:
 1. **Every gate is individually distinguishable on the wire.** One typed
    ``boot_adopt`` activity event per decision, ``phase`` = the gate's own token.
    Parametrized over every terminus — the four executor pre-attempt gates, the
-   eager-only non-entry, each ``attempt`` refusal, the miss and the hit.
+   eager-only non-compiled graph, each ``attempt`` refusal, the miss and the hit.
 2. **The vocabulary is exhaustive.** Every refusal token any path in the tree
    can produce is in ``boot_adopt.REASONS``; a new refusal that forgets to name
    itself fails here rather than becoming the next silent one.
@@ -240,8 +240,8 @@ def _executor(tmp_path: Path) -> Any:
             "declaration_unreadable",
             lambda mp: mp.setattr(
                 executor_mod.aot_declaration, "compiled_graph_plans",
-                _raise(ValueError("two mint plans share entry name"))),
-            "share entry name",
+                _raise(ValueError("two mint plans share compiled_graph name"))),
+            "share compiled_graph name",
         ),
     ],
 )
@@ -341,7 +341,7 @@ def _derived(wall_ms: int = 1234) -> Any:
     return boot_key.DerivedKey(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
         # class, so the set has one member and callers take it from `keys`.
-        entry_keys={"a": ck.from_axes({
+        compiled_graph_keys={"a": ck.from_axes({
             "graph": "c0ffee0000000000",
             "sm": "sm_89", "toolchain": "t" * 16}).digest},
         class_hashes={"a": "c0ffee0000000000"},

@@ -171,7 +171,7 @@ def main() -> int:
         # A site that went away is good news, but the allowlist must not keep
         # carrying it: a stale exemption silently re-permits the site if it
         # ever comes back. Same defect class the gate exists to police.
-        print("allowlist has entries with no matching call site — delete them:",
+        print("allowlist has compiled_graphs with no matching call site — delete them:",
               file=sys.stderr)
         for key in stale:
             print(f"  - {key}", file=sys.stderr)

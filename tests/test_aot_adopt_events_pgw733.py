@@ -48,7 +48,7 @@ CONSTANTS = [
     {"fqn": "conv_in.weight", "source": aot_serve.SOURCE_STATE_DICT,
      "dtype": "bfloat16", "shape": [320, 4, 3, 3]},
 ]
-ENTRY = "unet/g"
+COMPILED_GRAPH = "unet/g"
 
 
 class FakeTensor:
@@ -104,11 +104,11 @@ class Cfg:
     regional = False
 
 
-def _entry(**over: Any) -> Dict[str, Any]:
+def _compiled_graph(**over: Any) -> Dict[str, Any]:
     e: Dict[str, Any] = {
-        # pgw#1176: an entry block NAMES its class — that is what makes a
+        # pgw#1176: an compiled graph block NAMES its class — that is what makes a
         # refusal bisectable to the thing that failed.
-        "name": ENTRY,
+        "name": COMPILED_GRAPH,
         "target": "unet", "fork": [], "class_dims": [],
         "inputs": [dict(r) for r in INPUTS], "symbols": {},
         "constants": [dict(r) for r in CONSTANTS], "graph": {},
@@ -123,13 +123,13 @@ def _entry(**over: Any) -> Dict[str, Any]:
 
 
 def _meta(**over: Any) -> Dict[str, Any]:
-    # pgw#1176: ONE entry per artifact. No `entries=` override, because a
-    # multi-entry envelope is a shape production cannot produce.
-    entry = over.pop("entry", None) or _entry()
+    # pgw#1176: ONE compiled graph per artifact. No `compiled graphs=` override, because a
+    # multi-compiled graph envelope is a shape production cannot produce.
+    compiled_graph = over.pop("compiled_graph", None) or _compiled_graph()
     m: Dict[str, Any] = {
         "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
         **RUNTIME, "family": FAMILY, "precision": "w8a8",
-        "compiled_graph_key": KEY, compiled_graph_key_mod.ENTRY_BLOCK_KEY: entry,
+        "compiled_graph_key": KEY, compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY: compiled_graph,
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
         # pgw#1097: no weight BYTES in the .so (above) and no weight VALUES in
@@ -152,10 +152,10 @@ def _meta(**over: Any) -> Dict[str, Any]:
                               "guidance": [7.5]},
     }
     m["manifest_digest"] = compiled_graph_key_mod.manifest_digest(
-        [str((entry or {}).get("class_hash") or "")])
+        [str((compiled_graph or {}).get("class_hash") or "")])
     m.update(over)
     try:
-        m["compiled_graph_key"] = compiled_graph_key_mod.from_entry_metadata(m).digest
+        m["compiled_graph_key"] = compiled_graph_key_mod.from_compiled_graph_metadata(m).digest
     except compiled_graph_key_mod.CompiledGraphKeyError:
         pass  # deliberately-malformed variants keep the placeholder stamp
     return m
@@ -180,7 +180,7 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 def stub_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
     monkeypatch.setattr(
-        aot_serve, "_entry_admission_drift", lambda *a, **k: None)
+        aot_serve, "_compiled_graph_admission_drift", lambda *a, **k: None)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +192,7 @@ def test_successful_arm_returns_an_armed_outcome_naming_the_compiled_graph(
     tmp_path: Path, stub_runtime: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        aot_serve, "_load_package", lambda path, entry: FakePackage())
+        aot_serve, "_load_package", lambda path, compiled_graph: FakePackage())
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
     assert out.armed and out.reason == ""
     assert _meta()["compiled_graph_key"] in out.identity and FAMILY in out.identity
@@ -228,8 +228,8 @@ def test_artifact_invalid_named_on_the_wire(
     # Identity is best-effort: an unreadable artifact still names its file.
     assert "corrupt.tar.gz" in out.detail
 
-    # Malformed entries classify the same, with the reason in the detail.
-    malformed = _tar(tmp_path, _meta(entry={"name": ENTRY, "target": "unet"}))
+    # Malformed compiled graphs classify the same, with the reason in the detail.
+    malformed = _tar(tmp_path, _meta(compiled_graph={"name": COMPILED_GRAPH, "target": "unet"}))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=malformed)
     assert not out.armed and out.reason == "artifact_invalid"
     assert "declares no inputs" in out.detail
@@ -241,7 +241,7 @@ def test_constants_refusal_named_on_the_wire(
 ) -> None:
     monkeypatch.setattr(
         aot_serve, "_load_package",
-        lambda path, entry: FakePackage(fqns=("conv_in.weight",
+        lambda path, compiled_graph: FakePackage(fqns=("conv_in.weight",
                                               "not.in.state_dict")))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
     assert not out.armed
@@ -254,13 +254,13 @@ def test_constants_refusal_named_on_the_wire(
 
 
 def _nested_contract() -> Any:
-    entry = _entry(inputs=[
+    compiled_graph = _compiled_graph(inputs=[
         {"name": "sample", "position": 0, "dtype": "bfloat16",
          "shape": [2, 4, 128, 128]},
         {"name": "text_embeds", "position": 3, "dtype": "bfloat16",
          "shape": [2, 1280]},
     ])
-    return aot_serve.contract_from_meta(entry)
+    return aot_serve.contract_from_meta(compiled_graph)
 
 
 def test_missing_nested_input_still_refuses_by_name() -> None:

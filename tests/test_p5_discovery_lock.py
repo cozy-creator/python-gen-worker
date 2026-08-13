@@ -109,7 +109,7 @@ def test_cpu_endpoint_never_carries_gpu_or_cuda_floor(tmp_pkg: Path) -> None:
 
 
 def test_duplicate_wire_route_within_a_class_fails_validation() -> None:
-    """Two class-shape entries slugifying to the SAME wire route on ONE
+    """Two class-shape compiled graphs slugifying to the SAME wire route on ONE
     class would silently shadow one of them at dispatch — the bake-time
     validator (#328) must reject it. (The discover WALK itself hard-fails
     even earlier via ``_assert_unique_function_names`` for this exact case

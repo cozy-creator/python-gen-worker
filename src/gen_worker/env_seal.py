@@ -197,7 +197,7 @@ def effective_config() -> Dict[str, str]:
     return {**settings_authority.torch_readback(), **base}
 
 
-# Config entries torch MUTATES as a compile side effect — outputs, not knobs.
+# Config compiled graphs torch MUTATES as a compile side effect — outputs, not knobs.
 # `torch._inductor.aot_compile` writes machine facts (AOTI_CPU_ISA,
 # AOTI_COMPUTE_CAPABILITY, ...) into the global `aot_inductor.metadata` and
 # `save_config_portable()` includes it, so a process that has compiled digests
@@ -207,8 +207,8 @@ _PORTABLE_VOLATILE = ("aot_inductor.metadata",)
 
 def inductor_config_digest() -> str:
     """Digest of torch's PORTABLE inductor config — the codegen surface a
-    compiled graph's kernels were minted under (machine-specific entries excluded by
-    torch itself, torch's own compile-side-effect entries excluded here:
+    compiled graph's kernels were minted under (machine-specific compiled graphs excluded by
+    torch itself, torch's own compile-side-effect compiled graphs excluded here:
     pgw#1042). ``"absent"`` on a torchless worker (pgw#788) — a declared
     fact, so the seal digest stays meaningful for CPU compiled graphs."""
     if not torch_capability.present():
@@ -274,9 +274,9 @@ def _lib_digest(path: str, mtime_ns: int, size: int) -> str:
 #    rather than re-hashed). A KB-scale read covering, on the measured image,
 #    36 of 36 shipped toolchain libraries.
 # 2. The pgw#832 cross-process memo — now the fallback STORE for whatever
-#    RECORD does not cover, and still what a pgw#809 entry-compile child reads
-#    so a 72-entry mint does not re-pay the pass 72 times, K-wide, on the cores
-#    the compiles wanted (28 % of per-entry compile_s, measured by pgw#830).
+#    RECORD does not cover, and still what a pgw#809 compiled graph-compile child reads
+#    so a 72-compiled graph mint does not re-pay the pass 72 times, K-wide, on the cores
+#    the compiles wanted (28 % of per-compiled graph compile_s, measured by pgw#830).
 # 3. A full SHA-256 pass over the file — always correct, never skipped: a lib
 #    covered by neither manifest above is HASHED, never assumed.
 #
@@ -621,7 +621,7 @@ def declaration_digest() -> str:
     knob overrides). This is the value that folds into the ``toolchain``
     key axis (pgw#1059 amendment 4: "the compiler as we configure it") —
     a deliberate settings change re-keys through it. Deliberately excludes
-    ``loaded_libs`` (a measured binaries fact with its own toolchain entry)
+    ``loaded_libs`` (a measured binaries fact with its own toolchain compiled graph)
     and ``seal_v`` (the seal DICT's shape version, not a declaration
     fact)."""
     encoded = json.dumps(
@@ -669,7 +669,7 @@ def settings_readback() -> Dict[str, Any]:
     seal states the declaration; this states the process. The ``inductor``
     fact is the digest of the FULL portable config (wheel defaults included,
     torch-owned compile outputs excluded — ``_PORTABLE_VOLATILE``), so a
-    mutation of an entry the declaration never names is still caught and
+    mutation of an compiled graph the declaration never names is still caught and
     refused by name, instead of silently forking the traced graph."""
     return {
         "posture": guard_closure.posture_snapshot(),
@@ -738,8 +738,8 @@ def assert_seal_unchanged(label: str = "") -> None:
 
 #: pgw#830: what the LAST :func:`establish` call spent, per step. Telemetry
 #: only — nothing reads it to decide anything, and no digest depends on it.
-#: It exists because ``establish()`` is called once per pgw#809 entry-compile
-#: CHILD, so on a 72-entry mint its cost is multiplied by 72 and lands inside
+#: It exists because ``establish()`` is called once per pgw#809 compiled graph-compile
+#: CHILD, so on a 72-compiled graph mint its cost is multiplied by 72 and lands inside
 #: the recorded ``compile_s`` with no name. ``seal_libhash_s`` is the one that
 #: matters: the identity manifest used to SHA-256 every toolchain ``.so`` the
 #: env ships (measured off-pod: 36 files, 3.96 GB, 10.6-17.3 s), once per
@@ -750,7 +750,7 @@ LAST_ESTABLISH_SPANS: Dict[str, float] = {}
 
 
 def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-    """The boot entry (entrypoint wiring): SCRUB the behavior namespaces,
+    """The boot compiled graph (entrypoint wiring): SCRUB the behavior namespaces,
     IMPOSE the declaration (env, torch flags + declared knobs, dynamo shape
     posture, host-ISA clamp, process posture), verify every read-back
     against it, store the boot read-back for the tripwire, return the seal.

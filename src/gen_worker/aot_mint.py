@@ -2,18 +2,18 @@
 class set as ONE multi-graph compiled graph (pgw#704 GO, #723 mint path, #758 packaging).
 
     compose -> per declared class: torch.export.export -> aot_compile(code-only)
-            -> per-entry gates -> package_aoti({entry: files}) -> pack -> publish
+            -> per-compiled graph gates -> package_aoti({compiled graph: files}) -> pack -> publish
 
 Paul's ruling (pgw#758): "generate and generate_turbo are separate functions,
 they have separate graphs, but they are COMBINED TOGETHER INTO ONE FILE." One
 mint invocation produces one compiled graph per (family x lane x contract) carrying every
-declared graph class as a NAMED ENTRY — which removes the one-artifact-per-pod
+declared graph class as a NAMED COMPILED_GRAPH — which removes the one-artifact-per-pod
 serving ceiling the pilot runbook accepted.
 
 ``aot_serve`` owns the ENVELOPE — metadata contract, ``pack``, ``verify`` (#721
 S1 / #723 S1: ONE source of truth, imported by both lanes, never re-declared)
 — and consumes the result. ``aot_package`` reads facts back out of a compiled
-``.pt2`` (per entry) and holds the B1 gate. ``lora_lifted`` owns the
+``.pt2`` (per compiled graph) and holds the B1 gate. ``lora_lifted`` owns the
 no-baked-adapter gate. This module drives PRODUCTION and nothing else.
 Deliberately NOT folded into ``compile_cache``:
 a compiled-lane backend is its own module riding the compile-cache rails,
@@ -53,7 +53,7 @@ separate compilation system; our compilation system would only ever just be
 running the endpoint code we have already anyway." There is no dedicated mint
 fleet. ``python -m gen_worker.aot_mint`` stays CLI-invokable for ops and
 testing. Mint cost is INSTRUMENTED, not assumed: every mint records a
-per-phase, per-entry ``mint_phases`` table (export / lowering / codegen /
+per-phase, per-compiled graph ``mint_phases`` table (export / lowering / codegen /
 triton / host C++ compile+link) plus the graph-class count and the autotune
 posture, so an AOT-vs-JIT comparison is labeled data, never folklore (#757
 consumes it).
@@ -188,14 +188,14 @@ class MintResourceExhausted(RuntimeError):
 
     Deliberately NOT a subclass of :class:`MintRefused`. ``mint_child`` maps
     every ``MintRefused`` to ``EXIT_REFUSED``, which ``mint_process``
-    documents as "typed, deterministic — terminal", so an OOM-killed entry
+    documents as "typed, deterministic — terminal", so an OOM-killed compiled graph
     child inherited a never-retry verdict: the one failure class a narrower
     pool would have fixed was the one class that could never try a narrower
     pool. Raising a sibling type instead lets the child's own
     ``_is_resource_error`` see it (via ``mint_resource_shortfall``) and exit
     ``EXIT_RESOURCE``, which the parent re-budgets and retries.
 
-    ``peak_rss_bytes`` is the dead entry's MEASURED high-water, sampled by
+    ``peak_rss_bytes`` is the dead compiled graph's MEASURED high-water, sampled by
     the parent while it lived — a child the OOM killer takes writes no
     report, so this is the only measurement of it that will ever exist.
     """
@@ -206,11 +206,11 @@ class MintResourceExhausted(RuntimeError):
     mint_resource_shortfall = True
 
     def __init__(
-        self, detail: str, *, entry: str = "", basis: str = "",
+        self, detail: str, *, compiled_graph: str = "", basis: str = "",
         peak_rss_bytes: int = 0,
     ) -> None:
         super().__init__(detail)
-        self.entry = entry
+        self.compiled_graph = compiled_graph
         self.basis = basis
         self.peak_rss_bytes = int(peak_rss_bytes)
 
@@ -365,7 +365,7 @@ def dynamic_shapes_spec(
     out: Dict[str, Any] = {}
     for name in input_names:
         spec = by_input.get(name)
-        # One entry per EXPORTED element; every element of a declared
+        # One compiled graph per EXPORTED element; every element of a declared
         # container shares the container's declared axes, which is what makes
         # the elements one graph class rather than N. The element count comes
         # from `exported_input_names` — the same rule the declared-range and
@@ -394,10 +394,10 @@ def export_program(
         )
     except Exception as exc:
         # pgw#848: a CUDA OOM here is NOT a refusal. This broad catch turned
-        # "the child hit its own memory cap on entry 1 of 36" into
+        # "the child hit its own memory cap on compiled graph 1 of 36" into
         # `MintRefused` -> `EXIT_REFUSED` -> never retried — so the mint that
         # a bigger cap would fix was the one mint that could never be given
-        # one. Same defect as the entry pool's (item 4), at the other end.
+        # one. Same defect as the compiled graph pool's (item 4), at the other end.
         raise_if_device_oom(
             exc,
             f"torch.export(strict={strict}) for {type(module).__name__}")
@@ -410,7 +410,7 @@ def export_program(
 #: pgw#847: measured ONCE per mint process, and read by nobody.
 #:
 #: `torch.export.export` runs once per declared class row, SERIALLY, in this
-#: parent (`_export_entry`) — sdxl is 36 entries at a banked `export_s` of
+#: parent (`_export_compiled_graph`) — sdxl is 36 compiled graphs at a banked `export_s` of
 #: 37.8 s, so that loop is ~22 minutes of wall the pgw#809 pool never covered.
 #: An exported graph's `graph_module.code` is byte-identical across shape rows
 #: (the row lives in node metadata), and ONE export plus a per-row
@@ -428,7 +428,7 @@ def _probe_prop_s(program: Any) -> Optional[float]:
     Probe only: it mutates a FRESH `program.module()` (never the program), no
     decision reads it, and any failure records nothing rather than touching a
     mint. `.module()` is excluded from the timing because the current path
-    pays it too (`compile_entry_files`), so the comparison stays like-for-like.
+    pays it too (`compile_compiled_graph_files`), so the comparison stays like-for-like.
     """
     global _PROP_PROBE_DONE
     if _PROP_PROBE_DONE:
@@ -499,7 +499,7 @@ def declared_range_gaps(
     range, and pgw#704 B2 measured that nothing at runtime refuses the
     difference. So this must fail the mint, not ship.
 
-    Three checks, because presence of a range entry is NOT proof (ie#566 G3 —
+    Three checks, because presence of a range compiled graph is NOT proof (ie#566 G3 —
     a measured FALSE PASS: wan ti2v-5b declared symbolic H/W, exported clean,
     passed a presence-only gate, and yet a static per-token input of 27,280
     pinned H*W to exactly one shape):
@@ -561,10 +561,10 @@ def declared_range_gaps(
             # The SOLVED range of the axis's full expression, when the program
             # records one. This is what makes a UNIFIED relational axis (#739 /
             # ie#566 §5) gate-able: wan ti2v's per-token dim solves to
-            # ``31*s25*s56`` with its own composite range entry, while the
+            # ``31*s25*s56`` with its own composite range compiled graph, while the
             # per-symbol path below would compare a governing symbol's [20, 40]
             # against the declared [12400, 49600] and refuse a sound artifact.
-            # Composite entries are in the axis's OWN units, so the declared
+            # Composite compiled graphs are in the axis's OWN units, so the declared
             # bounds compare directly, with no multiple-of scaling.
             expr = getattr(getattr(dim, "node", None), "expr", None)
             interval = ranges.get(expr) if expr is not None else None
@@ -711,14 +711,14 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
     out: List[str] = []
     seen: set = set()
     for source in ("guards", "axioms"):
-        entries = getattr(env, source, None) or ()
-        if isinstance(entries, dict):
+        compiled_graphs = getattr(env, source, None) or ()
+        if isinstance(compiled_graphs, dict):
             # The VALUE is the truth the graph proved — reading keys alone
             # reports every proven inequality as a pin (pgw#1077).
-            entries = [key for key, value in entries.items()
+            compiled_graphs = [key for key, value in compiled_graphs.items()
                        if not _refuted(value)]
-        for entry in entries:
-            expr = getattr(entry, "expr", entry)
+        for compiled_graph in compiled_graphs:
+            expr = getattr(compiled_graph, "expr", compiled_graph)
             if expr is None:
                 continue
             if getattr(expr, "func", None) is None or \
@@ -775,15 +775,15 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
 MINT_COMPILE_THREADS = 4
 
 
-def _entry_configs(
+def _compiled_graph_configs(
     inductor_configs: Optional[Mapping[str, Any]], *, weightless: bool = False,
 ) -> Dict[str, Any]:
-    """The per-entry inductor config: caller options + the non-negotiable
+    """The per-compiled graph inductor config: caller options + the non-negotiable
     packaging flags. ``CODE_ONLY_CONFIGS`` and ``CONSTANT_BINDING_CONFIGS``
     are applied LAST so no caller-supplied config can re-enable constant
     baking or weight inlining — B1 and the folding fence are fleet
     correctness requirements, not defaults a caller may override. One compiled graph's
-    entries ALL compile under this one dict (a per-entry config drift would
+    compiled graphs ALL compile under this one dict (a per-compiled graph config drift would
     be an identity fact nothing records), and the resolved dict is recorded
     in the mint-phase telemetry."""
     configs: Dict[str, Any] = dict(inductor_configs or {})
@@ -795,7 +795,7 @@ def _entry_configs(
             "aot-mint: ignoring caller inductor config %s — code-only (B1) "
             "and the folding fence (pgw#1097) are not knobs", overridden)
     configs.update(non_negotiable)
-    # Emit loose files for package_aoti to combine, instead of a per-entry
+    # Emit loose files for package_aoti to combine, instead of a per-compiled graph
     # archive: the multi-graph compiled graph is ONE .pt2 (pgw#758).
     configs["aot_inductor.package"] = True
     # pgw#1080's weightless motive and pgw#1097's real-weight motive converge
@@ -810,9 +810,9 @@ def _entry_configs(
     return configs
 
 
-def compile_entry_files(
+def compile_compiled_graph_files(
     program: Any,
-    entry: str,
+    compiled_graph: str,
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
 ) -> List[Any]:
@@ -820,7 +820,7 @@ def compile_entry_files(
 
     This is ``aoti_compile_and_package``'s own internal compile step
     (verified on the pin: ``aot_compile(ep.module(check_guards=False),
-    *ep.example_inputs, options)``), deferred before packaging so N entries
+    *ep.example_inputs, options)``), deferred before packaging so N compiled graphs
     combine into one archive. Compilation is byte-identical to the
     single-model mint; only the packaging changes.
 
@@ -846,48 +846,48 @@ def compile_entry_files(
         with structure_only.compiling_under(program):
             files = aot_compile(
                 gm, tuple(args), dict(kwargs or {}),
-                options=_entry_configs(
+                options=_compiled_graph_configs(
                     inductor_configs,
                     weightless=structure_only.fake_mode_of_program(
                         program) is not None))
     except Exception as exc:
         raise MintRefused(
-            f"entry {entry!r}: aot_compile failed: "
+            f"compiled_graph {compiled_graph!r}: aot_compile failed: "
             f"{type(exc).__name__}: {exc}") from exc
     if not isinstance(files, list):
         raise MintRefused(
-            f"entry {entry!r}: aot_compile returned {type(files).__name__}, "
+            f"compiled_graph {compiled_graph!r}: aot_compile returned {type(files).__name__}, "
             f"not the loose-file list packaging needs "
             f"(aot_inductor.package was forced True)")
     return files
 
 
-def _entry_dir_name(entry: str) -> str:
-    """A filesystem-safe directory name for one entry's packing area.
+def _compiled_graph_dir_name(compiled_graph: str) -> str:
+    """A filesystem-safe directory name for one compiled graph's packing area.
 
-    Entry names carry ``/``, ``=`` and ``,`` (``denoiser/h=16,w=16``), so they
-    are not path components. The digest keeps two entries apart without
+    Compiled graph names carry ``/``, ``=`` and ``,`` (``denoiser/h=16,w=16``), so they
+    are not path components. The digest keeps two compiled graphs apart without
     inventing a second naming scheme anyone has to keep in sync — nothing
     reads this name back; the ARTIFACT is addressed by its ``ek1`` key.
     """
-    return hashlib.sha256(str(entry).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(str(compiled_graph).encode("utf-8")).hexdigest()[:16]
 
 
 def package_compiled_graph(
-    files_by_entry: Mapping[str, Sequence[Any]], package_path: Path,
+    files_by_compiled_graph: Mapping[str, Sequence[Any]], package_path: Path,
 ) -> Path:
-    """Combine every entry's compiled files into ONE ``.pt2`` of named
-    models (``data/aotinductor/<entry>/`` each) — the pgw#758 compiled graph."""
+    """Combine every compiled graph's compiled files into ONE ``.pt2`` of named
+    models (``data/aotinductor/<compiled graph>/`` each) — the pgw#758 compiled graph."""
     from torch._inductor.package import package_aoti
 
     package_path = Path(package_path)
     package_path.parent.mkdir(parents=True, exist_ok=True)
-    if not files_by_entry:
-        raise MintRefused("cannot package a compiled_graph with no entries")
+    if not files_by_compiled_graph:
+        raise MintRefused("cannot package a compiled_graph with no compiled_graphs")
     try:
         out = package_aoti(
             str(package_path),
-            {str(name): list(files) for name, files in files_by_entry.items()})
+            {str(name): list(files) for name, files in files_by_compiled_graph.items()})
     except Exception as exc:
         raise MintRefused(
             f"package_aoti failed: {type(exc).__name__}: {exc}") from exc
@@ -996,37 +996,37 @@ def autotune_posture(
 
 @dataclass
 class MintedArtifact:
-    """ONE packed, gated, publishable ENTRY: one graph class."""
+    """ONE packed, gated, publishable COMPILED_GRAPH: one graph class."""
 
     key: str
-    entry: str
+    compiled_graph: str
     artifact: Path
     metadata: Dict[str, Any]
 
 
 @dataclass
 class MintResult:
-    """Every entry this mint packed, plus its telemetry.
+    """Every compiled graph this mint packed, plus its telemetry.
 
     pgw#1176: a mint no longer produces "a compiled graph". It produces N independently
     keyed, independently publishable, independently armable artifacts and a
     derived MANIFEST digest. Nothing waits for the set to be complete —
-    :attr:`entries` is whatever finished, which is what makes the mint's
-    durability incremental (a crash costs the one in-flight entry, ~2 min,
+    :attr:`compiled graphs` is whatever finished, which is what makes the mint's
+    durability incremental (a crash costs the one in-flight compiled graph, ~2 min,
     never a 1 h 37 m compiled graph) and what makes a partially compiled family useful.
     """
 
-    entries: Tuple[MintedArtifact, ...]
+    compiled_graphs: Tuple[MintedArtifact, ...]
     manifest: str
     timings: Dict[str, float]
 
     @property
     def keys(self) -> Tuple[str, ...]:
-        return tuple(sorted(row.key for row in self.entries))
+        return tuple(sorted(row.key for row in self.compiled_graphs))
 
 
 @dataclass
-class _MintedEntry:
+class _MintedCompiledGraph:
     """One exported+compiled graph class, pre-packaging."""
 
     name: str
@@ -1057,7 +1057,7 @@ def declared_fork(fork: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
 
 def with_adapter_arm(plan: Any, arm: bool) -> Any:
     """One mint plan pinned to an adapter arm (a fork coordinate, so it names
-    the entry and lands in the class hash like every other fork)."""
+    the compiled graph and lands in the class hash like every other fork)."""
 
     return replace(
         plan,
@@ -1066,8 +1066,8 @@ def with_adapter_arm(plan: Any, arm: bool) -> Any:
             key=lambda pair: str(pair[0]))))
 
 
-def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
-    """The per-entry :class:`ExportSpec` one mint plan derives from the
+def _compiled_graph_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
+    """The per-compiled graph :class:`ExportSpec` one mint plan derives from the
     compiled graph-level request."""
 
     specialization = dict(spec.specialization)
@@ -1076,7 +1076,7 @@ def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     specialization.setdefault("warm_changes_key", bool(decl.warm_changes_key))
     for name, value in plan.fork:
         specialization.setdefault(f"fork.{name}", value)
-    fork, dims = _decl.entry_coordinates(plan)
+    fork, dims = _decl.compiled_graph_coordinates(plan)
     espec = replace(
         spec,
         target=str(plan.target),
@@ -1094,8 +1094,8 @@ def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     return espec
 
 
-def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
-    """Execute the declared mint-warm canon: one forward with the entry's
+def _run_declared_warm(module: Any, args: Tuple[Any, ...], compiled_graph: str) -> float:
+    """Execute the declared mint-warm canon: one forward with the compiled graph's
     own seed inputs BEFORE export (the warm-canon obligation — z-image's
     rope pre-warm measurably changes the graph, 4327 cold vs 4285 warmed
     nodes; a family declaring ``warm_changes_key=True`` that skips this
@@ -1108,9 +1108,9 @@ def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
         with torch.no_grad():
             module(*args)
     except Exception as exc:
-        raise_if_device_oom(exc, f"entry {entry!r}: declared mint-warm forward")
+        raise_if_device_oom(exc, f"compiled_graph {compiled_graph!r}: declared mint-warm forward")
         raise MintRefused(
-            f"entry {entry!r}: declared mint-warm forward failed "
+            f"compiled_graph {compiled_graph!r}: declared mint-warm forward failed "
             f"({type(exc).__name__}: {exc}) — warm_changes_key=True makes "
             f"the pre-warm a mint obligation, not a best effort") from exc
     return round(time.monotonic() - t0, 2)
@@ -1205,7 +1205,7 @@ def _measured_precision(pipeline: Any, rows: Sequence[Tuple[Any, Any]]) -> str:
 #: the hub can COUNT them per family — a class that cannot be exported is a
 #: standing authoring/toolchain fact, not a transient, and the fleet's answer to
 #: "which classes never compile" should be a query rather than a log hunt.
-KIND_ENTRY_EXPORT_UNSUPPORTED = "entry_export_unsupported"
+KIND_COMPILED_GRAPH_EXPORT_UNSUPPORTED = "compiled_graph_export_unsupported"
 
 
 def _export_skippable(exc: BaseException) -> bool:
@@ -1239,7 +1239,7 @@ def _export_skippable(exc: BaseException) -> bool:
     # ...and it must be TORCH'S OWN export refusal, not any deterministic
     # exception that happened to surface during the export step.
     #
-    # `_export_entry` resolves, feeds, WARMS, exports, GATES and compiles. Only
+    # `_export_compiled_graph` resolves, feeds, WARMS, exports, GATES and compiles. Only
     # the export's own "I cannot trace this construct" is a property of the
     # graph class. The others are not, and skipping them would be the silent
     # failure this issue exists to remove, wearing a new hat:
@@ -1280,23 +1280,23 @@ def _unsupported_construct(exc: BaseException) -> str:
     return out[:600]
 
 
-def _emit_entry_export_unsupported(
-    entry: str, detail: str, *, family: str = "",
+def _emit_compiled_graph_export_unsupported(
+    compiled_graph: str, detail: str, *, family: str = "",
 ) -> None:
     """Tell the hub which class was skipped and why. Never fails a mint."""
     try:
         activity_mod.emit_event(
-            KIND_ENTRY_EXPORT_UNSUPPORTED,
-            f"family={family} entry={entry}: torch.export refused this graph "
+            KIND_COMPILED_GRAPH_EXPORT_UNSUPPORTED,
+            f"family={family} compiled_graph={compiled_graph}: torch.export refused this graph "
             f"class and it is SKIPPED — {detail}. The remaining classes still "
             f"mint and publish; this class serves eager.",
             phase=PHASE_TRACE_GRAPH,
         )
     except Exception:  # noqa: BLE001 — telemetry never fails a mint
-        logger.debug("aot-mint: entry-skip event dropped", exc_info=True)
+        logger.debug("aot-mint: compiled_graph-skip event dropped", exc_info=True)
 
 
-def _export_entry(
+def _export_compiled_graph(
     pipeline: Any,
     spec: ExportSpec,
     plan: Any,
@@ -1304,25 +1304,25 @@ def _export_entry(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     compile_now: bool = True,
-) -> _MintedEntry:
+) -> _MintedCompiledGraph:
     """Resolve, feed, (warm,) export, gate, and compile ONE declared graph
-    class. Every refusal is prefixed with the entry name — a multi-graph
+    class. Every refusal is prefixed with the compiled graph name — a multi-graph
     mint that cannot say WHICH class failed is the silent-failure path in
     a new hat (pgw#758).
 
     ``compile_now=False`` stops after the export-side gates and returns the
-    entry with no files: pgw#809's pool then compiles every entry K-wide out
+    compiled graph with no files: pgw#809's pool then compiles every compiled graph K-wide out
     of process. Export must stay here and stay SERIAL — it runs against the
     one live pipeline, on the one card, inside the one branch-arm toggle."""
 
-    espec = _entry_spec(spec, plan, decl)
-    entry = _decl.plan_entry_name(plan)
+    espec = _compiled_graph_spec(spec, plan, decl)
+    compiled_graph = _decl.plan_compiled_graph_name(plan)
     timings: Dict[str, Any] = {}
 
     resolved = _resolve_target(pipeline, espec.target)
     if resolved is None:
         raise MintRefused(
-            f"entry {entry!r}: pipeline {type(pipeline).__name__} has no "
+            f"compiled_graph {compiled_graph!r}: pipeline {type(pipeline).__name__} has no "
             f"compile target {espec.target!r}")
     owner, attr, _fn = resolved
     if decl.forks:
@@ -1331,12 +1331,12 @@ def _export_entry(
             pipeline=pipeline, module=owner)
         if gaps:
             raise MintRefused(
-                f"entry {entry!r}: fork gate (pgw#739): " + "; ".join(gaps))
+                f"compiled_graph {compiled_graph!r}: fork gate (pgw#739): " + "; ".join(gaps))
     module = owner if attr == "forward" else _CallableTarget(owner, attr)
 
     # The LoRA bucket is a COMPILED GRAPH-level request but a PER-TARGET fact: adapters
     # ride the branch-capable denoisers, never the VAE (wan's vae.decode
-    # entry is bucket-0 in the same compiled graph as its bucket-128 transformer).
+    # compiled graph is bucket-0 in the same compiled graph as its bucket-128 transformer).
     # Scoped by COMPOSED truth (lora_lifted.branch_targets), not vocabulary —
     # and a branch-capable target whose lifting was not installed still fails
     # the lifted-input gate by name, never silently mints bucket-0.
@@ -1356,7 +1356,7 @@ def _export_entry(
             # what sent the first real mint attempt looking at the endpoint's
             # contract instead of at the pipeline's preparation.
             raise MintRefused(
-                f"entry {entry!r}: this class declares lifted adapter "
+                f"compiled_graph {compiled_graph!r}: this class declares lifted adapter "
                 f"input(s) {list(espec.lifted_inputs)!r} but "
                 f"{type(owner).__name__} carries no lifted forward — the "
                 f"branch containers are armed and the lifted signature is "
@@ -1371,19 +1371,19 @@ def _export_entry(
     # whole block is the identity context it has always been.
     fake_mode = structure_only.fake_mode_of(owner)
     with structure_only.under(fake_mode):
-        return _export_entry_body(
-            pipeline, espec, plan, decl, entry=entry, owner=owner, attr=attr,
+        return _export_compiled_graph_body(
+            pipeline, espec, plan, decl, compiled_graph=compiled_graph, owner=owner, attr=attr,
             module=module, timings=timings, fake_mode=fake_mode,
             inductor_configs=inductor_configs, compile_now=compile_now)
 
 
-def _export_entry_body(
+def _export_compiled_graph_body(
     pipeline: Any,
     espec: Any,
     plan: Any,
     decl: Any,
     *,
-    entry: str,
+    compiled_graph: str,
     owner: Any,
     attr: str,
     module: Any,
@@ -1391,8 +1391,8 @@ def _export_entry_body(
     fake_mode: Any = None,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     compile_now: bool = True,
-) -> _MintedEntry:
-    """The body of :func:`_export_entry`, run inside the target's fake mode.
+) -> _MintedCompiledGraph:
+    """The body of :func:`_export_compiled_graph`, run inside the target's fake mode.
 
     Split out rather than indented so the structure-only window is one
     statement and the real-weight path reads exactly as it did.
@@ -1409,7 +1409,7 @@ def _export_entry_body(
         # measured). Refused HERE so the failure is a named mint refusal
         # instead of a vacuous eager-serving artifact.
         raise MintRefused(
-            f"entry {entry!r}: example feed carries keyword argument(s) "
+            f"compiled_graph {compiled_graph!r}: example feed carries keyword argument(s) "
             f"{sorted(kwargs)!r} — all-positional feeds are a mint "
             f"obligation (pod 9, pgw#723 residuals): a kwarg-traced package "
             f"is uncallable by the positional serve marshal and fails only "
@@ -1419,7 +1419,7 @@ def _export_entry_body(
     # The WARM CANON, EXECUTED (declared per family; previously keyed but
     # never acted on): sdxl declared False and skips; z-image's True runs.
     if bool(decl.warm_changes_key):
-        timings["warm_s"] = _run_declared_warm(module, args, entry)
+        timings["warm_s"] = _run_declared_warm(module, args, compiled_graph)
 
     input_names = _input_names(module, args, kwargs)
     flat_leaves = flat_input_leaves(module, args, kwargs)
@@ -1436,7 +1436,7 @@ def _export_entry_body(
                 module, args, kwargs, dynamic_shapes=dynamic,
                 strict=espec.strict)
         except MintRefused as exc:
-            raise MintRefused(f"entry {entry!r}: {exc}") from exc
+            raise MintRefused(f"compiled_graph {compiled_graph!r}: {exc}") from exc
 
     t0 = time.monotonic()
     if fake_mode is None:
@@ -1449,22 +1449,22 @@ def _export_entry_body(
         # file:line rather than discovered as a mysterious pod OOM.
         try:
             with meta_instantiation.guard(
-                    f"trace:{entry}", actionable_only=True) as census:
+                    f"trace:{compiled_graph}", actionable_only=True) as census:
                 program = _full_export()
             if not census.clean:
                 # Real, but unattributable — torch's own machinery inside the
                 # fake mode. Reported, never refused: see `guard`.
                 logger.info(
-                    "aot-mint: entry %s traced with %d unattributable real "
-                    "allocation(s) (%s)", entry, len(census.events),
+                    "aot-mint: compiled_graph %s traced with %d unattributable real "
+                    "allocation(s) (%s)", compiled_graph, len(census.events),
                     ", ".join(sorted({e.op for e in census.events})[:6]))
         except meta_instantiation.MetaMaterializationError as exc:
-            raise MintRefused(f"entry {entry!r}: {exc}") from exc
+            raise MintRefused(f"compiled_graph {compiled_graph!r}: {exc}") from exc
     timings["export_s"] = round(time.monotonic() - t0, 2)
     # pgw#1000, telemetry only: the one number that sized "export once,
     # re-propagate per row". Kept after pgw#847 was deleted because it prices
     # the SAME question the export pool now answers with processes, and it is
-    # free. Once per process, so a 36-entry mint pays it once.
+    # free. Once per process, so a 36-compiled graph mint pays it once.
     prop_probe = _probe_prop_s(program)
     if prop_probe is not None:
         timings["prop_probe_s"] = prop_probe
@@ -1472,11 +1472,11 @@ def _export_entry_body(
     gaps = declared_range_gaps(program, espec.dynamic, arities)
     if gaps:
         raise MintRefused(
-            f"entry {entry!r}: declared-range gate: " + "; ".join(gaps))
+            f"compiled_graph {compiled_graph!r}: declared-range gate: " + "; ".join(gaps))
     lifted_gaps = lifted_input_gaps(program, espec, arities)
     if lifted_gaps:
         raise MintRefused(
-            f"entry {entry!r}: lifted-input gate: " + "; ".join(lifted_gaps))
+            f"compiled_graph {compiled_graph!r}: lifted-input gate: " + "; ".join(lifted_gaps))
 
     # pgw#725 G3, on the EXPORTEDPROGRAM and before any packing: the adapter
     # must be absent from the constant table AND present among the user inputs.
@@ -1492,33 +1492,33 @@ def _export_entry_body(
                 program, label=f"{espec.family}/{espec.target}")
         except ValidationError as exc:
             raise MintRefused(
-                f"entry {entry!r}: no-baked-adapter gate (#725 G3): "
+                f"compiled_graph {compiled_graph!r}: no-baked-adapter gate (#725 G3): "
                 f"{exc}") from exc
 
     # pgw#825: BEFORE the compile, not after it. The packed bindability gate
     # runs on the artifact and is the proof of what shipped; this one asks the
     # same question of the exported program, where it costs milliseconds
-    # instead of an entry's whole compile.
+    # instead of an compiled graph's whole compile.
     unbindable = aot_package.unbindable_program_constants(
         program, _state_dict_keys(owner))
     if unbindable:
         raise MintRefused(
-            f"entry {entry!r}: pre-compile bindability gate: "
+            f"compiled_graph {compiled_graph!r}: pre-compile bindability gate: "
             + "; ".join(unbindable))
 
     files: List[Any] = []
     if compile_now:
         before = _phase_snapshot()
         t0 = time.monotonic()
-        files = compile_entry_files(
-            program, entry, inductor_configs=inductor_configs)
+        files = compile_compiled_graph_files(
+            program, compiled_graph, inductor_configs=inductor_configs)
         timings["compile_s"] = round(time.monotonic() - t0, 2)
         phases = _phase_delta(before, _phase_snapshot())
         if phases:
             timings["phases"] = phases
 
-    return _MintedEntry(
-        name=entry, spec=espec, module=module, owner=owner, program=program,
+    return _MintedCompiledGraph(
+        name=compiled_graph, spec=espec, module=module, owner=owner, program=program,
         input_names=input_names, flat_leaves=flat_leaves, files=files,
         timings=timings)
 
@@ -1553,7 +1553,7 @@ def bench_step(pipeline: Any, spec: ExportSpec) -> Callable[[], Any]:
     want = str(spec.target or "") or str(decl.targets[0])
     dominant = next(
         (p for p in plans if str(p.target) == want), plans[0])
-    espec = _entry_spec(spec, dominant, decl)
+    espec = _compiled_graph_spec(spec, dominant, decl)
     resolved = _resolve_target(pipeline, espec.target)
     if resolved is None:
         raise MintRefused(
@@ -1621,7 +1621,7 @@ def declaration_module_gaps(
     (pgw#790): the ``adapter=true`` class is exported from the LIFTED
     forward, so ``lora_a``/``lora_b`` are admissible on a target the mint
     will lift; the ``adapter=false`` class is exported from the PLAIN module
-    and declares no adapter at all (``_entry_spec`` zeroes its bucket). A
+    and declares no adapter at all (``_compiled_graph_spec`` zeroes its bucket). A
     single one-size check would either refuse the branchless class or admit a
     lifted declaration on a module that can never carry one.
 
@@ -1629,7 +1629,7 @@ def declaration_module_gaps(
     LIFT-CAPABLE (``lora_lifted.branch_targets``), not of it being lifted
     right now: the caller is a serving parent, and the lift is installed by
     :func:`_arm_branches` inside the mint. That is the same COMPOSED-truth
-    scoping ``_export_entry`` applies, so this check predicts the mint rather
+    scoping ``_export_compiled_graph`` applies, so this check predicts the mint rather
     than describing the parent.
 
     Returns gap sentences; empty means every declared class fits its module.
@@ -1658,15 +1658,15 @@ def declaration_module_gaps(
         return []
 
     for plan, _arm in rows:
-        entry = _decl.plan_entry_name(plan)
+        compiled_graph = _decl.plan_compiled_graph_name(plan)
         try:
-            espec = _entry_spec(spec, plan, decl)
+            espec = _compiled_graph_spec(spec, plan, decl)
             resolved = _resolve_target(pipeline, espec.target)
             if resolved is None:
                 # Not this gate's question. "The pipeline carries no such
                 # target" is a different condition with its own owners
                 # (`compile_cache.has_compile_target` on the way in,
-                # `_export_entry` on the way out); with no module there is no
+                # `_export_compiled_graph` on the way out); with no module there is no
                 # signature to compare a declaration against, and claiming
                 # one would make this check refuse every pipeline shape it
                 # merely does not recognise.
@@ -1685,30 +1685,30 @@ def declaration_module_gaps(
                 takes |= set(espec.lifted_inputs)
             elif espec.lifted_inputs:
                 gaps.append(
-                    f"entry {entry!r}: the class declares lifted adapter "
+                    f"compiled_graph {compiled_graph!r}: the class declares lifted adapter "
                     f"input(s) {list(espec.lifted_inputs)!r} but "
                     f"{type(owner).__name__} carries no branch-capable "
                     f"module, so no lifted forward can be installed on it")
                 continue
         except MintRefused as exc:
-            gaps.append(f"entry {entry!r}: {exc}")
+            gaps.append(f"compiled_graph {compiled_graph!r}: {exc}")
             continue
         except Exception as exc:  # noqa: BLE001 — see the abstain note above
             logger.debug(
-                "aot-mint: entry %r not checkable (%s: %s)",
-                entry, type(exc).__name__, exc)
+                "aot-mint: compiled_graph %r not checkable (%s: %s)",
+                compiled_graph, type(exc).__name__, exc)
             continue
         blocked = sorted(declared & keyword_only)
         if blocked:
             gaps.append(
-                f"entry {entry!r}: declared input(s) {blocked!r} are "
+                f"compiled_graph {compiled_graph!r}: declared input(s) {blocked!r} are "
                 f"KEYWORD-ONLY on {type(owner).__name__}."
                 f"{_decl.target_attr(espec.target)} — the mint feeds every "
                 f"input positionally")
         missing = sorted(declared - takes - keyword_only)
         if missing:
             gaps.append(
-                f"entry {entry!r}: declared input(s) {missing!r} are not "
+                f"compiled_graph {compiled_graph!r}: declared input(s) {missing!r} are not "
                 f"parameters of {_decl.target_attr(espec.target)!r} on "
                 f"{type(owner).__name__} (parameters: {sorted(takes)!r})")
     return gaps
@@ -1776,11 +1776,11 @@ class MintProgress:
     reports nothing is indistinguishable from a hung one.
 
     One object carries both, so a live beat and an abort table can never
-    disagree about which entry the mint was on: :meth:`beat` records the
+    disagree about which compiled graph the mint was on: :meth:`beat` records the
     position it reports, and :func:`_attach_partial_phases` stamps that same
     position onto the aborted table as ``at``. That closes pgw#825's one
-    remaining blind spot — its per-entry rows name the entries that FINISHED,
-    and the entry a mint dies ON is the one a reader most needs named.
+    remaining blind spot — its per-compiled graph rows name the compiled graphs that FINISHED,
+    and the compiled graph a mint dies ON is the one a reader most needs named.
 
     Handed down and mutated in place; ``on_progress`` is optional and
     best-effort by construction — a raising callback never costs a mint.
@@ -1790,7 +1790,7 @@ class MintProgress:
     on_progress: Optional[Callable[[str, int, int, str], None]] = None
     t_mint: Optional[float] = None
     timings: Dict[str, float] = field(default_factory=dict)
-    minted: List[_MintedEntry] = field(default_factory=list)
+    minted: List[_MintedCompiledGraph] = field(default_factory=list)
     width: Optional[aot_compile_pool.PoolWidth] = None
     #: pgw#842: the pool's own ledger (pgw#830) once it has run, carried here
     #: so it reaches the phase table — and therefore the hub — instead of
@@ -1909,8 +1909,8 @@ def mint(
     out_dir: Path,
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
-    entry_workers: int = 0,
-    entry_peak_rss_bytes: int = 0,
+    compiled_graph_workers: int = 0,
+    compiled_graph_peak_rss_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     phase_snapshot: Optional[Path] = None,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
@@ -1927,10 +1927,10 @@ def mint(
     A lifecycle fact stated by the owner, not a tuning knob.
 
     pgw#825: an aborted mint used to report a wall-clock total and nothing
-    else — `compile_s`, `export_s` and `n_entries` all parsed to `-` — so a
+    else — `compile_s`, `export_s` and `n_compiled_graphs` all parsed to `-` — so a
     run that paid for real compiles and then refused produced no measurement
     at all, and the pod it happened on is gone by the time anyone reads the
-    table. The live entry list and timings dict are handed down and mutated
+    table. The live compiled graph list and timings dict are handed down and mutated
     in place, so whatever completed before the terminus is reportable from
     here whether the mint returned, refused, or died.
 
@@ -1980,8 +1980,8 @@ def mint(
         return _mint_compiled_graph(
             pipeline, spec, out_dir,
             inductor_configs=inductor_configs,
-            entry_workers=entry_workers,
-            entry_peak_rss_bytes=entry_peak_rss_bytes,
+            compiled_graph_workers=compiled_graph_workers,
+            compiled_graph_peak_rss_bytes=compiled_graph_peak_rss_bytes,
             execution_lane_verdict=execution_lane_verdict,
             release_residents=release_residents,
             progress=progress)
@@ -2006,16 +2006,16 @@ def partial_phase_table(
         return {}
     if started is not None:
         # The mint's OWN wall clock, so an aborted total is comparable
-        # with a completed one rather than being a sum of entry seconds.
+        # with a completed one rather than being a sum of compiled graph seconds.
         timings["total_s"] = round(time.monotonic() - float(started), 2)
     table = _mint_phase_table(
         minted, timings, progress.inductor_configs, progress.width,
         progress.pool_ledger)
     table["terminus"] = terminus
     if where:
-        # pgw#824 x pgw#825: the entries block names what FINISHED; this
-        # names what the mint was ON. Without it an 18-entry mint that
-        # dies in entry 12's export reports 11 rows and no twelfth, and
+        # pgw#824 x pgw#825: the compiled graphs block names what FINISHED; this
+        # names what the mint was ON. Without it an 18-compiled graph mint that
+        # dies in compiled graph 12's export reports 11 rows and no twelfth, and
         # the row that matters is the missing one.
         table["at"] = where
     return table
@@ -2132,7 +2132,7 @@ def write_phase_snapshot(path: Path, progress: MintProgress) -> None:
 
     That is not hypothetical: attempt sixteen compiled for **29 minutes** and
     reported `status=abandoned total_s=1741.33 — no compiled graph produced`. Zero
-    `entry:` rows. No `pool` row. K, its binding constraint, the per-entry
+    `compiled graph:` rows. No `pool` row. K, its binding constraint, the per-compiled graph
     timings and the peaks were all measured and all discarded, and the
     K-and-binding answer had to be re-bought with another pod.
 
@@ -2232,7 +2232,7 @@ class _ExportFootprint:
                 import torch as _t2
 
                 peak = int(_t2.cuda.max_memory_reserved())
-                # Against the row's OWN entry level, not the phase baseline:
+                # Against the row's OWN compiled graph level, not the phase baseline:
                 # rows that leave allocations behind (a cached graph, a lifted
                 # constant) would otherwise charge every later row for them.
                 self.rows.append(max(0, peak - before))
@@ -2257,8 +2257,8 @@ def _mint_compiled_graph(
     out_dir: Path,
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
-    entry_workers: int = 0,
-    entry_peak_rss_bytes: int = 0,
+    compiled_graph_workers: int = 0,
+    compiled_graph_peak_rss_bytes: int = 0,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
     release_residents: bool = False,
     progress: Optional[MintProgress] = None,
@@ -2273,8 +2273,8 @@ def _mint_compiled_graph(
     the envelope so serving reads it instead of an SM tuple; the numbers ride
     the result metadata beside ``mint_phases``, never the artifact.
 
-    ``entry_workers`` CAPS pgw#809's compile pool; it never widens it. The
-    width is derived from the pod (see :func:`aot_compile_pool.entry_workers`),
+    ``compiled_graph_workers`` CAPS pgw#809's compile pool; it never widens it. The
+    width is derived from the pod (see :func:`aot_compile_pool.compiled_graph_workers`),
     and this argument exists so an operator or a test can force the serial
     path (``1``) without pretending a 4-vCPU pod is an H100 host.
 
@@ -2286,7 +2286,7 @@ def _mint_compiled_graph(
     18 — so the mint child framed ``trace_graph`` once and said nothing again
     until ``seal_publish``. A real export measured ~5 minutes of complete wire
     silence, and the pod's only liveness evidence was that its CPU was warm.
-    "Entry 12 of 18" is the difference between a pod that is alive and a pod
+    "Compiled graph 12 of 18" is the difference between a pod that is alive and a pod
     that is working, which is exactly the distinction the no-magic-timeouts
     doctrine runs on.
 
@@ -2342,26 +2342,26 @@ def _mint_compiled_graph(
         spec = replace(spec, precision=measured)
     # pgw#809: how wide this pod may compile. Derived from the pod's REAL
     # budget (cgroup-aware vCPUs minus serving headroom, and available host
-    # RAM over the measured per-entry peak) — never os.cpu_count, never a
+    # RAM over the measured per-compiled graph peak) — never os.cpu_count, never a
     # constant. K=1 IS the pre-#809 serial in-process path, which is the
     # honest answer on a narrow pod.
-    entry_count = len(rows)
-    width = aot_compile_pool.entry_workers(
-        entry_count, limit=int(entry_workers or 0),
+    compiled_graph_count = len(rows)
+    width = aot_compile_pool.compiled_graph_workers(
+        compiled_graph_count, limit=int(compiled_graph_workers or 0),
         # pgw#848: the HOST ask, measured on this pod by a previous mint of
         # this (family, lane) and banked by the serving parent. Until this
         # existed the argument was never passed at ALL, so `mem_workers`
         # divided available RAM by a 3 GiB constant on every mint the fleet
-        # has run and `per_entry_rss_basis` said "default" forever. 0 keeps
+        # has run and `per_compiled_graph_rss_basis` said "default" forever. 0 keeps
         # the constant, and keeps saying so.
-        peak_rss_bytes=int(entry_peak_rss_bytes or 0))
+        peak_rss_bytes=int(compiled_graph_peak_rss_bytes or 0))
     # pgw#1111: a structure-only mint used to DISCARD this width and run K=1.
     # `fc77b923` made every production mint weight-free, so that override made
     # the pool dead code fleet-wide — and because `progress.width` is recorded
     # below either way, the hub's `pool` row went on reporting the width that
     # was thrown away. That is how the sdxl A40 mint (release
     # 6ee9b4d4df2697a53da6f43a, pod bgmdxhazxsugmk) came to be read as
-    # "entry_workers=3" when it ran serially: its `pool` block carries the
+    # "compiled_graph_workers=3" when it ran serially: its `pool` block carries the
     # width facts and NO ledger, and export_s + compile_s summed to within
     # 0.6 % of total_s, which is what zero overlap looks like.
     # The pool now carries a weight-free program as META
@@ -2369,16 +2369,16 @@ def _mint_compiled_graph(
     # `revirtualize_from_meta` in `aot_compile_child.load_program`), so the
     # width this pod computed is the width it runs.
     parallel = width.workers > 1
-    logger.info("aot-mint: entry compile width — %s", width.reason)
+    logger.info("aot-mint: compiled_graph compile width — %s", width.reason)
     if width.underwidth:
         # pgw#842: a pool narrower than the compiled graph could use is a COST, and it
         # is the mint's only multiplicative lever. Say so at WARNING with the
         # readings behind it — the same facts ride the `pool` event.
         logger.warning(
-            "aot-mint: pgw#842 entry pool runs %d worker(s) narrower than "
+            "aot-mint: pgw#842 compiled_graph pool runs %d worker(s) narrower than "
             "this compiled_graph could use (K=%d of %d), held by %s — inputs %s",
             width.underwidth, width.workers,
-            min(entry_count, width.ceiling), width.binding, width.facts())
+            min(compiled_graph_count, width.ceiling), width.binding, width.facts())
     progress.width = width
 
     minted = progress.minted
@@ -2394,7 +2394,7 @@ def _mint_compiled_graph(
     t_export = time.monotonic()
     # pgw#868 A4: the EXPORT phase's own device high-water, which nothing has
     # ever measured. `aot_compile_child` resets and samples around the INDUCTOR
-    # compile (`peak_device_bytes` in `EntryReport`), so that number is the
+    # compile (`peak_device_bytes` in `CompiledGraphReport`), so that number is the
     # compile's; export runs HERE, serially, in the parent, and was never
     # sampled at all. The two are different questions and must not share a
     # figure: export traces with FAKE tensors and executes no kernel, so the
@@ -2420,7 +2420,7 @@ def _mint_compiled_graph(
         PHASE_TRACE_GRAPH, 0, len(rows),
         f"{len(rows)} declared class row(s)")
 
-    def _rows_source() -> Iterator[_MintedEntry]:
+    def _rows_source() -> Iterator[_MintedCompiledGraph]:
         """Export every declared row IN ORDER — serial, in this process,
         inside the one branch-arm toggle (pgw#790). One body for the serial
         and the overlapped paths: pgw#1052 changes the HANDOFF time of each
@@ -2432,7 +2432,7 @@ def _mint_compiled_graph(
                     # ONE toggle for the whole branchless group (the rows are
                     # ordered adapter-bearing first): disable/enable
                     # reallocates every leaf's branch container, and doing it
-                    # per entry would be N times the VRAM churn for the same
+                    # per compiled graph would be N times the VRAM churn for the same
                     # graphs.
                     _disarm_branches(pipeline)
                     disarmed = True
@@ -2441,11 +2441,11 @@ def _mint_compiled_graph(
                 # after-the-fact tick names only the rows that finished.
                 progress.beat(
                     PHASE_TRACE_GRAPH, index, len(rows),
-                    _decl.plan_entry_name(plan))
-                name = _decl.plan_entry_name(plan)
+                    _decl.plan_compiled_graph_name(plan))
+                name = _decl.plan_compiled_graph_name(plan)
                 try:
                     with export_footprint.row():
-                        entry = _export_entry(
+                        compiled_graph = _export_compiled_graph(
                             pipeline, spec, plan, decl,
                             inductor_configs=inductor_configs,
                             compile_now=not parallel)
@@ -2454,11 +2454,11 @@ def _mint_compiled_graph(
                     # other 35. Before this, a single deterministic refusal
                     # anywhere in the row loop aborted the whole mint and threw
                     # away every class that had already exported clean — the
-                    # per-entry atom's own philosophy (pgw#718: the entry is
+                    # per-compiled graph atom's own philosophy (pgw#718: the compiled graph is
                     # the unit of identity and of publish) applied everywhere
-                    # EXCEPT to the loop that produces the entries.
+                    # EXCEPT to the loop that produces the compiled graphs.
                     #
-                    # Fail-closed stays fail-closed AT THE ENTRY: this class
+                    # Fail-closed stays fail-closed AT THE COMPILED_GRAPH: this class
                     # proved nothing, so it is never packed and never
                     # published, and serving covers it eager by the same
                     # mechanism that covers any shape outside a compiled graph's declared
@@ -2469,17 +2469,17 @@ def _mint_compiled_graph(
                     detail = _unsupported_construct(exc)
                     skipped.append((name, detail))
                     logger.warning(
-                        "aot-mint: entry %s cannot be exported and is SKIPPED "
+                        "aot-mint: compiled_graph %s cannot be exported and is SKIPPED "
                         "— %s. The remaining classes still mint; this one "
                         "serves eager.", name, detail)
-                    _emit_entry_export_unsupported(
+                    _emit_compiled_graph_export_unsupported(
                         name, detail, family=str(spec.family or ""))
                     progress.beat(
                         PHASE_TRACE_GRAPH, index, len(rows),
                         f"{name}: SKIPPED ({detail})")
                     continue
-                minted.append(entry)
-                yield entry
+                minted.append(compiled_graph)
+                yield compiled_graph
         finally:
             if disarmed:
                 _arm_branches(pipeline, int(spec.lora_bucket or 0))
@@ -2518,24 +2518,24 @@ def _mint_compiled_graph(
         # green mint); the original batch gate re-runs over the kept rows at
         # drain as the safety net for clusters only visible transitively.
         arrival = _ArrivalCanon()
-        arrival_aliases: Dict[str, List[_MintedEntry]] = {}
-        kept: List[_MintedEntry] = []
+        arrival_aliases: Dict[str, List[_MintedCompiledGraph]] = {}
+        kept: List[_MintedCompiledGraph] = []
 
-        pool = aot_compile_pool.EntryCompilePool(
+        pool = aot_compile_pool.CompiledGraphCompilePool(
             # A SIBLING of work/, never inside it — see the note on
-            # `_compile_entries_parallel`.
-            work.parent / "entry-pool", width=width,
+            # `_compile_compiled_graphs_parallel`.
+            work.parent / "compiled_graph-pool", width=width,
             inductor_configs=inductor_configs)
         t_pool = time.monotonic()
 
         def _feed() -> "Generator[Tuple[str, Any], None, None]":
-            for entry in _rows_source():
-                keeper = arrival.admit(entry)
+            for compiled_graph in _rows_source():
+                keeper = arrival.admit(compiled_graph)
                 if keeper is not None:
-                    arrival_aliases.setdefault(keeper.name, []).append(entry)
+                    arrival_aliases.setdefault(keeper.name, []).append(compiled_graph)
                     continue
-                kept.append(entry)
-                yield entry.name, entry.program
+                kept.append(compiled_graph)
+                yield compiled_graph.name, compiled_graph.program
             # The producer is exhausted: close the export phase's books, then
             # — when the caller surrendered the pipeline — hand the dead
             # residents back and let the pool re-derive K against the freed
@@ -2553,13 +2553,13 @@ def _mint_compiled_graph(
             f"(pgw#1052)")
         source = _feed()
         try:
-            by_entry = _drive_pool(
+            by_compiled_graph = _drive_pool(
                 pool, source, expected_total=len(rows), progress=progress,
                 # pgw#1189: `kept` is the live list the producer appends to,
-                # so an entry that exports after this closure is built is
+                # so an compiled graph that exports after this closure is built is
                 # still folded. This is the ONLY path a fleet mint takes.
-                on_entry_complete=_entry_timing_folder(kept, pool),
-                on_entry=lambda name, done, total: progress.beat(
+                on_compiled_graph_complete=_compiled_graph_timing_folder(kept, pool),
+                on_compiled_graph=lambda name, done, total: progress.beat(
                     PHASE_INDUCTOR_COMPILE, done, total, name))
         finally:
             source.close()
@@ -2568,7 +2568,7 @@ def _mint_compiled_graph(
             # extended to the overlapped shape).
             progress.pool_ledger = _pool_facts(pool)
         # NOTE: `_drive_pool` refreshes `progress.pool_ledger` on every
-        # completed entry (pgw#848), so the snapshot each beat writes already
+        # completed compiled graph (pgw#848), so the snapshot each beat writes already
         # carries a LIVE ledger — K, its binding, efficiency, peaks — rather
         # than only the width. An abandoned mint's row is the one that needs
         # it most.
@@ -2576,19 +2576,19 @@ def _mint_compiled_graph(
         class_aliases = _merge_alias_maps(arrival_aliases, late_aliases)
         if arrival_aliases:
             _emit_arrival_alias_event(arrival_aliases, len(rows))
-        _fold_pool_results(minted, pool, by_entry)
+        _fold_pool_results(minted, pool, by_compiled_graph)
         logger.info(
             "aot-mint: pgw#809/pgw#1052 pool compiled %d entr%s at K=%d in "
-            "%.0fs overlapped with export (sum of entry seconds %.0fs, peak "
+            "%.0fs overlapped with export (sum of compiled_graph seconds %.0fs, peak "
             "child RSS %.1f GiB)",
             len(minted), "y" if len(minted) == 1 else "ies",
             pool.width.workers, time.monotonic() - t_pool,
-            sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3)
+            sum(pool.compiled_graph_seconds.values()), pool.peak_rss_bytes / 1024**3)
         progress.pool_ledger = _pool_facts(pool)
     else:
-        for _entry in _rows_source():
+        for _compiled_graph in _rows_source():
             pass
-        # Asked of the EXPORTED programs: a compiled graph whose entries cannot be told
+        # Asked of the EXPORTED programs: a compiled graph whose compiled graphs cannot be told
         # apart at dispatch must cost seconds to refuse, not a full compile
         # bill (the pgw#825 discipline, one gate over). A width-1 serial mint
         # has already compiled as it exported, so here it refuses late;
@@ -2600,76 +2600,76 @@ def _mint_compiled_graph(
     # the classes that did export — a partial compiled graph must be able to say which
     # classes are missing, or "35 of 36" is indistinguishable from "36 of 36".
     #
-    # A compiled graph with NO entries still refuses: `_pack` raises `cannot package a
-    # compiled graph with no entries`, so "every class was skipped" fails closed on the
+    # A compiled graph with NO compiled graphs still refuses: `_pack` raises `cannot package a
+    # compiled graph with no compiled graphs`, so "every class was skipped" fails closed on the
     # path it already failed closed on rather than through a second check here.
-    timings["skipped_entries"] = float(len(skipped))
+    timings["skipped_compiled_graphs"] = float(len(skipped))
     if skipped:
         logger.warning(
             "aot-mint: %d of %d declared class(es) could not be exported and "
             "are absent from this compiled_graph: %s", len(skipped), len(rows),
             "; ".join(f"{n} ({d})" for n, d in skipped[:4]))
-    timings["canonicalized_entries"] = float(
+    timings["canonicalized_compiled_graphs"] = float(
         sum(len(rows) for rows in class_aliases.values()))
-    timings["entry_workers"] = float(width.workers)
+    timings["compiled_graph_workers"] = float(width.workers)
 
-    # ── PACK PER ENTRY (pgw#1176) ──────────────────────────────────────────
+    # ── PACK PER COMPILED_GRAPH (pgw#1176) ──────────────────────────────────────────
     #
-    # One artifact per graph class, not one per compiled graph. The multi-entry
+    # One artifact per graph class, not one per compiled graph. The multi-compiled graph
     # `model.pt2` is DELETED: it made identity, adoption, durability,
-    # verification and arming the same 36-entry unit, so a class that failed
+    # verification and arming the same 36-compiled graph unit, so a class that failed
     # anywhere destroyed the whole mint (th#1825 lost 1 h 37 m to a segfault on
-    # the last entry). Each entry is packed, keyed, and finished on its own —
-    # so a crash costs the one in flight, and the entries that already exist
+    # the last compiled graph). Each compiled graph is packed, keyed, and finished on its own —
+    # so a crash costs the one in flight, and the compiled graphs that already exist
     # are publishable and armable immediately.
     #
-    # NOTE ON PROCESS GRANULARITY, because "per entry" invites the wrong
+    # NOTE ON PROCESS GRANULARITY, because "per compiled graph" invites the wrong
     # reading: this is the granularity of the ARTIFACT, not of the compile
     # CHILD. pgw#1177 measured ~39 s of `env_seal.establish()` per fresh child
-    # — ~23 minutes across 36 entries — so a child that compiles several
-    # entries in sequence is strictly better and nothing here forbids it.
+    # — ~23 minutes across 36 compiled graphs — so a child that compiles several
+    # compiled graphs in sequence is strictly better and nothing here forbids it.
     # FAIL-CLOSED SURVIVES THE SPLIT, and pgw#1208's row is what caught that it
     # nearly did not. `package_compiled_graph` used to raise "cannot package a compiled graph with
-    # no entries" because it was called ONCE with the whole set; moving it
-    # inside the per-entry loop meant an all-skipped mint simply never entered
+    # no compiled graphs" because it was called ONCE with the whole set; moving it
+    # inside the per-compiled graph loop meant an all-skipped mint simply never entered
     # the loop and returned an EMPTY MintResult — a silent success reporting
     # that a mint produced nothing. Absence is a verdict (pgw#939), and the
     # verdict for "every declared class refused" is a refusal, not an empty
-    # set. Per-entry fail-closed means each class refuses on its own; it does
+    # set. Per-compiled graph fail-closed means each class refuses on its own; it does
     # not mean the mint stops having a terminal outcome.
     if not minted:
         raise MintRefused(
-            "no entries: every declared graph class refused before packaging, "
+            "no compiled_graphs: every declared graph class refused before packaging, "
             "so this mint produced nothing to key, publish or arm")
     t0 = time.monotonic()
     progress.beat(
         PHASE_SEAL_PUBLISH, len(minted), len(minted),
-        f"packaging {len(minted)} entries")
-    entry_blocks: Dict[str, Dict[str, Any]] = {}
+        f"packaging {len(minted)} compiled_graphs")
+    compiled_graph_blocks: Dict[str, Dict[str, Any]] = {}
     packages: Dict[str, Path] = {}
     for row in minted:
-        entry_work = work / "entries" / _entry_dir_name(row.name)
-        entry_work.mkdir(parents=True, exist_ok=True)
+        compiled_graph_work = work / "compiled_graphs" / _compiled_graph_dir_name(row.name)
+        compiled_graph_work.mkdir(parents=True, exist_ok=True)
         package = package_compiled_graph(
-            {row.name: row.files}, entry_work / aot_serve.PACKAGE_NAME)
+            {row.name: row.files}, compiled_graph_work / aot_serve.PACKAGE_NAME)
         packages[row.name] = package
-        entry_blocks[row.name] = _gate_and_declare_entry(row, package)
-        # pgw#917: the declared-class names this entry absorbed. Recorded so
+        compiled_graph_blocks[row.name] = _gate_and_declare_compiled_graph(row, package)
+        # pgw#917: the declared-class names this compiled graph absorbed. Recorded so
         # the merge is auditable from the artifact alone — a reader asking
         # "where did class row X go" gets an answer instead of an absence.
         # NOT a `class_hash` fact (see `aot_serve.class_hash`, which folds
         # named fields only): an alias declares no envelope the surviving
-        # entry's own contract does not already declare, so it must not
-        # re-key an otherwise identical entry.
+        # compiled graph's own contract does not already declare, so it must not
+        # re-key an otherwise identical compiled graph.
         merged = class_aliases.get(row.name) or ()
         if merged:
-            entry_blocks[row.name]["aliases"] = [
+            compiled_graph_blocks[row.name]["aliases"] = [
                 {"name": alias.name,
                  "class_dims": [
                      [str(n), int(v)] for n, v in sorted(alias.spec.class_dims)]}
                 for alias in sorted(merged, key=lambda r: r.name)
             ]
-        _write_literals([row], package, entry_work)
+        _write_literals([row], package, compiled_graph_work)
     timings["package_s"] = round(time.monotonic() - t0, 2)
 
     t0 = time.monotonic()
@@ -2679,10 +2679,10 @@ def _mint_compiled_graph(
     # downloads it, and the hub folds compile-health rows under
     # (manifest, sm, toolchain) with it.
     manifest = compiled_graph_key.manifest_digest(
-        aot_serve.stamp_entry(
+        aot_serve.stamp_compiled_graph(
             name, block, strict=bool(spec.strict),
             lora_bucket=int(spec.lora_bucket or 0)).get("class_hash") or ""
-        for name, block in entry_blocks.items())
+        for name, block in compiled_graph_blocks.items())
     timings["declare_s"] = round(time.monotonic() - t0, 2)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
     phase_table = _mint_phase_table(
@@ -2691,14 +2691,14 @@ def _mint_compiled_graph(
 
     t0 = time.monotonic()
     packed: List[MintedArtifact] = []
-    for name, block in entry_blocks.items():
+    for name, block in compiled_graph_blocks.items():
         try:
-            meta = aot_serve.entry_metadata(
+            meta = aot_serve.compiled_graph_metadata(
                 family=spec.family,
                 precision=spec.precision,
                 compiled_graph_key="",
                 name=name,
-                entry=block,
+                compiled_graph=block,
                 strict_export=bool(spec.strict),
                 lora_bucket=int(spec.lora_bucket or 0),
                 source_ref=spec.source_ref,
@@ -2735,7 +2735,7 @@ def _mint_compiled_graph(
             meta[kernel_path.EVIDENCE_KEY] = kernel_path.evidence_block(
                 execution_lane_verdict)
         packed.append(MintedArtifact(
-            key=key, entry=name, artifact=artifact, metadata=meta))
+            key=key, compiled_graph=name, artifact=artifact, metadata=meta))
     timings["pack_s"] = round(time.monotonic() - t0, 2)
 
     logger.info(
@@ -2748,56 +2748,56 @@ def _mint_compiled_graph(
         timings,
     )
     return MintResult(
-        entries=tuple(packed), manifest=manifest, timings=timings)
+        compiled_graphs=tuple(packed), manifest=manifest, timings=timings)
 
 
 
 def _drive_pool(
-    pool: aot_compile_pool.EntryCompilePool,
-    entries: Any,
+    pool: aot_compile_pool.CompiledGraphCompilePool,
+    compiled_graphs: Any,
     *,
     expected_total: int = 0,
-    on_entry: Optional[Callable[[str, int, int], None]] = None,
-    on_entry_complete: Optional[Callable[[str], None]] = None,
+    on_compiled_graph: Optional[Callable[[str, int, int], None]] = None,
+    on_compiled_graph_complete: Optional[Callable[[str], None]] = None,
     progress: Optional["MintProgress"] = None,
 ) -> Dict[str, List[str]]:
-    """Run one :class:`~gen_worker.aot_compile_pool.EntryCompilePool` and map
+    """Run one :class:`~gen_worker.aot_compile_pool.CompiledGraphCompilePool` and map
     its failures onto the mint's own vocabulary.
 
-    ``entries`` is either the fully-exported list (the serial-export shape the
+    ``compiled graphs`` is either the fully-exported list (the serial-export shape the
     pgw#848 tests drive) or pgw#1052's live producer iterator.
 
-    ``on_entry_complete`` (pgw#1189) folds one finished entry's measurement
-    onto the row that will be reported — see :func:`_entry_timing_folder`. It
-    fires per entry rather than at the end, so an abandoned mint keeps the
-    numbers of every entry that finished.
+    ``on_compiled_graph_complete`` (pgw#1189) folds one finished compiled graph's measurement
+    onto the row that will be reported — see :func:`_compiled_graph_timing_folder`. It
+    fires per compiled graph rather than at the end, so an abandoned mint keeps the
+    numbers of every compiled graph that finished.
     """
 
     def _tick(name: str, done: int, total: int) -> None:
-        # pgw#1189: fold THIS entry's spans FIRST, for the reason pgw#848
-        # wrote one line below and applied only to the ledger. An entry that
+        # pgw#1189: fold THIS compiled graph's spans FIRST, for the reason pgw#848
+        # wrote one line below and applied only to the ledger. An compiled graph that
         # has finished has really spent its seconds, and until this ran the
-        # per-entry partition was assembled only by `_fold_pool_results` —
+        # per-compiled graph partition was assembled only by `_fold_pool_results` —
         # which is reached only if `pool.compile` RETURNS. Every sdxl mint on
         # record was abandoned mid-pool, so the child spans and pgw#832's seal
         # split have never reached a reader; th#1834's P0-E answered "what is
         # the ~39 s residual" by inference against rows that structurally
         # could not carry the answer.
-        if on_entry_complete is not None:
-            on_entry_complete(name)
+        if on_compiled_graph_complete is not None:
+            on_compiled_graph_complete(name)
         # pgw#848: refresh the ledger BEFORE the beat, so the snapshot the
-        # beat writes carries this entry's numbers. A mint killed at entry 30
-        # of 36 then leaves 30 entries' worth of measurement on disk instead
+        # beat writes carries this compiled graph's numbers. A mint killed at compiled graph 30
+        # of 36 then leaves 30 compiled graphs' worth of measurement on disk instead
         # of one bare "no compiled graph produced" row.
         if progress is not None:
             progress.pool_ledger = _pool_facts(pool)
-        if on_entry is not None:
-            on_entry(name, done, total)
+        if on_compiled_graph is not None:
+            on_compiled_graph(name, done, total)
 
     try:
         return pool.compile(
-            entries, on_entry=_tick, expected_total=expected_total)
-    except aot_compile_pool.EntryCompileFailed as exc:
+            compiled_graphs, on_compiled_graph=_tick, expected_total=expected_total)
+    except aot_compile_pool.CompiledGraphCompileFailed as exc:
         # pgw#848: the pool's ledger and its MEASURED peak have to survive the
         # failure, because the aborted phase table is what the parent banks
         # and re-sizes K from. Without this the OOM'd attempt teaches the
@@ -2805,48 +2805,48 @@ def _drive_pool(
         if progress is not None:
             progress.pool_ledger = _pool_facts(pool)
         # Named, and the siblings are already torn down group-wide by the
-        # pool. A mint that says only "a compile failed" over 18 entries is
+        # pool. A mint that says only "a compile failed" over 18 compiled graphs is
         # the silent-failure path in a new hat (pgw#758).
         if exc.resource:
             raise MintResourceExhausted(
-                str(exc), entry=exc.entry, basis=exc.basis,
+                str(exc), compiled_graph=exc.compiled_graph, basis=exc.basis,
                 peak_rss_bytes=exc.peak_rss_bytes) from exc
         raise MintRefused(str(exc)) from exc
 
 
 def _fold_pool_results(
-    minted: Sequence[_MintedEntry],
-    pool: aot_compile_pool.EntryCompilePool,
-    by_entry: Mapping[str, List[str]],
+    minted: Sequence[_MintedCompiledGraph],
+    pool: aot_compile_pool.CompiledGraphCompilePool,
+    by_compiled_graph: Mapping[str, List[str]],
 ) -> None:
-    """Fold the pool's results back onto the entries that will PACK.
+    """Fold the pool's results back onto the compiled graphs that will PACK.
 
-    Every packed entry MUST have files — a pool that quietly returned fewer
-    entries than the compiled graph declares would pack a short compiled graph. Assembly is by
-    entry NAME: ``package_compiled_graph`` reads ``{row.name: row.files}`` in the order
+    Every packed compiled graph MUST have files — a pool that quietly returned fewer
+    compiled graphs than the compiled graph declares would pack a short compiled graph. Assembly is by
+    compiled graph NAME: ``package_compiled_graph`` reads ``{row.name: row.files}`` in the order
     ``minted`` already holds (the declaration's order), so completion order is
-    not observable in the artifact. An entry the drain-time pgw#917 pass
+    not observable in the artifact. An compiled graph the drain-time pgw#917 pass
     merged away may have compiled files nobody folds; its work is the bounded
     waste pgw#1052 states, never a packing input.
     """
-    missing = [row.name for row in minted if row.name not in by_entry]
+    missing = [row.name for row in minted if row.name not in by_compiled_graph]
     if missing:
         raise MintRefused(
-            f"entry compile pool returned {len(by_entry)} of {len(minted)} "
-            f"entries — missing {missing!r}. Packing the rest would ship a "
+            f"compiled_graph compile pool returned {len(by_compiled_graph)} of {len(minted)} "
+            f"compiled_graphs — missing {missing!r}. Packing the rest would ship a "
             f"compiled_graph whose declared class set is a lie")
     for row in minted:
-        row.files = list(by_entry[row.name])
-        _fold_entry_timings(row, pool)
+        row.files = list(by_compiled_graph[row.name])
+        _fold_compiled_graph_timings(row, pool)
 
 
-def _fold_entry_timings(
-    row: "_MintedEntry", pool: aot_compile_pool.EntryCompilePool,
+def _fold_compiled_graph_timings(
+    row: "_MintedCompiledGraph", pool: aot_compile_pool.CompiledGraphCompilePool,
 ) -> bool:
-    """Fold ONE finished entry's measurement onto the row a reader will see.
+    """Fold ONE finished compiled graph's measurement onto the row a reader will see.
 
-    ``True`` when the pool had anything for this entry. Assignments only, never
-    accumulations, so the per-entry pass (pgw#1189) and the final
+    ``True`` when the pool had anything for this compiled graph. Assignments only, never
+    accumulations, so the per-compiled graph pass (pgw#1189) and the final
     :func:`_fold_pool_results` pass can both run over the same row.
 
     Measured in the child; folded here so the roll-up reads the same whether a
@@ -2857,14 +2857,14 @@ def _fold_entry_timings(
     the torch imposition owns, is the rest). Without it a reader sees only the
     sum and re-opens a closed question — which is exactly what happened.
     """
-    phases = pool.entry_phases.get(row.name) or {}
-    overlays = pool.entry_overlays.get(row.name) or {}
-    if not phases and not overlays and row.name not in pool.entry_seconds:
-        # Nothing finished for this entry. Absence stays absence: a fold that
+    phases = pool.compiled_graph_phases.get(row.name) or {}
+    overlays = pool.compiled_graph_overlays.get(row.name) or {}
+    if not phases and not overlays and row.name not in pool.compiled_graph_seconds:
+        # Nothing finished for this compiled graph. Absence stays absence: a fold that
         # wrote zeros here would invent a measurement for a compile that never
         # ran, which is the failure mode this issue exists to end.
         return False
-    row.timings["compile_s"] = pool.entry_seconds.get(row.name, 0.0)
+    row.timings["compile_s"] = pool.compiled_graph_seconds.get(row.name, 0.0)
     if phases:
         row.timings["phases"] = dict(phases)
     if overlays:
@@ -2872,66 +2872,66 @@ def _fold_entry_timings(
     return True
 
 
-def _entry_timing_folder(
-    rows: Sequence["_MintedEntry"], pool: aot_compile_pool.EntryCompilePool,
+def _compiled_graph_timing_folder(
+    rows: Sequence["_MintedCompiledGraph"], pool: aot_compile_pool.CompiledGraphCompilePool,
 ) -> Callable[[str], None]:
-    """A per-entry fold bound to ``rows`` (pgw#1189), for ``_drive_pool``.
+    """A per-compiled graph fold bound to ``rows`` (pgw#1189), for ``_drive_pool``.
 
     ``rows`` is read live — under pgw#1052's overlapped shape it is the list
-    the producer is still appending to, so an entry that exports and compiles
+    the producer is still appending to, so an compiled graph that exports and compiles
     after this is built is still found.
     """
     def _fold(name: str) -> None:
         for row in rows:
             if row.name == name:
-                _fold_entry_timings(row, pool)
+                _fold_compiled_graph_timings(row, pool)
                 return
     return _fold
 
 
-def _compile_entries_parallel(
-    minted: List[_MintedEntry],
+def _compile_compiled_graphs_parallel(
+    minted: List[_MintedCompiledGraph],
     work: Path,
     width: aot_compile_pool.PoolWidth,
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
-    on_entry: Optional[Callable[[str, int, int], None]] = None,
+    on_compiled_graph: Optional[Callable[[str, int, int], None]] = None,
     progress: Optional["MintProgress"] = None,
 ) -> Dict[str, Any]:
-    """pgw#809: fill every entry's ``files`` K-wide, out of process — the
+    """pgw#809: fill every compiled graph's ``files`` K-wide, out of process — the
     already-exported-list shape. The production mint overlaps export with the
     pool instead (pgw#1052, in ``_mint_compiled_graph``); this survives as the driver
-    for a pre-exported entry set and returns the pool's own ledger (pgw#830)
+    for a pre-exported compiled graph set and returns the pool's own ledger (pgw#830)
     so it reaches the phase table.
     """
     # A SIBLING of work/, never inside it. pack() only copies a fixed member
     # set so debris there would be harmless today, but a pool workdir living
     # inside the directory that becomes the artifact is one refactor away from
     # putting job files and stderr tails into a compiled graph.
-    pool = aot_compile_pool.EntryCompilePool(
-        work.parent / "entry-pool", width=width,
+    pool = aot_compile_pool.CompiledGraphCompilePool(
+        work.parent / "compiled_graph-pool", width=width,
         inductor_configs=inductor_configs)
     t0 = time.monotonic()
-    by_entry = _drive_pool(
+    by_compiled_graph = _drive_pool(
         pool, [(row.name, row.program) for row in minted],
-        on_entry=on_entry, progress=progress,
-        on_entry_complete=_entry_timing_folder(minted, pool))
+        on_compiled_graph=on_compiled_graph, progress=progress,
+        on_compiled_graph_complete=_compiled_graph_timing_folder(minted, pool))
     wall = time.monotonic() - t0
-    _fold_pool_results(minted, pool, by_entry)
+    _fold_pool_results(minted, pool, by_compiled_graph)
     logger.info(
         "aot-mint: pgw#809 pool compiled %d entr%s at K=%d in %.0fs "
-        "(sum of entry seconds %.0fs, peak child RSS %.1f GiB)",
+        "(sum of compiled_graph seconds %.0fs, peak child RSS %.1f GiB)",
         len(minted), "y" if len(minted) == 1 else "ies", width.workers, wall,
-        sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3)
+        sum(pool.compiled_graph_seconds.values()), pool.peak_rss_bytes / 1024**3)
     return _pool_facts(pool)
 
 
-#: The mint window `entry_device_peaks` measures. Named on the row rather than
-#: implied, because an EXPORT high-water and an entry COMPILE high-water are
+#: The mint window `compiled_graph_device_peaks` measures. Named on the row rather than
+#: implied, because an EXPORT high-water and an compiled graph COMPILE high-water are
 #: different questions about the same card and maxing them together would
 #: produce a number describing neither (`_ExportFootprint`'s own docstring is
 #: the worked example of that mistake).
-DEVICE_PEAK_PHASE = "entry_compile"
+DEVICE_PEAK_PHASE = "compiled_graph_compile"
 
 
 def _device_peak_provenance() -> Dict[str, str]:
@@ -2976,7 +2976,7 @@ def _device_peak_provenance() -> Dict[str, str]:
     }
 
 
-def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
+def _pool_facts(pool: aot_compile_pool.CompiledGraphCompilePool) -> Dict[str, Any]:
     """The pool block of the phase table, on BOTH termini (pgw#848).
 
     An aborted mint's pool facts are the ones a reader most needs — they are
@@ -2988,8 +2988,8 @@ def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
         # pool actually overlapped rather than looping K-wide on paper.
         "peak_concurrency": int(pool.peak_concurrency),
         "peak_child_rss_bytes": int(pool.peak_rss_bytes),
-        # pgw#877 #2: the entry children's own DEVICE high-water, which is what
-        # the NEXT mint's per-entry ask is sized from. It rides the phase table
+        # pgw#877 #2: the compiled graph children's own DEVICE high-water, which is what
+        # the NEXT mint's per-compiled graph ask is sized from. It rides the phase table
         # rather than a second event for the same reason the RSS figure does:
         # the phase table is what survives the mint child, and the mint child
         # is the process that dies.
@@ -3001,14 +3001,14 @@ def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
         # can, and they ride the SAME phase table, so the row the hub receives
         # and the row this machine banks are the same bytes rather than two
         # measurements that have to be reconciled.
-        "entry_device_peaks": {
+        "compiled_graph_device_peaks": {
             name: {"allocated_bytes": int(a), "reserved_bytes": int(r)}
-            for name, (a, r) in sorted(pool.entry_device_peaks.items())
+            for name, (a, r) in sorted(pool.compiled_graph_device_peaks.items())
         },
         "device_peak_provenance": _device_peak_provenance(),
     }
-    if pool.oom_entry:
-        facts["oom_entry"] = pool.oom_entry
+    if pool.oom_compiled_graph:
+        facts["oom_compiled_graph"] = pool.oom_compiled_graph
         facts["oom_basis"] = pool.oom_basis
     return facts
 
@@ -3023,26 +3023,26 @@ class _DeclaredArg:
     dtype: str
 
 
-def _entry_ingress_declaration(
-    row: "_MintedEntry",
+def _compiled_graph_ingress_declaration(
+    row: "_MintedCompiledGraph",
 ) -> Tuple[Any, Tuple[Dict[str, Any], ...], Dict[str, Any]]:
-    """``(contract, representative calls, declaration meta)`` for one entry.
+    """``(contract, representative calls, declaration meta)`` for one compiled graph.
 
     The contract is built from ``aot_package.input_contract`` — the exact rows
     the packed compiled graph will carry — and read back through
     :func:`aot_serve.contract_from_meta`, the serve path's OWN parser, so the
     gate cannot drift from what dispatch will actually do.
 
-    The calls are that entry's own declared shapes: one per corner of its
+    The calls are that compiled graph's own declared shapes: one per corner of its
     symbol hull (all symbols at their lower bound, all at their upper, all at
-    the midpoint), deduplicated. A fully specialized entry — the sdxl case —
+    the midpoint), deduplicated. A fully specialized compiled graph — the sdxl case —
     yields exactly one call, which is the call its class row exists to serve.
     """
     inputs, symbols = aot_package.input_contract(row.program, row.flat_leaves)
     meta: Dict[str, Any] = {"inputs": inputs, "symbols": symbols}
     if adapter_arm(row.spec.fork) is False:
         # The NEGATIVE half of a branchless class's contract, exactly as
-        # `_gate_and_declare_entry` will pack it (pgw#790). Without it here the
+        # `_gate_and_declare_compiled_graph` will pack it (pgw#790). Without it here the
         # gate would ask a question the serve path never asks.
 
         meta["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
@@ -3071,9 +3071,9 @@ def _entry_ingress_declaration(
 
 
 def _admits(contract: Any, call: Mapping[str, Any]) -> bool:
-    """Does this entry admit this call? Asked of
+    """Does this compiled graph admit this call? Asked of
     :func:`aot_serve.assert_ingress` itself — the same function, on the same
-    contract shape, that :meth:`aot_serve.EntryDispatch.select` runs on a pod.
+    contract shape, that :meth:`aot_serve.CompiledGraphDispatch.select` runs on a pod.
     Keyword-fed, because that is how the negative contract (an EXCLUDED input
     the call carries) is visible at all."""
     try:
@@ -3084,12 +3084,12 @@ def _admits(contract: Any, call: Mapping[str, Any]) -> bool:
 
 
 def _class_identity(
-    row: "_MintedEntry", declaration: Mapping[str, Any],
+    row: "_MintedCompiledGraph", declaration: Mapping[str, Any],
 ) -> Dict[str, Any]:
     """Every axis except the class-row COORDINATE that two declared classes
     must share to be one logical class (pgw#917).
 
-    The entry key and the ingress contract have to be the same object. When
+    The compiled graph key and the ingress contract have to be the same object. When
     two rows collide at ingress the only question left is whether they are the
     same *thing* — same code, same target, same compatibility metadata — and
     each key here is one axis a human can be told about by name when they are
@@ -3134,31 +3134,31 @@ def _differing_axes(
 
 
 def canonicalize_dispatch_classes(
-    minted: Sequence["_MintedEntry"],
-) -> Tuple[List["_MintedEntry"], Dict[str, Tuple["_MintedEntry", ...]]]:
-    """Collapse declared classes that are ONE dispatchable entry; refuse the
+    minted: Sequence["_MintedCompiledGraph"],
+) -> Tuple[List["_MintedCompiledGraph"], Dict[str, Tuple["_MintedCompiledGraph", ...]]]:
+    """Collapse declared classes that are ONE dispatchable compiled graph; refuse the
     ones that are not (pgw#917).
 
-    :meth:`aot_serve.EntryDispatch.select` calls two entries admitting one
-    call ``entry_ambiguous`` — "a declaration that cannot discriminate two
+    :meth:`aot_serve.CompiledGraphDispatch.select` calls two compiled graphs admitting one
+    call ``compiled_graph_ambiguous`` — "a declaration that cannot discriminate two
     graph classes by ingress, which is a defect to surface, never a coin to
     flip". It is a per-REQUEST refusal, so a compiled graph with a colliding declaration
     arms, reports armed, and serves those coordinates 100 % eager: 4,200
     refused calls across gen-worker 0.89.0/0.90.0 on the standing stack, every
-    single one ``entry_ambiguous``, zero of any other phase.
+    single one ``compiled_graph_ambiguous``, zero of any other phase.
 
     **The collision is arithmetic, not a race.** sdxl's aspect rows at one
     megapixel bucket are area-preserving — 112x144 = 144x112 = 168x96 =
     96x168 = 16,128 — and a ``BasicTransformerBlock`` never sees ``H_lat`` and
     ``W_lat``, only the flattened sequence ``(B, H_lat*W_lat, C)``. The
-    declaration keys entries on the pair; the ingress contract can only
+    declaration keys compiled graphs on the pair; the ingress contract can only
     observe the product. So ambiguity is GUARANTEED for every area-preserving
     aspect family at a fixed bucket, which is exactly how the fleet's shape
     rows are generated.
 
     **Merge, don't only refuse.** Four rows that produce one ingress contract
     over one target with byte-identical code are one logical class: mint ONE
-    entry and keep the declared-class names as aliases (36 of the regional
+    compiled graph and keep the declared-class names as aliases (36 of the regional
     shape's 72 compiles bought nothing — the direct pgw#847 shape-invariant
     win). Refusal is reserved for a collision whose members are NOT the same
     thing, and then it names the colliding pair AND the differing axis, which
@@ -3166,18 +3166,18 @@ def canonicalize_dispatch_classes(
 
     Grouped exactly the way the serve path groups — target, adapter arm —
     because those are the axes dispatch resolves BEFORE ingress, and two
-    entries on different arms are meant to differ only by the lifted pair.
+    compiled graphs on different arms are meant to differ only by the lifted pair.
 
-    Returns ``(entries to compile and package, aliases by surviving entry)``.
+    Returns ``(compiled graphs to compile and package, aliases by surviving compiled graph)``.
     """
-    groups: Dict[Tuple[str, Any], List["_MintedEntry"]] = {}
+    groups: Dict[Tuple[str, Any], List["_MintedCompiledGraph"]] = {}
     for row in sorted(minted, key=lambda r: r.name):
         fork = {str(n): v for n, v in tuple(row.spec.fork)}
         key = (str(row.spec.target), fork.get(ADAPTER_FORK))
         groups.setdefault(key, []).append(row)
 
-    dropped: Dict[str, "_MintedEntry"] = {}
-    aliases: Dict[str, Tuple["_MintedEntry", ...]] = {}
+    dropped: Dict[str, "_MintedCompiledGraph"] = {}
+    aliases: Dict[str, Tuple["_MintedCompiledGraph", ...]] = {}
     conflicts: List[str] = []
     for rows in groups.values():
         if len(rows) < 2:
@@ -3187,12 +3187,12 @@ def canonicalize_dispatch_classes(
             str, Tuple[Any, Tuple[Dict[str, Any], ...], Dict[str, Any]]] = {}
         for row in rows:
             try:
-                declared[row.name] = _entry_ingress_declaration(row)
+                declared[row.name] = _compiled_graph_ingress_declaration(row)
             except (aot_package.PackageIntrospectionError, ValueError) as exc:
                 # An unreadable declaration is not "probably fine": it is a
                 # compiled graph whose dispatchability nobody can prove.
                 raise MintRefused(
-                    f"entry {row.name!r}: dispatch-ambiguity gate cannot read "
+                    f"compiled_graph {row.name!r}: dispatch-ambiguity gate cannot read "
                     f"the declared ingress contract, so this compiled_graph cannot be "
                     f"shown to be dispatchable at all: {exc}") from exc
         # Union the mutual-admission relation into clusters. Asked through
@@ -3241,13 +3241,13 @@ def canonicalize_dispatch_classes(
     if conflicts:
         raise MintRefused(
             f"dispatch-ambiguity gate: {len(conflicts)} cluster(s) of declared "
-            f"class rows are admitted by more than one entry of the same "
+            f"class rows are admitted by more than one compiled_graph of the same "
             f"dispatch, so every call they carry would be refused "
-            f"'entry_ambiguous' and served EAGER — "
+            f"'compiled_graph_ambiguous' and served EAGER — "
             + "; ".join(conflicts[:4]) + ". Rows that reduce to ONE "
-            "dispatchable ingress contract are one entry and are merged "
+            "dispatchable ingress contract are one compiled_graph and are merged "
             "automatically; these cannot be, because the named axes say they "
-            "are different artifacts. Fix the declaration so every entry's "
+            "are different artifacts. Fix the declaration so every compiled_graph's "
             "ingress contract is uniquely admitting, rather than compiling "
             "and publishing a class the compiled_graph can never select")
 
@@ -3255,25 +3255,25 @@ def canonicalize_dispatch_classes(
         for keep, merged_rows in sorted(aliases.items()):
             logger.info(
                 "aot-mint: pgw#917 canonicalized %d declared class row(s) onto "
-                "entry %r — identical ingress contract, target and code, so "
+                "compiled_graph %r — identical ingress contract, target and code, so "
                 "they are ONE dispatchable class: %s",
                 len(merged_rows), keep, [r.name for r in merged_rows])
         activity_mod.emit_event(
             "aot_class_canonicalized",
             f"{len(dropped)} of {len(minted)} declared class rows reduce to an "
             f"ingress contract a sibling already declares; merged onto "
-            f"{len(aliases)} entry/entries as aliases instead of compiling a "
+            f"{len(aliases)} compiled_graph/compiled_graphs as aliases instead of compiling a "
             f"class the dispatch could never select: "
             + "; ".join(
                 f"{keep} <- {[r.name for r in merged_rows]}"
                 for keep, merged_rows in sorted(aliases.items())[:4]),
-            phase="entry_merged",
+            phase="compiled_graph_merged",
         )
     return [row for row in minted if row.name not in dropped], aliases
 
 
 class _ArrivalCanon:
-    """pgw#917's merge-or-refuse decision, taken when the entry ARRIVES.
+    """pgw#917's merge-or-refuse decision, taken when the compiled graph ARRIVES.
 
     pgw#1052 overlaps export with the compile pool, so the batch gate's
     moment — "after the last export, before the first compile" — no longer
@@ -3295,10 +3295,10 @@ class _ArrivalCanon:
 
     def __init__(self) -> None:
         self._kept: Dict[Tuple[str, Any], List[
-            Tuple[_MintedEntry, Any, Tuple[Dict[str, Any], ...],
+            Tuple[_MintedCompiledGraph, Any, Tuple[Dict[str, Any], ...],
                   Dict[str, Any]]]] = {}
 
-    def admit(self, row: _MintedEntry) -> Optional[_MintedEntry]:
+    def admit(self, row: _MintedCompiledGraph) -> Optional[_MintedCompiledGraph]:
         """The kept sibling ``row`` aliases onto, or ``None`` (compile it).
 
         Raises :class:`MintRefused` on a same-ingress different-identity
@@ -3308,12 +3308,12 @@ class _ArrivalCanon:
         fork = {str(n): v for n, v in tuple(row.spec.fork)}
         group = (str(row.spec.target), fork.get(ADAPTER_FORK))
         try:
-            contract, calls, meta = _entry_ingress_declaration(row)
+            contract, calls, meta = _compiled_graph_ingress_declaration(row)
         except (aot_package.PackageIntrospectionError, ValueError) as exc:
             # An unreadable declaration is not "probably fine": it is a compiled graph
             # whose dispatchability nobody can prove.
             raise MintRefused(
-                f"entry {row.name!r}: dispatch-ambiguity gate cannot read "
+                f"compiled_graph {row.name!r}: dispatch-ambiguity gate cannot read "
                 f"the declared ingress contract, so this compiled_graph cannot be "
                 f"shown to be dispatchable at all: {exc}") from exc
         for kept_row, kept_contract, kept_calls, kept_meta in \
@@ -3331,8 +3331,8 @@ class _ArrivalCanon:
                     f"dispatch-ambiguity gate: {sorted(identities)!r} collide "
                     f"at ingress but are NOT one class — they differ on "
                     f"{list(axes)!r}, so every call they carry would be "
-                    f"refused 'entry_ambiguous' and served EAGER. Fix the "
-                    f"declaration so every entry's ingress contract is "
+                    f"refused 'compiled_graph_ambiguous' and served EAGER. Fix the "
+                    f"declaration so every compiled_graph's ingress contract is "
                     f"uniquely admitting (pgw#917; refused at ARRIVAL under "
                     f"pgw#1052 — the rows already exported are the bounded "
                     f"waste that refusal costs)")
@@ -3347,19 +3347,19 @@ class _ArrivalCanon:
 
 
 def _merge_alias_maps(
-    arrival: Mapping[str, List["_MintedEntry"]],
-    late: Mapping[str, Tuple["_MintedEntry", ...]],
-) -> Dict[str, Tuple["_MintedEntry", ...]]:
+    arrival: Mapping[str, List["_MintedCompiledGraph"]],
+    late: Mapping[str, Tuple["_MintedCompiledGraph", ...]],
+) -> Dict[str, Tuple["_MintedCompiledGraph", ...]]:
     """One alias map out of the arrival-time and drain-time pgw#917 passes.
 
     A drain-time merge can drop a keeper that itself collected arrival
-    aliases; those re-home onto the surviving entry so no declared class row
+    aliases; those re-home onto the surviving compiled graph so no declared class row
     ever falls out of the envelope's ``aliases`` audit trail.
     """
     surviving_by_dropped = {
         dropped.name: keep
         for keep, dropped_rows in late.items() for dropped in dropped_rows}
-    merged: Dict[str, List["_MintedEntry"]] = {
+    merged: Dict[str, List["_MintedCompiledGraph"]] = {
         keep: list(rows) for keep, rows in late.items()}
     for keeper_name, rows in arrival.items():
         home = surviving_by_dropped.get(keeper_name, keeper_name)
@@ -3368,7 +3368,7 @@ def _merge_alias_maps(
 
 
 def _emit_arrival_alias_event(
-    arrival: Mapping[str, List["_MintedEntry"]], declared: int,
+    arrival: Mapping[str, List["_MintedCompiledGraph"]], declared: int,
 ) -> None:
     """The pgw#917 canonicalization event for arrival-time merges — the batch
     gate emits its own for drain-time ones, and both are telemetry."""
@@ -3383,14 +3383,14 @@ def _emit_arrival_alias_event(
             + "; ".join(
                 f"{keep} <- {[r.name for r in rows]}"
                 for keep, rows in sorted(arrival.items())[:4]),
-            phase="entry_merged",
+            phase="compiled_graph_merged",
         )
     except Exception:  # pragma: no cover — telemetry never fails a mint
         logger.debug("aot-mint: arrival alias event failed", exc_info=True)
 
 
 def _release_mint_residents(
-    pipeline: Any, minted: Sequence["_MintedEntry"],
+    pipeline: Any, minted: Sequence["_MintedCompiledGraph"],
 ) -> Dict[str, float]:
     """pgw#1053: hand the mint parent's dead residents back to the card.
 
@@ -3409,7 +3409,7 @@ def _release_mint_residents(
     sourced constants — device aliases of the pipeline weights — become meta
     tensors of the same shape and dtype. Every parent-side gate that still
     runs (``program_package_drift``, ``unbindable_constants``,
-    ``input_contract``, ``entry_graph_block``, ``_write_literals``, the
+    ``input_contract``, ``compiled_graph_graph_block``, ``_write_literals``, the
     drain-time pgw#917 pass) reads names, shapes and literal bytes only, so
     NO gate is dropped; each runs against the code-only projection. The
     compile children read the STAGED programs from disk, written before this
@@ -3455,7 +3455,7 @@ def _release_mint_residents(
                 state[fqn] = _meta(state[fqn])
         constants = getattr(program, "constants", None)
         if isinstance(constants, dict):
-            # Only the state_dict-sourced entries: everything else is a
+            # Only the state_dict-sourced compiled graphs: everything else is a
             # LITERAL whose bytes still have to reach `_write_literals`.
             for fqn in list(constants):
                 if fqn in weights:
@@ -3505,7 +3505,7 @@ def _release_mint_residents(
     return facts
 
 
-def _structure_only_drift_hint(row: _MintedEntry) -> str:
+def _structure_only_drift_hint(row: _MintedCompiledGraph) -> str:
     """Name the AUTHORING cause a drift refusal usually has.
 
     pgw#1097 WIDENED this from structure-only to EVERY mint, because the cause
@@ -3543,44 +3543,44 @@ def _structure_only_drift_hint(row: _MintedEntry) -> str:
     return hint
 
 
-def _gate_and_declare_entry(
-    row: _MintedEntry, package: Path,
+def _gate_and_declare_compiled_graph(
+    row: _MintedCompiledGraph, package: Path,
 ) -> Dict[str, Any]:
-    """Run every package-side gate for one entry and build its envelope
-    block. Refusals name the entry AND the cause (pgw#758)."""
-    entry = row.name
-    violations = aot_package.code_only_violations(package, entry)
+    """Run every package-side gate for one compiled graph and build its envelope
+    block. Refusals name the compiled graph AND the cause (pgw#758)."""
+    compiled_graph = row.name
+    violations = aot_package.code_only_violations(package, compiled_graph)
     if violations:
         raise MintRefused(
-            f"entry {entry!r}: code-only gate (pgw#704 B1): "
+            f"compiled_graph {compiled_graph!r}: code-only gate (pgw#704 B1): "
             + "; ".join(violations))
     unbindable = aot_package.unbindable_constants(
-        package, _state_dict_keys(row.owner), entry)
+        package, _state_dict_keys(row.owner), compiled_graph)
     if unbindable:
         raise MintRefused(
-            f"entry {entry!r}: bindability gate: " + "; ".join(unbindable))
+            f"compiled_graph {compiled_graph!r}: bindability gate: " + "; ".join(unbindable))
     # pgw#728: strict and non-strict traces lift DIFFERENT constant sets, so the
     # manifest must be proven to describe the package that ships beside it. Two
     # independent derivations (program vs generated wrapper) required to agree —
     # drift the env seal cannot see, because both modes run identically sealed.
-    drift = aot_package.program_package_drift(row.program, package, entry)
+    drift = aot_package.program_package_drift(row.program, package, compiled_graph)
     if drift:
         raise MintRefused(
-            f"entry {entry!r}: constant-set drift: " + "; ".join(drift)
+            f"compiled_graph {compiled_graph!r}: constant-set drift: " + "; ".join(drift)
             + _structure_only_drift_hint(row))
     # pgw#1097, THE FOLDING FENCE. `CONSTANT_BINDING_CONFIGS` is what prevents
     # a weight's values from being compiled in; this is what PROVES it, per
-    # entry, against the artifact's own table. Without the proof the setting is
+    # compiled graph, against the artifact's own table. Without the proof the setting is
     # a hope: an inlining route torch adds tomorrow would ship a compiled graph that
     # serves the minting checkpoint's tensor to every other fine-tune, and the
     # only thing to notice would be the adopt-side parity floor refusing that
     # compiled graph on every checkpoint but one — compiled graph sharing dying quietly.
     folded = aot_package.folded_weights(
-        row.program, package, _state_dict_keys(row.owner), entry)
+        row.program, package, _state_dict_keys(row.owner), compiled_graph)
     if folded:
         raise MintRefused(
-            f"entry {entry!r}: folding fence (pgw#1097): " + "; ".join(folded))
-    fused = aot_package.eliminated_constants(row.program, package, entry)
+            f"compiled_graph {compiled_graph!r}: folding fence (pgw#1097): " + "; ".join(folded))
+    fused = aot_package.eliminated_constants(row.program, package, compiled_graph)
     if fused:
         # What is LEFT here is anonymous graph literals, never a weight — the
         # fence above has already refused those. Recorded, never fatal, but a
@@ -3588,26 +3588,26 @@ def _gate_and_declare_entry(
         # discarded.
         logger.info(
             "aot-mint: %s: %d lifted literal(s) folded away by the compiler "
-            "(e.g. %s)", entry, len(fused), fused[:3])
+            "(e.g. %s)", compiled_graph, len(fused), fused[:3])
     try:
         block = keying_block(row.program, row.flat_leaves, row.spec)
-        constants = aot_package.constants_manifest(package, entry)
+        constants = aot_package.constants_manifest(package, compiled_graph)
         # pgw#1058: the manifest rows this envelope will carry, proven against
         # the artifact's OWN generated input guards before anything can
         # publish. Same doctrine as the constant manifest: two independent
         # readings (program vs generated wrapper) that must agree, so a label
         # that drifted from its artifact fails closed HERE, not as an opaque
         # 36/36 admission miss on every adopting pod.
-        admission = aot_package.admission_drift(package, entry, block["inputs"])
+        admission = aot_package.admission_drift(package, compiled_graph, block["inputs"])
     except aot_package.PackageIntrospectionError as exc:
-        raise MintRefused(f"entry {entry!r}: declaration: {exc}") from exc
+        raise MintRefused(f"compiled_graph {compiled_graph!r}: declaration: {exc}") from exc
     if admission:
         raise MintRefused(
-            f"entry {entry!r}: admission drift (pgw#1058): "
+            f"compiled_graph {compiled_graph!r}: admission drift (pgw#1058): "
             + "; ".join(admission[:6]))
     # The manifest is RECORDED, never keyed (`aot_serve.class_hash` folds
     # target/fork/class_dims/range_digest/graph/strict/lora_bucket and nothing
-    # else) — which is why the boot-side derivation can state an entry's
+    # else) — which is why the boot-side derivation can state an compiled graph's
     # identity while carrying an empty one.
     block["constants"] = constants
     return block
@@ -3618,7 +3618,7 @@ class TracedClass:
     """One declared graph class, traced for its IDENTITY and nothing else."""
 
     name: str
-    #: The entry-envelope fields that reach this class's ``class_hash``.
+    #: The compiled graph-envelope fields that reach this class's ``class_hash``.
     block: Dict[str, Any]
     nodes: int
     #: Held only for the caller's probe window; drop it before the next class.
@@ -3628,7 +3628,7 @@ class TracedClass:
     #: whole set without enumerating it itself.
     declared: int = 0
     #: This row's own ``export_s`` / ``compile_s``, straight off
-    #: ``_export_entry``. The key path ignores them; the pgw#1134 measure-only
+    #: ``_export_compiled_graph``. The key path ignores them; the pgw#1134 measure-only
     #: child is here for exactly these numbers.
     timings: Dict[str, Any] = field(default_factory=dict)
     #: Loose inductor files, when the caller asked for the compile. The caller
@@ -3648,7 +3648,7 @@ def declared_class_rows(pipeline: Any, spec: ExportSpec, decl: Any) -> List[Any]
     """
     rows = adapter_arm_plans(_decl.compiled_graph_plans(decl), pipeline, spec)
     rows.sort(key=lambda row: (
-        row[1] is False, _decl.plan_entry_name(row[0])))
+        row[1] is False, _decl.plan_compiled_graph_name(row[0])))
     return rows
 
 
@@ -3673,7 +3673,7 @@ def trace_for_key(
       adapter-bearing rows first, ONE ``_disarm_branches`` for the whole
       branchless group. A caller that ordered its rows differently would trace
       different graphs, and the rule belongs beside the loop that made it;
-    * the trace itself is ``_export_entry``, whose refusals, fork gate,
+    * the trace itself is ``_export_compiled_graph``, whose refusals, fork gate,
       declared-range gate and lifted-input gate are the mint's. A boot-side
       re-implementation would be a second trace path, and the two would
       eventually key differently — which is the whole failure this derivation
@@ -3692,7 +3692,7 @@ def trace_for_key(
     parent-side guess would have been.
 
     ``compile_now`` (pgw#1134) runs the INDUCTOR half of each row as well —
-    ``_export_entry``'s own compile, the one a mint runs — and is what the
+    ``_export_compiled_graph``'s own compile, the one a mint runs — and is what the
     measure-only child needs: an export-only trace never exercises the
     whole-graph planner an OOM blocker is about, so a measurement taken
     without it answers a different question than the one asked. It rides THIS
@@ -3717,7 +3717,7 @@ def trace_for_key(
     disarmed = False
     try:
         for plan, arm in rows:
-            entry = _decl.plan_entry_name(plan)
+            compiled_graph = _decl.plan_compiled_graph_name(plan)
             if arm is False and not disarmed:
                 _disarm_branches(pipeline)
                 disarmed = True
@@ -3727,9 +3727,9 @@ def trace_for_key(
             # is how a phase table ends up honest about its names and wrong
             # about its numbers.
             with boot_phases.span(
-                boot_phases.PHASE_TRACE_FOR_KEY, function=entry,
+                boot_phases.PHASE_TRACE_FOR_KEY, function=compiled_graph,
             ) as span:
-                row = _export_entry(
+                row = _export_compiled_graph(
                     pipeline, spec, plan, decl, compile_now=bool(compile_now),
                     inductor_configs=inductor_configs)
                 try:
@@ -3740,7 +3740,7 @@ def trace_for_key(
                 # without the graph size it paid for.
                 span.note(f"nodes={nodes}")
             yield TracedClass(
-                name=entry,
+                name=compiled_graph,
                 block=keying_block(row.program, row.flat_leaves, row.spec),
                 nodes=nodes,
                 program=row.program,
@@ -3756,10 +3756,10 @@ def trace_for_key(
 def keying_block(
     program: Any, flat_leaves: Sequence[Any], spec: ExportSpec,
 ) -> Dict[str, Any]:
-    """The entry-envelope fields that reach an entry's ``class_hash`` — built
+    """The compiled graph-envelope fields that reach an compiled graph's ``class_hash`` — built
     from the EXPORTED PROGRAM and the declaration, and from nothing else.
 
-    ONE construction, shared by the mint (:func:`_entry_block`, which adds the
+    ONE construction, shared by the mint (:func:`_compiled_graph_block`, which adds the
     package-side ``constants`` manifest afterwards) and by the boot-side
     derivation (``boot_key``, which has no package and carries the manifest
     empty). Two constructions of the same block would be exactly the
@@ -3767,8 +3767,8 @@ def keying_block(
     key under one axis name.
 
     ``constants`` is present-but-empty rather than absent because
-    ``aot_serve.entries_from_meta`` validates every block as a full contract,
-    and an entry that cannot be parsed cannot be keyed.
+    ``aot_serve.compiled_graphs_from_meta`` validates every block as a full contract,
+    and an compiled graph that cannot be parsed cannot be keyed.
 
     ``graph_witness`` (pgw#1031) is the node-level digest of the traced
     program (``graph_hash.graph_hash``). It is recorded as a top-level SIBLING
@@ -3793,7 +3793,7 @@ def keying_block(
         "inputs": inputs,
         "symbols": symbols,
         "constants": [],
-        "graph": entry_graph_block(program, spec),
+        "graph": compiled_graph_graph_block(program, spec),
         "graph_witness": graph_hash.graph_hash(program),
     }
     placement = graph_hash.device_placement(program)
@@ -3807,9 +3807,9 @@ def keying_block(
         block["placement"] = list(placement)
     if adapter_arm(spec.fork) is False:
         # pgw#790: the NEGATIVE half of this class's contract. Without it the
-        # branchless entry silently ADMITS an adapter-bearing call (a
+        # branchless compiled graph silently ADMITS an adapter-bearing call (a
         # name-keyed bind ignores inputs it does not declare), the dispatch
-        # sees two admitting entries and refuses `entry_ambiguous` — and the
+        # sees two admitting compiled graphs and refuses `compiled_graph_ambiguous` — and the
         # compiled graph serves the whole attach lane eagerly. Declared, so the refusal
         # is the right one and it names the input.
 
@@ -3818,21 +3818,21 @@ def keying_block(
 
 
 def _mint_phase_table(
-    minted: Sequence[_MintedEntry],
+    minted: Sequence[_MintedCompiledGraph],
     timings: Mapping[str, float],
     inductor_configs: Optional[Mapping[str, Any]],
     width: Optional[aot_compile_pool.PoolWidth] = None,
     pool_ledger: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The per-mint phase table (#757's instrument-first deliverable): one
-    readable record of where the mint's seconds went, per entry and in
+    readable record of where the mint's seconds went, per compiled graph and in
     total, plus the two facts an AOT-vs-JIT comparison needs to be fair —
     the graph-class COUNT this mint compiled and the autotune posture.
 
     pgw#809 adds the ``pool`` block: the K this mint ran at AND the budget
     that chose it. Without it a mint's wall clock is uninterpretable —
     two mints of the same compiled graph on two pods legitimately differ by 4x."""
-    entries = {
+    compiled_graphs = {
         row.name: dict(row.timings) for row in minted}
     totals: Dict[str, float] = {
         "export_s": round(sum(
@@ -3854,7 +3854,7 @@ def _mint_phase_table(
         for label, value in (row.timings.get("overlays") or {}).items():
             overlay_totals[label] = round(
                 overlay_totals.get(label, 0.0) + float(value), 3)
-    # The ONE resolved inductor config every entry compiled under, recorded
+    # The ONE resolved inductor config every compiled graph compiled under, recorded
     # verbatim: #757's open seal-bypass concern is a per-call config the
     # seal cannot see, so whatever the mint passed is either identity-inert
     # (compile_threads, #757 pre-verified) or visible RIGHT HERE for the
@@ -3862,17 +3862,17 @@ def _mint_phase_table(
     resolved = {
         key: value if isinstance(value, (bool, int, float, str, type(None)))
         else repr(value)
-        for key, value in sorted(_entry_configs(inductor_configs).items())
+        for key, value in sorted(_compiled_graph_configs(inductor_configs).items())
     }
     return {
         "v": 1,
-        "n_entries": len(minted),
+        "n_compiled_graphs": len(minted),
         "autotune": autotune_posture(inductor_configs),
         "inductor_configs": resolved,
         "totals": {**totals, **{k: v for k, v in timings.items()}},
         "phases": phase_totals,
         "overlays": overlay_totals,
-        "entries": entries,
+        "compiled_graphs": compiled_graphs,
         # pgw#842: the width's INPUTS and the pool's own ledger ride the same
         # block, because the two questions a slow mint raises — "why this K"
         # and "what did K buy" — are answered by different halves of it, and a
@@ -3880,7 +3880,7 @@ def _mint_phase_table(
         # attempts ten and eleven) can answer neither.
         "pool": {
             **(width.facts() if width is not None
-               else {"entry_workers": 1, "binding": "serial"}),
+               else {"compiled_graph_workers": 1, "binding": "serial"}),
             **dict(pool_ledger or {}),
         },
     }
@@ -3889,11 +3889,11 @@ def _mint_phase_table(
 MINT_PHASES_KIND = "aot_mint_phases"
 
 
-def _entry_duration_s(timings: Mapping[str, Any]) -> float:
-    """One graph-class entry's own compile cost: export + compile + warm.
+def _compiled_graph_duration_s(timings: Mapping[str, Any]) -> float:
+    """One graph-class compiled graph's own compile cost: export + compile + warm.
 
-    The package/declare/pack phases are per-MINT, not per-entry, so they belong
-    to the roll-up only — summing the entry rows must never reproduce
+    The package/declare/pack phases are per-MINT, not per-compiled graph, so they belong
+    to the roll-up only — summing the compiled graph rows must never reproduce
     ``total_s`` or a reader would double-count.
     """
     return sum(
@@ -3928,7 +3928,7 @@ def _emit_pool_event(
     bought — the standing "no silent decisions" rule applied to the mint's
     only multiplicative lever.
 
-    Attempts ten and eleven compiled the same 72-entry sdxl compiled graph for the same
+    Attempts ten and eleven compiled the same 72-compiled graph sdxl compiled graph for the same
     seconds (1314.94 vs 1327.23) and took 347.94 s vs 554.78 s, because K was
     5 and then 3. Nothing hub-side recorded WHY: the width block existed in
     the phase table and was never emitted, and the pgw#830 pool ledger was
@@ -3942,12 +3942,12 @@ def _emit_pool_event(
     if not pool:
         return
 
-    workers = int(pool.get("entry_workers") or 1)
+    workers = int(pool.get("compiled_graph_workers") or 1)
     binding = str(pool.get("binding") or "unknown")
     under = int(pool.get("underwidth") or 0)
     wall_s = float(pool.get("pool_wall_s") or 0.0)
     head = (
-        f"family={family} lane={execution_lane} entry_workers={workers} "
+        f"family={family} lane={execution_lane} compiled_graph_workers={workers} "
         f"binding={binding} underwidth={under}")
     if under > 0:
         # Named in the FIRST line, so a narrow pool is legible without
@@ -3970,15 +3970,15 @@ def emit_phase_events(
     never only a pod log.
 
     th#1322: the mint's TOTAL now rides the numeric ``duration_ms`` field, and
-    each graph-class entry gets its own event under ``phase=entry:<name>``. The
+    each graph-class compiled graph gets its own event under ``phase=compiled graph:<name>``. The
     interpolated table stays in ``detail`` as the breakdown you read per event
     (exactly as ``stage_ms`` stays in the request payload), but every number a
     measurement lane groups, percentiles or trends on is now a column.
 
     Paul's question — "why is AOT mint so much slower than JIT mint?" — needs
-    the per-entry rows: an AOT mint compiles N graph classes where a JIT mint
+    the per-compiled graph rows: an AOT mint compiles N graph classes where a JIT mint
     compiles the graphs one real warm plan happens to trace, and the answer is
-    which entries the extra minutes are in, not just that there are more.
+    which compiled graphs the extra minutes are in, not just that there are more.
     """
     try:
 
@@ -3986,7 +3986,7 @@ def emit_phase_events(
         execution_lane = execution_lane or "plain"
         total_s = float(totals.get("total_s") or 0.0)
         # pgw#825: the roll-up's PHASE is the mint's terminus. An aborted mint
-        # measured real entries and must report them — under `aborted`, never
+        # measured real compiled graphs and must report them — under `aborted`, never
         # under `minted`, or a partial table would enter an AOT-vs-JIT
         # comparison as if a compiled graph came out.
         roll_up = terminus or str(table.get("terminus") or "") \
@@ -3994,7 +3994,7 @@ def emit_phase_events(
         activity_mod.emit_event(
             MINT_PHASES_KIND,
             f"family={family} lane={execution_lane} status={roll_up} "
-            f"n_entries={table.get('n_entries')} totals={totals} "
+            f"n_compiled_graphs={table.get('n_compiled_graphs')} totals={totals} "
             f"phases={dict(table.get('phases') or {})} "
             f"overlays={dict(table.get('overlays') or {})} "
             f"autotune={dict(table.get('autotune') or {})}",
@@ -4002,25 +4002,25 @@ def emit_phase_events(
             duration_ms=int(round(total_s * 1000)),
         )
         _emit_pool_event(family=family, execution_lane=execution_lane, table=table)
-        for name, timings in sorted((table.get("entries") or {}).items()):
+        for name, timings in sorted((table.get("compiled_graphs") or {}).items()):
             if not isinstance(timings, Mapping):
                 continue
-            entry_s = _entry_duration_s(timings)
-            if entry_s <= 0:
+            compiled_graph_s = _compiled_graph_duration_s(timings)
+            if compiled_graph_s <= 0:
                 continue
             activity_mod.emit_event(
                 MINT_PHASES_KIND,
-                f"family={family} lane={execution_lane} entry={name} "
+                f"family={family} lane={execution_lane} compiled_graph={name} "
                 f"timings={dict(timings)}",
-                phase=f"entry:{name}",
-                duration_ms=int(round(entry_s * 1000)),
+                phase=f"compiled_graph:{name}",
+                duration_ms=int(round(compiled_graph_s * 1000)),
             )
     except Exception:  # pragma: no cover — telemetry must never fail a mint
         logger.debug("aot-mint: phase event emission failed", exc_info=True)
 
 
-def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
-    """The per-entry graph-interface facts (fold into that entry's
+def compiled_graph_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
+    """The per-compiled graph graph-interface facts (fold into that compiled graph's
     ``class_hash``): the lifted constant FQN set, the lifted inputs, the
     pytree spec, and the python branches export FROZE at trace time.
     Constant BYTE SIZES are deliberately absent — they are a property of the
@@ -4030,11 +4030,11 @@ def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
     **v3 (pgw#1089): every fact here comes from the EXPORTED PROGRAM, never
     from the compiled package.** v2 read ``constant_fqns`` off the packaged
     artifact and carried ``fused_constants`` (the constants the compiler folded
-    away), so an entry's identity could not be stated until after its compile.
+    away), so an compiled graph's identity could not be stated until after its compile.
     Two consequences, one of which was already live:
 
     * **A weightless mint and a real-weight mint of the IDENTICAL graph keyed
-      differently.** pgw#1080 compiles structure-only entries with
+      differently.** pgw#1080 compiles structure-only compiled graphs with
       ``aot_inductor.use_runtime_constant_folding`` (it must — a compile-time
       fold bakes fake values), which keeps every parameter bindable and adds
       ``_FOLDED_CONST_*`` rows. Both package-side sets therefore move, so the
@@ -4051,7 +4051,7 @@ def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
     and the axiom admits nothing that does. They are not lost: the mint still
     PROVES them (``aot_package.program_package_drift`` refuses a package whose
     constant set disagrees with its program; ``eliminated_constants`` is still
-    logged per entry). Proven, not keyed.
+    logged per compiled graph). Proven, not keyed.
 
     pgw#857: that exclusion is right for a WEIGHT and wrong for a LITERAL, and
     both were excluded. A weight is rebound from the resident ``state_dict``
@@ -4089,8 +4089,8 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
     recomputed FROM recorded facts, so a stamp can never disagree with them.
     These blocks are what make that recomputation possible for the new kind, and
     they ride the metadata additively (the envelope's parsers read named fields
-    and are unaffected). Per-entry graph facts live in the ``entries`` blocks
-    (:func:`entry_graph_block`) and reach the key through the combined hash.
+    and are unaffected). Per-compiled graph graph facts live in the ``compiled graphs`` blocks
+    (:func:`compiled_graph_graph_block`) and reach the key through the combined hash.
     """
 
     return {
@@ -4162,9 +4162,9 @@ def _treespec_text(spec: Any) -> str:
 
 
 def compiled_graph_identity(meta: Mapping[str, Any]) -> compiled_graph_key.CompiledGraphKey:
-    """The ``ek1`` key ONE entry artifact's OWN recorded facts describe.
+    """The ``ek1`` key ONE compiled graph artifact's OWN recorded facts describe.
 
-    The computation is :func:`compiled_graph_key.from_entry_metadata` — ONE
+    The computation is :func:`compiled_graph_key.from_compiled_graph_metadata` — ONE
     implementation, so the key the mint stamps and the axes the publish path
     declares (``fleet_compiled_graphs._identity_axes``) are the same object rather than
     two derivations that can drift. Every input is a RECORDED block, which is
@@ -4175,7 +4175,7 @@ def compiled_graph_identity(meta: Mapping[str, Any]) -> compiled_graph_key.Compi
     publish refusal, not a fallback.
     """
     try:
-        return compiled_graph_key.from_entry_metadata(meta)
+        return compiled_graph_key.from_compiled_graph_metadata(meta)
     except compiled_graph_key.CompiledGraphKeyError as exc:
         raise MintRefused(str(exc)) from exc
 
@@ -4194,10 +4194,10 @@ def _state_dict_keys(module: Any) -> Tuple[str, ...]:
 
 
 def _write_literals(
-    minted: Sequence[_MintedEntry], package: Path, content_dir: Path,
+    minted: Sequence[_MintedCompiledGraph], package: Path, content_dir: Path,
 ) -> None:
-    """Pack the bytes of every entry's declared LITERAL constants beside the
-    package, keys namespaced ``<entry>::<fqn>`` (pgw#758).
+    """Pack the bytes of every compiled graph's declared LITERAL constants beside the
+    package, keys namespaced ``<compiled graph>::<fqn>`` (pgw#758).
 
     A literal has no ``state_dict`` counterpart (folded scalars, sinusoidal
     tables, shape vectors), so a consumer cannot bind it from resident weights.
@@ -4413,18 +4413,18 @@ class _CallableTarget:
 # ---------------------------------------------------------------------------
 
 
-def publish_entry(
+def publish_compiled_graph(
     row: MintedArtifact, publisher: Any, mint_duration_ms: int = 0,
 ) -> str:
-    """Publish ONE minted entry through a ``fleet_compiled_graphs.CompiledGraphPublisher``.
+    """Publish ONE minted compiled graph through a ``fleet_compiled_graphs.CompiledGraphPublisher``.
 
     Receipts are the HUB's business: it adds them at publish-finalize (#709),
     so the producer's whole obligation is a keyed ``metadata.json`` inside the
     tar — which :func:`mint` has already stamped and proven. Refuses before the
-    wire when the artifact carries no key, since an unaddressable entry would
+    wire when the artifact carries no key, since an unaddressable compiled graph would
     be stored under a flavor nothing can request.
 
-    pgw#1176: publish is PER ENTRY, and a failure is per entry. Nothing waits
+    pgw#1176: publish is PER COMPILED_GRAPH, and a failure is per compiled graph. Nothing waits
     for a set; nothing is rolled back because a sibling failed.
     """
     if not row.key:
@@ -4437,11 +4437,11 @@ def publish_entry(
 
 
 def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
-    """Publish every entry a mint produced. ``{entry key -> checkpoint}``.
+    """Publish every compiled graph a mint produced. ``{compiled graph key -> checkpoint}``.
 
     Failures are NOT swallowed and not collected: the first refusal raises, so
-    a caller that wants best-effort per-entry publishing drives
-    :func:`publish_entry` itself and decides what a partial set means. What
+    a caller that wants best-effort per-compiled graph publishing drives
+    :func:`publish_compiled_graph` itself and decides what a partial set means. What
     changed under pgw#1176 is that a partial set is now a coherent outcome
     rather than a broken compiled graph.
     """
@@ -4451,8 +4451,8 @@ def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
     mint_duration_ms = max(0, int(round(
         float(result.timings.get("total_s") or 0.0) * 1000)))
     return {
-        row.key: publish_entry(row, publisher, mint_duration_ms)
-        for row in result.entries
+        row.key: publish_compiled_graph(row, publisher, mint_duration_ms)
+        for row in result.compiled_graphs
     }
 
 
@@ -4507,7 +4507,7 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """``python -m gen_worker.aot_mint <request.json> --out <dir>`` — produce
-    one multi-graph compiled graph (ops/testing entry point; production mints run in a
+    one multi-graph compiled graph (ops/testing compiled graph point; production mints run in a
     serving pod's background under the pgw#677 eager-first machinery — #724
     was REJECTED, there is no dedicated mint fleet).
 
@@ -4577,9 +4577,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     print(json.dumps({
         "manifest": result.manifest,
-        "entries": [
-            {"entry": row.entry, "key": row.key, "artifact": str(row.artifact)}
-            for row in sorted(result.entries, key=lambda r: r.entry)
+        "compiled_graphs": [
+            {"compiled_graph": row.compiled_graph, "key": row.key, "artifact": str(row.artifact)}
+            for row in sorted(result.compiled_graphs, key=lambda r: r.compiled_graph)
         ],
         "timings": result.timings,
     }, indent=1))
@@ -4669,17 +4669,17 @@ __all__ = [
     "MINT_COMPILE_THREADS",
     "MintResult",
     "MintedArtifact",
-    "publish_entry",
+    "publish_compiled_graph",
     "autotune_posture",
     "bench_step",
     "compiled_graph_identity",
-    "compile_entry_files",
+    "compile_compiled_graph_files",
     "compose_for_mint",
     "declaration_module_gaps",
     "declared_range_gaps",
     "dynamic_shapes_spec",
     "emit_phase_events",
-    "entry_graph_block",
+    "compiled_graph_graph_block",
     "keying_block",
     "trace_for_key",
     "declared_class_rows",

@@ -2,7 +2,7 @@
 entrypoint, or at the unit beneath it?
 
 A unit test is structurally blind to wiring, because the unit test IS the
-caller the production path is not. ``entry_workers(peak_rss_bytes=…)``,
+caller the production path is not. ``compiled_graph_workers(peak_rss_bytes=…)``,
 ``set_guard_failure_callback``, the pgw#805/#815/#827 mint arms and the
 pgw#828 warm child were all correct code with green unit tests and no route
 that reached them. The only thing that would have caught them is a test that
@@ -42,7 +42,7 @@ _CHAIN: contextvars.ContextVar[Tuple[str, ...]] = contextvars.ContextVar(
 
 
 @dataclass
-class Entry:
+class CompiledGraph:
     """One observed call of one rung."""
     chain: Tuple[str, ...]      # rungs already entered, outermost first
     caller: str                 # file:line of the immediate non-instrument frame
@@ -59,10 +59,10 @@ class Entry:
 @dataclass
 class Recording:
     rungs: Tuple[str, ...]
-    entries: Dict[str, List[Entry]] = field(default_factory=dict)
+    compiled_graphs: Dict[str, List[CompiledGraph]] = field(default_factory=dict)
 
     def reached(self, rung: str) -> bool:
-        return bool(self.entries.get(rung))
+        return bool(self.compiled_graphs.get(rung))
 
     def deepest_reached(self) -> str | None:
         for rung in reversed(self.rungs):
@@ -79,7 +79,7 @@ class Recording:
         still have been reached.
         """
         for idx, rung in enumerate(self.rungs):
-            calls = self.entries.get(rung, [])
+            calls = self.compiled_graphs.get(rung, [])
             if not calls:
                 return rung
             if idx == 0:
@@ -92,7 +92,7 @@ class Recording:
     def report(self) -> str:
         lines = []
         for idx, rung in enumerate(self.rungs):
-            calls = self.entries.get(rung, [])
+            calls = self.compiled_graphs.get(rung, [])
             if not calls:
                 lines.append(f"  {idx}. {rung}  — NEVER REACHED")
                 continue
@@ -109,7 +109,7 @@ class Recording:
 def _resolve(dotted: str) -> Tuple[Any, str]:
     """``gen_worker.executor.Executor.handle_run_job`` -> (Executor, name).
 
-    Raises on a stale ledger entry: a rename that silently drops a rung would
+    Raises on a stale ledger compiled graph: a rename that silently drops a rung would
     turn this guard into decoration.
     """
     parts = dotted.split(".")
@@ -170,8 +170,8 @@ class ladder:
 
     def _record(self, rung: str) -> contextvars.Token:
         chain = _CHAIN.get()
-        self.rec.entries.setdefault(rung, []).append(
-            Entry(chain=chain, caller=_caller()))
+        self.rec.compiled_graphs.setdefault(rung, []).append(
+            CompiledGraph(chain=chain, caller=_caller()))
         return _CHAIN.set(chain + (rung,))
 
     def _wrap(self, rung: str, fn: Callable[..., Any]) -> Callable[..., Any]:

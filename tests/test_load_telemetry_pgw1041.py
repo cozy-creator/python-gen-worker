@@ -275,7 +275,7 @@ def test_live_load_names_each_component_to_the_hub(tmp_path, monkeypatch):
 
     started = events.of_kind(load_progress.EVENT_PHASE)
     done = events.of_kind(load_progress.EVENT_PHASE_DONE)
-    # Every entry is a COMPLETED update, which is what makes it durable
+    # Every compiled graph is a COMPLETED update, which is what makes it durable
     # hub-side (th#1250: a RUNNING update survives only on a phase change,
     # and this load does not own the enclosing activity's phase).
     assert started and done
@@ -285,7 +285,7 @@ def test_live_load_names_each_component_to_the_hub(tmp_path, monkeypatch):
     entered = [ev.phase for ev in started]
     assert entered[0] == "load"
     assert "hydrate:unet" in entered and "hydrate:vae" in entered
-    # The component's own tree size rides the entry row: the operator reading
+    # The component's own tree size rides the compiled graph row: the operator reading
     # a stuck load learns WHICH component and HOW BIG without a second query.
     unet = next(ev for ev in started if ev.phase == "hydrate:unet")
     assert "GiB tree" in unet.detail and "test/tiny:latest" in unet.detail
@@ -296,11 +296,11 @@ def test_live_load_names_each_component_to_the_hub(tmp_path, monkeypatch):
     assert all(ev.duration_ms >= 0 for ev in done)
     assert all("GiB" in ev.detail for ev in done)
     assert all(ev.duration_ms == 0 for ev in started), (
-        "an entry row measures nothing yet; 0 means 'not measured here'")
+        "an compiled_graph row measures nothing yet; 0 means 'not measured here'")
 
 
 def test_a_phase_that_never_ends_still_announced_itself(tmp_path):
-    """The hang case: no completion event exists, but the entry event for the
+    """The hang case: no completion event exists, but the compiled graph event for the
     phase the load is stuck in was already durable when it entered."""
     marker = tmp_path / "load-progress.json"
     rep = load_progress.LoadProgressReporter(
@@ -319,7 +319,7 @@ def test_a_phase_that_never_ends_still_announced_itself(tmp_path):
     closed = [ev.phase for ev in events.of_kind(load_progress.EVENT_PHASE_DONE)]
     assert entered == ["load", "hydrate:transformer"]
     assert closed == ["load"], "the phase we died in must not report complete"
-    # And the breadcrumb agrees with the last entry event.
+    # And the breadcrumb agrees with the last compiled graph event.
     assert json.loads(marker.read_text())["phase"] == "hydrate:transformer"
 
 

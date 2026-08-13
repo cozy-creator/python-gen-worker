@@ -37,13 +37,13 @@ tasks:
       ⚠️ REMOTE ONLY — a real AOTI compile, same as `rig:mint`.
 
       pgw#997 — the same full cycle against `examples/micro-diffusion`, the
-      org-worker-shaped endpoint: 3 export entries (two fork arms + a second
+      org-worker-shaped endpoint: 3 export compiled_graphs (two fork arms + a second
       target), CONTAINER inputs with a plain input after them so every cycle
       re-proves pgw#993/pgw#994, deterministically GENERATED weights, and a
       parity check that arms the adopted compiled_graph and compares every arm to eager.
 
       This is the vehicle a mint-path change should be proven against;
-      `task rig:mint` is the cheaper one-entry plumbing toy.
+      `task rig:mint` is the cheaper one-compiled_graph plumbing toy.
     cmds:
       - nice -n 10 uv run python scripts/micro_mint_rig.py --vehicle micro {{.CLI_ARGS}}
 
@@ -135,7 +135,7 @@ tasks:
     desc: The `fast gates` job, locally — same commands, same hardness
     # pgw#1202: this task is named like the CI gate, so it must be able to fail
     # like the CI gate. It could not, twice over, and both halves cost a real
-    # cycle (pgw#718's red was `tests/test_entry_blast_radius_pgw1208.py:156` —
+    # cycle (pgw#718's red was `tests/test_compiled_graph_blast_radius_pgw1208.py:156` —
     # a file this task did not even look at):
     #
     #   1. WRONG SCOPE. It ran `mypy src/gen_worker` while CI runs
@@ -163,7 +163,7 @@ tasks:
       - cmd: uv run python scripts/lint_http_timeouts.py
       # Hard gate (matches CI): pgw#849 guard 2 — public surface in the
       # aot/mint/serve packages with no caller on the pod's production path.
-      # Ratcheted against scripts/unreached_surface_baseline.txt: new entries
+      # Ratcheted against scripts/unreached_surface_baseline.txt: new compiled graphs
       # fail, and so does a baseline line that is now wired up.
       - cmd: uv run python scripts/lint_unreached_surface.py
       # Hard gate (matches CI): pgw#1013 / th#1662 — an external length prefix

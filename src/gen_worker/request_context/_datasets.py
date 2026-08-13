@@ -2,9 +2,9 @@
 
 Free functions used by ``_PublisherMixin.resolve_dataset``: look up a dataset
 row by (tenant, name), fetch its blob manifest (th#698 wire format — a
-rows.jsonl-style entry index with presigned URLs / inline text / raw CAS
+rows.jsonl-style compiled graph index with presigned URLs / inline text / raw CAS
 blob digests) — polling 202 until the async snapshot build is ready
-(DATASET-V2 contract, gw#457) — and stream each entry to disk with
+(DATASET-V2 contract, gw#457) — and stream each compiled graph to disk with
 sha256 digest verification + bounded retries.
 """
 from __future__ import annotations
@@ -146,7 +146,7 @@ def fetch_materialize_manifest(
     """GET /datasets/:id/materialize?format=files&include_urls=true.
 
     Authorizes by dataset id + read_dataset grant (or tenant read perm).
-    Returns (snapshot_id, entries); entries carry
+    Returns (snapshot_id, compiled graphs); compiled graphs carry
     {path, url?, size_bytes?, checksum?, inline_text?, blob_digest?}.
 
     DATASET-V2 async contract (th#691 / gw#457): the hub may answer
@@ -240,12 +240,12 @@ def fetch_materialize_manifest(
             )
 
         data = resp.json() if resp.text else {}
-        entries = data.get("entries") or []
-        if not isinstance(entries, list) or not entries:
+        compiled_graphs = data.get("compiled_graphs") or []
+        if not isinstance(compiled_graphs, list) or not compiled_graphs:
             raise RuntimeError(
-                f"dataset materialize returned no entries for dataset_id={dataset_id}"
+                f"dataset materialize returned no compiled_graphs for dataset_id={dataset_id}"
             )
-        return str(data.get("snapshot_id") or ""), entries
+        return str(data.get("snapshot_id") or ""), compiled_graphs
 
 
 #: Digest algorithms this reader can verify.
@@ -254,27 +254,27 @@ def fetch_materialize_manifest(
 #: deleted 2026-08-03 (890 objects) and the hub can no longer build a blake3
 #: dataset key at all, so a ``blake3:`` checksum names bytes that do not exist.
 #: Keeping the hasher would let this reader verify a download that could never
-#: have been served -- and, worse, make a live blake3 entry look supported.
+#: have been served -- and, worse, make a live blake3 compiled graph look supported.
 _DIGEST_HASHERS: Dict[str, Callable[[], Any]] = {
     "sha256": hashlib.sha256,
 }
 
 
-def _expected_digest(entry: Dict[str, Any]) -> str:
-    """The entry's ALGORITHM-TAGGED checksum, or raise.
+def _expected_digest(compiled_graph: Dict[str, Any]) -> str:
+    """The compiled graph's ALGORITHM-TAGGED checksum, or raise.
 
     pgw#882: this used to default a bare 64-hex to ``blake3:``. Both digests
     are 32 bytes, so the length names no algorithm and a guess is a coin flip
     that verifies nothing when it loses. An untagged or absent checksum is now
     a refusal — there is no spelling of "download it unverified".
     """
-    raw = str(entry.get("checksum") or "").strip().lower()
+    raw = str(compiled_graph.get("checksum") or "").strip().lower()
     if not raw:
-        raise RuntimeError("dataset entry has no checksum — refusing to download it unverified")
+        raise RuntimeError("dataset compiled_graph has no checksum — refusing to download it unverified")
     algo, sep, _ = raw.partition(":")
     if not sep:
         raise RuntimeError(
-            f"dataset entry checksum {raw!r} is untagged — 64 hex chars name no algorithm"
+            f"dataset compiled_graph checksum {raw!r} is untagged — 64 hex chars name no algorithm"
         )
     if algo not in _DIGEST_HASHERS:
         raise RuntimeError(f"unsupported digest algorithm {algo!r} in checksum {raw!r}")
@@ -304,7 +304,7 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     pgw#1013: the size comparison used to sit after the loop, where the bytes
     are already on disk and the only thing it can report is how far past the
     declaration the shard went. The declared size is known before the first
-    byte, so it caps the stream; an entry that declares none falls back to the
+    byte, so it caps the stream; an compiled graph that declares none falls back to the
     destination filesystem, which is what an unbounded shard exhausts.
     """
 
@@ -328,49 +328,49 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     )
 
 
-def download_entries(
-    entries: List[Dict[str, Any]],
+def download_compiled_graphs(
+    compiled_graphs: List[Dict[str, Any]],
     target_root: Path,
     *,
     fetch_blob: Optional[Callable[[str, Path], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
 ) -> None:
-    """Materialize every manifest entry under ``target_root``.
+    """Materialize every manifest compiled graph under ``target_root``.
 
-    Presigned ``url`` entries stream to disk with digest verification and up
-    to ``_DOWNLOAD_RETRIES`` attempts; ``inline_text`` entries are written
-    directly; entries with only a ``blob_digest`` fall back to ``fetch_blob``
+    Presigned ``url`` compiled graphs stream to disk with digest verification and up
+    to ``_DOWNLOAD_RETRIES`` attempts; ``inline_text`` compiled graphs are written
+    directly; compiled graphs with only a ``blob_digest`` fall back to ``fetch_blob``
     (the repo-CAS by-digest reader).
     """
-    for entry in entries:
-        if not isinstance(entry, dict):
+    for compiled_graph in compiled_graphs:
+        if not isinstance(compiled_graph, dict):
             continue
         if cancelled is not None and cancelled():
             raise RuntimeError("dataset materialization cancelled")
-        rel_path = str(entry.get("path") or "").strip().lstrip("/")
+        rel_path = str(compiled_graph.get("path") or "").strip().lstrip("/")
         if not rel_path or ".." in rel_path.split("/"):
             continue
         dest = target_root / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
-        expected_size = entry.get("size_bytes")
+        expected_size = compiled_graph.get("size_bytes")
         expected_size = int(expected_size) if expected_size is not None else None
         # Safe as a resume check because a downloaded file is renamed into
         # place ONLY after its digest matched — dest existing means verified.
         if dest.exists() and expected_size is not None and dest.stat().st_size == expected_size:
             continue  # already materialized
 
-        inline = entry.get("inline_text")
-        if isinstance(inline, str) and inline and not entry.get("url"):
+        inline = compiled_graph.get("inline_text")
+        if isinstance(inline, str) and inline and not compiled_graph.get("url"):
             dest.write_text(inline, encoding="utf-8")
             continue
 
-        url = str(entry.get("url") or "").strip()
-        blob_digest = str(entry.get("blob_digest") or "").strip()
+        url = str(compiled_graph.get("url") or "").strip()
+        blob_digest = str(compiled_graph.get("blob_digest") or "").strip()
         if not url and not blob_digest:
-            raise RuntimeError(f"dataset entry {rel_path!r} has neither url nor blob_digest")
-        # Demanded only on the URL path: inline entries carry their bytes and
+            raise RuntimeError(f"dataset compiled_graph {rel_path!r} has neither url nor blob_digest")
+        # Demanded only on the URL path: inline compiled graphs carry their bytes and
         # `fetch_blob` verifies against the digest that addresses them.
-        expected_digest = _expected_digest(entry) if url else ""
+        expected_digest = _expected_digest(compiled_graph) if url else ""
 
         last_exc: Optional[Exception] = None
         for attempt in range(_DOWNLOAD_RETRIES):

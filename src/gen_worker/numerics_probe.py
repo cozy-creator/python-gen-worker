@@ -14,7 +14,7 @@ This module is that missing measurement, and it is built to ONE constraint
 first: **bisectability**. Three confident diagnoses in this program were wrong
 because two fuses were burning at once, so a whole-compiled graph "fail" nobody can split
 is the artifact that produces the fourth. Every number here is taken against a
-single named :class:`ProbeAxis` — one packaged ENTRY, one shape ROW, one LANE,
+single named :class:`ProbeAxis` — one packaged COMPILED_GRAPH, one shape ROW, one LANE,
 one recorded SEED — and every verdict carries the axis, the thresholds and
 their source with it, the way :class:`~gen_worker.aot_compile_pool.PoolWidth`
 carries its readings.
@@ -34,7 +34,7 @@ callables and a contract, never a pipeline.
 **Parity by construction.** The probe feed comes from
 :func:`gen_worker.aot_inputs.builder_for` — the mint's OWN input builder,
 driven by an :class:`~gen_worker.aot_contract.ExportSpec` reconstructed from
-the compiled graph's own recorded entry coordinate. A probe that built its inputs some
+the compiled graph's own recorded compiled graph coordinate. A probe that built its inputs some
 other way would be measuring a call the artifact was never traced for, which is
 the gw#391 / ie#381 bug in a third hat. It comes from ``aot_contract`` and not
 ``aot_mint`` for a measured reason — see :func:`build_feed`.
@@ -63,7 +63,7 @@ from .aot_contract import ExportSpec
 
 logger = logging.getLogger(__name__)
 
-#: The lifted-adapter call inputs. An entry whose contract does not declare
+#: The lifted-adapter call inputs. An compiled graph whose contract does not declare
 #: them is a BRANCHLESS graph class (pgw#790) and must be probed with
 #: ``lora_bucket=0``, or the feed carries a pair the class refuses.
 _ADAPTER_INPUTS = ("lora_a", "lora_b")
@@ -100,15 +100,15 @@ class CompiledGraphNumericsRefused(RuntimeError):
 
 @dataclass(frozen=True)
 class ProbeAxis:
-    """ONE named axis: one entry x one shape row x one lane.
+    """ONE named axis: one compiled graph x one shape row x one lane.
 
-    Reconstructed from the compiled graph's own ``metadata.entries`` block, so the axis
+    Reconstructed from the compiled graph's own ``metadata.compiled graphs`` block, so the axis
     names a coordinate the ARTIFACT declares rather than one the probe chose.
     :attr:`name` is stable across pods and processes, which is what makes a
     verdict re-runnable by whoever reads it: ``probe_compiled_graph(..., only=name)``.
     """
 
-    entry: str
+    compiled_graph: str
     target: str
     fork: Tuple[Tuple[str, Any], ...] = ()
     class_dims: Tuple[Tuple[str, int], ...] = ()
@@ -117,7 +117,7 @@ class ProbeAxis:
 
     @property
     def name(self) -> str:
-        return self.entry
+        return self.compiled_graph
 
     @property
     def seed(self) -> int:
@@ -129,7 +129,7 @@ class ProbeAxis:
         re-litigates from a screenshot.
         """
         digest = hashlib.sha256(
-            f"{self.entry}|{self.execution_lane}|{self.lora_bucket}".encode()).hexdigest()
+            f"{self.compiled_graph}|{self.execution_lane}|{self.lora_bucket}".encode()).hexdigest()
         return int(digest[:8], 16)
 
     @property
@@ -139,7 +139,7 @@ class ProbeAxis:
         return ",".join(f"{n}={int(v)}" for n, v in self.class_dims)
 
     def __str__(self) -> str:
-        return (f"entry={self.entry} target={self.target} "
+        return (f"compiled_graph={self.compiled_graph} target={self.target} "
                 f"row={self.shape_row} lane={self.execution_lane or '(plain)'} "
                 f"bucket={self.lora_bucket} seed={self.seed}")
 
@@ -148,7 +148,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     """Every probeable axis of one compiled graph, read off its own metadata.
 
     ONE axis, because pgw#1176 made one artifact one graph class: the mint
-    parity gate runs per entry, at the moment that entry exists, against the
+    parity gate runs per compiled graph, at the moment that compiled graph exists, against the
     eager callable it was traced from — never "after all 36". That is what
     makes §4.33's ~8 GiB true by construction: exactly ONE compiled runner is
     resident beside the already-resident weights while the probe runs.
@@ -157,13 +157,13 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     changed is that its length is now one by construction rather than by luck.
     """
 
-    entry = aot_serve.entry_from_meta(dict(meta))
-    entries = {str(entry.get("name") or ""): entry}
+    compiled_graph = aot_serve.compiled_graph_from_meta(dict(meta))
+    compiled_graphs = {str(compiled_graph.get("name") or ""): compiled_graph}
     execution_lane = str(meta.get("precision") or "")
     compiled_graph_bucket = int(meta.get("lora_bucket") or 0)
     axes: List[ProbeAxis] = []
-    for name in sorted(entries):
-        block = entries[name]
+    for name in sorted(compiled_graphs):
+        block = compiled_graphs[name]
         contract = aot_serve.contract_from_meta(block)
         declared = {spec.name for spec in contract.inputs}
         # pgw#790: the branchless class declares no adapter inputs and REFUSES
@@ -173,7 +173,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
         bucket = compiled_graph_bucket if all(
             n in declared for n in _ADAPTER_INPUTS) else 0
         axes.append(ProbeAxis(
-            entry=str(name),
+            compiled_graph=str(name),
             target=str(block.get("target") or ""),
             fork=tuple((str(n), v) for n, v in (block.get("fork") or ())),
             class_dims=tuple(
@@ -184,7 +184,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     if not axes:
         raise ProbeUnavailable(
             "no_probeable_axis",
-            "the compiled_graph packages no entry to compare against eager")
+            "the compiled_graph packages no compiled_graph to compare against eager")
     return tuple(axes)
 
 
@@ -302,7 +302,7 @@ def measure_axis(
     measurement runs at mint time (child process, both forwards resident) and
     at adopt time (this module's caller) with no second implementation.
 
-    ``compiled`` must be the entry's OWN runner, never the dispatch: dispatch
+    ``compiled`` must be the compiled graph's OWN runner, never the dispatch: dispatch
     selects by ingress, so a probe that went through it could silently measure
     a different graph class than the axis names.
     """
@@ -402,7 +402,7 @@ class CompiledGraphNumerics:
         """The axis the whole-compiled graph verdict is decided on — NAMED, always.
 
         The gate judges the worst axis rather than a pooled number: pooling 36
-        entries would let one destroyed graph class hide behind 35 intact ones,
+        compiled graphs would let one destroyed graph class hide behind 35 intact ones,
         which is the same failure mode the ladder's norm-weighted aggregate
         exists to prevent one level down.
         """
@@ -438,7 +438,7 @@ def probe_compiled_graph(
 ) -> CompiledGraphNumerics:
     """Measure an ARMED pipeline against the eager forward it replaced.
 
-    ``only`` names one axis (``ProbeAxis.name``, i.e. the packaged entry name)
+    ``only`` names one axis (``ProbeAxis.name``, i.e. the packaged compiled graph name)
     and is the bisection interface: a whole-compiled graph refusal must be re-runnable
     one axis at a time, from a hub row, without editing anything.
 
@@ -466,7 +466,7 @@ def probe_compiled_graph(
         if not axes:
             raise ProbeUnavailable(
                 "no_such_axis",
-                f"family={family}: no packaged entry named {only!r}")
+                f"family={family}: no packaged compiled_graph named {only!r}")
     started = time.monotonic()
     verdicts: List[AxisVerdict] = []
     for axis in axes:
@@ -481,13 +481,13 @@ def probe_compiled_graph(
         eager = state.get("original")
         dispatch = state.get("runner")
         runner = next(
-            (r for n, r in getattr(dispatch, "runners", ()) if n == axis.entry),
+            (r for n, r in getattr(dispatch, "runners", ()) if n == axis.compiled_graph),
             None)
         if not callable(eager) or runner is None:
             verdicts.append(AxisVerdict(
-                axis=axis, reason="entry_not_loaded",
+                axis=axis, reason="compiled_graph_not_loaded",
                 detail=f"the armed target {axis.target!r} retains no eager "
-                       f"callable or no runner for entry {axis.entry!r}"))
+                       f"callable or no runner for compiled_graph {axis.compiled_graph!r}"))
             continue
         t0 = time.monotonic()
         try:

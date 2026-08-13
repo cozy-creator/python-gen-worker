@@ -120,7 +120,7 @@ def branch_targets(pipe: Any) -> Dict[str, Any]:
     """component name -> denoiser module for EVERY branch-capable denoiser
     the pipeline carries (gw#679), in stamp order.
 
-    One entry for an ordinary pipeline (LTX/sdxl/qwen: ``transformer`` or
+    One compiled graph for an ordinary pipeline (LTX/sdxl/qwen: ``transformer`` or
     ``unet``) — every operation below then degenerates to the pre-gw#679
     single-target behavior. TWO for a dual-expert MoE (Wan 2.2 A14B), and
     both are real branch targets: adapting only the high expert leaves the
@@ -686,16 +686,16 @@ def _stage_for(
     the modules, so an fp8 branch would be judged as fp8 without an edit — and
     an adapter the branch would destroy is refused HERE, on the pure pass,
     before a buffer is touched. Survival is a property of (adapter, model), so
-    it is computed once on the cold path and cached beside the staging entry
+    it is computed once on the cold path and cached beside the staging compiled graph
     (0.86 s for all 788 modules of sdxl lightning-4step on 4 CPU threads);
     warm swaps re-check the cached verdict for free."""
     cache: Dict[Any, Any] = getattr(model, _MAPCACHE_ATTR, None) or {}
     staged: List[Tuple[Dict[str, Any], float, str]] = []
     for sd, w, ref in adapters:
         key = (ref, id(sd), len(sd))
-        entry = cache.get(key)
-        fresh = entry is None
-        if entry is None:
+        compiled_graph = cache.get(key)
+        fresh = compiled_graph is None
+        if compiled_graph is None:
             mapped = map_adapter(sd, model, ref=ref)
             if not mapped:
                 # pgw#824 VACUOUS GUARD. `evaluate_branch` returns None for an
@@ -721,15 +721,15 @@ def _stage_for(
                     f"nothing to measure — so it is reported here",
                     phase="not_applied",
                 )
-            entry = _stage_adapter(mapped)
-            entry["survival"] = adapter_fidelity.evaluate_branch(
+            compiled_graph = _stage_adapter(mapped)
+            compiled_graph["survival"] = adapter_fidelity.evaluate_branch(
                 mapped, branch_modules(model), ref=ref)
-            cache[key] = entry
+            cache[key] = compiled_graph
             while len(cache) > _MAPCACHE_MAX:
                 cache.pop(next(iter(cache)))
         adapter_fidelity.gate(
-            entry.get("survival"), request_id=request_id, announce=fresh)
-        staged.append((entry, w, ref))
+            compiled_graph.get("survival"), request_id=request_id, announce=fresh)
+        staged.append((compiled_graph, w, ref))
     setattr(model, _MAPCACHE_ATTR, cache)
     return staged
 
@@ -737,8 +737,8 @@ def _stage_for(
 def _needed_rank(staged: Sequence[Tuple[Dict[str, Any], float, str]]) -> int:
     """The widest per-layer concatenated rank this staged set needs."""
     per_layer: Dict[str, int] = {}
-    for entry, _w, _ref in staged:
-        for path, r in entry["ranks"].items():
+    for compiled_graph, _w, _ref in staged:
+        for path, r in compiled_graph["ranks"].items():
             per_layer[path] = per_layer.get(path, 0) + r
     return max(per_layer.values(), default=0)
 
@@ -782,8 +782,8 @@ def _place_adapters(
     mapped = list(staged)
     if not uniform:
         covered_paths: set[str] = set()
-        for entry, _w, _ref in mapped:
-            covered_paths.update(entry["ranks"])
+        for compiled_graph, _w, _ref in mapped:
+            covered_paths.update(compiled_graph["ranks"])
         for path, mod in branch_modules(model).items():
             if path in covered_paths:
                 if (getattr(mod, "lora_a", None) is None
@@ -808,19 +808,19 @@ def _place_adapters(
                 device = mod.lora_a.device
                 break
         dev_flats: List[Dict[Any, Any]] = []
-        for entry, _w, _ref in mapped:
+        for compiled_graph, _w, _ref in mapped:
             df = {dt: t.to(device, non_blocking=t.is_pinned())
-                  for dt, t in entry["flat"].items()}
+                  for dt, t in compiled_graph["flat"].items()}
             dev_flats.append(df)
             copied += sum(t.numel() * t.element_size()
-                          for t in entry["flat"].values())
+                          for t in compiled_graph["flat"].values())
         for path, mod in mods.items():
             if getattr(mod, "lora_a", None) is None:
                 continue  # sparse placement: uncovered layer has no branch
             hit_any = False
             r0 = 0
-            for (entry, w, _ref), df in zip(mapped, dev_flats):
-                idx = entry["index"].get(path)
+            for (compiled_graph, w, _ref), df in zip(mapped, dev_flats):
+                idx = compiled_graph["index"].get(path)
                 if idx is None:
                     continue
                 if not hit_any:
@@ -951,9 +951,9 @@ def apply_branch_adapter_set(
     # pipeline exactly as it was.
     staged: Dict[str, List[Tuple[Dict[str, Any], float, str]]] = {}
     for comp, model in targets.items():
-        entries = list(routed.get(comp) or ())
+        compiled_graphs = list(routed.get(comp) or ())
         staged[comp] = (
-            _stage_for(model, entries, request_id=request_id) if entries else [])
+            _stage_for(model, compiled_graphs, request_id=request_id) if compiled_graphs else [])
     want = max((_needed_rank(s) for s in staged.values()), default=0)
     pre = {comp: branch_bucket(model) for comp, model in targets.items()}
     current = max(pre.values(), default=0)
@@ -1151,7 +1151,7 @@ def normalize_adapter_state_dict(
     :func:`map_adapter` grammar (diffusers/peft/kohya) then applies as
     before. sdxl-class converters receive ``unet_config`` for SGM block
     remapping of kohya adapters. Returned ``network_alphas`` fold back in as
-    ``<module>.alpha`` entries."""
+    ``<module>.alpha`` compiled graphs."""
 
     fn = getattr(type(pipe), "lora_state_dict", None)
     if fn is None:

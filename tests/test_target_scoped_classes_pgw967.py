@@ -10,14 +10,14 @@ vocabulary could not EXPRESS a second target's coordinates.
 declared dim and fork. So a family adding its VAE decoder or text encoders had
 exactly two options, both wrong: declare one flat class table and have
 ``mint_plans`` hand all of it to every target (sdxl: 18 identical text-encoder
-graphs under 18 entry names, each compiled and paid for), or declare dims the
+graphs under 18 compiled graph names, each compiled and paid for), or declare dims the
 text encoder cannot receive.
 
 Red-verified against the pre-change tree:
 
 - the sdxl-shaped three-target declaration raises ``DeclarationError`` at
   construction ("graph class #18 omits declared dim(s) ['H_lat', 'W_lat']"),
-  so the entry-count assertions below could not even be reached;
+  so the compiled graph-count assertions below could not even be reached;
 - with the row-scope check removed but scoping honoured nowhere, every target
   gets 18 plans and the totals below fail.
 
@@ -113,7 +113,7 @@ def test_each_target_mints_only_its_own_coordinates() -> None:
 
     plans = aot_declaration.compiled_graph_plans(decl)
     assert len(plans) == 10
-    names = {aot_declaration.plan_entry_name(p) for p in plans}
+    names = {aot_declaration.plan_compiled_graph_name(p) for p in plans}
     assert "text_encoder/B_txt=1,T_txt=77" in names
     assert "vae.decode/B_img=1,H_lat=128,W_lat=128" in names
     assert "unet/cfg=true/B=2,H_lat=128,T_txt=77,W_lat=128" in names
@@ -295,7 +295,7 @@ def _sdxl_with_decoder() -> Compile:
       (``forward(sample, latent_embeds=None)``), a plain-Tensor return, no
       hook, no dispatch. Tiling still works — ``tiled_decode`` calls
       ``self.decoder`` per tile, at tile shapes the compiled graph does not declare, so
-      an offloaded pod misses the entry and degrades to eager observably
+      an offloaded pod misses the compiled graph and degrades to eager observably
       instead of serving a graph that skipped its own onload.
 
     No TEXT ENCODER target. Under the pinned ``transformers>=5.13,<6``,
@@ -363,13 +363,13 @@ def _sdxl_with_decoder() -> Compile:
     )
 
 
-def test_the_proposed_sdxl_declaration_costs_nine_entries_not_eighteen() -> None:
-    """A4's bill, exactly: the compiled graph goes 36 -> 45 entries, +25%.
+def test_the_proposed_sdxl_declaration_costs_nine_compiled_graphs_not_eighteen() -> None:
+    """A4's bill, exactly: the compiled graph goes 36 -> 45 compiled graphs, +25%.
 
     36 = 18 UNet classes x 2 adapter arms (pgw#790's branchless/lora64 fork,
     synthesized by the SDK). The decoder is not lift-capable, so it forks into
     nothing and contributes its 9 rows once. Without row scoping it would
-    contribute 18 — nine of them duplicate graphs under distinct entry names,
+    contribute 18 — nine of them duplicate graphs under distinct compiled graph names,
     each one a full compile paid for a second time.
     """
     decl = _sdxl_with_decoder()
@@ -380,7 +380,7 @@ def test_the_proposed_sdxl_declaration_costs_nine_entries_not_eighteen() -> None
     assert all(p.dynamic == () for p in (*unet, *dec))
     assert len(aot_declaration.compiled_graph_plans(decl)) == 27
 
-    names = {aot_declaration.plan_entry_name(p) for p in dec}
+    names = {aot_declaration.plan_compiled_graph_name(p) for p in dec}
     assert names == {
         f"vae.decoder/B=1,H_lat={h // 8},W_lat={w // 8}"
         for w, h in _SDXL_ASPECTS

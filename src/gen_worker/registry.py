@@ -34,7 +34,7 @@ import dataclasses
 from .api.compile_axis import warm_guidance_values
 from .compiled_graph_key import facts_digest
 from .api.export_contract import (
-    declares_export_contract, register_export_declaration, registered_entry,
+    declares_export_contract, register_export_declaration, registered_compiled_graph,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,9 +173,9 @@ class EndpointSpec:
     payload_param: str = "payload"
     resources: Resources = field(default_factory=Resources)
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
-    # Slot-declared entries in `models` (pgw#520): slot -> Slot metadata
+    # Slot-declared compiled graphs in `models` (pgw#520): slot -> Slot metadata
     # (selected_by/default_checkpoint). A subset of `models`'s keys — bare
-    # bindings have no entry here.
+    # bindings have no compiled graph here.
     slots: Dict[str, Slot[Any]] = field(default_factory=dict)
     # Resolved family name per Slot (the endpoint's Compile(family=...), or
     # the handler's derived config schema's @family registration) —
@@ -815,7 +815,7 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
         # carrying classes by `register_export_declaration`.
         if not family or not declares_export_contract(compile_decl):
             continue
-        if registered_entry(family) is compile_decl:
+        if registered_compiled_graph(family) is compile_decl:
             continue
         try:
             register_export_declaration(compile_decl)

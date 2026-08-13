@@ -98,7 +98,7 @@ class PreparedAdapter:
 # fingerprint, cache_key). The cached den_sd OBJECT is reused across requests
 # so the branch layer's staging cache (keyed on id(sd)) hits — repeat swaps
 # skip key-mapping AND the CPU flatten. Split tensors alias the AdapterCache
-# entries (converters rename keys, they don't copy data), but the cap stays
+# compiled graphs (converters rename keys, they don't copy data), but the cap stays
 # small so this cache can never pin many evicted adapters by itself.
 # Guarded by its own lock: activate() calls this BEFORE taking the residency
 # lock, and multi-slot workers activate from several threads.
@@ -129,7 +129,7 @@ def _te_prefix_to_component() -> tuple[tuple[str, str], ...]:
 # Config fields that DISCRIMINATE denoiser structure. The UNet set alone
 # (pgw#740) made every DiT fingerprint to "|||" — a transformer has none of
 # those fields — so two structurally different DiTs shared one normalized-split
-# cache entry. The fingerprint is generic: it takes whatever the module
+# cache compiled graph. The fingerprint is generic: it takes whatever the module
 # actually declares, and says so when it declares nothing.
 _FINGERPRINT_FIELDS = (
     # UNet-shaped
@@ -146,7 +146,7 @@ _FINGERPRINT_FIELDS = (
 def _denoiser_fingerprint(pipe: Any) -> str:
     """Kohya/SGM normalization consults the denoiser's config — two
     checkpoints sharing a pipeline class but differing in block layout must
-    not share a normalized-split cache entry.
+    not share a normalized-split cache compiled graph.
 
     pgw#740: the field list must cover DiTs, not only UNets. A fingerprint that
     resolves to nothing is NOT a cache key — it is a collision — so a module
@@ -190,7 +190,7 @@ def _split_adapters(
     normalized through the pipeline class's own ``lora_state_dict`` converter
     (zero drift with the boot-time path, te#81 pattern), then split: denoiser
     keys ride the additive branch, the rest (text-encoder halves) keep peft.
-    Branch entries are (state_dict, weight, ref) — the
+    Branch compiled graphs are (state_dict, weight, ref) — the
     models.w8a8_lora.apply_branch_adapter_set contract.
 
     gw#679: the denoiser half is ROUTED to the component its keys name, so a
@@ -227,7 +227,7 @@ def _split_adapters(
             )
             with _SPLIT_CACHE_LOCK:
                 # A racing thread may have inserted the same key — keep the
-                # FIRST entry so every caller shares one den_sd object (the
+                # FIRST compiled graph so every caller shares one den_sd object (the
                 # branch staging cache keys on its id).
                 cached = _SPLIT_CACHE.setdefault(key, cached)
                 while len(_SPLIT_CACHE) > _SPLIT_CACHE_MAX:
@@ -344,15 +344,15 @@ def _reject_zero_delta(state_dict: Dict[str, Any], *, ref: str = "") -> None:
         prefix = m.group(1) if m.group(1) is not None else m.group(3)
         half = m.group(2) if m.group(2) is not None else m.group(4)
         half = "down" if half in ("down", "A") else "up"
-        entry = pairs.setdefault(prefix, {})
-        if entry.get(half):
+        compiled_graph = pairs.setdefault(prefix, {})
+        if compiled_graph.get(half):
             continue
         try:
             nonzero = bool((t != 0).any())
         except Exception:  # exotic dtype without eq — cannot vouch either way
             continue
-        entry[half] = nonzero
-        if entry.get("down") and entry.get("up"):
+        compiled_graph[half] = nonzero
+        if compiled_graph.get("down") and compiled_graph.get("up"):
             return
     raise RefCompatibilitySurprise(
         "adapter carries NO visible delta (no lora down/up pair with both "
@@ -413,7 +413,7 @@ class AdapterCache:
 
     def __init__(self, max_bytes: int = ADAPTER_CACHE_MAX_BYTES) -> None:
         self._max = int(max_bytes)
-        self._entries: "OrderedDict[str, tuple[Dict[str, Any], int]]" = OrderedDict()
+        self._compiled_graphs: "OrderedDict[str, tuple[Dict[str, Any], int]]" = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
         self.hits = 0
@@ -421,11 +421,11 @@ class AdapterCache:
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
         with self._lock:
-            hit = self._entries.get(key)
+            hit = self._compiled_graphs.get(key)
             if hit is None:
                 self.misses += 1
                 return None
-            self._entries.move_to_end(key)
+            self._compiled_graphs.move_to_end(key)
             self.hits += 1
             return hit[0]
 
@@ -434,12 +434,12 @@ class AdapterCache:
         if size > self._max:
             return
         with self._lock:
-            if key in self._entries:
+            if key in self._compiled_graphs:
                 return
-            self._entries[key] = (state_dict, size)
+            self._compiled_graphs[key] = (state_dict, size)
             self._bytes += size
-            while self._bytes > self._max and len(self._entries) > 1:
-                _, (_, evicted) = self._entries.popitem(last=False)
+            while self._bytes > self._max and len(self._compiled_graphs) > 1:
+                _, (_, evicted) = self._compiled_graphs.popitem(last=False)
                 self._bytes -= evicted
 
     @property
@@ -449,7 +449,7 @@ class AdapterCache:
 
     def __len__(self) -> int:
         with self._lock:
-            return len(self._entries)
+            return len(self._compiled_graphs)
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +628,7 @@ class AdapterResidency:
                     t0 = time.monotonic()
                     try:
                         # Shallow copy: diffusers' conversion utilities consume
-                        # the dict; the cached entry must stay intact.
+                        # the dict; the cached compiled graph must stay intact.
                         pipe.load_lora_weights(dict(a.state_dict), adapter_name=a.name)
                     except (ValidationError, RefCompatibilitySurprise):
                         raise

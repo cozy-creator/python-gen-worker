@@ -237,31 +237,31 @@ def mint_plans(decl: Compile, target: str) -> Tuple[MintPlan, ...]:
     return tuple(plans)
 
 
-def entry_coordinates(plan: MintPlan) -> Tuple[Tuple[Tuple[str, Any], ...], Tuple[Tuple[str, int], ...]]:
-    """The ``(fork, class_dims)`` coordinate one packaged entry is named by.
+def compiled_graph_coordinates(plan: MintPlan) -> Tuple[Tuple[Tuple[str, Any], ...], Tuple[Tuple[str, int], ...]]:
+    """The ``(fork, class_dims)`` coordinate one packaged compiled graph is named by.
 
     A static-rows plan is one class row, so its dims ARE the coordinate; a
     dynamic-collapse plan spans its rows, so the dims segment is empty and
-    the fork coordinate alone names the entry (the admitted range is the
-    entry's recorded contract, not its name).
+    the fork coordinate alone names the compiled graph (the admitted range is the
+    compiled graph's recorded contract, not its name).
     """
     if len(plan.rows) == 1 and not plan.dynamic:
         return plan.fork, plan.rows[0].dims
     return plan.fork, ()
 
 
-def entry_name(
+def compiled_graph_name(
     target: str,
     fork: Tuple[Tuple[str, Any], ...] = (),
     class_dims: Tuple[Tuple[str, int], ...] = (),
 ) -> str:
-    """The deterministic NAMED-ENTRY label of one graph class inside a
+    """The deterministic NAMED-COMPILED_GRAPH label of one graph class inside a
     multi-graph compiled graph (pgw#758, Paul's ruling: separate graphs per function,
     combined into one file).
 
     ``<target>/<fork k=v,...>/<dims k=v,...>`` with empty segments omitted;
     pairs are sorted, bools render lowercase. The name is the AOTI model
-    name inside the ``.pt2`` AND the key of ``metadata.entries``, so it must
+    name inside the ``.pt2`` AND the key of ``metadata.compiled graphs``, so it must
     be stable across mints — it derives only from declaration coordinates,
     never from trace artifacts.
     """
@@ -281,15 +281,15 @@ def entry_name(
     return "/".join(segments)
 
 
-def plan_entry_name(plan: MintPlan) -> str:
-    fork, dims = entry_coordinates(plan)
-    return entry_name(plan.target, fork, dims)
+def plan_compiled_graph_name(plan: MintPlan) -> str:
+    fork, dims = compiled_graph_coordinates(plan)
+    return compiled_graph_name(plan.target, fork, dims)
 
 
 def compiled_graph_plans(decl: Compile) -> Tuple[MintPlan, ...]:
     """EVERY mint plan of one family's declaration, across ALL declared
     targets — the whole class set one compiled graph packages (pgw#758). Refuses a
-    declaration whose plans would collide on an entry name (two classes one
+    declaration whose plans would collide on an compiled graph name (two classes one
     label could not be told apart by a refusal)."""
     if not decl.targets:
         raise MintRefused(
@@ -300,10 +300,10 @@ def compiled_graph_plans(decl: Compile) -> Tuple[MintPlan, ...]:
         plans.extend(mint_plans(decl, target))
     seen: Dict[str, MintPlan] = {}
     for plan in plans:
-        name = plan_entry_name(plan)
+        name = plan_compiled_graph_name(plan)
         if name in seen:
             raise MintRefused(
-                f"family {decl.family!r}: two mint plans share entry name "
+                f"family {decl.family!r}: two mint plans share compiled_graph name "
                 f"{name!r} — the declaration does not discriminate them")
         seen[name] = plan
     return tuple(plans)
@@ -447,19 +447,19 @@ _DTYPES: Dict[str, str] = {
 
 
 def _resolve_axis(
-    entry: Any, seed: GraphClass, config: Any, *, input_name: str, family: str,
+    compiled_graph: Any, seed: GraphClass, config: Any, *, input_name: str, family: str,
 ) -> int:
-    if isinstance(entry, int):
-        return entry
-    if isinstance(entry, str):
-        value = seed.dim_map.get(entry)
+    if isinstance(compiled_graph, int):
+        return compiled_graph
+    if isinstance(compiled_graph, str):
+        value = seed.dim_map.get(compiled_graph)
         if value is None:
             raise MintRefused(
-                f"input {input_name!r} names dim {entry!r}, which the "
+                f"input {input_name!r} names dim {compiled_graph!r}, which the "
                 f"selected class row does not carry (row dims: "
                 f"{sorted(seed.dim_map)!r})")
         return int(value)
-    _kind, field = entry
+    _kind, field = compiled_graph
     raw: Any = _MISSING if config is None else getattr(config, field, _MISSING)
     if raw is _MISSING and config is not None and hasattr(config, "get"):
         raw = config.get(field, _MISSING)
@@ -582,7 +582,7 @@ def declared_inputs(
         # inheritance word, and an empty dtype (only reachable through a
         # hand-built row that dodged Input's own validation) is refused
         # rather than guessed. The silent module-dtype default is what minted
-        # sdxl's scalar timestep bfloat16 against float32 traffic: 36 entries,
+        # sdxl's scalar timestep bfloat16 against float32 traffic: 36 compiled graphs,
         # zero admissible calls, published.
         if row.dtype == MODEL_DTYPE:
             dtype = mod_dtype
@@ -791,12 +791,12 @@ __all__ = [
     "derived_dynamic",
     "dim_hull",
     "effective_shape_strategy",
-    "entry_coordinates",
-    "entry_name",
+    "compiled_graph_coordinates",
+    "compiled_graph_name",
     "fork_gaps",
     "load_declaration",
     "mint_plans",
-    "plan_entry_name",
+    "plan_compiled_graph_name",
     "select_plan",
     "target_args",
     "target_attr",

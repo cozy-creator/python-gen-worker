@@ -5,7 +5,7 @@ THE FIELD RECORD. gen-worker 0.93.2, pod `7evvazd2xplzml` (A100-SXM4-80GB),
 recipe, and then refused in `trace_graph` — exit=2, `deterministic`, four
 identical attempts::
 
-    aot mint refused: entry 'transformer/adapter=true,cfg=true':
+    aot mint refused: compiled graph 'transformer/adapter=true,cfg=true':
     declared-range gate: declared dynamic dim names input 'x', which is not a
     user input of the exported program (inputs: ['cap_feats_0',
     'cap_feats_1', 'lora_a', 'lora_b', 't', 'x_0', 'x_1'])

@@ -79,7 +79,7 @@ def test_the_rig_RE_FINDS_pgw1141b_when_its_fix_is_deleted(
     """THE PROOF THE RIG IS WORTH ANYTHING.
 
     ``reintroduce(monkeypatch, "pgw1141b")`` deletes both halves of ``f3ab710e``
-    — the registration inside ``arm_entry``, and the object-first lane
+    — the registration inside ``arm_compiled_graph``, and the object-first lane
     reader — putting the tree back where the fix found it. The rig must then
     reproduce POD PROOF #4 (RTX A4500, sm_86, gen-worker 0.111.0) verbatim::
 
@@ -191,10 +191,10 @@ def test_the_declared_band_survives_EVERY_production_route(origin: str) -> None:
 # ===========================================================================
 
 
-def test_a_compiled_graph_whose_ENTRY_RAISES_revokes_itself_and_installs_no_target(
+def test_a_compiled_graph_whose_COMPILED_GRAPH_RAISES_revokes_itself_and_installs_no_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
-    """The de-arm still has teeth, forced the honest way: the packaged entry
+    """The de-arm still has teeth, forced the honest way: the packaged compiled graph
     really raises when the arm dispatches through it, so the artifact revokes
     ITSELF. Nothing here sets ``failed`` by hand.
 
@@ -241,7 +241,7 @@ def test_a_WARM_DISPATCH_moves_the_artifacts_own_counter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """The other arm of the proof pass, and it is a REAL dispatch: the handler
-    calls the wrapped forward at a declared shape row, so the packaged entry's
+    calls the wrapped forward at a declared shape row, so the packaged compiled graph's
     own invocation count moves. pgw#1141's rig moved a counter by hand."""
     boot = AdoptRig(tmp_path, monkeypatch, hub, warm_dispatches=1).boot()
 
@@ -273,7 +273,7 @@ def _tree(root: Path, files: Dict[str, str]) -> None:
 
 
 SEAM = '''
-def arm_entry(pipeline, *a, **k):
+def arm_compiled_graph(pipeline, *a, **k):
     meta = {}
     note_aot_key(str(meta.get("compiled_graph_key") or ""))
     return meta
@@ -361,7 +361,7 @@ def test_the_fence_goes_RED_when_the_SEAM_STOPS_FEEDING(tmp_path: Path) -> None:
     pgw#1141b again — so the seam's own call is an asserted fact, not a habit.
     """
     src, tests = tmp_path / "src", tmp_path / "tests"
-    _tree(src, {"aot_serve.py": "def arm_entry(pipeline, *a, **k):\n    return {}\n"})
+    _tree(src, {"aot_serve.py": "def arm_compiled_graph(pipeline, *a, **k):\n    return {}\n"})
     tests.mkdir()
     allowlist = tmp_path / "allow.txt"
     allowlist.write_text("")

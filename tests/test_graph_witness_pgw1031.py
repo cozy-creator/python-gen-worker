@@ -76,7 +76,7 @@ def _gpu_runtime() -> Any:
 def _trace(
     vehicle_name: str, tree: Path,
 ) -> Tuple[Dict[str, Any], Any, Dict[str, Any]]:
-    """``({entry: keying block}, {entry: ek1 key}, declared envelope)`` — trace
+    """``({compiled graph: keying block}, {compiled graph: ek1 key}, declared envelope)`` — trace
     only. pgw#1176: a declaration folds to a KEY SET, not one key."""
     from harness import rig_vehicles
 
@@ -100,10 +100,10 @@ def _trace(
         blocks[traced.name] = traced.block
         traced.program = None  # the largest object here; nothing below reads it
     envelope = fleet_compiled_graphs.declared_envelope_block(cfg)
-    entry_keys, _hashes, _manifest = boot_key.fold(
+    compiled_graph_keys, _hashes, _manifest = boot_key.fold(
         blocks, family=export_spec.family, precision="", strict=True,
         lora_bucket=int(cfg.lora_bucket or 0), envelope=envelope)
-    return blocks, entry_keys, envelope
+    return blocks, compiled_graph_keys, envelope
 
 
 @pytest.fixture(scope="module")
@@ -180,9 +180,9 @@ def test_the_witness_backstops_a_residual_collision(
     # about the class this artifact carries, which is the only thing it could
     # ever honestly answer about.
     name = sorted(fixed["blocks"])[0]
-    compiled_graph = aot_serve.entry_metadata(
+    compiled_graph = aot_serve.compiled_graph_metadata(
         family=PAIR[0], precision="", compiled_graph_key=fixed["key"],
-        name=name, entry=fixed["blocks"][name],
+        name=name, compiled_graph=fixed["blocks"][name],
         strict_export=True, lora_bucket=0)
 
     mine = {name: boot_key.graph_witnesses_of(fixed["blocks"])[name]}
@@ -204,12 +204,12 @@ def test_a_witnessless_compiled_graph_is_refused_not_skipped() -> None:
     A pre-pgw#1031 compiled graph records no witness, so it cannot be shown to compute
     this pod's graph — and 'cannot be shown to match' is what a refusal means.
     """
-    meta = {"entry": {"name": "unet", "class_hash": "aa" * 8}}
+    meta = {"compiled_graph": {"name": "unet", "class_hash": "aa" * 8}}
     reason = aot_identity.verify_graph_witness(meta, {"unet": "d" * 16})
     assert "graph_witness" in reason and "unet" in reason
 
     assert aot_identity.verify_graph_witness(
-        {"entry": {"name": "unet", "graph_witness": "d" * 16}}, {})
+        {"compiled_graph": {"name": "unet", "graph_witness": "d" * 16}}, {})
     assert aot_identity.verify_graph_witness(
         {}, {"unet": "d" * 16})
 
@@ -219,7 +219,7 @@ def test_a_witnessless_compiled_graph_is_refused_not_skipped() -> None:
 # is an unproven one") — and one artifact carries one class now, so the set it
 # guarded cannot exist. Porting it would have preserved the collection in the
 # suite after removing it from the code. What survives is the row above: an
-# entry that records no witness is refused, never skipped.
+# compiled graph that records no witness is refused, never skipped.
 
 
 def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
@@ -227,9 +227,9 @@ def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
     from gen_worker import compiled_graph_key as ck, compile_cache as cc, env_seal
 
     name = sorted(row["blocks"])[0]
-    meta = aot_serve.entry_metadata(
+    meta = aot_serve.compiled_graph_metadata(
         family=family, precision="", compiled_graph_key=row["key"][name],
-        name=name, entry=row["blocks"][name],
+        name=name, compiled_graph=row["blocks"][name],
         strict_export=True, lora_bucket=0)
     meta["kind"] = ck.EXPORTED_KIND
     meta["toolchain"] = dict(cc.toolchain_digest())
@@ -328,7 +328,7 @@ def _derived_key(traced: Dict[str, Any], family: str) -> Any:
     """A ``DerivedKey`` carrying one family's real traced witnesses."""
     blocks = traced[family]["blocks"]
     return boot_key.DerivedKey(
-        entry_keys=dict(traced[family]["key"]), class_hashes={}, manifest="",
+        compiled_graph_keys=dict(traced[family]["key"]), class_hashes={}, manifest="",
         workers=1, width_reason="pgw#1031 fixture", traced=len(blocks),
         memo="miss", wall_ms=1,
         graph_witnesses=boot_key.graph_witnesses_of(blocks))
@@ -340,9 +340,9 @@ def test_the_adopt_path_admits_the_pod_whose_graph_it_is(
 ) -> None:
     fixed = traced_pair[PAIR[0]]
     name = sorted(fixed["blocks"])[0]
-    meta = aot_serve.entry_metadata(
+    meta = aot_serve.compiled_graph_metadata(
         family=PAIR[0], precision="", compiled_graph_key=fixed["key"][name],
-        name=name, entry=fixed["blocks"][name],
+        name=name, compiled_graph=fixed["blocks"][name],
         strict_export=True, lora_bucket=0)
     # pgw#1176: a boot returns ONE outcome per declared class; this fixture
     # traces one, so the unpack ASSERTS that arity.
@@ -368,9 +368,9 @@ def test_the_adopt_path_refuses_the_colliding_pod(
     name = sorted(fixed["blocks"])[0]
     # the fix: the shared class keys apart
     assert fixed["key"][name] != branchy["key"][name]
-    meta = aot_serve.entry_metadata(
+    meta = aot_serve.compiled_graph_metadata(
         family=PAIR[0], precision="", compiled_graph_key=fixed["key"][name],
-        name=name, entry=fixed["blocks"][name],
+        name=name, compiled_graph=fixed["blocks"][name],
         strict_export=True, lora_bucket=0)
     (out,) = _attempt(
         monkeypatch, tmp_path, _derived_key(traced_pair, PAIR[1]),

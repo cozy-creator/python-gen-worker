@@ -34,10 +34,10 @@ Fixture / helper interface
 
 ``spawn_entrypoint(tmp_path, functions=..., env_overrides=...)`` (helper)
     Launches the real entrypoint as a subprocess against a baked manifest and
-    returns an ``EntrypointProc``: ``.wait_for_output(pred)`` (progress-gated
+    returns an ``compiledgraphpointProc``: ``.wait_for_output(pred)`` (progress-gated
     on output growth), ``.output()``, ``.phases()`` (parsed
     ``worker.startup.phase`` / ``worker.fatal`` lines), ``.send_signal()``,
-    ``.terminate_and_wait()``. ``manifest_entry(...)`` builds function rows;
+    ``.terminate_and_wait()``. ``manifest_compiled_graph(...)`` builds function rows;
     by default they point at ``tests_v2.catalog``.
 
 ``torchless`` (fixture)
@@ -123,7 +123,7 @@ from harness.progress_wait import Cadence, StalledError  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _fresh_process_settings():
-    """pgw#931: Settings are PUBLISHED by a process entry, not cached lazily.
+    """pgw#931: Settings are PUBLISHED by a process compiled graph, not cached lazily.
     Each test starts from a clean install over its own env (see
     tests/conftest.py for the full rationale)."""
     gw_config.reset_for_test()
@@ -389,16 +389,16 @@ def standalone_scheduler() -> Iterator[Tuple[FakeScheduler, int]]:
         server.stop(grace=0)
 
 
-def manifest_entry(
+def manifest_compiled_graph(
     *, name: str = "echo", module: str = "tests_v2.catalog",
     kind: str = "inference", gpu: bool = False,
 ) -> Dict[str, Any]:
-    entry: Dict[str, Any] = {"name": name, "module": module, "kind": kind}
-    entry["resources"] = {"gpu": True} if gpu else {}
-    return entry
+    compiled_graph: Dict[str, Any] = {"name": name, "module": module, "kind": kind}
+    compiled_graph["resources"] = {"gpu": True} if gpu else {}
+    return compiled_graph
 
 
-class EntrypointProc:
+class compiledgraphpointProc:
     """One live ``python -m gen_worker.entrypoint`` subprocess with drained,
     inspectable output. All waits are progress-gated on output growth or on
     process death — never a wall clock."""
@@ -484,7 +484,7 @@ def spawn_entrypoint(
     *,
     functions: List[Dict[str, Any]],
     env_overrides: Optional[Dict[str, str]] = None,
-) -> EntrypointProc:
+) -> compiledgraphpointProc:
     """Launch the REAL entrypoint module with a baked manifest. The default
     hello target is a definitively-closed port; pass ORCHESTRATOR_PUBLIC_ADDR
     in ``env_overrides`` to dial a live ``standalone_scheduler()``."""
@@ -504,7 +504,7 @@ def spawn_entrypoint(
         [sys.executable, "-m", "gen_worker.entrypoint"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    return EntrypointProc(proc)
+    return compiledgraphpointProc(proc)
 
 
 # ---------------------------------------------------------------------------

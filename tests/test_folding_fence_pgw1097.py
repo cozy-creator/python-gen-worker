@@ -45,7 +45,7 @@ import pytest
 
 from gen_worker import aot_mint, aot_package, aot_serve
 
-ENTRY = "denoise"
+COMPILED_GRAPH = "denoise"
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ def _package(tmp_path: Path, rows: Sequence[Mapping[str, object]]) -> Path:
     out = tmp_path / "compiled_graph.pt2"
     with zipfile.ZipFile(out, "w") as zf:
         zf.writestr(
-            f"data/aotinductor/{ENTRY}/c{ENTRY}.wrapper.cpp",
+            f"data/aotinductor/{COMPILED_GRAPH}/c{COMPILED_GRAPH}.wrapper.cpp",
             _wrapper_source(rows))
     return out
 
@@ -128,7 +128,7 @@ def test_folded_weight_is_named_and_refused(tmp_path: Path) -> None:
     kernel are one checkpoint's — only the mint can."""
     package = _package(tmp_path, FOLDED_ROWS)
     reasons = aot_package.folded_weights(
-        _program(*WEIGHTS), package, WEIGHTS, ENTRY)
+        _program(*WEIGHTS), package, WEIGHTS, COMPILED_GRAPH)
     assert reasons, "a folded weight must not pass the fence"
     text = reasons[0]
     assert "gn.bias" in text and "logit_scale" in text
@@ -138,7 +138,7 @@ def test_folded_weight_is_named_and_refused(tmp_path: Path) -> None:
 def test_fenced_package_passes(tmp_path: Path) -> None:
     package = _package(tmp_path, BOUND_ROWS)
     assert aot_package.folded_weights(
-        _program(*WEIGHTS), package, WEIGHTS, ENTRY) == []
+        _program(*WEIGHTS), package, WEIGHTS, COMPILED_GRAPH) == []
 
 
 def test_anonymous_literals_are_not_weights(tmp_path: Path) -> None:
@@ -146,12 +146,12 @@ def test_anonymous_literals_are_not_weights(tmp_path: Path) -> None:
     weight — routine, and never this gate's business."""
     program = _program(*WEIGHTS, "_tensor_constant0")
     package = _package(tmp_path, BOUND_ROWS)
-    assert aot_package.folded_weights(program, package, WEIGHTS, ENTRY) == []
-    assert aot_package.eliminated_constants(program, package, ENTRY) == [
+    assert aot_package.folded_weights(program, package, WEIGHTS, COMPILED_GRAPH) == []
+    assert aot_package.eliminated_constants(program, package, COMPILED_GRAPH) == [
         "_tensor_constant0"]
 
 
-def test_state_dict_entries_the_program_never_lifted_are_out_of_scope(
+def test_state_dict_compiled_graphs_the_program_never_lifted_are_out_of_scope(
     tmp_path: Path,
 ) -> None:
     """``torch.export`` deduplicates TIED parameters at the program level, so
@@ -159,7 +159,7 @@ def test_state_dict_entries_the_program_never_lifted_are_out_of_scope(
     property, not an inductor fold, and this fence does not claim it."""
     package = _package(tmp_path, [{"fqn": "a.weight"}])
     assert aot_package.folded_weights(
-        _program("a.weight"), package, ("a.weight", "b.weight"), ENTRY) == []
+        _program("a.weight"), package, ("a.weight", "b.weight"), COMPILED_GRAPH) == []
 
 
 def test_no_state_dict_means_no_verdict(tmp_path: Path) -> None:
@@ -168,7 +168,7 @@ def test_no_state_dict_means_no_verdict(tmp_path: Path) -> None:
     ``unbindable_constants`` uses."""
     package = _package(tmp_path, FOLDED_ROWS)
     assert aot_package.folded_weights(
-        _program(*WEIGHTS), package, (), ENTRY) == []
+        _program(*WEIGHTS), package, (), COMPILED_GRAPH) == []
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ FENCE_FLAG = "aot_inductor.use_runtime_constant_folding"
 
 
 def test_every_mint_compiles_with_the_fence_on() -> None:
-    configs = aot_mint._entry_configs(None)
+    configs = aot_mint._compiled_graph_configs(None)
     assert configs[FENCE_FLAG] is True
     assert configs["aot_inductor.package_constants_in_so"] is False
 
@@ -189,12 +189,12 @@ def test_weightless_and_real_weight_mints_share_one_config() -> None:
     """pgw#1080 needed this flag because a weightless mint's values are FAKE;
     pgw#1097 needs it because a real mint's values are one CHECKPOINT'S. Two
     motives, one config — so `weightless` no longer selects anything."""
-    assert (aot_mint._entry_configs(None, weightless=True)
-            == aot_mint._entry_configs(None, weightless=False))
+    assert (aot_mint._compiled_graph_configs(None, weightless=True)
+            == aot_mint._compiled_graph_configs(None, weightless=False))
 
 
 def test_a_caller_cannot_turn_the_fence_off() -> None:
-    configs = aot_mint._entry_configs({FENCE_FLAG: False})
+    configs = aot_mint._compiled_graph_configs({FENCE_FLAG: False})
     assert configs[FENCE_FLAG] is True
 
 
@@ -205,7 +205,7 @@ def test_the_fence_does_not_use_always_keep_tensor_constants() -> None:
     refusal. Measured red in CI on `WarmSensitive` (a plain-attribute table
     built inside `forward`). The runtime split's outputs are `FoldedConstant`
     rows, which that gate already exempts."""
-    assert "always_keep_tensor_constants" not in aot_mint._entry_configs(None)
+    assert "always_keep_tensor_constants" not in aot_mint._compiled_graph_configs(None)
 
 
 # ---------------------------------------------------------------------------
@@ -214,9 +214,9 @@ def test_the_fence_does_not_use_always_keep_tensor_constants() -> None:
 
 
 def _meta(**over: object) -> dict:
-    meta = aot_serve.entry_metadata(
+    meta = aot_serve.compiled_graph_metadata(
         family="micro-diffusion", precision="bf16", compiled_graph_key="ck1-test",
-        name=ENTRY, entry={
+        name=COMPILED_GRAPH, compiled_graph={
             "target": "transformer", "fork": [], "class_dims": [],
             "inputs": [{"name": "latent", "position": 0, "dtype": "float32",
                         "shape": [1, 16, "s0"], "path": []}],
@@ -302,8 +302,8 @@ def test_a_synthetic_declaration_round_trips(tmp_path: Path) -> None:
     """The fixture is only worth what it parses like: prove the synthetic
     wrapper reads back through the same introspection the real one does."""
     package = _package(tmp_path, BOUND_ROWS)
-    declared = aot_package.declared_constants(package, ENTRY)
+    declared = aot_package.declared_constants(package, COMPILED_GRAPH)
     assert [c.fqn for c in declared] == list(WEIGHTS)
     assert all(c.source == aot_serve.SOURCE_STATE_DICT for c in declared)
     assert json.loads(json.dumps(
-        aot_package.constants_manifest(package, ENTRY)))
+        aot_package.constants_manifest(package, COMPILED_GRAPH)))

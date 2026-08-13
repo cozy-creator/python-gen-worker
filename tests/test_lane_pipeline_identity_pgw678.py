@@ -17,7 +17,7 @@ never in the adapter code. It is an OBJECT IDENTITY defect in the executor:
     Slot-declared pipeline slot enters the share plan;
   * an OVERRIDDEN component is popped OUT of that plan (its bytes differ from
     the base's), so the lane acquires a non-empty EXCLUSIVE module set;
-  * `_register_lane` books `nn.ModuleDict(exclusive)` as the residency entry —
+  * `_register_lane` books `nn.ModuleDict(exclusive)` as the residency compiled graph —
     correct, and deliberate: LRU demote/promote must move only lane-owned
     weights, never the shared encoder;
   * but `_adapter_target` read `residency.obj(ref)` as if it were the
@@ -181,7 +181,7 @@ def _register(pipe: Any, *, override: bool) -> _ExecStub:
 
 
 def test_component_override_makes_the_residency_handle_a_moduledict() -> None:
-    """The mechanism, pinned: WITH an override the lane's residency entry is an
+    """The mechanism, pinned: WITH an override the lane's residency compiled graph is an
     `nn.ModuleDict` of exclusive modules; WITHOUT one it is the pipeline. Both
     are correct as MOVEMENT handles — only reading one as the pipeline is not."""
     pipe = _tiny_pipe()

@@ -4,14 +4,14 @@ Paul's contract: ``Resources(vram_gb=N)`` is a placement MINIMUM ("a machine
 with at least N GB"), never a usage cap; the worker packs real card capacity
 with checkpoints (all resident where they fit), serves resident models NOW
 while absent models download in the background, and LRU-evicts exclusive
-entries (per-pick UNets) before genuinely shared components (TE/VAE).
+compiled graphs (per-pick UNets) before genuinely shared components (TE/VAE).
 
 Layers under test, all real logic (fakes only at the torch module boundary):
 1. ``_estimate_setup_need`` — the pre-load headroom ask that used to reserve
    the declared ``vram_gb`` wholesale for every never-seen pick (the live
    9.8/24 GB one-pipeline incident).
 2. ``Residency`` holders semantics — shared components are demotable while
-   idle, never evictable while referenced, and multi-holder entries sort
+   idle, never evictable while referenced, and multi-holder compiled graphs sort
    last in LRU victim order.
 3. The packing juggle: a 24 GB budget holds several ~5 GB picks hot; only
    real pressure demotes the LRU one (planner logic real; modules faked).
@@ -156,16 +156,16 @@ def test_lru_victims_order_multi_holder_shared_last() -> None:
     res.acquire_shared(shared, _FakeModule, vram_bytes=2 * _GiB)
     res.acquire_shared(shared, lambda: pytest.fail("must hit"))  # 2nd holder
     assert res.shared_refcount(shared) == 2
-    # Exclusive UNet lanes, touched AFTER the shared entry (more recent).
+    # Exclusive UNet lanes, touched AFTER the shared compiled graph (more recent).
     res.track_vram("unet-a", _FakeModule(), vram_bytes=3 * _GiB)
     res.track_vram("unet-b", _FakeModule(), vram_bytes=3 * _GiB)
     victims = res.lru_vram_victims()
-    # Both exclusive lanes come first despite the shared entry being LRU.
+    # Both exclusive lanes come first despite the shared compiled graph being LRU.
     assert victims[-1] == shared.cache_id()
     assert set(victims[:-1]) == {"unet-a", "unet-b"}
 
 
-def test_release_shared_leaves_entry_resident_for_the_next_pick() -> None:
+def test_release_shared_leaves_compiled_graph_resident_for_the_next_pick() -> None:
     # pgw#636: no eager drain — a hot GPU keeps components resident; the
     # next pick with equal bytes aliases them for free.
     res = _budget_residency(24)
@@ -178,7 +178,7 @@ def test_release_shared_leaves_entry_resident_for_the_next_pick() -> None:
     assert res.acquire_shared(key, lambda: pytest.fail("must hit")) is obj
     stats = res.shared_stats()
     assert stats["hits"] == 1 and stats["misses"] == 1
-    # drain reclaims only unreferenced entries.
+    # drain reclaims only unreferenced compiled graphs.
     assert res.release_shared(key) == 0
     assert res.drain_shared() == 1
 
@@ -186,7 +186,7 @@ def test_release_shared_leaves_entry_resident_for_the_next_pick() -> None:
 def test_packing_juggle_24gb_card_holds_multiple_picks() -> None:
     """The mandate's core arithmetic on REAL make_room logic: ~5 GB picks
     pack a 24 GiB card until real pressure, then the LRU pick demotes —
-    never the multi-holder shared entry, never the executing pick."""
+    never the multi-holder shared compiled graph, never the executing pick."""
     res = _budget_residency(24)
     picks = ["pick-a", "pick-b", "pick-c", "pick-d"]
     objs = {}

@@ -1,12 +1,12 @@
-"""pgw#840: the entry child must BE the parent's own gen_worker.
+"""pgw#840: the compiled graph child must BE the parent's own gen_worker.
 
 The defect this closes was found through pgw#830's attribution invariant going
-red on a tree nobody had changed. The failing entry's table had no child spans
+red on a tree nobody had changed. The failing compiled graph's table had no child spans
 at all — the whole compile fell into ``reap_lag_s`` — while the compile itself
 had succeeded and returned files that exist. Nothing in the pool was wrong; the
 CHILD was a different gen_worker, old enough to predate the span table.
 
-MEASURED on the box that filed it: 236 preserved entry reports, 150 of them
+MEASURED on the box that filed it: 236 preserved compiled graph reports, 150 of them
 written by a pre-pgw#830 child, several under a parent that had pgw#832 (its
 pool workdir holds the ``seal-lib-memo.json`` only such a parent writes). Same
 venv, same interpreter — ``python -m gen_worker.aot_compile_child`` simply does
@@ -69,7 +69,7 @@ def test_the_child_resolves_the_parents_own_gen_worker(tmp_path: Path) -> None:
     resolved = Path(out.stdout.strip()).resolve()
 
     assert resolved == Path(pool.PACKAGE_ROOT) / "gen_worker" / "__init__.py", (
-        f"the entry child resolved gen_worker to {resolved} while the parent "
+        f"the compiled_graph child resolved gen_worker to {resolved} while the parent "
         f"runs from {pool.PACKAGE_ROOT}. That child compiles the loose files "
         f"the compiled_graph publishes, and every gate runs in the parent against the "
         f"parent's program — the assignment is only sound while both are the "
@@ -82,15 +82,15 @@ def test_the_child_resolves_the_parents_own_gen_worker(tmp_path: Path) -> None:
 
 
 _STALE_CHILD = '''#!{python}
-"""A pre-pgw#840 entry child: compiles nothing, reports the OLD shape."""
+"""A pre-pgw#840 compiled_graph child: compiles nothing, reports the OLD shape."""
 import json, sys
 from pathlib import Path
 
 job = json.loads(Path(sys.argv[-1]).read_bytes())
 loose = Path(job["report"]).parent / "fake.wrapper.cpp"
-loose.write_text("// as far as the parent can tell, a compiled entry\\n")
+loose.write_text("// as far as the parent can tell, a compiled compiled graph\\n")
 Path(job["report"]).write_text(json.dumps({{
-    "entry": job["entry"], "status": "compiled", "files": [str(loose)],
+    "compiled graph": job["compiled graph"], "status": "compiled", "files": [str(loose)],
     "detail": "1 loose file(s)", "elapsed_s": 0.01, "peak_rss_bytes": 1,
     "phases": {{}},
 }}))
@@ -115,7 +115,7 @@ def test_a_child_from_other_code_is_refused_by_name(tmp_path: Path) -> None:
 
     Before pgw#840 this run SUCCEEDED: the pool took the files, recorded
     ``compile_s`` with no child spans inside it, absorbed the entire compile
-    into ``reap_lag_s`` and published an entry compiled by code the parent
+    into ``reap_lag_s`` and published an compiled graph compiled by code the parent
     never ran. The only visible trace was pgw#830's invariant going red — the
     symptom that got filed, one level below the defect.
     """
@@ -123,23 +123,23 @@ def test_a_child_from_other_code_is_refused_by_name(tmp_path: Path) -> None:
     stale.write_text(_STALE_CHILD.format(python=sys.executable))
     stale.chmod(0o755)
 
-    width = pool.entry_workers(
+    width = pool.compiled_graph_workers(
         1, limit=1, vcpus=16, available_bytes=64 * 1024**3,
         device_lock=True)
-    box = pool.EntryCompilePool(
+    box = pool.CompiledGraphCompilePool(
         tmp_path / "pool", width=width, cache_dir=str(tmp_path / "cache"),
         python=str(stale))
 
-    with pytest.raises(pool.EntryCompileFailed) as caught:
+    with pytest.raises(pool.CompiledGraphCompileFailed) as caught:
         box.compile([("unet/adapter=true/dim=0", _program())])
 
-    assert caught.value.entry == "unet/adapter=true/dim=0"
+    assert caught.value.compiled_graph == "unet/adapter=true/dim=0"
     detail = str(caught.value)
     assert "DIFFERENT" in detail and "too old to report one" in detail, detail
     assert pool.CODE_DIGEST in detail, detail
-    # And it never became an attribution puzzle: the entry has no table at all
+    # And it never became an attribution puzzle: the compiled graph has no table at all
     # rather than one whose members quietly do not add up.
-    assert "unet/adapter=true/dim=0" not in box.entry_phases
+    assert "unet/adapter=true/dim=0" not in box.compiled_graph_phases
 
 
 def test_the_reports_identity_survives_the_wire(tmp_path: Path) -> None:
@@ -149,14 +149,14 @@ def test_the_reports_identity_survives_the_wire(tmp_path: Path) -> None:
     must distinguish "reported nothing" from "reported a match" — the empty
     digest is a REFUSAL, never a pass.
     """
-    encoded = msgspec.json.encode(pool.EntryReport(
-        entry="unet/dim=0", status=pool.COMPILED, files=["/dev/null"],
+    encoded = msgspec.json.encode(pool.CompiledGraphReport(
+        compiled_graph="unet/dim=0", status=pool.COMPILED, files=["/dev/null"],
         code_digest=pool.CODE_DIGEST, code_dir=pool.PACKAGE_ROOT))
-    back = msgspec.json.decode(encoded, type=pool.EntryReport)
+    back = msgspec.json.decode(encoded, type=pool.CompiledGraphReport)
     assert back.code_digest == pool.CODE_DIGEST and back.code_digest
     assert back.code_dir == pool.PACKAGE_ROOT
 
     old = msgspec.json.decode(
-        b'{"entry":"unet/dim=0","status":"compiled","files":["/dev/null"]}',
-        type=pool.EntryReport)
+        b'{"compiled_graph":"unet/dim=0","status":"compiled","files":["/dev/null"]}',
+        type=pool.CompiledGraphReport)
     assert old.code_digest == "" and old.spans == {}

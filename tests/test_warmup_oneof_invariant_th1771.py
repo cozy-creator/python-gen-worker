@@ -43,7 +43,7 @@ class OneOfMedia(msgspec.Struct, forbid_unknown_fields=True):
         ]
         if len(populated) != 1:
             raise ValueError(
-                "each references[] entry carries exactly one of image / video / audio, "
+                "each references[] compiled_graph carries exactly one of image / video / audio, "
                 f"got {populated or 'none'}"
             )
 
@@ -74,15 +74,15 @@ def _build(payload_type: type):
 def test_oneof_nested_struct_synthesizes_a_legal_instance() -> None:
     payload = _build(RefToVideoIn)
     assert len(payload.references) == 1
-    entry = payload.references[0]
-    assert entry.image is not None, "the one-of arm must be populated"
-    assert entry.video is None and entry.audio is None
-    assert entry.image.local_path, "the synthetic image must exist on disk"
+    compiled_graph = payload.references[0]
+    assert compiled_graph.image is not None, "the one-of arm must be populated"
+    assert compiled_graph.video is None and compiled_graph.audio is None
+    assert compiled_graph.image.local_path, "the synthetic image must exist on disk"
 
 
 def test_oneof_struct_alone_synthesizes() -> None:
-    entry = _build(OneOfMedia)
-    assert entry.image is not None
+    compiled_graph = _build(OneOfMedia)
+    assert compiled_graph.image is not None
 
 
 def test_unsatisfiable_oneof_is_a_reason_not_a_crash() -> None:

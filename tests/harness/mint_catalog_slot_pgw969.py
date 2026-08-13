@@ -50,7 +50,7 @@ class CatalogOut(msgspec.Struct):
     response: str
 
 
-#: One entry per handler call, base and turbo alike: the wire ref the
+#: One compiled graph per handler call, base and turbo alike: the wire ref the
 #: RESOLVED slot carried. The parent's serving path and the mint child's warm
 #: forward both write here, which is what makes "the same checkpoint" an
 #: assertion rather than a claim.

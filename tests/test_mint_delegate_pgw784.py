@@ -360,7 +360,7 @@ def test_the_only_bank_that_SIZES_anything_is_the_host_rss_one(
     the PROPERTY rather than a list of forbidden names.
 
     WHY IT CHANGED (pgw#1205, coordinator ruling 2026-08-13). It used to assert
-    `not hasattr(mint_workers, "record_entry_device_peak")`, and §4.33's own
+    `not hasattr(mint_workers, "record_compiled_graph_device_peak")`, and §4.33's own
     follow-up then asked for exactly that function back: *"Bank, per GRAPH
     CLASS … Provenance on every row — this is the point … Monotone per (class,
     card, toolchain, lane), as `record_child_peak` already was."* A banked
@@ -381,11 +381,11 @@ def test_the_only_bank_that_SIZES_anything_is_the_host_rss_one(
       `test_device_peak_bank_pgw1205.test_no_width_or_placement_decision_reads_the_bank`.
     * Nothing device-shaped is handed down on the request.
     """
-    mint_workers._ENTRY_RSS_PEAKS.clear()
-    assert mint_workers.entry_peak_rss("sdxl", "w8a8") == 0
-    mint_workers.record_entry_peak_rss("sdxl", "w8a8", 5 * GIB)
-    mint_workers.record_entry_peak_rss("sdxl", "w8a8", 2 * GIB)
-    assert mint_workers.entry_peak_rss("sdxl", "w8a8") == 5 * GIB, (
+    mint_workers._COMPILED_GRAPH_RSS_PEAKS.clear()
+    assert mint_workers.compiled_graph_peak_rss("sdxl", "w8a8") == 0
+    mint_workers.record_compiled_graph_peak_rss("sdxl", "w8a8", 5 * GIB)
+    mint_workers.record_compiled_graph_peak_rss("sdxl", "w8a8", 2 * GIB)
+    assert mint_workers.compiled_graph_peak_rss("sdxl", "w8a8") == 5 * GIB, (
         "the bank is not monotone — a lucky run talked the ask down")
 
     # The two whose names are history: they had consumers, and a consumer is
@@ -396,7 +396,7 @@ def test_the_only_bank_that_SIZES_anything_is_the_host_rss_one(
     # The invariant itself. A device reading may be BANKED (it is a
     # measurement) and may not be READ by anything that decides a width, a
     # placement or an admission.
-    reader = re.compile(r"(?<!record_)entry_device_peak\s*\(")
+    reader = re.compile(r"(?<!record_)compiled_graph_device_peak\s*\(")
     src_root = Path(mint_workers.__file__).resolve().parent
     consumers = [
         path.name for path in sorted(src_root.rglob("*.py"))
@@ -407,10 +407,10 @@ def test_the_only_bank_that_SIZES_anything_is_the_host_rss_one(
         f"arithmetic returning, and §4.33 deleted it on measured evidence")
 
     # ...and nothing device-shaped crosses to the child, which is the other
-    # half of the sentence this fence used to carry. `entry_peak_rss_bytes` is
+    # half of the sentence this fence used to carry. `compiled_graph_peak_rss_bytes` is
     # the one measurement handed down; `vram_cap_bytes` died with pgw#1175.
     handed_down = set(mp.MintRequest.__struct_fields__)
-    assert "entry_peak_rss_bytes" in handed_down
+    assert "compiled_graph_peak_rss_bytes" in handed_down
     assert not [
         f for f in handed_down
         if ("vram" in f or "device" in f) and f.endswith("_bytes")

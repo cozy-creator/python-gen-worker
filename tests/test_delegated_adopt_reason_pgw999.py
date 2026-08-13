@@ -78,7 +78,7 @@ def _sealed_compiled_graph(path: Path, **over: Any) -> Path:
     import tarfile as _tarfile
 
     meta = {"format": 2, "kind": "aot-inductor", "family": FAMILY,
-            "compiled_graph_key": "ek1-" + "e" * 56, "entries": {}, **over}
+            "compiled_graph_key": "ek1-" + "e" * 56, "compiled_graphs": {}, **over}
     payload = _json.dumps(meta).encode()
     with _tarfile.open(path, mode="w:gz") as tar:
         info = _tarfile.TarInfo("metadata.json")

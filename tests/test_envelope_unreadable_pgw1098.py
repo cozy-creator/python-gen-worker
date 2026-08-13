@@ -1,12 +1,12 @@
 """pgw#1098 — an UNREADABLE compiled graph envelope must refuse by name, not vanish.
 
-Row 7 (2026-08-10, sdxl on L40S): 36/36 entries compiled in 92 minutes, then
+Row 7 (2026-08-10, sdxl on L40S): 36/36 compiled graphs compiled in 92 minutes, then
 nothing was published. The wire said `lifted_inputs_unbindable` — a LoRA
 contract refusal — and the mint-goal driver correctly retired the pod on the
 resulting `forge_terminal no_compiled_graph`. $1.584 for no compiled graph.
 
 The LoRA contract was never the problem. `artifact_meta.MAX_METADATA_BYTES`
-(16 MiB, landed in the same release) refused to READ the 36-entry envelope;
+(16 MiB, landed in the same release) refused to READ the 36-compiled graph envelope;
 `try_read_metadata` turned that refusal into `None`; and `None` then read as
 "this compiled graph states no facts" at two consecutive call sites, each of which
 silently skipped the work it owed:
@@ -54,14 +54,14 @@ def _compiled_graph(path: Path, meta: Dict[str, Any], *, pad_to: int = 0) -> Pat
     return path
 
 
-#: The shape row 7's envelope had: entries whose `target` is the denoiser, and
+#: The shape row 7's envelope had: compiled graphs whose `target` is the denoiser, and
 #: a stamped key. Everything the two skipped gates needed was right here.
 #:
-#: DELIBERATELY PRE-pgw#1176, and left that way: `format: 2`, an `entries` MAP
+#: DELIBERATELY PRE-pgw#1176, and left that way: `format: 2`, an `compiled graphs` MAP
 #: and a `ck1` key. This fixture's job is to reproduce a REAL artifact from the
 #: row 7 incident so the metadata SIZE bound is measured against bytes that
-#: actually existed. Migrating it to a one-entry `ek1` envelope would shrink
-#: the very thing under test — a 36-entry compiled graph is what made the envelope
+#: actually existed. Migrating it to a one-compiled graph `ek1` envelope would shrink
+#: the very thing under test — a 36-compiled graph compiled graph is what made the envelope
 #: exceed 16 MiB — and would assert the bound against a shape that never
 #: overflowed it.
 _ROW7_META: Dict[str, Any] = {
@@ -70,7 +70,7 @@ _ROW7_META: Dict[str, Any] = {
     "family": "sdxl",
     "compiled_graph_key": "ck1-" + "a" * 56,
     "lora_bucket": 64,
-    "entries": {
+    "compiled_graphs": {
         "unet/adapter=true,cfg=true/B=2,H_lat=128,T_txt=77,W_lat=128": {
             "target": "unet",
         },
@@ -83,13 +83,13 @@ _ROW7_META: Dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
-def test_a_36_entry_sdxl_scale_envelope_is_readable(tmp_path: Path) -> None:
+def test_a_36_compiled_graph_sdxl_scale_envelope_is_readable(tmp_path: Path) -> None:
     """RED pre-fix: 16 MiB refused row 7's envelope.
 
     The size is not invented. `fleet_compiled_graphs._UNBOUNDED_ENVELOPE_BLOCKS` records
     a MEASURED sdxl compiled graph whose metadata is 13,377,167 bytes on a 69 MB
     artifact, and states that it grows with the artifact. Row 7's artifact was
-    ~141 MB with 36 AOT entries carrying per-class contracts and constant
+    ~141 MB with 36 AOT compiled graphs carrying per-class contracts and constant
     manifests, so its envelope sits above 16 MiB — which is why a 20 MiB
     envelope is the honest regression vehicle here.
     """
@@ -98,7 +98,7 @@ def test_a_36_entry_sdxl_scale_envelope_is_readable(tmp_path: Path) -> None:
     meta = artifact_meta.read_metadata(artifact)
 
     assert meta["compiled_graph_key"] == _ROW7_META["compiled_graph_key"]
-    assert meta["entries"]["unet/adapter=true,cfg=true/B=2,H_lat=128,"
+    assert meta["compiled_graphs"]["unet/adapter=true,cfg=true/B=2,H_lat=128,"
                            "T_txt=77,W_lat=128"]["target"] == "unet"
 
 

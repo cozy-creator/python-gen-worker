@@ -1,7 +1,7 @@
 """ie681: `streaming_w8a8_snapshot` forwards the module-path skip patterns.
 
 `streaming_w8a8_cast` has taken `skip_patterns` since gw#557, but the
-SNAPSHOT-level entry point the conversion endpoint actually invokes did not
+SNAPSHOT-level compiled graph point the conversion endpoint actually invokes did not
 forward them, so every produce run was locked to the architecture-agnostic
 default set. That default knows `adaln_single` and not MiniMax-H3's
 `adaln_proj`, so a bare `cast-dtype dtypes=["w8a8"]` on H3 quantizes 50

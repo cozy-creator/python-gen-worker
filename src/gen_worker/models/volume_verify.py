@@ -12,7 +12,7 @@ between one release and another's weights. It is therefore:
     manifest v2 that field is EMPTY and the digest lives in ``f.digest`` as
     ``sha256:<hex>``, so the check would have silently verified nothing while
     still reporting a clean tree. That is the same false-clean shape as reading
-    ``manifest["files"]`` when the key is ``entries``.
+    ``manifest["files"]`` when the key is ``compiled graphs``.
 *   **FAIL-CLOSED** — a mismatch names the blob to quarantine so
     re-materialization re-downloads instead of re-linking the same bad bytes.
     Upstream reports stay untrusted hints (pgw#769's ruling).
@@ -126,7 +126,7 @@ def verify_files(
             algo, want = parse_cas_ref(t.ref)
         except ValueError as exc:
             # An unreadable digest is CORRUPT, not "nothing to check". Treating
-            # it as a mere finding would let a malformed manifest entry pass
+            # it as a mere finding would let a malformed manifest compiled graph pass
             # the tree — the same degrade-to-skip that made the v2 snapshot
             # report clean without being hashed.
             with lock:
@@ -191,7 +191,7 @@ def snapshot_verify_targets(
 
     The digest is read from ``f.digest`` — algorithm-tagged — and from nowhere
     else. th#1303 S1 removed the legacy ``f.blake3`` fallback: it is EMPTY on
-    every v2 entry, and reading it first was how a whole tree got a clean
+    every v2 compiled graph, and reading it first was how a whole tree got a clean
     verdict without being hashed. Files the manifest gives no digest for are
     returned as SKIPPED so the caller must account for them explicitly instead
     of losing them into a pass.

@@ -127,7 +127,7 @@ PHASE_ENV_ESTABLISH = "env_establish"
 PHASE_LIB_MEMO = "lib_memo"
 #: Composing the export declaration a mint will trace against.
 PHASE_DECLARATION_COMPOSE = "declaration_compose"
-#: ONE graph CLASS traced for the key. `function` is the entry name and
+#: ONE graph CLASS traced for the key. `function` is the compiled graph name and
 #: `detail` carries `nodes=` — a class's trace cost is meaningless without the
 #: graph size it paid for. Never a roll-up: 36 classes is 36 rows.
 PHASE_TRACE_FOR_KEY = "trace_for_key"
@@ -142,11 +142,11 @@ PHASE_COMPILED_GRAPH_HUB_RTT = "compiled_graph_hub_rtt"
 #: Staging + contract verification of a downloaded compiled graph, before the first
 #: dlopen. The first half of admission.
 PHASE_COMPILED_GRAPH_VERIFY = "compiled_graph_verify"
-#: ONE entry's admission: contract parse, constant bind, ingress-assertion
+#: ONE compiled graph's admission: contract parse, constant bind, ingress-assertion
 #: arming and the admission-drift parity check against the artifact's own
-#: generated guards. The second half of admission, and the per-entry parity
+#: generated guards. The second half of admission, and the per-compiled graph parity
 #: sweep, measured where it happens.
-PHASE_ENTRY_ADMIT = "entry_admit"
+PHASE_COMPILED_GRAPH_ADMIT = "compiled_graph_admit"
 #: CUMULATIVE. The first instant this worker could have served a request at
 #: all, compiled or not — the first of the two user-visible timestamps.
 PHASE_EAGER_READY = "eager_ready"
@@ -199,7 +199,7 @@ _CLASS_BY_PHASE: Dict[str, str] = {
     PHASE_KEY_FOLD: CLASS_SETUP,
     PHASE_COMPILED_GRAPH_HUB_RTT: CLASS_SETUP,
     PHASE_COMPILED_GRAPH_VERIFY: CLASS_LOAD,
-    PHASE_ENTRY_ADMIT: CLASS_LOAD,
+    PHASE_COMPILED_GRAPH_ADMIT: CLASS_LOAD,
     PHASE_EAGER_READY: CLASS_SETUP,
     PHASE_COMPILED_SWAP: CLASS_SETUP,
 }
@@ -1124,17 +1124,17 @@ SHAPE_EAGER: frozenset = frozenset({
 #: A boot that came up through `python -m gen_worker.entrypoint` — i.e. every
 #: pod. `env_establish` and its nested `lib_memo` are produced by
 #: `env_seal.establish`, which the entrypoint, the mint child and the
-#: entry-compile child all call and an EMBEDDED worker (the in-process test
+#: compiled graph-compile child all call and an EMBEDDED worker (the in-process test
 #: harness, a library caller) does not. Kept as a separate shape rather than
 #: folded into SHAPE_EAGER so an embedded boot is not asked for a phase it
 #: legitimately cannot have — and so a POD boot still is.
-SHAPE_ENTRYPOINT: frozenset = SHAPE_EAGER | frozenset({
+SHAPE_CompiledGraphPOINT: frozenset = SHAPE_EAGER | frozenset({
     PHASE_ENV_ESTABLISH, PHASE_LIB_MEMO,
 })
 #: A boot that ADOPTED a compiled graph the hub named: no trace, no fold — it pays a
 #: download and an admission instead.
-SHAPE_ADOPT: frozenset = SHAPE_ENTRYPOINT | frozenset({
-    PHASE_COMPILED_GRAPH_FETCH, PHASE_COMPILED_GRAPH_VERIFY, PHASE_ENTRY_ADMIT, PHASE_COMPILED_GRAPH_ARM,
+SHAPE_ADOPT: frozenset = SHAPE_CompiledGraphPOINT | frozenset({
+    PHASE_COMPILED_GRAPH_FETCH, PHASE_COMPILED_GRAPH_VERIFY, PHASE_COMPILED_GRAPH_ADMIT, PHASE_COMPILED_GRAPH_ARM,
     PHASE_COMPILED_SWAP,
 })
 #: A boot that MINTED its own compiled graph: declaration, per-class trace, fold, the
@@ -1277,7 +1277,7 @@ __all__ = [
     "DEFAULT_RESIDUAL_TOLERANCE_PCT",
     "SHAPE_ADOPT",
     "SHAPE_EAGER",
-    "SHAPE_ENTRYPOINT",
+    "SHAPE_CompiledGraphPOINT",
     "SHAPE_SELF_MINT",
     "PHASES",
     "PHASE_HELLO",
@@ -1296,7 +1296,7 @@ __all__ = [
     "PHASE_KEY_FOLD",
     "PHASE_COMPILED_GRAPH_HUB_RTT",
     "PHASE_COMPILED_GRAPH_VERIFY",
-    "PHASE_ENTRY_ADMIT",
+    "PHASE_COMPILED_GRAPH_ADMIT",
     "PHASE_EAGER_READY",
     "PHASE_COMPILED_SWAP",
     "OUTCOME_OK",

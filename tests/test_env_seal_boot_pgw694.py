@@ -24,7 +24,7 @@ from typing import Iterator
 @pytest.fixture(autouse=True)
 def _restore_global_matmul_flags() -> Iterator[None]:
     """The canonical imposition is deliberately process-global; the SUITE
-    must not leak it across files (entries compiled under one TF32 state
+    must not leak it across files (compiled graphs compiled under one TF32 state
     GlobalStateGuard-miss under another — the flux hit-counter tests)."""
     precision = torch.get_float32_matmul_precision()
     matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
@@ -47,7 +47,7 @@ def test_entrypoint_establishes_effective_seal() -> None:
     assert torch.backends.cudnn.allow_tf32 is True
     assert torch.backends.cuda.matmul.allow_tf32 is True
     assert torch.get_float32_matmul_precision() == "high"
-    # Every canonical entry is stated by the seal — pgw#1049: as the
+    # Every canonical compiled graph is stated by the seal — pgw#1049: as the
     # DECLARATION (boot verified the read-back against it).
     from gen_worker import settings_authority as sa
 

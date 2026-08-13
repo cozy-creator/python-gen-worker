@@ -2,7 +2,7 @@
 
 The full mint cycle needs a compiler and is LOCAL-ONLY (pgw#978's rig). What
 does NOT need one is every claim this family makes about its own SHAPE, and
-those are the claims that would rot silently: the entry count, the container
+those are the claims that would rot silently: the compiled graph count, the container
 ordering that keeps pgw#993/pgw#994 under test, the determinism of the
 generated weights, and the two model properties the declaration's strategy
 depends on.
@@ -45,7 +45,7 @@ from gen_worker import aot_declaration as ad  # noqa: E402
 from gen_worker import aot_flatten  # noqa: E402
 from gen_worker.aot_mint import ExportSpec  # noqa: E402
 
-EXPECTED_ENTRIES = ["decoder", "transformer/cfg=false", "transformer/cfg=true"]
+EXPECTED_COMPILED_GRAPHS = ["decoder", "transformer/cfg=false", "transformer/cfg=true"]
 
 
 @pytest.fixture(scope="module")
@@ -59,29 +59,29 @@ def tree(tmp_path_factory) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# The size claim — three entries, and the reason it is three
+# The size claim — three compiled graphs, and the reason it is three
 # ---------------------------------------------------------------------------
 
 
-def test_declares_exactly_three_entries(declaration) -> None:
+def test_declares_exactly_three_compiled_graphs(declaration) -> None:
     """The whole premise. sdxl declares 36 and costs ~95 min a cycle."""
-    names = sorted(ad.plan_entry_name(p) for p in ad.compiled_graph_plans(declaration))
-    assert names == EXPECTED_ENTRIES
+    names = sorted(ad.plan_compiled_graph_name(p) for p in ad.compiled_graph_plans(declaration))
+    assert names == EXPECTED_COMPILED_GRAPHS
 
 
 def test_the_two_latent_rows_collapse_rather_than_multiply(declaration) -> None:
     """Two declared rows, still one artifact per arm — with a DERIVED range.
 
-    If this collapsed the other way the family would have 6 entries, and if
+    If this collapsed the other way the family would have 6 compiled graphs, and if
     the range were not derived the artifact would silently serve only its
     seed row.
     """
     assert len(declaration.shapes) == 2
     for plan in ad.compiled_graph_plans(declaration):
-        assert len(plan.rows) == 2, ad.plan_entry_name(plan)
+        assert len(plan.rows) == 2, ad.plan_compiled_graph_name(plan)
         spans = {(d.input_name, d.axis): (d.min, d.max) for d in plan.dynamic}
         assert spans, (
-            f"{ad.plan_entry_name(plan)} collapsed two rows with NO dynamic "
+            f"{ad.plan_compiled_graph_name(plan)} collapsed two rows with NO dynamic "
             f"dim — the artifact would silently serve only its seed row")
         assert set(spans.values()) == {(1024, 2304)}
 
@@ -98,7 +98,7 @@ def test_every_traced_extent_is_linear_in_one_symbol(declaration) -> None:
             per_input.setdefault(row.input_name, []).append(row.axis)
         for name, axes in per_input.items():
             assert len(axes) == 1, (
-                f"{ad.plan_entry_name(plan)}/{name} has SYMBOLIC axes {axes} "
+                f"{ad.plan_compiled_graph_name(plan)}/{name} has SYMBOLIC axes {axes} "
                 f"— their product is a nonlinear traced extent, which "
                 f"inductor cannot lower after the mint's export save/load "
                 f"(pgw#998)")
@@ -249,7 +249,7 @@ def test_the_slot_is_a_catalog_slot_with_no_code_default() -> None:
 
 
 def test_both_fork_arms_have_a_served_method() -> None:
-    """A declared arm no function reaches is an entry nothing can ever call."""
+    """A declared arm no function reaches is an compiled graph nothing can ever call."""
     assert callable(Generate.generate)
     assert callable(Generate.generate_turbo)
     assert [s.value for s in Size] == ["256x256", "384x384"]

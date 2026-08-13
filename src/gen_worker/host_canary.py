@@ -568,7 +568,7 @@ def measure_peer_collective(
                 os.environ[k] = v
 
 
-def _main() -> None:  # pragma: no cover - operator entry point
+def _main() -> None:  # pragma: no cover - operator compiled graph point
     """``python -m gen_worker.host_canary`` — the boot leg plus, on a
     multi-GPU host, both collective arms. Prints one JSON object."""
     logging.basicConfig(level=logging.INFO)

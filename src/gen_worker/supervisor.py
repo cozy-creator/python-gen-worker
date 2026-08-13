@@ -161,9 +161,9 @@ def _emit(detail: str, *, dial: bool = True) -> None:
         from . import config
         from .worker_fatal import report_worker_detail
 
-        # The supervisor is a PRE-FORK process entry: it loads its own
+        # The supervisor is a PRE-FORK process compiled graph: it loads its own
         # Settings once (§1.18 acceptance is one bootstrap-owned load per
-        # process entry, not one across the tree) and hands them down. It does
+        # process compiled graph, not one across the tree) and hands them down. It does
         # not consult a cache that may or may not have been filled.
         delivered = report_worker_detail(
             config.current() if config.installed() else config.load_settings(),

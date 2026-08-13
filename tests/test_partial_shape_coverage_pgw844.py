@@ -2,18 +2,18 @@
 compiled lane.
 
 MEASURED, attempt twelve (L4 pod `o0legpgj5olhic`, 2026-08-01, $0.04): the
-first cross-pod compiled graph adopt in platform history armed all 72 entries of a
+first cross-pod compiled graph adopt in platform history armed all 72 compiled graphs of a
 regional sdxl compiled graph, and then served 100 % eager.  A transformer block sees
-``(B, H_lat*W_lat, C)`` — the token PRODUCT — while the entries are keyed on
+``(B, H_lat*W_lat, C)`` — the token PRODUCT — while the compiled graphs are keyed on
 the latent H and W separately, so sdxl's nine aspect buckets collapse to four
-distinct token counts and eight of the nine admit more than one entry.  The
-boot warm plan refused them ``aot_ingress_refused / entry_ambiguous`` x12 and
+distinct token counts and eight of the nine admit more than one compiled graph.  The
+boot warm plan refused them ``aot_ingress_refused / compiled_graph_ambiguous`` x12 and
 the boot ended ``self_mint_skipped / boot_ended_uncompiled`` — including for
-1024x1024, whose 128x128 latent is unique and whose entry was armed and
+1024x1024, whose 128x128 latent is unique and whose compiled graph was armed and
 correct.
 
 Two independent defects produced that, and both are asserted here on the real
-paths (:class:`aot_serve.EntryDispatch` for dispatch, the executor's own
+paths (:class:`aot_serve.CompiledGraphDispatch` for dispatch, the executor's own
 derived warm plan and ``ensure_setup`` for the boot):
 
 1. **the all-or-nothing coverage rule** — an alias attributed to an object
@@ -81,13 +81,13 @@ SDXL_BUCKETS: Tuple[Tuple[int, int], ...] = (
 )
 
 
-def _entry_name(h: int, w: int, *, cfg: bool = False) -> str:
+def _compiled_graph_name(h: int, w: int, *, cfg: bool = False) -> str:
     return (f"unet/block=BasicTransformerBlock#0,cfg={str(cfg).lower()}"
             f"/B=1,H_lat={h},T_txt={TEXT_LEN},W_lat={w}")
 
 
-def _entry_meta(h: int, w: int) -> Dict[str, Any]:
-    """One entry block exactly as the regional mint packs it: keyed on H_lat
+def _compiled_graph_meta(h: int, w: int) -> Dict[str, Any]:
+    """One compiled graph block exactly as the regional mint packs it: keyed on H_lat
     and W_lat, but the BLOCK's own input carries only their product."""
     return {
         "inputs": [
@@ -106,18 +106,18 @@ def _runner(h: int, w: int) -> aot_serve.ArtifactRunner:
     the ingress assertion are production code."""
     return aot_serve.ArtifactRunner(
         package=lambda *feeds: feeds[0],
-        contract=aot_serve.contract_from_meta(_entry_meta(h, w)),
+        contract=aot_serve.contract_from_meta(_compiled_graph_meta(h, w)),
         constants=(),
         module_name="unet",
-        entry=_entry_name(h, w),
+        compiled_graph=_compiled_graph_name(h, w),
         bound=True,
         family=FAMILY,
     )
 
 
-def _dispatch(buckets: Tuple[Tuple[int, int], ...]) -> aot_serve.EntryDispatch:
-    return aot_serve.EntryDispatch(tuple(
-        (_entry_name(h, w), _runner(h, w)) for h, w in buckets))
+def _dispatch(buckets: Tuple[Tuple[int, int], ...]) -> aot_serve.CompiledGraphDispatch:
+    return aot_serve.CompiledGraphDispatch(tuple(
+        (_compiled_graph_name(h, w), _runner(h, w)) for h, w in buckets))
 
 
 def _call(h: int, w: int) -> Tuple[Any, ...]:
@@ -133,17 +133,17 @@ def _call(h: int, w: int) -> Tuple[Any, ...]:
 
 
 def test_sdxl_nine_buckets_collapse_to_four_token_counts_at_real_dispatch():
-    """The pod's own table, reproduced through ``EntryDispatch.select``.
+    """The pod's own table, reproduced through ``CompiledGraphDispatch.select``.
 
-    This is the reproduction, not an illustration: the entries are parsed by
+    This is the reproduction, not an illustration: the compiled graphs are parsed by
     :func:`aot_serve.contract_from_meta` and admitted by
     :func:`aot_serve.assert_ingress`, the same two functions the armed pod
-    ran.  One bucket dispatches; eight are ``entry_ambiguous``.
+    ran.  One bucket dispatches; eight are ``compiled_graph_ambiguous``.
     """
     dispatch = _dispatch(SDXL_BUCKETS)
 
     name, _runner_ = dispatch.select(_call(128, 128), {})
-    assert name == _entry_name(128, 128)
+    assert name == _compiled_graph_name(128, 128)
 
     groups = {15360: 2, 15808: 2, 16128: 4}
     for h, w in SDXL_BUCKETS:
@@ -151,16 +151,16 @@ def test_sdxl_nine_buckets_collapse_to_four_token_counts_at_real_dispatch():
             continue
         with pytest.raises(aot_serve.IngressContractError) as err:
             dispatch.select(_call(h, w), {})
-        assert err.value.reason == "entry_ambiguous"
-        assert f"{groups[h * w]} entries admit this call" in str(err.value)
+        assert err.value.reason == "compiled_graph_ambiguous"
+        assert f"{groups[h * w]} compiled_graphs admit this call" in str(err.value)
 
 
 def test_the_collapsed_declaration_dispatches_every_bucket_uniquely():
-    """pgw#829's remedy, verified from the SERVING side: one entry over the
+    """pgw#829's remedy, verified from the SERVING side: one compiled graph over the
     token hull admits every declared bucket and is unique by construction."""
     hull = min(h * w for h, w in SDXL_BUCKETS), max(
         h * w for h, w in SDXL_BUCKETS)
-    collapsed = aot_serve.EntryDispatch(((
+    collapsed = aot_serve.CompiledGraphDispatch(((
         "unet/block=BasicTransformerBlock#0,cfg=false",
         aot_serve.ArtifactRunner(
             package=lambda *feeds: feeds[0],
@@ -175,7 +175,7 @@ def test_the_collapsed_declaration_dispatches_every_bucket_uniquely():
             }),
             constants=(),
             module_name="unet",
-            entry="unet/block=BasicTransformerBlock#0,cfg=false",
+            compiled_graph="unet/block=BasicTransformerBlock#0,cfg=false",
             bound=True,
             family=FAMILY,
         )),))
@@ -254,7 +254,7 @@ def _arm(pipe: _Pipe, *_args: Any) -> Any:
         meta=meta,
         target="unet",
     )
-    # The pipeline-level format-3 marker `arm_entry` publishes — the shape
+    # The pipeline-level format-3 marker `arm_compiled_graph` publishes — the shape
     # `is_armed` / `execution_count` / `proven_since` / the guard + refusal
     # callbacks all read.
     module_marker = getattr(pipe.unet, aot_serve._MARKER_ATTR, {})
@@ -331,10 +331,10 @@ def _boot(
     # pgw#1152: an `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
     # arguing this process is "TOLD the flavor is an AOT compiled graph exactly as a
     # Plan's `Arm.artifact` tells a pod". Production is told no such thing — it
-    # LEARNS at the wrap (`arm_entry`, pgw#1141b), and the route that
+    # LEARNS at the wrap (`arm_compiled_graph`, pgw#1141b), and the route that
     # believed the convention instead is what cost four pods. The line is
     # deleted rather than moved: `_arm` below publishes the pipeline-level
-    # marker `arm_entry` publishes, so `holds_exported_compiled_graph` answers the
+    # marker `arm_compiled_graph` publishes, so `holds_exported_compiled_graph` answers the
     # lane question off the OBJECT and the registry is not consulted at all.
     artifact = _compiled_graph_snapshot(tmp_path)
     model_dir = tmp_path / "sdxl-model"
@@ -361,7 +361,7 @@ def _boot(
         ex, "_enable_compiled", _arm if exported else _arm_dynamo)
 
     # pgw#904: the compiled graph is an exact ORDER (Arm.artifact), never a snapshot
-    # entry the worker scans for.
+    # compiled graph the worker scans for.
     arm_order = executor_mod._ArmOrder(
         backend="aot_compiled_graph",
         selection=executor_mod._CompileArtifactSelection(
@@ -378,7 +378,7 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
     """THE pgw#844 assertion, on the real derived warm plan.
 
     Three declared aspect classes; two of them (192x80 / 80x192) share a token
-    count and are ``entry_ambiguous``, one (128x128) is unique.  The armed compiled graph
+    count and are ``compiled_graph_ambiguous``, one (128x128) is unique.  The armed compiled graph
     must survive: the target keeps its active identity, the boot does not end
     uncompiled, and the two eager classes are NAMED rather than inferred from
     a healthy-looking silence.
@@ -387,7 +387,7 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
 
     (target,) = ex.compile_targets()
     assert target.active_compile_ref == COMPILED_GRAPH_REF, (
-        "the armed, correct, unambiguous 1:1 entry must serve compiled even "
+        "the armed, correct, unambiguous 1:1 compiled_graph must serve compiled even "
         "though two sibling buckets are undispatchable")
     assert target.active_compile_snapshot_digest == COMPILED_GRAPH_DIGEST
     assert list(target.function_names) == ["generate"]

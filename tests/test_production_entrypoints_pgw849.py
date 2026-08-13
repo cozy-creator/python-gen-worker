@@ -1,9 +1,9 @@
-"""pgw#849 guard 1 — TESTS MUST DRIVE THE PRODUCTION ENTRYPOINT, NOT THE UNIT
+"""pgw#849 guard 1 — TESTS MUST DRIVE THE PRODUCTION CompiledGraphPOINT, NOT THE UNIT
 BENEATH IT.
 
 Eleven instances of one defect: correct code, green unit tests, and no route
 that reached it. ``aot_serve.set_guard_failure_callback`` was never called, so
-every AOT arm ever built was unadvertisable, for weeks. ``entry_workers``
+every AOT arm ever built was unadvertisable, for weeks. ``compiled_graph_workers``
 handled a ``peak_rss_bytes`` no caller passed. ``podguard.attend()`` returned a
 Keeper nobody entered, so sixteen attended pods sat on a silent fuse. All of
 them green, all of them at unit level, and unit level is exactly where a wiring
@@ -29,7 +29,7 @@ The ledger below is the deliverable, in both directions:
   silent drift. That is the same contract ``scripts/check_registry_contract.py``
   holds the registry to: state changes in either direction must be deliberate.
 
-An UNCOVERED entry is a debt, not a resting state. Each names its owner issue.
+An UNCOVERED compiled graph is a debt, not a resting state. Each names its owner issue.
 """
 
 from __future__ import annotations
@@ -147,7 +147,7 @@ def test_every_declared_rung_exists() -> None:
             assert callable(getattr(owner, attr)), f"{path}: {rung}"
 
 
-def test_uncovered_entries_name_a_real_rung_and_an_owner() -> None:
+def test_uncovered_compiled_graphs_name_a_real_rung_and_an_owner() -> None:
     for path, (rung, why, owner) in UNCOVERED.items():
         assert path in LADDERS, f"{path} is not a declared ladder"
         assert rung in LADDERS[path], f"{path}: {rung} is not one of its rungs"
@@ -191,7 +191,7 @@ def test_serve_ladder_is_driven_from_the_wire() -> None:
     assert rec.gap() is None, (
         "the serve ladder was not traversed from the wire:\n" + rec.report())
 
-    execs = rec.entries["gen_worker.executor.Executor._execute"]
+    execs = rec.compiled_graphs["gen_worker.executor.Executor._execute"]
     assert any(e.from_production for e in execs), (
         "_execute ran, but the TEST called it — that is a unit test wearing an "
         "integration test's clothes:\n" + rec.report())
@@ -220,11 +220,11 @@ def test_the_instrument_sees_a_unit_level_test() -> None:
         try:
             aot_serve.enable(object(), object())      # signature is irrelevant
         except Exception:
-            pass                                      # the ENTRY is the datum
+            pass                                      # the COMPILED_GRAPH is the datum
 
     leaf = "gen_worker.aot_serve.enable"
     assert rec.reached(leaf), "the leaf never recorded — instrument is broken"
-    calls = rec.entries[leaf]
+    calls = rec.compiled_graphs[leaf]
     assert not any(c.from_production for c in calls), (
         "the leaf was entered from production in a test that called it "
         "directly — the caller attribution is wrong:\n" + rec.report())
@@ -303,7 +303,7 @@ def test_uncovered_ladders_are_still_uncovered(path: str) -> None:
     The assertion is inverted on purpose. A ladder recorded as uncovered that
     quietly starts passing means somebody built the front-door test and the
     ledger no longer describes the tree; a ledger nobody has to update is a
-    ledger nobody reads. Delete the UNCOVERED entry in the same commit that
+    ledger nobody reads. Delete the UNCOVERED compiled graph in the same commit that
     covers the path.
     """
     stops_at, _why, _owner = UNCOVERED[path]
@@ -312,7 +312,7 @@ def test_uncovered_ladders_are_still_uncovered(path: str) -> None:
     gap = rec.gap()
     assert gap is not None, (
         f"{path} now traverses from its front door — DELETE its UNCOVERED "
-        f"entry in this file:\n" + rec.report())
+        f"compiled_graph in this file:\n" + rec.report())
     assert gap == stops_at, (
         f"{path} stops at {gap!r}, but the ledger says {stops_at!r}. The "
         f"wiring moved; update the ledger:\n" + rec.report())

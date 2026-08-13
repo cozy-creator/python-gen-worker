@@ -1,6 +1,6 @@
 """Worker config — the ONE component in this process that reads the environment.
 
-Ruling §1.18. `load_settings()` is called exactly once per process entry and the
+Ruling §1.18. `load_settings()` is called exactly once per process compiled graph and the
 resulting `Settings` is passed by parameter. There is no cached accessor: pgw#931
 deleted `get_settings()` because a `lru_cache`d process-global is the same defect
 as a raw env read, only harder to see.

@@ -122,17 +122,17 @@ META: Dict[str, Any] = {
     "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
     "family": "sdxl-base", "precision": "w8a8", "sku": "l4", "sm": "sm_89",
     "torch": "2.13.0+cu130", "cuda": "13.0",
-    # pgw#1176: this is now an ENTRY key and rides the marker's `entries` row,
+    # pgw#1176: this is now an COMPILED_GRAPH key and rides the marker's `compiled graphs` row,
     # so it is spelled in the grammar `compiled_graph_key.is_key` actually admits.
     "compiled_graph_key": "ek1-" + "d" * 56,
     "lora_bucket": 0,
 }
 
-#: The ONE graph class this fixture arms. An entry NAMES its class (pgw#1176).
-ENTRY_NAME = "unet/g"
+#: The ONE graph class this fixture arms. An compiled graph NAMES its class (pgw#1176).
+COMPILED_GRAPH_NAME = "unet/g"
 
-ENTRY = {
-    "name": ENTRY_NAME,
+COMPILED_GRAPH = {
+    "name": COMPILED_GRAPH_NAME,
     "target": "unet", "fork": [], "class_dims": [],
     "inputs": [{"name": "sample", "position": 0, "dtype": "bfloat16",
                 "shape": [2, 4, "h", "w"]}],
@@ -144,37 +144,37 @@ ENTRY = {
 
 
 def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
-    """A module wrapped by the real ``aot_serve`` swap, ONE entry armed.
+    """A module wrapped by the real ``aot_serve`` swap, ONE compiled graph armed.
 
-    pgw#1176: the PIPELINE marker carries ``targets`` + ``entries`` — the shape
-    :func:`aot_serve.arm_entry` writes. It used to be a bare ``state``, which
+    pgw#1176: the PIPELINE marker carries ``targets`` + ``compiled graphs`` — the shape
+    :func:`aot_serve.arm_compiled_graph` writes. It used to be a bare ``state``, which
     no production path has ever written on a pipeline and which
-    ``armed_entries`` does not recognise, so leaving it would have made
+    ``armed_compiled_graphs`` does not recognise, so leaving it would have made
     ``is_armed`` answer False on a pipeline this fixture calls armed.
     """
     module, package = FakeModule(), FakePackage()
     pipeline = FakePipeline(module)
     runner = aot_serve.ArtifactRunner(
         package=package,
-        contract=aot_serve.contract_from_meta(ENTRY),
-        constants=aot_serve.constants_from_meta(ENTRY),
-        module_name="unet", entry=ENTRY_NAME)
+        contract=aot_serve.contract_from_meta(COMPILED_GRAPH),
+        constants=aot_serve.constants_from_meta(COMPILED_GRAPH),
+        module_name="unet", compiled_graph=COMPILED_GRAPH_NAME)
     runner.bind(module.state_dict(), {})
-    dispatch = aot_serve.EntryDispatch(((ENTRY_NAME, runner),))
+    dispatch = aot_serve.CompiledGraphDispatch(((COMPILED_GRAPH_NAME, runner),))
     aot_serve.wrap_module(module, dispatch, META, target="unet")
     setattr(pipeline, "_cozy_aot", {
         "meta": META,
         "targets": {"unet": {
             "module": module, "attr": "forward",
             "state": getattr(module, "_cozy_aot")["state"]}},
-        "entries": {ENTRY_NAME: {
+        "compiled_graphs": {COMPILED_GRAPH_NAME: {
             "key": META["compiled_graph_key"], "target": "unet",
             "class_hash": "", "manifest_digest": ""}},
         "bound_constants": {"pools": {}, "literals": {}},
     })
     # The fixture's own claim, checked once here rather than in five rows: this
     # pipeline really is serving the class it says it is.
-    assert aot_serve.armed_entries(pipeline) == {ENTRY_NAME: META["compiled_graph_key"]}
+    assert aot_serve.armed_compiled_graphs(pipeline) == {COMPILED_GRAPH_NAME: META["compiled_graph_key"]}
     return module, package, pipeline
 
 

@@ -25,7 +25,7 @@ from .settings import Settings
 
 # Env name -> Settings field name. The env name is what gen-orchestrator
 # injects into the worker pod and what /run/secrets file names should match.
-# yaml + .env entries may use EITHER the env name or the field name; both
+# yaml + .env compiled graphs may use EITHER the env name or the field name; both
 # resolve to the same field via the normalize step below.
 _ENV_TO_FIELD: Dict[str, str] = {
     "HF_TOKEN": "hf_token",
@@ -95,7 +95,7 @@ _OWNED_PREFIXES = ("GEN_WORKER_", "TENSORHUB_", "WORKER_", "COZY_")
 #: may read them, and their PRESENCE in any config source is a boot refusal.
 #:
 #: pgw#884: the th#1307 refusal read `os.environ` alone. A PEM delivered as
-#: `/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, a `.env` line or a yaml entry was
+#: `/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, a `.env` line or a yaml compiled graph was
 #: therefore neither LOADED (the name is not a Settings field, so
 #: `_normalize_key` dropped it) NOR REFUSED — the pod booted green with a
 #: private key sitting world-readable to tenant code at a mounted path, which

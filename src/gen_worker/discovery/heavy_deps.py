@@ -45,7 +45,7 @@ not have fixed the reported chain anyway: the fatal
 ``triton.language.dtype`` touch is not inside any ``try``.
 
 Extension point: the allowlist is ``DEFAULT_HEAVY_ROOTS`` plus per-project
-``[tool.gen_worker] discovery_heavy_deps = ["my_heavy_lib"]`` entries
+``[tool.gen_worker] discovery_heavy_deps = ["my_heavy_lib"]`` compiled graphs
 (merged, never replacing the defaults).
 """
 

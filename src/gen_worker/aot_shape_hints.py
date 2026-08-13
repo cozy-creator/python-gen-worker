@@ -100,9 +100,9 @@ def symbol_labels(program: Any) -> Dict[str, str]:
     debug = getattr(env, "source_name_to_debug_name", None) or {}
     sources = getattr(env, "var_to_sources", None) or {}
     out: Dict[str, str] = {}
-    for symbol, entries in sources.items():
+    for symbol, compiled_graphs in sources.items():
         name = str(getattr(symbol, "name", symbol))
-        for source in entries or ():
+        for source in compiled_graphs or ():
             # `Source.name` is a method on some torch versions and a plain
             # string on others; both spellings key the same debug map.
             raw = getattr(source, "name", None)
@@ -110,7 +110,7 @@ def symbol_labels(program: Any) -> Dict[str, str]:
             # Two spellings, both authored: a DERIVED symbol's source is the
             # input expression and the debug map holds the declared form
             # (`2*H_lat_u`); a BASE symbol's source IS the declared name
-            # (`H_lat_u`) with no debug entry. The base symbols are the ones
+            # (`H_lat_u`) with no debug compiled graph. The base symbols are the ones
             # extents are written in, so both are worth carrying.
             label = debug.get(key) or (key if key.isidentifier() else "")
             if label:

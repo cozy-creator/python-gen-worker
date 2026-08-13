@@ -213,7 +213,7 @@ class _WarmJob:
     autocast_dtype: Optional[Any]
     # The requesting thread's intra-op thread count. Dynamo's GLOBAL_STATE
     # guard snapshots torch.get_num_threads() on the COMPILING thread, and
-    # the OpenMP ICV is per-thread once lazy-initialized — so an entry
+    # the OpenMP ICV is per-thread once lazy-initialized — so an compiled graph
     # compiled on the warm thread with a diverged value can never serve the
     # requesting thread (every heal would be dead, sigs would go volatile).
     # The warm compile imposes this value first, like grad/autocast.
@@ -643,9 +643,9 @@ def _run_warm_compile(job: _WarmJob) -> None:
             import torch
 
             # Align this thread's intra-op count with the requesting
-            # thread's BEFORE compiling: the entry's GLOBAL_STATE guard
+            # thread's BEFORE compiling: the compiled graph's GLOBAL_STATE guard
             # snapshots the compiling thread's value, and a mismatch makes
-            # the entry unservable from every serving thread (the CI-only
+            # the compiled graph unservable from every serving thread (the CI-only
             # heal-never-converges failure of test_guard_miss_pgw680).
             if (job.num_threads is not None
                     and job.num_threads != torch.get_num_threads()):

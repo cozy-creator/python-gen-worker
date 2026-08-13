@@ -16,7 +16,7 @@ hardened container (``__set_oom_adj``, ``fs/proc/base.c``). Placement follows
 through the parent's ``preexec_fn`` — that hook is async-signal-unsafe territory,
 forces ``fork()`` over ``posix_spawn()``, and pgw#932 is removing it.
 
-The mint child (pgw#784) and the AOT pool's entry children are descendants of a
+The mint child (pgw#784) and the AOT pool's compiled graph children are descendants of a
 compute child, and ``oom_score_adj`` is inherited across fork and preserved
 across exec — so the whole compute subtree is covered by this one call. There is
 deliberately no second knob for them (§4.24 item 1): the fattest process is

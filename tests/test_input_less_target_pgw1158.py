@@ -18,7 +18,7 @@ target the author gave nothing to trace.
 
 WHY THIS ONE AND NOT THE OTHER HALF. Whether an UNTARGETED row should fan out
 to every declared target is a defaulting semantic with real cost attached (it
-is one of two leading candidates for sdxl's 36-vs-18 entry discrepancy), and it
+is one of two leading candidates for sdxl's 36-vs-18 compiled graph discrepancy), and it
 is a design call. This refusal is deliberately independent of it: no defaulting
 anyone would choose makes an input-less target correct, so refusing it cannot
 freeze that question in either direction.

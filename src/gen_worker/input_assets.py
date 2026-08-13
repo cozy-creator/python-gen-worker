@@ -83,7 +83,7 @@ ResolveTransport = Callable[[str, Mapping[str, str], bytes], tuple[int, bytes]]
 
 
 class InputManifestEntry(msgspec.Struct, frozen=True):
-    """One dispatched ``RunJob.input_assets`` entry (immutable identity)."""
+    """One dispatched ``RunJob.input_assets`` compiled graph (immutable identity)."""
 
     asset_id: str
     source_ref: str
@@ -108,8 +108,8 @@ class _ResolveResponse(msgspec.Struct, forbid_unknown_fields=True):
     assets: list[_ResolvedInputAsset]
 
 
-def manifest_from_run_job(entries: Any) -> tuple[InputManifestEntry, ...]:
-    """Convert ``RunJob.input_assets`` proto rows to typed manifest entries."""
+def manifest_from_run_job(compiled_graphs: Any) -> tuple[InputManifestEntry, ...]:
+    """Convert ``RunJob.input_assets`` proto rows to typed manifest compiled graphs."""
     return tuple(
         InputManifestEntry(
             asset_id=str(e.asset_id),
@@ -119,7 +119,7 @@ def manifest_from_run_job(entries: Any) -> tuple[InputManifestEntry, ...]:
             kind=str(e.kind),
             mime_type=str(e.mime_type),
         )
-        for e in entries or ()
+        for e in compiled_graphs or ()
     )
 
 
@@ -132,7 +132,7 @@ class _AssetOccurrence:
 @dataclass
 class _DownloadUnit:
     occurrences: list[_AssetOccurrence]
-    entry: InputManifestEntry | None = None  # None = public caller transport
+    compiled_graph: InputManifestEntry | None = None  # None = public caller transport
     url: str = ""  # transport ref (public) or resolver-minted URL (private)
 
 
@@ -244,16 +244,16 @@ def _classify_ref(ref: str, path: str) -> bool:
     return True
 
 
-def _manifest_entry_valid(entry: InputManifestEntry) -> bool:
+def _manifest_compiled_graph_valid(compiled_graph: InputManifestEntry) -> bool:
     return (
-        bool(entry.asset_id.strip())
-        and bool(entry.source_ref)
-        and entry.source_ref == entry.source_ref.strip()
-        and entry.size_bytes > 0
-        and entry.kind in _MANIFEST_KINDS
-        and bool(entry.mime_type.strip())
-        and len(entry.blake3) == 64
-        and set(entry.blake3) <= _HEX
+        bool(compiled_graph.asset_id.strip())
+        and bool(compiled_graph.source_ref)
+        and compiled_graph.source_ref == compiled_graph.source_ref.strip()
+        and compiled_graph.size_bytes > 0
+        and compiled_graph.kind in _MANIFEST_KINDS
+        and bool(compiled_graph.mime_type.strip())
+        and len(compiled_graph.blake3) == 64
+        and set(compiled_graph.blake3) <= _HEX
     )
 
 
@@ -283,7 +283,7 @@ def _declared_kind_allows(asset: Asset, mime: str) -> bool:
     return True
 
 
-def _entry_kind_allows(kind: str, mime: str) -> bool:
+def _compiled_graph_kind_allows(kind: str, mime: str) -> bool:
     if kind == "media":
         return True
     return str(mime or "").lower().startswith(f"{kind}/")
@@ -435,14 +435,14 @@ def _resolve_private_urls(
             "input_asset_response_mismatch: resolver response does not match the manifest"
         )
     urls: list[str] = []
-    for entry, resolved in zip(manifest, decoded.assets):
+    for compiled_graph, resolved in zip(manifest, decoded.assets):
         if (
-            resolved.asset_id != entry.asset_id
-            or resolved.source_ref != entry.source_ref
-            or resolved.blake3 != entry.blake3
-            or resolved.size_bytes != entry.size_bytes
-            or resolved.kind != entry.kind
-            or resolved.mime_type != entry.mime_type
+            resolved.asset_id != compiled_graph.asset_id
+            or resolved.source_ref != compiled_graph.source_ref
+            or resolved.blake3 != compiled_graph.blake3
+            or resolved.size_bytes != compiled_graph.size_bytes
+            or resolved.kind != compiled_graph.kind
+            or resolved.mime_type != compiled_graph.mime_type
         ):
             raise RetryableError(
                 "input_asset_response_mismatch: resolver response does not match the manifest"
@@ -501,21 +501,21 @@ def _download(
 ) -> tuple[Path, int, str]:
     _check_cancel(cancel_check)
     occurrences = unit.occurrences
-    entry = unit.entry
+    compiled_graph = unit.compiled_graph
     cap = _effective_size_cap(occurrences)
-    if entry is not None:
-        if entry.size_bytes > cap:
+    if compiled_graph is not None:
+        if compiled_graph.size_bytes > cap:
             raise ValidationError(
                 f"input_asset_too_large: {occurrences[0].path} exceeds its byte cap"
             )
-        cap = entry.size_bytes
+        cap = compiled_graph.size_bytes
     # pgw#663: redirects go through the guarded opener, which re-applies the
     # SSRF policy to EVERY hop. `urlopen` follows them silently, so the
     # pre-flight `_validate_transport_url` only ever covered hop 0 — a caller
     # transport that 302s at the metadata service was reachable. Private
     # (resolver-minted, blake3-attested) units keep their internal-object-host
     # exemption, which is the whole reason that env var exists.
-    resolver_minted = entry is not None
+    resolver_minted = compiled_graph is not None
     try:
         fd, tmp_name = tempfile.mkstemp(prefix=f"input-{index}-", suffix=".part", dir=dest_dir)
     except OSError:
@@ -525,7 +525,7 @@ def _download(
     tmp = Path(tmp_name)
     total = 0
     head = b""
-    hasher = blake3_mod.blake3() if entry is not None else None
+    hasher = blake3_mod.blake3() if compiled_graph is not None else None
     try:
         try:
             with open_guarded_stream(
@@ -556,7 +556,7 @@ def _download(
                             head = chunk[:64]
                         total += len(chunk)
                         if total > cap:
-                            if entry is not None:
+                            if compiled_graph is not None:
                                 raise RetryableError(
                                     "input_asset_integrity_failed: "
                                     f"{occurrences[0].path} bytes exceed their attested size"
@@ -579,14 +579,14 @@ def _download(
             ) from None
 
         _check_cancel(cancel_check)
-        if entry is not None:
-            if total != entry.size_bytes:
+        if compiled_graph is not None:
+            if total != compiled_graph.size_bytes:
                 raise RetryableError(
                     f"input_asset_integrity_failed: {occurrences[0].path} bytes do not "
                     "match their attested size"
                 )
             assert hasher is not None
-            if hasher.hexdigest() != entry.blake3:
+            if hasher.hexdigest() != compiled_graph.blake3:
                 raise RetryableError(
                     f"input_asset_integrity_failed: {occurrences[0].path} bytes do not "
                     "match their attested BLAKE3"
@@ -595,7 +595,7 @@ def _download(
         if _requires_image_decode(occurrences):
             mime = _decode_image(tmp, occurrences)
         _check_cancel(cancel_check)
-        if entry is not None and not _entry_kind_allows(entry.kind, mime):
+        if compiled_graph is not None and not _compiled_graph_kind_allows(compiled_graph.kind, mime):
             raise ValidationError(
                 f"input_asset_kind_mismatch: {occurrences[0].path} content is not its "
                 "manifest media kind"
@@ -705,18 +705,18 @@ def _collect_units(
     # exactly (count, order, ref, kind) with valid immutable metadata BEFORE
     # any resolver call or GET. A mismatch is a non-retryable contract breach.
     private_sequence = list(private_by_key)
-    manifest_sequence = [(entry.source_ref, entry.kind) for entry in manifest]
+    manifest_sequence = [(compiled_graph.source_ref, compiled_graph.kind) for compiled_graph in manifest]
     if private_sequence != manifest_sequence:
         raise ValidationError(
             "input_asset_manifest_mismatch: dispatched manifest does not match "
             "the payload's private inputs"
         )
-    for entry, key in zip(manifest, private_sequence):
-        if not _manifest_entry_valid(entry):
+    for compiled_graph, key in zip(manifest, private_sequence):
+        if not _manifest_compiled_graph_valid(compiled_graph):
             raise ValidationError(
-                "input_asset_manifest_invalid: dispatched manifest entry is malformed"
+                "input_asset_manifest_invalid: dispatched manifest compiled_graph is malformed"
             )
-        private_by_key[key].entry = entry
+        private_by_key[key].compiled_graph = compiled_graph
     return units
 
 
@@ -756,7 +756,7 @@ def materialize_input_assets(
         return 0
 
     units = _collect_units(occurrences, manifest)
-    private_units = [unit for unit in units if unit.entry is not None]
+    private_units = [unit for unit in units if unit.compiled_graph is not None]
     if private_units and int(attempt) <= 0:
         raise ValidationError(
             "input_asset_attempt_invalid: private inputs require a positive attempt"
@@ -766,7 +766,7 @@ def materialize_input_assets(
     # before downloading the first item, so a later blocked ref cannot cause
     # partial materialization work.
     for unit in units:
-        if unit.entry is None:
+        if unit.compiled_graph is None:
             _validate_transport_url(unit.url, unit.occurrences[0].path)
 
     if private_units:
@@ -779,10 +779,10 @@ def materialize_input_assets(
             resolve_transport=resolve_transport,
             cancel_check=cancel_check,
         )
-        by_entry = dict(zip(manifest, urls))
+        by_compiled_graph = dict(zip(manifest, urls))
         for unit in private_units:
-            assert unit.entry is not None
-            unit.url = by_entry[unit.entry]
+            assert unit.compiled_graph is not None
+            unit.url = by_compiled_graph[unit.compiled_graph]
             _validate_transport_url(unit.url, unit.occurrences[0].path, resolver_minted=True)
 
     state = _start_scope(
@@ -801,7 +801,7 @@ def materialize_input_assets(
                 len(unit.occurrences),
                 size_bytes,
                 mime_type,
-                unit.entry is not None,
+                unit.compiled_graph is not None,
             )
         return len(units)
     except BaseException:

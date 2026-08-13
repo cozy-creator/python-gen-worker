@@ -15,7 +15,7 @@ So the list stops being maintained by memory. This test DERIVES the vocabulary
 from the source that emits it — every literal that can reach the reason slot of
 ``ExecutorState.unavailable``, which ``lifecycle._emit_unavailable`` puts on the
 wire verbatim — and requires the vendored ``.proto`` to document each token.
-Adding a new refusal reason without a contract entry fails here, in this repo,
+Adding a new refusal reason without a contract compiled graph fails here, in this repo,
 offline.
 
 The derivation reads the three shapes the emitting code actually uses: the

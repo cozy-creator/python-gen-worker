@@ -93,7 +93,7 @@ def _make_toy_pipe() -> Any:
     return _Pipe()
 
 
-def _rig_entry(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
+def _rig_compiled_graph(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
     """A follower that mirrors sequence_rank_main against the toy pipe."""
     from gen_worker.parallel.cp import CpComms, gated_call, install_context_parallel
     from gen_worker.parallel.runtime import _rehydrate
@@ -120,13 +120,13 @@ def _rig_entry(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cov
             pipe(*args)
 
 
-def _rig_entry_never_ready(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover
+def _rig_compiled_graph_never_ready(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover
     init_rank(spec)
     chan.next_command(timeout=120)
     time.sleep(600)
 
 
-def _rig_entry_skips_collectives(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover
+def _rig_compiled_graph_skips_collectives(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover
     """Armed and alive, but never joins a RUN's collectives — the follower-
     hang case. Rank 0 must time out TYPED, not park forever."""
     init_rank(spec)
@@ -141,14 +141,14 @@ def _rig_entry_skips_collectives(spec: RankSpec, chan: FollowerChannel) -> None:
 
 
 def _armed_runtime(
-    devices: tuple, entry: Any = _rig_entry, timeout_s: float = 60.0,
+    devices: tuple, compiled_graph: Any = _rig_compiled_graph, timeout_s: float = 60.0,
 ) -> tuple:
     pipe = _make_toy_pipe()
     # pgw#892: arming no longer takes a duration at all — a follower that
     # keeps working arms for as long as its work takes, and one that stops
     # working is condemned by silence.
     rt = SequenceRuntime(
-        devices, entry=entry, backend="gloo",
+        devices, compiled_graph=compiled_graph, backend="gloo",
         collective_timeout_s=timeout_s,
     )
     installed = rt.arm(pipe, BootPlan(degree=len(devices)),
@@ -256,7 +256,7 @@ def test_a_follower_that_skips_the_collective_times_out_typed() -> None:
     # now carries a real timeout and rank 0 fails typed, condemning the
     # group.
     collective_timeout_s = 5.0
-    rt, pipe = _armed_runtime((0, 1), entry=_rig_entry_skips_collectives,
+    rt, pipe = _armed_runtime((0, 1), compiled_graph=_rig_compiled_graph_skips_collectives,
                               timeout_s=collective_timeout_s)
     try:
         start = time.monotonic()
@@ -308,7 +308,7 @@ def test_arming_a_group_whose_follower_goes_silent_fails_typed(
     monkeypatch.setattr(group_mod, "_STAGING_SILENCE_WINDOW_S", 3.0)
     pipe = _make_toy_pipe()
     rt = SequenceRuntime(
-        (0, 1), entry=_rig_entry_never_ready, backend="gloo",
+        (0, 1), compiled_graph=_rig_compiled_graph_never_ready, backend="gloo",
         collective_timeout_s=30.0,
     )
     with pytest.raises(RankGroupError, match="no CPU or I/O"):
@@ -317,7 +317,7 @@ def test_arming_a_group_whose_follower_goes_silent_fails_typed(
 
 
 def test_close_is_never_a_collective_and_completes_against_a_wedged_follower() -> None:
-    rt, pipe = _armed_runtime((0, 1), entry=_rig_entry_skips_collectives,
+    rt, pipe = _armed_runtime((0, 1), compiled_graph=_rig_compiled_graph_skips_collectives,
                               timeout_s=5.0)
     # A RUN the follower ignores: it is now parked in a 600s sleep.
     parked_s = 600.0

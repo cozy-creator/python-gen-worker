@@ -3,7 +3,7 @@
 Why this test exists rather than a shared autotune cache. pgw#1006 was filed on
 the premise that "a large share of the 92-min `inductor_compile` phase is Triton
 autotuning". The repo's own banked measurement says otherwise — on a real w8a8
-SDXL UNet AOTI entry (L4 sm_89, `aoti_compile_s = 390.3`),
+SDXL UNet AOTI compiled graph (L4 sm_89, `aoti_compile_s = 390.3`),
 `CachingAutotuner.benchmark_all_configs` was **12.1 s over 96 calls, 3.1 %** —
 so the whole ceiling of a perfect cross-mint autotune cache is ~3 % of a mint.
 That number was reachable only by reading `metrics_raw` by hand; nothing named
@@ -72,7 +72,7 @@ def test_serial_mint_table_reports_autotune_separately_from_triton() -> None:
     """The two GPU-touching overlays are different questions.
 
     `triton_s` is kernel COMPILATION (already fanned out across worker
-    processes, 1.5 % of the banked entry); `autotune_s` is BENCHMARKING on the
+    processes, 1.5 % of the banked compiled graph); `autotune_s` is BENCHMARKING on the
     live card. Neither autotune key contains "triton" or "async_compile", so
     the two overlays cannot absorb each other — asserted, because the
     substring rule that builds `triton_s` would silently swallow a future
@@ -91,7 +91,7 @@ def test_serial_mint_table_reports_autotune_separately_from_triton() -> None:
 
 
 def test_absent_autotune_is_omitted_rather_than_reported_as_zero() -> None:
-    """A CPU entry never autotunes, and a recorded 0.0 would read as a
+    """A CPU compiled graph never autotunes, and a recorded 0.0 would read as a
     measurement rather than as an absence."""
     partition, overlays, _ = spans.phase_delta(
         _snapshot(), _snapshot(**{"GraphLowering.codegen": 3.0}))

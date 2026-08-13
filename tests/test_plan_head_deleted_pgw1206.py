@@ -35,7 +35,7 @@ def test_the_plan_module_is_gone_with_no_shim() -> None:
 
 
 @pytest.mark.parametrize("name", [
-    "handle_run_attempt", "_plan_order", "_plan_manifest_entry",
+    "handle_run_attempt", "_plan_order", "_plan_manifest_compiled_graph",
     "_grant_snapshots", "_materialize_arm", "_validate_plan_arm",
 ])
 def test_no_plan_head_method_survives_on_the_executor(name: str) -> None:

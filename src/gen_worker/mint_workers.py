@@ -13,13 +13,13 @@ four.
 What replaces it:
 
 * **K = f(cores, one measured child RSS)** — the two facts below feed
-  :func:`gen_worker.aot_compile_pool.entry_workers`, which now derives width
+  :func:`gen_worker.aot_compile_pool.compiled_graph_workers`, which now derives width
   from CPU and host RAM only. A compile child's device footprint is not
   estimated, banked, divided or compared against anything.
 * **The attempt is the signal.** A compile child that runs out of device
   memory dies in its own process, is classified (``MintResourceExhausted``)
-  and reported; an ADOPT that cannot bind an entry raises there and the pod
-  serves eager (``aot_serve.load_and_wrap``'s per-entry OOM guard). Neither
+  and reported; an ADOPT that cannot bind an compiled graph raises there and the pod
+  serves eager (``aot_serve.load_and_wrap``'s per-compiled graph OOM guard). Neither
   needed a number computed in advance to be correct.
 
 Everything here is a READING taken after the fact. If a function in this module
@@ -31,29 +31,29 @@ from __future__ import annotations
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 
-#: One entry child's measured HOST high-water, keyed by (family, weight lane).
+#: One compiled graph child's measured HOST high-water, keyed by (family, weight lane).
 #: The one bank that survives, because it is the divisor in ``K``'s host-RAM
 #: bound and nothing else. Monotone at the WRITE: a child that peaked higher
 #: once can peak that high again, and a lucky run must not talk the ask down.
-_ENTRY_RSS_PEAKS: Dict[Tuple[str, str], int] = {}
+_COMPILED_GRAPH_RSS_PEAKS: Dict[Tuple[str, str], int] = {}
 
 
-def record_entry_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> None:
-    """Bank one entry child's measured host high-water for the next mint.
+def record_compiled_graph_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> None:
+    """Bank one compiled graph child's measured host high-water for the next mint.
 
-    Written on EVERY outcome including failures: an aborted mint's entries
+    Written on EVERY outcome including failures: an aborted mint's compiled graphs
     still peaked where they peaked, and the attempt that follows is exactly
     the one that needs the fact.
     """
     if peak_bytes <= 0:
         return
     key = (str(family or ""), str(weight_lane or ""))
-    _ENTRY_RSS_PEAKS[key] = max(_ENTRY_RSS_PEAKS.get(key, 0), int(peak_bytes))
+    _COMPILED_GRAPH_RSS_PEAKS[key] = max(_COMPILED_GRAPH_RSS_PEAKS.get(key, 0), int(peak_bytes))
 
 
-def entry_peak_rss(family: str, weight_lane: str) -> int:
-    """0 = never measured on this pod; ``entry_workers`` says so in its basis."""
-    return _ENTRY_RSS_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
+def compiled_graph_peak_rss(family: str, weight_lane: str) -> int:
+    """0 = never measured on this pod; ``compiled_graph_workers`` says so in its basis."""
+    return _COMPILED_GRAPH_RSS_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ def entry_peak_rss(family: str, weight_lane: str) -> int:
 # cost on THIS machine", and onto `aot_mint_phases` for the fleet view. One
 # measurement, taken once, in the child that ran it.
 #
-# WHAT THIS IS NOT. It sizes nothing. `entry_workers` is still f(cores,
+# WHAT THIS IS NOT. It sizes nothing. `compiled_graph_workers` is still f(cores,
 # measured child RSS) and no width, placement or admission decision reads a row
 # below. Wiring one in would re-create precisely what §4.33 deleted, and this
 # module's own header says where such a term belongs: the deleted module.
@@ -119,7 +119,7 @@ class DevicePeakKey(NamedTuple):
     toolchain: str
     gen_worker: str
     weight_lane: str
-    #: WHICH window this high-water covers — an export peak and an entry
+    #: WHICH window this high-water covers — an export peak and an compiled graph
     #: compile peak are different questions and must never be maxed together.
     phase: str
 
@@ -130,7 +130,7 @@ class DevicePeakKey(NamedTuple):
 _DEVICE_PEAKS: Dict[DevicePeakKey, DevicePeak] = {}
 
 
-def record_entry_device_peak(
+def record_compiled_graph_device_peak(
     key: DevicePeakKey, allocated_bytes: int, reserved_bytes: int,
 ) -> None:
     """Bank one compile's measured device high-water.
@@ -149,7 +149,7 @@ def record_entry_device_peak(
         return
     if not str(key.graph_class or "").strip():
         # A row with no subject cannot be looked up and would silently
-        # accumulate every class into one entry.
+        # accumulate every class into one compiled graph.
         return
     held = _DEVICE_PEAKS.get(key)
     if held is None:
@@ -160,7 +160,7 @@ def record_entry_device_peak(
         max(held.reserved_bytes, reserved))
 
 
-def entry_device_peak(key: DevicePeakKey) -> Optional[DevicePeak]:
+def compiled_graph_device_peak(key: DevicePeakKey) -> Optional[DevicePeak]:
     """The banked reading, or ``None`` — which means NO EVIDENCE.
 
     ``None`` rather than a zero-valued row on purpose (§4.33): "never measured
@@ -235,6 +235,6 @@ def adopt_watermark(device: Optional[int] = None) -> Tuple[int, int]:
 __all__ = [
     "adopt_watermark",
     "device_of",
-    "entry_peak_rss",
-    "record_entry_peak_rss",
+    "compiled_graph_peak_rss",
+    "record_compiled_graph_peak_rss",
 ]

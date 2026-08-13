@@ -215,7 +215,7 @@ def test_a_live_credential_publishes_no_lapse_leg(hub, artifact, monkeypatch):
     assert not [p for _, p in seen if p == "credential_expired"]
 
 
-# --- the production entry: the event the three failures were reported as ----
+# --- the production compiled graph: the event the three failures were reported as ----
 
 
 def test_the_background_publish_reports_the_grouped_phase(hub, artifact,

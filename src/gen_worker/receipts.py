@@ -542,10 +542,10 @@ def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
     except ValueError as exc:
         raise ReceiptError("revocations_unavailable", f"response parse: {exc}") from exc
     out: Set[Tuple[str, str]] = set()
-    for entry in body.get("revoked") or []:
-        if isinstance(entry, dict):
-            key = str(entry.get("compiled_graph_key") or "").strip()
-            digest = str(entry.get("snapshot_digest") or "").strip()
+    for compiled_graph in body.get("revoked") or []:
+        if isinstance(compiled_graph, dict):
+            key = str(compiled_graph.get("compiled_graph_key") or "").strip()
+            digest = str(compiled_graph.get("snapshot_digest") or "").strip()
             if key and digest:
                 out.add((key, digest))
     return out

@@ -4,7 +4,7 @@ Measured on a real L4 (gen-worker 0.84.0, sdxl 0.2.102, release `39ac3726`,
 pod `d0l6455n9nifo3`): the mint loaded the pipeline, exported the
 adapter-bearing graph class, reached the linker and refused —
 
-    entry 'unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192':
+    compiled graph 'unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192':
     aot_compile failed: InductorError: InvalidCxxCompiler: No working C++
     compiler found in torch._inductor.config.cpp.cxx: (None, 'g++')
 

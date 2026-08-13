@@ -28,7 +28,7 @@ they existed is untouched by construction —
 :func:`test_existing_declarations_are_byte_identical` pins that, and the same
 comparison was run against the three real fleet declarations off-tree (flux2
 4b/9b, wan x3, sdxl: byte-identical declarations AND byte-identical derived
-entries, dynamic rows included).
+compiled graphs, dynamic rows included).
 """
 
 from __future__ import annotations
@@ -341,7 +341,7 @@ def _fingerprint(decl: Compile) -> str:
         "inputs": [i.as_row() for i in decl.inputs],
         "args": [a.as_row() for a in decl.args],
         "classes": [c.as_row() for c in decl.classes],
-        "entries": [
+        "compiled_graphs": [
             {"fork": [list(f) for f in p.fork],
              "dynamic": [[d.input_name, d.axis, d.min, d.max, d.multiple_of,
                           d.dim] for d in p.dynamic]}
@@ -355,7 +355,7 @@ def test_existing_declarations_are_byte_identical() -> None:
 
     Pinned as a unit here; the real check is the same comparison run against
     the fleet's own declarations, which came back byte-identical for flux2
-    4b/9b, wan t2v/i2v/ti2v and sdxl — declarations AND derived entries,
+    4b/9b, wan t2v/i2v/ti2v and sdxl — declarations AND derived compiled graphs,
     dynamic rows included.
     """
     plain = Input("hidden_states", shape=("B", 4, 6), dtype="model")
@@ -454,7 +454,7 @@ def test_collapsing_rows_that_differ_on_an_ARG_carried_dim_is_REFUSED() -> None:
 def test_static_rows_keeps_one_artifact_per_row_for_arg_carried_dims() -> None:
     """The declared remedy in that refusal, exercised: static-rows is exactly
     right for a family whose extents ride python ints — which is why
-    qwen-image derives 14 entries from 14 rows."""
+    qwen-image derives 14 compiled graphs from 14 rows."""
     rows = (GraphClass(dims={"B": 1, "H_pat": 4, "W_pat": 6}),
             GraphClass(dims={"B": 1, "H_pat": 8, "W_pat": 6}))
     assert len(compiled_graph_plans(_arg_carried_declaration(rows))) == 2

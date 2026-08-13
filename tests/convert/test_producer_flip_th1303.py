@@ -83,10 +83,10 @@ def test_publish_flavors_declares_v2(fake_hub: Any, tmp_path: Path) -> None:
     declared = {f["path"]: f for f in req["files"]}
     assert set(declared) == {"diffusion.safetensors",
                              "text_encoder.safetensors", "config.json"}
-    for name, entry in declared.items():
+    for name, compiled_graph in declared.items():
         want = hashlib.sha256((tree / name).read_bytes()).hexdigest()
-        assert entry["digest"] == f"sha256:{want}", name
-        assert entry["size_bytes"] == (tree / name).stat().st_size
+        assert compiled_graph["digest"] == f"sha256:{want}", name
+        assert compiled_graph["size_bytes"] == (tree / name).stat().st_size
 
     # The R2-shaped enforcement actually ran: the objects only exist because
     # bytes that hashed to the key were PUT to a checksum-signed URL.

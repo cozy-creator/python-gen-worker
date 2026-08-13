@@ -634,7 +634,7 @@ def test_resolve_pipeline_class_gw586() -> None:
 
 
 # pgw#1032: `test_arm_staged_artifact_reconciles_resident_drift` is deleted with
-# `arm_staged_artifact` itself — the STRICT arm entry point existed only for
+# `arm_staged_artifact` itself — the STRICT arm compiled graph point existed only for
 # hub-commanded hot adoption, which nothing has ever dispatched. The resident
 # convergence it checked is the same one `enable()` performs, and
 # `test_enable_reconciles_*` above/below cover it on the live path.
@@ -651,8 +651,8 @@ def test_resolve_pipeline_class_gw586() -> None:
 
 def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
     """gw#608 revert-turns-red: the AOTAutogradCache key embeds the decomp
-    table function's process memory address (ASLR), so its entries can never
-    hit across pods and an AOT miss skips the portable on-disk FX entries
+    table function's process memory address (ASLR), so its compiled graphs can never
+    hit across pods and an AOT miss skips the portable on-disk FX compiled graphs
     (live: 8/8 misses on byte-identical FX keys, two hosts). Both the
     capture/seed env contract and apply() must pin the AOT layer OFF so the
     FX cache is the lookup surface, symmetrically for producer and consumer."""
@@ -690,20 +690,20 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
     """gw#608 residual (live-disproven 0.40.5, B200, 2026-07-21): torch>=2.13
     config user overrides are ContextVars — THREAD-LOCAL. The arming thread's
     ``enable_autograd_cache = False`` was invisible to the warmup thread that
-    actually compiled, so the mint still packed ASLR-keyed AOT entries and the
+    actually compiled, so the mint still packed ASLR-keyed AOT compiled graphs and the
     store-served sibling still missed 8/8. The disable must bind EVERY thread
-    (entry-level env force), not just the caller's."""
+    (compiled graph-level env force), not just the caller's."""
     import threading
 
     import torch._functorch.config as fconf
 
-    entry = fconf._config["enable_autograd_cache"]
-    had_force = "env_value_force" in entry.__dict__
-    old_force = entry.__dict__.get("env_value_force")
+    compiled_graph = fconf._config["enable_autograd_cache"]
+    had_force = "env_value_force" in compiled_graph.__dict__
+    old_force = compiled_graph.__dict__.get("env_value_force")
     monkeypatch.delenv("TORCHINDUCTOR_AUTOGRAD_CACHE", raising=False)
     monkeypatch.setattr(fconf, "enable_autograd_cache", True)
     try:
-        entry.__dict__.pop("env_value_force", None)  # simulate no pre-import env
+        compiled_graph.__dict__.pop("env_value_force", None)  # simulate no pre-import env
         from gen_worker import settings_authority as sa
 
         sa.disable_autograd_cache()  # pgw#1181: the pin's owner, see above
@@ -718,14 +718,14 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
         t.join()
         assert seen["value"] is False, (
             "AOT autograd cache still enabled on a sibling thread — the "
-            "warmup/compile thread would repack ASLR-keyed AOT entries and "
+            "warmup/compile thread would repack ASLR-keyed AOT compiled_graphs and "
             "consumers would miss 8/8 (gw#608)"
         )
     finally:
         if had_force:
-            entry.env_value_force = old_force
+            compiled_graph.env_value_force = old_force
         else:
-            entry.__dict__.pop("env_value_force", None)
+            compiled_graph.__dict__.pop("env_value_force", None)
 
 
 # ---------------------------------------------------------------------------
@@ -749,9 +749,9 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
 
 
 # pgw#1181 REMOVED `test_fx_cache_failure_report_names_b2_samekey_resave`.
-# `samekey_resaves` counts entry files that a boot re-saved under a key the
+# `samekey_resaves` counts compiled graph files that a boot re-saved under a key the
 # COMPILED GRAPH had already seeded, so it is undefined without a compiled graph — and the compiled graph
-# half of `fx_cache_failure_report` read FX entries out of a
+# half of `fx_cache_failure_report` read FX compiled graphs out of a
 # `torch-inductor-cache` tarball, a format with no writer, deleted here. The
 # live-directory census the sibling row now fences is the half a pod can still
 # reach: what the executor hands this function is an exported compiled graph, which

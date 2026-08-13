@@ -129,7 +129,7 @@ class SelfMint:
 #: The digit is the token's FACT-SET SCHEMA, and it is the memo-invalidation
 #: mechanism (pgw#1113): ``arm2`` states the compile SUBJECT, ``arm1`` did
 #: not, so an ``arm1-`` memo answers a question no ``arm2`` reader is asking.
-#: A stale-schema entry is therefore unaddressable by construction rather
+#: A stale-schema compiled graph is therefore unaddressable by construction rather
 #: than misreadable, and :func:`arm_from_local_store` sweeps the predecessor
 #: files once per process instead of leaving them to accumulate silently.
 ARM_SCHEME = "arm2"
@@ -181,7 +181,7 @@ class ArmIdentity:
 #: ``graph`` is deliberately absent: it exists only after the export, and
 #: comparing a declared-facts stand-in against the traced fact is the
 #: phantom divergence this type retires.
-# pgw#1176: ``envelope`` LEFT this comparison with the key. A per-entry
+# pgw#1176: ``envelope`` LEFT this comparison with the key. A per-compiled graph
 # artifact records no DECLARED ENVELOPE — that is a manifest fact about the
 # whole declaration, not about one graph class — so comparing it here would
 # compare a value the child can no longer state against one the parent can,
@@ -427,7 +427,7 @@ _PENDING_LOCK = threading.Lock()
 _PENDING: Dict[str, "PendingSelfMint"] = {}
 # pgw#672: compiled graphs this process already finalized (packed + folded into the
 # live cache root). A later same-obligation arm re-arms cache_ready from the
-# folded entries instead of opening a SECOND capture — which, with the first
+# folded compiled graphs instead of opening a SECOND capture — which, with the first
 # mint's compiled code resident in dynamo's in-memory cache, would capture
 # nothing and disprove itself at finalize (the L4 churn loop).
 #
@@ -515,7 +515,7 @@ def _credential_lapse_s(token: str, *, now: float) -> float:
 #
 # Every one of them already ships INSIDE the artifact (`metadata.json` in the
 # .tar.gz) and is read from there — `guard_closure.load_manifest` opens the
-# tarball, `aot_serve` reads `entries` off the unpacked package. The copy in
+# tarball, `aot_serve` reads `compiled graphs` off the unpacked package. The copy in
 # the declare body had exactly one hub-side reader,
 # `api/compiled_graph_receipts.go:242-248`, which hashes it into two `omitempty` audit
 # claims that nothing verifies against anything (the worker parses
@@ -531,7 +531,7 @@ def _credential_lapse_s(token: str, *, now: float) -> float:
 # route cap and the hub answered 413 thirty-two times.
 _UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
     "guard_manifest",   # JIT lane: per-graph guard closures
-    "entries",          # AOT lane: per-class contracts + constant manifests
+    "compiled_graphs",          # AOT lane: per-class contracts + constant manifests
     "composition",      # pgw#697 composition fingerprint rows
     "weight_contract",  # per-tensor weight rows
 })
@@ -854,18 +854,18 @@ def _publish_failure_phase(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-#: pgw#1046: the published entry carrying the artifact's
+#: pgw#1046: the published compiled graph carrying the artifact's
 #: ``combined_graph_hash`` — the value pgw#903's pre-dlopen fence compares
 #: against ``Arm.graph_contract_digest``, and the key tensorhub's producer
 #: reads (``runattempt.ArmFromVerifiedCompiledGraph``, `axisGraphContract`). Since
-#: pgw#1059 its value IS the ``graph`` key axis; the hub-consumed entry NAME
+#: pgw#1059 its value IS the ``graph`` key axis; the hub-consumed compiled graph NAME
 #: is deliberately unchanged (a wire rename needs a paired tensorhub change).
 GRAPH_CONTRACT_AXIS = "graph_contract"
 
-#: pgw#1059: the published NON-KEY entry carrying the artifact's env-seal
+#: pgw#1059: the published NON-KEY compiled graph carrying the artifact's env-seal
 #: digest. The seal left the key (amendment 4 — its declaration folds into
 #: the ``toolchain`` axis), but the hub's ``ArtifactFromCompiledGraphRecord`` reads
-#: this entry to build ``ArtifactIdentity.env_seal_digest``, which pgw#904's
+#: this compiled graph to build ``ArtifactIdentity.env_seal_digest``, which pgw#904's
 #: consumer requires — so it rides the map as a wire fact, exactly like
 #: ``graph_contract``.
 ENV_SEAL_AXIS = "env_seal"
@@ -881,7 +881,7 @@ def _recomputed_key(meta: Mapping[str, Any]) -> compiled_graph_key.CompiledGraph
     kind is refused here by the derivation itself.
     """
     try:
-        return compiled_graph_key.from_entry_metadata(meta)
+        return compiled_graph_key.from_compiled_graph_metadata(meta)
     except compiled_graph_key.CompiledGraphKeyError as exc:
         raise CompiledGraphPublishRefused(
             f"compiled_graph states no computable identity ({exc}); publishing it under "
@@ -911,8 +911,8 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
     self-description, never identity).
 
     ``graph_contract`` and ``graph`` are no longer the same value, and that is
-    the point: ``graph`` is THIS entry's class hash (identity), while
-    ``graph_contract`` names the class SET this entry belongs to (coverage).
+    the point: ``graph`` is THIS compiled graph's class hash (identity), while
+    ``graph_contract`` names the class SET this compiled graph belongs to (coverage).
     Fusing them is what made adding one aspect ratio re-mint 35 unchanged
     classes.
     """
@@ -925,13 +925,13 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
             "the artifact does not corroborate")
     axes = {k: str(v) for k, v in key.axes_dict().items()}
     # The manifest label — telemetry/coverage, never identity. Empty is
-    # HONEST for an entry minted by a pod that has not folded its whole
+    # HONEST for an compiled graph minted by a pod that has not folded its whole
     # declaration, so it is not a publish refusal.
     axes[GRAPH_CONTRACT_AXIS] = str(meta.get("manifest_digest") or "").strip()
     seal = meta.get(env_seal.SEAL_KEY)
     if not isinstance(seal, dict) or not seal:
         # The seal left the KEY (pgw#1059 amendment 4) but not the wire: the
-        # hub's ArtifactFromCompiledGraphRecord requires the entry, and a row without
+        # hub's ArtifactFromCompiledGraphRecord requires the compiled graph, and a row without
         # it is a compiled graph the fleet can never arm — same fail-closed rule as
         # the axes above.
         raise CompiledGraphPublishRefused(
@@ -1959,10 +1959,10 @@ def _arm_exported_compiled_graph(
     # `try_read_metadata` answers None for both "this compiled graph has no envelope" and
     # "I refused to read the envelope it has", and every consumer here spent
     # that distinction on `meta is not None`. Measured on row 7: a 16 MiB bound
-    # refused a 36-entry sdxl envelope, so check 1 below SILENTLY DID NOT RUN,
+    # refused a 36-compiled graph sdxl envelope, so check 1 below SILENTLY DID NOT RUN,
     # `arm_aot` was handed None and skipped the lifted-binding install, and the
     # refusal that reached the wire named a downstream contract gate
-    # (`lifted_inputs_unbindable`) with no root. 36/36 entries, 92 minutes and
+    # (`lifted_inputs_unbindable`) with no root. 36/36 compiled graphs, 92 minutes and
     # $1.584 discarded; the only trace of the cause was the word `unreadable`
     # in one event's `compiled_graph_key=` field.
     #
@@ -2013,7 +2013,7 @@ def _arm_exported_compiled_graph(
 
 
 #: One sweep per process: the store is this machine's, the predecessor
-#: entries are finite, and re-listing a directory on every arm buys nothing.
+#: compiled graphs are finite, and re-listing a directory on every arm buys nothing.
 _MEMO_SWEPT = False
 
 
@@ -2022,7 +2022,7 @@ def _sweep_superseded_memos_once() -> None:
 
     pgw#1113 states the cost up front: the subject facts change every token,
     so every machine with a local store pays ONE re-mint per family, once.
-    That cost is the point — an entry keyed by a token that could not state
+    That cost is the point — an compiled graph keyed by a token that could not state
     what it was compiling is exactly the row that could hand this pipeline
     another checkpoint's compiled graph — but it must be spent EXPLICITLY, in a counted
     line, not discovered later as a store full of unreadable files.
@@ -2067,7 +2067,7 @@ def arm_from_local_store(
       the sweep the memo misses and the derived key still addresses the compiled graph it
       used to name. On a fleet pod both routes are one stat on an empty store.
 
-    A refusal on the memo route DROPS the entry — this machine wrote that memo
+    A refusal on the memo route DROPS the compiled graph — this machine wrote that memo
     for this exact identity, so a compiled graph that will not arm under it is stale.
     A refusal on the boot-key route does NOT: that hit is an inference about
     which pipe owns the bytes, and destroying another pipe's compiled graph to punish a
@@ -2185,9 +2185,9 @@ def adopt_delegated_mint(
     rows = [Path(a) for a in artifacts]
     if not rows:
         state["adopt_refusal"] = (
-            "no_entry_artifact", "the child reported no entry artifact")
+            "no_compiled_graph_artifact", "the child reported no compiled_graph artifact")
         return None
-    # The FIRST entry keeps the pending's canonical target path (the resume
+    # The FIRST compiled graph keeps the pending's canonical target path (the resume
     # bank and the local-store write address it); the rest sit beside it under
     # their own keys. Nothing reads a compiled graph-shaped single path any more.
     artifact = rows[0]
@@ -2208,7 +2208,7 @@ def adopt_delegated_mint(
     #
     # pgw#1176: PER ROW — and pgw#1183 wrote the seam per-artifact precisely so
     # that this loop is the only change needed. Every class is durable before
-    # any class is verified, so a crash costs the one entry in flight rather
+    # any class is verified, so a crash costs the one compiled graph in flight rather
     # than the set, and a class that refuses is quarantined without touching a
     # sibling that armed.
     _durable_keys: Dict[Path, str] = {
@@ -2230,12 +2230,12 @@ def adopt_delegated_mint(
     # §4.33 / pgw#1175: the pgw#1164 pre-arm headroom estimate that stood here
     # is DELETED. It priced the arm at `2 * activation` off a resident set the
     # card's free figure already excluded, and it declined stickily. The arm
-    # below is the measurement: `arm_entry` binds ONE class and a real device
+    # below is the measurement: `arm_compiled_graph` binds ONE class and a real device
     # OOM comes back as a typed `insufficient_adopt_vram` refusal through
     # `_arm_exported_compiled_graph`'s ordinary classification.
     #
     # pgw#1176 sharpens that: the refusal now costs ONE graph class, so a card
-    # that cannot hold entry 12 still serves entries 1-11 compiled — where the
+    # that cannot hold compiled graph 12 still serves compiled graphs 1-11 compiled — where the
     # estimate, and the compiled graph it guarded, discarded all 36.
     #
     # pgw#1168: the accounting lives at `provision.arm_aot`, the one seam every
@@ -2247,7 +2247,7 @@ def adopt_delegated_mint(
     # here, because this is the call site where a refusal has consequences
     # (nothing is armed, nothing is published); the ACCOUNTING belongs at the
     # seam so it cannot be wired on one path again.
-    # pgw#1176: ARM AND GATE EACH ENTRY. Every class is armed and parity-gated
+    # pgw#1176: ARM AND GATE EACH COMPILED_GRAPH. Every class is armed and parity-gated
     # on its own, at the moment it exists — which is what makes §4.33's ~8 GiB
     # true by construction (exactly ONE compiled runner resident beside the
     # already-resident weights while its probe runs) and what stops one bad
@@ -2281,12 +2281,12 @@ def adopt_delegated_mint(
         else:
             row_meta = {}
         row_key = str(row_meta.get("compiled_graph_key") or "").strip()
-        entry_name = str(
-            (row_meta.get(compiled_graph_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+        compiled_graph_name = str(
+            (row_meta.get(compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY) or {}).get("name") or "")
         if not row_armed:
-            refusals.append((entry_name or row.name, *row_refusal))
+            refusals.append((compiled_graph_name or row.name, *row_refusal))
             activity_mod.emit_event(
-                "aot_entry_arm_failed",
+                "aot_compiled_graph_arm_failed",
                 f"arm_key={pending.arm_token}: this class does not arm "
                 f"({row_refusal[0]}"
                 f"{': ' + row_refusal[1] if row_refusal[1] else ''}); it "
@@ -2295,15 +2295,15 @@ def adopt_delegated_mint(
                 phase=row_refusal[0],
                 family=pending.family,
                 compiled_graph_key=row_key,
-                graph_class=entry_name or row.name,
+                graph_class=compiled_graph_name or row.name,
             )
             continue
         if not row_key:
-            # pgw#1059: a produced entry without a stamped key has no identity
+            # pgw#1059: a produced compiled graph without a stamped key has no identity
             # to advertise, publish or ledger.
             refusals.append((
-                entry_name or row.name, "compiled_graph_key_missing",
-                "the child's entry carries no stamped compiled_graph_key"))
+                compiled_graph_name or row.name, "compiled_graph_key_missing",
+                "the child's compiled_graph carries no stamped compiled_graph_key"))
             continue
         adopted.append((row_key, row, row_meta))
 
@@ -2349,8 +2349,8 @@ def adopt_delegated_mint(
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return None
 
-    # The identity carried forward is the FIRST adopted entry's; the whole
-    # adopted set rides `state["adopted_entries"]` so publish and the local
+    # The identity carried forward is the FIRST adopted compiled graph's; the whole
+    # adopted set rides `state["adopted_compiled_graphs"]` so publish and the local
     # store loop over it. pgw#1176: there is no compiled graph-level identity to carry.
     key, first_artifact, meta = adopted[0]
     if refusals:
@@ -2358,11 +2358,11 @@ def adopt_delegated_mint(
             "fleet-compiled_graphs: %d of %d minted classes did not adopt (%s); the "
             "rest are armed and will publish", len(refusals), len(rows),
             ", ".join(f"{n}:{r}" for n, r, _d in refusals[:4]))
-    # §1.5 + pgw#1176: the DURABLE copy is each entry's address from here on.
+    # §1.5 + pgw#1176: the DURABLE copy is each compiled graph's address from here on.
     # `pending.target` and its siblings live under the mint root, which every
     # terminus cleans; a `SelfMint` pointing there is a reference to bytes
     # scheduled for deletion, and publishing from it is what made the upload a
-    # race against the cleanup. Admitted PER ENTRY, so a class that adopted is
+    # race against the cleanup. Admitted PER COMPILED_GRAPH, so a class that adopted is
     # durable under its own key whatever its siblings did.
     _adopted_paths = {row_path for _k, row_path, _m in adopted}
     durable_paths: Dict[str, Path] = {}
@@ -2387,7 +2387,7 @@ def adopt_delegated_mint(
     )
     state["minted"] = minted
     state["meta"] = dict(meta)
-    state["adopted_entries"] = [
+    state["adopted_compiled_graphs"] = [
         (k, p, dict(m)) for k, p, m in adopted]
     # pgw#1152: pgw#1033's registration stood here and is GONE, not moved.
     # `_arm_exported_compiled_graph` above already wrapped these bytes onto the pipe, and
@@ -2599,7 +2599,7 @@ def keep_self_mint_local(pending: "PendingSelfMint") -> None:
     is a WIRING ALARM — a fleet pod whose ``file_base_url``/JWT went missing —
     and firing it on cozy-local would make the one machine §4.28 was written
     about permanently indistinguishable from a broken pod. It also takes a
-    publisher, and this one cannot: the local serve entry's never-publish
+    publisher, and this one cannot: the local serve compiled graph's never-publish
     property is pinned structurally by
     ``tests/test_local_serve_no_publisher_pgw1127.py``, and a terminus that
     accepted a sink would be the hole that fence exists to close.

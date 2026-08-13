@@ -33,10 +33,10 @@ _KNOWN_KINDS = frozenset(("inference", "training", "dataset", "conversion", "eva
 def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationResult:
     """Validate a discovered endpoint.lock dict at bake time (#322/#328).
 
-    Confirms every entry in ``lock_dict["functions"]`` is a class-shape
+    Confirms every compiled graph in ``lock_dict["functions"]`` is a class-shape
     (post-#322) declaration:
 
-      1. ``class_name`` is present and non-empty — proves the entry came
+      1. ``class_name`` is present and non-empty — proves the compiled graph came
          from a ``@inference`` / ``@training`` / ``@dataset`` / ``@conversion``
          decorated class, not a bare ``@inference``.
       2. ``archetype`` is ``"SerialWorker"`` or ``"BatchedWorker"``.
@@ -52,7 +52,7 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
     The intended caller is ``python -m gen_worker.discovery`` (bake time) and
     any CI lint that wants to gate-keep a pull request that drops a class
     declaration. Bake fails loudly when an endpoint still ships an old
-    function-shape entry.
+    function-shape compiled graph.
     """
     errors: List[str] = []
     warnings: List[str] = []

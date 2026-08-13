@@ -2,11 +2,11 @@
 
 **The field observation** (pgw#868 A1 attempt 32, release `3a2a41bbb38b…`, compiled graph
 `ck1-5f421149…`, adopt pod `vf3vwnun17vcwd`, 36/36 parity green): the turbo arm
-served FROM THE COMPILED GRAPH; the base arm — same compiled graph, an entry with exactly its dims —
+served FROM THE COMPILED GRAPH; the base arm — same compiled graph, an compiled graph with exactly its dims —
 got `fallback_reason=ingress_refused`::
 
-    aot_ingress_refused/no_entry_admits — family=sdxl target=unet:
-      no packaged entry admits this call (36 tried) …
+    aot_ingress_refused/no_compiled_graph_admits — family=sdxl target=unet:
+      no packaged compiled graph admits this call (36 tried) …
       class=unet/#0=bfloat16[2,4,128,128],#1=int64[],…
 
 **Root cause, measured off-pod at \\$0** over `gen_worker.view.SAMPLERS` against
@@ -27,12 +27,12 @@ declared dtype can be right for every call. The normalization belongs at the one
 boundary that knows the contract.
 
 **And the observability half.** The refusal said "36 tried" and then listed six,
-in iteration order — and the entry whose dims MATCHED was not among them, so its
+in iteration order — and the compiled graph whose dims MATCHED was not among them, so its
 actual objection was unavailable and diagnosing it meant pulling the published
 compiled graph apart. That is pgw#1058's lesson repeating in the diagnostics layer.
 
 Real codepaths: a real `torch.export` + real AOTI compile on CPU, driven through
-the real `ArtifactRunner`/`EntryDispatch`, on the pgw#791 rig.
+the real `ArtifactRunner`/`CompiledGraphDispatch`, on the pgw#791 rig.
 """
 
 from __future__ import annotations
@@ -97,10 +97,10 @@ def _contract(timestep_dtype: str = "float32",
 
 
 def _runner(package: Any, contract: Any = None,
-            entry: str = "unet/adapter=false,cfg=false/B=1") -> Any:
+            compiled_graph: str = "unet/adapter=false,cfg=false/B=1") -> Any:
     runner = aot_serve.ArtifactRunner(
         package=package, contract=contract or _contract(),
-        constants=(), module_name="unet", entry=entry, family="tiny1074")
+        constants=(), module_name="unet", compiled_graph=compiled_graph, family="tiny1074")
     runner.bound = True
     return runner
 
@@ -117,7 +117,7 @@ def sink(monkeypatch) -> List[Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_int64_sampler_class_is_served_by_the_float32_entry(
+def test_the_int64_sampler_class_is_served_by_the_float32_compiled_graph(
         package, sink) -> None:
     """THE FIELD DEFECT. `dpmpp_2m_karras`/`lcm`/`ddim` present int64; the
     compiled graph is specialized float32; the call must SERVE, not fall back."""
@@ -125,7 +125,7 @@ def test_the_int64_sampler_class_is_served_by_the_float32_entry(
     sample = torch.randn(2, 8)
     with torch.no_grad():
         out = runner(sample, torch.tensor(7, dtype=torch.int64))
-    assert runner.refusals == {}, "the covering entry must admit this call"
+    assert runner.refusals == {}, "the covering compiled_graph must admit this call"
     assert runner.calls == 1
     assert runner.realigned == {"timestep/int64_to_float32": 1}
     events = [e for e in sink if e.kind == aot_serve.RECAST_EVENT]
@@ -180,8 +180,8 @@ def test_a_float32_call_is_untouched(package, sink) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pgw1058s_defect_is_still_caught_float32_call_bfloat16_entry() -> None:
-    """The attempt-30 compiled graph: entries specialized bf16, every real call float32.
+def test_pgw1058s_defect_is_still_caught_float32_call_bfloat16_compiled_graph() -> None:
+    """The attempt-30 compiled graph: compiled graphs specialized bf16, every real call float32.
     float -> float is not a normalization and must stay a named refusal, or
     this fix would have silently served the compiled graph pgw#1058 exists to reject."""
     contract = _contract(timestep_dtype="bfloat16")
@@ -192,7 +192,7 @@ def test_pgw1058s_defect_is_still_caught_float32_call_bfloat16_entry() -> None:
     assert excinfo.value.reason == "dtype_mismatch"
 
 
-def test_an_int64_call_on_a_bfloat16_entry_is_refused() -> None:
+def test_an_int64_call_on_a_bfloat16_compiled_graph_is_refused() -> None:
     """bf16 carries 8 mantissa bits: timestep 999 would land on 1000. A
     normalization that changes the value is a numeric change, so float32 and
     float64 are the ONLY recast targets."""
@@ -216,7 +216,7 @@ def test_a_nonscalar_int64_input_is_refused() -> None:
     assert excinfo.value.reason == "dtype_mismatch"
 
 
-def test_a_float32_call_on_an_int64_entry_is_refused() -> None:
+def test_a_float32_call_on_an_int64_compiled_graph_is_refused() -> None:
     """One direction only. wan-2.2 declares an int64 timestep; a karras-sigma
     float32 timestep fed to it would silently truncate the fraction."""
     contract = _contract(timestep_dtype="int64")
@@ -229,7 +229,7 @@ def test_a_float32_call_on_an_int64_entry_is_refused() -> None:
 
 def test_dims_still_decide_admission(package) -> None:
     """The recast widens nothing but dtype: a wrong-shape call is refused as
-    before, so an entry cannot serve a class it was not compiled for."""
+    before, so an compiled graph cannot serve a class it was not compiled for."""
     runner = _runner(package, contract=_contract(sample_dims=(1, 8)))
     with pytest.raises(aot_serve.IngressContractError) as excinfo:
         with torch.no_grad():
@@ -238,7 +238,7 @@ def test_dims_still_decide_admission(package) -> None:
 
 
 # ---------------------------------------------------------------------------
-# HALF TWO — the refusal names the CLOSEST entry (acceptance item one)
+# HALF TWO — the refusal names the CLOSEST compiled graph (acceptance item one)
 # ---------------------------------------------------------------------------
 
 
@@ -247,9 +247,9 @@ _ASPECTS = ((80, 192), (96, 168), (104, 152), (112, 144), (128, 128),
             (144, 112), (152, 104), (168, 96), (192, 80))
 
 
-def _sdxl_entry(adapter: bool, cfg: bool, batch: int, h: int, w: int,
+def _sdxl_compiled_graph(adapter: bool, cfg: bool, batch: int, h: int, w: int,
                 timestep_dtype: str) -> Tuple[str, Any]:
-    """One sdxl compiled graph entry, labelled and shaped exactly as the field compiled graph's
+    """One sdxl compiled graph compiled graph, labelled and shaped exactly as the field compiled graph's
     36 are (`unet/adapter=…,cfg=…/B=…,H_lat=…,T_txt=77,W_lat=…`). The adapter
     fork is the pgw#790 one: the branchless class REFUSES the lifted pair, the
     branch-bearing one declares it."""
@@ -279,20 +279,20 @@ def _sdxl_entry(adapter: bool, cfg: bool, batch: int, h: int, w: int,
     })
     return name, aot_serve.ArtifactRunner(
         package=None, contract=contract, constants=(), module_name="unet",
-        entry=name, family="sdxl")
+        compiled_graph=name, family="sdxl")
 
 
-def _sdxl_dispatch(timestep_dtype: str) -> aot_serve.EntryDispatch:
-    """The field compiled graph: 36 entries = adapter{F,T} x cfg{F,T} x 9 aspect rungs,
+def _sdxl_dispatch(timestep_dtype: str) -> aot_serve.CompiledGraphDispatch:
+    """The field compiled graph: 36 compiled graphs = adapter{F,T} x cfg{F,T} x 9 aspect rungs,
     B pinned by the cfg fork (cfg=true is ONE batch-2 forward, ie#345)."""
     rows = []
     for adapter in (False, True):
         for cfg, batch in ((False, 1), (True, 2)):
             for h, w in _ASPECTS:
-                rows.append(_sdxl_entry(
+                rows.append(_sdxl_compiled_graph(
                     adapter, cfg, batch, h, w, timestep_dtype))
     assert len(rows) == 36
-    return aot_serve.EntryDispatch(tuple(rows))
+    return aot_serve.CompiledGraphDispatch(tuple(rows))
 
 
 def _cfg_call() -> Dict[str, Any]:
@@ -309,26 +309,26 @@ def _cfg_call() -> Dict[str, Any]:
 _COVERING = ("unet/adapter=false,cfg=true/B=2,H_lat=128,T_txt=77,W_lat=128")
 
 
-def test_the_refusal_names_the_dims_matching_entry_not_the_first_six() -> None:
-    """RED BEFORE THE FIX. The dims-matching entry is 14th of 36 in iteration
+def test_the_refusal_names_the_dims_matching_compiled_graph_not_the_first_six() -> None:
+    """RED BEFORE THE FIX. The dims-matching compiled graph is 14th of 36 in iteration
     order, so `reasons[:6]` truncated away the only informative one — which is
     why the field report could say `36 tried` and show nothing that explained
-    anything. Here the entry is declared bfloat16 (the pgw#1058 shape) so that
+    anything. Here the compiled graph is declared bfloat16 (the pgw#1058 shape) so that
     it refuses for a reason the listing must surface rather than admitting."""
     dispatch = _sdxl_dispatch("bfloat16")
     with pytest.raises(aot_serve.IngressContractError) as excinfo:
         dispatch.select((), _cfg_call())
     detail = str(excinfo.value)
-    assert excinfo.value.reason == "no_entry_admits"
-    assert _COVERING in detail, "the entry whose dims match must be NAMED"
+    assert excinfo.value.reason == "no_compiled_graph_admits"
+    assert _COVERING in detail, "the compiled_graph whose dims match must be NAMED"
     assert "dtype_mismatch" in detail
     assert "every declared dim MATCHES" in detail
     assert "36 tried" in detail
 
 
-def test_the_closest_entry_survives_the_hub_detail_truncation() -> None:
-    """The field detail was cut at 573 chars and the informative entry fell
-    past the cut. The closest entry and its reason lead the sentence."""
+def test_the_closest_compiled_graph_survives_the_hub_detail_truncation() -> None:
+    """The field detail was cut at 573 chars and the informative compiled graph fell
+    past the cut. The closest compiled graph and its reason lead the sentence."""
     dispatch = _sdxl_dispatch("bfloat16")
     with pytest.raises(aot_serve.IngressContractError) as excinfo:
         dispatch.select((), _cfg_call())
@@ -337,16 +337,16 @@ def test_the_closest_entry_survives_the_hub_detail_truncation() -> None:
     assert "dtype_mismatch" in detail[:400]
 
 
-def test_every_tried_entry_is_accounted_for_never_silently_dropped() -> None:
+def test_every_tried_compiled_graph_is_accounted_for_never_silently_dropped() -> None:
     """`36 tried` then 6 listed and 30 unexplained is the defect. Whatever is
     not named individually is COUNTED by reason, and the counts add up."""
     dispatch = _sdxl_dispatch("bfloat16")
     with pytest.raises(aot_serve.IngressContractError) as excinfo:
         dispatch.select((), _cfg_call())
     detail = str(excinfo.value)
-    assert "Other 35 entries" in detail
-    # 17 branchless entries that reach the dtype check, 18 branch-bearing ones
-    # the call carries no adapter for. One count per entry, under its own
+    assert "Other 35 compiled_graphs" in detail
+    # 17 branchless compiled graphs that reach the dtype check, 18 branch-bearing ones
+    # the call carries no adapter for. One count per compiled graph, under its own
     # closest reason, so the counts sum to exactly what "36 tried" promised.
     counted = re.findall(r"(\w+) x(\d+)", detail)
     assert dict((k, int(v)) for k, v in counted) == {
@@ -355,8 +355,8 @@ def test_every_tried_entry_is_accounted_for_never_silently_dropped() -> None:
 
 
 def test_the_field_compiled_graph_now_serves_the_cfg_arm_end_to_end() -> None:
-    """The whole issue, as one assertion: the SAME 36-entry compiled graph, declared as
-    ie#627 declares it (float32), dispatches the int64 CFG call to the entry
+    """The whole issue, as one assertion: the SAME 36-compiled graph compiled graph, declared as
+    ie#627 declares it (float32), dispatches the int64 CFG call to the compiled graph
     that covers it."""
     dispatch = _sdxl_dispatch("float32")
     name, _runner_ = dispatch.select((), _cfg_call())
@@ -371,7 +371,7 @@ def test_a_genuinely_uncovered_class_still_refuses() -> None:
     call["sample"] = torch.zeros(2, 4, 64, 64, dtype=torch.bfloat16)
     with pytest.raises(aot_serve.IngressContractError) as excinfo:
         dispatch.select((), call)
-    assert excinfo.value.reason == "no_entry_admits"
+    assert excinfo.value.reason == "no_compiled_graph_admits"
     assert "static_dim_mismatch" in str(excinfo.value)
     assert "every declared dim MATCHES" not in str(excinfo.value)
 
@@ -395,7 +395,7 @@ def test_miss_distance_orders_dtype_before_dims_and_fewer_before_more(
 
 
 def test_ingress_report_collects_every_miss_not_only_the_first() -> None:
-    """The ranking is only as good as the diagnosis it ranks: one entry that
+    """The ranking is only as good as the diagnosis it ranks: one compiled graph that
     misses on two axes must report both."""
     contract = _contract(timestep_dtype="bfloat16", sample_dims=(1, 8))
     misses, symbols = aot_serve.ingress_report(
@@ -410,7 +410,7 @@ def test_ingress_report_collects_every_miss_not_only_the_first() -> None:
 
 
 def test_the_short_circuit_never_changes_an_admission_decision() -> None:
-    """`select` walks 36 entries per denoise step, so the ADMISSION pass exits
+    """`select` walks 36 compiled graphs per denoise step, so the ADMISSION pass exits
     at the first miss and only the refusal path pays the exhaustive walk. That
     is an early exit from one walk, not a second rule — so admitted/refused
     must agree exactly, over admitting and refusing calls alike."""

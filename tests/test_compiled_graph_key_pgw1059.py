@@ -48,7 +48,7 @@ def test_membership_axiom_the_key_is_exactly_three_axes():
     axiom (pgw#1059 amendment 6, Paul 2026-08-09) admits an axis only when
     the fact provably alters the compiled artifact AND cannot ride an
     existing axis's fact block (trace-shaping facts ride ``graph`` via THIS
-    entry's class hash; compiler configuration rides ``toolchain``).
+    compiled graph's class hash; compiler configuration rides ``toolchain``).
     kind/format (single-valued), family/lane (store metadata + discovery
     scoping) and env_seal (folded into toolchain; gates remain) were each
     REMOVED by that test — and pgw#1176 removed ``envelope`` by it too: it
@@ -112,8 +112,8 @@ _DERIVATION_ALLOWLIST = {
         # reader sees it was checked.
         "guard_closure.py",
     },
-    # the exported-ENTRY key: mint stamp, publish recompute, admission proof.
-    "from_entry_metadata(": {
+    # the exported-COMPILED_GRAPH key: mint stamp, publish recompute, admission proof.
+    "from_compiled_graph_metadata(": {
         "compiled_graph_key.py",    # def
         "aot_mint.py",    # compiled_graph_identity (the stamp)
         "fleet_compiled_graphs.py",  # _recomputed_key (the publish recompute)
@@ -122,7 +122,7 @@ _DERIVATION_ALLOWLIST = {
         # consciously, and it is the reason the fence is an allowlist rather
         # than a ban: the boot key must be THE compiled graph key, so the fourth site
         # had to be this function and not a fourth arithmetic. `boot_key.fold`
-        # assembles the mint's own entry blocks, stamps them through
+        # assembles the mint's own compiled graph blocks, stamps them through
         # `aot_serve.artifact_metadata` (which is where `combined_graph_hash`
         # and every `class_hash` are computed — note `boot_key.py` is NOT in
         # the `combined_graph_hash(` allowlist below, and must not be), and
@@ -212,13 +212,13 @@ def test_single_derivation_fence_is_red_provable(tmp_path):
     rogue = tmp_path / "rogue.py"
     rogue.write_text(
         "def my_own_key(meta):\n"
-        "    return from_entry_metadata(meta)\n")
-    sites = _derivation_sites(tmp_path, "from_entry_metadata(")
+        "    return from_compiled_graph_metadata(meta)\n")
+    sites = _derivation_sites(tmp_path, "from_compiled_graph_metadata(")
     assert sites == {"rogue.py": 1}
     # ...and comments do not trip it (the scanner reads code, not prose).
     commented = tmp_path / "commented.py"
-    commented.write_text("# from_entry_metadata( in prose\n")
-    sites = _derivation_sites(tmp_path, "from_entry_metadata(")
+    commented.write_text("# from_compiled_graph_metadata( in prose\n")
+    sites = _derivation_sites(tmp_path, "from_compiled_graph_metadata(")
     assert "commented.py" not in sites
 
 
@@ -240,11 +240,11 @@ def _old_schema_digest(meta: dict) -> str:
         "shell_digest": "",
         # The pre-pgw#1176 shape, spelled out verbatim because the whole point
         # of this helper is to reconstruct a key the tree can no longer
-        # produce. It read an `entries` MAP and a `declared_envelope`; an
-        # entry artifact records neither, which is itself the structural
+        # produce. It read an `compiled graphs` MAP and a `declared_envelope`; an
+        # compiled graph artifact records neither, which is itself the structural
         # reason an orphaned compiled graph can never be re-derived.
         "targets": [str(
-            (meta.get(compiled_graph_key.ENTRY_BLOCK_KEY) or {}).get("target") or "")],
+            (meta.get(compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY) or {}).get("target") or "")],
         "shapes": [[1024, 1024]],
         "text_lens": [77],
         "guidance": [7.5],
@@ -282,23 +282,23 @@ def test_old_and_new_keys_cannot_collide():
     the verification the purge note rests on: old dev-stack rows are
     unreachable by new derivations, so the purge is hygiene."""
     meta = exported_compiled_graph_meta()
-    new_key = compiled_graph_key.from_entry_metadata(meta).digest
+    new_key = compiled_graph_key.from_compiled_graph_metadata(meta).digest
     old_key = _old_schema_digest(meta)
     assert old_key != new_key
     # pgw#1176 makes this STRUCTURAL rather than a collision argument: a ck1
-    # key does not even parse as an entry key, so an orphaned compiled graph ref cannot
-    # reach a per-entry code path and fail late — it fails at the comparison.
+    # key does not even parse as an compiled graph key, so an orphaned compiled graph ref cannot
+    # reach a per-compiled graph code path and fail late — it fails at the comparison.
     assert not compiled_graph_key.is_key(old_key)
     assert compiled_graph_key.is_key(new_key)
 
 
 def _admissible_meta() -> dict:
-    """A fully self-consistent ENTRY metadata: the block stamped by the ONE
-    producer (``aot_serve.entry_metadata``), identity blocks recorded, key
+    """A fully self-consistent COMPILED_GRAPH metadata: the block stamped by the ONE
+    producer (``aot_serve.compiled_graph_metadata``), identity blocks recorded, key
     stamped from the recorded facts."""
-    meta = aot_serve.entry_metadata(
+    meta = aot_serve.compiled_graph_metadata(
         family="fam", precision="bf16", compiled_graph_key="", name="unet/main",
-        entry={
+        compiled_graph={
             "target": "unet",
             "fork": [],
             "class_dims": [["b", 1]],
@@ -315,27 +315,27 @@ def _admissible_meta() -> dict:
         "toolchain": {"torch": "x" * 16, "settings_declaration": "d" * 16,
                       "loaded_libs": "l" * 16},
     })
-    meta["compiled_graph_key"] = compiled_graph_key.from_entry_metadata(meta).digest
+    meta["compiled_graph_key"] = compiled_graph_key.from_compiled_graph_metadata(meta).digest
     return meta
 
 
 def test_pre_redefinition_artifact_is_structurally_refused():
-    """An artifact recording the OLD blocks (an ``entries`` MAP and a
-    ``combined_graph_hash``, the 36-entry-compiled graph era) cannot restate a
-    per-entry identity: the key derivation refuses typed, and admission
+    """An artifact recording the OLD blocks (an ``compiled graphs`` MAP and a
+    ``combined_graph_hash``, the 36-compiled graph-compiled graph era) cannot restate a
+    per-compiled graph identity: the key derivation refuses typed, and admission
     (``verify_contract``) turns the unrestatable stamp into a named refusal
     before anything can arm. That is what makes the ck1 corpus purge hygiene
     rather than a correctness precondition."""
     meta = _admissible_meta()
     old = dict(meta)
-    entry = old.pop(compiled_graph_key.ENTRY_BLOCK_KEY)
-    old["entries"] = {entry["name"]: entry}
+    compiled_graph = old.pop(compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY)
+    old["compiled_graphs"] = {compiled_graph["name"]: compiled_graph}
     # fence-symbol-exempt: the pre-atom artifact shape, on purpose — this
-    # row proves a format-2 compiled graph cannot restate a per-entry identity.
+    # row proves a format-2 compiled graph cannot restate a per-compiled graph identity.
     old["combined_graph_hash"] = "0" * 16
     old["format"] = 2
-    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="entry"):
-        compiled_graph_key.from_entry_metadata(old)
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="compiled_graph"):
+        compiled_graph_key.from_compiled_graph_metadata(old)
     # its (old-formula) stamp is present but unrestatable => admission refuses.
     # An ek-shaped stamp, because a ck1 stamp is not an identity CLAIM to this
     # runtime at all — `is_key` refuses it, so it never reaches the restate.
@@ -407,20 +407,20 @@ def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
     channel, rather than through a union digest that punishes its siblings.
     """
     meta = exported_compiled_graph_meta()
-    key = compiled_graph_key.from_entry_metadata(meta).digest
+    key = compiled_graph_key.from_compiled_graph_metadata(meta).digest
 
     # The envelope is not an input to identity at all any more: there is no
-    # `declared_envelope` on an entry artifact, and adding one changes nothing.
+    # `declared_envelope` on an compiled graph artifact, and adding one changes nothing.
     wider = dict(meta)
     wider[compiled_graph_key.EXPORT_ENVELOPE_KEY] = {
         "shapes": [[1024, 1024], [768, 768]],
         "text_lens": [77], "guidance": [7.5]}
-    assert compiled_graph_key.from_entry_metadata(wider).digest == key
+    assert compiled_graph_key.from_compiled_graph_metadata(wider).digest == key
 
     other_graph = dict(meta)
-    other_graph[compiled_graph_key.ENTRY_BLOCK_KEY] = {
-        **meta[compiled_graph_key.ENTRY_BLOCK_KEY], "class_hash": "b" * 16}
-    assert compiled_graph_key.from_entry_metadata(other_graph).digest != key
+    other_graph[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY] = {
+        **meta[compiled_graph_key.COMPILED_GRAPH_BLOCK_KEY], "class_hash": "b" * 16}
+    assert compiled_graph_key.from_compiled_graph_metadata(other_graph).digest != key
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +452,7 @@ def test_arm_token_never_passes_is_key(monkeypatch):
     assert not compiled_graph_key.is_key(token)
     # the compared facts are exactly the pre-trace set — graph is absent, and
     # so is `envelope`: pgw#1176 dropped it from ARM_ENVIRONMENT_FACTS because
-    # a per-entry artifact records no declared envelope, so comparing it would
+    # a per-compiled graph artifact records no declared envelope, so comparing it would
     # refuse every child handback by construction.
     assert set(identity.facts_dict()) == set(fleet_compiled_graphs.ARM_FACTS)
     assert "envelope" not in fleet_compiled_graphs.ARM_FACTS

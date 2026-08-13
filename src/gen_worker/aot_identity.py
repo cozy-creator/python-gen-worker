@@ -155,7 +155,7 @@ def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
         env_seal_digest=(
             env_seal.seal_digest(dict(seal)) if isinstance(seal, dict) else ""),
         # pgw#1176: the DECLARATION-wide coverage label, not identity.
-        # Identity is `compiled_graph_key` above, per entry.
+        # Identity is `compiled_graph_key` above, per compiled graph.
         graph_contract_digest=str(meta.get("manifest_digest") or ""),
         publisher_org="",
     )
@@ -223,7 +223,7 @@ def verify_declared_identity(
     return ""
 
 
-#: The entry-block field carrying the node-level digest of the traced program
+#: The compiled graph-block field carrying the node-level digest of the traced program
 #: (``graph_hash.graph_hash``), stamped by ``aot_mint.keying_block``. Since
 #: pgw#1031 (option a) it is FOLDED into ``class_hash`` (the key), and it also
 #: stays recorded here as a top-level sibling for the adopt backstop — see
@@ -249,21 +249,21 @@ def verify_graph_witness(
     tolerance between that and served output.
 
     This function is the belt-and-braces beneath the now-sound key: the mint
-    records ``graph_witness`` per entry, the adopter derives its own from the
+    records ``graph_witness`` per compiled graph, the adopter derives its own from the
     same traced programs its key came from (``boot_key``), and a disagreement —
-    a witness-blind compiled graph, a hash-broken entry, a cross forced by any non-key
+    a witness-blind compiled graph, a hash-broken compiled graph, a cross forced by any non-key
     path — is a typed refusal naming both digests. The pod then boots exactly
     as it booted before pull-by-key existed — eager, then mint — which is the
     correct outcome for "this compiled graph is not my computation".
 
     Fail-closed in both directions, the doctrine
     :func:`verify_declared_identity` already keeps: a compiled graph that is SILENT on an
-    entry's witness cannot be shown to compute this pod's graph, and "cannot be
+    compiled graph's witness cannot be shown to compute this pod's graph, and "cannot be
     shown to match" is what a refusal means. A witness set that does not cover
-    the same entries is the same failure — a partial agreement is not a
+    the same compiled graphs is the same failure — a partial agreement is not a
     narrower match, it is an unproven one (pgw#716).
 
-    ``witnesses`` is ``{entry: digest}`` as
+    ``witnesses`` is ``{compiled graph: digest}`` as
     ``boot_key.DerivedKey.graph_witnesses`` reports it. An empty mapping is a
     caller error, not a pass.
     """
@@ -271,17 +271,17 @@ def verify_graph_witness(
         return (
             "this pod derived no graph witnesses, so the compiled_graph's compiled "
             "graphs cannot be shown to be the graphs it traced (pgw#1031)")
-    entry = meta.get("entry")
-    if not isinstance(entry, Mapping) or not entry:
-        return "artifact records no entry block; it has no graph witness"
+    compiled_graph = meta.get("compiled_graph")
+    if not isinstance(compiled_graph, Mapping) or not compiled_graph:
+        return "artifact records no compiled_graph block; it has no graph witness"
     recorded = {
-        str(entry.get("name") or ""):
-            str(entry.get(GRAPH_WITNESS_FIELD) or ""),
+        str(compiled_graph.get("name") or ""):
+            str(compiled_graph.get(GRAPH_WITNESS_FIELD) or ""),
     }
     silent = sorted(name for name, value in recorded.items() if not value)
     if silent:
         return (
-            f"entries {silent[:4]!r} record no {GRAPH_WITNESS_FIELD!r}: this "
+            f"compiled_graphs {silent[:4]!r} record no {GRAPH_WITNESS_FIELD!r}: this "
             f"compiled_graph predates pgw#1031 and cannot state which graph it compiled")
     extra = sorted(set(recorded) - set(witnesses))
     missing = sorted(set(witnesses) - set(recorded))
@@ -294,7 +294,7 @@ def verify_graph_witness(
         want, have = recorded[name], str(witnesses[name] or "")
         if want != have:
             return (
-                f"entry {name!r}: graph witness {want} on the compiled_graph, {have} "
+                f"compiled_graph {name!r}: graph witness {want} on the compiled_graph, {have} "
                 f"traced here — the compiled_graph key matched but the COMPUTATION did "
                 f"not (pgw#1031: the key folds the ingress contract, not the "
                 f"graph nodes). Refusing to arm another graph's kernels")

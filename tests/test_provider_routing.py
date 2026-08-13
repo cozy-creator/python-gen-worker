@@ -64,7 +64,7 @@ def _manifest(*binding_blocks: dict) -> dict:
     [
         (
             # pgw#1148: a manifest `flavor` field is DEAD (§1.32(d)) — the key
-            # is the repo, and an entry that still carries one is not a
+            # is the repo, and an compiled graph that still carries one is not a
             # second address.
             {"pipeline": {"kind": "fixed", "provider": "hf",
                           "ref": "bfl/FLUX.2-klein-4B"}},
@@ -77,7 +77,7 @@ def _manifest(*binding_blocks: dict) -> dict:
             {"acme/flux:canary": "tensorhub"},
         ),
         (
-            # th#928: retired dispatch-kind entries are ignored, not parsed.
+            # th#928: retired dispatch-kind compiled graphs are ignored, not parsed.
             {"pipeline": {"kind": "dispatch", "field": "variant", "table": {
                 "bf16": {"provider": "hf", "ref": "owner/flux"},
             }}},

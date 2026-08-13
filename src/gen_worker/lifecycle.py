@@ -1433,11 +1433,11 @@ class Lifecycle:
         # measurement whose only consumer is a hub table nobody has queried yet
         # is how `compiled_graph_discover` survived four releases with no producer; the
         # boot that took the time is the one place a hole is cheap to notice.
-        # `SHAPE_ENTRYPOINT` is the MINIMUM every pod boot produces (the compiled graph
+        # `SHAPE_CompiledGraphPOINT` is the MINIMUM every pod boot produces (the compiled graph
         # phases depend on what the boot did), so `missing` here is always an
         # instrument defect, never a boot-shape difference.
         try:
-            verdict = boot_mod.completeness(boot_mod.SHAPE_ENTRYPOINT)
+            verdict = boot_mod.completeness(boot_mod.SHAPE_CompiledGraphPOINT)
             logger.info(
                 "[boot] servable in %dms — decomposition:\n%s",
                 verdict.total_ms, boot_mod.render_phase_table())

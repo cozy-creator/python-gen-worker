@@ -1,4 +1,4 @@
-"""pgw#1011: the acceleration-matrix driver, exercised through its real entry
+"""pgw#1011: the acceleration-matrix driver, exercised through its real compiled graph
 points with an in-process lane standing in for a GPU one.
 
 The lane is the ONLY thing faked, and it is faked at the seam the driver

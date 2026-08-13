@@ -8,20 +8,20 @@ resembles how a production pod is given its env, so the chain below was
 invisible to every test in this repo:
 
     worker function declares env  ->  build schema  ->  release_env_declarations
-    operator sets a value         ->  endpoint_env_entries (+ Vault)
+    operator sets a value         ->  endpoint_env_compiled_graphs (+ Vault)
     pod launch                    ->  EndpointEnvService.Resolve  ->  pod env
                                                                        |
                                                      config.loader ----+--> Settings
 
 That chain is exactly what took `GEN_WORKER_PREFER_AOT` dark. The flag was
 declared by the worker function and set on the endpoint; a release rebuild
-stopped declaring the name, the hub withheld every matching entry **silently**,
+stopped declaring the name, the hub withheld every matching compiled graph **silently**,
 and three pod attempts went by before anyone noticed the AOT path was off. Every
 component was individually correct. The DELIVERY was what broke, and delivery
 was the one thing nothing tested.
 
 WHAT THIS IS. A faithful model of `EndpointEnvService.Resolve`'s contract — NOT
-a reimplementation of the hub. It carries the one rule that matters (an entry
+a reimplementation of the hub. It carries the one rule that matters (an compiled graph
 reaches the pod only if the release DECLARES its name) and the reserved-name
 defence, and it reports withholdings with the same typed vocabulary the hub uses
 (th#1650). It is deliberately small: a big fake hub would drift from the real
@@ -55,7 +55,7 @@ RESERVED_PREFIXES: Tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class Withheld:
-    """One entry the operator set that this pod will not receive."""
+    """One compiled graph the operator set that this pod will not receive."""
 
     name: str
     reason: str
@@ -67,7 +67,7 @@ class ReleaseEnvDeclarations:
     """What THIS release's worker functions declare, per `release_env_declarations`.
 
     Per-RELEASE, which is the property that makes the postmortem possible: a
-    rebuild produces a new declaration set while the operator's entries are
+    rebuild produces a new declaration set while the operator's compiled graphs are
     per-ENDPOINT and long-lived.
     """
 
@@ -79,8 +79,8 @@ class ReleaseEnvDeclarations:
 
 
 @dataclass
-class EndpointEnvEntries:
-    """What the operator set, per `endpoint_env_entries`. Long-lived."""
+class EndpointEnvCompiledGraphs:
+    """What the operator set, per `endpoint_env_compiled_graphs`. Long-lived."""
 
     values: Dict[str, str] = field(default_factory=dict)
 
@@ -102,9 +102,9 @@ def is_reserved(name: str) -> bool:
 
 def resolve(
     declarations: ReleaseEnvDeclarations,
-    entries: EndpointEnvEntries,
+    compiled_graphs: EndpointEnvCompiledGraphs,
 ) -> Delivery:
-    """The hub's rule: an entry reaches the pod only if the release declares it.
+    """The hub's rule: an compiled graph reaches the pod only if the release declares it.
 
     Returns the delivered map AND every withholding, because a delivery that
     reports only what arrived is the exact shape that hid the defect — "nothing
@@ -113,7 +113,7 @@ def resolve(
     declared = set(declarations.names)
     env: Dict[str, str] = {}
     withheld: List[Withheld] = []
-    for name in sorted(entries.values):
+    for name in sorted(compiled_graphs.values):
         if name not in declared:
             withheld.append(Withheld(
                 name, WITHHELD_UNDECLARED,
@@ -123,7 +123,7 @@ def resolve(
             withheld.append(Withheld(
                 name, WITHHELD_RESERVED, "platform-reserved namespace"))
             continue
-        env[name] = entries.values[name]
+        env[name] = compiled_graphs.values[name]
     return Delivery(env=env, withheld=tuple(withheld))
 
 
@@ -133,7 +133,7 @@ def pod_environ(
     *,
     strip: Iterable[str] = (),
 ) -> Dict[str, str]:
-    """The environment a pod actually boots with: image env + delivered entries.
+    """The environment a pod actually boots with: image env + delivered compiled graphs.
 
     `strip` removes names the launching process happens to carry — without it a
     rig running on a developer box would let an ambient export stand in for a

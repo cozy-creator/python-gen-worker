@@ -1,4 +1,4 @@
-"""pgw#1127 / §4.28 — the cozy-local serve entry: the fleet arming brain, no sink.
+"""pgw#1127 / §4.28 — the cozy-local serve compiled graph: the fleet arming brain, no sink.
 
 DESIGN-RULINGS §4.28 (Paul, 2026-08-10): *"Untrusted hardware (community
 cloud, cozy-local) mints for ITSELF: local compiled graph, local repo-CAS, reused
@@ -18,7 +18,7 @@ line in ``cli/run.py``: the never-publish property has to be structural.
 WHAT IS STRUCTURAL HERE, and what merely happens to be true
 -----------------------------------------------------------
 ``publisher=None`` at one call site is a convention. What pins the property is
-that this module — the ONLY arming entry the local CLI has — contains no
+that this module — the ONLY arming compiled graph the local CLI has — contains no
 ``CompiledGraphPublisher`` construction, no publish call and no transport import at all,
 and ``tests/test_local_serve_no_publisher_pgw1127.py`` reads that out of the
 source tree. The obligation's terminus is ``fleet_compiled_graphs.keep_self_mint_local``,
@@ -146,7 +146,7 @@ def enable_compiled(
     if mint is None or mint.incomplete:
         # A pending nobody can drive is the pgw#815 shape: an obligation with
         # no terminus. End it here rather than leaving the capture dir and the
-        # ledger entry behind for a run that will never come.
+        # ledger compiled graph behind for a run that will never come.
         fleet_compiled_graphs.abandon_self_mint(pending)
         logger.warning(
             "local-serve: %s opened a mint this process cannot drive (%s); "
@@ -225,10 +225,10 @@ def compile_notice(
     cores = max(
         1, posture.cpu_budget_cores(
             vcpus, headroom=aot_compile_pool.SERVING_HEADROOM_CPUS))
-    workers = posture.entry_ceiling(aot_compile_pool.MAX_ENTRY_WORKERS)
+    workers = posture.compiled_graph_ceiling(aot_compile_pool.MAX_COMPILED_GRAPH_WORKERS)
     root = store_root if store_root is not None else local_compiled_graph_store.store_root()
     reserve = posture.rss_reserve_bytes(
-        aot_compile_pool.ENTRY_RSS_RESERVE_BYTES) // 1024**3
+        aot_compile_pool.COMPILED_GRAPH_RSS_RESERVE_BYTES) // 1024**3
     return (
         f"compiling {family} for this machine — this happens ONCE; every "
         f"later run of this endpoint arms from {root} with no compile and no "
@@ -246,7 +246,7 @@ class _Progress:
     """Renders the child's frames onto the user's terminal, throttled.
 
     Deliberately a throttle on TIME and not on frame count: the frames arrive
-    at wildly different rates (one per export, one per compiled entry, then
+    at wildly different rates (one per export, one per compiled compiled graph, then
     silence through a single long link step), and a user watching a machine
     they can no longer type on needs a steady "still working" cadence, not a
     burst followed by nothing.
@@ -402,7 +402,7 @@ def slot_map(
 ) -> Dict[str, MintSlot]:
     """The parent's resolution of every setup slot, as the child reads it.
 
-    A slot the local run did not resolve is ABSENT, never a present entry with
+    A slot the local run did not resolve is ABSENT, never a present compiled graph with
     a hole in it — ``MintSlot`` refuses to be constructed without both halves,
     and ``mint_child.assert_slots_resolvable`` refuses a declared,
     non-optional slot that never arrived.

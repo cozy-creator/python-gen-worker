@@ -121,14 +121,14 @@ def _fake_arm(key: str, ref: str):
         _runner = aot_serve.ArtifactRunner(
             package=None,
             contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
-            constants=(), module_name="unet", entry="unet/main")
-        _dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
+            constants=(), module_name="unet", compiled_graph="unet/main")
+        _dispatch = aot_serve.CompiledGraphDispatch(declared=("unet/main",))
         _dispatch.add("unet/main", _runner)
         state = {"successful_calls": 0, "failed": False,
                  "original": unet.forward, "runner": _dispatch}
         # pgw#1176: the two markers are DIFFERENT SHAPES in production and
         # this rig now models that honestly. `wrap_module` writes a bare
-        # `state` on the MODULE; `arm_entry` writes `targets` (+ `entries`) on
+        # `state` on the MODULE; `arm_compiled_graph` writes `targets` (+ `compiled graphs`) on
         # the PIPELINE. Sharing one dict between them was what kept a
         # `_marker_states` fallback alive for a shape nothing produces.
         setattr(unet, aot_serve._MARKER_ATTR, {
@@ -137,13 +137,13 @@ def _fake_arm(key: str, ref: str):
             "meta": {},
             "targets": {"unet": {
                 "module": unet, "attr": "forward", "state": state}},
-            "entries": {"unet/main": {"key": ""}},
+            "compiled_graphs": {"unet/main": {"key": ""}},
         })
         marker = getattr(pipe, aot_serve._MARKER_ATTR)
         # pgw#1152: an `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
-        # marker set above is what `arm_entry` publishes, so
+        # marker set above is what `arm_compiled_graph` publishes, so
         # `holds_exported_compiled_graph` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
         adopted = fleet_compiled_graphs.SelfMint(

@@ -575,11 +575,11 @@ def _scale_2d(scale: Any, out_features: int) -> Any:
 
 def _denoiser_class(root: Path, component: str) -> Any:
     index = json.loads((root / "model_index.json").read_text("utf-8"))
-    entry = index.get(component)
-    if not (isinstance(entry, list) and len(entry) == 2):
+    compiled_graph = index.get(component)
+    if not (isinstance(compiled_graph, list) and len(compiled_graph) == 2):
         raise W8a8SnapshotError(
-            f"model_index.json has no [library, class] entry for {component!r}")
-    lib, name = str(entry[0]), str(entry[1])
+            f"model_index.json has no [library, class] compiled_graph for {component!r}")
+    lib, name = str(compiled_graph[0]), str(compiled_graph[1])
     try:
         mod = importlib.import_module(lib)
     except ImportError:
@@ -697,7 +697,7 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
     fp8 storage on the TEXT ENCODERS ONLY — the denoiser already holds fp8
     scaled-mm modules that cast hooks must never touch.
 
-    ``art`` names the entry point; its SIBLINGS are rediscovered from ``path``
+    ``art`` names the compiled graph point; its SIBLINGS are rediscovered from ``path``
     so a mixture-of-experts snapshot lands every expert on the same lane. A
     caller that passes one expert of a pair does not get half a pipeline: it
     gets the pair, because half a quantized MoE is unserveable and silent

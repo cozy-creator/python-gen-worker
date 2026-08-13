@@ -171,7 +171,7 @@ def _guarded_enable(pipeline, *_args):
 
 def _compiled_graph_arm(artifact, ref=None, digest=None):
     """pgw#904: a delivered compiled graph is an exact ORDER (`Arm.artifact` ->
-    `_ArmOrder`), never a snapshot entry the worker scans for. These rigs
+    `_ArmOrder`), never a snapshot compiled graph the worker scans for. These rigs
     fake the arm itself, so no expected identity or publisher rides it."""
     from gen_worker import executor as executor_mod
 
@@ -866,7 +866,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
 def _sim_guard_closure(pipe, cfg, label=""):
     """A closed pgw#681 manifest for rigs whose compiles never touch dynamo."""
     return {"v": 1, "graphs": [{"target": "transformer", "code": "sim",
-                                "entry": 0, "guards": []}],
+                                "compiled_graph": 0, "guards": []}],
             "verdicts": {}, "leaks": []}
 
 
@@ -1387,11 +1387,11 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
     monkeypatch.setattr(executor_mod, "ensure_local", _download)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
-    # Torch boundary only: dynamo genuinely holds an entry for the class
+    # Torch boundary only: dynamo genuinely holds an compiled graph for the class
     # `__code__` both checkpoints share (the pgw#637 mechanism). torch.compile
     # is faked here, so the real cache stays empty — say so explicitly.
     monkeypatch.setattr(
-        eval_frame, "_debug_get_cache_entry_list", lambda _code: [object()])
+        eval_frame, "_debug_get_cache_compiled_graph_list", lambda _code: [object()])
 
     def _run(model: str, hits, pipe):
         spec = _make_spec(model)
@@ -1431,7 +1431,7 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
 
     # Same signature WITHOUT live dynamo code is still a disproof.
     monkeypatch.setattr(
-        eval_frame, "_debug_get_cache_entry_list", lambda _code: [])
+        eval_frame, "_debug_get_cache_compiled_graph_list", lambda _code: [])
     third_pipe = _Pipe()
     third = _run("acme/checkpoint-three", (10, 10), third_pipe)
     assert third.compile_targets() == []
@@ -2409,7 +2409,7 @@ def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_pa
 # pgw#1181 REMOVED `test_seeding_an_explicit_artifact_writes_the_live_cache`.
 # `cc.seed_artifact` — stage, verify in isolation, activate the delivered
 # inductor tree under the lock — is deleted with the `torch-inductor-cache`
-# format it was the entry point of. Nothing has written that format since
+# format it was the compiled graph point of. Nothing has written that format since
 # pgw#1178 removed `mint_artifact`, so this row proved a transaction no pod
 # can enter. The live delivered-compiled graph transaction is `aot_serve`'s, and
 # `test_aot_serve_pgw721` / `test_aot_selfmint_pgw805` drive it.
@@ -2420,7 +2420,7 @@ def test_manifest_carries_compile_block():
     ride along; guidance_scales derive from the payload's CompileAxis
     classes (Compile(guidance_scales=...) is deleted); lora_bucket comes
     from the decorator kwarg — both fn-level and inside the compile block."""
-    from gen_worker.discovery.discover import _extract_entries
+    from gen_worker.discovery.discover import _extract_compiled_graphs
 
     @endpoint(
         lora_bucket=64,
@@ -2436,14 +2436,14 @@ def test_manifest_carries_compile_block():
     assert spec.lora_bucket == 64
     compiled_graph = spec.compile_compiled_graph()
     assert compiled_graph is not None
-    (entry,) = _extract_entries(Ep, "testmod")
-    assert entry["lora_bucket"] == 64
-    assert entry["compile_axes"] == [{
+    (compiled_graph,) = _extract_compiled_graphs(Ep, "testmod")
+    assert compiled_graph["lora_bucket"] == 64
+    assert compiled_graph["compile_axes"] == [{
         "field": "guidance_scale",
         "classes": ["cfg_off", "cfg_on"],
         "warm": [0.0, 5.0],
     }]
-    assert entry["compile"] == {
+    assert compiled_graph["compile"] == {
         "family": FAMILY,
         "shapes": [[768, 768], [1024, 1024]],
         "targets": ["transformer", "vae.decode"],

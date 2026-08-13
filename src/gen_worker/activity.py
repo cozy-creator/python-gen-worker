@@ -76,7 +76,7 @@ KIND_GUARD_LEAK = "guard_leak"
 # and served eager. `guard_miss` is a dynamo concept (a torch guard fired), so
 # an AOT-armed pod produced no shape-gap fact at all and the hub could not
 # count AOT coverage holes the way it counts dynamo ones. `phase` carries the
-# ingress reason token (`no_entry_admits` / `entry_ambiguous`), `detail` names
+# ingress reason token (`no_compiled_graph_admits` / `compiled_graph_ambiguous`), `detail` names
 # the family, the target, the missing DECLARED CLASS and the compiled graph.
 KIND_SHAPE_GAP = "shape_gap"
 # pgw#760 (error-visibility doctrine): a fail-soft outcome that changes what
@@ -184,7 +184,7 @@ KIND_JIT_COMPILE = "jit_compile"
 # /v1/admin/worker-activity-events?kind=aot_mint_phases) and the table stayed
 # EMPTY on both stacks because no producer existed: `aot_mint` was reachable
 # only from `python -m gen_worker.aot_mint`, and no serving-pod code path
-# imported it. `phase=minted` carries the roll-up, `phase=entry:<name>` one
+# imported it. `phase=minted` carries the roll-up, `phase=compiled graph:<name>` one
 # declared graph class, `phase=stage:<name>` a mint-wide span (package/seal).
 KIND_AOT_MINT = "aot_mint_phases"
 # pgw#1134: a MEASURE-ONLY run (`gen_worker.measure_child`) — an operator

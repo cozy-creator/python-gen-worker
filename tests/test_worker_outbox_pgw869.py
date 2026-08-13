@@ -140,7 +140,7 @@ def test_hub_killed_midactivity_replays_every_fact_exactly_once() -> None:
         _await_live_reporting(harness)
 
         # A fact produced while the hub is up, and confirmed shipped.
-        activity_mod.emit_event(kind, "entries=36 ceiling=8", phase="pool")
+        activity_mod.emit_event(kind, "compiled_graphs=36 ceiling=8", phase="pool")
         conn0.wait_for(_is_activity(kind, "pool"))
 
         # The hub dies. The worker process does not — exactly the incident.
@@ -149,7 +149,7 @@ def test_hub_killed_midactivity_replays_every_fact_exactly_once() -> None:
         # The "mint" keeps producing measurements into a dead connection.
         during = [
             ("trace_graph", "26 evidence @ 0.99/s"),
-            ("autotune", "per_entry_device_bytes=11881591040 basis=measured"),
+            ("autotune", "per_compiled_graph_device_bytes=11881591040 basis=measured"),
             ("publish", "compiled_graph ck1-aeed10f6 published"),
         ]
         for phase, detail in during:
@@ -286,7 +286,7 @@ def test_a_fact_the_sender_took_but_never_shipped_comes_back() -> None:
     """
     async def _run() -> None:
         q = SendQueue()
-        msg = _fact("self_mint_compile", "trace_graph", "entries=36")
+        msg = _fact("self_mint_compile", "trace_graph", "compiled_graphs=36")
         await q.put(msg)
         kind, taken = await q.get()       # sender has it; the write then FAILS
         assert kind == "evidence"
