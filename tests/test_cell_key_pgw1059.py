@@ -133,6 +133,24 @@ _DERIVATION_ALLOWLIST = {
         "cell_key.py",     # def (+ toolchain_facts)
         "fleet_cells.py",  # arm_identity + arm_axis_divergence
         "aot_identity.py",  # artifact_identity (the wire fact)
+        # pgw#1205: the device-peak census's provenance. Added CONSCIOUSLY,
+        # which is what this fence's own message offers as the alternative to
+        # reading a stamped value — and here there is no stamped value to
+        # read: the census is taken in the MINT CHILD, which holds an
+        # `arm_token` (a hash of the facts) and never the facts themselves.
+        #
+        # It is the right call rather than merely the available one. A banked
+        # reading says "this graph class cost this much under THIS toolchain",
+        # and the only useful meaning of "this toolchain" is the one the CELL
+        # uses — same membership, same digest. A second notion computed
+        # locally would drift from the cell's exactly where it matters (the
+        # header above: "the two ends can disagree about membership"), and the
+        # bank would then be keyed on a toolchain nothing else recognises.
+        #
+        # It derives NO KEY: nothing compares this value against a cell key,
+        # an arm key or a boot key. It is a bank axis, and the bank sizes
+        # nothing (`test_device_peak_bank_pgw1205` fences that structurally).
+        "aot_mint.py",
     },
 }
 
