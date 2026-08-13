@@ -98,12 +98,22 @@ def test_missing_axis_is_a_typed_refusal():
 #: Extending an allowlist is a conscious act reviewed against the module
 #: docstrings of cell_key/aot_serve — never a drive-by.
 _DERIVATION_ALLOWLIST = {
-    # the traced-graph digest: stamped once, proven once at admission.
-    "combined_graph_hash(": {
-        "aot_serve.py",   # def + artifact_metadata stamp + verify_contract
+    # the declaration-wide coverage LABEL (pgw#1176: demoted from identity,
+    # so the fence is about ONE arithmetic, not one identity).
+    "manifest_digest(": {
+        "cell_key.py",    # def
+        "aot_mint.py",    # the mint's label over the class set it produced
+        "boot_key.py",    # the boot fold's label over the classes it traced
+        # CONSCIOUS EXTENSION (pgw#1176), and it is a NAME COLLISION rather
+        # than a second derivation: `guard_closure.manifest_digest` digests a
+        # GUARD CLOSURE's manifest and has nothing to do with cell identity.
+        # The fence greps a bare string, so an unrelated same-named function
+        # reads as a violation. Listed rather than silenced, so the next
+        # reader sees it was checked.
+        "guard_closure.py",
     },
-    # the exported-cell key: mint stamp, publish recompute, admission proof.
-    "from_exported_artifact_metadata(": {
+    # the exported-ENTRY key: mint stamp, publish recompute, admission proof.
+    "from_entry_metadata(": {
         "cell_key.py",    # def
         "aot_mint.py",    # cell_identity (the stamp)
         "fleet_cells.py",  # _recomputed_key (the publish recompute)
@@ -184,13 +194,13 @@ def test_single_derivation_fence_is_red_provable(tmp_path):
     rogue = tmp_path / "rogue.py"
     rogue.write_text(
         "def my_own_key(meta):\n"
-        "    return from_exported_artifact_metadata(meta)\n")
-    sites = _derivation_sites(tmp_path, "from_exported_artifact_metadata(")
+        "    return from_entry_metadata(meta)\n")
+    sites = _derivation_sites(tmp_path, "from_entry_metadata(")
     assert sites == {"rogue.py": 1}
     # ...and comments do not trip it (the scanner reads code, not prose).
     commented = tmp_path / "commented.py"
-    commented.write_text("# from_exported_artifact_metadata( in prose\n")
-    sites = _derivation_sites(tmp_path, "from_exported_artifact_metadata(")
+    commented.write_text("# from_entry_metadata( in prose\n")
+    sites = _derivation_sites(tmp_path, "from_entry_metadata(")
     assert "commented.py" not in sites
 
 
@@ -238,7 +248,10 @@ def _old_schema_digest(meta: dict) -> str:
     }
     canonical = json.dumps(
         axes, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return "ek1-" + hashlib.sha256(canonical.encode()).hexdigest()[:56]
+    # STAYS "ck1-": this helper deliberately reconstructs the OLD scheme, and
+    # a blanket ck1->ek1 rename would have made it reconstruct the new one and
+    # assert nothing.
+    return "ck1-" + hashlib.sha256(canonical.encode()).hexdigest()[:56]
 
 
 def test_old_and_new_keys_cannot_collide():

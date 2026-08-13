@@ -38,8 +38,7 @@ class _ContractCfg:
 
 
 _AXES = {
-    "graph": "0f0e0d0c0b0a0908", "envelope": "aa00bb11cc22dd33",
-    "sm": "sm_100", "toolchain": "bb11cc22dd33ee44",
+    "graph": "0f0e0d0c0b0a0908", "sm": "sm_100", "toolchain": "bb11cc22dd33ee44",
 }
 
 _RT = {
@@ -64,7 +63,7 @@ def test_key_deterministic_and_axis_sensitive():
     a = ck.from_axes(_AXES)
     assert a.digest == ck.from_axes(dict(_AXES)).digest
     assert ck.is_key(a.digest)
-    for axis in ("graph", "envelope", "sm", "toolchain"):
+    for axis in ("graph", "sm", "toolchain"):
         bumped = dict(_AXES, **{axis: _AXES[axis] + "x"})
         assert ck.from_axes(bumped).digest != a.digest, axis
 
@@ -80,7 +79,7 @@ def test_unknown_and_missing_axes_refuse():
         ck.from_axes({k: v for k, v in _AXES.items() if k != "toolchain"})
 
 
-def test_key_scheme_ck1_foreign_keys_are_key_shaped_but_distinct():
+def test_key_scheme_ek1_foreign_keys_are_key_shaped_but_distinct():
     """pgw#958 (§1.27(g)) + pgw#1059 amendment 1: ck1 is the only scheme
     this runtime mints — the redefinition kept the number (Paul: "stick
     with version-1 for now since we're still pre-launch") and PURGES the
@@ -92,7 +91,7 @@ def test_key_scheme_ck1_foreign_keys_are_key_shaped_but_distinct():
     """
     key = ck.from_axes(_AXES).digest
     assert key.startswith("ek1-")
-    for dead in ("ck2-", "ck3-", "ck4-", "ck5-", "ck6-"):
+    for dead in ("ek2-", "ek3-", "ek4-", "ek5-", "ek6-"):
         token = dead + "a" * 56
         assert ck.is_key(token), "a foreign-scheme token is still key-SHAPED"
         assert token != key
@@ -121,8 +120,8 @@ def test_local_cell_has_no_key_stamp(fixed_runtime):
         declared_compile_contract=cc.declared_compile_facts(_ContractCfg()),
     )
     assert "cell_key" not in meta
-    with pytest.raises(ck.CellKeyError, match="has no cell-key identity"):
-        ck.from_exported_artifact_metadata(meta)
+    with pytest.raises(ck.CellKeyError, match="has no entry-key identity"):
+        ck.from_entry_metadata(meta)
 
 
 def test_local_verdict_ignores_sku_and_pins_sm(fixed_runtime):

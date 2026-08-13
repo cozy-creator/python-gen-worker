@@ -55,8 +55,8 @@ def test_the_pre_trace_computed_key_no_longer_exists() -> None:
 def test_a_non_exported_kind_has_no_key_identity() -> None:
     """The other direction of the same wall: only exported cells are keyed;
     a torch-inductor-cache artifact is refused by name."""
-    with pytest.raises(cell_key.CellKeyError, match="no cell-key identity"):
-        cell_key.from_exported_artifact_metadata(
+    with pytest.raises(cell_key.CellKeyError, match="no entry-key identity"):
+        cell_key.from_entry_metadata(
             {"kind": "torch-inductor-cache", "cell_key": "ek1-" + "b" * 56})
 
 
