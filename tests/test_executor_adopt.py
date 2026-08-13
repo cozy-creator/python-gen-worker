@@ -1858,13 +1858,18 @@ def test_w8a8_exercised_miss_degrades_despite_unexercised_sibling(
     assert "DEGRADED" in degrade[0].getMessage()
 
 
-def test_store_served_failure_names_diverging_fx_key_component(
+def test_a_failed_warmup_proof_carries_the_fx_cache_state(
     tmp_path, monkeypatch, caplog,
 ):
-    """gw#608 forensics wiring: a store-served warmup-proof failure diffs the
-    boot's freshly saved FX entries against the seeded cell's and puts the
-    diverging FxGraphHashDetails component in the CompiledLaneUnavailable
-    detail. Revert the executor wiring and this goes red."""
+    """gw#608 forensics WIRING: whatever `fx_cache_failure_report` says about
+    this boot's FX cache lands in the degrade detail. Revert the executor
+    wiring and this goes red.
+
+    pgw#1200 retargeted the stub. It used to return the cell-side vocabulary
+    (`cell_keys` / `fresh_keys` / `divergence`) and take the artifact path —
+    both deleted with the `torch-inductor-cache` format, so the fixture was
+    asserting a shape the real function can no longer emit. The wiring is the
+    subject and it is unchanged; the payload is now the live census."""
     cls = _merged_execution_lane_endpoint(
         lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
     specs = extract_specs(cls)
@@ -1874,9 +1879,7 @@ def test_store_served_failure_names_diverging_fx_key_component(
 
     monkeypatch.setattr(
         cc, "fx_cache_failure_report",
-        lambda path: ("cell_keys=1; live_keys=2; fresh_keys=1; divergence: "
-                      "inductor_config[foo]: cell=cell-value != "
-                      "boot=boot-value"))
+        lambda: "live_keys=2; extern_current=libdevice.10.bc")
 
     # pgw#672: the disproof degrades; the forensics ride the degrade record.
     with caplog.at_level(logging.ERROR, logger="gen_worker.executor"):
@@ -1890,8 +1893,8 @@ def test_store_served_failure_names_diverging_fx_key_component(
         if "did not serve their own warmup graph" in r.getMessage()
     ]
     assert "fx forensics" in detail
-    assert "inductor_config[foo]" in detail
-    assert "cell=cell-value" in detail and "boot=boot-value" in detail
+    assert "live_keys=2" in detail
+    assert "extern_current=libdevice.10.bc" in detail
 
 
 def test_w8a8_all_objects_unexercised_degrades_to_eager(tmp_path, monkeypatch):

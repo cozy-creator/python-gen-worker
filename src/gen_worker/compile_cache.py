@@ -77,12 +77,10 @@ import threading
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import (
     Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple,
 )
 
-import pickle
 import sys
 
 from . import (
@@ -1399,26 +1397,7 @@ def cxx_toolchain_present() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _fx_entry_lines(data: bytes) -> Tuple[str, list]:
-    """(key, hash-details lines) from one pickled FxGraphCache entry."""
-
-    obj = pickle.loads(data)
-    key = str(getattr(obj, "_fx_graph_cache_key", "") or "")
-    lines = list(getattr(obj, "_fx_graph_cache_debug_lines", None) or [])
-    return key, lines
-
-
 _FX_COMPONENT_RE = re.compile(r"\A\[(\S+)\]\s+([^:]+):\s?(.*)\Z", re.DOTALL)
-
-
-def _fx_components(lines: list) -> Dict[str, Tuple[str, str]]:
-    """component name -> (hash, value text) from one entry's debug lines."""
-    out: Dict[str, Tuple[str, str]] = {}
-    for line in lines:
-        m = _FX_COMPONENT_RE.match(str(line))
-        if m:
-            out[m.group(2).strip()] = (m.group(1), m.group(3).strip())
-    return out
 
 
 def _clip(value: str, limit: int = 120) -> str:
@@ -1426,124 +1405,56 @@ def _clip(value: str, limit: int = 120) -> str:
     return flat if len(flat) <= limit else flat[:limit] + "…"
 
 
-def fx_cache_failure_report(artifact: Optional[Path] = None) -> str:
-    """Exhaustive FX-cache state for a failed store-served warmup proof
-    (gw#608). ALWAYS returns a non-empty report — counts alone discriminate
-    the failure classes with zero pod-log access:
+def fx_cache_failure_report() -> str:
+    """This boot's FX-cache state, for a dynamo warmup proof that failed
+    (gw#608). ALWAYS returns a non-empty report and never raises — it runs on
+    a failure path, so it may never add a second failure to the one being
+    diagnosed.
 
-    - fresh_keys>0            => the boot computed DIFFERENT keys (B1); the
-                                 per-component divergence is appended.
-    - fresh_keys=0 with
-      samekey_resave rows     => the boot computed the SAME keys and torch
-                                 re-saved next to the seeded entries — the
-                                 miss is in the candidate LOAD path (B2:
-                                 unpickle / extern-libs guard), which only
-                                 ever executes on consumers (a mint has
-                                 nothing to iterate); the sibling diff and
-                                 probes below name the failing step.
-    - cell_keys=0             => the artifact itself was unreadable here.
+    **pgw#1200 deleted the CELL side, and with it the three-way
+    classification.** The report used to name B1 (*"the boot computed
+    different keys"*), B2 (*"the keys matched and the miss is in torch's
+    candidate-load path"*) or *"unreadable artifact"* — every one of them a
+    difference measured against FX entries read out of a
+    `torch-inductor-cache` tarball's `inductor/fxgraph/` tree. pgw#1178
+    deleted that format's last writer and pgw#1181 deleted the format, so the
+    tar walk could only ever yield nothing, and the arithmetic did not degrade
+    gracefully — it INVERTED. `fresh = live_keys - seeded` became EVERY live
+    key, so **B1 was named on every boot with any FX entry at all**, while B2
+    was structurally unreportable and `cell_keys=0` (*"unreadable"*) was the
+    normal case. Measured on the real function: handed an exported cell — what
+    the caller passes today — the output was byte-identical to passing
+    ``None``, which is the shortest proof the argument carried no information.
 
-    Every sub-probe degrades to an err token; this never raises."""
+    A diagnostic that always names one class is worse than none, because it is
+    read as evidence. What survives is what the dynamo lane can actually
+    observe about itself, and it is reported as a census rather than a verdict.
+    """
 
     out: list = []
-    seeded_lines: Dict[str, list] = {}
-    seeded_names: Dict[str, set] = {}
-    cell_extern = None
-    cell_guards = "<none>"
-    if artifact is not None:
-        try:
-            with tarfile.open(Path(artifact), mode="r:*") as tar:
-                for member in tar:
-                    parts = PurePosixPath(member.name).parts
-                    if (
-                        len(parts) < 5
-                        or parts[:2] != ("inductor", "fxgraph")
-                        or not member.isfile()
-                    ):
-                        continue
-                    key, entry_name = parts[3], parts[4]
-                    seeded_names.setdefault(key, set()).add(entry_name)
-                    f = tar.extractfile(member)
-                    if f is None:
-                        continue
-                    try:
-                        obj = pickle.loads(f.read())
-                    except Exception as exc:  # noqa: BLE001
-                        out.append(
-                            f"cell_unpickle=EXC:{type(exc).__name__}:"
-                            f"{_clip(str(exc), 80)}")
-                        continue
-                    if cell_extern is None:
-                        cell_extern = str(
-                            getattr(obj, "extern_libs_key", None))
-                        cell_guards = repr(
-                            getattr(obj, "guards_expr", None))
-                    lines = list(getattr(
-                        obj, "_fx_graph_cache_debug_lines", None) or [])
-                    if lines:
-                        seeded_lines.setdefault(key, lines)
-        except Exception as exc:  # noqa: BLE001
-            out.append(f"cell_read=EXC:{type(exc).__name__}")
-    out.insert(0, f"cell_keys={len(seeded_names)}")
-    out.append(f"cell_guards={cell_guards}")
-    out.append(f"cell_extern={_clip(str(cell_extern), 90)}")
-
     base = Path(os.environ.get("TORCHINDUCTOR_CACHE_DIR", "") or "")
     fx_root = base / "fxgraph"
-    live_files: Dict[str, list] = {}
+    live_keys = 0
     if str(base) and fx_root.is_dir():
         for keydir in sorted(fx_root.glob("*/*")):
-            if keydir.is_dir():
-                files = sorted(
+            if not keydir.is_dir():
+                continue
+            try:
+                entries = [
                     p for p in keydir.iterdir()
-                    if p.is_file() and not p.name.startswith("."))
-                if files:
-                    live_files[keydir.name] = files
+                    if p.is_file() and not p.name.startswith(".")
+                ]
+            except OSError:
+                continue
+            if entries:
+                live_keys += 1
     else:
         out.append(f"live_dir_missing={str(fx_root) or '<unset>'}")
-    fresh = sorted(k for k in live_files if k not in seeded_names)
-    out.append(f"live_keys={len(live_files)}")
-    out.append(f"fresh_keys={len(fresh)}")
+    out.append(f"live_keys={live_keys}")
 
-    # Same-key re-save: seeded entry FILENAMES are their content sha, so any
-    # other file inside a seeded key dir is THIS boot's save of the same key.
-    resaves = 0
-    for key, files in sorted(live_files.items()):
-        names = seeded_names.get(key)
-        if not names:
-            continue
-        fresh_sibs = [p for p in files if p.name not in names]
-        seed_sibs = [p for p in files if p.name in names]
-        if not fresh_sibs or not seed_sibs:
-            continue
-        resaves += 1
-        if resaves == 1:
-            try:
-                a = pickle.loads(seed_sibs[0].read_bytes())
-                b = pickle.loads(fresh_sibs[0].read_bytes())
-                out.append(
-                    f"samekey_resave[{key[:12]}]: guards "
-                    f"cell={getattr(a, 'guards_expr', None)!r} "
-                    f"boot={getattr(b, 'guards_expr', None)!r}; extern "
-                    f"cell={_clip(str(getattr(a, 'extern_libs_key', None)), 90)} "
-                    f"boot={_clip(str(getattr(b, 'extern_libs_key', None)), 90)}")
-            except Exception as exc:  # noqa: BLE001
-                out.append(
-                    f"samekey_probe=EXC:{type(exc).__name__}:"
-                    f"{_clip(str(exc), 80)}")
-    out.append(f"samekey_resaves={resaves}")
-
-    # Emulate torch's candidate-load preconditions on one seeded live entry.
-    probe = next(
-        ((k, v) for k, v in live_files.items() if k in seeded_names), None)
-    if probe is not None:
-        try:
-            pickle.loads(probe[1][0].read_bytes())
-            out.append("live_cell_entry_unpickle=ok")
-        except Exception as exc:  # noqa: BLE001
-            out.append(
-                f"live_cell_entry_unpickle=EXC:{type(exc).__name__}:"
-                f"{_clip(str(exc), 80)}")
+    # The extern-libs key is a real input to torch's FX cache key and a real
+    # reason a boot misses, so it stays: it is a fact about THIS process,
+    # needing no cell to compare against.
     try:
         import torch.utils._triton as _tu
 
@@ -1552,62 +1463,7 @@ def fx_cache_failure_report(artifact: Optional[Path] = None) -> str:
     except Exception as exc:  # noqa: BLE001
         out.append(
             f"extern_current=EXC:{type(exc).__name__}:{_clip(str(exc), 80)}")
-
-    if fresh:
-        try:
-            observed = {
-                k: _fx_entry_lines(live_files[k][0].read_bytes())[1]
-                for k in fresh[:2]
-            }
-            divergence = fx_key_forensics(seeded_lines, observed)
-            if divergence:
-                out.append("divergence: " + divergence)
-        except Exception as exc:  # noqa: BLE001
-            out.append(f"divergence=EXC:{type(exc).__name__}")
     return "; ".join(str(v) for v in out)
-
-
-def fx_key_forensics(
-    seeded: Dict[str, list],
-    observed: Dict[str, list],
-    *,
-    max_fresh: int = 2,
-    max_components: int = 4,
-) -> str:
-    """Name the FxGraphHashDetails components on which this boot's freshly
-    compiled FX entries diverge from the seeded cell's (gw#608). Each fresh
-    key (present live, absent from the cell) is matched to the seeded key
-    with the fewest differing component hashes — the graphs are counterparts,
-    so the minimal diff IS the key defect. '' when there is nothing to say."""
-    fresh = {k: v for k, v in observed.items() if k not in seeded}
-    if not seeded or not fresh:
-        return ""
-    seeded_components = {k: _fx_components(v) for k, v in seeded.items()}
-    reports = []
-    for key, lines in sorted(fresh.items())[:max_fresh]:
-        fresh_c = _fx_components(lines)
-        best_key = ""
-        best_diff: Optional[list] = None
-        for skey, sc in seeded_components.items():
-            diffs = [
-                name for name in sorted(set(fresh_c) | set(sc))
-                if fresh_c.get(name, ("", ""))[0] != sc.get(name, ("", ""))[0]
-            ]
-            if best_diff is None or len(diffs) < len(best_diff):
-                best_key, best_diff = skey, diffs
-        if best_diff is None:
-            continue
-        sc = seeded_components[best_key]
-        named = "; ".join(
-            f"{name}: cell={_clip(sc.get(name, ('', '<absent>'))[1])} != "
-            f"boot={_clip(fresh_c.get(name, ('', '<absent>'))[1])}"
-            for name in best_diff[:max_components]
-        )
-        reports.append(
-            f"fresh key {key} vs nearest cell key {best_key}: "
-            f"{len(best_diff)} differing component(s): {named or 'none'}"
-        )
-    return " | ".join(reports)
 
 
 class AdoptError(RuntimeError):
@@ -3198,7 +3054,6 @@ __all__ = [
     "parse_cell_ref",
     "flavor_label",
     "fx_cache_failure_report",
-    "fx_key_forensics",
     "gen_worker_version",
     "GuardMiss",
     "guard_miss_reason_class",

@@ -733,88 +733,19 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-class _FakeFxEntry:
-    """Pickle-roundtrippable stand-in for a torch CompiledFxGraph entry."""
-
-    def __init__(self, key: str, lines: list) -> None:
-        self._fx_graph_cache_key = key
-        self._fx_graph_cache_debug_lines = lines
-
-
-def _fx_lines(config_value: str) -> list:
-    return [
-        "[gmhash] gm: <lambda>()\n\n\n\ndef forward(self, arg0_1):\n    ...",
-        "[inphash] example_inputs[0]: TensorMetadata(dtype=torch.bfloat16)",
-        f"[cfg-{config_value}] inductor_config[foo]: {config_value}",
-    ]
-
-
-def _write_fx_entry(root, key: str, lines: list) -> None:
-    import pickle
-
-    subdir = root / "fxgraph" / key[1:3] / key
-    subdir.mkdir(parents=True, exist_ok=True)
-    (subdir / "entry0").write_bytes(pickle.dumps(_FakeFxEntry(key, lines)))
-
-
-def test_fx_key_forensics_names_the_diverging_component(tmp_path):
-    """gw#608: a store-served boot that recompiled must be able to name the
-    exact FxGraphHashDetails component its fresh keys diverge on, by diffing
-    its own saved entries against the seeded cell's.
-
-    pgw#1035: the two dict-building readers this used to go through
-    (`artifact_fx_lines` / `live_fx_lines`) had no production caller — the live
-    report at `_adopt_divergence_report` builds its own from `_fx_entry_lines`
-    — so the test states the same inputs directly.
-    """
-    seeded = {"fseededkey111": _fx_lines("cell-value")}
-    observed = {"ffreshkey2222": _fx_lines("boot-value")}
-
-    report = cc.fx_key_forensics(seeded, observed)
-    assert "inductor_config[foo]" in report
-    assert "cell=cell-value" in report and "boot=boot-value" in report
-    # Matching components are noise — never reported.
-    assert "example_inputs[0]" not in report
-    assert "1 differing component(s)" in report
-
-
-def test_fx_key_forensics_silent_when_the_cell_served(tmp_path):
-    """Every live key present in the cell => nothing fresh => no report."""
-    lines = _fx_lines("same")
-    seeded = {"fkey1": lines}
-    assert cc.fx_key_forensics(seeded, {"fkey1": lines}) == ""
-    assert cc.fx_key_forensics({}, {"fkey1": lines}) == ""
-    assert cc.fx_key_forensics(seeded, {}) == ""
-
-
-def test_fx_key_forensics_matches_nearest_seeded_key(tmp_path):
-    """Each fresh key pairs with the seeded key sharing the most component
-    hashes — counterpart graphs, minimal diff — not an arbitrary one."""
-    far = [
-        "[othergm] gm: <lambda>() completely different graph",
-        "[otherin] example_inputs[0]: TensorMetadata(dtype=torch.float32)",
-        "[cfg-x] inductor_config[foo]: x",
-    ]
-    seeded = {"fnearkey": _fx_lines("cell-value"), "ffarkey": far}
-    observed = {"ffreshkey": _fx_lines("boot-value")}
-    report = cc.fx_key_forensics(seeded, observed)
-    assert "fnearkey" in report and "ffarkey" not in report
-
-
-def test_fx_cache_failure_report_names_b1_divergence(tmp_path, monkeypatch):
-    """fresh_keys>0: the report carries the counts AND the component diff."""
-    # pgw#1181: no `cell=` side. `fx_cache_failure_report`'s cell half read FX
-    # entries out of a `torch-inductor-cache` tarball, and that format has no
-    # writer and is deleted — what the executor can still hand this function is
-    # an exported cell, which carries no `inductor/` tree. The LIVE-directory
-    # census is the half that still runs on a pod, so that is what is fenced.
-    live = tmp_path / "live-inductor"
-    _write_fx_entry(live, "fseededkey111", _fx_lines("cell-value"))
-    _write_fx_entry(live, "ffreshkey2222", _fx_lines("boot-value"))
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(live))
-
-    report = cc.fx_cache_failure_report(None)
-    assert "live_keys=2" in report
+# pgw#1200 REMOVED the three `fx_key_forensics` rows and the two
+# `fx_cache_failure_report` rows that survived pgw#1181.
+#
+# `fx_key_forensics` diffed the CELL's recorded FxGraphHashDetails lines
+# against the boot's; with the `torch-inductor-cache` format deleted there is
+# no cell side to diff, and `fx_cache_failure_report` was its only production
+# caller — pgw#1181 kept all three alive by anchoring them here, which is the
+# reachability trap this rewrite exists to close. The helpers go with them.
+#
+# The report itself is NOT deleted: the dynamo lane still asks for its live
+# FX-cache state on a failed warmup proof. What it can honestly say — the live
+# key census, the missing-directory case and the extern-libs key — is driven
+# in `tests/test_fx_report_live_only_pgw1200.py`, against the real function.
 
 
 # pgw#1181 REMOVED `test_fx_cache_failure_report_names_b2_samekey_resave`.
@@ -826,9 +757,3 @@ def test_fx_cache_failure_report_names_b1_divergence(tmp_path, monkeypatch):
 # reach: what the executor hands this function is an exported cell, which
 # carries no `inductor/` tree at all.
 
-
-def test_fx_cache_failure_report_never_raises_without_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path / "nope"))
-    report = cc.fx_cache_failure_report(None)
-    assert "cell_keys=0" in report
-    assert "live_dir_missing" in report
