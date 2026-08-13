@@ -608,7 +608,6 @@ module = [
   "tests.test_pad32_codegen_pgw1079",
   "tests.test_partial_shape_coverage_pgw844",
   "tests.test_per_stage_staging_pgw1026",
-  "tests.test_plan_pgw902",
   "tests.test_pod_privilege_isolation_pgw858",
   "tests.test_pool_sizing_pgw842",
   "tests.test_post_connect_resolution_gate_pgw891",

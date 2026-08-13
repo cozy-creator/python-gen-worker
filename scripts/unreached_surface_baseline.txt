@@ -304,8 +304,6 @@ gen_worker.models.w4a4.quantize_tree_w4a4()
 gen_worker.models.w4a4.sanitize_w4a4_state_dict()
 gen_worker.parallel.cp._GroupMesh.get_group()
 gen_worker.parallel.cp.refuse_unless_divisible()
-gen_worker.plan.Plan.snapshot_digests()
-gen_worker.plan.PlanLedger.forget()
 gen_worker.procsplit.group.GroupPlan.child()
 gen_worker.progress.reset()
 gen_worker.progress.tracking

@@ -1,11 +1,11 @@
-"""Neutral dispatch orders (pgw#904).
+"""Neutral dispatch orders.
 
-A wire-reading head — ``executor.handle_run_job`` (legacy, dies with
-``RunJob`` at th#1457's cut) or ``executor.handle_run_attempt`` (the Plan
-head) — projects its message into these values at the boundary. The driver
-and every shared helper read ONLY these: ``pb.RunJob`` never crosses into
-shared machinery, which is what makes the legacy head deletable without
-touching the driver.
+The wire-reading head ``executor.handle_run_job`` projects its message into
+these values at the boundary. The driver and every shared helper read ONLY
+these: ``pb.RunJob`` never crosses into shared machinery, which is what makes
+the head replaceable without touching the driver. (pgw#1206 D deleted the
+second head, the RunAttempt/Plan one — tensorhub deleted its producer in
+``ec978c68`` — and this seam is why that cost the driver nothing.)
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ class SlotOrder:
     """One dispatched slot binding, as far as the head resolved it.
 
     ``ref`` is a canonical tensorhub-CAS ref or ``""`` (unbound — the driver
-    drops an optional slot, and only the LEGACY head may leave a required
-    slot for the code-declared default; the Plan head refuses first).
+    drops an optional slot, and the head may leave a required slot for the
+    code-declared default).
     """
 
     ref: str = ""

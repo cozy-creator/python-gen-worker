@@ -26,7 +26,6 @@ import pytest
 from gen_worker import aot_identity, aot_serve, cell_key, env_seal
 from gen_worker.aot_identity import ExpectedIdentity
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.plan import AttemptRef, PlanFactory
 
 _TOOLCHAIN = {"cc": "sha256:aaa", "ld": "sha256:bbb"}
 _SEAL = {"config": "cfg16", "inductor": "ind16", "loaded_libs": "libs16"}
@@ -135,9 +134,9 @@ def test_an_artifact_silent_on_an_axis_refuses_rather_than_skipping(
 
 
 def test_an_expectation_naming_no_value_is_never_a_pass() -> None:
-    """An unverifiable expectation must not read as verified. The Plan refuses
-    an artifact missing any of these, so reaching this means a hand-built
-    expectation — and it still refuses."""
+    """An unverifiable expectation must not read as verified. Every naming
+    source refuses an artifact missing any of these, so reaching this means a
+    hand-built expectation — and it still refuses."""
     reason = aot_identity.verify_declared_identity(_meta(), _expected(cell_key=""))
     assert reason == "cell_key: the spec named no expected value"
 
@@ -156,9 +155,9 @@ def test_the_closure_axis_is_absent_rather_than_invented() -> None:
     """
     assert "code_closure_id" not in ExpectedIdentity.__struct_fields__
     assert "code_closure" not in aot_identity._COMPARED_AXES
-    # The release id still rides the Plan, so the day it becomes comparable
-    # nothing has to be re-plumbed to reach it.
-    assert _plan().release.code_closure_id == "clo_01"
+    # The release id still rides `pb.ExecutionSpec.release`, so the day it
+    # becomes comparable nothing has to be re-plumbed to reach it.
+    assert "code_closure_id" in pb.EndpointRelease.DESCRIPTOR.fields_by_name
 
 
 def test_identity_is_never_confirmed_by_comparing_bytes() -> None:
@@ -170,42 +169,38 @@ def test_identity_is_never_confirmed_by_comparing_bytes() -> None:
         assert banned not in src, f"aot_identity reaches for bytes via {banned!r}"
 
 
-# --- projection from the immutable Plan -------------------------------------
+# --- projection from the hub-named artifact -------------------------------------
 
 
-def _plan(backend: int = pb.STEADY_BACKEND_AOT_CELL) -> Any:
-    arm = pb.Arm(
-        graph_contract_digest="gc_01",
-        shape=pb.ARM_SHAPE_BRANCHLESS,
-        backend=backend,
+def _named(backend: int = pb.STEADY_BACKEND_AOT_CELL) -> Any:
+    """The hub's ArtifactIdentity — the thing that NAMES a cell on the wire.
+
+    pgw#1206 D deleted the Plan head, so the expectation is built by the one
+    surviving map (``ExpectedIdentity.named_by``) from the source that names
+    an artifact. An ``eager_only`` arm names none, which the caller must read
+    as a complete answer rather than a gap.
+    """
+    if backend != pb.STEADY_BACKEND_AOT_CELL:
+        return None
+    return pb.ArtifactIdentity(
+        cell_ref="cozy/cells-micro#k1",
+        content_digest="sha256:" + "c" * 64,
+        cell_key="aot-inductor:k1",
+        publisher_org="cozy",
+        toolchain_digest=cell_key.facts_digest(_TOOLCHAIN),
+        env_seal_digest=env_seal.seal_digest(_SEAL),
     )
-    if backend == pb.STEADY_BACKEND_AOT_CELL:
-        arm.artifact.CopyFrom(pb.ArtifactIdentity(
-            cell_ref="cozy/cells-micro#k1",
-            content_digest="sha256:" + "c" * 64,
-            cell_key="aot-inductor:k1",
-            publisher_org="cozy",
-            toolchain_digest=cell_key.facts_digest(_TOOLCHAIN),
-            env_seal_digest=env_seal.seal_digest(_SEAL),
-        ))
-    spec = pb.ExecutionSpec(
-        digest="sha256:" + "a" * 64,
-        spec_version=1,
-        release=pb.EndpointRelease(
-            org="cozy", endpoint="micro", release_id="r1",
-            image_digest="sha256:img", code_closure_id="clo_01"),
-        function_name="generate",
-        numerical_lane=pb.ExecutionLane(weights=pb.WEIGHT_LANE_BF16),
-        arm=arm,
-        topology=pb.Topology(accelerator="cuda", gpu_count=1, execution_groups=1),
-        components=pb.ComponentManifest(slots=[pb.SlotBinding(
-            slot="unet", ref="cozy/micro@v1", snapshot_digest="sha256:d")]),
-    )
-    return PlanFactory.from_execution_spec(AttemptRef("req", 1), spec)
 
 
-def test_the_expectation_comes_from_the_plan_and_matches_a_real_artifact() -> None:
-    expected = aot_identity.expected_from_plan(_plan())
+def _named_expectation(backend: int = pb.STEADY_BACKEND_AOT_CELL) -> Any:
+    named = _named(backend)
+    if named is None:
+        return None
+    return aot_identity.ExpectedIdentity.named_by(named, "gc_01")
+
+
+def test_the_expectation_comes_from_the_named_artifact_and_matches_a_real_one() -> None:
+    expected = _named_expectation()
     assert expected is not None
     assert aot_identity.verify_declared_identity(_meta(), expected) == ""
     assert expected.publisher_org == "cozy"
@@ -214,9 +209,8 @@ def test_the_expectation_comes_from_the_plan_and_matches_a_real_artifact() -> No
 def test_an_arm_that_names_no_artifact_yields_no_expectation() -> None:
     """``None`` is a complete answer, not a gap: an eager_only arm has nothing
     to verify because it must arm nothing."""
-    assert aot_identity.expected_from_plan(
-        _plan(backend=pb.STEADY_BACKEND_EAGER_ONLY)) is None
-    assert aot_identity.expected_from_plan(_plan()) is not None
+    assert _named_expectation(pb.STEADY_BACKEND_EAGER_ONLY) is None
+    assert _named_expectation() is not None
 
 
 # --- the gate runs before dlopen, on a real staged tarball ------------------

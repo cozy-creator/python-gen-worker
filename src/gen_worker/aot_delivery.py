@@ -1,9 +1,9 @@
-"""Materialize the ONE artifact a Plan names (pgw#904, the delivery half).
+"""Materialize the ONE artifact the hub named (the delivery half).
 
 Identity and delivery are split on purpose: ``aot_identity`` compares the
 DECLARED identities (never bytes, §4.25/§4.26), and this module does the one
 byte-level check that legitimately exists — the delivered bytes must hash to
-the content digest the spec pinned. There is no listing, no ranking and no
+the content digest the hub named. There is no listing, no ranking and no
 sibling to fall back to: the grant either carries the named digest or the
 attempt refuses typed.
 

@@ -33,22 +33,13 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 import msgspec
 
 from . import activity as activity_mod
-from . import aot_declaration, aot_delivery, aot_identity, aot_mint
+from . import aot_declaration, aot_identity, aot_mint
 from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import cell_adopt
 from . import dispatch
 from . import handler_proof
 from .procsplit import broker as procsplit_broker
-from .plan import (
-    InputAssetRef,
-    Plan,
-    PlanConflict,
-    PlanFactory,
-    PlanLedger,
-    PlanRefusal,
-)
-from .transport import FatalTransportError
 from . import cpu_budget
 from . import kernel_path
 from . import mint_workers
@@ -2608,8 +2599,8 @@ class _CompileTargetRecord:
 
 @dataclass(frozen=True)
 class _ArmOrder:
-    """The hub-resolved arming decision for one Plan-dispatched attempt
-    (pgw#904). The worker OBEYS it: ``aot_cell`` arms exactly ``selection``
+    """The arming decision for one dispatched attempt. The worker OBEYS it:
+    ``aot_cell`` arms exactly ``selection``
     (already materialized and content-digest-verified), ``dynamo`` arms JIT
     intake, ``eager_only`` arms nothing. No discovery, ranking or self-mint
     fallback exists on this path — a failed exact arm is a typed refusal.
@@ -2641,10 +2632,10 @@ class _ArmOrder:
     ) -> "_ArmOrder":
         """THE artifact -> arming-order map, in one place (pgw#1152).
 
-        TWO routes build this object and they are field-for-field identical
-        except for ``adopt``: ``_setup_locked_inner``'s §4.27 BOOT-ADOPT order,
-        and ``_materialize_arm``'s hub PLAN order. That is the same duplicated
-        mapping pgw#1150 found between ``compile_cell()`` and ``cli.run`` — a
+        ONE route builds this object today — ``_setup_locked_inner``'s §4.27
+        BOOT-ADOPT order — after pgw#1206 D deleted the Plan head that built
+        the other. The constructor stays because the duplication it prevents is
+        the same mapping pgw#1150 found between ``compile_cell()`` and ``cli.run``: a
         field ADDED here that one site sets and the other forgets silently
         diverges the two arm routes, which is this repo's most expensive defect
         shape: pgw#1108, pgw#1122, pgw#1141 and pgw#1141b were all "a rule the
@@ -2667,13 +2658,11 @@ class _ArmOrder:
 class _JobOrder:
     """The NEUTRAL per-attempt order the dispatch driver executes (pgw#904).
 
-    Produced only by a wire head — ``_legacy_order`` (from ``pb.RunJob``,
-    dies with it) or ``_plan_order`` (from the immutable Plan). The driver
-    and every shared helper read this value and never a wire message; the
-    per-head semantics that cannot be neutral (the legacy
-    ``required_compile`` fence, the Plan's arm fence) ride ``fence`` as a
-    head-owned closure, and per-head config snapshotting rides
-    ``config_snapshot``.
+    Produced by the wire head ``_legacy_order`` (from ``pb.RunJob``). The
+    driver and every shared helper read this value and never a wire message,
+    which is what kept the head swappable; head semantics that cannot be
+    neutral (the ``required_compile`` fence) ride ``fence`` as a head-owned
+    closure, and config snapshotting rides ``config_snapshot``.
 
     ``snapshots`` is TRANSPORT (ref-keyed presigned material for the store),
     never identity — identity lives in the derived spec's bindings.
@@ -3526,9 +3515,6 @@ class Executor:
         )
         self.draining = False
         self.jobs: Dict[Tuple[str, int], _Job] = {}
-        # pgw#904: per-attempt Plan identity — the digest-conflict refusal
-        # and identical-replay dedupe for the RunAttempt head.
-        self.plans = PlanLedger()
         # pgw#687 cancel-unwind quarantine: (request_id, attempt) -> detail for
         # every cancel that has not reached a terminal result within the grace,
         # and the function names WE marked unavailable for them.
@@ -6963,11 +6949,11 @@ class Executor:
         eager_only = topology_eager or ordered_eager
         if eager_only and spec.compile is not None:
             logger.info("%s: %s", spec.name, eager_only)
-        # pgw#904: the ONLY source of a pre-materialized artifact is a Plan's
-        # exact `Arm.artifact` (the RunAttempt head materialized and
-        # digest-verified it). The connected snapshot scan that used to run
-        # here is deleted — the hub no longer attaches cells to snapshots, and
-        # a worker that could pick one would be a second resolver.
+        # The ONLY source of a pre-materialized artifact is §4.27 boot-adopt
+        # (pgw#1206 D deleted the Plan head that was the other one). The
+        # connected snapshot scan that used to run here is deleted — the hub
+        # no longer attaches cells to snapshots, and a worker that could pick
+        # one would be a second resolver.
         if arm is not None and arm.backend == "aot_cell" and topology_eager:
             raise compile_cache.CompiledExecutionLaneUnavailableError(
                 f"the spec names an exact cell but this pod cannot arm one: "
@@ -10468,69 +10454,6 @@ class Executor:
         # stage next while this job computes.
         self.preloader.poke()
 
-    async def handle_run_attempt(self, msg: pb.RunAttempt) -> None:
-        """The Plan head (pgw#904): ``RunAttempt`` -> immutable Plan ->
-        ledger admission -> the neutral order the shared driver executes.
-
-        The Plan is built and admitted BEFORE anything materializes: a spec
-        that cannot become a Plan, or an attempt re-dispatched under a
-        different spec digest, refuses without touching a store, a device or
-        the network.
-        """
-        try:
-            plan = PlanFactory.from_run_attempt(msg)
-        except PlanRefusal as exc:
-            if not (msg.HasField("attempt") and msg.attempt.request_id):
-                # No fencing token — nothing to address a JobResult to, and
-                # the contract (accepted-or-result) is unsatisfiable.
-                raise FatalTransportError(
-                    f"run_attempt carries no addressable AttemptId: {exc}")
-            await self._send_result(
-                msg.attempt.request_id, int(msg.attempt.attempt),
-                pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
-            return
-        try:
-            self.plans.admit(plan)
-        except PlanConflict as exc:
-            activity_mod.emit_event(
-                "plan_conflict",
-                f"request {plan.attempt.request_id} attempt "
-                f"{plan.attempt.attempt}: {exc}",
-                phase="admission",
-            )
-            # Fail the ATTEMPT closed, in one result. The hub changed what
-            # this fencing token asks for without bumping it, so neither
-            # execution's output may stand — an in-flight job for the same
-            # key is aborted into the refusal rather than allowed to produce
-            # a second, differently-derived result.
-            live = self.jobs.get(plan.key)
-            if live is not None and not live.finished:
-                live.cancel_requested = True
-                if live.ctx is not None:
-                    live.ctx._cancel()
-                if live.exec_task is not None:
-                    live.exec_task.cancel()
-                await self._finish(
-                    live, pb.JOB_STATUS_INVALID,
-                    safe_message=_sanitize(str(exc)))
-            else:
-                await self._send_result(
-                    plan.attempt.request_id, plan.attempt.attempt,
-                    pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
-            return
-        job = await self._admit_dispatch(
-            plan.attempt.request_id, plan.attempt.attempt, plan.function_name)
-        if job is None:
-            return
-        grant = msg.grant if msg.HasField("grant") else pb.DeliveryGrant()
-        payload = bytes(msg.input_payload)
-        job.task = asyncio.create_task(
-            self._supervise_job(
-                job,
-                functools.partial(self._plan_order, job, plan, grant, payload)),
-            name=f"job-{plan.attempt.request_id}")
-        self.preloader.poke()
-
     async def _admit_dispatch(
         self, request_id: str, attempt: int, function_name: str,
     ) -> Optional[_Job]:
@@ -10746,242 +10669,6 @@ class Executor:
             stamped_config=stamped,
             arm=None,
         )
-
-    async def _plan_order(
-        self, job: _Job, plan: Plan, grant: pb.DeliveryGrant, payload: bytes,
-    ) -> _JobOrder:
-        """Project one immutable Plan (+ its rotatable grant) into the
-        neutral order — the Plan head's whole resolution surface (pgw#904).
-
-        There is nothing to resolve: every ref is final, the lane is the
-        bindings, the artifact is named or absent. What happens here is
-        COMPLETENESS checking (a required slot the manifest does not bind
-        refuses typed) and DELIVERY (the grant's digest-keyed transport is
-        joined to the digests the spec pinned; the named cell's bytes are
-        materialized and digest-verified). A grant rotation changes none of
-        the identity inputs, so re-dispatching the same spec under a fresh
-        grant produces an equivalent order.
-        """
-        spec = job.spec
-        assert spec is not None
-        what = (
-            f"request {plan.attempt.request_id} attempt {plan.attempt.attempt} "
-            f"spec {plan.digest}")
-
-        gpu_index = (
-            int(plan.topology.device_ordinals[0])
-            if plan.topology.device_ordinals else 0)
-        if self.topology.execution_groups <= 1:
-            group = 0
-        else:
-            try:
-                group = self.topology.group_ordinal_exact(gpu_index)
-            except TopologyError as exc:
-                raise DispatchGroupUnresolved(
-                    f"{what}: topology device ordinal {gpu_index} is not a "
-                    f"rank-0 device of {self.topology}: {exc}") from exc
-
-        slots: Dict[str, dispatch.SlotOrder] = {}
-        for binding in plan.slots:
-            if binding.slot not in spec.models and binding.slot not in spec.slots:
-                logger.warning(
-                    "UNDECLARED_MODEL_SLOT function=%s slot=%s request_id=%s: "
-                    "spec-bound slot not declared by the endpoint — ignored, "
-                    "not loaded",
-                    spec.name, binding.slot, plan.attempt.request_id)
-            slots[binding.slot] = dispatch.SlotOrder(
-                ref=binding.ref,
-                components=tuple(
-                    (c.component, c.ref) for c in binding.components),
-                inference_defaults=binding.inference_defaults,
-                objective=binding.objective,
-                distilled=binding.distilled,
-                distilled_status=binding.distilled_status,
-            )
-        # Refuse-never-default (the Plan half): the manifest is THE exact
-        # resolved model set, so a declared, non-optional Slot it does not
-        # bind is a hub-side omission — refused, never resurrected from a
-        # code default. (Plain fixed `models={...}` bindings are code-pinned
-        # identity — the release IS the code — and stand as declared.)
-        missing = sorted(
-            name for name, decl in spec.slots.items()
-            if not decl.optional and name not in slots)
-        if missing:
-            raise ValidationError(
-                f"{what}: components manifest binds no ref for required "
-                f"slot(s) {missing} of {spec.name!r}")
-
-        adapters: Dict[str, Tuple[dispatch.AdapterOrder, ...]] = {}
-        for adapter in plan.adapters:
-            adapters[adapter.slot] = adapters.get(adapter.slot, ()) + (
-                dispatch.AdapterOrder(
-                    ref=adapter.ref,
-                    weight=adapter.weight,
-                    inference_defaults=adapter.inference_defaults,
-                ),)
-
-        stamped: Optional[Dict[str, Any]] = None
-        if spec.config and plan.config.values:
-            try:
-                raw = msgspec.msgpack.decode(plan.config.values)
-            except msgspec.DecodeError as exc:
-                raise ValidationError(
-                    f"{what}: undecodable ConfigSnapshot.values: {exc}"
-                ) from None
-            if isinstance(raw, dict):
-                stamped = {str(k): v for k, v in raw.items()}
-        # §4.16: the attempt is bound to VALUES, not to a generation pointer —
-        # nothing is stamped into the worker's config store, and the ctx
-        # snapshot is the spec's own canonical bytes.
-        arm = await self._materialize_arm(plan, grant, what)
-        return _JobOrder(
-            request_id=plan.attempt.request_id,
-            attempt=plan.attempt.attempt,
-            function_name=plan.function_name,
-            payload=payload,
-            group=group,
-            slots=slots,
-            adapters=adapters,
-            snapshots=self._grant_snapshots(plan, grant, what),
-            input_manifest=tuple(
-                self._plan_manifest_entry(a, what) for a in plan.input_assets),
-            fence=functools.partial(self._validate_plan_arm, plan=plan),
-            config_snapshot=lambda _name, _values: plan.config.values or None,
-            org=plan.attribution.org,
-            invoker_id=plan.attribution.invoker_id,
-            capability_token=str(grant.capability_token or ""),
-            inline_output=plan.output_mode == "inline",
-            accelerator=plan.topology.accelerator,
-            gpu_index=gpu_index,
-            lane_report="",  # the bindings ARE the lane; nothing instructs
-            stamped_config=stamped,
-            arm=arm,
-        )
-
-    @staticmethod
-    def _plan_manifest_entry(asset: InputAssetRef, what: str) -> InputManifestEntry:
-        """One spec input-asset IDENTITY as the materializer's manifest row.
-
-        The attested-integrity machinery is blake3-shaped end to end (entry
-        validation, resolver echo, streaming hash), so the spec's
-        algorithm-tagged digest must BE a blake3 one — anything else cannot
-        be verified on this path and refuses typed rather than skipping the
-        check."""
-        digest = str(asset.digest or "")
-        algo, _, hex_part = digest.partition(":")
-        if algo != "blake3" or not hex_part:
-            raise ValidationError(
-                f"{what}: input asset {asset.asset_id!r} digest {digest!r} is "
-                "not a blake3 attestation, which is the only algorithm the "
-                "input materializer verifies")
-        return InputManifestEntry(
-            asset_id=asset.asset_id,
-            source_ref=asset.source_ref,
-            blake3=hex_part,
-            size_bytes=asset.size_bytes,
-            kind=asset.kind,
-            mime_type=asset.mime_type,
-        )
-
-    def _grant_snapshots(
-        self, plan: Plan, grant: pb.DeliveryGrant, what: str,
-    ) -> Dict[str, pb.Snapshot]:
-        """Join the grant's digest-keyed transport to the refs the spec
-        pinned — DELIVERY only, and the one place the split is re-joined.
-        A pinned digest the grant does not carry is a typed refusal naming
-        it; nothing scans for a substitute."""
-        by_ref: Dict[str, str] = {}
-        for slot in plan.slots:
-            by_ref.setdefault(slot.ref, slot.snapshot_digest)
-            for comp in slot.components:
-                by_ref.setdefault(comp.ref, comp.snapshot_digest)
-        for adapter in plan.adapters:
-            by_ref.setdefault(adapter.ref, adapter.snapshot_digest)
-        out: Dict[str, pb.Snapshot] = {}
-        for ref, digest in by_ref.items():
-            if not digest:
-                continue
-            presigned = grant.snapshots.get(digest)
-            if presigned is None:
-                raise RetryableError(
-                    f"{what}: the grant carries no transport for pinned "
-                    f"content {digest} ({ref})")
-            out[ref] = pb.Snapshot(
-                digest=digest,
-                files=[
-                    pb.SnapshotFile(
-                        path=f.path,
-                        size_bytes=f.size_bytes,
-                        digest=f.digest,
-                        url=f.url,
-                        chunk_size_bytes=f.chunk_size_bytes,
-                        chunks=[
-                            pb.ChunkRef(sha256=c.sha256, url=c.url, len=c.len)
-                            for c in f.chunks
-                        ],
-                    )
-                    for f in presigned.files
-                ],
-            )
-        return out
-
-    async def _materialize_arm(
-        self, plan: Plan, grant: pb.DeliveryGrant, what: str,
-    ) -> _ArmOrder:
-        """The exact-artifact half of the cutover: materialize ONLY the
-        identity the spec named (from the grant's transport, digest-verified)
-        and carry pgw#903's expected identity to the arming choke point.
-        ``expected_from_plan`` returning ``None`` is a complete answer — a
-        dynamo/eager arm names nothing and nothing may be armed for it."""
-        artifact = plan.arm.artifact
-        expected = aot_identity.expected_from_plan(plan)
-        if artifact is None or expected is None:
-            return _ArmOrder(backend=plan.arm.backend)
-        presigned = grant.snapshots.get(artifact.content_digest)
-        path = await asyncio.to_thread(
-            aot_delivery.materialize_named_artifact,
-            artifact.cell_ref,
-            artifact.content_digest,
-            presigned,
-            cache_dir=self.store._cache_dir,
-            what=what,
-        )
-        return _ArmOrder.for_artifact(
-            path=path,
-            ref=artifact.cell_ref,
-            snapshot_digest=artifact.content_digest,
-            expected=expected,
-            publisher_org=artifact.publisher_org,
-        )
-
-    def _validate_plan_arm(self, spec: EndpointSpec, *, plan: Plan) -> None:
-        """The Plan fence (pgw#904), run where the legacy path ran its
-        ``required_compile`` fence: a READY instance must serve exactly the
-        arm the spec named. A mismatch is a typed refusal tied to the spec
-        digest — never a re-resolution, never a silent substitute."""
-        if spec.cls is None:
-            return
-        rec = self._classes.get(spec.instance_key)
-        if rec is None or not rec.ready:
-            return  # arming happens (or refuses typed) inside ensure_setup
-        active: set[str] = set()
-        for target in rec.compile_targets.values():
-            with target.state_lock:
-                if target.active_compile_ref:
-                    active.add(target.active_compile_ref)
-        artifact = plan.arm.artifact
-        if artifact is None:
-            if active:
-                raise RetryableError(
-                    f"arm_mismatch: spec {plan.digest} orders backend "
-                    f"{plan.arm.backend!r} but the live instance serves armed "
-                    f"cell(s) {sorted(active)}")
-            return
-        if active != {artifact.cell_ref}:
-            raise RetryableError(
-                f"arm_mismatch: spec {plan.digest} names cell "
-                f"{artifact.cell_ref!r}, the live instance serves "
-                f"{sorted(active) or 'no armed cell'}")
 
     def handle_cancel(self, cancel: pb.CancelJob) -> None:
         job = self.jobs.get((cancel.request_id, cancel.attempt))
