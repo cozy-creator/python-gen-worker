@@ -55,7 +55,7 @@ from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, guard_closure, hot_swap, mint_delegate
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
-from gen_worker.intent_registry import IntentRegistry
+from gen_worker.lifecycle_intents import IntentRegistry
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 

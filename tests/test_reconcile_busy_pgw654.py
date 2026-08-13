@@ -24,7 +24,7 @@ import time
 
 import msgspec
 
-from gen_worker.intent_registry import IntentRegistry
+from gen_worker.lifecycle_intents import IntentRegistry
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.blob_host import BlobHost

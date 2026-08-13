@@ -24,8 +24,8 @@ from ..models.ladder import (
     placement_to_metadata,
 )
 from .dtype_pins import verify_produced_tree
-from .hub import CommitFile, CommitResult, HubClient, files_from_tree
-from .publish_journal import JOURNAL_NAME
+from ..hubio.client import CommitFile, CommitResult, HubClient, files_from_tree
+from ..hubio.journal import JOURNAL_NAME
 from .produced import ProducedFlavor
 from .writer import assert_one_file_per_component
 

@@ -342,7 +342,7 @@ def merge_hello(
     """One Hello from G children's Hellos.
 
     ``worker_session_id`` OVERRIDES whatever the children minted. It is
-    ``uuid.uuid4().hex`` in ``intent_registry.__init__`` today, i.e. minted by
+    ``uuid.uuid4().hex`` in ``lifecycle_intents.IntentRegistry.__init__`` today, i.e. minted by
     the child, so it changes on every child respawn — and the hub rejects
     cross-session shadow state. At G == 1 stage 1 got away with it because a
     respawn also cycles the stream; with G children one group's respawn must

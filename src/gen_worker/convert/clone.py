@@ -25,8 +25,8 @@ from typing import Any, Iterable, Optional
 
 from gen_worker.api.errors import ValidationError
 
-from .hub import HubClient, files_from_tree
-from .publish_journal import JOURNAL_NAME, PublishJournal
+from ..hubio.client import HubClient, files_from_tree
+from ..hubio.journal import JOURNAL_NAME, PublishJournal
 from .keepalive import HubKeepalive
 from .ingest import (
     IngestedSource,
@@ -55,7 +55,7 @@ from .dtype_pins import (
 from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
 from .registry import repackage_family
 from ..api.slot import OBJECTIVES
-from .hub import _dtype_token
+from ..hubio.client import _dtype_token
 
 logger = logging.getLogger(__name__)
 

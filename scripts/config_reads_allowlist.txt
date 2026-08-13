@@ -89,7 +89,7 @@ src/gen_worker/procsplit/child.py::$ENV_WATCHDOG_PING_S IPC GEN_WORKER_CHILD_WAT
 src/gen_worker/procsplit/child.py::$ENV_LIVENESS_FD IPC GEN_WORKER_CHILD_LIVENESS_FD, parent-minted.
 src/gen_worker/procsplit/parent.py::$ENV_CHILD_CMD IPC watchdog ping cadence handed down to the child.
 src/gen_worker/procsplit/privdrop.py::GEN_WORKER_COMPUTE_UID IPC GEN_WORKER_COMPUTE_UID, parent-minted per child.
-src/gen_worker/intent_registry.py::GEN_WORKER_SESSION_ID IPC GEN_WORKER_SESSION_ID must SURVIVE RESPAWN, so it is a genuine handoff value - keep it, on argv.
+src/gen_worker/lifecycle_intents.py::GEN_WORKER_SESSION_ID IPC GEN_WORKER_SESSION_ID must SURVIVE RESPAWN, so it is a genuine handoff value - keep it, on argv.
 src/gen_worker/env_seal.py::GEN_WORKER_SEAL_LIB_MEMO IPC GEN_WORKER_SEAL_LIB_MEMO, parent-minted memo path.
 src/gen_worker/subproc.py::$SNAPSHOT_PATH_ENV IPC forwards GEN_WORKER_CONFIG_SNAPSHOT_PATH to a child. §1.18 ownership test FAILS: this value ORIGINATES in Settings, so the child must receive config rather than re-derive it from an env the parent re-exported.
 src/gen_worker/supervisor.py::GEN_WORKER_POSTMORTEM_FILE IPC GEN_WORKER_POSTMORTEM_FILE sink path for the pre-fork supervisor.

@@ -22,7 +22,7 @@ endpoint source (/api/v1/endpoints/:owner/:endpoint/releases/uploads),
 and user media (/api/v1/media/uploads — org-less, the hub derives the org
 from the credential; th#1722 §C). Repo checkpoints do NOT use
 this client anymore — they publish via the /commits API (gw#471,
-gen_worker.convert.hub).
+gen_worker.hubio.client).
 
 # HTTP stack (issues #13 / #385 / pgw#1125)
 

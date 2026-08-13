@@ -31,7 +31,7 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
-from gen_worker.api import Resources, endpoint
+from gen_worker import Resources, endpoint
 from gen_worker.executor import Executor
 from gen_worker.models import residency as residency_mod
 from gen_worker.models.residency import DeviceGroup, Residency, Tier

@@ -31,7 +31,7 @@ import pytest
 
 from gen_worker.config import load_settings
 from gen_worker.config.settings import BOOT_CONFIG_GENERATION_ABSENT
-from gen_worker.intent_registry import IntentRegistry
+from gen_worker.lifecycle_intents import IntentRegistry
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 _ENV = "WORKER_CONFIG_GENERATION"

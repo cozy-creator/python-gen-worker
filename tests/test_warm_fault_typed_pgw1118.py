@@ -20,7 +20,7 @@ import msgspec
 import pytest
 
 from gen_worker import activity as activity_mod
-from gen_worker.api import Resources, endpoint
+from gen_worker import Resources, endpoint
 from gen_worker.api.errors import (
     EndpointSetupFailed,
     ModelSlotIdentityError,

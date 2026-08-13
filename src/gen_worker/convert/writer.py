@@ -58,7 +58,7 @@ class ConversionImplementationError(RuntimeError):
 # to the wall); a 9.8GB shard failed the SAME way on every one of 5 retries
 # (it deterministically needs longer than the wall allows, so retrying
 # doesn't help). 2GB keeps every shard's verify time comfortably clear of
-# that ceiling regardless of R2 throughput variance. gen_worker.convert.hub's
+# that ceiling regardless of R2 throughput variance. gen_worker.hubio.client's
 # retry/poll resilience (#62/#63) still covers the remaining transient case;
 # this fixes the deterministic one.
 

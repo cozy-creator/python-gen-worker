@@ -6,7 +6,7 @@ import json
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
-from gen_worker.convert.hub import HubClient
+from gen_worker.hubio.client import HubClient
 
 
 import base64 as _base64

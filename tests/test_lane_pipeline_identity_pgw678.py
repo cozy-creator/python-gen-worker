@@ -132,7 +132,7 @@ class _ExecStub:
         self.store = _StoreStub()
         self._classes: Dict[Any, _ClassRecord] = {}
 
-    def _arm_execution_lane_gate(self, pipe: Any, ref: str, spec: Any = None) -> bool:
+    def _arm_lane_residency_gate(self, pipe: Any, ref: str, spec: Any = None) -> bool:
         return False
 
 

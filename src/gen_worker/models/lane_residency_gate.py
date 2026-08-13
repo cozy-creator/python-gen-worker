@@ -76,7 +76,7 @@ def _inference_mode_off() -> Any:
         return nullcontext()
 
 
-class ExecutionLaneGate:
+class LaneResidencyGate:
     """Ensures one lane ref is execution-ready around each pipeline call."""
 
     def __init__(
@@ -191,7 +191,7 @@ class ExecutionLaneGate:
             )
 
 
-def arm_execution_lane_gate(pipe: Any, gate: ExecutionLaneGate) -> bool:
+def arm_lane_residency_gate(pipe: Any, gate: LaneResidencyGate) -> bool:
     """Wrap ``pipe.__call__`` with the gate. Idempotent: an already-gated
     pipeline just gets the fresh gate. Object identity and isinstance are
     preserved (dynamic subclass with the same class name)."""
@@ -242,4 +242,4 @@ def arm_execution_lane_gate(pipe: Any, gate: ExecutionLaneGate) -> bool:
     return True
 
 
-__all__ = ["ExecutionLaneGate", "arm_execution_lane_gate"]
+__all__ = ["LaneResidencyGate", "arm_lane_residency_gate"]

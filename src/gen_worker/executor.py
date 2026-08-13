@@ -65,7 +65,7 @@ from .api.binding import (
     component_overrides,
     wire_ref,
 )
-from .convert.hub import HubPublishError
+from .hubio.client import HubPublishError
 from . import cell_key
 from .mint_process import MintSlot, slot_subjects
 from .api.errors import (
@@ -103,7 +103,7 @@ from .input_assets import (
     manifest_from_run_job,
     materialize_input_assets,
 )
-from .intent_registry import IntentRegistry
+from .lifecycle_intents import IntentRegistry
 from .models import cozy_snapshot
 from .models import disk_gc
 from .models import disk_telemetry
@@ -197,7 +197,7 @@ from .parallel.runtime import BootPlan, SequenceRuntime, arm_sequence_gate
 from .runtimes.server import RUNTIME_FACTORIES
 from .models.loading import composition_compute_dtype
 from .runtimes.server import ServerHandle
-from .models.execution_lane_gate import ExecutionLaneGate, arm_execution_lane_gate
+from .models.lane_residency_gate import LaneResidencyGate, arm_lane_residency_gate
 from .models.memory import rearm_offload
 from . import fleet_cells
 from . import aot_serve, numerics_ladder, shape_growth
@@ -2881,7 +2881,7 @@ class _ClassRecord:
     # held_refs; the instance serves the OLD pick and must be vacated.
     stale: bool = False
     # gw#551: wire refs of lane-registered slots (gw#479). Lane residency is
-    # call-time-owned (ExecutionLaneGate promotes + pins around each pipeline call);
+    # call-time-owned (LaneResidencyGate promotes + pins around each pipeline call);
     # the executor must neither whole-job-pin nor eagerly promote them, or
     # the idle sibling can never be LRU-swapped out.
     execution_lane_refs: set = dc_field(default_factory=set)
@@ -3046,7 +3046,7 @@ class _InjectionResult:
     execution_lane_slots: set = dc_field(default_factory=set)
     shared_keys: List[Any] = dc_field(default_factory=list)
     shared_bytes: int = 0
-    # gw#551: slots whose pipeline __call__ the ExecutionLaneGate wrapped. Only these
+    # gw#551: slots whose pipeline __call__ the LaneResidencyGate wrapped. Only these
     # may become call-time-owned; an un-gateable pipeline (no instance
     # __call__) keeps the eager whole-job pin + promote path.
     gated_slots: set = dc_field(default_factory=set)
@@ -7979,7 +7979,7 @@ class Executor:
             # gw#551: call-time-owned refs. Any record holding 2+ worker-
             # constructed pipelines can overcommit VRAM (content-keyed lanes
             # AND monolithic siblings alike) — those swap per use via the
-            # ExecutionLaneGate instead of being job-pinned + eagerly promoted.
+            # LaneResidencyGate instead of being job-pinned + eagerly promoted.
             pipe_slots = {s for s, (obj, _) in inj.loaded.items() if obj is not None}
             swap_owned = pipe_slots if len(pipe_slots) >= 2 else set(inj.execution_lane_slots)
             swap_owned &= inj.gated_slots  # un-gateable pipes stay eager
@@ -9248,7 +9248,7 @@ class Executor:
                         result.execution_lane_slots.add(slot)
                     else:
                         loaded[slot] = (pipe, delta)
-                        if self._arm_execution_lane_gate(pipe, ref, spec=spec):
+                        if self._arm_lane_residency_gate(pipe, ref, spec=spec):
                             result.gated_slots.add(slot)
                     kwargs[slot] = pipe
                 else:
@@ -9325,11 +9325,11 @@ class Executor:
             res.track_vram(ref, execution_lane_obj)
         else:
             res.track_ram(ref, execution_lane_obj)
-        if self._arm_execution_lane_gate(pipe, ref):
+        if self._arm_lane_residency_gate(pipe, ref):
             result.gated_slots.add(slot)
         return execution_lane_obj, execution_lane_bytes
 
-    def _arm_execution_lane_gate(
+    def _arm_lane_residency_gate(
         self, pipe: Any, ref: str, spec: Optional[EndpointSpec] = None,
     ) -> bool:
         """gw#551: wrap a worker-constructed pipeline's ``__call__`` so a
@@ -9346,7 +9346,7 @@ class Executor:
 
             def fallback() -> bool:
                 return self._serve_offload_fallback(bound_spec, pipe, ref)
-        return arm_execution_lane_gate(pipe, ExecutionLaneGate(
+        return arm_lane_residency_gate(pipe, LaneResidencyGate(
             ref=ref, residency=self.store.residency, label=ref,
             retry_exc=RetryableError, offload_fallback=fallback,
         ))
@@ -11542,7 +11542,7 @@ class Executor:
         # book the same free VRAM and OOM each other mid-load. Lane refs are
         # NOT leased (gw#551): lane dispatch is handler-side, so leasing every
         # declared lane would make the idle sibling un-demotable and the used
-        # lane un-promotable on an overcommitted card; the ExecutionLaneGate pins
+        # lane un-promotable on an overcommitted card; the LaneResidencyGate pins
         # exactly the lane it executes, at call time.
         try:
             with self.store.residency.admit(
@@ -11773,7 +11773,7 @@ class Executor:
         try:
             # Pin-while-executing: the models (and adapter snapshots) this job
             # uses are not eviction candidates for its duration. Lane refs
-            # excluded (gw#551): the ExecutionLaneGate pins the one lane the handler
+            # excluded (gw#551): the LaneResidencyGate pins the one lane the handler
             # actually calls; pinning all of them here would deadlock the
             # gate's promote against its own job's pins.
             exec_refs = self._job_pin_refs(spec, routed)

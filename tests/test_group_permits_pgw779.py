@@ -30,7 +30,7 @@ from typing import Any, List
 import msgspec
 import pytest
 
-from gen_worker.api import Hub, Resources
+from gen_worker import Hub, Resources
 from gen_worker.executor import (
     DispatchGroupUnresolved,
     EndpointSpec,

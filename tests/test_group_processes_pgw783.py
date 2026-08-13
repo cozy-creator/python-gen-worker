@@ -378,7 +378,7 @@ def test_hello_merges_state_residency_in_flight_and_cadence():
 
 
 def test_worker_session_id_is_parent_minted():
-    """It is uuid4 in intent_registry today, i.e. CHILD-minted, so it changes
+    """It is uuid4 in lifecycle_intents today, i.e. CHILD-minted, so it changes
     on every child respawn — and the hub rejects cross-session shadow state.
     With G children, one group's respawn must not invalidate the whole
     worker's."""
@@ -968,7 +968,7 @@ def test_the_parent_mints_a_stable_session_id_passed_to_every_child():
 
 
 def test_intent_registry_reads_the_parent_session_id_else_mints(monkeypatch):
-    from gen_worker.intent_registry import IntentRegistry
+    from gen_worker.lifecycle_intents import IntentRegistry
 
     monkeypatch.setenv(ENV_SESSION_ID, "parent-owned-session-abc")
     reg = IntentRegistry("release-x", ["fn"])

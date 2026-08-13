@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from fake_hub import _FakeHub, _client
-from gen_worker.convert.hub import CommitFile, HubPublishError
+from gen_worker.hubio.client import CommitFile, HubPublishError
 from gen_worker.executor import _map_exception
 from gen_worker.pb import worker_scheduler_pb2 as pb
 

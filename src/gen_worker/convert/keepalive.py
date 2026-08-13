@@ -36,7 +36,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 from ..http_origin import is_definite_hub_answer
-from .hub import _http_session
+from ..hubio.client import _http_session
 
 logger = logging.getLogger(__name__)
 

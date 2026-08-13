@@ -34,7 +34,7 @@ import pytest
 from gen_worker import aot_serve, cell_key, env_seal
 from gen_worker import fleet_cells as fc
 from gen_worker import receipts
-from gen_worker.convert.hub import HubPublishError
+from gen_worker.hubio.client import HubPublishError
 from gen_worker.models import chunk_upload as cu
 from gen_worker.procsplit import actions
 

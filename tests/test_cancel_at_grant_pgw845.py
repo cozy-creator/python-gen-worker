@@ -37,7 +37,7 @@ import asyncio
 from pathlib import Path
 
 from gen_worker.executor import ModelStore
-from gen_worker.intent_registry import IntentRegistry
+from gen_worker.lifecycle_intents import IntentRegistry
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 # Enough scheduling steps to cover the grant and several hops past it. The

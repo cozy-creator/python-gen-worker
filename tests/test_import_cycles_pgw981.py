@@ -16,7 +16,7 @@ and its errors — so the back-edge was the defect. `import gen_worker.cli.serve
 as a first import raised ``ImportError: cannot import name
 'DEFAULT_SOCKET_PATH' from partially initialized module``, and it was masked
 only because ``cli/__init__.py`` happens to reach `run` before `serve`. Fixed by
-moving the constant DOWN to `cli/transport.py`, a leaf, not by deferring the
+moving the constant DOWN to `cli/sockaddr.py`, a leaf, not by deferring the
 import: a deferred import keeps the cycle and hides it again.
 
 A module that cannot import because an OPTIONAL EXTRA is absent is not a cycle

@@ -34,8 +34,8 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from . import run as run_mod
-from . import transport
-from .transport import DEFAULT_SOCKET_PATH
+from . import sockaddr
+from .sockaddr import DEFAULT_SOCKET_PATH
 from .args import ArgError, build_payload, looks_like_field_token
 
 
@@ -79,7 +79,7 @@ class _ClientCanceler:
 
     def _send_cancel(self) -> None:
         try:
-            c = transport.create_client(str(self._sock_path), 5.0)
+            c = sockaddr.create_client(str(self._sock_path), 5.0)
             c.sendall(
                 (json.dumps({"cancel": {"request_id": self._request_id}}) + "\n").encode("utf-8")
             )
@@ -272,10 +272,10 @@ def _send_request(
     s: Optional[socket.socket] = None
     try:
         try:
-            s = transport.create_client(spec, _CONNECT_TIMEOUT_SECONDS)
+            s = sockaddr.create_client(spec, _CONNECT_TIMEOUT_SECONDS)
         except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
             raise run_mod._UsageError(
-                f"could not connect to serve at {transport.display(spec)}: {e}; "
+                f"could not connect to serve at {sockaddr.display(spec)}: {e}; "
                 "is 'gen-worker serve' running? (start it with `gen-worker serve` "
                 "or pass --socket PATH / tcp://host:port)"
             ) from e
@@ -339,12 +339,12 @@ def _send_request(
                 continue
             if not chunk:
                 break
-            if len(buf) + len(chunk) > transport.MAX_NDJSON_LINE_BYTES:
+            if len(buf) + len(chunk) > sockaddr.MAX_NDJSON_LINE_BYTES:
                 # pgw#1013: the same bound the server applies to the request
                 # line, applied to the response — a serve process that never
                 # sends `\n` must not grow this buffer without end.
                 raise run_mod._UsageError(
-                    f"serve sent more than {transport.MAX_NDJSON_LINE_BYTES} bytes "
+                    f"serve sent more than {sockaddr.MAX_NDJSON_LINE_BYTES} bytes "
                     "without completing a response line"
                 )
             buf.extend(chunk)
@@ -375,9 +375,9 @@ def _handle_invoke(args: argparse.Namespace) -> int:
     try:
         payload = _resolve_payload(args)
         # Unix paths resolve to absolute; a tcp://host:port spec passes through.
-        if transport.is_unix(args.socket_path):
+        if sockaddr.is_unix(args.socket_path):
             sock_path: Any = str(
-                Path(transport.parse_addr(args.socket_path).host).resolve())
+                Path(sockaddr.parse_addr(args.socket_path).host).resolve())
         else:
             sock_path = args.socket_path
         request = {

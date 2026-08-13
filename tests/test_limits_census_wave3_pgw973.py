@@ -155,7 +155,7 @@ def test_transport_and_worker_share_one_declared_queue_depth() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. execution_lane_gate — a flat deadline over a live progress signal
+# 3. lane_residency_gate — a flat deadline over a live progress signal
 # ---------------------------------------------------------------------------
 
 
@@ -191,7 +191,7 @@ class _FakeResidency:
 
 @pytest.fixture()
 def gated(monkeypatch: pytest.MonkeyPatch) -> Any:
-    from gen_worker.models import execution_lane_gate as gate_mod
+    from gen_worker.models import lane_residency_gate as gate_mod
 
     monkeypatch.setattr(gate_mod, "_cuda_available", lambda: True)
     monkeypatch.setattr(gate_mod, "_POLL_S", 0.01)
@@ -213,7 +213,7 @@ def test_a_card_that_keeps_returning_memory_is_never_given_up_on(
 
     monkeypatch.setattr(gated, "get_available_vram_gb", climbing)
     res = _FakeResidency(promote_after=40)
-    gate = gated.ExecutionLaneGate(
+    gate = gated.LaneResidencyGate(
         ref="lane", residency=res, wait_s=0.05,
         retry_exc=RuntimeError)     # type: ignore[arg-type]
 
@@ -237,7 +237,7 @@ def test_a_card_that_has_stopped_moving_still_gives_up(
     RETRYABLE rather than executing a cpu-resident lane."""
     monkeypatch.setattr(gated, "get_available_vram_gb", lambda: 3.0)
     res = _FakeResidency(promote_after=10**9)
-    gate = gated.ExecutionLaneGate(
+    gate = gated.LaneResidencyGate(
         ref="lane", residency=res, wait_s=0.05,
         retry_exc=RuntimeError)     # type: ignore[arg-type]
 
@@ -258,7 +258,7 @@ def test_allocator_jitter_cannot_keep_the_window_alive(
         return free[0]
 
     monkeypatch.setattr(gated, "get_available_vram_gb", jitter)
-    gate = gated.ExecutionLaneGate(
+    gate = gated.LaneResidencyGate(
         ref="lane", residency=_FakeResidency(promote_after=10**9),
         wait_s=0.05, retry_exc=RuntimeError)   # type: ignore[arg-type]
     with pytest.raises(RuntimeError):

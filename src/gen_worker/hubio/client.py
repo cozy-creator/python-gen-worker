@@ -40,7 +40,7 @@ from .. import activity as _activity
 from ..http_origin import is_definite_hub_answer
 from ..models import chunk_upload as _cu
 from ..models.chunk_upload import UploadGrant
-from .publish_journal import JOURNAL_NAME, JournalEntry, PublishJournal, artifact_key
+from .journal import JOURNAL_NAME, JournalEntry, PublishJournal, artifact_key
 
 logger = logging.getLogger(__name__)
 
@@ -506,7 +506,7 @@ class HubClient:
         rather than "re-run the cast". The session id is recorded beside the
         produced bytes BEFORE the first PUT, so a retry on this pod re-adopts
         the same session (same staging prefix) and re-plans it instead of
-        declaring a fresh one. See ``publish_journal`` for what this does and
+        declaring a fresh one. See ``hubio.journal`` for what this does and
         does not cover, and for the th#1654 hub dependency it is built to
         exploit.
         """
