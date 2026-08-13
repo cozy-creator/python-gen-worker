@@ -15,6 +15,7 @@ EXACTLY (degradation_reschedule.go: ``case "offload","cpu","emergency_quant"``)
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pytest
 
@@ -22,7 +23,7 @@ from gen_worker.models import rung
 from gen_worker.models.memory import place_pipeline
 from gen_worker.models.serve_fit import (
     RUN_CPU,
-    RUN_EMERGENCY,
+    plan_serve,
     RUN_FP8_STORAGE,
     RUN_NATIVE,
     RUN_OFFLOAD,
@@ -30,8 +31,10 @@ from gen_worker.models.serve_fit import (
 )
 
 #: tensorhub's exact-match FnDegraded.ran vocabulary
-#: (profiling/degradation.go + autoscale/degradation_reschedule.go).
-GO_RAN_VOCABULARY = {RUN_NATIVE, RUN_FP8_STORAGE, RUN_EMERGENCY, RUN_OFFLOAD, RUN_CPU, "bf16", "fp8"}
+#: (profiling/degradation.go + autoscale/degradation_reschedule.go). The hub
+#: still accepts "emergency_quant"; pgw#1206 D deleted the only rung that
+#: produced it, so nothing here may emit it again.
+GO_RAN_VOCABULARY = {RUN_NATIVE, RUN_FP8_STORAGE, RUN_OFFLOAD, RUN_CPU, "bf16", "fp8"}
 
 
 # --- the ladder itself ------------------------------------------------------
@@ -40,9 +43,15 @@ def test_one_ordered_ladder() -> None:
     """One ladder, best-first, price monotonic, projections coherent."""
     names = [r.name for r in rung.LADDER]
     assert names == [
-        "native", "fp8_storage", "nf4",
+        "native", "fp8_storage",
         "model_offload", "group_offload", "sequential", "cpu",
     ]
+    # pgw#1206 D: no rung manufactures a quant at runtime. A quant rung is an
+    # AOT artifact the ladder SELECTS; the only runtime storage transform left
+    # is fp8-E4M3, which is a re-encoding of the same weights, not a quant
+    # recipe with an ungated quality verdict.
+    assert [r.storage for r in rung.LADDER if r.storage] == ["fp8"]
+    assert "emergency_quant" not in {r.run_mode for r in rung.LADDER}
     prices = [r.latency for r in rung.LADDER]
     assert prices == sorted(prices), "price must be monotonic down the ladder"
     # Host-RAM-touching == exactly the placement tail (the strict_vram
@@ -163,10 +172,74 @@ def test_demotion_ran_matches_go_vocabulary_exactly() -> None:
 def test_load_rung_and_cast_drop_share_the_one_replan() -> None:
     """The load-time rungs and the th#737 cast-drop report through the SAME
     projection — no third vocabulary, wanted/ran stay honest."""
-    engaged = replan(None, run_mode=RUN_EMERGENCY, detail="load fit: nf4")
-    assert engaged.run_mode == RUN_EMERGENCY and engaged.ran == RUN_EMERGENCY
+    engaged = replan(None, run_mode=RUN_FP8_STORAGE, detail="load fit: fp8")
+    assert engaged.run_mode == RUN_FP8_STORAGE and engaged.ran == RUN_FP8_STORAGE
     assert engaged.degraded
     dropped = replan(None, wanted="fp8", ran="bf16", detail="no cast surface")
     assert dropped.run_mode == RUN_NATIVE
     assert dropped.wanted == "fp8" and dropped.ran == "bf16"
     assert dropped.degraded  # ran != wanted must surface as FnDegraded
+
+
+# --- pgw#1206 D: no rung manufactures a quant, and the floor still holds -----
+
+
+def _resources(vram_gb: float, *, strict: bool = False) -> Any:
+    from gen_worker.api.decorators import Resources
+
+    return Resources(gpu=True, vram_gb_hint=vram_gb, strict_vram=strict)
+
+
+def _cuda_caps() -> Any:
+    from gen_worker.models.hub_policy import TensorhubWorkerCapabilities
+
+    return TensorhubWorkerCapabilities(
+        cuda_version="13.0", gpu_sm=90, torch_version="2.13.0", installed_libs=[])
+
+
+@pytest.mark.parametrize("free_gb", [
+    40.0,  # THE nf4 window: 0.45*80 <= 40 < 0.55*80 — master answers
+           # `emergency_quant` here and nothing else in the suite covers it
+    8.0,   # far past every resident rung
+])
+def test_a_model_over_VRAM_lands_on_OFFLOAD_and_never_refuses(free_gb: float) -> None:
+    """Degrade-don't-OOM (Paul, 2026-07-10) survives the nf4 deletion.
+
+    At 40 GB free the old ladder had exactly one answer — quantize the
+    denoiser to 4 bits at load, at a quality nobody gated. The rung is gone,
+    so the same input must serve through the OFFLOAD ladder: slower, honest,
+    still a serve. A hard fail here would be the OOM the ruling forbids, and
+    a silent 4-bit serve is what the ruling now forbids instead.
+    """
+    plan = plan_serve(_resources(80.0), _cuda_caps(), free_vram_gb=free_gb)
+
+    assert plan.serveable, plan.reason
+    assert plan.run_mode == RUN_OFFLOAD
+    assert plan.ran in GO_RAN_VOCABULARY
+    assert plan.degraded
+    assert "emergency" not in (plan.warning or "").lower()
+    assert "4-bit" not in (plan.warning or "")
+
+
+def test_the_only_refusal_left_is_the_authors_own_strict_vram_optout() -> None:
+    """The floor is universal; the ONE exception is the author saying weights
+    may not touch host RAM. That is an opt-out, not a hardware verdict."""
+    plan = plan_serve(_resources(80.0, strict=True), _cuda_caps(), free_vram_gb=8.0)
+    assert not plan.serveable
+    assert "strict_vram" in plan.reason
+
+
+def test_no_runtime_quant_rung_exists_to_be_reached() -> None:
+    """The mechanism, not just the decision: the fit verdict vocabulary has no
+    runtime-quant member, so nothing can route to one again by adding a caller.
+    """
+    from gen_worker.models import hub_policy, loading
+
+    assert not hasattr(hub_policy, "FIT_EMERGENCY")
+    assert not hasattr(loading, "emergency_quantization_config")
+    assert not hasattr(loading, "emergency_quant_enabled")
+    assert not hasattr(loading, "bitsandbytes_available")
+    assert not hasattr(loading, "EMERGENCY_FIT_FACTOR")
+    # ...while the AOT path that READS a quant off disk is untouched: a
+    # fetched artifact still loads through its own config.
+    assert hasattr(loading, "synthesize_quantization_config")

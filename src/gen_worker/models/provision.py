@@ -42,7 +42,6 @@ from .cache_paths import tensorhub_cas_dir
 from .errors import UrlExpiredError
 from .envelope import envelope_refusal
 from .loading import (
-    RUNG_NF4_UNLANDED,
     assert_uniform_compute_dtype,
     composition_compute_dtype,
     detect_diffusers_variant,
@@ -92,7 +91,7 @@ class SlotLoad:
     # dropped before the load.
     pre_drop_wanted: str = ""
     pre_drop_detail: str = ""
-    # gw#491: the loader engaged an emergency fit rung ("fp8" / "nf4").
+    # gw#491: the loader engaged the fp8-storage fit rung.
     rung: str = ""
     rung_detail: str = ""
     # th#737 backstop: the resolved cast was attempted at load and failed on
@@ -234,21 +233,9 @@ def load_slot(
         cast_failed = getattr(
             pipe, "_cozy_fp8_storage_requested", False
         ) and not getattr(pipe, "_cozy_fp8_storage_ok", True)
-        if rung == RUNG_NF4_UNLANDED:
-            # pgw#824: the emergency rung ENGAGED and landed on nothing. Routed
-            # through the same SlotLoad.rung path as every sibling rung, so it
-            # reaches ServePlan/FnDegraded via `_record_adaptive_rung` instead of
-            # dying in a log line. It used to clear the stamp, which suppressed the
-            # only report the ladder had — the worst outcome was the silent one.
-            out.rung = rung
-            out.rung_detail = (
-                f"adaptive fit rung 'nf4' engaged at load for slot {slot!r} "
-                f"({type(pipe).__name__}) and landed on ZERO modules; this slot "
-                f"serves FULL PRECISION over the VRAM it was budgeted, and only "
-                f"the offload ladder carries it")
-        elif rung == "nf4" or (rung == "fp8" and not cast_failed):
-            # gw#491: the loader engaged an emergency rung because free VRAM at
-            # load was tighter than planning assumed.
+        if rung == "fp8" and not cast_failed:
+            # gw#491: the loader engaged the fp8-storage fit rung because free
+            # VRAM at load was tighter than planning assumed.
             out.rung = rung
             out.rung_detail = (
                 f"adaptive fit rung {rung!r} engaged at load for slot {slot!r} "

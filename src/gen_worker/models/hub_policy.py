@@ -4,7 +4,7 @@ import importlib.util
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from .memory import effective_vram_requirement_gb
-from .loading import EMERGENCY_FIT_FACTOR, FP8_STORAGE_FIT_FACTOR
+from .loading import FP8_STORAGE_FIT_FACTOR
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,6 @@ FIT_NVFP4 = "nvfp4"
 FIT_SVDQ_FP4 = "svdq_fp4"
 FIT_SVDQ_INT4 = "svdq_int4"
 FIT_EMERGENCY_FP8 = "emergency_fp8"
-FIT_EMERGENCY = "emergency_quant"
 FIT_GGUF = "gguf_quant"
 FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
@@ -122,10 +121,6 @@ def variant_fit(
     - ``emergency_fp8``: does not fit as stored, but runtime fp8-E4M3 weight
       storage (loading.apply_fp8_storage: fp8 bytes resident, bf16 compute,
       no fp8 silicon required) would fit — quality ~= a stored #fp8 flavor.
-    - ``emergency_quant``: even the fp8 estimate does not fit, but the
-      emergency nf4 rung (th#546 emergency lane; loading layer, automatic on
-      CUDA hosts) applies and the 4-bit estimate fits — runs at
-      below-platform quality, loudly.
     - ``offload``: runnable, but the recommended card size (vram_gb minus the
       fixed GPU reserve) exceeds free VRAM — the models/memory.py offload
       ladder carries it (slower).
@@ -157,11 +152,6 @@ def variant_fit(
             return FIT_EMERGENCY_FP8, (
                 f"runs (fp8 storage): {float(vram):g} GB VRAM via runtime "
                 f"fp8-E4M3 weight storage, {float(free_vram_gb):.1f} GB free"
-            )
-        if float(vram) * EMERGENCY_FIT_FACTOR <= float(free_vram_gb):
-            return FIT_EMERGENCY, (
-                f"runs (emergency quality): {float(vram):g} GB VRAM via 4-bit "
-                f"emergency quantization, {float(free_vram_gb):.1f} GB free"
             )
     return FIT_OFFLOAD, (
         f"declares {float(vram):g} GB VRAM, {float(free_vram_gb):.1f} GB free"
