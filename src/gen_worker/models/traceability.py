@@ -5,12 +5,18 @@ cannot be exported. `torch.export(strict=True)` does not degrade around it — i
 refuses, per graph class, with `Unsupported: Skip inlining
 torch.compiler.disable()d function`.
 
-THE CASE THIS EXISTS FOR. diffusers' group offloading installs hooks whose
-`ModuleGroup.onload_` is decorated `@torch.compiler.disable` (verified on
-diffusers 0.39.0: `ModuleGroup.onload_._torchdynamo_disable is True`). A pod
-whose card cannot hold the pipeline resident gets those hooks from the
-placement ladder — and then every one of its 36 declared graph classes refuses,
+THE CASE THIS EXISTS FOR. Offload hooks. diffusers' group offloading marks
+`ModuleGroup.onload_` (verified on diffusers 0.39.0:
+`ModuleGroup.onload_._torchdynamo_disable is True`); accelerate's model/
+sequential offload marks `CpuOffload.pre_forward`. Either puts disabled work in
+a forward path, and then every one of a family's declared graph classes refuses,
 one at a time, for the same reason.
+
+**It is not a card-size story.** sdxl refused on a 16 GiB A4000 and z-image on a
+**48 GiB A40 holding a 19 GiB model** — so offload here is a pipeline
+CONFIGURATION, not a response to memory pressure. This module therefore asks
+about HOOKS and never about capacity, which is also what §1.35 requires: every
+model runs on every GPU, feasibility is never asked.
 
 WHY A PRE-EXPORT CHECK RATHER THAN LETTING THE PER-ENTRY SKIP HANDLE IT.
 pgw#1208's blast-radius fix would dutifully skip all 36 and publish nothing:

@@ -493,11 +493,15 @@ def test_the_mint_refuses_ONCE_before_export_naming_the_construct() -> None:
         mint_child.assert_traceable_as_loaded(_offloaded(), request)
 
     said = str(caught.value)
-    assert "mint_requires_resident_parent" in said, "the refusal must be TYPED"
+    assert "mint_pipeline_not_traceable" in said, "the refusal must be TYPED"
     assert "ModuleGroup.onload_" in said, "and must name the construct"
-    assert "serve this family eager" in said, (
+    assert "serves the family eager" in said, (
         "and must say what this pod CAN still do — a refusal that does not is "
         "read as the pod being broken")
+    assert "resident" not in said.lower() and "fits" not in said.lower(), (
+        "the refusal must NOT read as a capacity verdict: z-image refused on a "
+        "48 GiB A40 holding a 19 GiB model, and §1.35 rules the card-filter "
+        "concept out of existence — feasibility is never asked")
 
 
 def test_the_check_is_on_the_REAL_WEIGHT_path_only() -> None:

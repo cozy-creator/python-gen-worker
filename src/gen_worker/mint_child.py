@@ -786,20 +786,24 @@ def mint(request: MintRequest) -> MintReport:
                 # reason to place it is gone.
                 #
                 # This is not a tuning choice, it is the whole of the sdxl
-                # A4000 failure. The ladder engaged diffusers GROUP OFFLOADING
-                # (the card had a resident serving parent on it), which
-                # installs hooks whose `ModuleGroup.onload_` is decorated
-                # `@torch.compiler.disable` — and `torch.export(strict=True)`
-                # refuses to inline a disabled function, fatally and
-                # deterministically:
+                # and z-image export failures. The ladder installs OFFLOAD
+                # HOOKS, and an offload hook puts a `@torch.compiler.disable`d
+                # function in the traced path — which `torch.export(strict=True)`
+                # refuses to inline, fatally and deterministically:
                 #
                 #   Unsupported: Skip inlining `torch.compiler.disable()`d
                 #   function <function ModuleGroup.onload_>
                 #
-                # Measured, same wheel (0.113.2), same entry
-                # (`unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192`):
-                # 91.07 s export on an A4500, `Unsupported` on an A4000. The
-                # hooks are not stripped here — they are never installed.
+                # The MECHANISM is family-independent; only the hook class
+                # differs (`ModuleGroup.onload_` for sdxl's group offload,
+                # `CpuOffload.pre_forward` for z-image's). It is NOT a
+                # card-capacity story: z-image refused on a 48 GiB A40 holding
+                # a 19 GiB model, so offload here is a CONFIGURATION and not a
+                # response to memory pressure. `place_pipeline` has exactly one
+                # call site, guarded by `if place and ...`, and no endpoint
+                # installs offload itself — so this line removes every offload
+                # hook for every family. The hooks are not stripped; they are
+                # never installed.
                 place=False,
                 structure_only=structure_targets) or {}
         except StructureNotHonored as exc:
@@ -922,11 +926,20 @@ def assert_traceable_as_loaded(pipeline: Any, request: MintRequest) -> None:
 
     pgw#1208 (a). The weight-free path never places and so never acquires these
     hooks; this is for the REAL-WEIGHT fallback, which loads a checkpoint into
-    this process and runs the serving placement ladder over it. On a card too
-    small to hold it resident the ladder engages diffusers group offloading,
-    whose `ModuleGroup.onload_` is `@torch.compiler.disable`d — and every one of
-    the family's declared graph classes then refuses `Unsupported: Skip inlining
-    …` for the same reason.
+    this process and runs the serving placement ladder over it. An offload hook
+    puts a `@torch.compiler.disable`d function in the traced path — diffusers'
+    `ModuleGroup.onload_` (group offload) or accelerate's
+    `CpuOffload.pre_forward` (model/sequential offload) — and every one of the
+    family's declared graph classes then refuses `Unsupported: Skip …` for the
+    same reason.
+
+    **This is NOT a capacity verdict, and must never be read as one.** z-image
+    refused on a 48 GiB A40 holding a 19 GiB model, so offload is a pipeline
+    CONFIGURATION rather than a response to memory pressure — and §1.35 has
+    since ruled the whole card-filter concept out of existence (every model runs
+    on every GPU, best effort; feasibility is never asked). What this detects is
+    exactly what it says: the pipeline AS LOADED carries hooks that cannot be
+    traced.
 
     Without this, pgw#1208's per-entry skip would do exactly what it is supposed
     to do and dutifully skip all 36: thirty-six typed refusals and an hour of
@@ -950,14 +963,16 @@ def assert_traceable_as_loaded(pipeline: Any, request: MintRequest) -> None:
     if not reason:
         return
     raise MintChildRefused(
-        f"mint_requires_resident_parent: {mint_identity(request)} loaded real "
-        f"weights and this card could not hold them resident, so the placement "
-        f"ladder installed offload hooks — and {reason}. `torch.export` refuses "
-        f"a `torch.compiler.disable`d function rather than tracing around it, "
-        f"so EVERY declared graph class would refuse identically. Refused once, "
-        f"before the first export, instead of once per class. This pod can "
-        f"serve this family eager; it cannot mint it — mint it where the "
-        f"pipeline fits resident.")
+        f"mint_pipeline_not_traceable: {mint_identity(request)} loaded real "
+        f"weights and the placement ladder installed offload hooks — {reason}. "
+        f"`torch.export` refuses a `torch.compiler.disable`d function rather "
+        f"than tracing around it, so EVERY declared graph class would refuse "
+        f"identically. Refused once, before the first export, instead of once "
+        f"per class. NOT a statement about this card (§1.35: every model runs "
+        f"on every GPU, feasibility is never asked) — it is a statement about "
+        f"this PIPELINE AS CONFIGURED. This pod serves the family eager "
+        f"exactly as before; only minting is unavailable while it is loaded "
+        f"this way.")
 
 
 def assert_handler_proven(request: MintRequest) -> None:
