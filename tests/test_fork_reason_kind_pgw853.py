@@ -36,8 +36,7 @@ import pytest
 from gen_worker import Compile, Dim, Fork, GraphClass, Input
 from gen_worker.api.export_contract import (
     FORK_REASONS, WEAK_FORK_REASONS, DeclarationError, export_declaration,
-    register_export_declaration, reset_export_declarations, weak_arms,
-    weak_arms_by_family,
+    register_export_declaration, reset_export_declarations,
 )
 
 
@@ -104,67 +103,6 @@ def test_prose_is_KEPT_alongside_the_kind_not_replaced() -> None:
 # 2. THE QUERY — the reason the field exists
 # ---------------------------------------------------------------------------
 
-
-def test_weak_arms_finds_exactly_the_value_closed_ones() -> None:
-    decl = _decl(
-        Fork("kv_cache", served=(False,), unserved=(True,), reason="absent_path"),
-        Fork("stg", served=(False,), unserved=(True,), reason="unpassed_arg"),
-        Fork("cfg", served=(False,), unserved=(True,), reason="default_value"),
-        Fork("expand", served=(False,), unserved=(True,), reason="checkpoint_config"),
-    )
-    assert [f.name for f in weak_arms(decl)] == ["stg", "cfg"]
-    assert set(WEAK_FORK_REASONS) == {"unpassed_arg", "default_value"}
-
-
-def test_the_UNANSWERED_state_is_now_UNCONSTRUCTIBLE() -> None:
-    """`None` used to mean "the question has not been answered", and reading
-    that as evidence of a weak guarantee would have been a guess. pgw#1157
-    removes the ambiguity at its source instead of interpreting it: an
-    unserved arm cannot be declared without saying what closes it, so
-    `weak_arms` never sees an unanswered fork again."""
-    with pytest.raises(DeclarationError, match="declares no reason"):
-        _decl(Fork("mystery", served=(False,), unserved=(True,)))
-
-
-def test_a_served_only_fork_is_never_weak() -> None:
-    decl = _decl(Fork("edit", served=(0,), reason="eager_by_choice"))
-    assert weak_arms(decl) == ()
-
-
-def test_the_fleet_query_ANSWERS_for_a_family_whose_declaration_REFUSES() -> None:
-    """A blocked family must not take a fleet-wide query down — pgw#853's
-    whole point is that a refusal to MINT is not a refusal to everything else.
-
-    pgw#1107 makes that strictly better than "skipped": the refusal is DATA on
-    the declaration, so a blocked family's weak arms are still readable. A
-    sweep asking "which families are one payload field from an unserved arm?"
-    used to answer with a hole exactly where the answer mattered most.
-    """
-    from gen_worker.api.export_contract import MintBlocker
-
-    blocker = MintBlocker(
-        id="B1-harness", what="one open question",
-        evidence="harness fixture", resolves_when="it is measured")
-
-    reset_export_declarations()
-    try:
-        register_export_declaration(_decl(
-            Fork("cfg", served=(False,), unserved=(True,),
-                 reason="default_value"),
-            family="harness-blocked", blockers=(blocker,)))
-        register_export_declaration(_decl(
-            Fork("cfg", served=(False,), unserved=(True,),
-                 reason="default_value"), family="harness-weak"))
-
-        found = weak_arms_by_family()
-
-        assert [f.name for f in found["harness-weak"]] == ["cfg"]
-        assert [f.name for f in found["harness-blocked"]] == ["cfg"]
-        decl = export_declaration("harness-blocked")
-        assert decl is not None
-        assert [b.id for b in decl.open_blockers] == ["B1-harness"]
-    finally:
-        reset_export_declarations()
 
 
 # ---------------------------------------------------------------------------

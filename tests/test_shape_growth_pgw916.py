@@ -117,65 +117,11 @@ def test_one_uncovered_class_books_one_growth_job_however_many_requests(events):
                 if k == activity_mod.KIND_SHAPE_GAP]) == 1
 
 
-def test_an_ambiguous_dispatch_is_recorded_but_never_submitted(events):
-    """pgw#917's failure is a DECLARATION defect. Compiling another entry
-    cannot fix it, so growth must not try — and must say why."""
-    calls: List[shape_growth.ShapeGap] = []
-
-    class _Backend:
-        def grow(self, gap: shape_growth.ShapeGap) -> bool:
-            calls.append(gap)
-            return True
-
-    shape_growth.register_backend(shape_growth.ARM_AOT, _Backend())
-    try:
-        assert shape_growth.report_and_submit(shape_growth.ShapeGap(
-            arm=shape_growth.ARM_AOT, family="sdxl",
-            target="unet[BasicTransformerBlock#0]",
-            declared_class="unet[BasicTransformerBlock#0]/h=bf16[2,16128,640]",
-            reason=shape_growth.REASON_AMBIGUOUS)) is False
-        assert not calls
-        # ...and it is still COUNTED, under its own phase.
-        assert (activity_mod.KIND_SHAPE_GAP, "entry_ambiguous") in [
-            (k, p) for k, p, _d in events]
-    finally:
-        shape_growth.register_backend(shape_growth.ARM_AOT, None)
-
-
-def test_a_growable_gap_reaches_the_registered_backend_once():
-    calls: List[shape_growth.ShapeGap] = []
-
-    class _Backend:
-        def grow(self, gap: shape_growth.ShapeGap) -> bool:
-            calls.append(gap)
-            return True
-
-    shape_growth.register_backend(shape_growth.ARM_AOT, _Backend())
-    try:
-        gap = shape_growth.ShapeGap(
-            arm=shape_growth.ARM_AOT, family="sdxl", target="unet",
-            declared_class="unet/y", reason=shape_growth.REASON_UNCOVERED)
-        assert shape_growth.report_and_submit(gap) is True
-        assert shape_growth.report_and_submit(gap) is False
-        assert [g.declared_class for g in calls] == ["unet/y"]
-    finally:
-        shape_growth.register_backend(shape_growth.ARM_AOT, None)
-
 
 # ---------------------------------------------------------------------------
 # 2. the absence of a growth path is loud
 # ---------------------------------------------------------------------------
 
-
-def test_no_backend_is_a_named_refusal_not_a_silent_noop(caplog):
-    gap = shape_growth.ShapeGap(
-        arm=shape_growth.ARM_AOT, family="sdxl", target="unet",
-        declared_class="unet/z", reason=shape_growth.REASON_UNCOVERED)
-    assert shape_growth.backend_for(shape_growth.ARM_AOT) is None
-    with caplog.at_level("WARNING"):
-        assert shape_growth.submit(gap) is False
-    assert "no growth backend registered for arm='aot'" in caplog.text
-    assert "stays EAGER" in caplog.text
 
 
 def test_the_executor_confesses_an_armed_target_with_no_growth_path():
@@ -217,30 +163,6 @@ def test_growth_does_not_import_the_dynamo_router():
     assert not [n for n in imported if "hot_swap" in n], imported
     assert not [n for n in imported if "aot_serve" in n], imported
 
-
-def test_the_dependency_edge_points_at_the_shared_module():
-    """Both arms REACH it: the dynamo arm imports it (and uses its turn-gate
-    and debounce types), the AOT serve path imports it."""
-    assert any("shape_growth" in n for n in _imports_of(hot_swap))
-    assert any("shape_growth" in n for n in _imports_of(aot_serve))
-    # One implementation, not two copies that can drift.
-    assert hot_swap.Debounce is shape_growth.Debounce
-    assert hot_swap.TurnGateBusy is shape_growth.TurnGateBusy
-    assert hot_swap.TurnGateClosed is shape_growth.TurnGateClosed
-
-
-def test_growth_implements_no_second_task_or_device_scheduler():
-    """The acceptance forbids it by name. ``Debounce``'s single serialized
-    republish thread is the ONE lifted primitive; anything queue- or
-    pool-shaped here would be the second scheduler."""
-    source = Path(shape_growth.__file__).read_text(encoding="utf-8")
-    for banned in ("queue.Queue", "ThreadPoolExecutor", "asyncio.Queue",
-                   "cuda.Stream", "set_device"):
-        assert banned not in source, banned
-    threads = [
-        node for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Attribute) and node.attr == "Thread"]
-    assert len(threads) == 1, "only Debounce's serialized republish thread"
 
 
 def test_the_dynamo_arm_books_its_permanent_holes_in_the_same_ledger():

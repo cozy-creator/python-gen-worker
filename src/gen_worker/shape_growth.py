@@ -37,11 +37,10 @@ What this module owns
   arm with one grouped query;
 * the **admission primitives** pgw#916 names as the parts of ``hot_swap`` to
   keep and lift: :class:`TurnGateBusy` / :class:`TurnGateClosed` (the pgw#677
-  background GPU turn) and :class:`Debounce` (the coalesced republish).  They
-  live here and ``hot_swap`` imports them, so there is exactly one
-  implementation and the dynamo arm reaches the shared module rather than
-  owning it;
-* the **submission seam**: :func:`submit` hands a gap to the backend
+  background GPU turn).  They live here and ``hot_swap`` imports them, so
+  there is exactly one implementation.  ``Debounce`` and the submission seam
+  (``register_backend``/``submit``) were deleted by pgw#1180 — nothing ever
+  registered a growth backend
   registered for its arm.
 
 What this module deliberately does NOT own
@@ -121,13 +120,6 @@ class ShapeGap:
         return self.reason != REASON_AMBIGUOUS
 
 
-class GrowthBackend(Protocol):
-    """The per-arm compiler. Selecting one is what ``arm`` is FOR."""
-
-    def grow(self, gap: ShapeGap) -> bool:
-        """Compile the named class in the background and adopt the grown
-        cell. True when the work was accepted (not when it completed)."""
-
 
 @dataclass
 class GrowthLedger:
@@ -167,23 +159,6 @@ class GrowthLedger:
 
 LEDGER = GrowthLedger()
 
-_BACKENDS: Dict[str, GrowthBackend] = {}
-_BACKEND_LOCK = threading.Lock()
-
-
-def register_backend(arm: str, backend: Optional[GrowthBackend]) -> None:
-    """Bind (or unbind, with ``None``) the compiler for one arm."""
-    with _BACKEND_LOCK:
-        if backend is None:
-            _BACKENDS.pop(str(arm), None)
-        else:
-            _BACKENDS[str(arm)] = backend
-
-
-def backend_for(arm: str) -> Optional[GrowthBackend]:
-    with _BACKEND_LOCK:
-        return _BACKENDS.get(str(arm))
-
 
 def report(gap: ShapeGap) -> bool:
     """Record the gap and emit the countable fact. True on first sighting.
@@ -214,100 +189,21 @@ def report(gap: ShapeGap) -> bool:
     return True
 
 
-def submit(gap: ShapeGap) -> bool:
-    """Hand one first-seen, growable gap to its arm's backend.
-
-    False — with a named reason on the log — when the arm has no backend
-    bound.  A silent no-op is the defect this issue exists to kill: the AOT
-    arm's growth call sites returned False for months and the success log line
-    that would have exposed it simply never printed.
-    """
-    if not gap.growable:
-        logger.info(
-            "shape-growth: %s is an ambiguous dispatch, not a coverage hole; "
-            "growth cannot fix a declaration defect (pgw#917 refuses it at "
-            "mint) — recorded, not submitted", gap.declared_class)
-        return False
-    backend = backend_for(gap.arm)
-    if backend is None:
-        logger.warning(
-            "shape-growth: no growth backend registered for arm=%r, so the "
-            "declared class %r stays EAGER for the life of this pod (pgw#916)",
-            gap.arm, gap.declared_class)
-        return False
-    try:
-        return bool(backend.grow(gap))
-    except Exception:  # noqa: BLE001 — growth never fails a served request
-        logger.warning(
-            "shape-growth: backend for arm=%r refused %r",
-            gap.arm, gap.declared_class, exc_info=True)
-        activity_mod.emit_event(
-            activity_mod.KIND_SERVE_DEGRADE,
-            f"arm={gap.arm} class={gap.declared_class}: serve-window growth "
-            f"backend raised; the class stays eager on this pod",
-            phase="growth_failed",
-        )
-        return False
-
 
 def report_and_submit(gap: ShapeGap) -> bool:
-    """The one call a serving path makes: count it, and grow it once."""
-    if not report(gap):
-        return False
-    return submit(gap)
+    """The one call a serving path makes: count the gap once.
 
-
-@dataclass
-class Debounce:
-    """Coalesce republish bursts into serialized runs of ``fn`` on a
-    background thread: at most one in flight, one queued.
-
-    Lifted out of ``hot_swap`` verbatim (pgw#916 names it as one of the two
-    parts to keep): republishing a grown cell is arm-agnostic — the artifact
-    kind differs, the "at most one in flight, one queued" rule does not.
+    The serve-window growth-backend seam (register_backend/submit) was deleted
+    by pgw#1180 — nothing ever registered a backend, so submission was a
+    permanent warning-and-False. A gap is recorded and the class stays eager.
     """
+    return report(gap)
 
-    fn: Callable[[], None]
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-    _running: bool = False
-    _dirty: bool = False
-
-    def __call__(self) -> None:
-        with self._lock:
-            if self._running:
-                self._dirty = True
-                return
-            self._running = True
-        threading.Thread(
-            target=self._run, name="cell-republish", daemon=True).start()
-
-    def _run(self) -> None:
-        while True:
-            try:
-                self.fn()
-            except Exception:
-                logger.warning(
-                    "shape-growth: debounced callback failed", exc_info=True)
-                # pgw#760: the debounced fn is the cell republish path — a
-                # swallowed failure means the fleet re-compiles this class
-                # forever.
-                activity_mod.emit_event(
-                    activity_mod.KIND_SERVE_DEGRADE,
-                    "debounced cell-republish callback failed",
-                    phase="republish_failed",
-                )
-            with self._lock:
-                if not self._dirty:
-                    self._running = False
-                    return
-                self._dirty = False
 
 
 __all__ = [
     "ARM_AOT",
     "ARM_DYNAMO",
-    "Debounce",
-    "GrowthBackend",
     "GrowthLedger",
     "LEDGER",
     "REASON_AMBIGUOUS",
@@ -315,9 +211,6 @@ __all__ = [
     "ShapeGap",
     "TurnGateBusy",
     "TurnGateClosed",
-    "backend_for",
-    "register_backend",
     "report",
     "report_and_submit",
-    "submit",
 ]

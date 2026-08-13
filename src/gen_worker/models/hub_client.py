@@ -37,7 +37,6 @@ class WorkerResolvedRepoFile:
     path: str
     size_bytes: int
     url: Optional[str]
-    transfer_grant: Optional[dict[str, Any]] = None
     #: Algorithm-tagged whole-file digest ("sha256:<hex>"). Every resolved
     #: entry carries one; an entry that does not is refused, not skipped.
     digest: str = ""
@@ -98,7 +97,6 @@ class WorkerResolvedRepo:
     size_bytes: int = 0
     # th#964: the resolved checkpoint's architecture family ("sdxl-pony",
     # ...) — drives the local family lane policy. "" on hubs not sending it.
-    model_family: str = ""
     # pgw#654/th#1566: resolved objective and distillation value plus the
     # evidence status that distinguishes explicit false from unknown. Empty
     # status is the backward-compatible shape from an older hub.
@@ -290,7 +288,6 @@ def resolve_repo(
     return WorkerResolvedRepo(
         snapshot_digest=digest, files=files,
         size_bytes=int(body.get("size_bytes") or 0),
-        model_family=str(body.get("model_family") or "").strip(),
         objective=str(body.get("objective") or "").strip(),
         distilled=bool(body.get("distilled") or False),
         distilled_status=distilled_status,

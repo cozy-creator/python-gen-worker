@@ -32,7 +32,7 @@ from typing import Any, Callable, ContextManager, Iterator, Optional, Tuple
 from . import activity as activity_mod
 from . import compile_cache
 from . import shape_growth
-from .shape_growth import Debounce, TurnGateBusy, TurnGateClosed
+from .shape_growth import TurnGateBusy, TurnGateClosed
 from . import postmortem
 
 logger = logging.getLogger(__name__)
@@ -761,7 +761,6 @@ def enable(
 
 __all__ = [
     "COMPILED",
-    "Debounce",
     "EAGER",
     "Router",
     "enable",

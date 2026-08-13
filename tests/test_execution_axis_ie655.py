@@ -97,24 +97,6 @@ def test_a_declared_instruction_owns_the_body_never_the_execution() -> None:
 # --- the vocabulary half, without a worker --------------------------------
 
 
-def test_observed_lanes_are_never_coerced() -> None:
-    """`observed_execution_lane` reports the posture it is handed. The PLAN
-    twin still prefers the table's choosable mode — the two callers are
-    deliberately different, which is the whole fix."""
-    for body in lanespec.known_execution_lane_bodies():
-        for compiled in (True, False):
-            observed = lanespec.observed_execution_lane(body, compiled)
-            assert observed.execution == ("compiled" if compiled else "eager")
-    # The exact pair the defect turned on.
-    assert lanespec.execution_lane_id(
-        lanespec.observed_execution_lane("fp8-w8a8-dynamic", False)
-    ) == "fp8-w8a8-dynamic+eager"
-    assert lanespec.execution_lane_id(
-        lanespec.execution_lane_of_body("fp8-w8a8-dynamic", False)
-    ) == "fp8-w8a8-dynamic+compiled"
-    with pytest.raises(ValueError):
-        lanespec.observed_execution_lane("int8-w8a8", False)
-
 
 def test_most_quantized_body_outranks_a_bf16_binding() -> None:
     """A bf16 VAE riding a w8a8 pipeline is still the w8a8 lane."""

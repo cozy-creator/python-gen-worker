@@ -162,21 +162,6 @@ def valid_execution_lane_body(token: str) -> bool:
     return _body_for_token(token) is not None
 
 
-def execution_lane_of_body(token: str, compiled: bool) -> ExecutionLane:
-    """PLAN: the lane a known BODY token is CHOSEN to execute as under live
-    compile state. Raises ValueError on a token outside the table: the lane
-    vocabulary is platform-wide (the hub joins verdicts, cells and pricing on
-    it) and no caller extends it.
-
-    Not for reporting — see ``observed_execution_lane`` (ie#655)."""
-    body = _body_for_token(token)
-    if body is None:
-        raise ValueError(
-            f"lane body {token!r} is not a known lane body "
-            f"(known: {', '.join(known_execution_lane_bodies())})")
-    return _planned_execution(
-        _execution_lane_for_body(body, EXEC_EAGER), compiled)
-
 
 def observed_execution_lane(token: str, compiled: bool) -> ExecutionLane:
     """REPORT: the lane weights of body ``token`` are OBSERVED executing as.
@@ -298,21 +283,6 @@ def parse_execution_lane_spec(s: str) -> ExecutionLaneSpec:
     return ExecutionLaneSpec(family=family_of(execution_lane), execution_lane=execution_lane)
 
 
-def _planned_execution(execution_lane: ExecutionLane, compiled: bool) -> ExecutionLane:
-    """The execution axis of a PLANNED lane: the caller's preference, moved
-    onto a mode the table says this body is chosen for. Planning only —
-    an OBSERVED posture is a fact and coercing it is a lie (ie#655)."""
-    execution = EXEC_COMPILED if compiled else EXEC_EAGER
-    body = _body_for_execution_lane(execution_lane)
-    if body is not None and not _supports(body, execution):
-        execution = EXEC_COMPILED if _supports(body, EXEC_COMPILED) else EXEC_EAGER
-    return ExecutionLane(
-        weights=execution_lane.weights,
-        activation=execution_lane.activation,
-        scale=execution_lane.scale,
-        execution=execution,
-    )
-
 
 def execution_lane_body_of_binding(storage_dtype: str) -> str:
     """The lane BODY a binding's declared CAST names — the WEIGHTS half, with
@@ -334,14 +304,6 @@ def execution_lane_body_of_binding(storage_dtype: str) -> str:
         execution_lane = ExecutionLane(weights=WEIGHTS_BF16, activation=ACT_W16A16, execution="")
     return execution_lane_body_id(execution_lane)
 
-
-def execution_lane_of_binding(storage_dtype: str, compiled: bool) -> ExecutionLane:
-    """PLAN: the lane a binding's cast is chosen to execute as — the twin of
-    tensorhub's ``LaneOfResolution``."""
-    body = _body_for_token(execution_lane_body_of_binding(storage_dtype))
-    assert body is not None  # every branch above names a table row
-    return _planned_execution(
-        _execution_lane_for_body(body, EXEC_EAGER), compiled)
 
 
 class ExecutionLaneUnavailableError(ValueError):
@@ -382,8 +344,6 @@ __all__ = [
     "execution_lane_body_id",
     "execution_lane_id",
     "execution_lane_body_of_binding",
-    "execution_lane_of_binding",
-    "execution_lane_of_body",
     "most_quantized_body",
     "observed_execution_lane",
     "valid_execution_lane_body",

@@ -103,9 +103,6 @@ def default_placement(precision_class: str) -> Optional[Placement]:
     return None
 
 
-def placement_for_flavor(flavor: str) -> Optional[Placement]:
-    return default_placement(classify_flavor_token(flavor))
-
 
 def placement_to_metadata(p: Placement) -> dict[str, Any]:
     """The ``checkpoints.metadata["placement"]`` wire/storage shape."""
@@ -118,27 +115,6 @@ def placement_to_metadata(p: Placement) -> dict[str, Any]:
         out["engines"] = list(p.engines)
     return out
 
-
-def placement_from_metadata(meta: Mapping[str, Any] | None) -> Optional[Placement]:
-    """Parse a checkpoint metadata mapping (the whole bag or the placement
-    block itself). Unknown keys ignored; malformed values fail soft (None)."""
-    if not isinstance(meta, Mapping):
-        return None
-    block = meta.get("placement", meta)
-    if not isinstance(block, Mapping):
-        return None
-    cls = str(block.get("precision_class", "") or "").strip().lower()
-    if not cls:
-        return None
-    try:
-        sm_allowed = tuple(int(v) for v in (block.get("sm_allowed") or ()))
-        sm_min = int(block.get("sm_min") or 0)
-    except (TypeError, ValueError):
-        return None
-    engines = tuple(
-        s for s in (str(e).strip() for e in (block.get("engines") or ())) if s
-    )
-    return Placement(cls, sm_allowed=sm_allowed, sm_min=sm_min, engines=engines)
 
 
 # Native fp8 tensor-core compute exists on SM >= 89 (sm_89 Ada, sm_90 Hopper,
@@ -164,14 +140,6 @@ _FAMILY_ROOT_OVERRIDES = {
 }
 
 
-def family_root(family: str) -> str:
-    """Architecture root of a family name; "" for empty. Unrecognized
-    families root to their own normalized spelling."""
-    n = str(family or "").strip().lower().replace(".", "").replace(" ", "")
-    if not n:
-        return ""
-    return _FAMILY_ROOT_OVERRIDES.get(n, n)
-
 
 # Conv-UNet roots get no fp8-GEMM win (torch scaled_mm is Linear-only;
 # th#927 measured SDXL w8a8 1.9-2.7x slower than bf16): their fp8-w8a8 rows
@@ -180,11 +148,6 @@ def family_root(family: str) -> str:
 # w8a8. Twin of tensorhub precision.convUNetW8A8ExcludedRoots.
 CONV_UNET_W8A8_EXCLUDED_ROOTS = frozenset({"sd1", "sd2", "sdxl"})
 
-
-def w8a8_excluded_for_family(family: str) -> bool:
-    """Whether AUTO selection policy-excludes fp8-w8a8 rows for this family
-    (any spelling — rooted internally)."""
-    return family_root(family) in CONV_UNET_W8A8_EXCLUDED_ROOTS
 
 
 EMERGENCY_NF4_VRAM_FACTOR = 0.45  # nf4 denoiser, encoders/VAE at compute dtype
@@ -216,8 +179,5 @@ __all__ = [
     "NF4_WEIGHT_BYTES_FACTOR",
     "Placement",
     "default_placement",
-    "family_root",
-    "placement_from_metadata",
     "placement_to_metadata",
-    "w8a8_excluded_for_family",
 ]

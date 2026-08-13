@@ -34,7 +34,6 @@ from .refs import TensorhubRef
 from .. import activity as _activity
 from .. import boot_phases
 from ..capability import InsufficientDiskError
-from ..s3_transfer import S3TransferGrant, download_file_with_grant
 from .loading import safetensors_file_valid
 
 _log = logging.getLogger("gen_worker.download")
@@ -322,12 +321,11 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
             raise ValueError(f"resolved model file {path}: {exc}") from exc
         parse_cas_ref(ref_tagged)  # shape-check; the tag travels with the ref
         url = (f.url or "").strip() or None
-        transfer_grant = f.transfer_grant if isinstance(f.transfer_grant, dict) else None
         chunks = tuple(f.chunks or ())
         # A chunked entry's bytes exist ONLY as chunks — it legitimately has no
         # whole-file url. Requiring one is how every v2 snapshot would be
         # rejected as untransferable.
-        if not chunks and not url and transfer_grant is None:
+        if not chunks and not url:
             raise ValueError(f"resolved model file missing transfer: {path}")
         if chunks:
             declared = sum(int(c.length) for c in chunks)
@@ -342,7 +340,6 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
                 path=path,
                 size_bytes=int(f.size_bytes or 0),
                 url=url,
-                transfer_grant=transfer_grant,
                 digest=ref_tagged,
                 chunks=chunks,
                 chunk_size_bytes=int(f.chunk_size_bytes or 0),
@@ -646,7 +643,7 @@ class CozySnapshotDownloader:
             # algorithms' hex could otherwise collide in this set and one
             # blob would stand in for the other.
             digest = f.cas_ref()
-            if not f.url and not f.transfer_grant and not f.chunks:
+            if not f.url and not f.chunks:
                 raise ValueError(f"missing transfer for {f.path}")
             if digest not in seen:
                 seen.add(digest)
@@ -944,27 +941,14 @@ class CozySnapshotDownloader:
                     # afterwards for the other — with an `if` in front of each,
                     # i.e. two vacuous guards guarding one set of bytes.
                     parse_cas_ref(digest)  # refuse an undigestable entry early
-                    if f.transfer_grant:
-                        grant = S3TransferGrant.from_mapping(f.transfer_grant)
-                        await asyncio.get_running_loop().run_in_executor(
-                            None,
-                            lambda: download_file_with_grant(
-                                grant=grant,
-                                dest_path=dst,
-                                expected_size_bytes=int(f.size_bytes or 0) or None,
-                                expected_digest=digest,
-                            ),
-                        )
-                        _on_bytes(int(f.size_bytes or 0), network=True)
-                    else:
-                        assert f.url is not None  # validated in _ensure_blobs
-                        await _download_one_file(
-                            f.url,
-                            dst,
-                            expected_size=int(f.size_bytes or 0),
-                            expected_digest=digest,
-                            on_bytes=lambda n: _on_bytes(n, network=True),
-                        )
+                    assert f.url is not None  # validated in _ensure_blobs
+                    await _download_one_file(
+                        f.url,
+                        dst,
+                        expected_size=int(f.size_bytes or 0),
+                        expected_digest=digest,
+                        on_bytes=lambda n: _on_bytes(n, network=True),
+                    )
                 # Every path above verified size + the content digest under the
                 # algorithm the manifest named, before publishing.
                 _mark_trusted(_VERIFIED_BLOBS, (blobs_root_id, digest))

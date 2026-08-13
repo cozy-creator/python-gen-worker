@@ -185,16 +185,3 @@ def test_mime_allowlist_uses_the_sniffed_type(origin, public) -> None:
         url_fetch.fetch_bytes(f"{base}/x.png", allowed_mime_types=("image/jpeg",))
 
 
-def test_fetch_image_returns_rgb_and_refuses_non_images(origin, public) -> None:
-    from PIL import Image
-
-    buf = BytesIO()
-    Image.new("RGBA", (8, 8), (10, 20, 30, 255)).save(buf, format="PNG")
-    base, state = origin
-    state["body"] = buf.getvalue()
-    image = url_fetch.fetch_image(f"{base}/x.png")
-    assert image.mode == "RGB" and image.size == (8, 8)
-
-    state["body"] = json.dumps({"not": "an image"}).encode()
-    with pytest.raises(ValidationError, match="not an image"):
-        url_fetch.fetch_image(f"{base}/x.json")

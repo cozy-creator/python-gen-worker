@@ -33,7 +33,7 @@ def _resolved(*paths: str) -> WorkerResolvedRepo:
         files=[
             WorkerResolvedRepoFile(
                 path=p, size_bytes=16, digest="sha256:" + "a" * 64,
-                url="https://example.invalid/" + p, transfer_grant=None,
+                url="https://example.invalid/" + p,
             )
             for p in paths
         ],
