@@ -63,13 +63,6 @@ from typing import (
 import msgspec
 
 from ..api.binding import ModelRef
-from ..api.sdk_shape import (
-    DELETED_FIELDS,
-    DeclarationShapeError,
-    DeletedField,
-    assert_declaration_shape,
-    assert_sdk_shape,
-)
 from ..api.slot import ResolvedSlot
 from ..api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 from ..families.base import GenerationDefaults
@@ -360,14 +353,9 @@ def fake_context(
 
 
 __all__ = [
-    "DELETED_FIELDS",
-    "DeclarationShapeError",
-    "DeletedField",
     "RecordedEvent",
     "Recorder",
     "SavedArtifact",
-    "assert_declaration_shape",
-    "assert_sdk_shape",
     "fake_context",
     "stub_slots",
 ]

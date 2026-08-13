@@ -22,11 +22,7 @@ from gen_worker.api.decorators import Compile, Resources
 from gen_worker.api.types import AudioAsset, ImageAsset, VideoAsset
 from gen_worker.request_context import ConversionContext, RequestContext
 from gen_worker.testing import (
-    DELETED_FIELDS,
-    DeclarationShapeError,
     Recorder,
-    assert_declaration_shape,
-    assert_sdk_shape,
     fake_context,
 )
 
@@ -197,61 +193,4 @@ def test_recorder_output_dir_is_removed_with_the_recorder() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_sdk_ships_no_deleted_field() -> None:
-    assert_sdk_shape()
 
-
-def test_the_deleted_table_covers_what_the_fleet_was_asserting() -> None:
-    """The endpoint-side fossils this replaces named exactly these."""
-    named = {(row.owner.__name__, row.name) for row in DELETED_FIELDS}
-    assert {
-        ("Resources", "vram_gb"),
-        ("Resources", "ram_gb"),
-        ("EndpointDecl", "regimes"),
-        ("EndpointDecl", "route"),
-        ("Compile", "guidance_scales"),
-        ("Compile", "lora_bucket"),
-        ("Slot", "default_config"),
-        ("Slot", "share_components"),
-    } <= named
-    # compute_capability came BACK at 0.75.0 (pgw#660) — a fleet-side copy of
-    # this list is exactly how that restoration would have gone unnoticed.
-    assert not any(row.name == "compute_capability" for row in DELETED_FIELDS)
-
-
-def test_assert_declaration_shape_passes_a_real_declaration() -> None:
-    assert_declaration_shape(ExampleEndpoint.__gen_worker_endpoint__)
-
-
-def test_assert_declaration_shape_walks_resources_compile_and_slots() -> None:
-    decl = ExampleEndpoint.__gen_worker_endpoint__
-
-    for owner, name in (
-        (decl.resources, "vram_gb"),
-        (decl.compile, "lora_bucket"),
-        (decl.slots["pipeline"], "share_components"),
-        (decl, "regimes"),
-    ):
-        # msgspec Structs and __slots__ classes both refuse a stray attribute,
-        # so the regression is staged on a stand-in that CAN carry one.
-        assert not hasattr(owner, name)
-
-    class _Revived:
-        vram_gb = 24.0
-
-    class _Decl:
-        resources = _Revived()
-        compile = None
-        slots: dict = {}
-
-    with pytest.raises(DeclarationShapeError) as exc:
-        assert_declaration_shape(_Decl())
-    assert "decl.resources.vram_gb" in str(exc.value)
-    assert "0.60.0" in str(exc.value)
-
-
-def test_assert_declaration_shape_reports_an_undeclared_slot() -> None:
-    with pytest.raises(DeclarationShapeError, match="'missing'"):
-        assert_declaration_shape(
-            ExampleEndpoint.__gen_worker_endpoint__, slots=["missing"]
-        )
