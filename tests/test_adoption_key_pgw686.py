@@ -182,12 +182,17 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
         assert _lane(wrong) != published, wrong
     # pgw#691/pgw#958: the recorded ck2 burst keys are dead — a
     # torch-inductor-cache artifact has no key identity at all any more
-    # (pgw#1059), so an old key can only MISS. They stay key-SHAPED
-    # (is_key mirrors tensorhub's scheme-agnostic IsCellKey, th#1183).
+    # (pgw#1059), so an old key can only MISS.
+    #
+    # pgw#1176 SHARPENS the miss and this row records the change: a `ck` key
+    # is no longer merely key-SHAPED-but-dead. It names a 36-entry
+    # all-or-nothing cell this runtime cannot arm at all, so it does not
+    # parse — which is what makes an orphaned ref fail at the comparison
+    # rather than late inside a per-entry code path.
     for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
-        assert ck.is_key(old)
-    with pytest.raises(ck.CellKeyError, match="has no cell-key identity"):
-        ck.from_exported_artifact_metadata(_BURST_META)
+        assert not ck.is_key(old)
+    with pytest.raises(ck.CellKeyError, match="has no entry-key identity"):
+        ck.from_entry_metadata(_BURST_META)
 
 
 # --- the fix: one base-lane resolution for every cell-identity surface -----
