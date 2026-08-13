@@ -345,9 +345,11 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
         if not cell_key.is_key(key):
             raise CellResolveRefused(
                 "invalid_request",
-                f"keys[{i}] is {key!r}, which is not a compiled-graph key; the "
-                f"resolve route addresses compiled graphs by "
-                f"{cell_key.KEY_SCHEME}-<hex digest> and by nothing else")
+                f"keys[{i}] is {key!r}, which is not a compiled-graph key; "
+                f"the resolve route addresses compiled graphs by "
+                f"<scheme>-<lowercase hex digest> and by nothing else. The "
+                f"grammar rules on SHAPE, never scheme (th#1183): a newer "
+                f"fleet's key is addressable here and is ruled on by its axes")
         if key in seen:
             # Answers are POSITIONAL. The hub refuses a repeat for that reason
             # and so does this: collapsing it would shift every later answer
