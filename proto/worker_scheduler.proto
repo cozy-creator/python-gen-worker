@@ -1125,6 +1125,105 @@ message JobMetrics {
   int64  steps = 21;
   int64  width = 22;
   int64  height = 23;
+  // th#1871 P1 (pgw#1225): the POSTURE this request was served under — the
+  // conditions that decide whether two measurements of the same (release,
+  // function, GPU, lane) may be compared at all. Absent = a worker that does
+  // not report it, which is NOT the same as a clean posture and must never be
+  // reduced as one (DESIGN-RULINGS §1.36; the ie#707 trap).
+  MeasuredPosture posture = 24;
+}
+
+// th#1871 P1 — what the worker ACTUALLY did, typed. Mirrors
+// internal/orchestrator/measurement.Posture field-for-field on purpose: the
+// hub's Digest() is the ONE identity implementation, so the wire must need no
+// translation layer to reach it. The digest is never computed worker-side.
+//
+// NOT named ServePosture: that message already exists below and is the
+// hub -> worker operator eager-only COMMAND (§4.32). Two different objects
+// under one name is how a vocabulary forks.
+message MeasuredPosture {
+  // The lane as RESOLVED, full descriptor. Redundant with JobMetrics.lane and
+  // carried anyway: the posture is a self-contained record, and a reader that
+  // has to reach outside it to know what it describes will eventually reach
+  // wrong.
+  string execution_lane = 1;
+  // What the attention kernel ACTUALLY was (fa3 | fa2 | sdpa | xformers |
+  // eager) and what was ASKED FOR. Unequal = the ie#707 degradation, silent
+  // until this field existed. Empty wanted = nothing was asked on this axis,
+  // which is different from asking for what you got.
+  string attention_backend = 2;
+  string attention_backend_wanted = 3;
+  // compiled | eager, and what the lane DECLARED. The APPLIED state is not an
+  // identity axis (§1.30: compile is a cache question over (execution, GPU));
+  // the MISMATCH is.
+  string compile_state = 4;
+  string compile_state_wanted = 5;
+  // Which residency rung actually ran: all_resident, or a rung that had to
+  // move something off the card. UNSTATED is unknown, never "fine".
+  string residency_mode = 6;
+  // ORDERED — the order the worker reached for them is itself a fact about the
+  // run (group_offload AFTER model_offload failed, not instead of it). Never
+  // collapsed onto one token: the retired FnDegraded.ran projected
+  // model_offload/group_offload/sequential onto "offload", so a 2.5x, a 3.0x
+  // and a 4.0x degradation were indistinguishable.
+  repeated AppliedTechnique applied = 7;
+  // Per component. Unordered on the wire; the hub sorts before digesting, so a
+  // worker enumerating its pipeline differently is the same posture.
+  repeated ComponentPosture components = 8;
+  // The quantified WHY. "Insufficient VRAM" is the old vocabulary; needed N,
+  // had M, short by N-M for component X is the diagnostic (§1.36 amendment).
+  ResourceShortfall shortfall = 9;
+}
+
+// One low-VRAM or compatibility lever the worker reached for.
+message AppliedTechnique {
+  // The lever, from the SDK's own rung vocabulary: fp8_storage, model_offload,
+  // group_offload, sequential, cpu, vae_tiling, vae_slicing,
+  // attention_slicing, disk_offload, attention_fallback.
+  string name = 1;
+  // What it was applied to ("transformer", "vae"; empty = whole pipeline).
+  string component = 2;
+  // What was ASKED FOR on this lever's axis, when anything was. Empty means
+  // the lever was FORCED — a degradation, but not a mismatch: a mismatch
+  // requires a stated expectation to violate.
+  string wanted = 3;
+  // Short machine-readable cause (vram_shortfall, kernel_unavailable), never
+  // prose.
+  string reason = 4;
+  // The worker's own multiplier for this lever (2.5 = 2.5x slower). 0 =
+  // unknown, never assumed 1. EXCLUDED from the digest: it is an estimate of
+  // the lever, not a property of the run.
+  double est_slowdown = 5;
+}
+
+// What one component ended up as. "The transformer is offloaded" is
+// actionable; "the pipeline is degraded" is not.
+message ComponentPosture {
+  string component = 1;
+  // What the weights were actually LOADED as, and what the lane BOUND. The
+  // live fleet reports `applied=fp8-w8a8-dynamic ... bound=bf16-w16a16` today
+  // — in prose, on a channel nothing reads.
+  string applied_quant = 2;
+  string bound_quant = 3;
+  // resident | offloaded | cpu | disk.
+  string placement = 4;
+  // Reported, never keyed: a component whose footprint moved by a megabyte
+  // between runs is the same posture.
+  int64 bytes = 5;
+}
+
+// The typed shortfall. Magnitudes are DATA, not identity — two runs short by
+// 6.1 and 6.3 GiB that reached for the same levers are one cell with two
+// samples, not two cells with one each.
+//
+// Deliberately absent: any suggestion of a better card. The worker knows what
+// it was short by; only the hub knows the catalog and the prices, so only the
+// hub can name a better pair (§1.36 amendment, clause 3).
+message ResourceShortfall {
+  string resource = 1;   // vram | host_ram | disk
+  string component = 2;
+  int64 needed_bytes = 3;
+  int64 available_bytes = 4;
 }
 
 // Worker -> orchestrator streaming output chunk. Ordered per (request_id,

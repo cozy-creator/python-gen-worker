@@ -38,6 +38,7 @@ from . import handler_proof
 from .procsplit import broker as procsplit_broker
 from . import cpu_budget
 from . import kernel_path
+from . import measured_posture as posture_mod
 from . import mint_workers
 from . import settings_authority
 from . import progress as progress_mod
@@ -890,6 +891,10 @@ class _JobOrder:
     accelerator: str = ""  # "" = unstated (the spec decides), "cuda" | "none"
     gpu_index: int = 0
     lane_report: str = ""  # instruction surfaced to ctx.lane/metrics only
+    # th#1871 P1: the hub DEMANDED a compiled cell for this dispatch. Carried on
+    # the order because that is where the RunJob is read; copied onto the job
+    # below, where the terminal posture is stamped.
+    compile_required: bool = False
     stamped_config: Optional[Mapping[str, Any]] = None
     arm: Optional[_ArmOrder] = None
 
@@ -1089,6 +1094,14 @@ class _ClassRecord:
     # INSTALLED (`gen_worker.report_applied_attention`). Empty == dense, which
     # is why no endpoint is obliged to report. Dies with the instance.
     applied_attention: List[Any] = dc_field(default_factory=list)
+    # th#1871 P1 (pgw#1225): the typed POSTURE this record is serving under —
+    # every lever reached for, in order, with the shortfall that forced it.
+    # Owned by the record for the same reason `applied_lanes` is: a lever
+    # applied to THESE weights stops being a fact the moment they are torn
+    # down, and a posture that outlived its pipeline would qualify the next
+    # instance's measurements with the last one's degradation.
+    posture: posture_mod.PostureLedger = dc_field(
+        default_factory=posture_mod.PostureLedger)
     # gw#661: consecutive will-retry setup losses; reset by any success.
     transient_setup_failures: int = 0
     # pgw#748 phase 1: the armed degree-D rank group serving THIS record, or
@@ -1316,6 +1329,14 @@ class _Job:
     # ie#655: the hub's lane instruction, kept so the terminal composition can
     # honor a declared (handles=) body without re-reading the dispatch order.
     lane_report: str = ""
+    # th#1871 P1: the hub DEMANDED a compiled cell for this dispatch. It is a
+    # second, independent statement of the compile axis and both are needed:
+    # `lane_report` is empty whenever the lane rides HelloAck's ModelResolution
+    # instead of the per-request override (`scheduler_dispatch.go:1037` — "" =
+    # policy), and on that path the declared axis would otherwise be unknown to
+    # the worker. Reported, never enforced: `_validate_required_compile` is what
+    # enforces it, at dispatch, and this is only its shadow on the measurement.
+    compile_required: bool = False
     # pgw#789 (th#1293 dimensions): this request was served EAGER by a compiled
     # lane — a pgw#680 guard miss, a router heal/volatile verdict, or an
     # aot_serve ingress refusal. Set from the guard-miss callback, which fires
@@ -2328,11 +2349,21 @@ class Executor:
         if ref and rungspec.touches_host_ram(to_rung):
             self.degraded_floor[ref] = rungspec.floor_of(
                 self.degraded_floor.get(ref, ""), to_rung)
+        free_gb = get_available_vram_gb() if (from_rung or to_rung) else 0.0
+        # th#1871 P1: this is the ONE place every ladder transition passes
+        # through, so it is the one place the typed posture is written. The
+        # numbers were already being computed for the log line and then thrown
+        # away — `needed_gb` and the live free VRAM ARE the §1.36 shortfall
+        # ("needed N, had M, short by N-M"), and prose was the only thing
+        # carrying them off this pod.
+        self._record_posture_transition(
+            spec, ref=ref, run_mode=run_mode, to_rung=to_rung,
+            wanted=wanted, ran=ran, needed_gb=needed_gb, free_gb=free_gb)
         line = transition_line(
             event="engaged", fn=spec.name, model=ref, phase=phase,
             from_rung=from_rung, to_rung=to_rung or run_mode,
             needed_gb=needed_gb,
-            free_gb=get_available_vram_gb() if (from_rung or to_rung) else 0.0,
+            free_gb=free_gb,
             detail=detail,
         )
         logger.warning(line)
@@ -2341,6 +2372,140 @@ class Executor:
             run_mode=run_mode, wanted=wanted, ran=ran, detail=line,
         )
         self._on_state_change()
+
+    def _posture_ledger(
+        self, spec: EndpointSpec,
+    ) -> "Optional[posture_mod.PostureLedger]":
+        """This spec's instance ledger, or None when there is no record yet.
+
+        None is not an error: a transition can fire before the record exists
+        (a refusal during the very first load), and inventing a ledger to hold
+        it would attribute a lever to an instance that never served."""
+        rec = self._classes.get(spec.instance_key)
+        return None if rec is None else rec.posture
+
+    def _record_posture_transition(
+        self, spec: EndpointSpec, *, ref: str, run_mode: str, to_rung: str,
+        wanted: str, ran: str, needed_gb: float, free_gb: float,
+    ) -> None:
+        """Project one ladder transition onto the typed posture.
+
+        The projection is deliberately NOT the wire's `run_mode`: that token is
+        coarse by design (`offload` covers three rungs whose prices differ by
+        60%), and th#1871 §6.6 item 5 is precisely that those three stop sharing
+        it. The named rung wins whenever the transition named one.
+        """
+        ledger = self._posture_ledger(spec)
+        if ledger is None:
+            return
+        technique = posture_mod.technique_for_run_mode(run_mode, to_rung)
+        if technique:
+            ledger.technique(
+                technique,
+                # A cast that was ASKED FOR and one that was FORCED are
+                # different postures even when the applied value matches, so
+                # `wanted` rides the lever rather than being reconciled away.
+                wanted=str(wanted or ""),
+                reason=(posture_mod.REASON_LANE_CAST_DROPPED
+                        if wanted and ran and wanted != ran
+                        else posture_mod.REASON_VRAM_SHORTFALL))
+        if to_rung:
+            ledger.residency(to_rung)
+        if needed_gb > 0.0:
+            ledger.shortfall(posture_mod.ResourceShortfall.from_gb(
+                posture_mod.RESOURCE_VRAM, needed_gb, free_gb,
+                component=str(ref or "")))
+
+    def _stamp_posture(
+        self, metrics: "pb.JobMetrics", spec: EndpointSpec,
+        served: "serving_mode_mod.ServedIdentity", lane: str, *,
+        instructed: str = "", compile_required: bool = False,
+    ) -> None:
+        """Stamp the typed posture on one terminal ``JobMetrics``.
+
+        THE ONE THING THIS MUST NEVER DO is send an empty posture. An all-empty
+        record does not mean "clean" — it means nobody looked — and the hub keys
+        the two differently on purpose (`endpoint_measurements`' unreported
+        posture has its own digest). Claiming a clean posture over a worker that
+        never observed one is ie#707 with the polarity flipped: instead of a
+        degraded run filed as clean, a silent run filed as measured.
+        """
+        ledger = self._posture_ledger(spec)
+        if ledger is None:
+            return
+        posture = ledger.snapshot(
+            execution_lane=lane,
+            compile_state=posture_mod.compile_axis(served.serving_mode),
+            # What the lane DECLARED, off the hub's own dispatch instruction —
+            # never off `lane`, which is composed from what actually ran and
+            # would make every run trivially self-consistent. This is the axis
+            # that made minimax-h3's declared-compiled/ran-eager hours
+            # unrepresentable.
+            compile_state_wanted=(
+                posture_mod.compile_axis_of_lane(instructed or "")
+                # The two hub paths, in the order of specificity. An instructed
+                # lane states the axis outright; a `required_compile` fence says
+                # `compiled` without naming a lane at all, and on the
+                # ModelResolution path it is the only thing that says it.
+                or (posture_mod.COMPILE_COMPILED if compile_required else "")),
+        )
+        if not posture.observed:
+            return
+        metrics.posture.CopyFrom(posture.to_proto())
+        if posture.degraded:
+            # §1.36's amendment, verbatim: *"the worker should obviously
+            # complain loudly if it has to use a bunch of optimization
+            # techniques"*. The typed record is what a DECISION reads; this line
+            # is what a human reads, and it is derived from the same object so
+            # the two cannot say different things. Never a gate — the request
+            # already succeeded by the time this runs.
+            logger.warning(
+                "serve-posture: DEGRADED fn=%s %s",
+                spec.name, posture_mod.summarize(posture))
+
+    def _record_placement_posture(
+        self, spec: EndpointSpec, *, ref: str, placed: Dict[str, Any],
+    ) -> None:
+        """Project one PLACEMENT onto the typed posture — proactive or not.
+
+        `memory.place_pipeline` answers with the rung it actually used, whether
+        it chose that rung up front against free VRAM or descended into it on a
+        CUDA OOM. Both are degradations of the same kind and both key the same
+        measurement; only the `reason` differs, and the reason is a field rather
+        than the difference between reporting and silence.
+        """
+        ledger = self._posture_ledger(spec)
+        if ledger is None:
+            return
+        mode = str(placed.get("mode") or "")
+        ledger.residency(mode)
+        reactive = bool(placed.get("oom_demotions"))
+        technique = posture_mod.residency_for_placement(mode)
+        if technique and technique != posture_mod.RESIDENCY_ALL_RESIDENT:
+            ledger.technique(
+                technique, component=str(ref or ""),
+                # The rung ASKED FOR, when a descent moved off it. Absent on a
+                # proactive selection: nothing was asked, the fit decided.
+                wanted=str(placed.get("requested_mode") or ""),
+                reason=(posture_mod.REASON_CUDA_OOM if reactive
+                        else posture_mod.REASON_VRAM_SHORTFALL))
+        if mode == "vae_only":
+            # Resident, but NOT the same run: slicing changes the traced decode
+            # graph and the decode's cost. A lever with no wire name at all
+            # until now (§6.6 item 5).
+            ledger.technique(
+                posture_mod.TECHNIQUE_VAE_SLICING, component="vae",
+                reason=posture_mod.REASON_VRAM_SHORTFALL)
+        if mode == "cpu":
+            ledger.technique(
+                posture_mod.TECHNIQUE_CPU, component=str(ref or ""),
+                reason=posture_mod.REASON_NO_CUDA)
+        needed_gb = float(placed.get("fit_needed_gb") or 0.0)
+        if needed_gb > 0.0:
+            ledger.shortfall(posture_mod.ResourceShortfall.from_gb(
+                posture_mod.RESOURCE_VRAM, needed_gb,
+                float(placed.get("fit_available_gb") or 0.0),
+                component=str(ref or "")))
 
     def available_functions(self) -> List[str]:
         out = []
@@ -3805,6 +3970,12 @@ class Executor:
                 activity_mod.KIND_APPLIED_LANE,
                 detail=f"{entry.detail()} bound={bound}",
                 phase=entry.component)
+            # th#1871 P1: the same fact, typed. `applied=fp8-w8a8-dynamic
+            # bound=bf16-w16a16` is exactly the per-component posture the hub
+            # needs to know whether two numbers describe the same thing — and
+            # the prose line above was, until now, the only place it existed.
+            rec.posture.component(
+                entry.component, applied_quant=entry.body, bound_quant=bound)
 
     def _record_applied_attention(
         self, rec: _ClassRecord, applied: Tuple[Any, ...],
@@ -3818,6 +3989,14 @@ class Executor:
                 activity_mod.KIND_APPLIED_ATTENTION,
                 detail=entry.detail(),
                 phase=entry.component)
+            # th#1871 P1: the KERNEL half of the report, typed. The ledger
+            # raises the `attention_fallback` technique itself when the engaged
+            # backend is not the one that was asked for — a fallback nobody has
+            # to notice is a fallback nobody notices (ie#707).
+            backend = str(getattr(entry, "backend", "") or "")
+            if backend:
+                rec.posture.attention(
+                    backend, wanted=str(getattr(entry, "backend_wanted", "") or ""))
 
     def _served_attention_mode(self, spec: EndpointSpec) -> str:
         """The attention mode `metrics.attention_mode` reports for a request on
@@ -3828,9 +4007,13 @@ class Executor:
             return ""
         rec = self._classes.get(spec.instance_key)
         entries = list(getattr(rec, "applied_attention", []) or []) if rec else []
-        if not entries:
+        # th#1871 P1: a BACKEND-only report says nothing about sparsity, so it
+        # must not turn "unreported" into a claim of dense. The two axes share
+        # one record and one scope; they do not share a default.
+        modes = [str(e.mode or "") for e in entries if str(e.mode or "")]
+        if not modes:
             return ""
-        return attnspec.most_sparse_mode([e.mode for e in entries])
+        return attnspec.most_sparse_mode(modes)
 
     def _served_attention_detail(self, spec: EndpointSpec) -> str:
         """The full applied-attention row for this instance (k, block, measured
@@ -7308,6 +7491,14 @@ class Executor:
                             wanted=sl.cast_fail_wanted, ran=sl.ran,
                             detail=sl.cast_fail_detail)
                     placed = sl.placed
+                    # th#1871 P1 §6.6 item 3: the posture is recorded for EVERY
+                    # placement, not only the OOM-demoted one below. The
+                    # `oom_demotions` gate is the biggest blind spot the census
+                    # found — a pipeline that `select_auto_mode` proactively put
+                    # on the offload ladder never OOMs, so it reported nothing,
+                    # served 2.5-4x slow, and its numbers were filed as
+                    # measurements of a resident run.
+                    self._record_placement_posture(spec, ref=ref, placed=placed)
                     if placed.get("oom_demotions"):
                         self._record_rung_transition(
                             spec, ref=ref, phase="load",
@@ -8449,6 +8640,7 @@ class Executor:
             inst, rec.instance, rec.ready = rec.instance, None, False
             rec.compile_targets.clear()
             rec.applied_lanes.clear()
+            rec.posture.clear()
             shutdown = getattr(inst, "shutdown", None)
             if inst is not None and callable(shutdown):
                 try:
@@ -8581,6 +8773,10 @@ class Executor:
         # pgw#1104: the applied lane belonged to THESE weights; the next setup
         # re-reports it or the lane honestly reverts to the binding's.
         rec.applied_lanes.clear()
+        # th#1871 P1: and so does the posture. A lever applied to weights that
+        # no longer exist would qualify the NEXT instance's measurements with
+        # the last one's degradation.
+        rec.posture.clear()
         # The next full StateDelta must remove the old address before any
         # replacement can become READY. Do this synchronously before teardown
         # awaits; adoption's second validation then rejects the stale ID.
@@ -8895,6 +9091,7 @@ class Executor:
             accelerator=str(compute.accelerator) if compute is not None else "",
             gpu_index=int(compute.gpu_index) if compute is not None else 0,
             lane_report=str(run.lane or ""),
+            compile_required=run.HasField("required_compile"),
             stamped_config=stamped,
             arm=None,
         )
@@ -9614,6 +9811,7 @@ class Executor:
             # th#1050: ctx.lane exposes the same post-degrade truth to the
             # handler (declared-lane endpoints branch on it).
             job.lane_report = order.lane_report
+            job.compile_required = order.compile_required
             job.execution_lane = self._served_execution_lane(
                 spec, instructed=job.lane_report)
             # pgw#789: the shape coordinate, taken from the EXECUTED payload
@@ -10881,6 +11079,15 @@ class Executor:
                 metrics.lane = self._served_execution_lane(
                     job.spec, instructed=job.lane_report, served=served)
                 job.execution_lane = metrics.lane
+                # th#1871 P1 (pgw#1225): the POSTURE, stamped from the same
+                # ServedIdentity and at the same instant as the lane and the
+                # serving mode — so the three cannot disagree about eager
+                # (ie#655's rule). It rides every terminal path for the reason
+                # stage_ms does: a degraded request's posture is exactly the one
+                # worth having.
+                self._stamp_posture(metrics, job.spec, served, metrics.lane,
+                                    instructed=job.lane_report,
+                                    compile_required=job.compile_required)
         terminal_status = (
             pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED
             if job.superseded
