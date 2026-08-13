@@ -28,6 +28,20 @@ The generalisation, and it is this program's sharpest recurring lesson:
 evidence.** Ask every fence what symbol it names NOW, mechanically. That is
 what this script is.
 
+WHY THIS IS NOT CEREMONY — read this before deleting it
+-------------------------------------------------------
+On its first run this gate found a residual in a file its author had read
+three times that same day and missed. That is not a lucky catch. It is the
+difference between a mechanical check and an attentive reader **on a class
+where attention is precisely what fails**: attention degrades exactly where a
+symbol looks familiar, and a renamed symbol looks familiar. A human re-reading
+a fence sees the shape they expect; only a machine asks whether the name still
+resolves.
+
+That is the whole argument for the gate, and it is stronger than any of the
+four instances that motivated it. If this file is ever moved or renamed, this
+paragraph and the false-positive ratio below move with it.
+
 WHY IT SCANS ITSELF
 -------------------
 This script is a guard that names things, so it has exactly the failure mode
