@@ -38,6 +38,7 @@ from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import cell_adopt
 from . import dispatch
+from . import handler_proof
 from .procsplit import broker as procsplit_broker
 from .plan import (
     InputAssetRef,
@@ -6739,6 +6740,14 @@ class Executor:
                             pass
 
                 await _to_thread_complete(_consume)
+            # pgw#1199: THE proof, recorded where it already happens. This call
+            # is the endpoint's own handler, running on the RESIDENT pipeline
+            # with real checkpoint values, and every warm path in this process
+            # goes through it. A delegated mint reads the record instead of
+            # materialising a second copy of the weights in its child to
+            # re-prove the same sentence with random values (§4.33 steps 4-5).
+            handler_proof.record(
+                spec.name, f"boot warm forward {spec.name!r} (real weights)")
         finally:
             postmortem.clear_inflight(inflight_token)
 
@@ -9878,6 +9887,15 @@ class Executor:
                     execution_lane=self._served_execution_lane(spec),
                     configs={spec.name: self._effective_config(spec)},
                     device=mint_workers.device_of(pipe),
+                    # pgw#1199: this boot ran the endpoint's own handler on the
+                    # resident pipeline before any mint was delegated (setup
+                    # completes, THEN `bg.task` is created), so the child gets
+                    # pgw#984's guarantee for free and allocates nothing for
+                    # it. Empty when a custom `warmup()` stood in for the
+                    # synthesized plan and no handler actually ran — the child
+                    # refuses on that, honestly, rather than proving it at the
+                    # cost of a checkpoint.
+                    handler_proof=handler_proof.provenance(spec.name),
                 ),
                 act=act, abandon=bg.abandon)
             if result.status == mint_delegate.ABANDONED:

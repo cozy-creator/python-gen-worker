@@ -73,7 +73,7 @@ def test_a_structure_only_component_is_not_resident_vram() -> None:
 def test_the_requirement_still_counts_what_the_virtual_structure_declares() -> None:
     """The other half, and the reason this is not a blanket "ignore fakes": the
     shape and dtype a fake parameter declares are the bytes a real load — or
-    ``materialize_random`` in the mint child — goes on to allocate."""
+    a real load — goes on to allocate."""
     pipe = _Pipeline(transformer=virtual_component(40.0, device="cuda"))
     assert memory.estimate_pipeline_size_gb(pipe) == pytest.approx(40.0)
 

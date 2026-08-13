@@ -294,57 +294,35 @@ def test_a_META_tensor_is_still_reported_by_the_placement_walk() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. The fake <-> real swap must preserve the graph, and price the payload
+# 3. Re-virtualizing must preserve the QUANTIZED topology
 # ---------------------------------------------------------------------------
 
 
-def test_the_warm_proof_keeps_the_QUANTIZED_topology(
+def test_revirtualizing_keeps_the_quantized_topology(
     quantized_target: Any,
 ) -> None:
-    """pgw#984's proof gives every virtual parameter real values. Rebuilding a
-    quantized weight as a plain tensor of its outer dtype would trace bf16
-    Linears for a pod that serves fp8 — a cell for a graph the pod never
-    executes, which is exactly what ``_refuse_artifact_lanes`` exists to
-    prevent — and would cost twice the bytes doing it."""
+    """`virtualize` rebuilt every parameter as a plain tensor of its OUTER
+    dtype, which turns a quantized weight into a bf16 one — so the export would
+    trace bf16 Linears for a pod that serves fp8: a cell for a graph the pod
+    never executes, which is exactly what `_refuse_artifact_lanes` exists to
+    prevent, arriving by the other door.
+
+    (The rows that used to sit here drove `materialize_random` — the pgw#984
+    warm proof's real-value materialisation. pgw#1199 deleted it: the proof
+    runs on the RESIDENT parent now, so nothing in this module can put values
+    on a structure. `test_structure_only_pgw1080` asserts that absence.)
+    """
     quantized = {name for name, p in quantized_target.named_parameters()
                  if isinstance(p.data, Quantized) or isinstance(p, Quantized)}
     assert quantized, "the fixture must have swapped something"
 
-    so.materialize_random(quantized_target, device="cpu")
+    so.virtualize(quantized_target, device="cpu")
 
     after = dict(quantized_target.named_parameters())
     for name in quantized:
         held = after[name]
         inner = held.data if not isinstance(held, Quantized) else held
         assert isinstance(inner, Quantized), (
-            f"{name} lost its quantization to the warm proof")
+            f"{name} lost its quantization to the re-virtualize")
         assert inner.qdata.dtype is torch.float8_e4m3fn
-        assert not mi.is_virtual(inner), "the proof runs on REAL values"
-
-
-def test_restoring_returns_the_quantized_parameters_to_virtual(
-    quantized_target: Any,
-) -> None:
-    so.materialize_random(quantized_target, device="cpu")
-    so.restore_virtual(quantized_target, device="cpu")
-
-    for name, param in quantized_target.named_parameters():
-        assert mi.is_virtual(param), f"{name} survived the restore as real"
-
-
-def test_the_proof_cost_is_the_PAYLOAD_and_is_measured_before_it_is_spent(
-    quantized_target: Any,
-) -> None:
-    """pgw#1199's left-hand side. It must be the same walk over the same
-    tensors that ``materialize_random`` performs — an estimate here would be
-    the disease §4.33 names — and it must price the fp8 payload rather than
-    the bf16 outer view."""
-    predicted = so.proof_cost_bytes([quantized_target])
-    spent = so.materialize_random(quantized_target, device="cpu")
-
-    assert predicted == spent, "the forecast IS the walk, not a model of it"
-
-    outer = sum(int(p.numel()) * int(p.element_size())
-                for p in quantized_target.parameters())
-    assert predicted < outer, (
-        "an fp8 payload under a bf16 outer view must not be priced at bf16")
+        assert mi.is_virtual(inner), "and it must still allocate nothing"

@@ -74,15 +74,6 @@ STAMP = "_cozy_structure_only"
 MODE_STAMP = "_cozy_structure_fake_mode"
 FACTS_STAMP = "_cozy_structure_facts"
 
-#: Standard deviation of the random values the pgw#984 warm proof runs on.
-#: Small enough that a deep stack of matmuls cannot overflow fp16, non-zero so
-#: a degenerate all-zero forward cannot pass a proof a real one would fail.
-RANDOM_STD = 0.02
-#: Fixed, because a proof that behaves differently on two runs of the same cell
-#: is not a proof. Not configurable: the value is not a tuning knob.
-RANDOM_SEED = 1080
-
-
 class StructureOnlyUnsupported(WorkerError):
     """This component cannot be built from code + config alone.
 
@@ -980,152 +971,38 @@ def revirtualize_from_meta(program: Any) -> Optional[Any]:
 
 
 # ---------------------------------------------------------------------------
-# The pgw#984 warm proof runs on RANDOM values (coordinator ruling, 2026-08-10)
+# pgw#1199: what USED to live here, and why it does not any more
 # ---------------------------------------------------------------------------
-
-
-def materialize_random(module: Any, *, device: str = "") -> int:
-    """Give every virtual parameter REAL random values; return the bytes.
-
-    The endpoint's own handler is proved to RUN before a byte is exported
-    (pgw#984), and a handler cannot run against zero-storage tensors. The
-    ruling is random values — the proof is structural ("does it run"), and the
-    ratified variability rule already forbids value-dependent program
-    structure, so a handler whose control flow breaks under random weights is
-    violating that rule and surfacing it is the point.
-
-    Random values are NOT checkpoint values: nothing this process holds came
-    from the model's bytes. The cost is reported (``values=random``) rather
-    than hidden, because it IS weight-scale for the length of the proof.
-    """
-    import torch
-    import torch.nn as nn
-
-    dev = device or "cpu"
-    generator = torch.Generator(device=dev).manual_seed(RANDOM_SEED)
-    total = 0
-    for sub in module.modules():
-        for name, param in list(sub._parameters.items()):
-            if param is None:
-                continue
-            real, bytes_ = _real_like(param, device=dev, generator=generator)
-            sub._parameters[name] = nn.Parameter(real, requires_grad=False)
-            total += bytes_
-    return total
-
-
-def _real_like(tensor: Any, *, device: str, generator: Any) -> Tuple[Any, int]:
-    """``(a REAL twin of ``tensor``, the bytes it allocated)``.
-
-    A wrapper subclass is rebuilt AS a subclass over real inner tensors
-    (pgw#1198): flattening one to its outer dtype would both cost twice the
-    bytes (bf16 where the payload is fp8) and hand the export a graph the pod
-    does not serve.
-    """
-    import torch
-
-    parts = _wrapper_parts(tensor)
-    if parts is not None:
-        names, _ctx = parts
-        inner: Dict[str, Any] = {}
-        bytes_ = 0
-        for name in names:
-            held, held_bytes = _real_like(
-                getattr(tensor, name), device=device, generator=generator)
-            inner[name] = held
-            bytes_ += held_bytes
-        return _rebuild_wrapper(tensor, inner), bytes_
-    real = torch.empty(tuple(tensor.shape), dtype=tensor.dtype, device=device)
-    if real.dtype in (torch.float16, torch.bfloat16, torch.float32,
-                      torch.float64):
-        real.normal_(0.0, RANDOM_STD, generator=generator)
-    else:
-        # fp8 and integer parameters have no `normal_`; a defined value beats
-        # an undefined one, and NaN/overflow would make every downstream
-        # cosine undefined (pgw#1056's guard).
-        real.zero_()
-    return real, int(real.numel()) * int(real.element_size())
-
-
-def proof_cost_bytes(modules: Any) -> int:
-    """Exactly what :func:`materialize_random` will allocate on the device.
-
-    Not an estimate — the same walk, summing the same tensors, so the mint can
-    compare it against MEASURED free VRAM before it allocates instead of
-    meeting the answer as an anonymous CUDA OOM (pgw#1199). A wrapper subclass
-    counts its PAYLOAD, which is the thing that gets allocated, not its
-    high-precision outer view.
-    """
-    total = 0
-    for module in modules:
-        for sub in module.modules():
-            for param in sub._parameters.values():
-                if param is not None:
-                    total += _payload_bytes(param)
-    return total
-
-
-def _payload_bytes(tensor: Any) -> int:
-    parts = _wrapper_parts(tensor)
-    if parts is None:
-        return int(tensor.numel()) * int(tensor.element_size())
-    names, _ctx = parts
-    return sum(_payload_bytes(getattr(tensor, name)) for name in names)
-
-
-def stray_real_tensors(module: Any) -> Tuple[Tuple[str, Any], ...]:
-    """Real tensors hanging off the tree that are NEITHER parameter nor buffer.
-
-    This is how the z-image rope class actually shows up on a weightless mint,
-    and it is the one place it CAN be seen. The gate's call-time half
-    (ie#628) watches for a real allocation — but inside a fake-mode export
-    every allocation is fake, so a lazily-built pinned table is invisible
-    there. What it cannot hide is the RESIDUE: the pgw#984 warm proof runs the
-    handler for real, the lazy build fires, and the table is cached on a plain
-    attribute where ``restore_virtual`` (which only re-fakes parameters) does
-    not reach. A real tensor still on the tree when the export begins is
-    exactly the property failing.
-
-    Searched: each module's own ``__dict__``, plus one level into plain
-    objects it holds — the shape upstream uses (``RopeEmbedder`` is not an
-    ``nn.Module``), and deep enough to name the attribute an author edits.
-    """
-    import torch
-
-    out: List[Tuple[str, Any]] = []
-    for prefix, sub in module.named_modules():
-        registered = set(sub._parameters) | set(sub._buffers)
-        for name, value in list(vars(sub).items()):
-            if name.startswith("_") or name in registered:
-                continue
-            path = f"{prefix}.{name}" if prefix else name
-            if isinstance(value, torch.Tensor):
-                if not mi.is_virtual(value):
-                    out.append((path, value))
-                continue
-            if isinstance(value, torch.nn.Module) or not hasattr(
-                    value, "__dict__"):
-                continue
-            for inner, held in list(vars(value).items()):
-                if isinstance(held, torch.Tensor) and not mi.is_virtual(held):
-                    out.append((f"{path}.{inner}", held))
-    return tuple(out)
-
-
-def restore_virtual(module: Any, *, device: str = "") -> Any:
-    """Return every parameter to a fake tensor, freeing the random values.
-
-    A NEW fake mode, deliberately: the values that ran the proof are gone and
-    the export must not carry a mode that ever held them.
-    """
-    return virtualize(module, device=device)
+#
+# `materialize_random` / `restore_virtual` / `stray_real_tensors` gave every
+# virtual parameter REAL random values so the mint child could run the pgw#984
+# does-it-run proof, then took them away again. That is one full checkpoint at
+# compute dtype, allocated in the process this module exists to keep empty,
+# concurrently with the parent's resident copy — 56.2 GB on wan-2.2 against
+# 15.5 GiB free, measured on pod `729431an6ugbvq`. It is also the number
+# §4.33's "a mint costs ~8 GiB" was really measuring: this walk, for an
+# sdxl-sized family.
+#
+# The proof did not need to be here. §4.33 steps 4-5 put verification on the
+# LIVE pipeline that already holds the weights, and `gen_worker.handler_proof`
+# is that: one warm forward through the endpoint's own handler, on the resident
+# pipeline, with REAL checkpoint values — strictly stronger than a random-value
+# re-run, and free on the fleet path where the executor's boot warm plan has
+# already run every declared handler before a mint is delegated.
+#
+# `stray_real_tensors` went with them, and this is the part worth stating
+# plainly rather than quietly: it hunted a REAL tensor cached on a plain
+# attribute by a lazily-built device-pinned table (ie#628's call-time class).
+# That residue existed *because* a real forward had just run here. With no real
+# values in this process the same lazy build fires inside the export's fake
+# mode and produces a FAKE constant, which `aot_package` cannot pack — the
+# failure is still loud, it just arrives at pack time instead of at a stray
+# walk. Nothing silently ships.
 
 
 __all__ = [
     "FACTS_STAMP",
     "MODE_STAMP",
-    "RANDOM_SEED",
-    "RANDOM_STD",
     "STAMP",
     "TOKEN_CAPABILITY_MISSING",
     "TOKEN_UNSUPPORTED",
@@ -1142,14 +1019,10 @@ __all__ = [
     "fake_mode_of_program",
     "has_meta_params",
     "is_structure_only",
-    "materialize_random",
     "modules_of",
     "program_shape_env",
-    "proof_cost_bytes",
     "refusal_token",
-    "restore_virtual",
     "revirtualize_from_meta",
-    "stray_real_tensors",
     "structure_only_components",
     "target_module",
     "to_meta_for_save",

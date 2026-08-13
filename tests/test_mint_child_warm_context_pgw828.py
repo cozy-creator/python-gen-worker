@@ -11,7 +11,7 @@ holding on this route too — and then dies in the endpoint's own warm job:
                                 phases={'load': 16.455, 'warmup_forward': 0.0}
     self_mint_abort delegated_crashed (phase=warmup_forward, deterministic)
 
-      File ".../mint_child.py", line 339, in _run_warm_job
+      File ".../handler_proof.py", in run_warm_job
         out = bound(**kwargs)
       File ".../sdxl/main.py", line 326, in generate
         resolved = ctx.slots["pipeline"]
@@ -46,6 +46,7 @@ from typing import Any, List
 
 import pytest
 
+from gen_worker import handler_proof
 from gen_worker import mint_child, registry, warmup
 from gen_worker.request_context import RequestContext
 
@@ -76,12 +77,12 @@ def test_the_childs_warm_job_resolves_the_endpoints_declared_slots(spec) -> None
     """RED at HEAD with the pod's exact sentence, ``KeyError: 'pipeline'``."""
     instance = spec.cls()
     instance.pipeline_path = "/tmp/does-not-matter"
-    jobs = mint_child._warm_jobs([spec])
+    jobs = handler_proof.warm_jobs([spec])
     job = next(j for j in jobs if j.spec.name == spec.name)
 
     # No exception is the assertion: the handler dereferences
     # `ctx.slots["pipeline"]` and returns.
-    mint_child._run_warm_job(instance, job, {}, "w8a8")
+    handler_proof.run_warm_job(instance, job, {}, "w8a8")
 
 
 def test_the_child_and_the_executor_build_the_SAME_context(spec) -> None:

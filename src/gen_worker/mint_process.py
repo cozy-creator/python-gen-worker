@@ -293,6 +293,15 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: a VALUE and may not carry a DECISION. Politeness is a decision: it
     #: changes the nice level of every process in the mint tree and halves K.
     posture: CompilePosture = compile_posture.FLEET
+    #: pgw#1199: HOW the parent proved this endpoint's handler runs, on the
+    #: RESIDENT pipeline with real checkpoint values, before this mint was
+    #: delegated. Empty = unproven, and the child refuses rather than proving
+    #: it itself: proving it there means materialising one full checkpoint at
+    #: compute dtype in a process that holds none (56.2 GB on wan-2.2, against
+    #: 15.5 GiB free), which is the allocation §4.33's "~8 GiB" was actually
+    #: measuring. The string is PROVENANCE, not a boolean, so the child's
+    #: report says which proof stood behind the cell it sealed.
+    handler_proof: str = ""
 
 
 class MintFrame(msgspec.Struct, frozen=True, kw_only=True):

@@ -42,12 +42,13 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from . import activity as activity_mod
 from . import aot_compile_pool
 from . import compile_cache as cc
-from . import compile_posture, fleet_cells, local_cell_store, mint_delegate
+from . import compile_posture, fleet_cells, handler_proof
+from . import local_cell_store, mint_delegate
 from .mint_process import MintFrame, MintSlot
 
 logger = logging.getLogger(__name__)
@@ -85,12 +86,36 @@ class LocalMintContext:
         return ""
 
 
+@dataclass
+class DeferredMint:
+    """A mint this machine owes, held until the endpoint's handler has RUN.
+
+    pgw#1199: the mint child no longer proves the handler itself, because on a
+    weight-free mint proving it meant materialising a whole checkpoint in a
+    process that holds none. The proof belongs to the resident parent — but on
+    cozy-local the parent reaches ``enable_compiled`` from inside the SLOT
+    LOAD, before ``setup()`` has bound the pipeline to the endpoint instance,
+    so there is no handler to run yet. So the mint waits: arm from the local
+    store now (that must stay in the load, or the endpoint's ``setup()`` sees
+    an unarmed pipeline), and mint after ``setup()`` and ``warmup()`` have
+    returned, when one real forward can be run on the resident weights.
+
+    This is the same ORDER the fleet already boots in — eager-first, setup
+    complete, handler warmed, then the background mint (pgw#671).
+    """
+
+    pipe: Any
+    pending: Any
+    mint: "LocalMintContext"
+
+
 def enable_compiled(
     pipe: Any,
     cfg: Any,
     cache_dir: Optional[Path] = None,
     *,
     mint: Optional[LocalMintContext] = None,
+    defer: Optional[List["DeferredMint"]] = None,
 ) -> bool:
     """Arm ``pipe`` from this machine's own cells, minting one if it has none.
 
@@ -128,7 +153,44 @@ def enable_compiled(
             "serving eager", pending.family,
             mint.incomplete if mint is not None else "no mint context")
         return False
+    if defer is not None:
+        # pgw#1199: the handler cannot run yet — see `DeferredMint`.
+        defer.append(DeferredMint(pipe=pipe, pending=pending, mint=mint))
+        return False
     return _mint_here(pipe, pending, mint)
+
+
+def run_deferred(
+    deferred: List[DeferredMint], *, instance: Any, specs: Any,
+    execution_lane: str = "", config: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Prove the handler on the resident pipeline, then mint what is owed.
+
+    pgw#1199's cozy-local half. ``setup()`` and ``warmup()`` have returned, so
+    the endpoint instance is bound to the pipeline this machine will serve
+    from, and ONE warm forward through its own handler discharges pgw#984 —
+    on real checkpoint values, in the process that already holds them, for the
+    price of one forward instead of a second copy of the model.
+
+    A handler that does not run mints NOTHING and says so. That is the same
+    disposition the child had (`a cell must not seal for a handler that cannot
+    serve`), reached before a compile is paid for rather than after.
+    """
+    if not deferred:
+        return
+    for owed in deferred:
+        try:
+            handler_proof.prove(
+                instance, specs, owed.mint.function,
+                execution_lane=execution_lane, config=config,
+                origin=f"cozy-local:{owed.pending.family}")
+        except handler_proof.HandlerProofFailed as exc:
+            _say(
+                f"{owed.pending.family} is not compiled on this machine: the "
+                f"endpoint's own handler does not run ({exc}). Serving eager.")
+            fleet_cells.abandon_self_mint(owed.pending)
+            continue
+        _mint_here(owed.pipe, owed.pending, owed.mint)
 
 
 def _say(line: str) -> None:
@@ -236,6 +298,7 @@ def _mint_here(
     """
     result: Optional[mint_delegate.DelegatedResult] = None
     family = str(pending.family)
+    proof = handler_proof.provenance(mint.function)
     # §4.30 / pgw#1137: the ONE site in the tree that declares a user-machine
     # posture. It is stated here, not derived from `publisher is None` or from
     # `local_cell_store.trust_class()` — both are facts about the SINK, and a
@@ -258,6 +321,7 @@ def _mint_here(
                     weight_lane=cc.cell_base_execution_lane(pipe),
                     device=mint.device,
                     posture=posture,
+                    handler_proof=proof,
                 ),
                 act=act, watch=watch))
         except Exception as exc:  # noqa: BLE001 — a mint must never kill a serve
