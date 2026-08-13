@@ -111,11 +111,27 @@ class Census:
         return not self.events
 
 
-def is_virtual(tensor: Any) -> bool:
+def is_virtual(tensor: Any, _depth: int = 0) -> bool:
     """Whether this tensor allocated nothing.
 
     Meta tensors by device; fake tensors by TYPE, because a fake tensor
     deliberately reports a real device while backing it with no storage.
+
+    AND WRAPPER SUBCLASSES BY THEIR CONTENTS (pgw#1198), which is the whole
+    reason this is a function and not an ``isinstance``. A quantizer run inside
+    ``setup()`` — torchao's ``quantize_``, which ``wan-2.2`` and ``minimax-h3``
+    both call on their denoisers — replaces a parameter with a traceable
+    wrapper subclass (``Float8Tensor``) whose inner ``qdata``/``scale`` are the
+    original FAKE tensors and whose OUTER dtype stays bf16. That object is not
+    a ``FakeTensor``, reports ``cuda:0``, and answers ``numel * element_size``
+    at the high-precision dtype — so a type-only test read a structure holding
+    nothing as the entire bf16 checkpoint: 56_203_673_600 bytes across
+    ``WanPipeline``'s two experts, which is exactly the whole model, for
+    storage that did not exist. Measured on pod ``729431an6ugbvq``.
+
+    Every inner tensor must be virtual, never any: a subclass over real data,
+    or over a mix (fake ``qdata``, real ``scale``), is REAL here. Widening the
+    answer is the fence getting more accurate, not weaker.
     """
     fake_cls: Optional[type] = None
     try:
@@ -126,10 +142,44 @@ def is_virtual(tensor: Any) -> bool:
         fake_cls = None
     if fake_cls is not None and isinstance(tensor, fake_cls):
         return True
+    inner = _wrapped_tensors(tensor) if _depth < _WRAPPER_DEPTH else ()
+    if inner:
+        return all(is_virtual(held, _depth + 1) for held in inner)
     device = getattr(tensor, "device", None)
     if device is None:
         return True
     return str(getattr(device, "type", device)) in VIRTUAL_DEVICES
+
+
+#: How far :func:`is_virtual` unwraps nested wrapper subclasses. A subclass
+#: over a subclass is real (torchao stacks them), a cycle is not; a bound that
+#: cannot be reached by real code costs nothing and makes the walk total.
+_WRAPPER_DEPTH = 4
+
+
+def _wrapped_tensors(tensor: Any) -> Tuple[Any, ...]:
+    """The tensors a traceable wrapper subclass is made OF, if it is one.
+
+    ``__tensor_flatten__`` is torch's own contract for exactly this question —
+    the one ``torch.compile`` and ``torch.export`` use to see inside a subclass
+    — so this asks the object rather than knowing a vocabulary of quantizer
+    types. An empty result means "not a wrapper subclass", and the caller falls
+    back to the device test.
+    """
+    try:
+        from torch.utils._python_dispatch import is_traceable_wrapper_subclass
+
+        if not is_traceable_wrapper_subclass(tensor):
+            return ()
+        names, _ctx = tensor.__tensor_flatten__()
+    except Exception:  # noqa: BLE001 — an unwalkable object is not a subclass
+        return ()
+    held = tuple(
+        value for value in (getattr(tensor, str(name), None) for name in names)
+        if value is not None)
+    # A subclass that flattens to nothing tells us nothing, so it must not
+    # answer `all([]) is True` and pass as virtual.
+    return held
 
 
 def _endpoint_site(skip: int = 0) -> str:
