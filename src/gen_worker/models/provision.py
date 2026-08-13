@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence,
+    TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequence,
     Tuple,
 )
 

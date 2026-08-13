@@ -2259,8 +2259,27 @@ def adopt_delegated_mint(
             pipe, pending.cfg, pending.cache_dir,
             int(getattr(pending.cfg, "lora_bucket", 0) or 0),
             row, pending.arm_key, verify_numerics=True)
-        row_meta = dict(row_meta) if row_meta is not None else \
-            _packed_metadata(row)
+        # pgw#1176 DEFECT, found by lane 2 and it is production, not a
+        # fixture. `_arm_exported_cell` returns `(False, None, …)` with reason
+        # `cell_envelope_unreadable` PRECISELY WHEN `read_metadata` raised —
+        # so re-reading the same artifact here re-raises, and
+        # `ArtifactMetadataError` escapes a function documented to return
+        # `None` when nothing adopted. That destroys the typed refusal, the
+        # quarantine and the `self_mint_abort` event pgw#1098 exists to
+        # produce, and it does it on the one path that was already failing.
+        #
+        # An unreadable envelope is exactly the case where the fallback CANNOT
+        # help, so it must not be attempted. The refusal below already carries
+        # everything a reader needs.
+        if row_meta is not None:
+            row_meta = dict(row_meta)
+        elif row_armed:
+            # Armed but silent on its metadata: the read is worth attempting,
+            # and a raise here is a genuine surprise rather than the
+            # already-classified one above.
+            row_meta = _packed_metadata(row)
+        else:
+            row_meta = {}
         row_key = str(row_meta.get("cell_key") or "").strip()
         entry_name = str(
             (row_meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
