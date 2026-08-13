@@ -22,6 +22,7 @@ from typing import Any, List
 
 import msgspec
 
+from gen_worker import child_contract
 from gen_worker import RequestContext, endpoint
 from gen_worker import mint_process as mp
 
@@ -59,7 +60,7 @@ def _request(workdir: Path) -> mp.MintRequest:
         target=str(workdir / "cell.tar.gz"),
         work_root=str(workdir / "capture"),
         report=str(workdir / mp.REPORT_NAME),
-        cfg=mp.CompileCellSpec(family="pgw784"),
+        cfg=child_contract.CompileSpec(family="pgw784"),
     )
 
 

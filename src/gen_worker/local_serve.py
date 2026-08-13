@@ -49,7 +49,7 @@ from . import aot_compile_pool
 from . import compile_cache as cc
 from . import compile_posture, fleet_cells, handler_proof
 from . import local_cell_store, mint_delegate
-from .mint_process import MintFrame, MintSlot
+from .child_contract import MintFrame, MintSlot
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class LocalMintContext:
     The same three facts the executor hands ``mint_delegate.MintTask``: WHICH
     routable function, WHICH modules to rediscover it in, and the parent's own
     resolution of every setup slot (identity + bytes + pgw#617 composition, as
-    one value — see ``mint_process.MintSlot``). A context with no function or
+    one value — see ``child_contract.MintSlot``). A context with no function or
     no modules cannot be minted from and is declared ``incomplete``: the child
     re-runs discovery, so a module list it cannot import is a silent
     "compiles nothing, forever".
@@ -404,7 +404,7 @@ def slot_map(
 
     A slot the local run did not resolve is ABSENT, never a present entry with
     a hole in it — ``MintSlot`` refuses to be constructed without both halves,
-    and ``mint_child.assert_slots_resolvable`` refuses a declared,
+    and ``child_preflight.assert_slots_resolvable`` refuses a declared,
     non-optional slot that never arrived.
     """
     out: Dict[str, MintSlot] = {}

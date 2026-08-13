@@ -74,7 +74,7 @@ from . import (
     activity, aot_identity, artifact_meta, boot_key, cell_resolve,
     local_cell_store,
 )
-from .mint_process import CompileCellSpec, MintSlot
+from .child_contract import CompileSpec, MintSlot
 
 logger = logging.getLogger(__name__)
 
@@ -436,7 +436,7 @@ def attempt(
     """
     family = str(getattr(cfg, "family", "") or "")
     fn = str(function)
-    spec = CompileCellSpec(
+    spec = CompileSpec(
         shapes=tuple(
             tuple(int(v) for v in row)
             for row in (getattr(cfg, "shapes", ()) or ())),

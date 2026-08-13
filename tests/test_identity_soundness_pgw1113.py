@@ -28,9 +28,8 @@ from typing import Any, Dict, Mapping
 import pytest
 
 from gen_worker import boot_key, cell_key, fleet_cells, local_cell_store
-from gen_worker import mint_process as mp
 from gen_worker.api.binding import Hub
-from gen_worker.mint_process import CompileCellSpec
+from gen_worker.child_contract import CompileSpec, MintSlot
 
 # --------------------------------------------------------------------------
 # fixtures — two checkpoints of one family, and one declaration over them
@@ -228,14 +227,14 @@ def test_a_subject_difference_is_not_a_handback_divergence() -> None:
 # --------------------------------------------------------------------------
 
 
-def _spec() -> CompileCellSpec:
-    return CompileCellSpec(
+def _spec() -> CompileSpec:
+    return CompileSpec(
         family="qwen-image", targets=("transformer",),
         shapes=((1024, 1024),), text_lens=(77,), guidance_scales=(4.0,))
 
 
-def _slots(ref: Any, path: str = "/cas/a") -> Dict[str, mp.MintSlot]:
-    return {"pipeline": mp.MintSlot(ref=ref, path=path)}
+def _slots(ref: Any, path: str = "/cas/a") -> Dict[str, MintSlot]:
+    return {"pipeline": MintSlot(ref=ref, path=path)}
 
 
 def test_a_rebinding_forces_a_memo_MISS() -> None:

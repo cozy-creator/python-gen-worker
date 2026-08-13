@@ -32,6 +32,7 @@ from typing import Any, Dict
 
 import pytest
 
+from gen_worker import child_contract
 from gen_worker import aot_compile_pool as pool
 from gen_worker import aot_mint, mint_delegate, mint_process
 from gen_worker.cell_adopt import AdoptOutcome
@@ -106,7 +107,7 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
         function="f", modules=(), family="sdxl", arm_token="k",
         target=str(tmp_path / "cell.tar.gz"), work_root=str(tmp_path),
         report=str(tmp_path / "report.json"),
-        cfg=mint_process.CompileCellSpec(),
+        cfg=child_contract.CompileSpec(),
         phases_snapshot=str(snapshot))
     recovered = mint_process._read_phase_snapshot(request.phases_snapshot)
     assert recovered, "the parent could not read what the child wrote"

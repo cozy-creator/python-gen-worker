@@ -58,7 +58,7 @@ from .api.binding import (
 )
 from .hubio.client import HubPublishError
 from . import cell_key
-from .mint_process import MintSlot, slot_subjects
+from .child_contract import MintSlot, slot_subjects
 from .api.errors import (
     ArtifactTransferError,
     CanceledError,
@@ -2958,7 +2958,7 @@ class _BackgroundMint:
     # rediscover for itself — the endpoint module(s) to walk (the child re-runs
     # discovery in a fresh interpreter) and the parent's own RESOLUTION of each
     # setup slot: identity, already-materialized local tree, and pgw#617
-    # composition, in ONE value per slot (pgw#974, `mint_process.MintSlot`).
+    # composition, in ONE value per slot (pgw#974, `child_contract.MintSlot`).
     # The paths matter because a mint is compute, and a mint process that could
     # download is one that can stall on a lemon host (pgw#786); the refs matter
     # because `ctx.slots` is built from bindings and the child rediscovers none

@@ -212,13 +212,13 @@ def micro_declaration(micro_tree: Path) -> None:
 
 def _job(micro_tree: Path, report: Path) -> Any:
     from gen_worker.api.binding import ModelRef
-    from gen_worker.mint_process import CompileCellSpec, MintSlot
+    from gen_worker.child_contract import CompileSpec, MintSlot
     from gen_worker.registry import collect_endpoints
 
     specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main"])
     spec = next(s for s in specs if s.name == "generate")
     cell = spec.compile_cell()
-    cfg = CompileCellSpec(
+    cfg = CompileSpec(
         shapes=tuple(
             tuple(int(v) for v in row) for row in (cell.shapes or ())),
         targets=tuple(str(t) for t in (cell.targets or ())),

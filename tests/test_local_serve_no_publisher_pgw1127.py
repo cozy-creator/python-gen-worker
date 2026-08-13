@@ -38,7 +38,7 @@ import pytest
 from gen_worker import fleet_cells, local_cell_store, local_serve, mint_delegate
 from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.cli import run as cli_run
-from gen_worker.mint_process import MintSlot
+from gen_worker.child_contract import MintSlot
 
 KEY_A = "ek1-" + "a" * 56
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56

@@ -33,6 +33,7 @@ import msgspec
 import pytest
 import torch
 
+from gen_worker import child_contract
 from gen_worker import mint_process as mp
 
 GIB = 1 << 30
@@ -48,7 +49,7 @@ def _request(tmp_path: Path, **over: Any) -> mp.MintRequest:
         target=str(tmp_path / "cell.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
-        cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
+        cfg=child_contract.CompileSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),
     )
     fields.update(over)
@@ -112,7 +113,7 @@ def test_child_env_pins_the_card_and_declares_itself(tmp_path: Path) -> None:
 def test_a_stray_print_is_not_a_frame(tmp_path: Path) -> None:
     """Frames are prefixed. Endpoint code, torch and pip all print; none of
     them may steer a mint."""
-    assert mp.frame_line(phase="load").startswith(mp.FRAME_PREFIX)
+    assert child_contract.frame_line(phase="load").startswith(child_contract.FRAME_PREFIX)
     frames: list = []
     out = asyncio.run(_run(tmp_path, "minted", frames=frames))
     assert out.minted

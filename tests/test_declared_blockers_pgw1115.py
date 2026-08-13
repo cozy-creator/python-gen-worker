@@ -40,6 +40,8 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
+from gen_worker import child_preflight
+from gen_worker import child_contract
 from gen_worker import Compile, MintBlocker, fleet_cells
 from gen_worker import mint_child, mint_delegate
 from gen_worker import mint_process as mp
@@ -369,7 +371,7 @@ def _blocked_request(tmp_path: Path) -> mp.MintRequest:
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="blocked-echo",
         modules=(HARNESS_MODULE,),
-        slots={"pipeline": mp.MintSlot(
+        slots={"pipeline": child_contract.MintSlot(
             ref=blocked.DECLARED_PIPELINE, path=str(tree))},
         execution_lane="w8a8", device=-1)
     request = mint_delegate.build_request(
@@ -421,7 +423,7 @@ def test_the_mint_child_mints_a_family_whose_blockers_are_all_resolved(
         mint_child._assert_family_mintable(FAMILY)  # no raise
 
         register_export_declaration(blocked.BLOCKED_COMPILE, replace=True)
-        with pytest.raises(mint_child.MintChildRefused) as exc:
+        with pytest.raises(child_preflight.PreflightRefused) as exc:
             mint_child._assert_family_mintable(FAMILY)
         assert all(i in str(exc.value) for i in blocked.OPEN_IDS)
     finally:

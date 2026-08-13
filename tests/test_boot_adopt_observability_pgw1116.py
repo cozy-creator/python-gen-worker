@@ -564,7 +564,7 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
     and the decision is READABLE afterwards, which is the half that was missing.
     """
     from gen_worker.api.binding import ModelRef
-    from gen_worker.mint_process import MintSlot
+    from gen_worker.child_contract import MintSlot
     from gen_worker.procsplit import broker
     from gen_worker.registry import collect_endpoints
 
@@ -626,7 +626,7 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
     from ``_boot_adopt`` down to the child's structure build is the real one.
     """
     from gen_worker.api.binding import ModelRef
-    from gen_worker.mint_process import MintSlot
+    from gen_worker.child_contract import MintSlot
     from gen_worker.procsplit import broker
     from gen_worker.registry import collect_endpoints
 

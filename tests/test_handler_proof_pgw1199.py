@@ -35,6 +35,8 @@ from typing import Any, Dict, List
 
 import pytest
 
+from gen_worker import child_preflight
+from gen_worker import child_contract
 from gen_worker import handler_proof
 from gen_worker import mint_delegate, mint_process
 
@@ -131,7 +133,7 @@ def test_the_request_field_defaults_to_unproven() -> None:
     request = mint_process.MintRequest(
         function="generate", modules=(), family="f", arm_token="a",
         target="t", work_root="w", report="r",
-        cfg=mint_process.CompileCellSpec())
+        cfg=child_contract.CompileSpec())
     assert request.handler_proof == ""
 
 
@@ -144,7 +146,7 @@ def _request(**kw: Any) -> mint_process.MintRequest:
     base: Dict[str, Any] = dict(
         function="generate", modules=("m",), family="micro-diffusion",
         arm_token="arm1-x", target="t", work_root="w", report="r",
-        cfg=mint_process.CompileCellSpec(targets=("transformer",)))
+        cfg=child_contract.CompileSpec(targets=("transformer",)))
     base.update(kw)
     return mint_process.MintRequest(**base)
 
@@ -158,7 +160,7 @@ def test_the_child_refuses_a_weight_free_mint_with_no_proof() -> None:
     """
     from gen_worker import mint_child
 
-    with pytest.raises(mint_child.MintChildRefused) as caught:
+    with pytest.raises(child_preflight.PreflightRefused) as caught:
         mint_child.assert_handler_proven(_request())
 
     said = str(caught.value)
@@ -178,7 +180,7 @@ def test_whitespace_is_not_a_proof() -> None:
     a forward, and must be refused exactly as one that set nothing."""
     from gen_worker import mint_child
 
-    with pytest.raises(mint_child.MintChildRefused):
+    with pytest.raises(child_preflight.PreflightRefused):
         mint_child.assert_handler_proven(_request(handler_proof="   "))
 
 

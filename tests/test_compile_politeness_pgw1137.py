@@ -48,10 +48,11 @@ import msgspec
 import pytest
 
 from gen_worker import (
-    aot_compile_pool, compile_posture, local_serve, mint_child, mint_delegate,
-    mint_process)
+    aot_compile_pool, compile_posture, local_serve, mint_child, mint_delegate)
 from gen_worker.compile_posture import FLEET, USER_MACHINE, CompilePosture
-from gen_worker.mint_process import MintFrame, MintRequest, MintSlot
+from gen_worker.child_contract import (
+    CompileSpec, MintFrame, MintSlot)
+from gen_worker.mint_process import MintRequest
 
 SRC = Path(aot_compile_pool.__file__).parent
 
@@ -236,7 +237,7 @@ def test_a_fleet_mint_declares_nothing_and_gets_the_fleet_posture() -> None:
     assert MintRequest(
         function="f", modules=(), family="x", arm_token="", target="",
         work_root="", report="",
-        cfg=mint_process.CompileCellSpec()).posture == FLEET
+        cfg=CompileSpec()).posture == FLEET
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +331,7 @@ def _drive_child_posture(
     request = MintRequest(
         function="generate", modules=("m",), family="micro-diffusion",
         arm_token="arm2-x", target="/tmp/c.tar.gz", work_root="/tmp",
-        report="/tmp/r.json", cfg=mint_process.CompileCellSpec(),
+        report="/tmp/r.json", cfg=CompileSpec(),
         posture=posture)
     mint_child._install_posture(request)
     return nice, armed
@@ -377,7 +378,7 @@ def test_a_kernel_that_refuses_the_nice_leaves_a_RUDE_mint_not_a_DEAD_one(
     request = MintRequest(
         function="generate", modules=("m",), family="f", arm_token="",
         target="", work_root="", report="",
-        cfg=mint_process.CompileCellSpec(), posture=USER_MACHINE)
+        cfg=CompileSpec(), posture=USER_MACHINE)
     mint_child._install_posture(request)   # must not raise
     assert compile_posture.current() == USER_MACHINE
 

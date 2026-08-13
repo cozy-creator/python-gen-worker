@@ -34,6 +34,7 @@ from typing import Any, Dict, List
 import pytest
 import torch
 
+from gen_worker import child_contract
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, mint_delegate, mint_workers
 from gen_worker import mint_process as mp
@@ -167,7 +168,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
         target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="gen",
-        modules=("app",), slots={"pipeline": mp.MintSlot(
+        modules=("app",), slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/sdxl",
                          tag="prod"), path="/cas/sdxl")},
         execution_lane="fp8-w8a16", configs={"gen": {"steps": 28}}, device=3)

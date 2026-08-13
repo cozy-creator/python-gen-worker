@@ -27,6 +27,7 @@ import types
 
 import pytest
 
+from gen_worker import child_preflight
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells
 
@@ -162,7 +163,7 @@ def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
         target="/tmp/x", work_root="/tmp/y", device=0,
         modules=[], function="generate", cfg=None, configs={}, execution_lane="",
         report="/tmp/r", arm_token="")
-    with pytest.raises(mint_child.MintChildRefused, match="no C\\+\\+ compiler"):
+    with pytest.raises(child_preflight.PreflightRefused, match="no C\\+\\+ compiler"):
         mint_child.mint(req)
 
 
