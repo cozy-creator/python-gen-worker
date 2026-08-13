@@ -143,8 +143,26 @@ name: CI
 # REQUIRED contexts (`fast gates`, `tests`) — they gate the merge, and unlike
 # tensorhub this repo keeps its full suite pre-merge because it is public,
 # unmetered, and ~10m rather than ~18m.
+# pgw#1209 (2026-08-13): `master` has a MERGE QUEUE. A queued PR is validated on
+# a `gh-readonly-queue/master/...` ref carrying master's tip plus every entry
+# ahead of it — which is the only place the "two PRs green alone, red together"
+# collision is visible. Two lines below are what make that work, and BOTH are
+# load-bearing:
+#
+#   1. `merge_group:` in the trigger list. Without it no run is created on the
+#      queue ref at all, the required contexts never report, and the queue sits
+#      until `check_response_timeout_minutes` expires and evicts the PR.
+#   2. `github.event_name == 'merge_group'` in each job's `if:`. On a merge_group
+#      event `github.event.pull_request` is NULL, so the draft guard alone
+#      evaluates false and the job SKIPS — and GitHub scores a skipped required
+#      check as satisfied. That failure is worse than the first: the queue merges
+#      having run nothing, and the PR page shows green.
+#
+# The trigger is deliberately bare (no `branches:`/`paths:` filter). A filter
+# that excludes a merge group is indistinguishable from case 1.
 on:
   workflow_dispatch: {}
+  merge_group:
   pull_request:
     branches: [master]
     # `ready_for_review` is NOT a default `pull_request` type, and the jobs below
@@ -163,7 +181,10 @@ jobs:
   # behind an 11-minute pytest run.
   gates:
     name: fast gates
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    # `merge_group` is listed FIRST and explicitly: on that event
+    # `github.event.pull_request` is null, so the draft clause alone skips the
+    # job and GitHub scores the skip as a satisfied required check (pgw#1209).
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -336,7 +357,10 @@ jobs:
   # header on why that is worth a dev trigger rather than master-only.
   tests:
     name: tests
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    # `merge_group` is listed FIRST and explicitly: on that event
+    # `github.event.pull_request` is null, so the draft clause alone skips the
+    # job and GitHub scores the skip as a satisfied required check (pgw#1209).
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:

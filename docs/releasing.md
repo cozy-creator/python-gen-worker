@@ -237,10 +237,15 @@ commit, say which one in the release notes, and **never re-point at master's tip
 landed under you** — that ships code with no changelog entry, which is the silent release note this
 whole file exists to prevent.
 
-That leaves the tag on a branch commit, so **merge the cut PR with a TRUE MERGE, not a squash**
-(`gh pr merge <n> --merge`). A squash rewrites your commit, the tag then points at something that is
-NOT an ancestor of `master`, and the next cutter's `git rev-list v<X.Y.Z>..HEAD` silently re-lists
-everything you just released. Assert it, do not hope:
+That leaves the tag on a branch commit, so the cut PR must land as a **TRUE MERGE, not a squash**. A
+squash rewrites your commit, the tag then points at something that is NOT an ancestor of `master`,
+and the next cutter's `git rev-list v<X.Y.Z>..HEAD` silently re-lists everything you just released.
+
+Since pgw#1209 you do not choose this per-PR: `master` is behind a **merge queue**, and the queue's
+merge method is set to a true merge for exactly this reason — one method applies to every entry, and
+a squash queue would break every release cut silently. So `gh pr merge <n>` enqueues, the queue
+re-runs `fast gates` + `tests` against master's tip, and it lands as a merge commit. Assert it, do
+not hope:
 
 ```bash
 git merge-base --is-ancestor v<X.Y.Z> origin/master && echo OK
