@@ -132,14 +132,32 @@ tasks:
         proto/worker_scheduler.proto
 
   lint:
-    desc: Type check (mypy) + lint (ruff)
-    # Both carry pre-existing advisory debt (matched by continue-on-error in CI):
-    # they run independently and report, so neither masks the other. Tighten to
-    # hard gates once the dead-code sweeps + v2 rewrites land.
+    desc: The `fast gates` job, locally — same commands, same hardness
+    # pgw#1202: this task is named like the CI gate, so it must be able to fail
+    # like the CI gate. It could not, twice over, and both halves cost a real
+    # cycle (pgw#718's red was `tests/test_entry_blast_radius_pgw1208.py:156` —
+    # a file this task did not even look at):
+    #
+    #   1. WRONG SCOPE. It ran `mypy src/gen_worker` while CI runs
+    #      `mypy src/gen_worker tests tests_v2`, so it omitted the 486 test
+    #      modules pgw#1202 PR 2 brought under type-checking — exactly where the
+    #      doubles that lie about production contracts live.
+    #   2. COULD NOT GO RED. `ignore_error: true` on the mypy line, annotated as
+    #      "matched by continue-on-error in CI". That was never true of mypy:
+    #      CI's mypy step is a hard gate and has been since gw#497. It is true
+    #      of RUFF, whose CI step really does carry continue-on-error — so the
+    #      flag was correct for one of the two commands it covered and the
+    #      shared comment made the wrong one look deliberate.
+    #
+    # So: mypy runs the CI command VERBATIM and fails. Ruff keeps ignore_error,
+    # which genuinely matches its CI step, and now says so on its own line.
+    # A gate that runs a different command under the same name is a different
+    # gate wearing its clothes.
     cmds:
-      - cmd: uv run --extra dev mypy src/gen_worker
-        ignore_error: true
+      - cmd: uv run --extra dev mypy src/gen_worker tests tests_v2
       - cmd: uv run --extra dev ruff check src/gen_worker
+        # Advisory, and this one IS matched by continue-on-error in CI:
+        # pre-existing debt, mostly in worker.py, which is being rewritten.
         ignore_error: true
       # Hard gate (matches CI): gw#467 HTTP timeout guard.
       - cmd: uv run python scripts/lint_http_timeouts.py
@@ -152,6 +170,23 @@ tasks:
       # may not size a read unless a validator bounds it or a
       # `# bound-justified:` comment says why none is needed.
       - cmd: uv run python scripts/lint_unbounded_reads.py
+      # pgw#1202: the eleven below were in CI's `fast gates` and NOT here, so
+      # `task lint` was green on a tree that CI would refuse. Each is a hard
+      # gate there and a hard gate here; all eleven run in seconds. The one CI
+      # gate deliberately NOT in this list is `lint_skip_census.py --ci`, which
+      # reads the .skip-census-*.json that only a full pytest run produces —
+      # it belongs to `task test`, not to a static lint pass.
+      - cmd: uv run python scripts/lint_mypy_ratchet.py
+      - cmd: uv run python scripts/lint_config_reads.py
+      - cmd: uv run python scripts/lint_settings_writers.py
+      - cmd: uv run python scripts/lint_layout_declarations.py
+      - cmd: uv run python scripts/lint_cell_key_layout_fence.py
+      - cmd: uv run python scripts/check_registry_contract.py
+      - cmd: uv run python scripts/lint_credential_identity.py
+      - cmd: uv run python scripts/lint_arm_state_feeders.py
+      - cmd: uv run python scripts/lint_ambient_census.py
+      - cmd: uv run python scripts/lint_post_connect_resolution.py
+      - cmd: uv run python scripts/assemble_changelog.py --check
 
   test:
     desc: Run tests (both suites, as CI does)
