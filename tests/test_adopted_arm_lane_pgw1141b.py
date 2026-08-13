@@ -90,7 +90,7 @@ from gen_worker import executor as ex_mod
 # the DEFAULT rig for anything arming-adjacent. It is the same chain, verbatim
 # — real `ensure_setup` -> real `_enable_compiled` -> a real `_ArmOrder(adopt=…)`
 # -> real `arm_ordered` -> the real receipt gate against a real RSA-signed
-# receipt from a real HTTP hub -> `provision.arm_aot` -> `load_and_wrap` on a
+# receipt from a real HTTP hub -> `provision.arm_aot` -> `arm_entry` on a
 # real packed cell -> real warmup, proof pass and target install.
 from harness.adopt_rig import FAMILY, AdoptRig  # noqa: F401
 from harness.receipt_hub import HubStub, hub, pub_map, rsa_key  # noqa: F401
@@ -252,7 +252,7 @@ def test_the_registration_lives_at_the_wrap_not_at_the_call_sites() -> None:
     """The fence against a FOURTH reader. ``note_aot_key`` was a convention
     ("whoever reads a cell_key off an aot-inductor envelope registers it") and
     the ordered arm simply did not keep it. Registration now happens inside
-    ``load_and_wrap``, the one function every arm route passes, so a new route
+    ``arm_entry``, the one function every arm route passes, so a new route
     inherits it instead of having to remember it.
 
     pgw#1152 made this a repo-wide lint (``scripts/lint_arm_state_feeders.py``)

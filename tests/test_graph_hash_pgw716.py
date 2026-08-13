@@ -211,7 +211,7 @@ def test_non_graph_is_refused_by_name():
 
 # --------------------------------------------------------------------------
 # (pgw#1030: the combined-hash tests moved out with the symbol — the live
-# formula and its coverage are `aot_serve.combined_graph_hash`.)
+# formula and its coverage are `cell_key.manifest_digest`.)
 # --------------------------------------------------------------------------
 
 
