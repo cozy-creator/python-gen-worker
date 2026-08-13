@@ -22,12 +22,13 @@ import hashlib
 import gen_worker.executor as executor_mod
 from gen_worker import config as gw_config
 import gen_worker.models.cozy_snapshot as snap_mod
-from gen_worker.executor import ModelStore
+from gen_worker.models.store import ModelStore
 from gen_worker.models.cache_paths import tensorhub_fill_source_dir
 from gen_worker.models.cozy_snapshot import NetworkBytesScope, ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from gen_worker.models.refs import TensorhubRef
 from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.models import store as store_mod
 
 _PAYLOAD = b"managed-tier-fill-source-payload" * 4096  # ~128KB
 _HEX = hashlib.sha256(_PAYLOAD).hexdigest()
@@ -268,7 +269,7 @@ def test_network_bytes_is_a_running_total_on_downloading_ticks(
     stays zero. Disable the progress-event debounce so every chunk reaches
     the wire, and stream the fake download in chunks (not one write) so a
     mid-flight DOWNLOADING event genuinely sees a PARTIAL network_bytes."""
-    monkeypatch.setattr(executor_mod, "_PROGRESS_EVENT_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(store_mod, "_PROGRESS_EVENT_MIN_INTERVAL_S", 0.0)
     chunk = _PAYLOAD[: len(_PAYLOAD) // 4]
     n_chunks = 4
     assert chunk * n_chunks == _PAYLOAD
@@ -333,7 +334,7 @@ def test_downloading_progress_reports_populated_bytes_done_and_total(
     0), and at least one mid-flight tick must show a PARTIAL bytes_done
     (0 < done < total), proving real progress reaches the wire in between
     started and on_disk."""
-    monkeypatch.setattr(executor_mod, "_PROGRESS_EVENT_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(store_mod, "_PROGRESS_EVENT_MIN_INTERVAL_S", 0.0)
     chunk = _PAYLOAD[: len(_PAYLOAD) // 4]
     n_chunks = 4
     assert chunk * n_chunks == _PAYLOAD

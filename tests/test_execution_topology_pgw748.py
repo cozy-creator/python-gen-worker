@@ -213,7 +213,7 @@ class _FakeCuda:
 
 
 def test_one_registry_per_group_each_owning_its_own_devices() -> None:
-    from gen_worker.executor import ModelStore
+    from gen_worker.models.store import ModelStore
 
     store = ModelStore(emit=None)  # type: ignore[arg-type]
     topo = ExecutionTopology(gpu_count=4, gpus_per_execution_group=2, parallel="sequence")
@@ -232,7 +232,7 @@ def test_one_registry_per_group_each_owning_its_own_devices() -> None:
 
 
 def test_residency_property_follows_the_current_group() -> None:
-    from gen_worker.executor import ModelStore
+    from gen_worker.models.store import ModelStore
 
     store = ModelStore(emit=None)  # type: ignore[arg-type]
     store.bind_topology(ExecutionTopology(gpu_count=2, gpus_per_execution_group=1))
@@ -247,7 +247,7 @@ def test_residency_property_follows_the_current_group() -> None:
 def test_disk_facts_union_across_groups(tmp_path) -> None:
     # §4.3 caveat 3: the CAS is ONE tree, hardlinked, with one page cache. A
     # per-group preserve set would drop the pages a sibling is mmapping.
-    from gen_worker.executor import ModelStore
+    from gen_worker.models.store import ModelStore
 
     store = ModelStore(emit=None)  # type: ignore[arg-type]
     store.bind_topology(ExecutionTopology(gpu_count=2, gpus_per_execution_group=1))

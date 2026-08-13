@@ -25,12 +25,14 @@ from gen_worker import Compile, RequestContext, Resources, endpoint
 from gen_worker import compile_cache as cc
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.api.errors import RetryableError
-from gen_worker.executor import Executor, ModelStore
+from gen_worker.executor import Executor
+from gen_worker.models.store import ModelStore
 from gen_worker.models import provision
 from gen_worker import fleet_cells
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec, extract_specs
 from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.models import store as store_mod
 
 FAMILY = "wan-2.2-t2v-a14b"
 
@@ -209,7 +211,7 @@ def _executor(spec: EndpointSpec, tmp_path: Path, sent: list, monkeypatch) -> Ex
     async def _fake_ensure_local(ref, **kwargs) -> Path:
         return tmp_path / "snap"
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
+    monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
     return Executor([spec], _send, store=store)
 
 

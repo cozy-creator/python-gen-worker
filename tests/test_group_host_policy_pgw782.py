@@ -40,7 +40,8 @@ import pytest
 
 from gen_worker import RequestContext, Resources, endpoint, worker_function
 from gen_worker import cpu_budget, video_encode
-from gen_worker.executor import Executor, ModelStore
+from gen_worker.executor import Executor
+from gen_worker.models.store import ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.progress_wait import Cadence, await_count

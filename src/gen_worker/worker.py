@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from . import boot_phases
 from .config import Settings
-from .executor import Executor, ModelStore
+from .executor import Executor
+from .models.store import ModelStore
 from .lifecycle import Lifecycle
 from .pb import worker_scheduler_pb2 as pb
 from .registry import collect_endpoints

@@ -284,12 +284,12 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "READ-ONLY WARNING PREDICATE. Re-reads the hub-delivered topology only "
         "to decide whether the 'GPUs are invisible' warning applies. Selects a "
         "log line, never a code path.",
-    ("src/gen_worker/executor.py", "RUNPOD_POD_ID"):
+    ("src/gen_worker/models/store.py", "RUNPOD_POD_ID"):
         "DEFECT, listed to keep the gate green while it burns down. A vendor env "
         "used as a proxy for 'managed runtime'. Blocked on pgw#921/th#1488 "
         "RuntimeIdentity.managed; pgw#929 AMBIGUOUS #5 forbids papering over it "
         "with a vendor Settings field.",
-    ("src/gen_worker/executor.py", "RUNPOD_PROVIDER"):
+    ("src/gen_worker/models/store.py", "RUNPOD_PROVIDER"):
         "DEFECT, same site and same blocker as RUNPOD_POD_ID above.",
     ("src/gen_worker/content_credentials.py", "$env_name"):
         "TRIPWIRE that REFUSES THE BOOT (th#1307). Threat: a C2PA private key "

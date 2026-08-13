@@ -48,7 +48,7 @@
 # VIOLATION — the burn-down list. Each names its blocker.
 # ---------------------------------------------------------------------------
 src/gen_worker/compile_cache.py::WORKER_IMAGE_DIGEST VIOLATION WORKER_IMAGE_DIGEST is a Settings field AND a compile-cache KEY AXIS. runtime_key() has 21 callers and no settings; needs an install-once image identity. Latent not live: production pods receive this via env so the loader and the raw read agree - it diverges only on a deployment configuring it from yaml/.env/secrets, where the cell would silently key on "".
-src/gen_worker/executor.py::RUNPOD_PROVIDER VIOLATION TENSORHUB_FILL_SOURCE_DIR has a Settings field; Executor.__init__ takes no Settings. Fix with the same pass that threads settings into the executor.
+src/gen_worker/models/store.py::RUNPOD_PROVIDER VIOLATION TENSORHUB_FILL_SOURCE_DIR has a Settings field; ModelStore.__init__ takes no Settings. Fix with the same pass that threads settings into the store (pgw#1206 C1 moved the read; it did not change it).
 src/gen_worker/postmortem.py::GEN_WORKER_BOOT_RECORD VIOLATION GEN_WORKER_BOOT_RECORD now HAS a field (boot_record_path). BOOT_RECORD_PATH is computed at IMPORT, before any process entry can have loaded config; needs an install-once path.
 src/gen_worker/postmortem.py::TENSORHUB_CACHE_DIR VIOLATION TENSORHUB_CACHE_DIR, same import-time constant, same fix.
 src/gen_worker/runtime_config.py::GEN_WORKER_CONFIG_SNAPSHOT_PATH VIOLATION GEN_WORKER_CONFIG_SNAPSHOT_PATH has a field; this module is reached from paths with no Settings in hand.
@@ -65,8 +65,8 @@ src/gen_worker/runtimes/server.py::<unresolved> IPC seeds an engine-server subpr
 src/gen_worker/subproc.py::<unresolved> IPC seeds a per-invoke subprocess's env in order to set GEN_WORKER_CONFIG_SNAPSHOT_PATH. §1.18 ownership test FAILS with its sibling at :144 - the snapshot path originates in Settings.
 src/gen_worker/env_seal.py::<unresolved> LIBRARY scrub_env() ITERATES the environment to find every name under SCRUB_PREFIXES and erase it before torch imports. Reading all of it is the mechanism; this is the one place §1.18 is already mechanically enforced in either repo.
 
-src/gen_worker/executor.py::RUNPOD_POD_ID VIOLATION RUNPOD_POD_ID as a proxy for "managed runtime". Blocked on pgw#921/th#1488 RuntimeIdentity.managed - pgw#929 AMBIGUOUS #5 forbids adding a vendor Settings field instead.
-src/gen_worker/executor.py::TENSORHUB_FILL_SOURCE_DIR VIOLATION has a Settings field; Executor.__init__ takes no Settings. Fix with the same pass that threads settings into the executor.
+src/gen_worker/models/store.py::RUNPOD_POD_ID VIOLATION RUNPOD_POD_ID as a proxy for "managed runtime". Blocked on pgw#921/th#1488 RuntimeIdentity.managed - pgw#929 AMBIGUOUS #5 forbids adding a vendor Settings field instead.
+src/gen_worker/models/store.py::TENSORHUB_FILL_SOURCE_DIR VIOLATION has a Settings field; ModelStore.__init__ takes no Settings. Fix with the same pass that threads settings into the store (pgw#1206 C1 moved the read; it did not change it).
 src/gen_worker/procsplit/parent.py::<unresolved> VIOLATION `dict(os.environ)` then `pop(_CHILD_FORBIDDEN_ENVS)` is a DENYLIST: the compute child inherits every variable not explicitly named. Correct shape is an allowlist built from Settings. Same shape th#1502 records at registry.go, and the reason tenant code can see anything nobody thought to strip.
 # ---------------------------------------------------------------------------
 # BOOTSTRAP — six sites. The one thing this repo already gets right.

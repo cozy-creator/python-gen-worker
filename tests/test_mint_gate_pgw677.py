@@ -55,9 +55,11 @@ from gen_worker import (
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
-from gen_worker.executor import Executor, ModelStore
+from gen_worker.executor import Executor
+from gen_worker.models.store import ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
+from gen_worker.models import store as store_mod
 
 FAMILY = "sdxl"
 _ASPECT_AXIS = CompileAxis(classes=(
@@ -188,7 +190,7 @@ class _Harness:
             p.mkdir(parents=True, exist_ok=True)
             return p
 
-        monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
+        monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
         # pgw#1181: the pgw#681 mint gate this simmed is deleted.

@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 
 from gen_worker.config import Settings
-from gen_worker.executor import Executor, ModelStore
+from gen_worker.executor import Executor
+from gen_worker.models.store import ModelStore
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.models.disk_telemetry import DISK_QUANTUM_BYTES
 from gen_worker.pb import worker_scheduler_pb2 as pb

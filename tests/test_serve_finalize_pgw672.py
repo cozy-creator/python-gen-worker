@@ -54,6 +54,7 @@ from gen_worker.executor import Executor
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
+from gen_worker.models import store as store_mod
 
 FAMILY = "sdxl"
 MODEL_DIGEST = "blake3:" + "c" * 64
@@ -251,7 +252,7 @@ class _Rig:
         def _mandatory_miss(*a: Any, **k: Any) -> bool:
             raise cc.CompiledExecutionLaneUnavailableError("no delivered cell")
 
-        monkeypatch.setattr(executor_mod, "ensure_local", _download)
+        monkeypatch.setattr(store_mod, "ensure_local", _download)
         monkeypatch.setattr(provision, "load_slot", _load_slot)
         monkeypatch.setattr(provision, "enable_compiled", _mandatory_miss)
         monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)

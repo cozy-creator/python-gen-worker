@@ -25,9 +25,10 @@ from pathlib import Path
 import pytest
 
 from gen_worker import executor as executor_mod
-from gen_worker.executor import ModelStore
+from gen_worker.models.store import ModelStore
 from gen_worker.models import volume_verify
 from gen_worker.models.volume_verify import clear_memo
+from gen_worker.models import store as store_mod
 
 
 def sha(b: bytes) -> str:
@@ -79,7 +80,7 @@ def counted(monkeypatch):
     # executor imports the name at module scope (pgw#976), so patching only the
     # source module would leave the real function bound in the caller.
     monkeypatch.setattr(volume_verify, "verify_files", spy)
-    monkeypatch.setattr(executor_mod, "verify_files", spy)
+    monkeypatch.setattr(store_mod, "verify_files", spy)
     return seen
 
 
