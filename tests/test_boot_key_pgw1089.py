@@ -103,9 +103,9 @@ def test_the_fold_is_the_mints_own_stamp_not_a_second_arithmetic() -> None:
     Proven by building the artifact envelope the way ``_mint_cell`` does —
     ``artifact_metadata`` + ``shared_identity_blocks`` + ``cell_identity`` —
     and asserting the boot fold returns that key. If the boot module ever
-    grows its own ``class_hash``/``combined_graph_hash`` arithmetic, this row
+    grows its own ``class_hash``/``manifest_digest`` arithmetic, this row
     keeps passing while the tree gets the attempt-28 phantom back; the
-    ``combined_graph_hash(`` derivation fence in
+    ``manifest_digest(`` derivation fence in
     ``test_cell_key_pgw1059.py`` is what stops that, and this row is what
     proves the shared path is the one actually taken.
     """
@@ -153,7 +153,7 @@ def test_class_order_and_assignment_do_not_move_the_key() -> None:
     Two independent orderings are exercised: the ORDER the blocks arrive in
     (children finish in whatever order they finish) and the SHARE each child
     is assigned. Both are structurally incapable of moving the key —
-    ``combined_graph_hash`` sorts by hash and the fold takes a dict — and
+    ``manifest_digest`` sorts by hash and the fold takes a dict — and
     "structurally incapable" is exactly the claim that must be pinned, because
     the compile pool's equivalent discipline (assembly by entry NAME, never by
     completion) had to be stated to be kept.

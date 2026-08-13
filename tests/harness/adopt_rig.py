@@ -321,7 +321,7 @@ class AdoptRig:
                         viewer identity this process does not hold (pgw#1122).
     ``warm_dispatches`` the handler really calls the wrapped forward N times.
     ``after_arm``       called with the pipeline immediately after the real
-                        ``load_and_wrap`` returns — an observation point at the
+                        ``arm_entry`` returns — an observation point at the
                         exact moment production has one, for driving real
                         dispatches before setup's proof snapshot. It may not
                         write state the arm did not.
@@ -524,7 +524,7 @@ class AdoptRig:
 def _revert_pgw1141b(monkeypatch: pytest.MonkeyPatch) -> None:
     """Put the tree back where ``f3ab710e`` found it, both halves.
 
-    1. ``load_and_wrap`` stops registering the key it just armed, so
+    1. ``arm_entry`` stops registering the key it just armed, so
        ``_KNOWN_AOT_KEYS`` goes back to being fed only by the two SELF-PRODUCED
        routes — which the ordered/boot-adopt arm is not one of.
     2. ``executor._exported_arm`` goes back to asking the REF STRING through
