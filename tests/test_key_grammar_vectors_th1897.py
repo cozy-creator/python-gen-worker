@@ -40,6 +40,14 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 HEX56 = "7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7"
 
 
+def _flavor_of(ref: str) -> str:
+    """The parsed `#fragment`, refusing the None branch loudly — a ref that
+    did not parse as a tensorhub ref is the bug these rows are about."""
+    th = parse_model_ref(ref).tensorhub
+    assert th is not None, ref
+    return th.flavor or ""
+
+
 def _vectors() -> list[dict]:
     return json.loads(KEY_VECTORS.read_text())["vectors"]
 
@@ -119,7 +127,7 @@ def test_the_real_key_length_fits() -> None:
     key = f"{cell_key.KEY_SCHEME}-{HEX56}"
     assert len(key) == 66
     assert cell_key.is_key(key)
-    assert parse_model_ref(f"root/family-sdxl#{key}").tensorhub.flavor == key
+    assert _flavor_of(f"root/family-sdxl#{key}") == key
 
 
 @pytest.mark.parametrize(
@@ -135,7 +143,7 @@ def test_the_fragment_bound_is_96_exactly(length: int, valid: bool) -> None:
     assert cell_key.is_key(key) is valid
     ref = f"root/family-sdxl#{key}"
     if valid:
-        assert parse_model_ref(ref).tensorhub.flavor == key
+        assert _flavor_of(ref) == key
     else:
         with pytest.raises(ValueError):
             parse_model_ref(ref)
@@ -176,7 +184,9 @@ def test_the_drift_script_is_committed_and_runnable_offline() -> None:
     assert "2 corpora agree" in proc.stdout, proc.stdout
 
 
-def test_the_drift_script_fails_when_a_corpus_differs(tmp_path) -> None:
+def test_the_drift_script_fails_when_a_corpus_differs(
+    tmp_path: pathlib.Path,
+) -> None:
     """And it goes red when they do not — the half that makes the row above
     mean something."""
     peer = tmp_path / "peer"
