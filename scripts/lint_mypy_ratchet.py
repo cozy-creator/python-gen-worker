@@ -42,7 +42,9 @@ REPO = Path(__file__).resolve().parents[1]
 #: at all. Lower a number only together with the names you deleted from
 #: pyproject.toml — that is what makes the burn-down a number in the diff.
 HIGH_WATER: Dict[str, Tuple[int, int]] = {
-    "disallow_any_generics": (69, 285),
+    # 69 -> 62: pgw#1202 PR 3 cleared the endpoint-AUTHORING surface
+    # (gen_worker.api.* + gen_worker.testing), 30 bare generics.
+    "disallow_any_generics": (62, 285),
     "warn_return_any": (26, 48),
     "disallow_untyped_calls": (20, 37),
     "disallow_untyped_decorators": (3, 9),

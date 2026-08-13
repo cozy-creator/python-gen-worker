@@ -55,7 +55,7 @@ from ..runtimes.server import ServerHandle
 from .tree import is_introspectable
 
 T = TypeVar("T")
-SlotLike = Union[Binding, Slot]
+SlotLike = Union[Binding, "Slot[Any]"]
 
 KINDS = ("inference", "training", "dataset", "conversion", "eval")
 
@@ -258,7 +258,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     max_gpus_per_execution_group: int | None = None
     parallel: tuple[str, ...] = ()
 
-    def manifest_dict(self) -> dict:
+    def manifest_dict(self) -> Dict[str, Any]:
         """The manifest ``resources{}`` projection (pgw#670).
 
         The declaration and the wire name differ for exactly one field: the
@@ -291,7 +291,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         so it must never appear on the wire.
         """
         raw = msgspec.to_builtins(self)
-        out: dict = dict(raw) if isinstance(raw, dict) else {}
+        out: Dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
         ram = out.pop("ram_gb_hint", None)
         if ram is not None:
             out["ram_gb"] = ram
@@ -739,7 +739,7 @@ class ConfigParam(msgspec.Struct, frozen=True):
     name: str
     type: type
     default: Any
-    choices: tuple = ()
+    choices: Tuple[Any, ...] = ()
     ge: Optional[float] = None
     le: Optional[float] = None
     regex: str = ""
@@ -1214,7 +1214,7 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # `models`' keys, carrying the Slot's selected_by/default_checkpoint
     # metadata that `models` (a plain Binding map every model-injection
     # call site understands) can't hold.
-    slots: Mapping[str, Slot] = msgspec.field(default_factory=dict)
+    slots: Mapping[str, Slot[Any]] = msgspec.field(default_factory=dict)
     runtime: Optional[str] = None
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
@@ -1350,7 +1350,7 @@ def _reject_producer_generator(owner: str, fn: Callable[..., Any], kind: str) ->
         )
 
 
-def _split_slot_like(key: str, v: "SlotLike") -> Tuple[Optional[Binding], Optional[Slot]]:
+def _split_slot_like(key: str, v: "SlotLike") -> Tuple[Optional[Binding], Optional[Slot[Any]]]:
     """One ``models={}``/``model=`` value -> ``(binding_or_None, slot_or_None)``.
 
     A ``Slot`` contributes its ``default_checkpoint`` (if any) to the plain
@@ -1370,7 +1370,7 @@ def _split_slot_like(key: str, v: "SlotLike") -> Tuple[Optional[Binding], Option
 
 def _normalize_models(
     model: Optional["SlotLike"], models: Optional[Mapping[str, "SlotLike"]]
-) -> Tuple[Dict[str, Binding], Dict[str, Slot]]:
+) -> Tuple[Dict[str, Binding], Dict[str, Slot[Any]]]:
     if model is not None and models is not None:
         raise ValueError("@endpoint: pass model= OR models=, not both")
     if model is not None:
@@ -1378,7 +1378,7 @@ def _normalize_models(
         # setup()/handler parameter name at class validation time.
         binding, slot = _split_slot_like("", model)
         out_models: Dict[str, Binding] = {"": binding} if binding is not None else {}
-        out_slots: Dict[str, Slot] = {"": slot} if slot is not None else {}
+        out_slots: Dict[str, Slot[Any]] = {"": slot} if slot is not None else {}
         return out_models, out_slots
     out_models = {}
     out_slots = {}
@@ -1436,9 +1436,9 @@ def _is_server_handle_param(p: inspect.Parameter) -> bool:
 def _resolve_single_slot(
     cls: type,
     models: Dict[str, Binding],
-    slots: Dict[str, Slot],
+    slots: Dict[str, Slot[Any]],
     handlers: list[tuple[str, Callable[..., Any]]],
-) -> Tuple[Dict[str, Binding], Dict[str, Slot]]:
+) -> Tuple[Dict[str, Binding], Dict[str, Slot[Any]]]:
     """Resolve the ``model=`` shorthand's slot name from setup()/handler
     params. Exactly one of ``models``/``slots`` holds the ``""`` key (a bare
     binding or a Slot, never both — ``_normalize_models`` is the only
@@ -1476,7 +1476,7 @@ def _resolve_single_slot(
 
 
 def _validate_class_models(
-    cls: type, models: Dict[str, Binding], slots: Dict[str, Slot]
+    cls: type, models: Dict[str, Binding], slots: Dict[str, Slot[Any]]
 ) -> None:
     """Model slots must be consumable: by setup() params (stateful) or by
     handler params (per-call injection when there is no setup)."""
@@ -1505,7 +1505,7 @@ def _validate_class_models(
 
 
 def _derive_optional_slots(
-    cls: type, slots: Dict[str, Slot], setup_kwargs: dict[str, inspect.Parameter]
+    cls: type, slots: Dict[str, Slot[Any]], setup_kwargs: dict[str, inspect.Parameter]
 ) -> None:
     """A slot is OPTIONAL exactly when its ``setup()`` parameter has a
     default — the signature is the single declaration, so code and manifest
@@ -1543,7 +1543,7 @@ def _annotation_admits_none(ann: Any) -> bool:
     return type(None) in get_args(ann)
 
 
-def _validate_root_slot(owner: str, slots: Dict[str, Slot]) -> None:
+def _validate_root_slot(owner: str, slots: Dict[str, Slot[Any]]) -> None:
     """pgw#654 gap #7: a multi-slot class must designate ONE root —
     ambiguity is a decoration-time error, never a silent runtime fallback
     (the old ``for_request`` swallowed the ambiguous-root ValueError and
@@ -1565,7 +1565,7 @@ def _validate_root_slot(owner: str, slots: Dict[str, Slot]) -> None:
         )
 
 
-def _validate_lora_state_dict(owner: str, slots: Dict[str, Slot], lora_bucket: int) -> None:
+def _validate_lora_state_dict(owner: str, slots: Dict[str, Slot[Any]], lora_bucket: int) -> None:
     """pgw#654 gap #9: a ``lora_bucket=`` endpoint whose root pipeline class
     is NON-introspectable (non-diffusers) must declare
     ``lora_state_dict`` — the adapter normalization path routes through
@@ -1663,7 +1663,7 @@ def _decorate_class(
     kind: str,
     resources: Resources,
     models: Dict[str, Binding],
-    slots: Dict[str, Slot],
+    slots: Dict[str, Slot[Any]],
     runtime: Optional[str],
     runtime_formula: Optional[Dict[str, RuntimeFormula]] = None,
     compile: Optional[Compile] = None,
@@ -1718,7 +1718,7 @@ def _decorate_function(
     kind: str,
     resources: Resources,
     models: Dict[str, Binding],
-    slots: Dict[str, Slot],
+    slots: Dict[str, Slot[Any]],
     runtime: Optional[str],
     runtime_formula: Optional[Dict[str, RuntimeFormula]] = None,
     name: Optional[str],

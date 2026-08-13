@@ -64,7 +64,7 @@ __all__ = [
 CFG_BATCH_REGIMES: Tuple[Tuple[bool, int], ...] = ((True, 2), (False, 1))
 
 
-class DerivedClasses(tuple):
+class DerivedClasses(Tuple[GraphClass, ...]):
     """The deriver's class rows, carrying the divisor they were derived AT.
 
     A tuple subclass so every existing call site is unaffected — it IS the
