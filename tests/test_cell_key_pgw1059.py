@@ -233,6 +233,9 @@ def _old_schema_digest(meta: dict) -> str:
     facts — the strongest possible collision candidate."""
     contract_facts = {
         "v": 3,
+        # fence-symbol-exempt: this helper reconstructs the PRE-pgw#1059
+        # payload byte-for-byte; renaming the dead key would make it
+        # rebuild the CURRENT format and assert nothing.
         "combined_graph_hash": "0" * 16,
         "shell_digest": "",
         # The pre-pgw#1176 shape, spelled out verbatim because the whole point
@@ -327,6 +330,8 @@ def test_pre_redefinition_artifact_is_structurally_refused():
     old = dict(meta)
     entry = old.pop(cell_key.ENTRY_BLOCK_KEY)
     old["entries"] = {entry["name"]: entry}
+    # fence-symbol-exempt: the pre-atom artifact shape, on purpose — this
+    # row proves a format-2 cell cannot restate a per-entry identity.
     old["combined_graph_hash"] = "0" * 16
     old["format"] = 2
     with pytest.raises(cell_key.CellKeyError, match="entry"):
