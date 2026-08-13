@@ -106,7 +106,7 @@ def test_the_ram_bound_is_monotone_in_the_pods_ram(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The VRAM reading — DELETED WITH ITS BOUND (pgw#1175)
+# The VRAM reading — DELETED WITH ITS BOUND
 # ---------------------------------------------------------------------------
 #
 # pgw#842's third bound divided free VRAM by a per-entry device ask, and this
@@ -180,7 +180,7 @@ def test_the_width_names_its_binding_constraint_and_its_readings() -> None:
                 "cgroup_reclaimable_bytes", "host_available_bytes",
                 "os_cpu_count", "affinity_cpus", "quota_cores"):
         assert key in facts, f"{key} missing from {sorted(facts)}"
-    # pgw#877's three DEVICE provenances died with the axis (pgw#1175). The
+    # pgw#877's three DEVICE provenances died with the axis. The
     # one per-entry footprint left still says whether it was measured or
     # defaulted, because a default must never read like a measurement.
     common: Dict[str, Any] = dict(

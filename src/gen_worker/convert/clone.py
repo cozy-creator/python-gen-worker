@@ -209,7 +209,7 @@ def build_flavor_tree(
     snapshot. Otherwise: optional layout repackage, then per-weight-set
     cast / quant / gguf via :mod:`gen_worker.convert.convert`.
 
-    ``objective``/``distilled`` (pgw#654) stamp objective-correct scheduler
+    ``objective``/``distilled`` stamp objective-correct scheduler
     config into the produced tree's ``scheduler/config.json`` (no-op for an
     epsilon/unstamped non-distilled checkpoint or a layout with no
     scheduler component).
@@ -267,7 +267,7 @@ def build_flavor_tree(
         from .repackage import diffusers_to_singlefile, singlefile_to_diffusers
 
         family = str(source.model_family or "").strip().lower()
-        # pgw#740 (B16): capability is registry membership, not a hand-synced
+        # capability is registry membership, not a hand-synced
         # allowlist. The declaration also states the DIRECTION it supports, so
         # a family that can only go singlefile->diffusers is refused for the
         # reverse instead of failing deep inside the converter.
@@ -324,12 +324,12 @@ def build_flavor_tree(
         target_names = set(quantize_components)
     elif is_fp8:
         # Denoiser-only by default: matches apply_fp8_storage's consumption
-        # scope; TEs join explicitly via the component-wise ladder (gw#392).
+        # scope; TEs join explicitly via the component-wise ladder.
         target_names = set(fp8_default_components())
     else:
         target_names = set(_default_quant_components())
     is_quant = spec.dtype not in {"bf16", "fp16", "fp32", "f16", "f32"}
-    # pgw#1133: a cast is TREE-wide, a precision pin is PER-COMPONENT. The
+    # a cast is TREE-wide, a precision pin is PER-COMPONENT. The
     # tree's own model_index.json classes decide, via families.facts — the
     # same table the loader honours. An EXPLICIT request to convert a pinned
     # component is refused by name (it has a repair); the tree-wide cast
@@ -394,7 +394,7 @@ def build_flavor_tree(
 
 class CloneDiskSpaceError(RuntimeError):
     """Preflight found too little free disk for the clone — fail fast and
-    actionably instead of ENOSPC minutes into a 40GB download (gw#462)."""
+    actionably instead of ENOSPC minutes into a 40GB download."""
 
 
 _DISK_MARGIN_BYTES = 2 * 1024**3
@@ -402,7 +402,7 @@ _PUBLISH_AS_IS_STRATEGIES = frozenset({
     "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
     "pipeline_tree", "diffusers_component",
 })
-# th#901: publish_as_is strategies whose weight set is an ordinary dense
+# publish_as_is strategies whose weight set is an ordinary dense
 # safetensors tree (not a binary quant container like gguf, and not a
 # mixed-dtype multi-checkpoint bundle like pipeline_tree) — a genuinely
 # mismatched requested dtype is real, in-line-castable work via
@@ -443,7 +443,7 @@ def _plan_has_no_repackager(plan: Any) -> bool:
     family through the same declared hint matchers ``detect_huggingface_source_layout``
     uses post-download.
 
-    pgw#740 (B16): this used to be spelled ``_hf_plan_looks_like_ltx2`` — one
+    this used to be spelled ``_hf_plan_looks_like_ltx2`` — one
     family named twice in this file to route AROUND the repackager. A source
     whose family declares no singlefile->diffusers converter simply has no
     repackager, LTX-2 or otherwise, and publishes as-is."""
@@ -501,7 +501,7 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             attrs = {"file_layout": "singlefile", "file_type": source_type}
             if source_type == "gguf":
                 strategy = "gguf"
-        # gw#592/gw#593: run_clone routes a strategy="aio_singlefile" source
+        # run_clone routes a strategy="aio_singlefile" source
         # whose family declares no singlefile->diffusers converter through
         # publish_as_is regardless of the requested output layout — but this
         # preflight only sees the pre-download classification, which has no
@@ -536,7 +536,7 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             and (spec.dtype == "source" or (source_dtype and spec.dtype == source_dtype))
         ]
         materialized = [spec for spec in specs if spec not in passthrough]
-        # th#1362: mirror ingest de-shards, so the transient cost is the
+        # mirror ingest de-shards, so the transient cost is the
         # merged copy of the LARGEST shard set — its members are unlinked as
         # soon as it verifies, one component at a time.
         shard_groups: dict[str, int] = {}
@@ -545,7 +545,7 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             if m:
                 shard_groups[m.group("group")] = shard_groups.get(m.group("group"), 0) + size
         deshard_bytes = len(passthrough) * max(shard_groups.values(), default=0)
-        # pgw#1121: bits per stored parameter, MEASURED at plan time off the
+        # bits per stored parameter, MEASURED at plan time off the
         # source's safetensors headers. An output tree is
         # ``params * out_bits / 8``, so scaling the source bytes by
         # ``out_bits / measured_bits`` is exact even for a mixed-dtype tree.
@@ -653,7 +653,7 @@ def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
     """Remove clone scratch left by crashed predecessors: dirs whose flock is
     free and that have been idle past COZY_CONVERT_SCRATCH_TTL_S (default 1h).
     A long-running conversion worker otherwise accumulates each crashed job's
-    scratch until any disk fills (gw#462)."""
+    scratch until any disk fills."""
     try:
         entries = sorted(base.glob("clone-*"))
     except OSError:
@@ -748,7 +748,7 @@ def run_clone(
     distilled_fact = bool(distilled)
     if include and provider != "huggingface":
         raise ValueError("source_include is only supported for provider='huggingface'")
-    # th#901: normalize_outputs collapses "caller asked for nothing" onto a
+    # normalize_outputs collapses "caller asked for nothing" onto a
     # schema default (dtype="bf16") — indistinguishable from an EXPLICIT
     # bf16 request once normalized. Only an explicit request may force a
     # publish_as_is source through a real conversion; an unspecified request
@@ -786,7 +786,7 @@ def run_clone(
         # This used to ALSO drive th#592's download-skip: a bank key over that
         # metadata, a banked manifest lookup, and a publish BY CAS REFERENCE
         # that downloaded nothing. That path is gone with the v1 protocol
-        # (pgw#807): its adds carried a caller-asserted blake3 and no local
+        # : its adds carried a caller-asserted blake3 and no local
         # bytes, which is precisely what the chunked-sha256 route cannot and
         # must not accept — a claimed digest stops being assertable. It had
         # also been dead in practice since the hub froze v1 writes.
@@ -812,7 +812,7 @@ def run_clone(
             logger.warning(
                 "clone source plan failed (download-skip disabled for this run): %s", exc)
 
-        # gw#462: the plan already knows every selected file's size — fail
+        # the plan already knows every selected file's size — fail
         # fast on an undersized disk instead of ENOSPC mid-download.
         _preflight_disk(workdir, plan, specs)
 
@@ -824,7 +824,7 @@ def run_clone(
             if total:
                 _progress(0.05 + 0.45 * min(1.0, done / total), "clone.download")
 
-        # pgw#743: download and cast are the two phases that talk to the hub
+        # download and cast are the two phases that talk to the hub
         # NOT AT ALL — an hour of them, and then the first upload discovers
         # whatever happened to the path in the meantime. Both losses of a paid
         # 53 GiB download landed exactly there. Keep the path warm and, either
@@ -856,14 +856,14 @@ def run_clone(
         from .convert import InlineConversionNotPossible
 
         result = CloneResult(destination_repo=destination, metadata=dict(source.metadata))
-        # th#606: upstream identity (upstream_ref + derivation_op=import) is
+        # upstream identity (upstream_ref + derivation_op=import) is
         # orchestrator-derived and rides the capability token; the worker only
         # ADDS the revision it actually resolved during download.
         provenance = {"upstream_revision": str(source.source_revision or "")}
         # Non-diffusers-class sources publish as-is; extra output specs that
         # would need conversion are refused per-flavor, not per-job.
         strategy = source.classification.strategy if source.classification is not None else ""
-        # gw#592/pgw#740 (B16): a bare single/multi-root safetensors repo whose
+        # a bare single/multi-root safetensors repo whose
         # family declares no singlefile->diffusers converter has nothing to
         # repackage INTO, so it publishes as-is rather than being handed to a
         # repackager with no rule for it. LTX-2 is the motivating case (the
@@ -890,7 +890,7 @@ def run_clone(
                         tree = source.dir
                         attrs = dict(source.attrs)
                         dtype_label = source_dtype or spec.dtype
-                        # th#1362: this passthrough bypasses build_flavor_tree
+                        # this passthrough bypasses build_flavor_tree
                         # entirely (every one of ITS branches de-shards), so
                         # de-shard it here too — the ruling is EXPLICIT that
                         # pure pass-through mirrors are normalised as well, so
@@ -917,7 +917,7 @@ def run_clone(
                     elif i == 0 and spec.file_type == "safetensors" \
                             and (strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
                                  or no_repackager):
-                        # th#901: an EXPLICITLY mismatched requested dtype is
+                        # an EXPLICITLY mismatched requested dtype is
                         # real, in-line-castable work for these strategies
                         # (ordinary dense safetensors trees) —
                         # build_flavor_tree already knows how to cast a
@@ -961,7 +961,7 @@ def run_clone(
                         )
                 else:
                     flavor_dir = workdir / f"flavor-{spec.label}"
-                    # pgw#1003: a tree a predecessor already CAST and DECLARED
+                    # a tree a predecessor already CAST and DECLARED
                     # is re-published, not re-cast. Anything else is wiped —
                     # a partial tree from a run that died mid-cast is not
                     # resumable, and never was.
@@ -997,13 +997,13 @@ def run_clone(
                 result.failed_flavors.append({
                     "spec_label": spec.label, "dtype": spec.dtype,
                     "file_type": spec.file_type, "reason": str(exc),
-                    # th#1084: spec/source combination rejections are input
+                    # spec/source combination rejections are input
                     # verdicts, not conversion faults.
                     "input_rejection": isinstance(exc, (ValueError, ValidationError)),
                 })
                 continue
 
-            # gw#522: EVERY publish path emits canonical filenames — this
+            # EVERY publish path emits canonical filenames — this
             # seam also covers the publish-as-is lane build_flavor_tree
             # never touches. Idempotent on already-normalized trees.
             if spec.file_type != "gguf" and dtype_label in _CAST_NORMALIZE_DTYPES:
@@ -1044,7 +1044,7 @@ def run_clone(
                     metadata["size_facts"] = facts
             except Exception:
                 pass
-            # pgw#1133 VISIBILITY: the flavor's scalar dtype describes the
+            # the flavor's scalar dtype describes the
             # tree, not every part of it. Publish the per-component precision
             # so a downcast is a queryable fact instead of a byte count
             # someone has to notice.
@@ -1054,7 +1054,7 @@ def run_clone(
                 metadata.setdefault(f"attr_{k}", str(v))
 
             _progress(0.55 + 0.4 * (i / max(1, len(specs))), f"clone.publish.{spec.label}")
-            # th#1303 phase 3: the mirror is the FIRST producer class flipped to
+            # the mirror is the FIRST producer class flipped to
             # the chunked sha256 CAS, chosen for blast radius — a mirror is
             # re-runnable from upstream, so a bad publish costs a re-clone and
             # never an unrecoverable artifact. Every file here is a real local
@@ -1065,7 +1065,7 @@ def run_clone(
             # `message` has no v2 equivalent and is NOT silently dropped — it
             # was `clone {provider}:{ref}@{revision}`, which is exactly
             # `upstream_ref` + `upstream_revision` in the provenance stamp the
-            # hub now resolves authoritatively (th#1331). The fact moved to a
+            # hub now resolves authoritatively. The fact moved to a
             # structured, queryable home; it did not disappear.
             #
             # A `merge` into a prior v1/blake3 manifest is a TYPED refusal
@@ -1084,7 +1084,7 @@ def run_clone(
                 dtype=str(attrs.get("dtype") or spec.dtype),
                 file_layout=str(attrs.get("file_layout") or spec.file_layout),
                 file_type=str(attrs.get("file_type") or spec.file_type),
-                # pgw#1009: the caller's checkpoint facts have to reach the
+                # the caller's checkpoint facts have to reach the
                 # DECLARE, not just `apply_objective_scheduler_config`. th#1411
                 # refuses a publish into a repo whose live rows carry
                 # classification unless the request restates it, so without
@@ -1097,7 +1097,7 @@ def run_clone(
                 metadata=metadata,
                 provenance=provenance,
                 repo_spec=source.repo_spec,
-                # pgw#1003: the session id lands beside the produced bytes
+                # the session id lands beside the produced bytes
                 # before the first PUT, so a retry re-uploads instead of
                 # re-cloning. Kept at the workdir root, out of every flavor
                 # tree `files_from_tree` walks.
@@ -1111,7 +1111,7 @@ def run_clone(
                 },
             )
             result.published.append({
-                # pgw#1159: the report states the DTYPE it published, not a
+                # the report states the DTYPE it published, not a
                 # flavor token — the token names nothing catalog-side.
                 "dtype": dtype_label,
                 "head": i == 0,
@@ -1127,7 +1127,7 @@ def run_clone(
             reasons = "; ".join(
                 str(f.get("reason") or "") for f in result.failed_flavors
             ) or "no output spec produced anything"
-            # th#1084: when every failure was an input-combination rejection
+            # when every failure was an input-combination rejection
             # (e.g. dtype="source" with a non-safetensors source), the verdict
             # is about the request, not the release — INVALID, not FATAL.
             if result.failed_flavors and all(f.get("input_rejection") for f in result.failed_flavors):
@@ -1151,9 +1151,9 @@ def run_clone(
                     "%.0fs, reachable at exit=%s",
                     keepalive.probes, keepalive.longest_outage_s,
                     keepalive.reachable)
-        # gw#462: a long-running worker must not leak scratch — the workdir
+        # a long-running worker must not leak scratch — the workdir
         # goes after every job that has nothing left to resume.
-        # pgw#929: COZY_CONVERT_RETAIN_WORKDIR deleted. Retaining a failed
+        # COZY_CONVERT_RETAIN_WORKDIR deleted. Retaining a failed
         # job's scratch is a DEBUGGING ACTION taken against one run, not a
         # deployment mode a pod is booted in — and as an env it could only ever
         # be set fleet-wide and forgotten, which is how a long-running worker
@@ -1168,7 +1168,7 @@ def run_clone(
         # The disk budget is the one that already exists: `_sweep_stale_workdirs`
         # reaps any unlocked workdir past COZY_CONVERT_SCRATCH_TTL_S (1 h) at
         # the start of the next clone, and the hub's own staging lifecycle
-        # (th#1319) bounds how long resuming is possible anyway.
+        #  bounds how long resuming is possible anyway.
         resumable = 0 if succeeded else len(
             PublishJournal.open(workdir / JOURNAL_NAME).entries)
         if resumable:

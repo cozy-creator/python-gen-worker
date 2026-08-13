@@ -340,7 +340,7 @@ def _send_request(
             if not chunk:
                 break
             if len(buf) + len(chunk) > sockaddr.MAX_NDJSON_LINE_BYTES:
-                # pgw#1013: the same bound the server applies to the request
+                # the same bound the server applies to the request
                 # line, applied to the response — a serve process that never
                 # sends `\n` must not grow this buffer without end.
                 raise run_mod._UsageError(

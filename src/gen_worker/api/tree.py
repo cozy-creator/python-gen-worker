@@ -25,7 +25,7 @@ Instance identity = root binding + override map: a swapped part changes
 identity, so the compile cell DERIVES facts like "this cell must not claim
 ``vae.decode``" instead of relying on an author comment.
 
-pgw#667: a part's LOAD DTYPE is part of that identity too. The tree therefore
+a part's LOAD DTYPE is part of that identity too. The tree therefore
 carries a per-component dtype opinion (:func:`component_dtypes`), resolved from
 the component's CLASS against the one facts table
 (``gen_worker.families.facts``) — not declared per endpoint. It is published
@@ -148,7 +148,7 @@ def component_dtypes(
     model_index_classes: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, ComponentDtype]:
     """``{part_name: ComponentDtype}`` — the load-dtype opinions this
-    composition's parts carry (pgw#667). Empty means "loads uniformly at the
+    composition's parts carry. Empty means "loads uniformly at the
     composition's compute dtype", which is the overwhelmingly common case.
 
     ``model_index_classes`` (``{part: class name}`` read from a snapshot's
@@ -200,7 +200,7 @@ def validate_no_sibling_parts(
     1. A sibling slot whose NAME matches a component of the root's derived
        tree (the old ``"vae": Slot(AutoencoderKL)`` hand-wiring) — the part
        is already addressable as ``<root>.<name>``; the override is catalog
-       data (th#1116), not endpoint code.
+       data, not endpoint code.
     2. A sibling ``str``/``Path``/``PurePath`` slot next to a derived-tree
        pipeline slot (the old ``"turbo_lora": Slot(str)`` workaround) —
        modifiers on components are adapters riding the binding, never
@@ -231,7 +231,7 @@ def validate_no_sibling_parts(
         if name in trees:
             continue
         cls = getattr(slot, "pipeline_cls", None)
-        # pgw#654 gap #8: Path counts — the docstring always promised it;
+        # Path counts — the docstring always promised it;
         # the old test only caught str/bytes, silently re-permitting the
         # deleted Slot(Path) modifier shape on Tier-A endpoints.
         if isinstance(cls, type) and (

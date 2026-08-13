@@ -107,7 +107,7 @@ def test_a_bar_below_1_0_is_refused_at_DECLARATION_time() -> None:
 @pytest.mark.parametrize("metric", [
     "total_round_trip_ms", "stage_ms.total_round_trip_ms"])
 def test_the_round_trip_is_refused_BY_NAME(metric: str) -> None:
-    # th#1795: a bar declared against the round trip measures the network and
+    # a bar declared against the round trip measures the network and
     # the queue and calls it the model — the "10.9x" that corrected to 1.3x.
     with pytest.raises(ValueError, match="round trip"):
         Compile(family="probe", shapes=((1024, 1024),),

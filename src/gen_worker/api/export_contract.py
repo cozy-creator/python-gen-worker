@@ -1,4 +1,4 @@
-"""The declaration vocabulary for the AOT export contract (pgw#739).
+"""The declaration vocabulary for the AOT export contract.
 
 Paul's SDK-generic rule, applied to the export-input contract: per-family
 content is a DECLARATION in the endpoint spec, never worker code. This module
@@ -108,7 +108,7 @@ _FORK_SOURCES = ("pipeline", "module")
 
 #: The explicit "this input follows the resolved module's own dtype" word.
 #: It exists so inheritance is a STATEMENT the declaration author owns, never
-#: a silent default (pgw#1058).
+#: a silent default.
 MODEL_DTYPE = "model"
 
 #: Every dtype word an ``Input`` row may declare. Aliases canonicalise in
@@ -129,11 +129,11 @@ class DeclarationError(ValueError):
 
 class MintBlocker(msgspec.Struct, frozen=True):
     """A named, evidence-carrying reason this family may not MINT yet
-    (pgw#1115).
+.
 
     A refusal is DATA on the declaration, not code that raises. Before this,
     a family with open questions expressed them by registering a THUNK that
-    raised ``MintRefused`` when the mint asked (pgw#853) — which the pgw#1107
+    raised ``MintRefused`` when the mint asked — which the pgw#1107
     fold cannot carry: ``@endpoint(compile=)`` takes a ``Compile``, never a
     callable, so folding a refusing thunk onto the decorator would silently
     DELETE the refusal and let the family mint against its own open questions.
@@ -158,7 +158,7 @@ class MintBlocker(msgspec.Struct, frozen=True):
     does today, and blockers are deliberately NOT a contract axis — resolving
     one must not re-key a cell.
 
-    When ``resolves_when`` is a MEASUREMENT (pgw#1134)
+    When ``resolves_when`` is a MEASUREMENT
     -------------------------------------------------
     The mint gate is closed while the blocker is open, so the run that would
     answer it cannot be a mint. Take the measurement with the measure-only
@@ -267,14 +267,14 @@ def blocker_refusal(family: str, blockers: Sequence[MintBlocker]) -> str:
         f"what settled it (pgw#1115).")
 
 
-#: The stage vocabulary a speed bar may name (th#1795). A bar declared against
+#: The stage vocabulary a speed bar may name. A bar declared against
 #: `total_round_trip_ms` measures the network and the queue and calls it the
 #: model — that is the "10.9x" which corrected to 1.3x.
 SPEED_STAGE_PREFIX = "stage_ms."
 
 
 def validate_speed_bar(metric: str, min_speedup: Optional[float]) -> Tuple[str, Optional[float]]:
-    """Normalize + refuse the family's declared compile-vs-eager bar (pgw#1149).
+    """Normalize + refuse the family's declared compile-vs-eager bar.
 
     Called from ``Compile.__post_init__`` so the refusal lands at endpoint
     import. The rules are the hub's own (th#1811 `parseManifestCompileBlock`):
@@ -314,7 +314,7 @@ def validate_speed_bar(metric: str, min_speedup: Optional[float]) -> Tuple[str, 
 
 def speed_bar(decl: Any) -> Optional[Dict[str, Any]]:
     """The declaration's speed bar as a JSON-able row, or ``None`` when the
-    family declares none (pgw#1149).
+    family declares none.
 
     The counterpart of :func:`blocker_rows`: ONE readable shape, so the endpoint
     repo's torch-free ``scripts/lint_author_ci.py`` reads the author's bar off
@@ -338,7 +338,7 @@ def _identifier(kind: str, name: Any) -> str:
 def _axis_spec(entry: Any, what: str) -> AxisSpec:
     """Validate and canonicalise one :data:`AxisSpec`.
 
-    Lifted out of ``Input.__post_init__`` (pgw#853) so the SAME three-way
+    Lifted out of ``Input.__post_init__`` so the SAME three-way
     rule — literal / declared-dim name / ``("config", field)`` — governs
     every place the vocabulary lets a number come from the class row:
     tensor axes, ``Input.repeat`` container arity, and the leaves of
@@ -532,7 +532,7 @@ class Fork(msgspec.Struct, frozen=True):
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
         force(self, "why", str(self.why or ""))
         if unserved and self.reason is None:
-            # pgw#1158 (the staged phase 2): an unserved arm is a CLOSED arm,
+            # an unserved arm is a CLOSED arm,
             # and a declaration that cannot say what closes it has not made
             # the guarantee it appears to make. Refused where it is written,
             # at declaration time, so it costs nothing at serve time.
@@ -562,7 +562,7 @@ class Fork(msgspec.Struct, frozen=True):
             "source": list(self.source) if self.source else None,
             "targets": list(self.targets),
         }
-        # pgw#846: OMITTED when absent, so every declaration written before
+        # OMITTED when absent, so every declaration written before
         # this field existed serialises byte-identically.
         if self.reason is not None:
             row["reason"] = self.reason
@@ -599,7 +599,7 @@ def _sorted_pairs(kind: str, owner: str, value: Any) -> Tuple[Tuple[str, Any], .
 class GraphClass(msgspec.Struct, frozen=True):
     """One RESOLVED coordinate a legal request can trace: dim values plus
     fork arm values. Generated by the endpoint's own legality oracle —
-    pgw#669: the payload is the legality oracle for the sparse legal set —
+    the payload is the legality oracle for the sparse legal set —
     so the relation behind a relational axis stays in the one place that can
     be right about it, and the declaration carries only its resolved values.
 
@@ -608,7 +608,7 @@ class GraphClass(msgspec.Struct, frozen=True):
     are hashable and endpoint generators can dedupe with ``dict.fromkeys``.
 
     ``targets`` scopes the row, exactly as it does on :class:`Input`,
-    :class:`Arg` and :class:`Fork`; empty means every target (pgw#967). A
+    :class:`Arg` and :class:`Fork`; empty means every target. A
     cell's targets are unrelated modules with unrelated call contracts —
     sdxl's UNet traces 9 aspect rows x 2 CFG arms, its VAE decoder traces
     the 9 aspect rows at batch 1 (CFG has collapsed by decode time), and its
@@ -652,7 +652,7 @@ class GraphClass(msgspec.Struct, frozen=True):
 
     def as_row(self) -> Dict[str, Any]:
         row: Dict[str, Any] = {"dims": dict(self.dims), "fork": dict(self.fork)}
-        # pgw#846 discipline: an absent field is OMITTED, so every
+        # an absent field is OMITTED, so every
         # declaration written before this vocabulary existed serialises
         # byte-identically and no published cell re-keys on the SDK change
         # alone (`Compile.contract_axes` feeds the cell key's contract
@@ -671,7 +671,7 @@ class Input(msgspec.Struct, frozen=True):
     as ONE argument). ``shape`` entries are :data:`AxisSpec`; a rank-0
     tensor is ``shape=()`` with ``value`` (sdxl's scalar timestep).
 
-    ``dtype`` is REQUIRED (pgw#1058): either a torch dtype name (wan's int64
+    ``dtype`` is REQUIRED: either a torch dtype name (wan's int64
     scalar timestep, ti2v's float32 per-token one) or the explicit word
     ``"model"`` — the resolved module's own dtype, stated on purpose. There
     is no default: an exported graph is dtype-specialized, so the ingress
@@ -693,7 +693,7 @@ class Input(msgspec.Struct, frozen=True):
 
     name: str
     shape: Tuple[AxisSpec, ...]
-    dtype: str = ""  # required; "" refused in __post_init__ (pgw#1058)
+    dtype: str = ""  # required; "" refused in __post_init__
     value: Optional[float] = None
     targets: Tuple[str, ...] = ()
     #: pgw#853: the parameter is a LIST of this many tensors, each of
@@ -743,7 +743,7 @@ class Input(msgspec.Struct, frozen=True):
             "value": self.value,
             "targets": list(self.targets),
         }
-        # pgw#846: an absent field is OMITTED, so every declaration written
+        # an absent field is OMITTED, so every declaration written
         # before this vocabulary existed serialises byte-identically.
         if self.repeat is not None:
             row["repeat"] = (list(self.repeat)
@@ -813,7 +813,7 @@ class Arg(msgspec.Struct, frozen=True):
             "name": self.name, "value": self.value,
             "targets": list(self.targets),
         }
-        # pgw#846: absent fields are OMITTED, so every declaration written
+        # absent fields are OMITTED, so every declaration written
         # before this vocabulary existed serialises byte-identically.
         if self.template is not None:
             row["template"] = _template_rows(self.template)
@@ -845,7 +845,7 @@ def dims_for_targets(
     args: Tuple[Arg, ...],
     targets: Sequence[str],
 ) -> Set[str]:
-    """The dim NAMES a target-scoped graph class must state (pgw#967).
+    """The dim NAMES a target-scoped graph class must state.
 
     A dim belongs to a target when one of its ``carried_by`` bindings names
     an :class:`Input` (or a templated :class:`Arg`) that target declares.
@@ -869,7 +869,7 @@ def dims_for_targets(
 
 
 def forks_for_targets(forks: Tuple[Fork, ...], targets: Sequence[str]) -> Set[str]:
-    """The fork NAMES a target-scoped graph class must state (pgw#967)."""
+    """The fork NAMES a target-scoped graph class must state."""
     if not targets:
         return {f.name for f in forks}
     want = set(targets)
@@ -939,7 +939,7 @@ def validate_contract(compile_decl: Any) -> None:
         if cls in seen:
             raise DeclarationError(f"Compile.classes repeats row #{i}: {cls.as_row()!r}")
         seen.add(cls)
-        # pgw#967: a row scoped to a target states that TARGET's dims and
+        # a row scoped to a target states that TARGET's dims and
         # forks. An unscoped row states all of them — the original rule,
         # unchanged for every declaration written before scoping existed.
         want_dims = dims_for_targets(dims, inputs, args, cls.targets)
@@ -991,7 +991,7 @@ def validate_contract(compile_decl: Any) -> None:
                     f"graph class #{i}: fork {name}={value!r} is not a "
                     f"declared arm (served: {sorted(map(repr, served_by_fork.get(name, set())))})")
 
-    # pgw#1158: the SAME question, asked from the arm's end. Every check above
+    # the SAME question, asked from the arm's end. Every check above
     # reads class -> arm ("does this class sit on an arm the fork declares?"),
     # so a SERVED arm no class covers passed silently — the declaration claims
     # to serve it, the mint traces nothing for it, and the first request on
@@ -1066,7 +1066,7 @@ def validate_contract(compile_decl: Any) -> None:
                 raise DeclarationError(
                     f"Input {inp.name!r} is declared twice for target {target!r}")
             names.add(inp.name)
-        # pgw#1158: ...and a declared target must end up with AT LEAST ONE.
+        # ...and a declared target must end up with AT LEAST ONE.
         # `target_inputs` scopes by `not inp.targets or target in inp.targets`,
         # so a target every row scopes AWAY from mints a plan with no declared
         # inputs at all — the trace has nothing to feed. This is refused
@@ -1085,7 +1085,7 @@ def validate_contract(compile_decl: Any) -> None:
     # A binding may belong to any target's inputs; refuse only when NO
     # declared row knows the name at all.
     #
-    # pgw#853: a TEMPLATED Arg is a legal carrier. qwen-image's H_pat/W_pat
+    # a TEMPLATED Arg is a legal carrier. qwen-image's H_pat/W_pat
     # genuinely enter the traced call at tuple positions 1 and 2 of
     # `img_shapes[b][0] = (frames, height, width)` — the endpoint's own
     # comment says the (name, index) pair is accurate and that "the
@@ -1123,7 +1123,7 @@ _declared: Dict[str, Any] = {}
 _import_failures: List[Tuple[str, str]] = []
 
 
-#: The export-contract vocabulary (pgw#1107). A ``Compile`` that carries ANY of
+#: The export-contract vocabulary. A ``Compile`` that carries ANY of
 #: these fields is DECLARING AN AOT EXPORT CONTRACT and is registered as one; a
 #: ``Compile`` that carries NONE of them is a dynamo-lane compile block and
 #: declares no export intent at all. That distinction is the tightening: the
@@ -1142,7 +1142,7 @@ EXPORT_CONTRACT_FIELDS: Tuple[str, ...] = (
 
 
 def declares_export_contract(decl: Any) -> bool:
-    """Whether this ``Compile`` declares an AOT export contract (pgw#1107).
+    """Whether this ``Compile`` declares an AOT export contract.
 
     False for a dynamo-only `compile=` block (shapes/targets/text_len/dynamic/
     regional and nothing else) — legitimate, and registered nowhere. True the
@@ -1170,7 +1170,7 @@ def register_export_declaration(
 
     pgw#1107 retired the CALLABLE form (pgw#853's thunk). Its job — letting a
     family that may not mint yet say so without taking the endpoint down at
-    import — is done by ``Compile(blockers=...)`` (pgw#1115), which the
+    import — is done by ``Compile(blockers=...)``, which the
     ``@endpoint(compile=)`` fold can actually carry. A callable cannot survive
     that fold at all, so it is refused here rather than silently dropped.
     """
@@ -1187,7 +1187,7 @@ def register_export_declaration(
     if family is not None and str(family).strip() != fam:
         raise DeclarationError(
             f"family= {family!r} does not match Compile.family {fam!r}")
-    # THE INVARIANT CARRIED OVER FROM `_Thunk.build()` (pgw#1107): a
+    # THE INVARIANT CARRIED OVER FROM `_Thunk.build()`: a
     # declaration in the export vocabulary that names no graph classes has
     # nothing to derive from. Before the tightening this could not fire from
     # the decorator at all — the gate filtered on `classes` and dropped such a
@@ -1246,7 +1246,7 @@ def registered_export_families() -> Tuple[str, ...]:
 def reset_export_declarations() -> None:
     """Drop every registration. Tests only.
 
-    Deliberately does NOT clear ``families.base._REGISTRY`` (pgw#1161). That
+    Deliberately does NOT clear ``families.base._REGISTRY``. That
     was tried and is wrong for the same reason pgw#1031 was: `@family`
     registration is an IMPORT SIDE EFFECT, so a registry emptied here can only
     be refilled by a re-import — and a module already in ``sys.modules``
@@ -1269,7 +1269,7 @@ def declaration_import_failures() -> Tuple[Tuple[str, str], ...]:
     """Every declaration module whose import raised, as (module, exception).
 
     :func:`import_export_declaration` deliberately swallows — an endpoint must
-    come up. The build gate (pgw#996) is where that swallow stops being
+    come up. The build gate is where that swallow stops being
     correct: an image whose declaration module cannot import ships an endpoint
     that declares AOT and mints nothing, and on a pod that is indistinguishable
     from an endpoint that never declared one.

@@ -110,7 +110,7 @@ def test_the_pools_sampler_sees_the_process_that_holds_the_memory(
          f"{sys.executable} {spawn_py} {alloc_py} {alloc} {marker} 20 & wait"],
         start_new_session=True)
     try:
-        # pgw#795/gw#666: bounded on PROGRESS, never on a clock. The advance
+        # bounded on PROGRESS, never on a clock. The advance
         # is the grandchild's RSS climbing — which is the very quantity under
         # test — and `gone` ends the wait immediately and definitively if the
         # fixture dies, with no duration involved.

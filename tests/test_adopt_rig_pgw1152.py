@@ -151,7 +151,7 @@ def test_the_arm_receives_the_type_PRODUCTION_builds_not_a_declaration(
 
     assert isinstance(boot.armed_cfg, CompileCell), type(boot.armed_cfg)
     assert not isinstance(boot.armed_cfg, Compile)
-    # …and the declared band really reaches the gate through it (pgw#1150).
+    # …and the declared band really reaches the gate through it.
     assert boot.armed_cfg.numerics_floor == cell868.FLOOR
     assert boot.armed_cfg.numerics_warn == cell868.WARN
 
@@ -226,7 +226,7 @@ def test_a_hub_that_serves_NO_RECEIPT_refuses_the_order(
     assert boot.is_armed() is False
     assert boot.holds_cell() is False, (
         "an unreceipted cell was wrapped onto the pipeline anyway")
-    # pgw#1122: an ordered arm this pod ordered ITSELF degrades to eager rather
+    # an ordered arm this pod ordered ITSELF degrades to eager rather
     # than failing the function, so the boot falls through to the ordinary
     # policy — a target is still registered (active-less, advertising the key
     # for peer adoption), and it must name NO artifact.

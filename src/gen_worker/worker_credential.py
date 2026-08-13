@@ -66,7 +66,7 @@ def install(token: str, expires_at_unix: float = 0.0) -> None:
 def install_bootstrap(settings: "Settings") -> None:
     """Hand this module the boot token, from the process entry's `Settings`.
 
-    pgw#931 (§1.18): `current()` used to reach for `get_settings()` itself,
+    `current()` used to reach for `get_settings()` itself,
     inside `getattr(..., "bootstrap_worker_jwt", "")` inside a bare
     `except Exception: return ""`. That is the DEFECT-TAXONOMY C8 shape on the
     field pgw#848 renamed precisely so a stale reader would raise: a getattr

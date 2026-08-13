@@ -1,4 +1,4 @@
-"""Canonical GRAPH identity (pgw#716).
+"""Canonical GRAPH identity.
 
 **What this digest is USED for (pgw#1031, Paul-ruled option a):** it is the
 pgw#917 same-class comparator, the per-entry ``graph_witness`` recorded on
@@ -37,7 +37,7 @@ nodes — so a node-only hash collides artifacts whose declared ENVELOPES differ
 adopt the ``[96,128]`` cell against a ``[64,160]`` key and 1024x1024 requests are
 refused by an artifact whose key promised to serve them. Symbolic ranges are the
 OPPOSITE of the non-semantic noise scrubbed below, and they are equally a defect
-for dynamo cells with declared dynamic dims (pgw#702), not only for ``.pt2``.
+for dynamo cells with declared dynamic dims, not only for ``.pt2``.
 
 What is SCRUBBED (non-semantic noise, the guard-manifest discipline):
 
@@ -277,7 +277,7 @@ def _render_bound(bound: Any) -> str:
 def _shape_env_ranges(graph: Any) -> Any:
     """The dynamo-side equivalent of ``ExportedProgram.range_constraints``:
     the ShapeEnv reachable from any symbolic dim in the graph. A dynamo cell
-    with declared dynamic dims has exactly the same collision (pgw#702)."""
+    with declared dynamic dims has exactly the same collision."""
     import torch
 
     for node in graph.nodes:
@@ -418,7 +418,7 @@ def digest_lines(lines: Iterable[str]) -> str:
     return hashlib.sha256(payload).hexdigest()[:_DIGEST_HEX]
 
 
-# pgw#1030: `combined_graph_hash` was deleted — it was a byte-identical,
+# `combined_graph_hash` was deleted — it was a byte-identical,
 # zero-caller duplicate of `aot_serve.combined_graph_hash`, which is the live
 # formula the stamped cell identity actually folds.
 

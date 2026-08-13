@@ -79,7 +79,7 @@ def _stub_build_flavor_tree(monkeypatch: pytest.MonkeyPatch, calls: list) -> Non
 
 
 # ---------------------------------------------------------------------------
-# pgw#589/th#901: dtype passthrough honesty.
+# dtype passthrough honesty.
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +155,7 @@ def test_non_cast_eligible_strategy_refuses_mismatch_loudly(
 
 
 # ---------------------------------------------------------------------------
-# pgw#593: classifier corpus (real-world-shaped filenames).
+# classifier corpus (real-world-shaped filenames).
 # ---------------------------------------------------------------------------
 
 
@@ -204,7 +204,7 @@ def test_classifier_refuses_oversized_unclassifiable_repo() -> None:
         classify_repo(["random_blob.bin"] * 3, sizes={"random_blob.bin": 200 * 1024**3})
 
 
-# th#960/pgw#609 Phase 2b: distinct classifier bug-classes with real incident
+# distinct classifier bug-classes with real incident
 # history, absorbed from tests/convert/test_classifier.py before its deletion
 # (its ~20 other tests cover shapes with no incident pin — collapsed here to
 # the ones that map to a real production failure or refusal-path regression).
@@ -288,7 +288,7 @@ def test_classifier_refuses_non_safetensors_only_repos(files: list, reason: str)
 
 
 # ---------------------------------------------------------------------------
-# pgw#566 (test-first, fix open): kohya-SGM SDXL adapter normalization.
+# kohya-SGM SDXL adapter normalization.
 # ---------------------------------------------------------------------------
 
 

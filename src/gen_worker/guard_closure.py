@@ -19,7 +19,7 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
 
 2. **Closure classifier** (:func:`classify`): the RelationalGuard family
    (aliasing, symbolic shapes) is judged by TYPE first — torch attaches it
-   to input managers, never predictably to one root (pgw#691). Every other
+   to input managers, never predictably to one root. Every other
    guard is classified by its SOURCE ROOT — module-rooted (``L['self']…``)
    guards are the weights/structure identity (covered by family +
    graph_signature + weight_contract key axes) and global-rooted (``G[…]``) guards are the
@@ -82,7 +82,7 @@ N-cold-pod zero-miss closure check: exit 0 = closed and consistent, 2 =
 leaks, 3 = cross-pod divergence.
 
 Note: ``_debug_get_cache_entry_list`` keys on the class-shared ``__code__``
-(pgw#637), so a warm process's dump can include same-family sibling entries;
+, so a warm process's dump can include same-family sibling entries;
 classification is source-based, so siblings classify identically.
 """
 
@@ -108,7 +108,7 @@ MANIFEST_VERSION = 1
 GATE_KEY = "gate"
 GATE_ADVISORY = "advisory"
 
-# Verdicts. LEAK and UNPROVEN are REPORTED, never fatal (pgw#756).
+# Verdicts. LEAK and UNPROVEN are REPORTED, never fatal.
 LEAK = "LEAK"
 UNPROVEN = "unproven"                    # guards unreadable on this torch build
 RUNTIME_STATE = "runtime-state"          # ambient process state (cell-key runtime axes)
@@ -179,7 +179,7 @@ _ID_SCRUB_RE = re.compile(r"(___check_(?:obj|type)_id\(.*?,\s*)\d+(\))")
 _COMMENT_RE = re.compile(r"\s{2,}#.*$", re.DOTALL)
 _TENSOR_MATCH_RE = re.compile(r"size=\[([^\]]*)\], stride=\[([^\]]*)\]")
 _SOURCE_LOCAL_RE = re.compile(r"^L\['([^']+)'\]")
-# pgw#733: torch 2.13 emits DERIVED guard sources that CONTAIN a local root
+# torch 2.13 emits DERIVED guard sources that CONTAIN a local root
 # without starting with it — `dict(type(L['self']).__mro__[1].__dict__)` for a
 # base-class @property (diffusers ConfigMixin.config, read in every model's
 # forward) and `type(L['self']._modules['x']).__dict__['forward'].__defaults__`
@@ -192,7 +192,7 @@ _SOURCE_EMBEDDED_GLOBAL_RE = re.compile(r"\bG[\['.]")
 
 class GuardClosureError(RuntimeError):
     """The mint produced no readable compiled graphs, or a stored manifest
-    is unreadable. NOTE (pgw#756): a classification LEAK no longer raises —
+    is unreadable. NOTE: a classification LEAK no longer raises —
     it is recorded in the manifest and emitted as a ``guard_leak`` event."""
 
 
@@ -205,7 +205,7 @@ class GuardBoundaryError(RuntimeError):
 
 class PostureError(GuardClosureError):
     """The process posture differs from the canonical serving posture or
-    from a cell's sealed posture (pgw#695). Named per fact — a posture
+    from a cell's sealed posture. Named per fact — a posture
     drift refuses the mint/arm loudly instead of surfacing later as an
     undiagnosable ambient guard miss."""
 
@@ -256,7 +256,7 @@ class ClosureReport:
 
     @property
     def unproven(self) -> Tuple[str, ...]:
-        """Entries whose guards could not be read (pgw#756). Reported, never
+        """Entries whose guards could not be read. Reported, never
         fatal: this is a fact about the torch build's guard debug surface,
         not about the mint."""
         return tuple(
@@ -320,7 +320,7 @@ class ContractPins:
     floats: frozenset
     has_dynamic: bool
     # Names the traced callable CLOSES OVER. A freevar renders exactly like a
-    # call input in a guard source (pgw#733), so the classifier needs the
+    # call input in a guard source, so the classifier needs the
     # callable's own vocabulary to tell them apart.
     freevars: frozenset = frozenset()
 
@@ -442,7 +442,7 @@ def extract_target_guards(
         try:
             rows = _entry_guard_rows(entry)
         except Exception as exc:  # noqa: BLE001 — recorded, never fatal
-            # pgw#756: the guards of a LIVE compiled graph were unreadable.
+            # the guards of a LIVE compiled graph were unreadable.
             # That is a torch-surface fact, not a mint defect, so it is
             # recorded as an UNPROVEN row and the mint continues.
             logger.warning(
@@ -514,7 +514,7 @@ def _source_root(source: str, freevars: frozenset = frozenset()) -> str:
     """The ROOT a guard source is rooted at: self / input / freevar / global /
     ambient, or "other" when nothing recognizable is embedded.
 
-    pgw#733: resolves the root EMBEDDED anywhere in a derived source, not just
+    resolves the root EMBEDDED anywhere in a derived source, not just
     a prefix. torch 2.13 wraps class/code-structure facts in expressions like
     ``dict(type(L['self']).__mro__[1].__dict__)`` — semantically self-rooted,
     and covered by the type dispatch — but a prefix match sees "other" and
@@ -542,7 +542,7 @@ def _source_root(source: str, freevars: frozenset = frozenset()) -> str:
     name = m.group(1)
     if name == "self":
         return "self"
-    # pgw#733 (second bug, latent today): a closure FREEVAR renders exactly
+    # a closure FREEVAR renders exactly
     # like a call input, so `L['outer_scale'] == 0.3` was judged an input and
     # leaked with the wrong name. Production roots are bound `forward` methods
     # with no freevars; naming it correctly keeps the check and fixes the
@@ -696,7 +696,7 @@ def classify(
         return LEAK, f"unclassified ambient guard {guard_type}"
     if root == "other":
         return LEAK, f"unrecognized guard source {source!r}"
-    # input- and freevar-rooted share ONE dispatch (pgw#733): a wrapper's
+    # input- and freevar-rooted share ONE dispatch: a wrapper's
     # captured code object is code (its identity/structure is pinned by
     # code_closure + toolchain), while a captured runtime SCALAR is not — and
     # _scalar_verdict already draws exactly that line. What the freevar root
@@ -738,7 +738,7 @@ def _classify_row(
 
 
 # ---------------------------------------------------------------------------
-# Process-posture seal (pgw#695)
+# Process-posture seal
 # ---------------------------------------------------------------------------
 
 # The ONE canonical serving posture. Every fact is ambient process state a
@@ -761,7 +761,7 @@ CANONICAL_POSTURE: Dict[str, str] = {
 
 def posture_snapshot() -> Dict[str, str]:
     """The live process posture in canonical string form. On a torchless
-    worker the only honest fact is the absence itself (pgw#788)."""
+    worker the only honest fact is the absence itself."""
     torch = torch_capability.torch_or_none()
     if torch is None:
         return {"torch": torch_capability.ABSENT}
@@ -797,7 +797,7 @@ def establish_posture() -> Dict[str, str]:
     foreign torch-function mode, a moved default device) REFUSE with a named
     :class:`PostureError` instead.
 
-    pgw#788: a torchless worker has no grad mode, no autocast stack and no
+    a torchless worker has no grad mode, no autocast stack and no
     default device to set or refuse. It seals the absence and boots."""
     torch = torch_capability.torch_or_none()
     if torch is None:
@@ -838,7 +838,7 @@ def _canonical_tensor(t: Any, path: str, label: str, dtypes: Dict[str, str]) -> 
     if tuple(t.stride()) != want:
         t = t.contiguous()
         if tuple(t.stride()) != want:
-            # ie#544: a size-1 dim keeps is_contiguous() true under an
+            # a size-1 dim keeps is_contiguous() true under an
             # arbitrary stride, making .contiguous() a no-op while
             # TENSOR_MATCH guards the exact stride tuple. The layout is
             # already contiguous, so restating the strides is safe.

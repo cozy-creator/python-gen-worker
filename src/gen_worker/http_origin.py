@@ -48,7 +48,7 @@ __all__ = [
     "REQUEST_DETERMINED_STATUSES",
 ]
 
-# pgw#987: statuses whose cause is a property of the REQUEST WE SENT, not of
+# statuses whose cause is a property of the REQUEST WE SENT, not of
 # who answered. The same bytes earn the same refusal from the hub, from a
 # proxy, and from anything else in the path, forever — so "did the hub itself
 # answer?" is not the question, and the retry-biased default below (which
@@ -93,7 +93,7 @@ def response_is_from_hub(resp: Any) -> bool:
     # `publishError.body()` (tensorhub `internal/api/repo_publish.go`) emits the
     # code as a STRING, not an object — so every publish refusal was read as
     # proxy-shaped and RETRIED under the silence window. Measured live on a v2
-    # publish (th#1303): a 422 from `/publishes/{id}/complete` was retried, the
+    # publish: a 422 from `/publishes/{id}/complete` was retried, the
     # retry hit the now-terminal session and returned 409 `publish_repudiated`,
     # and the ORIGINAL 422 — the only response that said WHY — was discarded.
     # A retry loop that converts a diagnosable refusal into a different, later
@@ -150,6 +150,6 @@ def is_definite_hub_answer(resp: Any) -> bool:
         # `message`, matching neither shape below. Ten minutes of a paid pod
         # re-sending a body that could never be accepted, and the typed event
         # that reached the hub said "network" while the hub's own log said
-        # `413`. That mislabelled error produced a wrong P0 (th#1644).
+        # `413`. That mislabelled error produced a wrong P0.
         return True
     return response_is_from_hub(resp)

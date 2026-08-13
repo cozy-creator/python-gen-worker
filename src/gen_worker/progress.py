@@ -1,4 +1,4 @@
-"""Progress registry (gw#621 / th#994): named monotonic counters for
+"""Progress registry: named monotonic counters for
 long-running phases.
 
 Long phases register a counter (download per-ref bytes, watchdog evidence
@@ -71,7 +71,7 @@ class Snapshot:
     #: The scope that owns this counter ("" = unowned/process-wide). LAST and
     #: defaulted on purpose: a Snapshot is constructed by hand in tests and by
     #: readers that do not care whose counter it is, and a new field must be
-    #: additive rather than a positional break (pgw#894).
+    #: additive rather than a positional break.
     owner: str = ""
 
 
@@ -136,7 +136,7 @@ def counter(
 ) -> Counter:
     """Register-or-get the open counter `name` within `owner` (idempotent).
 
-    ``owner`` scopes the counter to the work it describes (pgw#894). Two
+    ``owner`` scopes the counter to the work it describes. Two
     scopes may use the same NAME — two concurrent requests both counting
     ``infer:steps`` is the ordinary case — and neither can advance the
     other's clock.
@@ -188,7 +188,7 @@ def freshest(owner: Optional[str] = None) -> Optional[Snapshot]:
     what a "did this pod wedge" question wants.
 
     ``owner="..."`` is the SCOPE view, and it is the one a stall verdict must
-    use (pgw#894). A mint asking "am I still advancing" must not be answered
+    use. A mint asking "am I still advancing" must not be answered
     by a request that happens to be running beside it.
     """
     snaps = snapshot(owner)
@@ -209,7 +209,7 @@ def self_diagnosis(owner: Optional[str] = None) -> Optional[Snapshot]:
     Counter LIFETIME still has to be honest within a scope: a counter left
     open after its producer's phase ended is the min-age counter of a phase it
     knows nothing about, and confesses for it. `Activity.counter()` scopes
-    them to the phase for that reason (pgw#962)."""
+    them to the phase for that reason."""
     fresh = freshest(owner)
     if fresh is not None and fresh.age_s > fresh.window_s:
         return fresh

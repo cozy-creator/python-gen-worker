@@ -28,7 +28,7 @@ def _env(gpu_count: int, degree: int, parallel: str = "sequence") -> dict:
 
 def test_multi_gpu_execution_group_is_served() -> None:
     # 4x H100 delivered as two degree-2 groups: a legal hub decision, and now
-    # a SERVED one — per-group process groups (pgw#773/#774) plus
+    # a SERVED one — per-group process groups plus
     # topology-derived placement (the residual, see
     # test_group_device_map_pgw773.py) leave nothing to refuse.
     topo = delivered_topology(_env(4, 2), interconnect="nvlink", peer_gbps=272.6)

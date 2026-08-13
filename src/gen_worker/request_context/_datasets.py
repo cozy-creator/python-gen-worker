@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatasetRefNotFound(RuntimeError):
-    """No dataset exists at the requested address (th#1259).
+    """No dataset exists at the requested address.
 
     Internal marker only: these helpers see an opaque id and cannot know
     whether the caller or the platform chose it. ``resolve_dataset`` — the
@@ -39,9 +39,9 @@ _DOWNLOAD_RETRIES = 3
 _DOWNLOAD_BACKOFF_S = 1.0
 _CHUNK_BYTES = 1024 * 1024
 
-# DATASET-V2 202 contract (th#691).
+# DATASET-V2 202 contract.
 #
-# gw#666 (th#1166 finding F): the old `_MATERIALIZE_BUDGET_S = 30 min` gave up
+# the old `_MATERIALIZE_BUDGET_S = 30 min` gave up
 # on a materialization purely because a stopwatch expired. What the hub
 # actually reports is a DEFINITE state per poll — `202 building`, `503
 # snapshot_build_failed` (typed, terminal), or the manifest — and every poll
@@ -153,12 +153,12 @@ def fetch_materialize_manifest(
     Returns (snapshot_id, entries); entries carry
     {path, url?, size_bytes?, checksum?, inline_text?, blob_digest?}.
 
-    DATASET-V2 async contract (th#691 / gw#457): the hub may answer
+    DATASET-V2 async contract: the hub may answer
     202 ``{status: building, state_version, retry_after}`` while the snapshot
     builds in the background. We long-poll (``?wait=``, ignored by pre-v2
     hubs) and retry with backoff, honoring ``retry_after``.
 
-    There is NO total budget (gw#666). A 202 is the hub definitively saying
+    There is NO total budget. A 202 is the hub definitively saying
     the build is live, and each poll re-enqueues the unique build job, so the
     loop waits as long as the hub keeps answering. A typed
     ``snapshot_build_failed`` raises ``SnapshotBuildFailedError`` — that is
@@ -270,7 +270,7 @@ _DIGEST_HASHERS: Dict[str, Callable[[], Any]] = {
 def _expected_digest(entry: Dict[str, Any]) -> str:
     """The entry's ALGORITHM-TAGGED checksum, or raise.
 
-    pgw#882: this used to default a bare 64-hex to ``blake3:``. Both digests
+    this used to default a bare 64-hex to ``blake3:``. Both digests
     are 32 bytes, so the length names no algorithm and a guess is a coin flip
     that verifies nothing when it loses. An untagged or absent checksum is now
     a refusal — there is no spelling of "download it unverified".
@@ -295,7 +295,7 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     Writes to a UNIQUE temp file in ``dest``'s directory then renames, so a
     partial download can never be mistaken for a complete shard.
 
-    pgw#945: this site is RACY, and it was the one of pgw#938's three that
+    this site is RACY, and it was the one of pgw#938's three that
     is. ``resolve_dataset`` materializes into a pod-wide content-keyed cache
     (``/tmp/gen_worker_datasets/<owner>/<name>/<snapshot>``), so two requests
     in one container asking for one dataset arrive at the SAME ``dest`` — and
@@ -308,14 +308,14 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     removes the shared object entirely; the rename stays atomic, and two
     winners simply publish the same verified bytes.
 
-    pgw#1013: the size comparison used to sit after the loop, where the bytes
+    the size comparison used to sit after the loop, where the bytes
     are already on disk and the only thing it can report is how far past the
     declaration the shard went. The declared size is known before the first
     byte, so it caps the stream; an entry that declares none falls back to the
     destination filesystem, which is what an unbounded shard exhausts.
     """
 
-    # pgw#1206 B: ONE verified-download discipline (`hubio.fetch.fetch_once`)
+    # ONE verified-download discipline (`hubio.fetch.fetch_once`)
     # — writer-unique `.part` staging, the byte cap inside the stream loop,
     # tag-dispatched digest verification, durable atomic rename. This
     # wrapper keeps the dataset policy: `_expected_digest` upstream already

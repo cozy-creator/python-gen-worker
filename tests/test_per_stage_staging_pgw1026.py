@@ -4,7 +4,7 @@ ie#615's H3 bring-up: a 134.1 GiB tree plus the 8 GiB staging floor against
 116.4 GiB of host RAM refused structurally (``HostRamCapacityError``) on a
 pod whose card story te#171 had already proved. Host RAM bound ~26 GiB
 tighter than VRAM purely because staging was all-or-nothing while the load
-was already component-sequential (pgw#1041). Two halves, both here:
+was already component-sequential. Two halves, both here:
 
 * the LOADER places each component as it lands and drops the host copy, so
   the host-RAM high-water mark is one component instead of the tree;

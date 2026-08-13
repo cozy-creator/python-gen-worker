@@ -41,7 +41,7 @@ _PROC_MOUNTS = Path("/proc/mounts")
 _GIB = 1024 ** 3
 
 # Filesystems whose contents die with the container's memory — i.e. exactly
-# the death this record exists to report (pgw#657).
+# the death this record exists to report.
 _VOLATILE_FSTYPES = {"tmpfs", "ramfs"}
 
 _BOOT_RECORD_NAME = "gen-worker-boot-record.json"
@@ -71,7 +71,7 @@ def _fstype_for(path: Path, mounts: Path = _PROC_MOUNTS) -> str:
 def boot_record_is_volatile(path: Path, mounts: Path = _PROC_MOUNTS) -> bool:
     """Whether the record's carrier is wiped by the very death it instruments.
 
-    pgw#657: the record used to be unconditionally ``/tmp``, which on many
+    the record used to be unconditionally ``/tmp``, which on many
     container images is tmpfs — RAM. A cgroup OOM kill (the headline case this
     module reports) frees that RAM, so the evidence dies with the process and
     the next boot finds nothing, indistinguishable from "no death happened".
@@ -160,7 +160,7 @@ def _deepest(name: str) -> Optional[Path]:
     return None
 
 
-# ---- cgroup v1 (pgw#1041) --------------------------------------------------
+# ---- cgroup v1 --------------------------------------------------
 #
 # RunPod's AP-JP-1 H100 hosts (and any other cgroup-v1 fleet) mount the
 # memory controller at /sys/fs/cgroup/memory and have NO memory.max /
@@ -222,14 +222,14 @@ def container_limits() -> Dict[str, Any]:
     facts["memory_events"] = _read_keyed(ev) if ev else {}
     facts["cgroup_flavor"] = "v2" if mem_max is not None else "none"
     if mem_max is None and (_V1_MEM / "memory.limit_in_bytes").exists():
-        # pgw#1041: v1 host — the same facts under their v1 names.
+        # v1 host — the same facts under their v1 names.
         facts["cgroup_flavor"] = "v1"
         facts["memory_max_bytes"] = _v1_int("memory.limit_in_bytes")
         facts["memory_current_bytes"] = _v1_int("memory.usage_in_bytes")
         facts["memory_peak_bytes"] = _v1_int("memory.max_usage_in_bytes")
         facts["memory_swap_max_bytes"] = _v1_int("memory.memsw.limit_in_bytes")
         facts["memory_events"] = _v1_oom_control()
-    # pgw#975: the one fact that decides whether the pgw#763 split can report at
+    # the one fact that decides whether the pgw#763 split can report at
     # all. `memory.oom.group=1` makes the kernel kill the whole cgroup as a unit
     # — parent included — and `mem_cgroup_get_oom_group()` is consulted on the
     # GLOBAL oom path too, so `memory.max=unlimited` does not rule it out. We
@@ -368,7 +368,7 @@ def format_detail(
             _gb(limits.get("memory_swap_max_bytes")),
         )
     )
-    # pgw#975: `1` means the kernel kills the cgroup as a unit and this very
+    # `1` means the kernel kills the cgroup as a unit and this very
     # report is only reaching you because the parent happened to outlive it.
     oom_group = limits.get("memory_oom_group")
     head.append(
@@ -419,7 +419,7 @@ def write_boot_record(path: Path = BOOT_RECORD_PATH, **extra: Any) -> None:
         "oom_kill_at_boot": oom_kill_count(),
         "limits": container_limits(),
         # Carried IN the record so a reader can tell "the pod did not die"
-        # from "the evidence was on RAM and died with it" (pgw#657).
+        # from "the evidence was on RAM and died with it".
         "carrier_volatile": volatile,
     }
     record.update(extra)
@@ -482,7 +482,7 @@ def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
             "kill, container restart, or external kill)"
         ),
     }
-    # pgw#676: the previous process's in-flight marker + fault dump are the
+    # the previous process's in-flight marker + fault dump are the
     # death's attribution; consuming them here also feeds the crash registry
     # so this boot's gate can refuse a crash-streak function.
     extra.update(attribute_all_signal_deaths(
@@ -498,7 +498,7 @@ def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
     )
 
 
-# ---- in-flight marker + native-crash streaks (pgw#676) --------------------
+# ---- in-flight marker + native-crash streaks --------------------
 #
 # exit_code=139 used to reach the hub carrying NOTHING: no frame, no function,
 # and the restarted process would take the same request shape and die again —
@@ -533,7 +533,7 @@ def _sibling(name: str) -> Path:
     return BOOT_RECORD_PATH.parent / name
 
 
-# pgw#938: a compute group is a separate OS process.  Its transient markers
+# a compute group is a separate OS process.  Its transient markers
 # therefore need one writer just as its inductor cache does; otherwise one
 # child replaces or truncates a sibling's evidence.  The crash registry stays
 # pod-wide on purpose: it is the worker-level refusal fact consumed by every
@@ -840,7 +840,7 @@ def compile_marker(label: str) -> str:
 def compile_crash_rows(
     path: Optional[Path] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Crash-registry rows attributed to background compiles (pgw#714)."""
+    """Crash-registry rows attributed to background compiles."""
     return {
         fn: row for fn, row in native_crash_streaks(path).items()
         if fn.startswith(_COMPILE_FN_PREFIX)
@@ -859,7 +859,7 @@ def attribute_signal_death(
     the in-flight markers (consumed), the fault-dump tail, and — for each
     marker naming a function — the recorded crash streak.
 
-    pgw#714: when a ``compile`` marker is in flight, the streak is recorded
+    when a ``compile`` marker is in flight, the streak is recorded
     ONLY against the compile marker(s) — a background dynamo/inductor
     compile racing (or serialized next to) a tenant forward is the native
     suspect, and charging the request's function refuses serving and
@@ -887,7 +887,7 @@ def attribute_signal_death(
     tail = fault_dump_tail(dump_path)
     if tail:
         extra["fault_dump_tail"] = tail
-    # pgw#1041: a death mid-load names the phase/component and last byte
+    # a death mid-load names the phase/component and last byte
     # count — the difference between "SIGKILL" and "SIGKILL at
     # hydrate:transformer, 48.2/94.3 GiB staged".
     progress = take_load_progress(load_progress_path)

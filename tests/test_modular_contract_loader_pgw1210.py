@@ -20,7 +20,7 @@ one artifact shape has two entry points, and two dispatches that agree today
 are two dispatches that will disagree later. `contract_loaded_component` is now
 the only place that decides, and both callers ask it.
 
-wan-2.2's fp8 lane (ie#702) is the sibling consumer — it binds a produced fp8
+wan-2.2's fp8 lane is the sibling consumer — it binds a produced fp8
 tree on the non-modular path — which is why "keep both entry points on one
 dispatch" was the filing's own requirement.
 """

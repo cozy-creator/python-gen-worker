@@ -1,4 +1,4 @@
-"""Touch the hub while the job is busy elsewhere (pgw#743).
+"""Touch the hub while the job is busy elsewhere.
 
 A clone spends ~58 minutes downloading from HuggingFace and makes NOT ONE hub
 request in that time. Both recorded losses of a paid 53 GiB download landed on

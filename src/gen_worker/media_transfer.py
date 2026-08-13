@@ -1,4 +1,4 @@
-"""GPU->host frame staging for the video encode path (gw#549).
+"""GPU->host frame staging for the video encode path.
 
 The finalize wall and the D2H stall inside the compute wall are CPU/PCIe
 bound (ie#484: identical GPU step-ms, 4-10x spread in decode/encode tails).

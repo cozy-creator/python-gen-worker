@@ -146,7 +146,7 @@ def run_warm_job(
         payload = job.build(tmp)
         if payload is None:
             return
-        # pgw#828: the SAME construction the executor's warm path uses. This
+        # the SAME construction the executor's warm path uses. This
         # was three hand-rolled contexts, and one of them had no slots at all —
         # `ctx.slots["pipeline"]` raised `KeyError: 'pipeline'` on a real L4
         # after a 16.45 s load.

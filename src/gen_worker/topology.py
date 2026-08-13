@@ -35,7 +35,7 @@ to what has always shipped.
 An absent ENV VAR is a legal state, never an error: every CPU pod and every pod
 created before the field existed has no topology and keeps the historical
 single slot. An absent FIELD inside a *present* object is the opposite — a
-typed refusal (th#1385), because both producers always write ``gpu_count`` and
+typed refusal, because both producers always write ``gpu_count`` and
 the degree, so an object missing one did not come from a producer this contract
 knows, and defaulting it reads as ONE SLOT. Everything *present but not fully
 recognised* is likewise a typed refusal — never a silent fallback. That covers
@@ -199,7 +199,7 @@ KEY_GPUS_PER_GROUP = "gpus_per_execution_group"
 KEY_EXECUTION_GROUPS = "execution_groups"
 KEY_PARALLEL = "parallel"
 
-# th#1375's pre-rename spelling. NO LONGER EMITTED (pgw#950) — ``as_dict``
+# th#1375's pre-rename spelling. NO LONGER EMITTED — ``as_dict``
 # writes the canonical names only, which every hub already reads: tensorhub's
 # ``reconcileAlias`` treats an absent legacy key as "not written".
 #
@@ -223,7 +223,7 @@ _KNOWN_KEYS = frozenset({
     LEGACY_KEY_GPUS_PER_GROUP, LEGACY_KEY_EXECUTION_GROUPS,
 })
 
-# th#1385/pgw#870: a CEILING, not just a floor, and the same number on both
+# a CEILING, not just a floor, and the same number on both
 # sides (tensorhub ``topology.MaxGPUCount``). Without one the decoder accepts
 # any wire integer and ``all_groups()`` / ``group()`` over it is unbounded work
 # on a number no producer could have meant. The largest pod the fleet rents is
@@ -355,7 +355,7 @@ class ExecutionTopology:
         """``group_ordinal`` without the floor: a typed refusal instead.
 
         The floor exists so a single-group pod cannot index off the end. On a
-        wide pod flooring is the silent bug (pgw#779): every dispatch the hub
+        wide pod flooring is the silent bug: every dispatch the hub
         got wrong lands on group 0, which is also the group that is always
         busiest.
         """
@@ -461,7 +461,7 @@ class ExecutionTopology:
             written"; anything that is not a JSON integer is a TYPED decode
             refusal.
 
-            pgw#870: this used to accept any ``(int, float)`` and then compare
+            this used to accept any ``(int, float)`` and then compare
             ``int(value) != value``, which let an integral float through
             (``2.0`` -> 2, where the hub refuses) and let ``NaN``/``Infinity``
             — which ``json.loads`` accepts as non-standard literals — reach
@@ -483,7 +483,7 @@ class ExecutionTopology:
             return value
 
         def _aliased(key: str, legacy_key: str) -> Optional[int]:
-            """One field under either spelling (th#1375/#1376).
+            """One field under either spelling.
 
             Both present must AGREE. During the transition every hub emits
             both, so a disagreement is not a stale producer to be tolerated —
@@ -510,7 +510,7 @@ class ExecutionTopology:
                 return legacy_value
             return new_value
 
-        # pgw#870: TYPE-CHECK BEFORE DEFAULTING. This was
+        # TYPE-CHECK BEFORE DEFAULTING. This was
         # ``obj.get(KEY_PARALLEL) or ""``, the `or 1` launder in a second
         # field: every falsy non-string (``false``, ``0``, ``[]``, ``{}``)
         # became PARALLEL_NONE before the isinstance guard could see it, so
@@ -524,7 +524,7 @@ class ExecutionTopology:
             )
         else:
             parallel = parallel_raw
-        # th#1385: an ABSENT field is a refusal, not a default. The hub and
+        # an ABSENT field is a refusal, not a default. The hub and
         # this worker both always emit gpu_count and the degree (under one
         # spelling or the other), so an object missing either did not come
         # from a producer this contract knows — and a default reads it as
@@ -589,7 +589,7 @@ def delivered_topology(
     """The topology this worker will actually execute.
 
     Applies the same fabric gate the hub applies at Hello — the SAME two-term
-    predicate (pgw#818): a group the *platform* shards is sold on a proven
+    predicate: a group the *platform* shards is sold on a proven
     interconnect, so unless this pod's own boot canary measures ``nvlink``
     AND ``peer_gbps >= SP_MIN_PEER_GBPS`` the group is demoted to ``G×1``
     rather than served at a promise the hardware cannot keep. Class alone is

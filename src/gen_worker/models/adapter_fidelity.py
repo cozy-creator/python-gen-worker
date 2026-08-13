@@ -11,7 +11,7 @@ a perturbation larger than the adapter and 99.7% orthogonal to it.
 
 The guards that existed could not see this:
 
-* ``utils.lora._reject_zero_delta`` (th#1036) catches an EMPTY adapter — no
+* ``utils.lora._reject_zero_delta`` catches an EMPTY adapter — no
   down/up pair with both halves nonzero. An INERT adapter is fully populated;
   it dies in the cast, not in the file.
 * te#86's produce-time detector (``conversion/fuse_checks.py``) is advisory by
@@ -74,7 +74,7 @@ from ..api.errors import AdapterFidelityRefused
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Policy (pgw#794). Named and derived, never a buried constant.
+# Policy. Named and derived, never a buried constant.
 # ---------------------------------------------------------------------------
 
 #: The gated quantity is the **norm-weighted whole-adapter cosine** between the
@@ -190,7 +190,7 @@ class UnknownComputeDtypeError(RuntimeError):
     * a pgw#727 fp8-storage leaf records ``compute_dtype`` at restructure
       (``fp8_storage.restructure_fp8_storage``), because its own ``forward``
       upcasts to it;
-    * ``_Fp8ScaledLinear`` records it in ``__init__`` (pgw#1015).
+    * ``_Fp8ScaledLinear`` records it in ``__init__``.
 
     So there is no dtype-less caller left, and a default here can only be a
     module that FORGOT to record the fact — which is exactly what pgw#1015
@@ -210,7 +210,7 @@ def branch_compute_dtype(mod: Any) -> Any:
     the fp8-storage lane weight AND bias rest in fp8, and a pgw#727 leaf
     declares ``compute_dtype`` for exactly this question.
 
-    REFUSES rather than defaulting (pgw#1019) — see
+    REFUSES rather than defaulting — see
     :class:`UnknownComputeDtypeError` for why every legitimate caller can
     answer.
     """
@@ -364,7 +364,7 @@ class AdapterSurvival:
 
     @property
     def verdict(self) -> str:
-        # pgw#817: ONE ladder, calibrated per population. The rungs and the
+        # ONE ladder, calibrated per population. The rungs and the
         # ordering live in `numerics_ladder`; only the numbers are ours.
         return ADAPTER_THRESHOLDS.verdict(self.cosine, self.retention)
 
@@ -393,7 +393,7 @@ class AdapterSurvival:
 
 def _as_2d(t: Any) -> Any:
     """A [r, ...] or [out, r(, 1, 1)] adapter half as a 2-D matrix. Conv pairs
-    (gw#627) fold the kernel into the input axis — the delta's element set is
+ fold the kernel into the input axis — the delta's element set is
     unchanged, and the Gram identities below only need consistent shapes."""
     return t.reshape(t.shape[0], -1) if t.dim() != 2 else t
 

@@ -65,7 +65,7 @@ def _manifest_families(manifest: Dict[str, Any]) -> Set[str]:
 
     The hub applies `modelfamily.IsKnown` in three places on this document —
     `slots[].family` and `bindings[].family` (manifest_contract.go, the walk
-    attempt-27 actually hit) and `compile.family` (th#1310) — so the fence
+    attempt-27 actually hit) and `compile.family` — so the fence
     collects all of them plus `config_family`, rather than guessing which gate
     a future member will trip first.
     """

@@ -23,7 +23,7 @@ Layers under test, all real logic (fakes only at the torch module boundary):
    through ONE ``selected_by=`` slot all stay hot (zero re-setups on the
    second round).
 
-Serve-while-downloading (pgw#638) is deliberately absent — see that issue:
+Serve-while-downloading is deliberately absent — see that issue:
 the naive fix breaks the P2 mutable-tag identity fence and was reverted.
 """
 
@@ -166,7 +166,7 @@ def test_lru_victims_order_multi_holder_shared_last() -> None:
 
 
 def test_release_shared_leaves_entry_resident_for_the_next_pick() -> None:
-    # pgw#636: no eager drain — a hot GPU keeps components resident; the
+    # no eager drain — a hot GPU keeps components resident; the
     # next pick with equal bytes aliases them for free.
     res = _budget_residency(24)
     key = _key("text_encoder", "a" * 32)

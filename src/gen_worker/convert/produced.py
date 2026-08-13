@@ -51,7 +51,7 @@ class ProducedFlavor(msgspec.Struct):
       - flavor: optional PRODUCER-LOCAL label such as ``bf16``, ``fp8`` or
         ``int4``. pgw#1159: it is NOT published and it names no catalog row —
         th#1803 deleted the flavor as an address. It classifies the placement
-        stamp (th#697) and names the publish's activity legs; when empty the
+        stamp and names the publish's activity legs; when empty the
         ``dtype`` attribute is used. What the bytes ARE is stated by the
         ``dtype`` attribute and, when the producer knows it, an
         ``artifact_contract`` attribute (``ns.name@N``, PROVEN hub-side

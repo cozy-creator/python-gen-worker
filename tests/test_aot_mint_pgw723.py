@@ -100,7 +100,7 @@ class BakedBufferModule(torch.nn.Module):
 
 
 class PlainAttrModule(torch.nn.Module):
-    """The measured false-PASS case (pgw#725): the adapter lives in plain
+    """The measured false-PASS case: the adapter lives in plain
     ``__dict__``, so packing renames it to ``_tensor_constant0`` and a
     package-side FQN scan finds no ``lora_*`` name at all."""
 
@@ -224,7 +224,7 @@ CELL_ENTRY = "unet/B=4"
 def _only(result):
     """The ONE entry a single-class mint produced.
 
-    pgw#1176: a mint returns a SET of independently keyed artifacts. These
+    a mint returns a SET of independently keyed artifacts. These
     vehicles declare one class, so unpacking asserts that arity instead of
     indexing past a set nobody checked.
     """
@@ -399,7 +399,7 @@ def test_unbindable_constants_are_named(packages: Dict[str, Path]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#728 — strict is doctrine, and the manifest must prove it describes
+# strict is doctrine, and the manifest must prove it describes
 # the package it ships with
 # ---------------------------------------------------------------------------
 
@@ -419,7 +419,7 @@ def test_package_only_drift_is_refused_and_names_the_fqns(
 
     Nothing would bind it, and invoking a code-only package with an unbound
     constant segfaults inside AOTICompiledModel.__call__. A strict/non-strict
-    trace mix (pgw#728) surfaces here too.
+    trace mix surfaces here too.
     """
     class _Empty:
         graph_signature = None
@@ -456,7 +456,7 @@ def test_mint_refuses_a_package_wanting_undeclared_constants(
     tmp_path: Path, _gpu_runtime: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wired into the mint, not merely available — and the refusal NAMES the
-    entry (pgw#758)."""
+    entry."""
     monkeypatch.setattr(
         aot_package, "program_constant_fqns", lambda _p: ())
     with pytest.raises(aot_mint.MintRefused, match="constant-set drift") as err:
@@ -531,7 +531,7 @@ def test_minted_metadata_pins_the_trace_mode(cell: Dict[str, Any]) -> None:
     drifted["strict_export"] = False
     reason = aot_serve.verify_contract(drifted)
     assert "class_hash does not match its recorded facts" in reason
-    assert CELL_ENTRY in reason  # the refusal NAMES the class (pgw#716)
+    assert CELL_ENTRY in reason  # the refusal NAMES the class
 
 
 # ---------------------------------------------------------------------------
@@ -779,7 +779,7 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     assert meta["weight_lane"] == "w8a8"
     assert meta["cell_key"] == row.key
     assert meta[cell_key.ENTRY_BLOCK_KEY]["name"] == CELL_ENTRY
-    # pgw#1176: the manifest label rides the artifact as telemetry; identity
+    # the manifest label rides the artifact as telemetry; identity
     # is `cell_key`, which is this ONE class's.
     assert meta["manifest_digest"]
 
@@ -800,7 +800,7 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     assert entry["graph"]["specialization"]["gemm_mode"] == "pertensor"
     assert entry["graph"]["specialization"]["shape_strategy"] == "static-rows"
     assert meta["toolchain"] and meta["sm"] == "sm_89"
-    # pgw#1034: the envelope records NO `code_closure` — nothing ever read it.
+    # the envelope records NO `code_closure` — nothing ever read it.
     assert "code_closure" not in meta
     assert aot_mint.cell_identity(meta).digest == row.key
 
@@ -808,7 +808,7 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
     # on the RESULT/published metadata, never in the packed envelope (the
     # tar must stay byte-deterministic for the #699 double-mint compare).
     assert "mint_phases" not in meta
-    # pgw#1176: the phase table is a property of the MINT RUN, so every
+    # the phase table is a property of the MINT RUN, so every
     # entry's metadata carries the same one — it is the run's record, not an
     # artifact's identity.
     table = _only(result).metadata["mint_phases"]
@@ -973,10 +973,10 @@ def test_cell_key_differs_when_ONLY_the_declared_range_differs(
     assert (narrow[cell_key.ENTRY_BLOCK_KEY]["range_digest"]
             != wide[cell_key.ENTRY_BLOCK_KEY]["range_digest"])
     # The range digest folds into the per-class hash, the class hash into the
-    # combined hash, the combined hash into the key (pgw#716/#758).
+    # combined hash, the combined hash into the key.
     assert (narrow[cell_key.ENTRY_BLOCK_KEY]["class_hash"]
             != wide[cell_key.ENTRY_BLOCK_KEY]["class_hash"])
-    # pgw#1176: the graph axis IS this class's hash, so a declared-range
+    # the graph axis IS this class's hash, so a declared-range
     # change moves the key directly rather than through a combined digest.
     assert narrow["cell_key"] != wide["cell_key"]
     assert narrow["cell_key"] != wide["cell_key"], (
@@ -1089,7 +1089,7 @@ def test_publish_passes_the_keyed_metadata_through(
             artifact=tmp_path / "cell.tar.gz", metadata=meta),),
         manifest="m0", timings={})
     publisher = _RecordingPublisher()
-    # pgw#1176: publish is PER ENTRY and answers {key -> checkpoint}.
+    # publish is PER ENTRY and answers {key -> checkpoint}.
     assert aot_mint.publish(result, publisher) == {
         meta["cell_key"]: "checkpoint-1"}
     family, _artifact, sent = publisher.calls[0]
@@ -1121,7 +1121,7 @@ def test_cli_reports_a_bad_request(tmp_path: Path, capsys: Any) -> None:
 
 def test_cli_loads_a_full_request(tmp_path: Path) -> None:
     """A cell-level request: family + lane facts, NO coordinate — the class
-    set derives from the declaration (pgw#758)."""
+    set derives from the declaration."""
     request = tmp_path / "req.json"
     request.write_text(json.dumps({
         "family": "sdxl", "weight_lane": "w8a8",
@@ -1181,7 +1181,7 @@ def test_unknown_family_has_no_input_contract() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ie#566 — the four wan blockers
+# the four wan blockers
 # ---------------------------------------------------------------------------
 
 
@@ -1260,7 +1260,7 @@ def test_G1b_dotted_target_preserves_the_bound_signature() -> None:
 def test_G2_batch_is_declared_not_inferred_from_guidance() -> None:
     """wan's CFG is two SEQUENTIAL batch-1 forwards, so guidance changes the
     call COUNT, not the traced shape. The guidance heuristic that guessed
-    batch died with the sdxl SDK builder (pgw#739): batch is now a declared
+    batch died with the sdxl SDK builder: batch is now a declared
     coordinate — ``B`` is a Dim, the CFG regime is a Fork, and the class ROW
     states the traced batch outright."""
     from gen_worker.api.decorators import Compile

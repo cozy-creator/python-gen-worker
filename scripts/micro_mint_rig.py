@@ -272,7 +272,7 @@ def _mint_request(
     Not a hand-written `MintRequest`: the thing under test is the handoff, and
     a hand-written request is the one shape the handoff can never produce.
 
-    pgw#1175: the banked per-entry DEVICE peak this used to forward is gone
+    the banked per-entry DEVICE peak this used to forward is gone
     with the bound it opened. K is f(cores, one measured child RSS), so a rig
     cycle takes the pool path on its own cores without an operator priming a
     device basis.
@@ -352,7 +352,7 @@ def run_cycle(
                   f"covers={dev['covers']}")
     result.env = leg.facts
 
-    # pgw#1042: the rig parent seals exactly as a worker boot does. Without
+    # the rig parent seals exactly as a worker boot does. Without
     # this the parent's computed key axes (env_seal above all) describe an
     # UN-established process no pod ever runs, and the handback leg's
     # axis guard would refuse every healthy mint.
@@ -403,7 +403,7 @@ def run_cycle(
     env = dict(mp.child_env(request))
     hub_withheld: List[Dict[str, str]] = []
     if hub_env_mode:
-        # pgw#995: the child no longer inherits whatever this process carries.
+        # the child no longer inherits whatever this process carries.
         # It boots with what the HUB would have delivered for this release —
         # so a name the release stops declaring disappears here, locally, the
         # way it disappeared on the pod nobody was watching.
@@ -413,7 +413,7 @@ def run_cycle(
          env.get("PYTHONPATH", "")])
     env["PGW978_CHECKPOINT"] = str(tree)
     if dev["device_kind"] != "cuda":
-        # pgw#983: a cell key needs an `sm` and this box can state none. The
+        # a cell key needs an `sm` and this box can state none. The
         # probes are supplied, LOUDLY — see `install_synthetic_runtime_if_asked`
         # and the `synthetic_runtime` fact this leg reports.
         env[SYNTHETIC_RUNTIME_ENV] = "1"
@@ -449,7 +449,7 @@ def run_cycle(
     packed = sorted(
         (_serve.unpack_metadata(Path(outcome.artifact or "")).get("entries") or {}))
     leg.facts["packed_entries"] = packed
-    # pgw#999: the guard is a SUBSET check, not equality. A bucket-bearing
+    # the guard is a SUBSET check, not equality. A bucket-bearing
     # mint adds adapter arms whose exact set depends on composed
     # branch-capability; what must never happen is a packed cell MISSING a
     # declared class, which is the silent loss the entry vocabulary exists to
@@ -471,7 +471,7 @@ def run_cycle(
         result.total_s = time.monotonic() - t0
         return result
 
-    # -- the handback (pgw#1042): the parent adopts its OWN child's cell -----
+    # -- the handback: the parent adopts its OWN child's cell -----
     # The pod order: `adopt_delegated_mint` on the mint-opening parent's live
     # pipeline runs BEFORE anything publishes (gw#612 — only a cell that can
     # arm ships). The gauntlet ran green for months while this exact leg was
@@ -628,7 +628,7 @@ def _declared_entries(veh: Any) -> List[str]:
         return []
     # The DECLARED class set, always branchless: a bucket-bearing cfg forks
     # each branch-capable target into an adapter-bearing and a branchless
-    # graph class at MINT time (pgw#790), and which targets are branch-capable
+    # graph class at MINT time, and which targets are branch-capable
     # is composed truth this function has no pipeline for. So the declaration
     # stays the branchless authority and the guard compares against it after
     # stripping the adapter coordinate — see `_branchless`.
@@ -694,7 +694,7 @@ def _adopt_in_subprocess(
                 # A MISS is not a crash, and its reason lives in the typed
                 # `aot-cells` events on stderr. Carrying it out is the whole
                 # difference between "no cell" and "twelve cells, all rejected
-                # on one axis" (pgw#824).
+                # on one axis".
                 out["miss_log"] = _adopt_miss_log(proc.stderr)
             return out
     return {"ok": False,
@@ -713,7 +713,7 @@ def _adopt_miss_log(stderr: str) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    # pgw#1049: the rig parent seals as a worker boot does (establish below),
+    # the rig parent seals as a worker boot does (establish below),
     # and establish now fail-closes on an interpreter outside the declared
     # env — this is the STANDALONE entry's sanctioned imposition (one
     # re-exec, same as the worker entrypoint's).

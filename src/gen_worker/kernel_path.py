@@ -1,4 +1,4 @@
-"""Measured serving-kernel lane selection (pgw#863, pgw#947).
+"""Measured serving-kernel lane selection.
 
 The svdq serving path has TWO independent kernel choices, and pgw#863 is the
 proof they cannot be one switch:
@@ -382,7 +382,7 @@ def select(
 
 def unmeasured(execution_lane: str, detail: str) -> Verdict:
     """The verdict for a mint that COULD have benchmarked and deliberately did
-    not (pgw#1080).
+    not.
 
     The lane A/B is a whole-model benchmark: it loads one full pipeline per
     candidate and times a real step, so it needs weight-scale residency —

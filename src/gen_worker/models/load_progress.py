@@ -27,7 +27,7 @@ no parallel heartbeat systems):
   eventually succeeds leaves no death to read.
 
 Why events and not the counter name or the activity's phase: the hub makes a
-RUNNING update durable only on a phase transition (th#1250), and this load
+RUNNING update durable only on a phase transition, and this load
 does not own the phase of the activity it runs under — ``ensure_setup``'s
 ``self_mint_compile`` does. ``emit_event`` sends a COMPLETED update, which is
 always durable, and deliberately does not touch the open activity.
@@ -68,7 +68,7 @@ _INTERVAL_S = 5.0
 _GIB = float(1 << 30)
 
 #: How many full passes over a phase's own bytes count as staging before the
-#: reads are re-reads (pgw#1063). THREAT (§4.24): a staging admitted against
+#: reads are re-reads. THREAT (§4.24): a staging admitted against
 #: an estimate that turned out low crawls in direct reclaim — ie#615 read
 #: 1.578 TB for a 105 GB set (a 15x re-read) across 37 minutes of billed
 #: H100 before the kernel OOM-killed it. Derivation: a cold load reads each
@@ -133,7 +133,7 @@ class LoadProgressReporter:
         self._phase_bytes = 0
         self._phase_started = time.monotonic()
         self._staged = 0
-        # pgw#1063 thrash detection: this phase's own read/anon baselines and
+        # this phase's own read/anon baselines and
         # the verdict once it has been reached (sticky — the regime does not
         # un-happen, and the loader reads it between components).
         self._phase_read0 = 0
@@ -238,7 +238,7 @@ class LoadProgressReporter:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.stop(clean=exc_type is None)
 
-    # -- the re-read (direct-reclaim) verdict (pgw#1063) ---------------------
+    # -- the re-read (direct-reclaim) verdict ---------------------
 
     @property
     def thrash(self) -> str:
@@ -323,7 +323,7 @@ class LoadProgressReporter:
             rss_anon_kb = _proc_rss_anon_kb() or 0
             # Bytes STAGED is evidenced by whichever is further along:
             # cold reads show in io, page-cache-warm loads show as anon RSS.
-            # pgw#1063: reads BEYOND the set's own size are re-reads, not
+            # reads BEYOND the set's own size are re-reads, not
             # progress — crediting them is what let a 37-minute direct-
             # reclaim crawl report 1.578 TB of "advancement" for a 105 GB
             # set, so the stall clock never saw a stalled load. Cap the
@@ -335,7 +335,7 @@ class LoadProgressReporter:
             # ABSOLUTE counters: the phase baselines are absolute too, and a
             # delta-from-load-start would silently zero the comparison.
             self._check_thrash(io_now, rss_anon_kb * 1024)
-            # pgw#894: activity-owned, so a load advances the clock of the
+            # activity-owned, so a load advances the clock of the
             # phase doing it and not whatever else is open on this pod.
             c = activity_mod.scoped_counter(
                 COUNTER_NAME, "bytes",
@@ -368,7 +368,7 @@ def set_phase(phase: str, nbytes: int = 0) -> None:
 
 
 def thrash_verdict() -> str:
-    """The active load's re-read verdict, or ``""`` (pgw#1063).
+    """The active load's re-read verdict, or ``""``.
 
     Non-empty means THIS process has been measured re-reading a set it
     cannot hold instead of staging it. The loader refuses the next

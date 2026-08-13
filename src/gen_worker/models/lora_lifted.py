@@ -1,4 +1,4 @@
-"""LoRA input-lifting (pgw#725): the rank-bucket adapter as call INPUTS.
+"""LoRA input-lifting: the rank-bucket adapter as call INPUTS.
 
 Under AOT (``torch.export`` -> ``aoti_compile_and_package``) a compiled
 artifact's tensors are either graph INPUTS or baked constants. Today's hot swap
@@ -404,7 +404,7 @@ def install_lifted_lora_forward(model: Any, bucket: int = 0) -> LiftedLoraBindin
             # so the arity is exact, never a guess about a trailing tensor.
             args, lora_a, lora_b = args[:-2], args[-2], args[-1]
         if lora_a is None and lora_b is None:
-            # pgw#1001: arming a bucket must not alter the semantics of calls
+            # arming a bucket must not alter the semantics of calls
             # that do not use it. This wrapper replaces `forward` wholesale, so
             # without this branch a plain call RAISES on an armed pod — a
             # serving break, not just a probe one. After the positional-feed
@@ -471,7 +471,7 @@ def adapter_active(model: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Set level (gw#679): every branch-capable denoiser the pipeline carries gets
+# Set level: every branch-capable denoiser the pipeline carries gets
 # its OWN flat pair — the module sets differ, so the layouts do — and they
 # always move together.
 # ---------------------------------------------------------------------------
@@ -492,7 +492,7 @@ def arm_lifted_lora_execution_lanes(
     pipe: Any, bucket: int,
 ) -> Dict[str, LiftedLoraBinding]:
     """Put a pipeline on the LIFTED branch-bearing graph family: canonical
-    branch containers first, lifted call signature second (pgw#822).
+    branch containers first, lifted call signature second.
 
     THE arm for every AOT path — the mint's adapter-bearing classes, the
     operator compose, and (via the same two calls) the serving arm in

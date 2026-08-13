@@ -1,4 +1,4 @@
-"""Acceleration-matrix driver: one arm per technique, one lane per arm (pgw#1011).
+"""Acceleration-matrix driver: one arm per technique, one lane per arm.
 
 pgw#1011 has to answer "which acceleration technique is worth adopting on OUR
 silicon" for a model whose every published number was measured on somebody

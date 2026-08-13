@@ -1,4 +1,4 @@
-"""th#850 managed-tier ruling (gw#599): the CAS root stays on local/pod disk
+"""th#850 managed-tier ruling: the CAS root stays on local/pod disk
 as a managed, bounded LRU tier. A RunPod endpoint volume, when attached, is
 FILL SOURCE #1 (checked before R2, FILL SOURCE #2); an R2 fill writes
 through to the volume so the next same-endpoint pod finds it warm. This
@@ -159,7 +159,7 @@ def test_corrupt_volume_blob_falls_through_to_r2(tmp_path: Path, monkeypatch) ->
 # ---------------------------------------------------------------------------
 # tensorhub_fill_source_dir(): ismount-guarded, Settings-driven
 #
-# pgw#931: "env-driven" was the old description and it is no longer accurate.
+# "env-driven" was the old description and it is no longer accurate.
 # The value reaches this helper through the `Settings` the process entry
 # published, so a test that changes the environment must RELOAD — the same step
 # a real deployment performs exactly once, at boot. Under the deleted
@@ -398,7 +398,7 @@ def test_downloading_progress_reports_populated_bytes_done_and_total(
 
 
 # ---------------------------------------------------------------------------
-# th#1063 visibility guard: no fill source on a datacenter pod must be LOUD
+# no fill source on a datacenter pod must be LOUD
 # ---------------------------------------------------------------------------
 
 def test_datacenter_pod_without_fill_source_logs(tmp_path: Path, monkeypatch, caplog) -> None:

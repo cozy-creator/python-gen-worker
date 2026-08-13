@@ -178,7 +178,7 @@ _BOOT_WINDOWS = 4.0
 # is loaded. Under the deleted `_DEFAULT_BOOT_TIMEOUT_S` this shape died for
 # the sole crime of taking longer than the constant.
 #
-# pgw#957: it used to print for `talk_s` and only THEN bind its port, so
+# it used to print for `talk_s` and only THEN bind its port, so
 # becoming healthy cost a silent handoff — 53 ms idle, against a window the
 # boot fails the moment that gap outlives — that nothing kept talking across.
 # That is a bet on the runner's speed, in the file that polices exactly that
@@ -235,7 +235,7 @@ for i in range(lines):
 
 def _measured_stall_window_s(lines: int = 8) -> float:
     """A stall window this runner has EARNED, rather than one it is assumed to
-    deserve (pgw#957).
+    deserve.
 
     The window must cover the two silences a HEALTHY child really produces:
     spawning it (a fresh interpreter plus the engine's imports — measured at
@@ -321,7 +321,7 @@ def test_a_silent_engine_fails_on_the_stall_window_and_is_killed(tmp_path) -> No
     assert elapsed < _WEDGE_SLEEP_S / 10  # NOT the child's own 600s sleep
     pid = int(pidfile.read_text())
     # SIGTERM -> exit is not instantaneous, and how long it takes is the box's
-    # business: wait on the pid leaving the process table (pgw#956), not a clock.
+    # business: wait on the pid leaving the process table, not a clock.
     await_progress(
         lambda: _pid_alive(pid),
         lambda alive: not alive,
@@ -530,7 +530,7 @@ def fast_hub_retries(monkeypatch) -> None:
 
     monkeypatch.setattr(hub, "_RETRY_BASE_DELAY_S", 0.01)
     monkeypatch.setattr(hub, "_RETRY_MAX_DELAY_S", 0.02)
-    # pgw#796: `_post` funnels through `_send_with_retries`, whose OWN silence
+    # `_post` funnels through `_send_with_retries`, whose OWN silence
     # window (pgw#738/#743, added after this fixture was written) was left at
     # its 600s production value — so the dead-port tape below sat in that inner
     # loop for ten real minutes before the outer loop ever saw a failure. One
@@ -652,7 +652,7 @@ def test_the_wall_clock_constants_are_gone(relpath: str, gone: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#795: the guard covers TEST code too, because a release gate runs it
+# the guard covers TEST code too, because a release gate runs it
 # ---------------------------------------------------------------------------
 #
 # The five tapes above pin five NAMED constants in five NAMED src files. That
@@ -691,7 +691,7 @@ _CLOCK = r"time\.(?:monotonic|time|perf_counter)\(\)"
 
 _LITERAL_DEADLINE = re.compile(rf"{_CLOCK}\s*\+\s*[0-9]")
 
-# pgw#845: the two regexes below used to require a DIGIT and a small token
+# the two regexes below used to require a DIGIT and a small token
 # vocabulary, and both holes were load-bearing.
 #
 #   `deadline = time.monotonic() + _TIMEOUT`  (_TIMEOUT = 15.0)
@@ -762,7 +762,7 @@ _ELAPSED_ASSERT_BURNDOWN = {
     "test_mint_process_pgw784.py",         # hang bound: reap must not wait out a 600s child
     "test_subprocess_stall_gw665.py",      # hang bound: stall window << 30s
     "test_mint_reopen_pgw677.py",          # LATENCY BUDGET — anchor it next
-    # pgw#845 — exposed by the widened pattern below, each reviewed:
+    # exposed by the widened pattern below, each reviewed:
     "test_p6_cancel_stream_backpressure.py",  # LOWER bound on 2x an induced 0.5s
                                               # handler sleep: only OVERLAP can
                                               # fail it, slowness only raises it
@@ -795,7 +795,7 @@ def _scan(root: Path, pattern: "re.Pattern[str]", *, match: bool = False) -> set
     for path in sorted(root.rglob("*.py")):
         if path.name == Path(__file__).name:
             # This file HOLDS the patterns, so scanning it only finds itself.
-            # pgw#957 is what that costs: the guard's OWN boot fixture ran on a
+            # the guard's OWN boot fixture ran on a
             # literal 0.3s window, unpoliced. The rule here is manual.
             continue
         for line in _code_lines(path):

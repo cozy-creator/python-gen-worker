@@ -77,7 +77,7 @@ def counted(monkeypatch):
         return rep
 
     # Patch BOTH the defining module and the binding the call site looks up:
-    # executor imports the name at module scope (pgw#976), so patching only the
+    # executor imports the name at module scope, so patching only the
     # source module would leave the real function bound in the caller.
     monkeypatch.setattr(volume_verify, "verify_files", spy)
     monkeypatch.setattr(store_mod, "verify_files", spy)

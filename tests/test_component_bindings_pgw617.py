@@ -144,7 +144,7 @@ def test_unknown_component_refuses_typed(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Registry relaxation: selected_by slots may be default-less (pgw#617).
+# Registry relaxation: selected_by slots may be default-less.
 # ---------------------------------------------------------------------------
 
 

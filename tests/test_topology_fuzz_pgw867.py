@@ -3,7 +3,7 @@
 Why this file exists, stated as the bug it would have caught. The contract's
 docstring said an unrecognised payload was a typed refusal; the decoder in fact
 IGNORED unknown keys, and 5 of 5 version-skew payloads decoded clean against the
-shipped worker (pgw#856/th#1375). Ignoring a key reads the field it names as
+shipped worker. Ignoring a key reads the field it names as
 ABSENT, absent is legal, and absent means one slot — so a hub that bought degree
 2 was served degree 1, silently, with nothing logged anywhere. The sibling defect
 was ``_opt("gpu_count") or 1``, which laundered a ``gpu_count=0`` REFUSAL into
@@ -105,7 +105,7 @@ def _assert_partition(topo: ExecutionTopology, source: object) -> None:
         assert topo.parallel == PARALLEL_NONE, (
             f"{source!r} accepted parallel={topo.parallel!r} at degree 1"
         )
-    # pgw#870: the decoder now has a CEILING as well as a floor
+    # the decoder now has a CEILING as well as a floor
     # (``MAX_GPU_COUNT``), so enumerating every group of an accepted topology is
     # bounded work and this property no longer needs an escape hatch.
     assert topo.gpu_count <= MAX_GPU_COUNT, (
@@ -237,7 +237,7 @@ def test_decode_of_arbitrary_text_is_typed(raw: str) -> None:
 def test_round_trip(gpu_count: int, degree: int, parallel: str) -> None:
     """P2: ``decode(as_dict(t)) == t`` for every constructible topology.
 
-    pgw#950: ``as_dict`` emits the canonical spellings ONLY, so this is also
+    ``as_dict`` emits the canonical spellings ONLY, so this is also
     the assertion that the dual write is gone and the round trip never
     depended on it.
     """
@@ -248,7 +248,7 @@ def test_round_trip(gpu_count: int, degree: int, parallel: str) -> None:
     except TopologyError:
         return
     payload = topo.as_dict()
-    # pgw#950: the canonical spelling ONLY. The dual write is gone; the dual
+    # the canonical spelling ONLY. The dual write is gone; the dual
     # READ stays until th#1376 stops tensorhub emitting the legacy names.
     assert LEGACY_KEY_GPUS_PER_GROUP not in payload
     assert LEGACY_KEY_EXECUTION_GROUPS not in payload
@@ -265,7 +265,7 @@ def test_group_ordinal_is_exact_for_rank0_devices(gpu_count: int, degree: int) -
     ``group_ordinal_exact`` must agree with ``group`` for exactly those.
 
     The floored variant exists so a single-group pod cannot index off the end;
-    on a wide pod flooring is the silent bug (pgw#779) — every dispatch the hub
+    on a wide pod flooring is the silent bug — every dispatch the hub
     got wrong lands on group 0, which is also the busiest group.
     """
     assume(gpu_count % degree == 0)

@@ -6,7 +6,7 @@ ahead of HelloAck's ``apply_model_resolutions`` rebind and reach
 ``_fetch_compile_snapshot`` with bare authored refs and ``snapshots=None`` —
 a silent ``None`` (no cell selected) while materialization later followed the
 resolved w8a8 lane, fail-closing ``enable()`` generically. A compile cell,
-exactly like a Slot pick (pgw#532), can only arrive via hub delivery, so boot
+exactly like a Slot pick, can only arrive via hub delivery, so boot
 must defer these functions the same way.
 
 Covered here, over the REAL ``Lifecycle.startup()`` / ``Executor`` machinery
@@ -299,7 +299,7 @@ def test_boot_defers_compile_declared_function(tmp_path, monkeypatch, caplog) ->
     assert setup_calls == [] and enables == []
     # Slots stay advertised (per-dispatch serveability); a compile-declared
     # cls function reports loading until hub delivery warms it — the same
-    # visible state as the awaiting_hub bucket (ie#455), never failed.
+    # visible state as the awaiting_hub bucket, never failed.
     assert ex.available_functions() == ["slotted"]
     assert ex.loading_functions() == ["generate"]
     assert "generate" not in ex.unavailable and "slotted" not in ex.unavailable

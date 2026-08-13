@@ -1,4 +1,4 @@
-"""Per-group host-CPU budget (pgw#782).
+"""Per-group host-CPU budget.
 
 torch sizes its intra-op thread pool from the HOST's logical processors. It
 knows nothing about (a) the container's cpu quota or (b) how many execution
@@ -9,7 +9,7 @@ window really does get CFS-throttled under it (``nr_throttled`` 4,
 
 WHAT THIS DOES **NOT** FIX, measured (samples/dpfix, sdxl 1024^2/28 steps,
 4xA40, width-4 burst): 37.1 s with torch's 48-thread default vs 36.7 s pinned
-to 8 — within noise. The width-4 collapse is the shared interpreter (pgw#783),
+to 8 — within noise. The width-4 collapse is the shared interpreter,
 not thread oversubscription: at width 4 the process uses 2.3 of its 32.3
 allowed cores, so CPU was never the scarce resource on THIS pod. An earlier
 run appeared to show 74.0 s -> 42.3 s from this change; that was the probe's
@@ -104,7 +104,7 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
     ONE group's share of this process. Returns the recorded facts; never
     raises — a host that will not answer keeps torch's default.
 
-    pgw#783: the divisor is the number of execution groups sharing this CPU
+    the divisor is the number of execution groups sharing this CPU
     cgroup, which is ``groups`` (this process's own) TIMES the compute-child
     sibling count. Under the process split each child rewrites its own
     ``WORKER_EXECUTION_TOPOLOGY`` to a single local group, so ``groups`` reads 1

@@ -46,7 +46,7 @@ from harness.hub_double import hub_double
 
 # The private `activity._sink` restore this file used to carry is now
 # `tests/conftest.py::_fresh_report_sinks` — one authority for the whole suite,
-# not one file remembering (pgw#1024).
+# not one file remembering.
 
 
 def _reconnect_events(msgs: List[pb.WorkerMessage], phase: str) -> List[pb.ActivityUpdate]:
@@ -221,5 +221,5 @@ def test_an_involuntary_drop_and_its_reconnect_both_reach_the_hub() -> None:
             "teardown=", "overshoot=", "unaccounted=", "loop_silent_at_drop=",
         ):
             assert axis in row, f"{axis!r} missing from the reconnect row: {row}"
-        # A measured span, not a number interpolated into prose (th#1322).
+        # A measured span, not a number interpolated into prose.
         assert reconnected[0].duration_ms >= 0

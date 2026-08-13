@@ -56,7 +56,7 @@ _POOL_WIDTH = 2
 
 
 async def _workers_past_their_work_items(pool: concurrent.futures.Executor) -> None:
-    """Prove every pool thread returned to ``work_queue.get()`` (pgw#959).
+    """Prove every pool thread returned to ``work_queue.get()``.
 
     CPython's worker does ``work_item.run()`` -> ``del work_item``, and between
     those two the item — hence the load's result — is still reachable from the
@@ -118,7 +118,7 @@ def test_cancelled_to_thread_join_releases_result() -> None:
         release.set()
         with pytest.raises(asyncio.CancelledError) as excinfo:
             await task
-        # pgw#959: this used to judge reachability after five event-loop turns
+        # this used to judge reachability after five event-loop turns
         # — a wall clock spelled in turns, and the wrong clock besides. The
         # holder at turn five is the EXECUTOR thread, which had set the result
         # but not yet dropped its work item, so the row red whenever that

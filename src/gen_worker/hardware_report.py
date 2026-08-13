@@ -3,7 +3,7 @@ boot-time CUDA probe's silent exit.
 
 Previously a probe failure (cuda_probe.py, gw#529) logged
 ``GEN_WORKER_CUDA_PROBE_FAILED`` and exit(1)'d with no orchestrator contact —
-the pod died invisibly to every layer of telemetry (th#986). This module
+the pod died invisibly to every layer of telemetry. This module
 sends ONE ``HardwareUnsuitable`` ``WorkerMessage`` on the Connect stream, in
 place of Hello, so the hub can attribute the death and reschedule/blacklist
 the host. Bounded best-effort: a couple of short retries, then give up — the
@@ -125,7 +125,7 @@ def _identity_from_settings(settings: Settings) -> Tuple[str, str]:
     claims, mirroring Lifecycle's own identity resolution (lifecycle.py)."""
     worker_id = (settings.worker_id or "").strip()
     release_id = ""
-    # pgw#848: the CURRENT credential, never the frozen boot one. This dial
+    # the CURRENT credential, never the frozen boot one. This dial
     # opens its own Connect, so past T+30 min a stale token here is a fresh
     # `worker_token_expired` on every report — three of which wedge the pod.
     token = worker_credential.current()
@@ -202,7 +202,7 @@ async def _report_async(settings: Settings, report: HardwareReport) -> bool:
     if not target:
         return False
     worker_id, release_id = _identity_from_settings(settings)
-    # pgw#848: the CURRENT credential, never the frozen boot one. This dial
+    # the CURRENT credential, never the frozen boot one. This dial
     # opens its own Connect, so past T+30 min a stale token here is a fresh
     # `worker_token_expired` on every report — three of which wedge the pod.
     token = worker_credential.current()

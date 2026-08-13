@@ -8,7 +8,7 @@ The gap this closes (audited 2026-07-30, `BENCHMARK-TELEMETRY-COMPLETENESS.md`):
   to get a duration — not indexable, not percentile-able without a cast per
   row, and silently NULL the first time the formatting changes.
 * **JIT mint** was worse: `compile_cache` logged `"compiled %s in %.0fs"` and
-  nothing else, and a serve pod exposes no logs (pgw#760). The single number an
+  nothing else, and a serve pod exposes no logs. The single number an
   AOT-vs-JIT comparison most needs did not exist off-pod in any form.
 
 So: `ActivityUpdate.duration_ms` (proto field 17) + a typed `jit_compile` event
@@ -258,7 +258,7 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
 
     assert jit["shape:boot"].duration_ms == 612_500
     assert "route=intake" in jit["minted"].detail
-    # pgw#1082: `n_graphs` finally has a caller. It read 0 on every event on
+    # `n_graphs` finally has a caller. It read 0 on every event on
     # the platform because `emit_jit_compile_event`'s parameter was never
     # populated — the blindness that made a graph-broken 20.1B denoiser
     # indistinguishable from a healthy one for two releases.

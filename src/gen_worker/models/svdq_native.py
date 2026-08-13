@@ -1,4 +1,4 @@
-"""Native svdq-fp4 serving — SVDQuant checkpoints without nunchaku (pgw#685).
+"""Native svdq-fp4 serving — SVDQuant checkpoints without nunchaku.
 
 The ``"native"`` svdq ENGINE. `SvdqLinear` is `W4A4Linear` plus the three things
 an SVDQuant checkpoint needs (pgw#682 A3/G-C, the "contract v2" gw#540 named):
@@ -27,7 +27,7 @@ SvdqLinear always runs the dynamic path — a real contract difference from
 
 Why this exists: nunchaku's fp4 kernels are ``sm_120a``-only, and its wheels
 couple to one (torch minor, CUDA) build AND one diffusers transformer signature
-window per release (gw#405, th#1211). The native engine is stock
+window per release. The native engine is stock
 ``torch._scaled_mm`` + one triton quantizer, so it needs no nunchaku wheel, no
 diffusers window, no pin-matrix row and no torch downgrade — and it adds
 sm_100/103 coverage nunchaku will never have.
@@ -158,7 +158,7 @@ def _build_svdq_linear_class() -> type:
                      rank: int, bias: bool, compute_dtype: Any,
                      per_channel_scale: bool, smooth: bool) -> None:
             super().__init__()
-            # pgw#1019: record it — the packed weight is uint8 and every
+            # record it — the packed weight is uint8 and every
             # compute-dtype tensor here (smooth_factor, proj_*, bias) is
             # optional, so a rank-0 bias-free instance states it nowhere else.
             self.compute_dtype = compute_dtype
@@ -530,7 +530,7 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                 splits = adanorm_splits_for(type(model).__name__, prefix)
                 out_f = int(target.out_features)
                 in_f = int(target.in_features)
-                # pgw#864: modulation stays packed-resident (the +6.8 GB
+                # modulation stays packed-resident (the +6.8 GB
                 # delta was this dequant). pgw#863 split it off the linear
                 # lane — a card can want packed modulation and baseline
                 # linears at once, and sm_100 does. Degrade per-layer.

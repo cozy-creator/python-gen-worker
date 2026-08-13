@@ -1,6 +1,6 @@
 """pgw#858 / th#1380: the compute child runs as an UNPRIVILEGED uid.
 
-The parent/child split (pgw#763) already separates the process that holds the
+The parent/child split already separates the process that holds the
 worker's identity from the process that imports tenant code. Until this module
 both processes ran as **root, in one PID namespace**, which made the separation
 polite rather than enforced: `_CHILD_FORBIDDEN_ENVS` deletes ``WORKER_JWT`` from

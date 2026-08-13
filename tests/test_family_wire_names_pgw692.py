@@ -8,7 +8,7 @@ makes every request of that family FATAL at slot resolution — which is
 exactly what migration 0046's ``steps`` -> ``num_inference_steps`` rename did
 to wan-2.2 on chaos before this fix.
 
-pgw#740 (B1): this package no longer SHIPS any family vocabulary, so the
+this package no longer SHIPS any family vocabulary, so the
 per-family hub snapshots moved to the endpoints that own them
 (inference-endpoints ie#567 — ``sdxl/tests/test_family_vocabulary_ie567.py``
 and ``wan-2.2/tests/test_family_vocabulary_ie567.py``, which pin the exact

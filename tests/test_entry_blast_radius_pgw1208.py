@@ -32,11 +32,11 @@ TWO FIXES, AND THE SECOND IS THE MORE IMPORTANT
    pod threw away nothing (it died on its first entry), but the A4500 shows the
    shape that matters: 6 classes exported clean, and under the old code a
    refusal at row 7 would have discarded all six. The entry is already the unit
-   of identity and of publish (pgw#718); it is now the unit of FAILURE too.
+   of identity and of publish; it is now the unit of FAILURE too.
 
 Fail-closed stays fail-closed AT THE ENTRY: a skipped class is never packed and
 never published, and serving covers it eager by the same mechanism that covers
-any shape outside a cell's declared envelope (pgw#844). Only the blast radius
+any shape outside a cell's declared envelope. Only the blast radius
 changed.
 """
 
@@ -155,7 +155,7 @@ def test_a_deterministic_refusal_skips_ONE_class_and_mints_the_rest(
 
     assert len(seen) == 2, "both classes must be ATTEMPTED — one refusing must not stop the loop"
     assert result.timings.get("skipped_entries") == 1.0
-    # pgw#1176: a mint produces a SET of independently keyed entry artifacts,
+    # a mint produces a SET of independently keyed entry artifacts,
     # not one cell with an `entries` map — so the surviving class is a packed
     # ARTIFACT rather than a member of a bundle. The claim is unchanged and
     # sharper: fail-closed is per ENTRY, and the refusing class simply has no

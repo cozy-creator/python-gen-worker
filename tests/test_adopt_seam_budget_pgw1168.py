@@ -7,7 +7,7 @@ the identical `aot_serve.enable` -> `arm_entry` and reported nothing — the
 "emitter wired on one of N paths" shape this program keeps producing. It lives
 in `provision.arm_aot` now, which owns both the load and the §4.32 gate.
 
-Why the SPLIT matters (th#1825): `load` is what EVERY adopting pod pays for the
+Why the SPLIT matters: `load` is what EVERY adopting pod pays for the
 life of the arm and is the term that decides whether a cell fits the fleet it
 was built for; `verify` is the parity gate's two forwards and is paid only by
 the minting pod. A boot-adopt row on a 48 GB card is therefore the EMPIRICAL
@@ -192,7 +192,7 @@ def test_the_row_is_keyed_by_the_cell_s_OWN_recorded_lane(
     line these rows up per (family, lane) without provision importing
     compile_cache.
 
-    pgw#1175: this row USED to feed `mint_budget._ADOPT_PEAKS`, which was then
+    this row USED to feed `mint_budget._ADOPT_PEAKS`, which was then
     divided into free VRAM to refuse the next adopt. The bank is deleted; the
     ROW is not. It is the only instrument that answers where a loaded cell's
     device memory goes, which is exactly what §4.33's ~8 GiB target has to be

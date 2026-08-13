@@ -34,7 +34,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "ORCHESTRATOR_PUBLIC_ADDR": "orchestrator_public_addr",
     "WORKER_ID": "worker_id",
     # The ENV name is hub-injected and fixed; the FIELD is renamed
-    # (pgw#848) so no call site can read it as the live credential.
+    #  so no call site can read it as the live credential.
     "WORKER_JWT": "bootstrap_worker_jwt",
     "WORKER_RELEASE_ID": "worker_release_id",
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
@@ -51,7 +51,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "CIVITAI_API_KEY": "civitai_api_key",
     "GEN_WORKER_C2PA_CERT_PEM": "c2pa_cert_pem",
     "GEN_WORKER_C2PA_CERT_PATH": "c2pa_cert_path",
-    # th#1307: GEN_WORKER_C2PA_KEY_PEM / _KEY_PATH are deliberately NOT
+    # GEN_WORKER_C2PA_KEY_PEM / _KEY_PATH are deliberately NOT
     # mapped — a private key must never be readable by tenant code in this
     # process. content_credentials.configure() refuses to start if either is
     # present in the environment.
@@ -121,7 +121,7 @@ REFUSED_KEY_MATERIAL: Dict[str, str] = {
 #: what keeps :func:`_normalize_key`'s refusal from firing on a legitimate
 #: value. Anything not here and not in `_ENV_TO_FIELD` is a typo.
 _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozenset({
-    # pgw#929 CHILD IPC HANDOFF: parent-minted, per-child, no config origin.
+    # parent-minted, per-child, no config origin.
     "GEN_WORKER_COMPUTE_CHILD",
     "GEN_WORKER_COMPUTE_UID",
     "GEN_WORKER_CHILD_SOCKET",
@@ -135,7 +135,7 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     "GEN_WORKER_SEAL_LIB_MEMO",
     "GEN_WORKER_SUPERVISED",
     "WORKER_EXECUTION_TOPOLOGY",
-    # pgw#980: the live-edit probe marking and its separate publish arming.
+    # the live-edit probe marking and its separate publish arming.
     # Read by `procsplit.actions` — the PARENT's security boundary, which must
     # be readable with no Settings in hand, and which tenant-adjacent code in
     # the compute child must not be able to reach through the config surface.
@@ -169,7 +169,7 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     "COZY_CONVERT_SCRATCH_TTL_S",
     "COZY_CLONE_DOWNLOAD_ATTEMPTS",
     "COZY_CIVITAI_DOWNLOAD_ATTEMPTS",
-    # pgw#1114: rig-side only. A path to the fleet-line authority; a worker
+    # rig-side only. A path to the fleet-line authority; a worker
     # process never reads it and it has no Settings field by design.
     "GEN_WORKER_FLEET_LINE_FILE",
 })
@@ -206,7 +206,7 @@ def _normalize_key(raw: str, *, strict: bool = False) -> str | None:
     Returns None for a key that is not ours. When `strict`, an unrecognised key
     inside an owned namespace raises `UnknownSettingError` instead of being
     silently dropped, and a key naming REFUSED secret material raises
-    `RefusedKeyMaterialError` (pgw#884) instead of being dropped as "not a
+    `RefusedKeyMaterialError` instead of being dropped as "not a
     Settings field".
     """
     key = raw.strip()

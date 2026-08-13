@@ -187,7 +187,7 @@ def _arm(**kw: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# pgw#813 — the w8a8 lane is eager-serveable, therefore delegatable
+# the w8a8 lane is eager-serveable, therefore delegatable
 # ---------------------------------------------------------------------------
 
 
@@ -246,7 +246,7 @@ def test_a_w8a8_miss_mints_AOT_and_not_dynamo(
 
     pending = outcome.self_mint
     assert pending is not None, "the miss produced no mint at all"
-    # pgw#1010: a pending IS the AOT mint — the JIT recipe opens none — so the
+    # a pending IS the AOT mint — the JIT recipe opens none — so the
     # recipe axis that used to be asserted here cannot disagree any more. The
     # `self_mint_started` phase below is the wire half of the same claim.
     assert pending.delegated is True
@@ -263,13 +263,13 @@ def test_delegation_declines_name_their_TRUE_cause(
     kill switch from a pipeline classification."""
     register_export_declaration(_declaration())
 
-    # pgw#1010: the OPERATOR arm of this test drove
+    # the OPERATOR arm of this test drove
     # `GEN_WORKER_MINT_IN_PROCESS=1`. The env and the shape it selected are
     # deleted (in-process minting existed only to pack a dynamo cell), so the
     # caller-forced seam that replaces it is the one asserted here — the same
     # phase, reached the way a caller can still reach it.
     with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
-        # pgw#1010: this rig's lane is w8a8, which serves only from a cell — so
+        # this rig's lane is w8a8, which serves only from a cell — so
         # the decline is followed by the typed fail-closed rather than by a JIT
         # intake arm. The decline still NAMES ITS CAUSE first, which is the
         # pgw#813 claim under test.
@@ -277,7 +277,7 @@ def test_delegation_declines_name_their_TRUE_cause(
             _Pipe(), _Cfg(), publisher=_Publisher(), delegate=False)  # type: ignore[arg-type]
     assert "aot_mint_forced_in_process" in _phases(_events, "self_mint_skipped")
 
-    # pgw#995: the second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and
+    # the second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and
     # asserted the `aot_eager_first_disabled` phase. Both the switch and the
     # phase are deleted — eager-first is unconditional, so that decline cannot
     # arise, and a reason nobody can reach is a cause a reader hunts for and
@@ -287,7 +287,7 @@ def test_delegation_declines_name_their_TRUE_cause(
     _events.clear()
     fleet_cells._PENDING.clear()
 
-    # pgw#846: `Compile.regional` is the dynamo/JIT per-block knob (ie#381)
+    # `Compile.regional` is the dynamo/JIT per-block knob
     # and the AOT mint ignores it — regional EXPORT is retired, the recipe is
     # always whole-graph. A family that declares it must neither decline
     # delegation nor change the mint shape.
@@ -303,14 +303,14 @@ def test_mint_delegate_names_its_own_refusals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert mint_delegate.delegation_refusal() == ""
-    # pgw#995: eager-first is unconditional, so setting the deleted name is a
+    # eager-first is unconditional, so setting the deleted name is a
     # no-op rather than a second refusal. Asserted, not assumed — a deletion
     # that leaves a live reader somewhere else looks exactly like this test
     # passing for the wrong reason.
     monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "0")
     assert mint_delegate.delegation_refusal() == ""
     assert not hasattr(mint_delegate, "REFUSAL_EAGER_FIRST_DISABLED")
-    # pgw#1010: and the same is now true of the in-process switch — the WORKER
+    # and the same is now true of the in-process switch — the WORKER
     # half of the decision can no longer refuse anything, because there is no
     # in-process mint shape to select.
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
@@ -400,7 +400,7 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
 
 
 # ---------------------------------------------------------------------------
-# pgw#815 — every publish terminus is typed
+# every publish terminus is typed
 # ---------------------------------------------------------------------------
 
 
@@ -529,7 +529,7 @@ def test_a_boot_that_resolves_NOTHING_confesses(
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root4", publisher=_Publisher())
     pending.mint_root.mkdir(parents=True, exist_ok=True)
 
-    # pgw#1010: every pending is a DELEGATED mint now, so the BOOT sweep
+    # every pending is a DELEGATED mint now, so the BOOT sweep
     # defers to the driver that owns it — asserted, so a reader cannot mistake
     # the silence for the defect this test exists about...
     ex._assert_mint_termini(spec, [pending])  # type: ignore[arg-type]

@@ -420,7 +420,7 @@ class _Endpoint:
                 before = memory.cuda_allocated_bytes()
                 run_mod.run_setup(
                     inst, resolved, device=self.device,
-                    # pgw#1127: `cozy serve` is the machine §4.28 was written
+                    # `cozy serve` is the machine §4.28 was written
                     # about. Naming the function here is what lets its first
                     # run mint an AOT cell into this machine's own store and
                     # every later run arm it from disk.
@@ -705,7 +705,7 @@ def _parse_frame(line: bytes) -> Dict[str, Any]:
     if not isinstance(obj, dict):
         return {"kind": "error", "message": "request must be a JSON object"}
     if "posture" in obj:
-        # pgw#1142 / §4.32 item 4: the cozy-local half of the eager-only
+        # the cozy-local half of the eager-only
         # command. It rides the control-frame shape `cancel` already
         # established rather than opening a second channel — one socket, one
         # protocol, and `cozy` learns one more frame instead of a new client.
@@ -894,7 +894,7 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
             if not chunk:
                 break
             if len(buf) + len(chunk) > sockaddr.MAX_NDJSON_LINE_BYTES:
-                # pgw#1013: refuse at the byte that passes the bound, not after
+                # refuse at the byte that passes the bound, not after
                 # the peer has finished deciding how much to send.
                 return
             buf.extend(chunk)
@@ -1051,7 +1051,7 @@ def _serve_inner(args: argparse.Namespace) -> int:
         candidates, getattr(args, "functions", None),
     )
 
-    # pgw#1142 / §4.32 item 4: the order is installed BEFORE setup(), because
+    # the order is installed BEFORE setup(), because
     # setup() is where a cozy-local serve arms and (on a miss) mints. A flag
     # that only took effect afterwards would still have spent the compile the
     # operator asked us not to spend.

@@ -1,4 +1,4 @@
-"""The Dockerfile the docs teach must be one the hub will accept (pgw#1016).
+"""The Dockerfile the docs teach must be one the hub will accept.
 
 `docs/dockerfile.md` presents the canonical org Dockerfile — the file an
 endpoint author is told to copy. It taught a BuildKit cache mount, and

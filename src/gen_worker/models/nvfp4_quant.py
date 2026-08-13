@@ -1,4 +1,4 @@
-"""nvfp4 format primitives + the fused triton activation quantizer (pgw#685).
+"""nvfp4 format primitives + the fused triton activation quantizer.
 
 The pure-torch quantize chain (:func:`quantize_activation_torch`) is ~8 passes
 over the activation: fp32 upcast, per-16-block amax, e4m3 block scale, divide,

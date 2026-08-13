@@ -2,7 +2,7 @@
 
 Every collective is a rendezvous. gen-worker is full of per-rank adaptive
 decisions that read *this card's* measured free VRAM: the fit ladder, degraded
-mode (ie#468), residency LRU, compile arm/disarm, ``gate_functions``. Any
+mode, residency LRU, compile arm/disarm, ``gate_functions``. Any
 control-flow difference between ranks either
 
 - **hangs** — a different number of collectives, or

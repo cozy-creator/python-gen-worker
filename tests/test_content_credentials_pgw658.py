@@ -5,7 +5,7 @@ EU AI Act Art. 50 legal-critical path: every generated media asset must leave
 manifest when signing is configured. The pgw#609 test sweep deleted the
 original gw#518 suite; this is its greenfield replacement.
 
-th#1307: the private key is HUB-SIDE. Every round trip below therefore signs
+the private key is HUB-SIDE. Every round trip below therefore signs
 through a real HTTP signing oracle (``fake_hub_signer``) that holds the key and
 answers ``POST /v1/worker/c2pa/sign`` exactly like the hub route does —
 base64 COSE fixed-width r||s. The worker only ever holds the public chain.
@@ -281,7 +281,7 @@ def test_sign_media_file_round_trip(signer_configured, tmp_path):
 
 def test_inline_pem_config_signs(es256_chain, fake_hub_signer, monkeypatch):
     """GEN_WORKER_C2PA_CERT_PEM (hub-injected pod env, th#714) is sufficient —
-    the cert is the ONLY material a pod gets (th#1307)."""
+    the cert is the ONLY material a pod gets."""
     _reset(monkeypatch)
     cc.configure(
         SimpleNamespace(

@@ -7,7 +7,7 @@ leaf, because its evidence collector selected leaves by
 Measured before the fix, cardless::
 
     _gemm_param_dtypes on a w8a8 fp16 denoiser: {}
-    pgw#683 guard verdict: PASSED (blind)
+    PASSED (blind)
 
 i.e. a w8a8 denoiser built at fp16 and composed into a bf16 pipeline — the
 exact cross-composition aliasing shape pgw#683 exists to refuse — passed

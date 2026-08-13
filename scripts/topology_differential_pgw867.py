@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential fuzzer for the WORKER_EXECUTION_TOPOLOGY decoders (pgw#867/th#1382).
+"""Differential fuzzer for the WORKER_EXECUTION_TOPOLOGY decoders.
 
 OFF THE MERGE PATH by construction: this is a script, not a test. The merge gate
 runs the checked-in vector fixture (`tests/testdata/topology_wire_vectors.json`,
@@ -208,7 +208,7 @@ def generate(n: int, rng: random.Random) -> list[str]:
 
 # The recorded divergence CLASSES — EMPTY as of 2026-08-02.
 #
-# th#1385 and pgw#870 closed all nine: the Go decoder now checks its key set
+# the Go decoder now checks its key set
 # case-SENSITIVELY on a raw key map, refuses trailing data, distinguishes an
 # absent field from an explicit zero, and no longer case-folds `parallel`; the
 # Python decoder type-checks `parallel` BEFORE defaulting, refuses non-integer

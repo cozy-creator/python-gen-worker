@@ -5,7 +5,7 @@ Send-queue policy (CONTRACT.md §1): JobResult is NEVER dropped — results
 persist across reconnects until written to a live stream. Under overflow the
 drop order is JobProgress (oldest first); everything else blocks the producer.
 
-pgw#869 — THE EVIDENCE LANE. Results had a durable lane; measurements did not.
+THE EVIDENCE LANE. Results had a durable lane; measurements did not.
 `reset_for_reconnect` cleared `_items` wholesale and restored only
 `_pending_results`, so every queued ActivityUpdate/BootPhase — every
 `self_mint_compile` phase, every `aot_mint phase=pool` ledger, every terminal —
@@ -32,7 +32,7 @@ the motivating incident, and a mint is a child of the worker, so a worker restar
 ends the mint anyway. Disk persistence is out of scope and must be argued on its
 own merits, not borrowed from this one.
 
-pgw#803 — THE RECONNECT EPISODE IS A HUB ROW. Every duration in this module is
+THE RECONNECT EPISODE IS A HUB ROW. Every duration in this module is
 retry PACING or an RPC deadline, never a kill decision, and none of them can
 produce th#1333's 15m36s reconnect gap: the backoff is `uniform(0, min(30 s,
 2**attempt))` with `attempt` reset after `_BACKOFF_RESET_AFTER_S` of
@@ -40,7 +40,7 @@ connectedness, a dead peer is called by h2 keepalive within
 `KEEPALIVE_INTERVAL_S` + `KEEPALIVE_TIMEOUT_S`, and a hung dial is cut at
 `_HELLO_ACK_TIMEOUT_S`. So the gap was time the reconnect loop was NOT RUNNING — and nothing recorded that,
 because the loop's narration was `logger.info` on RunPod stdout, which is
-unreadable (gw#640). Each episode now emits two evidence rows (`dropped`, then
+unreadable. Each episode now emits two evidence rows (`dropped`, then
 `reconnected`) partitioning the gap into scheduled backoff, slept wall time,
 dial+Hello, teardown, and the remainder. No new bound is introduced anywhere:
 this measures, it never decides.
@@ -84,7 +84,7 @@ _EVIDENCE = "evidence"
 _EVIDENCE_MSGS = ("activity_update", "boot_phase")
 
 _MAX_REDIRECT_HOPS = 3
-# pgw#869 — WHAT THIS LADDER MAY AND MAY NOT JUDGE. A rejected credential is a
+# WHAT THIS LADDER MAY AND MAY NOT JUDGE. A rejected credential is a
 # verdict about US; an ABSENT hub is a verdict about nothing. Before that
 # change the ladder could not tell them apart, and the difference is the whole
 # outbox: a worker that outlives a hub outage ages past its 30 min JWT, redials,
@@ -93,7 +93,7 @@ _MAX_REDIRECT_HOPS = 3
 # `_auth_rejection_is_fatal`: an expired presented credential never reaches this
 # ladder.
 #
-# pgw#873 — AND THE SURVIVING RULE IS EVIDENCE-KEYED, NOT COUNT-KEYED. The old
+# AND THE SURVIVING RULE IS EVIDENCE-KEYED, NOT COUNT-KEYED. The old
 # `3 consecutive over 60 s` pair was the last magic number in the reconnect
 # path, and both premises under it were measured false:
 #
@@ -158,7 +158,7 @@ class FatalTransportError(Exception):
 
 
 class HandlerError(Exception):
-    """A MESSAGE HANDLER raised — this is not a transport failure (gw#640).
+    """A MESSAGE HANDLER raised — this is not a transport failure.
 
     `_recv_loop` awaits the handlers inline, so a raise while handling (say) a
     RunJob used to propagate into `run()`'s catch-all and be logged as
@@ -254,7 +254,7 @@ RECONNECT_EVENT = "worker_reconnect"
 
 
 class _ReconnectEpisode:
-    """One disconnect -> reconnect episode, measured (pgw#803).
+    """One disconnect -> reconnect episode, measured.
 
     Coalescing is by COUNT, never by dropping: an hour-long hub outage is two
     hub rows (`dropped`, then `reconnected` carrying the attempt histogram),
@@ -317,7 +317,7 @@ class _ReconnectEpisode:
 
 
 class SenderQuiesced(Exception):
-    """The send loop was asked to stop and the queue is empty (pgw#845).
+    """The send loop was asked to stop and the queue is empty.
 
     Ending the sender BETWEEN writes is not cosmetic: in grpc.aio a cancelled
     ``write()`` cancels the whole RPC (``_call._write`` calls ``self.cancel()``
@@ -371,7 +371,7 @@ class SendQueue:
     def __init__(
         self, maxsize: int = DEFAULT_QUEUE_MAXSIZE, evidence_max: int = EVIDENCE_MAX,
     ) -> None:
-        # pgw#973 §4.24 item 4: `maxsize <= 0` used to reach the enqueue path's
+        # `maxsize <= 0` used to reach the enqueue path's
         # `while self._maxsize > 0 and ...` and delete the bound outright — an
         # unbounded outbound queue in a pod whose producer (progress, events)
         # never blocks, i.e. the pod OOMs instead of shedding. `maxsize` is a
@@ -380,7 +380,7 @@ class SendQueue:
         if int(maxsize) <= 0:
             raise ValueError("maxsize must be positive")
         self._maxsize = int(maxsize)
-        # pgw#869: the durable evidence lane. Ordered (dict preserves insertion
+        # the durable evidence lane. Ordered (dict preserves insertion
         # order), so replay is FIFO. A coalescible beat REPLACES its slot in
         # place, which keeps a phase's beat where the phase began rather than
         # letting liveness chatter reorder the record.
@@ -428,7 +428,7 @@ class SendQueue:
         # (request_id, attempt) -> JobResult WorkerMessage, until written to a
         # live stream. Survives reconnects; drives Hello.in_flight.
         self._pending_results: dict[Tuple[str, int], pb.WorkerMessage] = {}
-        # pgw#845: set when this stream's sender must end. It ends only once
+        # set when this stream's sender must end. It ends only once
         # nothing is left to write, so quiescing never drops a queued message.
         self._quiescing = False
 
@@ -450,7 +450,7 @@ class SendQueue:
         # Durable JobResults are explicitly exempt from the queue bound. They
         # must not consume event/progress capacity merely because they share
         # the same deque (especially after reconnect requeues several results).
-        # pgw#869: evidence is exempt for the same reason and one stronger —
+        # evidence is exempt for the same reason and one stronger —
         # it has its own bound (`_evidence_max`) with its own shed policy, and
         # a producer that just MEASURED something must never block on a dead
         # connection to report it.
@@ -699,7 +699,7 @@ class SendQueue:
                 self._cond.notify_all()
                 return
             if kind == _EVIDENCE:
-                self._put_evidence(msg)               # pgw#869: never blocks
+                self._put_evidence(msg)               # never blocks
                 self._cond.notify_all()
                 return
             if self._host_capacity_key(msg) is not None:
@@ -837,7 +837,7 @@ class SendQueue:
             return
         async with self._cond:
             self._in_flight.discard(key)
-            # pgw#869: a fact retires from the durable lane only once a LIVE
+            # a fact retires from the durable lane only once a LIVE
             # stream has taken it. `_evidence_key` holds only the currently
             # stored copy, so a superseded beat can never retire the newer one.
             slot = self._evidence_key.pop(key, None)
@@ -863,7 +863,7 @@ class SendQueue:
     async def reset_for_reconnect(self) -> None:
         """Drop transient lanes; executor state replays capacity after HelloAck.
 
-        pgw#869: DURABLE lanes are requeued, not dropped. Results were already;
+        DURABLE lanes are requeued, not dropped. Results were already;
         evidence now is, in the order it was produced. Anything a live stream
         took but never confirmed (`mark_event_shipped` did not run because the
         write failed) is still in `_pending_evidence` and comes back with it —
@@ -908,7 +908,7 @@ class SendQueue:
                 or self._in_flight
                 or self._capacity_in_flight
                 or self._pending_results
-                or self._pending_evidence   # pgw#869: a drain flushes facts too
+                or self._pending_evidence   # a drain flushes facts too
             ):
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
@@ -973,9 +973,9 @@ class Transport:
         #: pgw#803: the open disconnect->reconnect episode, if any.
         self._episode: Optional["_ReconnectEpisode"] = None
         self._dial_started: float = 0.0
-        # gw#640: (message kind, exception class) already dialed to the hub.
+        # (message kind, exception class) already dialed to the hub.
         self._reported_handler_failures: set = set()
-        # pgw#763: a supervisor-requested stream cycle (compute child respawn
+        # a supervisor-requested stream cycle (compute child respawn
         # needs a fresh Hello). Cleared at the start of each connection, so a
         # request set BEFORE a connection is satisfied by that connection's
         # own fresh Hello.
@@ -997,7 +997,7 @@ class Transport:
     def current_worker_jwt(self) -> str:
         """Newest worker credential: hub-rotated token, else the boot token.
 
-        pgw#893 §2 / pgw#881 A: ONE source, and it is the process-wide one.
+        ONE source, and it is the process-wide one.
         This stream used to keep its own `_worker_jwt` cache and read it
         FIRST, which inverted the precedence pgw#848 exists to establish: the
         rotation handler assigned the cache and only then published to
@@ -1039,7 +1039,7 @@ class Transport:
             ("grpc.keepalive_timeout_ms", int(KEEPALIVE_TIMEOUT_S * 1000)),
             ("grpc.keepalive_permit_without_calls", 1),
             ("grpc.http2.max_pings_without_data", 0),
-            # pgw#973 (§4.24): the frame cap on ONE WorkerMessage, both
+            # the frame cap on ONE WorkerMessage, both
             # directions. grpc-python's own default is 4 MiB receive, which
             # this raises — the bound that matters is the one that must not be
             # ABSENT. Nothing else bounds a single message: the queue caps the
@@ -1157,7 +1157,7 @@ class Transport:
         )
         if pod:
             # The hub owns the actuator for a pod. Say so once per verdict so
-            # the silence is attributable off-pod (pgw#824).
+            # the silence is attributable off-pod.
             if not repeated:
                 self._report_auth_verdict_deferred(cred, details, pod)
             return False
@@ -1278,7 +1278,7 @@ class Transport:
             logger.debug("credential-age event failed", exc_info=True)
 
     def _report_handler_failure(self, err: HandlerError) -> None:
-        """Log a handler failure as ITSELF and dial it to the hub (gw#640).
+        """Log a handler failure as ITSELF and dial it to the hub.
 
         Reuses the `worker_fatal` carrier, so this lands as a durable
         `pod_events` row on every hub pin already deployed — no proto change,
@@ -1317,7 +1317,7 @@ class Transport:
         """A stream that HAD reached HelloAck ended: the episode starts here.
 
         Emitted immediately rather than only at reconnect: the evidence lane
-        survives the disconnect (pgw#869), so the drop is a durable fact even
+        survives the disconnect, so the drop is a durable fact even
         for a pod that dies before it ever gets back — which is the shape
         th#1333's tape had, and the shape that produced no worker-side row.
         """
@@ -1429,7 +1429,7 @@ class Transport:
                 target, use_tls = normalize_grpc_addr(self._settings.orchestrator_public_addr)
             self._connected_at = None
             self._dial_started = time.monotonic()
-            # pgw#803: the classified outcome of THIS attempt. Default names
+            # the classified outcome of THIS attempt. Default names
             # the clean case — `_connect_once` returning is a stream that ended
             # without raising.
             outcome = "stream_ended"
@@ -1485,7 +1485,7 @@ class Transport:
             except FatalTransportError:
                 raise
             except HandlerError as e:
-                # gw#640: NEVER let this look like a dropped socket again.
+                # NEVER let this look like a dropped socket again.
                 outcome = f"handler_{e.kind}_{type(e.cause).__name__}"
                 self._report_handler_failure(e)
             except Exception as e:
@@ -1590,8 +1590,8 @@ class Transport:
             self._connected_at = time.monotonic()
             self._last_send_at = self._connected_at
             self._note_connected(self._connected_at)
-            self._auth_verdicts.clear()               # pgw#873: healed
-            self._expired_rejection_reported.clear()   # pgw#869: healed
+            self._auth_verdicts.clear()               # healed
+            self._expired_rejection_reported.clear()   # healed
             self._connected.set()
             logger.info("connected to %s (HelloAck ok)", target)
             await self._handlers.on_hello_ack(ack)
@@ -1641,7 +1641,7 @@ class Transport:
                             # stream, and it reconnects like any other. Left to
                             # propagate it rode out of run() -> arun() ->
                             # Worker.run() and killed the process with no exit
-                            # code (pgw#845).
+                            # code.
                             raise ConnectionError(
                                 "stream cancelled by the transport layer"
                             ) from None
@@ -1657,7 +1657,7 @@ class Transport:
             await channel.close()
 
     async def _close_sender(self, send_task: "asyncio.Task[None]") -> bool:
-        """End this stream's sender BETWEEN writes, never inside one (pgw#845).
+        """End this stream's sender BETWEEN writes, never inside one.
 
         Measured: `send_task.cancel()` here dropped a COMPLETED job's result
         about one drain in six. The sender had already written that result
@@ -1692,7 +1692,7 @@ class Transport:
 
         `asyncio.wait` rather than `wait_for(shield(...))`: it neither cancels
         the receiver nor re-raises what it ended with, so an RPC-level
-        cancellation cannot escape a graceful close (pgw#845). The `finally`
+        cancellation cannot escape a graceful close. The `finally`
         in `_connect_once` retrieves the outcome.
         """
         try:
@@ -1710,7 +1710,7 @@ class Transport:
             if not await self.queue.should_ship_capacity(msg):
                 continue
             await stream.write(msg)
-            # pgw#803: the last instant this process is PROVEN to have been
+            # the last instant this process is PROVEN to have been
             # scheduling. A write into a dead socket still succeeds, so this is
             # not peer liveness — it is OUR liveness, and that is exactly the
             # axis th#1333's 15m36s gap turns on. The heartbeat loop forces a
@@ -1747,12 +1747,12 @@ class Transport:
                 # rotation also clears any stale-token auth strikes.
                 token = (msg.token_refresh.token or "").strip()
                 if token:
-                    # pgw#848: publish where EVERY hub dial reads. The
+                    # publish where EVERY hub dial reads. The
                     # attestation carrier opens its own Connect and used to
                     # authenticate with the frozen boot token — which is what
                     # wedged attempts 16 and 17.
                     #
-                    # pgw#893 §2: this is the ONLY place the rotation lands.
+                    # this is the ONLY place the rotation lands.
                     # It used to be preceded by a stream-local assignment and
                     # wrapped in `except Exception: pass`, so a failed publish
                     # was invisible AND survivable — this stream would carry
@@ -1769,7 +1769,7 @@ class Transport:
                         "worker JWT rotated by hub (exp=%d)",
                         msg.token_refresh.expires_at_unix,
                     )
-                    # pgw#763 delta 1: the rotation is OFFERED to the handler,
+                    # the rotation is OFFERED to the handler,
                     # which is NOT the same as forwarded to the compute child
                     # — `ParentControl.on_token_refresh` deliberately does
                     # nothing with it, because the child holds no credential

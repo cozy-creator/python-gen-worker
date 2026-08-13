@@ -44,7 +44,7 @@ the partition was the second attribution bug — it inflates "attributed" while
 leaving the residual unexplained. They are reported under their own names so a
 reader can attribute WITHIN a member without double-counting the total.
 
-``autotune_s`` (pgw#1006) is the compile-time Triton autotune benchmark —
+``autotune_s`` is the compile-time Triton autotune benchmark —
 ``autotune_at_compile_time`` resolves True for AOTI, so the autotune block runs
 INSIDE ``GraphLowering.codegen``. It is named because it decides two separate
 questions and both were being answered from a residual: how much of a mint a
@@ -67,7 +67,7 @@ import time
 from typing import Dict, Iterator, List, Mapping, Tuple
 
 #: Bump when the partition changes shape, so a reader never mixes two ledgers.
-#: v2 (pgw#1099): the outer partition grew its own residual, ``parent_other_s``.
+#: v2: the outer partition grew its own residual, ``parent_other_s``.
 #: Before it, an unclosable outer split was written into ``reap_lag_s``, so one
 #: NAME meant two things — "the child's exit plus the parent's poll
 #: granularity" on a reporting child, and "everything nobody could attribute"
@@ -130,7 +130,7 @@ PARTITIONS: Dict[str, Tuple[str, ...]] = {
 #: Residual member of each partition — the one that absorbs whatever the named
 #: members did not claim. Named so the invariant can say WHICH bucket grew.
 #: Every level has exactly one, and no MEASURED span is ever used as another
-#: level's residual (pgw#1099): a name that means "what I measured" on one
+#: level's residual: a name that means "what I measured" on one
 #: entry and "what nobody could measure" on the next is unreadable, and a
 #: reader who sums it across entries is measuring the instrument.
 RESIDUALS = ("parent_other_s", "child_other_s", "compile_other_s")

@@ -115,7 +115,7 @@ def _rig_entry(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cov
             return
         args = tuple(_rehydrate(a, spec.device) for a in cmd.get("args", ()))
         # Same gate `sequence_rank_main` enters: a follower's forward IS
-        # rank-symmetric, so it is inside the gate (pgw#775).
+        # rank-symmetric, so it is inside the gate.
         with torch.no_grad(), gated_call():
             pipe(*args)
 
@@ -144,7 +144,7 @@ def _armed_runtime(
     devices: tuple, entry: Any = _rig_entry, timeout_s: float = 60.0,
 ) -> tuple:
     pipe = _make_toy_pipe()
-    # pgw#892: arming no longer takes a duration at all — a follower that
+    # arming no longer takes a duration at all — a follower that
     # keeps working arms for as long as its work takes, and one that stops
     # working is condemned by silence.
     rt = SequenceRuntime(
@@ -211,7 +211,7 @@ def test_closing_one_group_leaves_the_sibling_serving() -> None:
 
 
 def test_rank0_exception_condemns_the_group_instead_of_wedging_it() -> None:
-    # pgw#774: rank 0 raising mid-call (OOM/deadline/cancel) used to skip the
+    # rank 0 raising mid-call (OOM/deadline/cancel) used to skip the
     # trailing barrier and park the followers forever; the next request then
     # blocked in a broadcast with no timeout. Now: the ORIGINAL error
     # surfaces, the group is condemned by name, teardown is bounded, and
@@ -251,7 +251,7 @@ def test_sibling_group_survives_a_condemned_neighbour() -> None:
 
 
 def test_a_follower_that_skips_the_collective_times_out_typed() -> None:
-    # pgw#774: `_RENDEZVOUS_TIMEOUT_S` was dead code — NO collective had a
+    # `_RENDEZVOUS_TIMEOUT_S` was dead code — NO collective had a
     # timeout, so a hung follower parked rank 0 forever. The process group
     # now carries a real timeout and rank 0 fails typed, condemning the
     # group.
@@ -263,7 +263,7 @@ def test_a_follower_that_skips_the_collective_times_out_typed() -> None:
         with pytest.raises(Exception):
             rt.call_with(_base_call, pipe, torch.ones(4, 2))
         # Bounded by the timeout the group was CONFIGURED with, not by a
-        # constant that says nothing about this rig (pgw#845).
+        # constant that says nothing about this rig.
         assert time.monotonic() - start < collective_timeout_s * 4
         assert rt.broken
     finally:
@@ -351,7 +351,7 @@ def test_group_mesh_contract_matches_installed_diffusers() -> None:
 
 
 def test_executor_close_sequence_group_runs_off_the_event_loop() -> None:
-    # pgw#774: the recovery path used to run runtime.close() ON the event
+    # the recovery path used to run runtime.close() ON the event
     # loop, whose first act was a broadcast that could block forever — the
     # loop (and the heartbeat) stopped, presenting as a platform stall.
     import asyncio
@@ -374,7 +374,7 @@ def test_executor_close_sequence_group_runs_off_the_event_loop() -> None:
 
     async def _drive() -> bool:
         ex._close_sequence_group(rec)
-        # pgw#795: the property is that the call RETURNED without waiting for
+        # the property is that the call RETURNED without waiting for
         # the 0.5s close — proven by the close still being in flight when it
         # did, not by an elapsed-time budget that asserts the runner instead.
         returned_early = not closed.is_set()

@@ -151,7 +151,7 @@ def test_apply_lora_execution_lane_stamps_and_allocates(w8a8_pipe: Any) -> None:
     assert compile_cache.apply_lora_execution_lane(w8a8_pipe, 128)
     assert branch_bucket(w8a8_pipe.unet) == 128
     assert w8a8_pipe._cozy_weight_lane == "w8a8-lora128"
-    # pgw#1181: the metadata round-trip that used to sit here
+    # the metadata round-trip that used to sit here
     # (`artifact_metadata` + `execution_lane_drift`) compared a
     # `torch-inductor-cache` cell's RECORDED lane with this pipeline's. Both
     # are deleted with the format. The lane stamp itself is what this row is
@@ -260,7 +260,7 @@ def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
             super().__init__()
             self.decoder = torch.nn.Linear(8, 8)
 
-    # pgw#1181: the delivered cell this used to build is a
+    # the delivered cell this used to build is a
     # `torch-inductor-cache` tarball — a format with no writer, now deleted.
     # The gw#627 property does not need one: a component slot resolves none of
     # `cfg.targets`, so the lane is never applied and nothing arms. Stating it

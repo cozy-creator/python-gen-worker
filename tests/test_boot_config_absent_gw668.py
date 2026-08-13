@@ -9,7 +9,7 @@ life. Since the protocol forbids a boot-stale config from advertising a READY
 capability, every ``FunctionCapability`` projected BOOT_STALE and the hub's
 exact-capability dispatch gate refused the worker for every request — with a
 remedy (pod replacement) that does not exist for a pod-less worker. That was
-th#1172: every local-worker e2e journey starved.
+every local-worker e2e journey starved.
 
 Both directions are pinned here, on the real ``IntentRegistry`` and the real
 ``Settings`` loader:

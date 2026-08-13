@@ -1,4 +1,4 @@
-"""W4A4 quality-parity + speed harness (gw#540).
+"""W4A4 quality-parity + speed harness.
 
 Same-seed renders of ONE model on the current GPU across lanes:
   bf16  — plain bf16-resident (the quality reference)

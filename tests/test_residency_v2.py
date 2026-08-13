@@ -1,6 +1,6 @@
 """Residency v2 program suite (pgw#641 umbrella; design of record:
 WORKER-RESIDENCY-DESIGN.md). One designed home for the program's rows —
-new stages add rows here, not new per-issue files (pgw#645).
+new stages add rows here, not new per-issue files.
 
 Covered trains, all REAL planner/admission/eviction logic; fakes only at the
 torch/CUDA boundary per th#1105:
@@ -42,7 +42,7 @@ _GiB = 1024 ** 3
 
 
 # ---------------------------------------------------------------------------
-# A. DeviceGroup: per-group accounting, never a cross-card sum (pgw#648).
+# A. DeviceGroup: per-group accounting, never a cross-card sum.
 # ---------------------------------------------------------------------------
 
 
@@ -146,7 +146,7 @@ def _plentiful_host_ram(monkeypatch: pytest.MonkeyPatch):
     """Demote-to-RAM consults the REAL host RAM probe (residency.py's
     get_available_ram_gb floor guard). On this shared box available RAM
     rides sibling load, flipping demote() verdicts test-to-test — fake the
-    HOST boundary (th#1105) so the accounting under test is deterministic."""
+    HOST boundary so the accounting under test is deterministic."""
     from gen_worker.models import residency as residency_mod
 
     monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 256.0)
@@ -247,7 +247,7 @@ def test_two_leases_on_one_ref_claim_max_not_sum() -> None:
 
 
 # ---------------------------------------------------------------------------
-# C. Single-flight per instance (pgw#647) — real Executor, real dispatch.
+# C. Single-flight per instance — real Executor, real dispatch.
 # ---------------------------------------------------------------------------
 
 
@@ -370,7 +370,7 @@ def test_reentrant_is_a_class_only_declaration() -> None:
 
 
 # ---------------------------------------------------------------------------
-# D. Activation-aware admission (pgw#652).
+# D. Activation-aware admission.
 # ---------------------------------------------------------------------------
 
 

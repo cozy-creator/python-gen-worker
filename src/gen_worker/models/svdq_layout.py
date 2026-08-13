@@ -1,4 +1,4 @@
-"""nunchaku "v1 single-file" svdq layout -> our SvdqLinear buffers (pgw#685).
+"""nunchaku "v1 single-file" svdq layout -> our SvdqLinear buffers.
 
 Converts an official SVDQuant checkpoint's per-Linear tensors into the layout
 ``torch._scaled_mm`` wants, so ONE module serves svdq-fp4 on every Blackwell
@@ -212,7 +212,7 @@ def unpack_wscales(wscales: Any, out_features: int, in_features: int) -> Any:
     upstream store-order table at L136-148 is the check: stored 32-bit word j
     holds channel ``(j%4)*32 + ((j//4)%4)*8 + (j//16)``.
 
-    pgw#770: we used (4, 8, 4) here, which reshapes without error and permutes
+    we used (4, 8, 4) here, which reshapes without error and permutes
     output channels within every 128-row tile — each channel then gets another
     channel's block scales. The dense fold shares this function, so it was
     equally wrong there; only the round-trip against our own ``pack_wscales``
@@ -264,7 +264,7 @@ def unpack_lowrank(weight: Any, *, down: bool) -> Any:
     before ``pack_lowrank_weight`` rearranged them into the mma fragment layout
     and re-viewed the result as ``[in, rank]`` / ``[out, rank]``.
 
-    pgw#770: reading the stored tensors as plain matrices scrambles the rank-128
+    reading the stored tensors as plain matrices scrambles the rank-128
     branch that carries SVDQuant's entire outlier budget — measured alone, it
     was the single largest contributor to the noise."""
     c, r = int(weight.shape[0]), int(weight.shape[1])

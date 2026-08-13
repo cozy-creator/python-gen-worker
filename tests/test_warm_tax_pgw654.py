@@ -227,7 +227,7 @@ def test_warm_contract_key_splits_on_execution_lane_and_overrides_not_ref(
     fine_tune = _pick(ex, "generate", "acme/cyberrealistic-xl")
     assert ex._warm_contract_key(base) == ex._warm_contract_key(fine_tune)
 
-    # pgw#1148: the flavor arm of this key is DELETED with the flavor axis
+    # the flavor arm of this key is DELETED with the flavor axis
     # (§1.32(d)) — a per-request pick can no longer name a stored precision,
     # so the key's remaining discriminators are the declared cast/dtype and
     # the component overrides asserted below.
@@ -316,7 +316,7 @@ def test_step_clamp_honors_meta_floor() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#647 gap #2: component-override dtype inherits the composition's
+# component-override dtype inherits the composition's
 # ---------------------------------------------------------------------------
 
 

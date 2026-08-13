@@ -1,4 +1,4 @@
-"""Boot-time CUDA health probe (gw#529).
+"""Boot-time CUDA health probe.
 
 RunPod occasionally allocates a host whose CUDA device is present but wedged
 ("CUDA-capable device(s) is/are busy or unavailable"). Left unchecked, the
@@ -57,7 +57,7 @@ def probe_cuda(device_index: int = 0) -> CudaProbeResult:
 
 
 def classify_probe_failure(reason: str) -> str:
-    """Typed vocabulary for ``CudaProbeResult.reason`` (gw#619) — the wire
+    """Typed vocabulary for ``CudaProbeResult.reason`` — the wire
     class the hub's pod_events row and death-taxonomy correlation key on.
     Never free-form: torch_unavailable | cuda_unavailable | driver_too_old |
     cuda_error | unknown. ``driver_too_old`` matches torch's own CUDA

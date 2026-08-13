@@ -1,4 +1,4 @@
-"""The ONE guarded HTTP fetch for endpoint code (pgw#663, ie#554).
+"""The ONE guarded HTTP fetch for endpoint code.
 
 Endpoints that accept a URL from a caller — a VLM caption input, an img2img
 source — were each hand-rolling `urlopen(url).read()`. That is an SSRF hole

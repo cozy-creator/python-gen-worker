@@ -1,4 +1,4 @@
-"""Fleet-line preflight for measurement rigs (pgw#1114).
+"""Fleet-line preflight for measurement rigs.
 
 A rig measures a rig. When the rig's torch/CUDA line drifts off the fleet's, its
 verdict is about software nobody runs — and it reads as a verdict about
@@ -34,7 +34,7 @@ measure.
 There is deliberately no override and no "warn" mode. A missing wheel for the
 fleet line is a FINDING to report, never permission to measure on an old one.
 
-VERSION STRINGS ARE NOT USABILITY (pgw#1120). Matching ``torch.version.cuda``
+VERSION STRINGS ARE NOT USABILITY. Matching ``torch.version.cuda``
 proves the WHEEL is right and says nothing about the HOST. RunPod's driver is
 per-host: on ``570.211.01`` (CUDA 12.8) a cu130 torch imports fine, prints every
 version correctly, and then cannot allocate — a failure that surfaces ~20 minutes
@@ -103,7 +103,7 @@ class FleetLineUnknown(RuntimeError):
 
 
 class CudaUnusable(FleetLineMismatch):
-    """The wheel is on the fleet line but the HOST cannot run it (pgw#1120).
+    """The wheel is on the fleet line but the HOST cannot run it.
 
     A subclass of :class:`FleetLineMismatch` so every existing rig handler still
     aborts, and a distinct type so the caller can tell "rebuild the environment"
@@ -397,7 +397,7 @@ def resolve_environment() -> dict[str, Any]:
         "packages": _package_versions(),
     }
     try:
-        import torch  # noqa: PLC0415 — heavy, and torch is a capability (pgw#788)
+        import torch  # noqa: PLC0415 — heavy, and torch is a capability
     except Exception as exc:  # noqa: BLE001 — an unimportable torch IS the report
         env["torch"] = None
         env["torch_import_error"] = f"{type(exc).__name__}: {exc}"[:400]
@@ -428,7 +428,7 @@ def resolve_environment() -> dict[str, Any]:
 
 
 def _usability(env: Mapping[str, Any]) -> dict[str, Any]:
-    """Can this interpreter actually ALLOCATE on the card (pgw#1120)?
+    """Can this interpreter actually ALLOCATE on the card?
 
     ``torch.version.cuda`` matching the fleet line proves the WHEEL is right and
     nothing about the HOST. RunPod's driver is per-host: on a 570.211.01 host

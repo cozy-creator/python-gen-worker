@@ -46,7 +46,7 @@ def test_one_ordered_ladder() -> None:
         "native", "fp8_storage",
         "model_offload", "group_offload", "sequential", "cpu",
     ]
-    # pgw#1206 D: no rung manufactures a quant at runtime. A quant rung is an
+    # no rung manufactures a quant at runtime. A quant rung is an
     # AOT artifact the ladder SELECTS; the only runtime storage transform left
     # is fp8-E4M3, which is a re-encoding of the same weights, not a quant
     # recipe with an ungated quality verdict.
@@ -87,7 +87,7 @@ def test_strict_vram_truncates_before_host_ram() -> None:
 
 
 def test_floor_only_deepens() -> None:
-    """The learned per-ref floor (gw#463) is a max, not a last-write."""
+    """The learned per-ref floor is a max, not a last-write."""
     assert rung.floor_of("group_offload", "model_offload") == "group_offload"
     assert rung.floor_of("model_offload", "sequential") == "sequential"
     assert rung.floor_of("", "model_offload") == "model_offload"

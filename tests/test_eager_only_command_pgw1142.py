@@ -122,13 +122,13 @@ META: Dict[str, Any] = {
     "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
     "family": "sdxl-base", "precision": "w8a8", "sku": "l4", "sm": "sm_89",
     "torch": "2.13.0+cu130", "cuda": "13.0",
-    # pgw#1176: this is now an ENTRY key and rides the marker's `entries` row,
+    # this is now an ENTRY key and rides the marker's `entries` row,
     # so it is spelled in the grammar `cell_key.is_key` actually admits.
     "cell_key": "cg-key-v1-" + "d" * 56,
     "lora_bucket": 0,
 }
 
-#: The ONE graph class this fixture arms. An entry NAMES its class (pgw#1176).
+#: The ONE graph class this fixture arms. An entry NAMES its class.
 ENTRY_NAME = "unet/g"
 
 ENTRY = {
@@ -146,7 +146,7 @@ ENTRY = {
 def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
     """A module wrapped by the real ``aot_serve`` swap, ONE entry armed.
 
-    pgw#1176: the PIPELINE marker carries ``targets`` + ``entries`` — the shape
+    the PIPELINE marker carries ``targets`` + ``entries`` — the shape
     :func:`aot_serve.arm_entry` writes. It used to be a bare ``state``, which
     no production path has ever written on a pipeline and which
     ``armed_entries`` does not recognise, so leaving it would have made

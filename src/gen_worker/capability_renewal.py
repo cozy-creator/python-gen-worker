@@ -56,7 +56,7 @@ def renew_once(
     ``RuntimeError`` on transient failures (5xx / malformed response).
     """
 
-    # pgw#763 delta 1: under the process split this runs in the compute child,
+    # under the process split this runs in the compute child,
     # which holds no worker JWT — the parent performs the renewal (it also
     # proves the request is one it dispatched) and returns only the new token.
     # Off the split, this is the same POST it always was.
@@ -139,7 +139,7 @@ async def renew_capability_while_running(
                 )
             except RenewDenied as exc:
                 logger.warning("capability renewal for %s stopped: %s", request_id, exc)
-                # pgw#760: the job keeps a token that will expire; its next
+                # the job keeps a token that will expire; its next
                 # upload fails with a bare auth error unless the denial is
                 # named on the wire NOW.
                 activity_mod.emit_event(
@@ -166,7 +166,7 @@ async def renew_capability_while_running(
                 "capability renewal for %s exhausted retries; token will expire",
                 request_id,
             )
-            # pgw#760: retries exhausted silently — the downstream symptom
+            # retries exhausted silently — the downstream symptom
             # (an expired-token upload failure minutes later) never names
             # this cause without the typed event.
             activity_mod.emit_event(

@@ -1,4 +1,4 @@
-"""Boot host canary (gw#550) — the designed home for its rows.
+"""Boot host canary — the designed home for its rows.
 
 Covers the pgw#748 phase-0 2-GPU leg: a delivered pod's GPU fabric is a
 MEASUREMENT, not an inference from the SKU. The hub can tell SXM from PCIe
@@ -7,7 +7,7 @@ access — and that is what decides whether a sequence-parallel release meets
 its latency SLO. The leg must reach the hub through Hello.resources, and it
 must stay inert on the 1-GPU pods that are the entire fleet today.
 
-Fakes only at the torch/CUDA boundary (th#1105); the parse and the
+Fakes only at the torch/CUDA boundary; the parse and the
 classification are pure and tested against verbatim ``nvidia-smi`` output.
 """
 
@@ -104,7 +104,7 @@ def _hello_canary(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_measured_fabric_reaches_the_hub(_fake_cuda, monkeypatch: pytest.MonkeyPatch) -> None:
-    # pgw#748: the whole point of the leg is that the number leaves the pod.
+    # the whole point of the leg is that the number leaves the pod.
     _fake_cuda(2)
     monkeypatch.setattr(hc, "_measure_peer", lambda *a, **k: ("nvlink", 348.5, True, "NV18"))
     canary = _hello_canary(monkeypatch)

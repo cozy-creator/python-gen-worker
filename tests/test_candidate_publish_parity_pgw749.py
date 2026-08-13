@@ -145,9 +145,9 @@ def test_artifact_manifest_records_disk_identity(
 ) -> None:
     """The metadata's per-library list is the DISK identity manifest (so a
     mismatch names the library), never the phase-dependent mapped set —
-    and the host driver never appears in it (pgw#745)."""
+    and the host driver never appears in it."""
     _phase(monkeypatch, tmp_path, "warm", _COLD_LIBS + _WARM_EXTRA)
-    # pgw#1181: read the manifest from its PRODUCER, `env_seal`, rather than
+    # read the manifest from its PRODUCER, `env_seal`, rather than
     # from `compile_cache.artifact_metadata`, which embedded it in a
     # `torch-inductor-cache` cell and is deleted with that format. `aot_mint`
     # records the same call's output under the same `loaded_libs` key, so the

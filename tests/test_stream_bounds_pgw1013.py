@@ -68,7 +68,7 @@ class _Rig(http.server.ThreadingHTTPServer):
     """Serves scripted bodies and records, per path, whether the response was
     written to COMPLETION before the client hung up.
 
-    ``finished`` is the ordering observation this file turns on (pgw#1204).
+    ``finished`` is the ordering observation this file turns on.
     ``served`` is kept as a DIAGNOSTIC — it makes a failure message concrete —
     and no assertion reads it, because how many bytes a server got onto the
     wire before an abort is a fact about the runner's scheduler, not about the
@@ -206,7 +206,7 @@ def _finished(rig: _Rig, path: str) -> bool:
 def _aborted_early(rig: _Rig, path: str) -> None:
     """The refusal happened DURING the transfer, not after it.
 
-    OBSERVED AS AN ORDERING, NOT AS A BYTE COUNT (pgw#1204). This predicate
+    OBSERVED AS AN ORDERING, NOT AS A BYTE COUNT. This predicate
     used to assert `served < 8 MiB` against a 32 MiB body — a threshold, on a
     quantity nothing in the code under test controls. How far a server gets
     before an abort lands is decided by the runner's scheduler and by kernel
@@ -446,7 +446,7 @@ WEIGHTS_SHA = hashlib.sha256(WEIGHTS).hexdigest()
 def _civitai(url: str, dst: Path, *, expected_size: int, sha: str = "") -> int:
     from gen_worker.models.download import _civitai_stream_one
 
-    # pgw#939: the observed digest now rides back beside the byte count so the
+    # the observed digest now rides back beside the byte count so the
     # manifest can distinguish a verified download from an unverified one.
     written, _observed = _civitai_stream_one(
         url, dst, api_key="", expected_size=expected_size,
@@ -572,7 +572,7 @@ def test_cell_artifact_oversized_stream_is_abandoned_mid_transfer(
 
 
 # ---------------------------------------------------------------------------
-# pgw#1204: the SEVERANCE check — `_aborted_early` must still be able to fail
+# the SEVERANCE check — `_aborted_early` must still be able to fail
 # ---------------------------------------------------------------------------
 
 

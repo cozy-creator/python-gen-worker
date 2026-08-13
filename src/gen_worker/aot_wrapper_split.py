@@ -1,5 +1,5 @@
 """Split AOTI's generated wrapper constructor so g++ stops paying a
-superlinear price for a data table written as code (pgw#793).
+superlinear price for a data table written as code.
 
 pgw#793 measured, per host invocation, that an AOTI mint's entire host cost
 is ONE ``g++ -O1 -c wrapper.cpp`` — 180.6 s of a 390 s AOTI compile (46%);

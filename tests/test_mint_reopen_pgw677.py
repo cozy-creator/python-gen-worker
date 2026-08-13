@@ -195,7 +195,7 @@ class _Harness:
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
-        # pgw#1010: every mint is a CHILD mint now (the in-process capture only
+        # every mint is a CHILD mint now (the in-process capture only
         # ever built a dynamo cell). This harness has no child process, so the
         # child's OUTCOME is stubbed — what it is testing is the serving side
         # around it: eager-first, the tenant never starving, the router, and
@@ -203,7 +203,7 @@ class _Harness:
         # `compiled` wrapper does, on the boot/warm thread, exactly as before.
         monkeypatch.setattr(
             mint_delegate, "build_cell", self._fake_build_cell)
-        # pgw#1181: the pgw#681 mint gate this simmed is deleted.
+        # the pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
         # the MINT and wrote the result into the cell's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
@@ -231,7 +231,7 @@ class _Harness:
         artifact: Any = None, publisher: Any = None,
     ) -> fleet_cells.ArmOutcome:
         mint_root = self.tmp_path / f"mint-{id(pipe)}"
-        # pgw#1010: OUTSIDE mint_root. The publish gate rmtree's mint_root when
+        # OUTSIDE mint_root. The publish gate rmtree's mint_root when
         # a mint resolves with no sink, and this rig's simulated compile writes
         # its "graphs" long after that.
         capture = self.tmp_path / f"capture-{id(pipe)}"
@@ -437,7 +437,7 @@ def test_w8a8_stamp_without_execution_lane_evidence_stays_foreground(
 # ---------------------------------------------------------------------------
 
 
-# pgw#1010: `test_multi_minute_compile_never_steals_against_live_demand` stood
+# `test_multi_minute_compile_never_steals_against_live_demand` stood
 # here. Its mechanism was the IN-PROCESS mint's background compile turns
 # competing with tenant demand — the mint compiles in a child process now, so
 # there are no in-process mint turns to steal with. The steal floors
@@ -488,7 +488,7 @@ def test_compile_steal_is_announced_on_the_wire(
 # ---------------------------------------------------------------------------
 
 
-# pgw#1010: `test_pack_or_closure_refusal_reaches_the_wire` and
+# `test_pack_or_closure_refusal_reaches_the_wire` and
 # `test_oom_truncated_plan_never_finalizes_partial_capture` stood here. Both
 # assert a PACK — of an in-process inductor capture, into a dynamo cell — and
 # both go with it. The surviving half of "a refusal reaches the wire" is the

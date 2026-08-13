@@ -255,7 +255,7 @@ def test_both_siblings_are_bound_so_the_warm_plan_stays_class_scoped(
 ) -> None:
     """``instance_key`` is a live property over ``spec.models``. Binding the
     invoked function alone would move its key out from under its sibling and
-    narrow a class-scoped mint (pgw#654) to one lane — silently."""
+    narrow a class-scoped mint to one lane — silently."""
     tree, binding = served
     request = _request(tree, binding, tmp_path)
     chosen, siblings = _child_specs(request)

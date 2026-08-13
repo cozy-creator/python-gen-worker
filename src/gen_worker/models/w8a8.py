@@ -1,4 +1,4 @@
-"""W8A8 fp8-GEMM loader mode (gw#534).
+"""W8A8 fp8-GEMM loader mode.
 
 A ``#fp8-w8a8`` flavor is a normal diffusers tree whose denoiser holds
 calibrated fp8-E4M3 weights WITH scales — the tensor-layout contract (frozen in
@@ -20,7 +20,7 @@ Execution: quantized Linears become :class:`Fp8ScaledLinear` —
 whole point, gw#534 measured the cast tax at +44% H100 / +73% B200), dynamic
 activation quant by default, the static scale when present. TWO dispatch
 branches over the ONE artifact, chosen once at load by :func:`w8a8_gemm_mode`
-(gw#564): "rowwise" (scale vectors inside the GEMM — CUTLASS fast, sm_90+)
+: "rowwise" (scale vectors inside the GEMM — CUTLASS fast, sm_90+)
 and "pertensor" (scalar-scaled cuBLASLt GEMM + per-channel epilogue rescale —
 the Ada/sm_89 fast path; torch's rowwise kernels fall back to ~half rate
 there, ie#498). Hosts where no branch wins the load-time micro-benchmark
@@ -50,7 +50,7 @@ W8A8_FLAVOR = "fp8-w8a8"
 # torch._scaled_mm needs fp8 tensor cores (sm_89 Ada +) and 16-aligned dims.
 W8A8_MIN_SM = 89
 # torch's fast ROWWISE-scaled kernels are CUTLASS sm_90+; sm_89 runs rowwise
-# on a ~half-rate fallback (ie#498) and takes the pertensor branch instead.
+# on a ~half-rate fallback and takes the pertensor branch instead.
 W8A8_ROWWISE_MIN_SM = 90
 _FP8_MAX = 448.0
 _DIM_ALIGN = 16
@@ -273,7 +273,7 @@ def _bench_gemm_pair(mode: str) -> tuple[float, float]:
 
 
 def _gemm_profitable(mode: str) -> bool:
-    """Load-time micro-benchmark gate (gw#564): the probe must verify the
+    """Load-time micro-benchmark gate: the probe must verify the
     fast path ENGAGES, not that the call succeeds — ie#498 measured sm_89
     rowwise probe-pass at ~half the bf16 rate (+79% compiled)."""
     fp8_ms, bf16_ms = _bench_gemm_pair(mode)
@@ -306,7 +306,7 @@ def _choose_gemm_mode(sm: int) -> str:
     logger.warning(
         "w8a8: no fp8 GEMM branch engages a real win on this device (sm_%d); "
         "dequant lane", sm)
-    # pgw#824: this is a LANE decision, taken once per process and silent. The
+    # this is a LANE decision, taken once per process and silent. The
     # whole point of the w8a8 artifact is the fused fp8 GEMM; falling to the
     # dequant lane keeps the memory saving but gives up the speed, so every
     # request this pod serves is slower than the lane it advertises — and a
@@ -333,7 +333,7 @@ def w8a8_gemm_mode() -> str:
     per-channel epilogue rescale — the Ada/sm_89 fast path, gw#564), or
     ``""`` (dequant lane). Live-probed AND micro-benchmarked: a branch arms
     only when its kernel call succeeds and beats the bf16 reference —
-    probe-pass ≠ profitable (ie#498)."""
+    probe-pass ≠ profitable."""
     try:
         import torch
     except ImportError:
@@ -351,7 +351,7 @@ def _build_quantizer(torch: Any) -> Any:
     reciprocal, mul, clamp, cast). Its cost scales with M*K while the GEMM
     scales with M*K*N, so the overhead fraction goes as 1/N and on a thin-N
     projection it eats the entire fp8 win. Measured on H100 at H3's shapes
-    (pgw#1156): `attn.to_out.0` and `ff.net.2` served 0.82-0.93x bf16 — the fp8
+: `attn.to_out.0` and `ff.net.2` served 0.82-0.93x bf16 — the fp8
     lane LOSING to the precision it replaces, at every duration — while their
     bare GEMMs won 1.48x and 1.30x. One inductor-fused kernel pair closes it
     (0.82x -> 1.21x, within 0.1% of the fully-compiled arm) and helps the wide
@@ -436,7 +436,7 @@ def _build_module_class() -> type:
 
         ``weight_scale`` is the [out, 1] dequant multiplier (per-tensor
         scalars are expanded at load). Two GEMM dispatch branches, chosen
-        ONCE at load by SKU (gw#564; ONE weight artifact serves both):
+        ONCE at load by SKU (ONE weight artifact serves both):
 
         - ``gemm_mode="rowwise"`` (sm_90+): scale vectors consumed inside
           ``_scaled_mm`` (per-row dynamic activation scale x per-channel
@@ -453,7 +453,7 @@ def _build_module_class() -> type:
         module — a dtype cast would upcast the fp8 buffer (device moves are
         fine).
 
-        Optional LoRA side-branch (gw#547): ``lora_a`` [bucket, in] /
+        Optional LoRA side-branch: ``lora_a`` [bucket, in] /
         ``lora_b`` [out, bucket] compute-dtype buffers, rank-padded to a
         fixed bucket so every adapter in the bucket shares one traced graph.
         The branch reads the ORIGINAL bf16 activation and adds onto the bf16
@@ -462,7 +462,7 @@ def _build_module_class() -> type:
 
         weight: Any  # fp8 buffer (annotated: Module.__getattr__ unions confuse mypy)
         weight_scale: Any
-        lora_a: Any  # None, or [bucket, in] bf16 branch buffer (gw#547)
+        lora_a: Any  # None, or [bucket, in] bf16 branch buffer
         lora_b: Any  # None, or [out, bucket] with scale folded in
         # Structural marker consumed by compile_cache.execution_contract.
         # Unlike a class-name check it survives refactors and records no
@@ -477,7 +477,7 @@ def _build_module_class() -> type:
             if gemm_mode not in ("rowwise", "pertensor"):
                 raise ValueError(f"invalid gemm_mode {gemm_mode!r}")
             self.gemm_mode = gemm_mode
-            # pgw#1015: RECORD it. `adapter_fidelity.branch_compute_dtype`
+            # RECORD it. `adapter_fidelity.branch_compute_dtype`
             # probes `mod.compute_dtype` FIRST, then the weight (fp8 here, so
             # correctly skipped), then the bias — so on a BIAS-FREE layer it
             # had nothing left and silently fell back to bf16. Measured: in
@@ -504,7 +504,7 @@ def _build_module_class() -> type:
                     out_features, dtype=compute_dtype, device=meta))
             else:
                 self.bias = None
-            # DECLARED slots, not plain attributes (pgw#726): the with-LoRA
+            # DECLARED slots, not plain attributes: the with-LoRA
             # graph class must be a structural fact at trace time, and a
             # plain `None` attribute makes `register_buffer` refuse the name
             # outright ("attribute 'lora_a' already exists") — the LoRA path
@@ -738,7 +738,7 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
 
 
 # ---------------------------------------------------------------------------
-# Root-layout serve path (gw#562): pipelines the worker does not assemble
+# Root-layout serve path: pipelines the worker does not assemble
 # (DiffSynth families — hidream-o1's sharded-transformers root, anima's
 # split checkpoint). The pipeline class's OWN from_pretrained constructs the
 # model; its loader runs sanitize_w8a8_state_dict so a quantized snapshot
@@ -813,7 +813,7 @@ def swap_w8a8_linears(
         return fh.get_tensor(name)
 
     swapped = 0
-    # pgw#824: every layer this loop SKIPS stays dequantized — full precision,
+    # every layer this loop SKIPS stays dequantized — full precision,
     # in a pipeline that reports the w8a8 lane to placement, billing and every
     # AOT-vs-eager comparison. One skip was a `logger.warning`; the alignment
     # skip below had no report of ANY kind. Counted by class and confessed once

@@ -1,4 +1,4 @@
-"""Native-kernel dispatch (pgw#860, pgw#863, pgw#947).
+"""Native-kernel dispatch.
 
 TWO decisions, each made once per process at LOAD time and each INDEPENDENT
 of the other (pgw#863 — binding them to one switch cost sm_100 either 9.5 GB
@@ -7,11 +7,11 @@ of residency or 19% of its step time, with no way to take both):
 - ``svdq_linear_lane()`` — FUSED W4A4 linears (pgw#862 triton kernels;
   `_cozy_kernels` C++ ops if/when a lane needs them) or the baseline unfused
   chain. A throughput question.
-- ``svdq_modulation_lane()`` — PACKED W4A16 AdaLN modulation (pgw#864) or
+- ``svdq_modulation_lane()`` — PACKED W4A16 AdaLN modulation or
   dense bf16. A residency question.
 
 **Neither decision is made here, and neither is derived from the SM
-(pgw#947).** Which combination of the two wins on a card is a per-card FACT,
+.** Which combination of the two wins on a card is a per-card FACT,
 not a derivable one — a custom op is opaque to inductor, so our fusion beats
 inductor's own on sm_120 and loses to it on sm_100 — and it used to live in
 hand-maintained SM tuples informed by ~$12 benchmark campaigns per card. It

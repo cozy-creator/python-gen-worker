@@ -1,4 +1,4 @@
-"""Progress-based give-up for retry and poll loops (gw#666).
+"""Progress-based give-up for retry and poll loops.
 
 Paul's standing rule, and the whole point of the th#1166 audit: nothing that
 can END REAL WORK may key on a wall clock. A fixed budget cannot tell a
@@ -84,7 +84,7 @@ class ProgressFloor:
 
     ``cleared(total)`` rebases and returns True only once ``total`` has grown
     by at least ``floor`` since the last clearance — so a transfer that
-    trickles can never masquerade as a healthy one (gw#655).
+    trickles can never masquerade as a healthy one.
     """
 
     __slots__ = ("floor", "_base")

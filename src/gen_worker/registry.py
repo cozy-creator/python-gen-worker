@@ -79,13 +79,13 @@ class CompileCell:
     # their own contracts (two checkpoints = two instances = two cells).
     guidance_scales: Tuple[float, ...]
     text_lens: Tuple[int, ...] = ()
-    # pgw#1150: the family's DECLARED numerics band, carried through to the
+    # the family's DECLARED numerics band, carried through to the
     # gate. `numerics_ladder.declared_thresholds` has one caller
     # (`numerics_probe.probe_cell`) and its `cfg` is always this object, so
     # before these two fields existed `Compile(numerics_floor=…)` was read by
     # nobody: every gate on every path scored against the SDK default and
     # every `threshold_source` said `sdk-default`, sdxl's measured 0.995/0.999
-    # (pgw#812/#814) included. Deliberately NOT in `contract_facts()` below —
+    #  included. Deliberately NOT in `contract_facts()` below —
     # a numerics band is not a graph axis and must never move a cell key.
     numerics_floor: Optional[float] = None
     numerics_warn: Optional[float] = None
@@ -127,7 +127,7 @@ class CompileCell:
         return (int(self.text_len),) if self.text_len is not None else ()
 
     def contract_facts(self) -> Dict[str, Any]:
-        """Canonical DECLARED compile-contract facts (pgw#647). Since
+        """Canonical DECLARED compile-contract facts. Since
         pgw#1059 this is NOT a key-axis input — the exported-cell key reads
         recorded artifact blocks only. Its one serialized consumer is the
         SDK v2 manifest's opaque ``shape_contract_digest`` (the wire field
@@ -173,7 +173,7 @@ class EndpointSpec:
     payload_param: str = "payload"
     resources: Resources = field(default_factory=Resources)
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
-    # Slot-declared entries in `models` (pgw#520): slot -> Slot metadata
+    # Slot-declared entries in `models`: slot -> Slot metadata
     # (selected_by/default_checkpoint). A subset of `models`'s keys — bare
     # bindings have no entry here.
     slots: Dict[str, Slot[Any]] = field(default_factory=dict)
@@ -181,10 +181,10 @@ class EndpointSpec:
     # the handler's derived config schema's @family registration) —
     # precomputed once here so ctx.slots doesn't need EndpointDecl.compile.
     slot_family: Dict[str, str] = field(default_factory=dict)
-    # SDK v2 (pgw#647): the handler's DERIVED config schema — the D in
+    # SDK v2: the handler's DERIVED config schema — the D in
     # `ctx: RequestContext[D]`. None when the handler annotates a bare
     # context. Catalog recipe metadata decodes against this type; code owns
-    # the schema, the catalog owns the values (th#1116).
+    # the schema, the catalog owns the values.
     defaults_type: Optional[type] = None
     # SDK v2: DERIVED component tree per introspectable pipeline slot —
     # {slot: {part_name: "weights"|"config"}}. Published into the release
@@ -198,34 +198,34 @@ class EndpointSpec:
     lora_bucket: int = 0
     runtime: Optional[str] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
-    # th#826: the function makes endpoint-to-endpoint child calls; emitted
+    # the function makes endpoint-to-endpoint child calls; emitted
     # into the discovery manifest so the hub mints the invoke_child grant.
     child_calls: bool = False
-    # pgw#647: handlers on one live instance run single-flight unless the
+    # handlers on one live instance run single-flight unless the
     # class explicitly declared itself re-entrant (mutates no instance state).
     reentrant: bool = False
     # th#1004 @variant_of: this function is the variant_kind variant of the
     # sibling function variant_of (both slugs). Empty = not a variant.
     variant_of: str = ""
     variant_kind: str = ""
-    # pgw#654: this handler's declared objective contract (from
+    # this handler's declared objective contract (from
     # @worker_function). None = unrestricted / serves either.
     objectives: Optional[Tuple[str, ...]] = None
-    # th#1257: this handler's declared serving tasks (@worker_function).
+    # this handler's declared serving tasks (@worker_function).
     # None = undeclared, which resolves NO quant approval hub-side.
     tasks: Optional[Tuple[str, ...]] = None
     distilled: Optional[bool] = None
-    # th#1757: this handler's opt-in reference contract (@worker_function).
+    # this handler's opt-in reference contract (@worker_function).
     # None = it never participates in the platform reference layer.
     accepts_references: Optional[Any] = None
-    # pgw#654 gap #6: this handler's effective text pin
+    # this handler's effective text pin
     # (@worker_function(text_len=) else the class Compile.text_len).
     text_len: Optional[int] = None
-    # pgw#654 derived warm plan: per-function non-axis warm overrides
+    # per-function non-axis warm overrides
     # (validated at walk time; require a recorded warm_reason).
     warm_overrides: Dict[str, Any] = field(default_factory=dict)
     warm_reason: str = ""
-    # pgw#748 phase 1: which EXECUTION GROUP this dispatch runs on (th#1285
+    # which EXECUTION GROUP this dispatch runs on (th#1285
     # `G×D` packing). Never authored and never discovered — the executor
     # derives it from the delivered topology and the job's rank-0 device, then
     # clones the spec so the group rides the identity every downstream
@@ -239,13 +239,13 @@ class EndpointSpec:
     # sibling specs; a function-shaped endpoint unions with itself).
     guidance_union: Tuple[float, ...] = ()
     text_lens: Tuple[int, ...] = ()
-    # th#1050: declared lane bodies this endpoint's code branches on
+    # declared lane bodies this endpoint's code branches on
     # (ctx.lane). Empty = platform-managed only.
     handles: Tuple[str, ...] = ()
-    # th#1051: declared compute-time formula for this handler; None =
+    # declared compute-time formula for this handler; None =
     # undeclared (scalar EWMA fall-through hub-side).
     runtime_formula: Optional["RuntimeFormula"] = None
-    # th#1087: declared config parameters (ctx.config) + declared env names.
+    # declared config parameters (ctx.config) + declared env names.
     config: Tuple[ConfigParam, ...] = ()
     env: Tuple[str, ...] = ()
     module: str = ""              # declaring module
@@ -280,7 +280,7 @@ class EndpointSpec:
         """Specs sharing this key share one class instance (same class + same
         resolved binding set + same execution group). The group ordinal is
         elided at 0, so a single-group worker's keys are byte-identical to
-        every key this worker has ever computed (pgw#748)."""
+        every key this worker has ever computed."""
         base = (self.cls, tuple(sorted(self.models.items())))
         return base if not self.device_group_ordinal else (
             base + (("device_group", int(self.device_group_ordinal)),)
@@ -290,11 +290,11 @@ class EndpointSpec:
 def _derive_defaults_type(
     owner: str, method: Callable[..., Any], ctx_param: str
 ) -> Optional[type]:
-    """SDK v2 (pgw#647): the D in ``ctx: RequestContext[D]`` — the handler's
+    """SDK v2: the D in ``ctx: RequestContext[D]`` — the handler's
     derived per-model config schema (``GenerationDefaults`` subclass).
     ``None`` for a bare/unannotated context parameter. The annotation is the
     ONLY declaration site: ``Slot(default_config=...)`` is deleted; the
-    catalog owns values (th#1116), code owns this schema."""
+    catalog owns values, code owns this schema."""
     try:
         hints = typing.get_type_hints(method, include_extras=False)
     except Exception:
@@ -622,7 +622,7 @@ def _spec_for_handler(
         if variant_of_slug == slug:
             raise ValueError(f"{owner}: @variant_of cannot target itself")
 
-    # th#1051: resolve + validate this handler's declared compute-time
+    # resolve + validate this handler's declared compute-time
     # formula now that the payload type is known. pgw#654 gap #4: fields
     # may resolve against the derived defaults schema (catalog recipe),
     # not only numeric wire defaults.
@@ -631,7 +631,7 @@ def _spec_for_handler(
         runtime_formula.validate_for_payload(
             payload_type, owner, defaults_type=defaults_type)
 
-    # pgw#654: per-function facts declared at the definition site.
+    # per-function facts declared at the definition site.
     wf: Optional[WorkerFunctionDecl] = getattr(method, WF_ATTR, None)
     warm_overrides: Dict[str, Any] = {}
     if wf is not None and wf.warm:
@@ -742,7 +742,7 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
             resources=decl.resources, walked_module=walked,
         ))
     out = _apply_class_unions(out)
-    # gw#470: boot warmup is default-on for GPU inference classes — fail at
+    # boot warmup is default-on for GPU inference classes — fail at
     # walk time (discovery/CI/boot), never at first request.
 
     validate_class_warmup(cls, decl, out)
@@ -809,7 +809,7 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
             continue
         seen.add(id(compile_decl))
         family = str(getattr(compile_decl, "family", "") or "").strip()
-        # pgw#1107: the same INTENT question the decorator asks — a dynamo-only
+        # the same INTENT question the decorator asks — a dynamo-only
         # `compile=` block declares no export contract and is registered
         # nowhere; anything reaching for the export vocabulary is held to
         # carrying classes by `register_export_declaration`.

@@ -57,6 +57,6 @@ def test_parse_execution_lane_spec_dual_form() -> None:
         execution_lanes.parse_execution_lane_spec("int8")
 
 
-# pgw#1148: the `flavor` argument is GONE (§1.32(d)). A BINDING names a tag or
+# the `flavor` argument is GONE (§1.32(d)). A BINDING names a tag or
 # a digest and declares at most a CAST; it no longer asserts a stored quant.
 

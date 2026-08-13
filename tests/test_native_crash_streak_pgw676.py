@@ -241,7 +241,7 @@ def test_streak_counts_distinct_requests_not_attempts_of_one(
 def test_compile_deaths_still_count_every_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A background compile carries no request id (pgw#714), so distinct-request
+    """A background compile carries no request id, so distinct-request
     counting must not silently disarm it — every death still counts."""
     registry = tmp_path / "streaks.json"
     monkeypatch.setattr(postmortem, "CRASH_REGISTRY_PATH", registry)

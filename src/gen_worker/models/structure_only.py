@@ -4,7 +4,7 @@ The mint child exports and compiles a family's declared compile targets. Until
 now it reached them by running the endpoint's own ``setup()``, which loads the
 checkpoint — so the process that traces held every byte the process that serves
 holds, and on a two-pipeline family (z-image, 42.53 GiB) the two copies do not
-fit on one card at all (ie#638). Paul's ruling: export and compile must not
+fit on one card at all. Paul's ruling: export and compile must not
 require real weights resident AT ALL.
 
 WHY THIS IS PER-COMPONENT AND NOT A ``structure_only=True`` LOADER FLAG
@@ -18,7 +18,7 @@ is ``init_empty_weights()`` + ``from_config`` — which is a per-CLASS capabilit
 already uses to build its denoiser (:mod:`.w8a8` , :mod:`.w4a4`,
 :mod:`.svdq_native`). The context manager itself is :mod:`.meta_init`, owned
 here rather than imported from ``accelerate``: see that module for the pods
-that measured what an undeclared import on this path costs (pgw#1123). A
+that measured what an undeclared import on this path costs. A
 PIPELINE's config is its component CLASS MAP
 (``model_index.json``), not a weights layout, so ``from_config`` on a pipeline
 builds nothing the export traces. Hence: build the COMPONENT, inject it through
@@ -113,7 +113,7 @@ class StructureCapabilityMissing(StructureOnlyUnsupported):
     correct property of some trees (a quantized artifact lane has no
     config-only structure and never will); this one is a broken install, is
     never normal, and strands EVERY family in the image rather than one — which
-    is exactly how it went unnoticed on two paid pods (pgw#1123).
+    is exactly how it went unnoticed on two paid pods.
     """
 
     def __init__(self, *, component: str, cls_name: str, lacks: str,
@@ -295,7 +295,7 @@ def _refuse_artifact_lanes(root: Path, component: str, cls: Any) -> None:
 def _init_empty_weights(component: str = "") -> Any:
     """The meta-init seam, PROVEN on this process before it is used.
 
-    pgw#1123: this used to import ``accelerate`` — undeclared, absent from the
+    this used to import ``accelerate`` — undeclared, absent from the
     fleet's own probe image, and refusing under the same token a stranded
     family refuses under. Both halves are fixed: the mechanism is owned
     (:mod:`.meta_init`), and if it is ever unavailable anyway the refusal names
@@ -401,7 +401,7 @@ def _wrapper_parts(tensor: Any) -> Optional[Tuple[List[str], Any]]:
     the SUBCLASS rather than a plain tensor of the outer dtype. Flattening one
     to bf16 traces bf16 Linears for a pod that serves fp8 — a cell for a graph
     the pod never executes, which is the defect ``_refuse_artifact_lanes``
-    exists to prevent, arriving by the other door (pgw#1198).
+    exists to prevent, arriving by the other door.
     """
     try:
         from torch.utils._python_dispatch import is_traceable_wrapper_subclass
@@ -618,7 +618,7 @@ def weight_free_breaches(
     ``place=False`` load that second target sits on the HOST, so the
     off-host walk (:func:`gen_worker.boot_trace_child.off_host_tensors`) reads
     clean too. Both guards can be green while the weight-free premise every
-    VRAM conclusion downstream rests on is false (pgw#1173).
+    VRAM conclusion downstream rests on is false.
 
     BUFFERS ARE NOT COUNTED. A structure-only component's buffers stay real by
     construction — they are config-derived tables and a literal-bearing family
@@ -826,13 +826,13 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# pgw#1111: the META round-trip that lets a weight-free program cross the
+# the META round-trip that lets a weight-free program cross the
 # entry-compile pool's process boundary
 # ---------------------------------------------------------------------------
 #
 # The parallel entry pool hands each ExportedProgram to a compile CHILD by
 # ``torch.export.save`` in the parent and ``torch.export.load`` in the child
-# (pgw#809). A structure-only program's PARAMETERS are FAKE tensors, and a fake
+# . A structure-only program's PARAMETERS are FAKE tensors, and a fake
 # tensor has no storage to serialize — the child dies deserializing it
 # ("We ran into an error when deserializing the saved file"). So before
 # ``fc77b923`` a weight-free mint could only compile SERIALLY, in the parent,
@@ -971,7 +971,7 @@ def revirtualize_from_meta(program: Any) -> Optional[Any]:
 
 
 # ---------------------------------------------------------------------------
-# pgw#1199: what USED to live here, and why it does not any more
+# what USED to live here, and why it does not any more
 # ---------------------------------------------------------------------------
 #
 # `materialize_random` / `restore_virtual` / `stray_real_tensors` gave every

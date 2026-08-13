@@ -17,7 +17,7 @@ zero free slots across the whole 301-second "no process-tree CPU" window.
 Both tapes below run REAL processes and a REAL grandchild that burns REAL CPU
 and then exits, because the property under test is exactly what ``/proc`` says
 after a ``wait()`` — which no mock can tell you. No wait here is a clock: they
-key on markers the children write and on measured advances (gw#666).
+key on markers the children write and on measured advances.
 """
 
 from __future__ import annotations
@@ -158,7 +158,7 @@ async def _await(
 
     ``watch`` finishing is a DEFINITIVE end, not a stall: the monitor issued
     its kill verdict, so there is nothing left to wait for and the caller's
-    assertion gets to report it verbatim. No duration bounds this (gw#666).
+    assertion gets to report it verbatim. No duration bounds this.
     """
     cadence = Cadence(floor_s=60.0)
     window = SilenceWindow(cadence.window_s)

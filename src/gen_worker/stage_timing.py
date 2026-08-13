@@ -1,4 +1,4 @@
-"""Per-stage timing for one served request (th#1111).
+"""Per-stage timing for one served request.
 
 ``runtime_ms`` used to be one opaque number covering input fetch, text
 encode, denoise, VAE decode, image encode, credential stamp and upload, and
@@ -20,7 +20,7 @@ Two properties the design is built around:
 
 Derived from the same intervals: ``total.prep`` (handler start -> first
 denoise step) and ``total.tail`` (last denoise step -> handler end), the two
-numbers pipelining (th#1108 / pgw#652) is sized against.
+numbers pipelining is sized against.
 """
 
 from __future__ import annotations
@@ -54,13 +54,13 @@ _CLASS_BY_STAGE: Dict[str, str] = {
     "adapter_activate": SMALL_GPU,
     # CPU / network
     "gpu_permit_wait": GPU_IDLE,
-    # pgw#943: parked on a child request's result — slot yielded when safe.
+    # parked on a child request's result — slot yielded when safe.
     "child_call_wait": GPU_IDLE,
     "input_fetch": GPU_IDLE,
     "setup_wait": GPU_IDLE,
     "image_encode": GPU_IDLE,
     "video_encode": GPU_IDLE,
-    # pgw#1094: the output-integrity floor. CPU numpy over a handful of
+    # the output-integrity floor. CPU numpy over a handful of
     # decimated frames — single-digit ms, and it must be ATTRIBUTED rather than
     # appear as unexplained residual on every render.
     "output_integrity": GPU_IDLE,
@@ -140,7 +140,7 @@ class StageTimer:
     def record_phase(self, stage: str, phase: str, seconds: float) -> None:
         """Record a SUB-PHASE of ``stage``, reported as ``stage.phase``.
 
-        pgw#1125 / th#1795: ``upload`` is one bracket around a three-leg
+        ``upload`` is one bracket around a three-leg
         protocol (create session -> PUT parts to the object store -> complete),
         and it is the largest measured term in a fast request's round trip
         (2587 ms of a 2623 ms finalize tail). Which leg owns it decides which
@@ -197,7 +197,7 @@ class StageTimer:
         """Record the END of denoise step ``index`` (1-based) for ``stage``.
 
         Wired from ``diffusers_step_callback`` AND from ``ctx.progress`` when
-        it carries a step counter (pgw#1154), so an endpoint driving its own
+        it carries a step counter, so an endpoint driving its own
         step loop gets denoise timing with no code change either. First mark
         for an index wins: the callback's is un-throttled and therefore the
         better clock, and ``ctx.progress`` only fills in the endpoints the

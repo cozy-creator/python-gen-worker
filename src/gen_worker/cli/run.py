@@ -28,7 +28,7 @@ from typing import (
 
 import msgspec
 
-if TYPE_CHECKING:  # pgw#1127: the arming import stays deferred at runtime —
+if TYPE_CHECKING:  # the arming import stays deferred at runtime —
     # `gen_worker.local_serve` pulls the whole compile stack, and `cozy run`
     # on a payload-only endpoint must not pay for it.
     from .. import local_serve
@@ -572,24 +572,24 @@ def run_setup(
     slots its signature declares.
 
     ``arm_compile=False`` loads the slots WITHOUT arming any compiled path
-    (pgw#784): the mint child drives its own cold arm + capture and must not
+: the mint child drives its own cold arm + capture and must not
     have a cell armed under it. ``return_loaded=True`` returns the loaded slot
     objects so a caller can reach the pipeline it just built.
 
-    ``selected`` (pgw#1127) is the routable function these slots belong to. It
+    ``selected`` is the routable function these slots belong to. It
     is what makes ``arm_compile=True`` able to MINT: a delegated child
     rediscovers the endpoint from its declaring module and re-resolves the
     parent's slots, so without it this path can only adopt a cell that already
     exists. Absent, the arm is adopt-only and says so.
 
-    ``place=False`` (pgw#1124) loads the slots without running the worker's
+    ``place=False`` loads the slots without running the worker's
     serving placement ladder at all, while ``device`` still says which device
     the virtual structure is BUILT on — the two are one knob only for a load
     that intends to serve. The boot-trace child sets it: it needs shapes and a
     graph, never a servable pipeline, and the ladder it was running moved the
     slot's REAL non-target components onto the card its serving parent owns.
 
-    ``structure_only`` (pgw#1080) names the components every slot must build
+    ``structure_only`` names the components every slot must build
     from CODE + CONFIG instead of from the checkpoint — the mint child's
     compile targets. They are constructed by
     ``models.structure_only.build_component`` and injected through the same
@@ -654,13 +654,13 @@ def run_setup(
         )
     # Each claimed slot loads through the production core (provision.load_slot):
     # a setup(pipeline: StableDiffusionXLPipeline) receives a constructed +
-    # placed pipeline, str/Path slots receive the snapshot path (gw#416).
+    # placed pipeline, str/Path slots receive the snapshot path.
     try:
         hints = typing.get_type_hints(setup_fn)
     except (TypeError, ValueError, NameError):
         hints = {}
     decl = getattr(type(instance), _ENDPOINT_ATTR, None)
-    # pgw#1127: the mint context is built from the WHOLE resolution, once,
+    # the mint context is built from the WHOLE resolution, once,
     # before any slot loads — the child re-runs setup, so it needs every slot
     # this endpoint declares and not just the one whose load happens to reach
     # the arm. Built even when `arm_compile` is False (it costs a dict) so the
@@ -668,12 +668,12 @@ def run_setup(
     mint = _local_mint_context(
         instance, resolved_models, wanted,
         component_paths=component_paths, selected=selected)
-    # pgw#1199: a mint this load OWES is collected, not run. Arming from the
+    # a mint this load OWES is collected, not run. Arming from the
     # local store still happens inside the load (the endpoint's `setup()` must
     # receive an armed pipeline), but the MINT waits until `setup()` and
     # `warmup()` have returned — because the mint child no longer proves the
     # endpoint's handler itself, and proving it needs an instance whose
-    # pipeline is bound. Same order the fleet boots in (pgw#671).
+    # pipeline is bound. Same order the fleet boots in.
     deferred: List[Any] = []
     loaded = {
         k: _load_injected_model(
@@ -758,7 +758,7 @@ def _assert_structure_honored(
 
     ``requested`` is what the CALLER asked to be weight-free, and it is checked
     separately because the loop below could only ever see components that were
-    BUILT (pgw#1173). A target the builder skipped — ``model_index.json`` does
+    BUILT. A target the builder skipped — ``model_index.json`` does
     not name it, or the tree has no readable index at all, in which case
     ``model_index_components`` returns the empty set and EVERY target is
     skipped — never enters ``injected``, so this guard iterated nothing and
@@ -809,7 +809,7 @@ def _assert_structure_honored(
 def _structure_device(device: str) -> str:
     """Where a structure-only component's VIRTUAL tensors claim to live.
 
-    Faithful device is the whole point (pgw#1080): AOTInductor codegens for
+    Faithful device is the whole point: AOTInductor codegens for
     the device the traced tensors report, so a structure built as "cpu" on a
     CUDA pod would compile a CPU cell. Fake tensors allocate nothing, so
     claiming the card costs nothing.
@@ -838,7 +838,7 @@ def _load_injected_model(
 
     ``overrides`` (component -> local tree) are loaded from their OWN trees
     and injected through ``from_pretrained(components=...)`` — the same seam
-    and the same loader the executor's setup uses (pgw#617/pgw#816), so a
+    and the same loader the executor's setup uses, so a
     composition assembled here is the composition assembled there."""
     # The override trees are part of the slot's identity: two loads of the
     # same base path with different overrides are different pipelines.
@@ -853,7 +853,7 @@ def _load_injected_model(
            if structure_only else "")
         # ...and an UNPLACED composition is a different object again: handing
         # it to a caller that asked for a servable one would serve from host
-        # memory (pgw#1124).
+        # memory.
         + ("" if place else "|unplaced"),
     )
     if key in _INJECTED_CACHE:
@@ -899,7 +899,7 @@ def _load_injected_model(
         # is self-consistent.
         from ..registry import CompileCell
 
-        # ONE constructor with the registry's path (pgw#1150): a must-survive
+        # ONE constructor with the registry's path: a must-survive
         # field this site forgot to copy — the declared numerics band was
         # exactly that — silently judges every locally minted cell at a default
         # nobody chose.
@@ -957,7 +957,7 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
     slot_family = getattr(spec, "slot_family", {}) or {}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
-    declared: List[str] = []  # pgw#763: FIXED slots only (see warmup)
+    declared: List[str] = []  # FIXED slots only (see warmup)
     for name, slot in selected.slots.items():
         try:
             resolved[name] = resolve_slot(
@@ -1001,7 +1001,7 @@ def _local_executing_execution_lane(
             lanespec.execution_lane_body_of_binding(
                 getattr(b, "storage_dtype", "") or "")
             for b in (bindings or {}).values())
-    # ie#655: a local run compiles nothing, so the execution axis is eager —
+    # a local run compiles nothing, so the execution axis is eager —
     # including for a compiled-only body, whose PLAN is not what happened here.
     return lanespec.execution_lane_id(
         lanespec.observed_execution_lane(body, False))
@@ -1124,7 +1124,7 @@ def dispatch_request(
 # --------------------------------------------------------------------------
 
 def _handle_run(args: argparse.Namespace) -> int:
-    # pgw#1142 / §4.32 item 4: before anything can arm or mint. `run` does its
+    # before anything can arm or mint. `run` does its
     # setup() per invocation, so the order has to stand before the first one.
     if bool(getattr(args, "eager_only", False)):
         serve_posture.apply_command(
@@ -1266,7 +1266,7 @@ def _run_inner(args: argparse.Namespace) -> int:
         default_name=getattr(mod, "__name__", "").split(".", 1)[0],
     )
 
-    # th#913/gw#596: optional human lane choice, mapped onto the bindings
+    # optional human lane choice, mapped onto the bindings
     # before resolution (the ladder twin's local expansion).
     if getattr(args, "execution_lane", ""):
         selected.bindings = _apply_execution_lane_to_bindings(selected.bindings, args.execution_lane)

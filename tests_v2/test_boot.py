@@ -207,7 +207,7 @@ def test_real_entrypoint_seals_dials_and_dumps_stacks(tmp_path: Path) -> None:
             seal_phase = next(p for p in phases if p.get("phase") == "env_seal")
             assert seal_phase.get("digest"), "the seal phase must carry its digest"
 
-            # pgw#1087: the seal's COST, off the wire. The startup phase lines
+            # the seal's COST, off the wire. The startup phase lines
             # above prove the seal ran and in what order; they say nothing
             # about what it cost, and "expect ms; prove it" was the issue's own
             # instruction. The library-digest memo nests inside it, so the
@@ -240,7 +240,7 @@ def test_real_entrypoint_seals_dials_and_dumps_stacks(tmp_path: Path) -> None:
             assert "echo" in ready.available_functions
             assert "stream3" in ready.available_functions
 
-            # pgw#639 forensics: SIGUSR2 dumps every thread's stack to stderr
+            # SIGUSR2 dumps every thread's stack to stderr
             # and the worker keeps running — a wedged pod is diagnosable from
             # any exec channel without killing it.
             proc.send_signal(signal.SIGUSR2)
@@ -254,7 +254,7 @@ def test_real_entrypoint_seals_dials_and_dumps_stacks(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # Scenario 4 — a torchless image is a first-class boot: the absence is SEALED
-# as a fact and the worker still dials the hub and advertises (pgw#788).
+# as a fact and the worker still dials the hub and advertises.
 # ---------------------------------------------------------------------------
 
 
@@ -325,7 +325,7 @@ def test_gpu_boot_refusal_is_typed_and_reaches_the_hub(tmp_path: Path) -> None:
         assert fatal.get("exit_code") == 1
         assert "Starting worker..." not in combined
 
-        # pgw#783/pgw#826: the probe fails in the compute child, which holds no
+        # the probe fails in the compute child, which holds no
         # credential — it hands the typed report to the parent (boot_fatal,
         # relayed=true) and the PARENT delivers it to the hub before exiting 1.
         report = next(

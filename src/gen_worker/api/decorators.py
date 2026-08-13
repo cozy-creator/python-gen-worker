@@ -19,7 +19,7 @@
   ``gen_worker.convert.publish_flavors(ctx, flavors)`` (one Tensorhub commit per
   ``ProducedFlavor``), and return a result struct. Generator handlers are
   rejected for producer kinds: nothing is ever published by yielding.
-* ``kind="eval"`` MEASURES a candidate against a reference (th#1255). It reads
+* ``kind="eval"`` MEASURES a candidate against a reference. It reads
   reserved refs like every non-inference kind and writes request output assets,
   but publishes no catalog repo — the hub refuses repo writes for eval tokens
   and never asks an eval where its output repo goes. Its input struct declares
@@ -62,7 +62,7 @@ KINDS = ("inference", "training", "dataset", "conversion", "eval")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 
-# pgw#660: the dotted capability (8.9) is the author-facing unit — the way
+# the dotted capability (8.9) is the author-facing unit — the way
 # NVIDIA writes it and the way v1's field did. `sm_89` is accepted because
 # that is how kernels and error messages spell it; the bare SM code is not,
 # because 89 and 8.9 are a silent factor-of-ten apart.
@@ -105,7 +105,7 @@ def _normalize_compute_capability(raw: float | str) -> float:
     return round(value, 1)
 
 
-# pgw#748/th#1285: the parallel mechanisms the PLATFORM implements. Kept in
+# the parallel mechanisms the PLATFORM implements. Kept in
 # lockstep with the hub's builder ingest (internal/builder/staffing_envelope.go
 # parallelMechanisms) and orchestrator/topology's Parallel* constants — an
 # unknown token refuses here, at declaration, before a build is spent.
@@ -116,7 +116,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     """Hardware envelope for one function (SDK v2): ONLY what the endpoint
     CANNOT RUN WITHOUT — ``Resources(gpu, gpu_count, libraries, vcpus)``.
 
-    v2 hard cut (pgw#647): ``vram_gb`` and ``compute_capability`` are
+    v2 hard cut: ``vram_gb`` and ``compute_capability`` are
     DELETED. th#683's prove-and-profile gate MEASURES the real VRAM
     requirement per lane and shape, and precision-per-card is the fit
     ladder's call, never a placement gate. "What it needs to run WELL"
@@ -128,7 +128,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     exist. It is never a gate, never a runtime ceiling, and never a
     per-load reservation. Declaring it implies ``gpu=True``.
 
-    ``min_vram_gb`` (pgw#660) is the HARD VRAM floor, and it is the exact
+    ``min_vram_gb`` is the HARD VRAM floor, and it is the exact
     twin of ``compute_capability`` above: the v2 cut deleted ``vram_gb`` on
     the reasoning that th#683 would MEASURE the real requirement, and that
     reasoning is right about how much VRAM a function wants and wrong about
@@ -157,7 +157,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     requests a pod can answer — a separate decision, not a consequence of
     this one.
 
-    ``ram_gb_hint`` (pgw#670) is its HOST-side twin, restored after the v2
+    ``ram_gb_hint`` is its HOST-side twin, restored after the v2
     cut deleted ``ram_gb`` on the reasoning that host RAM is an
     opportunistic latency tier. For ltx-video-2.3 it was neither
     opportunistic nor a guess: ie#484 measured 179-301 s mp4-encode and
@@ -175,7 +175,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     the very same encode tail, which is what made the RAM deletion read as
     accidental rather than principled.
 
-    ``compute_capability`` (pgw#660) is the HARD GPU-architecture floor,
+    ``compute_capability`` is the HARD GPU-architecture floor,
     restored after the v2 cut deleted it. The cut's reasoning — "precision
     per card is the fit ladder's call, never a placement gate" — is right
     about precision SELECTION and wrong about INCAPABILITY: a producer whose
@@ -197,7 +197,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     rungs (offload / cpu) outright instead of serving slowly. The on-GPU
     rungs (fp8 storage, emergency 4-bit) remain available.
 
-    ``min_disk_gb`` (pgw#732) is the CONTAINER-DISK floor, and it is named
+    ``min_disk_gb`` is the CONTAINER-DISK floor, and it is named
     for what it is: a floor the hub may exceed, never a cap, so ``min_`` reads
     truer than a ``_hint`` suffix. th#1233 already sizes a conversion pod's
     disk from the bytes the job will materialize, so the common case needs no
@@ -212,13 +212,13 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     ALLOCATION-time ask and does not imply ``gpu=True`` — a CPU-only
     conversion is the case that needed it first.
 
-    ``vcpus`` (gw#490) declares the host-side vCPU ask (CPU-heavy encode);
+    ``vcpus`` declares the host-side vCPU ask (CPU-heavy encode);
     it does not imply ``gpu=True``. ``gpu_count`` (>1 later feeds
     ``DeviceRequest`` — pgw#648) declares how many devices one instance
     needs; endpoint code NEVER picks devices.
 
     ``max_gpu_count`` + ``max_gpus_per_execution_group`` + ``parallel``
-    (pgw#748/th#1285/th#1426) are the author ENVELOPE — the SDK half of the
+ are the author ENVELOPE — the SDK half of the
     hub builder's ``extractStaffingEnvelope`` contract. ``gpu_count`` is the
     floor (devices ONE materialization requires); ``max_gpu_count`` is how
     many GPUs the POD may hold; ``max_gpus_per_execution_group`` is how many
@@ -229,7 +229,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
 
     The last two are INDEPENDENT axes, and both exist because the hub used to
     derive each from the other and so could only ever express ONE execution
-    group (th#1426)::
+    group::
 
         max_gpu_count=4                                  -> 1x4: one request across 4 cards
         max_gpu_count=4, max_gpus_per_execution_group=2  -> 2x2: two slots, each request across 2
@@ -259,7 +259,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     parallel: tuple[str, ...] = ()
 
     def manifest_dict(self) -> Dict[str, Any]:
-        """The manifest ``resources{}`` projection (pgw#670).
+        """The manifest ``resources{}`` projection.
 
         The declaration and the wire name differ for exactly one field: the
         builder's host-floor key is ``ram_gb`` (which it maps to the
@@ -268,11 +268,11 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         name. One mapping, in one place, rather than a second spelling for
         endpoint authors to get wrong.
 
-        ``min_disk_gb`` (pgw#732) needs no remap either — it is already the
+        ``min_disk_gb`` needs no remap either — it is already the
         key the hub reads as an additional disk floor
         (``mergeRequestDiskIntoSupply``), the same spelling on both sides.
 
-        ``min_vram_gb`` (pgw#660) needs no remap either, and that is the whole
+        ``min_vram_gb`` needs no remap either, and that is the whole
         reason the floor is spelled this way: it is already the key
         ``function_requirements.go`` folds into ``requirement_payload_json``
         (``for _, key := range []string{"min_vram_gb", "vram_multiplier"}``),
@@ -360,7 +360,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
                     f"max_gpu_count {m} is below gpu_count {n_gpu}")
             force(self, "max_gpu_count", m)
             force(self, "gpu", True)
-        # th#1426 — the degree axis. Legal domain is [2, max_gpu_count];
+        # the degree axis. Legal domain is [2, max_gpu_count];
         # absence means "no opinion", never a defaulted legal value.
         if self.max_gpus_per_execution_group is not None:
             d = int(self.max_gpus_per_execution_group)
@@ -411,7 +411,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
 
 
 class NoWarmup(msgspec.Struct, frozen=True):
-    """Opt a class out of the default boot warmup (gw#470) with a recorded
+    """Opt a class out of the default boot warmup with a recorded
     reason: ``@endpoint(warmup=NoWarmup("engine captures CUDA graphs at
     boot"))``. Warmup is behavior — the opt-out lives in code, never in an
     env knob."""
@@ -448,7 +448,7 @@ def _validate_warmup_decl(owner: str, warmup: Optional[NoWarmup]) -> Optional[No
     )
 
 
-# pgw#654: per-function facts live ON the function, not in class-level
+# per-function facts live ON the function, not in class-level
 # name-keyed dicts (the stringly-typed indirection v2 eliminated everywhere
 # else). ``@worker_function`` is the one per-handler declaration surface.
 WF_ATTR = "__gen_worker_function__"
@@ -542,7 +542,7 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     handler does not branch on the objective; non-diffusion endpoints
     simply never declare it).
 
-    ``tasks`` (th#1257) — the SERVING TASKS this handler performs
+    ``tasks`` — the SERVING TASKS this handler performs
     (subset of :data:`~gen_worker.api.slot.TASKS`). Several means one
     handler input-routes them (a merged ``generate()`` that does
     text-to-image when given no image and image-edit when given one).
@@ -573,7 +573,7 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     text_len: Optional[int] = None
     warm: Optional[Dict[str, Any]] = None
     warm_reason: str = ""
-    # th#1757: the opt-in reference contract. None = this handler never sees
+    # the opt-in reference contract. None = this handler never sees
     # the concept and a ref_text sent to it is refused hub-side.
     accepts_references: Optional[AcceptsReferences] = None
 
@@ -644,7 +644,7 @@ def worker_function(
     warm_reason: str = "",
     accepts_references: Optional[AcceptsReferences] = None,
 ) -> Callable[[T], T]:
-    """Per-handler contract facts (pgw#654), declared AT the definition
+    """Per-handler contract facts, declared AT the definition
     site — on class handler methods and on bare ``@endpoint`` functions::
 
         @worker_function(objectives=("epsilon",), tasks=("text_to_image",))
@@ -909,8 +909,8 @@ class DynamicDim(msgspec.Struct, frozen=True):
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
         d = str(self.dim or "").strip()
-        # pgw#739: the old hard-validation to "batch"|"sequence" was the
-        # vocabulary wall wan's latent-spatial axis hit (ie#550/ie#566). Any
+        # the old hard-validation to "batch"|"sequence" was the
+        # vocabulary wall wan's latent-spatial axis hit. Any
         # declared Dim name is now admissible; Compile.__post_init__
         # cross-validates the name against Compile.dims, so an unknown axis
         # is still refused — by cross-reference, not by a two-literal list.
@@ -948,7 +948,7 @@ class Compile(msgspec.Struct, frozen=True):
     so every fine-tune of a family shares one artifact), the spatial shape
     buckets the compile job warms, and the PINNED text-sequence length. A
     shape row is ``(width, height)`` for image models or ``(width, height,
-    frames)`` for video models (ie#381). Two-stage presets contribute BOTH
+    frames)`` for video models. Two-stage presets contribute BOTH
     their base and refined resolutions as rows.
 
     SHAPES DERIVE FROM THE PAYLOAD PRESET ENUM (ie#345 fleet policy): when
@@ -982,7 +982,7 @@ class Compile(msgspec.Struct, frozen=True):
     shapes: tuple[tuple[int, ...], ...] = ()
     targets: tuple[str, ...] = ("transformer", "vae.decode")
     family: str = ""
-    # SDK v2 text-sequence axis (ie#544): None = undeclared (walk-time lint
+    # SDK v2 text-sequence axis: None = undeclared (walk-time lint
     # failure for compile= endpoints); 0 = explicitly unconditioned; >0 =
     # pinned token length.
     text_len: Optional[int] = None
@@ -1022,7 +1022,7 @@ class Compile(msgspec.Struct, frozen=True):
     warm_changes_key: Optional[bool] = None
     # Declared-eager lanes (LTX §2.3): recorded decision, not an omission.
     eager: tuple[str, ...] = ()
-    # pgw#817 / pgw#812 S6: this family's ADOPTION numerics tolerance. A cell
+    # this family's ADOPTION numerics tolerance. A cell
     # about to arm is run against the eager forward it replaces and judged on
     # the shared verdict ladder; below `numerics_floor` it REFUSES to arm.
     # None = the SDK default (0.98 / 0.999), whose derivation is pgw#814's
@@ -1032,7 +1032,7 @@ class Compile(msgspec.Struct, frozen=True):
     # conv-bearing UNet.
     numerics_floor: Optional[float] = None
     numerics_warn: Optional[float] = None
-    # pgw#1149 / th#1811 (ie#664 §6): this family's own compile-vs-eager SPEED
+    # this family's own compile-vs-eager SPEED
     # bar — the stage it is read off and the minimum speedup the compiled arm
     # must clear. Declared here, beside the numerics band, because the hub's
     # publish-time validation session judges a release against the AUTHOR's bar
@@ -1045,7 +1045,7 @@ class Compile(msgspec.Struct, frozen=True):
     # cannot drop it silently.
     speed_metric: str = ""
     min_speedup: Optional[float] = None
-    # pgw#1115: DECLARED mint blockers. A family that may not mint yet says so
+    # DECLARED mint blockers. A family that may not mint yet says so
     # as DATA here — never as a thunk that raises, which the pgw#1107 fold onto
     # this decorator cannot carry (`compile=` takes a Compile, never a
     # callable, so a folded refusal would simply vanish). While any blocker is
@@ -1061,7 +1061,7 @@ class Compile(msgspec.Struct, frozen=True):
     #: NEVER AUTHORED. It is transferred off `derive.cfg_image_classes`'s
     #: return value in `__post_init__`; an author who writes it by hand is
     #: declaring the same number twice, which is the duplicate-map defect
-    #: (pgw#1150/#1152) in the surface pgw#1158 fenced. `None` means the class
+    #: in the surface pgw#1158 fenced. `None` means the class
     #: rows did not come from a deriver that knows the divisor, and the mint
     #: reports UNRECONCILED — never a pass.
     #:
@@ -1113,7 +1113,7 @@ class Compile(msgspec.Struct, frozen=True):
         force(self, "dynamic", dyn)
         # `regional=True` + `dynamic=(...)` is ADMITTED and, since pgw#1078,
         # SERVED by both lanes. `regional` is the dynamo/JIT per-block knob
-        # (ie#381) — the AOT export lane ignores it entirely since pgw#846
+        #  — the AOT export lane ignores it entirely since pgw#846
         # retired regional cells; the dynamo regional branch applies the
         # declared marks at the compiled-block ingress
         # (`compile_cache._mark_regional_blocks`).
@@ -1152,7 +1152,7 @@ class Compile(msgspec.Struct, frozen=True):
 
     @property
     def open_blockers(self) -> tuple[MintBlocker, ...]:
-        """The UNRESOLVED blockers (pgw#1115). Non-empty ⟹ this family refuses
+        """The UNRESOLVED blockers. Non-empty ⟹ this family refuses
         to mint, by declaration, and every mint site fails closed on it."""
         return open_blockers(self)
 
@@ -1210,7 +1210,7 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     kind: str = "inference"
     resources: Resources = msgspec.field(default_factory=Resources)
     models: Mapping[str, Binding] = msgspec.field(default_factory=dict)
-    # Slot-declared entries in `models=`/`model=` (pgw#520): a subset of
+    # Slot-declared entries in `models=`/`model=`: a subset of
     # `models`' keys, carrying the Slot's selected_by/default_checkpoint
     # metadata that `models` (a plain Binding map every model-injection
     # call site understands) can't hold.
@@ -1219,17 +1219,17 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
     compile: Optional[Compile] = None
-    # th#826 call-out primitive: the function makes endpoint-to-endpoint
+    # the function makes endpoint-to-endpoint
     # child calls (ctx.call_endpoint / ctx.workflow_checkpoint). The hub
     # mints the invoke_child credential ONLY for declaring functions.
     child_calls: bool = False
-    # pgw#647 concurrency contract: handlers on ONE live instance run
+    # handlers on ONE live instance run
     # SINGLE-FLIGHT by default (one binding set = one materialized graph
     # with mutable buffers — e.g. a resident LoRA branch; two concurrent
     # requests would corrupt each other). ``reentrant=True`` is the explicit
     # opt-in for classes whose handlers genuinely mutate no instance state.
     reentrant: bool = False
-    # gw#561 / SDK v2: dynamic-LoRA endpoints declare the resident traced
+    # dynamic-LoRA endpoints declare the resident traced
     # rank bucket at the DECORATOR (it shapes the graph family and the
     # resident branch buffers whether or not compile= is present). The
     # worker serves the branch-bearing graph family: canonical zeroed
@@ -1237,20 +1237,20 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # contract), only `<lane>-lora<bucket>` cells adopt, and adapter swaps
     # stay buffer copies — never a recompile. 0 = branchless.
     lora_bucket: int = 0
-    # gw#470/pgw#654 boot warmup: None = the DERIVED warm plan (defaults +
+    # None = the DERIVED warm plan (defaults +
     # axis cross-product + synthesized required fields, union-deduped per
     # graph class); NoWarmup(reason) = class-level opt-out. Developer
     # payload dicts are deleted.
     warmup: Optional[NoWarmup] = None
-    # th#1050: opt-in declared lane bodies this endpoint's code branches on
+    # opt-in declared lane bodies this endpoint's code branches on
     # (ctx.lane). Empty = platform-managed behavior only.
     handles: Tuple[str, ...] = ()
-    # th#1051: declared compute-time formulas, attr_name -> RuntimeFormula
+    # declared compute-time formulas, attr_name -> RuntimeFormula
     # (function-shaped endpoints key their single handler under "").
     # Declared via the runtime= kwarg overload; payload-field validation
     # happens at registry walk time when payload types are resolved.
     runtime_formula: Mapping[str, RuntimeFormula] = msgspec.field(default_factory=dict)
-    # th#1087: declared config parameters (ctx.config) + declared env names
+    # declared config parameters (ctx.config) + declared env names
     # (D2) — the mutable-config surface the hub validates writes against.
     config: Tuple[ConfigParam, ...] = ()
     env: Tuple[str, ...] = ()
@@ -1261,7 +1261,7 @@ VARIANT_ATTR = "__gen_worker_variant__"
 
 
 class VariantDecl(msgspec.Struct, frozen=True):
-    """``@variant_of`` marker (th#1004): this handler is the ``kind`` variant
+    """``@variant_of`` marker: this handler is the ``kind`` variant
     of sibling function ``of`` on the same endpoint."""
 
     of: str
@@ -1280,7 +1280,7 @@ class VariantDecl(msgspec.Struct, frozen=True):
 
 
 def variant_of(of: str, *, kind: str = "turbo") -> Callable[[T], T]:
-    """Declare a handler as a variant of a sibling function (th#1004).
+    """Declare a handler as a variant of a sibling function.
 
     The pairing is emitted into the discovery manifest (``variant_of`` /
     ``variant``) and surfaced on tensorhub's public endpoint info, so a
@@ -1705,7 +1705,7 @@ def _decorate_class(
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
-    # gw#470: default-on boot warmup — fail unwarmable GPU inference classes
+    # default-on boot warmup — fail unwarmable GPU inference classes
     # at import when type hints resolve here (walk time re-checks). Lazy
     # import: warmup.py imports this module.
     from ..warmup import validate_at_decoration
@@ -1858,11 +1858,11 @@ def endpoint(
             "Compile(dynamic=(DynamicDim('sequence', min=.., max=..),))."
         )
     if compile is not None:
-        # pgw#739: an export declaration is the family's export contract;
+        # an export declaration is the family's export contract;
         # registering at decoration is what lets the mint derive export inputs
         # with zero per-family SDK code.
         #
-        # pgw#1107: the gate asks about INTENT, not about the payload. It used
+        # the gate asks about INTENT, not about the payload. It used
         # to read `compile.classes and compile.family`, so a declaration that
         # named dims/forks/inputs and forgot its classes (or its family) was
         # dropped on the floor — registered nothing, minted nothing, and on a

@@ -146,7 +146,7 @@ def test_classifier_closed_world() -> None:
         == gc.CONTRACT_SCALAR
     assert gc.classify("EQUALS_MATCH", "L['n']", "L['n'] == 999", pins) \
         == (gc.LEAK, "int 999 is not a declared contract pin")
-    # pgw#691: input-rooted ID_MATCH is the object identity of a call-path
+    # input-rooted ID_MATCH is the object identity of a call-path
     # constant (enum member / callable bound by the endpoint call path) —
     # covered, not a leak.
     assert gc.classify("ID_MATCH", "L['mask']", "___check_obj_id(...)", pins)[0] \
@@ -190,7 +190,7 @@ def test_out_of_envelope_scalar_is_recorded_naming_the_variable() -> None:
     compiled = torch.compile(fn, backend="eager", dynamic=None)
     compiled(torch.randn(2, 4, 8), 3.25)  # 3.25 is NOT declared
 
-    # pgw#1181: read the classification off `audit_armed`, the live view of an
+    # read the classification off `audit_armed`, the live view of an
     # armed pipeline, instead of `closure_manifest` — the MINT-side wrapper
     # that embedded it in a `torch-inductor-cache` cell and is deleted with
     # that format. The classifier under test is the same one; only the
@@ -218,7 +218,7 @@ def test_out_of_envelope_scalar_is_recorded_naming_the_variable() -> None:
 def _perturbed_inputs() -> List[Any]:
     base = torch.randn(4, 1, 8)
     return [
-        # ie#544 trap: size-1 dim keeps is_contiguous() true under a garbage
+        # size-1 dim keeps is_contiguous() true under a garbage
         # stride, so .contiguous() alone is a no-op.
         base.as_strided((4, 1, 8), (8, 999, 1)),
         # Genuinely non-contiguous layout of the same shape.

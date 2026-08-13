@@ -80,7 +80,7 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 # machine. Pure logic over (Resources, capabilities, free VRAM); consumed by
 # serve_fit.plan_serve (the executor's flavor-fit ladder) and `run --list`.
 # The old select_variant ranking helper was deleted in pgw#527 — dead since
-# `--variant auto` was removed (pgw#226/#515); ranking now lives hub-side.
+# `--variant auto` was removed; ranking now lives hub-side.
 # ---------------------------------------------------------------------------
 
 FIT_FITS = "fits"
@@ -130,7 +130,7 @@ def variant_fit(
     libs = tuple(getattr(resources, "libraries", ()) or ())
     if needs_gpu and caps.gpu_sm <= 0:
         return FIT_INCOMPATIBLE, "no CUDA GPU detected"
-    # SDK v2 (pgw#647): no declared compute-capability gate — the fit
+    # SDK v2: no declared compute-capability gate — the fit
     # ladder picks precision per card.
     missing = [lib for lib in libs if lib not in (caps.installed_libs or [])]
     if missing:
@@ -143,7 +143,7 @@ def variant_fit(
     if vram is None or effective_vram_requirement_gb(vram) <= float(free_vram_gb):
         return FIT_FITS, ""
 
-    # Runtime rungs are automatic on CUDA hosts (gw#420) — pure functions of
+    # Runtime rungs are automatic on CUDA hosts — pure functions of
     # the declared capabilities, so verdicts don't depend on the probing host.
     if caps.gpu_sm > 0:
         # fp8-E4M3 runtime storage: weights ~halve, bf16 compute, quality

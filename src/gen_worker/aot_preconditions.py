@@ -1,4 +1,4 @@
-"""The AOT mint's STATIC preconditions — asked at IMAGE BUILD, once (pgw#996).
+"""The AOT mint's STATIC preconditions — asked at IMAGE BUILD, once.
 
 A precondition is static when the endpoint IMAGE decides it: the C++ toolchain
 apt installed into it, the torch wheel pinned into it, the declaration module
@@ -25,7 +25,7 @@ Four verdicts, and the difference between the last three is the whole point:
 ``ok``         the precondition holds on this image.
 ``refused``    it does not, and nothing on a pod can fix it — FAIL THE BUILD.
 ``blocked``    the declaration carries unresolved ``Compile.blockers``
-               (pgw#1115). The family said why; it is a DECLARED block, not a
+. The family said why; it is a DECLARED block, not a
                broken image, and it does not need a pod to repeat the
                sentence.
 ``abstained``  this environment cannot decide (a torch-less manifest build).
@@ -73,7 +73,7 @@ CHECK_ADAPTER_BACKEND = "adapter_backend"
 #: one ``models/fp8_storage`` imports three layer modules from at overlay
 #: time. gen-worker does NOT declare it: an endpoint that serves adapters
 #: declares that in ITS image, and this check is what makes the declaration
-#: PROVABLE at build instead of discoverable on a paid pod (pgw#501).
+#: PROVABLE at build instead of discoverable on a paid pod.
 ADAPTER_BACKEND_DIST = "peft"
 
 #: Distributions that must appear at most once. A second copy of any of them
@@ -111,7 +111,7 @@ def torch_version_gap(version: str) -> str:
     Pure string arithmetic, and the ONE implementation: the floor is decided
     at image build (``static_mint_preconditions`` -> ``endpoint.lock``), never
     again per mint. Two spellings of a floor is how a build proves one thing
-    and a pod discovers another (pgw#914).
+    and a pod discovers another.
     """
     parts = version.split("+")[0].split(".")
     floor = ".".join(map(str, LIFTED_LORA_TORCH_FLOOR))
@@ -195,7 +195,7 @@ def static_mint_preconditions(
                     "the registered export declaration evaluated to None — "
                     "there is no Compile to derive graph classes from")))
             continue
-        # pgw#1115: the declared block, read as DATA — the one form since
+        # the declared block, read as DATA — the one form since
         # pgw#1107 retired the thunk that used to say it by raising.
         blocked = open_blockers(decl)
         if blocked:
@@ -309,7 +309,7 @@ def _torch_singleton_row() -> Precondition:
     image's pin" — reads `/tmp/torch-constraints.txt`, which is written and
     deleted inside the generated Dockerfile and does not exist here. That half
     is decidable only where the base image is known, so it belongs to the hub
-    (th#1686) and is not faked here.
+ and is not faked here.
     """
     import importlib.metadata as md
 
@@ -354,7 +354,7 @@ def adapter_backend_present() -> bool:
 def adapter_backend_preconditions(
     declared: Mapping[str, int], *, present: Optional[bool] = None,
 ) -> Tuple[Precondition, ...]:
-    """One verdict per family that declares adapter serving (pgw#501).
+    """One verdict per family that declares adapter serving.
 
     ``lora_bucket > 0`` is the author declaring the unknowable — *this
     endpoint serves adapters*. The platform's job is then to PROVE the
@@ -405,7 +405,7 @@ def declared_compile_families(functions: Any) -> Dict[str, int]:
     """family -> largest declared ``lora_bucket``, over manifest functions.
 
     Reads the same ``functions[].compile`` block the hub keys its family-cache
-    lookups off (th#569), so "which families does this image declare" has one
+    lookups off, so "which families does this image declare" has one
     answer at build time and no second derivation.
     """
     out: Dict[str, int] = {}

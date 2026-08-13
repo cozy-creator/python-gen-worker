@@ -1,4 +1,4 @@
-"""Precision-ladder spec (th#697) — precision classes + placement requirements.
+"""Precision-ladder spec — precision classes + placement requirements.
 
 A quant token's *precision class* names its quantization lane (``fp8``,
 ``svdq-int4``, ...). A :class:`Placement` states which silicon can run it:
@@ -12,7 +12,7 @@ same defaults the stamping writes, so both paths agree. The ladder WALK
 (rung ordering per arch class) lives hub-side (tensorhub's
 internal/orchestrator/precision resolver) and delivers picks via HelloAck;
 this module is the classification + placement half, plus the family lane
-policy (th#964). The former local walk (``resolve``/``resolve_local_bindings``)
+policy. The former local walk (``resolve``/``resolve_local_bindings``)
 was deleted with pgw#515 — locally, fit is the loading layer's job (runtime
 fp8 rung + the offload ladder). pgw#1148 deleted the local AUTO fp8
 FOLD on top of it: it selected among sibling FLAVOR rows, and th#1803 deleted
@@ -33,7 +33,7 @@ CLASS_FP8 = "fp8"  # fp8-E4M3 storage; universal (bf16-upcast path needs no fp8 
 CLASS_SVDQ_FP4 = "svdq-fp4"  # nunchaku SVDQuant fp4 — consumer Blackwell only
 CLASS_SVDQ_INT4 = "svdq-int4"  # nunchaku SVDQuant int4 — sm_75-89
 CLASS_NVFP4 = "nvfp4"  # plain nvfp4 artifact — Blackwell datacenter, no serving lane (not a diffusers rung)
-# Calibrated nvfp4 with two-level scales (gw#540): torch fp4 blockwise
+# Calibrated nvfp4 with two-level scales: torch fp4 blockwise
 # scaled_mm serve lane. Blackwell-only (sm_100+ incl. sm_120 consumer) —
 # no fp4 silicon below, and the 4x dequant blow-up erases the fit story.
 CLASS_NVFP4_W4A4 = "nvfp4-w4a4"
@@ -123,7 +123,7 @@ def placement_to_metadata(p: Placement) -> dict[str, Any]:
 FP8_COMPUTE_MIN_SM = 89
 
 
-# --- Family-root policy (th#964) — twin of tensorhub's modelfamily.Root ----
+# --- Family-root policy — twin of tensorhub's modelfamily.Root ----
 
 # Families whose root is not derivable by normalization alone. Roots collapse
 # fine-tune/scheduler/distillation variants that keep the weight envelope.
@@ -151,7 +151,7 @@ CONV_UNET_W8A8_EXCLUDED_ROOTS = frozenset({"sd1", "sd2", "sdxl"})
 
 
 
-# th#1361/pgw#1065: the flavor-token parses (classify_flavor_token,
+# the flavor-token parses (classify_flavor_token,
 # placement_for_flavor) are package-internal choke points, not public API —
 # the hub unexported its twin under th#1433. They die when th#1721 typed
 # descriptors are backfilled; nothing new may grow on them. pgw#1148 deleted

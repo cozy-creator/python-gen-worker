@@ -7,7 +7,7 @@ The worker runs synthetic requests per GPU inference function after
 ``setup()``, BEFORE the function reports READY. Output is discarded (never
 billing/outputs/CAS); a failure is a load failure (loud).
 
-pgw#654: the warm plan is DERIVED, never developer-written — hand-written
+the warm plan is DERIVED, never developer-written — hand-written
 warmup payloads were a coverage CLAIM that drifts (add a guidance class,
 forget warmup, ship an untraced graph that compiles at request time).
 Derivation per handler:
@@ -224,7 +224,7 @@ def _present_factory(t: Any, depth: int) -> Optional[_Factory]:
     """A factory that POPULATES a field — never the `None` arm of an option.
 
     `_field_factory` answers `None` for any optional type, which is right for
-    a neutral default and useless for repairing a one-of (th#1771).
+    a neutral default and useless for repairing a one-of.
     """
     t = _unwrap(t)
     if depth > _MAX_DEPTH:
@@ -244,7 +244,7 @@ def _present_factory(t: Any, depth: int) -> Optional[_Factory]:
 
 def _struct_factory(payload_type: type, depth: int = 0) -> Tuple[Optional[_Factory], str]:
     field_factories: List[Tuple[str, _Factory]] = []
-    # th#1771: the one-of repair set. A struct whose fields are ALL optional
+    # the one-of repair set. A struct whose fields are ALL optional
     # but which asserts "exactly one of these is set" (the standard one-of
     # media shape) is not sparse — it is unconditionally illegal empty, and
     # required-only synthesis built exactly that.
@@ -639,7 +639,7 @@ def select_runs(
       run per (function, guidance class), collapsed to a single shape
       representative (:func:`_shape_rank`). Eager warm cost is allocator-
       pool growth plus kernel-heuristic selection — shape-driven, not
-      coverage-driven (gw#470) — and nothing is being traced, so the class
+      coverage-driven — and nothing is being traced, so the class
       x bucket cross-product buys nothing.
     - ``executed`` covering every selected run's ``graph_key``: ONE clamped
       verification run. Allocator pool, cuBLAS/cuDNN heuristics and
@@ -677,7 +677,7 @@ def plan(
     has_warmup_method: bool = False,
 ) -> Tuple[List[WarmupJob], List[WarmupSkip]]:
     """The DERIVED warm plan for the GPU inference handlers of ONE instance
-    group (pgw#654): per handler, the cross-product of its axis classes'
+    group: per handler, the cross-product of its axis classes'
     warm representatives over a synthesized base payload — one run per
     (function, graph class), so each alias proves its own code path.
     Per-function ``@worker_function(warm=...)`` overrides apply to
@@ -708,7 +708,7 @@ def plan(
         axes = tuple(getattr(s, "payload_axes", ()) or ())
         combos = _axis_combos(axes)
         if axes:
-            # pgw#669: drop the combinations the endpoint declares illegal
+            # drop the combinations the endpoint declares illegal
             # BEFORE they become planned runs, and record the coverage.
             combos, illegal = _legal_combos(
                 s.name, base, combos, overrides, clamps)
@@ -825,7 +825,7 @@ def validate_class_warmup(cls: type, decl: EndpointDecl, specs: List["EndpointSp
 
 
 # ---------------------------------------------------------------------------
-# The warm-job RequestContext — ONE construction (pgw#828)
+# The warm-job RequestContext — ONE construction
 # ---------------------------------------------------------------------------
 
 
@@ -848,7 +848,7 @@ def resolved_slots_kwargs(
     slots: Optional[Mapping[str, "dispatch.SlotOrder"]] = None,
     adapters: Optional[Mapping[str, Tuple["dispatch.AdapterOrder", ...]]] = None,
 ) -> Dict[str, Any]:
-    """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
+    """``ctx.slots`` resolution chain: merge each
     ``Slot``-declared slot's repo-metadata ``inference_defaults`` over its
     code fallback preset, then apply each riding lora's own
     ``inference_defaults`` as a FIELD-LEVEL override, in lora order (pgw#516
@@ -859,7 +859,7 @@ def resolved_slots_kwargs(
     + no fallback, or no ref) is deferred to a ``ctx.slots[name]`` access
     error instead of failing the whole dispatch.
 
-    ``slots``/``adapters`` are the NEUTRAL per-dispatch orders (pgw#904) —
+    ``slots``/``adapters`` are the NEUTRAL per-dispatch orders —
     never a wire message. ``None`` is the WARM shape: no per-dispatch binding
     metadata, so every slot resolves from the spec's own declaration. That is
     what makes this reachable from the delegated mint child, which has the
@@ -879,7 +879,7 @@ def resolved_slots_kwargs(
         name: tuple(a.inference_defaults for a in advs if a.inference_defaults)
         for name, advs in dict(adapters or {}).items()
     }
-    # pgw#654: the resolved checkpoint's stamped objective/distilled facts
+    # the resolved checkpoint's stamped objective/distilled facts
     # ride the binding; the per-function declaration is the backstop (the
     # hub gates checkpoint<->function compatibility at deploy/dispatch).
     objectives = {
@@ -890,7 +890,7 @@ def resolved_slots_kwargs(
         name: so.distilled_status for name, so in slot_orders.items()}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
-    # pgw#763/th#1288: a FIXED slot's ref is the RELEASE's own declaration, so
+    # a FIXED slot's ref is the RELEASE's own declaration, so
     # its resolution failure is version-independent origin evidence and gets a
     # typed label. `selected_by` slots stay untyped — the payload picks there.
     declared: list = []
@@ -931,7 +931,7 @@ def warm_context(
 ) -> Any:
     """The ``RequestContext`` a WARM forward runs under — one construction.
 
-    pgw#828: the delegated mint child hand-rolled its own, and the one it
+    the delegated mint child hand-rolled its own, and the one it
     rolled had no slots at all. On a real L4 the child LOADED the pipeline in
     16.45 s (pgw#816's fix holding) and then died in the endpoint's own warm
     job at ``ctx.slots["pipeline"]`` with ``KeyError: 'pipeline'`` — so the
@@ -939,7 +939,7 @@ def warm_context(
     nothing, and no mint route on the platform could produce a cell.
 
     That is the same shape as pgw#816 one stage later, and the same shape as
-    pgw#816/#822/#825/#827: two constructions of one thing, free to drift.
+    two constructions of one thing, free to drift.
     The graphs the child traces are the graphs the parent must later hit, so
     a child whose ctx resolves DIFFERENT slot defaults traces different
     shapes and the parent's proof misses — the "mint succeeded, no artifact"
@@ -949,7 +949,7 @@ def warm_context(
     already derives its warm plan from here, and it must never import the
     executor's whole arming brain to build a context.
 
-    ``origin`` (pgw#969) names the warm this context belongs to and is
+    ``origin`` names the warm this context belongs to and is
     prefixed onto every deferred slot-resolution error, so a handler's
     ``ctx.slots[...]`` failure says WHICH warm it killed. A mint child holds
     no orchestrator session; the text it raises is its only channel, and

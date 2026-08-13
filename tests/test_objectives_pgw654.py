@@ -423,7 +423,7 @@ def test_flow_objective_refuses_a_diffusion_sampler() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#1139 / ie#657: the flow gate reads CAPABILITY, not the class NAME.
+# the flow gate reads CAPABILITY, not the class NAME.
 #
 # `WAN_SCHEDULER_CONFIG` is verbatim
 # `Wan-AI/Wan2.2-TI2V-5B-Diffusers@b8fff731:scheduler/scheduler_config.json` —
@@ -526,7 +526,7 @@ def test_declared_flow_shift_reaches_the_field_the_class_honours() -> None:
 
 
 def test_sampler_table_defines_euler_trailing_and_dpmpp_completely() -> None:
-    # pgw#647 gap #2 absorbed: the SDK table is the ONE definition of each
+    # the SDK table is the ONE definition of each
     # named sampler; endpoints delete their private maps.
     from gen_worker.view import SAMPLERS
 
@@ -544,7 +544,7 @@ def test_sampler_table_defines_ddim_trailing() -> None:
     schemas; the SDK owed the DEFINITION (Hyper-SD's published recipe is DDIM
     with trailing timestep spacing), resolvable against real diffusers.
 
-    pgw#740 (B1): the companion assertion — that the sdxl family enum exports
+    the companion assertion — that the sdxl family enum exports
     the key so a catalog row can name it — is an SDXL fact and moved to the
     sdxl endpoint's own tests along with `SdxlScheduler`."""
     pytest.importorskip("diffusers")

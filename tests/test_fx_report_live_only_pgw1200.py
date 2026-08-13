@@ -29,7 +29,7 @@ resurrecting the format, so it is DELETED, and what remains is the live-cache
 census the dynamo lane can actually observe.
 
 The call site was already scoped correctly (`if proves_inductor and ...`,
-pgw#722 finding 2: "FX forensics describe the dynamo lane only"), which is why
+"FX forensics describe the dynamo lane only"), which is why
 this went unnoticed — the branch is reachable, its yield is not.
 """
 

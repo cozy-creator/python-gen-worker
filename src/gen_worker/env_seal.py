@@ -18,7 +18,7 @@ settings):
   knobs, dynamo shape posture, host-ISA clamp, process posture), verify
   every read-back against it, fail closed on mismatch.
 * :func:`effective_seal` — the seal is a digest of the DECLARATION
-  (pgw#1049): ``settings_authority.declaration()`` facts plus the
+: ``settings_authority.declaration()`` facts plus the
   loaded-library digest (pgw#719: the native ``.so`` set the python env
   ships — closes the LD_PRELOAD/LD_LIBRARY_PATH substitution hole that env
   vars and a package's *own* metadata cannot see; pgw#1095 derives each
@@ -87,7 +87,7 @@ logger = logging.getLogger(__name__)
 # `scripts/config_reads_allowlist.txt` already ruled it a VIOLATION: bumping it
 # is a fleet-wide recall, and a recall is a recorded operator intent with an
 # actor and a reason, which an env var on a pod is not. The hub's
-# `cell_revocations` (th#1499) is where a recall lives.
+# `cell_revocations` is where a recall lives.
 #
 # pgw#1042 bumped 2 -> 3 by EXCLUDING torch's compile-injected
 # `aot_inductor.metadata` from the inductor fact (see _PORTABLE_VOLATILE).
@@ -107,7 +107,7 @@ logger = logging.getLogger(__name__)
 SEAL_VERSION = 4
 SEAL_KEY = "env_seal"
 
-# The behavior namespaces scrub_env ERASES wholesale (pgw#718). Known or
+# The behavior namespaces scrub_env ERASES wholesale. Known or
 # unknown, hostile or informational: after the scrub, torch behavior is
 # decided by CODE, never by whatever a base image or operator exported.
 # This supersedes the #696 allowlist gate whose R7 widening refused the
@@ -124,7 +124,7 @@ SCRUB_PREFIXES = (
     "NVIDIA_TF32",  # flips numerics under every torch flag
     "OMP_",        # thread counts enter cpp codegen decisions
     "MKL_",
-    # pgw#1049 ambient-input census: the behavior namespaces the census scan
+    # the behavior namespaces the census scan
     # of the installed torch/triton tree proved are CONSULTED and were not
     # yet erased. Same doctrine — an ambient value is deleted, never honored;
     # what we need post-scrub is imposed (settings_authority.DECLARED_ENV).
@@ -158,7 +158,7 @@ class EnvSealError(RuntimeError):
 
 
 def scrub_env() -> List[str]:
-    """ERASE every env var in the behavior namespaces (pgw#718). Logs and
+    """ERASE every env var in the behavior namespaces. Logs and
     returns the erased names, sorted; NEVER raises — an unexpected var in a
     scrubbed namespace is deleted like any other, so a base-image export
     can neither refuse a boot nor change minted kernels. Load-bearing
@@ -185,12 +185,12 @@ def effective_config() -> Dict[str, str]:
     ``PYTHONHASHSEED=0`` (imposition is the entrypoint's re-exec —
     ``settings_authority.ensure_interpreter_env``).
 
-    pgw#788: a torchless worker has no matmul/cudnn surface to read back, so it
+    a torchless worker has no matmul/cudnn surface to read back, so it
     reads the ABSENCE as a fact instead of crashing on the import."""
     base = {
         "python_hash_seed": os.environ.get("PYTHONHASHSEED", ""),
         "hash_randomization": str(sys.flags.hash_randomization),
-        # pgw#754: the host codegen target, read back live so a drifted clamp
+        # the host codegen target, read back live so a drifted clamp
         # is named legibly (beyond the opaque inductor digest below).
         **host_isa.effective(),
     }
@@ -209,7 +209,7 @@ def inductor_config_digest() -> str:
     """Digest of torch's PORTABLE inductor config — the codegen surface a
     cell's kernels were minted under (machine-specific entries excluded by
     torch itself, torch's own compile-side-effect entries excluded here:
-    pgw#1042). ``"absent"`` on a torchless worker (pgw#788) — a declared
+    pgw#1042). ``"absent"`` on a torchless worker — a declared
     fact, so the seal digest stays meaningful for CPU cells."""
     if not torch_capability.present():
         return torch_capability.ABSENT
@@ -234,7 +234,7 @@ _LIB_BASENAME_PREFIXES = (
     "libnvjitlink", "libtriton", "libnccl",
 )
 
-# Driver-side objects are NEVER identity (gw#577): the manifest enumerates
+# Driver-side objects are NEVER identity: the manifest enumerates
 # USERSPACE TOOLCHAIN libs only. The driver's userspace half (libcuda.so.*,
 # libnvidia-*, libcudadebugger) is mounted from the HOST at pod start —
 # it varies per machine and driver rollout, invisible to the image digest,
@@ -263,7 +263,7 @@ def _lib_digest(path: str, mtime_ns: int, size: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Where a library's identity digest comes from (pgw#1095, pgw#832)
+# Where a library's identity digest comes from
 # ---------------------------------------------------------------------------
 # THREE sources, in this order, for the SAME value — the 16-hex prefix of the
 # file's sha256. Which one served it changes the cost of a boot by 17 s and
@@ -368,7 +368,7 @@ def write_library_memo(path: Path) -> int:
     whether that is worth a typed event; children fall back to the full
     rehash either way.
 
-    pgw#945 classification: today's only caller hands a PER-ATTEMPT path
+    today's only caller hands a PER-ATTEMPT path
     (``aot_compile_pool`` seeds ``<mint workdir>/seal-lib-memo.json``, and the
     workdir is ``<mint root>/child-<attempt>``), so no two writers meet. The
     atomicity promise above is this FUNCTION's, though, not that caller's, and
@@ -437,7 +437,7 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
     return tuple(sorted(out.items()))
 
 
-# pgw#749: the IDENTITY manifest is enumerated from the python env ON DISK
+# the IDENTITY manifest is enumerated from the python env ON DISK
 # — never from /proc/self/maps. The mapped set is a function of LOAD PHASE
 # (torch preloads cublas/cudnn at import; libtriton maps at first dynamo
 # compile; libcuda at first CUDA call), so a "frozen at first computation"
@@ -544,7 +544,7 @@ def _shipped_digest_sets() -> Dict[str, Tuple[str, ...]]:
 
 
 # The identity manifest is FROZEN at first computation: the disk content is
-# already phase-independent (pgw#749), so the freeze is purely an
+# already phase-independent, so the freeze is purely an
 # amortization — one identity pass per process (multi-GB when it has to hash,
 # a KB-scale manifest read when RECORD covers the tree), never a semantic
 # phase pin.
@@ -561,7 +561,7 @@ def frozen_library_digests() -> Tuple[Tuple[str, str], ...]:
     global _LIB_SNAPSHOT, _LAST_LIBHASH_S
     if _LIB_SNAPSHOT is None:
         t0 = time.monotonic()
-        # pgw#1087: THE library-identity phase. `_LAST_LIBHASH_S` has always
+        # THE library-identity phase. `_LAST_LIBHASH_S` has always
         # measured this pass but was reported only into the seal dict, where no
         # boot reader ever joined it to the rest of the boot. As a phase the
         # hit and miss populations are two rows of the same table and what a
@@ -603,7 +603,7 @@ _ESTABLISHED_OVERRIDES: Optional[Dict[str, str]] = None
 
 def loaded_libs_digest() -> str:
     """Combined 16-hex digest of the BOOT-frozen loaded-library snapshot
-    (pgw#719): toolchain CONTENT the dist-info RECORDs cannot see — the
+: toolchain CONTENT the dist-info RECORDs cannot see — the
     LD_PRELOAD/LD_LIBRARY_PATH substitution hole. Rides the ``toolchain``
     key axis (pgw#1059 amendment 4) and the seal dict; the per-library list
     rides metadata via ``compile_cache.artifact_metadata`` so a mismatch
@@ -632,13 +632,13 @@ def declaration_digest() -> str:
 
 
 def effective_seal() -> Dict[str, Any]:
-    """The seal dict — a digest of the DECLARATION (pgw#1049), recorded
+    """The seal dict — a digest of the DECLARATION, recorded
     verbatim in cell metadata. Its settings facts come from
     ``settings_authority.declaration()``; ambient mutation cannot move them
     (it trips :func:`assert_seal_unchanged` instead). The one measured fact
     is ``loaded_libs`` (:func:`loaded_libs_digest`).
 
-    pgw#1059 amendment 4: the seal is NO LONGER a key axis. Its declaration
+    the seal is NO LONGER a key axis. Its declaration
     and loaded-libs digests fold into the ``toolchain`` axis
     (``compile_cache.toolchain_digest``); this dict stays RECORDED on every
     artifact (the observable statement of the declaration a cell was minted
@@ -663,7 +663,7 @@ def seal_digest(seal: Mapping[str, Any]) -> str:
 
 
 def settings_readback() -> Dict[str, Any]:
-    """The live settings state — the TRIPWIRE surface (pgw#719/pgw#1049).
+    """The live settings state — the TRIPWIRE surface.
 
     Deliberately read-back where :func:`effective_seal` no longer is: the
     seal states the declaration; this states the process. The ``inductor``
@@ -679,7 +679,7 @@ def settings_readback() -> Dict[str, Any]:
     }
 
 
-# The boot read-back (pgw#719): stored by establish() AFTER read-back was
+# The boot read-back: stored by establish() AFTER read-back was
 # verified == declaration; every mint trace asserts the live state against
 # it before tracing.
 _BOOT_READBACK: Optional[Dict[str, Any]] = None
@@ -700,7 +700,7 @@ def _seal_diff(boot: Mapping[str, Any], live: Mapping[str, Any]) -> List[str]:
 
 
 def assert_seal_unchanged(label: str = "") -> None:
-    """Point-of-use enforcement (pgw#719): the LIVE settings must still be
+    """Point-of-use enforcement: the LIVE settings must still be
     the BOOT settings — and boot verified those against the declaration, so
     a trip is a declaration mismatch by transitivity. First call without an
     established boot read-back adopts the current state as boot
@@ -758,7 +758,7 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     not take effect, an undeclared knob, or an interpreter that booted
     outside the declared env (``settings_authority.ensure_interpreter_env``
     is the imposition for that one)."""
-    # pgw#1087: THE envelope/toolchain/sm derivation phase. The `spans` dict
+    # THE envelope/toolchain/sm derivation phase. The `spans` dict
     # below has always measured this in detail, but it rode `LAST_ESTABLISH_SPANS`
     # — a module global no boot reader ever joined to the rest of the ladder —
     # so the derivation's cost was "expect ms; prove it" and unproven for a

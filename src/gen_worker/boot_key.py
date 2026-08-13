@@ -1,7 +1,7 @@
 """pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``cg-key-v1`` entry
 key SET AT BOOT, from CODE ALONE, before a single weight byte is resident.
 
-pgw#1176: §4.27 said "THE cell key" (singular). It is a KEY SET plus a derived
+§4.27 said "THE cell key" (singular). It is a KEY SET plus a derived
 contract manifest now — one ``cg-key-v1`` per declared graph class. Every property
 the ruling wanted survives STRENGTHENED, because a partial resolve now helps:
 a pod that resolves 30 of 36 keys arms 30 classes and compiles 6, where the
@@ -237,7 +237,7 @@ class DerivedKey:
     """The KEY SET this boot derived — the contract manifest — and the
     measurements that produced it.
 
-    pgw#1176: ``entry_keys`` replaces the single ``key``. §4.27 ruled "THE
+    ``entry_keys`` replaces the single ``key``. §4.27 ruled "THE
     cell key" (singular); it is now a derived key SET plus a manifest, and
     every property that ruling wanted survives strengthened, because a
     PARTIAL resolve now helps instead of falling back to a full re-mint.
@@ -296,7 +296,7 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
     A boot trace holds no card and allocates no weights — its parameters are
     fake — so unlike the compile pool there is no VRAM bound and no host-RAM
     bound worth modelling: a structure-only export's measured device high-water
-    is 9.8 MiB (pgw#1080) and its RSS is an import closure. CPU is the only
+    is 9.8 MiB and its RSS is an import closure. CPU is the only
     real bound, and one core is reserved for the serving parent that is
     concurrently fetching and loading weights.
 
@@ -348,11 +348,11 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
 #: Memo file schema. Bumped when the MEANING of a stored hash changes; a
 #: reader that finds an older version treats the whole file as absent, which
 #: is a miss and a re-trace, never a wrong key.
-#: v3 (pgw#1031): the stored blocks now carry ``graph_witness``, and a v2 entry
+#: v3: the stored blocks now carry ``graph_witness``, and a v2 entry
 #: has none — which the adopt-side floor reads as "this pod cannot state its
 #: own graph" and refuses. Bumped so a stale memo is a re-trace rather than a
 #: refusal nobody can explain.
-#: v4 (pgw#1113): the digest a row is filed under now names the RESOLVED SLOTS
+#: v4: the digest a row is filed under now names the RESOLVED SLOTS
 #: as well as the code and the declaration. A v3 row was filed under a
 #: checkpoint-blind digest, so it answers a strictly different question and
 #: must not be read as an answer to this one. The version rides the digest
@@ -376,7 +376,7 @@ def closure_digest(
     declare different shape ladders trace different graphs.
 
     ``slots`` is the third half, and it is the one this memo went without for
-    two issues (pgw#1113). The traced graph is a function of the CHECKPOINT's
+    two issues. The traced graph is a function of the CHECKPOINT's
     own config: ``zero_cond_t`` exists on ``Qwen-Image-Edit-2511`` and not on
     ``Qwen-Image``, and block counts, head counts and quantization ops are the
     general case. Without it, a redeploy that rebinds a slot to a different
@@ -440,7 +440,7 @@ def read_memo(
             parsed = json.loads(canon)
         except (TypeError, ValueError):
             # One unreadable block invalidates the WHOLE entry: a partial class
-            # set is not a narrower key, it is a wrong one (pgw#716).
+            # set is not a narrower key, it is a wrong one.
             return {}
         if not isinstance(parsed, dict):
             return {}
@@ -538,7 +538,7 @@ def assert_memo_honest(
         had = had_hashes.get(str(name))
         if had and want and had != want:
             disagreements.append(f"{name}: memo {had} != traced {want}")
-        # pgw#1031: the memo now also answers the ADOPT-side witness, so a
+        # the memo now also answers the ADOPT-side witness, so a
         # memo whose class hash is right and whose witness is stale would
         # admit a colliding cell on the very axis the witness exists to
         # separate. Checked here for the same reason the hash is.
@@ -570,7 +570,7 @@ def assert_memo_honest(
 def graph_witnesses_of(
     blocks: Mapping[str, Mapping[str, Any]],
 ) -> Dict[str, str]:
-    """``{entry: graph_witness}`` for one set of keying blocks (pgw#1031).
+    """``{entry: graph_witness}`` for one set of keying blocks.
 
     Read off the blocks rather than recomputed: the witness is stamped where
     the program is, by ``aot_mint.keying_block``, and a second derivation here
@@ -619,7 +619,7 @@ def fold(
     envelope: Mapping[str, Any],
 ) -> Tuple[Dict[str, str], Dict[str, str], str]:
     """``({entry: entry_key}, {entry: class_hash}, manifest_digest)`` for one
-    declaration's class set — THE derived contract manifest (pgw#1176).
+    declaration's class set — THE derived contract manifest.
 
     §4.27 asked for "THE cell key" (singular). This returns a KEY SET plus a
     manifest, and everything §4.27 wanted survives strengthened: the <60 s
@@ -717,7 +717,7 @@ def shares(classes: int, workers: int) -> List[Tuple[int, int]]:
 def free_device_bytes() -> int:
     """Bytes actually free on this process's card, or 0 when there is no card.
 
-    pgw#1165: read at the moment of the fan-out, so the parent's OWN residents
+    read at the moment of the fan-out, so the parent's OWN residents
     (it is serving throughout a §4.28 boot) are already excluded — the children
     compete for what is left, not for the nameplate capacity.
     """
@@ -1007,7 +1007,7 @@ def derive(
     # child reports how many classes the WHOLE declaration produced on its own
     # composed pipeline, all of them must agree, and the union of the shares
     # must be exactly that many. A key that cannot name every class is a key a
-    # mismatch cannot name (pgw#716).
+    # mismatch cannot name.
     declared = sorted({int(r.declared_classes) for r in reports})
     if len(declared) != 1 or declared[0] <= 0:
         raise BootKeyUnavailable(

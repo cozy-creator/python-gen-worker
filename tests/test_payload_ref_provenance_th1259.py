@@ -38,7 +38,7 @@ from gen_worker.request_context import (
 )
 
 BLOB_BYTES = b"real blob bytes"
-# pgw#1013: the digest ADDRESSES the bytes, and `_download_blob_by_digest`
+# the digest ADDRESSES the bytes, and `_download_blob_by_digest`
 # now verifies that. A rig that serves one blob under an arbitrary digest is
 # describing a hub that cannot exist, so the "good" address is derived from the
 # bytes it names.

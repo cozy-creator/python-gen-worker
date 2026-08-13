@@ -1,6 +1,6 @@
-"""Lane serve gate (gw#551): promote-on-use for LRU-swappable pipelines.
+"""Lane serve gate: promote-on-use for LRU-swappable pipelines.
 
-Multi-lane endpoints (gw#479) dispatch to a lane handler-side (pgw#509), so
+Multi-lane endpoints dispatch to a lane handler-side, so
 the executor cannot know pre-dispatch which lane a request will run. When the
 lanes overcommit VRAM, one sits demoted in host RAM — and nothing between
 "demoted" and "the handler calls the pipeline" used to re-promote it: the
@@ -38,7 +38,7 @@ _GATED_FLAG = "_cozy_lane_gated"
 
 _GiB = 1024 ** 3
 
-# pgw#973 (gw#666 / §4.24): a SILENCE window over free VRAM, not a wall budget.
+# a SILENCE window over free VRAM, not a wall budget.
 # This loop polls `get_available_vram_gb()` four times a second, so free VRAM
 # IS the progress signal — a sibling demoting a large pipeline returns bytes in
 # visible steps, and the old flat 45 s deadline gave up on a card that was
@@ -125,7 +125,7 @@ class LaneResidencyGate:
             return
         obj = res.obj(self.ref)
         if obj is not None and _obj_offload_hooked(obj):
-            return  # block-window offload (ie#468): hooks own placement
+            return  # block-window offload: hooks own placement
         with self._lock, _inference_mode_off():
             tier = res.tier(self.ref)
             if tier is Tier.VRAM:
@@ -167,7 +167,7 @@ class LaneResidencyGate:
                             "%.1f GiB); serving CPU-offloaded",
                             self.label, get_available_vram_gb(),
                         )
-                        # pgw#760: a serve-time quality decision — this lane
+                        # a serve-time quality decision — this lane
                         # now runs CPU-offloaded; countable on the wire.
                         activity_mod.emit_event(
                             activity_mod.KIND_SERVE_DEGRADE,
@@ -228,7 +228,7 @@ def arm_lane_residency_gate(pipe: Any, gate: LaneResidencyGate) -> bool:
             "lane gate could not wrap %s (%s: %s); lane relies on eager "
             "promotion only", cls.__name__, type(exc).__name__, exc,
         )
-        # pgw#760: the te#79 crash class (a demoted lane executing on cpu
+        # the te#79 crash class (a demoted lane executing on cpu
         # mid-denoise) is only prevented by this wrap — its silent absence
         # is a serving hazard the hub should see.
         activity_mod.emit_event(

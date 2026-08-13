@@ -98,7 +98,7 @@ __all__ = [
     "clone",
     "CloneResult",
     "publish_flavors",
-    # Family declarations (pgw#740): the endpoint declares, the SDK executes.
+    # Family declarations: the endpoint declares, the SDK executes.
     "CIVITAI",
     "ComponentRepack",
     "DirMatch",

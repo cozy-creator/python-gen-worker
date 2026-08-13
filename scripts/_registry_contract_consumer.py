@@ -1,6 +1,6 @@
 """A representative CONSUMER declaration module for the registry-contract gate.
 
-pgw#740: the SDK ships registry MECHANISMS; every vocabulary is declared by the
+the SDK ships registry MECHANISMS; every vocabulary is declared by the
 endpoint that owns it. This module declares a synthetic family the way a real
 endpoint does, across all six decorator/registration surfaces. The gate
 (`check_registry_contract.py`) imports it via the documented

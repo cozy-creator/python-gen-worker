@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""svdq lane bench driver — ONE watched pod, cells run in sequence (pgw#865).
+"""svdq lane bench driver — ONE watched pod, cells run in sequence.
 
 Promoted from the one-shot te#137/pgw#862 drivers into the repeatable
 instrument pgw#865 owns, and generalised over the card so pgw#863's sm_100

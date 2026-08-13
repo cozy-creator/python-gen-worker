@@ -114,7 +114,7 @@ class Preloader:
         # background stage this generation — retried only on a new desired
         # set, never in a loop.
         self._failed: set = set()
-        # pgw#1048: identities REFUSED deterministically (a composition the
+        # identities REFUSED deterministically (a composition the
         # tree plus the injection cannot satisfy). Never cleared by a new
         # desired set: the verdict is a function of the identity's own bytes,
         # so re-sending the same DesiredInstance cannot change it. A hub that
@@ -181,7 +181,7 @@ class Preloader:
             return
         except Exception as exc:
             logger.exception("rotation preload driver crashed; parked until next poke")
-            # pgw#760: the whole background-staging subsystem is now off
+            # the whole background-staging subsystem is now off
             # until the next poke — the hub's desired plan goes silently
             # unfulfilled and every rotation pays the full visible swap.
             activity_mod.emit_event(
@@ -205,7 +205,7 @@ class Preloader:
             except asyncio.CancelledError:
                 raise
             except ComponentSubstitutionError as exc:
-                # pgw#1048: deterministic, not a failure to retry. The tree is
+                # deterministic, not a failure to retry. The tree is
                 # materialized and the injection is known, so the next desired
                 # set carrying these same bytes has the same answer — pgw#1047
                 # measured that loop as 9 minutes of a paid pod.
@@ -228,7 +228,7 @@ class Preloader:
                     "next desired set",
                     instance.function_name, type(exc).__name__, exc,
                 )
-                # pgw#760: the hub planned this instance hot; the stage is
+                # the hub planned this instance hot; the stage is
                 # abandoned for the whole desired-set generation, so the next
                 # rotation to it pays the full visible swap.
                 activity_mod.emit_event(

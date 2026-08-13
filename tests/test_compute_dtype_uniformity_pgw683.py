@@ -28,7 +28,7 @@ activation flow — not the LoRA side-branch (a bare matmul), not the VAE decode
 conv that pgw#675 was.
 
 **2. Identity, not dtype decision, is what let a Half module in.** The
-content-keyed shared-component cache (gw#479) keys on
+content-keyed shared-component cache keys on
 `LoadedComponentKey`, whose `dtype` field is the binding's DECLARED dtype.
 Hub bindings declare none, and prod's binding is flavor-unpinned
 (`ref=tensorhub/wai-illustrious`, `tag=prod`), so the flavor is resolved per
@@ -288,7 +288,7 @@ def test_invariant_admits_every_legal_composition() -> None:
     assert_uniform_compute_dtype(
         _Pipe(unet=_linear_stack(torch.bfloat16),
               text_encoder=_linear_stack(torch.bfloat16)), "bf16")
-    # pgw#667: the wider part is a DECLARED decision, never a collision.
+    # the wider part is a DECLARED decision, never a collision.
     assert_uniform_compute_dtype(
         _Pipe(unet=_linear_stack(torch.bfloat16),
               vae=_linear_stack(torch.float32)), "bf16")

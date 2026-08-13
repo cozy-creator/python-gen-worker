@@ -11,7 +11,7 @@ identical attempts::
     'cap_feats_1', 'lora_a', 'lora_b', 't', 'x_0', 'x_1'])
 
 THE MECHANISM — two SDK features that each work and could not compose.
-`Input.repeat` containers (pgw#853) are FLATTENED by `torch.export` into one
+`Input.repeat` containers are FLATTENED by `torch.export` into one
 positional user input per element, suffixed `_0`, `_1`, …; `Dim.carried_by`
 names its input by the DECLARED name. The declared-range gate resolved the
 declared name against the exported program and refused on the miss, which

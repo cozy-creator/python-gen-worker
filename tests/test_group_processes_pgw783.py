@@ -436,7 +436,7 @@ def test_activity_is_terminal_only_when_every_group_is():
 
 
 def test_activity_progress_is_the_aggregate_so_one_group_cannot_mask_others():
-    """The hub judges liveness by counter advancement (gw#621). If the parent
+    """The hub judges liveness by counter advancement. If the parent
     forwarded one group's frozen counter the pod would be reaped while three
     groups made progress. The worker-level counter is the SUM."""
     merged = reconcile_activity_kind(
@@ -918,7 +918,7 @@ def test_a_child_is_reaped_when_its_parent_dies():
         # Kill the intermediate parent; PR_SET_PDEATHSIG must reap the grandchild.
         parent.kill()
         parent.wait(timeout=10)
-        # pgw#795: the reap itself is the progress signal — the wait ends when
+        # the reap itself is the progress signal — the wait ends when
         # the pid is gone, or fails on a silence window, never on a clock.
         def _gone_yet() -> bool:
             try:

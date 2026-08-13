@@ -42,7 +42,7 @@ if TYPE_CHECKING:  # heavy deps stay import-time-free; methods import lazily
 
 
 class LoraOverlay(TypedDict):
-    """One per-request LoRA overlay riding a model slot (gw#393)."""
+    """One per-request LoRA overlay riding a model slot."""
 
     ref: str
     weight: float
@@ -104,7 +104,7 @@ class _SlotTable(Mapping[str, "ResolvedSlot[Any]"]):
     HANDLER actually reads that slot, not a blanket failure for every
     Slot-declared endpoint whose handler never touches an unresolved one.
 
-    ``declared`` (pgw#763/th#1288) names the failed slots whose ref is the
+    ``declared`` names the failed slots whose ref is the
     RELEASE'S OWN fixed declaration; those raise the typed
     ``DeclaredSlotResolutionError``, so the hub classifies the resulting FATAL
     by ORIGIN at any worker version instead of discarding it. A
@@ -141,7 +141,7 @@ class _SlotTable(Mapping[str, "ResolvedSlot[Any]"]):
 
 
 def _copy_context_metadata(value: _MetaT) -> _MetaT:
-    # pgw#1202: a structure-preserving deep copy. mypy cannot prove the rebuilt
+    # a structure-preserving deep copy. mypy cannot prove the rebuilt
     # dict/list/tuple is the SAME type it was handed, so the narrowing is a
     # single `_cast` at this definition rather than an `Any` escaping into every
     # caller — `ctx.models` and `ctx.loras` are typed because of it.
@@ -284,7 +284,7 @@ _AssetT = TypeVar("_AssetT", bound=Asset)
 class RequestContext(Generic[D]):
     """Context object passed to request handlers.
 
-    SDK v2 (pgw#647): ``ctx`` carries only REQUEST-SCOPED facts — resolved
+    SDK v2: ``ctx`` carries only REQUEST-SCOPED facts — resolved
     refs/digests (honest output metadata), the typed per-model config
     (``ctx.defaults``), progress/cancel, request id, timing. Model
     instances live on the endpoint object (``self.pipeline``, stored by
@@ -297,7 +297,7 @@ class RequestContext(Generic[D]):
 
     Output contract: RETURN the output object (``ImageOutput`` etc.); the
     SDK owns encode + upload. A handler that hand-uploads inside its body
-    opts out of the encode/upload tail overlap (gw#516) — the contract is
+    opts out of the encode/upload tail overlap — the contract is
     "return, don't upload". The blocking ``ctx.save_*`` methods gain
     ``async`` twins in pgw#652 Phase 1 (an addition, not a break).
     """
@@ -332,13 +332,13 @@ class RequestContext(Generic[D]):
         self._started_at = time.time()
         self._canceled = False
         self._boot_warmup = bool(boot_warmup)
-        self._execution_lane = ""  # th#1050: executing lane, set by the executor
-        self._config: Dict[str, Any] = {}  # th#1087: effective config params
+        self._execution_lane = ""  # executing lane, set by the executor
+        self._config: Dict[str, Any] = {}  # effective config params
         self._config_snapshot: Optional[bytes] = None
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
-        # pgw#824: one confession per context for an unparseable
+        # one confession per context for an unparseable
         # destination_repo (see `_repo_job_upload_scope`) — coalesced, because
         # the getter is called once per uploaded file.
         self._repo_scope_parse_reported = False
@@ -347,7 +347,7 @@ class RequestContext(Generic[D]):
         self._slots = _SlotTable(
             resolved_slots or {}, slot_errors or {}, declared_slot_errors or ())
         self._root_slot_name = str(root_slot or "").strip()
-        # pgw#654: caller-visible adjustment warnings — structured rows the
+        # caller-visible adjustment warnings — structured rows the
         # merge/clamp layer emits whenever a requested value is modified.
         # They ride the RESULT ENVELOPE (JobResult.adjustments) + the hub's
         # request record/events stream; pod logs alone never reach a caller.
@@ -367,21 +367,21 @@ class RequestContext(Generic[D]):
         # blocking uploads release the GPU slot while they wait on the
         # network. None for CPU jobs and local (CLI) runs.
         self._gpu_slot_lease: Optional[Any] = None
-        # pgw#943: may a CHILD-CALL wait yield the GPU slot? Stamped per job
+        # may a CHILD-CALL wait yield the GPU slot? Stamped per job
         # by the executor: True only when this job holds no instance gate and
         # no per-request adapters — see _child_call_wait for why both matter.
         self._child_call_slot_yieldable: bool = False
-        # gw#516: executor callback fired on the TERMINAL slot release at the
+        # executor callback fired on the TERMINAL slot release at the
         # decode->finalize handoff, so the worker's finalizing-job count (and
         # the hub's StateDelta view of it) tracks the encode/upload tail.
         self._on_finalize_release: Optional[Callable[[], None]] = None
 
-        # th#1130: outputs whose encode+upload run in the finalize tail,
+        # outputs whose encode+upload run in the finalize tail,
         # after the executor releases the GPU permit. Disarmed by default —
         # CLI runs, endpoint unit tests and streaming handlers stay eager.
         self._deferred = DeferredTail()
 
-        # th#1111: per-stage timing for this request. Framework hooks
+        # per-stage timing for this request. Framework hooks
         # (permit wait, input fetch, encode, stamp, upload, denoise steps)
         # record into it unconditionally; endpoints refine with ctx.stage().
         self._stages = StageTimer()
@@ -393,14 +393,14 @@ class RequestContext(Generic[D]):
     @property
     def boot_warmup(self) -> bool:
         """True when this call is the worker's boot-time synthetic warmup
-        (gw#470): the output is discarded, so a handler MAY cheapen the run
+: the output is discarded, so a handler MAY cheapen the run
         (e.g. ``steps = 1 if ctx.boot_warmup else steps``) — the allocator
         peak is shape-driven, not step-driven."""
         return self._boot_warmup
 
     @property
     def execution_lane(self) -> str:
-        """The EXECUTING precision lane of this call (th#1050), a full
+        """The EXECUTING precision lane of this call, a full
         descriptor id like ``"fp8-w8a8-dynamic+compiled"`` — post-degrade
         truth, the same value JobMetrics.lane reports (th#1043 consistent).
         Read-only; always available. Handlers that declared
@@ -434,7 +434,7 @@ class RequestContext(Generic[D]):
 
     @property
     def loras(self) -> Dict[str, Tuple[LoraOverlay, ...]]:
-        """Per-request LoRA overlays riding each model slot (gw#393):
+        """Per-request LoRA overlays riding each model slot:
         slot name -> tuple of ``{"ref", "weight"}``. Empty for adapter-free
         requests. The worker applies/removes the adapters around the handler
         call; this surface is read-only metadata."""
@@ -498,15 +498,15 @@ class RequestContext(Generic[D]):
     def defaults(self) -> D:
         """The resolved per-model config for this request's ROOT slot,
         typed as the handler's ``RequestContext[D]`` annotation: the
-        catalog-resolved recipe (th#1116) decoded against the derived
-        schema, with per-lora field overrides applied (pgw#516). Payload
+        catalog-resolved recipe decoded against the derived
+        schema, with per-lora field overrides applied. Payload
         values still win over these — that precedence is handler logic.
         Non-root lanes of a multi-slot class read
         ``ctx.slots[name].defaults`` explicitly."""
         # `_root_slot()` erases to ResolvedSlot[Any]; the ctx's own D is
         # what the root slot resolves to. Stating Optional[D] here keeps
         # the existing runtime guard below load-bearing AND lets the
-        # return be D rather than Any (pgw#1202).
+        # return be D rather than Any.
         d: Optional[D] = self._root_slot().defaults
         if d is None:
             raise ValueError(
@@ -518,7 +518,7 @@ class RequestContext(Generic[D]):
     def adjusted(
         self, field: str, requested: Any, applied: Any, reason: str,
     ) -> None:
-        """Record a caller-visible ADJUSTMENT (pgw#654): the serve path
+        """Record a caller-visible ADJUSTMENT: the serve path
         modified a requested value (clamp, substitution, injection). Rows
         ride the result envelope (``JobResult.adjustments``) and the hub's
         request record + events stream, so API consumers and UIs can show
@@ -718,7 +718,7 @@ class RequestContext(Generic[D]):
             owner, repo = _parse_owner_repo(destination_repo)
         except Exception:
             logger.debug("_repo_job_upload_scope: destination_repo=%r did not parse as owner/repo", destination_repo, exc_info=True)
-            # pgw#824: returning None here does not mean "no repo was asked
+            # returning None here does not mean "no repo was asked
             # for" — a destination_repo WAS supplied and could not be parsed,
             # so this job's outputs silently stop being repo-CAS writes and
             # land on the user-files/media path instead. That is exactly the
@@ -822,7 +822,7 @@ class RequestContext(Generic[D]):
         tier: Optional[str] = None,
         poll_interval_s: float = 2.0,
     ) -> Any:
-        """Call another endpoint's function as a CHILD request (th#826).
+        """Call another endpoint's function as a CHILD request.
 
         The function must be declared ``@endpoint(child_calls=True)`` — the
         platform then scopes this invocation's credential for child calls.
@@ -859,7 +859,7 @@ class RequestContext(Generic[D]):
         return handle.result(timeout_s, poll_interval_s=poll_interval_s)
 
     def workflow_checkpoint(self, key: str, fn: Callable[[], Any]) -> Any:
-        """Memoize one workflow step's result under this request (th#826).
+        """Memoize one workflow step's result under this request.
 
         Durability-by-memoization (WORKFLOW-DESIGN.md §4): the first call
         computes ``fn()`` and stores its JSON-serializable result under
@@ -887,7 +887,7 @@ class RequestContext(Generic[D]):
         release already saw ``held == False`` and skipped, so the balance
         stays exact and the freed slot isn't captured by a dying job.
 
-        pgw#738: ``reacquire`` raises ``GpuSlotUnreachable`` when the permit
+        ``reacquire`` raises ``GpuSlotUnreachable`` when the permit
         provably cannot come back. That refusal only ever REPLACES a clean
         exit — a failure raised by the block owns the outcome and is never
         masked by it.
@@ -915,14 +915,14 @@ class RequestContext(Generic[D]):
     @contextmanager
     def _child_call_wait(self) -> "Iterator[None]":
         """Worker-internal: park for a child request's result with the GPU
-        slot YIELDED (pgw#943) — a parent waiting on a network round trip
+        slot YIELDED — a parent waiting on a network round trip
         must not rent the accelerator, so another request (or a background
         mint turn) runs on the permit and the wait re-acquires before
         returning to tenant code. Same lease discipline as ``save_bytes``
         (#382); the wait itself stays on the handler thread, so heartbeats
         and StateDeltas ride the free event loop exactly as before.
 
-        Gate-holding class endpoints yield too (pgw#954): every permit
+        Gate-holding class endpoints yield too: every permit
         acquirer now takes the instance gate FIRST, so a same-instance
         follower queues on ``run_lock`` holding no permit and the re-acquire
         cannot wedge. What remains SCOPED out is a job with per-request
@@ -942,15 +942,15 @@ class RequestContext(Generic[D]):
 
     def _release_gpu_slot_for_finalize(self) -> None:
         """Worker-internal: TERMINAL GPU-slot release at the decode->finalize
-        handoff (gw#476 / gw#516). The handler is done with GPU compute; the
+        handoff. The handler is done with GPU compute; the
         encode + upload tail proceeds slotless so a request on ANOTHER live
         instance can take the card instead of idling it (measured up to 179s
         on a CPU-contended host).
 
-        pgw#1154 — READ THIS BEFORE SIZING ANY OVERLAP AGAINST THIS RELEASE.
+        READ THIS BEFORE SIZING ANY OVERLAP AGAINST THIS RELEASE.
         It does NOT hand the card to a SAME-instance follower, which is the
         back-to-back case a single-endpoint pod actually serves. The worker's
-        lock order is instance gate -> GPU permit (pgw#954), so the follower
+        lock order is instance gate -> GPU permit, so the follower
         is queued on ``run_lock``, and this method releases only the permit;
         the gate stays held until the handler RETURNS. Releasing the gate
         here too would let a follower mutate the instance graph under a
@@ -999,7 +999,7 @@ class RequestContext(Generic[D]):
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
         """Bracket one stage of this request for :data:`JobMetrics.stage_ms`
-        (th#1111)::
+::
 
             with ctx.stage("text_encode"):
                 embeds = encode(prompt)
@@ -1032,7 +1032,7 @@ class RequestContext(Generic[D]):
         step counter when known (e.g. denoise step 5 of 20) so UIs can render
         "5 / 20" instead of a bare percentage.
 
-        pgw#1154: a call carrying ``step`` is ALSO a timing mark. th#1111 wired
+        a call carrying ``step`` is ALSO a timing mark. th#1111 wired
         marks from ``diffusers_step_callback`` only, so every endpoint driving
         its own step loop — the whole DiffSynth half of the fleet, minimax-h3
         and ltx-video included — reported progress to the hub and no stage
@@ -1078,7 +1078,7 @@ class RequestContext(Generic[D]):
     def log(self, message: str, level: LogLevel = "info", **fields: Any) -> None:
         """Emit a request-scoped OPERATOR diagnostic (rides ``request.log``).
 
-        pgw#508: this is the PLATFORM/OPERATOR debug stream, full stop —
+        this is the PLATFORM/OPERATOR debug stream, full stop —
         never user-facing. tensorhub persists it under an operator-only event
         kind and never serves it on a tenant-facing surface (SSE job feed,
         events.bin, poll); it does not reach the cozy-art job card. See
@@ -1115,7 +1115,7 @@ class RequestContext(Generic[D]):
         return {"request_id": self._request_id, "models": model_refs}
 
     def _c2pa_sign_bytes(self, ref: str, data: bytes) -> bytes:
-        """C2PA-sign media payloads at the finalize seam (th#714).
+        """C2PA-sign media payloads at the finalize seam.
 
         Returns ``data`` unchanged when signing is unconfigured or the
         payload is not a signable media format; raises when signing is
@@ -1157,7 +1157,7 @@ class RequestContext(Generic[D]):
         media output: `JobResult` owns its own inline-vs-blob_ref choice at
         its own ceiling (`executor.INLINE_RESULT_MAX_BYTES`). The client's
         `Prefer: bytes=inline` hint is about MEDIA and must not reach here —
-        pgw#767: it did, so every result in
+        it did, so every result in
         (INLINE_RESULT_MAX_BYTES, _SAVE_BYTES_INLINE_THRESHOLD] returned a
         `blob_ref` naming a blob that was never uploaded.
         """
@@ -1233,7 +1233,7 @@ class RequestContext(Generic[D]):
         extension is derived from the format when ``ref`` has no suffix.
 
         On the serve path the encode + C2PA stamp + upload are DEFERRED to the
-        finalize tail (th#1130): the returned handle carries its ``ref``
+        finalize tail: the returned handle carries its ``ref``
         immediately and its bytes fields fill in after the handler returns and
         the GPU permit is released, so the ~1.1s webp encode overlaps the next
         request's denoise instead of holding the card. Nothing about the
@@ -1249,12 +1249,12 @@ class RequestContext(Generic[D]):
             ref = _normalize_output_ref(str(ref))
             if Path(ref).suffix == "":
                 ref += ext
-        # pgw#1094: the output-integrity floor, on the pixels, before anything
+        # the output-integrity floor, on the pixels, before anything
         # is encoded or uploaded. Judged EAGERLY even on the deferred path: the
         # check is sub-millisecond on one image and the handler is still on the
         # stack here, so a rejected render raises where the request can see it
         # instead of inside the post-handler finalize drain. Charged to
-        # its OWN stage so its wall is ATTRIBUTED (th#1111) without borrowing
+        # its OWN stage so its wall is ATTRIBUTED without borrowing
         # `image_encode`, which on the deferred path means the finalize tail.
         if judged(self):
             with self._stages.stage("output_integrity"):
@@ -1288,7 +1288,7 @@ class RequestContext(Generic[D]):
         self._deferred.defer(pending)
         return handle
 
-    # -- deferred finalize tail (th#1130) ---------------------------------
+    # -- deferred finalize tail ---------------------------------
 
     def _arm_deferred_outputs(self) -> None:
         """Worker-internal: let ``save_image`` defer its encode+upload to the
@@ -1399,7 +1399,7 @@ class RequestContext(Generic[D]):
         if not os.path.exists(src):
             raise FileNotFoundError(src)
 
-        # C2PA signing (th#714): media files upload as a signed temp copy;
+        # C2PA signing: media files upload as a signed temp copy;
         # the caller's file is never mutated. No-op unless signing is
         # configured and the file is a signable media format.
         signed_tmp = self._c2pa_sign_file(ref, src)
@@ -1497,7 +1497,7 @@ class _PublisherMixin:
     inheritance (so ``self`` has ``_file_api_base_url`` / ``_owner`` /
     ``_get_worker_capability_token``).
 
-    Producer-only STATE lives here too (pgw#526): the reserved
+    Producer-only STATE lives here too: the reserved
     ``source``/``destination``/``text_encoder``/``candidate`` payload structs,
     the hf token, and their materialized paths initialize in this ``__init__``
     — a plain inference ``RequestContext`` never carries them.
@@ -1529,7 +1529,7 @@ class _PublisherMixin:
         self._candidate_path: Optional[str] = None
         self._hf_token = (hf_token or "").strip()
     if TYPE_CHECKING:
-        # The host contract (gw#497): everything this mixin borrows from
+        # The host contract: everything this mixin borrows from
         # RequestContext, declared so mypy checks the mixin against the
         # composition instead of erroring attr-defined on every use.
         request_id: str
@@ -1667,7 +1667,7 @@ class _PublisherMixin:
     ) -> Tensors:
         """Shared checkpoint-publish core.
 
-        Job-scoped writes publish through the /commits stream (gw#471) so
+        Job-scoped writes publish through the /commits stream so
         the returned Tensors carries a blake3 digest + blob_digest and each
         save materializes one finalized repo revision; everything else falls
         back to the plain asset save the ``fallback`` callable provides.
@@ -1754,7 +1754,7 @@ class _PublisherMixin:
         only thing that decides how a terminal miss classifies. See
         :data:`REF_ORIGIN_PAYLOAD`.
 
-        pgw#1013 — this reader used to have NO cap and NO verification at all,
+        this reader used to have NO cap and NO verification at all,
         on the path its own public wrapper's docstring calls "the untrusted
         case": a tenant handing a digest to ``materialize_blob`` got whatever
         bytes arrived, in whatever quantity, written straight over ``dest``.
@@ -1861,12 +1861,12 @@ class _PublisherMixin:
         emitted by an earlier conversion) can pull the bytes themselves.
 
         ``origin`` defaults to :data:`REF_ORIGIN_PAYLOAD` because that is
-        the untrusted case and the safe default (th#1259): a bad address
+        the untrusted case and the safe default: a bad address
         fails the REQUEST typed rather than indicting the release. Pass
         :data:`REF_ORIGIN_PLATFORM` for a digest the platform produced.
 
         The bytes are capped at the response's declared length and verified
-        against the digest before ``dest`` exists (pgw#1013) — "the untrusted
+        against the digest before ``dest`` exists — "the untrusted
         case" is now a claim the code enforces rather than one it documents.
         """
         dest_path = Path(os.fspath(dest))
@@ -1878,7 +1878,7 @@ class _PublisherMixin:
         """Return a JOB-SCOPED SCRATCH dir keyed by (job_id, key) — a stable
         working directory for trainer ``output_dir`` use within one job.
 
-        NOT persistent storage (pgw#527): it lives under
+        NOT persistent storage: it lives under
         ``tempfile.gettempdir()`` — pod-local ``/tmp``, gone at pod
         churn/eviction. Do not park resume state here; durable resume goes
         through published checkpoints (``save_checkpoint`` / the job's
@@ -1927,7 +1927,7 @@ class _PublisherMixin:
            → a rows.jsonl-style entry index (raw CAS blobs by digest) with
            presigned URLs, sizes and blake3 checksums. A 202 (async snapshot
            build, th#691) is polled for as long as the hub keeps answering —
-           there is no wall-clock budget (gw#666); a typed
+           there is no wall-clock budget; a typed
            ``snapshot_build_failed`` raises ``SnapshotBuildFailedError``, and
            ``hub_silence_window_s`` bounds only how long a hub that answers
            NOTHING is tolerated.
@@ -1936,7 +1936,7 @@ class _PublisherMixin:
            repo-CAS by-digest reader.
 
         The REF is caller-supplied, so a ref that resolves to nothing raises
-        ``DatasetNotFoundError`` — a typed request error (th#1259), never
+        ``DatasetNotFoundError`` — a typed request error, never
         release-health evidence. Everything downstream of a resolved ref (an
         empty manifest, a silent hub, an exhausted download) is the
         platform's and still raises ``RuntimeError``.
@@ -1960,7 +1960,7 @@ class _PublisherMixin:
         fetch_kwargs: Dict[str, Any] = {"cancelled": lambda: self.cancelled}
         if hub_silence_window_s is not None:
             fetch_kwargs["hub_silence_window_s"] = hub_silence_window_s
-        # th#1259: `ref` came from the caller, so THIS is the boundary that
+        # `ref` came from the caller, so THIS is the boundary that
         # knows the provenance — the lookup helpers only see an opaque id.
         # A ref that resolves to nothing is a payload verdict; everything
         # after resolution keeps its platform-fault classification.
@@ -1985,7 +1985,7 @@ class _PublisherMixin:
         target_root.mkdir(parents=True, exist_ok=True)
         download_entries(
             entries, target_root,
-            # th#1259: these digests come from the HUB's own manifest, not
+            # these digests come from the HUB's own manifest, not
             # from the payload — a miss is a platform fault, not the caller's.
             fetch_blob=self._fetch_platform_blob,
             cancelled=lambda: self.cancelled,
@@ -2049,9 +2049,9 @@ class DatasetContext(_PublisherMixin, RequestContext[GenerationDefaults]):
 
 
 class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
-    """Typed per-step training metric (pgw#450), payload of a
+    """Typed per-step training metric, payload of a
     ``request.training_metric`` event. tensorhub downsample-persists these
-    as ``job.training.metric`` request_events rows (th#681)."""
+    as ``job.training.metric`` request_events rows."""
 
     step: int
     total: int
@@ -2100,7 +2100,7 @@ class TrainingContext(_PublisherMixin, RequestContext[GenerationDefaults]):
 
         Keep ``ctx.progress`` for human-readable stage text; this is the
         machine channel a UI charts (loss curve, it/s, ETA). Events carrying
-        ``val_loss`` bypass the throttle like first/last (pgw#459) — val
+        ``val_loss`` bypass the throttle like first/last — val
         points are sparse and every one must reach the hub.
         """
         now = time.monotonic()

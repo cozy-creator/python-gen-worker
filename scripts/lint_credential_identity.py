@@ -20,7 +20,7 @@ gate apart:
 So this is not a rule about one file. Every read of a worker credential inside
 ``src/gen_worker`` must appear in ``scripts/credential_identity_allowlist.txt``
 under one of the classifications below, or this script fails — the same
-enforcement shape as ``lint_settings_writers.py`` (pgw#1049) and
+enforcement shape as ``lint_settings_writers.py`` and
 ``lint_config_reads.py`` (§1.18): an unclassified site is red, and a stale row
 is red.
 
@@ -84,7 +84,7 @@ CREDENTIAL_ATTRS: Tuple[str, ...] = (
     "_worker_jwt",
 )
 
-#: The process-wide credential source (pgw#848).
+#: The process-wide credential source.
 CREDENTIAL_CALLS: Tuple[str, ...] = ("worker_credential.current",)
 
 #: The env the credential arrives in at pod launch. Reading it is how the child
@@ -155,7 +155,7 @@ class _Reads(ast.NodeVisitor):
 def scan(root: Path = SRC_ROOT) -> Dict[Tuple[str, str], int]:
     """Credential-read sites outside the resolver, keyed ``(path, site)``.
 
-    Never keyed by line number: a line is a fact other people change (pgw#931).
+    Never keyed by line number: a line is a fact other people change.
     """
     sites: Dict[Tuple[str, str], int] = {}
     for path in sorted(root.rglob("*.py")):

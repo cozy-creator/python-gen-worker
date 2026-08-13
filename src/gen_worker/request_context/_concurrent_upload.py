@@ -1,6 +1,6 @@
 """Capability byte-budget back-pressure for worker-side uploads (issue #269).
 
-pgw#1004 E: this module used to advertise ``parallel_map_uploads`` as "the
+this module used to advertise ``parallel_map_uploads`` as "the
 single source of truth for the worker-side file-level upload fan-out". No
 such function has ever existed — the claim matched only its own docstrings.
 There is NO file-level upload parallelism: files are uploaded serially and

@@ -1,9 +1,9 @@
-"""Boot host canary (gw#550): measure the host ONCE, report at registration.
+"""Boot host canary: measure the host ONCE, report at registration.
 
 ie#484 proved the GPU-pod host lottery lives entirely in the CPU-bound
 stages: identical per-step denoise times across every host sampled, while
 VAE-decode tails ranged 26-147 s and mp4-encode 27-301 s on the SAME job.
-The hub's degraded-host watch (th#740) only trips AFTER slow completions.
+The hub's degraded-host watch only trips AFTER slow completions.
 This canary measures the three host properties those tails depend on —
 host memcpy bandwidth, pinned PCIe H2D/D2H bandwidth, raw CPU throughput —
 in a bounded ~1.5 s at boot, and ships them in ``Hello.resources`` so a bad
@@ -56,7 +56,7 @@ _MEMCPY_REPS = 3
 _PCIE_REPS = 3
 _CPU_SLICE_S = 0.25
 _HASH_BLOCK = 1 << 20
-# 2-GPU leg (pgw#748): same 256 MiB buffer, 3 timed peer copies.
+# 2-GPU leg: same 256 MiB buffer, 3 timed peer copies.
 _PEER_REPS = 3
 
 # Measured interconnect classes, worst to best.
@@ -65,7 +65,7 @@ INTERCONNECT_HOST_STAGED = "host-staged"
 INTERCONNECT_PCIE_P2P = "pcie-p2p"
 INTERCONNECT_NVLINK = "nvlink"
 
-# SP_MIN_PEER_GBPS (pgw#818) is the measured-bandwidth floor a pod must clear
+# SP_MIN_PEER_GBPS is the measured-bandwidth floor a pod must clear
 # to carry a platform-sharded group, IN ADDITION to classifying ``nvlink`` —
 # the hub's ``topology.SPMinPeerGbps`` (tensorhub topology/interconnect.go),
 # verbatim. Class alone is a string a degraded NV4 host also prints. The
@@ -223,7 +223,7 @@ def _measure_pcie() -> tuple[float, float, bool]:
 
 
 # ---------------------------------------------------------------------------
-# The 2-GPU leg (pgw#748): what fabric does THIS pod actually have?
+# The 2-GPU leg: what fabric does THIS pod actually have?
 # ---------------------------------------------------------------------------
 
 
@@ -364,7 +364,7 @@ def measure_host_canary() -> HostCanaryReport:
     """Run every axis once; failures zero their axis instead of raising."""
     t0 = time.perf_counter()
     memcpy = single = multi = 0.0
-    # gw#640: os.cpu_count() reports the HOST's cores — 32 on a pod that owns
+    # os.cpu_count() reports the HOST's cores — 32 on a pod that owns
     # 4 — and shipping that next to a cgroup-derived ram_total_gb produced a
     # "32 vCPUs / 14.9 GB" report nobody could interpret. Report what this
     # container may actually use, and benchmark with that many threads.

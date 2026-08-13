@@ -10,7 +10,7 @@ repo's one-URL-to-disk downloaders) so the discipline exists ONCE:
 - the byte cap INSIDE the stream loop (pgw#1013 — ``expected_size`` when the
   manifest declares one, ``cap_bytes`` as the caller's bound of last resort;
   a breach raises :class:`~gen_worker.bounded_stream.StreamTooLarge`);
-- algorithm-tagged digest verification, dispatching on the tag (pgw#871);
+- algorithm-tagged digest verification, dispatching on the tag;
 - durable atomic finalize (gw#408: fsync data, rename, fsync directory);
 - progress-floor retry (gw#666: strikes count CONSECUTIVE attempts that fail
   to move the byte floor — a link that keeps landing bytes never times out).
@@ -49,7 +49,7 @@ _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 # blob is likely corrupt — 2 re-downloads, then give up. UrlExpiredError /
 # ENOSPC never retry.
 #
-# gw#666 (th#1166 finding C): the transient half used to give up after an
+# the transient half used to give up after an
 # hour of WALL time, however many bytes had landed — a clock cannot tell a
 # 200GB blob crawling in over a bad pod uplink from a wedge, and
 # resume-on-retry means the slow case was genuinely converging. The give-up
@@ -106,7 +106,7 @@ def fetch_once(
     ``writer_id`` must be unique per concurrent writer (distinct calls, and
     critically distinct PROCESSES when ``dst`` sits on a network volume
     shared by several pods) so two writers of the same missing blob never
-    stage into the same temp path (pgw#945/th#850). Stable across one
+    stage into the same temp path. Stable across one
     caller's retries, so HTTP-Range resume still works; falls back to a
     fresh one-off id, which loses cross-retry resume but stays
     collision-safe.
@@ -165,7 +165,7 @@ def fetch_once(
                  dst.name, _human_size(expected_size) if expected_size else "unknown",
                  expected_digest[:24])
 
-    # The in-loop bound (pgw#1013): the declared size when the manifest has
+    # The in-loop bound: the declared size when the manifest has
     # one, the caller's cap of last resort otherwise. Zero = the caller
     # explicitly declined a fallback bound and the declaration is the bound.
     limit = int(expected_size) or int(cap_bytes)
@@ -237,7 +237,7 @@ def fetch_once(
         # failure still tells the caller WHICH kind of failure it was.
         raise
 
-    # Durable atomic finalize (gw#408): rename is only atomic in the
+    # Durable atomic finalize: rename is only atomic in the
     # NAMESPACE — a pod hard-kill after the rename but before writeback
     # persisted a complete-looking blob with truncated/zero data pages,
     # which then poisoned every snapshot built from it. fsync data before

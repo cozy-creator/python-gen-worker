@@ -48,7 +48,7 @@ class RefIndex:
     def _save_locked(self) -> None:
         """Write the index through, atomically.
 
-        pgw#945: ``self._lock`` is a THREAD lock, so it orders the writers in
+        ``self._lock`` is a THREAD lock, so it orders the writers in
         one process and says nothing about the others. The index lives in the
         model cache dir — a path a mounted cache can share between processes
         (procsplit members, a second container on the same volume) — and the

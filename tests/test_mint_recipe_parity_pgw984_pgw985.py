@@ -240,10 +240,10 @@ def test_the_child_refuses_a_deterministic_environment_decline(
     for fact in ("sm",):
         assert fact in report.detail, f"{fact!r} missing from: {report.detail}"
     assert not Path(request.target).exists()
-    # th#1322: and the phase it died in survives into the report. This was
+    # and the phase it died in survives into the report. This was
     # ALWAYS "" — `_close_phases()` closes the open phase, and the field was
     # read after it in the same call.
-    # The phase it died in survives into the report (th#1322). WHICH phase is
+    # The phase it died in survives into the report. WHICH phase is
     # the child's business — a cardless box refuses inside the export's
     # packaging step — so the assertion is that a phase is NAMED, not which.
     assert report.phase, report.phase
@@ -343,7 +343,7 @@ def test_an_aot_mint_cannot_seal_for_a_handler_that_cannot_run(
 
     text = str(exc.value)
     assert "warm plan does not run" in text, text
-    # pgw#1010: the recipe left the identity line with the recipe axis — the
+    # the recipe left the identity line with the recipe axis — the
     # child mints one kind, so a name for it on every refusal is noise.
     assert "microrig" in text and FUNCTION in text, text
     assert "no resolved model ref" in text, text
@@ -357,7 +357,7 @@ def test_a_resource_shortfall_in_the_warm_plan_is_still_retryable(
 ) -> None:
     """The line the refusal must not cross. A named refusal is terminal, so
     classifying an OOM as one would strand a mint the next attempt could make
-    at a narrower width (pgw#848)."""
+    at a narrower width."""
     from harness import tiny_diffusion_endpoint as ep
 
     def _oom(self: Any, ctx: Any, data: Any) -> Any:

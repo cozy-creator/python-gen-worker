@@ -1,5 +1,5 @@
 """fp8-E4M3 weight storage as module STRUCTURE, not a forward-boundary
-mutation (pgw#727).
+mutation.
 
 The lane's semantics are "weights RESIDE in fp8, compute happens in the
 compute dtype". diffusers expresses that as a MUTATION at the forward

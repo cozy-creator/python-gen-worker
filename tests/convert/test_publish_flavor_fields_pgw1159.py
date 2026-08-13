@@ -82,7 +82,7 @@ def test_the_producer_label_still_classifies_placement(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
     """`ProducedFlavor.flavor` survives as a PRODUCER-LOCAL label: it stamps
-    placement (th#697). Deleting it silently would drop the stamp."""
+    placement. Deleting it silently would drop the stamp."""
     ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}")
     _publish(ctx, _tree(tmp_path))
 

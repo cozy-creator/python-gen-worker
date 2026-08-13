@@ -38,7 +38,7 @@ branch, a similarity score or a "close enough" fallback (§1.33's extensibility
 invariant, `f6f95736`). Neither function contains a literal handle string, and
 `scripts/lint_cell_key_layout_fence.py` fails if one appears.
 
-**4. Preference is NOT here.** §1.33 point 2 as amended (th#1803): the accepted
+**4. Preference is NOT here.** §1.33 point 2 as amended: the accepted
 set is a compatibility FILTER whose order carries no preference, and preference
 has exactly one authority — the author-configured ordered ladder of (GPU, lane)
 pairs. So the planner returns EVERY reachable accepted target and orders the
@@ -46,7 +46,7 @@ result deterministically for reproducibility; the caller that owns a ladder
 chooses. A planner that picked "the earliest accepted layout" would be a second
 ordering that can disagree with the first.
 
-The wheel ships this registry EMPTY, like the other five (pgw#740): converters
+The wheel ships this registry EMPTY, like the other five: converters
 are declared by the endpoint that owns the format, registered through
 `load_declaration_module`, and asserted bare by `scripts/check_registry_contract.py`.
 """

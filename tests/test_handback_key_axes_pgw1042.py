@@ -145,7 +145,7 @@ def test_adopt_refuses_typed_before_any_arm(
     from gen_worker import artifact_meta
     from gen_worker.models import provision
 
-    # pgw#1098: the adopt reads through `read_metadata` now — an envelope it
+    # the adopt reads through `read_metadata` now — an envelope it
     # CANNOT read is its own refusal (`cell_envelope_unreadable`) rather than
     # a `None` that flows on into a gate it silently disables. This test is
     # about the DIVERGENCE verdict, so it supplies a readable envelope.

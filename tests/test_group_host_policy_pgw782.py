@@ -343,7 +343,7 @@ def test_the_semaphore_actually_admits_two_per_group(
     workers = [threading.Thread(target=_hold, daemon=True) for _ in range(8)]
     for w in workers:
         w.start()
-    # pgw#795: holders arriving is the progress signal; the give-up is "no
+    # holders arriving is the progress signal; the give-up is "no
     # holder has arrived in a staleness window", not a 5s budget for eight
     # thread starts on a shared runner.
     try:

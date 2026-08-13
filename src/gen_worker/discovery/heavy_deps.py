@@ -175,7 +175,7 @@ def stub_missing_heavy_deps(extra: Iterable[str] = ()) -> Iterator[frozenset[str
     still fails loudly.
     """
     roots = dict.fromkeys((*DEFAULT_HEAVY_ROOTS, *extra))
-    # pgw#1197: the extension point may not re-arm the landmine. A project
+    # the extension point may not re-arm the landmine. A project
     # listing a probed root in `[tool.gen_worker] discovery_heavy_deps` gets it
     # dropped, loudly — silently honouring it would reintroduce the defect
     # with no trace in the build log.

@@ -98,7 +98,7 @@ class AotFamily:
         # the rig says so — the unexercised direction models an armed .pt2
         # the warm plan never actually invoked.
         if RIG.get("exercise"):
-            # pgw#1176: `execution_count` sums the RUNNERS' own calls, so
+            # `execution_count` sums the RUNNERS' own calls, so
             # "the artifact ran" means an artifact's counter moved — not a
             # state field production no longer reads. Bumping the old field
             # would model an exercise that never happened.
@@ -118,7 +118,7 @@ def _fake_arm(key: str, ref: str):
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
                 publisher: Any = None) -> "fleet_cells.ArmOutcome":
         unet = pipe.unet
-        # pgw#1176: production wraps a REGISTRY; `is_armed` reads it.
+        # production wraps a REGISTRY; `is_armed` reads it.
         _runner = aot_serve.ArtifactRunner(
             package=None,
             contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
@@ -127,7 +127,7 @@ def _fake_arm(key: str, ref: str):
         _dispatch.add("unet/main", _runner)
         state = {"successful_calls": 0, "failed": False,
                  "original": unet.forward, "runner": _dispatch}
-        # pgw#1176: the two markers are DIFFERENT SHAPES in production and
+        # the two markers are DIFFERENT SHAPES in production and
         # this rig now models that honestly. `wrap_module` writes a bare
         # `state` on the MODULE; `arm_entry` writes `targets` (+ `entries`) on
         # the PIPELINE. Sharing one dict between them was what kept a
@@ -141,7 +141,7 @@ def _fake_arm(key: str, ref: str):
             "entries": {"unet/main": {"key": ""}},
         })
         marker = getattr(pipe, aot_serve._MARKER_ATTR)
-        # pgw#1152: an `aot_serve.note_aot_key(key)` stood here — the ONE line no
+        # an `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
         # marker set above is what `arm_entry` publishes, so
@@ -254,7 +254,7 @@ def test_mandatory_execution_lane_without_a_dispatch_does_not_kill_the_boot(
     _key, ref = _rig(monkeypatch, seed="c", exercise=False,
                      weight_lane="w8a8-lora64")
     ex = _executor(tmp_path, monkeypatch)
-    _boot(ex)  # pgw#672: never a load failure
+    _boot(ex)  # never a load failure
     pipe = RIG["pipe"]
     assert aot_serve.is_armed(pipe)
     assert not compile_cache.cell_proven_in_process(ref)

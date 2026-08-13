@@ -423,7 +423,7 @@ def test_preload_component_staging_skips_quantized_execution_lanes(
     """Quantized bindings load through special lanes a vanilla component
     load cannot reproduce: staging stops at the disk tier.
 
-    pgw#1148: the signal is the declared CAST (`storage_dtype`), not a
+    the signal is the declared CAST (`storage_dtype`), not a
     `#fp8` in the ref — §1.32(d) deleted that address, and the preload
     driver no longer has a flavor field to read."""
     ex = _executor(

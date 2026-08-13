@@ -90,7 +90,7 @@ class LocalMintContext:
 class DeferredMint:
     """A mint this machine owes, held until the endpoint's handler has RUN.
 
-    pgw#1199: the mint child no longer proves the handler itself, because on a
+    the mint child no longer proves the handler itself, because on a
     weight-free mint proving it meant materialising a whole checkpoint in a
     process that holds none. The proof belongs to the resident parent — but on
     cozy-local the parent reaches ``enable_compiled`` from inside the SLOT
@@ -101,7 +101,7 @@ class DeferredMint:
     returned, when one real forward can be run on the resident weights.
 
     This is the same ORDER the fleet already boots in — eager-first, setup
-    complete, handler warmed, then the background mint (pgw#671).
+    complete, handler warmed, then the background mint.
     """
 
     pipe: Any
@@ -154,7 +154,7 @@ def enable_compiled(
             mint.incomplete if mint is not None else "no mint context")
         return False
     if defer is not None:
-        # pgw#1199: the handler cannot run yet — see `DeferredMint`.
+        # the handler cannot run yet — see `DeferredMint`.
         defer.append(DeferredMint(pipe=pipe, pending=pending, mint=mint))
         return False
     return _mint_here(pipe, pending, mint)
@@ -294,7 +294,7 @@ def _mint_here(
     boot, and it blocks), there is nowhere to publish, so the obligation ends
     at ``keep_self_mint_local`` instead of at the publish gate, and there is a
     PERSON on the machine — so §4.30's posture is declared here, and what the
-    compile is doing to their computer is said out loud (pgw#1137).
+    compile is doing to their computer is said out loud.
     """
     result: Optional[mint_delegate.DelegatedResult] = None
     family = str(pending.family)
@@ -317,7 +317,7 @@ def _mint_here(
                     slots=dict(mint.slots),
                     # Cell IDENTITY's lane, the same probe the mint's own
                     # `stamp_lane` memoizes — so what this machine looks up on
-                    # its next boot is what this mint stamps (pgw#686).
+                    # its next boot is what this mint stamps.
                     weight_lane=cc.cell_base_execution_lane(pipe),
                     device=mint.device,
                     posture=posture,
@@ -344,7 +344,7 @@ def _mint_here(
         fleet_cells.keep_self_mint_local(pending)
         return True
     if not fleet_cells.terminus_of(pending):
-        # pgw#815: every obligation ends somewhere nameable. `build_cell`
+        # every obligation ends somewhere nameable. `build_cell`
         # abandons its own failures; a DECLINED one (no room on the card) it
         # deliberately leaves open for a caller that might have another.
         fleet_cells.abandon_self_mint(pending)

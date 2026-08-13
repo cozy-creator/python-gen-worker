@@ -88,7 +88,7 @@ from test_receipts_pgw709 import (  # noqa: F401 — fixtures come with it
 
 #: The parent's credential, shaped exactly as `cellgrant.Stamp` writes it:
 #: the scheduler subject plus the two VIEWER claims the hub stamps from its OWN
-#: record of the release (th#1657/th#1680). Nothing here is invented — the
+#: record of the release. Nothing here is invented — the
 #: fixture manufactures no field production does not set.
 POD_ENDPOINT = SELF_ENDPOINT
 POD_ORG = SELF_ORG
@@ -495,7 +495,7 @@ def test_a_HUB_ordered_arm_stays_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The other half, and the one this fix must not erode: when the HUB named
-    an exact artifact (pgw#904), a substitute would not be it. That refusal is
+    an exact artifact, a substitute would not be it. That refusal is
     still typed and terminal — the degrade is scoped to arms nobody ordered."""
     _Events(monkeypatch)
     _refusing_arm(monkeypatch)
@@ -511,7 +511,7 @@ def test_a_HUB_ordered_arm_stays_terminal(
 def test_a_mandatory_lane_still_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A w8a8/w4a4 lane serves ONLY from a cell (pgw#1010), so "boot as
+    """A w8a8/w4a4 lane serves ONLY from a cell, so "boot as
     yesterday" is not available: degrading there would serve numerics the
     release does not describe. Fail closed, named."""
     _Events(monkeypatch)
@@ -587,7 +587,7 @@ def _lint() -> Any:
 def test_the_fence_catches_a_new_unclassified_credential_read(
     tmp_path: Path,
 ) -> None:
-    """A check that cannot go red proves nothing (pgw#1113). Write the pgw#1122
+    """A check that cannot go red proves nothing. Write the pgw#1122
     bug into a fresh module and prove the fence names it."""
     lint = _lint()
     (tmp_path / "new_gate.py").write_text(

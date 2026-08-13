@@ -38,7 +38,7 @@ _PROTO = _ROOT / "proto" / "worker_scheduler.proto"
 _SOURCES = (
     _ROOT / "src" / "gen_worker" / "executor.py",
     _ROOT / "src" / "gen_worker" / "capability.py",
-    # pgw#1117: the third file declaring a reason token on an exception class.
+    # the third file declaring a reason token on an exception class.
     # `_mark_setup_failed` writes `exc.reason` for it exactly the way it does
     # for the capability gates, so leaving this file out would have made the
     # NEW token the one case the contract test cannot see — which is precisely

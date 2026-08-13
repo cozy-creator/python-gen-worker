@@ -63,14 +63,14 @@ def _target_is_cpu(args: tuple, kwargs: dict) -> bool:
 
 
 class _Unmeasurable(RuntimeError):
-    """This module's incoming byte count could not be computed (pgw#940)."""
+    """This module's incoming byte count could not be computed."""
 
 
 def _incoming_bytes(module: Any) -> int:
     """Bytes this module would newly land in host RAM: parameters + buffers
     not already CPU-resident.
 
-    Raises :class:`_Unmeasurable` rather than returning 0 (pgw#940). The 0
+    Raises :class:`_Unmeasurable` rather than returning 0. The 0
     flowed straight into ``incoming < _MIN_GUARDED_GIB`` and returned, so the
     guard silently no-opped — on precisely the shapes most likely to be huge,
     since ``module.parameters()`` raises on meta-device modules, on
@@ -96,7 +96,7 @@ def _incoming_bytes(module: Any) -> int:
 def _refuse_if_over_budget(incoming: int, **probe_kwargs: Any) -> None:
     """The budget decision, separated from the torch module it came from.
 
-    pgw#783: ``probe_host_ram`` now reports THIS process's share of a cgroup it
+    ``probe_host_ram`` now reports THIS process's share of a cgroup it
     may split with G-1 sibling compute children, so the same 20 GiB move that
     fits a solo worker on a 64 GiB pod is correctly refused for one of four.
     The guard needs no group logic of its own — the share is in the probe.

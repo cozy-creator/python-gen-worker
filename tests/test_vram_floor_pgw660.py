@@ -1,7 +1,7 @@
 """pgw#660 — SDK v2 dropped every endpoint's hard VRAM floor; this restores it.
 
 v2 deleted `Resources.vram_gb` and `Resources.compute_capability` on purpose
-(pgw#647), on the reasoning that th#683's prove-and-profile would MEASURE the
+, on the reasoning that th#683's prove-and-profile would MEASURE the
 real requirement. That reasoning is right about how much VRAM a function
 WANTS and wrong about the card it cannot run on AT ALL — and only the second
 question has an answer before a first build exists.

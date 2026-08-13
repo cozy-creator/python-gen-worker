@@ -93,13 +93,13 @@ TOOL_ROOTS = (REPO / "scripts", REPO / "examples", REPO / "agents",
 # as reach would exempt half the tree.
 SELF = Path(__file__).resolve()
 
-# The RATCHET. Every entry is a live hit measured on 2026-08-01 (pgw#849) and
+# The RATCHET. Every entry is a live hit measured on 2026-08-01 and
 # recorded rather than silently tolerated: the guard fails on anything NEW, and
 # equally on an entry that has since been wired up and not removed. A baseline
 # nobody has to shrink is a baseline nobody reads.
 BASELINE = REPO / "scripts" / "unreached_surface_baseline.txt"
 
-# The guarded scope: THE WHOLE PACKAGE (pgw#1182). It used to be the mint / arm
+# The guarded scope: THE WHOLE PACKAGE. It used to be the mint / arm
 # / serve modules only, on a pgw#849 measurement that whole-package scope was
 # "noisier for no extra yield". That measurement is superseded: the noise was
 # two fixable things — a resolver that mis-resolved every relative import inside
@@ -200,7 +200,7 @@ class Definition:
     doc: str = ""
     #: "callable" or "type". A symbol sweep that enumerates only functions
     #: misses a dead TYPE entirely — one survived a whole deletion pass on a
-    #: sibling lane and only the compiler caught it (pgw#1189).
+    #: sibling lane and only the compiler caught it.
     kind: str = "callable"
 
     @property
@@ -568,7 +568,7 @@ def reached(d: Definition, reach: Reach) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# THE CROSS-REPO CHECK (pgw#1182)
+# THE CROSS-REPO CHECK
 #
 # The finding this whole guard produces is "no non-test call site IN THIS REPO",
 # and that is NOT the claim "no consumer". pgw#1179 deleted `trt_engine.build`
@@ -760,7 +760,7 @@ def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
 
 
 # ---------------------------------------------------------------------------
-# The INERT-DECLARATION check (pgw#849) — REPORT MODE, never a gate.
+# The INERT-DECLARATION check — REPORT MODE, never a gate.
 #
 # "A declared fact with no consequence" is a DIFFERENT SHAPE and the
 # reachability scan above is blind to it: a per-family flag that is validated,

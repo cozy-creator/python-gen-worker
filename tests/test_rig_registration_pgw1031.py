@@ -22,7 +22,7 @@ nothing has declared any more, and the failure surfaces later and elsewhere.
 Whether the two land in the same worker is a function of shard split, which is
 why adding five unrelated test rows to a PR could summon it.
 
-It is the same defect class the arm-state fence exists for (pgw#1152): a
+It is the same defect class the arm-state fence exists for: a
 process-global registry fed by a convention the caller has to remember. The fix
 is the same shape — ask the registry, do not trust the convention.
 """

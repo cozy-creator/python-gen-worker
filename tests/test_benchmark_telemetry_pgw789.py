@@ -90,7 +90,7 @@ def test_job_metrics_carry_the_serving_dimensions_on_the_wire() -> None:
     assert m.serving_mode == serving_mode.MODE_EAGER
     assert m.served_cell_ref == ""
     assert m.served_eager_fallback is False
-    # pgw#824: and neither may the REASON be an empty string. "" here was the
+    # and neither may the REASON be an empty string. "" here was the
     # same ambiguity one level down — it could not tell "this release declares
     # no compile target, eager is the contract" from "the mint is still
     # running" from "the mint was declined for cause". `served_eager_fallback`
@@ -172,7 +172,7 @@ def test_in_boot_closes_at_the_servable_milestone() -> None:
     ladder. Without it a ref delivered hours later appends a `weights_fetch`
     span to a finished boot, and `residual_ms` stops reconciling."""
     assert boot_phases.in_boot() is True
-    # pgw#797: the close now has a PRECONDITION — `hello`. A worker the hub
+    # the close now has a PRECONDITION — `hello`. A worker the hub
     # cannot reach is not servable, and closing the boot before the stream
     # existed is what suppressed every span on 0.78.0.
     boot_phases.mark_once(boot_phases.PHASE_HELLO, since_process_start=True)

@@ -6,7 +6,7 @@ cell-key derivation allowlist, the layout fence's ``AXIS_PRODUCERS``. When one
 of those symbols is renamed or deleted, the fence keeps running, keeps exiting
 0, and **guards nothing**. It does not go red. Nothing anywhere says so.
 
-MEASURED, in one migration (pgw#1176), three instances of the class and one of
+MEASURED, in one migration, three instances of the class and one of
 them was exactly this:
 
 * ``lint_cell_key_layout_fence.py`` listed ``from_exported_artifact_metadata``

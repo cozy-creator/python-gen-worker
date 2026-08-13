@@ -181,7 +181,7 @@ def test_a_degraded_ref_is_charged_its_tree_and_refuses(
     tmp_path, monkeypatch,
 ) -> None:
     """The incident's admission: 134.1 GiB of tree on a 116.4 GiB host with
-    a card that holds it. Resident, that is a boot (pgw#1026). On the rung
+    a card that holds it. Resident, that is a boot. On the rung
     the OOM degrade just learned, it is a structural refusal — and the
     refusal is what did not happen."""
     tree = _sparse_h3_tree(tmp_path / "h3")

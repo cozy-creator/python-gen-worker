@@ -54,7 +54,7 @@ ProgressFn = Callable[[int, Optional[int]], None]
 
 
 class CloneDownloadError(RuntimeError):
-    """Source download failed after bounded retries (gw#456) — the clone job
+    """Source download failed after bounded retries — the clone job
     fails cleanly instead of hanging."""
 
 
@@ -70,7 +70,7 @@ def _download_attempts() -> int:
             pass
     return 3
 
-# pgw#761: how many candidate component subfolders' config.json we will fetch
+# how many candidate component subfolders' config.json we will fetch
 # before classification. Real component repos publish one; the cap keeps a
 # pathological listing from turning classification into N round-trips.
 _MAX_COMPONENT_CONFIG_FETCHES = 8
@@ -79,14 +79,14 @@ _SAFETENSORS_DTYPE_NAMES = {
     "F32": "fp32", "F16": "fp16", "BF16": "bf16",
     "F8_E4M3": "fp8", "F8_E5M2": "fp8:e5m2",
 }
-# pgw#1121: bits per stored element, for weighing a mixed header by BYTES.
+# bits per stored element, for weighing a mixed header by BYTES.
 _SAFETENSORS_DTYPE_BITS = {
     "F64": 64, "I64": 64, "U64": 64,
     "F32": 32, "I32": 32, "U32": 32,
     "F16": 16, "BF16": 16, "I16": 16, "U16": 16,
     "F8_E4M3": 8, "F8_E5M2": 8, "I8": 8, "U8": 8, "BOOL": 8,
 }
-# pgw#1121: how many of the selected weight files' headers we range-read to
+# how many of the selected weight files' headers we range-read to
 # resolve an untagged source's real dtype. Shards of one set share a dtype,
 # so the largest few are representative; the cap keeps a 100-shard listing
 # from turning plan time into 100 round-trips.
@@ -100,7 +100,7 @@ def _remote_safetensors_width(
     hf_token: str | None,
 ) -> tuple[str, int]:
     """``(dominant dtype, bits per stored parameter)`` of a REMOTE safetensors
-    set, read from the files' HEADERS (pgw#1121). ``("", 0)`` when no header
+    set, read from the files' HEADERS. ``("", 0)`` when no header
     could be read.
 
     ``parse_safetensors_file_metadata`` range-reads the header and nothing
@@ -244,7 +244,7 @@ def _hf_classification_inputs(
             side["config_json"] = None
 
     if "config.json" not in paths and "model_index.json" not in paths:
-        # pgw#761: no root marker at all. A standalone component published
+        # no root marker at all. A standalone component published
         # under the pipeline key it overrides (PrunaAI/PrunaVAED's
         # vae/config.json) is only recognizable from the SUBFOLDER's config —
         # fetch every candidate's (tiny) config so the classifier can re-root
@@ -305,7 +305,7 @@ class HFSourcePlan:
     side: dict[str, Any]
     classification: RepoClassification
     content_ids: dict[str, str]        # path -> "sha256:<hex>" | "git:<oid>"
-    # pgw#1121: MEASURED bits per stored parameter, off the selected weight
+    # MEASURED bits per stored parameter, off the selected weight
     # set's safetensors headers. 0 when no header could be read. Lives on the
     # plan, not in ``classification.attrs``, because it is a sizing fact for
     # the disk preflight — not a checkpoint attribute anyone publishes.
@@ -424,7 +424,7 @@ def resolve_plan_source_width(
 ) -> int:
     """Read the selected weight set's real storage width off its safetensors
     headers; stamp the dtype when the filename heuristic came up empty, and
-    return bits-per-parameter for the disk estimate (pgw#1121). 0 = unreadable.
+    return bits-per-parameter for the disk estimate. 0 = unreadable.
 
     The variant-tag heuristic can only read a dtype off a FILENAME
     (``model.fp16.safetensors``), and upstream diffusers repos are untagged —
@@ -489,7 +489,7 @@ def _snapshot_download_with_retries(
     progress: ProgressFn | None,
     total_hint: Optional[int],
 ) -> None:
-    """Bounded, resumable ``snapshot_download`` (gw#456): every socket has a
+    """Bounded, resumable ``snapshot_download``: every socket has a
     timeout floor (:mod:`gen_worker.net`), the stall watchdog reports byte
     progress and aborts no-progress downloads, and transient network failures
     retry (hf_hub resumes ``.incomplete`` files via Range). Exhausted retries
@@ -517,7 +517,7 @@ def _snapshot_download_with_retries(
             return
         except (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,
                 EntryNotFoundError) as exc:
-            _raise_input_refusal(exc)  # permanent + user-caused (th#1084)
+            _raise_input_refusal(exc)  # permanent + user-caused
         except (ValueError, TypeError):
             raise  # permanent — retrying cannot help
         except Exception as exc:
@@ -612,7 +612,7 @@ def ingest_huggingface(
         "source_file_count": str(len(paths)),
     }
     if subfolder:
-        # pgw#761 (Paul's ruling, 2026-07-29): the PUBLISHER'S layout is what
+        # the PUBLISHER'S layout is what
         # we mirror — the component stays under ``<subfolder>/``, which is
         # its own role declaration and exactly what ``load_component``'s
         # ``src = root / component`` resolves. tensorhub's diffusers layout
@@ -758,7 +758,7 @@ def ingest_civitai(
     if model_kind in {"lora", "locon", "lycoris", "dora"}:
         attrs["runtime_library"] = "diffusers-lora"
 
-    # th#611: gguf-only civitai versions publish AS-IS (single unshardable
+    # gguf-only civitai versions publish AS-IS (single unshardable
     # artifact; the hub classifies family + flavor from the header). Without
     # a classification the clone falls into the safetensors repackage path
     # and dies with "no safetensors entry for repackage".

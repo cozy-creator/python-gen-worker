@@ -12,7 +12,7 @@ The locus is one captured object. ``mint_delegate._on_evidence`` acquired the
 ``mint_child_evidence`` counter ONCE and closed over it, while
 ``Activity.counter()`` binds a counter to the phase that registered it and
 ``Activity.phase()`` FINISHES — i.e. unregisters from the process registry —
-every counter the new phase does not own (pgw#962). The mint crosses
+every counter the new phase does not own. The mint crosses
 ``load`` -> ``warmup_forward`` -> ``trace_graph``, so from the first phase
 change onward every ``set_done`` fed an object no reader could reach:
 ``activity.on_beat`` found no counter for the activity and returned WITHOUT

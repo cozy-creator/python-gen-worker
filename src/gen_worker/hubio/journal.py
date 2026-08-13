@@ -1,4 +1,4 @@
-"""The publish journal — "never redo the cast to redo the upload" (pgw#1003).
+"""The publish journal — "never redo the cast to redo the upload".
 
 A 2h16m fp8 cast on an H100 costs about $10 of GPU plus the wall time. If the
 upload of its ~37 GB output fails, the honest cost is "re-upload". Before this

@@ -1,4 +1,4 @@
-"""Split AOTI's generated ``run_impl`` across K translation units (pgw#811).
+"""Split AOTI's generated ``run_impl`` across K translation units.
 
 pgw#793 shipped the constants-constructor half of this problem. This is the
 other, larger half. Two independent compiler profiles of the real banked

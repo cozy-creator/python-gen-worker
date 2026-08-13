@@ -1,6 +1,6 @@
 """The source-layout detection schema — declarative matchers the engine runs.
 
-pgw#740 (B14): ``convert/layout.py`` carried four overlapping family ladders
+``convert/layout.py`` carried four overlapping family ladders
 (12 variants across 9 families) plus a root-file sentinel that was *duplicated
 into the te#70 trainer repo and hand-synced*. Four hand-written ladders that
 must agree, and did not: ``z_image``/``zimage``/``z-image``, ``flux``/``flux1``/

@@ -1,6 +1,6 @@
 """The repackage declaration schema — typed maps the SDK engine executes.
 
-pgw#740 (C3/B14/B15): ``convert/`` used to be the one package with no
+``convert/`` used to be the one package with no
 registration hook, so every family's layout knowledge lived as a module-level
 private constant inside the SDK — ~430 lines of hand-ported per-family tensor
 surgery, four overlapping detection ladders, and two copies of the SDXL

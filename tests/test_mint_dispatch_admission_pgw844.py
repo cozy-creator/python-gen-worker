@@ -148,7 +148,7 @@ def test_two_entries_of_one_dispatch_group_admitting_one_call_are_MERGED():
 
 def test_a_static_row_shadowed_by_a_dynamic_sibling_is_refused_BY_AXIS():
     """The case an equality digest cannot see, and the reason this gate had to
-    change (pgw#844): the two contracts are DIFFERENT and both admit the same
+    change: the two contracts are DIFFERENT and both admit the same
     call.  pgw#917 additionally NAMES the axis they differ on, so the refusal
     tells a declaration author what to fix."""
     minted = [

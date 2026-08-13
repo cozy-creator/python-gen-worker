@@ -1,7 +1,7 @@
 """pgw#1132 — the BOOT-KEY derivation owns its own branch arm, or no
 ``lora_bucket`` family can ever ask for its cell.
 
-pgw#822 at the mint: the child armed the branch CONTAINERS
+the child armed the branch CONTAINERS
 (``compile_cache.apply_lora_execution_lane``) and handed ``torch.export`` the
 BARE denoiser, whose forward never took ``lora_a``/``lora_b``. The mint's own
 loop fixed it by owning the arm (``aot_mint._arm_branches``, called before the

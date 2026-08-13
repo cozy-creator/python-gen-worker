@@ -1,4 +1,4 @@
-"""Host-driver preflight for measurement rigs (pgw#1120).
+"""Host-driver preflight for measurement rigs.
 
 ``rigcheck`` answers "is the SOFTWARE on the fleet line". This module answers the
 question two lanes lost an evening to on 2026-08-11: **can this HOST run it at

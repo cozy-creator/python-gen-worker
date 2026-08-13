@@ -117,7 +117,7 @@ def is_virtual(tensor: Any, _depth: int = 0) -> bool:
     Meta tensors by device; fake tensors by TYPE, because a fake tensor
     deliberately reports a real device while backing it with no storage.
 
-    AND WRAPPER SUBCLASSES BY THEIR CONTENTS (pgw#1198), which is the whole
+    AND WRAPPER SUBCLASSES BY THEIR CONTENTS, which is the whole
     reason this is a function and not an ``isinstance``. A quantizer run inside
     ``setup()`` — torchao's ``quantize_``, which ``wan-2.2`` and ``minimax-h3``
     both call on their denoisers — replaces a parameter with a traceable
@@ -247,7 +247,7 @@ def guard(phase: str, *, actionable_only: bool = False) -> Iterator[Census]:
 
     ``actionable_only`` refuses only an allocation this gate can NAME a
     file:line for — i.e. one made by the endpoint's own code. It exists for
-    the TRACE window (pgw#1080), where ``torch.export`` legitimately allocates
+    the TRACE window, where ``torch.export`` legitimately allocates
     small real tensors of its own inside the fake mode: measured on the micro
     rig, a 380-byte ``empty`` with no endpoint frame anywhere on the stack.
     Refusing that would fail every mint for something no author can fix,

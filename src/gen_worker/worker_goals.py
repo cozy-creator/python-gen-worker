@@ -24,7 +24,7 @@ UNCONDITIONAL, not a function of a posture. The reserve terms in
 
 Carrier
 -------
-The Directive (th#1488) will deliver a full-replace goal set on the control
+The Directive will deliver a full-replace goal set on the control
 channel, at which point :func:`install` is called with each new Directive. The
 ``WORKER_MODE`` env and ``WorkerResources.worker_mode`` that used to seed it
 are both gone (pgw#1092, th#1751 W4): a pod that has to be told it may serve is

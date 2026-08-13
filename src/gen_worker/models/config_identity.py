@@ -1,4 +1,4 @@
-"""Canonical JSON-config digests for content-keyed sharing (gw#479).
+"""Canonical JSON-config digests for content-keyed sharing.
 
 Split-vendor repo pairs ship byte-identical component WEIGHTS whose tiny JSON
 sidecars differ only in save-era serialization: provenance stamps

@@ -6,7 +6,7 @@ tensorhub/qwen-image:prod cannot promote to VRAM (waited 45s for headroom);
 retrying``, reported ACTIVITY_STATE_FAILED, and the hub condemned the pod —
 4 condemnations against 4 compiles that then COMPLETED, one finishing 53s
 after its pod was already condemned. The hub's ``lastWorkerProgressLocked``
-(th#1160) *excludes* failed activities from progress evidence, so declaring a
+ *excludes* failed activities from progress evidence, so declaring a
 will-retry attempt FAILED erases exactly the evidence that keeps a working pod
 alive.
 

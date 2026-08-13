@@ -22,7 +22,7 @@ the person who ran it.
 
 WHAT IT ASSEMBLES — every piece already ships; none of them were wired together:
 
-1. ``rigcheck.assert_fleet_line`` first (pgw#1114/#1120). A rig off the fleet's
+1. ``rigcheck.assert_fleet_line`` first. A rig off the fleet's
    torch/CUDA line has produced no evidence. Exits 90/91 in rigcheck's own
    vocabulary, so a wrapper script reads one exit table and not two.
 2. The ARM — the endpoint's own ``setup()`` mints (or adopts this machine's
@@ -164,7 +164,7 @@ def resolve_bar(declaration: Any, record: Dict[str, Any]) -> Bar:
 
 
 def _metric(metric: str) -> str:
-    """Refuse a round-trip metric BY NAME (th#1795)."""
+    """Refuse a round-trip metric BY NAME."""
     if not metric.startswith(METRIC_PREFIX) or not metric[len(METRIC_PREFIX):]:
         raise HarnessError(
             f"[speed] metric = {metric!r} is not readable here. This harness "
@@ -506,7 +506,7 @@ def read_parity(subject: _Subject, declaration: Any,
     """The mint-parent gate's verdict — read, or (on an ADOPT) taken.
 
     A cell this process MINTED was already gated strictly on the way to
-    publication (pgw#1141), so its report (``minted``) is simply read back — an
+    publication, so its report (``minted``) is simply read back — an
     armed cell that had failed that gate would not be armed. A cell that came
     out of this machine's store was gated at ITS mint and adoption runs no
     quality gate (§4.32 item 3), so there is no verdict to read and this run
@@ -650,7 +650,7 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
                 arm = ARM_MINTED if minted is not None else ARM_ADOPTED
                 arm_detail = f"cell {cell_key or '?'}"
                 parity = read_parity(subject, declaration, minted)
-            # pgw#1142 through its IN-PROCESS api: the author's pod may have
+            # the author's pod may have
             # no hub, and the order is what makes this the SAME process, the
             # same weights and the same pipeline answer eager.
             serve_posture.apply_command(

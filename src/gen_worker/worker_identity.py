@@ -58,7 +58,7 @@ from .request_context._helpers import _decode_unverified_jwt_claims
 
 logger = logging.getLogger(__name__)
 
-#: The hub-stamped viewer claims. ``cellgrant.Stamp`` (th#1657/th#1680) writes
+#: The hub-stamped viewer claims. ``cellgrant.Stamp`` writes
 #: them from the hub's OWN record of the release — never from anything the
 #: worker says — which is why they are the identity both ends of the cell
 #: exchange scope by.
@@ -82,7 +82,7 @@ class IdentityUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class ViewerIdentity:
-    """The endpoint this pod serves and the org that owns it (th#1657/th#1680).
+    """The endpoint this pod serves and the org that owns it.
 
     Both empty is legal and NARROWS the pod (platform-tier cells only); it is
     never a licence to widen. :attr:`named` distinguishes "the hub stamped

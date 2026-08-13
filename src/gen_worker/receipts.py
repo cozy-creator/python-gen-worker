@@ -3,7 +3,7 @@
 A ``cell_store`` row (cell_key -> artifact) is a Nix *realisation*: fetch
 verifies the BYTES against the hub's recorded digest, but nothing ever
 signed the RECORD binding the key to those bytes. Under "bucket is truth,
-DB is a rebuildable index" (th#659) that made bucket write access
+DB is a rebuildable index" that made bucket write access
 equivalent to arbitrary cell delivery after any index rebuild.
 
 The hub now signs a ``cell-receipt-v1`` compact JWS at publish-finalize
@@ -23,7 +23,7 @@ the ordinary miss policy (fleet workers self-mint their own replacement —
 their own bytes need no receipt; the copy they publish gets one from the
 th#910 gate). A receipt failure never kills serving.
 
-th#1303/pgw#807 — SHA-256 ONLY. The receipt's canonical binding is
+SHA-256 ONLY. The receipt's canonical binding is
 ``artifact.digest``, always tagged (``sha256:<hex>``), and verification
 dispatches on that tag. An untagged bare-hex digest is REFUSED rather than
 read as some assumed algorithm, and a receipt with no usable digest at all is
@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 # version check refuses it outright rather than defaulting them.
 RECEIPT_VERSION = "cell-receipt-v2"
 
-# Publisher tiers (th#1657). `platform` means the platform vouches for the
+# Publisher tiers. `platform` means the platform vouches for the
 # publishing org's endpoint code, so the cell is adoptable fleet-wide within its
 # family. Anything else — including an absent or unrecognised value — is `org`,
 # and an org-scoped cell is adoptable only by pods of the endpoint that minted
@@ -92,7 +92,7 @@ JWKS_PATH = "/api/v1/artifacts/.well-known/jwks.json"
 RECEIPT_PATH = "/v1/worker/cells/receipt"
 REVOCATIONS_PATH = "/v1/worker/cells/revocations"
 
-# pgw#973 (§4.24): per-CALL socket budget on the three small control-plane
+# per-CALL socket budget on the three small control-plane
 # round trips this module makes (JWKS, receipt, revocations). Not a gw#666
 # kill — none of them can be "making progress" in any observable sense, and
 # expiry ends no work — but without it a hub that accepts a connection and
@@ -115,9 +115,8 @@ class Receipt:
     """Decoded, signature-verified cell receipt claims — the ones something
     CHECKS.
 
-    pgw#1034 dropped six that nothing did: ``axes``, ``publisher``,
-    ``artifact_path``, ``manifest_digest``, ``fingerprint_digest`` and
-    ``issued_at_unix``. The signature still covers the whole payload, so a
+    Decoded: ``axes``, ``publisher``, ``artifact_path``, ``manifest_digest``,
+    ``fingerprint_digest`` and ``issued_at_unix``. The signature still covers the whole payload, so a
     claim this worker does not decode is neither trusted nor forgeable — it is
     simply not a promise anyone here relies on. Two notes worth keeping:
 
@@ -138,7 +137,7 @@ class Receipt:
     family: str
     cell_key: str
     owning_endpoint_id: str
-    # th#1657: the publisher-trust boundary, inside the signature.
+    # the publisher-trust boundary, inside the signature.
     publisher_tier: str
     publisher_org_id: str
     snapshot_digest: str
@@ -150,7 +149,7 @@ class Receipt:
 @dataclass
 class _Config:
     base_url: str
-    #: A BEARER, and nothing else (pgw#1122). Under the split the parent
+    #: A BEARER, and nothing else. Under the split the parent
     #: supplies the real credential and ignores this one; it is used only by
     #: the single-process path's direct fetches. WHO THIS POD IS comes from
     #: ``worker_identity``, never from decoding this.
@@ -215,7 +214,7 @@ def _normalize_publisher_tier(raw: object) -> str:
 
 
 def _self_viewer() -> "worker_identity.ViewerIdentity":
-    """WHO THIS POD IS, from the one resolver that can answer (pgw#1122).
+    """WHO THIS POD IS, from the one resolver that can answer.
 
     This used to decode ``cell_read_endpoint_id``/``cell_read_org_id`` out of
     ``cfg.worker_jwt()`` — *this process's* credential. The gate is armed at
@@ -250,7 +249,7 @@ def needs_viewer_identity(receipt: Receipt) -> bool:
 def refuse_untrusted_publisher(
     receipt: Receipt, self_endpoint_id: str, self_org_id: str = "",
 ) -> None:
-    """Raise unless this pod may adopt ``receipt``'s cell (th#1657).
+    """Raise unless this pod may adopt ``receipt``'s cell.
 
     THE RULE: a cell must have come from THIS endpoint, from THIS pod's OWN ORG,
     or from a publisher the platform vouches for.
@@ -292,7 +291,7 @@ def refuse_untrusted_publisher(
     # support.
     if owner and mine and owner == mine:
         return
-    # Same org (th#1680). BOTH sides must be non-empty: an empty-equals-empty
+    # Same org. BOTH sides must be non-empty: an empty-equals-empty
     # match is the vacuous-guard shape this module already refuses elsewhere —
     # two cells neither of which can be attributed must not match each other.
     if owner_org and my_org and owner_org == my_org:
@@ -492,7 +491,7 @@ def _fetch_receipt_jws(cfg: _Config, digest: str, cell_key: str) -> str:
     make "which digest armed this cell?" unanswerable, and th#715 says a 404
     from a proxy is not a 404 from the hub.
 
-    pgw#763 delta 1: parent-mediated when the split is on (the child holds no
+    parent-mediated when the split is on (the child holds no
     worker JWT); the identical GET otherwise.
     """
     params: Dict[str, Any] = {
@@ -653,7 +652,7 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     try:
         viewer = _self_viewer()
     except worker_identity.IdentityUnavailable as exc:
-        # pgw#1122: fail CLOSED, and say which failure this is. An unnamed pod
+        # fail CLOSED, and say which failure this is. An unnamed pod
         # may adopt platform-tier cells only — same outcome as before — but the
         # reason is now `identity_unavailable` (nobody could be asked) rather
         # than `publisher_untrusted` (we asked and the answer refuses). One is a

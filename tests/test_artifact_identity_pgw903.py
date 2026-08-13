@@ -329,7 +329,7 @@ def test_an_internally_corrupt_artifact_keeps_its_own_distinct_refusal(
 
 
 # ---------------------------------------------------------------------------
-# pgw#1152: every axis is verified SOMEWHERE, and the claim is checked
+# every axis is verified SOMEWHERE, and the claim is checked
 # ---------------------------------------------------------------------------
 
 

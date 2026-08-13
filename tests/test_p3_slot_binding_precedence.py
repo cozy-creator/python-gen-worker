@@ -60,7 +60,7 @@ def _decode(data: bytes) -> EchoOut:
 
 
 # ---------------------------------------------------------------------------
-# pgw#606/th#938: boot precedence.
+# boot precedence.
 # ---------------------------------------------------------------------------
 
 
@@ -113,7 +113,7 @@ def test_slot_boot_precedence_outranks_code_default(tmp_path) -> None:
     try:
         pipeline_payload = b"hub-stamped-pipeline-bytes"
         vae_payload = b"hub-stamped-vae-bytes"
-        # A FIXED slot's identity gate (pgw#583) is keyed on repo identity,
+        # A FIXED slot's identity gate is keyed on repo identity,
         # not tag/flavor — the hub-stamped delivery names the SAME declared
         # repo (only the code default's TAG differs), exactly like the live
         # th#938 incident (code default `wai-illustrious` unqualified, hub
@@ -168,7 +168,7 @@ def test_slot_boot_precedence_outranks_code_default(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#583: model-slot identity gate.
+# model-slot identity gate.
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +218,7 @@ def test_fixed_slot_same_repo_tag_pick_serves(tmp_path) -> None:
             out = _decode(res.inline)
             # The harness echo interpolates ref.tag UNCONDITIONALLY (it is not
             # the normal form), so the resolved tag shows even though the
-            # normal form would elide it (th#1276).
+            # normal form would elide it.
             assert out.response == f"tensorhub:{DECLARED_PIPELINE.path}:canary"
     finally:
         blobs.shutdown()

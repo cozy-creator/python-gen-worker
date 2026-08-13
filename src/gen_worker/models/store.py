@@ -58,7 +58,7 @@ __all__ = ["ModelStore"]
 _GiB = 1024 ** 3
 _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
-# th#763: how long a cold tensorhub ref waits for the hub's re-minted
+# how long a cold tensorhub ref waits for the hub's re-minted
 # snapshot after reporting missing_snapshot. The FAILED event triggers an
 # immediate hub-side re-mint (resolve + DOWNLOAD push), so arrival is
 # seconds; the bound only caps a hub that never answers.
@@ -105,7 +105,7 @@ def _snapshot_without_components(
 # with ModelEvent emission. Single-loop, per-ref asyncio locks — no
 
 def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
-    """pb.Snapshot -> the typed resolved-manifest struct (gw#497): the ONE
+    """pb.Snapshot -> the typed resolved-manifest struct: the ONE
     wire-boundary conversion; everything downstream (ensure_local,
     ensure_snapshot_async) is typed — no dict laundering."""
 
@@ -116,7 +116,7 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
                 path=f.path,
                 size_bytes=int(f.size_bytes),
                 url=f.url or None,
-                # th#1303 manifest v2: the algorithm-tagged digest and the
+                # the algorithm-tagged digest and the
                 # ordered chunk list. Dropping these here is what would make
                 # every chunked snapshot look like a whole file with no URL.
                 #
@@ -198,14 +198,14 @@ class ModelStore:
         self._hf_home = hf_home or None
         self._hf_token = hf_token or None
         self._cache_dir = cache_dir or tensorhub_cas_dir()
-        # th#850 managed-tier ruling (gw#599): endpoint-scoped datacenter-warm
+        # endpoint-scoped datacenter-warm
         # fill source (RunPod volume mount), consulted before R2 on a blob
         # miss — resolved once at boot like _cache_dir; never the CAS root.
         # Same `or` shape as _cache_dir above: an explicit path (tests) wins,
         # otherwise resolve from env (production/tensorhub; unset -> None,
         # the cozy-local/no-volume degenerate case).
         self._fill_source_dir = fill_source_dir or tensorhub_fill_source_dir()
-        # th#1063 visibility guard: a datacenter pod without a warm fill
+        # a datacenter pod without a warm fill
         # source silently pulls everything from R2 with write-through off —
         # that state must be visible in the boot log, never inferred.
         if self._fill_source_dir is None and os.environ.get("RUNPOD_POD_ID") and (
@@ -227,7 +227,7 @@ class ModelStore:
                 )
         elif self._fill_source_dir is not None:
             logger.info("fill_source_enabled dir=%s (volume-warm CAS fill tier)", self._fill_source_dir)
-        # pgw#748 phase 1: ONE Residency registry per execution group, sharing
+        # ONE Residency registry per execution group, sharing
         # only the disk tier. VRAM is not fungible between cards, so a group's
         # LRU, leases and free-VRAM probe speak that group's devices and
         # nothing else — which is exactly what DeviceGroup's docstring has
@@ -248,7 +248,7 @@ class ModelStore:
             "materialize_intent", default=""
         )
         self._bindings: Dict[str, Any] = {}
-        # th#1330 B2: ref -> the component set last skipped for it, so the
+        # ref -> the component set last skipped for it, so the
         # typed event fires on transitions and not once per materialization.
         self._override_exclusions_reported: Dict[str, Tuple[str, ...]] = {}
         self.keep: list[str] = []
@@ -256,10 +256,10 @@ class ModelStore:
         self._index = disk_gc.RefIndex(self._cache_dir)
         self._disk_free = disk_free_bytes_fn or self._default_disk_free
         # Refs whose on-disk snapshot passed integrity verification THIS boot
-        # (gw#408): a cached snapshot is re-verified on first use per process
+        # : a cached snapshot is re-verified on first use per process
         # so pod-churn corruption can never be trusted forever.
         self._verified: set[str] = set()
-        # Last digest-carrying snapshot seen per ref (gw#465): companion-slot
+        # Last digest-carrying snapshot seen per ref: companion-slot
         # setups may arrive snapshot-less; without memory of the hub's desired
         # state / RunJob snapshot they cannot materialize tensorhub refs. Stale
         # URLs self-heal: they fail url_expired and the hub re-mints.
@@ -281,7 +281,7 @@ class ModelStore:
         # pipeline is still in RAM/VRAM. Keep the disk identity separately
         # until record teardown makes it the highest residency tier.
         self._disk_identities: Dict[str, _ResidencyIdentity] = {}
-        # pgw#628 (th#1070 residency v2): every applied HelloAck opens a new
+        # every applied HelloAck opens a new
         # republish epoch. The reconcile pass re-announces verified cached
         # identities the hub re-asked about even when unchanged — observations
         # are content-addressed and idempotent hub-side, and a force-resent
@@ -291,10 +291,10 @@ class ModelStore:
         self._residency_republish_epoch = 0
         self._identity_publish_epochs: Dict[str, int] = {}
         self._identity_lock = threading.RLock()
-        # Cold-ref waiters (th#763): ensure_local blocks here until the
+        # Cold-ref waiters: ensure_local blocks here until the
         # hub's re-minted DOWNLOAD banks a snapshot for the ref.
         self._snapshot_waiters: Dict[str, asyncio.Event] = {}
-        # th#850 managed-tier ruling (gw#599): network_bytes for the NEXT
+        # network_bytes for the NEXT
         # ON_DISK transition of this ref, handed off to
         # _on_residency_event so the one authoritative wire event Residency
         # emits carries it — set immediately before track_disk(), consumed
@@ -302,7 +302,7 @@ class ModelStore:
         # otherwise. Avoids a second, redundant ON_DISK event and avoids
         # widening EventFn's arity (Residency has other direct callers).
         self._pending_network_bytes: Dict[str, int] = {}
-        # pgw#610/th#962 measured disk telemetry: generation bumps only when
+        # generation bumps only when
         # the measured (quantized) shape changes, so the hub can fence
         # insufficient-disk failure clears on real capacity change.
         self._disk_report_lock = threading.Lock()
@@ -403,7 +403,7 @@ class ModelStore:
         if state == residency_mod.IN_VRAM:
             kw["vram_bytes"] = int(vram_bytes)
         if duration_ms > 0:
-            # Swap telemetry (gw#479): promote/demote wall time rides the
+            # Swap telemetry: promote/demote wall time rides the
             # existing ModelEvent.duration_ms field.
             kw["duration_ms"] = int(duration_ms)
         if state == residency_mod.ON_DISK:
@@ -536,12 +536,12 @@ class ModelStore:
                 # Retarget it rather than replace it: its entries and leases
                 # are already the live bookkeeping.
                 zero.device_group = self._residency_groups[0]
-        # pgw#780 item 1: the pinned-host fair share was DEAD code — the pool's
+        # the pinned-host fair share was DEAD code — the pool's
         # per-group cap only engages once it knows G, and nothing in src/ ever
         # told it. Without this a G=4 degraded pod lets group 0 claim the whole
         # pinned budget (§4.3 caveat 2).
         staging_mod.pinned_pool().set_group_count(int(topology.execution_groups))
-        # pgw#780 item 2: registries were created lazily on first dispatch, so
+        # registries were created lazily on first dispatch, so
         # the boot disk re-track (which unions over all_residencies()) was a
         # no-op for groups 1..G-1 — their LRU/preserve/eviction views started
         # blind to the disk tier that was already there. Create every group's
@@ -578,7 +578,7 @@ class ModelStore:
 
     def residency_snapshot(self) -> List[pb.ModelResidency]:
         out: List[pb.ModelResidency] = []
-        # pgw#776 / DPA-6: union across EVERY group's registry. This runs on
+        # union across EVERY group's registry. This runs on
         # the event-loop thread (where _state_delta lives), whose contextvar
         # is always the default group — reading `self.residency` here meant a
         # G=4 pod reported 1/G of its resident set, and the hub's cache-aware
@@ -626,7 +626,7 @@ class ModelStore:
         return out
 
     def disk_usage_report(self) -> pb.DiskUsageReport:
-        """Cached measured per-tier disk telemetry (pgw#610/th#962).
+        """Cached measured per-tier disk telemetry.
 
         Never measures directly — returns whatever
         :meth:`refresh_disk_usage_report` last computed. ``_state_delta()``
@@ -647,7 +647,7 @@ class ModelStore:
             return {}
         sizes: Dict[str, int] = {}
         for f in snap.files:
-            # th#1303 S1: the tagged digest and nothing else. The legacy
+            # the tagged digest and nothing else. The legacy
             # `blake3` fallback was empty on every v2 entry, so this used to
             # bail to {} — sizes unknown — on exactly the manifests it was
             # written for. Zero entries is a REFUSAL ({}), never a silent 0.
@@ -715,7 +715,7 @@ class ModelStore:
         loop (boothang: 0.40.7's post-seal_publish LTX hang)."""
         keep = set(self.keep)
         entries = self._index.entries()
-        # pgw#748: the CAS is ONE tree with one page cache, hardlinked
+        # the CAS is ONE tree with one page cache, hardlinked
         # across every group, so the preserve set is the UNION across groups —
         # dropping clean pages one group is done with would drop the pages a
         # sibling group is still mmapping (§4.3 caveat 3).
@@ -761,7 +761,7 @@ class ModelStore:
 
     def has_snapshot(self, ref: WireRef) -> bool:
         """A digest-carrying snapshot for ``ref`` was seen this connection
-        (gw#465): snapshot-less ops for it can still materialize the bytes."""
+: snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
 
     def bank_snapshot(self, ref: WireRef, snapshot: pb.Snapshot) -> None:
@@ -917,7 +917,7 @@ class ModelStore:
         """Publish exact identity when verified cached bytes satisfy the
         desired state without requiring a redundant download.
 
-        pgw#628 (th#1070 residency v2): the emission is content-addressed and
+        the emission is content-addressed and
         idempotent hub-side, so it is re-sent once per applied-HelloAck epoch
         even when the identity is unchanged — a re-received plan (redrive,
         overdue resend, reconnect) is the hub asking for a resync, and a
@@ -974,7 +974,7 @@ class ModelStore:
         groups: Dict[str, Dict[str, str]] = {}
         for f in snap.files:
             rel = str(f.path).strip().lstrip("/")
-            # th#1303: this read `f.blake3`, which is EMPTY on every v2
+            # this read `f.blake3`, which is EMPTY on every v2
             # entry, so every file of a v2 snapshot was skipped and component
             # sharing was silently OFF fleet-wide — the fail-CLOSED half of
             # the empty-guard class (the fail-open half is
@@ -1019,7 +1019,7 @@ class ModelStore:
         """Boot-time truth: re-register still-present downloads from the
         persisted ref index so Hello.models and GC see what disk holds.
 
-        Also sweeps abandoned writer-unique CAS temp artifacts (th#850): on
+        Also sweeps abandoned writer-unique CAS temp artifacts: on
         pod-local disk those died with the pod, but a CAS root pointed at a
         persistent volume keeps them until swept."""
         for ref, ent in self._index.entries().items():
@@ -1090,7 +1090,7 @@ class ModelStore:
             out.append((last, ref))
         return self._disk_eviction_order(out, include_keep, keep_rank)
 
-    # th#850 managed-tier ruling (gw#599): the eviction POLICY (ranking one
+    # the eviction POLICY (ranking one
     # pass's evictable set) is a distinct seam from the evictable SET itself
     # (``_gc_candidates`` above, which owns the hard never-evict invariants).
     # Default is the LRU-oldest-first/keep-priority-escape-hatch ordering
@@ -1117,7 +1117,7 @@ class ModelStore:
         if not self.residency.evict(ref):  # refuses in-use entries; emits EVICTED
             return
         if path is not None:
-            # th#1330 B4: snapshot trees are keyed by DIGEST, so two refs that
+            # snapshot trees are keyed by DIGEST, so two refs that
             # resolve to the same snapshot (a tag alias and its pin, the same
             # checkpoint reached under two spellings) share ONE directory.
             # rmtree-ing it here deleted the bytes a still-resident sibling ref
@@ -1192,7 +1192,7 @@ class ModelStore:
         self, ref: WireRef, binding: Any, snapshot: Optional[pb.Snapshot],
     ) -> Tuple[str, ...]:
         """Base-composition subfolders this materialization must NOT fetch
-        (th#1330 B2): the components a pgw#617 dispatch SUBSTITUTES.
+        the components a pgw#617 dispatch SUBSTITUTES.
 
         The override's own tree is materialized separately and handed to
         ``from_pretrained`` as a constructed object, so diffusers never reads
@@ -1244,7 +1244,7 @@ class ModelStore:
         """Cold tensorhub ref with no orchestrator-resolved snapshot: emit
         ``missing_snapshot`` (the hub refreshes desired state with fresh URLs
         on seeing it — connect_worker handleModelFailure) and block
-        until that snapshot is banked (th#763). The bank site runs OUTSIDE
+        until that snapshot is banked. The bank site runs OUTSIDE
         the per-ref lock this coroutine holds, so the refreshed reconcile's
         ensure_local wakes us and then queues behind the lock. Raises
         :class:`MissingSnapshotError` when nothing arrives in
@@ -1322,7 +1322,7 @@ class ModelStore:
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         operation_identity = self._snapshot_identity(ref, snapshot)
-        # th#1330 B2: the components this dispatch SUBSTITUTES are not fetched
+        # the components this dispatch SUBSTITUTES are not fetched
         # from the base composition. The base is loaded with the override
         # object handed to `from_pretrained` (pgw#617 load-then-substitute),
         # so its own copy of that subfolder is downloaded and discarded.
@@ -1349,7 +1349,7 @@ class ModelStore:
         acquired = False
 
         def complete(path: Path) -> _MaterializedLocal:
-            # pgw#748: the bytes are pod-wide but each group keeps its own
+            # the bytes are pod-wide but each group keeps its own
             # ledger, so the group that asked must ALSO book the shared disk
             # entry — otherwise a group riding a sibling's materialization
             # never sees the ref in its own LRU, preserve set or eviction.
@@ -1387,7 +1387,7 @@ class ModelStore:
                 )
             # Union across groups: without this, group 1 loading a ref
             # group 0 already fetched sees `None` and re-runs the whole
-            # download/verify — one pod, one copy, every group (pgw#748).
+            # download/verify — one pod, one copy, every group.
             cached = self.disk_local_path(ref)
             # A digest-carrying snapshot is authoritative: a cached
             # materialization of the SAME ref at a DIFFERENT digest is stale
@@ -1396,7 +1396,7 @@ class ModelStore:
             want = ""
             if snapshot is not None and snapshot.digest:
                 want = snapshot.digest.split(":", 1)[-1].strip().lower()
-            # th#1330 B2: with an override exclusion the acceptable cached
+            # with an override exclusion the acceptable cached
             # names are the exclusion's own key OR the bare digest — the
             # latter is a SUPERSET (a complete tree already on disk serves an
             # excluded fetch for free, and is never narrowed retroactively).
@@ -1413,7 +1413,7 @@ class ModelStore:
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
                     return complete(cached)
-                # First use this boot: verify before trusting (gw#408). A
+                # First use this boot: verify before trusting. A
                 # pod-churn-truncated snapshot used to fatal every load until
                 # a manual delete; now it is quarantined + re-materialized.
                 ok, bad = await asyncio.to_thread(
@@ -1444,7 +1444,7 @@ class ModelStore:
                         or lookup_provider_for_ref(ref, default=""))
                 if prov == "tensorhub":
                     # The worker cannot resolve tensorhub-CAS refs itself
-                    # (gw#465). Report missing_snapshot — the hub's re-mint
+                    # . Report missing_snapshot — the hub's re-mint
                     # trigger — then BLOCK until the re-minted DOWNLOAD
                     # banks a snapshot (th#763: a user request must never
                     # be the sacrificial cache warmer). No DOWNLOADING
@@ -1456,7 +1456,7 @@ class ModelStore:
                         intent_id=intent_id,
                     )
                     operation_identity = self._snapshot_identity(ref, snapshot)
-            # th#1330 B2: every byte figure below (headroom gate, DOWNLOADING
+            # every byte figure below (headroom gate, DOWNLOADING
             # totals, the boot weights span) counts what will actually be
             # fetched, so an override's skipped component never shows up as
             # bytes anybody planned for or reported.
@@ -1473,7 +1473,7 @@ class ModelStore:
                     intent_id=intent_id,
                 )
             last_progress = 0.0
-            # th#850 managed-tier ruling (gw#599): opened before _progress so
+            # opened before _progress so
             # its DOWNLOADING ticks can read the running total, and entered
             # once for the whole retry loop so it accumulates across
             # attempts. The hub (tensorhub th#850/PR#493) reads network_bytes
@@ -1482,12 +1482,12 @@ class ModelStore:
             # both must carry it for the wire contract to actually work.
             net_scope = cozy_snapshot.NetworkBytesScope()
 
-            # gw#621: per-ref bytes as a registry counter (visible on every
+            # per-ref bytes as a registry counter (visible on every
             # 10s beat while an activity is open); snapshot sizes make the
             # total known up front, so the wire never shows total=0 for
             # tensorhub refs.
             known_total = sum(int(f.size_bytes) for f in fetch_files)
-            # pgw#894: owned by the activity this download is FOR when there
+            # owned by the activity this download is FOR when there
             # is one, so it advances that scope's clock and no other.
             dl_counter = activity_mod.scoped_counter(
                 f"download:{ref}", progress_mod.UNIT_BYTES, total=known_total)
@@ -1526,7 +1526,7 @@ class ModelStore:
                         unit="bytes",
                     ),
                 )
-            # pgw#789: THE weights-fetch boot span. It lives here, not at a
+            # THE weights-fetch boot span. It lives here, not at a
             # caller, because this is the only layer that sees every
             # materialization path (startup prefetch, DesiredResidency
             # disk_refs, hot instances, RunJob delivery) AND the only layer
@@ -1548,7 +1548,7 @@ class ModelStore:
                         resolved = None
                         if snapshot is not None and snapshot.digest:
                             resolved = _snapshot_to_resolved(snapshot)
-                        # pgw#1087: name this span as the parent for the
+                        # name this span as the parent for the
                         # per-component rows opened inside the downloader.
                         # `open_span` cannot push the nesting stack itself
                         # (its close is in another frame), and a component row
@@ -1581,7 +1581,7 @@ class ModelStore:
                                 self._disk_identities[ref] = operation_identity
                                 if tier_before in (None, residency_mod.Tier.DISK):
                                     self._resident_identities[ref] = operation_identity
-                        # th#850 managed-tier ruling (gw#599): handed off to
+                        # handed off to
                         # _on_residency_event so the ON_DISK event Residency
                         # emits for a genuinely fresh registration carries the
                         # bytes this materialization fetched over the network
@@ -1614,7 +1614,7 @@ class ModelStore:
                         if terminal:
                             vocab = self._error_vocab(exc)
                             if vocab == "download_failed":
-                                # th#757: the generic bucket must carry the root
+                                # the generic bucket must carry the root
                                 # cause — pods are often unreachable and the hub
                                 # log is the only forensic surface (J24M run11:
                                 # a starved request was undiagnosable hub-side).
@@ -1722,7 +1722,7 @@ class ModelStore:
             return identity
         return self.activate_disk_identity(ref)
 
-    # ---- snapshot integrity (gw#408) -------------------------------------------
+    # ---- snapshot integrity -------------------------------------------
 
     def _verify_snapshot_tree(
         self, path: Path, snapshot: Optional[pb.Snapshot]
@@ -1742,7 +1742,7 @@ class ModelStore:
         covered: set[Path] = set()
         files = list(snapshot.files) if snapshot is not None else []
         if files and p.is_dir():
-            # pgw#769/#781 (th#1303): the hash algorithm comes from the DIGEST,
+            # the hash algorithm comes from the DIGEST,
             # never from this call site. This used to read `f.blake3` and hash
             # with blake3 -- but under manifest v2 that field is EMPTY, so
             # `digest` was "" and BOTH the size and hash checks were skipped
@@ -1814,7 +1814,7 @@ class ModelStore:
     async def refetch_corrupt(
         self, ref: WireRef, snapshot: Optional[pb.Snapshot] = None, *, binding: Any = None
     ) -> Optional[Path]:
-        """Load-failure path (gw#408): a weights load failed with a
+        """Load-failure path: a weights load failed with a
         corruption-shaped error — digest-verify the snapshot. A clean tree
         returns None (the failure is NOT corruption; caller re-raises); a
         dirty tree is quarantined and re-materialized, returning the fresh

@@ -241,7 +241,7 @@ class _Fp8WeightWindow:
 
     Block-window (not per-leaf-layer) granularity is what makes this safe for
     transformers models, which — unlike diffusers denoisers — read weight
-    dtype and touch weights OUTSIDE the owning leaf's forward (gw#460):
+    dtype and touch weights OUTSIDE the owning leaf's forward:
     Gemma3's embed-scale multiply runs on the embedding output, and T5's
     ``T5DenseActDense`` casts ACTIVATIONS to ``self.wo.weight.dtype`` before
     calling ``wo``, so a leaf-hooked (diffusers-style) ``wo`` still poisons
@@ -386,7 +386,7 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
     storage modules (pgw#727, :mod:`gen_worker.models.fp8_storage`: upcast at
     the use site inside forward); transformers text encoders keep the
     :class:`_Fp8WeightWindow` block hooks — they read weight dtype OUTSIDE the
-    owning leaf's forward (gw#460), which resident fp8 would poison, and they
+    owning leaf's forward, which resident fp8 would poison, and they
     are not on any compiled path.
     ``text_encoders=True`` (the ``storage_dtype="fp8+te"`` rung) extends the
     cast to the pipeline's text encoders via the transformers-aware path.
@@ -426,7 +426,7 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
     applied = False
     for name, mod in targets:
         if getattr(mod, "_cozy_fp8_storage_applied", False):
-            # Idempotence (gw#479): a content-shared module injected into a
+            # Idempotence: a content-shared module injected into a
             # sibling lane is already armed; double hooks would double-cast.
             applied = True
             continue
@@ -450,7 +450,7 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
         except Exception as exc:
             logger.warning("fp8 storage failed on %s (%s); serving at full precision",
                            name, exc)
-            # pgw#760: the all-components failure is structurally reported
+            # the all-components failure is structurally reported
             # (th#737 cast_dropped), but a PARTIAL failure returns
             # applied=True and reads as success — this component alone now
             # holds ~2x its budgeted VRAM at full precision.
@@ -465,10 +465,10 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
 
 
 class _BlockOffloadWindow:
-    """Degraded-mode rung 2 (ie#468): one transformer block's weights REST in
+    """Degraded-mode rung 2: one transformer block's weights REST in
     host RAM (pinned when possible) and stream to the execution device only
     for that block's forward. The pre-hook is PREPENDED so the H2D copy runs
-    before any fp8 upcast window (gw#460) on the same block — composed order:
+    before any fp8 upcast window on the same block — composed order:
     host fp8 bytes -> device fp8 -> device compute dtype. The post-hook
     rebinds ``.data`` to the pristine host copy (weights are read-only at
     inference; no copy-back), so whatever dtype games other hooks played in
@@ -590,7 +590,7 @@ def apply_block_window_offload(
             name, len(windows), parked_bytes / float(1 << 30),
             "pinned" if pin else "pageable",
         )
-        # pgw#824: the SIBLING the pgw#760 apply_fp8_storage fix missed. This
+        # the SIBLING the pgw#760 apply_fp8_storage fix missed. This
         # is the same class of fact and a larger one: every forward on this
         # component now streams its weights over PCIe from host RAM, which is
         # the single biggest per-request latency change the loader can make,
@@ -733,7 +733,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
             return merged
         # A pod kill mid-writeback can persist a truncated merged file that
         # was then trusted forever — every load fataled with "Unable to load
-        # weights from checkpoint file" until manual delete (gw#408).
+        # weights from checkpoint file" until manual delete.
         logger.warning(
             "cached merged checkpoint %s is structurally invalid (truncated?); re-merging",
             merged.name,
@@ -787,14 +787,14 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
                     remaining -= len(buf)
         out.flush()
 
-        os.fsync(out.fileno())  # durable before rename (gw#408)
+        os.fsync(out.fileno())  # durable before rename
     tmp.rename(merged)
     logger.info("reassembled sharded single-file checkpoint: %s (%d shards, %d tensors, %d bytes)",
                 merged.name, len(shard_names), len(entries), offset)
     return merged
 
 
-# --- fp8 download stays the fp8 storage lane (pgw#772) ----------------------
+# --- fp8 download stays the fp8 storage lane ----------------------
 # The gw#534 "rung 2" voluntary upgrade (fp8 download upcast ONCE to plain
 # bf16-resident weights whenever the snapshot fit free VRAM with headroom,
 # `bf16_resident_fits` / BF16_RESIDENT_MARGIN_GB) is REMOVED, ruled by Paul on
@@ -812,7 +812,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # and the w8a8/w4a4 dequant-on-unsupported-host lanes are declared rungs, not
 # probe outcomes.
 
-# The pipeline's weight lane, part of the compile-cache graph key (gw#534):
+# The pipeline's weight lane, part of the compile-cache graph key:
 # "" = plain resident weights (incl. the involuntary w8a8/w4a4 dequant
 # lanes), "fp8-hooks" =
 # fp8 weights resident with a per-layer upcast (traced INTO the FX graphs).
@@ -824,7 +824,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # keys, no cross-lane adoption.
 _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 
-#: EVERY base lane a loader can leave on ``_WEIGHT_LANE_ATTR`` (pgw#918).
+#: EVERY base lane a loader can leave on ``_WEIGHT_LANE_ATTR``.
 #:
 #: THE single source of this vocabulary. It is authored here, next to the
 #: attribute itself, because this is where the assignments live — and
@@ -906,7 +906,7 @@ def model_index_components(path: str | Path) -> set:
 def model_index_component_classes(path: str | Path) -> Dict[str, str]:
     """``{component: class name}`` the snapshot's ``model_index.json`` declares.
 
-    The authoritative component-class vocabulary at LOAD time (pgw#667): a
+    The authoritative component-class vocabulary at LOAD time: a
     fine-tune may substitute a class, and the bytes on disk decide. Empty when
     there is no readable ``model_index.json`` (single-file checkpoints,
     transformers layouts)."""
@@ -931,7 +931,7 @@ def component_load_dtypes(
     pipeline_cls: Any, path: str | Path,
 ) -> Dict[str, Any]:
     """``{component: ComponentDtype}`` this composition's parts require at LOAD
-    time (pgw#667) — the snapshot's own ``model_index.json`` classes first, the
+    time — the snapshot's own ``model_index.json`` classes first, the
     pipeline class's ``__init__`` annotations as the fallback.
 
     Empty for every uniform composition, which is the common case: the caller
@@ -972,7 +972,7 @@ def composition_compute_dtype(base_path: str | Path, dtype: str = "") -> str:
     tree's LOAD LANE actually computes at. ``""`` = unknown (an
     fp32-defaulting composition).
 
-    Lane selection mirrors :func:`load_from_pretrained` (pgw#675): a
+    Lane selection mirrors :func:`load_from_pretrained`: a
     quantized-artifact tree (svdq / w8a8 / w4a4) computes at the lane's bf16
     default regardless of the tree's MAJORITY on-disk dtype — a produced
     ``#fp8-w8a8`` flavor quantizes only the repeated-block Linears and passes
@@ -1027,7 +1027,7 @@ class MixedComputeDtypeError(RuntimeError):
 #: casting hold weights at those precisions BY DESIGN and upcast per forward.
 _COMPUTE_DTYPE_NAMES = ("float16", "bfloat16", "float32", "float64")
 #: The pair that cannot interoperate and never legitimately coexists in one
-#: composition. fp32 is the DECLARED widening axis (pgw#667) and is reported
+#: composition. fp32 is the DECLARED widening axis and is reported
 #: but never fatal — widening is a precision decision, not a dtype collision.
 _INCOMPATIBLE_COMPUTE = ("float16", "bfloat16")
 
@@ -1039,7 +1039,7 @@ def _gemm_param_dtypes(module: Any) -> Dict[str, str]:
     embeddings are excluded: they carry their own (legitimately wider)
     precision and never meet a weight in one kernel.
 
-    pgw#1020: the isinstance selector alone is BLIND to the quantized lanes.
+    the isinstance selector alone is BLIND to the quantized lanes.
     All five quantized leaves (``_Fp8ScaledLinear``, ``_W4A4Linear``,
     ``_SvdqLinear``, ``_SvdqFusedLinear``, ``_AwqPackedLinear``) subclass
     ``nn.Module`` directly, so a w8a8 fp16 denoiser inside a bf16 composition
@@ -1086,7 +1086,7 @@ def _gemm_param_dtypes(module: Any) -> Dict[str, str]:
 def assert_uniform_compute_dtype(
     obj: Any, expected: str = "", *, label: str = "",
 ) -> None:
-    """Refuse a MIXED-precision composition at LOAD (pgw#683).
+    """Refuse a MIXED-precision composition at LOAD.
 
     Checks every GEMM input of every component: an fp16 weight and a bf16
     weight in one composition means some forward will die on a dtype the
@@ -1159,7 +1159,7 @@ def _component_dtype_map(
     cls: Any, path: str | Path, scalar_dtype: Any,
 ) -> Optional[Dict[str, Any]]:
     """diffusers' per-component ``torch_dtype`` map for this composition, or
-    None when every part loads at the composition's own dtype (pgw#667).
+    None when every part loads at the composition's own dtype.
 
     Shape is diffusers': ``{"default": <compute dtype>, "<part>": <wider
     dtype>}``. A part is included only when its declared load dtype DIFFERS
@@ -1195,7 +1195,7 @@ def _component_dtype_map(
 
 
 #: Load dtype a component asks for, keyed by what its OWN safetensors headers
-#: store (pgw#1071). fp8 is a STORAGE fact — the artifact carries its own
+#: store. fp8 is a STORAGE fact — the artifact carries its own
 #: quantization config and bf16 is the compute dtype over it, which is why it
 #: maps to :data:`QUANT_EXECUTION_LANE_COMPUTE_DEFAULT` rather than to itself.
 _CHECKPOINT_LOAD_DTYPE = {
@@ -1208,7 +1208,7 @@ _CHECKPOINT_LOAD_DTYPE = {
 
 def checkpoint_load_dtype(source: str | Path) -> str:
     """The dtype ONE component tree's own bytes ask to be loaded at, or ``""``
-    when its headers say nothing (pgw#1071).
+    when its headers say nothing.
 
     Read per COMPONENT, never per snapshot: a majority vote over a whole
     mixed-precision tree upcasts every narrow component when the vote lands
@@ -1237,7 +1237,7 @@ def _modular_declared_dtypes(
     binding's own dtype when it has one, plus pgw#667's per-part facts.
 
     ``None`` when nothing is declared — the hydration loop then reads each
-    component's checkpoint (pgw#1071). With a declared composition dtype this
+    component's checkpoint. With a declared composition dtype this
     is exactly :func:`_component_dtype_map`; without one the facts stand
     alone, because a ``"default"`` key would put every unlisted component
     back under a guess."""
@@ -1364,7 +1364,7 @@ def load_component(
     if not src.is_dir():
         src = root
 
-    # pgw#667: a component with a declared load-dtype fact keeps it when it is
+    # a component with a declared load-dtype fact keeps it when it is
     # SUBSTITUTED too — the fact is a property of the component class, and the
     # substituted tree's part must be resident at the same precision the base
     # part required or the composition is silently degraded.
@@ -1405,14 +1405,14 @@ def contract_loaded_component(
     recognised and has no component-level loader — a typed refusal, never a
     fall-through.
 
-    **Why this is a function and not two copies (pgw#1210).** It was inline in
+    **Why this is a function and not two copies.** It was inline in
     :func:`load_component`, so the NON-modular path routed a produced
     `cozy.fp8-rowwise@1` tree to :func:`load_w8a8_denoiser` while a diffusers
     MODULAR pipeline hydrated the same bytes through `ComponentSpec.load()` ->
     plain `from_pretrained` and died inside `DiffusersAutoQuantizer` on the
     tree's own `quantization_config` — minimax-h3 0.4.34, two releases, three
     pods, `deterministic_fault_loop`, serving nothing. The fp8 lane that
-    wan-2.2 (ie#702) binds is the same artifact shape on the other entry
+    wan-2.2 binds is the same artifact shape on the other entry
     point, so the two had to become ONE dispatch rather than two that agree
     today.
 
@@ -1470,14 +1470,14 @@ def load_component_override(
 
 class ModularHydrationError(RuntimeError):
     """A ModularPipeline slot could not be hydrated from the LOCAL tree
-    (pgw#1036). Typed so the failure is a refusal at load — never a silent
+. Typed so the failure is a refusal at load — never a silent
     shell handed to ``setup()``, and never a fetch from the repo id the
     snapshot's index happens to name."""
 
 
 class ComponentSubstitutionError(RuntimeError):
     """A non-modular diffusers composition names a component the local tree
-    does not carry and the dispatch injected nothing for it (pgw#1048).
+    does not carry and the dispatch injected nothing for it.
 
     DETERMINISTIC: the tree is already materialized and the injected set is
     already known, so nothing about a retry can change the answer — a refetch
@@ -1671,7 +1671,7 @@ def _weightless_model_dir(src: Path) -> bool:
 
 
 _GIB = 1024 ** 3
-# Mirrors residency/staging's host-RAM floor policy (gw#407).
+# Mirrors residency/staging's host-RAM floor policy.
 _STAGING_FLOOR_GB = 8.0
 _STAGING_FLOOR_FRACTION = 0.2
 
@@ -1687,13 +1687,13 @@ def _admit_component_staging(component: str, nbytes: int) -> None:
     """pgw#1041: admit ONE component's staging against the cgroup budget.
 
     ``probe_host_ram`` already speaks cgroup (v1 and v2) and credits clean
-    reclaimable page cache (pgw#752), so the just-fetched tree's own cache
+    reclaimable page cache, so the just-fetched tree's own cache
     never blocks its own load. A component that cannot fit an EMPTY host is
     the structural pgw#752 verdict; one that cannot fit right now is the
     transient one. Both carry the measured numbers. An unreadable probe
     fails open — no worse than the unchecked load it replaces.
 
-    pgw#1063: the estimate can be wrong (an upcast, a quant unpack, an
+    the estimate can be wrong (an upcast, a quant unpack, an
     allocator's own overhead), and when it is the load does not fail — it
     crawls in direct reclaim until the kernel kills it. So a MEASURED
     verdict outranks this arithmetic: a process the load dial has caught
@@ -1797,7 +1797,7 @@ class StreamedHydrationPlan:
     unit_count: int
     host_total_bytes: int
     device_free_bytes: int
-    #: The rung the pipeline will be placed on (pgw#1063). An offload rung
+    #: The rung the pipeline will be placed on. An offload rung
     #: keeps the weights in host RAM, so it never takes the discount.
     placement_mode: str = ""
 
@@ -1838,7 +1838,7 @@ def plan_streamed_hydration(
     bring-up, 134.1 GiB tree + the 8 GiB staging floor against 116.4 GiB of
     host RAM on a 1x H100-80 pod, `HostRamCapacityError`. Host RAM binds
     ~26 GiB tighter than VRAM there purely because staging is all-or-nothing
-    while the load is already component-sequential (pgw#1041).
+    while the load is already component-sequential.
 
     THE OBSERVABLES, all measured rather than estimated:
 
@@ -1895,7 +1895,7 @@ def decide_streamed_hydration(
         placement_mode=str(placement_mode or ""),
     )
     if touches_host_ram(placement_mode):
-        # pgw#1063: the discount is admissible ONLY because each component
+        # the discount is admissible ONLY because each component
         # leaves the host for the card. An offload rung puts it back — the
         # weights live on the host by definition — so the honest requirement
         # is the whole tree, and charging one component here is what admitted
@@ -1989,7 +1989,7 @@ def hydrate_modular_pipeline(
     place_device: str = "",
 ) -> Dict[str, str]:
     """Hydrate a freshly constructed ``ModularPipeline`` from the LOCAL
-    snapshot tree (pgw#1036).
+    snapshot tree.
 
     ``ModularPipeline.__init__`` registers every ``from_pretrained``
     component as ``None`` and copies each spec's
@@ -2019,10 +2019,10 @@ def hydrate_modular_pipeline(
     component, or diffusers' ``{"default": ..., "<part>": ...}`` map. What it
     does not name loads at that component's OWN checkpoint dtype
     (:func:`checkpoint_load_dtype`), never at a snapshot-wide majority and
-    never at diffusers' fp32 default (pgw#1071). ``_keep_in_fp32_modules``
+    never at diffusers' fp32 default. ``_keep_in_fp32_modules``
     stays diffusers' business: naming a dtype is what lets it act at all.
 
-    ``place_device`` (pgw#1026) moves each component onto that device as it
+    ``place_device`` moves each component onto that device as it
     lands and drops the host copy, so the host-RAM high-water mark is ONE
     component instead of the tree. Set it from
     :func:`plan_streamed_hydration`, never by hand: it is admissible only
@@ -2137,7 +2137,7 @@ def hydrate_modular_pipeline(
                     "pretrained_model_name_or_path": {n: sources[n]},
                     "subfolder": {n: ""},
                 }
-                # pgw#1071: this component's OWN checkpoint dtype when the
+                # this component's OWN checkpoint dtype when the
                 # caller declared none. Sniffed here rather than by the
                 # caller because this is the only place that knows each
                 # component's actual source dir — an override tree is a
@@ -2146,7 +2146,7 @@ def hydrate_modular_pipeline(
                 if dt is not None:
                     kwargs["torch_dtype"] = dt
                     dtypes[n] = str(dt).removeprefix("torch.")
-                # pgw#1210: THE CONTRACT DISPATCH, on the modular path too.
+                # THE CONTRACT DISPATCH, on the modular path too.
                 #
                 # `load_components` is diffusers' own hydration and reaches
                 # plain `from_pretrained`, which never consults the SDK's
@@ -2156,7 +2156,7 @@ def hydrate_modular_pipeline(
                 # three pods, serving nothing — while the NON-modular path
                 # loaded the identical bytes correctly through
                 # `load_w8a8_denoiser`. One artifact shape, two entry points,
-                # one of them blind; wan-2.2's fp8 lane (ie#702) is the other
+                # one of them blind; wan-2.2's fp8 lane is the other
                 # consumer of exactly this.
                 #
                 # The contract-loaded module is injected through
@@ -2169,7 +2169,7 @@ def hydrate_modular_pipeline(
                     pipe.update_components(**{n: built})
                 else:
                     pipe.load_components(names=[n], **kwargs)
-                # pgw#1026: place it now and drop the host copy, so the next
+                # place it now and drop the host copy, so the next
                 # component's admission above sees the host RAM this one
                 # gave back rather than the tree accumulating behind it.
                 if place_device:
@@ -2200,7 +2200,7 @@ def hydrate_modular_pipeline(
     except Exception:  # noqa: BLE001
         pass
     detail = " ".join(f"{n}<-{sources[n]}" for n in sorted(sources))
-    # pgw#1071: the dtype each component actually loaded at is the evidence
+    # the dtype each component actually loaded at is the evidence
     # the fp32-upcast wall was invisible for — it belongs in the hub-visible
     # record, not only in a log line.
     dtype_detail = " ".join(f"{n}={dtypes[n]}" for n in sorted(dtypes))
@@ -2350,7 +2350,7 @@ def _load_modular_pipeline(
     component_trees: Optional[Dict[str, str]] = None,
     placement_mode: str = "",
 ) -> Any:
-    """The modular lane of :func:`load_from_pretrained` (pgw#1036):
+    """The modular lane of :func:`load_from_pretrained`:
     ``cls.from_pretrained(path)`` builds a SHELL (every weight-bearing
     component ``None``, specs naming the index's repo id verbatim), then
     :func:`hydrate_modular_pipeline` re-points every spec at the local tree
@@ -2363,7 +2363,7 @@ def _load_modular_pipeline(
         logger.warning(
             "storage_dtype=%s ignored on the modular lane (component "
             "precision is a per-component artifact fact)", storage_dtype)
-    # pgw#1071: DECLARED dtypes only. The snapshot-wide dtype sniff that used
+    # DECLARED dtypes only. The snapshot-wide dtype sniff that used
     # to stand in for a declaration was a majority vote over every safetensors
     # header in the tree — it truncated a wide component when the vote fell
     # narrow (an fp32 VAE loading bf16) and, when the vote fell outside the
@@ -2380,7 +2380,7 @@ def _load_modular_pipeline(
         except ImportError:
             pass  # torch-less environment: loaders fail on their own terms
     torch_dtype: Any = _modular_declared_dtypes(cls, path, scalar_dtype)
-    # pgw#1026: a tree the card holds but the host does not stages ONE
+    # a tree the card holds but the host does not stages ONE
     # COMPONENT AT A TIME straight onto the device. Decided here, from the
     # same measurements the executor's admission gate reads, so the two
     # cannot disagree about which shape the load takes; if free VRAM moved
@@ -2456,7 +2456,7 @@ def load_from_pretrained(
     silently discards). ``placement_mode`` is the rung the worker will place
     this pipeline on: an offload rung keeps the weights in host RAM, so the
     modular lane must not stage them onto the card and must not take the
-    per-component host-RAM discount (pgw#1063)."""
+    per-component host-RAM discount."""
     path = str(path)
     if is_modular_pipeline_class(cls):
         return _load_modular_pipeline(
@@ -2469,12 +2469,12 @@ def load_from_pretrained(
             f"component_trees is the MODULAR delivery mechanism and "
             f"{getattr(cls, '__name__', cls)} is not a modular pipeline "
             f"class; non-modular overrides ride components= (pgw#617)")
-    # pgw#1048: the composition the index names must be satisfiable from the
+    # the composition the index names must be satisfiable from the
     # tree plus the injection BEFORE any lane touches from_pretrained. A
     # component that is in neither is a deterministic miss, and every lane
     # below reports it as the same nameless OSError against the snapshot root.
     assert_composition_satisfiable(cls, path, components=components, ref=ref)
-    # SVDQuant/nunchaku 4-bit flavors (gw#415): self-describing snapshots take
+    # SVDQuant/nunchaku 4-bit flavors: self-describing snapshots take
     # the svdq lane — a nunchaku transformer swapped into the standard
     # pipeline. Detection precedes every other rung; failures are typed
     # (SvdqStackError / SvdqHardwareError / SvdqSnapshotError), never a
@@ -2485,7 +2485,7 @@ def load_from_pretrained(
         if components:
             logger.warning("preloaded components ignored on the svdq lane")
         return load_svdq_pipeline(cls, Path(path), svdq_art)
-    # W8A8 fp8-GEMM flavors (gw#534): fp8 weights WITH scales take the
+    # W8A8 fp8-GEMM flavors: fp8 weights WITH scales take the
     # scaled-mm lane (fp8 resident, no per-layer cast); hosts without usable
     # scaled_mm dequant once to bf16-resident. Precedes the storage-cast
     # rungs — a scale-free fp8 tree never detects here.
@@ -2499,7 +2499,7 @@ def load_from_pretrained(
             except ImportError:
                 pass
         if not w8a8_art.component:
-            # Root layout (gw#562): the pipeline class's own loader
+            # Root layout: the pipeline class's own loader
             # constructs; the worker swaps post-construction.
             if components:
                 logger.warning(
@@ -2515,7 +2515,7 @@ def load_from_pretrained(
             components=components,
             fp8_text_encoders=storage_dtype == "fp8+te",
         )
-    # W4A4 nvfp4 flavors (gw#540): packed fp4 weights WITH two-level scales
+    # W4A4 nvfp4 flavors: packed fp4 weights WITH two-level scales
     # take the blockwise fp4 scaled_mm lane on Blackwell (sm_100+); other
     # qualifying hosts dequant once to bf16-resident. Disjoint from w8a8
     # detection (uint8 vs e4m3 weights) and from scale-free trees.
@@ -2581,13 +2581,13 @@ def load_from_pretrained(
                 # torch-less environment (unit tests / CPU tools) — loaders
                 # that actually need torch will fail on their own terms.
                 pass
-    # pgw#772: a declared fp8 storage lane is SERVED as fp8 storage — the
+    # a declared fp8 storage lane is SERVED as fp8 storage — the
     # voluntary free-VRAM bf16-resident upgrade is removed (see the lane
     # tombstone above BF16_RESIDENT's old site). Only the involuntary
     # fit-ladder rungs below may move the lane, and only downward.
     fp8_storage = storage_dtype in ("fp8", "fp8+te") or sniffed == "fp8"
     fp8_text_encoders = storage_dtype == "fp8+te"
-    adaptive_rung = ""  # gw#491: load-time rung engagement, stamped on the pipe
+    adaptive_rung = ""  # load-time rung engagement, stamped on the pipe
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
         if qc is None:
@@ -2597,19 +2597,19 @@ def load_from_pretrained(
             )
             assert eqc is None  # the fp8 rung carries no quantization_config
             if mode == "fp8":
-                fp8_storage = True  # runtime fp8-E4M3 storage rung (th#683)
+                fp8_storage = True  # runtime fp8-E4M3 storage rung
                 adaptive_rung = "fp8"
         if qc is not None:
             kwargs["quantization_config"] = qc
     # The composition's ONE compute dtype, captured before pgw#667's
-    # per-component map can replace the kwarg with a dict (pgw#683).
+    # per-component map can replace the kwarg with a dict.
     scalar_dtype = kwargs.get("torch_dtype")
     single = _single_file_checkpoint(Path(path))
     if single is not None and callable(getattr(cls, "from_single_file", None)):
         kwargs.pop("variant", None)
         pipe = cls.from_single_file(str(single), **kwargs)
     else:
-        # pgw#667: a part whose dtype opinion is WIDER than the composition's
+        # a part whose dtype opinion is WIDER than the composition's
         # compute dtype must come off disk that way — upcasting a bf16-loaded
         # component afterwards recovers no precision, it only hides the
         # truncation. diffusers takes a per-component dtype MAP (a "default"
@@ -2648,7 +2648,7 @@ def load_from_pretrained(
             f"unmaterialized meta tensors (e.g. {unmaterialized[:3]})"
         )
     if fp8_storage and "quantization_config" not in kwargs:
-        # pgw#683: the SCALAR compute dtype — `kwargs["torch_dtype"]` may be
+        # the SCALAR compute dtype — `kwargs["torch_dtype"]` may be
         # pgw#667's per-component MAP by now, and a dict reaching
         # `enable_layerwise_casting(compute_dtype=...)` either explodes into
         # "serving at full precision" or arms windows that upcast to a
@@ -2656,7 +2656,7 @@ def load_from_pretrained(
         # fact, so it is the composition default that belongs here.
         applied = apply_fp8_storage(pipe, compute_dtype=scalar_dtype,
                                     text_encoders=fp8_text_encoders)
-        # th#737: make the outcome observable — a cast that silently no-ops
+        # make the outcome observable — a cast that silently no-ops
         # (denoiser-less pipeline) must surface as a structural degradation
         # upstream, not vanish into a log line.
         try:
@@ -2667,7 +2667,7 @@ def load_from_pretrained(
         except Exception:
             pass
     if adaptive_rung:
-        # gw#491: a silently-engaged emergency rung is the th#736 bug class —
+        # a silently-engaged emergency rung is the th#736 bug class —
         # the executor reconciles this stamp into ServePlan.ran / FnDegraded.
         try:
             pipe._cozy_adaptive_rung = adaptive_rung

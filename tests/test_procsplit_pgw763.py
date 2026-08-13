@@ -4,7 +4,7 @@ Real everything on the worker side of the socket: a REAL ParentControl
 (real Transport, real SendQueue, real supervision) speaking real gRPC to the
 hub-double, spawning a REAL compute-child subprocess (real Worker/executor/
 lifecycle wired to ChildTransport). The only double is the hub, as everywhere
-else in this suite (th#960).
+else in this suite.
 
 Covers, per the lane's acceptance list:
   1. a handler death does NOT kill the stream/pod — the dead job is
@@ -13,7 +13,7 @@ Covers, per the lane's acceptance list:
   3. cancellation stays prompt across the process boundary (measured);
   4. a pre-Hello crash loop is DETECTED, reported typed, and BOUNDED — the
      parent exits 1 after the boot-death limit instead of billing a respawn
-     loop forever (pgw#826); a terminal typed boot verdict (T_BOOT_FATAL)
+     loop forever; a terminal typed boot verdict (T_BOOT_FATAL)
      exits after ONE spawn with the report relayed on the parent's credential;
   5. a wedged (SIGSTOPped) child is killed by the WatchdogSec analog and
      the pod recovers;
@@ -133,7 +133,7 @@ class SplitHarness:
         )
         self.exit_code: Optional[int] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
-        # pgw#960: a parent that exited can never dial in (definitive), and a
+        # a parent that exited can never dial in (definitive), and a
         # child boot's silence is worth whatever it costs on THIS runner.
         self.scheduler.worker_alive = lambda: self.alive
         self.scheduler.boot_cost = lambda: measure_child_boot_cost_s(child_env)
@@ -355,7 +355,7 @@ def test_wedged_child_is_killed_by_watchdog_and_pod_recovers(tmp_path, captured_
 
 
 def test_seam_cost_frame_rtt_and_throughput(tmp_path, capsys):
-    """Measure the boundary's COST — never the runner's speed (pgw#845).
+    """Measure the boundary's COST — never the runner's speed.
 
     Both arms of both measurements are taken in this run, interleaved, against a
     raw-socket echo on the same event loop and the same transport. The framed
@@ -681,7 +681,7 @@ def test_signal_death_consumes_the_inflight_marker_and_records_the_streak(
         died = conn.wait_for(is_result_for("r-marker"))
         assert died.job_result.status == pb.JOB_STATUS_FATAL
 
-        # pgw#845: the job_result is NOT the event these assertions want. The
+        # the job_result is NOT the event these assertions want. The
         # durable attribution is deliberately emitted first (parent.py
         # `_handle_child_death` step 1) and the post-mortem — signal
         # attribution, streak write, dial — is step 2, several awaits and one

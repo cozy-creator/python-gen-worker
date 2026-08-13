@@ -174,7 +174,7 @@ def test_hf_binding_resolution_is_rejected_keeps_declared() -> None:
 def test_regate_runs_after_resolutions_and_is_idempotent() -> None:
     """apply_model_resolutions re-runs gate_functions against the rebound
     bindings; gate marks are gate-owned (cleared on re-gate), setup failures
-    survive. SDK v2 (pgw#647) deleted the compute-capability gate (the fit
+    survive. SDK v2 deleted the compute-capability gate (the fit
     ladder owns precision), so the regate mechanic is pinned on the
     surviving missing-library gate."""
     spec = _spec(resources=Resources(gpu=True, libraries=("nunchaku",)))
@@ -209,7 +209,7 @@ _DIGEST_PICK = "acme/z-image@sha256:" + "1a" * 32
 
 def test_rebind_pick_is_the_single_fold() -> None:
     """pgw#1148: the ladder/`flavor=` arm is GONE. A hub pick is a DIGEST
-    (th#1803) or a cast, and the round-trip guard is unchanged."""
+ or a cast, and the round-trip guard is unchanged."""
     b = Hub("acme/z-image")
 
     # hub path: resolved_ref is checked, cast is stamped

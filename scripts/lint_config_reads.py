@@ -37,7 +37,7 @@ Baselining follows th#1383's precedent on the Go side: the allowlist is seeded
 with today's accepted sites so the gate is green on arrival, then burned down. A
 gate that fails on day one gets switched off.
 
-Also enforced here (pgw#929): every owned-namespace env name read anywhere in
+Also enforced here: every owned-namespace env name read anywhere in
 `src/` must be known to `config.loader` — either bound to a Settings field or
 listed in `_OWNED_NON_SETTINGS`. That is what keeps the loader's
 unknown-key refusal honest: the refusal is only safe while its exemption set is
@@ -222,7 +222,7 @@ def load_allowlist() -> Tuple[Dict[Tuple[str, str], str], List[str]]:
 
 
 # ---------------------------------------------------------------------------
-# pgw#995 — the BEHAVIOUR axis
+# the BEHAVIOUR axis
 # ---------------------------------------------------------------------------
 #
 # The six classifications above answer WHERE a read happens relative to the

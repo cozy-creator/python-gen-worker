@@ -1,4 +1,4 @@
-"""Per-COMPONENT load-time dtype facts (pgw#667).
+"""Per-COMPONENT load-time dtype facts.
 
 A component's dtype is part of its RESIDENT IDENTITY, decided AT LOAD — not a
 post-load adjustment. Upcasting a bf16-loaded tensor recovers no precision; it
@@ -23,7 +23,7 @@ COMPONENT CLASS name rather than by family or by endpoint:
   disagreeing about the Wan VAE's load dtype would make one checkpoint mean
   different math depending on which one served it.
 
-Deliberately NOT catalog recipe data (th#1116): a numeric-stability floor is an
+Deliberately NOT catalog recipe data: a numeric-stability floor is an
 architecture fact, identical for every checkpoint of the family, and a per-repo
 value would let one bad metadata row silently degrade output. Recipe data keeps
 what a checkpoint genuinely varies (steps, guidance, shift).

@@ -1,6 +1,6 @@
 """The ONE component-name vocabulary.
 
-pgw#740 (B5/B6): the tuple ``("transformer", "unet", ...)`` was copy-pasted into
+the tuple ``("transformer", "unet", ...)`` was copy-pasted into
 20+ modules across ``models/`` and ``convert/``. The copies disagreed — Wan MoE's
 ``transformer_2`` and LTX's ``connectors`` were absent from several of them, which
 is how components ended up silently un-offloaded and un-quantized.

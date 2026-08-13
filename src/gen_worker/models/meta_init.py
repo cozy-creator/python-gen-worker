@@ -1,7 +1,7 @@
 """pgw#1123: the ONE meta-instantiation seam, owned and proven in-process.
 
 Weight-free instantiation is not an optimization any more — it is step 1 of
-every boot-time adopt (§4.27) and of the zero-download forge (pgw#1080). The
+every boot-time adopt (§4.27) and of the zero-download forge. The
 key a pod derives, and therefore whether it can ASK the hub for a cell at all,
 begins with building a compile target from code + config alone.
 

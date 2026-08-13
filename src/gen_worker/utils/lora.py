@@ -1,4 +1,4 @@
-"""Per-request LoRA adapter overlays with adapter residency (gw#393 + gw#399).
+"""Per-request LoRA adapter overlays with adapter residency.
 
 ``RunJob.models[].loras`` reaches the executor, which materializes each
 adapter snapshot via the normal ``ensure_local`` path and parses + validates
@@ -127,7 +127,7 @@ def _te_prefix_to_component() -> tuple[tuple[str, str], ...]:
 
 
 # Config fields that DISCRIMINATE denoiser structure. The UNet set alone
-# (pgw#740) made every DiT fingerprint to "|||" — a transformer has none of
+#  made every DiT fingerprint to "|||" — a transformer has none of
 # those fields — so two structurally different DiTs shared one normalized-split
 # cache entry. The fingerprint is generic: it takes whatever the module
 # actually declares, and says so when it declares nothing.
@@ -148,7 +148,7 @@ def _denoiser_fingerprint(pipe: Any) -> str:
     checkpoints sharing a pipeline class but differing in block layout must
     not share a normalized-split cache entry.
 
-    pgw#740: the field list must cover DiTs, not only UNets. A fingerprint that
+    the field list must cover DiTs, not only UNets. A fingerprint that
     resolves to nothing is NOT a cache key — it is a collision — so a module
     whose config declares none of these fields falls back to its class name
     plus its parameter shape signature rather than to an empty string.
@@ -193,7 +193,7 @@ def _split_adapters(
     Branch entries are (state_dict, weight, ref) — the
     models.w8a8_lora.apply_branch_adapter_set contract.
 
-    gw#679: the denoiser half is ROUTED to the component its keys name, so a
+    the denoiser half is ROUTED to the component its keys name, so a
     dual-expert MoE lands each half of a distillation on ITS expert. The
     routed slices are cached with the split (not rebuilt per request) —
     the branch staging cache keys on ``id(sd)``, and a fresh dict every
@@ -217,7 +217,7 @@ def _split_adapters(
                 # RAW keys decide routability on a multi-expert pipeline —
                 # the converter above rewrites every non-diffusers key onto
                 # the high-noise prefix whatever expert it came from
-                # (gw#679). Only adapters that HAVE a denoiser half owe a
+                # . Only adapters that HAVE a denoiser half owe a
                 # declaration; a text-encoder-only overlay is unaffected.
                 w8a8_lora.require_component_declaration(
                     components, a.state_dict, ref=a.ref)
@@ -329,7 +329,7 @@ _LORA_PAIR_RE = re.compile(
 
 
 def _reject_zero_delta(state_dict: Dict[str, Any], *, ref: str = "") -> None:
-    """th#1036 attach-but-invisible rule, ONE implementation (ie#552): the
+    """th#1036 attach-but-invisible rule, ONE implementation: the
     adapter's low-rank product must be provably nonzero, or attaching it
     silently serves the bare base model (e.g. undistilled output labeled
     turbo). Delta per module is ``up @ down`` — a pair with EITHER half
@@ -473,7 +473,7 @@ class _PipeAttachments:
 
 
 class AdapterResidency:
-    """Per-pipeline attachment registry (gw#399), keyed by model ref.
+    """Per-pipeline attachment registry, keyed by model ref.
 
     ``activate`` attaches missing adapters (load_lora_weights — the ~1s step,
     paid once per adapter per pipeline), toggles the active set, and LRU-evicts
@@ -514,7 +514,7 @@ class AdapterResidency:
         targeting LoCon) fall back to the whole-adapter peft path when the
         pipeline supports it — capability preserved, branch primary.
 
-        gw#679: a pipeline's denoiser is a SET. Each adapter half is routed
+        a pipeline's denoiser is a SET. Each adapter half is routed
         to the expert its keys name and the set is applied atomically; the
         peft fallback is refused outright on a multi-expert pipeline
         (diffusers expresses the second expert as a ``load_lora_weights(...,
@@ -545,7 +545,7 @@ class AdapterResidency:
         with self._lock:
             st = self._state(ref, pipe)
             try:
-                # pgw#722 F3: a lifted binding exists only when the AOT arm
+                # a lifted binding exists only when the AOT arm
                 # installed it (flag-gated F2) — its presence IS the routing
                 # fact. An armed exported artifact reads the adapter from the
                 # lifted flat pair (call inputs); a buffer copy would be
@@ -682,7 +682,7 @@ class AdapterResidency:
             try:
                 targets = w8a8_lora.branch_targets(pipe)
                 if targets:
-                    # pgw#722 F3: a lifted denoiser deactivates through its
+                    # a lifted denoiser deactivates through its
                     # binding — zero-B must land in the flat pair the armed
                     # artifact reads, not in the orphaned canonical buffers.
                     for model in targets.values():
@@ -697,7 +697,7 @@ class AdapterResidency:
                     "[request_id=%s] lora branch clear failed", request_id,
                     exc_info=True,
                 )
-                # pgw#760: adapter deltas may still be live in the branch
+                # adapter deltas may still be live in the branch
                 # buffers — the NEXT tenant's request can render with THIS
                 # request's LoRA. Serving-correctness, never log-only.
                 activity_mod.emit_event(
@@ -799,7 +799,7 @@ class AdapterResidency:
                 logger.info("lora attachment evicted (LRU): %s", victim)
             except Exception as exc:
                 logger.warning("lora eviction failed for %s", victim, exc_info=True)
-                # pgw#760: the attachment is dropped from bookkeeping but its
+                # the attachment is dropped from bookkeeping but its
                 # tensors stay on the pipeline — repeated failures creep VRAM.
                 activity_mod.emit_event(
                     activity_mod.KIND_LORA_HYGIENE,

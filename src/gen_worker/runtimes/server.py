@@ -27,7 +27,7 @@ from .llama import plan_for, resolve_gguf
 
 logger = logging.getLogger(__name__)
 
-# gw#666 (th#1166 finding B): a boot is bounded by SILENCE, never by a clock.
+# a boot is bounded by SILENCE, never by a clock.
 # The old `_DEFAULT_BOOT_TIMEOUT_S = 600.0` killed the child on a flat deadline
 # whose only liveness check was `proc.poll()` — "has not exited yet", which
 # says nothing about progress — while the engine was printing weight-load
@@ -154,7 +154,7 @@ class ServerProcess:
         """Boot is over when the health URL answers. It has FAILED only when
         the process died or stopped emitting output for its stall window —
         every log line the engine prints is proof it is still loading, so a
-        slow cold load is never a failure (gw#666)."""
+        slow cold load is never a failure."""
         delay = 0.25
         while True:
             code = proc.poll()
@@ -190,7 +190,7 @@ def vllm_server(
 
     There is no boot-duration knob: how long a cold load legitimately takes
     is not something an endpoint can know in advance, and the boot is bounded
-    by engine silence instead (gw#666).
+    by engine silence instead.
     """
     p = port or free_port()
     return ServerProcess(
@@ -219,7 +219,7 @@ class DegradingBoot:
             try:
                 handle = proc.start()
                 if rung > 0:
-                    # pgw#760: the engine is serving on a degraded rung
+                    # the engine is serving on a degraded rung
                     # (fewer GPU layers / CPU-only) — a quality decision the
                     # planned rung's failure would otherwise hide.
                     activity_mod.emit_event(
@@ -254,7 +254,7 @@ def llama_server(
     ``model_source`` may be the ``.gguf`` file or a snapshot dir (the
     Hub()-injected path) — dirs resolve to their single GGUF model. Unless
     the caller pins ``-ngl``/``-c`` in ``extra_args``, ``-ngl`` and context
-    are sized to the free-VRAM budget (gw#402) and the boot degrades
+    are sized to the free-VRAM budget and the boot degrades
     through fewer GPU layers rather than failing.
     """
 

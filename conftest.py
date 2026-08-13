@@ -1,4 +1,4 @@
-"""Repo-root pytest plugin: the skip census (pgw#966).
+"""Repo-root pytest plugin: the skip census.
 
 **The defect this exists to remove.** In a green run a skipped row and a passing
 row are the same character of nothing — no line a reader looks at, no way to

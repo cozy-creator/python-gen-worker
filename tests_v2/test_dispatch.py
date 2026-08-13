@@ -125,7 +125,7 @@ def test_dispatch_load_serve_and_upload_walk(hub, blob_host, upload_sink) -> Non
             request_id="r-stage", attempt=1, function_name="staged-generate",
             input_payload=catalog.row("staged-generate").input_bytes(prompt="a cat"),
             output_mode=pb.OUTPUT_MODE_INLINE,
-            # pgw#767: the ~200 KiB result envelope is now always really
+            # the ~200 KiB result envelope is now always really
             # stored, so this dispatch needs the capability token every other
             # large-result dispatch needs. It passed without one only because
             # the inline shortcut skipped the upload and handed back a ref for
@@ -168,7 +168,7 @@ def test_dispatch_load_serve_and_upload_walk(hub, blob_host, upload_sink) -> Non
         )
         assert upload_sink.requests, "the real upload sink was never hit"
         path, body = upload_sink.requests[-1]
-        # th#1722 §C / pgw#1138: the org rides the CREDENTIAL, not the path —
+        # the org rides the CREDENTIAL, not the path —
         # ORG is dispatched on the job and must not appear in the URL.
         assert path == MEDIA_UPLOADS_PATH
         assert ORG not in path
@@ -415,7 +415,7 @@ def test_dispatch_refusal_matrix_is_typed_and_named(hub, blob_host) -> None:
         # An unknown function is refused BEFORE acceptance — no accept race.
         assert conn.count(is_accept_for("r-unknown")) == 0
 
-        # Missing model (th#763): a dispatch for a residency-gated function is
+        # Missing model: a dispatch for a residency-gated function is
         # never a terminal fault pinned on the caller and never a silent hang
         # — the worker emits the typed missing_snapshot decline the hub
         # re-mints from, and once residency arrives the SAME parked job

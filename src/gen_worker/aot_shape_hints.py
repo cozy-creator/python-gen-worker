@@ -1,4 +1,4 @@
-"""The symbolic-shape facts the export handoff must carry (pgw#998).
+"""The symbolic-shape facts the export handoff must carry.
 
 THE DEFECT, measured on torch 2.13.0+cu130, CPU, by the micro-mint rig.
 ``aot_compile_pool`` saves each ``ExportedProgram`` and ``aot_compile_child``

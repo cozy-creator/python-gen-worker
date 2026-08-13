@@ -92,7 +92,7 @@ def _load_and_key(
     )
     execution_lane = cc.cell_base_execution_lane(sl.obj)
     cfg = _ContractCfg()
-    # pgw#1059: the pre-trace surface is the obligation identity
+    # the pre-trace surface is the obligation identity
     # (fleet_cells.arm_identity), not a cell key.
     from gen_worker import fleet_cells
     identity = fleet_cells.arm_identity(

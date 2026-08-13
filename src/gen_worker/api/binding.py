@@ -9,7 +9,7 @@ single ``model=`` binding, the ``setup()``/handler parameter name).
     Civitai("123456", version="789012")
     ModelScope("circlestone-labs/Anima", files=("split_files/*.safetensors",))
 
-``ModelRef`` (pgw#511) is the ONE structured type: ``source`` is an explicit
+``ModelRef`` is the ONE structured type: ``source`` is an explicit
 field (never inferred from which factory built the value), ``path`` is the
 bare repo/model id. ``Hub``/``HF``/``Civitai``/``ModelScope`` are thin
 FACTORY FUNCTIONS over ``ModelRef`` — sugar, not a second type — that pin
@@ -63,7 +63,7 @@ def _clean_storage_dtype(v: object) -> str:
 
 
 class ModelRef(msgspec.Struct, frozen=True):
-    """ONE structured model reference (pgw#511): ``source`` is explicit, never
+    """ONE structured model reference: ``source`` is explicit, never
     inferred from shape or which factory built the value. Pure identity +
     fetch scope — no permission fields live here (pgw#523: overlay
     permission is a slot-policy concern, not an identity-struct flag).
@@ -183,7 +183,7 @@ def Hub(
 ) -> ModelRef:
     """Tensorhub-backed binding: ``Hub("owner/repo", tag=, storage_dtype=, components=)``.
 
-    ``components=`` (pgw#505) fetches only the named pipeline component
+    ``components=`` fetches only the named pipeline component
     subfolders (+ root config files) instead of the whole repo — e.g. a
     full SDXL checkpoint bound only for its VAE:
     ``Hub("owner/sdxl-repo", components=("vae",))``.
@@ -208,7 +208,7 @@ def HF(
 
     ``files`` are ``snapshot_download`` ``allow_patterns`` globs — set them to
     fetch only specific files (ComfyUI / split-checkpoint repos with no
-    ``model_index.json``). ``components=`` (pgw#505) is the diffusers-layout
+    ``model_index.json``). ``components=`` is the diffusers-layout
     counterpart: name the pipeline component subfolders to fetch (e.g.
     ``components=("unet", "text_encoder")``); root config files
     (``model_index.json`` + other root ``*.json``) are always kept. When both
@@ -275,9 +275,9 @@ def wire_ref(binding: Binding) -> WireRef:
 
 def component_overrides(binding: Binding) -> tuple[tuple[str, WireRef], ...]:
     """The ``(component, canonical ref)`` substitutions ``binding`` carries
-    (pgw#617), normalized and sorted by :class:`ModelRef` itself.
+, normalized and sorted by :class:`ModelRef` itself.
 
-    pgw#982: this and :func:`binding_wire_refs` live HERE, beside the field
+    this and :func:`binding_wire_refs` live HERE, beside the field
     they read — they answer "what does this binding resolve to", which is not
     an executor internal. Every consumer (the executor, the rotation preload
     driver) names the SAME derivation, so placement semantics cannot fork.
@@ -300,7 +300,7 @@ def rebind_pick(
     resolved_ref: str = "",
     cast: str = "",
 ) -> Binding:
-    """THE fold of a hub pick into a binding (gw#494): the HelloAck path
+    """THE fold of a hub pick into a binding: the HelloAck path
     (``resolved_ref`` + ``cast``).
 
     ``resolved_ref`` is authoritative when given — since th#1803 the hub's

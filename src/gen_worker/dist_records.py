@@ -13,7 +13,7 @@ Two consumers, ONE derivation (the pgw#1059 fence pattern):
 * :func:`digest_for` — per-FILE identity for ``env_seal``'s native-library
   manifest (the seal's ``loaded_libs`` fact and the live substitution check).
 * :func:`record_texts` — per-DISTRIBUTION RECORD text for
-  ``compile_cache.toolchain_digest``'s binary half (pgw#710), which has always
+  ``compile_cache.toolchain_digest``'s binary half, which has always
   read exactly these files.
 
 **The digest is byte-identical to the hash it replaces.** RECORD stores
@@ -165,7 +165,7 @@ def _scan() -> _Scan:
 def record_texts() -> Mapping[str, str]:
     """``{distribution name (lowercased): RECORD text}`` for every installed
     distribution that ships one — ``compile_cache.toolchain_digest``'s
-    per-PACKAGE binary half (pgw#710), reading the same scan the seal's
+    per-PACKAGE binary half, reading the same scan the seal's
     per-FILE half reads."""
     return _scan().texts
 

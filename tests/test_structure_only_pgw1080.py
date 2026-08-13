@@ -125,7 +125,7 @@ def test_the_structure_EXPORTS_and_AOT_COMPILES(tree: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The structure NEVER holds values — not even for the pgw#984 proof (pgw#1199)
+# The structure NEVER holds values — not even for the pgw#984 proof
 # ---------------------------------------------------------------------------
 
 
@@ -211,7 +211,7 @@ def test_not_honored_is_a_DISTINCT_type_from_the_buildable_strand() -> None:
     real-weight mint. A composition that discarded a target that DID build
     weight-free raises ``StructureNotHonored``; falling back there would export
     ~weight-scale real tensors while reporting weightless — the silent z-image
-    40 GiB `retryable` OOM (ie#638). The mint child tells them apart by TYPE, so
+    40 GiB `retryable` OOM. The mint child tells them apart by TYPE, so
     the subclass relationship (broad ``except`` still sees "unsupported") must
     hold WHILE the concrete type stays distinguishable."""
     assert issubclass(so.StructureNotHonored, so.StructureOnlyUnsupported)
@@ -232,7 +232,7 @@ def test_the_real_load_seam_raises_NOT_HONORED_on_a_swallowed_injection(
     ``_load_injected_model`` raises ``StructureNotHonored`` (NOT the buildable
     strand). The mint child's three-line handler turns exactly this type into a
     ``PreflightRefused`` so the real-weight export never starts; conflating it
-    with the strand is what let z-image OOM ~40 GiB as `retryable` (ie#638)."""
+    with the strand is what let z-image OOM ~40 GiB as `retryable`."""
     from gen_worker.cli import run as run_mod
     from gen_worker.models import provision
 

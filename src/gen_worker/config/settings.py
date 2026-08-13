@@ -28,7 +28,7 @@ avoid pulling in pydantic. The source-loader layering (env → .env → secrets 
 """
 import msgspec
 
-# gw#668 sentinel: no boot-only environment (``WORKER_CONFIG_GENERATION``) was
+# no boot-only environment (``WORKER_CONFIG_GENERATION``) was
 # ever injected into this process. Distinct from generation 0, which is a real
 # — and genuinely ancient — injected generation.
 BOOT_CONFIG_GENERATION_ABSENT = -1
@@ -60,7 +60,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Path to the discovery manifest (endpoint.lock). Default is the baked
     # container location; non-container runs (e2e, bare-metal dev) override it.
     endpoint_lock_path: str = "/app/.tensorhub/endpoint.lock"
-    # pgw#848 / Paul: NOT "the worker's JWT". It is the BOOTSTRAP copy — the
+    # NOT "the worker's JWT". It is the BOOTSTRAP copy — the
     # value the hub injected at pod create, frozen there forever and updated by
     # nothing. The live credential is rotated over the scheduler stream at ~80 %
     # of TTL, and `gen_worker.worker_credential` is the ONLY source of truth for
@@ -75,7 +75,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # reader is now an AttributeError at the call site, not a stale string. Read
     # this field from `worker_credential` and nowhere else.
     bootstrap_worker_jwt: str = ""
-    # pgw#763 delta 1: the worker's release identity, delivered SEPARATELY from
+    # the worker's release identity, delivered SEPARATELY from
     # the JWT. Under the process split the compute child holds no JWT (the
     # parent strips it), so it cannot read `release_id` out of the claims — but
     # the intent registry and every lifecycle snapshot are keyed on it. A claim
@@ -86,14 +86,14 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Runtime introspection (set by the RunPod runtime; not configuration).
     runpod_pod_id: str = ""
 
-    # th#1087: local mutable-config snapshot file (atomic-rewritten on each
+    # local mutable-config snapshot file (atomic-rewritten on each
     # config-generation push; per-invoke subprocesses read it). Empty =
     # runtime_config.DEFAULT_SNAPSHOT_PATH.
     config_snapshot_path: str = ""  # GEN_WORKER_CONFIG_SNAPSHOT_PATH
     # Config generation whose boot-only environment was injected when this pod
     # was created. Never inferred from the first desired-state command.
     #
-    # gw#668: the DEFAULT is the sentinel -1, meaning "no boot-only
+    # the DEFAULT is the sentinel -1, meaning "no boot-only
     # environment was ever injected into this process" — which is not the same
     # fact as "the injected boot config is generation 0". Tensorhub injects
     # WORKER_CONFIG_GENERATION only into pod-launch env, so a host-process
@@ -107,7 +107,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # variant it selected for this pod.
     worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
 
-    # pgw#931 VIOLATION-A #14/#15: where the post-mortem boot record is written.
+    # where the post-mortem boot record is written.
     # It had NO field at all and was read raw in three places, which is why the
     # parent and the child could disagree about the carrier. Empty = let
     # `postmortem` pick a DURABLE default (the model-cache volume when it is not
@@ -125,7 +125,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # models/provision.py::resolve_local_path).
     tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
     tensorhub_cas_dir: str = ""    # TENSORHUB_CAS_DIR
-    # th#850 managed-tier ruling (gw#599): endpoint-scoped datacenter-warm
+    # endpoint-scoped datacenter-warm
     # fill source (RunPod network volume mount), tried before R2. Never the
     # CAS root itself — see models/cache_paths.py::tensorhub_fill_source_dir.
     tensorhub_fill_source_dir: str = ""  # TENSORHUB_FILL_SOURCE_DIR
@@ -139,7 +139,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # (content_credentials.py). Inline *_PEM carries the PEM content itself —
     # the hub injects it into pod env at launch (RunPod pods have no file
     # mounts) — and takes precedence over *_PATH. Chain = leaf first.
-    # th#1307: there is NO key field. The PRIVATE KEY never reaches a pod;
+    # there is NO key field. The PRIVATE KEY never reaches a pod;
     # the hub signs claims over POST /v1/worker/c2pa/sign. A pod that finds
     # GEN_WORKER_C2PA_KEY_PEM/_KEY_PATH in ANY config source refuses to start
     # — env via content_credentials._refuse_pod_private_key_material (a

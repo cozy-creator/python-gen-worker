@@ -1,4 +1,4 @@
-"""Mandatory, fused, file-parallel snapshot verification (pgw#769 / pgw#781).
+"""Mandatory, fused, file-parallel snapshot verification.
 
 This is a LOAD-BEARING SECURITY CONTROL, not an optimization. A materialized
 snapshot can come from a volume shared across releases and pods, so "the bytes
@@ -65,7 +65,7 @@ def clear_memo() -> None:
 @dataclass(frozen=True)
 class VerifyTarget:
     """One file to verify. ``ref`` is ALGORITHM-TAGGED — an untagged ref is an
-    unreadable digest, i.e. CORRUPT, not "nothing to check" (pgw#871). ``size``
+    unreadable digest, i.e. CORRUPT, not "nothing to check". ``size``
     of 0 means the manifest declared none."""
 
     path: Path

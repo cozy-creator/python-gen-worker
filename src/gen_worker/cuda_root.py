@@ -1,4 +1,4 @@
-"""Compose the CUDA root AOTInductor's host compile needs (pgw#1017, pgw#823).
+"""Compose the CUDA root AOTInductor's host compile needs.
 
 ``g++`` is necessary and not sufficient. AOTInductor emits a C++ wrapper and
 links a real ``.so``, and torch's ``cpp_extension`` has to find a CUDA tree to

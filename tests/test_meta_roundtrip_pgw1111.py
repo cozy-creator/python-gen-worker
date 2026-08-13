@@ -3,7 +3,7 @@ entry-compile pool's process boundary.
 
 Why this exists, measured rather than asserted
 ----------------------------------------------
-``fc77b923`` (pgw#1080) made every production mint weight-free, and
+``fc77b923`` made every production mint weight-free, and
 ``aot_mint`` then FORCED ``parallel = False`` for exactly those mints because a
 fake-parameter ``ExportedProgram`` could not survive ``torch.export.save`` ->
 ``load``. So the entry pool became dead code fleet-wide and every mint ran K=1,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collapse changelog.d/ fragments into a CHANGELOG.md section at cut time.
 
-pgw#968: every lane appending to one mutable CHANGELOG.md made a conflict on
+every lane appending to one mutable CHANGELOG.md made a conflict on
 `dev` near-certain for any PR that sat through a sibling merge. Lanes now write
 changelog.d/<issue>.md -- a path nobody else touches -- and a cut concatenates
 them here.

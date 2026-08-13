@@ -65,7 +65,7 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 def _sealed_cell(path: Path, **over: Any) -> Path:
     """A REAL sealed cell: a tarball carrying a readable `metadata.json`.
 
-    pgw#1098: these fixtures used to write raw bytes (`b"cell"`) and rely on
+    these fixtures used to write raw bytes (`b"cell"`) and rely on
     `try_read_metadata` swallowing the resulting error into `None`. That made
     every test here silently exercise the UNREADABLE-envelope path while
     claiming to test the arm's refusal classification — the same

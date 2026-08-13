@@ -2,7 +2,7 @@
 retry-loop on a nameless OSError.
 
 pgw#1047 measured the defect on a paid L40S: the hub's seed path dropped the
-sdxl deploy's ``vae`` component override (th#1715) while th#1711 had already
+sdxl deploy's ``vae`` component override while th#1711 had already
 narrowed the outbound snapshot to exclude ``vae/``, so the pod fetched a
 vae-less tree, loaded the composition with nothing substituted, and diffusers
 raised

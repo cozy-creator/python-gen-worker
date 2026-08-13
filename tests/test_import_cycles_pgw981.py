@@ -21,7 +21,7 @@ import: a deferred import keeps the cycle and hides it again.
 
 A module that cannot import because an OPTIONAL EXTRA is absent is not a cycle
 and is reported as such — 429 of this package's function-body imports exist
-precisely so `import gen_worker` works without torch (pgw#976).
+precisely so `import gen_worker` works without torch.
 """
 
 from __future__ import annotations

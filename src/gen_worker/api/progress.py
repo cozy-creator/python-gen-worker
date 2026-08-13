@@ -1,4 +1,4 @@
-"""Per-step progress helper for diffusers pipelines (pgw#482).
+"""Per-step progress helper for diffusers pipelines.
 
 Free function over a context method so :class:`RequestContext` keeps its
 capped surface. Does not import diffusers — it just returns a callable that
@@ -78,7 +78,7 @@ def diffusers_step_callback(
         nonlocal last_emit
         ctx.raise_if_cancelled()
         step = int(step_index) + 1  # fires after the step ends -> 1-based count
-        # th#1111: every step end is a timing mark, un-throttled (the emit
+        # every step end is a timing mark, un-throttled (the emit
         # below is throttled; the measurement must not be). This is what gives
         # denoise total + per-step timing on all 14 endpoints wired to this
         # callback with no endpoint change.

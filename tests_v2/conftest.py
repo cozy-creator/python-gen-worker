@@ -1,4 +1,4 @@
-"""tests_v2 shared fixtures — the v2 suite's ONE fixture surface (pgw#808).
+"""tests_v2 shared fixtures — the v2 suite's ONE fixture surface.
 
 Every v2 suite builds on exactly this interface; read this docstring before
 writing a new suite. House style is non-negotiable: real worker over real
@@ -82,7 +82,7 @@ for _p in (str(REPO_ROOT), str(REPO_ROOT / "src"), str(REPO_ROOT / "tests")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# pgw#802: point the postmortem carriers off the host BEFORE anything imports
+# point the postmortem carriers off the host BEFORE anything imports
 # gen_worker.postmortem (paths resolve once at import). Subprocess boots
 # inherit os.environ, and a crash streak recorded into the shared /tmp
 # registry poisons every later boot in every lane.
@@ -90,7 +90,7 @@ os.environ.setdefault(
     "GEN_WORKER_BOOT_RECORD",
     str(Path(tempfile.mkdtemp(prefix="pgw-v2-postmortem-")) / "boot-record.json"),
 )
-# Deterministic CPU encode (gw#476): never probe or engage NVENC from tests.
+# Deterministic CPU encode: never probe or engage NVENC from tests.
 os.environ.setdefault("GEN_WORKER_VIDEO_ENCODER", "x264")
 
 import gen_worker  # noqa: E402
@@ -136,7 +136,7 @@ def _fresh_process_settings():
 
 
 def pytest_configure(config):
-    # pgw#1049: same treatment as tests/conftest.py — the declared
+    # same treatment as tests/conftest.py — the declared
     # interpreter env (PYTHONHASHSEED=0), imposed by ONE re-exec with global
     # capture stopped first so the re-exec'd run still owns the terminal.
     # xdist workers inherit the env from the re-exec'd master.

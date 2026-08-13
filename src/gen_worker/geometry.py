@@ -292,7 +292,7 @@ def fit_to_native(
             fitted_refs.append(_edge_pad(image, ref_bucket, box))
         fitted = tuple(fitted_refs)
         if preset is None:
-            # ie#600: compose output geometry is a FREE parameter the caller
+            # compose output geometry is a FREE parameter the caller
             # supplies. It must NOT silently inherit references[0]'s aspect —
             # that inheritance is today's undocumented behaviour, not a design.
             raise ValidationError(
@@ -431,7 +431,7 @@ def restore(
     stage = upscaler if upscaler is not None else _UPSCALER
     enlarged = stage(framed, plan.target_size) if stage is not None else None
     if enlarged is None or enlarged.size != plan.target_size:
-        # ie#599: no image super-resolution capability exists in the fleet.
+        # no image super-resolution capability exists in the fleet.
         return RestoreResult(
             image=framed, size=framed.size, upscaled=False, composited=False,
             note=(

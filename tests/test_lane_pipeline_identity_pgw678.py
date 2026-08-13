@@ -13,7 +13,7 @@ gen-worker 0.67.1 image, same `wai-illustrious#fp8-w8a8` base, same
 `utils/lora.py` is byte-identical across 0.66.0 and 0.67.1, so the defect was
 never in the adapter code. It is an OBJECT IDENTITY defect in the executor:
 
-  * sharing is automatic by content address (pgw#647), so every component of a
+  * sharing is automatic by content address, so every component of a
     Slot-declared pipeline slot enters the share plan;
   * an OVERRIDDEN component is popped OUT of that plan (its bytes differ from
     the base's), so the lane acquires a non-empty EXCLUSIVE module set;
@@ -157,7 +157,7 @@ def _key(component: str, digest: str) -> Any:
 
 def _register(pipe: Any, *, override: bool) -> _ExecStub:
     """Book the lane exactly as setup injection does. `override=True` is the
-    th#980 shape: the overridden component is popped out of the share plan, so
+    the overridden component is popped out of the share plan, so
     it becomes the lane's EXCLUSIVE module."""
     ex = _ExecStub()
     shared = {"transformer": _key("transformer", "d-transformer")}

@@ -300,7 +300,7 @@ def test_free_vram_reports_the_tightest_group_never_the_pod_sum(
     # The REPORTING half of pgw#648: a 4-card pod that reports the sum invites
     # the hub to admit a model that fits on no single card.
     #
-    # pgw#776 corrected the direction: MAX across groups was honest per JOB and
+    # MAX across groups was honest per JOB and
     # dishonest per POD, because the hub admits G concurrent jobs against this
     # ONE scalar. The MIN is the only safe single number.
     torch = pytest.importorskip("torch")
@@ -314,7 +314,7 @@ def test_free_vram_reports_the_tightest_group_never_the_pod_sum(
     monkeypatch.setenv(
         ENV_VAR, '{"gpu_count":4,"gpus_per_execution_group":1,"execution_groups":4}')
     # 4x1: four independent pools, and the hub may fill all four — so the
-    # honest offer is the tightest one, not the roomiest (pgw#776).
+    # honest offer is the tightest one, not the roomiest.
     assert lifecycle.free_vram_bytes() == 10 * _GiB
 
     monkeypatch.setenv(

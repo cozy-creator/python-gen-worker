@@ -36,7 +36,7 @@ equivalence test below is the part that stops the next drift: it asserts the
 two are the SAME construction, not merely that both are non-empty. The graphs
 the child traces are the graphs the parent must later hit, so a child that
 resolved DIFFERENT slot defaults would trace different shapes and the parent's
-proof would miss — the "mint succeeded, no artifact" class (pgw#815).
+proof would miss — the "mint succeeded, no artifact" class.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ def test_the_childs_warm_job_resolves_the_endpoints_declared_slots(spec) -> None
 
 def test_the_child_and_the_executor_build_the_SAME_context(spec) -> None:
     """The structural pin. Two constructions of one thing were free to drift,
-    and did — four times now (pgw#816, #822, #825, #827) in this exact class.
+    and did — four times now in this exact class.
     """
     with tempfile.TemporaryDirectory() as tmp:
         child = warmup.warm_context(

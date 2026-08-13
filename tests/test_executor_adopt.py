@@ -214,7 +214,7 @@ def _artifact(
 
     pgw#1181 retargeted this from `compile_cache.pack` — the whole-cell
     `torch-inductor-cache` tarball, whose last producer died with
-    `mint_artifact` (pgw#1178) and which is now deleted — onto the exported
+    `mint_artifact` and which is now deleted — onto the exported
     `aot-inductor` cell, through the same shared harness the publish-path
     tests use. The rows below stub `_enable_compiled`, so what they need from
     this file is that it EXISTS at a path the executor's snapshot plumbing
@@ -689,7 +689,7 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
     assert any(
         "STORE_SERVED_BOOT_COMPILED" in r.message for r in caplog.records
     ), "a store-served boot that hid a real compile must alarm loudly"
-    # pgw#923: the alarm has its OWN typed event. It used to ride
+    # the alarm has its OWN typed event. It used to ride
     # `ModelEvent{ADOPTED}` with `duration_ms` redefined to mean "inductor
     # compile wall" — a second meaning for the one field the adoption
     # measurement lane (`compile_cache_adopt`) percentiles over, on the only
@@ -852,7 +852,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
     _NoProofEndpoint.setups = _NoProofEndpoint.warmups = _NoProofEndpoint.runs = 0
 
-    # pgw#672: the disproven mandatory-lane mint DEGRADES to explicit eager
+    # the disproven mandatory-lane mint DEGRADES to explicit eager
     # instead of failing the boot closed — the function stays dispatchable,
     # nothing is advertised, and the identity is quarantined in-process.
     asyncio.run(ex.ensure_setup(
@@ -871,7 +871,7 @@ def _sim_guard_closure(pipe, cfg, label=""):
             "verdicts": {}, "leaks": []}
 
 
-# pgw#1010: `_pending_mint_rig` and its two boot tests (pack-and-publish-only-
+# `_pending_mint_rig` and its two boot tests (pack-and-publish-only-
 # the-proven-capture, unproven-fails-closed-and-never-publishes) covered the
 # IN-PROCESS capture — the executor arming a live pipe cold, packing the dir
 # its own warmup filled, and publishing those bytes. That whole route built a
@@ -1105,7 +1105,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
         await asyncio.sleep(0)
 
     asyncio.run(_trip())
-    # pgw#672: no reload churn, no function disable — serving continues.
+    # no reload churn, no function disable — serving continues.
     assert rec.stale is False
     assert "edit" not in ex.unavailable
     assert "generate" not in ex.unavailable
@@ -1113,7 +1113,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert tripped.active_compile_ref == ""
     assert ex.serving_tiers() == {"edit": "eager", "generate": "eager"}
     assert cc.cell_quarantined_in_process(cell_ref)
-    # pgw#1032: revocation is state-only. The `adopt_failed:runtime_guard`
+    # revocation is state-only. The `adopt_failed:runtime_guard`
     # ModelEvent terminated a hub-commanded adoption operation, and there is no
     # operation to terminate — the tier flip above is the wire-visible signal.
     assert _events(sent, pb.MODEL_STATE_FAILED) == []
@@ -1351,7 +1351,7 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
 
     from gen_worker import settings_authority
 
-    # Production boot order (pgw#719): the canonical config is imposed
+    # Production boot order: the canonical config is imposed
     # BEFORE any mint/artifact exists, so the cell's recorded seal and the
     # post-bootstrap arm state agree (the executor's pgw#654 TF32 bootstrap
     # is a no-op re-assertion of the same canonical values).
@@ -1744,7 +1744,7 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
 def _merged_execution_lane_endpoint(record_warm):
     """Two w8a8 lane pipes behind ONE handler (the qwen merged shape): the
     declared warmup can only exercise the t2i lane — edit needs an input
-    image, so its object has no warmup modality by design (gw#595)."""
+    image, so its object has no warmup modality by design."""
 
     @endpoint(
         models={
@@ -1840,7 +1840,7 @@ def test_w8a8_exercised_miss_degrades_despite_unexercised_sibling(
     ex, pipes, cell_ref, artifact = _wire_merged_execution_lane(
         specs, tmp_path, monkeypatch)
 
-    # pgw#672: the disproven proof DEGRADES to explicit eager — setup
+    # the disproven proof DEGRADES to explicit eager — setup
     # completes, nothing is advertised, and the gw#608 self-discriminating
     # counts (compile_seconds ~0 = crediting bug vs minutes = recompile)
     # land in the loud degrade record instead of a fatal raise.
@@ -1882,7 +1882,7 @@ def test_a_failed_warmup_proof_carries_the_fx_cache_state(
         cc, "fx_cache_failure_report",
         lambda: "live_keys=2; extern_current=libdevice.10.bc")
 
-    # pgw#672: the disproof degrades; the forensics ride the degrade record.
+    # the disproof degrades; the forensics ride the degrade record.
     with caplog.at_level(logging.ERROR, logger="gen_worker.executor"):
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
@@ -1954,7 +1954,7 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
         function_name=spec.name,
         models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
     )
-    # gw#587: the miss proceeds to the self-mint, IGNORING the inherited
+    # the miss proceeds to the self-mint, IGNORING the inherited
     # local/producer env cells (if the env were honored this would arm and
     # succeed); in a CUDA-less env the typed quantized refusal fires from
     # the self-mint exit.
@@ -2035,7 +2035,7 @@ def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, mo
     )
     monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
 
-    # pgw#672: no addressable compile target => the functions serve
+    # no addressable compile target => the functions serve
     # explicit eager; the boot never dies for a missing optimization.
     asyncio.run(ex.ensure_setup(spec, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
@@ -2271,14 +2271,14 @@ def test_runtime_guard_revokes_state_and_quarantines_the_cell(tmp_path):
     assert revoked.incarnation_id == active_id
     assert revoked.active_compile_ref == ""
     assert revoked.active_compile_snapshot_digest == ""
-    # pgw#672: the record is NOT marked stale and the aliases stay
+    # the record is NOT marked stale and the aliases stay
     # dispatchable — the object serves explicit eager; the identity is
     # quarantined process-wide, which is the half `fleet_cells` reads on the
     # arm path so this boot never re-arms the cell that just exploded.
     assert rec.stale is False
     assert spec.name not in ex.unavailable
     assert cc.cell_quarantined_in_process(active_ref)
-    # pgw#1032: no ModelEvent. The causal terminal belonged to a hub-commanded
+    # no ModelEvent. The causal terminal belonged to a hub-commanded
     # adoption operation, and there is no operation to terminate.
     assert _events(sent, pb.MODEL_STATE_FAILED) == []
 
@@ -2332,7 +2332,7 @@ def test_guard_revocation_between_intake_and_gpu_turn_fails_final_fence(
         await asyncio.sleep(0)
 
     asyncio.run(scenario())
-    # pgw#1032: revocation is state-only now; the causal ModelEvent went with
+    # revocation is state-only now; the causal ModelEvent went with
     # the adoption operation it used to terminate.
     assert _events(sent, pb.MODEL_STATE_FAILED) == []
 
@@ -2449,7 +2449,7 @@ def test_manifest_carries_compile_block():
         "shapes": [[768, 768], [1024, 1024]],
         "targets": ["transformer", "vae.decode"],
         "text_len": 0,
-        # pgw#654 gap #6: the class's per-lane pin union rides too.
+        # the class's per-lane pin union rides too.
         "text_lens": [0],
         "guidance_scales": [0.0, 5.0],
         "shape_contract_digest": cell.contract_digest(),
@@ -2495,7 +2495,7 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-# pgw#1032: `test_fresh_boot_advertises_candidate_cell_lookups` is deleted with
+# `test_fresh_boot_advertises_candidate_cell_lookups` is deleted with
 # `Executor.cell_lookups`. gw#605 wrote it to keep a fresh boot advertising
 # pre-load CANDIDATE keys so the hub could attach a stored cell before setup —
 # but those candidates are COMPUTED (kind="inductor") keys, and since pgw#1010
@@ -2506,12 +2506,12 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# gw#612: multi-lane self-mint — sibling handoff must complete, publish gated
+# multi-lane self-mint — sibling handoff must complete, publish gated
 # on full capture coverage (ie#501 run 26 / gw#611 qwen variant)
 # ---------------------------------------------------------------------------
 
 
-# pgw#1010: the two-lane IN-PROCESS mint boots that stood here
+# the two-lane IN-PROCESS mint boots that stood here
 # (`_dual_mint_boot` / `_routed_mint_boot` + three publish/withhold tests) are
 # deleted with the route they drove. Each armed live pipes cold, packed one
 # shared inductor capture and published the union as a family cell — a DYNAMO

@@ -69,7 +69,7 @@ class TinyUNet(nn.Module):
 
 
 def _declare() -> Any:
-    """The DECLARED path (pgw#739), not the hand-registered escape hatch: the
+    """The DECLARED path, not the hand-registered escape hatch: the
     lifted pair is derived by `aot_declaration.declared_inputs` and bound to
     the positional slots `install_lifted_lora_forward` now appends to the
     denoiser's signature."""
@@ -115,7 +115,7 @@ def _fresh_registry():
 def cell(tmp_path_factory, request) -> Dict[str, Any]:
     """ONE real two-arm mint, shared (an AOTI compile costs ~10s per entry).
 
-    pgw#1176: the mint yields TWO independently keyed artifacts rather than
+    the mint yields TWO independently keyed artifacts rather than
     one two-entry cell. ``by_entry`` indexes them by the class each one names,
     which is the addressing every row below wants — an entry NAMES its class,
     and that is what makes a per-class refusal bisectable.
@@ -305,7 +305,7 @@ def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(
         out = tmp_path / f"active{int(active)}"
         result = aot_mint.mint(
             pipe, _spec(), out)
-        # pgw#1176: the key SET, per entry name. One comparison now carries
+        # the key SET, per entry name. One comparison now carries
         # both halves this row used to assert apart (same classes, same keys),
         # and the length assert is what stops an empty mint passing it
         # vacuously.
@@ -351,7 +351,7 @@ def armed(cell, monkeypatch) -> Dict[str, Any]:
     `aot_serve.arm_entry` — stage -> verify -> load -> bind -> register, ONE
     graph class per call.
 
-    pgw#1176: this is the accretion loop, and it is the production shape
+    this is the accretion loop, and it is the production shape
     rather than a test convenience. Each entry arms whole or not at all and
     JOINS the target's registry, so the two classes below reach the dispatch
     through two independent arms — which is exactly what makes a single

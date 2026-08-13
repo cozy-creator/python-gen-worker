@@ -1,4 +1,4 @@
-"""SVDQuant flavor trees (gw#415) — build + mirror.
+"""SVDQuant flavor trees — build + mirror.
 
 A ``#svdq-fp4-rN`` / ``#svdq-int4-rN`` flavor is the base checkpoint's
 diffusers tree with the denoiser's plain weights replaced by ONE

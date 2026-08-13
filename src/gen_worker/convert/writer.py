@@ -12,7 +12,7 @@ safetensors_io) into one:
   - streaming_cast_snapshot / streaming_fp8_snapshot: whole-tree variants
   - merge_safetensors_by_offset: raw byte-range de-shard, zero decode
 
-th#1362: the re-shard planner (byte budgets, tensor packing, index.json
+the re-shard planner (byte budgets, tensor packing, index.json
 rewriting) is GONE. Every producer here emits exactly one file per component;
 reading a sharded input stays supported forever.
 
@@ -121,7 +121,7 @@ class IncrementalSafetensorsWriter:
 
     ``metadata`` (string-valued) is emitted as the header's ``__metadata__``.
 
-    pgw#1003: bytes go to a same-directory temp and reach ``output_path`` only
+    bytes go to a same-directory temp and reach ``output_path`` only
     via fsync -> os.replace -> fsync(dir), the durable-finalize shape the
     download side already uses (``hubio/fetch.py``, ``models/chunk_cas.py``).
     A hard-killed pod therefore leaves no truncated cast output under the
@@ -251,14 +251,14 @@ def _weight_component_dirs() -> frozenset[str]:
 
 
 #: Where a converted pickle is staged, beside the component it came from.
-#: One spelling, because there is one pickle reader (pgw#498).
+#: One spelling, because there is one pickle reader.
 PICKLE_CACHE_DIR = ".__pickle_cache__"
 
 
 def materialize_pickle_to_safetensors(pickle_path: Path, work_dir: Path) -> Path:
     """Convert a pickle weight file to safetensors (``weights_only=True``).
 
-    **The only pickle reader in this package** (pgw#498). Conversion ingests
+    **The only pickle reader in this package**. Conversion ingests
     ARBITRARY tenant-submitted repos, so every ``.bin``/``.ckpt`` reaching this
     process is untrusted bytes; ``weights_only=True`` is passed EXPLICITLY and
     never left to torch's default, which ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD``
@@ -403,7 +403,7 @@ def stream_reencode(
                 metas.append((name, out_dtype, shape, shard_path))
                 size_map[name] = numel * _ST_DTYPE_SIZES[out_dtype]
 
-    # th#1362: ONE file per component. Tensor order is sorted-name, which is
+    # ONE file per component. Tensor order is sorted-name, which is
     # what the planner produced for a single-shard plan, so nothing about the
     # output changed except that there is now always exactly one of them.
     metas.sort(key=lambda row: row[0])
@@ -570,7 +570,7 @@ def streaming_fp8_storage_cast(
 
 
 # ---------------------------------------------------------------------------
-# W8A8 per-channel-scaled fp8 producer (gw#557 / ie#494) — data-free requant
+# W8A8 per-channel-scaled fp8 producer — data-free requant
 # from the bf16 source, streaming. The tensor-layout contract is gw#534's
 # ``#fp8-w8a8`` (consumed by gen_worker.models.w8a8): per quantized Linear a
 # F8_E4M3 ``weight`` plus a F32 [out] ``weight_scale`` DEQUANT twin; excluded
@@ -801,7 +801,7 @@ def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: s
     those.
 
     A passthrough component that arrives as an HF shard set is COLLAPSED here
-    (th#1362). This is the only door untouched weights enter a tree we produce,
+. This is the only door untouched weights enter a tree we produce,
     and every caller is one of our producers, so the one-file-per-component
     invariant is satisfied at the door rather than at each of the callers. The
     source is untouched: what is unlinked is this tree's hardlink, and the
@@ -831,7 +831,7 @@ def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: s
             deshard_indexed_safetensors(index_path)
 
 
-# pgw#654: scheduler config overrides per checkpoint objective/distilled
+# scheduler config overrides per checkpoint objective/distilled
 # fact. v_prediction needs zero-terminal-SNR v-prediction sampling;
 # distilled needs trailing timestep spacing (few-step, near-zero CFG).
 _OBJECTIVE_SCHEDULER_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -982,7 +982,7 @@ def te_fp8_castable_keys(component_dir: Path) -> frozenset[str]:
     graph walk + the loader's key translation is the zero-drift contract:
     the stored artifact is byte-identical to what cast-at-load produces.
 
-    Block-window rules (gw#460): castable = Linear/conv WEIGHTS inside the
+    Block-window rules: castable = Linear/conv WEIGHTS inside the
     children of top-level ``nn.ModuleList`` containers, excluding params
     shared with modules outside a block (tied lm_head / embeddings).
     Embeddings, norms, biases, poolers stay at source precision."""
@@ -1177,7 +1177,7 @@ def streaming_w8a8_snapshot(
     the gw#534 corroborating ``quantization_config`` (the safetensors
     headers stay authoritative for detection).
 
-    Non-diffusers layouts (gw#562) scan the WHOLE tree for weight sets
+    Non-diffusers layouts scan the WHOLE tree for weight sets
     (root and nested — split-checkpoint layouts keep component files under
     subdirs). Exactly the denoiser set(s) get the requant: a single
     discovered set is unambiguous; with several, ``weight_set_patterns``
@@ -1312,7 +1312,7 @@ def verify_w8a8_snapshot(
     seed: int = 0,
     source_compute_dtype: str = "storage",
 ) -> dict[str, Any]:
-    """Byte-gate a produced w8a8 tree against its source (gw#557 / ie#494).
+    """Byte-gate a produced w8a8 tree against its source.
 
     Detection runs through the CONSUMER's own sniffer
     (:func:`gen_worker.models.w8a8.detect_w8a8_artifact`), then for a
@@ -1830,7 +1830,7 @@ def merge_safetensors_by_offset(
 def deshard_indexed_safetensors(index_path: Path) -> Path:
     """Collapse ONE HF shard set into a single ``<prefix>.safetensors``.
 
-    th#1362: bytes WE own are normalised to one file per component — mirrors we
+    bytes WE own are normalised to one file per component — mirrors we
     ingest AND the passthrough components of the flavors we produce, which are
     the same bytes one step later. Chunked CAS already gives resumable,
     parallel, partial-failure-tolerant transfer BELOW the file, so the shard set
@@ -1912,7 +1912,7 @@ def deshard_mirror_tree(tree: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Canonical published filenames (gw#466 / gw#522)
+# Canonical published filenames
 # ---------------------------------------------------------------------------
 
 CAST_NORMALIZE_DTYPES = {"fp16", "bf16", "fp32", "f16", "f32"}

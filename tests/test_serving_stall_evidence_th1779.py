@@ -119,7 +119,7 @@ def test_evidence_is_scoped_to_the_request_and_closed_after(
 ) -> None:
     """pgw#894's rule, applied to the in-call loop it left registry-wide: a
     neighbour's counter can neither save nor condemn this request, and the
-    counter dies with the handler (pgw#962)."""
+    counter dies with the handler."""
     other = progress_mod.counter("infer:steps", progress_mod.UNIT_STEPS, owner="request:other")
     other.add(1)
     with executor_mod._HandlerEvidence(OWNER, interval_s=0.01, evidence=lambda: 0.0):

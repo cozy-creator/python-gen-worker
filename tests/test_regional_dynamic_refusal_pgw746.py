@@ -7,7 +7,7 @@ the refusal onto the dynamo arm, which then sent such a target to the
 whole-forward branch. Both rested on one premise — *"the dynamo regional
 branch cannot apply the declared marks"* — and ie#632 measured what it costs:
 minimax-h3's 20.1B denoiser declares ``regional=True`` precisely because
-whole-graph inductor planning is unaffordable for its class (ie#381), and the
+whole-graph inductor planning is unaffordable for its class, and the
 decline compiled it whole-forward anyway. Its boot warmup compiled one shape;
 every real request presented a different packed sequence, guard-missed, and
 `_guarded` served eager for the life of the pod (`lane=bf16-w16a16+eager`,

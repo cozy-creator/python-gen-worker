@@ -193,7 +193,7 @@ class _Harness:
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
-        # pgw#1181: the pgw#681 mint gate this simmed is deleted.
+        # the pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
         # the MINT and wrote the result into the cell's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
@@ -318,7 +318,7 @@ def _stage_ms(res: pb.JobResult, name: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-# pgw#1010: `test_tenant_serves_at_serving_latency_during_mint_and_red_verifies`
+# `test_tenant_serves_at_serving_latency_during_mint_and_red_verifies`
 # stood here. Its mechanism is the mint SEED WINDOW — preemptible in-process
 # seed units holding the instance gate while a tenant request arrives — and the
 # in-process mint is deleted (it only ever built a dynamo cell). A delegated
@@ -344,7 +344,7 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
     instance_gate_wait stage, not billed as runtime. RED: with the kill
     switch the overlap is observed (pgw#995: that arm is gone — see below)."""
 
-    # pgw#995: the RED arm drove `GEN_WORKER_BG_YIELD=0` and asserted that the
+    # the RED arm drove `GEN_WORKER_BG_YIELD=0` and asserted that the
     # pre-fix tree DOES exhibit the pgw#676 overlap. The switch and that tree
     # are deleted, so the overlap is now structurally impossible rather than
     # merely not-selected — which is the stronger statement the docstring
@@ -366,7 +366,7 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
         assert wall >= 0.1
         # ...the wait is attributed, and runtime_ms excludes it.
         assert _stage_ms(res, "instance_gate_wait") >= 100
-        # pgw#795: the gate wait it must EXCLUDE is the compile it waited on,
+        # the gate wait it must EXCLUDE is the compile it waited on,
         # so that is the anchor — a runtime that absorbed the wait could not
         # come in under it.
         assert res.metrics.runtime_ms < h_on.compile_delay_s * 1000, (
@@ -389,7 +389,7 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
 # ---------------------------------------------------------------------------
 
 
-# pgw#1010: `test_mint_completes_under_sustained_tenant_load` stood here — the
+# `test_mint_completes_under_sustained_tenant_load` stood here — the
 # minimum-progress half of the same seed-window doctrine (a sustained tenant
 # stream must not starve the mint of background turns). With the compile in a
 # child process the mint's progress no longer competes for in-process turns at
@@ -444,7 +444,7 @@ def test_mint_seed_window_forces_eager_enqueue_on_degraded_routers(
 
 
 # ---------------------------------------------------------------------------
-# pgw#995 — the deleted arm is UNREACHABLE, not merely unused
+# the deleted arm is UNREACHABLE, not merely unused
 # ---------------------------------------------------------------------------
 
 

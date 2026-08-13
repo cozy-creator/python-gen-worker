@@ -184,7 +184,7 @@ def cell(tmp_path_factory, request) -> Dict[str, Any]:
     result = aot_mint.mint(
         pipe, _spec(), tmp / "out")
     reset_export_declarations()
-    # pgw#1176: the mint yields one independently keyed artifact per graph
+    # the mint yields one independently keyed artifact per graph
     # class. Index them by the class each NAMES — the addressing the atom
     # makes natural, and what keeps a per-class assertion bisectable.
     by_entry = {row.entry: row for row in result.entries}

@@ -143,7 +143,7 @@ def _collect_payload_moderation_metadata(payload_type: type) -> Dict[str, Any]:
             return
 
         if origin in (set, frozenset):
-            # th#886: input-asset manifests are ordered; unordered containers
+            # input-asset manifests are ordered; unordered containers
             # have no stable occurrence order, so an Asset here is a build error.
             args = typing.get_args(ann)
             if args and _annotation_carries_asset(args[0]):
@@ -354,14 +354,14 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         "ref": binding.path,
     }
     if binding.source == "tensorhub":
-        # Normal form (gw#492): the default tag ('prod', th#1276) is elided
+        # Normal form: the default tag ('prod', th#1276) is elided
         # at the manifest boundary so hub-minted keep/routing refs stay
         # byte-equal to worker-minted wire refs (Go folds a non-empty tag
         # verbatim). An explicit 'latest' is stamped, never elided.
         if binding.tag and binding.tag != DEFAULT_REF_TAG:
             out["tag"] = binding.tag
         if binding.components:
-            # pgw#505: the hub's desired-snapshot scoping (platform-side,
+            # the hub's desired-snapshot scoping (platform-side,
             # not yet built) reads this to resolve only the named pipeline
             # component subfolders instead of the whole repo.
             out["components"] = list(binding.components)
@@ -401,7 +401,7 @@ def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
     """``default_checkpoint`` ref shape used by the slots
     block: ``{source, path, tag?, revision?, version?, components?}``
-    — a structured ModelRef (pgw#511; ``components`` added pgw#505)."""
+    — a structured ModelRef (``components`` added pgw#505)."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
     if ref.tag and ref.tag != DEFAULT_REF_TAG:
         out["tag"] = ref.tag
@@ -427,7 +427,7 @@ def _slot_to_manifest(
     ``pipeline.vae`` curated / ``pipeline.unet`` fixed, th#980/ie#524) and
     component-level routing. Pinned at publish so diffusers drift stays
     deterministic. ``default_config`` is gone: recipe values are catalog
-    data (th#1116); the schema derives from the handler's
+    data; the schema derives from the handler's
     ``RequestContext[D]`` annotation."""
     out: Dict[str, Any] = {
         "name": name,
@@ -535,7 +535,7 @@ def discover_functions(
         sys.path.insert(0, src_str)
 
     top_level = main_module.split(".", 1)[0]
-    # pgw#1163: the audit below is about what THE WALK imported, so the set it
+    # the audit below is about what THE WALK imported, so the set it
     # compares against has to be taken before the walk runs. Scanning all of
     # `sys.modules` instead attributes the CALLER's imports to discovery — and
     # when the caller is pytest, that is its own `conftest` and test modules,
@@ -604,7 +604,7 @@ def _audit_source_only_imports(
     depend on the directory it happens to start in).
 
     ``preloaded`` is ``sys.modules`` as it stood BEFORE the walk, and the scan
-    considers only what the walk ADDED (pgw#1163). Without it the audit reports
+    considers only what the walk ADDED. Without it the audit reports
     on its CALLER's imports: run from inside pytest it flagged the runner's own
     ``conftest`` and test modules, which sit under ``root``, are absent from the
     wheel, and are imported by no pod that ever exists. Excluding by
@@ -647,7 +647,7 @@ def _audit_source_only_imports(
     offenders: List[str] = []
     for name, mod in list(sys.modules.items()):
         if name in preloaded:
-            continue  # the caller's import, not the walk's (pgw#1163)
+            continue  # the caller's import, not the walk's
         if "." in name:
             continue  # submodules resolve with their package
         filename = getattr(mod, "__file__", None)
@@ -709,7 +709,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
     for es in extract_specs(obj, walked_module=module_name):
         res_dict: Dict[str, Any] = {}
         try:
-            # pgw#670: Resources owns its own manifest projection (the one
+            # Resources owns its own manifest projection (the one
             # declaration -> wire-name mapping lives there, not here).
             project = getattr(es.resources, "manifest_dict", None)
             raw = project() if callable(project) else msgspec.to_builtins(es.resources)
@@ -737,7 +737,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             )
             _stamp_family(block, family)
 
-        # pgw#747: `es.slot_family` is AUTHORITATIVE per slot — it already
+        # `es.slot_family` is AUTHORITATIVE per slot — it already
         # folds in Compile(family=...), and it deliberately holds "" for an
         # auxiliary bare-typed slot that never opted into the family
         # vocabulary. Re-defaulting to `compile_family` here would put the
@@ -797,11 +797,11 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             "incremental_output": incremental,
             "is_async": es.is_async,
         }
-        # th#826: the child-call declaration — the hub mints the invoke_child
+        # the child-call declaration — the hub mints the invoke_child
         # capability grant only for declaring functions. Omitted when false.
         if es.child_calls:
             fn["child_calls"] = True
-        # SDK v2 (pgw#647): payload compile axes (equivalence classes) —
+        # SDK v2: payload compile axes (equivalence classes) —
         # catalog recipes validate against the declared class names at
         # publish time; the warm plan derives from classes x buckets.
         if es.payload_axes:
@@ -810,7 +810,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["lora_bucket"] = int(es.lora_bucket)
         # SDK v2: the derived config schema (RequestContext[D]) — names the
         # family vocabulary the catalog's recipe values are validated
-        # against (th#1116).
+        # against.
         if es.defaults_type is not None:
             fn["config_schema"] = es.defaults_type.__name__
             fam = str(getattr(es.defaults_type, "__gen_worker_family__", "") or "")
@@ -821,32 +821,32 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         if es.variant_of:
             fn["variant_of"] = es.variant_of
             fn["variant"] = es.variant_kind
-        # pgw#654: per-function objective contract (@worker_function) —
+        # per-function objective contract (@worker_function) —
         # objectives omitted = unrestricted; distilled omitted = either.
         if es.objectives is not None:
             fn["objectives"] = list(es.objectives)
         if es.distilled is not None:
             fn["distilled"] = bool(es.distilled)
-        # th#1257: declared serving tasks — the axis the hub's lane-verdict
+        # declared serving tasks — the axis the hub's lane-verdict
         # store keys on. Omitted = undeclared, and every quant lane then
         # resolves unmeasured (serves at base precision).
         if es.tasks is not None:
             fn["tasks"] = list(es.tasks)
-        # th#1757: the opt-in reference contract. Omitted = this function
+        # the opt-in reference contract. Omitted = this function
         # never sees the concept; the hub refuses a ref_text sent to it.
         if es.accepts_references is not None:
             fn["accepts_references"] = es.accepts_references.to_manifest()
-        # th#1050: opt-in declared lane bodies (behavioral divergence marker).
+        # opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)
-        # th#1087: declared config parameters + env names — the hub persists
+        # declared config parameters + env names — the hub persists
         # these as the release's declared surface and 422s config writes
         # outside it.
         if es.config:
             fn["config_params"] = [p.to_manifest() for p in es.config]
         if es.env:
             fn["env"] = list(es.env)
-        # th#1051: declared compute-time formula — the hub learns the
+        # declared compute-time formula — the hub learns the
         # constants per physics cell; the source string is the contract.
         if es.runtime_formula is not None:
             fn["runtime_formula"] = es.runtime_formula.source
@@ -858,7 +858,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["delta_output_schema"] = delta_schema
         ccell = es.compile_cell()
         if es.compile is not None and ccell is not None:
-            # Hub keys family-cache lookups off this block (th#569).
+            # Hub keys family-cache lookups off this block.
             fn["compile"] = {
                 "family": es.compile.family,
                 "shapes": [[int(v) for v in s] for s in es.compile.shapes],
@@ -866,13 +866,13 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             }
             # SDK v2 shape contract: the declared text axis and dynamic
             # ranges ride to the hub's cell producer, and the contract
-            # digest is the ck2 cell-key axis (pgw#647).
+            # digest is the ck2 cell-key axis.
             if ccell.text_len is not None:
                 # THIS function's effective pin (a @worker_function
                 # text_len= override wins over the class Compile's).
                 fn["compile"]["text_len"] = int(ccell.text_len)
             if ccell.contract_text_lens():
-                # pgw#654 gap #6: the CLASS's per-lane pin union — what the
+                # the CLASS's per-lane pin union — what the
                 # shared cell contract digests (dual-pin classes describe
                 # both lanes).
                 fn["compile"]["text_lens"] = [
@@ -889,7 +889,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 # Compile(guidance_scales=...) decorator tuple).
                 fn["compile"]["guidance_scales"] = list(ccell.guidance_scales)
             fn["compile"]["shape_contract_digest"] = ccell.contract_digest()
-            # ie#381: the primary binding's weight-storage lane (gw#389 fp8
+            # the primary binding's weight-storage lane (gw#389 fp8
             # layerwise casting) rides along so the hub's cell producer
             # builds from an identically-loaded pipeline — the cast hooks
             # are traced INTO the FX graphs; a bf16-built cell for an
@@ -900,12 +900,12 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 fn["compile"]["storage_dtype"] = storage
             if getattr(es.compile, "regional", False):
                 fn["compile"]["regional"] = True
-            # gw#561: dynamic-LoRA endpoints trace the branch-bearing graph
+            # dynamic-LoRA endpoints trace the branch-bearing graph
             # family; the hub's producer must build `-lora<bucket>` cells.
             # SDK v2: declared at the decorator (`@endpoint(lora_bucket=)`).
             if es.lora_bucket:
                 fn["compile"]["lora_bucket"] = int(es.lora_bucket)
-            # pgw#1149 / th#1811 (ie#664 §6): the AUTHOR's declared bar and
+            # the AUTHOR's declared bar and
             # refusals, so the hub's publish-time validation session judges a
             # release against a DECLARATION instead of a number the platform
             # picked. Absent when undeclared — the hub reports `bar_undeclared`
@@ -915,7 +915,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 fn["compile"]["speed_metric"] = es.compile.speed_metric
             if es.compile.min_speedup is not None:
                 fn["compile"]["min_speedup"] = float(es.compile.min_speedup)
-            # OPEN blockers only (pgw#1115): the hub reads a non-empty list as
+            # OPEN blockers only: the hub reads a non-empty list as
             # "the author refuses to mint" and marks the mint check
             # blocked-by-declaration, so a RESOLVED id would park the family in
             # that state forever. Ids, not prose — open-vs-resolved is the
@@ -960,20 +960,20 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             )
         seen_fn[fn_name] = py_name
 
-    # th#1580 A4: the endpoint half of §1.30's intersection, DERIVED from the
+    # the endpoint half of §1.30's intersection, DERIVED from the
     # decoders this image actually carries — never a hand-maintained list.
     # Runs inside the same heavy-dep stubbing the endpoint walk used, so a
     # torch-less manifest build derives the same set an in-image build does.
     with stub_missing_heavy_deps(cfg.discovery_heavy_deps) as stubbed:
         derived = derive_execution_lanes()
-        # pgw#996: the AOT lane's STATIC preconditions, decided in the image
+        # the AOT lane's STATIC preconditions, decided in the image
         # that will run them. `validate_endpoint_lock` turns a refusal into a
         # build error, so an endpoint that declares an export it cannot
         # compile never reaches a pod to downgrade there.
         declared_families = declared_compile_families(functions)
         preconditions = static_mint_preconditions(
             declared_families, torch_available="torch" not in stubbed)
-        # pgw#501: and the ADAPTER capability, which is not an AOT question —
+        # and the ADAPTER capability, which is not an AOT question —
         # an endpoint declaring `lora_bucket > 0` serves adapters whether or
         # not it compiles, and `peft` is honest under the heavy-dep stubbing
         # (it is deliberately not a stubbed root), so this decides here too.

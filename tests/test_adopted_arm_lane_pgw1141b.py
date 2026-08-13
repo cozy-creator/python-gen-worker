@@ -86,7 +86,7 @@ import pytest
 from gen_worker import activity, aot_serve, cell_adopt
 from gen_worker import executor as ex_mod
 
-# pgw#1152: the vehicle this file built is now `tests/harness/adopt_rig.py`,
+# the vehicle this file built is now `tests/harness/adopt_rig.py`,
 # the DEFAULT rig for anything arming-adjacent. It is the same chain, verbatim
 # — real `ensure_setup` -> real `_enable_compiled` -> a real `_ArmOrder(adopt=…)`
 # -> real `arm_ordered` -> the real receipt gate against a real RSA-signed
@@ -204,7 +204,7 @@ def test_a_REVOKED_cell_still_de_arms_and_installs_no_target(
     guard was bound, so nothing may advertise ``serving_mode=aot_cell`` for it.
     A fix that made a cell undisarmable would be worse than the bug.
 
-    pgw#1152: the revocation is forced by BREAKING a real input — the packaged
+    the revocation is forced by BREAKING a real input — the packaged
     entry raises when the arm dispatches through it — rather than by setting
     ``failed`` on a marker the test wrote itself.
     """
@@ -277,7 +277,7 @@ def test_a_wrapped_object_answers_the_lane_question_itself(
     pipe = boot.pipeline
 
     assert aot_serve.holds_exported_cell(pipe) is True
-    # pgw#1176: REVOKING is de-arming every entry, not setting a flag.
+    # REVOKING is de-arming every entry, not setting a flag.
     # `is_armed` asks the REGISTRY what is armed — deliberately, because a
     # boolean can claim more than the pod serves — so a fixture that flipped
     # `state["failed"]` was revoking a cell-level thing that no longer exists.

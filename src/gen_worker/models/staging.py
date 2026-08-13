@@ -1,4 +1,4 @@
-"""Pinned host staging + the dedicated H2D copy stream (pgw#674).
+"""Pinned host staging + the dedicated H2D copy stream.
 
 Rotating double-buffer serving (WORKER-RESIDENCY-DESIGN, Paul-ratified)
 stages the NEXT checkpoint while the current job computes. Two shared
@@ -20,7 +20,7 @@ facilities live here:
   Interference is measured from ordinary production traffic
   (DESIGN-RULINGS §1.2), not from a bespoke harness — the
   ``benchmarks.swap_latency overlap`` case was deleted with its
-  zero-adopter endpoint wrapper (pgw#883).
+  zero-adopter endpoint wrapper.
 
 CPU-only hosts (and the CPU-only test suite) get honest no-ops: no CUDA
 means no copy stream and pinned allocation falls back to pageable.
@@ -82,7 +82,7 @@ class PinnedPool:
         self._budget_fn = budget_fn
         self._lock = threading.Lock()
         self._reserved = 0
-        # pgw#748 phase 1: pinned host RAM is a POD budget, not a per-instance
+        # pinned host RAM is a POD budget, not a per-instance
         # one, and it is the harshest allocation class there is (unswappable).
         # With G execution groups the cap must be SHARED, or group 0 claims
         # the whole 50% and a G=4 degraded pod pages itself to death (§4.3
@@ -201,7 +201,7 @@ _streams: dict = {}
 def copy_stream(device: Optional[Any] = None) -> Optional[Any]:
     """The dedicated H2D copy stream FOR ONE DEVICE; ``None`` off-CUDA.
 
-    pgw#780 item 4: this used to be a process-wide singleton created on the
+    this used to be a process-wide singleton created on the
     first caller's device — device 0 in practice — so a promote onto
     ``cuda:3`` queued its copies on card 0's stream context (falling through
     to card 3's DEFAULT/compute stream) and then synchronized card 0: the

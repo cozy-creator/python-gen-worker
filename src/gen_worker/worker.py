@@ -30,7 +30,7 @@ from .procsplit import is_compute_child
 
 logger = logging.getLogger(__name__)
 
-# pgw#887: what this bounds CHANGED, and the number stayed. It used to be the
+# what this bounds CHANGED, and the number stayed. It used to be the
 # budget for all in-flight tenant work — SIGTERM, then 30 s, then `abort_all()`
 # regardless of what any job or mint was doing. Tenant work is now bounded by
 # progress (`lifecycle._await_tenant_idle`), and this bounds only the SHUTDOWN
@@ -41,7 +41,7 @@ _SIGNAL_DRAIN_DEADLINE_MS = 30_000
 
 
 class UnexpectedWorkerExit(RuntimeError):
-    """The run loop ended without a hub Drain or a shutdown signal (gw#640)."""
+    """The run loop ended without a hub Drain or a shutdown signal."""
 
 
 class _LoopStallWatchdog:
@@ -115,11 +115,11 @@ class Worker:
         if not (settings.orchestrator_public_addr or "").strip():
             raise ValueError("Settings.orchestrator_public_addr is required")
         self.settings = settings
-        # pgw#763: an endpoint-authored oversized `.to("cpu")` becomes a typed
+        # an endpoint-authored oversized `.to("cpu")` becomes a typed
         # job error instead of a cgroup OOM SIGKILL of the whole worker.
 
         _install_host_move_guard()
-        # pgw#748 / th#1285: the delivered `G×D` packing. Absent env == one
+        # the delivered `G×D` packing. Absent env == one
         # slot, which is every pod that exists today. A malformed one is a
         # typed refusal raised here — booting one slot on a pod the hub is
         # dispatching G jobs to is worse than not booting.
@@ -153,7 +153,7 @@ class Worker:
             )
         self.lifecycle = Lifecycle(settings, self.executor)
         self.executor._on_state_change = self.lifecycle.state_changed
-        # pgw#763: in the split's COMPUTE CHILD, the "transport" speaks frames
+        # in the split's COMPUTE CHILD, the "transport" speaks frames
         # to the control parent (which owns the real gRPC stream + SendQueue).
         # Lifecycle/Executor wiring is identical either way.
 
@@ -173,7 +173,7 @@ class Worker:
         # Capability renewal presents the freshest worker JWT (contract §1
         # rotation), not the boot-time settings token.
         self.executor.worker_jwt_provider = lambda: self.transport.current_worker_jwt
-        # pgw#1087: process start -> SDK ready. Everything before this line is
+        # process start -> SDK ready. Everything before this line is
         # interpreter startup, `import torch`, endpoint-module import and
         # executor construction — a window NO span could ever have covered,
         # because the recorder itself is part of what is being imported. It
@@ -228,7 +228,7 @@ class Worker:
         try:
             await transport_task
         except FatalTransportError as exc:
-            # gw#640: surfaced to the entrypoint so the cause reaches the hub
+            # surfaced to the entrypoint so the cause reaches the hub
             # instead of only this pod's stdout.
             logger.error("worker exiting: %s", exc)
             raise
@@ -241,7 +241,7 @@ class Worker:
             return 0
         if self._stop_requested:
             return 0
-        # gw#640: the reconnect loop is supposed to run until a hub Drain or a
+        # the reconnect loop is supposed to run until a hub Drain or a
         # signal. Falling out of it any other way ended the process with a
         # clean exit 0 and NOTHING on the wire — the hub saw only a stream
         # close and a young-worker death. An unexplained exit is a fatal.

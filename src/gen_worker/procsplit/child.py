@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WATCHDOG_PING_S = 5.0
 _BOOT_FATAL_SEND_TIMEOUT_S = 5.0
-# pgw#833 (pgw#826 follow-on): how long the dying child waits for the parent
+# how long the dying child waits for the parent
 # to CONFIRM it has recorded the verdict. Bounded — a wedged parent must not
 # hold a doomed child alive — and losing the ack only degrades to the old
 # fire-and-forget behaviour.
@@ -42,7 +42,7 @@ def send_boot_fatal(report: Dict[str, Any], *, kind: str = "hardware_unsuitable"
     its credential and exits 1 instead of respawning — a hardware verdict is
     not a transient fault.
 
-    pgw#833: after sending, WAIT (bounded) for the parent's T_BOOT_FATAL_ACK.
+    after sending, WAIT (bounded) for the parent's T_BOOT_FATAL_ACK.
     Without it, a child that exits immediately can be reaped before the parent
     reads the frame off the socket buffer, downgrading the typed verdict to a
     crash-to-retry (the race CI run 30692482234 caught). The ack is written
@@ -84,7 +84,7 @@ def _wait_boot_fatal_ack(sock: socket.socket) -> None:
     while True:
         header = _recv_exact(sock, 5)
         ftype, length = header[0], int.from_bytes(header[1:5], "big")
-        # pgw#1013 (§4.24, ABSENCE sweep): `length` is 4 attacker-supplied bytes
+        # `length` is 4 attacker-supplied bytes
         # off the control socket, so it may declare up to 4 GiB. The bound
         # already exists — frames.MAX_FRAME_BYTES, enforced by BOTH ends of the
         # normal path (frames.read_frame and FrameWriter.frame). This reader is
@@ -104,7 +104,7 @@ def _wait_boot_fatal_ack(sock: socket.socket) -> None:
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    # pgw#1013: accumulate into a bytearray, not `buf += chunk`. The old form
+    # accumulate into a bytearray, not `buf += chunk`. The old form
     # reallocated and copied the whole buffer per chunk, so a large frame cost
     # O(n^2) — the length bound above caps n, but quadratic copying at 128 MiB
     # is still a stall, and there is no reason to pay it.
@@ -305,7 +305,7 @@ class ChildTransport:
         await writer.frame(ftype, payload)
 
     async def _watchdog_ping(self) -> None:
-        """EVENT-LOOP liveness (pgw#771): this proves the loop is turning, and
+        """EVENT-LOOP liveness: this proves the loop is turning, and
         nothing more. Its silence ARMS the parent's hang verdict; the
         thread-sourced liveness pipe is what decides it."""
         interval = _ping_interval()
@@ -364,7 +364,7 @@ class ChildTransport:
         except (FatalTransportError, asyncio.CancelledError):
             raise
         except Exception:
-            # Same doctrine as Transport.HandlerError (gw#640): a handler bug
+            # Same doctrine as Transport.HandlerError: a handler bug
             # must never masquerade as a dropped link. Log as itself; the
             # parent's gRPC transport already dials handler failures when they
             # occur there — here the process stays alive and keeps serving.

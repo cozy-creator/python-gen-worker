@@ -61,7 +61,7 @@ class _FakeHub(BaseHTTPRequestHandler):
             self._send_proxy_page(int(st.get("proxy_status", 503)))
             return
         if self.path.split("?", 1)[0].endswith("/resolve"):
-            # th#1411 source-stamp reads: answer the pgw#654 resolve shape
+            # answer the pgw#654 resolve shape
             # from state["resolve_body"], 404 when unset.
             st.setdefault("resolve_gets", []).append(self.path)
             body = st.get("resolve_body")
@@ -106,7 +106,7 @@ class _FakeHub(BaseHTTPRequestHandler):
             self._send(200, {"results": results})
             return
         if self.path.endswith("/clone-manifests"):
-            # th#592 bank record: refuse manifests whose blobs aren't in CAS.
+            # refuse manifests whose blobs aren't in CAS.
             req = self._read_json()
             st.setdefault("bank_records", []).append(req)
             manifests = st.setdefault("bank_manifests", {})
@@ -210,14 +210,14 @@ class _FakeHub(BaseHTTPRequestHandler):
                        if op["type"] == "add")
             self._send(201, {"revision_id": "rev-1", "uploads": uploads,
                              "deletions": [], "copies": [], "tags": req.get("tags") or [],
-                             # th#1400: the hub's normalizePublishMode("")
+                             # the hub's normalizePublishMode("")
                              # returns "replace" on BOTH routes now. A double
                              # that still echoed "merge" would assert the
                              # retired default back into existence.
                              "mode": req.get("mode") or "replace"})
             return
         if "/commits/" in self.path and self.path.endswith("/uploads"):
-            # th#699 re-open: fresh presigned upload for one stashed add whose
+            # fresh presigned upload for one stashed add whose
             # staged bytes were lost (mirrors handleReopenRepoCommitUpload).
             req = self._read_json()
             path_label = str(req.get("path") or "")
@@ -251,7 +251,7 @@ class _FakeHub(BaseHTTPRequestHandler):
             path_label = st.get("upload_paths", {}).get(uid, "")
             misses = st.get("staging_missing") or {}
             if misses.get(path_label, 0) > 0:
-                # th#699: the staged bytes vanished server-side; retrying this
+                # the staged bytes vanished server-side; retrying this
                 # complete can never succeed — the client must re-open.
                 misses[path_label] -= 1
                 st.setdefault("staging_missing_hits", []).append(uid)
@@ -260,7 +260,7 @@ class _FakeHub(BaseHTTPRequestHandler):
                 return
             expired = st.get("session_expired") or {}
             if expired.get(path_label, 0) > 0:
-                # gw#570: the up-front-minted session outlived its fixed
+                # the up-front-minted session outlived its fixed
                 # expiry mid-publish; only a re-open can mint a fresh one.
                 expired[path_label] -= 1
                 st.setdefault("session_expired_hits", []).append(uid)
@@ -305,7 +305,7 @@ class _FakeHub(BaseHTTPRequestHandler):
 
     def _v2_plan(self, req: dict) -> dict:
         """`{have, need}` answered from the fake CAS — residency comes from the
-        STORE, never from a client claim (th#634)."""
+        STORE, never from a client claim."""
         st = _FakeHub.state
         cas = st.setdefault("v2_cas", set())
         base = f"http://127.0.0.1:{self.server.server_port}"
@@ -368,7 +368,7 @@ class _FakeHub(BaseHTTPRequestHandler):
         data = self.rfile.read(n) if n else b""
         counts = st.setdefault("put_counts", {})
         counts[self.path] = counts.get(self.path, 0) + 1
-        # pgw#1005 C: the 5xx and expired-presign injectors apply to EVERY PUT
+        # the 5xx and expired-presign injectors apply to EVERY PUT
         # surface, v1 part URLs and v2 chunk grants alike. They used to sit
         # below the v2 branch, so the chunk-CAS data plane — the one every
         # producer now rides — could not be made to fail at all.
@@ -384,7 +384,7 @@ class _FakeHub(BaseHTTPRequestHandler):
             return
         expired_puts = st.get("expired_put_paths") or {}
         if expired_puts.get(self.path, 0) > 0:
-            # gw#570: S3 answers 403 for an expired presigned URL.
+            # S3 answers 403 for an expired presigned URL.
             expired_puts[self.path] -= 1
             self.send_response(403)
             self.send_header("Content-Length", "0")

@@ -29,7 +29,7 @@ Everything runs on the real executor, over the real ``@endpoint`` ->
 on the other end speaking the documented callout wire contract. No model is
 loaded and no inference runs.
 
-pgw#949: every wait here is progress-gated and every assertion is about a
+every wait here is progress-gated and every assertion is about a
 property — an ordering, or a share of a baseline measured in the same run —
 never about the runner's speed.
 """

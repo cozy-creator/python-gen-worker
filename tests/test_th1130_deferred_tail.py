@@ -63,7 +63,7 @@ def test_the_permit_is_released_before_the_deferred_encode_runs() -> None:
     assert res.status == pb.JOB_STATUS_OK, res.safe_message
     stages = dict(res.metrics.stage_ms)
     encode_ms = stages["image_encode"]
-    # pgw#795: this used to be a wall-clock claim about the runner's CPU, and
+    # this used to be a wall-clock claim about the runner's CPU, and
     # it has now failed a release THREE times under three different constants —
     # `>= 100` at 83ms (PR #397), `>= 0.5 * total.tail` at 76 vs 77, and
     # `>= 10` on the v0.78.0 publish rerun. Lowering the number each time is
@@ -91,7 +91,7 @@ def test_the_permit_is_released_before_the_deferred_encode_runs() -> None:
         res.metrics.runtime_ms + stages["resid.unattributed"]), (
         res.metrics.slot_held_ms, res.metrics.runtime_ms, encode_ms, stages)
 
-    # th#1111: the tail work is attributed to the tail, and the map reconciles.
+    # the tail work is attributed to the tail, and the map reconciles.
     assert stages["total.tail"] >= encode_ms
     attributed, total = reconciliation(stages)
     assert total == res.metrics.runtime_ms
@@ -120,7 +120,7 @@ def test_a_second_job_takes_the_gpu_while_the_first_is_still_encoding() -> None:
     assert b_start > a_handler_end, "B must not run inside A's GPU phase"
     # ...and started BEFORE A's tail finished: A's encode+upload and B's
     # compute were in flight at the same time.
-    # pgw#795: the property is the OVERLAP EXISTING — B holding the GPU while
+    # the property is the OVERLAP EXISTING — B holding the GPU while
     # A is still encoding. How MUCH of A's tail B covers is a race between two
     # threads on a shared runner, so a `>= 0.5 * encode_ms` share was a claim
     # about the scheduler's mood; the overlap is reported, not asserted on.

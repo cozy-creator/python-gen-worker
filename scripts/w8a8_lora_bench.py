@@ -1,4 +1,4 @@
-"""W8A8 runtime-LoRA branch bench + quality A/B (gw#547).
+"""W8A8 runtime-LoRA branch bench + quality A/B.
 
 perf mode (no downloads): SDXL-class Fp8ScaledLinear GEMM stack on the
 current GPU — branch tax per rank bucket vs branchless, hot-swap latency,

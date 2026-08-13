@@ -169,7 +169,7 @@ def test_dict_leaves_pair_with_their_own_tensors() -> None:
 
 
 def test_the_dict_case_binds_because_the_contract_says_where() -> None:
-    """The nested search is gone (pgw#994): a decoy kwarg carrying the same
+    """The nested search is gone: a decoy kwarg carrying the same
     key must not be able to decide the bind, and the real one still resolves
     because its identity names its argument."""
     module = _DictModule()

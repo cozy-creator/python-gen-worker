@@ -167,8 +167,8 @@ def test_chunk_arithmetic_matches_the_hub():
 def test_parse_cas_ref_is_prefix_dispatched_and_strict():
     assert parse_cas_ref("sha256:" + "a" * 64) == ("sha256", "a" * 64)
     assert parse_cas_ref("blake3:" + "b" * 64) == ("blake3", "b" * 64)
-    # pgw#871: an UNTAGGED ref is REFUSED, matching the hub's read-path rule
-    # (th#1357). A 64-char hex cannot tell blake3 from sha256 — both digests are
+    # an UNTAGGED ref is REFUSED, matching the hub's read-path rule
+    # . A 64-char hex cannot tell blake3 from sha256 — both digests are
     # 32 bytes — so inferring one addresses the wrong namespace silently.
     for bad in ["", "c" * 64, "sha256:" + "a" * 32, "md5:" + "a" * 64,
                 "blake3:sha256:" + "a" * 64, "sha256:" + "z" * 64]:
@@ -477,7 +477,7 @@ def test_verify_file_digest_uses_the_declared_algorithm(tmp_path):
     data = make_file(1024, seed=53)
     f.write_bytes(data)
     verify_file_digest(f, "sha256:" + sha(data))
-    # th#1303 S1: the same hex LABELLED blake3 must not pass either. Before S1
+    # the same hex LABELLED blake3 must not pass either. Before S1
     # this was a DigestMismatch (hashed with the wrong algorithm); now the
     # algorithm itself is refused. Both are failures; what must never happen
     # is a pass, and reinstating hash_file's blake3 arm turns the first

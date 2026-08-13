@@ -38,7 +38,7 @@ from gen_worker import aot_serve as aot
 from gen_worker import numerics_probe
 from gen_worker.api.export_contract import reset_export_declarations
 
-# pgw#1152: the rig this file grew moved to `tests/harness/exported_cell.py`.
+# the rig this file grew moved to `tests/harness/exported_cell.py`.
 # Three other modules already imported it from here as `rig868`, and the
 # adopt-path rig needs the same packed artifact — a shared vehicle belongs
 # where shared vehicles live. Nothing about it changed; the names below are
@@ -68,7 +68,7 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     packages = {entry_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
     pipeline, module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
-    # pgw#1176: one verdict PER GRAPH CLASS. Every class here is 1% off, so
+    # one verdict PER GRAPH CLASS. Every class here is 1% off, so
     # every class refuses — and the pipeline serves nothing compiled, which is
     # now a CONSEQUENCE of every entry refusing rather than a rule that one
     # refusal condemns the rest.
@@ -79,7 +79,7 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     assert isinstance(module.forward(torch.zeros(8, 8), torch.tensor(1.0)),
                       torch.Tensor)
 
-    # pgw#923: the adopt ledger cannot need closing, because nothing is
+    # the adopt ledger cannot need closing, because nothing is
     # announced until the arm is FINAL. `enable` used to say `armed` before
     # this gate ran, so a reader counting armed adoptions over-counted every
     # numerics refusal and a second "retraction" row existed only to correct
@@ -262,7 +262,7 @@ def test_an_axis_names_its_entry_row_execution_lane_and_seed_and_reproduces():
     rebuild the exact feed."""
     from gen_worker.numerics_probe import ProbeAxis, axes_from_meta
 
-    # pgw#1176: ONE artifact, ONE axis. The seed's independence across CLASSES
+    # ONE artifact, ONE axis. The seed's independence across CLASSES
     # is the property that matters and it is unchanged — it is derived from
     # the axis, so two artifacts of one declaration still never share a feed.
     (a,) = axes_from_meta(metadata(ROWS[0]))

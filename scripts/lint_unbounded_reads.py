@@ -3,7 +3,7 @@
 until something has bounded it, and a stream may not be copied without a bound
 checked INSIDE the loop.
 
-WHY THIS GUARD EXISTS. The §4.24 bounds census (pgw#973 / th#1620) enumerated
+WHY THIS GUARD EXISTS. The §4.24 bounds census enumerated
 every numeric constant and adjudicated each against "name the runaway you
 prevent". That procedure can only inspect bounds that EXIST, so it is blind by
 construction to a read site that needs one and has none — and it walked past two

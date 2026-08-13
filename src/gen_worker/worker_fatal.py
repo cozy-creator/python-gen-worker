@@ -5,7 +5,7 @@ stdout ONLY. RunPod exposes no container-logs API, so every cloud-only worker
 death was unobservable by construction — the th#1085 cold-boot investigation
 burned six live runs on a crash whose traceback existed and was unreachable.
 
-This module reuses the ``HardwareUnsuitable`` carrier (gw#619/th#988) with
+This module reuses the ``HardwareUnsuitable`` carrier with
 ``reason_class="worker_fatal"``: the hub already persists that message as a
 durable ``pod_events`` row (class ``hardware_unsuitable``, reason = the class,
 full JSON payload in ``provider_message``) and logs it, so a fatal becomes
@@ -112,9 +112,9 @@ def report_worker_fatal(
     if settings is None or not (settings.orchestrator_public_addr or "").strip():
         return False
     detail = build_fatal_detail(phase, exc, exit_code=exit_code)
-    # pgw#763 delta 1: in the compute child there is no worker JWT to open a
+    # in the compute child there is no worker JWT to open a
     # Connect with, and there should not be — a HardwareUnsuitable-carrier
-    # report is a fleet-wide verdict key (th#1310), so it is worth more dialed
+    # report is a fleet-wide verdict key, so it is worth more dialed
     # by the process that runs no tenant code. The parent dials it.
     if _broker_active():
         from .procsplit import broker

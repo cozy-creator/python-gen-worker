@@ -15,7 +15,7 @@ import requests
 # and ships the manifest + presigned URLs via
 # JobExecutionRequest.resolved_repos_by_id over gRPC. STANDALONE clients
 # (gen-worker run/serve/prefetch under cozy, #379) resolve the same shape over
-# HTTP via ``resolve_repo`` against tensorhub's public resolve route (th#560).
+# HTTP via ``resolve_repo`` against tensorhub's public resolve route.
 
 
 @dataclass(frozen=True)
@@ -67,7 +67,7 @@ def resolved_entry_digest(
     rather than reaching for a field name. Raises on an absent or untagged
     digest: an integrity check with no digest is a REFUSAL, never a skip.
 
-    th#1303 S1: the legacy ``blake3`` mirror is no longer read. Before the
+    the legacy ``blake3`` mirror is no longer read. Before the
     repoint an entry could carry bare blake3 hex and nothing else; after it,
     an entry with no ``digest`` is a stale pointer, and the only safe answer
     is to refuse it. Reinstating the mirror arm here re-opens the vacuous
@@ -88,16 +88,16 @@ def resolved_entry_digest(
 class WorkerResolvedRepo:
     snapshot_digest: str
     files: List[WorkerResolvedRepoFile]
-    # th#697: total checkpoint size. pgw#1148: `sibling_flavors` is GONE —
+    # total checkpoint size. pgw#1148: `sibling_flavors` is GONE —
     # th#1803 re-keyed `repo_tags` to (repo, tag, checkpoint) and dropped the
     # flavor column, so the hub emits `tag_members` (checkpoint rows) and no
     # flavor row exists to parse. Nothing in the SDK reads the group today:
     # selection within a tag group is contract compatibility (§1.33), and the
     # local pickers that consumed these rows died with them.
     size_bytes: int = 0
-    # th#964: the resolved checkpoint's architecture family ("sdxl-pony",
+    # the resolved checkpoint's architecture family ("sdxl-pony",
     # ...) — drives the local family lane policy. "" on hubs not sending it.
-    # pgw#654/th#1566: resolved objective and distillation value plus the
+    # resolved objective and distillation value plus the
     # evidence status that distinguishes explicit false from unknown. Empty
     # status is the backward-compatible shape from an older hub.
     objective: str = ""

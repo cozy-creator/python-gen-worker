@@ -1,4 +1,4 @@
-"""The ONE flattening rule, for the mint and the serve side alike (pgw#994).
+"""The ONE flattening rule, for the mint and the serve side alike.
 
 ``torch.export`` does not take a call as written: it FLATTENS it. A container
 argument occupies one caller parameter slot and produces one graph input per

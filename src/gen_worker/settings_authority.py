@@ -129,7 +129,7 @@ def declaration(
     posture, the host-ISA codegen clamp (a declared rule of the host —
     ``min(host level, BASELINE)``, pgw#754 — like ``sm``, not a config
     read-back), and the canonical process posture. A torchless worker
-    declares the absence itself as the fact (pgw#788)."""
+    declares the absence itself as the fact."""
     from . import guard_closure, host_isa  # lazy: keep this module light
 
     if torch_capability.present():
@@ -144,7 +144,7 @@ def declaration(
     else:
         # Knob names are still validated (torch-free contract); a DECLARED
         # knob on a torchless image refuses — honouring it silently would
-        # fork cell identity (pgw#788).
+        # fork cell identity.
         validated_table(overrides)
         if overrides:
             raise SettingsImpositionError(
@@ -167,7 +167,7 @@ def validated_table(
     overrides: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, str]:
     """:data:`DECLARED_TORCH` with DECLARED knob overrides folded in — the
-    typed-knob surface (pgw#718): keys must exist in the canonical table, so
+    typed-knob surface: keys must exist in the canonical table, so
     the only route to non-canonical behavior is a declared knob, which is
     part of the declaration and therefore keyed. An unknown knob refuses,
     named. One-way door: a scrubbed env var that turns out to be needed
@@ -275,7 +275,7 @@ def impose_torch(
     same-thread read-back is a process-wide proof. Returns the read-back.
 
     On a torchless worker there is nothing to impose; knob names are still
-    validated and a declared knob refuses (pgw#788)."""
+    validated and a declared knob refuses."""
     table = validated_table(overrides)
     torch = torch_capability.torch_or_none()
     if torch is None:

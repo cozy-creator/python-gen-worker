@@ -77,7 +77,7 @@ def merge_phase(phases: Sequence["pb.WorkerPhase"]) -> "pb.WorkerPhase":
 def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
     """One worker-level StateDelta from G per-group ones.
 
-    ``deltas`` carries only LIVE groups (pgw#937). A down group contributes no
+    ``deltas`` carries only LIVE groups. A down group contributes no
     function to the union, no free VRAM to the sum, and no vote to the phase
     min — otherwise the worker keeps advertising a dead group's functions and
     every dispatch onto it is answered "compute process restarting".
@@ -128,7 +128,7 @@ def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
             d.observed_residency_generation for d in deltas
         ),
         observed_config_generation=min(d.observed_config_generation for d in deltas),
-        # pgw#1032: no `cell_lookups` — no child produces them any more.
+        # no `cell_lookups` — no child produces them any more.
         compile_targets=targets,
     )
     # THE TRAP: disk is NOT summable. All G children share ONE container
@@ -221,7 +221,7 @@ def reconcile_activity_kind(
       is); it is terminal only when EVERY group's latest is terminal, and FAILED
       then only if any of those terminals failed;
     * carries the AGGREGATE progress — summed counters, the furthest step — so
-      the hub's counter-advancement liveness (gw#621) sees the union of the
+      the hub's counter-advancement liveness sees the union of the
       groups' work advancing, never one group's stall masking three groups'
       progress;
     * is re-stamped with the PARENT's monotonic ``seq``. Children have
@@ -283,7 +283,7 @@ def worker_fn_unavailable(
     does the worker report unavailable, carrying one representative reason (the
     admin availability view is per-worker, not per-group).
 
-    **THE CONTRACT THE CALLER MUST NOT GET BACKWARDS (pgw#937): a value of
+    **THE CONTRACT THE CALLER MUST NOT GET BACKWARDS: a value of
     ``None`` means "this group SERVES it", so a group whose child is DOWN is
     EXCLUDED from the mapping — never entered as ``None``.** Popping a dead
     group's entry without also dropping the group would make the dead group read
@@ -317,7 +317,7 @@ def worker_fn_degraded(
     it wants a bigger one". Under ruling 1 the worker routes a dispatch to a
     group that can serve, so if ANY group serves the function NATIVE the worker
     is not degraded: report nothing. ``served_native_somewhere`` and
-    ``per_group`` are both computed over LIVE groups only (pgw#937): absence
+    ``per_group`` are both computed over LIVE groups only: absence
     means "serves it native" here too, so a down group left in the scan would
     veto a live group's degradation report. The worker is degraded only when it serves
     the function AND the best any group can do is degraded — then report the

@@ -338,7 +338,7 @@ class Source:
              ``from_single_file``) is refused here, typed: use
              ``Source.as_hf_model()`` and quantize the resulting pipeline
              yourself. Nothing in the fleet converts that layout through this
-             API, and a half-wired branch reads as support (pgw#657).
+             API, and a half-wired branch reads as support.
 
           3. **Passthrough vs quant decision.** Components matching
              ``quant_only`` are loaded + quantized; the rest are yielded
@@ -547,7 +547,7 @@ def _iter_singlefile_components(
         )
         return
 
-    # pgw#657: this was a NotImplementedError plus docs promising the layout
+    # this was a NotImplementedError plus docs promising the layout
     # worked — a dispatchable branch nobody wired, with no tracker item. It is
     # a REFUSAL, not a gap: no fleet conversion uses this layout through this
     # API, and the documented alternative is one call away.

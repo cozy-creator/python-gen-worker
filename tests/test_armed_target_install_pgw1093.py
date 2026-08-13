@@ -361,7 +361,7 @@ def test_a_boot_warmup_degrade_is_named_not_reported_as_uncompiled(
         assert ex._eager_posture(eff, rec) != cell_adopt.EagerPhase.UNCOMPILED.value
 
         # And it is a dated, greppable row — not a log line on a pod whose
-        # stdout nobody can reach (pgw#824).
+        # stdout nobody can reach.
         assert any(
             kind == activity.KIND_SERVE_DEGRADE
             and phase == cc.COMPILED_DEGRADE_TOKEN

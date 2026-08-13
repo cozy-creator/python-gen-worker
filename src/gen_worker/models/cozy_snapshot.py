@@ -56,7 +56,7 @@ def _inflight_blob_lock(digest: str) -> "asyncio.Lock":
     return _INFLIGHT_BLOB_LOCKS.setdefault(digest, asyncio.Lock())
 
 
-# gw#598 / th#850: verify-on-first-use-per-process for REUSED CAS state.
+# verify-on-first-use-per-process for REUSED CAS state.
 # The CAS root persists across pod restarts (cozy-local) and, historically,
 # could itself be a volume shared by several pods (superseded by gw#599's
 # managed-tier ruling — the root is local-only now, but an operator can
@@ -78,7 +78,7 @@ def _mark_trusted(s: Set[tuple], item: tuple) -> None:
 
 ProgressFn = Callable[[int, Optional[int]], None]
 
-# th#850 managed-tier ruling (gw#599): bytes actually fetched over the
+# bytes actually fetched over the
 # network (R2 origin), as opposed to bytes served from a warm local/volume
 # cache — the signal a "volume-attached boot ⇒ ~0 network bytes" runtime
 # assertion needs. Carried via a ContextVar (same idiom as
@@ -145,7 +145,7 @@ def _blob_path(blobs_root: Path, ref: str) -> Path:
     The algorithm is a PATH SEGMENT, mirroring the hub's `blobs/<algo>/` layout,
     so a sha256 blob and a blake3 blob of different bytes can never collide on
     one name and a legacy blake3 tree keeps its exact existing paths. An
-    untagged ref is REFUSED by `parse_cas_ref` (pgw#871/th#1357) — a bare hex
+    untagged ref is REFUSED by `parse_cas_ref` — a bare hex
     names no namespace, so there is no path to build.
     """
     algo, hexpart = parse_cas_ref(ref)
@@ -153,7 +153,7 @@ def _blob_path(blobs_root: Path, ref: str) -> Path:
 
 
 def _component_of(path: str) -> str:
-    """The diffusers COMPONENT a snapshot file belongs to (pgw#1087).
+    """The diffusers COMPONENT a snapshot file belongs to.
 
     The first path segment when the file sits in a subdirectory, ``(root)``
     otherwise — model_index.json, a top-level scheduler config and the like.
@@ -193,11 +193,11 @@ def _copy_verified_blob(src: Path, dst: Path, ref: str, expected_size: int) -> b
     verifies size and digest (mirrors the multi-writer discipline gw#597
     established for ordinary downloads).
 
-    ``ref`` is ALGORITHM-TAGGED and the hash dispatches on it (th#1303): a
+    ``ref`` is ALGORITHM-TAGGED and the hash dispatches on it: a
     sha256 blob checked with blake3 fails every honest copy, and an empty
     digest must never reduce this to a size-only check.
 
-    pgw#971: the hash is FUSED INTO THE COPY, per pgw#769 — hashing stays
+    the hash is FUSED INTO THE COPY, per pgw#769 — hashing stays
     mandatory, but it rides the read this function already performs instead of
     costing a second full pass. The old shape was `copyfileobj` and then
     `hash_file(tmp)`: three passes over every byte (read source, write stage,
@@ -279,7 +279,7 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 # shape — each wire boundary parses into it; no dict-or-object duck typing).
 # ---------------------------------------------------------------------------
 
-# pgw#782 / th#1313: pickle serialisation formats a worker REFUSES to
+# pickle serialisation formats a worker REFUSES to
 # materialize, mirroring tensorhub's publish-time ban
 # (catalog.PickleWeightExtensions). Defence in depth, and the depth is the
 # point: the hub now refuses these at publish, but blobs already in the shared
@@ -312,7 +312,7 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
         path = (f.path or "").strip()
         if not path:
             continue
-        # th#1303: the algorithm-tagged ref FIRST. `cas_ref()` raises on an
+        # the algorithm-tagged ref FIRST. `cas_ref()` raises on an
         # entry that carries no readable digest, so an unreadable manifest can
         # never degrade into "download it unverified".
         try:
@@ -365,7 +365,7 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
 #: declared components plus root config — loadable on its own), ``__x`` is an
 #: override EXCLUSION (th#1330 B2) and is NOT — the excluded component's
 #: subfolder is absent by construction, so the tree only loads together with
-#: the override trees it was narrowed for (pgw#816).
+#: the override trees it was narrowed for.
 SUBSET_MARKER = "__c"
 EXCLUDE_MARKER = "__x"
 
@@ -380,7 +380,7 @@ def snapshot_dir_key(
     components: Sequence[str] = (),
     exclude: Sequence[str] = (),
 ) -> str:
-    """On-disk snapshot-directory key (pgw#505): the bare digest normally, or
+    """On-disk snapshot-directory key: the bare digest normally, or
     ``<digest>__c<fingerprint>`` when ``components`` narrows the materialized
     tree to a SUBSET of the digest's full content. Keyed separately so a
     component-scoped (partial) materialization can never be mistaken for —
@@ -467,7 +467,7 @@ class CozySnapshotDownloader:
         blobs_root.mkdir(parents=True, exist_ok=True)
         snaps_root.mkdir(parents=True, exist_ok=True)
         fill_blobs_root = fill_source_dir / "blobs" if fill_source_dir is not None else None
-        # pgw#972: the volume's chunk-object tree, a SIBLING of `blobs/` — an
+        # the volume's chunk-object tree, a SIBLING of `blobs/` — an
         # incomplete file's verified chunks, so a replacement pod resumes it
         # instead of refetching it whole.
         fill_chunks_root = fill_source_dir / "chunks" if fill_source_dir is not None else None
@@ -483,7 +483,7 @@ class CozySnapshotDownloader:
             res = _filter_resolved_components(
                 ref, res, components, exclude_components)
 
-        # pgw#505: a components=-scoped fetch materializes a NARROWER tree
+        # a components=-scoped fetch materializes a NARROWER tree
         # than the digest's full content, so it is keyed separately (never
         # under the bare digest — that name is reserved for the complete
         # snapshot). th#1330 B2: an exclude_components= scope is narrower in
@@ -516,13 +516,13 @@ class CozySnapshotDownloader:
                 raise RuntimeError("concurrent snapshot build failed") from entry.exception
             return snap_dir
 
-        # pgw#971: volume write-throughs that could not be teed run in the
+        # volume write-throughs that could not be teed run in the
         # background and are JOINED below, so the build never returns — or
         # fails — with a publish still in flight.
         publishes: List["asyncio.Task"] = []
         try:
             if snap_dir.exists():
-                # gw#598: a materialized tree this process has not produced or
+                # a materialized tree this process has not produced or
                 # checked (another pod's writes on a shared volume root, or a
                 # previous boot's) is verified ONCE before reuse; corruption
                 # quarantines tree + bad blobs and falls through to a rebuild.
@@ -614,7 +614,7 @@ class CozySnapshotDownloader:
                 if not snap_dir.exists():
                     raise
             else:
-                fsync_dir(snaps_root)  # persist the rename itself (gw#408)
+                fsync_dir(snaps_root)  # persist the rename itself
 
     # ------------------------------------------------------------------
     # Blob download (deduplicated, parallel)
@@ -630,7 +630,7 @@ class CozySnapshotDownloader:
         fill_chunks_root: Optional[Path] = None,
         publishes: Optional[List["asyncio.Task"]] = None,
     ) -> None:
-        # pgw#971: background volume write-throughs land here; the caller joins
+        # background volume write-throughs land here; the caller joins
         # them before returning, so none can outlive the build.
         if publishes is None:
             publishes = []
@@ -639,7 +639,7 @@ class CozySnapshotDownloader:
         seen: Set[str] = set()
         unique: List[WorkerResolvedRepoFile] = []
         for f in files:
-            # th#1303: dedupe on the ALGORITHM-TAGGED ref. Two different
+            # dedupe on the ALGORITHM-TAGGED ref. Two different
             # algorithms' hex could otherwise collide in this set and one
             # blob would stand in for the other.
             digest = f.cas_ref()
@@ -663,7 +663,7 @@ class CozySnapshotDownloader:
 
         total = sum(int(f.size_bytes or 0) for f in unique) or None
         done = total - missing_bytes if total else 0
-        network_bytes = 0  # th#850: bytes actually fetched over the network
+        network_bytes = 0  # bytes actually fetched over the network
         # this call, as opposed to bytes already present under blobs_root —
         # the signal a "volume-attached boot ⇒ ~0 network bytes" runtime
         # assertion needs. Only _dl_locked's real fetch increments it.
@@ -685,7 +685,7 @@ class CozySnapshotDownloader:
                 done += n
                 if network:
                     network_bytes += n
-                    # th#850 managed-tier ruling (gw#599): update the
+                    # update the
                     # NetworkBytesScope sink LIVE (not just once at the end
                     # of this call, see below) so a caller's mid-flight
                     # `progress()` tick — called synchronously right below,
@@ -695,17 +695,17 @@ class CozySnapshotDownloader:
                     # way it reads bytes_done/bytes_total.
                     if _sink is not None:
                         _sink[0] += n
-                    # ie#522: a real network byte is honest proof the
+                    # a real network byte is honest proof the
                     # activity (self-mint compile's load phase, etc.) is
                     # alive — heartbeat it directly, independent of the
                     # CPU-sampling watchdog thread (I/O-bound fills are
                     # CPU-light by design and would otherwise starve it).
                     _activity.note_progress()
-                # pgw#1041: fetched bytes as an activity COUNTER, so the 10s
+                # fetched bytes as an activity COUNTER, so the 10s
                 # beat carries byte-level fetch progress to the hub (the
                 # heartbeat above proves liveness but reports no number).
                 # Activity-scoped: finished on phase change/activity end
-                # (pgw#962), re-acquired per tick.
+                # , re-acquired per tick.
                 act = _activity.current()
                 if act is not None:
                     act.counter("download:bytes", "bytes").add(n)
@@ -725,7 +725,7 @@ class CozySnapshotDownloader:
         # Sort largest first for better overlap, then download in parallel.
         unique.sort(key=lambda f: int(f.size_bytes or 0), reverse=True)
 
-        # pgw#1087: per-COMPONENT fetch spans. `weights_fetch` says how long
+        # per-COMPONENT fetch spans. `weights_fetch` says how long
         # the whole ref took and nothing about which of transformer / vae /
         # text_encoder owned it, and — because these run four-wide — nothing
         # about how much of the wall is genuinely serialized. Both are
@@ -761,12 +761,12 @@ class CozySnapshotDownloader:
                 drop_volume_chunks(volume_chunk_dir(fill_chunks_root, digest))
 
         async def _blob_trusted(dst: Path, f: WorkerResolvedRepoFile, digest: str) -> bool:
-            """Reusable AND digest-trusted (gw#598): size gate as before, plus
+            """Reusable AND digest-trusted: size gate as before, plus
             a full content-hash check once per (root, digest) per process —
             reused bytes on a shared volume root are another pod's writes of
             any age and must earn the same trust as a fresh verified download.
 
-            The hash DISPATCHES on the ref's algorithm (th#1303); it is never
+            The hash DISPATCHES on the ref's algorithm; it is never
             skipped, because a check that does not run is indistinguishable
             from one that passes."""
             if not self._blob_usable(dst, f):
@@ -787,7 +787,7 @@ class CozySnapshotDownloader:
             return False
 
         async def _fill_from_volume(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> bool:
-            """th#850 managed-tier ruling (gw#599): FILL SOURCE #1. A blob
+            """th#850 managed-tier ruling: FILL SOURCE #1. A blob
             present on the endpoint volume is BLAKE3-verified and copied to
             local CAS — never trusted on size alone (digest-verification of
             volume-read blobs is mandatory regardless of the local/shared
@@ -814,11 +814,11 @@ class CozySnapshotDownloader:
             return False
 
         async def _fill_to_volume(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
-            """Write-through (gw#599): a fresh R2 fetch warms the volume for
+            """Write-through: a fresh R2 fetch warms the volume for
             the next same-endpoint pod. Best-effort — a publish failure never
             fails the request; the next pod simply falls through to R2 too.
 
-            pgw#971: this is now the FALLBACK. Chunked blobs — which is where a
+            this is now the FALLBACK. Chunked blobs — which is where a
             multi-GB keep-set's bytes actually live — fill both stores in one
             pass inside ``download_chunked_file``; only whole-file blobs (a v2
             manifest chunks anything over 64 MiB, so these are the small ones)
@@ -846,7 +846,7 @@ class CozySnapshotDownloader:
                 await asyncio.to_thread(_drop_chunks, digest)
 
         async def _dl(f: WorkerResolvedRepoFile) -> None:
-            # pgw#1087: the component span brackets THIS file's contribution
+            # the component span brackets THIS file's contribution
             # and carries the source it actually came from — the same
             # cached/volume/network distinction `weights_fetch` reports, one
             # level finer, so "the vae was warm and the transformer was cold"
@@ -899,7 +899,7 @@ class CozySnapshotDownloader:
                 _log.info("blob_download_start path=%s size=%s digest=%s chunks=%d",
                           f.path, f.size_bytes, digest[:24], len(f.chunks))
                 if f.chunks:
-                    # th#1303 v2: bounded out-of-order fetch, IN-ORDER commit,
+                    # bounded out-of-order fetch, IN-ORDER commit,
                     # whole-file hash fused into the commit stream. Only the
                     # chunks are store-enforced, so this is the one place a
                     # wrong whole-file label is caught — it fails closed.
@@ -907,7 +907,7 @@ class CozySnapshotDownloader:
                         ChunkSpec(sha256=c.sha256, url=c.url, length=int(c.length))
                         for c in f.chunks
                     ]
-                    # pgw#971: fill BOTH stores in this one pass when a volume
+                    # fill BOTH stores in this one pass when a volume
                     # is attached — the NFS write hides behind network latency
                     # and the extra read+hash pass disappears.
                     teed = await asyncio.to_thread(
@@ -923,7 +923,7 @@ class CozySnapshotDownloader:
                             _blob_path(fill_blobs_root, digest)
                             if fill_blobs_root is not None else None
                         ),
-                        # pgw#972: verified chunks land here as they arrive and
+                        # verified chunks land here as they arrive and
                         # are adopted from here by the next pod, so a pod that
                         # dies 90% in costs its successor 10% of the bytes, not
                         # 100%.
@@ -962,7 +962,7 @@ class CozySnapshotDownloader:
             # NAMED rather than leaving open rows the hub cannot interpret.
             if comp_spans is not None:
                 comp_spans.close_all("fetch_aborted")
-        # th#850 managed-tier runtime-assertion signal: on a volume-attached
+        # on a volume-attached
         # boot with blobs already warm, network_bytes should land near zero.
         # _on_bytes above already streamed this total into the caller's
         # NetworkBytesScope live, chunk by chunk (so mid-flight DOWNLOADING
@@ -976,7 +976,7 @@ class CozySnapshotDownloader:
 
     @staticmethod
     def _blob_usable(dst: Path, f: WorkerResolvedRepoFile) -> bool:
-        """A cached blob is only reusable at the manifest's size (gw#408): a
+        """A cached blob is only reusable at the manifest's size: a
         truncated blob from a pre-durability build must be re-downloaded, not
         silently rebuilt into every future snapshot."""
         try:
@@ -1057,7 +1057,7 @@ class CozySnapshotDownloader:
                         shutil.copyfileobj(in_f, out_f)
                     total_written += part_size
                 out_f.flush()
-                os.fsync(out_f.fileno())  # durable before the snapshot rename (gw#408)
+                os.fsync(out_f.fileno())  # durable before the snapshot rename
 
             _log.info("reassemble_done file=%s total_size=%s", original_path, total_written)
 
@@ -1086,7 +1086,7 @@ def _verify_materialized_tree(
     """Integrity of a reused materialized snapshot (worker thread, blocking).
 
     Manifest-covered regular files are checked against declared size AND their
-    CONTENT DIGEST, hashed under the algorithm the manifest named (th#1303);
+    CONTENT DIGEST, hashed under the algorithm the manifest named;
     reassembled chunked originals (which the manifest digests only part-wise)
     get the structural safetensors check. Returns ``(ok, bad)`` — algorithm-
     tagged refs in ``bad`` name blobs to quarantine.

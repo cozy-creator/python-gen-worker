@@ -8,7 +8,7 @@ WHAT WAS DELETED, AND WHAT STANDS IN ITS PLACE.
 whenever no forward had run yet, compared against a ``free_bytes`` those very
 weights are already outside of. Its own docstring conceded the arithmetic
 "CANNOT refuse a card that merely cannot hold 36 runners", i.e. it could not
-refuse the failure it was written for (th#1825), and it COULD refuse cards that
+refuse the failure it was written for, and it COULD refuse cards that
 were fine — stickily, for the life of the process. Two call sites ran it:
 ``provision.arm_aot`` (every arm route) and ``fleet_cells.adopt_delegated_mint``
 (the self-mint route). Both are gone.

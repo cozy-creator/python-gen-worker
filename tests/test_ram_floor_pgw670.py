@@ -9,7 +9,7 @@ th#740's read-back-and-reject. Without a carrier a starved allocation degrades
 SILENTLY — a slow request, not a refused pod.
 
 Tapes go through the REAL discovery manifest builder, because the whole defect
-class (pgw#660) is a declaration that never reaches the builder's
+class is a declaration that never reaches the builder's
 ``resources{}`` keys:
 
   * ``ram_gb_hint`` is declared, validated, and reaches the manifest under the

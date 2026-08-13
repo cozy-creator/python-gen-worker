@@ -1,4 +1,4 @@
-"""Chunked sha256 CAS: prefix-dispatched verification and chunk reassembly (pgw#781 / th#1303).
+"""Chunked sha256 CAS: prefix-dispatched verification and chunk reassembly.
 
 DATA PLANE. Every byte here is fetched, hashed and written by the process that
 calls these functions, so under pgw#763 Layer 1 this module belongs to the
@@ -37,7 +37,7 @@ to actually live.
     and refetched on a fresh connection instead of holding a 35 GB file hostage.
     Only when the whole route is bad does the aggregate floor raise a typed
     stall for the hub to re-place the pod.
-*   **Both stores are filled AT ONCE** (pgw#971). When an endpoint volume is
+*   **Both stores are filled AT ONCE**. When an endpoint volume is
     attached, every block is ``pwrite``-ed to its offset in the volume's part
     file in the same pass as the local one, so the volume write hides behind
     network latency instead of costing a second full read + write + hash of
@@ -45,7 +45,7 @@ to actually live.
     is published only after the LOCAL file passes its whole-file digest, so a
     half-written volume blob is never readable under the digest name, and any
     mirror failure disables the mirror rather than failing the fetch.
-*   **Resume crosses PODS, at chunk granularity** (pgw#972). Each chunk is
+*   **Resume crosses PODS, at chunk granularity**. Each chunk is
     copied onto the volume the moment its own sha256 verifies, under the
     content-addressed name ``chunks/<algo>/aa/bb/<file>/<index>-<chunk>``. So
     the volume never holds unverified bytes under a name anyone reads: it holds
@@ -113,7 +113,7 @@ _READ_CHUNK_BYTES = 4 * 1024 * 1024
 # on ranged GETs (pgw#786 measured 250 MB/s), so 4 MiB per window is two orders
 # of magnitude below healthy and unambiguously a lemon.
 _CHUNK_PROGRESS_FLOOR_BYTES = 4 * 1024 * 1024
-# pgw#972: a chunk's retry budget is a STRIKE COUNT plus a wall-clock cap, and
+# a chunk's retry budget is a STRIKE COUNT plus a wall-clock cap, and
 # the two failure shapes are told apart before either is charged.
 #
 #   * A `DigestMismatch` is a COMPLETE, wrong-hashing body: the route is
@@ -149,7 +149,7 @@ _CHUNK_PROGRESS_FLOOR_BYTES = 4 * 1024 * 1024
 # (`_DOWNLOAD_RETRIES`, which the journal resumes across) sit on top of it.
 _CHUNK_MAX_ATTEMPTS = 8
 _CHUNK_BACKOFF_CAP_S = 30.0
-# th#1362: with positional writes a worker holds one 4 MiB read block instead of
+# with positional writes a worker holds one 4 MiB read block instead of
 # a whole 64 MiB chunk, so the window is priced in threads and sockets rather
 # than in gigabytes. 16 is where the measured curve flattens (see
 # tests/test_chunk_cas_parallel_th1362.py) — past it the connection pool and the
@@ -165,7 +165,7 @@ class ChunkedDownloadStalled(RuntimeError):
     """Every chunk source is below the progress floor — the ROUTE is bad.
 
     Typed so the hub can re-place the pod rather than retrying into the same
-    lemon host (pgw#786).
+    lemon host.
     """
 
 
@@ -191,7 +191,7 @@ def parse_cas_ref(ref: str) -> tuple[str, str]:
     A 64-character hex cannot distinguish blake3 from sha256, because both
     digests are 32 bytes: the length check is not a discriminator, it only looks
     like one. Inferring an algorithm addresses the WRONG namespace silently
-    (pgw#871).
+.
     """
     s = (ref or "").strip().lower()
     if not s:
@@ -237,7 +237,7 @@ def sha256_file(path: Path, chunk_size: int = _READ_CHUNK_BYTES) -> str:
 def hasher_for(algo: str) -> "hashlib._Hash":
     """A fresh incremental hasher for the named algorithm — the same dispatch
     as :func:`hash_file`, in the same place, for callers that can FUSE the hash
-    into a read they already perform (pgw#769/pgw#971) rather than pay a second
+    into a read they already perform rather than pay a second
     pass over the bytes."""
     if algo == "sha256":
         return hashlib.sha256()
@@ -248,7 +248,7 @@ def hash_file(path: Path, algo: str) -> str:
     """Hash a file with the named algorithm. No default: the caller must have
     read the algorithm off the digest, never assumed it.
 
-    th#1303 S1: ``blake3`` is no longer hashable here. `parse_cas_ref` still
+    ``blake3`` is no longer hashable here. `parse_cas_ref` still
     RECOGNISES a blake3 ref (that grammar dies at S2, with the shared
     cross-language vectors), so a v1 ref reaching a verifier lands here and
     RAISES. That asymmetry is deliberate: after the repoint no tag resolves to
@@ -289,7 +289,7 @@ def _pwrite_all(fd: int, data: bytes, offset: int) -> None:
 
 
 class _Mirror:
-    """A SECOND positional destination written in the same pass (pgw#971).
+    """A SECOND positional destination written in the same pass.
 
     The endpoint volume, filled at the same time as local CAS rather than by a
     full re-read afterwards. Best effort in the strongest sense: the first
@@ -584,7 +584,7 @@ def _fetch_chunk_to_offset(
 ) -> None:
     """Stream ONE chunk straight into its byte range, verifying as it goes.
 
-    Abandon-and-refetch is per attempt and per chunk (pgw#786): an attempt that
+    Abandon-and-refetch is per attempt and per chunk: an attempt that
     stops clearing its own progress floor is dropped and retried on a FRESH
     connection, so one bad connection cannot hold the file. pgw#972 splits that
     from the case where NOTHING arrived — see ``_CHUNK_MAX_ATTEMPTS`` above.
@@ -735,13 +735,13 @@ def download_chunked_file(
     pass over the bytes, and no second read. On mismatch the partial file is
     deleted so the next attempt starts clean.
 
-    ``mirror_dst`` (pgw#971) fills a SECOND store — the endpoint volume — in the
+    ``mirror_dst`` fills a SECOND store — the endpoint volume — in the
     same pass, so the write-through costs neither a re-read nor a second hash of
     every byte. Returns whether that mirror was published; ``False`` (including
     always when ``mirror_dst`` is ``None``) means the caller still owes the
     volume a copy.
 
-    ``mirror_chunk_dir`` (pgw#972) is that file's chunk-object directory on the
+    ``mirror_chunk_dir`` is that file's chunk-object directory on the
     same volume — see :func:`volume_chunk_dir`. Verified chunks are published
     there as they land and adopted from there on the next pod, so a pod that
     dies 90% into a 35 GB component leaves its successor 3.5 GB to fetch instead
@@ -775,7 +775,7 @@ def download_chunked_file(
         if not (c.url or "").strip():
             raise ValueError(f"chunk {i} has no URL")
 
-    # pgw#783: G compute children share ONE container filesystem, so serialise
+    # G compute children share ONE container filesystem, so serialise
     # the fetch of this exact CAS entry across processes — the in-process dedup
     # cannot, the groups are separate processes. The first child fetches under
     # the flock; the rest block, then find dst already present and skip (G x
@@ -1054,7 +1054,7 @@ def _download_chunked_locked(
             # would publish a file with holes.
             _seed_mirror(fd, mirror, chunks, offsets, already)
 
-        # pgw#972: whatever THIS pod's local journal could not supply, a
+        # whatever THIS pod's local journal could not supply, a
         # PREVIOUS pod may have left verified on the volume. Local disk wins
         # (no volume read is owed for a chunk we already hold); everything else
         # is adopted here, re-hashed, and never fetched again.
@@ -1110,7 +1110,7 @@ def _download_chunked_locked(
             _log.info("blob_fill_publish source=r2 destination=volume mode=tee "
                       "digest=%s bytes=%d published=%s",
                       want_whole[:16], total_size, published)
-        # pgw#972 cleanup: the volume now holds the COMPLETE blob under its
+        # the volume now holds the COMPLETE blob under its
         # digest name, so this file's chunk objects are garbage. `exists()`
         # rather than `published` — a concurrent pod may have published it
         # first, and the chunks are just as dead either way.
@@ -1147,7 +1147,7 @@ def _fetch_pending(
     aggregate = ProgressFloor(_CHUNK_PROGRESS_FLOOR_BYTES * max_inflight)
     delivered_total = 0
     counter = threading.Lock()
-    # pgw#972: per-chunk retries now sleep, so a fatal failure elsewhere has to
+    # per-chunk retries now sleep, so a fatal failure elsewhere has to
     # be able to cut them short — otherwise the pool cannot drain until every
     # sibling has spent its whole retry budget.
     give_up = threading.Event()
@@ -1171,7 +1171,7 @@ def _fetch_pending(
         # needs no lock of its own.
         os.write(jfd, f"{i}\n".encode())
         prefix.mark(i)
-        # pgw#972: the chunk has proved its own digest, so it is publishable
+        # the chunk has proved its own digest, so it is publishable
         # on its own — AFTER the mark, which keeps the whole-file hasher
         # moving while this worker pays the volume write.
         if vol_chunks is not None:
@@ -1246,7 +1246,7 @@ def _finalize(
             f"{want_whole[:16]}… (chunks were individually valid, so the "
             f"whole-file label is wrong or the chunk ORDER is)"
         )
-    # Durable atomic finalize (gw#408): rename is atomic in the NAMESPACE only.
+    # Durable atomic finalize: rename is atomic in the NAMESPACE only.
     # CYCLE: cozy_cas imports DigestMismatch from this module.
     from .cozy_cas import fsync_dir
 

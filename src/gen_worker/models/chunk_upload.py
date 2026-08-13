@@ -1,4 +1,4 @@
-"""Chunked sha256 CAS upload client (pgw#781 / th#1303).
+"""Chunked sha256 CAS upload client.
 
 The publisher's side of the v2 flow. Shape, and why each part is the way it is:
 
@@ -444,7 +444,7 @@ def upload_grants(
                 raise ValueError(
                     f"grant for {g.digest[:20]}… is {g.size_bytes} bytes, local span is {length}"
                 )
-            # pgw#1004 D: the slot is taken BEFORE the span is read, so the
+            # the slot is taken BEFORE the span is read, so the
             # PUT budget bounds bytes resident in this process and not merely
             # sockets open from it. It used to be taken inside _put_one, one
             # 64 MiB buffer too late.

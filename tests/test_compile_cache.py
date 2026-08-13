@@ -368,7 +368,7 @@ def test_system_repo():
 
 
 # ---------------------------------------------------------------------------
-# gw#577: fleet delivery axes + named refusal reasons
+# fleet delivery axes + named refusal reasons
 # ---------------------------------------------------------------------------
 
 
@@ -479,7 +479,7 @@ def test_compile_struct_validation():
 def test_dynamic_dim_validation():
     d = DynamicDim(dim=" Batch ", min=2, max=8)
     assert (d.dim, d.min, d.max) == ("batch", 2, 8)
-    # pgw#739: the two-literal "batch"|"sequence" wall is REPLACED — wan's
+    # the two-literal "batch"|"sequence" wall is REPLACED — wan's
     # latent-spatial axis is the red case (ie#550/ie#566 hit it from both
     # sides). A named axis constructs; validation moved to Compile, which
     # cross-references the name against declared Compile.dims.
@@ -496,7 +496,7 @@ def test_dynamic_dim_validation():
 
 
 def test_compile_struct_video_shapes():
-    """(w, h, frames) rows — video graphs key on the frame axis (ie#381)."""
+    """(w, h, frames) rows — video graphs key on the frame axis."""
     c = Compile(
         family="ltx-2.3",
         shapes=[[1280, 704, 121], (960, 544, 241), (1920, 1088, 241)],
@@ -574,14 +574,14 @@ def test_endpoint_compile_reaches_spec():
     assert cell.text_len == 0
     # Warm guidance derives from the payload CompileAxis classes, in class
     # declaration order (Compile(guidance_scales=...) is deleted in v2).
-    assert cell.guidance_scales == (0.0, 5.0)  # class union, sorted (pgw#654)
+    assert cell.guidance_scales == (0.0, 5.0)  # class union, sorted
 
     with pytest.raises(TypeError, match="compile="):
         @endpoint(compile="yes")  # type: ignore[arg-type]
         def bad(ctx, p: In) -> Out:
             return Out()
 
-    # SDK v2 lint (ie#544): an inference compile= endpoint must declare its
+    # SDK v2 lint: an inference compile= endpoint must declare its
     # text-sequence axis — text_len or a dynamic "sequence" dim.
     with pytest.raises(ValueError, match="text-sequence"):
         @endpoint(compile=Compile(shapes=((768, 768),)))
@@ -629,11 +629,11 @@ def test_resolve_pipeline_class_gw586() -> None:
 
 
 # ---------------------------------------------------------------------------
-# gw#588: resident prep-mode drift (off <-> vae_only) converges to the cell
+# resident prep-mode drift (off <-> vae_only) converges to the cell
 # ---------------------------------------------------------------------------
 
 
-# pgw#1032: `test_arm_staged_artifact_reconciles_resident_drift` is deleted with
+# `test_arm_staged_artifact_reconciles_resident_drift` is deleted with
 # `arm_staged_artifact` itself — the STRICT arm entry point existed only for
 # hub-commanded hot adoption, which nothing has ever dispatched. The resident
 # convergence it checked is the same one `enable()` performs, and
@@ -662,8 +662,8 @@ def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
 
     monkeypatch.delenv("TORCHINDUCTOR_AUTOGRAD_CACHE", raising=False)
     monkeypatch.setattr(fconf, "enable_autograd_cache", True)
-    # pgw#1181: the pin is `settings_authority.disable_autograd_cache`, the ONE
-    # writer of torch settings (pgw#1049). `capture_env` used to call it on the
+    # the pin is `settings_authority.disable_autograd_cache`, the ONE
+    # writer of torch settings. `capture_env` used to call it on the
     # way to writing a `torch-inductor-cache` capture and is deleted with that
     # format; the invariant is unchanged and is asserted at its owner.
     sa.disable_autograd_cache()
@@ -706,7 +706,7 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
         entry.__dict__.pop("env_value_force", None)  # simulate no pre-import env
         from gen_worker import settings_authority as sa
 
-        sa.disable_autograd_cache()  # pgw#1181: the pin's owner, see above
+        sa.disable_autograd_cache()  # the pin's owner, see above
 
         seen: dict = {}
 
@@ -729,7 +729,7 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# FX-key forensics (gw#608)
+# FX-key forensics
 # ---------------------------------------------------------------------------
 
 

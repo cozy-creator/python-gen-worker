@@ -91,7 +91,7 @@ class FakePackage:
 
     def load_constants(self, values, check_full_update=False,
                         user_managed=False):
-        # torch 2.13's real signature carries user_managed (pgw#1042).
+        # torch 2.13's real signature carries user_managed.
         self.full_update_asked = check_full_update
         if check_full_update and set(values) != set(self._fqns):
             raise RuntimeError("partial constant update refused by torch")
@@ -172,7 +172,7 @@ def _meta(**over):
             [str((entry or {}).get("class_hash") or "")]),
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
-        # pgw#1097: the folding fence, declared (see the fixture note in
+        # the folding fence, declared (see the fixture note in
         # test_aot_adopt_events_pgw733).
         "constant_folding_fenced": True,
         "source_ref": "", "source_digest": "",
@@ -462,13 +462,13 @@ def test_swap_serves_out_of_contract_requests_eagerly_and_stays_armed():
     runner = _runner(package)
     runner.bind(module.state_dict(), {})
     meta = _meta()
-    # pgw#1176: production wraps a REGISTRY, never a bare runner — `is_armed`
+    # production wraps a REGISTRY, never a bare runner — `is_armed`
     # asks it what is armed. A fixture wrapping a bare runner was modelling a
     # call shape `arm_entry` does not make.
     dispatch = aot.EntryDispatch(declared=(ENTRY,))
     dispatch.add(ENTRY, runner)
     aot.wrap_module(module, dispatch, meta)
-    # pgw#1176: the PIPELINE marker `arm_entry` publishes — `targets` plus one
+    # the PIPELINE marker `arm_entry` publishes — `targets` plus one
     # `entries` row per armed graph class. The bare `{"module": …, "state": …}`
     # this used to build is a pipeline shape nothing produces; `is_armed` asks
     # the REGISTRY what is armed rather than reading a flag, so a fixture that
@@ -512,7 +512,7 @@ def test_swap_falls_permanently_eager_and_revokes_proof_on_artifact_error():
     runner.bind(module.state_dict(), {})
     meta = _meta()
     aot.wrap_module(module, runner, meta)
-    # pgw#1176: the PIPELINE marker `arm_entry` publishes — `targets`, not a
+    # the PIPELINE marker `arm_entry` publishes — `targets`, not a
     # bare `module`/`state`. The old shape is one nothing in production writes;
     # `_marker_states`' pipeline-level fallback for it is deleted, and this was
     # the last fixture building it.
@@ -599,7 +599,7 @@ def test_verify_is_abi_exact(stub_runtime):
     assert "torch" in aot.verify(_meta(torch="2.12.0+cu130"))
     assert "sm" in aot.verify(_meta(sm="sm_80"))
     assert "cuda" in aot.verify(_meta(cuda="12.8"))
-    # pgw#765: the GPU MODEL is not an axis — an h100-minted cell would be
+    # the GPU MODEL is not an axis — an h100-minted cell would be
     # refused on sm_90-vs-sm_89, never on the marketing name.
     assert aot.verify(_meta(sku="h100-80gb-hbm3")) == ""
     assert "kind" in aot.verify(_meta(kind="an-unknown-kind"))
@@ -773,7 +773,7 @@ def test_provision_dispatches_aot_kind_and_reports_a_hit(tmp_path, monkeypatch, 
         raise AssertionError("compile_cache.enable must not be reached")
     monkeypatch.setattr(cc, "enable", _unexpected)
 
-    # pgw#868: the arm now GATES on numerics, and a torch-free rig has no
+    # the arm now GATES on numerics, and a torch-free rig has no
     # tensors to compare — this file's whole premise ("no torch, no CUDA, no
     # real artifact"). The gate is stubbed here because the subject is KIND
     # DISPATCH; its own behaviour, and the fact that `arm_aot` reaches it at
@@ -806,7 +806,7 @@ def test_provision_falls_through_to_inductor_when_the_pt2_is_unusable(
     assert provision.enable_compiled(
         pipeline, Cfg(), tmp_path / "cache", _tar(tmp_path)).armed is False
     # The unusable .pt2 is DROPPED and the fall-through lane is the JIT one.
-    # pgw#1181: it cannot be handed an artifact at all — `compile_cache.enable`
+    # it cannot be handed an artifact at all — `compile_cache.enable`
     # takes none, because the `torch-inductor-cache` format it used to seed has
     # no writer and is deleted. The drop is now structural, not a convention.
     assert seen == ["reached"]
@@ -828,7 +828,7 @@ def test_provision_still_routes_the_inductor_kind(tmp_path, monkeypatch, stub_ru
         return True
     monkeypatch.setattr(cc, "enable", _inductor)
     # An artifact of an UNKNOWN kind still falls through to the JIT lane —
-    # which arms cold-compile and is handed no artifact (pgw#1181).
+    # which arms cold-compile and is handed no artifact.
     unknown = _tar(tmp_path, _meta(kind="compile-cache"), name="cc.tar.gz")
     assert provision.enable_compiled(
         FakePipeline(), Cfg(), tmp_path / "cache", unknown).armed is True

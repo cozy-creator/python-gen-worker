@@ -44,7 +44,7 @@ from gen_worker.api.export_contract import (
 _TEXT_LEN = 77
 _VAE_SCALE = 8
 
-#: sdxl's declared payload bucket table (ie#345), trimmed to three rows — the
+#: sdxl's declared payload bucket table, trimmed to three rows — the
 #: arithmetic under test is per-row, not per-table.
 _ASPECT_ROWS: tuple[tuple[int, int], ...] = ((1216, 832), (1024, 1024), (832, 1216))
 
@@ -188,7 +188,7 @@ def test_a_target_with_no_class_row_is_refused_by_name() -> None:
         dims=(Dim("B", carried_by=(("sample", 0),)),),
         classes=(GraphClass(dims={"B": 2}, targets=("unet",)),),
         inputs=(Input("sample", shape=("B", 4, 128, 128), targets=("unet",), dtype="model"),
-                # pgw#1158: vae.decode needs a row of its own, or the
+                # vae.decode needs a row of its own, or the
                 # DECLARATION is refused first and this row would stop
                 # measuring the missing CLASS it is named for.
                 Input("z", shape=("B", 4, 128, 128), targets=("vae.decode",),
@@ -386,5 +386,5 @@ def test_the_proposed_sdxl_declaration_costs_nine_entries_not_eighteen() -> None
         for w, h in _SDXL_ASPECTS
     }
     # Every declared aspect the payload enum admits, and nothing else: the
-    # decoder's coordinate set IS the shape bucket table (ie#345).
+    # decoder's coordinate set IS the shape bucket table.
     assert len(names) == len(_SDXL_ASPECTS)

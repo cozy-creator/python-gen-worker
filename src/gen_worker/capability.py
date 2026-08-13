@@ -158,7 +158,7 @@ class InsufficientHostRamError(_HostRamFacts, RetryableError):
 class HostRamCapacityError(_HostRamFacts, HardwareUnmetError):
     """This pod SIZE can never stage the model — an empty host is too small.
 
-    pgw#752: the retryable form says "another worker may have room", which is
+    the retryable form says "another worker may have room", which is
     true only while the shortfall is pressure. When the requirement exceeds the
     host's TOTAL RAM, every retry re-buys an identically-sized pod and refuses
     identically (observed: 5 attempts across 2 pods, th#1228). Reporting a

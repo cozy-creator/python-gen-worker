@@ -21,7 +21,7 @@ Component parts (``pipeline.unet`` / ``pipeline.vae`` /
 ``pipeline.text_encoder`` / ``pipeline.scheduler``) are DERIVED from the
 pipeline class and addressable by path — never declared as sibling slots
 (``gen_worker.api.tree``). Component overrides (the SDXL VAE fix) are
-CATALOG DATA (th#1116), not endpoint code. Explicit multi-slot declaration
+CATALOG DATA, not endpoint code. Explicit multi-slot declaration
 survives only as the escape hatch for runtimes the SDK cannot introspect
 (llama/gguf, custom engines).
 
@@ -163,7 +163,7 @@ class Slot(Generic[D]):
     its ``setup()`` parameter carries a default (``edit: Pipe | None =
     None``). The signature is the single source of truth, so the two can
     never disagree. An optional slot may be left unbound at deploy time —
-    the deploy chooses which lanes a release serves (th#980/ie#524) — and
+    the deploy chooses which lanes a release serves — and
     ``setup()`` then runs with the parameter's own default.
     """
 
@@ -225,7 +225,7 @@ class ResolvedSlot(Generic[D]):
     Explicit PAYLOAD values still win over ``.defaults`` — that precedence
     is handler logic; this object only carries the resolved catalog recipe.
 
-    ``objective``/``distilled`` (pgw#654) are the resolved checkpoint's
+    ``objective``/``distilled`` are the resolved checkpoint's
     hub-stamped values. ``distilled_status`` distinguishes an evidenced false
     value from an unclassified or inconclusive one. An empty status means an
     older hub omitted the additive field. ``ctx.for_request`` applies the
@@ -307,7 +307,7 @@ def _apply_lora_overrides(
 def _finish_resolved(
     name: str,
     ref: ModelRef,
-    # pgw#1202: NOT `D`, and not `Optional[D]` either. `ResolvedSlot.__init__`
+    # NOT `D`, and not `Optional[D]` either. `ResolvedSlot.__init__`
     # declares `defaults: D` (bound to GenerationDefaults) but `resolve_slot`
     # passes None on the no-schema path below, and nothing in the tree guards
     # `.defaults is None`. So the declared type already disagrees with runtime;
@@ -401,7 +401,7 @@ def resolve_slot(
     ``lora_metadata_json`` (pgw#516, in lora-ride order) applies LAST, field
     by field — see :func:`_apply_lora_overrides`.
 
-    ``objective``/``distilled`` (pgw#654) are the resolved checkpoint's
+    ``objective``/``distilled`` are the resolved checkpoint's
     hub-stamped values; ``distilled_status`` distinguishes an evidenced false
     from unknown evidence (empty means an older sender).
     ``allowed_objectives``/``allowed_distilled``, when given, are the

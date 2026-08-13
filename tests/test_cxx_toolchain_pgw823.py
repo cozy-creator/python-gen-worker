@@ -130,7 +130,7 @@ def test_the_parent_no_longer_second_guesses_the_image(
         inputs=(Input("sample", shape=("B", 4), dtype="model"),),
         shape_strategy="static-rows", warm_changes_key=False)
     # Patch the caller's binding too: fleet_cells imports the name at module
-    # scope (pgw#976), so patching only export_contract leaves the real one bound.
+    # scope, so patching only export_contract leaves the real one bound.
     monkeypatch.setattr(ec, "export_declaration", lambda _f: decl)
     monkeypatch.setattr(fleet_cells, "export_declaration", lambda _f: decl)
 
@@ -167,7 +167,7 @@ def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
         mint_child.mint(req)
 
 
-# pgw#1010: `test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate` stood here.
+# `test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate` stood here.
 # The child mints ONE artifact kind now, and AOTInductor links a shared object,
 # so the C++ compiler is an unconditional precondition rather than a per-recipe
 # one. The finding it recorded (leg 2's dynamo mints ran 24-47 minutes on an

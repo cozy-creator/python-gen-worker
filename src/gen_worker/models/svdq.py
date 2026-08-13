@@ -1,4 +1,4 @@
-"""SVDQuant/nunchaku 4-bit loader mode (gw#415).
+"""SVDQuant/nunchaku 4-bit loader mode.
 
 A ``#svdq-fp4-*`` / ``#svdq-int4-*`` flavor is a normal diffusers tree whose
 denoiser directory holds ONE nunchaku-format single-file checkpoint instead of
@@ -203,7 +203,7 @@ def svdq_precision_for_sm(gpu_sm: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Engine selection (pgw#685) — nunchaku is no longer the only way to serve an
+# Engine selection — nunchaku is no longer the only way to serve an
 # svdq artifact.
 # ---------------------------------------------------------------------------
 

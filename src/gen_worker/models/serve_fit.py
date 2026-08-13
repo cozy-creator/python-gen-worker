@@ -89,7 +89,7 @@ class ServePlan:
     @property
     def degraded(self) -> bool:
         """True when it runs, but not as planned: non-native placement,
-        or (th#737) a precision pick that could not be applied
+        or a precision pick that could not be applied
         (``ran`` != ``wanted``, e.g. a dropped fp8 cast serving bf16)."""
         if not self.serveable:
             return False
@@ -104,9 +104,8 @@ def _wanted(binding: Any) -> str:
     bf16. Counting the cast here makes a SUCCESSFUL cast visible (wanted=fp8
     ran=fp8) instead of masquerading as bf16.
 
-    pgw#1148 dropped the STORED half: it read `binding.flavor`, and §1.32(d)
-    deleted that field. What the stored bytes are is the checkpoint's
-    tensor-layout contract, not a token on the binding."""
+    What the stored bytes are is the checkpoint's tensor-layout contract, not a
+    token on the binding (§1.32(d))."""
     storage = str(getattr(binding, "storage_dtype", "") or "").strip().lower()
     return storage or "bf16"
 

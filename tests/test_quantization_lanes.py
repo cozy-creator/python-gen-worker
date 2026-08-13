@@ -4,8 +4,8 @@ authorized a dedicated file for (no P-test home; this surface is orthogonal
 to the worker<->hub lifecycle contract P1-P10 cover, but is flagship-
 critical and carries real incident history).
 
-Absorbed from (all deleted after this file lands): test_w8a8.py (gw#534),
-test_w4a4.py (gw#540), test_fp8_and_emergency_loading.py (gw#389/th#546),
+Absorbed from (all deleted after this file lands): test_w8a8.py,
+test_w4a4.py, test_fp8_and_emergency_loading.py,
 test_promote_device_integrity.py (gw#409, J17 9%-request-loss incident).
 Their other ~40 tests (numerics-heavy GPU lanes, ladder/compile-key
 bookkeeping, emergency-rung sizing arithmetic) have no incident pin and are
@@ -26,7 +26,7 @@ pytest.importorskip("accelerate")
 
 
 # ---------------------------------------------------------------------------
-# gw#534: W8A8 fp8-GEMM contract — real tiny diffusers pipeline (CPU, no
+# W8A8 fp8-GEMM contract — real tiny diffusers pipeline (CPU, no
 # network), producer writes the exact tensor-layout contract, loader dequants to
 # bf16-resident and reproduces source weights to fp8 rounding.
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def test_w8a8_contract_artifact_detects_and_dequants_to_source_weights(
 
     w8a8.w8a8_gemm_mode.cache_clear() if hasattr(w8a8.w8a8_gemm_mode, "cache_clear") else None
     pipe = load_from_pretrained(DDPMPipeline, w8a8_tree)
-    # pgw#801: was `in ("", "bf16-resident")`, which could never fail —
+    # was `in ("", "bf16-resident")`, which could never fail —
     # `pipeline_weight_lane` collapses "bf16-resident" to "" (loading.py: it
     # traces identically to plain bf16), so the second arm was unreachable and
     # the assertion was satisfied unconditionally. What the test means is that
@@ -83,7 +83,7 @@ def test_w8a8_contract_artifact_detects_and_dequants_to_source_weights(
 
 
 # ---------------------------------------------------------------------------
-# gw#540: W4A4 nvfp4 contract — same real-pipeline shape, distinct format.
+# W4A4 nvfp4 contract — same real-pipeline shape, distinct format.
 # ---------------------------------------------------------------------------
 
 
@@ -103,7 +103,7 @@ def test_w4a4_contract_artifact_detects_and_round_trips(tiny_ddpm: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# gw#389/th#546: fp8 storage targets the denoiser specifically (not the whole
+# fp8 storage targets the denoiser specifically (not the whole
 # pipeline) and defaults bf16 compute. pgw#727 made the mechanism module
 # STRUCTURE instead of diffusers cast hooks, so this asserts the RESULT on a
 # real tiny denoiser (fp8-resident leaves, bf16 upcast, VAE untouched) rather

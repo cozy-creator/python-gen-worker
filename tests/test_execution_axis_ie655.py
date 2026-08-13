@@ -77,7 +77,7 @@ def test_the_lane_and_the_serving_mode_are_one_reading() -> None:
 
 
 def test_ctx_execution_lane_carries_the_same_string() -> None:
-    """`ctx.lane` is the handler's copy of the reported lane (th#1050), so it
+    """`ctx.lane` is the handler's copy of the reported lane, so it
     must not be the flattering one either — an author kernel that branches on
     `+compiled` would otherwise take the compiled branch on an eager pod."""
     res = _run("r-ie655-ctx")

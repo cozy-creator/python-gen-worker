@@ -1,4 +1,4 @@
-"""The declarative endpoint catalog — endpoints as DATA (pgw#808).
+"""The declarative endpoint catalog — endpoints as DATA.
 
 This single module replaces the old per-issue harness endpoint modules
 (`mint_endpoints_pgw784.py`, `shape_endpoints_pgw789.py`, ...). Scenarios never

@@ -55,7 +55,7 @@ def fake_sm(monkeypatch):
     full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
     monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
     # The consumer probe must agree with the mint probe: aot_serve.verify
-    # rules on sm (pgw#765), so a fake sm is only coherent in both.
+    # rules on sm, so a fake sm is only coherent in both.
     monkeypatch.setattr(aot_serve, "runtime_key", lambda: {
         "sku": full["sku"], "sm": full["sm"], "torch": full["torch"],
         "cuda": full["cuda"]})
@@ -412,7 +412,7 @@ def test_mint_records_the_phase_table(minted_cell) -> None:
 def _armed(minted_cell) -> Any:
     """Arm EVERY minted entry onto one pipeline, one artifact at a time.
 
-    pgw#1176: this is what accretion looks like from the outside — the second
+    this is what accretion looks like from the outside — the second
     call joins the first's registry, the first's target pool and the first's
     live wrap. The old shape (one `arm_entry` over a multi-entry cell) is
     gone with the cell.

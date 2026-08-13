@@ -203,7 +203,7 @@ def supervise(
 
     report_previous_container_death(record_path)
     # Anything the previous-death report did not consume is stale by now —
-    # a lingering marker would misattribute the NEXT death (pgw#676).
+    # a lingering marker would misattribute the NEXT death.
     postmortem.clear_all_inflight(record_path.parent)
     postmortem.write_boot_record(record_path)
 
@@ -247,7 +247,7 @@ def supervise(
         oom_after = postmortem.oom_kill_count()
         extra: dict = {"child_pid": child_pid}
         if verdict.get("signaled"):
-            # pgw#676: name the death — the in-flight marker (what was
+            # name the death — the in-flight marker (what was
             # executing), the faulthandler dump (every thread's Python
             # stack, written below Python by the dying child), and the
             # per-pod crash streak the next boot's gate refuses on.

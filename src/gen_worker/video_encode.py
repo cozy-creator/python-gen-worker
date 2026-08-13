@@ -1,4 +1,4 @@
-"""Video encode backend selection + streaming encoder (gw#476).
+"""Video encode backend selection + streaming encoder.
 
 Software x264 at the PyAV default (preset medium) can dominate request wall
 time on CPU-weak or contended hosts: the B200 gauntlet measured one 10s@1080p
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 ENCODER_ENV = "GEN_WORKER_VIDEO_ENCODER"
 #: Max concurrent buffered CPU finalize encodes (gw#516 host-RAM bound).
 ENCODE_CONCURRENCY_ENV = "GEN_WORKER_VIDEO_ENCODE_CONCURRENCY"
-#: PER EXECUTION GROUP (pgw#782). The bound exists so raw frame buffers do not
+#: PER EXECUTION GROUP. The bound exists so raw frame buffers do not
 #: pile up in host RAM — and host RAM is bought per pod, not per process. A
 #: flat process-global 2 made a G-group worker's tail serialize across
 #: unrelated cards: at G=4 two of four groups always waited for a sibling's
@@ -141,7 +141,7 @@ def detect_encoder(*, refresh: bool = False) -> EncoderChoice:
         return _detected
 
 
-# ---- bounded finalize concurrency (gw#516) ---------------------------------
+# ---- bounded finalize concurrency ---------------------------------
 
 _finalize_sem: Optional[threading.BoundedSemaphore] = None
 _finalize_sem_lock = threading.Lock()
@@ -149,7 +149,7 @@ _finalize_sem_lock = threading.Lock()
 
 def finalize_concurrency() -> int:
     """Concurrent buffered CPU encodes this PROCESS allows: two per execution
-    group (pgw#782). The bound is a host-RAM bound and host RAM is bought per
+    group. The bound is a host-RAM bound and host RAM is bought per
     pod, so it scales with the number of groups the pod runs — a flat 2 made
     two of four groups wait on an unrelated card's encode."""
     raw = os.environ.get(ENCODE_CONCURRENCY_ENV, "").strip()
@@ -179,7 +179,7 @@ def _finalize_semaphore() -> threading.BoundedSemaphore:
 def finalize_permit() -> Iterator[None]:
     """Bound concurrent buffered CPU encodes. Acquired BEFORE the GPU slot is
     released so back-pressure holds the slot (pausing new decodes) instead of
-    letting raw-frame buffers pile up in host RAM (gw#516)."""
+    letting raw-frame buffers pile up in host RAM."""
     sem = _finalize_semaphore()
     sem.acquire()
     try:
@@ -234,7 +234,7 @@ def frames_to_uint8(frames: Any) -> Any:
 class StreamingVideoEncoder:
     """Incremental H.264/AAC mp4 encoder — feed frame chunks as they exist.
 
-    Built for the VAE-framewise-decode seam (gw#476): call :meth:`add` with
+    Built for the VAE-framewise-decode seam: call :meth:`add` with
     each decoded chunk instead of buffering the whole clip, then
     :meth:`finish` (optionally with the audio waveform). Dimensions latch
     from the first chunk; odd rows/columns are cropped (yuv420p needs even
@@ -268,7 +268,7 @@ class StreamingVideoEncoder:
         self._audio_stream: Any = None
         self._frames = 0
         self._closed = False
-        # gw#549 zero-copy handoff: wrap contiguous rgb24 arrays with PyAV's
+        # wrap contiguous rgb24 arrays with PyAV's
         # from_numpy_buffer (no intermediate copy into the AVFrame) when the
         # installed av supports it; one failure disables it for this encode.
         self._zero_copy = hasattr(av.VideoFrame, "from_numpy_buffer")
@@ -350,7 +350,7 @@ class StreamingVideoEncoder:
 
         The wrapped buffer is only read inside ``stream.encode`` (the rgb24
         source is consumed by the yuv420p reformat before encode returns), so
-        reusing the caller's staging buffer afterwards is safe (gw#549).
+        reusing the caller's staging buffer afterwards is safe.
         """
         if self._zero_copy and getattr(frame_array, "flags", None) is not None \
                 and frame_array.flags["C_CONTIGUOUS"]:

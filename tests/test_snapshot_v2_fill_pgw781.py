@@ -314,7 +314,7 @@ def test_chunk_lengths_must_sum_to_the_declared_size(tmp_path, store):
 
 
 def test_network_bytes_counts_chunked_transfer(tmp_path, store):
-    """The volume-attached-boot assertion (th#850) reads this counter; a
+    """The volume-attached-boot assertion reads this counter; a
     chunked fill that reported zero would make a cold boot look warm."""
     data = body(CS * 3 + 11)
     with NetworkBytesScope() as scope:

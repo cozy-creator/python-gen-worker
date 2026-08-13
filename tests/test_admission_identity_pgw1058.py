@@ -214,7 +214,7 @@ def real_package(tmp_path_factory):
     path = tmp_path_factory.mktemp("pgw1058") / "m.pt2"
     torch._inductor.aoti_compile_and_package(
         program, package_path=str(path),
-        # pgw#1097: compile like a REAL mint does. Without the folding fence
+        # compile like a REAL mint does. Without the folding fence
         # this module's `lin.bias` is 1-D with 8 elements, which meets
         # `GraphLowering.can_inline_constant`, so inductor renders its values
         # into the kernel and the weight leaves the artifact's constant table

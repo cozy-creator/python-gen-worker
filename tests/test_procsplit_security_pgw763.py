@@ -446,7 +446,7 @@ def billing_split(tmp_path, captured_dials, monkeypatch):
 def test_delta3_forged_billables_are_replaced_by_the_parents_observation(
     billing_split, captured_dials,
 ):
-    """THE ATTACK: the child reports its own billing quantities (th#1309).
+    """THE ATTACK: the child reports its own billing quantities.
 
     Here it claims three HOURS of runtime, queue, slot-held and finalize wall
     for a job the parent watched take milliseconds, plus a fabricated
@@ -471,7 +471,7 @@ def test_delta3_forged_billables_are_replaced_by_the_parents_observation(
         "billable wall clock (th#1309)"
     )
     # The clamp must be the parent's OBSERVED wall, not a cap. Anchored to the
-    # attack's own magnitude rather than a wall clock (pgw#795): an echo job's
+    # attack's own magnitude rather than a wall clock: an echo job's
     # parent-observed wall is fractions of a second, so any value within even
     # a thousandth of the forged three hours (10.8 s) is a clamp/cap artifact,
     # not an observation — the old `< 60_000` bound would have PASSED a 59 s
@@ -493,7 +493,7 @@ def test_delta3_forged_billables_are_replaced_by_the_parents_observation(
     # The divergence is BANKED, not merely clamped away in silence.
     assert billing_split.pc.metric_divergences >= 1
     assert any("compute_billing_attestation" in d for d in captured_dials)
-    # th#1364: `output_media_duration_s=0` is NO LONGER a divergence, and its
+    # `output_media_duration_s=0` is NO LONGER a divergence, and its
     # absence is the assertion. `_scan_output_assets` sums `Asset.duration_s`,
     # which only a TEMPORAL asset has, so a still image legitimately reports
     # 0.0 — the check fired on every successful image job and the parent could
@@ -561,7 +561,7 @@ def test_delta5_the_child_signs_through_the_parent_holding_no_credential(
     conn.wait_for(is_ready)
 
     # The handler passes a base URL of its own choosing. It is IGNORED: the
-    # parent aims its own credential, at the host the hub named (th#1312).
+    # parent aims its own credential, at the host the hub named.
     conn.send(run_job=pb.RunJob(
         request_id="r-sign", attempt=1, function_name="c2pa-sign",
         input_payload=_payload("http://attacker.invalid")))

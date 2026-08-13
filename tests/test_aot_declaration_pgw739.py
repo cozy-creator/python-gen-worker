@@ -522,7 +522,7 @@ def test_lifted_lora_mint_requires_the_torch_213_floor() -> None:
     export') that 2.13 traces fine — a named refusal instead of a deep-trace
     AssertionError.
 
-    pgw#914 moved WHERE it is decided: the torch wheel is baked into the
+    the torch wheel is baked into the
     image, so the floor is an image fact the build gate settles once into
     `endpoint.lock`. The mint re-decided it per spec against the same wheel
     the gate already cleared, which can only ever agree — or disagree, which
@@ -656,11 +656,11 @@ def test_fork_and_row_reach_the_cell_identity() -> None:
         meta = {
             "sm": "sm_89", "format": 3, "family": "sdxl-shaped",
             "kind": aot_serve.ARTIFACT_KIND,
-            # pgw#1176: ONE entry block, which NAMES its class. The manifest
+            # ONE entry block, which NAMES its class. The manifest
             # digest rides beside it as a coverage label, never as identity.
             cell_key.ENTRY_BLOCK_KEY: entry,
             "manifest_digest": cell_key.manifest_digest([ch]),
-            # pgw#1046: every key input is now a RECORDED block, so this
+            # every key input is now a RECORDED block, so this
             # fixture states them rather than relying on an empty-dict digest.
             "env_seal": {"v": 1}, "toolchain": {"torch": "2.9.0"},
             "declared_envelope": {"shapes": [], "text_lens": [], "guidance": []},

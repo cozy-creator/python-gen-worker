@@ -7,7 +7,7 @@ the INDUCTOR compile — against ONE declared class set, records what the run
 cost on the card, and produces **nothing else**. No cell, no artifact, no
 package, no hub call, no advertisement.
 
-What ``<request>.mint.json`` actually IS (pgw#1153)
+What ``<request>.mint.json`` actually IS
 --------------------------------------------------
 The file an operator holds is the one an endpoint repo COMMITS — e.g.
 ``ltx-video-2.3/aot/transformer-b200-tv261120-ta126-tat1.mint.json``. That is a
@@ -50,7 +50,7 @@ directly.
 
 Why a second child exists at all
 --------------------------------
-A blocker (pgw#1115) is a declared refusal whose exit criterion is often a
+A blocker is a declared refusal whose exit criterion is often a
 MEASUREMENT, and ltx-video-2.3's OQ-3 is the worked example: *"is a whole-graph
 export of the served w8a8 lane bigger than the card?"*. Both front doors were
 shut against the run that answers it:
@@ -227,7 +227,7 @@ class MeasureDocument(msgspec.Struct, frozen=True, kw_only=True):
     # The committed declaration payload's half. `family` is common to both.
     family: str = ""
     #: The module whose IMPORT registers the family's export declaration
-    #: (pgw#1107). Committed by every endpoint repo and fenced by their own
+    #:. Committed by every endpoint repo and fenced by their own
     #: declaration suites, which is what makes it a safe default for `modules`.
     declaration_module: str = ""
     #: The compile target's checkpoint, as the endpoint repo records it. Bound
@@ -236,7 +236,7 @@ class MeasureDocument(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class MeasureRefused(Exception):
-    """A typed refusal raised while BUILDING the job (pgw#1153).
+    """A typed refusal raised while BUILDING the job.
 
     It carries a :data:`REASONS` token so that a request that cannot start is
     reported in the same vocabulary as a run that started and stopped. The
@@ -373,7 +373,7 @@ def _discard(files: Sequence[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The envelope (pgw#1153): a committed declaration payload -> a MeasureJob.
+# The envelope: a committed declaration payload -> a MeasureJob.
 #
 # Nothing here decides anything about the measurement. It answers the four
 # questions the payload does not spell out — which image, which function,
@@ -577,7 +577,7 @@ def resolve_job(
         raise MeasureRefused("function_underivable", str(exc)) from exc
 
     if not cfg.targets:
-        # pgw#1107: targets DERIVE from the declaration, so no committed
+        # targets DERIVE from the declaration, so no committed
         # payload carries them — and `compile_cache.resolve_targets` returns
         # nothing for an empty tuple, which is the same defect one step later.
         declared = tuple(
@@ -711,7 +711,7 @@ def run(
     if cfg.lora_bucket:
         # The CONTAINER half and the lane stamp, exactly as `mint_child` and
         # `boot_trace_child` arm the pipeline they hand the export. The LIFTED
-        # half belongs to the loop that needs it (pgw#1132).
+        # half belongs to the loop that needs it.
         cc.apply_lora_execution_lane(pipeline, int(cfg.lora_bucket))
     spec = fleet_cells.aot_export_spec(pipeline, cfg)
     virtual = structure_only.structure_only_components(pipeline)

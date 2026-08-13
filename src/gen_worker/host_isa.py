@@ -1,4 +1,4 @@
-"""Host CPU ISA portability for compiled artifacts (pgw#754).
+"""Host CPU ISA portability for compiled artifacts.
 
 An AOTI ``.pt2`` ships host-side machine code (the wrapper ``.so`` plus any
 CPU kernels). torch compiles that code ``-march=native`` when
@@ -156,7 +156,7 @@ def impose() -> Dict[str, str]:
     verify the read-back ON A FOREIGN THREAD. Called from
     ``env_seal.establish`` at boot, before any compile. No-op (empty dict) on
     non-x86 machines, and on a torchless worker — there is no inductor
-    codegen to clamp (pgw#788).
+    codegen to clamp.
 
     The foreign-thread read-back is the whole point, not belt-and-braces.
     torch's ``user_override`` layer — the one a plain attribute assignment
@@ -236,7 +236,7 @@ def assert_command_is_clamped(argv: Sequence[str]) -> None:
 
 def effective() -> Dict[str, str]:
     """Read-back of the live codegen target (seal fact; never assumed).
-    Empty on a torchless worker: no codegen target exists to read (pgw#788)."""
+    Empty on a torchless worker: no codegen target exists to read."""
     if not torch_capability.present():
         return {}
     import torch._inductor.config as inductor_config

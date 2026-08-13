@@ -60,7 +60,7 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # third-party stub gaps and are not debt). The remaining 5 are blocked on
     # open lanes owning their importers, not on difficulty.
     "implicit_reexport": (16, 34),
-    # pgw#1202 PR 2: test modules still dirty at the relaxed test posture.
+    # test modules still dirty at the relaxed test posture.
     # 170 of 486 were already clean and are checked from that commit on.
     # 314 -> 312: PR 8 took the two HARNESS doubles — `tests.harness.cell_hub`
     # and `tests.harness.adopt_rig`. These are the modules the "Protocols for

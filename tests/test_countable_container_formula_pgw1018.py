@@ -1,7 +1,7 @@
 """pgw#1018: a RuntimeFormula could not express a countable-container term, so
 a reference-heavy request was cost-modeled as if its references were free.
 
-Measured by the H3 endpoint lane (ie#612): ref2va runs **208 s vs 80 s** for
+Measured by the H3 endpoint lane: ref2va runs **208 s vs 80 s** for
 the same duration once references are present — ~2.6x — and the term for it
 could not be declared at all. The lane left it out rather than faking a
 constant, which is the honest failure and is why this is a filed gap instead
@@ -13,7 +13,7 @@ tensorhub `internal/formula` byte-for-byte, calls are excluded from the
 grammar on both sides, and the term KEY is canonicalized from the expression —
 so a `len(...)` term would mint a key the hub can never reproduce. The
 platform already HAS this vocabulary and it is not a call: the hub's
-`internal/price` (th#833 / ie#600) binds an identifier naming an ARRAY or MAP
+`internal/price` binds an identifier naming an ARRAY or MAP
 to that container's ITEM COUNT. This closes the gap by teaching the worker the
 same reading, so pricing and runtime prediction share one string.
 """

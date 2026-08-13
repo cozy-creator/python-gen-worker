@@ -17,7 +17,7 @@ register with the hub, each claim a worker identity, each own a store, each
 report residency — and every hub-facing invariant we have is
 one-worker-per-pod.
 
-**Process-group discipline (pgw#773).** The worker process is rank 0 of EVERY
+**Process-group discipline.** The worker process is rank 0 of EVERY
 group, so no group may ever touch the default torch.distributed process
 group: two groups would collide in one world and corrupt each other's
 collectives. Every group therefore gets its own NON-default ProcessGroup —
@@ -26,7 +26,7 @@ race-free), a unique group name, and an explicit handle passed to every
 collective. Teardown destroys exactly that handle; a sibling group and the
 process-local default are untouchable by construction.
 
-**Command channel (pgw#774).** Rank-0 -> follower commands ride per-follower
+**Command channel.** Rank-0 -> follower commands ride per-follower
 mp queues, NOT collectives: an idle follower parks on ``queue.get`` (no
 collective timeout to trip), teardown is a queue put + join/terminate (no
 collective that can block the event loop), and command payloads are pickled
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # WALL CLOCKS that condemned WORK: 180 s for a follower to reach the store
 # rendezvous and 1800 s for it to finish arming, where arming "covers a
 # follower's full pipeline materialization (a cold model load)". The first
-# self-mint measured ~28 min (ie#546) and pgw#846 projects 47 min - 6.26 h for
+# self-mint measured ~28 min and pgw#846 projects 47 min - 6.26 h for
 # sdxl, so `_ARM_TIMEOUT_S` was a mint-killer of exactly the shape
 # `runtimes/server.py` already rejects by name — and a follower wedged in a
 # cold `import torch` at 181 s failed the group under the other one.
@@ -215,7 +215,7 @@ def _refuse_nvls_multicast() -> None:
     refusing.
     """
     previous = os.environ.get(_NVLS_ENV)
-    # pgw#1049: the write is the settings authority's (NCCL_NVLS_ENABLE=0 is
+    # the write is the settings authority's (NCCL_NVLS_ENABLE=0 is
     # in DECLARED_ENV); this site keeps the drop-an-override warning below.
     settings_authority.impose_process_env()
     if previous not in (None, "0"):
@@ -350,7 +350,7 @@ class RankGroup:
         self._entry = entry
         self._collective_timeout_s = float(collective_timeout_s)
         self._procs: List[Any] = []
-        #: pid -> high-water evidence mark (pgw#892).
+        #: pid -> high-water evidence mark.
         self._staging_peaks: dict[int, float] = {}
         self._channels: List[FollowerChannel] = []
         self._error_q: Any = None
@@ -412,7 +412,7 @@ class RankGroup:
             channel = FollowerChannel(commands=ctx.Queue(), ready=self._ready_q)
             proc = ctx.Process(
                 target=_follower_main,
-                # pgw#820: the follower's death is tied to THIS process (rank
+                # the follower's death is tied to THIS process (rank
                 # 0) in its own bootstrap — daemon=True cannot survive an
                 # abort, and the pgw#783 parent must not know about ranks.
                 args=(spec, self._entry, channel, self._error_q, os.getpid()),
@@ -494,7 +494,7 @@ class RankGroup:
 
     def _staging_silence(self) -> SilenceWindow:
         """A fresh silence window over follower work, with the high-water
-        marks it compares against reset (pgw#892)."""
+        marks it compares against reset."""
         self._staging_peaks = {}
         return SilenceWindow(_STAGING_SILENCE_WINDOW_S)
 
@@ -527,7 +527,7 @@ class RankGroup:
         dead or SILENT follower. Queue-based — never a collective, so a
         follower that dies mid-materialization cannot park us.
 
-        pgw#892: this took a `timeout_s=1800.0` and raised "followers not
+        this took a `timeout_s=1800.0` and raised "followers not
         armed after 1800s" at 30:01 for a follower that was still legitimately
         loading. `check_alive()` already fails a DEAD follower typed and
         immediately, so the duration added nothing death detection did not
@@ -595,7 +595,7 @@ class RankGroup:
         group whose followers are stuck in a collective (they are killed and
         their peers' collectives time out typed). Destroys only this group's
         process-group handle; the process-local default and every sibling
-        group are untouched (pgw#773)."""
+        group are untouched."""
         for channel in self._channels:
             try:
                 channel.commands.put(pickle.dumps({"op": _OP_CLOSE}))

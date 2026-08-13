@@ -124,7 +124,7 @@ def test_flavor_identity_and_provenance_survive_the_flip(
     _publish(ctx, _tree(tmp_path))
 
     req = _FakeHub.state["publish_request"]
-    # pgw#1159: `flavor` is GONE from the body; `dtype` is the axis the hub
+    # `flavor` is GONE from the body; `dtype` is the axis the hub
     # actually records.
     assert "flavor" not in req
     assert req["dtype"] == "fp8"
@@ -134,7 +134,7 @@ def test_flavor_identity_and_provenance_survive_the_flip(
         "quantization_method": "w8a8",
         "quantization_library": "llm-compressor",
     }
-    # Orchestrator-derived lineage is never sendable from the worker (th#1331).
+    # Orchestrator-derived lineage is never sendable from the worker.
     assert "parents" not in req["provenance"]
     assert "derivation_op" not in req["provenance"]
 

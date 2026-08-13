@@ -484,7 +484,7 @@ def _spec(name: str, cls: type) -> EndpointSpec:
 class _Rig:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
-        # pgw#1010: no export declaration is registered, so the miss takes the
+        # no export declaration is registered, so the miss takes the
         # JIT INTAKE arm — the in-process compile the guard-miss doctrine
         # (mint window OFF while compiling, serve window ON while serving) is
         # about. It mints and publishes nothing, which is orthogonal to this
@@ -513,7 +513,7 @@ class _Rig:
 
         def _load_slot(*args: Any, **kwargs: Any) -> Any:
             pipe = _Pipe()
-            # pgw#1010: a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
+            # a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
             # from a cell — the dispatch fence pins every request to an active
             # compile incarnation — so a family with no export declaration
             # fails closed there instead of arming JIT intake. The doctrine
@@ -543,7 +543,7 @@ class _Rig:
         monkeypatch.setattr(
             cc, "compile_wall_seconds",
             lambda: self.compile_wall.pop(0) if self.compile_wall else 12.5)
-        # pgw#681 coexistence: when the guard-closure mint gate is present,
+        # when the guard-closure mint gate is present,
         # neutralize it — it audits REAL dynamo graphs, which this rig's
         # simulated torch boundary never creates. Orthogonal to the
         # guard-miss doctrine under test here.
@@ -619,7 +619,7 @@ def test_tenant_guard_miss_end_to_end(
     rig = _Rig(tmp_path, monkeypatch, [spec])
 
     rig.boot(spec)
-    # pgw#1010: JIT intake serves COMPILED CODE and names no artifact, so the
+    # JIT intake serves COMPILED CODE and names no artifact, so the
     # platform tier — which means "serving from a cell" — is eager, and the
     # target advertises active-less. The per-request axis is where the
     # compiled-ness of an intake pod is stated (`serving_mode=jit_cell`).
@@ -631,7 +631,7 @@ def test_tenant_guard_miss_end_to_end(
     (target,) = rig.ex.compile_targets()
     cell_ref = target.active_compile_ref
     assert cell_ref == "", "an intake arm has no cell to advertise"
-    # pgw#1010 / th#1322: and the compile it just paid for is a NUMBER on the
+    # and the compile it just paid for is a NUMBER on the
     # wire. The emitter used to be the mint parent's, and the mint no longer
     # runs JIT — so this boot is the only place an AOT-vs-JIT cost comparison
     # can get its JIT arm from.

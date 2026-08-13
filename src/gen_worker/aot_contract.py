@@ -1,15 +1,15 @@
 """Mint CONTRACT types — the vocabulary, with none of the mint driver.
 
-Extracted from :mod:`gen_worker.aot_mint` (pgw#868) for one measured reason:
+Extracted from :mod:`gen_worker.aot_mint` for one measured reason:
 ``compile_cache``'s local re-trace memo records ``code_closure``, the CONTENT
 digest of the static import-graph closure of the compile entrypoints — and
 that walk is an AST walk, so it follows function-level imports too.
 ``models.provision`` is one of those entrypoints, so anything the ARM reaches
 statically enters that recorded closure fleet-wide. (The closure left cell
 IDENTITY in pgw#990 — and the pre-trace cell key itself is gone since
-pgw#1059 — but the memo and the layering rule both stand.)
+but the memo and the layering rule both stand.)
 
-The numerics gate (pgw#868) has to build a probe feed the way the MINT builds
+The numerics gate has to build a probe feed the way the MINT builds
 one — that is its whole parity argument — which means the arm now reaches
 ``aot_declaration.declared_inputs``. Through ``aot_mint`` that dragged
 ``aot_wrapper_split`` and ``aot_run_impl_split`` into the closure, which
@@ -39,7 +39,7 @@ class MintRefused(RuntimeError):
     say what went wrong is the silent-failure path the doctrine forbids.
 
     ``mint_phases`` carries the PARTIAL phase table of the mint that refused
-    (pgw#825): the entries that did export and compile before the refusal
+: the entries that did export and compile before the refusal
     spent real minutes on a real pod, and a terminus that reports only a
     wall-clock total is a measurement lost to a pod that no longer exists.
     Populated by :func:`mint`; empty for a refusal raised before any entry.
@@ -151,7 +151,7 @@ class ExportSpec:
 
     def execution_lane_label(self) -> str:
         """This spec's lane label — ONE implementation, shared with the
-        cell-key axis it has to agree with (pgw#1040)."""
+        cell-key axis it has to agree with."""
         return _execution_lane_label(self.weight_lane, self.lora_bucket)
 
 

@@ -2,7 +2,7 @@
 
 Live root cause (master fleet, 2026-07-23): ``ensure_desired_instance``
 demanded ``set(bindings) == set(spec.models)``, but every fleet endpoint now
-declares deploy-bound Slots with NO code default (ie#524/th#980), so
+declares deploy-bound Slots with NO code default, so
 ``spec.models`` is EMPTY and every hub hot intent — gw#587 self-mint
 prewarm, th#912 slot-default seeding, #567 compile-cell reload — was refused
 with ``ValidationError("must bind exactly []")``, swallowed by
@@ -282,7 +282,7 @@ def test_declared_space_hot_bindings_remap_through_picks(tmp_path, monkeypatch) 
     specs through the resolutions map", hello_ack.go th#697) — the warm
     instance must derive the RESOLVED binding, never silently undo the pick.
 
-    pgw#1148: the pick's visible half is now the CAST (the flavor that used
+    the pick's visible half is now the CAST (the flavor that used
     to re-address the binding is deleted), so that is what must survive."""
     setup_calls: List[str] = []
     ex, _sent, _enables = _harness(tmp_path, monkeypatch,

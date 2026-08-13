@@ -136,7 +136,7 @@ def test_a_sequence_still_compiles_exactly_as_before(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#917 at ARRIVAL: alias before a compile is spent; refuse at row N
+# alias before a compile is spent; refuse at row N
 # ---------------------------------------------------------------------------
 
 XATTN = 128
@@ -285,7 +285,7 @@ def test_overlapped_and_serial_mints_share_one_cell_key(
     serial = _mint(tmp_path / "serial", entry_workers=1)
     overlapped = _mint(tmp_path / "overlapped")
 
-    # pgw#1176: a mint produces a KEY SET, so "same cell key" becomes "the
+    # a mint produces a KEY SET, so "same cell key" becomes "the
     # same classes, keyed identically" — which is the stronger claim the row
     # always meant. An overlapped mint that agreed on a combined digest while
     # one class differed would have passed the old assertion.
@@ -298,7 +298,7 @@ def test_overlapped_and_serial_mints_share_one_cell_key(
     assert "export_all_s" in overlapped.timings, (
         "the export phase's own wall must survive the overlap (the pgw#1052 "
         "acceptance names it)")
-    # pgw#1176: the phase table is a property of the MINT RUN, carried on
+    # the phase table is a property of the MINT RUN, carried on
     # every entry's metadata. Read it off one entry rather than off a result
     # that no longer has a single metadata.
     pool_block = ((overlapped.entries[0].metadata.get("mint_phases") or {})

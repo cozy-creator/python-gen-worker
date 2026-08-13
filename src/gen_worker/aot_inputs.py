@@ -2,7 +2,7 @@
 
 ``torch.export`` needs example inputs with the exact structure the target's
 forward takes. That structure is FAMILY knowledge — and per Paul's SDK-generic
-rule (pgw#739) it is a DECLARATION in the endpoint spec, never worker code:
+rule it is a DECLARATION in the endpoint spec, never worker code:
 the endpoint declares ``Compile(dims=..., forks=..., classes=..., inputs=...)``
 and :func:`gen_worker.aot_declaration.declared_inputs` derives the example
 inputs generically. This module carried the sdxl contract as per-family SDK
@@ -53,7 +53,7 @@ InputBuilder = Callable[[Any, "ExportSpec"], Tuple[Tuple[Any, ...], Dict[str, An
 #: denoiser AND the VAE, and a family-only key made ``vae.decode`` unmintable for
 #: EVERY family, not just wan. ``target=""`` registers a family-wide fallback.
 #: This registry is the ESCAPE HATCH while a family's declaration is being
-#: written; a registered export DECLARATION (pgw#739) always wins over it.
+#: written; a registered export DECLARATION always wins over it.
 _BUILDERS: Dict[Tuple[str, str], InputBuilder] = {}
 
 
@@ -213,7 +213,7 @@ def compose(
     load_cls: Any = DiffusionPipeline
     pipeline_class = str(request.get("pipeline_class") or "").strip()
     if pipeline_class:
-        # gw#586 call-path parity: trace through the SERVING pipeline class.
+        # trace through the SERVING pipeline class.
         load_cls = resolve_pipeline_class(pipeline_class)
     pipe = load_from_pretrained(
         load_cls, str(model),

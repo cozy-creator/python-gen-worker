@@ -1,4 +1,4 @@
-"""W4A4 nvfp4 loader mode (gw#540) — the gw#534 W8A8 pattern one tier down.
+"""W4A4 nvfp4 loader mode — the gw#534 W8A8 pattern one tier down.
 
 A ``#nvfp4-w4a4`` flavor is a normal diffusers tree whose denoiser holds
 calibrated nvfp4 weights WITH two-level scales — the tensor-layout contract
@@ -88,7 +88,7 @@ class W4a4SnapshotError(W4a4Error):
 @dataclass(frozen=True)
 class W4a4Artifact:
     # Denoiser dir name ("transformer"/"unet") for diffusers trees; "" for a
-    # root-layout snapshot whose weight set IS the denoiser (gw#562).
+    # root-layout snapshot whose weight set IS the denoiser.
     component: str
     files: tuple[Path, ...]
     quantized: tuple[str, ...]  # module names with the contract triple
@@ -383,7 +383,7 @@ def _build_module_class() -> type:
                      static_input_scale: bool,
                      pre_quant_scale: bool = False) -> None:
             super().__init__()
-            # pgw#1019: a quantized leaf is the ONLY thing that knows its
+            # a quantized leaf is the ONLY thing that knows its
             # compute dtype — the weight is uint8 and the bias is optional,
             # so bias-free instances leave no trace of it. Record it.
             self.compute_dtype = compute_dtype
@@ -492,11 +492,11 @@ def _dequant_into(sd: Dict[str, Any], name: str, compute: Any) -> None:
         sd.pop(f"{name}{suffix}", None)
 
 
-# NO `@implements_contract` HERE, deliberately (th#1590): this flat nvfp4 layout
+# NO `@implements_contract` HERE, deliberately: this flat nvfp4 layout
 # has no registry entry yet, and it is NOT `bfl.nvfp4-preswizzled@1` — that one is
 # HIGH-nibble with pre-swizzled scales, and conflating them measured LPIPS 1.11
 # (te#151). Registering ours needs a real artifact to read; none has ever passed
-# the publish gate (gw#540), so this decoder contributes no execution lane.
+# the publish gate, so this decoder contributes no execution lane.
 def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
                        compute_dtype: Any = None, mode: str = "",
                        cls: Any = None) -> Any:
@@ -681,7 +681,7 @@ def swap_w4a4_linears(
         return fh.get_tensor(name)
 
     swapped = 0
-    # pgw#824: the w8a8 twin. A skipped layer stays dequantized at full
+    # the w8a8 twin. A skipped layer stays dequantized at full
     # precision inside a pipeline that reports the w4a4 lane; the alignment
     # skip below had no report of any kind. Counted by class, confessed once.
     skipped: Dict[str, int] = {}

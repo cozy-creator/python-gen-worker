@@ -31,7 +31,7 @@ from gen_worker import cell_key as cell_key_mod
 from gen_worker import activity, aot_serve
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
-#: share of that induced quantity rather than a bare constant (pgw#795). This is
+#: share of that induced quantity rather than a bare constant. This is
 #: a LOWER bound on work the test itself produced: a slow runner only raises the
 #: measured value, so nothing here can fail because the machine was busy.
 
@@ -106,7 +106,7 @@ class Cfg:
 
 def _entry(**over: Any) -> Dict[str, Any]:
     e: Dict[str, Any] = {
-        # pgw#1176: an entry block NAMES its class — that is what makes a
+        # an entry block NAMES its class — that is what makes a
         # refusal bisectable to the thing that failed.
         "name": ENTRY,
         "target": "unet", "fork": [], "class_dims": [],
@@ -123,7 +123,7 @@ def _entry(**over: Any) -> Dict[str, Any]:
 
 
 def _meta(**over: Any) -> Dict[str, Any]:
-    # pgw#1176: ONE entry per artifact. No `entries=` override, because a
+    # ONE entry per artifact. No `entries=` override, because a
     # multi-entry envelope is a shape production cannot produce.
     entry = over.pop("entry", None) or _entry()
     m: Dict[str, Any] = {
@@ -132,17 +132,17 @@ def _meta(**over: Any) -> Dict[str, Any]:
         "cell_key": KEY, cell_key_mod.ENTRY_BLOCK_KEY: entry,
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
-        # pgw#1097: no weight BYTES in the .so (above) and no weight VALUES in
+        # no weight BYTES in the .so (above) and no weight VALUES in
         # its kernels (here). Both are declared axes; a cell silent on either
         # is refused before a byte moves.
         "constant_folding_fenced": True,
         "source_ref": "", "source_digest": "",
-        # pgw#950: every mint stamps a host-ISA requirement, and a cell that
+        # every mint stamps a host-ISA requirement, and a cell that
         # stamps none is refused rather than sniffed from the .pt2. Satisfiable
         # anywhere: this host's machine, no ISA level.
         "host_isa": {"machine": platform.machine(), "march": "", "simdlen": 0,
                      "level": ""},
-        # pgw#1059: the identity blocks the four-axis key restates from —
+        # the identity blocks the four-axis key restates from —
         # verify_contract refuses a stamp the artifact cannot restate.
         "env_seal": {"seal_v": 4, "env": {"PYTHONHASHSEED": "0"}},
         "toolchain": {"torch": "t" * 16, "settings_declaration": "d" * 16,
@@ -201,7 +201,7 @@ def test_successful_arm_returns_an_armed_outcome_naming_the_cell(
 def test_key_mismatch_named_on_the_wire(
     tmp_path: Path, events: List[Any], stub_runtime: None,
 ) -> None:
-    # pgw#765: an sm mismatch is the key mismatch; a SKU difference alone is
+    # an sm mismatch is the key mismatch; a SKU difference alone is
     # adopted (same-sm cross-SKU cells are the point of the pgw#691 collapse).
     art = _tar(tmp_path, _meta(sm="sm_80"))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=art)

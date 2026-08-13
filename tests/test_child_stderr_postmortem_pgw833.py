@@ -3,7 +3,7 @@
 The first hub-launched pod under the unconditional split died pre-Hello six
 times and the wire carried only ``exit:1`` — the child's stderr (its crash
 traceback, its last startup phase) lives only in the container log, and
-RunPod exposes no container-logs API (gw#640). Diagnosing that took three
+RunPod exposes no container-logs API. Diagnosing that took three
 paid probe pods. The fix: the parent captures the child's stderr (teeing
 every byte back to its own stderr so the container log is unchanged) and
 attaches the tail to the compute_process_exit post-mortem dial and to the

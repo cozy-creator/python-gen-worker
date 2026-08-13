@@ -1,8 +1,8 @@
-"""th#1303 empty-guard class, fail-closed half (pgw#821).
+"""th#1303 empty-guard class, fail-closed half.
 
 `ModelStore.component_digests` read `f.blake3` — EMPTY on every manifest-v2
 entry — so every file of a v2 snapshot was skipped and component sharing
-(gw#479) was silently OFF for the whole repointed corpus. Revert-turns-red:
+ was silently OFF for the whole repointed corpus. Revert-turns-red:
 restore the `f.blake3`-only read and the v2 test returns {} again.
 
 th#1303 S1 retired the legacy mirror arm pgw#821 added, so

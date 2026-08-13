@@ -64,7 +64,7 @@ def _synth_nunchaku_linear(out_f: int, in_f: int, *, second_key: str,
     q = blocks / (bs.float().unsqueeze(-1) * second_bcast.unsqueeze(-1))
     codes = cast_e2m1(q.reshape(out_f, in_f))
 
-    # pgw#770: EVERY tensor is fragment-packed on disk, so the fixture packs
+    # EVERY tensor is fragment-packed on disk, so the fixture packs
     # every one of them. wtscale is the sole exception (it is a scalar).
     tensors: dict[str, Any] = {
         "qweight": pack_qweight(codes),

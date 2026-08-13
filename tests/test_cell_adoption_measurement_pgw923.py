@@ -35,7 +35,7 @@ REF = "root/family-sdxl#cg-key-v1-" + "b" * 56
 DIGEST = "blake3:" + "c" * 64
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
-#: share of that induced quantity rather than a bare constant (pgw#795). This is
+#: share of that induced quantity rather than a bare constant. This is
 #: a LOWER bound on work the test itself produced: a slow runner only raises the
 #: measured value, so nothing here can fail because the machine was busy.
 _INDUCED_ARM_S = 0.05
@@ -137,7 +137,7 @@ def test_each_adoption_is_its_own_sample() -> None:
 
 
 # ---------------------------------------------------------------------------
-# the arm itself: measured once, in the one place that arms (pgw#923/#924)
+# the arm itself: measured once, in the one place that arms
 # ---------------------------------------------------------------------------
 
 

@@ -1,5 +1,5 @@
 """Serve-window shape growth — ONE module, reached by both execution arms
-(pgw#916).
+.
 
 §1.12's contract has two halves: *serve eager* and *compile in the background
 and adopt*.  The second half only ever existed on the dynamo arm.
@@ -70,7 +70,7 @@ ARM_DYNAMO = "dynamo"
 
 #: Ingress reasons that mean "this class is not covered". ``no_entry_admits``
 #: is a genuine coverage hole; ``entry_ambiguous`` is a DECLARATION defect
-#: (pgw#917) that growth must never try to compile its way out of — it is
+#: that growth must never try to compile its way out of — it is
 #: recorded and reported, never submitted.
 REASON_UNCOVERED = "no_entry_admits"
 REASON_AMBIGUOUS = "entry_ambiguous"
@@ -78,14 +78,14 @@ REASON_AMBIGUOUS = "entry_ambiguous"
 
 class TurnGateClosed(Exception):
     """The executor's background-turn gate is gone (shutdown/drain); the
-    growth job is dropped and its class stays eager (pgw#677)."""
+    growth job is dropped and its class stays eager."""
 
 
 class TurnGateBusy(Exception):
     """No background turn within the bounded admission window (live tenant
     demand). The job re-queues instead of blocking the growth thread — a
     blocked compile for one instance must never head-of-line delay every
-    other instance's jobs (pgw#677)."""
+    other instance's jobs."""
 
 
 @dataclass(frozen=True)

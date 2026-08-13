@@ -408,7 +408,7 @@ def _reap_state(proc: Any, pid: int, *, parent_alive: bool) -> str:
     """``running`` -> ``reaped``, with THIS process doing the collecting once
     nothing else can.
 
-    pgw#956: ``proc.returncode`` is asyncio bookkeeping delivered to the parent's
+    ``proc.returncode`` is asyncio bookkeeping delivered to the parent's
     loop by the child watcher, and the watcher DROPS that delivery once the loop
     has closed. So it can confirm a reap and never deny one, and this helper must
     read the process table instead.
@@ -494,8 +494,8 @@ def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
     proc = dropped.pc._proc
     assert proc is not None and proc.returncode is None
     pid = proc.pid
-    # gw#666/pgw#795: NO `assert time.monotonic() - started < 120.0` here, and
-    # (pgw#956) no single read after `close()` either — returning from `close()`
+    # NO `assert time.monotonic() - started < 120.0` here, and
+    #  no single read after `close()` either — returning from `close()`
     # is not proof the reap completed. The property is that the parent exited
     # and the child was reaped, so wait on THAT advancing; a hang fails by never
     # reaping, which is the actual defect.

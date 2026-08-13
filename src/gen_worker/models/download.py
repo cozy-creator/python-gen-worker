@@ -49,7 +49,7 @@ ProgressFn = Callable[[int, Optional[int]], None]
 # Provider index: normal-form ref -> provider. Built once at boot from the
 # endpoint.lock manifest (the wire carries bare refs without a provider field).
 #
-# ONE keying function (gw#492) normalizes both index keys and lookups —
+# ONE keying function normalizes both index keys and lookups —
 # replacing the old raw/stripped/tag-removed fallback chain and its
 # `_binding_canonical_ref` twin. Keys are (repo, tag)-granular, with a
 # repo-identity fallback so a hub-minted DIGEST pick still routes to its
@@ -209,7 +209,7 @@ async def ensure_local(
     registry. Refs without a snapshot fall back to their provider's direct
     download (hf/civitai/modelscope) or fail retryably (tensorhub).
 
-    ``components`` (pgw#505) is honored on the HF direct-download branch.
+    ``components`` is honored on the HF direct-download branch.
     It is deliberately NOT applied to the ``snapshot is not None`` branch:
     that snapshot is orchestrator-resolved and the executor's residency
     layer digest-verifies the materialized tree against the FULL
@@ -255,7 +255,7 @@ async def ensure_local(
         )
 
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
-        # The worker cannot resolve tensorhub-CAS refs itself (gw#465):
+        # The worker cannot resolve tensorhub-CAS refs itself:
         # typed + terminal so callers fail fast with "missing_snapshot"
         # instead of burning retries on a deterministic local condition.
         from .errors import MissingSnapshotError
@@ -390,7 +390,7 @@ def select_component_paths(
     components: Sequence[str],
     exclude: Sequence[str] = (),
 ) -> set[str]:
-    """Narrow a repo file listing to declared pipeline COMPONENTS (pgw#505):
+    """Narrow a repo file listing to declared pipeline COMPONENTS:
     every path under a ``<component>/`` subfolder, plus every root-level
     ``*.json`` (``model_index.json`` and siblings — always kept so
     downstream component-set introspection / pipeline-class detection still
@@ -455,7 +455,7 @@ def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) ->
 # (pgw#514 dead-config sweep found zero producers for the env vars that used
 # to back them), so they're fixed constants rather than Settings fields.
 #
-# pgw#655: the bound is a PROGRESS-RATE FLOOR, never a wall clock. A wall-clock
+# the bound is a PROGRESS-RATE FLOOR, never a wall clock. A wall-clock
 # cap cannot distinguish a healthy 200GB pull from a wedge, so it is either
 # useless (the 0.0 it sat at for its whole life) or it kills real downloads;
 # the honest question is "is this transfer still moving fast enough to ever
@@ -526,7 +526,7 @@ def _run_with_stall_watchdog(
     dl_thread.start()
 
     last_bytes = 0
-    # The progress window as two shared values (gw#666): the floor decides
+    # The progress window as two shared values: the floor decides
     # what counts as an advance (a trickle never does), the window decides how
     # long an unadvanced loop may run. Same pair now guards the CAS fetch.
     floor = ProgressFloor(max(int(min_window_bytes), 1))
@@ -594,7 +594,7 @@ def download_hf(
     ``asyncio.to_thread``). Transfer, cache, resume and locking are
     huggingface_hub's; this only plans the file selection.
 
-    ``components`` (pgw#505) narrows the repo listing to the named pipeline
+    ``components`` narrows the repo listing to the named pipeline
     component subfolders (+ root config files, via
     :func:`select_component_paths`) BEFORE the existing ``files=``/auto
     variant-selection logic runs — so a component-scoped fetch still gets
@@ -604,7 +604,7 @@ def download_hf(
     from ..net import hf  # lazy: net imports requests; keeps `import gen_worker` light
 
     try:
-        hub = hf()  # gw#456: no HF socket may wait forever
+        hub = hf()  # no HF socket may wait forever
     except Exception as e:  # pragma: no cover
         raise RuntimeError(
             "huggingface_hub is required for hf model refs; install gen-worker with the HF extra."
@@ -940,7 +940,7 @@ def _civitai_stream_one(
         tmp.unlink(missing_ok=True)
         raise ValueError(f"civitai sha256 mismatch for {dst.name}")
     tmp.replace(dst)
-    # pgw#939: the OBSERVED digest travels back whether or not civitai
+    # the OBSERVED digest travels back whether or not civitai
     # published one to check it against. Refusing an unhashed file is not
     # available — civitai routinely omits SHA256 for large/GGUF files and this
     # lane exists to ingest them — so the fix is that the manifest can no
@@ -970,7 +970,7 @@ def _civitai_adoptable(
     """The manifest row for an existing file that is provably complete, or
     ``None`` to (re)download it.
 
-    pgw#939: this was ``dst.exists() and (not size or st_size == size)`` — the
+    this was ``dst.exists() and (not size or st_size == size)`` — the
     left half of an ``or`` whose short-circuit meant that when civitai
     declared no size, **any** file already occupying that path was adopted as
     a finished download. No size, no hash, no read. A truncated prior attempt

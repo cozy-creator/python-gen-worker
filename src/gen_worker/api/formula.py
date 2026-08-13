@@ -1,4 +1,4 @@
-"""RuntimeFormula — declared compute-time formula terms (th#1051).
+"""RuntimeFormula — declared compute-time formula terms.
 
 ``runtime=RuntimeFormula("a + b*num_inference_steps + c*num_inference_steps*megapixels")``
 on ``@endpoint``: the author declares the SHAPE of compute time as a sum of
@@ -183,7 +183,7 @@ class RuntimeFormula:
                     f"{owner}: runtime formula field {name!r} is not a payload field"
                 )
             if _is_countable_container(getattr(f, "type", None)):
-                # pgw#1018: a list/map field IS a numeric term — its item
+                # a list/map field IS a numeric term — its item
                 # count. It needs no numeric default: an omitted or null
                 # container is zero items, which is a reading of the field
                 # rather than a guess about it.
@@ -256,7 +256,7 @@ class RuntimeFormula:
             if isinstance(raw, bool):
                 values[name] = 1.0 if raw else 0.0
             elif isinstance(raw, _COUNTABLE_TYPES):
-                # pgw#1018: the countable-container reading, identical to the
+                # the countable-container reading, identical to the
                 # hub's `price.PayloadVars`.
                 values[name] = float(len(raw))
             elif isinstance(raw, (int, float)):
@@ -401,7 +401,7 @@ def _parse_terms(source: str, limits: FormulaLimits) -> List[_Term]:
 
 
 def _is_countable_container(annotation: Any) -> bool:
-    """Is this declared field type a countable container (pgw#1018)?
+    """Is this declared field type a countable container?
 
     ``list[X]``, ``dict[K, V]``, ``tuple[...]``, ``set[X]`` and their
     ``Optional``/union spellings. A union counts only when EVERY non-``None``

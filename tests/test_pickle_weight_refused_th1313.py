@@ -9,7 +9,7 @@ worker is where unpickling would actually execute — ``torch.load`` /
 holding hub credentials and other tenants' work.
 
 The refusal lives in ``_validate_resolved``, which every wire boundary parses
-through (gw#497), so the bytes are never even downloaded.
+through, so the bytes are never even downloaded.
 """
 from __future__ import annotations
 

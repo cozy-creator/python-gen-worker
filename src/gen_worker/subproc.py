@@ -37,9 +37,9 @@ class LineTail:
     Draining is not optional: a child whose pipe fills BLOCKS, so whoever
     captures output must keep reading for the process's whole life.
 
-    ``run_process`` uses it to bound a run-to-completion tool (gw#665);
+    ``run_process`` uses it to bound a run-to-completion tool;
     ``runtimes.server`` uses it to bound an engine BOOT while keeping the
-    child alive afterwards (gw#666).
+    child alive afterwards.
     """
 
     __slots__ = ("_proc", "_on_line", "_window", "_thread")

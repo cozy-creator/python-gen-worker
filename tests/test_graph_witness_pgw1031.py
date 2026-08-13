@@ -53,7 +53,7 @@ PAIR = ("micro-pad32", "micro-pad32-branchy")
 
 @pytest.fixture(scope="module", autouse=True)
 def _gpu_runtime() -> Any:
-    """A key-complete runtime on a card-less box — probes only (pgw#983).
+    """A key-complete runtime on a card-less box — probes only.
 
     Module-scoped because the traces are: ``sm`` is a KEY AXIS, so the fold in
     :func:`_trace` needs it, and that runs inside the module-scoped fixture.
@@ -152,7 +152,7 @@ def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
         "the pair no longer differs in its computation")
 
     # …and THE FIX: the key now sees the body, so the members key apart.
-    # pgw#1176: the claim is now per GRAPH CLASS, which is what it always
+    # the claim is now per GRAPH CLASS, which is what it always
     # meant — the two declarations trace the same class names with different
     # bodies, so every shared class must key apart. Asserting it per class is
     # strictly stronger than asserting it once over a combined digest, which
@@ -176,7 +176,7 @@ def test_the_witness_backstops_a_residual_collision(
     proves the backstop still holds beneath the sound key: were a witness-blind
     cell ever handed over, the adopt path still refuses on the witness."""
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    # pgw#1176: ONE artifact, ONE class — so the witness backstop is asked
+    # ONE artifact, ONE class — so the witness backstop is asked
     # about the class this artifact carries, which is the only thing it could
     # ever honestly answer about.
     name = sorted(fixed["blocks"])[0]
@@ -344,7 +344,7 @@ def test_the_adopt_path_admits_the_pod_whose_graph_it_is(
         family=PAIR[0], precision="", cell_key=fixed["key"][name],
         name=name, entry=fixed["blocks"][name],
         strict_export=True, lora_bucket=0)
-    # pgw#1176: a boot returns ONE outcome per declared class; this fixture
+    # a boot returns ONE outcome per declared class; this fixture
     # traces one, so the unpack ASSERTS that arity.
     (out,) = _attempt(
         monkeypatch, tmp_path, _derived_key(traced_pair, PAIR[0]),

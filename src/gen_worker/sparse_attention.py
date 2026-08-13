@@ -1,6 +1,6 @@
 """Block-sparse attention MECHANISM (pgw#1043 §PRODUCTIZATION).
 
-pgw#740 doctrine: the mechanism lives here, the per-model vocabulary lives in the
+the mechanism lives here, the per-model vocabulary lives in the
 endpoint. This module knows how to turn *block scores* into a FlexAttention
 ``BlockMask`` and run the attention; it knows nothing about H3, about where the
 scores came from, or about what a "global prefix" means beyond a row count.
@@ -85,7 +85,7 @@ def _bits() -> dict:
     except Exception as exc:  # noqa: BLE001
         raise SparseUnavailable(f"flex_attention unimportable: {exc}") from exc
     # The recompile ceiling is the SETTINGS AUTHORITY's to raise, never a second
-    # writer's (pgw#1049). Sparse adds one compiled flex callable per distinct
+    # writer's. Sparse adds one compiled flex callable per distinct
     # kernel_options set, so it declares the shape count and asks.
     settings_authority.raise_dynamo_cache_limits(64)
     _FLEX["BlockMask"] = BlockMask

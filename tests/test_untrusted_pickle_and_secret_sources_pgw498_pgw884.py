@@ -47,7 +47,7 @@ from gen_worker.convert import repackage, writer  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# pgw#498 — the untrusted-pickle boundary in the convert lane
+# the untrusted-pickle boundary in the convert lane
 # ---------------------------------------------------------------------------
 
 
@@ -205,7 +205,7 @@ def test_there_is_exactly_one_pickle_reader_in_the_tree() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#884 — refused key material, at every source that can deliver it
+# refused key material, at every source that can deliver it
 # ---------------------------------------------------------------------------
 
 

@@ -1,4 +1,4 @@
-"""``.pt2`` introspection and the B1 code-only gate (pgw#704; #723 produce half).
+"""``.pt2`` introspection and the B1 code-only gate (#723 produce half).
 
 ``aot_serve`` owns the ENVELOPE — the metadata contract, ``pack``/``unpack``,
 ``verify``, and the serve-time gates that read the declared manifest. This
@@ -355,7 +355,7 @@ def code_only_violations(package: Path, entry: str = "") -> List[str]:
     ``down_blocks.0...``" is. Callers turn a non-empty list into a red refusal,
     never a warning. ``entry`` scopes the gate to one named model; the multi-
     graph mint runs it once per entry so a refusal names BOTH the entry and
-    the cause (pgw#758).
+    the cause.
     """
     package = Path(package)
     reasons: List[str] = []
@@ -414,7 +414,7 @@ def program_literal_fqns(program: Any) -> Tuple[str, ...]:
 
 def literal_values_digest(program: Any) -> str:
     """Digest of the VALUES of every ``source=literal`` constant — ``""`` when
-    there are none (pgw#857).
+    there are none.
 
     **Why values, and only for literals.** A cell's identity folds constant
     NAMES but deliberately not their bytes, because a weight is rebound from
@@ -498,7 +498,7 @@ def unbindable_program_constants(
 ) -> List[str]:
     """:func:`unbindable_constants`, asked BEFORE the compile is paid for.
 
-    pgw#825: the packed gate fires per entry AFTER that entry's 4-6 minute
+    the packed gate fires per entry AFTER that entry's 4-6 minute
     AOTI compile, so a declaration/module mismatch cost a whole L4 rental to
     learn. The exported program already names every parameter and buffer it
     lifted, and AOTInductor's constant table is a function of exactly that —
@@ -557,7 +557,7 @@ def program_package_drift(
     want = set(program_constant_fqns(program))
     have = {c.fqn for c in declared_constants(Path(package), entry)
             if c.source != SOURCE_COMPUTED}
-    # pgw#1080: a COMPUTED constant is package-only by design — the runtime
+    # a COMPUTED constant is package-only by design — the runtime
     # fold produces it from the bound constants at load, so "the program never
     # lifted it" is the expected state and not the segfault precondition this
     # gate exists for.
@@ -584,7 +584,7 @@ def eliminated_constants(
     **A WEIGHT here is never routine** — that is :func:`folded_weights`, which
     refuses. This docstring used to call the sdxl case ("program 2423, package
     2422, the difference being ``unet.conv_out.bias``") *routine compiler
-    fusion into the convolution epilogue*. It is not fusion (pgw#1097): a 1-D
+    fusion into the convolution epilogue*. It is not fusion: a 1-D
     constant of 4 elements meets ``GraphLowering.can_inline_constant``, so
     inductor rendered that checkpoint's four floats into the kernel source.
     """
@@ -612,7 +612,7 @@ def folded_weights(
     turns fleet-wide cell sharing into a per-checkpoint compile without
     anything saying why. So it is refused HERE, once, on the mint pod.
 
-    Mechanism, read off torch 2.13.0 and MEASURED (pgw#1097): with
+    Mechanism, read off torch 2.13.0 and MEASURED: with
     ``aot_inductor.use_runtime_constant_folding`` and
     ``always_keep_tensor_constants`` both off, ``GraphLowering.get_attr``
     inlines a constant whose SHAPE meets either rule — 0-dim (rendered via
@@ -666,7 +666,7 @@ def unbindable_constants(
 
 
 # ---------------------------------------------------------------------------
-# The generated input guards — the artifact's OWN admission facts (pgw#1058)
+# The generated input guards — the artifact's OWN admission facts
 # ---------------------------------------------------------------------------
 #
 # AOTInductor renders, per user input, a `check_input_<i>` function into the
@@ -761,7 +761,7 @@ def input_guard_drift(
     """Named reasons the declared manifest rows do NOT describe the program
     whose guards these are; empty when they agree.
 
-    The comparison that makes an entry's label a verified echo (pgw#1058):
+    The comparison that makes an entry's label a verified echo:
     rows come from the ``ExportedProgram`` (or a packed ``metadata.json``),
     guards from the artifact's own generated wrapper — two independent
     readings that must agree, the same doctrine as the constant manifest.
@@ -854,7 +854,7 @@ def input_contract(
     off the example inputs, so what is recorded is what export actually
     committed to — which is what the consumer will be checked against.
 
-    ``leaves`` are ``aot_flatten`` leaves, not names (pgw#994): each row
+    ``leaves`` are ``aot_flatten`` leaves, not names: each row
     records WHERE IN THE CALL its input lives — parameter, that parameter's
     position, and the path into it — because a name cannot tell the serve side
     that ``x.0`` is element 0 of the single argument ``x`` rather than the

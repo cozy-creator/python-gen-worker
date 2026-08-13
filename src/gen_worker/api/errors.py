@@ -11,7 +11,7 @@ class ValidationError(WorkerError):
 
 class IllegalCombination(ValidationError, ValueError):
     """This combination of payload field VALUES is outside the endpoint's
-    contract, even though each field is individually legal (pgw#669).
+    contract, even though each field is individually legal.
 
     Raise it from a payload struct's ``__post_init__`` for inter-field
     constraints — ltx-video-2.3's 4K is 16:9 and B200-only, its ultrawide is
@@ -52,12 +52,12 @@ class CanceledError(WorkerError):
 class GpuSlotUnreachable(RetryableError):
     """A mid-handler GPU-permit re-acquire (#382) can never be satisfied.
 
-    pgw#738: the #382 lease yields the permit across a blob upload and takes
+    the #382 lease yields the permit across a blob upload and takes
     it back before returning to tenant code. That wait has NO honest progress
     signal of its own — FIFO position does not move while a healthy holder
     computes for four hours, and a holder's silence is not the waiter's fault
     (the publish phase is log-silent and GPU-idle by construction). So the
-    wait is bounded by REACHABILITY, never by a clock (gw#666): it is refused
+    wait is bounded by REACHABILITY, never by a clock: it is refused
     only when the permit ledger proves an outstanding permit belongs to no
     live holder — a raw acquirer outside the ledger, or a hold whose owning
     task already finished. Neither state resolves itself.
@@ -127,7 +127,7 @@ class OutputTooLargeError(ValidationError):
 
 
 class PayloadRefError(ValidationError):
-    """A ref the REQUEST PAYLOAD named could not be resolved (th#1259).
+    """A ref the REQUEST PAYLOAD named could not be resolved.
 
     PROVENANCE decides the class, not the status code or the message: an
     address the caller supplied is the caller's to get right, so this is a
@@ -290,7 +290,7 @@ class ComponentSubstitutionError(WorkerError):
 
 
 class DeclaredSlotResolutionError(WorkerError, ValueError):
-    """A FIXED release-declared model slot failed to resolve (pgw#763/th#1288).
+    """A FIXED release-declared model slot failed to resolve.
 
     The failing ref is the RELEASE'S OWN declaration — no payload field
     participates — so the label is the worker's origin claim and the hub
@@ -460,7 +460,7 @@ class HostRamMoveRefusedError(WorkerError):
 
 class OutputIntegrityError(WorkerError):
     """pgw#1094: the decoded output failed the NOISE/BLANK floor, so the
-    request must NOT bank as a clean success (ie#615/ie#634).
+    request must NOT bank as a clean success.
 
     Production minimax-h3 0.3.8 uploaded VAE-decoded noise on billed, settled
     requests. Nothing on the worker looked at the pixels; the "proof" was
@@ -469,7 +469,7 @@ class OutputIntegrityError(WorkerError):
     the garbage never reaches storage and the request reaches the hub as a
     deterministic worker-side failure carrying the measured statistic.
 
-    BLAME (th#1259 / th#1288 / pgw#1088). A rendered output is produced by the
+    BLAME. A rendered output is produced by the
     release's code, the model's runtime state AND the request's payload
     together, so this label is NOT version-independent evidence about the
     release and must never be added to the hub's `declaredFaultLabels`: that
@@ -479,7 +479,7 @@ class OutputIntegrityError(WorkerError):
     CODE answering a REQUEST", the strongest honest class a job result can
     carry — which is exactly right and needs no hub change.
 
-    NOT retryable, deliberately. The measured cause (ie#634) was persistent
+    NOT retryable, deliberately. The measured cause was persistent
     model state on one pod, and a retry there re-renders noise at full GPU
     cost. The blame ladder's distinct-worker machinery is what moves a request
     off a bad pod; a self-declared RETRYABLE would only spend the attempt

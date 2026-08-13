@@ -6,7 +6,7 @@ done that since pgw#654; `run_clone`'s publish call site never did — it spent
 the caller's facts only on `apply_objective_scheduler_config` (the scheduler
 stamp inside the produced tree) and dropped them before the wire.
 
-Live cost (ie#609): master's `tensorhub/wan22-t2v-a14b` mirror is missing
+Live cost: master's `tensorhub/wan22-t2v-a14b` mirror is missing
 `transformer_2`, and the repair — one more `clone-huggingface` leg — is
 impossible, because every re-clone into that already-classified repo dies at
 declare with `classification_required`. Every mirror the catalog already

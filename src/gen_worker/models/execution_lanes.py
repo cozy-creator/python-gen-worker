@@ -1,4 +1,4 @@
-"""Lane vocabulary (th#913/gw#596) — the SHARED SPEC twin of tensorhub's
+"""Lane vocabulary — the SHARED SPEC twin of tensorhub's
 ``internal/orchestrator/precision/lane.go``. Ids and semantics must stay
 byte-identical across repos.
 
@@ -141,7 +141,7 @@ def execution_lane_body_id(execution_lane: ExecutionLane) -> str:
 
 def known_execution_lane_bodies() -> list[str]:
     """Every concrete lane BODY token, ranked (table order). These are the
-    valid `handles=` declaration tokens (th#1050) — execution axis excluded:
+    valid `handles=` declaration tokens — execution axis excluded:
     author kernels declare the quant scheme, the platform owns eager/compiled."""
     return [
         execution_lane_body_id(_execution_lane_for_body(body, EXEC_EAGER))
@@ -166,7 +166,7 @@ def valid_execution_lane_body(token: str) -> bool:
 def observed_execution_lane(token: str, compiled: bool) -> ExecutionLane:
     """REPORT: the lane weights of body ``token`` are OBSERVED executing as.
 
-    ie#655: the table's execution support says which lanes the platform
+    the table's execution support says which lanes the platform
     PLANS, and an observation is not a plan. ``_planned_execution`` therefore
     must not touch this path: wan-2.2 served w8a8 weights EAGER on an H100
     (its self-mint declined for `insufficient_vram`) and the compiled-only
@@ -201,7 +201,7 @@ def most_quantized_body(tokens: Iterable[str]) -> str:
 
 
 class AppliedLane(msgspec.Struct, frozen=True, kw_only=True):
-    """What a SERVE-TIME recipe actually did to the weights (pgw#1104).
+    """What a SERVE-TIME recipe actually did to the weights.
 
     The lane a request reports must be the lane its weights execute. A
     binding names the CHECKPOINT the hub resolved; an endpoint that quantizes
@@ -286,7 +286,7 @@ def parse_execution_lane_spec(s: str) -> ExecutionLaneSpec:
 
 def execution_lane_body_of_binding(storage_dtype: str) -> str:
     """The lane BODY a binding's declared CAST names — the WEIGHTS half, with
-    no execution axis. Split out of ``execution_lane_of_binding`` (ie#655) so
+    no execution axis. Split out of ``execution_lane_of_binding`` so
     the reporting path can stamp an observed execution onto it instead of a
     planned one.
 

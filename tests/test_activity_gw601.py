@@ -80,7 +80,7 @@ def test_executor_setup_emits_monotonic_activity_phases():
 
     ups = _updates(sent)
     assert ups, "no activity envelopes emitted"
-    # pgw#1067: the boot-forward roll-up is a self-contained EVENT under its
+    # the boot-forward roll-up is a self-contained EVENT under its
     # own kind, not part of this activity's phase envelope. This assertion
     # read as "one activity" only because the two used to share a kind.
     assert {u.kind for u in ups} <= {
@@ -183,7 +183,7 @@ def test_running_context_manager_reports_failed_with_exception():
 
 
 # ---------------------------------------------------------------------------
-# ie#522: default evidence must not blind-spot two honest liveness sources —
+# default evidence must not blind-spot two honest liveness sources —
 # live subprocess CPU (inductor's async_compile workers) and I/O-bound
 # download-byte progress (large model fills, CPU-light by design). Both
 # were reproduced live killing a healthy worker at ~9.5-10min (th#965 layer
@@ -252,7 +252,7 @@ def test_watchdog_survives_zero_cpu_download_via_note_progress(monkeypatch):
     here and the hub kills it at 10min; this activity must never go
     silent while download ticks keep arriving.
 
-    De-flaked (ie#522): the original real-clock version (0.3s window,
+    De-flaked: the original real-clock version (0.3s window,
     real default evidence) let note_progress() land exactly ONE beat (the
     5s rate-limit floor swallowed the rest) and silently depended on
     incidental watchdog CPU/IO noise for the second — present on a

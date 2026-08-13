@@ -12,7 +12,7 @@ The sdxl w8a8-lora64 mint of 2026-08-06 (cell
 **97.6 % of the mint is one row, and the row named after the work is zero.**
 The zero is not a bug in the clock: ``mint_child`` opens the
 ``inductor_compile`` frame around ``_drain_router``, and the fleet mint arms
-COLD with no router (gw#587), so that phase measures an empty queue. Every
+COLD with no router, so that phase measures an empty queue. Every
 compile happens INLINE inside the warm forwards, i.e. inside
 ``warmup_forward``, which is therefore a bucket holding compile AND execution
 AND everything else with no way to tell them apart.

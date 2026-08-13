@@ -4,7 +4,7 @@ File-selection logic lives in :mod:`gen_worker.convert.classifier`. This module
 answers the downstream metadata question: given a repo_dir + file list, which
 model family / variant is this? The output feeds destination checkpoint tags.
 
-pgw#740 (B14): the four hand-written family ladders that used to live here —
+the four hand-written family ladders that used to live here —
 and the LTX-2 root sentinel that was *duplicated into the te#70 trainer repo
 and hand-synced* — are now :class:`~.layout_spec.LayoutDeclaration` records
 registered by the endpoint that owns the family. This file evaluates them; it

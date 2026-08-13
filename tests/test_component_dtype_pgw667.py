@@ -230,7 +230,7 @@ def test_a_fact_agreeing_with_the_default_stays_out_of_the_kwargs(
 
 
 def test_substituted_component_keeps_the_fact(tmp_path: Path) -> None:
-    # pgw#617 component override: the base composition computes bf16, but the
+    # the base composition computes bf16, but the
     # substituted Wan VAE must still be resident fp32.
     base = _wan_tree(tmp_path / "base")
     override = tmp_path / "override"

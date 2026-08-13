@@ -138,7 +138,7 @@ def _load_component_state_dict(
     if bin_base:
         bin_path = component_dir / f"{bin_base}.bin"
         if bin_path.exists():
-            # pgw#498: the clone lane feeds this ARBITRARY tenant-submitted
+            # the clone lane feeds this ARBITRARY tenant-submitted
             # repos, so a `.bin` here is an untrusted pickle and unpickling it
             # is arbitrary code execution inside a pod holding hub credentials
             # and other tenants' work (cozy_snapshot.py:285-292). This used to
@@ -266,7 +266,7 @@ def _family_from_pipeline_class(model_dir: Path) -> str:
 def assert_converter_matches_signature(model_dir: Path, spec: RepackageFamily) -> None:
     """Refuse to run a converter whose declared signature disagrees with disk.
 
-    The permanent guard (pgw#740). Whichever way the family arrives — detected
+    The permanent guard. Whichever way the family arrives — detected
     here or passed in by a caller — the component set on disk is ground truth,
     and a mismatch is a named refusal rather than a wrong output file.
     """

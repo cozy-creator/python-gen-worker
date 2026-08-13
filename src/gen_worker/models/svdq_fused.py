@@ -59,14 +59,14 @@ _SELF_CHECK_PROBES = ((128, 512, 256), (77, 3072, 384))
 # tune_quant.py can sweep it per card instead of anyone editing source.
 # sm_120: 8 warps (pgw#862, strided kernel). sm_100: 1 warp on the contiguous
 # kernel — a whole-sweep optimum on B200, where more warps only add
-# contention on an already memory-bound kernel (pgw#863).
+# contention on an already memory-bound kernel.
 _QUANT_WARPS_BY_SM = {100: 1, 103: 1, 120: 8, 121: 8}
 _QUANT_WARPS_DEFAULT = 4
 # 16-element blocks handled per program, per SM.
 _QBPP = 128
 _QBPP_BY_SM = {100: 128, 103: 128, 120: 128, 121: 128}
-# SMs served by the contiguous-load quantizer (pgw#863). sm_120 keeps the
-# strided kernel: register re-layout measured SLOWER there (pgw#862).
+# SMs served by the contiguous-load quantizer. sm_120 keeps the
+# strided kernel: register re-layout measured SLOWER there.
 _CONTIG_QUANT_SMS = (100, 103)
 
 
@@ -116,7 +116,7 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
 
     # Structure mirrors nvfp4_quant's proven fused kernel (27.6us at qwen
     # shapes): one row x BLOCKS_PER_PROG 16-elem groups per program, even/odd
-    # strided loads. Two 5090-banked lessons (pgw#862): fusing the rank-R
+    # strided loads. Two 5090-banked lessons: fusing the rank-R
     # lora_down here reloads its tile per M-tile (~16x slower — it stays a
     # cuBLAS mm); and a 2-D [BM, BK] tile with tl.split/reshape re-layout ran
     # 179us vs this structure. Differences vs pgw#685: optional in-register
@@ -477,7 +477,7 @@ def fused_ops() -> Optional[tuple[Any, Any, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Self-check — the arming gate the dispatch probe calls (pgw#860).
+# Self-check — the arming gate the dispatch probe calls.
 # ---------------------------------------------------------------------------
 
 
@@ -578,7 +578,7 @@ def _build_fused_linear_class() -> type:
                      rank: int, bias: bool, compute_dtype: Any,
                      per_channel_scale: bool, smooth: bool) -> None:
             super().__init__()
-            # pgw#1019: record it (twin of _SvdqLinear).
+            # record it (twin of _SvdqLinear).
             self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)

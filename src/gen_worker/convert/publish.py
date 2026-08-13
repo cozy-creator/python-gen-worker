@@ -113,7 +113,7 @@ def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None
 
 
 def _journal_beside(flavor: ProducedFlavor) -> Path:
-    """The publish journal for one produced flavor (pgw#1003).
+    """The publish journal for one produced flavor.
 
     NEXT TO the tree, never inside it: ``files_from_tree`` walks a flavor
     directory wholesale, and a journal written into it would publish itself as
@@ -127,7 +127,7 @@ def _journal_beside(flavor: ProducedFlavor) -> Path:
 def _publish_leg(dest: str, label: str, stage: str, facts: Mapping[str, Any]) -> None:
     """One typed `convert_publish` event per LEG of the publish protocol.
 
-    pgw#1004 B: `publish_flavors` is what every quantize / fuse / cast job
+    `publish_flavors` is what every quantize / fuse / cast job
     calls — the 2h16m casts — and it used to pass no ``on_stage``, no
     ``progress`` and no ``part_progress``, so the highest-volume producer on
     the platform emitted ZERO `worker_activity_events` legs for its whole
@@ -161,7 +161,7 @@ def publish_flavors(
     base weights. Pass ``mode="merge"`` explicitly only for deliberate
     overlay publishes (e.g. a vae swap on top of an existing tree).
 
-    ``journal_path`` (pgw#1003) is where the in-flight ``publish_id`` is
+    ``journal_path`` is where the in-flight ``publish_id`` is
     recorded so a retry on this pod re-uploads instead of re-casting. Pass the
     produced tree's own directory; omit it and the publish is exactly as
     unrecoverable as it was before."""
@@ -173,7 +173,7 @@ def publish_flavors(
         raise ValueError("destination_repo is required (payload.destination.repo)")
 
     client = HubClient.from_ctx(ctx)
-    # th#1411: a v2 publish mints a new identity and inherits nothing, so a
+    # a v2 publish mints a new identity and inherits nothing, so a
     # publish into a classified repo must restate objective/distilled. Default:
     # restate the SOURCE checkpoint's hub stamps — this producer just derived
     # the flavors from exactly that source, and quantize/fuse/cast preserve
@@ -187,7 +187,7 @@ def publish_flavors(
             distilled = src_distilled
     results: list[CommitResult] = []
     for flavor in flavors:
-        # th#1362 item 4: OUR producers never emit shards, and this is the
+        # OUR producers never emit shards, and this is the
         # last place a conversion / training-promote / cell-publish output can
         # be checked before it becomes somebody's checkpoint. It is NOT a
         # universal publish gate — a user's own sharded upload never reaches
@@ -203,12 +203,12 @@ def publish_flavors(
         # per-component precision is published either way.
         produced_dtypes = verify_produced_tree(Path(flavor.path))
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
-        # pgw#1159: a PRODUCER-LOCAL label. It classifies the placement stamp
+        # a PRODUCER-LOCAL label. It classifies the placement stamp
         # and names the activity leg; it is NOT sent to the hub and does not
         # name a catalog row — `dtype` + `artifact_contract` state what the
         # bytes are (th#1803 §1.32(d)).
         label = str(flavor.flavor or attrs.get("dtype") or "").strip()
-        # th#606: worker-addable provenance stamp fields. Producers declare
+        # worker-addable provenance stamp fields. Producers declare
         # quant identity in the flavor attribute bag; it rides the commit's
         # `provenance` object onto the checkpoint's node stamp (parents /
         # derivation_op come from the orchestrator's token claim, never here).
@@ -249,14 +249,14 @@ def publish_flavors(
             files=_flavor_files(flavor),
             tags=list(tags or []),
             mode=mode,
-            # pgw#1004 B: the conversion producer now puts its own legs on the
+            # the conversion producer now puts its own legs on the
             # wire. (The per-object liveness beat lives in the data plane
             # itself — `chunk_upload._beat` — so it cannot be lost by a caller
             # who forgets to pass a callback, which is exactly how it was
             # lost here.)
             on_stage=functools.partial(_publish_leg, dest, label),
             journal_path=journal_path or _journal_beside(flavor),
-            # th#1580: when the producer declares one, the hub PROVES it
+            # when the producer declares one, the hub PROVES it
             # against the header before recording it.
             artifact_contract=attrs.get("artifact_contract", ""),
             dtype=attrs.get("dtype", ""),

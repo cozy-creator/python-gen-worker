@@ -1,6 +1,6 @@
 """Registration hooks for ``convert/`` — the missing third registry.
 
-pgw#740 (C3): ``@family`` (serving defaults), ``@inputs_for`` (export inputs) and
+``@family`` (serving defaults), ``@inputs_for`` (export inputs) and
 ``cli/families.py --module`` (schema export) already implement the endpoint-owned
 split. ``convert/`` had no hook at all, which is the single reason its family
 knowledge had to live in the SDK.

@@ -1,6 +1,6 @@
 """Parent-side attestation of billable job metrics (pgw#763 delta 3).
 
-th#1309: ``JobMetrics`` is the sole billing source and it is produced by the
+``JobMetrics`` is the sole billing source and it is produced by the
 code being billed. Under the split that code runs in the compute child, so the
 child's numbers arrive at the parent as a claim — and the parent is the one
 component that watched the whole job from outside it.
@@ -99,7 +99,7 @@ def attest(
             )
         metrics.rss_at_end_bytes = int(child_rss_bytes)
 
-    # th#1364: the `output_media_duration_s == 0` divergence is DELETED, and
+    # the `output_media_duration_s == 0` divergence is DELETED, and
     # deleting it is the fix rather than relabelling what it emitted.
     #
     # `_scan_output_assets` sums `Asset.duration_s`, which only a TEMPORAL asset

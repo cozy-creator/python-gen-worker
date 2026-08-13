@@ -87,7 +87,7 @@ class HostRamHeadroom:
     @property
     def structural(self) -> bool:
         """The requirement exceeds the whole host — no eviction can help, and
-        no identically-sized pod ever will either (pgw#752)."""
+        no identically-sized pod ever will either."""
         return self.total_bytes > 0 and self.required_bytes > self.total_bytes
 
 
@@ -187,14 +187,14 @@ class _Entry:
     vram_hint: int = 0           # last measured footprint (survives demotion)
     pinned: bool = False
     refcount: int = 0            # live executions (pin-while-executing)
-    # Records referencing a shared component (pgw#636). Holders do NOT block
+    # Records referencing a shared component. Holders do NOT block
     # VRAM->RAM demotion (an idle pick's component may swap out; the owner
     # promotes it back before executing) but DO block evict/release_to_disk:
     # the registry must never drop its handle on a module that live
     # pipelines still alias.
     holders: int = 0
     last_used: float = field(default_factory=time.monotonic)
-    # Swap telemetry (gw#479): tier-transition counts + last durations.
+    # Swap telemetry: tier-transition counts + last durations.
     promote_count: int = 0
     demote_count: int = 0
     last_promote_ms: int = 0
@@ -212,7 +212,7 @@ class _Entry:
 
 
 def _default_free_vram_bytes(group: Optional[DeviceGroup] = None) -> int:
-    """Free VRAM of ONE device-group (pgw#648). The previous all-device SUM
+    """Free VRAM of ONE device-group. The previous all-device SUM
     was the live accounting bug: a 3x24GB pod reported 72GB free and admitted
     a 30GB model that fits on no single card."""
     return (group or DeviceGroup()).free_vram_bytes()
@@ -226,7 +226,7 @@ def _obj_manages_own_device(obj: Any) -> bool:
 
 
 def _obj_offload_hooked(obj: Any) -> bool:
-    """Any offload arming that parks weights in host RAM (gw#521): the
+    """Any offload arming that parks weights in host RAM: the
     diffusers CPU-offload modes plus the ie#468 block-window rung."""
     if _obj_manages_own_device(obj):
         return True
@@ -243,7 +243,7 @@ def _move_obj(obj: Any, device: str) -> None:
     (gw#551 — full-PCIe H2D promotes, pointer-swap demotes), else whole-object
     ``.to(device)``. Raises on failure — the caller
     (:meth:`Residency._move_verified`) owns rollback; swallowing a mid-move
-    CUDA OOM here used to book a half-moved pipeline as resident (gw#409)."""
+    CUDA OOM here used to book a half-moved pipeline as resident."""
     if obj is None or _obj_manages_own_device(obj):
         return
 
@@ -267,7 +267,7 @@ class Lease:
     the ref actually books VRAM, and any unconsumed remainder dies with the
     lease.
 
-    A lease also carries an ACTIVATION reservation (pgw#652): the transient
+    A lease also carries an ACTIVATION reservation: the transient
     VRAM a running request allocates on top of its weights. Unlike weight
     reservations — which are MAXed per ref because two jobs needing the same
     checkpoint share one future load — activation SUMS across live leases:
@@ -319,7 +319,7 @@ class Residency:
         self._free_vram_fn = free_vram_bytes_fn
         self._move = move_fn
         # The one device-group whose VRAM pool this registry accounts for
-        # (pgw#648). Admission, make_room and the free probe all speak this
+        # . Admission, make_room and the free probe all speak this
         # group; nothing here ever sums VRAM across groups.
         self.device_group = device_group or DeviceGroup()
         # Called with (ref, obj) before a VRAM->RAM demotion moves the object
@@ -336,7 +336,7 @@ class Residency:
         # and it is consumed by the ref's actual track_vram booking.
         self._leases: Dict[int, Lease] = {}
         self._ref_reservations: Dict[str, Dict[int, int]] = {}
-        # Learned activation footprints (pgw#652): key -> observed transient
+        # Learned activation footprints: key -> observed transient
         # VRAM high-water. Populated ONLY by measurement (record_activation);
         # an unmeasured key claims nothing, so nothing is reserved on the
         # strength of a declaration. No endpoint knob feeds this.
@@ -352,7 +352,7 @@ class Residency:
             self._on_event(ref, state, int(vram_bytes), int(duration_ms))
         except Exception as exc:
             logger.exception("residency event callback failed for %s", ref)
-            # pgw#760: the hub's residency view just silently diverged — the
+            # the hub's residency view just silently diverged — the
             # activity stream is an independent channel, so confess there.
             activity_mod.emit_event(
                 activity_mod.KIND_RESIDENCY_FAULT,
@@ -492,7 +492,7 @@ class Residency:
         :func:`~gen_worker.models.memory.estimate_cuda_resident_gb`).
 
         Offload-hooked pipelines (diffusers CPU-offload modes, block-window
-        offload) are booked in the RAM tier instead (gw#521): their weights
+        offload) are booked in the RAM tier instead: their weights
         rest in host RAM and the allocator delta across such a load is noise
         (0.03GB registered live), so a VRAM booking would be a lie in both
         tier and size."""
@@ -549,10 +549,10 @@ class Residency:
                 return False  # an admitted job needs it (pgw#641 Stage 2)
             if not e.movable:
                 return False
-            # Size-aware RAM floor (gw#407): demoting a pipeline of size X
+            # Size-aware RAM floor: demoting a pipeline of size X
             # eats ~X host RAM — landing it must still leave the floor, or
             # the host thrashes into the keepalive-stall livelock. Bytes
-            # already staged in the pinned swap cache (gw#551) are resident
+            # already staged in the pinned swap cache are resident
             # host RAM — only the uncached remainder is a fresh demand.
 
             need_gb = float(e.vram_hint or e.vram_bytes) / _GiB
@@ -584,7 +584,7 @@ class Residency:
         return True
 
     def _move_verified(self, obj: Any, device: str, *, ref: str = "") -> bool:
-        """Move + paranoid completeness walk (gw#409): after ``.to(device)``,
+        """Move + paranoid completeness walk: after ``.to(device)``,
         every module parameter/buffer must actually be on ``device`` — a move
         that raised (mid-move CUDA OOM) or skipped tensors gets one targeted
         repair pass, and an unrepairable object is rolled back to the other
@@ -620,7 +620,7 @@ class Residency:
                     "object is mixed-device and unusable",
                     ref or type(obj).__name__, restore, left[:5],
                 )
-                # pgw#760: the next forward on this object fatals mid-denoise
+                # the next forward on this object fatals mid-denoise
                 # ("Expected all tensors to be on the same device") — the
                 # hub must see the cause, not only the downstream job error.
                 activity_mod.emit_event(
@@ -649,14 +649,14 @@ class Residency:
         default group; an explicit ``cuda:N`` once a topology has told us the
         group owns card N — a group-1 instance must never load onto card 0
         merely because the loading thread's current device said so
-        (pgw#748)."""
+."""
         primary = int(self.device_group.primary)
         return "cuda" if primary == 0 else f"cuda:{primary}"
 
     def promote(self, ref: str, device: str = "") -> bool:
         """RAM -> VRAM (makes room first). True when resident afterward —
         i.e. every tensor verified on ``device``; a failed/partial move is
-        rolled back to CPU and refused instead of booked (gw#409)."""
+        rolled back to CPU and refused instead of booked."""
         device = device or self.vram_device
         with self._lock:
             e = self._entries.get(ref)
@@ -725,10 +725,10 @@ class Residency:
             # for real headroom instead of 0 (a 0-byte ask promoted 6.9GB
             # pipelines into ~2GB free and OOMed mid-move, gw#409).
             hint = int(estimate_pipeline_size_gb(obj) * _GiB)
-        t0 = time.monotonic()  # swap wall incl. the make_room demote (gw#479)
+        t0 = time.monotonic()  # swap wall incl. the make_room demote
         if not self.make_room(hint, for_refs=(ref,)):
             # Refuse FAST instead of paying a doomed multi-GB partial move +
-            # rollback (gw#551). Gate on the hard physical minimum — actual
+            # rollback. Gate on the hard physical minimum — actual
             # weight bytes — never the bookkeeping hint (which can inflate
             # from residual shares, and is faked by budget-mode tests).
             need = int(estimate_pipeline_size_gb(obj) * _GiB)
@@ -848,7 +848,7 @@ class Residency:
 
     def _outstanding_activation_bytes(self, exclude_lease_id: int = 0) -> int:
         """Transient VRAM every OTHER live request will allocate. SUMMED, not
-        maxed: concurrency costs activation per request (pgw#652)."""
+        maxed: concurrency costs activation per request."""
         return sum(
             lease.activation for lid, lease in self._leases.items()
             if lid != exclude_lease_id
@@ -884,7 +884,7 @@ class Residency:
         ``sizes`` maps ref -> expected VRAM bytes (0 = unknown; the ref is
         still lease-protected, it just books no reservation).
         ``activation_bytes`` is the LEARNED transient footprint of this
-        request (pgw#652) — 0 until measured — reserved for the lease's whole
+        request — 0 until measured — reserved for the lease's whole
         life so concurrent requests cannot each assume the same headroom and
         OOM once interleaving starts working. Admission never
         REFUSES here — the adaptive-fit ladder downstream absorbs genuine
@@ -997,7 +997,7 @@ class Residency:
         refs this call is making room FOR, whose own reservations are the
         very demand being satisfied and are therefore excluded. The same
         exclusion identifies the CALLING lease, whose activation claim
-        (pgw#652) is likewise not subtracted — it is either already allocated
+ is likewise not subtracted — it is either already allocated
         and thus already visible in the measured free bytes, or it is this
         job's own future demand. Other in-flight requests' activation is
         subtracted: their latents and attention workspace are real bytes this
@@ -1051,7 +1051,7 @@ class Residency:
         registered ONCE (VRAM counted once) under ``key.cache_id()`` and held
         (``holders``) so evict/release can never drop the registry's handle
         while any pipeline aliases the module. Holders do NOT block VRAM->RAM
-        demotion (pgw#636): an idle pick's component may swap out under real
+        demotion: an idle pick's component may swap out under real
         pressure; owners re-promote before executing (pin + promote path)."""
         ref = key.cache_id()
         with self._lock:
@@ -1117,7 +1117,7 @@ class Residency:
             }
 
     def transition_stats(self) -> Dict[str, Dict[str, int]]:
-        """Per-ref swap telemetry (gw#479): promote/demote counts + last wall
+        """Per-ref swap telemetry: promote/demote counts + last wall
         durations for every entry that has ever transitioned."""
         with self._lock:
             return {
@@ -1167,7 +1167,7 @@ def _digest(value: Any) -> str:
 
 def content_set_digest(files: Any) -> str:
     """Digest of a component's sorted ``(relative_path, blake3)`` pairs — the
-    CONTENT identity of the file set (gw#479). Content-addressed = immutable:
+    CONTENT identity of the file set. Content-addressed = immutable:
     a tag moving to new bytes changes file digests, hence this digest."""
     rows = sorted(f"{str(p)}\x1f{str(d)}" for p, d in dict(files).items())
     if not rows:
@@ -1178,7 +1178,7 @@ def content_set_digest(files: Any) -> str:
 @dataclass(frozen=True)
 class LoadedComponentKey:
     """Canonical identity of a loadable immutable component set, keyed by
-    CONTENT (gw#479). Two bindings share one loaded entry IFF the bytes and
+    CONTENT. Two bindings share one loaded entry IFF the bytes and
     every load-affecting fact are equal: the file-set content digest plus
     dtype, quant scheme+config, GPU index, placement mode, component name and
     adapter overlays. ref/revision are NOT identity — byte-identical

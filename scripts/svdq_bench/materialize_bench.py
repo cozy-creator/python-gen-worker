@@ -108,7 +108,7 @@ def fp8_from_manifest(manifest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists() and dest.stat().st_size == f["size_bytes"]:
             return dest, f["size_bytes"], "cached"
-        # Big objects are chunk-CAS (th#1310): one presigned URL per chunk,
+        # Big objects are chunk-CAS: one presigned URL per chunk,
         # in order. Small ones carry a single "url".
         urls = f.get("chunk_urls") or ([f["url"]] if f.get("url") else [])
         if not urls:

@@ -64,7 +64,7 @@ class _Pipeline:
 def test_a_structure_only_component_is_not_resident_vram() -> None:
     """The boot-trace / mint child's composition. Its transformer's parameters
     are fake ON the compute device — that placement is part of the graph's
-    identity (pgw#1080) and is precisely why the naive walk read them as 40 GB
+    identity and is precisely why the naive walk read them as 40 GB
     of occupied card."""
     pipe = _Pipeline(transformer=virtual_component(40.0, device="cuda"))
     assert memory.estimate_cuda_resident_gb(pipe) == 0.0

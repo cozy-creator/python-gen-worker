@@ -24,7 +24,7 @@ corrupt each other's trajectory — and the assignment is exactly the
 swap-don't-wrap that risks a recompile. Cloning the scheduler per request
 is a CORRECTNESS fix, not an optimization.
 
-pgw#669: the view clones EVERY scheduler the pipeline carries, not just the
+the view clones EVERY scheduler the pipeline carries, not just the
 attribute literally named ``scheduler``. A pipeline with a second stateful
 sampler — ``LTX2ConditionPipeline.audio_scheduler`` for the audio half of its
 joint video+audio latent, which diffusers' own ``__call__`` drives with
@@ -66,7 +66,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # data (th#1116 family schemas), never rows here.
 SAMPLERS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "ddim": ("DDIMScheduler", {}),
-    # th#1174: the hub already RECOGNIZES "ddim_trailing" in both sdxl
+    # the hub already RECOGNIZES "ddim_trailing" in both sdxl
     # schemas; this is its definition. Hyper-SD's published recipe is DDIM
     # with trailing timestep spacing, and family-neutral by construction
     # exactly like "euler_trailing".
@@ -102,7 +102,7 @@ SAMPLERS: Dict[str, Tuple[str, Dict[str, Any]]] = {
 # preference. What makes a scheduler flow-match is CAPABILITY, not spelling:
 # the `FlowMatch*` family is flow by construction, and the multistep solvers
 # (UniPC, DPMSolver, DEIS) are flow when their config says so. UniPC with
-# `use_flow_sigmas` IS the official Wan solver (pgw#1139/ie#657).
+# `use_flow_sigmas` IS the official Wan solver.
 _FLOW_CLASS_PREFIX = "FlowMatch"
 # The __init__ field that only a flow-capable non-FlowMatch class has.
 _FLOW_SIGMAS_FIELD = "use_flow_sigmas"
@@ -226,7 +226,7 @@ def _clonable_scheduler(name: str, obj: Any) -> bool:
 
 def discover_schedulers(pipeline: Any) -> Tuple[str, ...]:
     """Every attribute of ``pipeline`` that carries per-request SAMPLER state
-    (pgw#669), primary first, then the rest in declaration order.
+, primary first, then the rest in declaration order.
 
     Derived from the pipeline's own attributes — diffusers registers optional
     components (``_optional_components``) as plain attributes, so a checkpoint
@@ -267,7 +267,7 @@ def clone_scheduler(
 
     ``sampler`` picks a different scheduler class from the SDK table
     (``""`` keeps the instance's class). ``objective`` applies the resolved
-    checkpoint's stamped training-objective fact (pgw#654) — scheduler math
+    checkpoint's stamped training-objective fact — scheduler math
     at view construction, never payload logic:
 
     - ``"epsilon"`` / ``"v_prediction"``: sets ``prediction_type``; for
@@ -284,7 +284,7 @@ def clone_scheduler(
     A declared flow ``shift`` is renamed to whichever of
     ``shift``/``flow_shift`` the target class honours — ``from_config`` drops
     the other spelling, so a published shift would be ignored rather than
-    applied (ie#535).
+    applied.
 
     ``attr`` names which scheduler attribute to clone (default the primary
     ``scheduler``); :func:`for_request` uses it for secondary samplers.
@@ -351,7 +351,7 @@ def for_request(
     ``view.generator`` for convenience; pass it explicitly to the call if
     the pipeline's signature wants it per call.
 
-    EVERY sampler-shaped attribute is cloned (pgw#669), not just
+    EVERY sampler-shaped attribute is cloned, not just
     ``scheduler``: ``schedulers=None`` discovers them
     (:func:`discover_schedulers`); an explicit
     ``schedulers=("scheduler", "audio_scheduler")`` pins the set. ``sampler``,

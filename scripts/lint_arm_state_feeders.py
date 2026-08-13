@@ -10,7 +10,7 @@ or §4.31's serve-first rule. pgw#1033 wrote its feeding rule as a CONVENTION �
 had exactly two feeders, ``fleet_cells.arm_from_local_store`` and
 ``adopt_delegated_mint``, **both SELF-PRODUCED routes**. ``arm_ordered`` (every
 hub Plan arm and every §4.27 boot-adopt) fed it nothing. Measured on a real pod
-(pgw#1141b, POD PROOF #4): a cell that resolved, materialized and armed was
+a cell that resolved, materialized and armed was
 scored on the dynamo ledger, disarmed, and the pod served eager for life.
 
 That was the FOURTH gate in a row with the same shape (pgw#1108, pgw#1122,
@@ -63,10 +63,10 @@ recognizer itself (no pipeline anywhere, the classifier is the subject) qualifie
 structurally; a fixture standing in for an adoption cannot, whatever it writes in
 the file. So a simulated arm still has no label to write down.
 
-Same enforcement shape as ``lint_credential_identity.py`` (pgw#1122),
-``lint_settings_writers.py`` (pgw#1049) and ``lint_config_reads.py`` (§1.18).
+Same enforcement shape as ``lint_credential_identity.py``,
+``lint_settings_writers.py`` and ``lint_config_reads.py`` (§1.18).
 Sites are keyed ``<path>::<enclosing scope>::<name>``, never by line number: a
-line is a fact other people change (pgw#931).
+line is a fact other people change.
 """
 
 from __future__ import annotations

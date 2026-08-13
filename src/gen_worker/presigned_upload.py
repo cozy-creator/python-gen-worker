@@ -2,9 +2,9 @@
 
 Upload flow (one file):
   1. Client computes BLAKE3 hash of the file (and declares sha256 at create —
-     th#1795 — so the hub can presign into the final content-addressed key).
+     so the hub can presign into the final content-addressed key).
   2. POST {base_url}{endpoint_path} with {path, blake3, size_bytes, sha256}.
-  3. TensorHub answers dedup, a store-enforced single PUT (th#1795), or
+  3. TensorHub answers dedup, a store-enforced single PUT, or
      presigned multipart part URLs uploaded part-by-part and completed with
      part ETags. The worker NEVER holds store credentials (pgw#1206 B: the
      credentialed grant lane had zero hub producers and is gone, boto3 with
@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 # pgw#973 (§4.24), completing wave 2's KEEP-BUT-DOCUMENT verdict. These are
 # per-CALL socket budgets on the two hub round trips, not give-up decisions:
 # the give-up is `_COMPLETE_SILENCE_WINDOW_S` below, over the hub's own
-# answers (gw#666). Without them a hub that accepts a connection and never
+# answers. Without them a hub that accepts a connection and never
 # replies wedges a publish forever. `/complete` gets ten times `/create`'s
 # budget because it VERIFIES the object synchronously (streams it back from R2
 # and hashes it) while `/create` only mints presigns — and it is the DERIVATION
@@ -128,7 +128,7 @@ _FINALIZE_RETRY_BACKOFF_S = 0.5
 # returns the same 200 success payload to the next poll, no data lost.
 _COMPLETE_IN_PROGRESS_POLL_S = 5.0
 
-# gw#666 (th#1166 finding E): the old `_COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600`
+# the old `_COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600`
 # FAILED THE JOB after 10 minutes of wall time — the worker had already
 # uploaded every byte and then discarded the result because the hub was still
 # stitching a large multipart object. A clock cannot distinguish "assembly is
@@ -145,7 +145,7 @@ _COMPLETE_SILENCE_WINDOW_S = 2.0 * _FINALIZE_TIMEOUT_S
 # Default part size sent by server, but we read it from the response.
 _FALLBACK_PART_SIZE = 64 * 1024 * 1024  # 64 MiB
 
-# pgw#973 (§4.24) — KEEP, but the old justification was false and is replaced.
+# KEEP, but the old justification was false and is replaced.
 #
 # It read: "File-level fan-out is fixed at 4 and per-file part fan-out is fixed
 # at 4, so this semaphore is the authoritative cap that keeps the two axes from
@@ -324,7 +324,7 @@ def _presigned_put_slot() -> Iterator[None]:
 def _phase(on_phase: Optional[Any], name: str) -> Iterator[None]:
     """Time one leg of the three-leg protocol and hand it to ``on_phase``.
 
-    pgw#1125 / th#1795: ``stage_ms.upload`` is ONE bracket around create ->
+    ``stage_ms.upload`` is ONE bracket around create ->
     PUT -> complete, and it is 98.6% of a fast request's finalize tail. The
     split across the three legs decides which fix is worth building, so it has
     to be measured rather than budgeted. The callback fires on the way out of
@@ -382,7 +382,7 @@ def presigned_upload_file(
             without it ``stage_ms.upload`` is one opaque number and every
             attribution inside it is a guess.
         complete_extra: Optional extra fields merged into the /complete POST
-            body (after the `parts` array). NOTE (gw#401/th#606): tensorhub's
+            body (after the `parts` array). NOTE: tensorhub's
             per-file /complete is parts-only and does NOT persist lineage
             metadata; step/epoch/quant identity reach the catalog via the
             commit body's `provenance` object (worker-addable stamp fields),
@@ -450,7 +450,7 @@ def _post_create(
     leg opens an upload session and mints presigns; it writes no media row and
     publishes nothing — the object only exists once ``/complete`` runs, and
     this save completes exactly one of the two sessions. A duplicate is an
-    unfinished session the hub GCs, and the direct-final path (th#1795) makes
+    unfinished session the hub GCs, and the direct-final path makes
     it emptier still: the bytes go straight to the content-addressed key the
     digest names, so two sessions for the same save even name the same key.
     The one real charge is the capability grant's budget, which tensorhub
@@ -580,7 +580,7 @@ def _presigned_upload_file_scoped(
             retryable=False,
         )
 
-    # th#1795: a store-enforced single PUT straight into the FINAL
+    # a store-enforced single PUT straight into the FINAL
     # content-addressed key. The hub can only mint this when the create
     # declared `sha256` — given the digest it knows where the bytes belong, so
     # there is nothing to assemble and nothing to promote, and it drops five
@@ -695,7 +695,7 @@ def _poll_until_finalized(
     once finalized (`sess.Finalized` fast path returns the same success
     payload), so re-POST it instead of treating the race as fatal.
 
-    The wait is bounded by SILENCE, never by a clock (gw#666): a hub that
+    The wait is bounded by SILENCE, never by a clock: a hub that
     keeps answering 409 is a hub actively assembling the object we just
     uploaded, and failing the job at that moment throws the whole upload
     away for nothing."""
@@ -774,7 +774,7 @@ def _complete_upload_session(
                 retryable=True,
                 cause_type=type(e).__name__,
             )
-            # pgw#1125: `/complete` was ALREADY retried here on a connection
+            # `/complete` was ALREADY retried here on a connection
             # failure, and the hub contract that makes that safe is unchanged
             # (a finalized session answers the same success payload again —
             # `_poll_until_finalized`). What keepalive adds is a pool that can
@@ -877,7 +877,7 @@ def _upload_parts_to_s3(
     file_size = os.path.getsize(file_path)
 
     def _feed(n: int) -> None:
-        # gw#621: uploaded bytes are visible on the 10s beat while a
+        # uploaded bytes are visible on the 10s beat while a
         # seal_publish-class activity is open, and proof-of-life either way.
         act = _activity.current()
         if act is not None:

@@ -37,7 +37,7 @@ from .url_fetch import DEFAULT_MAX_BYTES, open_guarded_stream
 
 logger = logging.getLogger(__name__)
 
-# pgw#973 (§4.24): one number for tensorhub's media cap, owned by url_fetch.
+# one number for tensorhub's media cap, owned by url_fetch.
 # open_guarded_stream deliberately caps nothing ("the caller owns the read
 # and its byte cap"), so this path really does need its own enforcement —
 # it just must not re-decide the value.
@@ -509,7 +509,7 @@ def _download(
                 f"input_asset_too_large: {occurrences[0].path} exceeds its byte cap"
             )
         cap = entry.size_bytes
-    # pgw#663: redirects go through the guarded opener, which re-applies the
+    # redirects go through the guarded opener, which re-applies the
     # SSRF policy to EVERY hop. `urlopen` follows them silently, so the
     # pre-flight `_validate_transport_url` only ever covered hop 0 — a caller
     # transport that 302s at the metadata service was reachable. Private

@@ -18,7 +18,7 @@ from harness.blob_host import BlobHost, GatedBlobHost
 from harness.hub_double import Conn, WorkerHarness, hub_double, is_model_event, is_ready
 from harness.progress_wait import Cadence, await_count, await_progress
 
-# pgw#795 (the v0.78.0 release blocker): this ref must NOT be one a toy
+# this ref must NOT be one a toy
 # endpoint declares. It used to be `harness/residency-tiny`, which
 # harness/toy_endpoints.py binds — so ~2 s after boot the eager first-boot
 # promoted the ref to RAM, and from that moment every re-sent plan
@@ -30,7 +30,7 @@ from harness.progress_wait import Cadence, await_count, await_progress
 # property holds at any spacing (verified at 0.5 s and 5 s gaps).
 _MODEL_REF = "harness/republish-tiny"
 
-# pgw#955: a SECOND undeclared ref, materialized after _MODEL_REF in the same
+# a SECOND undeclared ref, materialized after _MODEL_REF in the same
 # plan, whose blob the test can hold open — that is what keeps a reconcile pass
 # genuinely in flight while the hub re-sends the plan.
 _GATE_REF = "harness/republish-gate"
@@ -75,7 +75,7 @@ def _count_on_disk(conn: Conn) -> int:
 def _wait_on_disk_count(conn: Conn, harness: WorkerHarness, want: int) -> None:
     """Wait for ``want`` ON_DISK re-reports — on PROGRESS, never on a clock.
 
-    pgw#795: this wait used to be a fixed 15-second deadline, and on
+    this wait used to be a fixed 15-second deadline, and on
     2026-07-30 it failed the v0.78.0 publish job twice, after seeing 2 of 3
     re-reports. The deadline was the messenger (see ``_MODEL_REF`` for the
     disease), and a wall clock is a bad messenger: it reports "slow" for

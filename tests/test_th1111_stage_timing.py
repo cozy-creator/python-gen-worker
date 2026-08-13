@@ -30,7 +30,7 @@ def _payload() -> bytes:
 
 
 def test_stage_map_reconciles_with_runtime_ms_on_the_real_serve_path() -> None:
-    # pgw#767: this test used to need no file API at all. Under
+    # this test used to need no file API at all. Under
     # OUTPUT_MODE_INLINE the image AND the (~200 KiB) result envelope both took
     # the inline shortcut, and the envelope's shortcut was the defect — it
     # returned a ref for bytes that were never uploaded. With the envelope now
@@ -114,7 +114,7 @@ def test_nested_stages_are_charged_exclusively() -> None:
     timer.handler_close()
     out = timer.snapshot()
 
-    # gw#666: bounds are DERIVED from the sleeps, never a literal band. A sleep
+    # bounds are DERIVED from the sleeps, never a literal band. A sleep
     # is a floor at any box load, so the child's floor is a real ceiling on an
     # exclusively-charged parent; the old `15 <= upload <= 35` was red at load
     # 90 and green at load 17 while nothing about the code had changed.

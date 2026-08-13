@@ -109,7 +109,7 @@ def request(
 
 
 def viewer_identity() -> Dict[str, str]:
-    """Ask the parent WHO THIS POD IS (pgw#1122).
+    """Ask the parent WHO THIS POD IS.
 
     Returns ``{"endpoint_id": ..., "org_id": ...}`` — the two hub-stamped
     viewer claims, decoded by the parent out of the credential it holds. The

@@ -112,7 +112,7 @@ def test_the_fold_is_the_mints_own_stamp_not_a_second_arithmetic() -> None:
     blocks = {"forward/x@64": _block(dim=64), "forward/x@128": _block(dim=128)}
     from gen_worker import compile_cache as cc, env_seal
 
-    # pgw#1176: the mint packs ONE artifact per class, so the comparison is
+    # the mint packs ONE artifact per class, so the comparison is
     # per class too — and it is stronger for it. A single combined key could
     # agree while an individual class's hash disagreed underneath it.
     minted = {}
@@ -298,7 +298,7 @@ def test_one_unreadable_block_invalidates_the_WHOLE_memo_entry(
     tmp_path: Path,
 ) -> None:
     """A partial class set is not a narrower key, it is a wrong one
-    (pgw#716) — so a memo that can only answer for some of its classes must
+ — so a memo that can only answer for some of its classes must
     answer for none."""
     boot_key.write_memo(tmp_path, "closureA", {"a": _block(), "b": _block()})
     path = tmp_path / boot_key.MEMO_FILENAME
@@ -467,7 +467,7 @@ def test_a_child_that_produced_no_hashes_refuses_the_whole_derivation(
     tmp_path: Path, monkeypatch,
 ) -> None:
     """A partial class set is not a narrower key, it is a WRONG key: a cell's
-    identity is its whole class set (pgw#716/#758). So one dead child refuses
+    identity is its whole class set. So one dead child refuses
     the derivation, and the pod mints the ordinary way."""
     monkeypatch.setattr(boot_key, "cpu_quota_cores", lambda: 2.0)
     monkeypatch.setattr(
@@ -628,7 +628,7 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
 
 
 # ---------------------------------------------------------------------------
-# pgw#847 — priced, and it decides nothing
+# priced, and it decides nothing
 # ---------------------------------------------------------------------------
 
 

@@ -17,7 +17,7 @@ pairs::
     out = Generate().generate(ctx, TextToImage(prompt="a cat"))
 
 Pass a :class:`Recorder` to assert what the handler SAVED and LOGGED
-(pgw#942) — the outputs go through the SDK's real encode/stamp/write path
+ — the outputs go through the SDK's real encode/stamp/write path
 and land in an inspectable list::
 
     rec = Recorder()
@@ -319,7 +319,7 @@ def fake_context(
     :class:`RequestContext` constructor kwarg (``owner``, ``invoker_id``,
     ...) passes through via ``**kwargs``.
 
-    ``recorder`` (pgw#942) turns on RECORDING MODE: saves land in
+    ``recorder`` turns on RECORDING MODE: saves land in
     ``recorder.saved`` and events in ``recorder.events``, and outputs are
     written into the recorder's own directory instead of being uploaded — so
     the handler runs the SDK's real encode path with no hub and no network.

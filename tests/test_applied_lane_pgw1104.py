@@ -159,7 +159,7 @@ def test_a_serve_time_recipe_moves_the_reported_lane(boot) -> None:
         # The binding on its own still says bf16 — the divergence is real,
         # not a mis-resolved binding.
         assert ex._bound_execution_body(eff) == "bf16-w16a16"
-        # ie#655: this rig has no compiled cell, so the honest execution axis
+        # this rig has no compiled cell, so the honest execution axis
         # is `+eager`. Until ie#655 this line read `+compiled` — the lane
         # table's compiled-only PLAN for the w8a8 body coerced an observed
         # eager posture, and the test encoded the over-claim.
@@ -243,7 +243,7 @@ def test_every_reportable_body_composes_at_either_observed_posture() -> None:
     twin of the hub's `precision.KnownExecutionLaneBodies()` — what verdicts
     key on) at WHICHEVER posture was observed.
 
-    ie#655: the reported set is deliberately WIDER than
+    the reported set is deliberately WIDER than
     `known_execution_lanes()`. That list is the lanes the platform CHOOSES —
     an owner ladder, an admin override, a resolution — and `fp8-w8a8-dynamic`
     is compiled-only there because eager w8a8 is unmeasured, not because it

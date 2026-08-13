@@ -49,7 +49,7 @@ _ORDER = {VERDICT_HEALTHY: 0, VERDICT_DEGRADED: 1, VERDICT_DESTROYED: 2}
 #: Typed event phases. A DEGRADED subject is served and confesses; a DESTROYED
 #: subject is refused and confesses. Both reach the hub, because the error
 #: reaches only the caller of one request while a fleet-wide rate is only
-#: countable from activity records (pgw#800).
+#: countable from activity records.
 PHASE_DEGRADED = "degraded"
 PHASE_REFUSED = "refused"
 
@@ -379,7 +379,7 @@ def gate(
 # ---------------------------------------------------------------------------
 # The compiled-cell (assembled-vs-eager) calibration — pgw#814's measured band
 # ---------------------------------------------------------------------------
-# Moved here from the retired regional module (pgw#846): the calibration is
+# Moved here from the retired regional module: the calibration is
 # family-GENERAL — it reads `Compile.numerics_floor` / `numerics_warn`, which
 # whole-graph families (sdxl: 0.995/0.999) declare too, and the adoption
 # numerics gate is the mechanism that should have caught the regional serve
@@ -456,7 +456,7 @@ def declared_thresholds(cfg: Any) -> Thresholds:
     answer onto :attr:`Thresholds.source`. Nobody may re-derive it: the whole
     class of defect here is a declaration read by a second party that drifts
     from the authority, which is how ``Compile.numerics_floor`` spent its
-    first 300 commits reaching no gate at all (pgw#1150).
+    first 300 commits reaching no gate at all.
 
     ``cfg`` is duck-typed on purpose — it is a raw ``Compile`` on the author-CI
     path and a ``registry.CompileCell`` on every fleet path, and both carry the

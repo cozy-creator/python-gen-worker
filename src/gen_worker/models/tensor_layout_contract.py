@@ -1,7 +1,7 @@
 """th#1580 A4 (§1.30 declaration 2+3): a decoder declares WHICH TENSOR-LAYOUT
 CONTRACT it implements, beside the code that implements it.
 
-The tensor-layout contract (th#1721; was "the artifact contract") is how
+The tensor-layout contract (was "the artifact contract") is how
 tensors exist ON DISK — byte packing, scale layout, swizzle, key-naming
 convention, file topology — named by a descriptor handle
 ``<producer>.<format>@<major>``. Its sibling, the tensor-binding contract
@@ -40,7 +40,7 @@ CONTRACT_COZY_FP8_ROWWISE = "cozy.fp8-rowwise@1"
 CONTRACT_NUNCHAKU_V1 = "nunchaku.v1@1"
 CONTRACT_COZY_SVDQ_NVFP4_LR8 = "cozy.svdq-nvfp4-lr8@1"
 CONTRACT_BFL_NVFP4_PRESWIZZLED = "bfl.nvfp4-preswizzled@1"
-# th#1803: transformers' FineGrainedFP8 / DeepSeek-style 128x128 block scales.
+# transformers' FineGrainedFP8 / DeepSeek-style 128x128 block scales.
 # NOT cozy.fp8-rowwise@1 — same element type and activation scheme, different
 # scale leaf, rank and span (`models/hf_fp8_blockwise.py`).
 CONTRACT_HF_FP8_BLOCKWISE = "hf.fp8-blockwise@1"

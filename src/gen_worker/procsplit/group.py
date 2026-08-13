@@ -1,6 +1,6 @@
 """pgw#783: the execution GROUP as an OS process — the child plan.
 
-pgw#782 measured it: four execution groups in ONE interpreter serve 0.94x of
+four execution groups in ONE interpreter serve 0.94x of
 serial (21% on every card); four PROCESSES with one group each serve **4.00x**
 at 91-93% util, same pod, same weights. So the child of pgw#763's split is not
 one process — it is one process PER EXECUTION GROUP.

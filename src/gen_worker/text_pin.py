@@ -4,7 +4,7 @@ endpoint-side pins).
 qwen-image / z-image / hidream-o1 feed a prompt-length-dependent SEQUENCE
 dim into a statically compiled denoiser, so every distinct prompt length
 minted a new graph — unbounded and un-warmable, every paid request missing
-the shipped graph (ie#544). The v2 contract declares the axis
+the shipped graph. The v2 contract declares the axis
 (``Compile(text_len=...)``); this helper is how the handler HONORS it.
 
 ie#544's hard-won detail: dynamo guards on STRIDES, and ``.contiguous()``

@@ -15,7 +15,7 @@ cancellation — a follower holding one would be a second worker, which is the
 thing Paul's one-connection ruling forbids. Why not wrap only the transformer:
 the denoise LOOP has to stay in lockstep, and it lives in the pipeline.
 
-**Error doctrine (pgw#774).** An exception cannot interrupt an SPMD region
+**Error doctrine.** An exception cannot interrupt an SPMD region
 symmetrically: when rank 0 raises mid-call (OOM, deadline, cancel, endpoint
 bug) its peers are somewhere inside the same call waiting on collectives rank
 0 will never issue. There is no barrier that repairs that — only two honest

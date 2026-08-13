@@ -1,7 +1,7 @@
 """pgw#1097 — THE FOLDING FENCE.
 
 One cell serves every fine-tune of a family because weights rebind BY NAME at
-load (pgw#857). That is sound only while the compiled code holds no weight
+load. That is sound only while the compiled code holds no weight
 VALUE. With ``constant_folding_fenced`` off — torch's default, and what
 every real-weight mint ran under until this issue — ``GraphLowering.get_attr``
 renders a constant's values straight into the kernel source when its SHAPE

@@ -1,6 +1,6 @@
 """Shared per-family inference-defaults vocabulary (pgw#520 / th#767 / th#767b).
 
-The MODEL SET is catalog, not code (th#767) — but the SHAPE of a family's
+The MODEL SET is catalog, not code — but the SHAPE of a family's
 inference defaults/constraints (scheduler choices, step counts, guidance
 clamps, ...) is still a code-side contract: it is what lets tensorhub
 validate REPO METADATA at PUT time (fail at config, not at invoke) and what
@@ -100,7 +100,7 @@ class GenerationDefaults(
     exported JSON schema is closed (``additionalProperties: false``): a
     contract, not a suggestion.
 
-    **Positional construction (pgw#524):** this base's own ``kw_only=True``
+    **Positional construction:** this base's own ``kw_only=True``
     only marks ITS field (``schema_version``) keyword-only — msgspec's
     ``kw_only`` does not propagate to a subclass's own fields. A preset row
     like ``SdxlDefaults("euler_a", 28, 6.0)`` (declaration order) works
@@ -152,7 +152,7 @@ def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Typ
         key = (fam, knd)
         existing = _REGISTRY.get(key)
         if existing is not None and existing is not cls:
-            # pgw#1161: a RE-IMPORT is not a collision. Registration is an
+            # a RE-IMPORT is not a collision. Registration is an
             # import side effect, so re-importing a declaration module builds a
             # NEW class object for the same declaration — same module, same
             # qualname — and an identity check alone reads that as two families

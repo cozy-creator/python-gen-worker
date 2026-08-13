@@ -1,4 +1,4 @@
-"""Pod-side physical benchmarks shipped IN the wheel (pgw#674).
+"""Pod-side physical benchmarks shipped IN the wheel.
 
 Packaged here so every pod that installs gen-worker can run a benchmark
 without an out-of-band delivery path (serving pods have no sshd) — ie#546.

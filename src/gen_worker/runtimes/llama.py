@@ -1,4 +1,4 @@
-"""llama.cpp serving runtime (gw#402).
+"""llama.cpp serving runtime.
 
 GGUF checkpoint resolution, VRAM fit planning (n_gpu_layers / context from
 the free-VRAM budget — degraded mode is fewer GPU layers, never a crash),

@@ -1,6 +1,6 @@
 """pgw#660: the hard GPU-architecture floor has a declared carrier again.
 
-The v2 API freeze (pgw#647) deleted ``Resources.compute_capability`` on the
+The v2 API freeze deleted ``Resources.compute_capability`` on the
 reasoning that "precision-per-card is the fit ladder's call, never a placement
 gate". That reasoning holds for PRECISION SELECTION and does not hold for
 INCAPABILITY: a producer whose kernel is ``torch._scaled_mm`` cannot run below

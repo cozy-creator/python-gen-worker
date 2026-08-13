@@ -443,7 +443,7 @@ def optimal_part_concurrency(total_parts: int) -> int:
 
     A single file can saturate R2 with a small number of in-flight PUTs.
 
-    pgw#973 (§4.24): this is the BINDING bound on the in-repo presigned path —
+    this is the BINDING bound on the in-repo presigned path —
     the caller is sequential, so 4 is the real ceiling on concurrent PUTs.
     ``presigned_upload._PRESIGNED_PUT_BUDGET`` (8) is not a second cap on this
     axis; it covers a different one (an endpoint author saving from their own

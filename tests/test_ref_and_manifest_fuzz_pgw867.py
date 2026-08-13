@@ -136,7 +136,7 @@ def test_ref_acceptance_implies_well_formed_components(raw: str) -> None:
     if th.digest is not None:
         # A digest that reached a parsed ref is used to ADDRESS CAS objects, so
         # "present" is not enough — it must name its algorithm. An inferred
-        # algorithm addresses the wrong namespace silently (th#1357).
+        # algorithm addresses the wrong namespace silently.
         assert ":" in th.digest, f"{raw!r} accepted an untagged digest {th.digest!r}"
         algo, _, _ = th.digest.partition(":")
         assert algo in ("sha256", "blake3"), f"{raw!r} accepted digest algorithm {algo!r}"

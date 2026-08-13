@@ -50,7 +50,7 @@ from gen_worker.cell_adopt import AdoptOutcome, EagerPhase
 
 FAMILY = "sdxl"
 #: What this runtime's facts COMPUTE — the arm token, known before any
-#: compile has run. NOT ck-shaped (pgw#1059): an obligation is not a cell.
+#: compile has run. NOT ck-shaped: an obligation is not a cell.
 ARM_KEY = "arm1-" + "a" * 56
 #: What the child's envelope is STAMPED with — the cell identity, unknowable
 #: until the export finishes. A different digest, always.
@@ -156,7 +156,7 @@ def _adopt(
 ) -> Any:
     """Run the real ``adopt_delegated_mint`` over a child cell stamped with a
     key of the cell's OWN space — the production shape, in one line."""
-    # pgw#1098: a REAL readable envelope carrying the stamp. This used to be
+    # a REAL readable envelope carrying the stamp. This used to be
     # `b"packed-cell"` plus a `_packed_metadata` patch, which worked only
     # because the pre-arm read swallowed its own failure into `None`. An
     # unreadable envelope is now refused before the arm, so the cell has to

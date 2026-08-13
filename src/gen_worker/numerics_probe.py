@@ -64,7 +64,7 @@ from .aot_contract import ExportSpec
 logger = logging.getLogger(__name__)
 
 #: The lifted-adapter call inputs. An entry whose contract does not declare
-#: them is a BRANCHLESS graph class (pgw#790) and must be probed with
+#: them is a BRANCHLESS graph class and must be probed with
 #: ``lora_bucket=0``, or the feed carries a pair the class refuses.
 _ADAPTER_INPUTS = ("lora_a", "lora_b")
 
@@ -166,7 +166,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
         block = entries[name]
         contract = aot_serve.contract_from_meta(block)
         declared = {spec.name for spec in contract.inputs}
-        # pgw#790: the branchless class declares no adapter inputs and REFUSES
+        # the branchless class declares no adapter inputs and REFUSES
         # them. Feeding it the lifted pair would be refused at ingress, which
         # reads as an unmeasurable axis when it is really a probe that built
         # the wrong call. The contract discriminates; nothing here guesses.
@@ -206,7 +206,7 @@ class _EagerView:
 
     A facade rather than a temporary restore: un-swapping a live module to run
     a probe would hand the cell's traffic back to eager for the duration, on a
-    pod that is concurrently serving (pgw#784). Everything except ``attr``
+    pod that is concurrently serving. Everything except ``attr``
     delegates to the real module, so config, parameters, buffers and dtype all
     come off the thing actually being measured.
     """
@@ -452,7 +452,7 @@ def probe_cell(
     # so could disagree with the band it was reporting on: a family declaring
     # only `numerics_warn` was judged at its DECLARED band while this said
     # `sdk-default`. `declared_thresholds` is the one authority and stamps its
-    # own answer (pgw#1150).
+    # own answer.
     source = thresholds.source
     targets = aot_serve.armed_targets(pipeline)
     if not targets:

@@ -12,7 +12,7 @@ standing in for local CAS and the volume. Every property under test is a
 property of concurrency and IO, so a mock would assert nothing.
 
 The evidence is always a COUNT — which chunks the server was asked for, which
-objects exist, which bytes they hold. Never a clock (pgw#795).
+objects exist, which bytes they hold. Never a clock.
 
 Run: pytest tests/test_chunk_resume_pgw972.py -q
 """

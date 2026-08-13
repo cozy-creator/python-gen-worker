@@ -83,7 +83,7 @@ def target_forks(decl: Compile, target: str) -> Tuple[Fork, ...]:
 
 
 def arg_carriers(decl: Compile, target: str) -> frozenset:
-    """Names of TEMPLATED args a dim may be carried by (pgw#853).
+    """Names of TEMPLATED args a dim may be carried by.
 
     An extent that enters the traced call as a python int inside a container
     — qwen-image's ``img_shapes[b][0] = (frames, H_pat, W_pat)`` — is a real
@@ -132,7 +132,7 @@ def derived_dynamic(
         values = {row.dim_map[dim.name] for row in rows}
         if len(values) <= 1:
             continue  # static across this artifact's rows
-        # pgw#853: an extent carried ONLY by a templated Arg is a python int
+        # an extent carried ONLY by a templated Arg is a python int
         # in the traced call. It specializes, so collapsing rows that differ
         # on it would mint ONE artifact that silently serves only the seed
         # row — the same class of silent-wrongness as the 0/1 refusal below,
@@ -180,7 +180,7 @@ def effective_shape_strategy(decl: Compile) -> str:
 
 
 def target_classes(decl: Compile, target: str) -> Tuple[GraphClass, ...]:
-    """The graph classes declared for one target (pgw#967).
+    """The graph classes declared for one target.
 
     An unscoped row serves every target — the pre-scoping rule — so a
     single-target family reads exactly as it always did.
@@ -288,7 +288,7 @@ def plan_entry_name(plan: MintPlan) -> str:
 
 def cell_plans(decl: Compile) -> Tuple[MintPlan, ...]:
     """EVERY mint plan of one family's declaration, across ALL declared
-    targets — the whole class set one cell packages (pgw#758). Refuses a
+    targets — the whole class set one cell packages. Refuses a
     declaration whose plans would collide on an entry name (two classes one
     label could not be told apart by a refusal)."""
     if not decl.targets:
@@ -319,7 +319,7 @@ def select_plan(
     """The mint plan for one requested coordinate, refused by name when the
     coordinate is not declared — reading only declared facts, never family
     knowledge."""
-    # pgw#790: the adapter arm is an SDK-synthesized coordinate — the endpoint
+    # the adapter arm is an SDK-synthesized coordinate — the endpoint
     # never declared it, so it can never select a DECLARED plan. Stripped here
     # (rather than at each call site) because every reader of a spec's fork
     # goes through this function.
@@ -578,7 +578,7 @@ def declared_inputs(
 
     values: Dict[str, Any] = {}
     for row in rows:
-        # pgw#1058: dtype is a REQUIRED declaration — "model" is the explicit
+        # dtype is a REQUIRED declaration — "model" is the explicit
         # inheritance word, and an empty dtype (only reachable through a
         # hand-built row that dodged Input's own validation) is refused
         # rather than guessed. The silent module-dtype default is what minted
@@ -616,7 +616,7 @@ def declared_inputs(
         if row.repeat is None:
             _nest(values, row.name, _one())
         else:
-            # pgw#853: a declared LIST parameter. z-image's `x` is a python
+            # a declared LIST parameter. z-image's `x` is a python
             # list over the CFG-doubled batch, and the #739 vocabulary could
             # not say so — `_nest` built a DICT from the dotted name, so
             # `Input('x.0', ...)` yielded {'0': tensor} where the target takes
@@ -628,7 +628,7 @@ def declared_inputs(
         if arg.template is None:
             _nest(values, arg.name, arg.value)
             continue
-        # pgw#853: a ROW-DERIVED structured argument. qwen-image's
+        # a ROW-DERIVED structured argument. qwen-image's
         # `img_shapes` is the class row restated as python ints, which
         # `Arg.value` could not express on two counts — a scalar type, and
         # declaration-GLOBAL where the value is per-row (blocker B1).
@@ -658,7 +658,7 @@ def call_signature(module: Any, target: str, family: str) -> Tuple[List[Any], Se
     """``(positional parameters, keyword-only names)`` of the callable
     ``target`` names on ``module``, refused by name when unreadable.
 
-    ONE read for two callers (pgw#822): :func:`_positionalize`, which binds
+    ONE read for two callers: :func:`_positionalize`, which binds
     the declared feed to positional slots at mint time, and
     :func:`gen_worker.aot_mint.declaration_module_gaps`, which asks the same
     question on the PARENT before a child is spawned or a pod is rented.

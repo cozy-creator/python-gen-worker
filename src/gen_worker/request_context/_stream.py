@@ -82,7 +82,7 @@ class _RequestOutputStream:
         self._last_progress_mono = self._started_mono
         self._last_progress_uploaded = 0
         self._session_id: Optional[str] = None
-        # Split routing by artifact kind (gw#453): checkpoint streams publish
+        # Split routing by artifact kind: checkpoint streams publish
         # via the /commits API when the job carries a destination_repo scope
         # (job-bound create_checkpoint grant, multi-GB per-file caps);
         # asset streams (sample images, media outputs) always ride the media
@@ -165,7 +165,7 @@ class _RequestOutputStream:
             if self._stream_remote:
                 finalize_t0 = time.monotonic()
                 try:
-                    # th#1111: the upload tail, promoted from the
+                    # the upload tail, promoted from the
                     # finalize_elapsed_s log line into JobMetrics.stage_ms.
                     with stage_of(self._ctx, "upload"):
                         if self._repo_job_scope is not None:
@@ -300,7 +300,7 @@ class _RequestOutputStream:
         self._ctx._emit_event("request.upload_progress", payload)
 
     def _emit_upload_failed(self, exc: Exception) -> None:
-        """Typed upload-failure report (gw#471): the phantom-route breakage
+        """Typed upload-failure report: the phantom-route breakage
         was invisible for a dozen runs because failures only hit worker logs.
         Emitted BEFORE the exception propagates; non-fatal callers (sample
         harvest) emit-and-continue, fatal paths emit-then-raise."""
@@ -318,9 +318,9 @@ class _RequestOutputStream:
     def _finalize_checkpoint_commit(self) -> Tensors:
         """Publish the buffered checkpoint file as ONE tensorhub publish.
 
-        pgw#807: this rode the v1 (blake3) `/commits` route, which the hub
+        this rode the v1 (blake3) `/commits` route, which the hub
         froze and this SDK no longer speaks. It now goes over the chunked
-        sha256 route (th#1303) through the same client `publish_flavors` and
+        sha256 route through the same client `publish_flavors` and
         the cell self-mint use — one save_checkpoint == one publish == one
         finalized repo revision, and the repo is still auto-created
         server-side under the job's create_repo grant on first publish. A
@@ -341,7 +341,7 @@ class _RequestOutputStream:
             base_url=ctx._get_file_api_base_url(),
             token=ctx._get_worker_capability_token(),
         )
-        # Worker-addable provenance stamp fields only (th#606).
+        # Worker-addable provenance stamp fields only.
         provenance: Dict[str, Any] = {}
         if self._lineage_step_number and self._lineage_step_number > 0:
             provenance["step_number"] = int(self._lineage_step_number)
@@ -378,7 +378,7 @@ class _RequestOutputStream:
             format=fmt,
             size_bytes=int(file_size),
             sha256=self._sha.hexdigest(),
-            # pgw#807: the published blob is sha256-addressed, so the digest
+            # the published blob is sha256-addressed, so the digest
             # this reports is the one the hub actually stored it under. A
             # `blake3:` blob_digest here named a key nothing could resolve.
             blob_digest=f"sha256:{self._sha.hexdigest()}",
@@ -413,7 +413,7 @@ class _RequestOutputStream:
         content_type = self._infer_content_type()
         if content_type and content_type != "application/octet-stream":
             create_payload["content_type"] = content_type
-        # th#1795 / pgw#1125: DECLARE the sha256. It has been computed during
+        # DECLARE the sha256. It has been computed during
         # the writes (`self._sha`, :138) and thrown away ever since, and that
         # one omission is why the hub cannot presign into the final
         # content-addressed key: without the digest it does not know where the
@@ -442,7 +442,7 @@ class _RequestOutputStream:
             self._maybe_emit_progress(stage="stream_upload")
 
         def _phase_cb(phase: str, seconds: float) -> None:
-            # th#1795: `upload` is one bracket around create -> PUT ->
+            # `upload` is one bracket around create -> PUT ->
             # complete and it is 98.6% of the finalize tail. Report the legs
             # separately so the fix is aimed by measurement.
             record_phase_of(self._ctx, "upload", phase, seconds)

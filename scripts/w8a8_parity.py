@@ -1,4 +1,4 @@
-"""W8A8 quality-parity + speed harness (gw#534).
+"""W8A8 quality-parity + speed harness.
 
 Same-seed renders of ONE model three ways on the current GPU:
   bf16      — plain bf16-resident (the quality reference)

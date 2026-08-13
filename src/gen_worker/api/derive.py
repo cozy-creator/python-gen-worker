@@ -1,4 +1,4 @@
-"""Declaration inference + the migration safety gate (pgw#1107).
+"""Declaration inference + the migration safety gate.
 
 pgw#1107 collapses ``aot_declaration.py`` and the inline ``@endpoint(
 compile=Compile(...))`` into ONE declaration on the class decorator. Two
@@ -17,12 +17,12 @@ so they run anywhere including this box:
    flux2 (token-COUNT collapse), wan (3-D latent + relational ``N_tok``) and
    ltx (audio-token formula x two-stage x keyframe axis x frame-legality x
    H100/B200 tier) embed model-specific token math that IS the endpoint's own
-   legality oracle (pgw#669). For those the class SET is family-declared; only
+   legality oracle. For those the class SET is family-declared; only
    the collapse-onto-the-decorator and the gate below apply.
 
 2. :func:`contract_delta` / :func:`assert_faithful` — the MIGRATION SAFETY
    GATE. ``Compile.contract_axes()`` is exactly what feeds the cell key's
-   contract digest (pgw#647), so two declarations with an identical
+   contract digest, so two declarations with an identical
    ``contract_axes()`` produce an identical contract digest and — the traced
    graph being a pure function of the same declaration under fixed model code
    and toolchain — an identical ``combined_graph_hash``. Deleting the standing
@@ -32,7 +32,7 @@ so they run anywhere including this box:
    the gate exists to catch before a family being minted RIGHT NOW is disturbed.
 
 3. :func:`blocker_delta` / :func:`assert_blockers` — the REFUSAL half of that
-   gate (pgw#1115). The one fact a fold can drop that neither of the above
+   gate. The one fact a fold can drop that neither of the above
    sees is a family's declared mint blockers, because before the fold the
    family that had them kept them OUTSIDE its ``Compile`` (a module-level
    table read by a refusing thunk, retired in pgw#1107). Dropping one does not
@@ -59,7 +59,7 @@ __all__ = [
 
 #: The sdxl/z-image regime table: CFG on traces ONE batch-2 forward, turbo /
 #: no-CFG pins the batch-1 graph. Each arm is its own graph class of one cell
-#: (ie#345, gw#627). ``(fork_value, traced_batch)`` — the two families that
+#:. ``(fork_value, traced_batch)`` — the two families that
 #: batch CFG into a single forward share this exact pair.
 CFG_BATCH_REGIMES: Tuple[Tuple[bool, int], ...] = ((True, 2), (False, 1))
 
@@ -133,7 +133,7 @@ def cfg_image_classes(
                 },
                 fork={cfg_fork: cfg},
             ))
-    # pgw#1167: the divisor rides out with the rows it produced, so the mint
+    # the divisor rides out with the rows it produced, so the mint
     # can reconcile it against the pipeline instead of the author declaring it
     # a second time.
     return DerivedClasses(
@@ -191,7 +191,7 @@ def _repr(value: Any) -> Any:
 
 #: Must-survive facts that are NOT part of ``contract_axes()`` (so a change
 #: does not re-key) but ARE hard-won measured decisions the migration must not
-#: drop: the numerics ADOPT band (pgw#812/#814) and the compile-vs-eager SPEED
+#: drop: the numerics ADOPT band and the compile-vs-eager SPEED
 #: bar the hub's publish-time validation gate judges against (pgw#1149 /
 #: th#1811). ``shape_strategy``, ``warm_changes_key`` and ``eager`` are already
 #: contract axes and covered by :func:`contract_delta`; these four are the gap.
@@ -219,7 +219,7 @@ def override_delta(standing: Compile, migrated: Compile) -> Dict[str, Tuple[Any,
 
 def blocker_delta(standing: Compile, migrated: Compile) -> Tuple[str, ...]:
     """The OPEN blocker ids the standing declaration carries and the migrated
-    one does not (pgw#1115). ``()`` iff no refusal was lost.
+    one does not. ``()`` iff no refusal was lost.
 
     Deliberately DIRECTIONAL, unlike every other delta here. A fold may ADD a
     blocker — that is a family recording a question it had not written down —
@@ -237,7 +237,7 @@ def assert_blockers(
     decl: Compile, *, ids: Sequence[str], family: str = "",
 ) -> None:
     """Raise :class:`DeclarationMismatch` unless ``decl``'s OPEN blocker ids
-    are EXACTLY ``ids`` (pgw#1115) — the per-family testable guard.
+    are EXACTLY ``ids`` — the per-family testable guard.
 
     :func:`blocker_delta` can only compare two declarations, so it is blind
     where the standing declaration kept its blockers OUTSIDE the ``Compile``

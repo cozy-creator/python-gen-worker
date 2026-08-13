@@ -67,7 +67,7 @@ def run_one(
                 "failed_leg": "did-not-run",
                 "failed_why": "gpu-only lane; this run is cardless"}
     out = root / f"{name}.json"
-    # pgw#1014: DELETE it first. A variant the rig REFUSED (the load gate, a
+    # DELETE it first. A variant the rig REFUSED (the load gate, a
     # cardless `--device cuda`) exits before writing any json, and a stale file
     # from a previous run then gets read as THIS run's result — which is how a
     # CPU row was very nearly reported as a GPU one, complete with the previous
@@ -194,7 +194,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    # pgw#1114: carry the resolved environment, but do NOT assert the fleet line
+    # carry the resolved environment, but do NOT assert the fleet line
     # here. This gauntlet's product is a plumbing verdict (did the machinery
     # agree with its expectation), never a number, and the box cannot run a
     # cu130 build against its card at all — `scripts/rig_gpu_env.sh` builds the
