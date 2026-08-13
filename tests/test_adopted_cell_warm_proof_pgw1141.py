@@ -101,8 +101,12 @@ def test_the_MINTING_pod_proves_its_own_bytes_before_they_ship(
     assert outcome.armed is True
     assert aot_serve.is_armed(pipeline) is True
     rows = [(p, d) for k, d, p in events if k == activity.KIND_CELL_NUMERICS]
-    assert [p for p, _d in rows] == ["checked"], rows
-    assert "axes=2/2" in rows[0][1]
+    # pgw#1176: ONE row per graph class — the gate runs at the moment that
+    # entry exists, never "after all N" (DESIGN-RULINGS 4.32).
+    assert [p for p, _d in rows] == ["checked", "checked"], rows
+    # pgw#1176: ONE axis per artifact, so the report is 1/1 twice, never
+    # 2/2 once. A report over a collection is what the atom removed.
+    assert "axes=1/1" in rows[0][1]
 
 
 def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
@@ -117,10 +121,14 @@ def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
     assert outcome.armed is False, "a gray-band cell was published to the fleet"
     assert aot_serve.is_armed(pipeline) is False
     assert outcome.reason == "numerics_refused"
-    assert "nothing is published" in outcome.detail
+    # pgw#1176: the refusal is per CLASS, so it says "is not published" of
+    # that class rather than "nothing is published" of a bundle.
+    assert "is not published" in outcome.detail
     # It still CONFESSES — a fleet-wide rate is only countable from rows.
+    # pgw#1176: one gate row PER GRAPH CLASS — this declaration has two,
+    # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
-            if k == activity.KIND_CELL_NUMERICS] == ["degraded"]
+            if k == activity.KIND_CELL_NUMERICS] == ["degraded", "degraded"]
 
 
 def test_the_MINT_gate_refuses_a_cell_below_its_floor(
@@ -134,8 +142,10 @@ def test_the_MINT_gate_refuses_a_cell_below_its_floor(
 
     assert outcome.armed is False
     assert aot_serve.is_armed(pipeline) is False
+    # pgw#1176: one gate row PER GRAPH CLASS — this declaration has two,
+    # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
-            if k == activity.KIND_CELL_NUMERICS] == ["refused"]
+            if k == activity.KIND_CELL_NUMERICS] == ["refused", "refused"]
 
 
 def _pending(tmp_path: Path, decl: Any, publisher: Any = None):
@@ -209,8 +219,10 @@ def test_a_FAITHFUL_cell_passes_the_mint_gate_and_is_publishable(
 
     assert minted is not None, "a faithful cell was refused by the mint gate"
     assert minted.cell_key == "cell868"
+    # pgw#1176: one gate row PER GRAPH CLASS — this declaration has two,
+    # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
-            if k == activity.KIND_CELL_NUMERICS] == ["checked"]
+            if k == activity.KIND_CELL_NUMERICS] == ["checked", "checked"]
 
 
 # ---------------------------------------------------------------------------

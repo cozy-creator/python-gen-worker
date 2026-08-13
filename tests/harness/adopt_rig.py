@@ -443,13 +443,23 @@ class AdoptRig:
     ) -> None:
         """SEAM 1: the derive+resolve half, whose own coverage is pgw#1116's."""
 
-        def _adopt(_self: Any, spec: Any, slots: Any) -> boot_adopt.BootAdoptOutcome:
-            return boot_adopt.report(boot_adopt.BootAdoptOutcome(
+        def _adopt(
+            _self: Any, spec: Any, slots: Any,
+        ) -> Tuple[boot_adopt.BootAdoptOutcome, ...]:
+            """pgw#1176: `_boot_adopt` answers ONE outcome PER DECLARED CLASS.
+
+            The double must return the shape production returns — a tuple —
+            or every caller downstream is exercised against a contract the
+            worker does not have. Lane 2 found two doubles lying this exact
+            way and fixed them at the double rather than the assertion; this
+            is the same fix at the rig.
+            """
+            return (boot_adopt.report(boot_adopt.BootAdoptOutcome(
                 adoption=boot_adopt.BootAdoption(
                     derived=_derived(cell.cell_key), cell=cell,
                     artifact=artifact),
                 reason=boot_adopt.HIT, derived_key=cell.cell_key,
-                derive_ms=10_291, family=FAMILY, function="generate"))
+                derive_ms=10_291, family=FAMILY, function="generate")),)
 
         self.monkeypatch.setattr(Executor, "_boot_adopt", _adopt)
 

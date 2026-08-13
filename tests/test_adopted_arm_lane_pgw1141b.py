@@ -277,8 +277,13 @@ def test_a_wrapped_object_answers_the_lane_question_itself(
     pipe = boot.pipeline
 
     assert aot_serve.holds_exported_cell(pipe) is True
-    for state in aot_serve._marker_states(pipe):
-        state["failed"] = True
+    # pgw#1176: REVOKING is de-arming every entry, not setting a flag.
+    # `is_armed` asks the REGISTRY what is armed — deliberately, because a
+    # boolean can claim more than the pod serves — so a fixture that flipped
+    # `state["failed"]` was revoking a cell-level thing that no longer exists.
+    # `disarm_entry` is what production calls, and it is sticky for the boot.
+    for name in list(aot_serve.armed_entries(pipe)):
+        aot_serve.disarm_entry(pipe, name, "revoked by the lane-question row")
     assert aot_serve.is_armed(pipe) is False
     assert aot_serve.holds_exported_cell(pipe) is True, (
         "a revoked cell stopped being recognizable as an exported one, which "
