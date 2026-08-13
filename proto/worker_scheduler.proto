@@ -101,6 +101,19 @@ message WorkerMessage {
 }
 
 message SchedulerMessage {
+  // th#1457/pgw#891's staged dispatch cutover is ABANDONED (th#1842), so the
+  // half-landed `RunAttempt run_attempt = 7` that existed only to be switched
+  // to is gone. RunJob (field 2) was and remains the live dispatch — nothing
+  // ever produced or consumed field 7, so no peer observes this.
+  //
+  // BOTH markers are required, and the number is the one that matters:
+  // §1.27(f) scopes reserved markers to ONE major and this is a WITHIN-major
+  // retirement. An unreserved 7 lets the next field added here silently
+  // inherit a live wire number — the one failure mode a deletion can leave
+  // behind that no test in either repo would see.
+  reserved 7;
+  reserved "run_attempt";
+
   oneof msg {
     HelloAck     hello_ack     = 1;
     RunJob       run_job       = 2;
@@ -108,12 +121,6 @@ message SchedulerMessage {
     ModelOp      model_op      = 4;
     Drain        drain         = 5;
     TokenRefresh token_refresh = 6;
-    // th#1457/pgw#891 SCHEMA LANDING: declared and generated so both repos
-    // compile against one contract. NOTHING sends this yet — RunJob (field 2)
-    // is still the live dispatch, and a peer that never receives this field
-    // behaves exactly as before. At the coordinated cutover RunJob is deleted
-    // and field 2 + the name "run_job" become `reserved` (§1.27(f)).
-    RunAttempt   run_attempt   = 7;
     // §4.32 item 4 / th#1808 / pgw#1142: the operator's eager-only command.
     ServePosture serve_posture = 8;
   }
@@ -933,338 +940,38 @@ message ChunkRef {
 }
 
 // ===========================================================================
-// th#1457 / pgw#891 — ExecutionSpec: the immutable execution identity.
+// th#1457 / pgw#891 — the ExecutionSpec surface: DELETED (th#1842, 2026-08-13).
 //
-// STATUS: SCHEMA LANDING ONLY. `RunAttempt` is declared and generated so both
-// repos compile against one contract; NOTHING produces or consumes it yet.
-// `RunJob` remains the live dispatch until the coordinated cutover window
-// (pgw#891 PRs 3-5 + the paired deploy). There is no dual-read, no translator
-// and no negotiation — the old message is not being kept, it is being
-// RETIRED ON A SCHEDULE, and the schedule is written below so the additive
-// state cannot quietly become permanent.
+// `SchedulerMessage.run_attempt` was the only thing that ever referenced it,
+// and the staged dispatch cutover it was landed for is ABANDONED — th#1834
+// Phase 2 replaced its role with per-entry batch resolve, and PR #1107 already
+// deleted the hub-side arm authority that was to consume it. The field is gone
+// and tag 7 is reserved above; these 24 declarations went with it in the SAME
+// cut rather than a later one, because the file is vendored byte-for-byte by
+// python-gen-worker and a second deletion would cost a second lockstep window
+// for zero additional benefit.
 //
-// AT THE CUTOVER, in one coordinated window:
-//   - SchedulerMessage.run_job (field 2) is deleted; field number 2 and the
-//     name "run_job" become `reserved`. §1.27(f) scopes reserved markers to
-//     ONE major and this is a within-major retirement, so they are required
-//     here — th#1597's dense reclaim was legal only because it WAS the major
-//     bump. Do not read that precedent as licence to skip them.
-//   - `RunJob`, `ModelBinding`, `LoraOverlay`, `Snapshot`, `SnapshotFile`,
-//     `InputAsset`, `RequiredCompileExecution` and `ResolvedCompute` are
-//     deleted outright. They have no readers once dispatch moves.
+// Deleted: RunAttempt, AttemptId, ExecutionSpec, EndpointRelease, Attribution,
+// ExecutionLane, Arm, ArtifactIdentity, Topology, ComponentManifest,
+// SlotBinding, ComponentRef, AdapterBinding, ConfigSnapshot,
+// ContractIdentities, ExplorationRef, InputAssetRef, DeliveryGrant,
+// PresignedSnapshot, PresignedFile, PresignedAsset, and the three enums no
+// surviving field names (WeightLane, ArmShape, SteadyBackend). No `reserved`
+// markers: reservation protects FIELD NUMBERS inside a live message, and a
+// deleted top-level type has none to protect — the tag that needed protecting
+// is `SchedulerMessage`'s 7, and it has it.
 //
-// THE SPLIT THAT SHAPES EVERYTHING BELOW. `RunJob` mixes IDENTITY
-// (`Snapshot.digest`, `SnapshotFile.digest`, `ChunkRef.sha256`) with DELIVERY
-// (presigned `url`s, `capability_token`) in one message. Any digest over that
-// message moves when a credential rotates, which makes th#1457's acceptance —
-// "grant rotation does not change execution identity" — unsatisfiable by
-// construction. So: every digest lives in `ExecutionSpec`, every URL and token
-// lives in `DeliveryGrant`, and the grant is keyed BY CONTENT DIGEST so the
-// two are joinable without either owning the other.
-//
-// EVERY RETIRED `RunJob` FIELD IS ACCOUNTED FOR — mapped, or deleted with a
-// reason. There is no residue:
-//   request_id/attempt (1,2) -> AttemptId
-//   function_name (3)        -> ExecutionSpec.function_name
-//   input_payload (4)        -> RunAttempt.input_payload
-//   timeout_ms (5)           -> DELETED. See the ruling note on RunAttempt.
-//   org (6), invoker_id (7)  -> ExecutionSpec.attribution
-//   capability_token (8)     -> DeliveryGrant.capability_token
-//   output_mode (9)          -> ExecutionSpec.output_mode
-//   compute (10)             -> ExecutionSpec.topology
-//   models (11)              -> ExecutionSpec.components + .adapters
-//   snapshots (12)           -> digests to .components, URLs to the grant
-//   required_compile (13)    -> Arm.artifact
-//   lane (14)                -> ExecutionSpec.numerical_lane, RESOLVED only
-//   input_assets (15)        -> refs to .input_assets, URLs to the grant
-//   config_generation (16)   -> DELETED, subsumed by ConfigSnapshot (§4.16)
-//   config_params (17)       -> ConfigSnapshot.values
+// TH#1457'S SCHEMA RULINGS RETIRE WITH THE SURFACE THEY RULED ON, and that is
+// deliberate rather than incidental. They were: every URL and token lives in
+// DeliveryGrant so grant rotation cannot move the execution digest; and there
+// is NO duration field anywhere in the attempt, because a wall clock cannot
+// distinguish a slow-but-advancing attempt from a wedged one (§4.24, the
+// standing no-magic-timeouts rule, pgw#933). The second is NOT retired as a
+// rule — it is the standing rule, it simply no longer has this schema to be
+// enforced against, and `executionspec_schema_th1457_test.go` was deleted with
+// its subject. Whoever next designs a dispatch message inherits both.
 // ===========================================================================
 
-// RunAttempt replaces RunJob. It is three separable things in one envelope:
-// WHICH attempt this is, WHAT is to be executed (immutable, digested), and
-// HOW to fetch the bytes (rotatable, never digested).
-//
-// NOTE — there is deliberately NO duration field anywhere in this message or
-// in ExecutionSpec. `RunJob.timeout_ms` is DELETED rather than carried
-// forward, ruled by th#1457 on the question pgw#891 routed to it. Three rules
-// converge and none admits a wall bound: the standing no-magic-timeouts rule
-// (kill and condemn decisions come from liveness plus progress-staleness,
-// never a fixed duration); DESIGN-RULINGS §4.24 (a limit must name the threat
-// it mitigates — a wall clock cannot distinguish a slow-but-advancing attempt
-// from a wedged one, so it names none); and pgw#933, which forbids
-// endpoint-visible wall-timeout policy outright. Liveness is
-// Report.activities[] counter advancement; staleness OF THAT is what a
-// condemnation may read. Re-adding a duration here re-seeds the same defect
-// `defaultClusterDrainWindow`'s fixed 60s already carries one layer up.
-message RunAttempt {
-  AttemptId     attempt       = 1;
-  ExecutionSpec spec          = 2; // immutable; spec.digest covers fields 2..N of it
-  DeliveryGrant grant         = 3; // renewable; NOT covered by spec.digest
-  bytes         input_payload = 4; // canonical MessagePack input
-}
-
-// AttemptId is the fencing token, owned by the hub. `attempt` is bumped by the
-// orchestrator on every (re)queue and by nothing else.
-message AttemptId {
-  string request_id = 1;
-  int64  attempt    = 2;
-}
-
-// ExecutionSpec is the immutable, digested description of one execution. Its
-// digest IS the execution identity: two attempts with the same digest are the
-// same work, and anything that changes what would be produced must change it.
-//
-// Rule for adding a field: if a hub could want a different value for it on an
-// attempt that is already accepted, it does NOT belong here — it belongs in
-// DeliveryGrant or in a Directive. If it changes what the worker produces, it
-// belongs here and it is covered by the digest.
-message ExecutionSpec {
-  // Canonical digest over fields 2..N. Secret bytes never enter it; there are
-  // none in this message by construction, which is the point of the split.
-  string digest       = 1;
-  // Generated-schema version. An unknown REQUIRED field refuses the attempt
-  // before model acquisition rather than degrading silently.
-  uint32 spec_version = 2;
-
-  EndpointRelease         release        = 3;
-  string                  function_name  = 4;
-  ExecutionLane           numerical_lane = 5;
-  Arm                     arm            = 6;
-  Topology                topology       = 7;
-  ComponentManifest       components     = 8;
-  repeated AdapterBinding adapters       = 9;
-  ConfigSnapshot          config         = 10;
-  ContractIdentities      contracts      = 11;
-  ExplorationRef          exploration    = 12; // absent = ordinary traffic (§4.7)
-
-  // The three RunJob fields the shared spec's retirement table did not cover.
-  // All three are semantic — they change attribution or the output product —
-  // so they are inside the digest rather than beside it.
-  Attribution             attribution    = 13;
-  OutputMode              output_mode    = 14;
-  repeated InputAssetRef  input_assets   = 15;
-}
-
-// EndpointRelease pins the code that runs. `image_digest` and
-// `code_closure_id` are what make "the same release" mean the same bytes
-// rather than the same name.
-message EndpointRelease {
-  string org             = 1;
-  string endpoint        = 2;
-  string release_id      = 3;
-  string image_digest    = 4;
-  string code_closure_id = 5;
-}
-
-// Attribution: who the outputs belong to and who asked. `org` here is the
-// CALLER's org (RunJob.org — "the org that owns job outputs"), which is a
-// different fact from EndpointRelease.org, the org that publishes the
-// endpoint. They were never the same field and are not merged.
-message Attribution {
-  string org        = 1;
-  string invoker_id = 2;
-}
-
-// ExecutionLane is the RESOLVED numerical lane and cannot express anything
-// else. `RunJob.lane` was a free string whose own comment permitted a COARSE
-// FAMILY ("bf16"|"fp8"|"4bit") that "the worker expands via its ladder twin" —
-// layer-1/2 resolution policy running inside the worker, which §1.31 and
-// §1.10 forbid. An enum makes the coarse form UNREPRESENTABLE: "fp8" is not a
-// member, so there is nothing left for a worker to expand.
-message ExecutionLane {
-  WeightLane weights = 1;
-  // Whether this lane has no eager form (a mandatory traced lane). This is a
-  // FACT about the lane, not a fallback policy.
-  //
-  // DELIBERATELY NOT ENCODED HERE: what happens when a mandatory lane's cell
-  // is missing. That is pgw#888's open conflict with §1.12/§4.5 and it is
-  // Paul's to rule. The schema must not pre-empt either answer, so it carries
-  // the fact and no policy. Do not add a fallback field until the ruling.
-  bool       mandatory = 2;
-}
-
-// The resolved weight lanes, mirroring compilecache.baseCellExecutionLanes.
-// Adding one is a code change in both repos, which is the property a free
-// string never had.
-enum WeightLane {
-  WEIGHT_LANE_UNSPECIFIED = 0;
-  WEIGHT_LANE_BF16        = 1; // plain resident graphs
-  WEIGHT_LANE_W8A16       = 2; // layerwise cast-hook graphs
-  WEIGHT_LANE_W8A8        = 3; // scaled_mm fp8-GEMM graphs
-  WEIGHT_LANE_W4A4        = 4; // blockwise fp4 scaled_mm (Blackwell)
-}
-
-// Arm is the structured execution arm (§4.4, §4.5). Adapter traffic is a HARD
-// partition, not a modifier, so the rank bucket rides the arm rather than
-// being recoverable from the adapter list.
-message Arm {
-  string           graph_contract_digest = 1;
-  ArmShape         shape                 = 2;
-  // Set iff shape == ARM_SHAPE_ADAPTER. One of compilecache.RankBuckets.
-  int32            adapter_rank_bucket   = 3;
-  SteadyBackend    backend               = 4;
-  // Exactly one artifact identity, or explicitly none (pgw#904). Absent iff
-  // backend != STEADY_BACKEND_AOT_CELL — since pgw#1010 dynamo cells are
-  // neither sealed nor published, so DYNAMO has no artifact to name.
-  ArtifactIdentity artifact              = 5;
-}
-
-enum ArmShape {
-  ARM_SHAPE_UNSPECIFIED = 0;
-  ARM_SHAPE_BRANCHLESS  = 1;
-  ARM_SHAPE_ADAPTER     = 2;
-}
-
-enum SteadyBackend {
-  STEADY_BACKEND_UNSPECIFIED = 0;
-  STEADY_BACKEND_AOT_CELL    = 1;
-  STEADY_BACKEND_DYNAMO      = 2;
-  STEADY_BACKEND_EAGER_ONLY  = 3;
-}
-
-// ArtifactIdentity names a compiled cell exactly (th#1429, §4.26).
-//
-// `publisher_org` is load-bearing and is not decoration: compiled artifacts
-// are CODE the adopting pod dlopen()s, so WHO produced it is the trust answer,
-// never a matching key. §4.25/§4.26 also forbid confirming an artifact by
-// byte comparison — two mints of one key legitimately differ — so verification
-// is declared-identity comparison against these fields.
-message ArtifactIdentity {
-  string cell_ref         = 1;
-  string content_digest   = 2;
-  string cell_key         = 3;
-  string publisher_org    = 4;
-  string toolchain_digest = 5;
-  string env_seal_digest  = 6;
-}
-
-// Topology is spec identity, not placement advice: the same work on a
-// different device count is different work.
-message Topology {
-  string accelerator            = 1; // "cuda" | "none"
-  int32  gpu_count              = 2;
-  int32  execution_groups       = 3;
-  repeated int32 device_ordinals = 4; // per-GPU slot scheduler's picks
-}
-
-// ComponentManifest is the exact resolved model set. There is no slot->ref
-// indirection the worker may re-resolve: every ref is final and carries the
-// snapshot digest that pins its bytes. That is what deletes the second
-// resolver (pgw#904).
-message ComponentManifest {
-  repeated SlotBinding slots = 1;
-}
-
-message SlotBinding {
-  string slot            = 1;
-  string ref             = 2; // canonical resolved ref; NOT substitutable worker-side
-  string snapshot_digest = 3; // identity; the grant carries this key's URLs
-  // Per-component substitutions on the base composition (th#980), each one
-  // already resolved and pinned.
-  repeated ComponentRef components = 4;
-  // Stamped serving facts from the hub's catalog (th#1139/pgw#654).
-  string objective         = 5;
-  bool   distilled         = 6;
-  string distilled_status  = 7;
-  // Family-typed inference defaults, JSON-encoded ("" = none).
-  string inference_defaults = 8;
-}
-
-message ComponentRef {
-  string component       = 1;
-  string ref             = 2;
-  string snapshot_digest = 3;
-}
-
-// AdapterBinding is one resolved LoRA overlay. Adapters are spec identity
-// because they change the product; their bytes are fetched through the grant
-// like any other content.
-message AdapterBinding {
-  string slot              = 1;
-  string ref               = 2;
-  string snapshot_digest   = 3;
-  double weight            = 4; // hub validates to [-4, 4]; worker mirror-checks
-  string inference_defaults = 5;
-}
-
-// ConfigSnapshot is THIS attempt's own immutable evaluated configuration
-// (§4.16). `RunJob.config_generation` is deleted rather than carried: a
-// generation is a pointer to mutable state, and binding an attempt to a
-// pointer is exactly what §4.16 forbids. The values ARE the binding, and
-// their digest rides the spec digest.
-message ConfigSnapshot {
-  bytes  values = 1; // msgpack map: declared parameter name -> evaluated value
-  string digest = 2;
-}
-
-// ContractIdentities pins the contracts an attempt is comparable under.
-// The graph contract is NOT repeated here — it is Arm.graph_contract_digest,
-// because it identifies the arm rather than the attempt.
-message ContractIdentities {
-  string quality_contract_digest = 1;
-  string runtime_formula_digest  = 2;
-}
-
-// ExplorationRef marks an attempt as a durable operator exploration intent
-// (§4.7). Absent means ordinary traffic; it is never inferred.
-message ExplorationRef {
-  string exploration_id     = 1;
-  string operator_intent_id = 2;
-}
-
-// InputAssetRef is a stored input's IDENTITY. Its presigned transport lives in
-// DeliveryGrant.input_assets, keyed by asset_id.
-//
-// AMENDMENT to the shared spec, and the reason for it: the spec placed input
-// assets ONLY in DeliveryGrant. That would leave a changed input asset without
-// a change in the spec digest — i.e. two different executions sharing one
-// identity, which is the exact property the digest exists to prevent. Input
-// assets are semantic inputs, so they split like snapshots do: identity here,
-// delivery there.
-message InputAssetRef {
-  string asset_id   = 1;
-  string source_ref = 2;
-  string digest     = 3; // algorithm-tagged content digest
-  int64  size_bytes = 4;
-  string kind       = 5;
-  string mime_type  = 6;
-}
-
-// DeliveryGrant is separable, rotatable authority. It carries every secret and
-// every expiring URL, and NOTHING in it enters the spec digest. Refreshing a
-// grant changes authority and neither changes execution identity nor
-// authorizes re-execution; `epoch` is monotonic so a stale grant is
-// recognisable rather than merely expired.
-//
-// Snapshots are keyed by CONTENT DIGEST rather than by ref: a ref is a name
-// that resolution already consumed, whereas the digest is what the spec
-// actually pinned, so the join cannot drift from the identity it delivers.
-message DeliveryGrant {
-  string capability_token = 1;
-  int64  expires_unix_ms  = 2;
-  uint64 epoch            = 3;
-  map<string, PresignedSnapshot> snapshots = 4; // key: snapshot content digest
-  repeated PresignedAsset input_assets     = 5;
-}
-
-message PresignedSnapshot {
-  repeated PresignedFile files = 1;
-}
-
-message PresignedFile {
-  string path             = 1;
-  int64  size_bytes       = 2;
-  string digest           = 3; // algorithm-tagged; whole-file sha256 when chunked
-  string url              = 4; // presigned GET for the whole file
-  int64  chunk_size_bytes = 5;
-  repeated ChunkRef chunks = 6;
-}
-
-message PresignedAsset {
-  string asset_id = 1;
-  string url      = 2; // presigned GET for the exact request+attempt capability
-}
 
 // Worker -> orchestrator: dispatch acknowledged; the worker now owns
 // (request_id, attempt). Stops orchestrator retransmission.
@@ -1821,10 +1528,13 @@ message TokenRefresh {
 // runtime, and REVERSIBLE in both directions on a live stream — "the compile is
 // broken" is discovered while serving, and so is "it was not the compile".
 //
-// Distinct from the two eager postures that already exist, deliberately:
-//   * `ExecutionSpec`'s `STEADY_BACKEND_EAGER_ONLY` is PLAN-carried — chosen
-//     per dispatch, before the pod is serving, and reports
-//     `hub_ordered_eager`;
+// Distinct from the other eager posture that exists, deliberately:
+//   * (th#1842: the PLAN-carried `STEADY_BACKEND_EAGER_ONLY` this used to
+//     contrast with went with `ExecutionSpec` when the abandoned dispatch
+//     cutover was deleted. It was chosen per dispatch, before the pod was
+//     serving, and reported `hub_ordered_eager`. Nothing on the live wire
+//     carries a per-dispatch eager choice today — RunJob has no such field —
+//     so this command is now the ONLY hub-ordered eager posture.)
 //   * §4.31's sticky de-arm is AUTOMATIC and per-cell — a cell-attributable
 //     failure, evidence, irreversible for the boot.
 // This one is operator-explicit, whole-worker and reversible, and it reports

@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from gen_worker import aot_identity, aot_serve, cell_key, env_seal
+from gen_worker import aot_identity, aot_serve, cell_key, cell_resolve, env_seal
 from gen_worker.aot_identity import ExpectedIdentity
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
@@ -155,9 +155,13 @@ def test_the_closure_axis_is_absent_rather_than_invented() -> None:
     """
     assert "code_closure_id" not in ExpectedIdentity.__struct_fields__
     assert "code_closure" not in aot_identity._COMPARED_AXES
-    # The release id still rides `pb.ExecutionSpec.release`, so the day it
-    # becomes comparable nothing has to be re-plumbed to reach it.
-    assert "code_closure_id" in pb.EndpointRelease.DESCRIPTOR.fields_by_name
+    # th#1842 deleted `pb.ExecutionSpec`/`pb.EndpointRelease` with the rest of
+    # the abandoned staged-dispatch surface, so the release id no longer rides
+    # the wire at all. The gap is unchanged and still one ruling by the th#1457
+    # lane; what changed is that closing it now needs a SOURCE for the digest,
+    # not merely a comparison. Pinned so nobody re-plumbs to a dead message.
+    assert not hasattr(pb, "EndpointRelease")
+    assert not hasattr(pb, "ExecutionSpec")
 
 
 def test_identity_is_never_confirmed_by_comparing_bytes() -> None:
@@ -172,28 +176,35 @@ def test_identity_is_never_confirmed_by_comparing_bytes() -> None:
 # --- projection from the hub-named artifact -------------------------------------
 
 
-def _named(backend: int = pb.STEADY_BACKEND_AOT_CELL) -> Any:
-    """The hub's ArtifactIdentity — the thing that NAMES a cell on the wire.
+def _named(armed: bool = True) -> Any:
+    """The source that NAMES an artifact — now the PRODUCTION one.
 
-    pgw#1206 D deleted the Plan head, so the expectation is built by the one
-    surviving map (``ExpectedIdentity.named_by``) from the source that names
-    an artifact. An ``eager_only`` arm names none, which the caller must read
+    th#1842 deleted `pb.ArtifactIdentity` and the `STEADY_BACKEND_*` enum with
+    the abandoned staged-dispatch surface. That surface was only ever this
+    test's fixture; the real caller of ``named_by`` is the JSON resolve answer
+    ``cell_resolve.ResolvedCell``. Re-pointing here is a strict improvement —
+    the projection is now exercised through the shape production actually
+    hands it. An unarmed request names no artifact, which the caller must read
     as a complete answer rather than a gap.
     """
-    if backend != pb.STEADY_BACKEND_AOT_CELL:
+    if not armed:
         return None
-    return pb.ArtifactIdentity(
-        cell_ref="cozy/cells-micro#k1",
-        content_digest="sha256:" + "c" * 64,
-        cell_key="aot-inductor:k1",
-        publisher_org="cozy",
+    return cell_resolve.ResolvedCell(
+        family="micro", cell_key="aot-inductor:k1",
+        cell_ref="cozy/cells-micro#k1", checkpoint_id="",
+        content_digest="sha256:" + "c" * 64, artifact_path="cell.tar.gz",
+        size_bytes=0, publisher_org="cozy", publisher_tier="platform",
+        graph_contract="gc_01",
         toolchain_digest=cell_key.facts_digest(_TOOLCHAIN),
         env_seal_digest=env_seal.seal_digest(_SEAL),
+        identity_axes={}, sm="90", sku="h100", lane="", receipt="",
+        transport=cell_resolve.Transport(
+            snapshot_digest="blake3:" + "cd" * 32, files=()),
     )
 
 
-def _named_expectation(backend: int = pb.STEADY_BACKEND_AOT_CELL) -> Any:
-    named = _named(backend)
+def _named_expectation(armed: bool = True) -> Any:
+    named = _named(armed)
     if named is None:
         return None
     return aot_identity.ExpectedIdentity.named_by(named, "gc_01")
@@ -209,7 +220,7 @@ def test_the_expectation_comes_from_the_named_artifact_and_matches_a_real_one() 
 def test_an_arm_that_names_no_artifact_yields_no_expectation() -> None:
     """``None`` is a complete answer, not a gap: an eager_only arm has nothing
     to verify because it must arm nothing."""
-    assert _named_expectation(pb.STEADY_BACKEND_EAGER_ONLY) is None
+    assert _named_expectation(armed=False) is None
     assert _named_expectation() is not None
 
 

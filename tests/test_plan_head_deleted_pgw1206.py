@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib
+from pathlib import Path
 import inspect
 from typing import cast
 
@@ -48,21 +49,50 @@ def test_the_surviving_head_is_the_legacy_one() -> None:
     assert hasattr(Executor, "_legacy_order")
 
 
-def test_a_run_attempt_is_refused_as_an_unsupported_command() -> None:
-    """The real dispatch path, not a stub of it.
+def test_the_run_attempt_field_is_gone_and_its_tag_is_reserved() -> None:
+    """th#1842 deleted the field this head used to read; pgw vendored it.
+
+    The assertion is expressed off the DESCRIPTOR because the symbol it used to
+    name no longer exists — a test that constructs `pb.RunAttempt()` cannot
+    survive the deletion it is supposed to pin. Both markers are checked: the
+    NUMBER is the one that matters, because an unreserved 7 lets the next field
+    added here silently inherit a live wire tag.
+    """
+    assert "run_attempt" not in pb.SchedulerMessage.DESCRIPTOR.fields_by_name
+    assert 7 not in {f.number for f in pb.SchedulerMessage.DESCRIPTOR.fields}
+
+    # The reservation is asserted against the vendored SOURCE, not the
+    # descriptor: the upb (C++) implementation does not expose reserved ranges
+    # at runtime, so a descriptor-only check would silently pass on a proto
+    # that merely dropped the field. `scripts/proto-drift-check.sh` pins this
+    # file byte-for-byte to tensorhub's canonical copy, so reading it here is
+    # reading the contract itself.
+    body = Path("proto/worker_scheduler.proto").read_text()
+    block = body.split("message SchedulerMessage {", 1)[1].split("\n}", 1)[0]
+    assert "reserved 7;" in block, "tag 7 must be RESERVED, not merely absent"
+    assert 'reserved "run_attempt";' in block
+
+
+def test_an_unsupported_command_is_refused_LOUDLY_not_dropped() -> None:
+    """The generic exhaustiveness arm, which th#1834 ruled STAYS.
+
+    It is not a per-message vestige: it covers every oneof this worker does not
+    handle, and `token_refresh` is one the hub really can send. Dropping such a
+    message would discard tenant work against an accepted-or-result contract, so
+    the refusal is fatal to the STREAM — the loud failure the hub can see.
 
     ``on_message``'s unknown-command arm touches nothing on ``self``, so this
     drives the production method itself with a bare object as the instance —
-    no double, no monkeypatch. Reached the arm ⇒ the message is fatal.
+    no double, no monkeypatch.
     """
-    msg = pb.SchedulerMessage(run_attempt=pb.RunAttempt())
-    assert msg.WhichOneof("msg") == "run_attempt"
+    msg = pb.SchedulerMessage(token_refresh=pb.TokenRefresh())
+    assert msg.WhichOneof("msg") == "token_refresh"
 
     bare = cast(Lifecycle, object())  # the arm reads nothing off `self`
 
     with pytest.raises(FatalTransportError) as err:
         asyncio.run(Lifecycle.on_message(bare, msg))
-    assert "run_attempt" in str(err.value)
+    assert "token_refresh" in str(err.value)
 
 
 def test_the_dispatch_seam_reads_no_wire_message() -> None:
