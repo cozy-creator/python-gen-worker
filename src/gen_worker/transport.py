@@ -1081,7 +1081,7 @@ class Transport:
     @staticmethod
     def _credential_claims(token: str) -> dict:
         try:
-            from .request_context import _decode_unverified_jwt_claims
+            from .request_context._helpers import _decode_unverified_jwt_claims
 
             return _decode_unverified_jwt_claims(token) or {}
         except Exception:  # noqa: BLE001 — a probe never breaks a connect
@@ -1242,7 +1242,7 @@ class Transport:
         no name.
         """
         try:
-            from .request_context import _decode_unverified_jwt_claims
+            from .request_context._helpers import _decode_unverified_jwt_claims
 
             claims = _decode_unverified_jwt_claims(token) or {}
             exp = float(claims.get("exp") or 0.0)

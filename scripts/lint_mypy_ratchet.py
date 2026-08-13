@@ -50,7 +50,10 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     "disallow_untyped_decorators": (3, 9),
     # implicit_reexport is split in two: our modules (a burn-down) and
     # third-party stub export gaps (not our debt — upstream's __all__).
-    "implicit_reexport": (17, 34),
+    # 17 -> 16: pgw#1202 PR 4 closed 1 of the 8 OURS (the other 9 are
+    # third-party stub gaps and are not debt). The remaining 5 are blocked on
+    # open lanes owning their importers, not on difficulty.
+    "implicit_reexport": (16, 34),
     # pgw#1202 PR 2: test modules still dirty at the relaxed test posture.
     # 170 of 486 were already clean and are checked from that commit on.
     "ignore_errors": (316, 2016),

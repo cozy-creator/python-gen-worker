@@ -304,7 +304,7 @@ module = [
 ]
 disallow_untyped_decorators = false
 
-# --- burn-down: implicit_reexport, OUR modules (8) ---
+# --- burn-down: implicit_reexport, OUR modules (7) ---
 # Keyed on the EXPORTING module, not the importer. Each name means some other
 # module reaches a symbol through this one instead of through the module that
 # owns it (e.g. gen_worker.request_context._decode_unverified_jwt_claims read
@@ -314,11 +314,10 @@ module = [
   "gen_worker.aot_mint",
   "gen_worker.cuda_root",
   "gen_worker.fleet_cells",
-  "gen_worker.hot_swap",
   "gen_worker.models.chunk_upload",
+  "gen_worker.hot_swap",
   "gen_worker.models.cozy_snapshot",
   "gen_worker.models.lora_lifted",
-  "gen_worker.request_context",
 ]
 implicit_reexport = true
 
