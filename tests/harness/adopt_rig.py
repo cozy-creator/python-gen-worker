@@ -176,7 +176,7 @@ def cell_metadata() -> Dict[str, Any]:
     # The REAL key, restated from the artifact's own recorded facts — the same
     # recomputation admission runs (pgw#1059), so nothing here is a stamp the
     # bytes cannot back up.
-    meta["cell_key"] = cell_key.from_exported_artifact_metadata(meta).digest
+    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
     return meta
 
 
