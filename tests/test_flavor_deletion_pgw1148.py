@@ -141,11 +141,11 @@ def test_the_cell_fragment_still_parses() -> None:
     th = parse_model_ref(CELL_REF).tensorhub
     assert th is not None
     assert (th.owner, th.repo, th.tag, th.flavor) == (
-        "root", "family-sdxl", "cells", "ck1-4f2a9b")
+        "root", "family-sdxl", "cells", "ek1-4f2a9b")
 
 
 def test_parse_cell_ref_is_unchanged() -> None:
-    assert cc.parse_cell_ref(CELL_REF) == ("sdxl", "ck1-4f2a9b")
+    assert cc.parse_cell_ref(CELL_REF) == ("sdxl", "ek1-4f2a9b")
     assert cc.family_from_ref(CELL_REF) == "sdxl"
 
 

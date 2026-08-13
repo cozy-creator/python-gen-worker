@@ -198,7 +198,13 @@ def test_an_incomplete_answer_is_a_typed_refusal_not_a_miss() -> None:
 
 def test_a_non_key_is_refused_before_the_hub_is_dialled(stub) -> None:
     sent, _resp = stub
-    for bad in ("", "sdxl", "arm1-" + "ab" * 28, "ck1-short"):
+    # `ck1-short` is refused for its LENGTH, which is why the WELL-FORMED ck1
+    # key sits beside it: pgw#1176 re-keyed the grammar, and a `ck1` key names
+    # a 36-entry all-or-nothing cell this runtime cannot arm at all. It must
+    # fail HERE, at the comparison, rather than late inside a per-entry path —
+    # so the prefix, not the shape, has to be what refuses it.
+    for bad in ("", "sdxl", "arm1-" + "ab" * 28, "ck1-short",
+                "ck1-" + "0" * 56):
         with pytest.raises(cell_resolve.CellResolveRefused):
             cell_resolve.resolve("sdxl", bad)
     assert not sent  # nothing was sent
@@ -243,7 +249,10 @@ def test_a_hit_builds_the_same_expected_identity_the_plan_path_builds(
         "cell_key": KEY,
         "toolchain": {"torch": "x"},
         "env_seal": {"a": 1},
-        "combined_graph_hash": "c0ffee0000000000",
+        # pgw#1176: the declaration-wide coverage label. Same arithmetic as
+        # `combined_graph_hash`, demoted from identity — identity is
+        # `cell_key`, per entry.
+        "manifest_digest": "c0ffee0000000000",
     }
     meta["toolchain_digest_expected"] = ck.facts_digest(meta["toolchain"])
     reason = aot_identity.verify_declared_identity(
@@ -411,12 +420,17 @@ def _attempt(monkeypatch, tmp_path, *, derive=None, resolve=None,
         guidance_scales = (7.5,)
         lora_bucket = 0
 
-    return boot_adopt.attempt(
+    # pgw#1176: `attempt` returns ONE outcome per declared graph class, and a
+    # derivation failure is a single-element tuple. Every declaration below
+    # traces one class, so the unpack ASSERTS that arity for all five callers
+    # rather than indexing past a set nobody checked.
+    (out,) = boot_adopt.attempt(
         function="txt2img", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=3,
         envelope={"shapes": [[1024, 1024]], "text_lens": [77],
                   "guidance": [7.5]},
         work_root=tmp_path)
+    return out
 
 
 def _derived(digest: str = KEY) -> Any:
