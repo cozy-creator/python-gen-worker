@@ -62,7 +62,12 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     "implicit_reexport": (16, 34),
     # pgw#1202 PR 2: test modules still dirty at the relaxed test posture.
     # 170 of 486 were already clean and are checked from that commit on.
-    "ignore_errors": (314, 2016),
+    # 314 -> 312: PR 8 took the two HARNESS doubles — `tests.harness.cell_hub`
+    # and `tests.harness.adopt_rig`. These are the modules the "Protocols for
+    # test doubles" item exists for, and they were wholly unchecked: a bogus
+    # attribute plus a `reveal_type` injected into cell_hub.py still produced
+    # `Success: no issues found`.
+    "ignore_errors": (312, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted

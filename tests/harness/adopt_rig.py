@@ -115,7 +115,7 @@ class Out(msgspec.Struct):
 CELL = msgspec.structs.replace(declaration(), text_len=0)
 
 
-class AdoptedPipeline(ProbePipeline):
+class AdoptedPipeline(ProbePipeline):  # type: ignore[misc]  # pgw#1219: harness.* is Any
     """A WORKER-LOADED slot class — the annotation shape that routes the arm
     order into ``_enable_compiled``. ``from_pretrained`` is what the executor
     tests for; the load itself is the named seam (``provision.load_slot``)."""
@@ -375,8 +375,9 @@ class AdoptRig:
             except Exception:
                 return None
 
+        # ONE patch: `executor.activity_mod` IS this module object, and the
+        # executor resolves the attribute at call time.
         self.monkeypatch.setattr(activity, "emit_event", _spy)
-        self.monkeypatch.setattr(ex_mod.activity_mod, "emit_event", _spy)
 
     def _forget_keys(self) -> None:
         """``_KNOWN_AOT_KEYS`` is PROCESS-global, so a sibling test file that
@@ -413,8 +414,8 @@ class AdoptRig:
             RIG["pipe"] = pipe
             return provision.SlotLoad(obj=pipe, is_pipeline=True, ran="bf16")
 
+        # ONE patch, same reason as `emit_event` above.
         mp.setattr(provision, "load_slot", _load_slot)
-        mp.setattr(ex_mod.provision, "load_slot", _load_slot)
 
         # OBSERVE, never construct: what cfg object did production actually
         # hand the arm? pgw#1150's third variant is a fixture passing a TYPE no
@@ -519,7 +520,7 @@ class AdoptRig:
         eff = ex._dispatched_spec(
             spec,
             {"pipeline": dispatch_mod.SlotOrder(ref=MODEL_REF, components=())})
-        snaps = {normalize_model_ref(MODEL_REF): pb.Snapshot(
+        snaps: Dict[str, pb.Snapshot] = {normalize_model_ref(MODEL_REF): pb.Snapshot(
             digest="d1" * 16,
             files=[pb.SnapshotFile(
                 path="model.safetensors", size_bytes=5, blake3="cd" * 32,

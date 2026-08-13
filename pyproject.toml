@@ -383,8 +383,6 @@ module = [
   "tests.convert.test_publish_status_mapping_pgw1002",
   "tests.convert.test_publish_survival_pgw1003",
   "tests.convert.test_publish_v2_pgw781",
-  "tests.harness.adopt_rig",
-  "tests.harness.cell_hub",
   "tests.harness.deferred_endpoints",
   "tests.harness.hardware_report_hub",
   "tests.harness.modular_endpoint",
