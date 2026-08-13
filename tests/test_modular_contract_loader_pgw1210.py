@@ -104,14 +104,21 @@ def test_a_MODULAR_component_routes_through_the_contract_loader(
     from micro_diffusion.model import MicroDenoiser
 
     comp = _w8a8_component(tmp_path)
-    called: list = []
-    real = loading.load_w8a8_denoiser
+    called: list[tuple[str, str]] = []
+    from gen_worker.models.w8a8 import load_w8a8_denoiser as _real_loader
+
+    real = _real_loader
 
     def _spy(root: Any, art: Any, **kw: Any) -> Any:
         called.append((str(root), art.component))
         return real(root, art, **kw)
 
-    monkeypatch.setattr(loading, "load_w8a8_denoiser", _spy)
+    # Patched by dotted PATH, not by attribute: `loading` re-exports
+    # `load_w8a8_denoiser` without listing it in `__all__`, and strict mypy
+    # (correctly) refuses an implicit re-export. Widening the production
+    # surface to suit a test would be the wrong direction.
+    monkeypatch.setattr(
+        "gen_worker.models.loading.load_w8a8_denoiser", _spy)
 
     built = loading._contract_component_for_spec(
         _spec(MicroDenoiser, comp), "transformer", tmp_path)
