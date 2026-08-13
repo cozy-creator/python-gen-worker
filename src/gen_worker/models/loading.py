@@ -1404,42 +1404,80 @@ def load_component(
         except ImportError:
             pass  # torch-less environment: loader fails on its own terms
 
-    def _covers(artifact_component: str) -> bool:
-        """The artifact's weight set IS this component: a diffusers tree
-        names it, a bare override tree (root layout) has nothing else in
-        it."""
-        return artifact_component == component or (
-            not artifact_component and src == root
-        )
-
-    w8a8_art = detect_w8a8_artifact(root)
-    if w8a8_art is not None and _covers(w8a8_art.component):
-        return load_w8a8_denoiser(
-            root, w8a8_art, compute_dtype=torch_dtype, cls=cls)
-    w4a4_art = detect_w4a4_artifact(root)
-    if w4a4_art is not None and _covers(w4a4_art.component):
-        return load_w4a4_denoiser(
-            root, w4a4_art, compute_dtype=torch_dtype, cls=cls)
-    svdq_art = detect_svdq_artifact(root)
-    if svdq_art is not None and _covers(svdq_art.component):
-        raise ComponentExecutionLaneUnsupported(
-            f"component {component!r} of {root} is an svdq-{svdq_art.precision} "
-            f"artifact ({svdq_art.file.name}): its denoiser is built by the "
-            f"svdq engine during the PIPELINE load, so there is no "
-            f"component-level production loader to borrow"
-        )
-    if component in denoiser_components() and detect_gguf_snapshot(root):
-        raise ComponentExecutionLaneUnsupported(
-            f"component {component!r} of {root} is a GGUF denoiser: it is "
-            f"dequantized by the pipeline's own gguf loader, so there is no "
-            f"component-level production loader to borrow"
-        )
+    contracted = contract_loaded_component(
+        root, component, cls=cls, compute_dtype=torch_dtype, src=src)
+    if contracted is not None:
+        return contracted
 
     kwargs: Dict[str, Any] = {}
     if torch_dtype is not None and _accepts_kwarg(
             cls.from_pretrained, "torch_dtype"):
         kwargs["torch_dtype"] = torch_dtype
     return cls.from_pretrained(str(src), **kwargs)
+
+
+def contract_loaded_component(
+    root: Path, component: str, *, cls: Any, compute_dtype: Any = None,
+    src: Optional[Path] = None,
+) -> Optional[Any]:
+    """THE contract dispatch: one component's tree -> its registered loader.
+
+    ``None`` means this tree declares no layout contract and the caller's own
+    generic load is correct. A module means the tree's layout was recognised
+    and the SDK's declaring loader built it. A raise means the layout IS
+    recognised and has no component-level loader — a typed refusal, never a
+    fall-through.
+
+    **Why this is a function and not two copies (pgw#1210).** It was inline in
+    :func:`load_component`, so the NON-modular path routed a produced
+    `cozy.fp8-rowwise@1` tree to :func:`load_w8a8_denoiser` while a diffusers
+    MODULAR pipeline hydrated the same bytes through `ComponentSpec.load()` ->
+    plain `from_pretrained` and died inside `DiffusersAutoQuantizer` on the
+    tree's own `quantization_config` — minimax-h3 0.4.34, two releases, three
+    pods, `deterministic_fault_loop`, serving nothing. The fp8 lane that
+    wan-2.2 (ie#702) binds is the same artifact shape on the other entry
+    point, so the two had to become ONE dispatch rather than two that agree
+    today.
+
+    The silent fall-through is the defect. A contract-bearing tree that is
+    loaded generically does not fail loudly — it produces a module whose
+    numerics cannot serve, or (here) an exception from three libraries away
+    that names none of this.
+    """
+    weights = Path(root)
+    where = Path(src) if src is not None else weights
+
+    def _covers(artifact_component: str) -> bool:
+        """The artifact's weight set IS this component: a diffusers tree
+        names it, a bare override tree (root layout) has nothing else in
+        it."""
+        return artifact_component == component or (
+            not artifact_component and where == weights
+        )
+
+    w8a8_art = detect_w8a8_artifact(weights)
+    if w8a8_art is not None and _covers(w8a8_art.component):
+        return load_w8a8_denoiser(
+            weights, w8a8_art, compute_dtype=compute_dtype, cls=cls)
+    w4a4_art = detect_w4a4_artifact(weights)
+    if w4a4_art is not None and _covers(w4a4_art.component):
+        return load_w4a4_denoiser(
+            weights, w4a4_art, compute_dtype=compute_dtype, cls=cls)
+    svdq_art = detect_svdq_artifact(weights)
+    if svdq_art is not None and _covers(svdq_art.component):
+        raise ComponentExecutionLaneUnsupported(
+            f"component {component!r} of {weights} is an "
+            f"svdq-{svdq_art.precision} artifact ({svdq_art.file.name}): its "
+            f"denoiser is built by the svdq engine during the PIPELINE load, "
+            f"so there is no component-level production loader to borrow"
+        )
+    if component in denoiser_components() and detect_gguf_snapshot(weights):
+        raise ComponentExecutionLaneUnsupported(
+            f"component {component!r} of {weights} is a GGUF denoiser: it is "
+            f"dequantized by the pipeline's own gguf loader, so there is no "
+            f"component-level production loader to borrow"
+        )
+    return None
 
 
 def load_component_override(
@@ -1937,6 +1975,33 @@ def _place_and_release(pipe: Any, name: str, device: str) -> None:
     flush_memory()
 
 
+def _contract_component_for_spec(
+    spec: Any, name: str, src: Path,
+) -> Optional[Any]:
+    """A modular component's contract loader, or ``None`` for a plain tree.
+
+    The class comes from the spec (`ComponentSpec.type_hint`) because a modular
+    pipeline has no `model_index.json` to name it — which is precisely why
+    :func:`load_component` cannot simply be called here and why the DISPATCH,
+    not the whole loader, is what the two paths share.
+
+    A spec with no class at all is left to diffusers rather than guessed at: a
+    contract loader needs a class to build, and inventing one would be a second
+    source of truth for what a component IS.
+
+    The class is NOT required to expose ``from_pretrained``. The contract
+    loaders build through ``load_config`` + ``from_config`` (that is the whole
+    point — they do not go through the generic loader), so demanding the
+    generic entry point here would refuse exactly the classes this path exists
+    to serve. Caught by `test_a_MODULAR_component_routes_through_the_contract_loader`,
+    which went red on a denoiser that has no `from_pretrained` at all.
+    """
+    cls = getattr(spec, "type_hint", None)
+    if cls is None or not isinstance(cls, type):
+        return None
+    return contract_loaded_component(src, name, cls=cls, src=src)
+
+
 def hydrate_modular_pipeline(
     pipe: Any,
     path: str | Path,
@@ -2104,7 +2169,29 @@ def hydrate_modular_pipeline(
                 if dt is not None:
                     kwargs["torch_dtype"] = dt
                     dtypes[n] = str(dt).removeprefix("torch.")
-                pipe.load_components(names=[n], **kwargs)
+                # pgw#1210: THE CONTRACT DISPATCH, on the modular path too.
+                #
+                # `load_components` is diffusers' own hydration and reaches
+                # plain `from_pretrained`, which never consults the SDK's
+                # registered contract loaders. A produced `cozy.fp8-rowwise@1`
+                # tree then dies inside `DiffusersAutoQuantizer` on its own
+                # `quantization_config` — minimax-h3 0.4.34, two releases,
+                # three pods, serving nothing — while the NON-modular path
+                # loaded the identical bytes correctly through
+                # `load_w8a8_denoiser`. One artifact shape, two entry points,
+                # one of them blind; wan-2.2's fp8 lane (ie#702) is the other
+                # consumer of exactly this.
+                #
+                # The contract-loaded module is injected through
+                # `update_components` — the same seam a gw#479 preloaded
+                # shared module already uses, so the pipeline registers it
+                # exactly as it registers any component it did not load
+                # itself.
+                built = _contract_component_for_spec(specs[n], n, comp_src)
+                if built is not None:
+                    pipe.update_components(**{n: built})
+                else:
+                    pipe.load_components(names=[n], **kwargs)
                 # pgw#1026: place it now and drop the host copy, so the next
                 # component's admission above sees the host RAM this one
                 # gave back rather than the tree accumulating behind it.
