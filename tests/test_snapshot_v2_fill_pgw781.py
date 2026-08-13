@@ -424,7 +424,7 @@ def test_the_grpc_conversion_carries_chunks_through():
 
     `_snapshot_to_resolved` is the only place production snapshots are typed,
     and it is exactly where a stale stub is invisible."""
-    from gen_worker.executor import _snapshot_to_resolved
+    from gen_worker.models.store import _snapshot_to_resolved
     from gen_worker.pb import worker_scheduler_pb2 as pb
 
     snap = pb.Snapshot(digest="sha256:" + "c" * 64)

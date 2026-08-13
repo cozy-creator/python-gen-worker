@@ -55,6 +55,7 @@ from gen_worker.pb import worker_scheduler_pb2 as pb  # noqa: E402
 from gen_worker.registry import extract_specs  # noqa: E402
 
 import msgspec  # noqa: E402
+from gen_worker.models import store as store_mod
 
 _GiB = 1024 ** 3
 
@@ -499,7 +500,7 @@ def _executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 
     import gen_worker.executor as ex_mod
 
-    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
+    monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
     ex.store.residency._vram_budget = 64 * _GiB  # both fit -> full background setup
     return ex, sent
 

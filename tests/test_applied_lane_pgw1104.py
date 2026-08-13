@@ -47,6 +47,7 @@ from gen_worker.models import execution_lanes as lanespec
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
+from gen_worker.models import store as store_mod
 
 REF = "tensorhub/minimax-h3:serve-narrowed"
 
@@ -126,7 +127,7 @@ def boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
+    monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
 
     from gen_worker import dispatch
 

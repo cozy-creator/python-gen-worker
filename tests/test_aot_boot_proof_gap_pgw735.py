@@ -44,6 +44,7 @@ from gen_worker.executor import Executor
 from gen_worker.models.refs import normalize_model_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
+from gen_worker.models import store as store_mod
 
 FAMILY = "sdxl"
 
@@ -171,7 +172,7 @@ def _executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Executor:
 
     import gen_worker.executor as ex_mod
 
-    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
+    monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
     return ex
 
 

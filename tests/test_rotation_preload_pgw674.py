@@ -42,6 +42,7 @@ from gen_worker.models import staging as staging_mod
 from gen_worker.models.pinned_swap import prestage_module
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
+from gen_worker.models import store as store_mod
 
 _GiB = 1024 ** 3
 
@@ -177,7 +178,7 @@ def _executor(
 
     import gen_worker.executor as ex_mod
 
-    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
+    monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
     return ex
 
 
