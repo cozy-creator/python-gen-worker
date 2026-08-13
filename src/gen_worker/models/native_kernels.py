@@ -94,7 +94,7 @@ def _cuda_gap() -> Optional[str]:
 def _fused_linear_self_check() -> Optional[str]:
     """Numerics only. The SM is deliberately NOT consulted: a compiled graph that names
     the fused linear was minted on this compute capability (``sm`` is a
-    compiled graph-key axis), so a capability question here would only re-derive what
+    compiled-graph-key axis), so a capability question here would only re-derive what
     the verdict already proved by running."""
     gap = _cuda_gap()
     if gap is not None:

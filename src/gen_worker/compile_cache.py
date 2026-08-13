@@ -530,7 +530,7 @@ class GuardMiss:
 
     ``reason`` is torch's verbatim message — per cached compiled graph, the exact
     guard that failed (size/stride/scalar specialization, …): the confession
-    is the data for the compiled graph-reusability investigation (Paul's GPU-A/B
+    is the data for the compiled-graph-reusability investigation (Paul's GPU-A/B
     hypothesis). ``sig`` is the request's shape/axis identity as the hot-swap
     router sees it; ``heal`` is the background-heal verdict."""
 
@@ -547,7 +547,7 @@ _GUARD_REASON_LINE_RE = re.compile(r"^\s*-\s*(?:\d+/\d+:\s*)?(.+)$")
 def guard_miss_reason_class(reason: str) -> str:
     """A short, stable class token for one verbatim guard-miss reason.
 
-    The first per-compiled graph failure line, compiled graph index stripped, whitespace
+    The first per-compiled-graph failure line, compiled graph index stripped, whitespace
     collapsed, clipped — so top-N reasons are one ``sort | uniq -c`` away on
     the hub's activity log (per pgw#680 the reasons ARE the instrument)."""
     for line in str(reason or "").splitlines():
@@ -668,7 +668,7 @@ def runtime_key() -> Dict[str, str]:
         # key than every healthy pod computes — i.e. a guaranteed cache miss
         # (and a mint) whose cause is invisible. Say it.
         logger.warning(
-            "compile-cache: torch/CUDA runtime-key probe failed — compiled_graph identity "
+            "compile-cache: torch/CUDA runtime-key probe failed — compiled graph identity "
             "falls back to empty sku/sm/torch fields; expect a cache MISS",
             exc_info=True)
     try:
@@ -1519,7 +1519,7 @@ class CompiledExecutionLaneImpossibleError(FatalError):
     endpoint. Here the author declared a mandatory quantized lane, so eager is
     not a posture they sanctioned — falling back to it would serve numerics
     nobody approved rather than refuse. §4.31 and pgw#1010 therefore do not
-    conflict once "compiled graph-attributable failure => serve eager" is read as
+    conflict once "compiled-graph-attributable failure => serve eager" is read as
     "=> serve eager WHERE EAGER IS PERMITTED". Recorded here because it is an
     assumption, not a quotation: if it is ever reversed, this class is the
     single place the reversal lands.
@@ -2879,7 +2879,7 @@ def enable(pipeline: Any, cfg: Any) -> bool:
         execution_lane_name = quant_execution_lane[:4].upper()
         raise CompiledExecutionLaneUnavailableError(
             f"{execution_lane_name} requires an exact compatible compile compiled_graph "
-            f"(no compiled_graph artifact delivered); eager/dequantized execution is "
+            f"(no compiled graph artifact delivered); eager/dequantized execution is "
             f"not a {execution_lane_name} production lane"
         )
     return armed

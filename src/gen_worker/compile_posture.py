@@ -139,7 +139,7 @@ class CompilePosture(msgspec.Struct, frozen=True, kw_only=True):
         """Scheduling-priority increment for the mint process tree.
 
         Applied by the mint child TO ITSELF and inherited by every descendant
-        — the compiled graph-pool children, inductor's compile workers, and every
+        — the compiled-graph-pool children, inductor's compile workers, and every
         ``cc1plus`` under them. 0 on a pod: a mint there competes with a tenant
         whose reserves are already held back explicitly, and de-prioritising it
         on top of that would slow paid work for no gain.

@@ -775,7 +775,7 @@ def execution_lane_from_metadata(meta: Mapping[str, Any]) -> Tuple[str, str]:
     block = meta.get(META_KEY) if isinstance(meta, Mapping) else None
     if block is None:
         return DEFAULT_EXECUTION_LANE, (
-            f"{REASON_ABSENT}: compiled_graph records no kernel-lane verdict "
+            f"{REASON_ABSENT}: compiled graph records no kernel-lane verdict "
             f"(pre-pgw#947 compiled_graph); serving the declared default "
             f"{DEFAULT_EXECUTION_LANE!r}")
     if not isinstance(block, Mapping):
@@ -785,11 +785,11 @@ def execution_lane_from_metadata(meta: Mapping[str, Any]) -> Tuple[str, str]:
     winner = str(block.get("winner") or "")
     if winner not in EXECUTION_LANES:
         return DEFAULT_EXECUTION_LANE, (
-            f"{REASON_UNKNOWN_EXECUTION_LANE}: compiled_graph names lane {winner!r}, which this "
+            f"{REASON_UNKNOWN_EXECUTION_LANE}: compiled graph names lane {winner!r}, which this "
             f"worker does not implement ({list(EXECUTION_LANES)!r}); serving "
             f"{DEFAULT_EXECUTION_LANE!r}")
     return winner, (
-        f"{REASON_ADOPTED}: compiled_graph verdict {winner!r} "
+        f"{REASON_ADOPTED}: compiled graph verdict {winner!r} "
         f"(binding={block.get('binding') or '?'}, "
         f"rule={block.get('rule') or '?'})")
 
@@ -871,14 +871,14 @@ def refit(
     if not total:
         return execution_lane, (
             f"{reason}; {REASON_FIT_UNVERIFIED}: this process cannot detect a "
-            f"device total, so the compiled_graph's fit constraint could not be "
+            f"device total, so the compiled graph's fit constraint could not be "
             f"re-applied here")
     if execution_lane not in peaks:
         return execution_lane, (
-            f"{reason}; {REASON_FIT_UNVERIFIED}: the compiled_graph records no measured "
+            f"{reason}; {REASON_FIT_UNVERIFIED}: the compiled graph records no measured "
             f"peak for {execution_lane!r}, so its fit could not be re-applied on "
             f"{device}, {total} B — adopting it unverified across cards "
-            f"(compiled_graphs are keyed on SM, not on card memory)")
+            f"(compiled graphs are keyed on SM, not on card memory)")
     if fits_bytes(peaks[execution_lane], total):
         return execution_lane, (
             f"{reason}; re-checked here: {required_for(peaks[execution_lane])} B "
@@ -903,7 +903,7 @@ def refit(
                 f"wins ({winner!r}, {required_for(peaks[winner])} B required)")
     tag = REASON_REFIT_LOCAL if binding != BIND_NO_FIT else REASON_REFIT_NO_FIT
     return winner, (
-        f"{tag}: the compiled_graph's verdict {execution_lane!r} asks "
+        f"{tag}: the compiled graph's verdict {execution_lane!r} asks "
         f"{required_for(peaks[execution_lane])} B and {device} has {total} B, so it "
         f"does not fit here; re-applied the rule locally -> {winner!r} "
         f"(binding={binding}) — {detail} [{provenance}]")
@@ -957,7 +957,7 @@ def adopt(meta: Optional[Mapping[str, Any]], *, source: str = "") -> str:
     """
     if meta is None:
         execution_lane, reason = DEFAULT_EXECUTION_LANE, (
-            f"{REASON_NO_COMPILED_GRAPH}: no compiled compiled_graph delivered for this load; "
+            f"{REASON_NO_COMPILED_GRAPH}: no compiled compiled graph delivered for this load; "
             f"serving the declared default {DEFAULT_EXECUTION_LANE!r}")
     else:
         execution_lane, reason = execution_lane_from_metadata(meta)

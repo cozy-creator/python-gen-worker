@@ -464,7 +464,7 @@ def _denoiser_class(root: Path, component: str) -> Any:
     compiled_graph = index.get(component)
     if not (isinstance(compiled_graph, list) and len(compiled_graph) == 2):
         raise W4a4SnapshotError(
-            f"model_index.json has no [library, class] compiled_graph for {component!r}")
+            f"model_index.json has no [library, class] compiled graph for {component!r}")
     lib, name = str(compiled_graph[0]), str(compiled_graph[1])
     try:
         mod = importlib.import_module(lib)

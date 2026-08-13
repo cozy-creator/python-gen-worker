@@ -315,7 +315,7 @@ def _reinline(source: str) -> str:
 DISABLE_V2_ENV = "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"
 
 #: How many of the K+1 part compiles may run at once. pgw#809's pool owns
-#: the pod's CPU budget ACROSS compiled graphs; it sets this to its per-compiled graph share
+#: the pod's CPU budget ACROSS compiled graphs; it sets this to its per-compiled-graph share
 #: so the two levers compose (split-within-compiled graph x pool-across-compiled graphs)
 #: instead of oversubscribing. Unset: derive from the pod's own budget.
 JOBS_ENV = "GEN_WORKER_AOT_HOST_COMPILE_JOBS"

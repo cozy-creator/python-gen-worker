@@ -846,7 +846,7 @@ def _validate_config_decl(owner: str, config: Any) -> Tuple[ConfigParam, ...]:
     for p in config:
         if not isinstance(p, ConfigParam):
             raise TypeError(
-                f"@endpoint {owner}: config= compiled_graphs must be ConfigParam, "
+                f"@endpoint {owner}: config= compiled graphs must be ConfigParam, "
                 f"got {type(p).__name__}"
             )
         if p.name in seen:

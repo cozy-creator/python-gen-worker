@@ -79,7 +79,7 @@ def resolved_compiled_graph_digest(
     if ":" not in d:
         raise ValueError(
             f"{what}: digest {d[:16]}… is untagged; "
-            "every compiled_graph must carry an algorithm prefix"
+            "every compiled graph must carry an algorithm prefix"
         )
     return d
 

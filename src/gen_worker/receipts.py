@@ -6,7 +6,7 @@ signed the RECORD binding the key to those bytes. Under "bucket is truth,
 DB is a rebuildable index" (th#659) that made bucket write access
 equivalent to arbitrary compiled graph delivery after any index rebuild.
 
-The hub now signs a ``compiled graph-receipt-v1`` compact JWS at publish-finalize
+The hub now signs a ``compiled-graph-receipt-v1`` compact JWS at publish-finalize
 binding: compiled_graph_key + owning endpoint + the publisher-trust rung + the snapshot
 digest (the derivation binding Nix's fingerprint famously omits) + the
 packed tarball's ALGORITHM-TAGGED digest AND integral size (Bazel REv2:
@@ -307,10 +307,10 @@ def refuse_untrusted_publisher(
         raise ReceiptError(
             "publisher_untrusted",
             "this pod cannot name its own endpoint or org (no compiled_graph_read_* claim "
-            "on the worker credential), so it may adopt platform-tier compiled_graphs only")
+            "on the worker credential), so it may adopt platform-tier compiled graphs only")
     raise ReceiptError(
         "publisher_untrusted",
-        f"compiled_graph was minted for endpoint {owner or '<unnamed>'} "
+        f"compiled graph was minted for endpoint {owner or '<unnamed>'} "
         f"(org {owner_org or '<unnamed>'}) and this pod serves "
         f"{mine or '<unnamed>'} (org {my_org or '<unnamed>'})")
 
@@ -662,7 +662,7 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
         raise ReceiptError(
             "identity_unavailable",
             f"this pod cannot be named by anything in reach ({exc}), so no "
-            f"org-tier compiled_graph can be shown to be adoptable here") from exc
+            f"org-tier compiled graph can be shown to be adoptable here") from exc
     refuse_untrusted_publisher(receipt, viewer.endpoint_id, viewer.org_id)
 
     return receipt

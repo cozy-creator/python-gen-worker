@@ -72,7 +72,7 @@ class MetaInitUnavailable(WorkerError):
             f"this process cannot provide {self.capability}: {self.lacks}. "
             f"Weight-free instantiation is how a compile target is built from "
             f"CODE + CONFIG, so without it no boot key can be derived, no "
-            f"compiled_graph can be asked for, and this pod will self-mint on every "
+            f"compiled graph can be asked for, and this pod will self-mint on every "
             f"boot")
 
 

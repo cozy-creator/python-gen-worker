@@ -158,7 +158,7 @@ def resolve_bar(declaration: Any, record: Dict[str, Any]) -> Bar:
         raise HarnessError(f"[speed] min_speedup = {raw!r} is not a number")
     if float(raw) < 1.0:
         raise HarnessError(
-            f"[speed] min_speedup = {raw} is below 1.0 — a compiled_graph that is not "
+            f"[speed] min_speedup = {raw} is below 1.0 — a compiled graph that is not "
             f"faster than eager has no reason to exist")
     return Bar(_metric(metric), float(raw), "author-ci.toml")
 
@@ -530,7 +530,7 @@ def read_parity(subject: _Subject, declaration: Any,
     if report is None:
         return Parity(False, None, "?",
                       "the gate ran and produced no report — refusing to call "
-                      "an unmeasurable compiled_graph healthy (pgw#868)")
+                      "an unmeasurable compiled graph healthy (pgw#868)")
     comparison = report.comparison()
     return Parity(
         passed=bool(passed),
@@ -639,7 +639,7 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
             if pipe is None:
                 arm, compiled = ARM_EAGER, None
                 arm_detail = (
-                    "no compiled_graph armed on this pod, so there is nothing to "
+                    "no compiled graph armed on this pod, so there is nothing to "
                     "compare — the reason is on the activity wire "
                     "(self_mint_skipped / self_mint_abort)")
             else:

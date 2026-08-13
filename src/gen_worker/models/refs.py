@@ -3,7 +3,7 @@
 Normal form — the ONE canonical string for a model ref (grammar th#597 C5,
 shared vectors ``tests/testdata/ref_grammar_vectors.json``):
 
-    tensorhub:  owner/repo[:tag][@sha256:<hex>|@blake3:<hex>][#<compiled graph-fragment>]
+    tensorhub:  owner/repo[:tag][@sha256:<hex>|@blake3:<hex>][#<compiled-graph-fragment>]
     hf:         owner/repo[@revision]
 
 The tag is ELIDED when it equals ``prod`` (the grammar default) and stamped
@@ -120,7 +120,7 @@ class TensorhubRef:
         return f"{self.owner}/{self.repo}"
 
     def canonical(self) -> "WireRef":
-        """Normal form: ``owner/repo[:tag][@digest][#compiled graph-fragment]``; the tag is
+        """Normal form: ``owner/repo[:tag][@digest][#compiled-graph-fragment]``; the tag is
         elided when it is ``prod`` (the grammar default) and stamped verbatim
         otherwise, including ``latest``. Tensorhub is the default provider so
         no prefix is emitted; consumers track provider separately."""

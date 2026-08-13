@@ -866,7 +866,7 @@ def _extract_compiled_graphs(obj: Any, module_name: str) -> List[Dict[str, Any]]
             }
             # SDK v2 shape contract: the declared text axis and dynamic
             # ranges ride to the hub's compiled graph producer, and the contract
-            # digest is the ck2 compiled graph-key axis (pgw#647).
+            # digest is the ck2 compiled-graph-key axis (pgw#647).
             if ccompiledgraph.text_len is not None:
                 # THIS function's effective pin (a @worker_function
                 # text_len= override wins over the class Compile's).

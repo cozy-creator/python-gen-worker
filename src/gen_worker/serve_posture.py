@@ -54,7 +54,7 @@ Same posture, two triggers, and they must never be read as each other:
 ===================  ==========================  ==========================
                      §4.31 sticky de-arm         §4.32 eager-only command
 ===================  ==========================  ==========================
-trigger              a compiled graph-attributable serve   an operator, explicitly
+trigger              a compiled-graph-attributable serve   an operator, explicitly
                      failure (guard refusal,
                      artifact crash)
 scope                THAT compiled graph                   the whole worker
@@ -169,13 +169,13 @@ def apply_command(
     if current.active:
         logger.warning(
             "serve-posture: EAGER ONLY by order — %s. Nothing will arm or "
-            "mint, and armed compiled_graphs stay armed but are not called; releasing "
+            "mint, and armed compiled graphs stay armed but are not called; releasing "
             "the order resumes compiled serving without a re-arm.",
             current.describe())
     else:
         logger.warning(
-            "serve-posture: eager-only order RELEASED — %s. Armed compiled_graphs serve "
-            "compiled again from the next request; compiled_graphs de-armed for cause "
+            "serve-posture: eager-only order RELEASED — %s. Armed compiled graphs serve "
+            "compiled again from the next request; compiled graphs de-armed for cause "
             "(§4.31) stay de-armed.", current.describe())
     _emit_transition(current)
     return True
@@ -198,7 +198,7 @@ def _emit_transition(current: EagerOnlyOrder) -> None:
            "(§4.32 item 4); every request serves eager and the posture token "
            f"is {REASON}"
            if current.active else
-           "the operator's eager-only order is released; armed compiled_graphs serve "
+           "the operator's eager-only order is released; armed compiled graphs serve "
            "compiled again and arming decisions run normally")
     )
     try:

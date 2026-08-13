@@ -243,7 +243,7 @@ def run(job: TraceJob) -> int:
         return _fail(
             report_path, "no_declaration",
             f"family {export_spec.family!r} has no registered export "
-            f"declaration — a multi-graph compiled_graph derives its class set from it")
+            f"declaration — a multi-graph compiled graph derives its class set from it")
 
     blocks: Dict[str, str] = {}
     nodes: Dict[str, int] = {}

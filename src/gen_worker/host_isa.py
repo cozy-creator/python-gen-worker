@@ -19,7 +19,7 @@ wrapper contains ZERO ymm/zmm vector instructions (inductor passes
 ``-fno-tree-loop-vectorize``); the only above-baseline code is a handful of
 incidental EVEX scalar encodings with exact SSE2 equivalents. Because
 ``cpp.march``/``cpp.simdlen`` are part of ``save_config_portable`` the clamp
-is env_seal- and therefore compiled graph-key-visible: hosts below baseline mint and
+is env_seal- and therefore compiled-graph-key-visible: hosts below baseline mint and
 serve their own honestly-keyed cohort instead of sharing a lying key.
 
 Defense in depth: mints stamp :func:`stamp` into artifact metadata, and

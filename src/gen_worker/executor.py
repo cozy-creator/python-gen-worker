@@ -2621,7 +2621,7 @@ class _ArmOrder:
     #: pgw#1176: the OTHER compiled graphs this boot resolved. A boot derives a key SET
     #: and coverage ACCRETES, so several hits are the expected shape — each is
     #: armed into the same registry, the same target pool and the same live
-    #: wrap after the first. A failure on one of these is a per-compiled graph degrade
+    #: wrap after the first. A failure on one of these is a per-compiled-graph degrade
     #: (that class serves eager), never terminal: the first arm already proved
     #: the pod can serve compiled.
     extra: Tuple[Tuple[Path, Optional["aot_identity.ExpectedIdentity"], str],
@@ -4712,7 +4712,7 @@ class Executor:
             # pass never made it faster — it only checked it. What the compiled graph
             # advertises is what it may serve; a class it does not carry is
             # refused BY NAME at ingress and served eager per request
-            # (pgw#844), and a compiled graph-attributable failure revokes the arm
+            # (pgw#844), and a compiled-graph-attributable failure revokes the arm
             # in-request through the wrapper's own fallback.
             #
             # The DYNAMO lane keeps the ledger, and the difference is the
@@ -5087,7 +5087,7 @@ class Executor:
         )
         if not all(identity):
             raise RetryableError(
-                "required_compile_invalid: target, compiled_graph ref/digest, and "
+                "required_compile_invalid: target, compiled graph ref/digest, and "
                 "contract digest must all be nonempty"
             )
         found = self._compile_target(identity[0])
@@ -5123,7 +5123,7 @@ class Executor:
             or target_active[2] != identity[3]
         ):
             raise RetryableError(
-                "required_compile_identity_mismatch: active compiled_graph or execution "
+                "required_compile_identity_mismatch: active compiled graph or execution "
                 "contract changed"
             )
 
@@ -6968,7 +6968,7 @@ class Executor:
         # one would be a second resolver.
         if arm is not None and arm.backend == "aot_compiled_graph" and topology_eager:
             raise compile_cache.CompiledExecutionLaneUnavailableError(
-                f"the spec names an exact compiled_graph but this pod cannot arm one: "
+                f"the spec names an exact compiled graph but this pod cannot arm one: "
                 f"{topology_eager}")
         compile_selection = arm.selection if arm is not None else None
         compile_artifact = compile_selection.path if compile_selection else None
@@ -7278,7 +7278,7 @@ class Executor:
                         "%s: delegated mint discarded — this boot is not "
                         "eager-first, so there is no eager tier to serve "
                         "from while a child compiles; serving eager with the "
-                        "compiled_graph absent", spec.name)
+                        "compiled graph absent", spec.name)
                     _fc_undelegate.abandon_self_mint(_mint)
                     inj.pending_self_mints.pop(_pid, None)
             if eager_first:
@@ -7569,7 +7569,7 @@ class Executor:
                         # once, on the pod that MINTED it, and adoption runs no
                         # quality gate. The absence of a dispatch is therefore
                         # not a verdict: the arm stands, the first real request
-                        # is the proof, and a compiled graph-attributable failure de-arms
+                        # is the proof, and a compiled-graph-attributable failure de-arms
                         # it in-request.
                         arm_without_dispatch[id(pipe)] = (
                             "adoption runs no quality gate (§4.32) — this compiled_graph "
@@ -7653,7 +7653,7 @@ class Executor:
                         return
                     activity_mod.emit_event(
                         activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
-                        f"{spec.name}: the exported compiled_graph on slots "
+                        f"{spec.name}: the exported compiled graph on slots "
                         f"{sorted(candidate.slots)} took no warm dispatch — "
                         f"{reason}. It STAYS ARMED and serves; a "
                         f"compiled_graph-attributable failure revokes it in-request",
@@ -7689,7 +7689,7 @@ class Executor:
                 #   * EVIDENCE AGAINST still disarms (`disproven`: the object was
                 #     exercised and demonstrably did not serve its own graph —
                 #     a measured fault, not a missing measurement);
-                #   * a compiled graph-attributable failure at serve time revokes the arm
+                #   * a compiled-graph-attributable failure at serve time revokes the arm
                 #     IN-REQUEST (`aot_serve.wrap_module` / the pgw#680
                 #     guard-miss doctrine): the tenant still gets a correct eager
                 #     answer, the disarm is sticky for the process, and it is
@@ -9407,14 +9407,14 @@ class Executor:
             compiled_graph = target.active_compile_ref
         logger.warning(
             "shape-growth: %s is armed on arm=%s with NO serve-window growth "
-            "path (pgw#916); every declared class the compiled_graph does not cover "
+            "path (pgw#916); every declared class the compiled graph does not cover "
             "serves eager for the life of this pod", spec.name, arm)
         activity_mod.emit_event(
             activity_mod.KIND_SHAPE_GAP,
             f"arm={arm} fn={sorted(target.function_names)} "
             f"compiled_graph={compiled_graph or '<none>'}: this armed target has no serve-window "
-            f"shape-growth path — a request at a class the compiled_graph does not "
-            f"cover is served eager and NOTHING will grow the compiled_graph, on this "
+            f"shape-growth path — a request at a class the compiled graph does not "
+            f"cover is served eager and NOTHING will grow the compiled graph, on this "
             f"pod or any other",
             phase="no_growth_path",
         )
@@ -9855,7 +9855,7 @@ class Executor:
         for pid, pending in bg.pendings.items():
             holders.setdefault(id(pending), []).append(pid)
         if not holders:
-            raise RuntimeError("delegated mint has no pending compiled_graph to build")
+            raise RuntimeError("delegated mint has no pending compiled graph to build")
 
         #: id(pipeline) -> the compiled graph its OWN pipeline armed. pgw#1113 deleted
         #: the "sharers" fiction that used to fill this for every pid holding
@@ -9962,7 +9962,7 @@ class Executor:
             if id(pending) not in discharged:
                 fleet_compiled_graphs_mod.withhold_self_mint_publish(
                     pending,
-                    "the delegated mint produced no compiled_graph for this obligation")
+                    "the delegated mint produced no compiled graph for this obligation")
             else:
                 fleet_compiled_graphs_mod.publish_self_mint(pending)
 
@@ -10026,7 +10026,7 @@ class Executor:
             return (boot_adopt.refused(
                 "no_export_declaration",
                 f"family {family!r} has no registered export declaration, so "
-                f"this boot cannot state the class set a compiled_graph key names",
+                f"this boot cannot state the class set a compiled graph key names",
                 family=family, function=fn),)
         try:
             declared_hint = len(list(aot_declaration.compiled_graph_plans(decl)))
@@ -10065,7 +10065,7 @@ class Executor:
         if boot_adopt.no_compiled_graph_source(hub_absent):
             return (boot_adopt.refused(
                 "no_compiled_graph_source",
-                f"{hub_absent}, and this machine's own compiled_graph store is empty",
+                f"{hub_absent}, and this machine's own compiled graph store is empty",
                 family=family, function=fn),)
         work_root = Path(
             self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
@@ -10159,7 +10159,7 @@ class Executor:
                     except Exception as extra_exc:  # noqa: BLE001
                         activity_mod.emit_event(
                             "aot_compiled_graph_arm_failed",
-                            f"a sibling compiled_graph of an armed compiled_graph would not arm "
+                            f"a sibling compiled graph of an armed compiled graph would not arm "
                             f"({type(extra_exc).__name__}: {extra_exc}); that "
                             f"CLASS serves eager and every armed sibling keeps "
                             f"serving compiled",
@@ -10317,7 +10317,7 @@ class Executor:
                 #
                 # Under ck1 it was sound: one compiled graph, one ref, and no ref meant
                 # there was nothing anyone could attribute. Under a resolved
-                # KEY SET it swallows the commonest per-compiled graph outcome there
+                # KEY SET it swallows the commonest per-compiled-graph outcome there
                 # is — an compiled graph that MISSED has no artifact ref BY
                 # CONSTRUCTION, so a pod resolving 30 of 36 keys would have
                 # reported the 30 and silently discarded the six that are the
@@ -10370,7 +10370,7 @@ class Executor:
                     duration_ms=adoption.arm_ms,
                 )
             logger.info(
-                "compiled_graph adoption %s ref=%s digest=%s arm_ms=%d warmup_s=%.3f "
+                "compiled graph adoption %s ref=%s digest=%s arm_ms=%d warmup_s=%.3f "
                 "calls=%d hits=%d misses=%d%s",
                 "ADOPTED" if adoption.armed else "FAILED",
                 adoption.ref, adoption.snapshot_digest, adoption.arm_ms,
@@ -11898,7 +11898,7 @@ class Executor:
         for compiled_graph in datasets:
             ref = str(getattr(compiled_graph, "ref", "") or "").strip()
             if not ref:
-                raise ValidationError("payload.datasets compiled_graphs need a non-empty ref")
+                raise ValidationError("payload.datasets compiled graphs need a non-empty ref")
             await asyncio.to_thread(resolve, ref)
 
     async def _handler_kwargs(

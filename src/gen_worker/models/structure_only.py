@@ -128,7 +128,7 @@ class StructureCapabilityMissing(StructureOnlyUnsupported):
             f"impossible in THIS PROCESS, for every family it serves: "
             f"{self.lacks}. Missing capability: {self.capability}. This is an "
             f"IMAGE defect, not an authoring one — no boot key can be derived "
-            f"here, so this pod can never ask the hub for a compiled_graph and will "
+            f"here, so this pod can never ask the hub for a compiled graph and will "
             f"self-mint on every boot"
             + (f" (tree: {self.tree})" if self.tree else "")
         )
@@ -827,7 +827,7 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 
 # ---------------------------------------------------------------------------
 # pgw#1111: the META round-trip that lets a weight-free program cross the
-# compiled graph-compile pool's process boundary
+# compiled-graph-compile pool's process boundary
 # ---------------------------------------------------------------------------
 #
 # The parallel compiled graph pool hands each ExportedProgram to a compile CHILD by

@@ -19,7 +19,7 @@ What replaces it:
 * **The attempt is the signal.** A compile child that runs out of device
   memory dies in its own process, is classified (``MintResourceExhausted``)
   and reported; an ADOPT that cannot bind an compiled graph raises there and the pod
-  serves eager (``aot_serve.load_and_wrap``'s per-compiled graph OOM guard). Neither
+  serves eager (``aot_serve.load_and_wrap``'s per-compiled-graph OOM guard). Neither
   needed a number computed in advance to be correct.
 
 Everything here is a READING taken after the fact. If a function in this module

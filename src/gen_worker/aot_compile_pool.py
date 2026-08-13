@@ -7,7 +7,7 @@ branchless group) and then AOTI-compiles each one at ~420 s. The compiles
 share nothing: each is ``aot_compile(ep.module(), ...)`` over its own
 ExportedProgram, producing its own loose files, combined afterwards by
 ``package_aoti``. Serially that is ~2 h; K-wide it is ``ceil(N/K)`` x
-per-compiled graph.
+per-compiled-graph.
 
 Why processes, and not threads
 ------------------------------
@@ -166,7 +166,7 @@ CPUS_PER_COMPILED_GRAPH_WORKER = 2
 #: where rounds stop improving for the largest real family.
 #:
 #: WHAT WOULD FALSIFY IT: a family whose compiled graph count makes ceil(N/K) strictly
-#: decrease past K=8 AND whose per-compiled graph compile still dominates the serial
+#: decrease past K=8 AND whose per-compiled-graph compile still dominates the serial
 #: terms. Measure ``mint_phases`` on that family before raising this; do not
 #: raise it because a pod looks idle.
 MAX_COMPILED_GRAPH_WORKERS = 8
@@ -176,7 +176,7 @@ MAX_COMPILED_GRAPH_WORKERS = 8
 #: top so that a tenant request arriving mid-mint does not meet an OOM killer.
 COMPILED_GRAPH_RSS_RESERVE_BYTES = 4 * 1024**3
 
-#: Per-compiled graph peak RSS assumed before this (family, lane) has banked one.
+#: Per-compiled-graph peak RSS assumed before this (family, lane) has banked one.
 #:
 #: §4.24, re-derived pgw#1035 against the row it was accused of contradicting.
 #: THE THREAT: K compiled graph children whose summed peak RSS exceeds available host
@@ -186,7 +186,7 @@ COMPILED_GRAPH_RSS_RESERVE_BYTES = 4 * 1024**3
 #: WHY THIS IS NOT pgw#877 #5's REFUSE-TO-WIDEN CASE, which deleted the DEVICE
 #: twin of this constant. Two differences, both load-bearing:
 #:
-#: * That branch fires when the per-compiled graph device footprint is genuinely
+#: * That branch fires when the per-compiled-graph device footprint is genuinely
 #:   UNKNOWN — no number, from anywhere, for the compiled graph about to run. This one
 #:   is a MEASURED number: 2.09 GiB, on the real sdxl wrapper TU (codegen holds
 #:   the generated source plus inductor's IR; ``cc1plus`` on the wrapper TU is
@@ -205,7 +205,7 @@ COMPILED_GRAPH_RSS_RESERVE_BYTES = 4 * 1024**3
 #: bank its peak, not to guess a larger constant.
 #:
 #: Banked per (family, lane) once measured (``mint_workers.compiled_graph_peak_rss``).
-#: pgw#1175: this is now the ONLY per-compiled graph footprint K divides by.
+#: pgw#1175: this is now the ONLY per-compiled-graph footprint K divides by.
 DEFAULT_COMPILED_GRAPH_PEAK_RSS_BYTES = 3 * 1024**3
 
 #: Programs staged AHEAD of the running set. The export loop hands the pool
@@ -485,7 +485,7 @@ def compiled_graph_workers(
       paged in.
 
     WHAT LEFT, AND WHY (pgw#1175). A third bound divided free VRAM by a
-    per-compiled graph device ask, and the only source that ask ever had in production
+    per-compiled-graph device ask, and the only source that ask ever had in production
     was ``mint_budget.co_residency().need_bytes`` — the MINT CHILD's whole
     co-residency estimate, whose leading term was the PARENT's resident
     weights. Compiles are weight-free since ``fc77b923``; the estimate
@@ -544,7 +544,7 @@ def compiled_graph_workers(
             limit=max(0, int(limit)), posture=posture,
             reason=(
                 f"{compiled_graphs} entr{'y' if compiled_graphs == 1 else 'ies'}: serial "
-                f"(no cpu/memory bound was read — the compiled_graph count "
+                f"(no cpu/memory bound was read — the compiled graph count "
                 f"decides this width on its own)"))
 
     if vcpus > 0:
@@ -598,8 +598,8 @@ def compiled_graph_workers(
             1, binding="device-lock", lock=False,
             reason=(
                 "serial: this torch has no GPU-benchmark lock hook, so a wide "
-                "pool would let compiled_graphs benchmark against each other and bake "
-                "contention-chosen kernel configs into a compiled_graph whose key would "
+                "pool would let compiled graphs benchmark against each other and bake "
+                "contention-chosen kernel configs into a compiled graph whose key would "
                 "not move"))
     binding = min(
         (cpu_workers, "cpu"), (mem_workers, "host-memory"),
@@ -774,7 +774,7 @@ class PoolLedger:
     #: future width change must stay readable as a delta from one row.
     workers_initial: int = 1
     wall_s: float = 0.0
-    #: Sum of the per-compiled graph Popen-to-reap walls (== the mint's ``compile_s``).
+    #: Sum of the per-compiled-graph Popen-to-reap walls (== the mint's ``compile_s``).
     busy_s: float = 0.0
     #: ``workers * wall_s`` — the seconds the pool COULD have compiled for.
     capacity_s: float = 0.0
@@ -1046,7 +1046,7 @@ class CompiledGraphCompilePool:
     """Compile N exported programs K-wide, out of process.
 
     Not a general executor: it exists to hold pgw#809's three invariants —
-    compiled graph-named failure, group-wide sibling teardown, and assembly by compiled graph
+    compiled-graph-named failure, group-wide sibling teardown, and assembly by compiled graph
     NAME rather than completion order.
     """
 
@@ -1123,7 +1123,7 @@ class CompiledGraphCompilePool:
         self.oom_basis = ""
         self.compiled_graph_seconds: Dict[str, float] = {}
         self.compiled_graph_phases: Dict[str, Dict[str, float]] = {}
-        # pgw#830: parent-side per-compiled graph spans (staging + spawn) and the
+        # pgw#830: parent-side per-compiled-graph spans (staging + spawn) and the
         # pool-level idle split. Kept separate from `compiled_graph_phases` because
         # they are NOT inside `compile_s`: staging happens in the parent while
         # other children run, so summing it into the compile total would
@@ -1211,7 +1211,7 @@ class CompiledGraphCompilePool:
         *, on_compiled_graph: Optional[Callable[[str, int, int], None]] = None,
         expected_total: int = 0,
     ) -> Dict[str, List[str]]:
-        """``[(compiled graph, ExportedProgram)] -> {compiled graph: [file, ...]}``.
+        """``[(compiled graph, ExportedProgram)] -> {compiled_graph: [file, ...]}``.
 
         Raises :class:`CompiledGraphCompileFailed` naming the FIRST compiled graph to fail,
         after tearing down every sibling group. Returns a dict ordered by
@@ -1473,14 +1473,14 @@ class CompiledGraphCompilePool:
             self.seal_memo = ""
             logger.warning(
                 "aot-pool: pgw#832 seal memo seeding failed (%s) — every "
-                "compiled_graph child will re-pay the full toolchain hash", detail)
+                "compiled graph child will re-pay the full toolchain hash", detail)
             try:
                 from . import activity as activity_mod
 
                 activity_mod.emit_event(
                     activity_mod.KIND_AOT_MINT,
                     "seal library memo seeding failed (pgw#832): "
-                    f"{detail} — compiled_graph children fall back to a full "
+                    f"{detail} — compiled graph children fall back to a full "
                     "per-child toolchain rehash (correct, but re-pays a "
                     "multi-GB SHA-256 pass once per compiled_graph)",
                     phase="pool",
@@ -1721,7 +1721,7 @@ class CompiledGraphCompilePool:
             f"whatever the interpreter's path yields (a second checkout, an "
             f"inherited PYTHONPATH, a stale wheel, or this tree edited between "
             f"the parent's import and this spawn), and that child compiled the "
-            f"files this compiled_graph would publish while every gate ran against the "
+            f"files this compiled graph would publish while every gate ran against the "
             f"parent's program")
 
     def _close_compiled_graph_partition(

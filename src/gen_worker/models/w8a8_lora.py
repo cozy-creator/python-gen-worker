@@ -760,7 +760,7 @@ def _settle_bucket(
             raise ValidationError(
                 f"active LoRA set needs rank bucket {want} but the compiled "
                 f"pipeline traced bucket {current or 'none'} — recompile at "
-                "swap time is never allowed; publish a matching lora compiled_graph"
+                "swap time is never allowed; publish a matching lora compiled graph"
             )
         for model in models:
             enable_lora_branches(model, want)

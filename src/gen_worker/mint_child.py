@@ -426,7 +426,7 @@ def _drive_warm_plan(
             raise MintChildRefused(
                 f"{mint_identity(request)}: the endpoint's own warm plan does "
                 f"not run — warm job {job.spec.name!r} raised "
-                f"{type(exc).__name__}: {exc}. A compiled_graph must not seal for a "
+                f"{type(exc).__name__}: {exc}. A compiled graph must not seal for a "
                 f"handler that cannot serve.") from exc
     return ledger
 
@@ -517,7 +517,7 @@ def execution_lane_verdict_for(
         verdict = kernel_path.unmeasured(
             candidates[0],
             "meta-mint: this child holds no weights (pgw#1080) and the lane "
-            "A/B is a whole-model benchmark; the serving side treats a compiled_graph "
+            "A/B is a whole-model benchmark; the serving side treats a compiled graph "
             "with no verdict as the documented conservative default")
         kernel_path.pin(verdict.winner, f"meta-mint: {verdict.detail}")
         frame(phase="load",
@@ -642,10 +642,10 @@ def _mint_aot(
             mint_phases=getattr(exc, "mint_phases", None)) from exc
 
     frame(phase="seal_publish",
-          note=f"packed {len(result.compiled_graphs)} compiled_graph artifact(s)")
+          note=f"packed {len(result.compiled_graphs)} compiled graph artifact(s)")
     # pgw#1176: the child moves EVERY compiled graph it packed into the parent's
     # directory, one file per graph class, and reports the set. `target` names
-    # the directory the parent watches; the per-compiled graph file names are the
+    # the directory the parent watches; the per-compiled-graph file names are the
     # compiled graphs' own `ek1` keys, so the parent addresses each by identity rather
     # than by position.
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -951,10 +951,10 @@ def assert_traceable_as_loaded(pipeline: Any, request: MintRequest) -> None:
     exactly what it says: the pipeline AS LOADED carries hooks that cannot be
     traced.
 
-    Without this, pgw#1208's per-compiled graph skip would do exactly what it is supposed
+    Without this, pgw#1208's per-compiled-graph skip would do exactly what it is supposed
     to do and dutifully skip all 36: thirty-six typed refusals and an hour of
     wall clock to say once what was knowable before the first export began. The
-    per-compiled graph skip is for a class that is individually unexportable. This is the
+    per-compiled-graph skip is for a class that is individually unexportable. This is the
     whole PIPELINE being untraceable as loaded, which is a different fact and
     gets its own sentence.
 
@@ -1012,7 +1012,7 @@ def assert_handler_proven(request: MintRequest) -> None:
     raise MintChildRefused(
         f"{mint_identity(request)}: this is a WEIGHT-FREE mint and the parent "
         f"sent no handler proof. pgw#984 requires the endpoint's own handler "
-        f"to have run before a compiled_graph seals, and since pgw#1199 that proof "
+        f"to have run before a compiled graph seals, and since pgw#1199 that proof "
         f"belongs to the process that HOLDS the weights — proving it here "
         f"would mean materialising one full checkpoint at compute dtype in a "
         f"process that holds none. Run one warm forward on the resident "
@@ -1105,7 +1105,7 @@ def _install_posture(request: MintRequest) -> None:
     that has live gRPC threads with ``pthread_atfork`` handlers, which is a
     large blast radius for a one-line guarantee.
 
-    Doing it here also covers strictly more ground than nicing the compiled graph-pool
+    Doing it here also covers strictly more ground than nicing the compiled-graph-pool
     spawns would. Since pgw#1080 every production mint is weight-free, and
     ``aot_mint._mint_compiled_graph`` forces ``parallel=False`` for a weight-free mint —
     so the pool spawns NO children at all today and the compile runs in THIS

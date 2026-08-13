@@ -120,7 +120,7 @@ def bank_root(scope: str) -> Path:
     ``scope`` is the pending's ``compiled_graph_key``. For an AOT pending that is a
     CAPTURE HANDLE, not the published compiled graph's key (a real AOT key folds the
     combined graph hash and is unknowable until the export finishes) — which is
-    exactly right here: this is a SCOPE, and identity is the per-compiled graph check
+    exactly right here: this is a SCOPE, and identity is the per-compiled-graph check
     that runs inside it. A colliding scope cannot admit anything wrong; it can
     only produce a graph-hash refusal.
     """
@@ -487,7 +487,7 @@ class CompiledGraphBank:
     def _put(self, compiled_graph: str, graph: str, files: Sequence[str]) -> None:
         if not graph:
             raise ValueError(
-                "refusing to bank an compiled_graph with no graph hash — it could only "
+                "refusing to bank an compiled graph with no graph hash — it could only "
                 "ever be re-admitted on path trust")
         unstated = sorted(a for a, v in self.context.items() if v == UNSTATED)
         if unstated:
@@ -518,7 +518,7 @@ class CompiledGraphBank:
                 "sha256": _sha256_file(dest),
             })
         if not rows:
-            raise ValueError("nothing to bank: the compiled_graph reported no files")
+            raise ValueError("nothing to bank: the compiled graph reported no files")
         payload = {
             "v": BANK_V,
             "compiled_graph": compiled_graph,

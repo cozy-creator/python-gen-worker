@@ -243,7 +243,7 @@ def fetch_materialize_manifest(
         compiled_graphs = data.get("compiled_graphs") or []
         if not isinstance(compiled_graphs, list) or not compiled_graphs:
             raise RuntimeError(
-                f"dataset materialize returned no compiled_graphs for dataset_id={dataset_id}"
+                f"dataset materialize returned no compiled graphs for dataset_id={dataset_id}"
             )
         return str(data.get("snapshot_id") or ""), compiled_graphs
 
@@ -270,11 +270,11 @@ def _expected_digest(compiled_graph: Dict[str, Any]) -> str:
     """
     raw = str(compiled_graph.get("checksum") or "").strip().lower()
     if not raw:
-        raise RuntimeError("dataset compiled_graph has no checksum — refusing to download it unverified")
+        raise RuntimeError("dataset compiled graph has no checksum — refusing to download it unverified")
     algo, sep, _ = raw.partition(":")
     if not sep:
         raise RuntimeError(
-            f"dataset compiled_graph checksum {raw!r} is untagged — 64 hex chars name no algorithm"
+            f"dataset compiled graph checksum {raw!r} is untagged — 64 hex chars name no algorithm"
         )
     if algo not in _DIGEST_HASHERS:
         raise RuntimeError(f"unsupported digest algorithm {algo!r} in checksum {raw!r}")

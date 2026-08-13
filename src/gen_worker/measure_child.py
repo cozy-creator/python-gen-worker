@@ -97,7 +97,7 @@ What it measures, and against what vocabulary
 ``export_peak_device_bytes`` / ``export_peak_device_reserved_bytes`` are the
 mint's own names for the same two counters (``aot_mint._mint_compiled_graph``), read on
 the same allocator, so a number from this child and a number from a real mint
-are comparable without translation. The per-compiled graph figure is the RUNNING
+are comparable without translation. The per-compiled-graph figure is the RUNNING
 high-water after that compiled graph — the counter is reset once, before the first row,
 exactly as the mint resets it once before its export phase — so the row that
 raised the water line is the row named beside it.

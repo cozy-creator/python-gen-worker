@@ -44,7 +44,7 @@ compiled graph. Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER CO
 the unbound-compiled graph segfault was re-measured per named model on the pin.
 
 **Truthfulness is structural.** The pod never claims "compiled graph X armed"; it
-reports per-compiled graph serve state. There is no unit left that CAN advertise more
+reports per-compiled-graph serve state. There is no unit left that CAN advertise more
 than it serves, so the old all-or-nothing invariant ("a compiled graph that cannot arm
 one of its graph classes arms none of them") is not weakened — it is
 vacuous.
@@ -147,7 +147,7 @@ RECAST_EVENT = "aot_input_recast"
 AOTI_ALIGNMENT = 16
 #: Format 3 = ONE graph class per artifact (pgw#1176): the metadata carries
 #: one ``compiled graph`` block instead of an ``compiled graphs`` map. Formats 1 and 2 are
-#: RETIRED — a format-2 compiled graph cannot restate a per-compiled graph identity, so the ck1
+#: RETIRED — a format-2 compiled graph cannot restate a per-compiled-graph identity, so the ck1
 #: corpus is purged in the coordinated re-key rather than migrated.
 ARTIFACT_FORMAT = 3
 #: Separator between the compiled graph name and the constant FQN in
@@ -288,7 +288,7 @@ _KNOWN_AOT_KEYS_LOCK = threading.Lock()
 
 
 def note_aot_key(compiled_graph_key: str) -> None:
-    """Record that ``compiled_graph_key`` (a stamped compiled graph-key digest) is an AOT compiled graph."""
+    """Record that ``compiled_graph_key`` (a stamped compiled-graph-key digest) is an AOT compiled graph."""
     key = str(compiled_graph_key or "").strip()
     if not key:
         return
@@ -652,10 +652,10 @@ def stamp_compiled_graph(
     """
     label = str(name or "").strip()
     if not label:
-        raise ValueError("compiled_graph block carries no name")
+        raise ValueError("compiled graph block carries no name")
     if LITERAL_SEP in label:
         raise ValueError(
-            f"compiled_graph name {label!r} contains {LITERAL_SEP!r}, which the "
+            f"compiled graph name {label!r} contains {LITERAL_SEP!r}, which the "
             f"literal namespace reserves")
     if not isinstance(block, Mapping):
         raise ValueError(f"compiled_graph {label!r} is not an object")
@@ -690,13 +690,13 @@ def compiled_graph_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
     """
     raw = meta.get(compiled_graph_key_mod.COMPILED_GRAPH_BLOCK_KEY)
     if not isinstance(raw, Mapping) or not raw:
-        raise ValueError("metadata declares no compiled_graph block")
+        raise ValueError("metadata declares no compiled graph block")
     label = str(raw.get("name") or "").strip()
     if not label:
-        raise ValueError("compiled_graph block carries no name")
+        raise ValueError("compiled graph block carries no name")
     if LITERAL_SEP in label:
         raise ValueError(
-            f"compiled_graph name {label!r} contains {LITERAL_SEP!r}, which the "
+            f"compiled graph name {label!r} contains {LITERAL_SEP!r}, which the "
             f"literal namespace reserves")
     if not str(raw.get("target") or "").strip():
         raise ValueError(f"compiled_graph {label!r} declares no target")
@@ -818,7 +818,7 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
     if meta.get("package_constants_in_so") is not False:
         return (
             "artifact was minted with package_constants_in_so != False "
-            "(weights baked into the .so; breaks the CAS compiled_graph model)")
+            "(weights baked into the .so; breaks the CAS compiled graph model)")
     # pgw#1097: the same shape of refusal, one layer in. A compiled graph minted before
     # the folding fence carries the minting checkpoint's values for any 0-dim
     # or <=8-element weight inductor inlined, so it is sound for exactly one
@@ -901,7 +901,7 @@ def verify_contract(
     # on the staged bytes. Two consequences, both deliberate: a forged /
     # hand-edited stamp is refused by name, and a PRE-ATOM compiled graph is refused
     # STRUCTURALLY (its metadata records an `compiled graphs` MAP and a
-    # `combined_graph_hash`, no per-compiled graph identity, so the recomputation
+    # `combined_graph_hash`, no per-compiled-graph identity, so the recomputation
     # raises rather than matching) — which is what makes the ck1 corpus purge
     # hygiene rather than a correctness precondition.
     # Gated on key SHAPE: an ek-shaped stamp is an identity claim and must
@@ -1733,7 +1733,7 @@ def _load_literals(path: Path, device: str) -> Dict[str, Any]:
 
 
 def split_literals(literals: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Split a namespaced literal payload into per-compiled graph tables.
+    """Split a namespaced literal payload into per-compiled-graph tables.
 
     Keys are ``<compiled graph>::<fqn>`` (:data:`LITERAL_SEP`); a key with no
     namespace is refused by name — a literal the dispatch cannot attribute
@@ -2035,7 +2035,7 @@ class ArtifactRunner:
         # sdxl mint died at publish as an anonymous `RuntimeError:
         # update_constant_buffer_func_(...) API call failed at
         # model_container_runner.cpp:289` — the real message (a cudaMalloc
-        # OOM from per-compiled graph constant copies) went to a stderr no pod
+        # OOM from per-compiled-graph constant copies) went to a stderr no pod
         # exposes. Every failure inside the AOTI update is now a typed
         # ConstantsUnboundError carrying the compiled graph, the constants' size and
         # the card's live free/total, so the hub row names the failure class.
@@ -2156,7 +2156,7 @@ def no_compiled_graph_detail(
     """
     if not missed:
         return (
-            f"request out of declared envelope: no packaged compiled_graph admits "
+            f"request out of declared envelope: no packaged compiled graph admits "
             f"this call ({tried} tried), so the request is served EAGER "
             f"and named at ingress")
     ranked = sorted(missed, key=lambda row: (row[0], row[1]))
@@ -2164,7 +2164,7 @@ def no_compiled_graph_detail(
     dims_ok = all(_rung(m.reason) < MISS_RUNGS["static_dim_mismatch"]
                   for m in misses)
     head = (
-        f"request out of declared envelope — no packaged compiled_graph admits this "
+        f"request out of declared envelope — no packaged compiled graph admits this "
         f"call, served EAGER ({tried} tried); CLOSEST compiled_graph "
         f"{closest!r}"
         f"{' — every declared dim MATCHES' if dims_ok else ''}: "
@@ -2247,8 +2247,8 @@ class CompiledGraphDispatch:
     def remove(self, name: str, reason: str) -> bool:
         """De-arm ONE compiled graph, sticky for the boot. True when it was armed.
 
-        This is the whole replacement for the old compiled graph-wide revoke: a
-        compiled graph-attributable failure in one graph class costs that class, and
+        This is the whole replacement for the old compiled-graph-wide revoke: a
+        compiled-graph-attributable failure in one graph class costs that class, and
         every sibling keeps serving compiled.
         """
         label = str(name)
@@ -2322,7 +2322,7 @@ class CompiledGraphDispatch:
                 # already contains.
                 raise IngressContractError(
                     "compiled_graph_pending_compile",
-                    f"no ARMED compiled_graph admits this call ({len(self.runners)} "
+                    f"no ARMED compiled graph admits this call ({len(self.runners)} "
                     f"armed, {len(pending)} declared classes still pending "
                     f"compile) — served EAGER while the background compile "
                     f"reaches them: {list(pending)[:4]!r}. "
@@ -2333,7 +2333,7 @@ class CompiledGraphDispatch:
             names = sorted(name for name, _ in admitted)
             raise IngressContractError(
                 "compiled_graph_ambiguous",
-                f"{len(admitted)} compiled_graphs admit this call ({names[:6]!r}) — "
+                f"{len(admitted)} compiled graphs admit this call ({names[:6]!r}) — "
                 f"the declaration does not discriminate these graph classes "
                 f"by ingress contract")
         return admitted[0]
@@ -2366,7 +2366,7 @@ class CompiledGraphDispatch:
         return out
 
     def compiled_graph_calls(self) -> Dict[str, int]:
-        """Per-compiled graph served-call counts — which graph class actually served."""
+        """Per-compiled-graph served-call counts — which graph class actually served."""
         return {name: runner.calls for name, runner in self.runners}
 
     def excludes(self, names: Sequence[str]) -> bool:
@@ -2541,7 +2541,7 @@ def wrap_module(
     counted, per-request contract refusal — the request serves eagerly and
     the artifact stays armed for traffic inside the declared envelope,
     because one
-    out-of-range request (or an compiled graph-dispatch miss/ambiguity) says nothing
+    out-of-range request (or an compiled-graph-dispatch miss/ambiguity) says nothing
     about the artifact's health.
 
     pgw#725 LoRA seam: when the denoiser carries a lifted adapter, both
@@ -2566,7 +2566,7 @@ def wrap_module(
     }
 
     def _de_arm(reason: str, detail: str) -> None:
-        """§4.31 PER COMPILED_GRAPH (pgw#1176): a compiled graph-attributable failure de-arms the
+        """§4.31 PER COMPILED_GRAPH (pgw#1176): a compiled-graph-attributable failure de-arms the
         GRAPH CLASS that produced it, sticky for the boot, and every sibling
         keeps serving compiled. The target's compiled lane is revoked only
         when the registry empties — that is the moment, and the only moment,
@@ -2698,7 +2698,7 @@ def wrap_module(
                 logger.warning(
                     "aot-serve: %s hit CUDA OOM (%s); serving this request "
                     "eager, artifact stays armed — allocator pressure is not "
-                    "the compiled_graph's fault", label, exc)
+                    "the compiled graph's fault", label, exc)
                 activity_mod.emit_event(
                     "aot_serve_oom",
                     f"family={meta.get('family')} target={label}: "
@@ -2904,7 +2904,7 @@ def _oom_in_chain(exc: BaseException) -> Optional[BaseException]:
 def _marker(pipeline: Any) -> Dict[str, Any]:
     """The pipeline's arm marker, created empty on first use.
 
-    pgw#1176: the marker is the pod's per-compiled graph serve-state record, not a
+    pgw#1176: the marker is the pod's per-compiled-graph serve-state record, not a
     snapshot of one compiled graph. It carries the wrapped targets, the by-reference
     constant pools that must outlive their runners, the literal tables, and
     one row per compiled graph ever armed on this object.
@@ -2934,7 +2934,7 @@ def arm_compiled_graph(
     """Stage + verify + load + BIND + register ONE compiled graph class.
 
     THE ATOM (pgw#1176). What this replaces — ``load_and_wrap``'s
-    stage-verify-load-EVERY-compiled graph-then-bind-ALL-then-wrap shape — carried the
+    stage-verify-load-EVERY-compiled-graph-then-bind-ALL-then-wrap shape — carried the
     invariant "a compiled graph that cannot arm one of its graph classes arms none of
     them, because a partially served contract would be a silent subset of
     what the compiled graph key advertises". That invariant was locally correct and
@@ -2946,8 +2946,8 @@ def arm_compiled_graph(
     Consequences that fall out rather than being engineered:
 
     * an compiled graph that cannot arm costs THAT class. Its siblings keep serving
-      compiled, and the pod reports per-compiled graph serve state rather than a
-      compiled graph-level claim;
+      compiled, and the pod reports per-compiled-graph serve state rather than a
+      compiled-graph-level claim;
     * coverage ACCRETES. A second call arms a second class into the same
       registry, the same target pool and the same live wrap. There is no
       "complete" state and nothing waits for one;
@@ -3107,7 +3107,7 @@ def arm_compiled_graph(
         # pipeline shares by construction (`verify_declared` refuses any
         # artifact whose sm/torch/cuda/family disagree), kept so callers that
         # ask the live object what it is armed with get an answer without
-        # re-reading a tarball. Per-compiled graph facts live in `compiled graphs`.
+        # re-reading a tarball. Per-compiled-graph facts live in `compiled graphs`.
         marker["meta"] = meta
         marker["compiled_graphs"][name] = {
             "key": str(meta.get("compiled_graph_key") or ""),
@@ -3131,7 +3131,7 @@ def arm_compiled_graph(
 def disarm_compiled_graph(pipeline: Any, name: str, reason: str) -> bool:
     """De-arm ONE graph class, sticky for the boot. True when it was armed.
 
-    The per-compiled graph half of §4.31, reachable from outside a serve call: the
+    The per-compiled-graph half of §4.31, reachable from outside a serve call: the
     mint's parity gate refuses an compiled graph here rather than un-arming a compiled graph,
     and an LRU eviction of a cold container is the same operation.
     """
@@ -3155,11 +3155,11 @@ def disarm_compiled_graph(pipeline: Any, name: str, reason: str) -> bool:
 
 
 def compiled_graph_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
-    """Per-compiled graph SERVE STATE — what this pod actually serves, per graph class.
+    """Per-compiled-graph SERVE STATE — what this pod actually serves, per graph class.
 
     pgw#1176 §1.4: the pod never claims "compiled graph X armed". It reports, per compiled graph,
     ``armed`` / ``de_armed(reason)`` / ``pending`` — so there is no unit left
-    that can advertise more than it serves. This is the record the per-compiled graph
+    that can advertise more than it serves. This is the record the per-compiled-graph
     hub events (§1.7) are built from.
     """
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
@@ -3223,7 +3223,7 @@ def enable(
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
         identity = _adopt_identity(Path(artifact))
         logger.warning(
-            "aot-serve: compiled_graph unusable (%s: %s); this class serves eager",
+            "aot-serve: compiled graph unusable (%s: %s); this class serves eager",
             reason, exc)
         return AdoptOutcome.miss(
             reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
@@ -3373,7 +3373,7 @@ def armed_metadata(pipeline: Any) -> Dict[str, Any]:
 def armed_compiled_graphs(pipeline: Any) -> Dict[str, str]:
     """``compiled graph name -> compiled graph key`` for every graph class ARMED right now.
 
-    pgw#1176: this — not a compiled graph-level boolean — is what the pod may claim. A
+    pgw#1176: this — not a compiled-graph-level boolean — is what the pod may claim. A
     subset is a legitimate steady state, so "how many, and which" is the only
     honest answer to "what does this pod serve compiled".
     """

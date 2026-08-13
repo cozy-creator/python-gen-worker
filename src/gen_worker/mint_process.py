@@ -338,7 +338,7 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     #: pgw#877: there was a `peak_rss_bytes` beside it, written from
     #: `getrusage(SELF)+getrusage(CHILDREN)` on both minted termini and read by
     #: NOTHING — the parent banks the host high-water from
-    #: `mint_phases["pool"]["peak_child_rss_bytes"]`, which is a per-compiled graph
+    #: `mint_phases["pool"]["peak_child_rss_bytes"]`, which is a per-compiled-graph
     #: VmHWM tree sum and the number `compiled_graph_workers` actually divides by.
     peak_vram_bytes: int = 0
     elapsed_s: float = 0.0
@@ -372,7 +372,7 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     warm_proof_peak_bytes: int = 0
     warm_proof_values: str = ""
     export_peak_bytes: int = 0
-    #: pgw#805: the AOT recipe's per-compiled graph phase TABLE
+    #: pgw#805: the AOT recipe's per-compiled-graph phase TABLE
     #: (``aot_mint._mint_phase_table``). The child emits it too, but a mint
     #: child holds no orchestrator session, so the child's events go nowhere —
     #: the parent re-emits from this, exactly as it does for `jit_compile`.
@@ -834,7 +834,7 @@ async def run_mint(
         if not present:
             return _out(
                 CRASHED,
-                "the mint process exited 0 but wrote no compiled_graph artifact "
+                "the mint process exited 0 but wrote no compiled graph artifact "
                 f"(report={'present' if report else 'absent'}, "
                 f"named={len(rows)})")
         return _out(MINTED, report.detail if report else "", present)

@@ -570,7 +570,7 @@ def assert_memo_honest(
 def graph_witnesses_of(
     blocks: Mapping[str, Mapping[str, Any]],
 ) -> Dict[str, str]:
-    """``{compiled graph: graph_witness}`` for one set of keying blocks (pgw#1031).
+    """``{compiled_graph: graph_witness}`` for one set of keying blocks (pgw#1031).
 
     Read off the blocks rather than recomputed: the witness is stamped where
     the program is, by ``aot_mint.keying_block``, and a second derivation here
@@ -587,7 +587,7 @@ def graph_witnesses_of(
 def class_hashes_of(
     blocks: Mapping[str, Mapping[str, Any]],
 ) -> Dict[str, str]:
-    """``{compiled graph: class_hash}`` for one set of keying blocks.
+    """``{compiled_graph: class_hash}`` for one set of keying blocks.
 
     Stamped by ``aot_serve.stamp_compiled_graph`` — the mint's own function — so a
     hash computed here and a hash the mint stamped are the same computation.
@@ -618,7 +618,7 @@ def fold(
     lora_bucket: int,
     envelope: Mapping[str, Any],
 ) -> Tuple[Dict[str, str], Dict[str, str], str]:
-    """``({compiled graph: compiled_graph_key}, {compiled graph: class_hash}, manifest_digest)`` for one
+    """``({compiled_graph: compiled_graph_key}, {compiled_graph: class_hash}, manifest_digest)`` for one
     declaration's class set — THE derived contract manifest (pgw#1176).
 
     §4.27 asked for "THE compiled graph key" (singular). This returns a KEY SET plus a
@@ -745,7 +745,7 @@ def concurrency_budget(
 
     ``per_child_bytes`` is the child's WHOLE PROCESS footprint on the card and
     must stay that. The th#1825 lane bounded the same question for finalize's
-    adopt and ruled out per-compiled graph literals as the dominant term by three
+    adopt and ruled out per-compiled-graph literals as the dominant term by three
     independent measurements (literals live inside the artifact — 4.19 MB); the
     real cost is the loaded AOTI packages, plus device code, per-runner
     workspace and load-time buffers, **none of which appear in the artifact**.
@@ -920,7 +920,7 @@ def derive(
     if int(declared_hint) <= 0:
         raise BootKeyUnavailable(
             "no_classes",
-            f"family {family!r} declares no graph classes; a compiled_graph with no "
+            f"family {family!r} declares no graph classes; a compiled graph with no "
             f"class set has no identity (pgw#716/#758)")
 
     digest = closure_digest(family, cfg, function=function, slots=slots)

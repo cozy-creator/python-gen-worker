@@ -200,7 +200,7 @@ def prove(
         raise HandlerProofFailed(
             f"the endpoint's own warm plan does not run on the resident "
             f"pipeline — warm job {job.spec.name!r} raised "
-            f"{type(exc).__name__}: {exc}. A compiled_graph must not seal for a handler "
+            f"{type(exc).__name__}: {exc}. A compiled graph must not seal for a handler "
             f"that cannot serve.") from exc
     how = f"resident warm forward {job.spec.name!r} (real weights)"
     record(name, how)

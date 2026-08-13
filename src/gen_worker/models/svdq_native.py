@@ -431,7 +431,7 @@ def adanorm_splits_for(model_class: str, prefix: str) -> int:
         f"unknown adaLN split count for AWQ layer {prefix!r} in "
         f"{model_class} — the exporter's adanorm transform cannot be inferred "
         f"from the tensors, and a wrong count corrupts output silently; add "
-        f"the (class, suffix) compiled_graph to _ADANORM_SPLITS after verifying it")
+        f"the (class, suffix) compiled graph to _ADANORM_SPLITS after verifying it")
 
 
 def native_denoiser_class(model_class: str) -> Any:

@@ -349,7 +349,7 @@ def _mint_here(
         # deliberately leaves open for a caller that might have another.
         fleet_compiled_graphs.abandon_self_mint(pending)
     logger.info(
-        "local-serve: %s has no compiled_graph on this machine yet (%s); serving eager",
+        "local-serve: %s has no compiled graph on this machine yet (%s); serving eager",
         pending.family,
         (result.detail or result.status) if result is not None else "mint failed")
     return False

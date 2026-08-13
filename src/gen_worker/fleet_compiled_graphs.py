@@ -181,7 +181,7 @@ class ArmIdentity:
 #: ``graph`` is deliberately absent: it exists only after the export, and
 #: comparing a declared-facts stand-in against the traced fact is the
 #: phantom divergence this type retires.
-# pgw#1176: ``envelope`` LEFT this comparison with the key. A per-compiled graph
+# pgw#1176: ``envelope`` LEFT this comparison with the key. A per-compiled-graph
 # artifact records no DECLARED ENVELOPE — that is a manifest fact about the
 # whole declaration, not about one graph class — so comparing it here would
 # compare a value the child can no longer state against one the parent can,
@@ -585,7 +585,7 @@ def control_plane_metadata(meta: Mapping[str, Any]) -> Dict[str, Any]:
             key=lambda k: len(json.dumps(kept[k], sort_keys=True, default=str)),
             default="")
         raise CompiledGraphPublishRefused(
-            f"compiled_graph declare is {encoded} bytes, over the "
+            f"compiled graph declare is {encoded} bytes, over the "
             f"{COMPILED_GRAPH_DECLARE_MAX_BYTES}-byte control-plane bound (th#1645); "
             f"the largest block is {widest!r} — it belongs in the artifact, "
             "not in the declare",
@@ -711,7 +711,7 @@ class CompiledGraphPublisher:
         mark = meta.get(ADOPTION_MARK)
         if mark:
             raise CompiledGraphPublishRefused(
-                f"compiled_graph carries adoption provenance {mark!r}; republishing "
+                f"compiled graph carries adoption provenance {mark!r}; republishing "
                 "it is fenced (pgw#712)")
         key = str(meta.get("compiled_graph_key") or "").strip()
         if not key:
@@ -759,7 +759,7 @@ class CompiledGraphPublisher:
             from .hubio.client import CommitFile, HubClient
 
             # th#1303/pgw#807 item 3 — THE FLIP, taken. Both gates that held
-            # it are discharged: th#1340 gave the v2 route the compiled graph-publish
+            # it are discharged: th#1340 gave the v2 route the compiled-graph-publish
             # claim (receipt + `compiled_graph_store` + `compiled_graph_receipts`, the same three
             # writes v1 does), and the receipt reader dispatches on the
             # receipt's OWN algorithm tag, so a sha256-bound compiled graph resolves.
@@ -884,7 +884,7 @@ def _recomputed_key(meta: Mapping[str, Any]) -> compiled_graph_key.CompiledGraph
         return compiled_graph_key.from_compiled_graph_metadata(meta)
     except compiled_graph_key.CompiledGraphKeyError as exc:
         raise CompiledGraphPublishRefused(
-            f"compiled_graph states no computable identity ({exc}); publishing it under "
+            f"compiled graph states no computable identity ({exc}); publishing it under "
             "partial axes would produce a row the fleet cannot arm from "
             "(pgw#1046)") from exc
 
@@ -935,7 +935,7 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
         # it is a compiled graph the fleet can never arm — same fail-closed rule as
         # the axes above.
         raise CompiledGraphPublishRefused(
-            "compiled_graph records no env_seal block; the hub's ArtifactIdentity "
+            "compiled graph records no env_seal block; the hub's ArtifactIdentity "
             "requires its digest (pgw#903/pgw#1046)")
     axes[ENV_SEAL_AXIS] = env_seal.seal_digest(seal)
     axes["family"] = str(meta.get("family") or family or "")
@@ -1071,13 +1071,13 @@ def _publish_async(
             # The bytes are durable, the record stays `pending`, and this
             # machine's next boot re-attempts the upload from them.
             logger.warning(
-                "fleet-compiled_graphs: publish failed; the compiled_graph stays durable in this "
+                "fleet-compiled_graphs: publish failed; the compiled graph stays durable in this "
                 "machine's local CAS and the upload is retried next boot",
                 exc_info=True)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: publish attempt failed: "
-                f"{type(exc).__name__}: {exc}; the compiled_graph is durable locally "
+                f"{type(exc).__name__}: {exc}; the compiled graph is durable locally "
                 f"and the upload is still owed",
                 # The hub's OWN code when it gave one, so a fleet-wide
                 # refusal is one `phase=` group instead of N prose strings.
@@ -1144,7 +1144,7 @@ def resume_owed_publishes(
             arm_token=compiled_graph.arm_token))
     if threads:
         logger.info(
-            "fleet-compiled_graphs: re-attempting %d owed compiled_graph upload(s) from this "
+            "fleet-compiled_graphs: re-attempting %d owed compiled graph upload(s) from this "
             "machine's local CAS — each survived the process that minted it",
             len(threads))
     return threads
@@ -1396,7 +1396,7 @@ def arm_ordered(
     if not receipts.configured():
         raise OrderedArmError(
             "receipt_gate_unconfigured",
-            "an ordered compiled_graph arm requires the hub receipt gate; this process "
+            "an ordered compiled graph arm requires the hub receipt gate; this process "
             "has no hub wiring to verify the publisher against")
     try:
         receipt = receipts.verify_delivered_artifact(Path(artifact), family)
@@ -1440,7 +1440,7 @@ def arm_ordered(
             cc.drop_lora_execution_lane(pipe)
         raise OrderedArmError(
             outcome.reason or "ordered_arm_refused",
-            f"the named compiled_graph did not arm: {outcome.detail or outcome.identity}")
+            f"the named compiled graph did not arm: {outcome.detail or outcome.identity}")
     return ArmOutcome(armed=True, adoptions=(row,))
 
 
@@ -1536,7 +1536,7 @@ def _arming_policy(
         # Mandatory (w8a8/w4a4) miss: production used to fail closed here.
         # The whole point of self-mint is that this worker can produce the
         # compiled graph itself.
-        logger.info("fleet-compiled_graphs: no delivered compiled_graph for mandatory lane; self-minting")
+        logger.info("fleet-compiled_graphs: no delivered compiled graph for mandatory lane; self-minting")
 
     if not family:
         return _fail_closed(
@@ -1600,11 +1600,11 @@ def _arming_policy(
             declares_export = export_declaration(family) is not None
             return _fail_closed(
                 pipe,
-                ("this lane serves only from a compiled_graph and the mint recipe is "
-                 f"{recipe!r}, not aot, so no compiled_graph can be minted for it here "
+                ("this lane serves only from a compiled graph and the mint recipe is "
+                 f"{recipe!r}, not aot, so no compiled graph can be minted for it here "
                  "(pgw#1010)") if declares_export else
-                ("this lane serves only from a compiled_graph and this family declares "
-                 "no export, so no compiled_graph can be minted for it (pgw#1010)"),
+                ("this lane serves only from a compiled graph and this family declares "
+                 "no export, so no compiled graph can be minted for it (pgw#1010)"),
                 selection_bug, phase=EagerPhase.MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH,
                 permanent=not declares_export)
         # INTAKE. Arm the declared targets and let this pod's own warmup
@@ -1624,7 +1624,7 @@ def _arming_policy(
         logger.info(
             "fleet-compiled_graphs: JIT intake armed for %s (lane=%s) — this pod "
             "compiles its own graphs and serves them for its own life; no "
-            "compiled_graph is minted, keyed or published (pgw#1010)",
+            "compiled graph is minted, keyed or published (pgw#1010)",
             family, loading.pipeline_weight_lane(pipe) or "plain")
         return ArmOutcome(armed=True, selection_bug=selection_bug)
 
@@ -1721,7 +1721,7 @@ def _arming_policy(
                 Path(finalized_prior.artifact), arm_key)
             if not armed_ready:
                 logger.warning(
-                    "fleet-compiled_graphs: the in-process finalized compiled_graph for key=%s "
+                    "fleet-compiled_graphs: the in-process finalized compiled graph for key=%s "
                     "did not re-arm (%s%s); falling through to a fresh mint",
                     key, refusal[0], f": {refusal[1]}" if refusal[1] else "")
         except Exception as exc:  # noqa: BLE001 — fall back to a fresh mint
@@ -1786,7 +1786,7 @@ def _arming_policy(
         _PENDING.setdefault(key, pending)
     logger.info(
         "fleet-compiled_graphs: DELEGATED %s self-mint for %s (key=%s) — a child "
-        "process builds the compiled_graph while this process serves eager "
+        "process builds the compiled graph while this process serves eager "
         "(pgw#784/#805)", recipe, family, key)
     activity_mod.emit_event(
         "self_mint_started",
@@ -1818,7 +1818,7 @@ def _packed_metadata(artifact: Path) -> Dict[str, Any]:
 def arm_axis_divergence(
     arm_key: ArmIdentity, meta: Mapping[str, Any],
 ) -> str:
-    """'' when the child's compiled graph-metadata states the parent's obligation
+    """'' when the child's compiled-graph-metadata states the parent's obligation
     identity on every ENVIRONMENT fact (:data:`ARM_ENVIRONMENT_FACTS`), else
     the FIRST diverging fact with both values (pgw#1042).
 
@@ -1855,7 +1855,7 @@ def arm_axis_divergence(
     parent = arm_key.facts_dict()
     for fact in ARM_ENVIRONMENT_FACTS:
         if parent.get(fact, "") != child.get(fact, ""):
-            return (f"{fact}: child compiled_graph states {child.get(fact, '')!r}, "
+            return (f"{fact}: child compiled graph states {child.get(fact, '')!r}, "
                     f"this runtime computed {parent.get(fact, '')!r}")
     return ""
 
@@ -1976,7 +1976,7 @@ def _arm_exported_compiled_graph(
         meta: Optional[Dict[str, Any]] = artifact_meta.read_metadata(artifact)
     except artifact_meta.ArtifactMetadataError as exc:
         return False, None, ("compiled_graph_envelope_unreadable", (
-            f"the compiled_graph's {artifact_meta.METADATA_NAME} could not be read, so "
+            f"the compiled graph's {artifact_meta.METADATA_NAME} could not be read, so "
             f"no gate that reads it could run: {exc}"))
     divergence = ""
     if meta is not None and arm_key is not None:
@@ -1984,7 +1984,7 @@ def _arm_exported_compiled_graph(
     if divergence:
         stamped = str(meta.get("compiled_graph_key") or "") if meta else "MISSING"
         return False, meta, ("key_axis_divergence", (
-            f"the compiled_graph (stamped key {stamped}) does not describe this "
+            f"the compiled graph (stamped key {stamped}) does not describe this "
             f"runtime: {divergence}"))
     try:
         outcome = provision.arm_aot(
@@ -2086,7 +2086,7 @@ def arm_from_local_store(
             route = ROUTE_BOOT_KEY
             local = local_compiled_graph_store.lookup(boot_local_key)
     except Exception as exc:  # noqa: BLE001 — a cache read must never be fatal
-        logger.warning("fleet-compiled_graphs: local compiled_graph store unreadable (%s)", exc)
+        logger.warning("fleet-compiled_graphs: local compiled graph store unreadable (%s)", exc)
         return None
     if local is None:
         return None
@@ -2095,7 +2095,7 @@ def arm_from_local_store(
     if not armed:
         dropped = route == ROUTE_MEMO
         logger.warning(
-            "fleet-compiled_graphs: the local store's compiled_graph for %s (key=%s, route=%s) did "
+            "fleet-compiled_graphs: the local store's compiled graph for %s (key=%s, route=%s) did "
             "not arm (%s%s); %s and minting", family, local.key, route, reason,
             f": {detail}" if detail else "",
             "dropping it" if dropped else "leaving it in place")
@@ -2104,7 +2104,7 @@ def arm_from_local_store(
         activity_mod.emit_event(
             "local_compiled_graph_refused",
             f"family={family} arm_key={arm_key.token} compiled_graph_key={local.key} "
-            f"route={route}: this machine's own stored compiled_graph did not arm "
+            f"route={route}: this machine's own stored compiled graph did not arm "
             f"({reason}{': ' + detail if detail else ''}); it has been "
             + ("dropped from the local store" if dropped else
                "LEFT in the local store — a boot-key hit is an inference "
@@ -2140,13 +2140,13 @@ def arm_from_local_store(
         # same record must re-arm these bytes rather than pay a second lookup.
         _FINALIZED[arm_key.token] = minted
     logger.info(
-        "fleet-compiled_graphs: armed %s from THIS MACHINE's local compiled_graph store "
+        "fleet-compiled_graphs: armed %s from THIS MACHINE's local compiled graph store "
         "(key=%s, %.1f MB, route=%s) — no mint, no hub, no network (§4.28)",
         family, key, local.bytes / 1e6, route)
     activity_mod.emit_event(
         "local_compiled_graph_armed",
         f"family={family} arm_key={arm_key.token} compiled_graph_key={key} "
-        f"route={route}: this machine minted this compiled_graph on an earlier boot and "
+        f"route={route}: this machine minted this compiled graph on an earlier boot and "
         f"stored it locally; it arms from disk with no mint and no publish "
         f"route"
         + (" — addressed by the key THIS BOOT derived, so the arm-token memo "
@@ -2185,11 +2185,11 @@ def adopt_delegated_mint(
     rows = [Path(a) for a in artifacts]
     if not rows:
         state["adopt_refusal"] = (
-            "no_compiled_graph_artifact", "the child reported no compiled_graph artifact")
+            "no_compiled_graph_artifact", "the child reported no compiled graph artifact")
         return None
     # The FIRST compiled graph keeps the pending's canonical target path (the resume
     # bank and the local-store write address it); the rest sit beside it under
-    # their own keys. Nothing reads a compiled graph-shaped single path any more.
+    # their own keys. Nothing reads a compiled-graph-shaped single path any more.
     artifact = rows[0]
     if artifact != pending.target:
         try:
@@ -2303,7 +2303,7 @@ def adopt_delegated_mint(
             # to advertise, publish or ledger.
             refusals.append((
                 compiled_graph_name or row.name, "compiled_graph_key_missing",
-                "the child's compiled_graph carries no stamped compiled_graph_key"))
+                "the child's compiled graph carries no stamped compiled_graph_key"))
             continue
         adopted.append((row_key, row, row_meta))
 
@@ -2326,7 +2326,7 @@ def adopt_delegated_mint(
         activity_mod.emit_event(
             "self_mint_abort",
             f"family={pending.family} arm_key={pending.arm_token} "
-            f"compiled_graph_key={stamped}: the child process produced a compiled_graph this "
+            f"compiled_graph_key={stamped}: the child process produced a compiled graph this "
             f"runtime could not adopt "
             f"({reason}{': ' + detail if detail else ''}); serving stays "
             f"eager, nothing is published, and the artifact is QUARANTINED in "
@@ -2351,7 +2351,7 @@ def adopt_delegated_mint(
 
     # The identity carried forward is the FIRST adopted compiled graph's; the whole
     # adopted set rides `state["adopted_compiled_graphs"]` so publish and the local
-    # store loop over it. pgw#1176: there is no compiled graph-level identity to carry.
+    # store loop over it. pgw#1176: there is no compiled-graph-level identity to carry.
     key, first_artifact, meta = adopted[0]
     if refusals:
         logger.warning(
@@ -2530,7 +2530,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         activity_mod.emit_event(
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: the publish "
-            "gate ran with no finalized compiled_graph on this pending — nothing was "
+            "gate ran with no finalized compiled graph on this pending — nothing was "
             "packed, so nothing can ship",
             phase="nothing_to_publish",
         )
@@ -2575,7 +2575,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         activity_mod.emit_event(
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: no publish "
-            "sink (file_base_url/worker JWT absent at arming time); the compiled_graph "
+            "sink (file_base_url/worker JWT absent at arming time); the compiled graph "
             "was kept in this machine's own store (§4.28/pgw#1096 — the "
             "sentence 'stays local to this pod' is now TRUE; before it was "
             "printed on the way to an rmtree) and this machine reuses it, but "
@@ -2613,7 +2613,7 @@ def keep_self_mint_local(pending: "PendingSelfMint") -> None:
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: this machine "
             f"has no publish sink and nothing was packed for this pending, so "
-            f"there is no compiled_graph to keep either",
+            f"there is no compiled graph to keep either",
             phase="nothing_to_publish",
         )
         mark_terminus(pending, TERMINUS_ABANDONED)
@@ -2626,7 +2626,7 @@ def keep_self_mint_local(pending: "PendingSelfMint") -> None:
     activity_mod.emit_event(
         "self_mint_publish_withheld",
         f"family={pending.family} key={pending.arm_token}: this machine mints "
-        f"for ITSELF (§4.28) — the compiled_graph is in its own store, addressed by the "
+        f"for ITSELF (§4.28) — the compiled graph is in its own store, addressed by the "
         f"same ck1 key the hub store would use, and no publish was attempted "
         f"because no sink exists to attempt one against",
         phase=KEEP_NO_PUBLISHER,
@@ -2657,7 +2657,7 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
         activity_mod.emit_event(
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: {reason} — and "
-            "nothing was packed for this pending, so there was no compiled_graph to "
+            "nothing was packed for this pending, so there was no compiled graph to "
             "withhold either",
             phase="nothing_to_publish",
         )
@@ -2667,7 +2667,7 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
     state["publish_resolved"] = True
     logger.error(
         "fleet-compiled_graphs: SELF_MINT_PUBLISH_WITHHELD family=%s key=%s — %s; "
-        "compiled_graph stays local to this pod",
+        "compiled graph stays local to this pod",
         pending.family, pending.arm_token, reason)
     # pgw#677 reopen: the withhold decision is hub-relevant truth (the mint
     # obligation stays undischarged and every cold pod re-mints) — it must
@@ -2825,7 +2825,7 @@ def mint_recipe(
             "no_export_declaration",
             f"family {family!r} registered no export declaration (a "
             f"`compile=` block carrying graph classes, pgw#739/#758) — the "
-            f"class set a multi-graph compiled_graph covers is undeclared")
+            f"class set a multi-graph compiled graph covers is undeclared")
 
     # pgw#1115: the refusal, as DATA. A `Compile` carrying unresolved
     # `blockers=` declines here under its own phase, naming the ids — the one
@@ -2959,14 +2959,14 @@ def _fail_closed(
             # declared this lane mandatory, so eager is not a posture they
             # sanctioned (see CompiledExecutionLaneImpossibleError).
             refusal: Exception = cc.CompiledExecutionLaneImpossibleError(
-                f"{lane} requires a compile compiled_graph and no compiled_graph can EVER exist for "
-                f"this family ({reason}). Not retryable: no pod can hold a compiled_graph "
+                f"{lane} requires a compile compiled graph and no compiled graph can EVER exist for "
+                f"this family ({reason}). Not retryable: no pod can hold a compiled graph "
                 f"the family declares no export for. Not served eager either: "
                 f"the {lane} lane is declared mandatory, so eager would serve "
                 f"numerics this endpoint never sanctioned")
         else:
             refusal = cc.CompiledExecutionLaneUnavailableError(
-                f"{lane} requires a compile compiled_graph and the self-mint "
+                f"{lane} requires a compile compiled graph and the self-mint "
                 f"is unavailable ({reason})")
         if selection_bug is not None:
             raise refusal from selection_bug
@@ -2986,7 +2986,7 @@ def _fail_closed(
     logger.info("fleet-compiled_graphs: serving eager (%s)", reason)
     activity_mod.emit_event(
         "self_mint_skipped",
-        f"lane={execution_lane or 'plain'}: no compiled_graph and no mint — {reason}; this "
+        f"lane={execution_lane or 'plain'}: no compiled graph and no mint — {reason}; this "
         f"worker serves eager and publishes nothing",
         phase=phase,
     )

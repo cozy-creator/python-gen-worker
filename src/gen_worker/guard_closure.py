@@ -111,7 +111,7 @@ GATE_ADVISORY = "advisory"
 # Verdicts. LEAK and UNPROVEN are REPORTED, never fatal (pgw#756).
 LEAK = "LEAK"
 UNPROVEN = "unproven"                    # guards unreadable on this torch build
-RUNTIME_STATE = "runtime-state"          # ambient process state (compiled graph-key runtime axes)
+RUNTIME_STATE = "runtime-state"          # ambient process state (compiled-graph-key runtime axes)
 CODE_IDENTITY = "code-identity"          # G[...] roots (version/image axes)
 MODULE_STRUCTURE = "module-structure"    # L['self'] roots (family/graph/weight axes)
 CONTRACT_SHAPE = "contract-shape"        # input tensor shape/stride/dtype/device
@@ -275,7 +275,7 @@ class ClosureReport:
         return dict(sorted(counts.items()))
 
     def manifest(self) -> Dict[str, Any]:
-        """Deterministic JSON manifest — the durable per-compiled graph guard dump."""
+        """Deterministic JSON manifest — the durable per-compiled-graph guard dump."""
         return {
             "v": MANIFEST_VERSION,
             "graphs": [
@@ -406,7 +406,7 @@ def _compiled_graph_guard_rows(compiled_graph: Any) -> List[Tuple[str, str, str]
     manager = getattr(compiled_graph, "guard_manager", None)
     if manager is None:
         raise GuardClosureError(
-            "dynamo cache compiled_graph exposes no guard_manager — the guard debug "
+            "dynamo cache compiled graph exposes no guard_manager — the guard debug "
             "surface changed; closure is unprovable on this torch")
     root = getattr(manager, "root", None)
     if root is not None:
@@ -664,7 +664,7 @@ def classify(
     to the input managers (and SYMBOLIC_SHAPE_GUARD to synthetic tuple
     sources), never predictably to one root. Everything else dispatches on
     the source root: module- and global-rooted guards are covered by
-    construction (weights + code identity, pinned by the compiled graph-key axes);
+    construction (weights + code identity, pinned by the compiled-graph-key axes);
     input-rooted and ambient guards are the closed world — unknown types are
     LEAKS, never waved on.
     """

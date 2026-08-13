@@ -274,9 +274,9 @@ def _lib_digest(path: str, mtime_ns: int, size: int) -> str:
 #    rather than re-hashed). A KB-scale read covering, on the measured image,
 #    36 of 36 shipped toolchain libraries.
 # 2. The pgw#832 cross-process memo — now the fallback STORE for whatever
-#    RECORD does not cover, and still what a pgw#809 compiled graph-compile child reads
+#    RECORD does not cover, and still what a pgw#809 compiled-graph-compile child reads
 #    so a 72-compiled graph mint does not re-pay the pass 72 times, K-wide, on the cores
-#    the compiles wanted (28 % of per-compiled graph compile_s, measured by pgw#830).
+#    the compiles wanted (28 % of per-compiled-graph compile_s, measured by pgw#830).
 # 3. A full SHA-256 pass over the file — always correct, never skipped: a lib
 #    covered by neither manifest above is HASHED, never assumed.
 #
@@ -738,7 +738,7 @@ def assert_seal_unchanged(label: str = "") -> None:
 
 #: pgw#830: what the LAST :func:`establish` call spent, per step. Telemetry
 #: only — nothing reads it to decide anything, and no digest depends on it.
-#: It exists because ``establish()`` is called once per pgw#809 compiled graph-compile
+#: It exists because ``establish()`` is called once per pgw#809 compiled-graph-compile
 #: CHILD, so on a 72-compiled graph mint its cost is multiplied by 72 and lands inside
 #: the recorded ``compile_s`` with no name. ``seal_libhash_s`` is the one that
 #: matters: the identity manifest used to SHA-256 every toolchain ``.so`` the

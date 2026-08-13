@@ -184,7 +184,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     if not axes:
         raise ProbeUnavailable(
             "no_probeable_axis",
-            "the compiled_graph packages no compiled_graph to compare against eager")
+            "the compiled graph packages no compiled graph to compare against eager")
     return tuple(axes)
 
 
@@ -317,7 +317,7 @@ def measure_axis(
             "eager_forward_failed",
             f"{axis}: the EAGER reference forward raised "
             f"({type(exc).__name__}: {exc}) — with no reference there is "
-            f"nothing to compare the compiled_graph against") from exc
+            f"nothing to compare the compiled graph against") from exc
     try:
         with torch.no_grad():
             subject = compiled(*args)
@@ -459,14 +459,14 @@ def probe_compiled_graph(
         raise ProbeUnavailable(
             "not_armed",
             f"family={family}: the pipeline carries no armed AOT target, so "
-            f"there is no compiled_graph to compare against eager")
+            f"there is no compiled graph to compare against eager")
     axes = axes_from_meta(meta)
     if only:
         axes = tuple(a for a in axes if a.name == only)
         if not axes:
             raise ProbeUnavailable(
                 "no_such_axis",
-                f"family={family}: no packaged compiled_graph named {only!r}")
+                f"family={family}: no packaged compiled graph named {only!r}")
     started = time.monotonic()
     verdicts: List[AxisVerdict] = []
     for axis in axes:

@@ -111,7 +111,7 @@ def _device_lock_wait_s() -> float:
 def _peak_device() -> tuple:
     """This compiled graph child's DEVICE high-water — allocated and reserved.
 
-    pgw#868 A4. The pool's per-compiled graph device ask used to be
+    pgw#868 A4. The pool's per-compiled-graph device ask used to be
     `mint_budget.co_residency().need_bytes` — `resident_weights * 1.25 + 5 GiB`,
     i.e. sdxl's 4.87 GiB of weights (which the compile does not hold at all
     since `fc77b923`) plus an activation term that module's own docstring

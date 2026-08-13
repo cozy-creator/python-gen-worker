@@ -144,7 +144,7 @@ PHASE_COMPILED_GRAPH_HUB_RTT = "compiled_graph_hub_rtt"
 PHASE_COMPILED_GRAPH_VERIFY = "compiled_graph_verify"
 #: ONE compiled graph's admission: contract parse, constant bind, ingress-assertion
 #: arming and the admission-drift parity check against the artifact's own
-#: generated guards. The second half of admission, and the per-compiled graph parity
+#: generated guards. The second half of admission, and the per-compiled-graph parity
 #: sweep, measured where it happens.
 PHASE_COMPILED_GRAPH_ADMIT = "compiled_graph_admit"
 #: CUMULATIVE. The first instant this worker could have served a request at
@@ -1124,7 +1124,7 @@ SHAPE_EAGER: frozenset = frozenset({
 #: A boot that came up through `python -m gen_worker.entrypoint` — i.e. every
 #: pod. `env_establish` and its nested `lib_memo` are produced by
 #: `env_seal.establish`, which the entrypoint, the mint child and the
-#: compiled graph-compile child all call and an EMBEDDED worker (the in-process test
+#: compiled-graph-compile child all call and an EMBEDDED worker (the in-process test
 #: harness, a library caller) does not. Kept as a separate shape rather than
 #: folded into SHAPE_EAGER so an embedded boot is not asked for a phase it
 #: legitimately cannot have — and so a POD boot still is.

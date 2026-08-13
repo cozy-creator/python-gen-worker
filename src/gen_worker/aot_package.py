@@ -519,7 +519,7 @@ def unbindable_program_constants(
     return [
         f"{len(missing)} constant(s) the exported program lifts from the "
         f"module's state_dict are absent from the resident module's bind "
-        f"table, e.g. {missing[:6]!r} — the compiled compiled_graph could never bind "
+        f"table, e.g. {missing[:6]!r} — the compiled compiled graph could never bind "
         f"them, so the compile would be paid for an unpublishable compiled_graph"
     ]
 
@@ -634,7 +634,7 @@ def folded_weights(
     return [
         f"{len(folded)} weight(s) the exported program lifted are ABSENT from "
         f"the compiled artifact's constant table: {folded[:6]!r} — their "
-        f"values were compiled into the kernel, so this compiled_graph carries THIS "
+        f"values were compiled into the kernel, so this compiled graph carries THIS "
         f"checkpoint's copy and no other fine-tune could rebind them "
         f"(pgw#1097 folding fence; pgw#857 tensor-binding contract)"
     ]
@@ -660,7 +660,7 @@ def unbindable_constants(
         return []
     return [
         f"{len(missing)} declared state_dict constant(s) are absent from the "
-        f"resident module's state_dict, e.g. {missing[:6]!r} — the compiled_graph could "
+        f"resident module's state_dict, e.g. {missing[:6]!r} — the compiled graph could "
         f"never bind its constants and must not be published"
     ]
 
@@ -822,7 +822,7 @@ def admission_drift(
 
     ONE function, two call sites, per the pgw#1058 ruling: the mint's
     package gate (a divergent compiled graph is never published) and the arm's
-    per-compiled graph verification (a corrupted one is never served) must be the
+    per-compiled-graph verification (a corrupted one is never served) must be the
     same derivation, or the gate models the arm and drifts from it.
     """
     return input_guard_drift(inputs_rows, input_guards(Path(package), compiled_graph))

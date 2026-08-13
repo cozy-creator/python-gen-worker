@@ -724,7 +724,7 @@ def _run_warm_compile(job: _WarmJob) -> None:
             # failure means the fleet re-compiles this shape forever.
             activity_mod.emit_event(
                 activity_mod.KIND_SERVE_DEGRADE,
-                f"target={job.label}: on_warmed (compiled_graph republish) callback "
+                f"target={job.label}: on_warmed (compiled graph republish) callback "
                 f"failed: {type(exc).__name__}: {exc}",
                 phase="republish_failed",
             )

@@ -223,7 +223,7 @@ def verify_declared_identity(
     return ""
 
 
-#: The compiled graph-block field carrying the node-level digest of the traced program
+#: The compiled-graph-block field carrying the node-level digest of the traced program
 #: (``graph_hash.graph_hash``), stamped by ``aot_mint.keying_block``. Since
 #: pgw#1031 (option a) it is FOLDED into ``class_hash`` (the key), and it also
 #: stays recorded here as a top-level sibling for the adopt backstop — see
@@ -263,17 +263,17 @@ def verify_graph_witness(
     the same compiled graphs is the same failure — a partial agreement is not a
     narrower match, it is an unproven one (pgw#716).
 
-    ``witnesses`` is ``{compiled graph: digest}`` as
+    ``witnesses`` is ``{compiled_graph: digest}`` as
     ``boot_key.DerivedKey.graph_witnesses`` reports it. An empty mapping is a
     caller error, not a pass.
     """
     if not witnesses:
         return (
-            "this pod derived no graph witnesses, so the compiled_graph's compiled "
+            "this pod derived no graph witnesses, so the compiled graph's compiled "
             "graphs cannot be shown to be the graphs it traced (pgw#1031)")
     compiled_graph = meta.get("compiled_graph")
     if not isinstance(compiled_graph, Mapping) or not compiled_graph:
-        return "artifact records no compiled_graph block; it has no graph witness"
+        return "artifact records no compiled graph block; it has no graph witness"
     recorded = {
         str(compiled_graph.get("name") or ""):
             str(compiled_graph.get(GRAPH_WITNESS_FIELD) or ""),
@@ -282,20 +282,20 @@ def verify_graph_witness(
     if silent:
         return (
             f"compiled_graphs {silent[:4]!r} record no {GRAPH_WITNESS_FIELD!r}: this "
-            f"compiled_graph predates pgw#1031 and cannot state which graph it compiled")
+            f"compiled graph predates pgw#1031 and cannot state which graph it compiled")
     extra = sorted(set(recorded) - set(witnesses))
     missing = sorted(set(witnesses) - set(recorded))
     if extra or missing:
         return (
             f"graph witness class set differs (compiled_graph-only {extra[:3]!r}, "
-            f"traced-only {missing[:3]!r}): the compiled_graph was compiled from a "
+            f"traced-only {missing[:3]!r}): the compiled graph was compiled from a "
             f"different class set than this pod traced")
     for name in sorted(recorded):
         want, have = recorded[name], str(witnesses[name] or "")
         if want != have:
             return (
-                f"compiled_graph {name!r}: graph witness {want} on the compiled_graph, {have} "
-                f"traced here — the compiled_graph key matched but the COMPUTATION did "
+                f"compiled_graph {name!r}: graph witness {want} on the compiled graph, {have} "
+                f"traced here — the compiled graph key matched but the COMPUTATION did "
                 f"not (pgw#1031: the key folds the ingress contract, not the "
                 f"graph nodes). Refusing to arm another graph's kernels")
     return ""

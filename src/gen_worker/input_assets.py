@@ -714,7 +714,7 @@ def _collect_units(
     for compiled_graph, key in zip(manifest, private_sequence):
         if not _manifest_compiled_graph_valid(compiled_graph):
             raise ValidationError(
-                "input_asset_manifest_invalid: dispatched manifest compiled_graph is malformed"
+                "input_asset_manifest_invalid: dispatched manifest compiled graph is malformed"
             )
         private_by_key[key].compiled_graph = compiled_graph
     return units

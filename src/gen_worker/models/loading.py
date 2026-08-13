@@ -835,7 +835,7 @@ _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 #:
 #: ``"bf16-resident"`` is deliberately absent: :func:`pipeline_weight_lane`
 #: folds it to ``""`` (it traces identically to plain bf16), so it is never a
-#: distinct compiled graph-identity lane. Bucketed LoRA lanes
+#: distinct compiled-graph-identity lane. Bucketed LoRA lanes
 #: (``w8a8_lora.lora_execution_lane``) are these bases with a rank suffix and are
 #: decomposed by ``compile_cache.execution_lane_bucket``, so the BASE set is complete.
 STAMPABLE_BASE_EXECUTION_LANES: Tuple[str, ...] = (

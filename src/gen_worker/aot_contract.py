@@ -151,7 +151,7 @@ class ExportSpec:
 
     def execution_lane_label(self) -> str:
         """This spec's lane label — ONE implementation, shared with the
-        compiled graph-key axis it has to agree with (pgw#1040)."""
+        compiled-graph-key axis it has to agree with (pgw#1040)."""
         return _execution_lane_label(self.weight_lane, self.lora_bucket)
 
 

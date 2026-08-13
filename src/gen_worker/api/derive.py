@@ -75,7 +75,7 @@ class DerivedClasses(Tuple[GraphClass, ...]):
 
     So this is TRANSPORT, not storage: nothing downstream reads it, and it
     deliberately does not persist on the declaration. The alternative — a
-    compiled graph-wide scalar stamped onto every row and read back off `rows[0]` — is
+    compiled-graph-wide scalar stamped onto every row and read back off `rows[0]` — is
     the shape that produced a P0 filed on a false premise, because a label
     written beside a thing cannot be told from a label describing it, and it
     silently answers a question nothing asks (what if two rows disagree?).
@@ -145,7 +145,7 @@ def cfg_image_classes(
 # ---------------------------------------------------------------------------
 
 class DeclarationMismatch(AssertionError):
-    """A migrated declaration's compiled graph-key contract differs from the standing
+    """A migrated declaration's compiled-graph-key contract differs from the standing
     one — deleting the standing file would re-key or drop a fact. STOP."""
 
 
@@ -157,7 +157,7 @@ def _canonical(value: Any) -> str:
 
 
 def contract_delta(standing: Compile, migrated: Compile) -> Dict[str, Tuple[Any, Any]]:
-    """``{axis: (standing_value, migrated_value)}`` for every compiled graph-key contract
+    """``{axis: (standing_value, migrated_value)}`` for every compiled-graph-key contract
     axis the two declarations disagree on; ``{}`` iff identical.
 
     ``{}`` is the migration's green light: identical ``contract_axes()`` ⟹
@@ -298,7 +298,7 @@ def assert_faithful(
     standing: Compile, migrated: Compile, *, family: str = "",
 ) -> None:
     """Raise :class:`DeclarationMismatch` unless the migrated declaration's
-    compiled graph-key contract is byte-identical to the standing one. The reusable
+    compiled-graph-key contract is byte-identical to the standing one. The reusable
     per-family migration gate: run it in the endpoint's test with the standing
     ``aot_declaration`` Compile and the new decorator's ``compile`` BEFORE the
     file is deleted.

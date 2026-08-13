@@ -177,7 +177,7 @@ def build_request(
         # `mint_root`, and abandonment is how a crashed mint ends, so a bank
         # sited there would be deleted on its way out of the one case it
         # exists for. Keyed by the pending's `compiled_graph_key` as a SCOPE (identity is
-        # the per-compiled graph re-derivation inside it), so a mint child restarted in
+        # the per-compiled-graph re-derivation inside it), so a mint child restarted in
         # place on the same pod — or a whole new pending for the same compiled graph on a
         # later boot — finds the same bank.
         resume=str(aot_resume.bank_root(pending.arm_token)),
@@ -454,10 +454,10 @@ async def build_compiled_graph(
             return DelegatedResult(
                 status=FAILED, attempts=attempts, reason=reason,
                 detail=(
-                    f"the child's compiled_graph did not adopt on this runtime "
+                    f"the child's compiled graph did not adopt on this runtime "
                     f"({reason}{': ' + why if why else ''})"
                     if reason else
-                    "the child's compiled_graph did not adopt on this runtime"))
+                    "the child's compiled graph did not adopt on this runtime"))
 
         _emit_abort(outcome, family, pending.arm_token, attempts)
         if not (outcome.retryable and attempts < max(1, max_attempts)):
@@ -595,7 +595,7 @@ def _emit_aot_phases(
         activity_mod.emit_event(
             activity_mod.KIND_AOT_MINT,
             f"family={family} lane={execution_lane or 'plain'} status={outcome.status} "
-            f"total_s={round(total_s, 2)} — no compiled_graph produced",
+            f"total_s={round(total_s, 2)} — no compiled graph produced",
             phase="aborted",
             duration_ms=int(round(total_s * 1000)),
         )

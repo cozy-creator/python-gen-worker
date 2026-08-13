@@ -293,7 +293,7 @@ def compiled_graph_plans(decl: Compile) -> Tuple[MintPlan, ...]:
     label could not be told apart by a refusal)."""
     if not decl.targets:
         raise MintRefused(
-            f"family {decl.family!r} declares no targets — a compiled_graph with no "
+            f"family {decl.family!r} declares no targets — a compiled graph with no "
             f"functions has nothing to package")
     plans: List[MintPlan] = []
     for target in decl.targets:
@@ -303,7 +303,7 @@ def compiled_graph_plans(decl: Compile) -> Tuple[MintPlan, ...]:
         name = plan_compiled_graph_name(plan)
         if name in seen:
             raise MintRefused(
-                f"family {decl.family!r}: two mint plans share compiled_graph name "
+                f"family {decl.family!r}: two mint plans share compiled graph name "
                 f"{name!r} — the declaration does not discriminate them")
         seen[name] = plan
     return tuple(plans)

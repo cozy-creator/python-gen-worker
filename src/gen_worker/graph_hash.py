@@ -1,7 +1,7 @@
 """Canonical GRAPH identity (pgw#716).
 
 **What this digest is USED for (pgw#1031, Paul-ruled option a):** it is the
-pgw#917 same-class comparator, the per-compiled graph ``graph_witness`` recorded on
+pgw#917 same-class comparator, the per-compiled-graph ``graph_witness`` recorded on
 every compiled graph by ``aot_mint.keying_block``, AND — since pgw#1031 — a folded input
 to the key. ``aot_serve.class_hash`` (facts v3) folds ``graph_witness`` so the
 ``graph`` axis (``combined_graph_hash`` over ``class_hash``) is the traced

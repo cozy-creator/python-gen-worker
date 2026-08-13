@@ -404,7 +404,7 @@ def arm_aot(
                 f"{str((meta or {}).get('module') or '') or '<absent>'} "
                 f"targets={targets or '<absent>'}, branch-capable="
                 f"{sorted(branch_capable) or '<none>'}"
-                + ("; the compiled_graph envelope was unreadable" if meta is None else ""))
+                + ("; the compiled graph envelope was unreadable" if meta is None else ""))
             logger.warning(
                 "aot arm: bucket=%d declared but no lifted target resolved "
                 "(%s); a lifted artifact will refuse at "
@@ -480,7 +480,7 @@ def arm_aot(
             f"resident_before={_resident_before / gib:.3f}GiB "
             f"verified={bool(verify_numerics)} armed={bool(armed)} "
             f"basis=measured — `load` is what EVERY adopting pod pays and is "
-            f"the term that decides whether this compiled_graph fits its serving fleet; "
+            f"the term that decides whether this compiled graph fits its serving fleet; "
             f"`verify` is the §4.32 gate and is paid only by the minting pod.",
             phase="measured",
         )
@@ -645,7 +645,7 @@ def gate_compiled_graph_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -
             # `degraded` row above, so the confession is on the wire; what
             # changes here is that the bytes do not ship.
             logger.error(
-                "aot mint: REFUSING to publish %s — the compiled_graph it just compiled "
+                "aot mint: REFUSING to publish %s — the compiled graph it just compiled "
                 "lands in the gray band (%s), and an adopter runs no gate that "
                 "could re-check it (§4.32)", family or "compiled_graph", comparison.verdict)
             return False
@@ -657,7 +657,7 @@ def gate_compiled_graph_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -
                 phase="checked", duration_ms=report.elapsed_ms)
     except numerics_probe.CompiledGraphNumericsRefused as exc:
         logger.error(
-            "aot arm: REFUSING to arm %s — the compiled_graph does not reproduce its "
+            "aot arm: REFUSING to arm %s — the compiled graph does not reproduce its "
             "eager reference: %s", family or "compiled_graph", exc)
         return False
     except Exception as exc:  # noqa: BLE001 — a gate that errored is a refusal
@@ -688,7 +688,7 @@ def _refuse_unmeasurable(family: str, reason: str, detail: str) -> bool:
             activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
             f"family={family} REFUSED TO ARM: the compiled-vs-eager "
             f"comparison could not be taken ({reason}). This is not a pass — "
-            f"an unmeasurable compiled_graph stays eager (pgw#868). {detail}",
+            f"an unmeasurable compiled graph stays eager (pgw#868). {detail}",
             phase="unmeasurable")
     except Exception:  # noqa: BLE001 — the refusal stands even if the wire is down
         logger.debug("could not announce unmeasurable numerics", exc_info=True)

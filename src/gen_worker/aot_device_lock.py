@@ -1,4 +1,4 @@
-"""pgw#809: one GPU timing at a time, across the whole compiled graph-compile pool.
+"""pgw#809: one GPU timing at a time, across the whole compiled-graph-compile pool.
 
 The hazard, stated exactly
 -------------------------
@@ -152,7 +152,7 @@ def install(path: Path) -> Optional[DeviceBenchmarkLock]:
     if setter is None:
         logger.warning(
             "pgw#809: this torch has no set_gpu_benchmark_lock_context — GPU "
-            "autotune timings CANNOT be serialized across the compiled_graph pool, so "
+            "autotune timings CANNOT be serialized across the compiled graph pool, so "
             "a wide pool would silently benchmark against itself")
         return None
     lock = DeviceBenchmarkLock(Path(path))

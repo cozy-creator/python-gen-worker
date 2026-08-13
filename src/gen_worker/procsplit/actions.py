@@ -106,7 +106,7 @@ ACTIONS: Dict[str, HubAction] = {
             r"^/v1/worker/c2pa/sign$",
             body=("alg", "claim_b64"),
         ),
-        # pgw#709 compiled graph-receipt gate: fetch one receipt, fetch the revocation
+        # pgw#709 compiled-graph-receipt gate: fetch one receipt, fetch the revocation
         # list. Read-only, and the gate fails closed without them.
         # ``artifact_digest`` is ONE algorithm-tagged digest (pgw#1034 collapsed
         # the multi-algorithm ceremony; the bare ``blake3`` key had already gone
@@ -284,7 +284,7 @@ def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[
         # from a named refusal rather than from a compiled graph that never appeared.
         raise ActionRefused(
             f"{match.name} is disarmed on this pod: {_PROBE_ENV} marks it a "
-            f"live-edit probe running rsync'd code, whose compiled_graphs carry a "
+            f"live-edit probe running rsync'd code, whose compiled graphs carry a "
             f"`gen_worker` version that does not describe them and a "
             f"`code_closure` no other pod can reproduce. Set "
             f"{_PROBE_PUBLISH_ARM_ENV}=1 to arm it deliberately (pgw#980)."

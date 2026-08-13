@@ -176,7 +176,7 @@ class MintBlocker(msgspec.Struct, frozen=True):
 
     It exports (and, unless ``--export-only``, AOT-compiles) the declared class
     set and writes ``export_peak_device_bytes`` /
-    ``export_peak_device_reserved_bytes`` and a per-compiled graph outcome. Cite that
+    ``export_peak_device_reserved_bytes`` and a per-compiled-graph outcome. Cite that
     report in ``resolution=`` — measuring resolves nothing by itself, and a
     ``resolved=True`` with no citation is refused here.
     """
@@ -981,7 +981,7 @@ def validate_contract(compile_decl: Any) -> None:
                 f"graph class #{i} is scoped to target(s) {list(cls.targets)!r} "
                 f"and carries fork(s) {extra_f!r} that Compile.forks scopes "
                 f"to other targets — a fork the target does not take splits "
-                f"its compiled_graphs on nothing")
+                f"its compiled graphs on nothing")
         for name, value in cls.fork:
             if value in unserved_by_fork.get(name, set()):
                 raise DeclarationError(

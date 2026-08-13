@@ -138,7 +138,7 @@ from typing import Any, Dict, Iterable, Mapping, Tuple
 # pgw#1176: ``ck1`` (the 36-compiled graph COMPILED GRAPH key) is REPLACED by ``ek1`` (one graph
 # class). This is a §1.34 third-category change — a name persisted as an
 # ADDRESS — so it is a COORDINATED FLEET RE-KEY, never a quiet rename: every
-# stored compiled graph is orphaned by it, and the cut carries scheme + per-compiled graph store
+# stored compiled graph is orphaned by it, and the cut carries scheme + per-compiled-graph store
 # schema + resolve/publish wire + pack format + the
 # ``Arm.graph_contract_digest`` proto change + the corpus purge together.
 # Priced today: the adoptable corpus is ONE toy family, so the re-key costs
@@ -173,7 +173,7 @@ EXPORTED_KIND = "aot-inductor"
 #:
 #: pgw#1176: this is a MANIFEST fact and NEVER a key axis. It rides the
 #: derived contract manifest (the declaration that produced the key set), not
-#: the per-compiled graph artifact, because it is a property of the COLLECTION: the
+#: the per-compiled-graph artifact, because it is a property of the COLLECTION: the
 #: union of every class's shapes. Keying on it re-minted 35 unchanged classes
 #: every time an author added an aspect ratio.
 #:
@@ -183,7 +183,7 @@ EXPORTED_KIND = "aot-inductor"
 #: appear, write "the artifact-metadata envelope" vs "the declared envelope".
 EXPORT_ENVELOPE_KEY = "declared_envelope"
 
-#: The per-compiled graph artifact's block naming the ONE graph class it carries.
+#: The per-compiled-graph artifact's block naming the ONE graph class it carries.
 COMPILED_GRAPH_BLOCK_KEY = "compiled_graph"
 
 
@@ -219,7 +219,7 @@ class CompiledGraphKey:
 
 
 def is_key(value: str) -> bool:
-    """True when ``value`` has compiled graph-key SHAPE: ``ek`` + 1-2 scheme digits +
+    """True when ``value`` has compiled-graph-key SHAPE: ``ek`` + 1-2 scheme digits +
     ``-`` + 56 lowercase hex.
 
     Scheme-AGNOSTIC, byte-for-byte the grammar tensorhub's
@@ -233,7 +233,7 @@ def is_key(value: str) -> bool:
 
     NOTE the ``ck`` prefix is NOT accepted. A ck1 key names a 36-compiled graph
     all-or-nothing compiled graph, which is not a thing this runtime can arm at all; a
-    grammar that admitted both would let a compiled graph ref reach a per-compiled graph code
+    grammar that admitted both would let a compiled graph ref reach a per-compiled-graph code
     path and fail late instead of at the comparison.
     """
     v = str(value or "")
@@ -297,12 +297,12 @@ def from_axes(axes: Mapping[str, str]) -> CompiledGraphKey:
                 "fact provably alters the compiled artifact and cannot ride "
                 "an existing axis's fact block")
         if text:
-            _refuse_key_shaped("compiled_graph key axes", name, text)
+            _refuse_key_shaped("compiled graph key axes", name, text)
             clean[name] = text
     missing = [name for name in _REQUIRED if not clean.get(name)]
     if missing:
         raise CompiledGraphKeyError(
-            f"compiled_graph key requires axes {missing!r} (got {sorted(clean)!r})")
+            f"compiled graph key requires axes {missing!r} (got {sorted(clean)!r})")
     return CompiledGraphKey(axes=tuple(sorted(clean.items())))
 
 
@@ -475,21 +475,21 @@ def from_compiled_graph_metadata(meta: Mapping[str, Any]) -> CompiledGraphKey:
 
     Pre-pgw#1176 artifacts fail here STRUCTURALLY: they record an ``compiled graphs``
     MAP and a ``combined_graph_hash`` rather than one ``compiled graph`` block, so a
-    36-compiled graph compiled graph can never restate a per-compiled graph identity. That is what makes
+    36-compiled graph compiled graph can never restate a per-compiled-graph identity. That is what makes
     the ck1 corpus purge hygiene rather than a correctness precondition.
     """
     kind = str(meta.get("kind") or "")
     if kind != EXPORTED_KIND:
         raise CompiledGraphKeyError(
             f"artifact kind {kind!r} has no compiled_graph-key identity: only exported "
-            f"{EXPORTED_KIND!r} compiled_graphs are keyed (pgw#1010/pgw#1059 — JIT is "
+            f"{EXPORTED_KIND!r} compiled graphs are keyed (pgw#1010/pgw#1059 — JIT is "
             "intake, local torch-inductor-cache artifacts compare facts via "
             "compile_cache.local_compiled_graph_mismatch)")
     sm = str(meta.get("sm") or "")
     if not sm:
         raise CompiledGraphKeyError(
             "cannot state the compute capability (sm) of this runtime; an "
-            "exported compiled_graph has no identity without it — mint on the target GPU")
+            "exported compiled graph has no identity without it — mint on the target GPU")
     compiled_graph = meta.get(COMPILED_GRAPH_BLOCK_KEY)
     if not isinstance(compiled_graph, Mapping) or not compiled_graph:
         raise CompiledGraphKeyError(

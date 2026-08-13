@@ -531,7 +531,7 @@ class Lifecycle:
                 return
         # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
-        # pgw#709: arm the compiled graph-receipt gate the moment the hub wiring
+        # pgw#709: arm the compiled-graph-receipt gate the moment the hub wiring
         # exists — every delivered compile compiled graph is signature-verified
         # before it may arm. Same wiring moment as the CompiledGraphPublisher's.
         if self.executor.file_base_url:
@@ -558,7 +558,7 @@ class Lifecycle:
                     self.executor._compiled_graph_publisher())
             except Exception:  # noqa: BLE001 — never blocks the handshake
                 logger.warning(
-                    "owed compiled_graph uploads could not be re-attempted", exc_info=True)
+                    "owed compiled graph uploads could not be re-attempted", exc_info=True)
         # th#1087: the desired state advertises (release_id, config_gen).
         # Observe it (memory + snapshot file rewrite); parameter VALUES ride
         # RunJob stamps (class 1), bindings ride the desired-residency
@@ -1033,7 +1033,7 @@ class Lifecycle:
             # longer act on.
             logger.warning(
                 "ignoring retired ModelOp (pgw#1032): hot compile-cache "
-                "adoption is gone; a compiled_graph arrives only through §4.27 "
+                "adoption is gone; a compiled graph arrives only through §4.27 "
                 "boot-adopt — the hub never pushes one")
         elif which == "serve_posture":
             # pgw#1142 / §4.32 item 4: the operator's eager-only command.

@@ -195,7 +195,7 @@ def compiled_graph_dir(key: str, root: Optional[Path] = None) -> Path:
     """
     if not compiled_graph_key.is_key(key):
         raise ValueError(
-            f"the local compiled_graph store addresses {compiled_graph_key.KEY_SCHEME} keys only; "
+            f"the local compiled graph store addresses {compiled_graph_key.KEY_SCHEME} keys only; "
             f"{key!r} is not one")
     return compiled_graphs_root(root) / key
 
@@ -388,7 +388,7 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCompiledGraph
     if not want or have != want:
         logger.error(
             "local-compiled_graph-store: DROPPING %s — the stored bytes digest %s, the "
-            "record states %s; a compiled_graph that cannot vouch for its own content "
+            "record states %s; a compiled graph that cannot vouch for its own content "
             "is never armed", key, have, want or "nothing")
         drop(key, root)
         return None
@@ -575,7 +575,7 @@ def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bo
         return False
     logger.warning(
         "local-compiled_graph-store: the hub asserts this hardware may not publish "
-        "(%s) — compiled_graphs minted here are kept LOCALLY and reused on every later "
+        "(%s) — compiled graphs minted here are kept LOCALLY and reused on every later "
         "boot of this machine; nothing is uploaded and nothing is requested "
         "(§4.28)", UNTRUSTED_REFUSAL_CODE)
     return True

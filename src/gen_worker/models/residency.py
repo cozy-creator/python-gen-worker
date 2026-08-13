@@ -706,7 +706,7 @@ class Residency:
                         ref, e.vram_bytes)
                     activity_mod.emit_event(
                         activity_mod.KIND_RESIDENCY_FAULT,
-                        f"ref={ref}: a mixed-device VRAM compiled_graph could not be "
+                        f"ref={ref}: a mixed-device VRAM compiled graph could not be "
                         f"repaired OR evicted to CPU. It stays on the card and "
                         f"stays BOOKED at {e.vram_bytes} bytes — booking it as "
                         f"RAM/0 would hand `make_room` headroom that does not "

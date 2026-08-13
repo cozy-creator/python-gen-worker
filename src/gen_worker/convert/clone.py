@@ -285,7 +285,7 @@ def build_flavor_tree(
         if source_layout == "singlefile":
             groups = snapshot_weight_groups(source_dir, "singlefile")
             if not groups:
-                raise ValueError("no safetensors compiled_graph for repackage")
+                raise ValueError("no safetensors compiled graph for repackage")
             singlefile_to_diffusers(
                 groups[0][1], repack_dir, model_family=family, output_dtype=spec.dtype)
         else:

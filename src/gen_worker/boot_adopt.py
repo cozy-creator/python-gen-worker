@@ -317,7 +317,7 @@ def arm_refused(
         adoption=None,
         reason="arm_refused",
         detail=(
-            f"cause={cause}: {detail} — this pod resolved the compiled_graph by its own "
+            f"cause={cause}: {detail} — this pod resolved the compiled graph by its own "
             f"derived key, so nothing ordered this arm; serving EAGER and "
             f"minting its own instead of failing the function"),
         derived_key=outcome.derived_key,
@@ -383,7 +383,7 @@ def _local_answer(
             reason="local_graph_witness_mismatch",
             detail=(
                 f"this machine's own store holds {key} and its graphs are not "
-                f"this pod's graphs: {mismatch}. The compiled_graph is LEFT in place — a "
+                f"this pod's graphs: {mismatch}. The compiled graph is LEFT in place — a "
                 f"derived-key hit is an inference, not the memo this machine "
                 f"wrote for its own arm — and this pod asks the hub instead"),
             derived_key=key, derive_ms=derived.wall_ms,
@@ -574,7 +574,7 @@ def _attempt_key(
         # and it is on the event.
         return report(BootAdoptOutcome(
             reason="miss",
-            detail=f"the hub holds no entitled compiled_graph for {key}",
+            detail=f"the hub holds no entitled compiled graph for {key}",
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
 
@@ -608,7 +608,7 @@ def _attempt_key(
         return report(BootAdoptOutcome(
             reason="witness_unreadable",
             detail=(
-                f"the materialized compiled_graph for {key} would not state its "
+                f"the materialized compiled graph for {key} would not state its "
                 f"metadata ({type(exc).__name__}: {exc}), so its graphs cannot "
                 f"be shown to be this pod's graphs"),
             derived_key=key, derive_ms=derived.wall_ms,

@@ -322,7 +322,7 @@ def impose_config_default(
     if compiled_graph is None:
         raise SettingsImpositionError(
             f"declared setting cannot reach a process-wide target: torch's "
-            f"config has no {key!r} compiled_graph to set a default on. torch's "
+            f"config has no {key!r} compiled graph to set a default on. torch's "
             f"config internals changed; re-seat the authority before any "
             f"compile can be trusted.")
     compiled_graph.default = value
@@ -395,7 +395,7 @@ def disable_autograd_cache() -> None:
     (:data:`DECLARED_ENV`, fresh processes incl. compile-worker subprocesses)
     and, torch already imported, the installed config compiled graph's
     ``env_value_force`` — user overrides are thread-local ContextVars in
-    torch>=2.13, and the compiled graph-level env force is consulted by every thread
+    torch>=2.13, and the compiled-graph-level env force is consulted by every thread
     with top precedence (the 0.40.5 live disproof: the assignment ran on the
     arming thread while the warmup compile ran on another)."""
     os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = (

@@ -382,7 +382,7 @@ class RankGroup:
         import torch.distributed as dist
 
         if self._compiled_graph is None:
-            raise RankGroupError("a degree>1 group needs a follower compiled_graph point")
+            raise RankGroupError("a degree>1 group needs a follower compiled graph point")
 
         ctx = mp.get_context("spawn")
         self._error_q = ctx.Queue()

@@ -61,7 +61,7 @@ def materialize_named_artifact(
     digest, so a re-dispatch of the same spec is a verify-and-return.
     ``what`` names the attempt + spec digest for every refusal.
     """
-    # pgw#1087: THE compiled graph-download phase. `compiled_graph_fetch` has been a declared boot
+    # pgw#1087: THE compiled-graph-download phase. `compiled_graph_fetch` has been a declared boot
     # phase since pgw#764 with NO producer anywhere in the tree — so "the adopt
     # leg took 6.2 min" could never be split into download vs admission, which
     # is the first question anyone asks about an adopt. This is the one place
@@ -155,14 +155,14 @@ def _materialize_named_artifact(
         else:
             url = str(compiled_graph.url or "")
             if not url:
-                raise ValueError("transport compiled_graph has no URL")
+                raise ValueError("transport compiled graph has no URL")
             with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
                 dl.raise_for_status()
                 with open(tmp, "wb") as f:
                     got = copy_bounded(
                         dl.iter_content(1 << 20), f.write,
                         limit_bytes=declared_size,
-                        what=f"named compiled_graph artifact {compiled_graph_ref}")
+                        what=f"named compiled graph artifact {compiled_graph_ref}")
             if got != declared_size:
                 raise ValueError(
                     f"truncated: transport declares {declared_size} bytes, "

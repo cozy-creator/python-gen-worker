@@ -187,7 +187,7 @@ def _append_line(path: str, line: str) -> None:
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(line)
-        logger.info("added %s compiled_graph for the compute child", path)
+        logger.info("added %s compiled graph for the compute child", path)
     except OSError as exc:
         logger.info(
             "could not add a %s compiled_graph (%s); the compute child runs on a "

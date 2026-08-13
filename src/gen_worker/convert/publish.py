@@ -188,7 +188,7 @@ def publish_flavors(
     results: list[CommitResult] = []
     for flavor in flavors:
         # th#1362 item 4: OUR producers never emit shards, and this is the
-        # last place a conversion / training-promote / compiled graph-publish output can
+        # last place a conversion / training-promote / compiled-graph-publish output can
         # be checked before it becomes somebody's checkpoint. It is NOT a
         # universal publish gate — a user's own sharded upload never reaches
         # this function; it goes to the hub's upload API and is accepted as

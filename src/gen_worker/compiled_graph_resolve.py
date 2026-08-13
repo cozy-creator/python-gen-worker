@@ -233,12 +233,12 @@ def resolve(
     if not compiled_graph_key.is_key(key):
         raise CompiledGraphResolveRefused(
             "invalid_request",
-            f"{key!r} is not a compiled_graph key; the resolve route addresses compiled_graphs by "
+            f"{key!r} is not a compiled graph key; the resolve route addresses compiled graphs by "
             f"ck<scheme>-<56 hex> and by nothing else")
     fam = str(family or "").strip()
     if not fam:
         raise CompiledGraphResolveRefused(
-            "invalid_request", "resolve requires the compiled_graph's family namespace")
+            "invalid_request", "resolve requires the compiled graph's family namespace")
 
     with boot_phases.span(
         boot_phases.PHASE_COMPILED_GRAPH_HUB_RTT, function="compiled_graphs.resolve",

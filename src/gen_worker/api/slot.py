@@ -154,7 +154,7 @@ class Slot(Generic[D]):
     fail-open defect wearing a new name.
 
     This lives on ``Slot`` and NOT on ``Compile``: ``Compile``'s fields feed
-    ``contract_axes()``, a compiled graph-key input, and §1.33 point 5 is that
+    ``contract_axes()``, a compiled-graph-key input, and §1.33 point 5 is that
     conversion is upstream of compute and invisible to compiled graph identity. A
     layout declaration there would either re-key every compiled graph in the fleet or
     sit inside the key struct while deliberately not participating.
