@@ -15,7 +15,7 @@ between one release and another's weights. It is therefore:
     ``manifest["files"]`` when the key is ``entries``.
 *   **FAIL-CLOSED** — a mismatch names the blob to quarantine so
     re-materialization re-downloads instead of re-linking the same bad bytes.
-    Upstream reports stay untrusted hints (pgw#769's ruling).
+    Upstream reports stay untrusted hints.
 *   **FILE-PARALLEL** — hashing is CPU-bound and releases the GIL inside
     ``hashlib``, so N files hash on N cores. At ~2 GB/s per core, 8
     cores put a 40 GiB tree at a few seconds.
@@ -190,9 +190,9 @@ def snapshot_verify_targets(
     stays free of the transport). Returns ``(targets, skipped_paths)``.
 
     The digest is read from ``f.digest`` — algorithm-tagged — and from nowhere
-    else. th#1303 S1 removed the legacy ``f.blake3`` fallback: it is EMPTY on
-    every v2 entry, and reading it first was how a whole tree got a clean
-    verdict without being hashed. Files the manifest gives no digest for are
+    else. There is deliberately no legacy ``f.blake3`` fallback: it is EMPTY on
+    every v2 entry, and reading it first is how a whole tree gets a clean verdict
+    without being hashed. Files the manifest gives no digest for are
     returned as SKIPPED so the caller must account for them explicitly instead
     of losing them into a pass.
     """

@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""pgw#978 — the local micro-mint rig: the whole mint machinery, on this box.
+"""The local micro-mint rig: the whole mint machinery, on this box.
 
     python scripts/micro_mint_rig.py            # full cycle
     python scripts/micro_mint_rig.py --stage mint   # stop after the child
     python scripts/micro_mint_rig.py --json out.json
 
-WHAT THIS REPLACES. The loop it exists to invert is: change code -> publish to
-PyPI -> build an image on the published version -> spawn a pod -> observe for the
-FIRST time. Paul, 2026-08-06: *"we want to release new versions of
-python-gen-worker to pypi only after we've proven they work."* Attempt twenty
-burned ~4 h of that loop to learn one `ValueError` that fired 0.0 s into
-`warmup_forward`.
+WHAT THIS REPLACES. The loop it inverts is: change code -> publish to PyPI ->
+build an image on the published version -> spawn a pod -> observe for the FIRST
+time. New versions of python-gen-worker go to PyPI only after we have proven
+they work.
 
 WHAT IT ACTUALLY RUNS. Every leg below is the production code path, against a
 randomly-initialized toy latent-diffusion model on this box's card:
@@ -25,11 +23,9 @@ randomly-initialized toy latent-diffusion model on this box's card:
   8. publish      — the real `CellPublisher` wire to a LOCAL hub (7 HTTP calls)
   9. adopt        — a SECOND OS process fetches the exact named cell and adopts it
 
-Legs 1-5 are where 9 of attempt twenty's 12 walls were.
-
-THE BOUNDS (Paul's amendment to his own local-inference rule, 2026-08-06 —
-recorded in `WORKSPACE-GIT-POLICY.md`). These are hard and this script enforces
-them rather than trusting the operator:
+THE BOUNDS (the local-inference carve-out recorded in
+`WORKSPACE-GIT-POLICY.md`). These are hard and this script enforces them rather
+than trusting the operator:
 
   * weights under 500 MB, generated locally, never downloaded;
   * a 4 GiB device budget, SPLIT deliberately between the mint child and the
@@ -39,23 +35,20 @@ them rather than trusting the operator:
   * a load gate: refuse to start above 1-min load 24;
   * `GEN_WORKER_HOST_MOVE_GUARD` untouched — the rig never disables it.
 
-THE ENV-DELIVERY MODE (pgw#995, `--hub-env`). The rig above builds the child's
+THE ENV-DELIVERY MODE (`--hub-env`). The default rig builds the child's
 environment itself — `mint_process.child_env` plus a few rig keys — which is a
-shape no production pod ever has. So the chain that actually delivers env to a
-pod was invisible to it, and to every other test in this repo:
+shape no production pod ever has, leaving the real chain invisible:
 
     worker function declares env -> release_env_declarations
     operator sets a value        -> endpoint_env_entries
     pod launch                   -> EndpointEnvService.Resolve -> pod env -> Settings
 
-That chain is what took `GEN_WORKER_PREFER_AOT` dark: a release rebuild stopped
-declaring the name, the hub withheld the live entry SILENTLY, and three pod
-attempts went by. `--hub-env` boots the mint child through it instead — the
+A release that stops DECLARING a name makes the hub withhold the live entry
+silently. `--hub-env` boots the mint child through that chain instead: the
 child's environment is what the hub's rule would have delivered, ambient values
 are STRIPPED so a developer's shell cannot stand in for a delivered one, and any
-withholding is reported as a rig fact rather than a missing variable nobody
-looks for. The model lives in `tests/harness/hub_env.py`; the first regression
-tests are `tests/test_hub_env_delivery_pgw995.py`.
+withholding is reported as a rig fact. The model lives in
+`tests/harness/hub_env.py`.
 """
 
 from __future__ import annotations
@@ -84,14 +77,10 @@ GIB = 1 << 30
 #: run compatible with a desktop session and another agent's work.
 RIG_VRAM_BUDGET_BYTES = 4 * GIB
 
-#: pgw#1175: the mint/adopt VRAM SPLIT is deleted. It was enforced through
-#: `MintRequest.vram_cap_bytes` -> `set_per_process_memory_fraction`, and that
-#: field is gone with `mint_budget` — the number it normally carried was
-#: `co_residency().cap_bytes`, which pinned two real mints at 11.09 GiB on
-#: cards with 21.48 GiB free. The rig's politeness lever is now
-#: `compile_posture.USER_MACHINE` (§4.30): half the cores, double the host-RAM
-#: reserve, and a nice level — bounds on what the box FEELS, not a guess at
-#: what a compile will allocate.
+#: There is deliberately no mint/adopt VRAM split. The rig's politeness lever is
+#: `compile_posture.USER_MACHINE`: half the cores, double the host-RAM reserve,
+#: and a nice level — bounds on what the box FEELS, not a guess at what a
+#: compile will allocate.
 
 #: Refuse to start above this 1-minute load. The box is shared with several
 #: agent sessions; a compile that starts at load 30 finishes slower AND makes
@@ -101,10 +90,10 @@ MAX_START_LOAD_1MIN = 24.0
 #: The size ceiling the policy carve-out states. Enforced, not documented.
 MAX_WEIGHTS_BYTES = 500 * 1000 * 1000
 
-#: pgw#997: WHAT the rig mints is now a choice. `tiny` is pgw#978's original
-#: one-entry plumbing toy; `micro` is the org-worker-shaped
-#: `examples/micro-diffusion` package — three export entries, container inputs,
-#: generated weights, a Dockerfile. See `tests/harness/rig_vehicles.py`.
+#: WHAT the rig mints is a choice. `tiny` is the one-entry plumbing toy; `micro`
+#: is the org-worker-shaped `examples/micro-diffusion` package — three export
+#: entries, container inputs, generated weights, a Dockerfile. See
+#: `tests/harness/rig_vehicles.py`.
 DEFAULT_VEHICLE = "tiny"
 
 
@@ -129,18 +118,17 @@ def assert_load_gate(limit: float = MAX_START_LOAD_1MIN) -> float:
 def resolve_device(want: str = "auto") -> Dict[str, Any]:
     """Which device this cycle runs on, and — when it is not the card — WHY.
 
-    pgw#983, found by this rig's first run: the repo pins `torch==2.13.0+cu130`
-    and this box's NVIDIA driver is 570.211.01 (CUDA 12.8). A cu130 build needs
-    a 580-series driver, so `torch.cuda.is_available()` is False here and the
-    box cannot execute the fleet's own pinned torch at all.
+    A box whose NVIDIA driver predates the pinned torch build (cu130 needs a
+    580-series driver) reports `torch.cuda.is_available()` False and cannot
+    execute the fleet's own pinned torch at all.
 
-    That does NOT stop the rig from being worth running. The nine walls of
-    attempt twenty that this exists to catch were PLUMBING — endpoint
-    discovery, slot binding across the delegation boundary, the child spawn,
-    the declaration, the publish wire, the adopt filter — and every one of them
-    runs identically on CPU. What CPU does not cover is stated rather than
-    quietly implied: no VRAM cap enforcement, no device placement, no measured
-    kernel lane, and an `sm` axis that comes from a probe rather than a card.
+    That does NOT stop the rig from being worth running: the failures it exists
+    to catch are PLUMBING — endpoint discovery, slot binding across the
+    delegation boundary, the child spawn, the declaration, the publish wire, the
+    adopt filter — and every one of them runs identically on CPU. What CPU does
+    not cover is stated rather than quietly implied: no VRAM cap enforcement, no
+    device placement, no measured kernel lane, and an `sm` axis that comes from
+    a probe rather than a card.
 
     So the device is RESOLVED and REPORTED, never assumed. `--device cuda`
     turns the fallback into a refusal for the day the driver is current.
@@ -250,10 +238,9 @@ class RigResult:
 def _mint_slot(tree: Path, ref_path: str) -> Any:
     """The parent's resolution: WHICH checkpoint, and WHERE its bytes are.
 
-    Built through the real `ModelRef`/`MintSlot` types, because pgw#974's whole
-    point is that a slot with bytes and no identity must be unconstructable —
-    a rig that hand-rolled a dict would route around the guard it exists to
-    exercise.
+    Built through the real `ModelRef`/`MintSlot` types: a slot with bytes and no
+    identity must be unconstructable, and a rig that hand-rolled a dict would
+    route around the guard it exists to exercise.
     """
     from gen_worker.api.binding import ModelRef
     from gen_worker.child_contract import MintSlot
@@ -272,10 +259,9 @@ def _mint_request(
     Not a hand-written `MintRequest`: the thing under test is the handoff, and
     a hand-written request is the one shape the handoff can never produce.
 
-    the banked per-entry DEVICE peak this used to forward is gone
-    with the bound it opened. K is f(cores, one measured child RSS), so a rig
-    cycle takes the pool path on its own cores without an operator priming a
-    device basis.
+    No banked per-entry DEVICE peak is forwarded: K is f(cores, one measured
+    child RSS), so a rig cycle takes the pool path on its own cores without an
+    operator priming a device basis.
     """
     from gen_worker import mint_delegate
     from gen_worker.mint_delegate import MintTask
@@ -352,10 +338,10 @@ def run_cycle(
                   f"covers={dev['covers']}")
     result.env = leg.facts
 
-    # the rig parent seals exactly as a worker boot does. Without
-    # this the parent's computed key axes (env_seal above all) describe an
-    # UN-established process no pod ever runs, and the handback leg's
-    # axis guard would refuse every healthy mint.
+    # The rig parent seals exactly as a worker boot does. Without this the
+    # parent's computed key axes (env_seal above all) describe an UN-established
+    # process no pod ever runs, and the handback leg's axis guard would refuse
+    # every healthy mint.
     from gen_worker import env_seal as _env_seal
 
     _env_seal.establish()
@@ -403,19 +389,18 @@ def run_cycle(
     env = dict(mp.child_env(request))
     hub_withheld: List[Dict[str, str]] = []
     if hub_env_mode:
-        # the child no longer inherits whatever this process carries.
-        # It boots with what the HUB would have delivered for this release —
-        # so a name the release stops declaring disappears here, locally, the
-        # way it disappeared on the pod nobody was watching.
+        # The child does not inherit whatever this process carries: it boots
+        # with what the HUB would have delivered for this release, so a name the
+        # release stops declaring disappears here rather than on a pod.
         env, hub_withheld = hub_delivered_env(env, hub_env_entries)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(REPO / "tests"), str(REPO / "src"), *veh.syspath,
          env.get("PYTHONPATH", "")])
     env["PGW978_CHECKPOINT"] = str(tree)
     if dev["device_kind"] != "cuda":
-        # a cell key needs an `sm` and this box can state none. The
-        # probes are supplied, LOUDLY — see `install_synthetic_runtime_if_asked`
-        # and the `synthetic_runtime` fact this leg reports.
+        # A cell key needs an `sm` and this box can state none. The probes are
+        # supplied, LOUDLY — see `install_synthetic_runtime_if_asked` and the
+        # `synthetic_runtime` fact this leg reports.
         env[SYNTHETIC_RUNTIME_ENV] = "1"
     outcome = asyncio.run(mp.run_mint(
         request, workdir=workdir, env=env, observe_interval_s=2.0,
@@ -449,11 +434,10 @@ def run_cycle(
     packed = sorted(
         (_serve.unpack_metadata(Path(outcome.artifact or "")).get("entries") or {}))
     leg.facts["packed_entries"] = packed
-    # the guard is a SUBSET check, not equality. A bucket-bearing
-    # mint adds adapter arms whose exact set depends on composed
-    # branch-capability; what must never happen is a packed cell MISSING a
-    # declared class, which is the silent loss the entry vocabulary exists to
-    # prevent. An extra packed arm is the adapter fork doing its job.
+    # The guard is a SUBSET check, not equality. A bucket-bearing mint adds
+    # adapter arms whose exact set depends on composed branch-capability; what
+    # must never happen is a packed cell MISSING a declared class. An extra
+    # packed arm is the adapter fork doing its job.
     missing = [n for n in _branchless(packed) if n not in set(entries)]
     if entries and missing:
         leg.ok = False
@@ -473,10 +457,8 @@ def run_cycle(
 
     # -- the handback: the parent adopts its OWN child's cell -----
     # The pod order: `adopt_delegated_mint` on the mint-opening parent's live
-    # pipeline runs BEFORE anything publishes (gw#612 — only a cell that can
-    # arm ships). The gauntlet ran green for months while this exact leg was
-    # failing on every sdxl pod, because the rig only ever adopted in a fresh
-    # SECOND process.
+    # pipeline runs BEFORE anything publishes — only a cell that can arm ships.
+    # Adopting only in a fresh SECOND process would leave this leg untested.
     if veh.parent_pipe is not None:
         import gc
 
@@ -617,8 +599,7 @@ def _declared_entries(veh: Any) -> List[str]:
     Reported by the handoff leg so a cycle states its own SIZE: the whole
     point of the micro vehicle is that this list has three rows and sdxl's
     has thirty-six. A vehicle whose family carries no declaration reports none
-    rather than failing (pgw#1010: such a family serves JIT intake and mints
-    nothing at all).
+    rather than failing — such a family serves JIT intake and mints nothing.
     """
     from gen_worker import aot_declaration as ad
     from gen_worker.api.export_contract import export_declaration
@@ -656,9 +637,9 @@ def _adopt_in_subprocess(
     checkpoint_id: str,
     synthetic_runtime: bool = False,
 ) -> Dict[str, Any]:
-    """A SECOND OS process adopting the EXACT published cell (pgw#904:
-    it is TOLD the checkpoint id — discovery is deleted; a serving pod is
-    told by `Arm.artifact` the same way).
+    """A SECOND OS process adopting the EXACT published cell: it is TOLD the
+    checkpoint id — there is no discovery; a serving pod is told by
+    `Arm.artifact` the same way.
 
     In-process adoption would be a different test: the whole cross-pod claim is
     that a cell minted by one interpreter is servable by another that shares
@@ -713,10 +694,9 @@ def _adopt_miss_log(stderr: str) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    # the rig parent seals as a worker boot does (establish below),
-    # and establish now fail-closes on an interpreter outside the declared
-    # env — this is the STANDALONE entry's sanctioned imposition (one
-    # re-exec, same as the worker entrypoint's).
+    # The rig parent seals as a worker boot does, and `establish` fail-closes on
+    # an interpreter outside the declared env — this is the STANDALONE entry's
+    # sanctioned imposition (one re-exec, same as the worker entrypoint's).
     from gen_worker.settings_authority import ensure_interpreter_env
 
     ensure_interpreter_env()

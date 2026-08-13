@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""svdq runtime bench: ONE arm per process (pgw#865 instrument).
+"""svdq runtime bench: ONE arm per process.
 
 Arms: ``ours`` (gen-worker svdq lane — baseline or fused, chosen by the
 per-process lane decision), ``bf16`` (the unquantized reference transformer on

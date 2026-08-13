@@ -1,5 +1,4 @@
-"""``CompileAxis`` — compile-graph equivalence classes on PAYLOAD FIELDS
-(SDK v2, pgw#647).
+"""``CompileAxis`` — compile-graph equivalence classes on PAYLOAD FIELDS.
 
 What selects a compiled graph is a payload field's equivalence CLASS, not
 its value: CFG==0 traces a batch-1 UNet graph, CFG!=0 traces batch-2

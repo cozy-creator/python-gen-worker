@@ -1,8 +1,8 @@
 """Per-stage timing for one served request.
 
-``runtime_ms`` used to be one opaque number covering input fetch, text
-encode, denoise, VAE decode, image encode, credential stamp and upload, and
-the GPU-permit wait appeared in no metric at all. This module is the
+Without it ``runtime_ms`` is one opaque number covering input fetch, text
+encode, denoise, VAE decode, image encode, credential stamp and upload, with
+the GPU-permit wait appearing in no metric at all. This module is the
 measurement spine: framework hooks (``io.write_image``, the output stream's
 finalize, the credential stamp, the executor's permit acquire) and endpoint
 brackets (``with ctx.stage("text_encode")``) all land here, and
@@ -14,9 +14,8 @@ Two properties the design is built around:
   charged to the child, never twice), so measured stages + ``resid.*`` sum to
   ``total.handler``, which equals ``runtime_ms``.
 * **It classifies.** Every stage is GPU-BUSY, SMALL-GPU or GPU-IDLE, which is
-  what makes ``class.gpu_busy / total.handler`` the per-request half of
-  pgw#652's hot-fraction metric — the number that says how much of a
-  request's wall clock the device was actually computing.
+  what makes ``class.gpu_busy / total.handler`` the per-request hot-fraction
+  metric — how much of a request's wall clock the device was computing.
 
 Derived from the same intervals: ``total.prep`` (handler start -> first
 denoise step) and ``total.tail`` (last denoise step -> handler end), the two
@@ -109,9 +108,9 @@ class StageTimer:
         # stage name -> [(step_index, monotonic_at_step_end), ...]
         self._steps: Dict[str, List[Tuple[int, float]]] = {}
         # stage name -> step indices already marked. Two producers can mark the
-        # same step (pgw#1154: the diffusers callback marks, then calls
-        # ctx.progress, which marks too); a duplicate index would inflate the
-        # mark count and halve the derived per-step mean.
+        # same step (the diffusers callback marks, then calls ctx.progress,
+        # which marks too); a duplicate index would inflate the mark count and
+        # halve the derived per-step mean.
         self._step_seen: Dict[str, set] = {}
         self._handler_start: Optional[float] = None
         self._handler_end: Optional[float] = None
@@ -354,11 +353,11 @@ def _clipped(
 
 
 #: Stages recorded OUTSIDE the handler window: reported, never part of the
-#: ``runtime_ms`` reconciliation. ``instance_gate_wait`` is pgw#677's
-#: attribution of time queued behind the per-instance gate (typically a
-#: background mint/compile turn) — deliberately outside ``runtime_ms``.
-#: pgw#1154: ``gpu_idle_before`` is not a wait this request served at all — it
-#: is the gap BEFORE it, charged to no request's runtime. Reported, never summed.
+#: ``runtime_ms`` reconciliation. ``instance_gate_wait`` is time queued behind
+#: the per-instance gate (typically a background mint/compile turn),
+#: deliberately outside ``runtime_ms``. ``gpu_idle_before`` is not a wait this
+#: request served at all — it is the gap BEFORE it, charged to no request's
+#: runtime. Reported, never summed.
 PRE_HANDLER_STAGES = frozenset(
     {"gpu_permit_wait", "input_fetch", "setup_wait", "instance_gate_wait",
      "gpu_idle_before"})

@@ -1,4 +1,4 @@
-"""pgw#1133: a dtype cast is TREE-wide, precision pins are PER-COMPONENT.
+"""A dtype cast is TREE-wide; precision pins are PER-COMPONENT.
 
 ``families.facts`` states which component CLASSES must come off disk wider
 than the composition's compute dtype (``AutoencoderKLWan -> fp32``), and
@@ -16,8 +16,8 @@ This module is the producer half of that one fact. It reads the TREE'S OWN
   not refuse, because "publish a bf16 flavor of this model" is a tree-level
   intent with no per-component spelling that could satisfy both it and the
   pin, and the loader would widen the component right back anyway. Refusing
-  would leave the caller with the ie#649 workaround (a third pod leg, plus an
-  operator who already knows the fact) as the only path to the same tree.
+  would leave the caller with a workaround (a third pod leg, plus an operator
+  who already knows the fact) as the only path to the same tree.
 * :func:`check_explicit_pin_conflict` — the caller NAMING a pinned component
   as a quant target is a per-component instruction that contradicts the pin.
   That is refused, typed and by name: the caller can repair it (drop the

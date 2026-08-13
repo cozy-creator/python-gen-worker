@@ -12,14 +12,11 @@ URL, so the store itself refuses bytes that do not hash to the key), re-plan
 checkpoint; N artifacts are N publishes joining one tag group, and exactly
 one of them is `head=True`.
 
-THE v1 (blake3) `/commits` PROTOCOL IS GONE FROM THIS CLIENT. It was
-frozen hub-side (th#1303 phase 3.5 — every new v1 commit answers 410
-`unsupported_digest_algorithm`), and a retired protocol left resident in the
-tree is a runtime failure on a rented pod instead of a compile failure in CI.
-Deleted with it: `blake3_file`, `CommitFile.resolve`/`.blake3`, the
-by-reference add, `BankedBlobGoneError`, and the th#592 download-skip bank
-(`lookup_clone_manifests` / `record_clone_manifests`), whose adds were
-by-reference and therefore un-migratable by construction.
+THE v1 (blake3) `/commits` PROTOCOL IS GONE FROM THIS CLIENT: it is frozen
+hub-side (every new v1 commit answers 410 `unsupported_digest_algorithm`),
+and a retired protocol left resident in the tree is a runtime failure on a
+rented pod instead of a compile failure in CI. The by-reference add went with
+it — a digest must be proven from bytes in hand.
 """
 
 from __future__ import annotations
@@ -44,19 +41,19 @@ from .journal import JOURNAL_NAME, JournalEntry, PublishJournal, artifact_key
 
 logger = logging.getLogger(__name__)
 
-# the retry loop's PACE, and deliberately not its end — the
-# give-up is `SilenceWindow(_SEND_SILENCE_WINDOW_S)` over definite hub answers
-# , so these two decide only how often a hub that is down gets asked.
-# The threat is this worker: a publish riding out a hub rebuild for the better
-# part of an hour must not become a retry flood against it, and must not stall
-# an hour between attempts once it recovers. The ceiling also bounds a hostile
-# or buggy `Retry-After`, which `_retry_after_s` clamps to it (:157).
+# The retry loop's PACE, and deliberately not its end — the give-up is
+# `SilenceWindow(_SEND_SILENCE_WINDOW_S)` over definite hub answers, so these
+# two decide only how often a hub that is down gets asked. A publish riding out
+# a hub rebuild for the better part of an hour must not become a retry flood
+# against it, and must not stall an hour between attempts once it recovers. The
+# ceiling also bounds a hostile or buggy `Retry-After`, which `_retry_after_s`
+# clamps to it.
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
 
-# Connect timeout split from read (mirrors gen_worker.hubio.transport and
-# the gw#456 download-side floor): a dead host fails in seconds instead of
-# consuming the whole read budget.
+# Connect timeout split from read (mirrors gen_worker.hubio.transport and the
+# download-side floor): a dead host fails in seconds instead of consuming the
+# whole read budget.
 _CONNECT_TIMEOUT_S = 15.0
 
 # Bounded RE-PLAN passes for a publish whose granted objects did not all land.
@@ -64,7 +61,7 @@ _CONNECT_TIMEOUT_S = 15.0
 # landed is now resident, so a pass costs only the objects still missing.
 _REUPLOAD_ATTEMPTS = 2
 
-# re-plans spent purely on RE-MINTING expired presigns, charged to
+# Re-plans spent purely on RE-MINTING expired presigns, charged to
 # their own budget. An expired grant is not a failed transfer — nothing about
 # the bytes is in question — so consuming a re-upload pass for one is how a
 # 2 h TTL crossed mid-publish turns into a fatal job. Small, because the CAS
@@ -76,13 +73,12 @@ _EXPIRY_REPLAN_ATTEMPTS = 3
 # and the client must not read its own impatience as a failure.
 _COMPLETE_TIMEOUT_S = 600.0
 
-# how long the client tolerates hearing NOTHING
-# DEFINITE from the hub before giving up — network errors, edge-masked 5xx,
-# proxy-shaped 404s. Silence-bounded, never attempt-counted: a hub restart is
-# seconds and a tunnel re-dial is minutes, and the old 5-attempt cap (~2 min)
-# classified both FATAL and threw away paid GPU work at the finish line (two
-# 58-minute clones, pgw#743). Six verify-lengths, because a container rebuild
-# is tens of minutes and an hour parked on the CPU rig costs about what
+# How long the client tolerates hearing NOTHING DEFINITE from the hub before
+# giving up — network errors, edge-masked 5xx, proxy-shaped 404s.
+# Silence-bounded, never attempt-counted: a hub restart is seconds and a tunnel
+# re-dial is minutes, and an attempt cap classifies both FATAL and throws away
+# paid GPU work at the finish line. Six verify-lengths, because a container
+# rebuild is tens of minutes and an hour parked on the CPU rig costs about what
 # re-downloading costs — and unlike the re-download it cannot fail the same
 # way twice. Waiting stays observable: the loop beats liveness every pass.
 _COMPLETE_SILENCE_WINDOW_S = 6.0 * _COMPLETE_TIMEOUT_S
@@ -91,10 +87,8 @@ def _dtype_token(v: str) -> str:
     """Publish-body dtype hygiene: the internal dtype-axis colon
     forms (``gguf:q4_k_m``, ``int8:awq``) publish as ``-`` forms.
 
-    pgw#1159 narrowed this to `dtype`, the one field it normalizes that the
-    hub still reads. `flavor`/`flavors`/`default_flavor` are GONE from the
-    publish body — th#1803 deleted the flavor as an address, and this surface
-    kept sending fields the hub decoded and never read.
+    `dtype` is the only field normalized here — `flavor`/`flavors`/
+    `default_flavor` are not part of the publish body at all.
     """
     return str(v or "").replace(":", "-")
 
@@ -132,7 +126,7 @@ class HubPublishError(RuntimeError):
     """Terminal failure talking to tensorhub's commit API.
 
     ``status`` and ``code`` carry the hub's OWN classification when it gave
-    one (the ``{"error": {"code": ...}}`` envelope, or a th#1301 projection's
+    one (the ``{"error": {"code": ...}}`` envelope, or a projection's
     ``status.failure.code``). Callers that report a publish outcome to the
     fleet need a stable token to put on the wire; re-deriving one by matching
     substrings of ``str(exc)`` is how a refusal reason turns into prose that
@@ -148,7 +142,7 @@ class HubPublishError(RuntimeError):
 
 
 def _is_terminal_repudiation(exc: BaseException) -> bool:
-    """Should this failure destroy the session's staged bytes? (pgw#1002 B)
+    """Should this failure destroy the session's staged bytes?
 
     ONLY a refusal the hub itself classified terminal. `DELETE /publishes/:id`
     is not a tidy-up — hub-side it runs `cleanupCASPublishV2Staging` and
@@ -189,11 +183,10 @@ def _error_code_of(resp: requests.Response) -> str:
     return hub_error_of(resp).code
 
 
-# how long _send_with_retries tolerates hearing nothing
-# DEFINITE from the hub (network errors, 5xx, 429, proxy-shaped 404s) before
-# giving up. A hub restart is seconds and a tunnel re-dial is minutes; the old
-# 5-attempt cap (~2 min) classified both FATAL and threw away paid GPU work
-# at the finish line (two 58-min clones, #743). Silence-bounded per gw#666.
+# How long _send_with_retries tolerates hearing nothing DEFINITE from the hub
+# (network errors, 5xx, 429, proxy-shaped 404s) before giving up. A hub restart
+# is seconds and a tunnel re-dial is minutes, so the bound is SILENCE, never an
+# attempt count.
 _SEND_SILENCE_WINDOW_S = 600.0
 
 
@@ -210,7 +203,7 @@ def _send_with_retries(
     really the hub speaking (not a proxy's offline page). Indefinite answers
     — network errors, 429, 5xx, and ANY proxy-shaped status (ngrok with no
     healthy backend while the hub restarts answers 404 AND 503 with the same
-    HTML page; pgw#743) — retry with backoff until nothing definite has been
+    HTML page) — retry with backoff until nothing definite has been
     heard for ``silence_window_s``, then surface the last state. Unknown
     exception types never leak raw: they become a typed ``HubPublishError``.
     Returns the last response for non-retryable statuses — callers keep their
@@ -236,18 +229,18 @@ def _send_with_retries(
         else:
             code = int(resp.status_code)
             # `definite` lets a caller supply its OWN definiteness rule for a
-            # route whose refusals are not envelope-shaped (th#1303's v2
-            # completion answers with a projection carrying an explicit
-            # `retryable` flag). The default stays the shape heuristic.
+            # route whose refusals are not envelope-shaped (a v2 completion
+            # answers with a projection carrying an explicit `retryable` flag).
+            # The default stays the shape heuristic.
             is_definite = definite(resp) if definite is not None else is_definite_hub_answer(resp)
             if code != 429 and is_definite:
                 return resp  # definite hub answer
             last_resp, last_exc = resp, None
             delay = _retry_after_s(resp) or delay
-        # this loop can now legitimately run for the better part of
-        # an hour riding out a hub rebuild, and a publisher that goes silent
-        # for an hour is exactly the dead-job signature the watchdogs kill on
-        # . Waiting IS work — say so on the liveness channel.
+        # This loop can legitimately run for the better part of an hour riding
+        # out a hub rebuild, and a publisher silent for an hour is the dead-job
+        # signature the watchdogs kill on. Waiting IS work — say so on the
+        # liveness channel.
         _activity.note_progress()
         if contact.stalled():
             if last_resp is not None:
@@ -271,8 +264,7 @@ class CommitFile:
 
     There is no by-reference form. v2's guarantee is that a digest is proven
     from bytes in hand — a caller who cannot supply them has nothing the
-    protocol can attest, and the th#592 by-reference bank that used to rely on
-    the opposite died with the v1 route it was built on."""
+    protocol can attest."""
 
     path: str
     local_path: Optional[Path] = None
@@ -390,13 +382,10 @@ class HubClient:
 
         `_send_with_retries` decides "did we hear from the hub?" from the body's
         SHAPE, and a v2 completion's refusal is a projection rather than an
-        error envelope — so it read a real, typed, `retryable: false` refusal as
-        a proxy non-answer and retried it. MEASURED LIVE (twice): the retry
-        found the session already terminal and returned 409
-        `publish_repudiated`, so the caller was told the publish had been
-        repudiated instead of `invalid_manifest_for_kind:
-        missing_diffusers_single_file_safetensors` — a consequence in place of a
-        cause, and the actual reason was gone.
+        error envelope — so it would read a real, typed, `retryable: false`
+        refusal as a proxy non-answer and retry it. The retry then finds the
+        session already terminal and returns 409 `publish_repudiated`: a
+        consequence in place of the cause, which is gone.
 
         A publish is not idempotent to re-complete, so a blind retry here can
         only ever destroy the diagnosis. Network-level failures still retry
@@ -418,26 +407,22 @@ class HubClient:
         destination_repo: str,
         files: list[CommitFile],
         tags: list[str] | None = None,
-        # "replace" — a checkpoint is COMPLETE IN ITSELF. "merge"
-        # unions this publish with the repo's prior :latest, so a caller that
-        # never mentioned a sibling inherits its bytes; te#44 shipped an #fp8
-        # checkpoint carrying 5.2 GB of fp16 base weights that way, and a
-        # differently-sharded base splices into a quantization the same way.
-        # te#44 was fixed at ONE call site (publish_flavors' own default)
-        # instead of here, so every future caller re-acquired the bug — the
-        # hub's normalizePublishMode("") had the same default until th#1400.
-        # Both are "replace" now; pass mode="merge" explicitly and only for
-        # what it is for: assembling ONE checkpoint across several commits
-        # (clone.py's chunked full-clone, _stream.py's streamed output).
+        # "replace" — a checkpoint is COMPLETE IN ITSELF. "merge" unions this
+        # publish with the repo's prior :latest, so a caller that never
+        # mentioned a sibling INHERITS its bytes (an fp8 checkpoint carrying
+        # the fp16 base weights; a differently-sharded base spliced into a
+        # quantization). Both this default and the hub's are "replace"; pass
+        # mode="merge" explicitly and only for what it is for: assembling ONE
+        # checkpoint across several commits (clone.py's chunked full-clone,
+        # _stream.py's streamed output).
         mode: str = "replace",
-        # HEAD, not `default_flavor`. A variant publish
-        # (one carrying quant provenance) JOINS the tag group without moving
-        # the tag; `head=True` says this publish owns the bare row.
+        # HEAD. A variant publish (one carrying quant provenance) JOINS the tag
+        # group without moving the tag; `head=True` says this publish owns the
+        # bare row.
         head: bool = False,
         # `ns.name@N` — what the bytes ARE. PROVEN at tier 1 against
         # the safetensors header, so an unprovable claim refuses the publish
-        # instead of being stored as a maybe. This replaces the `flavor`
-        # token, which stated the same thing and was never read.
+        # instead of being stored as a maybe.
         artifact_contract: str = "",
         dtype: str = "",
         file_layout: str = "",
@@ -464,21 +449,20 @@ class HubClient:
         GUARANTEES INTEGRITY: each object's sha256 is signed into its presigned
         PUT, so R2 refuses bytes that do not hash to the key (400, and the
         object does not exist afterwards) and refuses a substituted claim (403).
-        A claimed digest stops being assertable, which is what kills th#1305's
+        A claimed digest stops being assertable, which kills the
         inherit/overwrite class structurally rather than by guard.
 
         Files > 64 MiB become an ordered list of enforced chunks, so a retry
         costs one chunk instead of a 2 GB shard and progress is monotone across
-        retries — the pgw#786 lemon-host pathology, fixed by the unit of work
-        rather than by a new watchdog.
+        retries — a lemon host is bounded by the unit of work rather than by a
+        new watchdog.
 
         THERE IS NO PROTOCOL AUTO-SELECT AND NO ENV KNOB. The caller names the
         protocol, so flipping a producer class to sha256 is a code change and a
-        deploy — which is exactly the controlled, blast-radius-ordered producer
-        flip th#1303 phase 3 asks for. A hub without these routes answers 404,
-        and this deliberately does NOT fall back: a silent downgrade to blake3
-        would make "did this publish v2?" unanswerable from the outside (and a
-        404 from a PROXY is not a 404 from the hub — th#715).
+        deploy. A hub without these routes answers 404, and this deliberately
+        does NOT fall back: a silent downgrade to blake3 would make "did this
+        publish v2?" unanswerable from the outside (and a 404 from a PROXY is
+        not a 404 from the hub).
 
         ``provenance`` carries the WORKER-ADDABLE stamp subset only, exactly as
         :meth:`commit` does — the hub resolves the authoritative stamp from the
@@ -499,8 +483,7 @@ class HubClient:
         produced bytes BEFORE the first PUT, so a retry on this pod re-adopts
         the same session (same staging prefix) and re-plans it instead of
         declaring a fresh one. See ``hubio.journal`` for what this does and
-        does not cover, and for the th#1654 hub dependency it is built to
-        exploit.
+        does not cover, and for the hub dependency it is built to exploit.
         """
 
         # Read the constant off the module at CALL time rather than binding a
@@ -540,9 +523,9 @@ class HubClient:
             "mode": mode,
             "files": [d.to_wire() for d in decls],
         }
-        # an EMPTY list is an explicit "move no tags" and must reach
-        # the wire (the classification gate refuses an OMITTED tags field on
-        # repos that carry tag rows); only None omits the field.
+        # An EMPTY list is an explicit "move no tags" and must reach the wire
+        # (the classification gate refuses an OMITTED tags field on repos that
+        # carry tag rows); only None omits the field.
         if tags is not None:
             body["tags"] = [
                 {"tag": t, **({"head": True} if head else {})} for t in tags
@@ -565,7 +548,7 @@ class HubClient:
         if metadata:
             body["metadata"] = dict(metadata)
         if provenance:
-            # the v2 declare decodes this STRICTLY into the same
+            # The v2 declare decodes this STRICTLY into the same
             # `commitProvenanceInput` v1 uses, so the accepted subset is exactly
             # `step_number | epoch_number | quantization_method |
             # quantization_library | upstream_revision | upstream_attestation`.
@@ -606,9 +589,7 @@ class HubClient:
                     put_url=str(g.get("put_url") or ""),
                     headers={str(k): str(v) for k, v in (g.get("headers") or {}).items()},
                     staging_key=str(g.get("staging_key") or ""),
-                    # the hub has always sent this
-                    # (`chunkcas/plan.go` ObjectGrant.ExpiresAt); we used to
-                    # decode the grant and drop it.
+                    # `chunkcas/plan.go` ObjectGrant.ExpiresAt.
                     expires_at=str(g.get("expires_at") or ""),
                 ))
             return out
@@ -633,7 +614,7 @@ class HubClient:
                     status=again.status_code, code=_error_code_of(again))
             return self._json(again)
 
-        # adopt a journalled session before declaring a new one. Its
+        # Adopt a journalled session before declaring a new one. Its
         # staging prefix is session-scoped, so reusing the id is the ONLY way
         # to reach bytes a predecessor already moved. A session the hub no
         # longer accepts simply falls through to a fresh declare — resuming is
@@ -714,9 +695,9 @@ class HubClient:
                 if report.ok:
                     break
                 if report.needs_replan:
-                    # nothing failed — presigns went stale. Re-mint
-                    # them without charging the re-upload budget, which exists
-                    # for objects that would not land.
+                    # Nothing failed — presigns went stale. Re-mint them
+                    # without charging the re-upload budget, which exists for
+                    # objects that would not land.
                     expiry_replans += 1
                     if expiry_replans > _EXPIRY_REPLAN_ATTEMPTS:
                         raise HubPublishError(
@@ -738,9 +719,8 @@ class HubClient:
                         + "; ".join(report.failures[:5])
                     )
                 # RESUME NEEDS NO CLIENT STATE FOR THIS PROCESS: re-plan and
-                # the need set names what still has to move. th#1654 is what
-                # makes it come back SMALLER (staged-but-unpromoted objects are
-                # invisible to the hub's planner until it lands); the journal
+                # the need set names what still has to move, and it comes back
+                # SMALLER because what landed is now resident. The journal
                 # above is what lets a LATER process re-enter this same loop.
                 grants = _grants_of(_replan(publish_id))
 
@@ -753,8 +733,7 @@ class HubClient:
                 # Lead with the hub's OWN typed classification when it gave one.
                 # A refusal that reports its `code`, its `retryable` bit and the
                 # stage that produced it is actionable; a bare status code plus
-                # 800 bytes of truncated projection is what sent this lane
-                # looking in the wrong place twice.
+                # 800 bytes of truncated projection is not.
                 failure = self._v2_failure(done)
                 if failure:
                     stage = ""
@@ -784,13 +763,13 @@ class HubClient:
                     f"publish {publish_id} completed without a checkpoint id: "
                     f"{json.dumps(final)[:500]}", code="checkpoint_id_missing")
         except BaseException as exc:
-            # ABORT ONLY ON A TERMINAL REFUSAL. `DELETE /publishes/:id`
-            # runs `cleanupCASPublishV2Staging` hub-side, which deletes every
-            # staged chunk — so aborting on a transport blip threw away 37 GB of
-            # transferred bytes to keep a session row tidy. A transport failure,
-            # a timeout or a KeyboardInterrupt now leaves the session intact so
-            # a retry (this pod, via the journal) can resume it. Sessions that
-            # genuinely leak are the staging lifecycle's problem.
+            # ABORT ONLY ON A TERMINAL REFUSAL. `DELETE /publishes/:id` runs
+            # `cleanupCASPublishV2Staging` hub-side, which deletes every staged
+            # chunk — aborting on a transport blip throws away every transferred
+            # byte to keep a session row tidy. A transport failure, a timeout or
+            # a KeyboardInterrupt leaves the session intact so a retry (this
+            # pod, via the journal) can resume it. Sessions that genuinely leak
+            # are the staging lifecycle's problem.
             if _is_terminal_repudiation(exc):
                 self._abort_publish(repo_path, publish_id)
                 if journal is not None:
@@ -806,9 +785,9 @@ class HubClient:
         # job: the bytes are in the CAS.
         if journal is not None:
             journal.clear(publish_id)
-        # Surfaced, not swallowed: the hub names which canonical th#1301 checks
-        # it did NOT run. A list that promises 19 and silently runs 14 is worse
-        # than one promising 14.
+        # Surfaced, not swallowed: the hub names which canonical checks it did
+        # NOT run. A list that promises 19 and silently runs 14 is worse than
+        # one promising 14.
         skipped = final.get("checks_unavailable") or []
         if skipped:
             logger.info("publish %s checks_unavailable=%s", publish_id, skipped)

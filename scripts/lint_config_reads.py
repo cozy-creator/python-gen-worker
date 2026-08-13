@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""pgw#931 / ruling §1.18: exactly ONE component in this process reads the environment.
-
-Paul, 2026-08-02:
-
-    *"we should NEVER be loading random envs in the middle of code; we should
-    only load it from our config pipeline and then pass it around."*
+"""Exactly ONE component in this process reads the environment: envs are never
+loaded in the middle of code, only from the config pipeline and then passed
+around.
 
 `gen_worker.config` is that component. Every other `os.environ` / `os.getenv`
 access in `src/gen_worker` must appear in `scripts/config_reads_allowlist.txt`
@@ -19,12 +16,11 @@ sites are individual lines inside files that also contain violations
 A file-granular allowlist would exempt exactly the files that need checking.
 
 Line granularity is the smaller half of the reason. The larger half: the
-allowlist format forces every accepted site to NAME ITS CLASSIFICATION. That is
-what stops it from decaying into `config/settings.py`'s old prose exception list,
-which named 5 files while the reads lived in 41 — a written boundary that was
-10% accurate, which is not a boundary.
+allowlist format forces every accepted site to NAME ITS CLASSIFICATION, which
+is what stops it decaying into a prose exception list that no longer describes
+the tree.
 
-The four classifications are §1.18's, and only the first is a defect:
+Only the first classification is a defect:
 
     VIOLATION   a plain config read that should come from the struct
     BOOTSTRAP   read before config can exist; must be a named, tiny set
@@ -33,9 +29,8 @@ The four classifications are §1.18's, and only the first is a defect:
     STANDALONE  a CLI that loads no app config
     TRIPWIRE    a guard whose entire purpose is to fire on a misconfiguration
 
-Baselining follows th#1383's precedent on the Go side: the allowlist is seeded
-with today's accepted sites so the gate is green on arrival, then burned down. A
-gate that fails on day one gets switched off.
+The allowlist is seeded with the accepted sites so the gate is green on
+arrival, then burned down. A gate that fails on day one gets switched off.
 
 Also enforced here: every owned-namespace env name read anywhere in
 `src/` must be known to `config.loader` — either bound to a Settings field or
@@ -136,8 +131,8 @@ class EnvVisitor(ast.NodeVisitor):
         whole mapping and reads a key out of it later, and
         `procsplit/parent.py` copies the entire environment into the compute
         child's and then pops a DENYLIST — so the child inherits every variable
-        nobody thought to name. Same shape th#1502 records at `registry.go`.
-        Hits dedupe by line, so an `os.environ.get(...)` is not double-counted.
+        nobody thought to name. Hits dedupe by line, so an `os.environ.get(...)`
+        is not double-counted.
         """
         if (isinstance(node.value, ast.Name) and node.value.id == "os"
                 and node.attr == "environ" and id(node) not in self._consumed):
@@ -148,13 +143,10 @@ class EnvVisitor(ast.NodeVisitor):
 def scan() -> Tuple[Dict[Tuple[str, str], int], Set[str]]:
     """Every env access outside `config/`, keyed by (path, ENV NAME).
 
-    NOT by line number, and that is the whole point. pgw#931 shipped this gate
-    keyed on `path:line` and it went red on `dev` within the hour: two sibling
-    PRs (#432, #434) merged alongside it and shifted lines in four files nobody
-    in this change had touched. A line number is a fact OTHER PEOPLE change
-    independently, so pinning an allowlist to one makes the allowlist a second
-    carrier that goes stale silently — §4.22, and precisely the defect class
-    this gate exists to police. The gate committed the sin it polices.
+    NOT by line number, and that is the whole point: a line number is a fact
+    OTHER PEOPLE change independently, so pinning an allowlist to one makes the
+    allowlist a second carrier that goes stale silently — precisely the defect
+    class this gate exists to police.
 
     (path, name) is stable under unrelated edits, and it is the meaningful unit
     anyway: the classification belongs to "this file reading this variable",
@@ -227,17 +219,13 @@ def load_allowlist() -> Tuple[Dict[Tuple[str, str], str], List[str]]:
 #
 # The six classifications above answer WHERE a read happens relative to the
 # config pipeline. None of them answers whether the read SELECTS BEHAVIOUR, and
-# those are orthogonal questions. `GEN_WORKER_PREFER_AOT` was a behaviour switch
-# that silently disarmed on a release rebuild and took the entire AOT path dark
-# for three pod attempts; nothing WHERE-shaped could have flagged it. The
-# allowlist proves the axis was missing rather than implicit: it classified
-# `GEN_WORKER_AOT_EXPORT_PARALLEL`/`_REUSE` as LIBRARY (torch has never heard of
-# either name) and three serving-hot-path switches as STANDALONE ("a CLI that
-# loads no app config").
+# those are orthogonal questions — a behaviour switch that silently disarms on a
+# release rebuild takes a whole code path dark, and nothing WHERE-shaped can
+# flag it.
 #
-# Paul's rule: env carries CONFIG, SECRETS and TUNING VALUES. A branch selector
+# The rule: env carries CONFIG, SECRETS and TUNING VALUES. A branch selector
 # needs typed config, a loud typed observable, and a named threat. This gate
-# makes a NEW one fail the build instead of being noticed three pods later.
+# makes a NEW one fail the build instead of being noticed pods later.
 
 #: (path, ENV_NAME) -> the named threat this gate defends against.
 #: A gate lives here ONLY with a threat a reader can evaluate. "It is useful"
@@ -433,25 +421,21 @@ def _is_literal_alternatives(node: ast.AST, collections: Set[str]) -> bool:
 class BehaviourVisitor(ast.NodeVisitor):
     """Env reads whose value reaches a CONDITIONAL rather than a value slot.
 
-    Deliberately syntactic and conservative. What it catches is stated, and so
-    is what it does not — a gate that pretends to completeness it does not have
-    is worse than one whose reach is stated.
+    Deliberately syntactic and conservative. It cannot follow a read through a
+    variable into an `if` three functions away, and it does not try — a gate
+    that pretends to completeness it does not have is worse than one whose
+    reach is stated.
 
-    TWO passes, because one was not enough:
+    TWO passes, because pass 1 alone was structurally blind to a whole gate
+    shape:
 
     1. `_scan_conditions` — the read sits syntactically inside an `if`/`while`/
        ternary/`assert` test, a comprehension guard, or the `return` of a
-       predicate-shaped function. Every switch deleted by pgw#995 was this
-       shape.
+       predicate-shaped function.
 
-    2. `_scan_discriminated_locals` (th#1887) — the read is assigned to a local
-       and that local is then discriminated against known alternatives
-       (`==`/`!=`/`in`/`not in`, or a `match` subject). This shape was
-       STRUCTURALLY INVISIBLE to pass 1, and three real gates were hiding in
-       it: GEN_WORKER_NATIVE_KERNELS, GEN_WORKER_SVDQ_ENGINE and
-       GEN_WORKER_VIDEO_ENCODER, all misfiled as STANDALONE. A registry that
-       cannot see a whole gate SHAPE is a guard that cannot fire, which is
-       worse than the three gates it missed.
+    2. `_scan_discriminated_locals` — the read is assigned to a local and that
+       local is then discriminated against known alternatives (`==`/`!=`/`in`/
+       `not in`, or a `match` subject).
 
     Still out of reach, stated honestly: a read stored in a module-level
     constant and branched on elsewhere; a read passed as a call argument to a
@@ -549,7 +533,7 @@ def scan_behaviour() -> Dict[Tuple[str, str], int]:
 
 
 def check_behaviour_gates() -> List[str]:
-    """Paul's rule, enforced: env carries values, never a branch selection."""
+    """The rule, enforced: env carries values, never a branch selection."""
     found = scan_behaviour()
     errors: List[str] = []
     for key in sorted(set(found) - set(BEHAVIOUR_GATES)):

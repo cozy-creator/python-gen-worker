@@ -2,8 +2,8 @@
 
 Civitai's ``baseModel`` enum is a *foreign catalog's* vocabulary: 46 keys
 mapping onto 35 canonical slugs, changing whenever civitai adds a base model.
-It has nothing to do with what a worker can execute, so pgw#740 (B13) moved the
-table out of the SDK: the ingest endpoint (or the hub catalog) injects it with
+It has nothing to do with what a worker can execute, so the table lives OUTSIDE
+the SDK: the ingest endpoint (or the hub catalog) injects it with
 :func:`declare_foreign_family_map` and the SDK only performs the lookup.
 
 An unmapped value returns ``None`` — the caller stamps nothing rather than

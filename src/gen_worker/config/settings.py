@@ -10,15 +10,14 @@ Each process entry performs one bootstrap-owned `load_settings()`:
 `entrypoint._run_main()` for the worker, `procsplit.parent.main()` for the
 control parent, and the `cli/` command group for the standalone CLI. Nothing
 else loads; nothing else reads env. There is deliberately **no** cached
-process-global accessor — `get_settings()` was deleted in pgw#931 because a
-`lru_cache`d singleton is the same defect as a raw env read wearing better
-clothes: unreachable by a caller that wants to pass a different value,
-invisible to a test that does not clear the cache, and latched by whichever
-module happened to import first.
+process-global accessor: a `lru_cache`d singleton is the same defect as a raw
+env read wearing better clothes — unreachable by a caller that wants to pass a
+different value, invisible to a test that does not clear the cache, and latched
+by whichever module happened to import first.
 
-The list of sanctioned raw-read sites is not prose here — prose drifted from
-5 files to 41 before pgw#931 measured it. It is
-`scripts/config_reads_allowlist.txt`, every line classified, enforced by
+The list of sanctioned raw-read sites is deliberately not prose here (prose
+drifts). It is `scripts/config_reads_allowlist.txt`, every line classified,
+enforced by
 `scripts/lint_config_reads.py` in CI. A new `os.environ` read outside this
 package fails the build.
 
@@ -28,9 +27,9 @@ avoid pulling in pydantic. The source-loader layering (env → .env → secrets 
 """
 import msgspec
 
-# no boot-only environment (``WORKER_CONFIG_GENERATION``) was
-# ever injected into this process. Distinct from generation 0, which is a real
-# — and genuinely ancient — injected generation.
+# No boot-only environment (``WORKER_CONFIG_GENERATION``) was ever injected into
+# this process. Distinct from generation 0, which is a real — and genuinely
+# ancient — injected generation.
 BOOT_CONFIG_GENERATION_ABSENT = -1
 
 
@@ -64,19 +63,14 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # value the hub injected at pod create, frozen there forever and updated by
     # nothing. The live credential is rotated over the scheduler stream at ~80 %
     # of TTL, and `gen_worker.worker_credential` is the ONLY source of truth for
-    # it. Renamed from `worker_jwt` deliberately: it read exactly like "the
-    # worker's JWT" to anyone who did not already know the live value lived in
-    # another module's private state, and the attestation carrier read it for
-    # precisely that reason — every dial past T+30 min then presented an expired
-    # token, three of which wedge the pod (pgw#846 attempts 16 and 17).
-    #
-    # The rename is the fix rather than a comment because it makes the mistake
-    # IMPOSSIBLE instead of detectable: any surviving `settings.worker_jwt`
-    # reader is now an AttributeError at the call site, not a stale string. Read
-    # this field from `worker_credential` and nowhere else.
+    # it. The name is deliberately NOT `worker_jwt`: that spelling reads like
+    # "the worker's JWT" and invites a caller to present an expired token, which
+    # wedges the pod. Any surviving `settings.worker_jwt` reader is an
+    # AttributeError at the call site, not a stale string. Read this field from
+    # `worker_credential` and nowhere else.
     bootstrap_worker_jwt: str = ""
-    # the worker's release identity, delivered SEPARATELY from
-    # the JWT. Under the process split the compute child holds no JWT (the
+    # The worker's release identity, delivered SEPARATELY from the JWT. Under
+    # the process split the compute child holds no JWT (the
     # parent strips it), so it cannot read `release_id` out of the claims — but
     # the intent registry and every lifecycle snapshot are keyed on it. A claim
     # is not a credential: the control parent decodes its own token and hands
@@ -86,35 +80,32 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Runtime introspection (set by the RunPod runtime; not configuration).
     runpod_pod_id: str = ""
 
-    # local mutable-config snapshot file (atomic-rewritten on each
+    # Local mutable-config snapshot file (atomic-rewritten on each
     # config-generation push; per-invoke subprocesses read it). Empty =
     # runtime_config.DEFAULT_SNAPSHOT_PATH.
     config_snapshot_path: str = ""  # GEN_WORKER_CONFIG_SNAPSHOT_PATH
     # Config generation whose boot-only environment was injected when this pod
     # was created. Never inferred from the first desired-state command.
     #
-    # the DEFAULT is the sentinel -1, meaning "no boot-only
-    # environment was ever injected into this process" — which is not the same
-    # fact as "the injected boot config is generation 0". Tensorhub injects
-    # WORKER_CONFIG_GENERATION only into pod-launch env, so a host-process
-    # worker (the e2e local-worker shape, the dev loop, any BYO/externally
-    # managed fleet) never receives one; conflating the two made every such
-    # worker report BOOT_STALE for its whole life, with a remedy (pod
-    # replacement) that does not exist for a pod-less worker.
+    # The DEFAULT is the sentinel -1, meaning "no boot-only environment was ever
+    # injected into this process" — which is NOT the same fact as "the injected
+    # boot config is generation 0". Tensorhub injects WORKER_CONFIG_GENERATION
+    # only into pod-launch env, so a host-process worker never receives one;
+    # conflating the two makes every such worker report BOOT_STALE for its whole
+    # life, with a remedy (pod replacement) that does not exist for it.
     boot_config_generation: int = BOOT_CONFIG_GENERATION_ABSENT  # WORKER_CONFIG_GENERATION
 
     # Immutable image provenance stamped by Tensorhub from the release image
     # variant it selected for this pod.
     worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
 
-    # where the post-mortem boot record is written.
-    # It had NO field at all and was read raw in three places, which is why the
-    # parent and the child could disagree about the carrier. Empty = let
+    # Where the post-mortem boot record is written. It is a FIELD so the parent
+    # and the child cannot disagree about the carrier. Empty = let
     # `postmortem` pick a DURABLE default (the model-cache volume when it is not
     # itself volatile; /tmp only as a last resort, and loudly).
     boot_record_path: str = ""  # GEN_WORKER_BOOT_RECORD
 
-    # tensorhub access for standalone clients (run/serve/prefetch). Production
+    # Tensorhub access for standalone clients (run/serve/prefetch). Production
     # workers get orchestrator-resolved manifests and never dial these.
     tensorhub_url: str = ""        # TENSORHUB_URL
     tensorhub_token: str = ""      # TENSORHUB_TOKEN
@@ -125,28 +116,26 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # models/provision.py::resolve_local_path).
     tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
     tensorhub_cas_dir: str = ""    # TENSORHUB_CAS_DIR
-    # endpoint-scoped datacenter-warm
-    # fill source (RunPod network volume mount), tried before R2. Never the
-    # CAS root itself — see models/cache_paths.py::tensorhub_fill_source_dir.
+    # Endpoint-scoped datacenter-warm fill source (RunPod network volume mount),
+    # tried before R2. Never the CAS root itself — see
+    # models/cache_paths.py::tensorhub_fill_source_dir.
     tensorhub_fill_source_dir: str = ""  # TENSORHUB_FILL_SOURCE_DIR
 
     # Civitai provider credential (CIVITAI_API_KEY, alias CIVITAI_TOKEN).
     civitai_api_key: str = ""
 
-    # C2PA Content Credentials signing (th#714, EU AI Act Art. 50).
+    # C2PA Content Credentials signing (EU AI Act Art. 50).
     # Signing is ON iff cert material is set (inline PEM or path): every
     # generated media asset gets a signed provenance manifest at save time
     # (content_credentials.py). Inline *_PEM carries the PEM content itself —
     # the hub injects it into pod env at launch (RunPod pods have no file
     # mounts) — and takes precedence over *_PATH. Chain = leaf first.
-    # there is NO key field. The PRIVATE KEY never reaches a pod;
+    # There is deliberately NO key field. The PRIVATE KEY never reaches a pod;
     # the hub signs claims over POST /v1/worker/c2pa/sign. A pod that finds
-    # GEN_WORKER_C2PA_KEY_PEM/_KEY_PATH in ANY config source refuses to start
-    # — env via content_credentials._refuse_pod_private_key_material (a
-    # ratchet, re-checked at every read of the signing state), and .env /
-    # /run/secrets / yaml via loader.REFUSED_KEY_MATERIAL (pgw#884: this
-    # sentence used to say "in its env", and a PEM mounted at
-    # /run/secrets/GEN_WORKER_C2PA_KEY_PEM booted green).
+    # GEN_WORKER_C2PA_KEY_PEM/_KEY_PATH in ANY config source refuses to start —
+    # env via content_credentials._refuse_pod_private_key_material (a ratchet,
+    # re-checked at every read of the signing state), and .env / /run/secrets /
+    # yaml via loader.REFUSED_KEY_MATERIAL. ANY source, not just env.
     c2pa_cert_pem: str = ""   # GEN_WORKER_C2PA_CERT_PEM (inline PEM chain)
     c2pa_cert_path: str = ""  # GEN_WORKER_C2PA_CERT_PATH
     c2pa_alg: str = "es256"   # GEN_WORKER_C2PA_ALG (COSE alg matching the cert key)

@@ -61,11 +61,10 @@ def materialize_named_artifact(
     digest, so a re-dispatch of the same spec is a verify-and-return.
     ``what`` names the attempt + spec digest for every refusal.
     """
-    # THE cell-download phase. `cell_fetch` has been a declared boot
-    # phase since pgw#764 with NO producer anywhere in the tree — so "the adopt
-    # leg took 6.2 min" could never be split into download vs admission, which
-    # is the first question anyone asks about an adopt. This is the one place
-    # cell bytes move, so it is the one place the span belongs.
+    # THE cell-download phase. Without a producer here, an adopt leg cannot be
+    # split into download vs admission — the first question anyone asks about
+    # an adopt. This is the one place cell bytes move, so it is the one place
+    # the span belongs.
     with boot_phases.span(
         boot_phases.PHASE_CELL_FETCH,
         ref=cell_ref,

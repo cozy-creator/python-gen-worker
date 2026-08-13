@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-"""pgw#1013 / th#1662: a length read off external bytes may not size a read
-until something has bounded it, and a stream may not be copied without a bound
-checked INSIDE the loop.
+"""A length read off external bytes may not size a read until something has
+bounded it, and a stream may not be copied without a bound checked INSIDE the
+loop.
 
-WHY THIS GUARD EXISTS. The §4.24 bounds census enumerated
-every numeric constant and adjudicated each against "name the runaway you
-prevent". That procedure can only inspect bounds that EXIST, so it is blind by
-construction to a read site that needs one and has none — and it walked past two
-real ones in files it had already swept:
-
-    convert/writer.component_stored_tensor_names   json.loads(fh.read(header_len))
-    models/loading  (deshard path)                 json.loads(f.read(n))
-
-Both took the attacker-controlled 8-byte safetensors prefix and allocated on it.
-RED, measured: `OverflowError: byte string is too large` attempting a 2**63-byte
-allocation. Fixed in pgw#973 wave 2 — this guard is what stops the class coming
-back, because the census that missed them cannot be re-run to catch a new one.
+WHY THIS GUARD EXISTS. A bounds census can only inspect bounds that EXIST, so
+it is blind by construction to a read site that needs one and has none. Two
+real ones took the attacker-controlled 8-byte safetensors prefix and allocated
+on it, measured RED as `OverflowError: byte string is too large` attempting a
+2**63-byte allocation. This guard is what stops the class coming back.
 
 THE RULE. Inside a function, if a name is bound from a binary length prefix —
 

@@ -1,16 +1,14 @@
-"""Production-grade HTTP transport for presigned S3 multipart PUTs (issue #13).
+"""Production-grade HTTP transport for presigned S3 multipart PUTs.
 
-The hand-rolled ``requests.put`` loop this replaces failed in production
-against Cloudflare R2 with ``SSLV3_ALERT_BAD_RECORD_MAC`` during the
-FLUX.2-klein-4B clone. Root cause: ``requests``'s default
-``HTTPAdapter`` keeps a process-global ``urllib3.PoolManager`` whose
-connection pool happily hands out TLS sockets that R2's edge has
-half-closed. The next write on a stale socket fails the MAC check on
-the receiver side — fatal, unrecoverable on the same connection — and
-``requests`` cannot tell that error apart from a fresh-handshake
-failure, so its retry just replays the broken socket.
+A hand-rolled ``requests.put`` loop fails in production against Cloudflare R2
+with ``SSLV3_ALERT_BAD_RECORD_MAC``: ``requests``'s default ``HTTPAdapter``
+keeps a process-global ``urllib3.PoolManager`` whose connection pool happily
+hands out TLS sockets that R2's edge has half-closed. The next write on a stale
+socket fails the MAC check on the receiver side — fatal, unrecoverable on the
+same connection — and ``requests`` cannot tell that error apart from a
+fresh-handshake failure, so its retry just replays the broken socket.
 
-This module fixes that with three mechanical changes while preserving the
+This module avoids that with three mechanical properties while preserving the
 Tensorhub upload contract: Tensorhub creates a multipart session and returns
 presigned part URLs; the worker PUTs bytes directly to those URLs.
 
@@ -18,9 +16,9 @@ presigned part URLs; the worker PUTs bytes directly to those URLs.
      ``urllib3.PoolManager(maxsize=1, block=False)`` — guaranteed-new
      TCP+TLS handshake — so a stale half-closed socket never propagates
      to the retry. First attempts within ONE save may share a
-     save-scoped ``PutPool`` (issue #385): keepalive across that save's
-     parts, torn down with the save, never cross-request. See
-     ``PutPool`` for why this scope cannot reproduce the R2 incident.
+     save-scoped ``PutPool``: keepalive across that save's parts, torn
+     down with the save, never cross-request. See ``PutPool`` for why
+     this scope cannot reproduce the R2 incident.
   2. **Explicit retry classification.** TLS/connection/timeout errors,
      429, and 5xx are retried with exponential backoff + decorrelated
      jitter. 4xx (other than 429) is terminal. The classifier matches
@@ -32,16 +30,15 @@ presigned part URLs; the worker PUTs bytes directly to those URLs.
 
 The control plane (create / complete / abort POSTs to tensorhub) stays
 on ``requests``, on a PROCESS-scoped ``requests.Session`` per hub origin
-owned by ``presigned_upload.py`` (th#1795 candidate 3 / pgw#1125). That
-wider scope is deliberate and stops at this file's edge: the R2 data
-plane below stays per-save, because the incident this module exists for
-was an R2 edge behaviour and the hub is a different peer.
+owned by ``presigned_upload.py``. That wider scope is deliberate and
+stops at this file's edge: the R2 data plane below stays per-save,
+because the behaviour this module exists for is an R2 edge behaviour and
+the hub is a different peer.
 
 Public API: ``upload_part_to_presigned_url(url, file_path, offset,
 length, pool=None)`` -> ``etag``, ``PutPool``, and ``backoff_sleep_s`` —
-the ONE decorrelated-jitter backoff every worker-side upload loop uses
-(pgw#1004 wired the chunk-CAS data plane onto it rather than growing a
-fourth implementation). Caller owns the part-level fan-out
+the ONE decorrelated-jitter backoff every worker-side upload loop uses,
+the chunk-CAS data plane included. Caller owns the part-level fan-out
 (``presigned_upload.py``). This module is a pure transport leaf.
 """
 
@@ -212,9 +209,8 @@ class GrantExpired(Exception):
     """A presigned grant is (or has just proven to be) expired.
 
     NOT a failure of the bytes and NOT terminal: an expired presign is fixed
-    by asking the hub for fresh grants (re-plan). Distinguishing this from a
-    substituted-claim 403 is pgw#1004 C; the discrimination lives HERE so
-    every PUT path shares one policy."""
+    by asking the hub for fresh grants (re-plan). The discrimination from a
+    substituted-claim 403 lives HERE so every PUT path shares one policy."""
 
 
 #: put_verdict() results — the ONE status classification for presigned PUTs.
@@ -225,11 +221,11 @@ PUT_TERMINAL = "terminal"    # not fixed by retrying
 
 
 def put_verdict(status: int, *, presign_expired: bool = False) -> str:
-    """THE status classification for presigned PUTs (pgw#1206 B).
+    """THE status classification for presigned PUTs.
 
     2xx ok; 403 on a presign past its stated expiry is a RE-PLAN, never a
-    repudiation (pgw#1004 C); 408/429/5xx transient (botocore's
-    StandardRetryHandler shape); every other 4xx terminal."""
+    repudiation; 408/429/5xx transient (botocore's StandardRetryHandler shape);
+    every other 4xx terminal."""
     if 200 <= status < 300:
         return PUT_OK
     if status == 403 and presign_expired:
@@ -308,12 +304,12 @@ def upload_part_to_presigned_url(
 ) -> str:
     """PUT one presigned object (or multipart part) to S3, return the ETag.
 
-    ``extra_headers`` are sent VERBATIM. th#1795: a store-enforced grant signs
+    ``extra_headers`` are sent VERBATIM: a store-enforced grant signs
     ``x-amz-checksum-sha256`` as a header, so dropping or editing it is a 403,
     never a weaker upload — the headers are part of the grant, not decoration.
 
     With ``pool`` given, the FIRST attempt goes through that save-scoped
-    keepalive pool (issue #385). Every retry attempt — and every attempt
+    keepalive pool. Every retry attempt — and every attempt
     when ``pool`` is None — allocates its own ``urllib3.PoolManager
     (maxsize=1)``, issues the PUT, and tears the pool down, so a stale
     socket (root cause of the ``SSLV3_ALERT_BAD_RECORD_MAC`` against R2)
@@ -443,12 +439,11 @@ def optimal_part_concurrency(total_parts: int) -> int:
 
     A single file can saturate R2 with a small number of in-flight PUTs.
 
-    this is the BINDING bound on the in-repo presigned path —
-    the caller is sequential, so 4 is the real ceiling on concurrent PUTs.
+    This is the BINDING bound on the in-repo presigned path — the caller is
+    sequential, so 4 is the real ceiling on concurrent PUTs.
     ``presigned_upload._PRESIGNED_PUT_BUDGET`` (8) is not a second cap on this
     axis; it covers a different one (an endpoint author saving from their own
-    threads). The previous text here cited ``_concurrent_upload.py`` as the
-    file-level fan-out owner — that module no longer exists.
+    threads).
 
     Without this, one large file's part count IS the concurrency, and a
     thousand-part upload opens a thousand PUTs.

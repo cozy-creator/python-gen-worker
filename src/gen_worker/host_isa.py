@@ -134,8 +134,8 @@ def mint_simdlen(march: Optional[str]) -> Optional[int]:
 
 def _impose_default(inductor_config: object, key: str, value: object) -> None:
     """Process-wide fallback write, via the ONE shared mechanism
-    (``settings_authority.impose_config_default`` — pgw#1049), wrapped so
-    this module's callers keep their typed :class:`HostIsaError`."""
+    (``settings_authority.impose_config_default``), wrapped so this module's
+    callers keep their typed :class:`HostIsaError`."""
     from . import settings_authority
 
     try:
@@ -164,11 +164,9 @@ def impose() -> Dict[str, str]:
     documentation. Boot imposes on the boot thread; every host compile that
     happens anywhere else does not inherit it. Those are not hypothetical
     threads: ``hot_swap``'s process-global background shape-warm/heal worker
-    and pgw#811's K-way ``run_impl`` splitter pool both host-compile off the
-    boot thread, so both were emitting ``-march=native`` — unclamped,
-    unportable, the exact pgw#754 SIGILL class — and, once pgw#811's
-    ``assert_command_is_clamped`` landed, failing outright instead. A
-    same-thread read-back could never see any of it.
+    and the K-way ``run_impl`` splitter pool both host-compile off the boot
+    thread, and an unclamped ``-march=native`` object there is the SIGILL
+    class this exists to prevent. A same-thread read-back could never see it.
     """
     if not torch_capability.present():
         return {}
@@ -209,10 +207,9 @@ def impose() -> Dict[str, str]:
 def assert_command_is_clamped(argv: Sequence[str]) -> None:
     """Refuse a host compile whose ARGV still carries ``-march=native``.
 
-    :func:`impose` asserts the clamp at the *config* level and nothing has
-    ever asserted it at the argv level — and pgw#793's research harness is a
-    live example of a path that mints unclamped objects, because it never
-    booted through ``env_seal.establish``. torch builds the flag in
+    :func:`impose` asserts the clamp at the *config* level only; a harness
+    that never booted through ``env_seal.establish`` mints unclamped objects.
+    torch builds the flag in
     ``cpp_builder._get_cpu_arch_cflags``, which falls through to
     ``march=native`` whenever ``config.cpp.march`` is None, so this reads
     what was actually built rather than what was intended.

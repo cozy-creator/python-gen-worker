@@ -138,7 +138,7 @@ class ExpectedOutput:
     # ``input.<field>`` ref to a payload field already denominated in seconds.
     # Derived expressions (num_frames / fps) are not supported — frame-based
     # endpoints leave this unset; settlement uses the probed
-    # ``VideoAsset.duration_s`` instead (tensorhub counterpart th#572).
+    # ``VideoAsset.duration_s`` instead.
     duration_s: int | str | None = None
 
 

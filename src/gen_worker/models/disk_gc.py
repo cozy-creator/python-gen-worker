@@ -275,10 +275,10 @@ def sweep_stale_writer_temp(
     """Remove abandoned writer-unique temp artifacts: blob downloads stage to
     ``.<name>.part-<writer-id>`` and snapshot builds stage to
     ``<key>.building-<writer-id>`` (writer-unique so concurrent writers on a
-    SHARED CAS root — several pods on one RunPod volume, th#850 — never
-    collide). A writer that dies mid-transfer leaves its temp behind; on
-    pod-local disk that vanished with the pod, but a persistent volume keeps
-    it forever unless swept. Call at boot (`ModelStore.rescan_disk`) — safe
+    SHARED CAS root — several pods on one RunPod volume — never collide). A
+    writer that dies mid-transfer leaves its temp behind; on pod-local disk that
+    vanishes with the pod, but a persistent volume keeps it forever unless
+    swept. Call at boot (`ModelStore.rescan_disk`) — safe
     at any time since only artifacts idle past ``older_than_s`` are removed.
     """
     removed = 0

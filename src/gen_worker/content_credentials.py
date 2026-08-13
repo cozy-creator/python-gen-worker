@@ -175,8 +175,8 @@ class _RemoteSigner:
     worker_jwt: Any  # Callable[[], str]
 
 
-# env names that would carry a private key INTO the pod. Their
-# presence is a platform regression, not a configuration option.
+# Env names that would carry a private key INTO the pod. Their presence is a
+# platform regression, not a configuration option.
 _REFUSED_KEY_ENVS = ("GEN_WORKER_C2PA_KEY_PEM", "GEN_WORKER_C2PA_KEY_PATH")
 
 SIGN_PATH = "/v1/worker/c2pa/sign"
@@ -344,27 +344,20 @@ def sign_media_file(
 def _refuse_pod_private_key_material(settings: Any = None) -> None:
     """Refuse, loudly, any C2PA PRIVATE KEY delivered to this pod.
 
-    This is a ratchet on the pod's environment, so it is checked at every read
-    of the signing state rather than once at ``configure()``. pgw#931 removed
-    ``_active_config``'s lazy ``configure()`` fallback — correctly, since a
-    signing module must not go and find its own config — but the refusal rode
-    along inside that call, so it became reachable only from the one entry that
-    calls ``configure()``. Anything else (a library embed, a compute child, an
-    endpoint importing the module directly) got a quiet ``enabled() == False``
-    and shipped unsigned media beside a key that was sitting right there in the
-    environment. The presence of the key is the fact; no entry point owns it.
+    This is a ratchet on the pod's ENVIRONMENT, so it is checked at every read
+    of the signing state rather than once at ``configure()``: the presence of
+    the key is the fact, and no entry point owns it. A library embed, a compute
+    child or an endpoint importing this module directly must not get a quiet
+    ``enabled() == False`` beside a key sitting in the environment.
 
     ``settings`` is checked too when supplied, so a field smuggled back into
     Settings is refused on the same breath as the env.
 
-    **This arm covers the ENV only, and that is deliberate**. The
-    other delivery vectors — ``.env``, ``/run/secrets``, yaml — never reach
-    ``os.environ``, and until pgw#884 nothing refused them either: the loader
-    dropped the names as "not a Settings field" and the pod booted green with
-    a private key mounted where tenant code could read it. They are refused
-    where they are READ, in ``config.loader.REFUSED_KEY_MATERIAL``, which is
-    the one component that sees every source and does so once per boot rather
-    than once per signed asset.
+    **This arm covers the ENV only, and that is deliberate**. The other
+    delivery vectors — ``.env``, ``/run/secrets``, yaml — never reach
+    ``os.environ``; they are refused where they are READ, in
+    ``config.loader.REFUSED_KEY_MATERIAL``, the one component that sees every
+    source and does so once per boot rather than once per signed asset.
     """
     for env_name in _REFUSED_KEY_ENVS:
         if str(os.environ.get(env_name, "") or "").strip() or str(
@@ -384,16 +377,11 @@ def _active_config() -> Optional[_SignerConfig]:
     _refuse_pod_private_key_material()
     if _configured:
         return _config
-    # this used to resolve lazily from the cached Settings
-    # loader, i.e. a signing module that could go and find its own signing
-    # config from the environment at first use. It cannot: `configure()` is
+    # Deliberately NO lazy resolve from the cached Settings loader: a signing
+    # module must not go and find its own config at first use. `configure()` is
     # called by the process entry with the entry's `Settings`, and a process
-    # that never configured signing is a process where signing is OFF.
-    #
-    # That is also the honest answer. th#1307 makes cert material's PRESENCE
-    # the gate, so "unconfigured" and "configured with no cert" must not be the
-    # same silent state as "found some env" — see the C2PA disposition in
-    # signing being dark is a reported fact, never an inference.
+    # that never configured signing is a process where signing is OFF —
+    # a reported fact, never an inference.
     with _lock:
         _config = None
         _configured = True
@@ -416,11 +404,11 @@ def _hub_sign_claim(remote: _RemoteSigner, alg: str, claim: bytes) -> bytes:
     never the media. Any refusal raises, so the request fails instead of
     shipping an asset with a missing or bogus manifest.
     """
-    # under the process split this callback runs in the compute
-    # child, which holds no worker JWT — so the ASK is a parent-side IPC action.
-    # The child sends a hash (the COSE to-be-signed octets) and gets a signature
-    # back; the credential that authorizes the oracle, like the key behind it,
-    # is somewhere this process cannot reach. `broker.request` is the same POST
+    # Under the process split this callback runs in the compute child, which
+    # holds no worker JWT — so the ASK is a parent-side IPC action. The child
+    # sends a hash (the COSE to-be-signed octets) and gets a signature back;
+    # the credential that authorizes the oracle, like the key behind it, is
+    # somewhere this process cannot reach. `broker.request` is the same POST
     # off the split, so there is one code path either way.
 
     try:

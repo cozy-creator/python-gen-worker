@@ -1,9 +1,8 @@
-"""gw#640: a supervisor parent that outlives the worker and names its death.
+"""A supervisor parent that outlives the worker and names its death.
 
 The worker process is the container's PID 1. When it is killed by a signal —
 cgroup OOM SIGKILL, SIGSEGV in a C extension, an external kill — there is no
-Python left to report anything, which is why six live runs of the th#1085
-cold-boot gate produced restarts and zero diagnostics.
+Python left to report anything, so a restart carries zero diagnostics.
 
 So we fork FIRST, before the heavy imports: the parent stays a few MiB of
 interpreter, the child is the worker. The parent forwards signals, waits, and
@@ -45,7 +44,7 @@ _FORWARDED = (
     signal.SIGUSR2,
 )
 # The subset that means "die". These arm the shutdown deadline; SIGUSR1/USR2
-# are the pgw#639 forensic pokes and must never start a countdown.
+# are the forensic pokes and must never start a countdown.
 _TERMINATING = (
     signal.SIGTERM,
     signal.SIGINT,
@@ -81,7 +80,7 @@ def _mask(how: int, signals: frozenset) -> None:
 def _forward(child_pid: int, stop_timeout_s: float = _STOP_TIMEOUT_S) -> None:
     """Relay the contract signals to the worker, and bound the shutdown.
 
-    pgw#639/#640 require the relay. But a relay alone is not a drain: a child
+    The relay is required, but a relay alone is not a drain: a child
     that cannot answer — deaf, wedged below Python in a CUDA call, or blocked
     writing into a stderr pipe nobody is draining — leaves the parent in
     ``waitpid`` forever, which on a pod means PID 1 never exits and a rented

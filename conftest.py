@@ -3,11 +3,10 @@
 **The defect this exists to remove.** In a green run a skipped row and a passing
 row are the same character of nothing — no line a reader looks at, no way to
 tell "3117 passed" apart from "3117 passed, and the one row that measures the
-thing you changed did not run". pgw#858 is that failure in production: its
-container row skips on `ubuntu-latest` (the image cannot exec the runner's
-uv-managed interpreter, handled by a by-name skip on exit 127), so the row that
-proves the uid boundary has only ever executed on developer boxes — which is
-how the pgw#956 flake reached `dev` behind a green CI.
+thing you changed did not run". The privdrop container row is a live example:
+it skips on `ubuntu-latest` (the image cannot exec the runner's uv-managed
+interpreter, handled by a by-name skip on exit 127), so the row that proves the
+uid boundary only ever executes on developer boxes.
 
 So: record what the session did NOT run, keyed stably, and let
 `scripts/lint_skip_census.py` gate on it against `scripts/skip_census.txt`. A

@@ -1,7 +1,7 @@
 """Progress-based give-up for retry and poll loops.
 
-Paul's standing rule, and the whole point of the th#1166 audit: nothing that
-can END REAL WORK may key on a wall clock. A fixed budget cannot tell a
+Paul's standing rule: nothing that can END REAL WORK may key on a wall
+clock. A fixed budget cannot tell a
 healthy three-hour transfer from a wedge, so it is either useless or it
 kills work that was about to succeed. The honest question is always "has
 anything advanced lately?".
@@ -18,7 +18,7 @@ them:
 
 :class:`ProgressFloor`
     A monotonic total that must GROW BY A FLOOR to count as an advance
-    (gw#655's rule: a trickle is a stall). Without it, a byte a minute
+    (a trickle is a stall). Without it, a byte a minute
     keeps an any-progress watchdog alive forever.
 
 Both take their clock by injection so tests drive them deterministically

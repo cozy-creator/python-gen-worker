@@ -1,24 +1,21 @@
 """Declaration inference + the migration safety gate.
 
-pgw#1107 collapses ``aot_declaration.py`` and the inline ``@endpoint(
-compile=Compile(...))`` into ONE declaration on the class decorator. Two
-pieces of that live here — both pure Python, no model, no trace, no inductor,
-so they run anywhere including this box:
+The family's export declaration lives on the class decorator
+(``@endpoint(compile=Compile(...))``). Two pieces of that live here — both pure
+Python, no model, no trace, no inductor, so they run anywhere:
 
 1. :func:`cfg_image_classes` — the MECHANICAL half of "the SDK derives
    ``classes``". For a CFG-batched image UNet/DiT whose legal request set is
    ``aspect rows x the two CFG regimes`` (sdxl, z-image), the graph-class
    cross-product is a pure function of the author's kept ``shapes`` + the
-   latent scale + ``text_len``. The author stops hand-writing the
-   ``_..._graph_classes()`` helper; the loop, the ``//vae_scale`` latent math
-   and the ``dict.fromkeys`` transposed-row dedupe move here, byte-identical.
+   latent scale + ``text_len``, so the author does not hand-write it.
 
    It is deliberately NOT a universal deriver. qwen (ceil-div token grid),
    flux2 (token-COUNT collapse), wan (3-D latent + relational ``N_tok``) and
    ltx (audio-token formula x two-stage x keyframe axis x frame-legality x
    H100/B200 tier) embed model-specific token math that IS the endpoint's own
-   legality oracle. For those the class SET is family-declared; only
-   the collapse-onto-the-decorator and the gate below apply.
+   legality oracle. For those the class SET is family-declared; only the gate
+   below applies.
 
 2. :func:`contract_delta` / :func:`assert_faithful` — the MIGRATION SAFETY
    GATE. ``Compile.contract_axes()`` is exactly what feeds the cell key's
@@ -32,11 +29,9 @@ so they run anywhere including this box:
    the gate exists to catch before a family being minted RIGHT NOW is disturbed.
 
 3. :func:`blocker_delta` / :func:`assert_blockers` — the REFUSAL half of that
-   gate. The one fact a fold can drop that neither of the above
-   sees is a family's declared mint blockers, because before the fold the
-   family that had them kept them OUTSIDE its ``Compile`` (a module-level
-   table read by a refusing thunk, retired in pgw#1107). Dropping one does not
-   re-key anything; it simply starts minting against an open design question.
+   gate. The one fact a fold can drop that neither of the above sees is a
+   family's declared mint blockers: dropping one re-keys nothing, it simply
+   starts minting against an open design question.
 """
 
 from __future__ import annotations
@@ -58,9 +53,9 @@ __all__ = [
 ]
 
 #: The sdxl/z-image regime table: CFG on traces ONE batch-2 forward, turbo /
-#: no-CFG pins the batch-1 graph. Each arm is its own graph class of one cell
-#:. ``(fork_value, traced_batch)`` — the two families that
-#: batch CFG into a single forward share this exact pair.
+#: no-CFG pins the batch-1 graph. Each arm is its own graph class of one cell.
+#: ``(fork_value, traced_batch)`` — the two families that batch CFG into a
+#: single forward share this exact pair.
 CFG_BATCH_REGIMES: Tuple[Tuple[bool, int], ...] = ((True, 2), (False, 1))
 
 
@@ -74,11 +69,10 @@ class DerivedClasses(Tuple[GraphClass, ...]):
     `Compile.latent_basis` and then rebuilds `classes` as a plain tuple.
 
     So this is TRANSPORT, not storage: nothing downstream reads it, and it
-    deliberately does not persist on the declaration. The alternative — a
-    cell-wide scalar stamped onto every row and read back off `rows[0]` — is
-    the shape that produced a P0 filed on a false premise, because a label
-    written beside a thing cannot be told from a label describing it, and it
-    silently answers a question nothing asks (what if two rows disagree?).
+    deliberately does not persist on the declaration. The rejected alternative
+    — a cell-wide scalar stamped onto every row and read back off `rows[0]` —
+    cannot be told from a label describing that one row, and silently answers a
+    question nothing asks (what if two rows disagree?).
     """
 
     latent_basis: int
@@ -103,11 +97,8 @@ def cfg_image_classes(
 ) -> Tuple[GraphClass, ...]:
     """The ``aspect rows x CFG regimes`` graph-class cross-product.
 
-    Reproduces sdxl's ``_sdxl_graph_classes`` and z-image's
-    ``_z_image_graph_classes`` byte-identically (same iteration order, same
-    ``//latent_scale`` latent math, same ``dict.fromkeys`` dedupe of
-    transposed rows). ``shapes`` is the author's kept ``(w, h)`` aspect table
-    — single-sourced from the payload preset enum, never re-declared.
+    ``shapes`` is the author's kept ``(w, h)`` aspect table — single-sourced
+    from the payload preset enum, never re-declared. Transposed rows dedupe.
 
     The dim NAMES differ per family (sdxl ``B``/``T_txt`` vs z-image
     ``N``/``T_cap``) and are parameters, not literals, so one deriver serves
@@ -133,9 +124,9 @@ def cfg_image_classes(
                 },
                 fork={cfg_fork: cfg},
             ))
-    # the divisor rides out with the rows it produced, so the mint
-    # can reconcile it against the pipeline instead of the author declaring it
-    # a second time.
+    # The divisor rides out with the rows it produced, so the mint can
+    # reconcile it against the pipeline instead of the author declaring it a
+    # second time.
     return DerivedClasses(
         tuple(dict.fromkeys(out)), latent_basis=int(latent_scale))
 
@@ -191,10 +182,10 @@ def _repr(value: Any) -> Any:
 
 #: Must-survive facts that are NOT part of ``contract_axes()`` (so a change
 #: does not re-key) but ARE hard-won measured decisions the migration must not
-#: drop: the numerics ADOPT band and the compile-vs-eager SPEED
-#: bar the hub's publish-time validation gate judges against (pgw#1149 /
-#: th#1811). ``shape_strategy``, ``warm_changes_key`` and ``eager`` are already
-#: contract axes and covered by :func:`contract_delta`; these four are the gap.
+#: drop: the numerics ADOPT band and the compile-vs-eager SPEED bar the hub's
+#: publish-time validation gate judges against. ``shape_strategy``,
+#: ``warm_changes_key`` and ``eager`` are already contract axes and covered by
+#: :func:`contract_delta`; these four are the gap.
 #:
 #: The speed pair is here for the same reason the floor is: dropping it loosens
 #: a gate without re-keying anything, so :func:`contract_delta` alone waves it
@@ -240,11 +231,9 @@ def assert_blockers(
     are EXACTLY ``ids`` — the per-family testable guard.
 
     :func:`blocker_delta` can only compare two declarations, so it is blind
-    where the standing declaration kept its blockers OUTSIDE the ``Compile``
-    (a module-level table read by a refusing thunk — ltx-video-2.3's pre-fold
-    shape, and precisely the shape the fold had to carry across). This states
-    the expectation in the family's OWN test instead, so the assertion survives
-    the file the blockers used to live in.
+    where a declaration keeps its blockers OUTSIDE the ``Compile`` (a
+    module-level table read by a refusing thunk). This states the expectation
+    in the family's OWN test instead.
 
     ``ids=()`` asserts the family is mintable, and is just as load-bearing:
     it goes red the day somebody adds a blocker without telling the family's

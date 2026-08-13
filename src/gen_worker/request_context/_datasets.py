@@ -1,11 +1,10 @@
 """Dataset snapshot materialization against the tensorhub datasets API.
 
 Free functions used by ``_PublisherMixin.resolve_dataset``: look up a dataset
-row by (tenant, name), fetch its blob manifest (th#698 wire format — a
-rows.jsonl-style entry index with presigned URLs / inline text / raw CAS
-blob digests) — polling 202 until the async snapshot build is ready
-(DATASET-V2 contract, gw#457) — and stream each entry to disk with
-sha256 digest verification + bounded retries.
+row by (tenant, name), fetch its blob manifest (a rows.jsonl-style entry index with
+presigned URLs / inline text / raw CAS blob digests) — polling 202 until the
+async snapshot build is ready (DATASET-V2 contract) — and stream each entry to
+disk with sha256 digest verification + bounded retries.
 """
 from __future__ import annotations
 
@@ -257,11 +256,11 @@ def fetch_materialize_manifest(
 
 #: Digest algorithms this reader can verify.
 #:
-#: th#1412 phase 4: ``blake3`` is GONE. The dataset-CAS blake3 namespace was
-#: deleted 2026-08-03 (890 objects) and the hub can no longer build a blake3
-#: dataset key at all, so a ``blake3:`` checksum names bytes that do not exist.
-#: Keeping the hasher would let this reader verify a download that could never
-#: have been served -- and, worse, make a live blake3 entry look supported.
+#: No ``blake3``: the dataset-CAS blake3 namespace is deleted and the hub
+#: cannot build a blake3 dataset key at all, so a ``blake3:`` checksum names
+#: bytes that do not exist. Keeping the hasher would let this reader verify a
+#: download that could never have been served, and make a live blake3 entry
+#: look supported.
 _DIGEST_HASHERS: Dict[str, Callable[[], Any]] = {
     "sha256": hashlib.sha256,
 }
@@ -270,10 +269,10 @@ _DIGEST_HASHERS: Dict[str, Callable[[], Any]] = {
 def _expected_digest(entry: Dict[str, Any]) -> str:
     """The entry's ALGORITHM-TAGGED checksum, or raise.
 
-    this used to default a bare 64-hex to ``blake3:``. Both digests
-    are 32 bytes, so the length names no algorithm and a guess is a coin flip
-    that verifies nothing when it loses. An untagged or absent checksum is now
-    a refusal — there is no spelling of "download it unverified".
+    A bare 64-hex is never defaulted to an algorithm: both candidate digests
+    are 32 bytes, so the length names nothing and a guess verifies nothing when
+    it loses. An untagged or absent checksum is a refusal — there is no
+    spelling of "download it unverified".
     """
     raw = str(entry.get("checksum") or "").strip().lower()
     if not raw:
@@ -295,14 +294,12 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     Writes to a UNIQUE temp file in ``dest``'s directory then renames, so a
     partial download can never be mistaken for a complete shard.
 
-    this site is RACY, and it was the one of pgw#938's three that
-    is. ``resolve_dataset`` materializes into a pod-wide content-keyed cache
-    (``/tmp/gen_worker_datasets/<owner>/<name>/<snapshot>``), so two requests
-    in one container asking for one dataset arrive at the SAME ``dest`` — and
-    the old name was derived from it (``dest.tmp``), so they arrived at the
-    same temp file too. The bytes are identical (same snapshot), which is what
-    made this look harmless; the destruction is in the LIFECYCLE, not the
-    content. One writer's failure path runs ``tmp.unlink()`` on the other's
+    This site is RACY. ``resolve_dataset`` materializes into a pod-wide
+    content-keyed cache (``/tmp/gen_worker_datasets/<owner>/<name>/<snapshot>``),
+    so two requests in one container asking for one dataset arrive at the SAME
+    ``dest`` — and a temp name derived from it lands them on the same temp file.
+    The bytes are identical, so the destruction is in the LIFECYCLE, not the
+    content: one writer's failure path runs ``tmp.unlink()`` on the other's
     in-flight download, and the victim then fails its own ``replace`` after
     paying for every byte. A unique name per writer costs one ``mkstemp`` and
     removes the shared object entirely; the rename stays atomic, and two

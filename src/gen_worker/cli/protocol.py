@@ -19,15 +19,15 @@ from typing import List
 PROTOCOL_VERSION = 1
 
 # Optional features a host can rely on without scraping ``--help``. Add a token
-# only when the feature is actually implemented (see the issues in parens):
-#   - "describe"       : `gen-worker describe --json` (#349)
-#   - "list_functions" : `gen-worker serve --list-functions [--json]` (#340)
-#   - "prefetch"       : `gen-worker prefetch` (#21)
-#   - "cancel"         : per-request `{"cancel":{"request_id"}}` control (#352)
-#   - "streaming"      : multi-frame streamed responses, `{"stream":true}` (#344)
-#   - "tcp_listen"     : `serve --listen tcp://host:port` (#347)
-#   - "serve_sidecar"  : machine-readable `.gen-worker.serve.json` handle (#349)
-#   - "hub_resolve"    : standalone Hub-ref resolve via TENSORHUB_URL (#379)
+# only when the feature is actually implemented:
+#   - "describe"       : `gen-worker describe --json`
+#   - "list_functions" : `gen-worker serve --list-functions [--json]`
+#   - "prefetch"       : `gen-worker prefetch`
+#   - "cancel"         : per-request `{"cancel":{"request_id"}}` control
+#   - "streaming"      : multi-frame streamed responses, `{"stream":true}`
+#   - "tcp_listen"     : `serve --listen tcp://host:port`
+#   - "serve_sidecar"  : machine-readable `.gen-worker.serve.json` handle
+#   - "hub_resolve"    : standalone Hub-ref resolve via TENSORHUB_URL
 CAPABILITIES: List[str] = [
     "describe",
     "list_functions",

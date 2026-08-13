@@ -12,9 +12,8 @@ of the hub, not the hub. That timing is the whole reason this module exists:
     by, and the touch — not a multi-GB upload — is what pays if there is.
 
   * Whether or not that hypothesis holds, this makes the outage OBSERVABLE and
-    dates it. Before, the first evidence that the hub had been gone was the
-    corpse of the job; the log now says when reachability was lost and
-    regained, which is what turns "the publisher is flaky" into a measurement.
+    dates it: the log says when reachability was lost and regained, rather than
+    leaving the corpse of the job as the first evidence the hub had been gone.
 
 The alternative considered and rejected was starting uploads earlier by
 sub-chunking the source tier. It does not fit clone's architecture: the output

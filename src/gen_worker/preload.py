@@ -1,15 +1,13 @@
 """Rotation preload: stage the NEXT checkpoint while the current job
-computes (pgw#674 — worker half of WORKER-RESIDENCY-DESIGN's Paul-ratified
-"Rotating double-buffer serving").
+computes — the worker half of "Rotating double-buffer serving".
 
 The hub's desired plan (``DesiredResidency.hot``) names the instances a
-worker should hold. Until now the ONLY path acting on it — lifecycle's
-``_reconcile_pass`` — is gated on tenant idle and cancelled by every
-run_job, so the next checkpoint's multi-second repo-cas pull and load never
-overlap inference: every hop pays the full visible swap (ie#546 measured
-~14s = 11s pull + 3s VRAM load). This driver stages desired instances IN
-THE BACKGROUND while jobs run, so rotation on job completion approaches a
-pointer swap.
+worker should hold. Lifecycle's ``_reconcile_pass`` is gated on tenant idle
+and cancelled by every run_job, so on its own the next checkpoint's
+multi-second repo-cas pull and load never overlap inference and every hop pays
+the full visible swap (~14s = 11s pull + 3s VRAM load). This driver stages
+desired instances IN THE BACKGROUND while jobs run, so rotation on job
+completion approaches a pointer swap.
 
 Stage ladder per candidate instance (capacity-tier ruling):
 
@@ -32,7 +30,7 @@ Stage ladder per candidate instance (capacity-tier ruling):
    (fp8/svdq/nf4/w8a8) load through special lanes a vanilla component load
    cannot reproduce, so they stop at tier 1.
 
-Fence carve-out (pgw#638 stays intact): a ref whose RESIDENT identity
+Fence carve-out: a ref whose RESIDENT identity
 differs from the desired snapshot digest is never touched here — the
 idle-gated reconcile owns identity moves, because a tenant job may be
 re-materializing the older bytes concurrently. This driver only stages
@@ -84,7 +82,7 @@ _PLAIN_DTYPES = frozenset(
 
 def _nice_thread_init() -> None:
     """Background staging threads run at nice +10 (same posture as the
-    pgw#671 background-mint warm thread): loading must not slow serving."""
+    background-mint warm thread): loading must not slow serving."""
     try:
         os.setpriority(os.PRIO_PROCESS, 0, 10)
     except (OSError, AttributeError):  # pragma: no cover - platform-specific
@@ -114,7 +112,7 @@ class Preloader:
         # background stage this generation — retried only on a new desired
         # set, never in a loop.
         self._failed: set = set()
-        # identities REFUSED deterministically (a composition the
+        # Identities REFUSED deterministically (a composition the
         # tree plus the injection cannot satisfy). Never cleared by a new
         # desired set: the verdict is a function of the identity's own bytes,
         # so re-sending the same DesiredInstance cannot change it. A hub that
@@ -205,10 +203,10 @@ class Preloader:
             except asyncio.CancelledError:
                 raise
             except ComponentSubstitutionError as exc:
-                # deterministic, not a failure to retry. The tree is
+                # Deterministic, not a failure to retry: the tree is
                 # materialized and the injection is known, so the next desired
-                # set carrying these same bytes has the same answer — pgw#1047
-                # measured that loop as 9 minutes of a paid pod.
+                # set carrying these same bytes has the same answer, and
+                # retrying is minutes of a paid pod spent on it.
                 self._refused.add(ident)
                 logger.error(
                     "rotation preload REFUSED %s: %s", instance.function_name, exc)
@@ -228,9 +226,9 @@ class Preloader:
                     "next desired set",
                     instance.function_name, type(exc).__name__, exc,
                 )
-                # the hub planned this instance hot; the stage is
-                # abandoned for the whole desired-set generation, so the next
-                # rotation to it pays the full visible swap.
+                # The hub planned this instance hot; the stage is abandoned for
+                # the whole desired-set generation, so the next rotation to it
+                # pays the full visible swap.
                 activity_mod.emit_event(
                     activity_mod.KIND_ROTATION_PRELOAD,
                     f"fn={instance.function_name} "
@@ -294,8 +292,8 @@ class Preloader:
 
     def _fence_conflict(self, ref: WireRef) -> bool:
         """True when the ref is RESIDENT under a different identity than the
-        desired snapshot names — the pgw#638 case the idle-gated reconcile
-        owns (a tenant job may be re-materializing the older bytes)."""
+        desired snapshot names — the case the idle-gated reconcile owns (a
+        tenant job may be re-materializing the older bytes)."""
         store = self._ex.store
         wanted = store.snapshot_digest(ref, self._snapshots.get(ref))
         have = store.resident_identity(ref)[0]

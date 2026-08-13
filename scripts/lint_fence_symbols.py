@@ -1,81 +1,40 @@
 #!/usr/bin/env python3
-"""pgw#1176 — THE GUARDS ARE GUARDED. Every symbol a fence NAMES must exist.
+"""THE GUARDS ARE GUARDED. Every symbol a fence NAMES must exist.
 
 A fence names symbols in string literals: the arm-state feeder list, the
 cell-key derivation allowlist, the layout fence's ``AXIS_PRODUCERS``. When one
 of those symbols is renamed or deleted, the fence keeps running, keeps exiting
-0, and **guards nothing**. It does not go red. Nothing anywhere says so.
-
-MEASURED, in one migration, three instances of the class and one of
-them was exactly this:
-
-* ``lint_cell_key_layout_fence.py`` listed ``from_exported_artifact_metadata``
-  in ``AXIS_PRODUCERS`` after that symbol was deleted. A module computing an
-  entry key through the real producer was no longer detected as an axis
-  producer at all — and the gate exited 0 the whole time. **No amount of
-  running things finds that**, because nothing was failing;
-* ``test_cell_key_pgw1059``'s one-derivation fence guarded
-  ``combined_graph_hash(`` and ``from_exported_artifact_metadata(``, both
-  deleted in the same change, so it guarded nothing and would have passed
-  vacuously forever;
-* ``_old_schema_digest`` — a helper that deliberately reconstructs the OLD key
-  scheme to prove old and new cannot collide — was caught by a blanket rename
-  and made to reconstruct the NEW one, asserting nothing. A vacuous test
-  manufactured by the sweep meant to fix the suite.
-
-The generalisation, and it is this program's sharpest recurring lesson:
-**execute what you wrote — AND, after a rename, a green fence is not
-evidence.** Ask every fence what symbol it names NOW, mechanically. That is
-what this script is.
-
-WHY THIS IS NOT CEREMONY — read this before deleting it
--------------------------------------------------------
-On its first run this gate found a residual in a file its author had read
-three times that same day and missed. That is not a lucky catch. It is the
-difference between a mechanical check and an attentive reader **on a class
-where attention is precisely what fails**: attention degrades exactly where a
-symbol looks familiar, and a renamed symbol looks familiar. A human re-reading
-a fence sees the shape they expect; only a machine asks whether the name still
-resolves.
-
-That is the whole argument for the gate, and it is stronger than any of the
-four instances that motivated it. If this file is ever moved or renamed, this
-paragraph and the false-positive ratio below move with it.
+0, and **guards nothing**. It does not go red. Nothing anywhere says so — no
+amount of running things finds it, because nothing is failing. This script asks
+every fence what symbol it names NOW, mechanically.
 
 WHY IT SCANS ITSELF
 -------------------
-This script is a guard that names things, so it has exactly the failure mode
-it detects. The resolution is not to exempt it but to point it at itself: if
-it ever names a symbol that no longer exists, it goes red **about itself**.
-The self-reference terminates rather than recursing, and this becomes the one
-guard that cannot rot silently.
+This script is a guard that names things, so it has exactly the failure mode it
+detects. It is pointed at itself rather than exempted: if it ever names a symbol
+that no longer exists, it goes red **about itself**. The self-reference
+terminates rather than recursing.
 
 DELIBERATELY SMALL
 ------------------
 String literals in lint scripts and fence-shaped tests, checked against
 ``src/gen_worker``. It is NOT a general dead-symbol linter —
-``lint_unreached_surface.py`` already owns that question, and this one's whole
-value is that it looks at **the guards**. Keep it small; a fence that grows
-into a linter gets disabled by the first person it annoys.
+``lint_unreached_surface.py`` owns that question, and this one's whole value is
+that it looks at **the guards**. Keep it small; a fence that grows into a linter
+gets disabled by the first person it annoys.
 
-THE FALSE-POSITIVE SHAPE, recorded so nobody deletes the gate over it. Two
-kinds, handled differently on purpose:
+THE FALSE-POSITIVE SHAPE. Two kinds, handled differently on purpose:
 
 1. A bare identifier in a string can be a MODULE name, a dataclass FIELD, or a
-   path component — none of which are top-level defs. The first sweep found
-   seven candidates and six were exactly those. Filtered structurally, by
+   path component — none of which are top-level defs. Filtered structurally, by
    collecting every name a module legitimately exposes rather than only its
    functions and classes.
 2. A fence may name a dead symbol **ON PURPOSE** — a historical-evidence
-   fixture, a collision proof, a negative case reconstructing a format the
-   tree can no longer produce. ``_old_schema_digest`` is exactly this: it
-   rebuilds the pre-pgw#1059 payload, dead keys and all, and renaming those
-   keys would make it reconstruct the CURRENT format and assert nothing.
-   These are NOT filtered automatically — they carry
+   fixture, a collision proof, a negative case reconstructing a format the tree
+   can no longer produce. These are NOT filtered automatically: they carry
    ``# fence-symbol-exempt: <reason>`` on the line. The reason is mandatory,
-   because the whole point is that somebody looked. Turning a false positive
-   into a written record is the same move as an allowlist entry that says
-   WHICH it is; silent suppression is what lets the real ones through.
+   because the whole point is that somebody looked; silent suppression is what
+   lets the real ones through.
 """
 
 from __future__ import annotations

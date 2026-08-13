@@ -321,7 +321,7 @@ class SequenceRuntime:
         Ordering is forced and it is the whole reason this is one method:
         `set_attention_backend` (the endpoint's, already done by the time a
         pipeline is materialized) -> `enable_parallelism` -> (compile —
-        disabled at degree>1, pgw#775).
+        disabled at degree>1).
         """
         if self.degree <= 1:
             return ()
@@ -431,7 +431,7 @@ _SP_ATTR = "_gen_worker_sp_runtime"
 def arm_sequence_gate(pipe: Any, runtime: "SequenceRuntime") -> bool:
     """Route this pipeline's ``__call__`` through the group.
 
-    Same dynamic-subclass technique as gw#551's LaneGate (object identity and
+    Same dynamic-subclass technique as the LaneGate (object identity and
     isinstance preserved, idempotent), and it COMPOSES with it: each wrap
     subclasses the previous class, so a lane-gated pipeline stays lane-gated.
     The endpoint's handler calls ``pipe(...)`` exactly as it always has and

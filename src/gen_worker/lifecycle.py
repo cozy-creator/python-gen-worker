@@ -41,34 +41,28 @@ logger = logging.getLogger(__name__)
 
 _VRAM_QUANTUM_FRACTION = 0.05  # quantize free-VRAM deltas to 5% of total
 
-# how often the drain re-asks the progress registry while it waits
-# for in-flight work. A CADENCE, not a verdict — it bounds latency-to-notice
-# and can never end anything; the give-up test is `progress.self_diagnosis()`,
-# which is silence-keyed and per-phase.
+# How often the drain re-asks the progress registry while it waits for
+# in-flight work. A CADENCE, not a verdict — it bounds latency-to-notice and can
+# never end anything; the give-up test is `progress.self_diagnosis()`.
 _DRAIN_PROGRESS_POLL_S = 1.0
 
-# poll cadence for hub-delivered snapshots of
-# functions the startup scan left awaiting (store lookups are local + cheap).
+# Poll cadence for hub-delivered snapshots of functions the startup scan left
+# awaiting (store lookups are local + cheap).
 _BOOT_SETUP_WATCH_INTERVAL_S = 2.0
 
-# universal app-level heartbeat cadence, declared in Hello.
-# The beat task lives on the asyncio event loop — the control loop that owes
-# all progress, never a detached timer thread — so beats stop exactly when
-# that loop wedges. Each tick force-sends the full StateDelta (unchanged
-# bytes included). A stuck coroutine leaves the loop (and beats) alive; the
-# hub's layer-3 obligation invariant covers that mode.
-# 10s beat / 6 misses (Paul, 2026-07-21): one missed beat costs 10s of slack
-# and a transient stall (GC pause, scheduler hiccup) never reads as death,
-# while detection stays ~60s. CONTRACT §3 event-loop discipline follows:
-# worker code must never block the loop longer than the miss window — long
-# synchronous work (torch.compile, model loads, CUDA sync) runs in executor
-# threads (executor._to_thread_complete / asyncio.to_thread).
+# Universal app-level heartbeat cadence, declared in Hello. The beat task lives
+# on the asyncio event loop, never a detached timer thread, so beats stop
+# exactly when that loop wedges; each tick force-sends the full StateDelta.
+# 10s beat / 6 misses (Paul, 2026-07-21): one missed beat costs 10s of slack so
+# a transient stall (GC pause, scheduler hiccup) never reads as death, while
+# detection stays ~60s. Worker code must therefore never block the loop longer
+# than the miss window — long synchronous work (torch.compile, model loads,
+# CUDA sync) runs in executor threads.
 HEARTBEAT_INTERVAL_MS = 10_000
 
-# pgw#610 disk stats keep their original 30s measurement cadence: the report
-# rides every beat, but the statvfs/ref-index scan is recomputed at most
-# every _DISK_REPORT_TTL_S — a beat between refreshes re-ships the cached
-# report (identical bytes, generation unchanged).
+# The disk report rides every beat, but the statvfs/ref-index scan is
+# recomputed at most every _DISK_REPORT_TTL_S — a beat between refreshes
+# re-ships the cached report (identical bytes, generation unchanged).
 _DISK_REPORT_TTL_S = 30.0
 
 
@@ -77,13 +71,9 @@ def probe_hardware() -> Dict[str, Any]:
 
     ``gpu_free_mem`` is the input `gate_functions` turns into `unavailable` +
     `serve_plans` for EVERY function, so on a wide pod it must be the free pool
-    of the group with the LEAST room, not card 0's (pgw#776/DPA-7). Card 0 is
-    always the least free card in practice — it carries group 0's weights plus
-    the allocator cache (measured: qwen 96.5 GiB on card 0 vs ~68 on 1-3) — so
-    reading it planned offload/fp8-fallback rungs for groups 1..G-1 from a card
-    they will never touch, and a genuinely-unfit card 0 refused functions the
-    other three could serve. The MIN is the honest single scalar until the fit
-    ladder is per-rank: it never promises a group room it does not have.
+    of the group with the LEAST room, not card 0's. The MIN is the honest
+    single scalar until the fit ladder is per-rank: it never promises a group
+    room it does not have.
     """
     info: Dict[str, Any] = {
         "gpu_count": 0,
@@ -95,12 +85,9 @@ def probe_hardware() -> Dict[str, Any]:
         "installed_libs": [],
         "driver_version": "",
     }
-    # the HOST driver, read from NVML rather than torch —
-    # the whole point of this fact is that it stays readable when the CUDA
-    # runtime is not. A cu130 build on a 570.x host imports fine, reports every
-    # version string correctly, and dies on its first allocation, so the driver
-    # is the only field in this dict that can tell the hub which hosts its
-    # placement filter actually landed on.
+    # The HOST driver, read from NVML rather than torch: it must stay readable
+    # when the CUDA runtime is not. A cu130 build on a 570.x host imports fine,
+    # reports every version string correctly, and dies on its first allocation.
     try:
         from .hardware_report import _nvidia_smi_driver_and_gpu
 
@@ -148,10 +135,9 @@ _MULTI_GPU_NO_TOPOLOGY_WARNED = False
 def _worst_group_free_vram_bytes() -> int:
     """The free pool of the least-roomy execution group, or 0 if unknowable.
 
-    Reads the DELIVERED topology (pgw#776/DPA-5): on a pod this worker itself
-    demoted for a non-NVLink fabric, ``from_env`` describes a packing that is
-    not being served, so reporting from it makes the reported and served
-    topologies disagree.
+    Reads the DELIVERED topology: on a pod this worker itself demoted for a
+    non-NVLink fabric, ``from_env`` describes a packing that is not being
+    served, so reporting from it makes reported and served topologies disagree.
     """
 
     groups = delivered_topology().all_groups()
@@ -161,25 +147,17 @@ def _worst_group_free_vram_bytes() -> int:
 def free_vram_bytes() -> int:
     """Free VRAM the hub may admit against (``StateDelta.free_vram_bytes``).
 
-    This used to be the sum across every CUDA device, which is the reporting
-    half of the bug pgw#648 fixed in the accounting half: VRAM is not fungible
-    between cards, so a 2x24GB pod that reports 48GB invites the hub to admit
-    a 30GB model that fits on neither.
-
-    It then became the MAX across groups, which is honest PER JOB and dishonest
-    per POD (pgw#776/DPA-5): the hub admits against a single scalar and can
-    admit G concurrent jobs whose sum is G times what any one group has. With
-    one scalar on the wire the only safe answer is the MIN across groups — MIN
-    within a replicated group too, since every member holds a full copy — so
-    every one of the G jobs the hub may admit fits where it lands. At G == 1,
-    which is every pod today, MIN and MAX are the same number.
+    Never a sum across devices and never the MAX: VRAM is not fungible between
+    cards, and the hub admits against this single scalar, so it can admit G
+    concurrent jobs whose sum is G times what any one group has. The only safe
+    answer is the MIN across groups — MIN within a replicated group too, since
+    every member holds a full copy — so every job the hub may admit fits where
+    it lands. At G == 1, MIN and MAX coincide.
 
     Multi-GPU host with NO delivered topology (every harness attach and
     `cli serve`): the worker has ONE slot which places on the thread-current
     device, so card 0 is the honest number and the other cards are invisible to
-    the hub. That is a real behaviour change from the historical all-device sum
-    (the pgw#748 G=1 invariant's one exception), so it is named and logged once
-    rather than left to be rediscovered.
+    the hub. Named and logged once rather than left to be rediscovered.
     """
     try:
         worst = _worst_group_free_vram_bytes()
@@ -225,12 +203,11 @@ def _warn_once_if_gpus_are_invisible() -> None:
 def _snapshot_content_key(snap: Optional["pb.Snapshot"]) -> tuple:
     """Snapshot CONTENT identity: digest + per-file (path, size, digest).
 
-    Presigned URL bytes are deliberately excluded — the hub refreshes
-    expiring snapshot URLs on every release-config rebuild (~15s TTL) and
-    its own HelloAck semantic hash excludes them for exactly this reason
-    (tensorhub desiredResidencySemanticHash). Hashing URLs made every
-    URL rotation look like a model change and cancelled in-flight warmup
-    loads at ~15s / ~10min cadence."""
+    Presigned URL bytes are deliberately excluded — the hub refreshes expiring
+    snapshot URLs on every release-config rebuild (~15s TTL) and its own
+    HelloAck semantic hash excludes them for the same reason. Hashing them
+    makes every URL rotation look like a model change and cancels in-flight
+    warmup loads."""
     if snap is None:
         return ()
     return (
@@ -243,10 +220,10 @@ def _semantic_model_key(
     ack: "pb.HelloAck",
     desired: "pb.DesiredResidency",
 ) -> tuple:
-    """gw#614: order-independent identity of the MODEL content of an ack —
-    resolutions, disk refs, snapshot content, hot instances. Generation,
-    presigned URL bytes, and other non-model fields are excluded so benign
-    plan rewrites compare equal."""
+    """Order-independent identity of the MODEL content of an ack — resolutions,
+    disk refs, snapshot content, hot instances. Generation, presigned URL bytes
+    and other non-model fields are excluded so benign plan rewrites compare
+    equal."""
     return (
         tuple(sorted((r.ref, r.resolved_ref, r.cast, r.lane) for r in ack.resolutions)),
         tuple(sorted(ref for ref in desired.disk_refs if ref)),
@@ -275,11 +252,10 @@ class Lifecycle:
         # Identity: JWT claims are authoritative (sub = worker_id, release_id);
         # Hello echoes them for dev mode / cross-checking only.
         claims: Dict[str, Any] = {}
-        # the BOOTSTRAP token by intent, not by accident. This runs at
-        # construction, before any stream exists, and it reads IDENTITY claims
-        # (sub / release_id) which rotation never changes — so the frozen copy is
-        # the right and only available answer here. Anything reading a
-        # credential to AUTHENTICATE must use `worker_credential.current()`.
+        # The BOOTSTRAP token by intent: this runs before any stream exists and
+        # reads IDENTITY claims (sub / release_id), which rotation never
+        # changes. Anything reading a credential to AUTHENTICATE must use
+        # `worker_credential.current()` instead.
         _boot_jwt = (settings.bootstrap_worker_jwt or "").strip()
         if _boot_jwt:
             from .request_context._helpers import _decode_unverified_jwt_claims
@@ -288,9 +264,9 @@ class Lifecycle:
         self.worker_id = (
             settings.worker_id or str(claims.get("sub") or "").strip() or f"py-worker-{os.getpid()}"
         )
-        # in the split's compute child there is no JWT to read
-        # claims from — the parent decodes its own and hands the release id
-        # down as a plain value. A claim is not a credential.
+        # In the split's compute child there is no JWT to read claims from —
+        # the parent decodes its own and hands the release id down as a plain
+        # value. A claim is not a credential.
         self.release_id = (
             str(claims.get("release_id") or "").strip()
             or settings.worker_release_id.strip()
@@ -298,8 +274,8 @@ class Lifecycle:
         self.intent_registry = IntentRegistry(
             self.release_id,
             executor.specs.keys(),
-            # pass the value THROUGH, sentinel and all — a missing
-            # WORKER_CONFIG_GENERATION is "no boot-only env was injected"
+            # Pass the value THROUGH, sentinel and all: a missing
+            # WORKER_CONFIG_GENERATION means "no boot-only env was injected"
             # (-1), never "generation 0".
             boot_config_generation=int(getattr(
                 settings, "boot_config_generation",
@@ -359,34 +335,26 @@ class Lifecycle:
             # must not drain/retire this worker on GPU-idleness alone.
             finalizing_jobs=self.executor.finalizing_jobs(),
             observed_residency_generation=self._observed_residency_generation,
-            # `cell_lookups` is NOT filled. It advertised COMPUTED
-            # (kind="inductor") keys, a space with no producer since pgw#1010,
-            # so the store lookups it fed could never resolve. A target now
-            # states only the identity it IS serving. The wire field retires
-            # with the RunJob cut.
+            # `cell_lookups` is NOT filled: a target states only the identity
+            # it IS serving. The wire field retires with the RunJob cut.
             compile_targets=self.executor.compile_targets(),
-            # measured per-tier disk telemetry. Rides every
-            # StateDelta (and thus Hello.state). boothang fix: this ONLY
-            # reads ModelStore's cache (never blocks) — the actual statvfs
-            # measurement is a fire-and-forget background task kicked by
-            # _kick_disk_usage_refresh_if_stale, gated to at most every
-            # _DISK_REPORT_TTL_S. A synchronous (or awaited-inline) refresh
-            # here could freeze the event loop — and thus the th#965
-            # heartbeat sharing the same loop — for as long as a stalled
-            # provider VOLUME mount's statvfs() call blocks (the 0.40.7
-            # LTX post-seal_publish hang).
+            # Per-tier disk telemetry, riding every StateDelta (and thus
+            # Hello.state). This ONLY reads ModelStore's cache and never
+            # blocks — the statvfs measurement is a fire-and-forget background
+            # task kicked by _kick_disk_usage_refresh_if_stale. A synchronous
+            # (or awaited-inline) refresh here would freeze the event loop —
+            # and thus the heartbeat sharing it — for as long as a stalled
+            # provider VOLUME mount's statvfs() call blocks.
             disk_usage=self.executor.store.disk_usage_report(),
         )
 
     def _kick_disk_usage_refresh_if_stale(self) -> None:
-        """FIRE-AND-FORGET off-loop (asyncio.to_thread) disk-usage refresh,
-        gated to at most every _DISK_REPORT_TTL_S. Called from
-        maybe_send_state_delta — never awaited there and never inline in
-        _state_delta() (see boothang fix note above): a send must not wait
-        on the measurement any more than the event loop should. A stalled
-        provider VOLUME mount just means this boot's disk telemetry stays
-        stale until the mount recovers — every StateDelta/heartbeat/RunJob
-        keeps flowing on schedule regardless."""
+        """FIRE-AND-FORGET off-loop disk-usage refresh, gated to at most every
+        _DISK_REPORT_TTL_S. Called from maybe_send_state_delta — never awaited
+        there and never inline in _state_delta(): a send must not wait on the
+        measurement any more than the event loop should. A stalled provider
+        VOLUME mount just leaves this boot's disk telemetry stale until the
+        mount recovers; StateDelta/heartbeat/RunJob keep flowing regardless."""
         now = time.monotonic()
         if self._disk_report_at and now - self._disk_report_at < _DISK_REPORT_TTL_S:
             return
@@ -430,9 +398,8 @@ class Lifecycle:
             )
         except Exception:
             logger.warning("host canary failed; Hello ships without it", exc_info=True)
-        # the hub attests the self-mint publish's gen_worker
-        # axis against THIS Hello-reported version (absent => publish fails
-        # closed, which old workers never hit — they don't publish).
+        # The hub attests the self-mint publish's gen_worker axis against THIS
+        # Hello-reported version; absent => the publish fails closed.
         try:
             from .compile_cache import gen_worker_version
 
@@ -446,17 +413,15 @@ class Lifecycle:
             gpu_name=str(hw.get("gpu_name") or ""),
             gpu_sm=str(hw.get("gpu_sm") or ""),
             torch_version=str(hw.get("torch_version") or ""),
-            # the host driver, so the hub can answer
-            # "can the host we landed on run this pod's CUDA line?" from a
-            # SUCCESSFUL boot instead of only from a corpse.
+            # The host driver, so the hub can answer "can the host we landed on
+            # run this pod's CUDA line?" from a SUCCESSFUL boot, not a corpse.
             driver_version=str(hw.get("driver_version") or ""),
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=gw_version,
             image_digest=self._settings.worker_image_digest,
-            # git_commit intentionally unpopulated (pgw#514/P4): no launcher
-            # ever set WORKER_GIT_COMMIT and Go never read WorkerResources
-            # .git_commit — dead on both ends. Field stays on the wire
-            # (deleting it needs a coordinated tensorhub proto update).
+            # git_commit intentionally unpopulated — dead on both ends. The
+            # field stays on the wire; deleting it needs a coordinated
+            # tensorhub proto update.
             instance_id=self._settings.runpod_pod_id or "",
         )
 
@@ -489,17 +454,13 @@ class Lifecycle:
         )
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
-        # the stream exists now, so bind the boot-phase sink and FLUSH
-        # everything recorded before it did. This is the earliest point a boot
-        # row can reach the hub at all: activity's own sink is not bound until
-        # Executor.ensure_setup, which is after weights are on disk, and the
-        # send queue drops queued events on every reconnect. Binding here also
-        # re-flushes after a reconnect, and the hub upserts on
-        # (boot_id, ordinal), so a duplicate delivery is harmless.
+        # The stream exists now: bind the boot-phase sink and FLUSH everything
+        # recorded before it did. This is the earliest point a boot row can
+        # reach the hub at all — activity's own sink is not bound until
+        # Executor.ensure_setup, after weights are on disk. The hub upserts on
+        # (boot_id, ordinal), so the reconnect re-flush is harmless.
         try:
             boot_mod.bind_sink(self.executor._send, asyncio.get_running_loop())
-            # process start -> hello: the first boot number, and the one the
-            # hub could previously only infer from pod create -> connect.
             # ONCE per process: this handler runs again on every reconnect, and
             # "process start -> hello" measured on a reconnect hours later is
             # not a boot number.
@@ -532,39 +493,35 @@ class Lifecycle:
                 return
         # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
-        # arm the cell-receipt gate the moment the hub wiring
-        # exists — every delivered compile cell is signature-verified
-        # before it may arm. Same wiring moment as the CellPublisher's.
+        # Arm the cell-receipt gate the moment the hub wiring exists: every
+        # delivered compile cell is signature-verified before it may arm.
         if self.executor.file_base_url:
             receipts.configure(
                 base_url=self.executor.file_base_url,
                 worker_jwt=self.executor.worker_jwt_provider,
             )
-            # arm the hub-side C2PA signer at the same moment. The
-            # platform private key never enters this pod — the hub signs the
-            # claim bytes. Until this call lands, a signing-configured worker
-            # FAILS media requests rather than shipping them unsigned.
+            # The platform private key never enters this pod — the hub signs
+            # the claim bytes. Until this call lands, a signing-configured
+            # worker FAILS media requests rather than shipping them unsigned.
             content_credentials.configure_remote_signer(
                 base_url=self.executor.file_base_url,
                 worker_jwt=self.executor.worker_jwt_provider,
             )
-            # the same wiring moment is the first moment this
-            # pod CAN discharge an upload it still owes. A cell minted by a
-            # process that died mid-upload — or by a pod retired mid-upload —
-            # is durable in the local CAS with its record still `pending`;
-            # this ships it. Off the critical path, and a no-op on the pods
-            # that owe nothing, which is nearly all of them.
+            # First moment this pod CAN discharge an upload it still owes: a
+            # cell minted by a process that died mid-upload is durable in the
+            # local CAS with its record still `pending`. Off the critical path,
+            # and a no-op on the pods that owe nothing.
             try:
                 fleet_cells.resume_owed_publishes(
                     self.executor._cell_publisher())
             except Exception:  # noqa: BLE001 — never blocks the handshake
                 logger.warning(
                     "owed cell uploads could not be re-attempted", exc_info=True)
-        # the desired state advertises (release_id, config_gen).
-        # Observe it (memory + snapshot file rewrite); parameter VALUES ride
-        # RunJob stamps (class 1), bindings ride the desired-residency
-        # reconcile below (class 2), envs are boot-only (class 3 — the hub
-        # drain-rolls; the worker never mutates its own env).
+        # The desired state advertises (release_id, config_gen). Observe it
+        # (memory + snapshot file rewrite); parameter VALUES ride RunJob stamps
+        # (class 1), bindings ride the desired-residency reconcile below
+        # (class 2), envs are boot-only (class 3 — the hub drain-rolls; the
+        # worker never mutates its own env).
         push = extract_config_push(ack)
         if push is not None:
             gen, release_id = push
@@ -603,8 +560,8 @@ class Lifecycle:
                 self._last_delta = None
                 await self.maybe_send_state_delta(hello_ack=True)
                 return
-        # apply the hub's precision-ladder picks for THIS card
-        # (full-replace: refs absent from the map revert to declared).
+        # The hub's precision-ladder picks for THIS card. Full-replace: refs
+        # absent from the map revert to declared.
         resolutions = {
             r.ref: (r.resolved_ref, r.cast, r.lane, bool(r.lane_pinned))
             for r in ack.resolutions
@@ -624,9 +581,9 @@ class Lifecycle:
             )
         else:
             self._observed_residency_generation = generation
-            # a superseded declared spelling must not be GC-protected
-            # either — an unloaded base outranking genuinely cold refs in the
-            # preserve set is the same waste one eviction later.
+            # A superseded declared spelling must not be GC-protected either:
+            # an unloaded base outranking genuinely cold refs in the preserve
+            # set is the same waste one eviction later.
             _superseded = self._superseded_disk_refs(desired)
             self.executor.store.keep = list(dict.fromkeys(
                 ref for ref in desired.disk_refs if ref and ref not in _superseded))
@@ -635,11 +592,10 @@ class Lifecycle:
                 generation=generation,
             )
             self._replace_residency_reconcile(desired, model_key=_semantic_model_key(ack, desired))
-            # the SAME desired set also feeds the
-            # background stager, which — unlike the reconcile above — is not
-            # tenant-idle-gated and not cancelled by run_job: it stages the
-            # NEXT instance while jobs compute (fence-conflicting refs are
-            # left to the idle-gated pass).
+            # The SAME desired set feeds the background stager, which — unlike
+            # the reconcile above — is not tenant-idle-gated and not cancelled
+            # by run_job: it stages the NEXT instance while jobs compute
+            # (fence-conflicting refs are left to the idle-gated pass).
             self.executor.preloader.update_desired(
                 list(desired.hot), dict(desired.snapshots), generation)
         # New connection: per-worker fn disables/degradations were wiped by
@@ -669,9 +625,9 @@ class Lifecycle:
         *,
         model_key: Any = None,
     ) -> None:
-        # an ack whose semantic model set
-        # is unchanged must not kill an in-flight reconcile — a running
-        # self_mint_compile needs its full window.
+        # An ack whose semantic model set is unchanged must not kill an
+        # in-flight reconcile — a running self_mint_compile needs its full
+        # window.
         task = getattr(self, "_residency_task", None)
         running = task is not None and not task.done()
         if (
@@ -680,16 +636,15 @@ class Lifecycle:
             and getattr(self, "_residency_model_key", None) == model_key
         ):
             self._desired_residency = desired
-            # not cancelling is not the same as doing nothing. The
-            # ack already opened a republish epoch (replace_desired_snapshots),
-            # and only a reconcile pass reads it — so returning silently here
-            # dropped the hub's redrive on the floor, with no cancel, no
-            # restart, and no later event to heal it. Signal the level-
-            # triggered loop instead: it finishes the item it is on (gw#614
-            # intact) and then re-converges, which re-announces the held
-            # identities under the new epoch. The re-pass is cheap and cannot
-            # spam — satisfied refs short-circuit, and the epoch guard emits
-            # at most one re-report per ref per applied ack.
+            # Not cancelling is not the same as doing nothing: the ack already
+            # opened a republish epoch (replace_desired_snapshots) and only a
+            # reconcile pass reads it, so returning silently would drop the
+            # hub's redrive with no later event to heal it. Signal the
+            # level-triggered loop instead — it finishes the item it is on and
+            # then re-converges, re-announcing the held identities under the
+            # new epoch. The re-pass is cheap and cannot spam: satisfied refs
+            # short-circuit, and the epoch guard emits at most one re-report
+            # per ref per applied ack.
             self._signal_residency_restart()
             wanted = {instance.function_name for instance in desired.hot if instance.function_name}
             if wanted.issubset(set(self.executor.available_functions())):
@@ -698,12 +653,11 @@ class Lifecycle:
         self._residency_model_key = model_key
         self._desired_residency = desired
         if running and self._active_work_still_desired(desired):
-            # the set changed, but the model this reconcile is
-            # loading RIGHT NOW is still wanted with the same identity and
-            # resolution. Cancelling would discard minutes of load over a
-            # benign update (sibling ref added/removed, plan rewrite);
-            # signal the level-triggered loop to re-converge against the
-            # new set once the current item completes.
+            # The set changed, but the model this reconcile is loading RIGHT
+            # NOW is still wanted with the same identity and resolution.
+            # Cancelling would discard minutes of load over a benign update;
+            # signal the level-triggered loop to re-converge against the new
+            # set once the current item completes.
             self._signal_residency_restart()
             if not task.done():  # type: ignore[union-attr]
                 return
@@ -719,20 +673,17 @@ class Lifecycle:
         event.set()
 
     def _superseded_disk_refs(self, desired: "pb.DesiredResidency") -> set:
-        """th#1330/th#1316: declared disk_refs the hub's OWN resolutions have
-        already replaced, and whose replacement is in the same list.
+        """Declared disk_refs the hub's OWN resolutions have already replaced,
+        and whose replacement is in the same list.
 
-        The hub addresses workers in resolved ref space, but a moment
-        with no pick — a transient flavor resolve, a refusal, an
-        unminted-cell gate — seeds the BARE spelling into desired.disk_refs,
-        and no hub path removes it once the pick returns (declared and
-        effective collapse to one key in the removal layer). The worker then
-        materializes both: measured on prod, a 6.94 GB bf16 base staged ahead
-        of the 4.38 GB fp8 variant it was meant to replace, ~144 s of a 270 s
-        cold boot, for weights that are never loaded.
+        The hub addresses workers in resolved ref space, but a moment with no
+        pick — a transient flavor resolve, a refusal, an unminted-cell gate —
+        seeds the BARE spelling into desired.disk_refs, and no hub path removes
+        it once the pick returns. Materializing both costs a full extra copy of
+        weights that are never loaded.
 
-        Skipping is safe exactly when the resolved twin is ALSO listed: the
-        hub is already asking for the artifact this ref resolves to, so the
+        Skipping is safe exactly when the resolved twin is ALSO listed: the hub
+        is already asking for the artifact this ref resolves to, so the
         declared spelling can only add bytes. When the resolved twin is NOT
         listed the ref is materialized normally — a lane override that keeps
         the canonical spelling is never skipped."""
@@ -789,9 +740,9 @@ class Lifecycle:
         desired: "pb.DesiredResidency",
     ) -> bool:
         """Whether the reconcile loop's CURRENT work item survives ``desired``
-        unchanged — the gw#623 cancel test: only cancel an in-flight load
-        when the model it is FOR left the set (or changed identity or
-        resolution), never on unrelated set churn."""
+        unchanged. Only cancel an in-flight load when the model it is FOR left
+        the set (or changed identity or resolution), never on unrelated
+        churn."""
         active = getattr(self, "_reconcile_active", None)
         if active is None:
             return True  # between items: the restart signal re-converges
@@ -866,22 +817,18 @@ class Lifecycle:
                 pb.DESIRED_INTENT_KIND_MATERIALIZE,
                 ref=ref,
             )
-            # removing this
-            # tenant-idle gate is the obvious fix for the measured staging
-            # starvation (4.7 GB staged downloads stuck at 0% for minutes on
-            # busy workers) and it is WRONG. The pass's first act is to fence
-            # a stale resident identity for this ref, and a tenant job may
-            # legitimately be re-materializing OLDER bytes concurrently; with
-            # the gate gone the fence races the job's load and the worker
-            # reports the stale identity until the next HelloAck (th#1066
-            # drift). Proven by
-            # tests/test_p2_residency_reconcile.py::
+            # Do NOT remove this tenant-idle gate to cure staging starvation.
+            # The pass's first act is to fence a stale resident identity for
+            # this ref, and a tenant job may legitimately be re-materializing
+            # OLDER bytes concurrently; without the gate the fence races the
+            # job's load and the worker reports the stale identity until the
+            # next HelloAck. Guarded by tests/test_p2_residency_reconcile.py::
             # test_mutable_tag_move_fences_events_by_digest_and_generation,
-            # which does not converge within 10s without this gate — and is
-            # NOT fixable by re-verifying after the job, because handle_run_job
+            # which does not converge within 10s without it — and is NOT
+            # fixable by re-verifying after the job, because handle_run_job
             # returns before the job's load completes. The real fix is
-            # transfers become their own tasks with their own
-            # lifecycle, so staging never sits inside this serialized pass.
+            # transfers becoming their own tasks with their own lifecycle, so
+            # staging never sits inside this serialized pass.
             await self.intent_registry.reported_await(
                 intent_id,
                 self.executor.wait_idle(),
@@ -1014,10 +961,10 @@ class Lifecycle:
             # A tenant request preempts unrelated background transfer/setup.
             # Re-running desired state after idle is cheap: local refs and
             # ready instances short-circuit through the existing dedupe paths.
-            # this cancel is LOAD-BEARING for the mutable-tag
-            # identity fence — see the reverted-gate comment in
-            # _reconcile_pass. Making downloads survive preemption needs
-            # transfers to be first-class tasks (pgw#641 Stage 4).
+            # This cancel is LOAD-BEARING for the mutable-tag identity fence —
+            # see the tenant-idle gate comment in _reconcile_pass. Making
+            # downloads survive preemption needs transfers to be first-class
+            # tasks.
             self._cancel_residency_reconcile()
             try:
                 await self.executor.handle_run_job(msg.run_job)
@@ -1026,31 +973,26 @@ class Lifecycle:
         elif which == "cancel_job":
             self.executor.handle_cancel(msg.cancel_job)
         elif which == "model_op":
-            # the sole ModelOp kind (ADOPT_COMPILE_CACHE) is retired.
-            # Its hub-side push was keyed off the COMPUTED cell key, a space
-            # with no producer since pgw#1010, so no stack has ever dispatched
-            # one. Ignore rather than refuse: a hub that has not yet deployed
-            # th#1702 must not lose its stream over a message we simply no
-            # longer act on.
+            # The sole ModelOp kind (ADOPT_COMPILE_CACHE) is retired. Ignore
+            # rather than refuse: a hub still sending one must not lose its
+            # stream over a message we simply no longer act on.
             logger.warning(
                 "ignoring retired ModelOp (pgw#1032): hot compile-cache "
                 "adoption is gone; a cell arrives only through §4.27 "
                 "boot-adopt — the hub never pushes one")
         elif which == "serve_posture":
-            # the operator's eager-only command.
-            # Applied SYNCHRONOUSLY and unconditionally — it touches one
-            # process-global order and never blocks, so there is no state in
-            # which a worker is "too busy" to stop using a broken cell, and
-            # in-flight requests pick it up at their next compiled call.
-            # Idempotent, so the hub replaying it on reconnect is free.
+            # The operator's eager-only command, applied SYNCHRONOUSLY and
+            # unconditionally: it touches one process-global order and never
+            # blocks, so no worker is ever "too busy" to stop using a broken
+            # cell, and in-flight requests pick it up at their next compiled
+            # call. Idempotent, so a reconnect replay is free.
             serve_posture.apply_command(
                 bool(msg.serve_posture.eager_only),
                 actor=str(msg.serve_posture.actor or ""),
                 reason=str(msg.serve_posture.reason or ""),
             )
         elif which == "drain":
-            # The hub asked, explicitly, for this budget on this drain — an
-            # operator budget on a command, which pgw#887 keeps.
+            # The hub asked, explicitly, for this budget on this drain.
             self.start_drain(
                 int(msg.drain.deadline_ms or 0), work_deadline=True)
         elif which is None:
@@ -1090,14 +1032,11 @@ class Lifecycle:
     def _enter_error_phase(
         self, reason: str, exc: Optional[BaseException] = None,
     ) -> None:
-        """pgw#654 observability: every WORKER_PHASE_ERROR names its cause on
-        a durable channel. The hub persists only the bare phase flip
-        ("worker phase reported error" -> release breaker), and a worker's
-        lifecycle snapshot can be dropped by hub shadow validation — the
-        combination made the 0.58.0 fleet-wide breakage undiagnosable
-        (ie#544: signature="" detail="worker phase reported error"). Dial
-        the gw#640 worker-fatal carrier once per process, best-effort; the
-        hub stores it as a queryable pod_events row."""
+        """Every WORKER_PHASE_ERROR names its cause on a durable channel: the
+        hub persists only the bare phase flip, and a worker's lifecycle
+        snapshot can be dropped by hub shadow validation. Dials the
+        worker-fatal carrier once per process, best-effort; the hub stores it
+        as a queryable pod_events row."""
 
         if exc is not None:
             detail = worker_fatal.build_fatal_detail(f"phase_error: {reason}", exc, exit_code=0)
@@ -1105,8 +1044,7 @@ class Lifecycle:
             detail = f"phase=phase_error: {reason}"
         logger.error("entering WORKER_PHASE_ERROR: %s", detail)
         self.phase = pb.WORKER_PHASE_ERROR
-        # getattr: stubbed Lifecycles skip __init__ (same convention as
-        # _cancel_residency_reconcile, pgw#610).
+        # getattr: stubbed Lifecycles skip __init__.
         if getattr(self, "_error_phase_reported", False):
             return
         self._error_phase_reported = True
@@ -1150,28 +1088,21 @@ class Lifecycle:
         self._kick_disk_usage_refresh_if_stale()
         delta = self._state_delta()
         raw = delta.SerializeToString(deterministic=True)
-        # force (th#965 layer 2): the heartbeat tick re-sends an unchanged
-        # snapshot — receipt IS the beat the hub timestamps.
+        # force: the heartbeat tick re-sends an unchanged snapshot — receipt IS
+        # the beat the hub timestamps.
         if force or raw != self._last_delta:
             self._last_delta = raw
             await self._send_state_message(
                 pb.WorkerMessage(state_delta=delta),
                 hello_ack=hello_ack,
             )
-            # THE boot close, and its only owner. "Servable" means the
-            # hub may dispatch to this worker, and the hub dispatches to
+            # THE boot close, and its only owner. "Servable" means the hub may
+            # dispatch to this worker, and the hub dispatches to
             # `available_functions` — so the fact is "a StateDelta advertising
             # at least one function has gone out on a connected stream", which
-            # is observable here and nowhere else.
-            #
-            # pgw#789 marked it from `Lifecycle.startup()` instead, once per
-            # code path. That missed the path EVERY real release takes: a spec
-            # declaring `Compile` (or slots) is routed to `dynamic` and set up
-            # on hub delivery, so `awaiting_hub` was empty, the milestone fired
-            # at the end of `startup()` — which `worker.arun` runs CONCURRENTLY
-            # with the transport — and the boot closed before `hello`. Live on
-            # chaos/0.78.0: ordinal 1 `first_request_servable` 8.9s, ordinal 2
-            # `hello` 13.2s, and every span after it suppressed by `in_boot()`.
+            # is observable here and nowhere else. Marking it from
+            # `Lifecycle.startup()` is wrong: that runs concurrently with the
+            # transport and closes the boot before `hello`.
             if delta.available_functions and not self.draining:
                 self._mark_servable()
         await self._send_lifecycle_snapshot(
@@ -1221,22 +1152,20 @@ class Lifecycle:
             )
 
     async def _emit_degraded(self, *, hello_ack: bool = False) -> None:
-        """th#683 P3: per served function running degraded, tell the
-        orchestrator STRUCTURALLY (FnDegraded, not just a log line) so
-        placement learns "this release degraded on this card — it wants a
-        bigger one". Emitting rides the orchestrator transport, so cozy-local
-        (no orchestrator) never sends it — there the honest-guidance advisory
-        on the terminal is the surface."""
+        """Per served function running degraded, tell the orchestrator
+        STRUCTURALLY (FnDegraded, not just a log line) so placement learns
+        "this release degraded on this card". Rides the orchestrator transport,
+        so cozy-local (no orchestrator) never sends it — there the
+        honest-guidance advisory on the terminal is the surface."""
         if self.transport is None:
             return
         for name, plan in sorted(self.executor.serve_plans.items()):
             if not plan.degraded or name in self.executor.unavailable:
                 continue
             ran = plan.ran or plan.run_mode
-            # `ran` now stays inside the hub's exact-match
-            # RunMode vocabulary (the placement sub-rung no longer decorates
-            # it), so a deeper demotion re-reports via the WARNING text —
-            # dedupe on both or an escalation inside one run mode goes silent.
+            # `ran` stays inside the hub's exact-match RunMode vocabulary, so a
+            # deeper demotion re-reports via the WARNING text — dedupe on both
+            # or an escalation inside one run mode goes silent.
             emitted_key = f"{ran}\x1f{plan.warning}"
             if self._emitted_degraded.get(name) == emitted_key:
                 continue
@@ -1269,9 +1198,9 @@ class Lifecycle:
         """Gate functions, prefetch worker-fetchable models with retry/backoff,
         set up endpoints, advance phases. Never raises: failures gate
         individual functions, not the process."""
-        # the beat starts BEFORE any boot work so a hang
-        # anywhere in setup is still covered — the task shares this event
-        # loop, so it beats iff the loop is servicing tasks.
+        # The beat starts BEFORE any boot work so a hang anywhere in setup is
+        # still covered — the task shares this event loop, so it beats iff the
+        # loop is servicing tasks.
         if self._heartbeat_task is None:
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
         # Disk truth first: after a restart the CAS dir is full while Residency
@@ -1285,13 +1214,10 @@ class Lifecycle:
                 continue
             for slot, binding in spec.models.items():
                 if slot in spec.slots:
-                    # a declared Slot's default_checkpoint is a SEED
-                    # for the hub mapping, not a load instruction — the hub
-                    # resolves the slot (registered binding / per-request
-                    # pick) and drives DOWNLOADs itself. A hub-connected
-                    # worker never self-fetches the raw upstream default
-                    # (mirror-first, gw#465 — the fc157 civitai_not_found
-                    # boot failure).
+                    # A declared Slot's default_checkpoint is a SEED for the hub
+                    # mapping, not a load instruction: the hub resolves the
+                    # slot and drives DOWNLOADs itself. A hub-connected worker
+                    # never self-fetches the raw upstream default.
                     continue
                 ref = wire_ref(binding)
                 if binding.source != "tensorhub" and ref not in prefetch_refs:
@@ -1303,24 +1229,20 @@ class Lifecycle:
             await self.set_phase(pb.WORKER_PHASE_DOWNLOADING_MODELS)
             for ref in prefetch_refs:
                 try:
-                    # the weights_fetch boot span lives in
-                    # `ModelStore._materialize_local`, NOT here. This call site
-                    # only covers hf/civitai prefetch refs; the tensorhub refs
-                    # that own the ~230s of a real cold boot arrive later via
-                    # DesiredResidency/RunJob and never pass through here, so a
-                    # span here measured the cheap path and left the expensive
-                    # one invisible. The materializer is also the only layer
-                    # that can stamp bytes AND source (network vs warm volume
-                    # vs local CAS), which is what the fetch rate needs.
+                    # The weights_fetch boot span lives in
+                    # `ModelStore._materialize_local`, NOT here: this call site
+                    # only covers hf/civitai prefetch refs, while the tensorhub
+                    # refs that own most of a real cold boot arrive later via
+                    # DesiredResidency/RunJob. The materializer is also the only
+                    # layer that can stamp bytes AND source (network vs warm
+                    # volume vs local CAS).
                     await self.executor.store.ensure_local(ref)
                 except Exception as exc:
-                    # this used to log and walk on to READY with an
-                    # unmaterialized model, so the failure resurfaced as a
-                    # per-job load failure on paid GPU. `_materialize_local`
-                    # has already retried the transient classes with backoff;
-                    # reaching here means the model is not coming, so the
-                    # functions that need it go unavailable NOW and the hub
-                    # stops routing to them.
+                    # `_materialize_local` has already retried the transient
+                    # classes with backoff, so reaching here means the model is
+                    # not coming: the functions that need it go unavailable NOW
+                    # rather than resurfacing as a per-job load failure on paid
+                    # GPU.
                     gated = self.executor.mark_ref_unmaterializable(
                         ref, f"{type(exc).__name__}: {exc}")
                     logger.error(
@@ -1337,15 +1259,12 @@ class Lifecycle:
             if spec.name in self.executor.unavailable:
                 continue
             if spec.slots or spec.compile is not None:
-                # pgw#532 (slots) + gw#584 (compile): Slot picks and compile
-                # cells are set up ONLY on hub delivery — Hot DesiredInstance
-                # or RunJob, both of which rebind through _effective_spec
-                # with the hub-stamped refs. th#938: th#912's watcher ran
-                # ensure_setup on the class-table spec here, materializing
+                # Slot picks and compile cells are set up ONLY on hub delivery —
+                # Hot DesiredInstance or RunJob, both of which rebind through
+                # _effective_spec with the hub-stamped refs. Running
+                # ensure_setup on the class-table spec here would materialize
                 # the image-baked code default over the hub-stamped release
-                # binding (sdxl's Civitai default -> civitai_not_found ->
-                # both fns setup_failed). The code default is the hub-less
-                # bootstrap fallback only.
+                # binding; that default is the hub-less bootstrap fallback only.
                 dynamic.append(spec.name)
                 continue
             missing = sorted(
@@ -1360,20 +1279,14 @@ class Lifecycle:
                 # Waits for DesiredResidency / RunJob snapshots (§7). This wait
                 # is unbounded and hub-driven: a release without resolved
                 # desired bindings leaves the function in loading_functions
-                # forever (ie#455 z-image fns=[]), so say so loudly instead of
-                # dropping the function in silence.
+                # forever, so say so loudly instead of dropping it in silence.
                 awaiting_hub[spec.name] = missing
                 continue
             try:
-                # the `pipeline_load` span moved INTO
-                # `Executor.ensure_setup`. It was here and at
-                # `_setup_awaiting_functions`, i.e. on the two boot paths a
-                # release declaring `Compile` never takes — those specs are
-                # routed to `dynamic` above and set up from hub delivery
-                # (`_ensure_hot_instance` / RunJob), so the span measured the
-                # paths that cost nothing and missed every real load. Same
-                # doctrine as pgw#789 moving `weights_fetch` into the
-                # materializer: instrument the layer all callers pass through.
+                # The `pipeline_load` span belongs to `Executor.ensure_setup`,
+                # not to this call site: a release declaring `Compile` never
+                # takes this path (those specs route to `dynamic` above).
+                # Instrument the layer all callers pass through.
                 await self.executor.ensure_setup(spec)
             except Exception as exc:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
@@ -1392,30 +1305,20 @@ class Lifecycle:
                     f"{fn} <- {', '.join(refs)}" for fn, refs in sorted(awaiting_hub.items())
                 ),
             )
-            # the hub's desired-disk plan delivers those snapshots
-            # seconds later, but nothing re-ran setup — the function sat in
-            # loading_functions forever while the hub dispatches only to
-            # advertised functions (each side waiting on the other; found
-            # live, ie#519). Finish boot setup the moment the refs land.
+            # The hub's desired-disk plan delivers those snapshots seconds
+            # later, but nothing else re-runs setup — and the hub dispatches
+            # only to advertised functions, so each side would wait on the
+            # other forever. Finish boot setup the moment the refs land.
             self._boot_setup_watch = asyncio.create_task(
                 self._setup_awaiting_functions(awaiting_hub), name="boot-setup-watch"
             )
 
-        # FIRST-REQUEST-SERVABLE. Boot is over here — READY is the
-        # moment the hub may dispatch to this worker, whether it got there
-        # eager (pgw#671 eager-first boot, mint still running in the
-        # background) or fully compiled. Measured from OS process start, so it
-        # is the same quantity the autoscaler's cold-boot horizon prices
-        # against, and everything after it is optimization, not boot.
-        #
-        # NOT marked here, on any path. pgw#789 special-cased
-        # `awaiting_hub` and left the `dynamic` (compile-cell / slot) path —
-        # i.e. every real release — closing the boot at the end of `startup()`,
-        # concurrently with and usually BEFORE the transport's own hello. The
-        # milestone now has exactly one owner, `maybe_send_state_delta`, which
-        # marks it on the fact itself: a StateDelta advertising a function went
-        # out. If no function is ever advertised the boot has no closing
-        # milestone, and that is the finding (same doctrine as an open span).
+        # FIRST-REQUEST-SERVABLE is NOT marked here, on any path: `startup()`
+        # runs concurrently with (and usually before) the transport's hello.
+        # The milestone has exactly one owner, `maybe_send_state_delta`, which
+        # marks it on the fact itself — a StateDelta advertising a function
+        # went out. If no function is ever advertised the boot has no closing
+        # milestone, and that is the finding.
         await self.set_phase(pb.WORKER_PHASE_READY)
 
     def _mark_servable(self) -> None:
@@ -1429,14 +1332,11 @@ class Lifecycle:
             since_process_start=True,
         ):
             return
-        # the pod reports its OWN decomposition, once, at the instant
-        # the boot closes — and says so when it cannot explain itself. A
-        # measurement whose only consumer is a hub table nobody has queried yet
-        # is how `cell_discover` survived four releases with no producer; the
-        # boot that took the time is the one place a hole is cheap to notice.
-        # `SHAPE_ENTRYPOINT` is the MINIMUM every pod boot produces (the cell
-        # phases depend on what the boot did), so `missing` here is always an
-        # instrument defect, never a boot-shape difference.
+        # The pod reports its OWN decomposition once, at the instant the boot
+        # closes, and says so when it cannot explain itself. `SHAPE_ENTRYPOINT`
+        # is the MINIMUM every pod boot produces (the cell phases depend on
+        # what the boot did), so `missing` here is always an instrument defect,
+        # never a boot-shape difference.
         try:
             verdict = boot_mod.completeness(boot_mod.SHAPE_ENTRYPOINT)
             logger.info(
@@ -1450,13 +1350,13 @@ class Lifecycle:
             logger.debug("boot decomposition report failed", exc_info=True)
 
     async def _heartbeat_loop(self) -> None:
-        """th#965 layer 2 + pgw#610: force-send the full StateDelta (which
-        carries the refreshed measured-disk report) every beat, in EVERY
-        state including drain — the beat only ends when the process does."""
+        """Force-send the full StateDelta (which carries the measured-disk
+        report) every beat, in EVERY state including drain — the beat only ends
+        when the process does."""
         while not self.drained.is_set():
             await asyncio.sleep(HEARTBEAT_INTERVAL_MS / 1000.0)
             await self.maybe_send_state_delta(force=True)
-            # progress counters piggyback on the same beat — one
+            # Progress counters piggyback on the same beat: one
             # counter-carrying ActivityUpdate per tick while an activity is
             # open, plus the typed self-diagnosis on a stalled registry.
             activity_mod.on_beat()
@@ -1489,8 +1389,8 @@ class Lifecycle:
                 await self.maybe_send_state_delta()
             if pending:
                 await asyncio.sleep(_BOOT_SETUP_WATCH_INTERVAL_S)
-        # no mark here either. The `maybe_send_state_delta` above is
-        # the one that advertises these functions, and it owns the milestone.
+        # No servable mark here: the `maybe_send_state_delta` above advertises
+        # these functions and owns the milestone.
 
     # ---- drain -------------------------------------------------------------------
 
@@ -1519,21 +1419,20 @@ class Lifecycle:
         self.executor.draining = True
         self._cancel_residency_reconcile()
         self.executor.preloader.stop()  # no staging into a drain
-        # the heartbeat deliberately keeps beating through drain — a
-        # worker hung mid-drain must still be detectable as dead. It is
-        # cancelled after the stream closes in _finish_drain.
+        # The heartbeat deliberately keeps beating through drain — a worker
+        # hung mid-drain must still be detectable as dead. It is cancelled
+        # after the stream closes in _finish_drain.
         logger.info("drain started (deadline_ms=%d)", deadline_ms)
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()
         self._drain_deadline_at = loop.time() + deadline_s if deadline_s is not None else None
-        # two deadlines, because they bound two different things and
+        # Two deadlines, because they bound two different things and
         # collapsing them is the defect. `_drain_deadline_at` bounds the
-        # SHUTDOWN — the result flush and the stop time this worker
-        # reports to the hub — and every drain has one. `_drain_work_deadline_at`
-        # bounds the TENANT WORK, and only a caller that explicitly asked for
-        # one gets it: a `Drain` carrying `deadline_ms` is an operator budget
-        # on a command, while the SIGTERM handler's fleet default is
-        # exactly what abandoned a 29-minute mint as `abandoned_shutdown`.
+        # SHUTDOWN — the result flush and the stop time reported to the hub —
+        # and every drain has one. `_drain_work_deadline_at` bounds the TENANT
+        # WORK, and only a caller that explicitly asked for one gets it: a
+        # `Drain` carrying `deadline_ms` is an operator budget on a command,
+        # whereas the SIGTERM handler's fleet default would abandon long mints.
         self._drain_work_deadline_at = (
             self._drain_deadline_at if work_deadline else None)
         self.intent_registry.set_drain(
@@ -1546,34 +1445,18 @@ class Lifecycle:
         ADVANCING (or an EXPLICIT operator budget ran out) and the drain gave
         up on the remainder.
 
-        pgw#887 / gw#666 / DESIGN-RULINGS §2. This was
-        ``wait_idle(timeout=deadline_at - now)``, so at 30 s (SIGTERM) or 60 s
-        (the hub's cluster drain, which is what BOTH standing stacks run) the
-        drain logged "drain deadline expired" and called ``abort_all()``.
-        Nothing consulted progress: a render at step 30/50 and a render at
-        step 1/50 were aborted identically, and a MINT — which has no partial
-        result to requeue — was abandoned outright. ``self_mint_abort`` has 52
-        rows on chaos and 64 on master; one was recorded verbatim:
-        *"attempt sixteen ran 29 minutes and died
-        ``self_mint_abort/abandoned_shutdown``"*.
-
         A drain is a COMMAND, so a deadline on it is legitimate — but the
-        deadline must bound acknowledgement and shutdown, not the tenant work
+        deadline bounds acknowledgement and shutdown, never the tenant work
         underneath. Admission already stopped in ``_begin_drain``; what ends
         this wait is the work ceasing to advance, which
-        ``progress.self_diagnosis()`` already answers and the 10 s beat
-        already reports to the hub. Nothing new is invented here.
+        ``progress.self_diagnosis()`` answers.
 
-        What stayed, and why. A ``Drain`` that arrives on the wire carrying
-        ``deadline_ms`` IS the "explicit operator budget on a specific command"
-        the ruling allows — the caller chose it, for this drain. What
-        is deleted is the worker INVENTING one: the SIGTERM handler's
-        `_SIGNAL_DRAIN_DEADLINE_MS` is no longer a work budget, so a pod
-        stopping on a signal no longer abandons a mint at 30 s. The hub's own
-        60 s cluster window is a hub-side default and is routed to tensorhub
-        rather than reinterpreted here. Even under an explicit budget the
-        progress test still applies and fires FIRST: a wedged job is given up
-        on when it wedges, not when the clock happens to run out.
+        Only a ``Drain`` that arrives on the wire carrying ``deadline_ms`` is
+        an explicit operator budget; the worker never INVENTS one, so the
+        SIGTERM handler's `_SIGNAL_DRAIN_DEADLINE_MS` is not a work budget and
+        a pod stopping on a signal does not abandon a running mint. Even under
+        an explicit budget the progress test applies and fires FIRST: a wedged
+        job is given up on when it wedges, not when the clock runs out.
 
         Two properties worth stating because they are deliberate:
 
@@ -1585,8 +1468,7 @@ class Lifecycle:
           The worker's job is to not throw away work that was about to finish.
         * ``self_diagnosis()`` is registry-wide, so a background mint's
           advancing counter can currently defer this verdict for a wedged
-          tenant job. That cross-talk is pgw#894's, is named there, and is
-          strictly better than the wall clock this replaces.
+          tenant job.
         """
         loop = asyncio.get_running_loop()
         budget_at = self._drain_work_deadline_at
@@ -1657,15 +1539,13 @@ class Lifecycle:
                     pb.DRAIN_LIFECYCLE_STATUS_FLUSHING,
                 )
                 await self.maybe_send_state_delta()
-                # this used to be `max(0.0, deadline_at - loop.time())`,
-                # which is exactly 0.0 on every path that gets here after the
-                # tenant wait expired — i.e. precisely when `abort_all` above has
-                # just produced the typed RETRYABLE results whose entire purpose
-                # is to tell the hub to re-dispatch. A bound that is provably
-                # zero is not a bound. The deadline governs waiting for TENANT
-                # WORK; shipping results we already hold is not that, so the
-                # floor is the channel's own peer-dead threshold: we try for as
-                # long as the transport would still call the hub alive.
+                # Never `max(0.0, deadline_at - loop.time())`: that is provably
+                # zero on every path reaching here after the tenant wait
+                # expired — precisely when `abort_all` has just produced the
+                # typed RETRYABLE results whose purpose is to tell the hub to
+                # re-dispatch. The deadline governs waiting for TENANT WORK;
+                # shipping results we already hold is not that, so the floor is
+                # the channel's own peer-dead threshold.
                 flush_timeout = (
                     None if deadline_at is None
                     else max(KEEPALIVE_TIMEOUT_S, deadline_at - loop.time())
@@ -1693,8 +1573,7 @@ class Lifecycle:
                 logger.exception("failed to report drain failure")
             raise
         self.drained.set()
-        # getattr: stubbed Lifecycles skip __init__ (same convention as
-        # _cancel_residency_reconcile, pgw#610).
+        # getattr: stubbed Lifecycles skip __init__.
         beat_task = getattr(self, "_heartbeat_task", None)
         if beat_task is not None:
             beat_task.cancel()

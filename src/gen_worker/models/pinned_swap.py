@@ -1,17 +1,17 @@
 """Pinned host-RAM weight swapping.
 
-Tier swaps used to ride whole-object ``.to(device)``: pageable host memory
-throttles H2D copies far below PCIe line rate, so promoting a ~38 GB
-transformer took many seconds. This module keeps a pinned host copy of every
-weight, cached on the module across swaps:
+Pageable host memory throttles H2D copies far below PCIe line rate, so a
+whole-object ``.to(device)`` takes many seconds to promote a ~38 GB
+transformer. This module keeps a pinned host copy of every weight, cached on
+the module across swaps:
 
 - demote (cuda -> cpu): weights are copied D2H into pinned staging ONCE and
   parameters re-pointed at it. Later demotes of an unchanged weight are pure
   pointer swaps (the host copy is already current — residency-managed weights
   are immutable; adapters detach via ``pre_demote`` before any move).
 - promote (cpu -> cuda): one ``non_blocking`` H2D per tensor from pinned
-  memory at full PCIe bandwidth, issued on the DEDICATED COPY STREAM
-: copy engines are separate hardware from the SMs, so a
+  memory at full PCIe bandwidth, issued on the DEDICATED COPY STREAM: copy
+  engines are separate hardware from the SMs, so a
   background promote overlaps the serving job's compute instead of
   serializing behind it on the default stream. Only the copy stream is
   synchronized before returning — never the whole device.

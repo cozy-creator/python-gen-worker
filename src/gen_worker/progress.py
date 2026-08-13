@@ -43,13 +43,11 @@ _now = time.monotonic
 
 _lock = threading.Lock()
 
-#: ``(owner, name) -> Counter``. pgw#894: the key used to be the NAME alone, so
-#: one process-global namespace held every phase's counters and `freshest()`
-#: returned whichever of them advanced most recently — regardless of which work
-#: it described. A serving request's `infer:steps` therefore refreshed a
-#: background mint's stall clock: measured on the standing chaos hub, 28 log
-#: lines reporting `infer:steps` under `self_mint_compile`, one of which
-#: declined a condemnation because that mint activity was "0s ago".
+#: ``(owner, name) -> Counter``. The owner is part of the key: keyed on the NAME
+#: alone, one process-global namespace holds every phase's counters and
+#: `freshest()` returns whichever advanced most recently regardless of which work
+#: it described — a serving request's `infer:steps` then refreshes a background
+#: mint's stall clock and declines its condemnation.
 #:
 #: The OWNER is the scope the counter belongs to (an activity id, a request
 #: id). Registry-wide queries still exist and still mean what they meant — "is
@@ -200,11 +198,10 @@ def self_diagnosis(owner: Optional[str] = None) -> Optional[Snapshot]:
     window — the typed self_stalled confession the beat reports so the hub
     kills on fact, not inference.
 
-    Scoped to ``owner`` when one is named, registry-wide otherwise. pgw#894:
-    registry-wide was the ONLY form, and it is the right answer to "is this
-    process alive" and the wrong one to "is this mint stalled" — a request
-    running beside a wedged mint answered for it. `Activity.on_beat` passes
-    the activity's own id.
+    Scoped to ``owner`` when one is named, registry-wide otherwise:
+    registry-wide is the right answer to "is this process alive" and the wrong
+    one to "is this mint stalled" — a request running beside a wedged mint would
+    answer for it. `Activity.on_beat` passes the activity's own id.
 
     Counter LIFETIME still has to be honest within a scope: a counter left
     open after its producer's phase ended is the min-age counter of a phase it

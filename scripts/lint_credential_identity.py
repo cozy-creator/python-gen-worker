@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""pgw#1122: the compute child cannot answer a question about itself with a
-credential it does not hold — so every site that reads one is classified.
+"""The compute child cannot answer a question about itself with a credential
+it does not hold — so every site that reads one is classified.
 
-THE DEFECT CLASS. The compute child (pgw#783, the only execution model) holds
-**no worker credential by construction**: the parent strips ``WORKER_JWT`` from
-its environment and no frame carries it (pgw#763 delta 1). A gate that reads
-that credential to answer "who am I?" or "is there a hub?" is therefore not
-wrong on some pods — it is wrong on **every real serving pod, always**, and it
-looks like a decision while it does it. Measured twice, on the same seam, one
-gate apart:
+THE DEFECT CLASS. The compute child (the only execution model) holds **no
+worker credential by construction**: the parent strips ``WORKER_JWT`` from its
+environment and no frame carries it. A gate that reads that credential to
+answer "who am I?" or "is there a hub?" is therefore not wrong on some pods —
+it is wrong on **every real serving pod, always**, and it looks like a decision
+while it does it. Measured twice on the same seam: boot-adopt read "do I hold a
+bearer?" as "is there a hub to ask?" and never called resolve at all, and the
+cell receipt trust gate decoded viewer claims out of this process's own JWT and
+refused every org-tier cell.
 
-* **pgw#1108** — boot-adopt read "do I hold a bearer?" as "is there a hub to
-  ask?": ``/v1/worker/cells/resolve`` was called ZERO times on three real pods.
-* **pgw#1122** — the cell receipt trust gate decoded the viewer claims out of
-  this process's own JWT: every org-tier cell refused ``publisher_untrusted``
-  after a successful resolve, the function went down, three pods were reaped
-  ``state_blocked_idle`` and two replacements were bought.
-
-So this is not a rule about one file. Every read of a worker credential inside
+Every read of a worker credential inside
 ``src/gen_worker`` must appear in ``scripts/credential_identity_allowlist.txt``
 under one of the classifications below, or this script fails — the same
 enforcement shape as ``lint_settings_writers.py`` and
@@ -33,8 +28,8 @@ Classifications:
                 nothing else; under the split the parent supplies the real one
                 and ignores this, so an empty string here costs nothing
     READINESS   credential-presence as a "can we reach the hub" signal, and it
-                MUST carry the seam fallback (``broker.active()``) that
-                pgw#1108 established — otherwise it is the pgw#1108 bug again
+                MUST carry the seam fallback (``broker.active()``), or the
+                child reads "no credential" as "no hub to ask"
     WIRING      the provider is passed through to somebody else and never read
                 here
     RELAYED     it derives a value the parent ALSO hands the child as a plain
@@ -68,8 +63,8 @@ CLASSIFICATIONS = {
 #: it IS the resolver every other site is required to use.
 RESOLVER_FILES = {"worker_identity.py"}
 
-#: The module that OWNS the credential itself (pgw#848's single source): its
-#: whole job is holding and handing out the token.
+#: The module that OWNS the credential itself — the single source whose whole
+#: job is holding and handing out the token.
 CREDENTIAL_FILES = {"worker_credential.py"}
 
 #: Attribute names that name a worker credential. Deliberately by NAME rather

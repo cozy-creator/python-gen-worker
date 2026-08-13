@@ -1,4 +1,4 @@
-"""pgw#809: one GPU timing at a time, across the whole entry-compile pool.
+"""One GPU timing at a time, across the whole entry-compile pool.
 
 The hazard, stated exactly
 -------------------------
@@ -33,12 +33,12 @@ same thread" — is why :class:`DeviceBenchmarkLock` is reentrant.
 What this does NOT fix, and must be said
 ----------------------------------------
 The serving tenant is running eager inference on the same card for the whole
-mint — that is pgw#784's contract, not an accident. So autotune timings are
+mint — that is the mint contract, not an accident. So autotune timings are
 ALREADY perturbed by live traffic at K=1, and this lock cannot exclude the
 tenant. The pool is therefore held to a narrower claim: it must not perturb
 ITSELF. Whether a mint taken beside live serving picks the same configs as a
-mint on a quiet card is a PRE-EXISTING, unmeasured question that pgw#809 did
-not introduce and does not close.
+mint on a quiet card is a pre-existing, unmeasured question this does not
+close.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """Measured serving-kernel lane selection.
 
-The svdq serving path has TWO independent kernel choices, and pgw#863 is the
-proof they cannot be one switch:
+The svdq serving path has TWO independent kernel choices, and they cannot be
+one switch:
 
     linear      W4A4 matmuls: ``fused`` (our triton kernels) or ``baseline``
                 (the open unfused chain). A THROUGHPUT question.
@@ -12,22 +12,21 @@ proof they cannot be one switch:
 Which COMBINATION wins on a card is a per-card FACT, not a derivable one: a
 custom op is opaque to inductor, so on sm_120 our fusion beats what inductor
 can do with the open chain and on sm_100 it loses to it by 19%, while the
-packed modulation is worth having on both. That used to be two
-hand-maintained SM tuples, informed by ~$12 benchmark campaigns per card and
-one human edit per new card class — and while they were ONE tuple, sm_100
-had to give up either 9.5 GB of residency or 19% of its step time, because a
-single switch cannot express "baseline linears, packed modulation".
+packed modulation is worth having on both. Deliberately NOT a hand-maintained
+SM tuple per axis: a single switch cannot express "baseline linears, packed
+modulation", so sm_100 would have to give up either 9.5 GB of residency or
+19% of its step time.
 
-This module replaces both tuples with a measurement taken on the card the
-cell is being minted for, recorded INTO the cell, and adopted by serving:
+The verdict is a measurement taken on the card the cell is being minted for,
+recorded INTO the cell, and adopted by serving:
 
     mint      probe(candidates, ...) -> Verdict     (every buildable
               combination built, compiled, and timed on the target card, in
-              the pgw#784 mint process)
+              the mint process)
     envelope  metadata.json["kernel_lane"] — the DISCRETE verdict, plus each
               candidate's QUANTIZED peak and the fallback order
     result    metadata["kernel_lane_evidence"] — the numbers, published with
-              the checkpoint, never packed (the #699 double-mint byte-compare
+              the checkpoint, never packed (the double-mint byte-compare
               forbids wall clocks inside the artifact)
     serve     adopt(meta) -> re-apply the fit rule on THIS card -> pin(); the
               load-time swap reads the pin, each axis projecting its own
@@ -160,7 +159,7 @@ FRAGMENTATION_HEADROOM_BYTES = 1 << 30  # 1 GiB
 
 # Peaks recorded in the PACKED envelope are quantized (rounded UP). A raw
 # `max_memory_allocated()` is a MEASUREMENT, and an unrounded measurement in
-# metadata.json is precisely what the #699 double-mint byte-compare forbids —
+# metadata.json is precisely what the double-mint byte-compare forbids —
 # an autotuned kernel picking a different workspace on the second mint would
 # move the number and strand the cell. Rounding to a coarse grain makes the
 # recorded byte count reproducible for the same reason `MARGIN_FRACTION`
@@ -202,7 +201,7 @@ BIND_FIT = "fit"
 BIND_VRAM_TIEBREAK = "vram_tiebreak"
 BIND_SOLE_CANDIDATE = "sole_candidate"
 BIND_NO_FIT = "no_fit"
-#: pgw#1080: the mint held no weights, so no whole-model A/B was run.
+#: The mint held no weights, so no whole-model A/B was run.
 BIND_UNMEASURED = "unmeasured"
 
 
@@ -535,9 +534,7 @@ def packed_candidate_gap() -> str:
 
     No SM term at all, deliberately: the W4A16 dequant-GEMM is ordinary
     triton with no block-scaled-MMA dependency, so it builds on any CUDA card
-    triton supports. pgw#863 carried a Blackwell tuple for it purely because
-    it shared a switch with the fused linear; separating the axes removes the
-    reason, and the measurement decides the rest.
+    triton supports. The measurement decides the rest.
     """
     try:
         from .models.svdq_awq_packed import awq_packed_self_check
@@ -673,8 +670,8 @@ def fit_block(verdict: Verdict) -> Dict[str, Any]:
 def envelope_block(verdict: Verdict) -> Dict[str, Any]:
     """The DISCRETE verdict, for ``metadata.json`` inside the packed cell.
 
-    Deliberately carries no wall clocks: the #699 double-mint byte-compare
-    requires the artifact to be reproducible, and milliseconds are not. Peak
+    Deliberately carries no wall clocks: the double-mint byte-compare requires
+    the artifact to be reproducible, and milliseconds are not. Peak
     BYTES are a different kind of number — discrete, quantized here, and
     load-bearing for a card that shares this cell's SM but not its memory —
     so they ride the envelope while the timings stay in

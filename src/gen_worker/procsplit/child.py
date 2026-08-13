@@ -1,11 +1,11 @@
-"""Child (compute-plane) side of the pgw#763 split: a Transport-shaped object
+"""Child (compute-plane) side of the process split: a Transport-shaped object
 that speaks frames to the control parent instead of gRPC to the hub.
 
 Lifecycle/Executor are wired to this exactly as they are to the real
 Transport — the residency protocol (CONFIG_APPLY / MATERIALIZE /
-FUNCTION_READY, th#1283 receipts), ctx, cancellation, and job execution all
-run in-process here, unchanged. Durable result queueing lives in the PARENT's
-real SendQueue; this side writes through.
+FUNCTION_READY, receipts), ctx, cancellation and job execution all run
+in-process here, unchanged. Durable result queueing lives in the PARENT's real
+SendQueue; this side writes through.
 """
 
 from __future__ import annotations
@@ -27,27 +27,25 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WATCHDOG_PING_S = 5.0
 _BOOT_FATAL_SEND_TIMEOUT_S = 5.0
-# how long the dying child waits for the parent
-# to CONFIRM it has recorded the verdict. Bounded — a wedged parent must not
-# hold a doomed child alive — and losing the ack only degrades to the old
-# fire-and-forget behaviour.
+# How long the dying child waits for the parent to CONFIRM it has recorded the
+# verdict. Bounded — a wedged parent must not hold a doomed child alive — and
+# losing the ack only degrades to fire-and-forget.
 _BOOT_FATAL_ACK_TIMEOUT_S = 10.0
 
 
 def send_boot_fatal(report: Dict[str, Any], *, kind: str = "hardware_unsuitable") -> bool:
-    """pgw#826: hand the parent a TERMINAL typed boot verdict before exiting.
+    """Hand the parent a TERMINAL typed boot verdict before exiting.
 
     Runs pre-transport (the CUDA probe fails before ChildTransport exists), so
     it opens its own short-lived socket. The parent propagates the report on
     its credential and exits 1 instead of respawning — a hardware verdict is
     not a transient fault.
 
-    after sending, WAIT (bounded) for the parent's T_BOOT_FATAL_ACK.
-    Without it, a child that exits immediately can be reaped before the parent
-    reads the frame off the socket buffer, downgrading the typed verdict to a
-    crash-to-retry (the race CI run 30692482234 caught). The ack is written
-    only after the parent has recorded the verdict, so surviving this call
-    means the respawn decision will see it.
+    After sending it WAITS (bounded) for the parent's T_BOOT_FATAL_ACK: a child
+    that exits immediately can be reaped before the parent reads the frame off
+    the socket buffer, downgrading the typed verdict to a crash-to-retry. The
+    ack is written only after the parent has recorded the verdict, so surviving
+    this call means the respawn decision will see it.
     """
     path = os.environ.get(ENV_SOCKET, "").strip()
     if not path:
@@ -125,14 +123,12 @@ def _ping_interval() -> float:
 
 
 def start_liveness_thread() -> Optional[threading.Thread]:
-    """pgw#771: report WHAT IS OPEN on a thread, not on the event loop.
+    """Report WHAT IS OPEN on a thread, not on the event loop.
 
     The frame ping in ``ChildTransport`` is an asyncio task, so an inductor
     compile that starves the loop silences it — and a parent that kills on that
-    silence reproduces th#1299 one layer down, SIGKILLing a live compile and
-    labelling it ``watchdog_hang``. Loop silence may only ARM the verdict; the
-    open activity DECIDES it, the same discipline the hub half settled on
-    (ef890253).
+    silence SIGKILLs a live compile and labels it ``watchdog_hang``. Loop
+    silence may only ARM the verdict; the open activity DECIDES it.
 
     This thread carries only that one fact — which activity is open — over a
     dedicated pipe with one atomic ``os.write``. Deliberately NOT the evidence:

@@ -70,12 +70,10 @@ def _infer_tensors_format(ref_or_path: str) -> str:
 
 
 def _require_worker_capability_token() -> str:
-    # The per-request worker_capability_token is plumbed from
-    # JobExecutionRequest.worker_capability_token via RequestContext.
-    # Callers should prefer RequestContext._get_worker_capability_token(),
-    # which uses the per-request token directly and only falls back here
-    # when none is available. Without a per-request token, file
-    # operations cannot proceed.
+    # Callers must prefer RequestContext._get_worker_capability_token(), which
+    # uses the per-request token plumbed from
+    # JobExecutionRequest.worker_capability_token and only falls back here when
+    # none is available. Without one, file operations cannot proceed.
     raise RuntimeError("worker_capability_token is required for file operations")
 
 

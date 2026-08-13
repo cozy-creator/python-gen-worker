@@ -1,35 +1,11 @@
-"""pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``cg-key-v1`` entry
-key SET AT BOOT, from CODE ALONE, before a single weight byte is resident.
+"""Derive this worker's ``cg-key-v1`` entry key SET AT BOOT, from CODE ALONE,
+before a single weight byte is resident. Target: **< 60 s, every time**, ~99 %
+of it the traces.
 
-§4.27 said "THE cell key" (singular). It is a KEY SET plus a derived
-contract manifest now — one ``cg-key-v1`` per declared graph class. Every property
-the ruling wanted survives STRENGTHENED, because a partial resolve now helps:
-a pod that resolves 30 of 36 keys arms 30 classes and compiles 6, where the
-cell key made that same outcome a total miss and a full re-mint.
-
-Paul, §4.27 step 1, verbatim: *"**Immediately** on boot: derive the cell key on
-CPU from code alone — fake/meta-tensor traces, **as parallel as possible** ('to
-get the trace time down as low as possible'). No weights required, ever, for
-identity."* Target: **< 60 s, every time**, ~99 % of it the traces.
-
-Why this can exist at all
--------------------------
-Two things had to be true, and only one of them was:
-
-1. **The compile target must be constructible without a checkpoint.**
-   pgw#1080 increment 2 built that (``models.structure_only``) — for the MINT
-   CHILD only. Widening it to the boot path is the gate pgw#1080's own owed
-   list names, and it is discharged here by the simplest honest route: the boot
-   derivation runs the mint child's own load, in its own processes.
-2. **An entry's ``class_hash`` must be statable from the exported program.**
-   It was NOT. ``aot_mint.entry_graph_block`` v2 read ``constant_fqns`` and
-   ``fused_constants`` off the COMPILED PACKAGE, so identity could not be
-   stated until after the compile it was supposed to let us skip. v3 makes the
-   block program-only — see that function for why those two facts carry zero
-   bits the key does not already hold, and for the live defect it closes (a
-   weightless mint and a real-weight mint of the identical graph keyed
-   DIFFERENTLY, because pgw#1080's mandatory runtime constant folding moves
-   both package-side sets).
+The result is a KEY SET plus a derived contract manifest — one ``cg-key-v1``
+per declared graph class — so a PARTIAL resolve helps: a pod that resolves 30
+of 36 keys arms 30 classes and compiles 6, where a single cell key made that
+same outcome a total miss and a full re-mint.
 
 Processes, not threads — and the reason is measured
 ---------------------------------------------------
@@ -37,18 +13,18 @@ Processes, not threads — and the reason is measured
 in ONE process producing one usable result and three distinct internal failures
 (``CURRENT_PATCHER is None``, ``KeyError: 'custom'`` in
 ``fx.traceback.annotate``, a fake-tensor propagation crash), because inductor
-keeps process-global mutable state: *"a thread pool here is not slower, it is
-WRONG"*. A boot trace is ``torch.export`` under a fake mode — the SAME dynamo
-patcher and the SAME ``fx.traceback`` stack — so the unit of parallelism is an
-OS process here too. The parent never imports the endpoint, never builds a fake
-mode and never installs a dynamo patcher: the serving process's torch state is
-untouched by construction, which is the second reason for the split.
+keeps process-global mutable state. A boot trace is ``torch.export`` under a
+fake mode — the SAME dynamo patcher and the SAME ``fx.traceback`` stack — so
+the unit of parallelism is an OS process here too. The parent never imports the
+endpoint, never builds a fake mode and never installs a dynamo patcher: the
+serving process's torch state is untouched by construction, which is the second
+reason for the split.
 
 Why the MINT can only export serially and this can be K-wide
 ------------------------------------------------------------
-The mint exports *"by construction — one pipeline, one card, and the branch arm
-is toggled once for the whole branchless group"*. A weight-free trace has no
-card and no shared pipeline: each child composes its OWN structure-only
+The mint exports serially by construction — one pipeline, one card, and the
+branch arm is toggled once for the whole branchless group. A weight-free trace
+has no card and no shared pipeline: each child composes its OWN structure-only
 pipeline, toggles its OWN branch arm, and its rows are ordered adapter-first
 inside that child exactly as the mint orders them inside its one process.
 
@@ -57,31 +33,27 @@ Parallelism is not an identity axis
 Blocks are assembled by ENTRY NAME, never by completion, and the fold is over
 ``aot_serve.stamp_entry`` — the mint's own stamping code, called with the
 mint's own blocks. K-wide and 1-wide therefore produce the identical key by
-construction rather than by care, and ``test_boot_key_pgw1089`` pins it.
+construction rather than by care.
 
 The memo, and what it may hold
 ------------------------------
 ``closure digest -> the per-class KEYING BLOCKS`` — i.e. the GRAPH half of the
 identity, and **never the folded keys.** The other two axes (sm, toolchain)
-re-derive in milliseconds every boot and MUST: an sm that changed or a
-toolchain that changed has to move every key on the very next boot, and a
-memoized key would answer with the previous pod's.
-Memoizing the graph half is sound because the traced graph is a pure function
-of the code closure the digest names (pgw#990 demoted the closure to exactly
-this: *"a memo, never identity"*).
+re-derive in milliseconds every boot and MUST: an sm or toolchain that changed
+has to move every key on the very next boot, and a memoized key would answer
+with the previous pod's. Memoizing the graph half is sound because the traced
+graph is a pure function of the code closure the digest names.
 
-**A memo hit SKIPS THE TRACES.** That is the point of having one — the memo
-path is milliseconds, and pgw#1089 says so. It stores the blocks rather than
-the finished class hashes for one reason: the hashes are stamped by
-``aot_serve.stamp_entry``, and a memo that stored them would make this
-module recompute a class hash itself, which is the second derivation
-the whole design forbids. Stored blocks re-fold through the mint's own code.
+**A memo hit SKIPS THE TRACES** — that is the point of having one. It stores
+the blocks rather than the finished class hashes so this module never
+recomputes a class hash itself; stored blocks re-fold through the mint's own
+code.
 
 Honesty is enforced, not trusted: when this pod goes on to MINT, the freshly
 traced per-class hashes are compared against whatever the memo answered
 (:func:`assert_memo_honest`), and a mismatch invalidates the memo entry and
 re-traces on the next boot. A wrong key is never produced — at worst a memo is
-thrown away, and the pod that threw it away is the pod that proved it wrong.
+thrown away, by the pod that proved it wrong.
 """
 
 from __future__ import annotations
@@ -108,8 +80,7 @@ logger = logging.getLogger(__name__)
 TRACE_CHILD_MODULE = "gen_worker.boot_trace_child"
 
 #: The directory that must lead the child's ``PYTHONPATH`` so that
-#: ``-m gen_worker.boot_trace_child`` means THIS gen_worker (pgw#840's lesson,
-#: applied at the second child seam rather than rediscovered on a pod).
+#: ``-m gen_worker.boot_trace_child`` means THIS gen_worker.
 PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 
 #: The modules that define this parent/child contract. A child running
@@ -118,10 +89,9 @@ PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 _CONTRACT_MODULES = ("boot_key.py", "boot_trace_child.py")
 
 #: Serving headroom, in whole cores, held back from the trace pool. A boot
-#: trace races the weights download and the pipeline load, and starving those
-#: to finish the key sooner trades the number Paul asked for against the
-#: number he asked for it FOR (§4.27 step 4 / pgw#1091: nothing on the request
-#: path, and the traces must OVERLAP the fetch rather than displace it).
+#: trace races the weights download and the pipeline load: the traces must
+#: OVERLAP the fetch rather than displace it, and nothing may land on the
+#: request path.
 SERVING_HEADROOM_CORES = 1
 
 EXIT_OK = 0
@@ -216,12 +186,12 @@ class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
     strict: bool = True
     lora_bucket: int = 0
     code_digest: str = ""
-    #: pgw#847's economy, measured where the graphs are: ``FakeTensorProp``
-    #: seconds over this child's first program, beside that program's export
-    #: seconds. Never read by a decision here — see ``prop_economy``.
+    #: ``FakeTensorProp`` seconds over this child's first program, beside that
+    #: program's export seconds. Never read by a decision here — see
+    #: ``prop_economy``.
     prop_probe_ms: int = 0
     export_probe_ms: int = 0
-    #: pgw#1165: this child's WHOLE device footprint (`total - free` on its own
+    #: This child's WHOLE device footprint (`total - free` on its own
     #: card), context and kernel images included. 0 = unmeasured, which the
     #: parent's budget reads as "no evidence", never as "free".
     device_peak_bytes: int = 0
@@ -236,11 +206,6 @@ class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
 class DerivedKey:
     """The KEY SET this boot derived — the contract manifest — and the
     measurements that produced it.
-
-    ``entry_keys`` replaces the single ``key``. §4.27 ruled "THE
-    cell key" (singular); it is now a derived key SET plus a manifest, and
-    every property that ruling wanted survives strengthened, because a
-    PARTIAL resolve now helps instead of falling back to a full re-mint.
     """
 
     #: entry name -> that class's ``cg-key-v1`` key. THE thing resolve asks for.
@@ -257,12 +222,12 @@ class DerivedKey:
     wall_ms: int
     trace_ms: Mapping[str, int] = field(default_factory=dict)
     nodes: Mapping[str, int] = field(default_factory=dict)
-    #: pgw#1031: entry name -> the NODE-level digest of the graph this boot
-    #: traced (``aot_mint.keying_block``'s ``graph_witness``). Since option a it
-    #: is FOLDED into ``class_hash`` (so the key now separates two bodies behind
-    #: one declaration) AND kept here for the adopt backstop, which compares it
-    #: against the cell's own record (defense-in-depth). Rides the keying
-    #: blocks, so a memo hit carries it exactly as a cold trace does.
+    #: Entry name -> the NODE-level digest of the graph this boot traced
+    #: (``aot_mint.keying_block``'s ``graph_witness``). FOLDED into
+    #: ``class_hash`` (so the key separates two bodies behind one declaration)
+    #: AND kept here for the adopt backstop, which compares it against the
+    #: cell's own record. Rides the keying blocks, so a memo hit carries it
+    #: exactly as a cold trace does.
     graph_witnesses: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -277,10 +242,9 @@ class PoolWidth:
 
     workers: int
     reason: str
-    #: pgw#1165: WHICH bound decided it — `classes`, `cpu`, `vram` or `cap`.
-    #: Named rather than inferred from the prose so a regression that collapses
-    #: the pool is assertable (`c9fb5d4a`'s lesson: the mint pool ran at K=1
-    #: fleet-wide for weeks because nothing asserted the achieved width).
+    #: WHICH bound decided it — `classes`, `cpu`, `vram` or `cap`. Named rather
+    #: than inferred from the prose so a regression that collapses the pool is
+    #: assertable.
     binding: str = "classes"
 
 
@@ -288,30 +252,18 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
     """How many trace children this pod may run at once.
 
     DERIVED from the pod's own measured CPU — never a constant and never an
-    env (§1.17: an env may carry a value, never a decision). ``cpu_quota_cores``
+    env (an env may carry a value, never a decision). ``cpu_quota_cores``
     is the cgroup's ``cpu.max``: ``os.cpu_count()`` reports the HOST's cores,
     32 on a pod that owns 4, and sizing a pool by it is how a 4-vCPU pod ends
-    up thrashing 32 ways.
-
-    A boot trace holds no card and allocates no weights — its parameters are
-    fake — so unlike the compile pool there is no VRAM bound and no host-RAM
-    bound worth modelling: a structure-only export's measured device high-water
-    is 9.8 MiB and its RSS is an import closure. CPU is the only
-    real bound, and one core is reserved for the serving parent that is
+    up thrashing 32 ways. One core is reserved for the serving parent that is
     concurrently fetching and loading weights.
 
-    pgw#1165 CORRECTS the paragraph above, which was measured wrong and said so
-    confidently. A structure-only export's *allocator* high-water really is
-    ~9.8 MiB — but the CHILD is a process, and a process that touches CUDA pays
-    for a context plus the cuBLAS/cuDNN kernel images the export loads. Measured
-    on a live pod (RTX 3090, sdxl, uncontended, one request): **7 children at
-    1.25-1.29 GiB each**, card at 3.12 MiB free of 23.56 GiB, every one of the
-    18 declared classes refused with `torch.export … OUT OF DEVICE MEMORY`. The
-    same derivation on a 48 GB A40 succeeded twice. So there IS a device bound,
-    it is per-PROCESS rather than per-tensor, and sizing this pool by CPU alone
-    is what made a 96-vCPU pod spawn 18 contexts onto a 24 GB card.
+    There IS also a device bound, but it is per-PROCESS rather than per-tensor:
+    a structure-only export's *allocator* high-water is ~9.8 MiB, while the
+    CHILD is a process that pays for a CUDA context plus the cuBLAS/cuDNN kernel
+    images the export loads — measured at 1.25-1.29 GiB per child.
 
-    The device bound does NOT live here. This function decides the SHARDING —
+    That device bound does NOT live here. This function decides the SHARDING —
     how the declared classes are divided (``rows[i::K]``) — which is a
     correctness question; how many of those children hold the card at once is a
     resource question, and it is answered from a MEASUREMENT by
@@ -348,18 +300,10 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
 #: Memo file schema. Bumped when the MEANING of a stored hash changes; a
 #: reader that finds an older version treats the whole file as absent, which
 #: is a miss and a re-trace, never a wrong key.
-#: v3: the stored blocks now carry ``graph_witness``, and a v2 entry
-#: has none — which the adopt-side floor reads as "this pod cannot state its
-#: own graph" and refuses. Bumped so a stale memo is a re-trace rather than a
-#: refusal nobody can explain.
-#: v4: the digest a row is filed under now names the RESOLVED SLOTS
-#: as well as the code and the declaration. A v3 row was filed under a
-#: checkpoint-blind digest, so it answers a strictly different question and
-#: must not be read as an answer to this one. The version rides the digest
-#: input as well as the file header, so a stale row is unaddressable AND the
-#: file it lives in is discarded whole — two independent reasons it cannot be
-#: misread, which is what "typed invalidation" has to mean for a cache whose
-#: wrong answer is a wrong cell.
+#: The version rides the digest input as well as the file header, so a stale
+#: row is unaddressable AND the file it lives in is discarded whole — two
+#: independent reasons it cannot be misread, which is what typed invalidation
+#: has to mean for a cache whose wrong answer is a wrong cell.
 MEMO_VERSION = 4
 MEMO_FILENAME = "boot-key-graphs.json"
 
@@ -370,22 +314,19 @@ def closure_digest(
 ) -> str:
     """The memo's key: what a per-class graph hash is a pure function OF.
 
-    ``cc.content_keys()`` is the SDK+endpoint code content (pgw#990 demoted it
-    from a key axis to exactly this: *"a memo, never identity"*), and the
-    declaration facts are the other half — two boots of the same code that
-    declare different shape ladders trace different graphs.
+    ``cc.content_keys()`` is the SDK+endpoint code content (a memo, never
+    identity), and the declaration facts are the other half — two boots of the
+    same code that declare different shape ladders trace different graphs.
 
-    ``slots`` is the third half, and it is the one this memo went without for
-    two issues. The traced graph is a function of the CHECKPOINT's
-    own config: ``zero_cond_t`` exists on ``Qwen-Image-Edit-2511`` and not on
-    ``Qwen-Image``, and block counts, head counts and quantization ops are the
-    general case. Without it, a redeploy that rebinds a slot to a different
-    checkpoint answered from the PREVIOUS checkpoint's row — and because a
-    memo hit skips the traces and returns the memo's own witnesses, the
-    pgw#1031 witness floor that ``boot_adopt`` runs against those witnesses
-    could only ever agree with itself. Folding the slots in is what makes that
-    check capable of failing. Cost: one memo miss and one trace on the first
-    boot after a rebinding, which is what correctness costs here.
+    ``slots`` is the third half. The traced graph is a function of the
+    CHECKPOINT's own config: ``zero_cond_t`` exists on ``Qwen-Image-Edit-2511``
+    and not on ``Qwen-Image``, and block counts, head counts and quantization
+    ops are the general case. Without it, a redeploy that rebinds a slot to a
+    different checkpoint would answer from the PREVIOUS checkpoint's row — and
+    because a memo hit skips the traces and returns the memo's own witnesses,
+    the witness floor ``boot_adopt`` runs against them could only ever agree
+    with itself. Cost: one memo miss and one trace on the first boot after a
+    rebinding.
 
     Deliberately NOT included: sm, toolchain, env seal. They are key AXES and
     they re-derive every boot in milliseconds; folding them in here would make
@@ -511,12 +452,9 @@ def assert_memo_honest(
     blocks. Returns ``''`` when the memo agreed (or held nothing for this
     closure), otherwise the reason — and the offending entry is invalidated so
     the next boot re-traces rather than re-reading a hash that has been proven
-    wrong.
-
-    This is what makes the memo safe to have at all. A memo that is merely
-    *believed* is a key generator with no error path; a memo that is CHECKED
-    against the traced truth every time this pod produces one can only ever
-    cost a re-trace.
+    wrong. A memo that is CHECKED against the traced truth every time this pod
+    produces one can only ever cost a re-trace, which is what makes the memo
+    safe to have at all.
     """
     memoized = read_memo(memo_dir, digest)
     if not memoized:
@@ -538,10 +476,9 @@ def assert_memo_honest(
         had = had_hashes.get(str(name))
         if had and want and had != want:
             disagreements.append(f"{name}: memo {had} != traced {want}")
-        # the memo now also answers the ADOPT-side witness, so a
-        # memo whose class hash is right and whose witness is stale would
-        # admit a colliding cell on the very axis the witness exists to
-        # separate. Checked here for the same reason the hash is.
+        # The memo also answers the ADOPT-side witness, so a memo whose class
+        # hash is right and whose witness is stale would admit a colliding cell
+        # on the very axis the witness exists to separate.
         want_w = str((block or {}).get("graph_witness") or "")
         had_w = had_witnesses.get(str(name)) or ""
         if want_w and had_w != want_w:
@@ -621,35 +558,25 @@ def fold(
     """``({entry: entry_key}, {entry: class_hash}, manifest_digest)`` for one
     declaration's class set — THE derived contract manifest.
 
-    §4.27 asked for "THE cell key" (singular). This returns a KEY SET plus a
-    manifest, and everything §4.27 wanted survives strengthened: the <60 s
-    target is unchanged (the traces are the same traces), the memo is
-    unchanged (it holds graph blocks, never keys), and boot-time adoption
-    gets STRICTLY better because a PARTIAL hit now helps — a pod that
-    resolves 30 of 36 keys arms 30 classes and compiles 6, where the cell key
-    made that outcome a total miss and a full re-mint.
-
     The fold is ``aot_serve.stamp_entry`` followed by
     ``cell_key.from_entry_metadata`` — i.e. the mint's own stamp and the
     publish path's own recomputation, reached through the identical
     functions. There is deliberately no ``class_hash`` arithmetic in this
-    module: a second implementation of the fold is exactly the attempt-28
-    phantom (a declared-facts key beside a traced-facts key under one axis
-    name) that pgw#1059 exists to have retired.
+    module: a second implementation of the fold produces a declared-facts key
+    beside a traced-facts key under one axis name.
 
     The two non-graph axes are restated FRESH here on every call — ``sm``
-    from ``aot_serve.runtime_key()``, toolchain from
-    ``cc.toolchain_digest()`` — which is why the memo may hold graph hashes
-    and must never hold a key. ``envelope`` is recorded on the MANIFEST and
-    reaches no key: pgw#1176 evicted it from identity because it digests the
-    union of the ladder across the whole bundle, so widening it re-minted
-    every class that traced identically.
+    from ``aot_serve.runtime_key()``, toolchain from ``cc.toolchain_digest()``
+    — which is why the memo may hold graph hashes and must never hold a key.
+    ``envelope`` is recorded on the MANIFEST and reaches no key: it digests the
+    union of the ladder across the whole bundle, so folding it into identity
+    would re-mint every class that traced identically whenever it widened.
     """
     runtime = aot_serve.runtime_key()
     toolchain = dict(cc.toolchain_digest())
     seal = env_seal.effective_seal()
-    # `envelope` and `precision` are MANIFEST facts under pgw#1176 — recorded
-    # by the caller on the manifest, read by no key axis here.
+    # `envelope` and `precision` are MANIFEST facts — recorded by the caller on
+    # the manifest, read by no key axis here.
     del envelope, precision
     with boot_phases.span(
         boot_phases.PHASE_KEY_FOLD, function=str(family or ""),
@@ -717,9 +644,9 @@ def shares(classes: int, workers: int) -> List[Tuple[int, int]]:
 def free_device_bytes() -> int:
     """Bytes actually free on this process's card, or 0 when there is no card.
 
-    read at the moment of the fan-out, so the parent's OWN residents
-    (it is serving throughout a §4.28 boot) are already excluded — the children
-    compete for what is left, not for the nameplate capacity.
+    Read at the moment of the fan-out, so the parent's OWN residents (it is
+    serving throughout a boot) are already excluded — the children compete for
+    what is left, not for the nameplate capacity.
     """
     try:
         import torch
@@ -744,19 +671,16 @@ def concurrency_budget(
     which is the property that lets this ship without re-keying anything.
 
     ``per_child_bytes`` is the child's WHOLE PROCESS footprint on the card and
-    must stay that. The th#1825 lane bounded the same question for finalize's
-    adopt and ruled out per-entry literals as the dominant term by three
-    independent measurements (literals live inside the artifact — 4.19 MB); the
-    real cost is the loaded AOTI packages, plus device code, per-runner
-    workspace and load-time buffers, **none of which appear in the artifact**.
-    So sizing this budget against an artifact size, a literal size or an
-    allocator high-water would under-count badly and in the direction that
-    OOMs. `total - free` is the only input that sees all of it.
+    must stay that. The dominant cost is the loaded AOTI packages plus device
+    code, per-runner workspace and load-time buffers, **none of which appear in
+    the artifact** — so sizing this budget against an artifact size, a literal
+    size or an allocator high-water would under-count badly and in the direction
+    that OOMs. `total - free` is the only input that sees all of it.
 
-    Two conventions, matching `mint_workers`' surviving RSS bank: the number
-    is MONOTONE (it only ever tightens — see `_run_children`),
-    and the reason STATES ITS BASIS, so a measured bound and an absent one can
-    never be read as the same claim.
+    Two conventions, matching `mint_workers`' RSS bank: the number is MONOTONE
+    (it only ever tightens — see `_run_children`), and the reason STATES ITS
+    BASIS, so a measured bound and an absent one can never be read as the same
+    claim.
     """
     pending = max(1, int(pending))
     if per_child_bytes <= 0 or free_bytes <= 0:
@@ -832,25 +756,16 @@ def _run_children(
 ) -> List[TraceReport]:
     """Run every child, holding the card to what it can actually carry.
 
-    pgw#1165. This used to be "spawn every child at once", and K came from CPU
-    alone — so a 96-vCPU pod put 18 CUDA contexts on one card. On a 24 GB card
-    that is 3.12 MiB free and 18 of 18 classes refusing with OUT OF DEVICE
-    MEMORY; on a 48 GB card it fits, which is why the failure looked like "small
-    cards cannot derive keys" for a day.
-
     The FIRST child is a probe: it runs alone and reports what one child costs
     the card (`TraceReport.device_peak_bytes`, the whole process footprint
     including its CUDA context). Every remaining child is admitted against that
     measurement and the card's real free bytes. Nothing is estimated, nothing is
-    configured, and a card that reports nothing keeps exactly the old width —
-    an absent measurement must not be able to throttle a pod.
+    configured, and a card that reports nothing keeps the unbounded width — an
+    absent measurement must not be able to throttle a pod.
 
-    Deliberately NOT a serialization. `c9fb5d4a` is the cautionary case: the
-    mint's entry pool ran at K=1 fleet-wide for weeks, cost every mint 2.4x, and
-    survived because nothing asserted the achieved width. So the width reached
-    here is reported (`wave_widths`) and asserted in tests, and the probe costs
-    exactly one child's latency — on a card with room, wave 2 carries the whole
-    remainder.
+    Deliberately NOT a serialization: the width reached here is reported and
+    asserted in tests, and the probe costs exactly one child's latency — on a
+    card with room, wave 2 carries the whole remainder.
     """
     jobs = list(jobs)
     if len(jobs) <= 1:
@@ -901,7 +816,7 @@ def derive(
     precision: str = "",
     strict: bool = True,
 ) -> DerivedKey:
-    """Derive this boot's ``ck1`` key from code alone. §4.27 step 1.
+    """Derive this boot's ``ck1`` key from code alone.
 
     ``trust_memo=False`` forces the traces even when a memo is present and then
     RULES on what the memo held — the verify posture, never the boot default.
@@ -929,12 +844,11 @@ def derive(
 
     # THE MEMO PATH — milliseconds, and no trace at all. The graph half of the
     # identity is a pure function of the code closure this digest names, so a
-    # hit re-folds the stored blocks; the other three axes are restated FRESH
-    # inside `fold`, which is what makes it safe to skip the expensive half and
-    # still re-key on a toolchain upgrade, a different card or a widened
-    # envelope. Honesty is not assumed here — it is enforced at the next MINT
-    # by `assert_memo_honest`, which is the only moment this pod holds a traced
-    # truth to compare against.
+    # hit re-folds the stored blocks; the other axes are restated FRESH inside
+    # `fold`, which is what makes it safe to skip the expensive half and still
+    # re-key on a toolchain upgrade or a different card. Honesty is enforced at
+    # the next MINT by `assert_memo_honest`, the only moment this pod holds a
+    # traced truth to compare against.
     if memoized:
         entry_keys, class_hashes, manifest = fold(
             memoized, family=family,
@@ -1035,10 +949,9 @@ def derive(
     )
 
     # `trust_memo=False` is the VERIFY posture: trace anyway and rule on
-    # whatever the memo held. It is what the rig and the mint-adjacent honesty
-    # gate use, and it is the only way a stale memo is caught before a mint —
-    # so it exists, and it is never the boot default (a boot that re-traced to
-    # check its own memo would have no memo path at all).
+    # whatever the memo held. It is the only way a stale memo is caught before
+    # a mint, and it is never the boot default (a boot that re-traced to check
+    # its own memo would have no memo path at all).
     if not trust_memo:
         held = read_memo(memo_dir, digest)
         if held:
@@ -1077,13 +990,12 @@ def derive(
 
 
 def prop_economy(reports: Sequence[TraceReport]) -> Dict[str, Any]:
-    """pgw#847's number, aggregated off whatever the children measured.
+    """The prop/export ratio, aggregated off whatever the children measured.
 
     ``export_s - prop_s`` is the saving one-export-N-props would buy. This
-    function REPORTS it and decides nothing (pgw#830: instrument first,
-    optimise never in the same change) — the collapse itself is a separate
-    increment, and it may only be built once this ratio is measured on a real
-    family's graphs rather than bounded by an off-pod probe.
+    function REPORTS it and decides nothing — the collapse itself may only be
+    built once this ratio is measured on a real family's graphs rather than
+    bounded by an off-pod probe.
     """
     exports = [int(r.export_probe_ms) for r in reports if r.export_probe_ms > 0]
     props = [int(r.prop_probe_ms) for r in reports if r.prop_probe_ms > 0]

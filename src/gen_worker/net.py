@@ -31,10 +31,10 @@ _installed = False
 class HfHttpFloorError(RuntimeError):
     """The huggingface_hub timeout floor could not be installed or PROVEN.
 
-    this patch is load-bearing and reaches into ``huggingface_hub``'s
-    backend, which has already been reshaped once (requests -> httpx). A silent
-    revert puts the whole fleet back on infinite timeouts — the gw#456 hang —
-    and nothing would say so. So installation ends in a behavioural assertion
+    This patch is load-bearing and reaches into ``huggingface_hub``'s backend,
+    which has already been reshaped once (requests -> httpx). A silent revert
+    puts the whole fleet back on infinite HTTP timeouts and nothing would say
+    so. So installation ends in a behavioural assertion
     on the session huggingface_hub will actually use, and a failure is loud at
     boot instead of a wedge weeks later.
     """

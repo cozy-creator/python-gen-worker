@@ -1,4 +1,4 @@
-"""Per-job capability-token renewal (client half of tensorhub #561 / th#639).
+"""Per-job capability-token renewal (worker half).
 
 While a job is in flight, a background task renews its capability token at
 ~80% of the token's TTL via ``POST {file_base_url}/v1/worker/capability/renew``
@@ -20,7 +20,7 @@ from .request_context._helpers import _decode_unverified_jwt_claims
 logger = logging.getLogger(__name__)
 
 RENEW_PATH = "/v1/worker/capability/renew"
-# pgw#973 (§4.24). Renew at 80% of the token's OWN lifetime, so the fraction is
+# Renew at 80% of the token's OWN lifetime, so the fraction is
 # a statement about the remaining budget rather than a duration anybody picked:
 # whatever TTL the hub issues, a fifth of it is left for the retries below.
 # The threat is a job losing its capability MID-FLIGHT — an in-flight upload or

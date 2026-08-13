@@ -74,12 +74,11 @@ def resolve_calibration_action(
     unsupported    no          any                 any         skip
     ============== =========== =================== =========== =================
 
-    The ``beneficial + no dataset + skip_calibration=False`` row used to fall
-    through to a silent weight-only run. We now hard-fail there: the invoker
-    asked for a scheme whose policy declares calibration *helpful* but didn't
-    supply a dataset and didn't explicitly opt out. Falling through silently
-    shipped uncalibrated weights to invokers who didn't realize the difference.
-    Force the choice by supplying a calibration dataset, or set
+    The ``beneficial + no dataset + skip_calibration=False`` row HARD-FAILS:
+    the invoker asked for a scheme whose policy declares calibration *helpful*
+    but supplied no dataset and did not explicitly opt out, and falling through
+    would ship uncalibrated weights to an invoker who did not realize the
+    difference. Force the choice by supplying a calibration dataset, or set
     ``skip_calibration=True`` on the spec.
 
     Tenants typically take the returned action + any ``WARN-``-tagged notes

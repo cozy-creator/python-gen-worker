@@ -94,15 +94,14 @@ _OWNED_PREFIXES = ("GEN_WORKER_", "TENSORHUB_", "WORKER_", "COZY_")
 #: :data:`_OWNED_NON_SETTINGS`, these are not "read by somebody else": NOBODY
 #: may read them, and their PRESENCE in any config source is a boot refusal.
 #:
-#: pgw#884: the th#1307 refusal read `os.environ` alone. A PEM delivered as
-#: `/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, a `.env` line or a yaml entry was
-#: therefore neither LOADED (the name is not a Settings field, so
-#: `_normalize_key` dropped it) NOR REFUSED — the pod booted green with a
-#: private key sitting world-readable to tenant code at a mounted path, which
-#: is the precise scenario th#1307 exists to make impossible. The file sources
-#: are hand-authored and pass through `_normalize_key(strict=True)` already,
-#: so the refusal belongs exactly there: it costs one dict lookup per key, it
-#: never reads the VALUE (presence is the fact), and it kills the boot.
+#: The refusal must cover EVERY source, not `os.environ` alone: a PEM delivered
+#: as `/run/secrets/GEN_WORKER_C2PA_KEY_PEM`, a `.env` line or a yaml entry is
+#: otherwise neither LOADED (the name is not a Settings field, so
+#: `_normalize_key` drops it) NOR REFUSED, and the pod boots green with a
+#: private key world-readable to tenant code at a mounted path. Every source
+#: passes through `_normalize_key(strict=True)`, so the refusal lives there: one
+#: dict lookup per key, never reading the VALUE (presence is the fact), and it
+#: kills the boot.
 REFUSED_KEY_MATERIAL: Dict[str, str] = {
     "GEN_WORKER_C2PA_KEY_PEM": (
         "a C2PA PRIVATE KEY must never be delivered to a pod (th#1307 — tenant "
@@ -141,7 +140,7 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     # the compute child must not be able to reach through the config surface.
     "GEN_WORKER_PROBE",
     "GEN_WORKER_PROBE_PUBLISH_ARMED",
-    # pgw#929 library/standalone-tool knobs; see scripts/config_reads_allowlist.txt.
+    # Library/standalone-tool knobs; see scripts/config_reads_allowlist.txt.
     "GEN_WORKER_LOG_LEVEL",
     "GEN_WORKER_LOCAL_CELLS_DIR",
     "GEN_WORKER_LOCAL_OUTPUT_DIR",
@@ -178,20 +177,19 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
 class RefusedKeyMaterialError(ValueError):
     """A config source delivered secret material this pod refuses to hold.
 
-    pgw#884. Terminal at boot by design: the material is already on the box
-    when this raises, so the only honest outcome is that nothing tenant-facing
-    starts beside it.
+    Terminal at boot by design: the material is already on the box when this
+    raises, so the only honest outcome is that nothing tenant-facing starts
+    beside it.
     """
 
 
 class UnknownSettingError(ValueError):
     """A key inside an owned namespace matches no Settings field.
 
-    pgw#931 deliverable 8. `_normalize_key` used to return None for anything
-    unrecognised and every source layer then silently skipped it, so a typo'd
-    ``TENSORHUB_CHACE_DIR`` in `.env` or `/run/secrets` was accepted and inert
-    — the operator's intent evaporated with no diagnostic anywhere. Same hole
-    the hub side closed at `config/config.go:1281` (th#1500 deliverable 4).
+    Returning None for anything unrecognised makes every source layer silently
+    skip it, so a typo'd ``TENSORHUB_CHACE_DIR`` in `.env` or `/run/secrets`
+    would be accepted and inert — the operator's intent evaporating with no
+    diagnostic anywhere.
 
     Deliberately scoped to `_OWNED_PREFIXES`: the process environment legitimately
     carries hundreds of variables belonging to CUDA, Python, the OS and the pod

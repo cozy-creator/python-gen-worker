@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""pgw#1049: the ambient-input census — structural half (no torch needed).
+"""The ambient-input census — structural half (no torch needed).
 
 `scripts/ambient_inputs_census.txt` classifies every env input torch/triton
 consult. This lint verifies the claims that are checkable from the tree
 alone; `tests/test_ambient_census_pgw1049.py` verifies completeness against
-the INSTALLED torch (an unclassified input is red — the th#1678 shape).
+the INSTALLED torch (an unclassified input is red).
 
 Checked here:
 

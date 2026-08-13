@@ -6,8 +6,8 @@ facilities live here:
 
 - :class:`PinnedPool` — bounded accounting for pinned (page-locked) host
   RAM. Pinned memory is unswappable; an unbounded pinned tier can push the
-  host into the gw#407 reclaim-thrash livelock exactly like an unbounded
-  warm tier. The budget is MEASURED (available RAM minus the residency
+  host into the reclaim-thrash livelock exactly like an unbounded warm
+  tier. The budget is MEASURED (available RAM minus the residency
   floor, hard-capped at half of total RAM) — no knobs, per the standing
   no-developer-facing-residency-knobs rule. Reservations release by
   weakref finalizer on the pinned tensor, so accounting tracks the actual
@@ -16,7 +16,7 @@ facilities live here:
 - the process copy stream — a dedicated CUDA stream for weight H2D.
   Copy engines are separate hardware from the SMs, so a pinned-memory H2D
   on this stream runs concurrently with the serving job's compute instead
-  of serializing behind it on the default stream (pgw#652 overlap #2).
+  of serializing behind it on the default stream.
   Interference is measured from ordinary production traffic
   (DESIGN-RULINGS §1.2), not from a bespoke harness — the
   ``benchmarks.swap_latency overlap`` case was deleted with its
@@ -64,8 +64,8 @@ def _current_group() -> int:
 
 def _floor_bytes() -> int:
     """The host-RAM floor the warm/pinned tiers must leave alone, in bytes.
-    One owner (`memory.effective_ram_floor_gb`, pgw#973 §4.24) — this used to
-    restate residency's two constants AND its derivation."""
+    One owner (`memory.effective_ram_floor_gb`); never restate residency's
+    constants or its derivation here."""
     return int(effective_ram_floor_gb(get_total_ram_gb()) * _GiB)
 
 

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""pgw#1049: exactly ONE authority writes torch settings.
+"""Exactly ONE authority writes torch settings.
 
-Paul's directive (2026-08-09): "everything has to go through _us_ …
-`us -> pytorch settings`, not `[us, random other things] -> pytorch
-settings`." The settings authority (`gen_worker.settings_authority` and the
+`us -> pytorch settings`, never `[us, random other things] -> pytorch
+settings`. The settings authority (`gen_worker.settings_authority` and the
 modules it names in `AUTHORITY_MODULES`) is the only sanctioned writer of
 torch/dynamo/inductor process settings. Any OTHER write site in
 `src/gen_worker` must appear in `scripts/settings_writers_allowlist.txt`
 with a classification, or this script fails — the same enforcement shape as
-`lint_config_reads.py` (§1.18) and th#1678's wirecontract census:
-an unclassified site is red, and a stale allowlist row is red.
+`lint_config_reads.py` (§1.18): an unclassified site is red, and a stale
+allowlist row is red.
 
 What counts as a WRITE:
 
@@ -31,7 +30,7 @@ Classifications:
 
     SCOPED     a context-managed ``config.patch`` that restores on exit;
                the serving window it opens is covered by dynamo's
-               GlobalStateGuard + the pgw#680 guard-miss doctrine
+               GlobalStateGuard + the guard-miss doctrine
     PLUMBING   a cache/path redirect (TORCHINDUCTOR_CACHE_DIR, ...) —
                points where bytes land, never what bytes are generated;
                inductor entries are content-addressed
@@ -196,7 +195,7 @@ class _Writes(ast.NodeVisitor):
 
 def scan(root: Path = SRC_ROOT) -> Dict[Tuple[str, str], int]:
     """Every write site outside the authority, keyed (path, site) — never by
-    line number (a line is a fact other people change; pgw#931's lesson)."""
+    line number (a line is a fact other people change)."""
     sites: Dict[Tuple[str, str], int] = {}
     for path in sorted(root.rglob("*.py")):
         if path.name in AUTHORITY_FILES and path.parent == root:

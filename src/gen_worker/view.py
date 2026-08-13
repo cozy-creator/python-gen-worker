@@ -1,5 +1,5 @@
-"""Per-request pipeline VIEWS (SDK v2, pgw#647 / WORKER-RESIDENCY-DESIGN
-"Shared components and mutation safety").
+"""Per-request pipeline VIEWS (WORKER-RESIDENCY-DESIGN "Shared components and
+mutation safety").
 
 One live instance == one binding set == one materialized graph. Everything
 PER-REQUEST (sampler/scheduler state, latents, generator/seed, steps,
@@ -16,15 +16,14 @@ Concretely: the diffusers pipeline OBJECT is a thin container of module
 references; the view is a container copy sharing every module by reference,
 with its OWN scheduler cloned from the instance scheduler's config.
 
-This fixes a live concurrency-corruption class: diffusers holds ONE
-stateful scheduler (``step_index`` and sigmas advance during the loop)
-reused across calls, and endpoints that ASSIGN ``self.pipeline.scheduler``
-per request (sdxl's old ``_ensure_scheduler``) let two concurrent requests
-corrupt each other's trajectory — and the assignment is exactly the
-swap-don't-wrap that risks a recompile. Cloning the scheduler per request
-is a CORRECTNESS fix, not an optimization.
+This closes a concurrency-corruption class: diffusers holds ONE stateful
+scheduler (``step_index`` and sigmas advance during the loop) reused across
+calls, and an endpoint that ASSIGNS ``self.pipeline.scheduler`` per request
+lets two concurrent requests corrupt each other's trajectory — and the
+assignment is exactly the swap-don't-wrap that risks a recompile. Cloning the
+scheduler per request is a CORRECTNESS fix, not an optimization.
 
-the view clones EVERY scheduler the pipeline carries, not just the
+The view clones EVERY scheduler the pipeline carries, not just the
 attribute literally named ``scheduler``. A pipeline with a second stateful
 sampler — ``LTX2ConditionPipeline.audio_scheduler`` for the audio half of its
 joint video+audio latent, which diffusers' own ``__call__`` drives with
@@ -51,8 +50,8 @@ import inspect
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Friendly sampler name -> (diffusers scheduler class name, extra config).
-# The SDK table DEFINES each named sampler COMPLETELY (pgw#654, absorbing
-# pgw#647 gap #2): recipes SELECT among these names; endpoint-private
+# The SDK table DEFINES each named sampler COMPLETELY:
+# recipes SELECT among these names; endpoint-private
 # sampler tables must not exist — two endpoints defining "euler_trailing"
 # differently would make one recipe mean different math depending on which
 # endpoint serves it. Per-setting rulings folded in:
@@ -63,13 +62,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # - "euler_trailing" (Euler + timestep_spacing="trailing"): the documented
 #   SDXL-Lightning recipe, family-neutral by construction.
 # Genuinely family-specific numbers (steps, guidance) are catalog recipe
-# data (th#1116 family schemas), never rows here.
+# data, never rows here.
 SAMPLERS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "ddim": ("DDIMScheduler", {}),
-    # the hub already RECOGNIZES "ddim_trailing" in both sdxl
-    # schemas; this is its definition. Hyper-SD's published recipe is DDIM
-    # with trailing timestep spacing, and family-neutral by construction
-    # exactly like "euler_trailing".
+    # Hyper-SD's published recipe is DDIM with trailing timestep spacing, and
+    # family-neutral by construction exactly like "euler_trailing".
     "ddim_trailing": ("DDIMScheduler", {"timestep_spacing": "trailing"}),
     "ddpm": ("DDPMScheduler", {}),
     "deis": ("DEISMultistepScheduler", {}),
@@ -159,8 +156,8 @@ def flow_capable(cls: Any, config: Optional[Dict[str, Any]] = None) -> bool:
 
 
 def _alias_flow_shift(cls: Any, overrides: Dict[str, Any]) -> None:
-    """Rename a declared flow shift to the field ``cls`` honours (ie#535's
-    second half): a published ``{"shift": …}`` on a UniPC mirror is dropped by
+    """Rename a declared flow shift to the field ``cls`` honours:
+    a published ``{"shift": …}`` on a UniPC mirror is dropped by
     ``from_config`` — ignored rather than refused. Only renames when the class
     takes exactly one of the two spellings; never invents a value."""
     fields = _init_fields(cls)
@@ -271,7 +268,7 @@ def clone_scheduler(
     at view construction, never payload logic:
 
     - ``"epsilon"`` / ``"v_prediction"``: sets ``prediction_type``; for
-      v-prediction ALSO sets ``rescale_betas_zero_snr=True`` (th#1017's
+      v-prediction ALSO sets ``rescale_betas_zero_snr=True`` (the
       zero-terminal-SNR contract — folded in here so no endpoint can
       forget it and wash out).
     - ``"flow"``: requires a scheduler that INTEGRATES flow-match sigmas

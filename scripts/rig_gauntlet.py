@@ -134,7 +134,7 @@ def _why(facts: Dict[str, Any], leg: Dict[str, Any]) -> str:
     """The CLASSIFIED reason a leg failed, never a slice of raw stderr.
 
     A table cell wide enough for a stack trace tail is a table cell that says
-    nothing; the whole point of pgw#999 was that these refusals carry a class.
+    nothing; these refusals carry a class.
     """
     if facts.get("arm_reason"):
         return str(facts["arm_reason"])

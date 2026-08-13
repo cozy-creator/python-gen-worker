@@ -1,4 +1,4 @@
-"""th#1087 worker-local mutable release config.
+"""Worker-local mutable release config.
 
 The hub's desired state carries (release_id, config_generation); parameter
 values for declared knobs propagate over the existing gRPC stream. On each
@@ -99,9 +99,9 @@ class ConfigStore:
         self._on_snapshot_failure = on_snapshot_failure
 
     def observe(self, generation: int, *, release_id: str = "") -> bool:
-        """A hub desired-state push advertised ``generation`` (th#1085
-        interface: DesiredResidency.config_generation). Advances the observed
-        gen monotonically, keeping known parameter values; stale/duplicate
+        """A hub desired-state push advertised ``generation``
+        (DesiredResidency.config_generation). Advances the observed gen
+        monotonically, keeping known parameter values; stale/duplicate
         generations are ignored. Returns True when state advanced (memory
         updated + snapshot file atomically rewritten)."""
         gen = int(generation)

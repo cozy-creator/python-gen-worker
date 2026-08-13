@@ -20,7 +20,7 @@ import requests
 
 @dataclass(frozen=True)
 class WorkerResolvedChunk:
-    """One CAS object of a chunked file (manifest v2, th#1303).
+    """One CAS object of a chunked file (manifest v2).
 
     ``sha256`` is bare lowercase hex; ``length`` comes from the manifest so a
     chunk's cumulative offset is arithmetic, not an assumption about the
@@ -88,12 +88,9 @@ def resolved_entry_digest(
 class WorkerResolvedRepo:
     snapshot_digest: str
     files: List[WorkerResolvedRepoFile]
-    # total checkpoint size. pgw#1148: `sibling_flavors` is GONE —
-    # th#1803 re-keyed `repo_tags` to (repo, tag, checkpoint) and dropped the
-    # flavor column, so the hub emits `tag_members` (checkpoint rows) and no
-    # flavor row exists to parse. Nothing in the SDK reads the group today:
-    # selection within a tag group is contract compatibility (§1.33), and the
-    # local pickers that consumed these rows died with them.
+    # Total checkpoint size. There is deliberately no `sibling_flavors`: the
+    # hub emits `tag_members` (checkpoint rows) and no flavor row exists to
+    # parse. Selection within a tag group is contract compatibility (§1.33).
     size_bytes: int = 0
     # the resolved checkpoint's architecture family ("sdxl-pony",
     # ...) — drives the local family lane policy. "" on hubs not sending it.
@@ -218,7 +215,7 @@ def resolve_repo(
         raise HubResolveError(f"tensorhub resolve failed for {ref.canonical()}: {e}") from e
 
     if resp.status_code == 404:
-        # te#125/th#1238: only the HUB's own 404 means "no such repo". A proxy
+        # Only the HUB's own 404 means "no such repo". A proxy
         # answering 404 means the hub is unreachable (restarting), and calling
         # that "repo not found" sends the operator hunting a catalog problem
         # that does not exist.

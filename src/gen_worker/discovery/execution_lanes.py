@@ -1,5 +1,5 @@
-"""th#1580 A4: the endpoint-side execution-lane declaration, DERIVED at image
-build from the decoders actually present in the image.
+"""The endpoint-side execution-lane declaration, DERIVED at image build from
+the decoders actually present in the image.
 
 Three steps, none of them a list anybody maintains:
 

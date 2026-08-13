@@ -30,13 +30,11 @@ from .procsplit import is_compute_child
 
 logger = logging.getLogger(__name__)
 
-# what this bounds CHANGED, and the number stayed. It used to be the
-# budget for all in-flight tenant work — SIGTERM, then 30 s, then `abort_all()`
-# regardless of what any job or mint was doing. Tenant work is now bounded by
-# progress (`lifecycle._await_tenant_idle`), and this bounds only the SHUTDOWN
-# half: the floor under the result FLUSH, and the deadline the worker reports
-# to the hub so the two agree about when the pod stops answering. A drain is a
-# command and a command may carry a deadline; the work underneath may not.
+# This bounds only the SHUTDOWN half — NOT in-flight tenant work, which is
+# bounded by progress (`lifecycle._await_tenant_idle`). It is the floor under the
+# result FLUSH and the deadline the worker reports to the hub, so the two agree
+# about when the pod stops answering. A drain is a command and a command may
+# carry a deadline; the work underneath may not.
 _SIGNAL_DRAIN_DEADLINE_MS = 30_000
 
 
@@ -45,7 +43,7 @@ class UnexpectedWorkerExit(RuntimeError):
 
 
 class _LoopStallWatchdog:
-    """Forensics for gw#407: a host in RAM reclaim-thrash stalls the whole
+    """Forensics: a host in RAM reclaim-thrash stalls the whole
     process — the event loop AND the gRPC C threads that answer h2 keepalive
     pings — and the hub reaps the worker as dead within ~30s. This thread
     pings the loop and logs LOUDLY (with available host RAM) when the ping
@@ -115,13 +113,11 @@ class Worker:
         if not (settings.orchestrator_public_addr or "").strip():
             raise ValueError("Settings.orchestrator_public_addr is required")
         self.settings = settings
-        # an endpoint-authored oversized `.to("cpu")` becomes a typed
-        # job error instead of a cgroup OOM SIGKILL of the whole worker.
-
+        # An endpoint-authored oversized `.to("cpu")` becomes a typed job error
+        # instead of a cgroup OOM SIGKILL of the whole worker.
         _install_host_move_guard()
-        # the delivered `G×D` packing. Absent env == one
-        # slot, which is every pod that exists today. A malformed one is a
-        # typed refusal raised here — booting one slot on a pod the hub is
+        # The delivered `G×D` packing. Absent env == one slot. A malformed one is
+        # a typed refusal raised here — booting one slot on a pod the hub is
         # dispatching G jobs to is worse than not booting.
         self.topology = topology if topology is not None else delivered_topology()
 
@@ -173,13 +169,12 @@ class Worker:
         # Capability renewal presents the freshest worker JWT (contract §1
         # rotation), not the boot-time settings token.
         self.executor.worker_jwt_provider = lambda: self.transport.current_worker_jwt
-        # process start -> SDK ready. Everything before this line is
-        # interpreter startup, `import torch`, endpoint-module import and
-        # executor construction — a window NO span could ever have covered,
-        # because the recorder itself is part of what is being imported. It
-        # arrived as an unexplained residual on every boot; now it is named,
-        # and `reconciliation()` subtracts it from the residual rather than
-        # leaving the biggest unmeasured slice unattributed.
+        # Process start -> SDK ready. Everything before this line is interpreter
+        # startup, `import torch`, endpoint-module import and executor
+        # construction — a window no span can cover, because the recorder itself
+        # is part of what is being imported. Naming it lets `reconciliation()`
+        # subtract it from the residual instead of leaving the biggest unmeasured
+        # slice unattributed.
         boot_phases.mark_once(
             boot_phases.PHASE_SDK_READY,
             detail=f"endpoints={len(specs)} modules={len(user_module_names)}")
@@ -188,7 +183,7 @@ class Worker:
         await self.transport.send(msg)
 
     def run(self) -> int:
-        """Always returns an exit code. gw#640: a fatal end to the run loop is
+        """Always returns an exit code. A fatal end to the run loop is
         reported to the HUB here (sync context, own loop) before returning —
         pod stdout is unreadable on RunPod, so this is the only channel that
         survives the process."""

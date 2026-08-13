@@ -1,7 +1,7 @@
 """Declaration-layer modules: the @endpoint decorator, bindings, types, errors.
 
-The single public facade is ``gen_worker`` itself (pgw#1206 A1) — import
-public names from there::
+The single public facade is ``gen_worker`` itself — import public names from
+there::
 
     from gen_worker import endpoint, Resources, Slot, ValidationError
 

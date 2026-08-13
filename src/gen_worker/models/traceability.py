@@ -1,4 +1,4 @@
-"""pgw#1208: can this pipeline, AS LOADED, be traced at all?
+"""Can this pipeline, AS LOADED, be traced at all?
 
 A pipeline that carries `torch.compiler.disable`d work in its forward path
 cannot be exported. `torch.export(strict=True)` does not degrade around it — it
@@ -19,8 +19,8 @@ about HOOKS and never about capacity, which is also what §1.35 requires: every
 model runs on every GPU, feasibility is never asked.
 
 WHY A PRE-EXPORT CHECK RATHER THAN LETTING THE PER-ENTRY SKIP HANDLE IT.
-pgw#1208's blast-radius fix would dutifully skip all 36 and publish nothing:
-thirty-six typed refusals and an hour of wall clock to say once what is knowable
+The per-entry skip would dutifully skip all 36 and publish nothing: thirty-six
+typed refusals and an hour of wall clock to say once what is knowable
 before the first export begins. The per-entry skip is for a class that is
 individually unexportable; this is the whole PIPELINE being untraceable as
 loaded, which is a different fact and deserves its own sentence.

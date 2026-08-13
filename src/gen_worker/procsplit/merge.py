@@ -1,29 +1,25 @@
-"""pgw#783 fan-in: G children produce G views; the hub sees ONE worker.
+"""Fan-in: G children produce G views; the hub sees ONE worker.
 
 Pure functions over the wire protobufs — no I/O, no torch, no state. Every
 rule here has a plausible wrong answer that would be silently harmful on a wide
 pod, so each carries the reason it is not that answer.
 
-**The orchestrator sees ONE worker, never N sub-units** (Paul, 2026-07-30):
-*"from the orchestrator's point of view, they should be thinking of a worker as
-one unit they can assign work to. The worker worries about the sub-execution
-units, but from the orchestrator's point of view, they are one worker. This
-keeps the system boundaries intact."* So the hub must not learn that groups
-exist at all — no group-keyed wire field, ever. The parent is a genuine
+**The orchestrator sees ONE worker, never N sub-units.** The hub assigns work
+to a worker; the worker worries about its sub-execution units. So the hub must
+not learn that groups exist at all — no group-keyed wire field, ever. The
+parent is a genuine
 AGGREGATOR, not a relay: it reconciles G children into one coherent worker view
 (one function set, one activity stream, one liveness claim, one capacity
 picture) BEFORE anything reaches the stream.
 
-**A function is advertised while ANY group can serve it** (Paul, 2026-07-30):
-*"The worker should advertise any function it can serve. If it has 4 execution
-groups, and only one of them can serve function-X, then it should advertise
-function-X as serveable."* So availability UNIONS. The hub dispatches to the
-worker; the worker routes to a group that can serve (procsplit.group.route),
-and a dispatch landing on a group that cannot serve is the worker's problem to
-re-home internally, not the hub's to avoid. Whether the scheduler should ALSO
-know staffing depth (1 group vs 4 can serve X) is deliberately left open and
-filed separately (th#, "does the scheduler benefit from knowing how many groups
-can serve X") — NOT built speculatively here.
+**A function is advertised while ANY group can serve it.** Availability
+UNIONS: if four execution groups exist and only one can serve function-X, the
+worker still advertises function-X. The hub dispatches to the worker; the
+worker routes to a group that can serve (procsplit.group.route), and a dispatch
+landing on a group that cannot serve is the worker's problem to re-home
+internally, not the hub's to avoid. Whether the scheduler should ALSO know
+staffing depth (1 group vs 4 can serve X) is deliberately left open — NOT built
+speculatively here.
 
 **At G == 1 every function returns its single input UNCHANGED** (the same
 object, so the serialized bytes are trivially identical). The N-child path is
@@ -358,9 +354,7 @@ def merge_hello(
     if len(hellos) == 1 and not worker_session_id and not extra_in_flight:
         return hellos[0]
 
-    # Group 0 is the template: protocol version, identity, and (until pgw#763
-    # delta 2 moves hardware measurement to the parent) `resources`. Delta 2
-    # replaces exactly this line and nothing else.
+    # Group 0 is the template: protocol version, identity and `resources`.
     merged = pb.Hello()
     merged.CopyFrom(hellos[0])
 

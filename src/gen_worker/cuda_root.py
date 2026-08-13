@@ -18,20 +18,20 @@ reasons — none of which a compiler install fixes:
 3. **Several cu13 headers include ``<nv/target>``**, which is CCCL and ships in
    NO tree in the image. The ``cuda-cccl`` wheel has it.
 
-Tensorhub's SYNTHESIZED Dockerfile has composed this root since pgw#823. A
-family that ships its OWN Dockerfile got none of it, so it could install
-``g++``, pass the ``cxx_toolchain`` precondition, boot a pod, load, export —
-the expensive part — and only then die at ``CUDA_HOME``. That is a PAID
-failure where the missing-compiler sibling was a free one.
+Tensorhub's SYNTHESIZED Dockerfile composes this root. A family that ships its
+OWN Dockerfile gets none of it, so without this module it can install ``g++``,
+pass the ``cxx_toolchain`` precondition, boot a pod, load, export — the
+expensive part — and only then die at ``CUDA_HOME``: a PAID failure where the
+missing-compiler sibling is a free one.
 
 The fix is this module, invoked by the author in one line:
 
     RUN python -m gen_worker.cuda_root
 
 The author still owns invoking it — the platform never injects layers into
-author-owned content (pgw#1017's settled contract). The SDK owns the recipe's
-correctness, so there is ONE authority for it rather than twenty lines of
-shell transcribed into every Dockerfile that needs it (the pgw#988 lesson).
+author-owned content. The SDK owns the recipe's correctness, so there is ONE
+authority for it rather than twenty lines of shell transcribed into every
+Dockerfile that needs it.
 ``aot_preconditions.CHECK_CUDA_ROOT`` then VERIFIES the result at build time,
 so an image that declares an AOT export and skipped this refuses for $0.00
 instead of on a rented card.

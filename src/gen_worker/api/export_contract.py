@@ -6,30 +6,29 @@ defines the *vocabulary*; the endpoint writes the declaration;
 :mod:`gen_worker.aot_declaration` derives export inputs, dynamic-shape marks
 and mint plans from it. No family name appears in the SDK.
 
-The vocabulary, per the #739 ratification:
+The vocabulary:
 
 - **NO formula DSL.** Endpoints emit RESOLVED ROWS (:class:`GraphClass`);
   the vocabulary is named dims with ``(input, axis)`` bindings
   (:class:`Dim`). Rows are coordinates, not expressions — the endpoint's own
-  legality oracle resolves them (LTX-AOT-DESIGN.md §2.3), and the SDK derives
-  every bound FROM the rows. A relational axis (wan ti2v's per-token
-  timestep) is a :class:`Dim` with ``relates_to``: the SDK derives its free
-  range from the rows and ``torch.export``'s solver unifies the relation into
-  the shape env (measured: ``31*s25*s56`` carried with 458 asserts, ie#566
-  §5) — endpoint hand-math is exactly what this prevents.
+  legality oracle resolves them, and the SDK derives every bound FROM the
+  rows. A relational axis (wan ti2v's per-token timestep) is a :class:`Dim`
+  with ``relates_to``: the SDK derives its free range from the rows and
+  ``torch.export``'s solver unifies the relation into the shape env, which is
+  what keeps endpoint hand-math out of the contract.
 - **Graph-class forks** (:class:`Fork`) bind to ``(source: pipeline|module,
   field)``, not to ``module.config``: wan's ``expand_timesteps`` is a
   ``WanPipeline`` field in ``model_index.json`` and is ABSENT from all four
   transformer configs, so a builder that only reads module configs never
-  sees it (ie#566 G6).
-- **Shape strategy is a per-family DECLARED choice** (#730 ratification):
-  conv-bearing families declare ``static-rows`` (symbolic latent H/W turns
-  off inductor's channels-last layout opt — +7.2% measured on sdxl), DiTs
-  declare ``dynamic-collapse``.
+  sees it.
+- **Shape strategy is a per-family DECLARED choice**: conv-bearing families
+  declare ``static-rows`` (symbolic latent H/W turns off inductor's
+  channels-last layout opt — +7.2% measured on sdxl), DiTs declare
+  ``dynamic-collapse``.
 - **Mint-warm canon is a per-family DECLARED fact** (``warm_changes_key``):
-  sdxl measured False, z-image measured True (the rope pre-warm changes the
-  graph, 4327 cold vs 4285 warmed). A family with classes but no declared
-  canon is refused at mint time, not defaulted.
+  sdxl measured False, z-image True (its rope pre-warm changes the graph). A
+  family with classes but no declared canon is refused at mint time, not
+  defaulted.
 """
 
 from __future__ import annotations
@@ -64,9 +63,9 @@ ForkValue = Union[bool, int, str]
 #: with a different width exports correctly instead of failing in the trace.
 AxisSpec = Union[int, str, Tuple[str, str]]
 
-#: pgw#853/ie#591: WHY an unserved fork arm is closed. Five kinds, because a
-#: fleet audit found `unserved` was recording five materially different
-#: guarantees as one word — and only ONE of them means "unreachable".
+#: WHY an unserved fork arm is closed. Five kinds, because `unserved` alone
+#: conflates five materially different guarantees and only ONE of them means
+#: "unreachable".
 #:
 #: * ``absent_path``      — the code that reaches the arm is never imported or
 #:                          instantiated (flux2's ``kv_cache``: KV caching
@@ -84,7 +83,7 @@ AxisSpec = Union[int, str, Tuple[str, str]]
 #:                          not by this repo (wan's ``expand_timesteps``).
 #: * ``eager_by_choice``  — reachable AND served; excluded from the COMPILED
 #:                          set on purpose (qwen's edit lane). The opposite of
-#:                          unreachable, and it used to be spelled the same.
+#:                          unreachable.
 FORK_REASONS: Tuple[str, ...] = (
     "absent_path",
     "unpassed_arg",
@@ -128,21 +127,15 @@ class DeclarationError(ValueError):
 
 
 class MintBlocker(msgspec.Struct, frozen=True):
-    """A named, evidence-carrying reason this family may not MINT yet
-.
+    """A named, evidence-carrying reason this family may not MINT yet.
 
-    A refusal is DATA on the declaration, not code that raises. Before this,
-    a family with open questions expressed them by registering a THUNK that
-    raised ``MintRefused`` when the mint asked — which the pgw#1107
-    fold cannot carry: ``@endpoint(compile=)`` takes a ``Compile``, never a
-    callable, so folding a refusing thunk onto the decorator would silently
-    DELETE the refusal and let the family mint against its own open questions.
-
-    So the refusal moves into the vocabulary. Every field is a literal; there
-    is no callable, no torch, no runtime state and nothing to evaluate — which
-    is what lets the endpoint repo's torch-free declaration lint READ a
-    family's open blockers out of an AST-extracted ``compile=`` expression
-    without a GPU, a pod or a mint.
+    A refusal is DATA on the declaration, never code that raises:
+    ``@endpoint(compile=)`` takes a ``Compile``, never a callable, so a
+    refusing thunk would be silently DELETED and let the family mint against
+    its own open questions. Every field is a literal — no callable, no torch,
+    no runtime state — which is what lets the endpoint repo's torch-free
+    declaration lint READ a family's open blockers out of an AST-extracted
+    ``compile=`` expression without a GPU, a pod or a mint.
 
     * ``what`` — the claim the declaration cannot yet make.
     * ``evidence`` — the citations. A blocker with no evidence is an opinion.
@@ -166,10 +159,10 @@ class MintBlocker(msgspec.Struct, frozen=True):
 
         python -m gen_worker.measure_child <request>.mint.json <report>.json
 
-    ``<request>.mint.json`` is the file the endpoint repo COMMITS under
-    ``aot/`` — the declaration payload, read as such since pgw#1153; the
-    function, the compile targets and the target slot's checkpoint are derived
-    from the declaration it names. Run it in the endpoint's own image. Any slot
+    ``<request>.mint.json`` is the declaration payload the endpoint repo
+    COMMITS under ``aot/``; the function, the compile targets and the target
+    slot's checkpoint are derived from the declaration it names. Run it in the
+    endpoint's own image. Any slot
     the payload does not name (``setup()`` may require more than one) is
     refused BY NAME, on the spot, and supplied with
     ``--slot NAME=/path/to/tree`` — the run never downloads.
@@ -269,7 +262,7 @@ def blocker_refusal(family: str, blockers: Sequence[MintBlocker]) -> str:
 
 #: The stage vocabulary a speed bar may name. A bar declared against
 #: `total_round_trip_ms` measures the network and the queue and calls it the
-#: model — that is the "10.9x" which corrected to 1.3x.
+#: model.
 SPEED_STAGE_PREFIX = "stage_ms."
 
 
@@ -277,10 +270,10 @@ def validate_speed_bar(metric: str, min_speedup: Optional[float]) -> Tuple[str, 
     """Normalize + refuse the family's declared compile-vs-eager bar.
 
     Called from ``Compile.__post_init__`` so the refusal lands at endpoint
-    import. The rules are the hub's own (th#1811 `parseManifestCompileBlock`):
-    the metric names a STAGE, the bar is ``>= 1.0``, and the two are a PAIR —
-    the hub's ``Bar.Declared`` is ``metric != "" and min_speedup >= 1.0``, so
-    half a declaration is ``bar_undeclared`` with extra steps.
+    import. The rules are the hub's own (`parseManifestCompileBlock`): the
+    metric names a STAGE, the bar is ``>= 1.0``, and the two are a PAIR — the
+    hub's ``Bar.Declared`` is ``metric != "" and min_speedup >= 1.0``, so half
+    a declaration is ``bar_undeclared`` with extra steps.
     """
     name = str(metric or "").strip()
     if name:
@@ -398,9 +391,7 @@ class Dim(msgspec.Struct, frozen=True):
     """A named axis of the export contract with its ingress bindings.
 
     ``carried_by`` is the ``(input, axis)`` binding set: every place this one
-    logical extent enters the traced call. This is what replaces the
-    two-literal ``DynamicDim.dim`` validation — wan's latent-spatial axis and
-    LTX's ``T_v`` are nameable — and it doubles as the ``Compile`` ->
+    logical extent enters the traced call. It doubles as the ``Compile`` ->
     ``aot_mint.DynamicDim`` bridge: the mint derives one
     ``aot_mint.DynamicDim(input, axis, min, max, multiple_of)`` row per
     binding.
@@ -411,7 +402,7 @@ class Dim(msgspec.Struct, frozen=True):
     cannot drift from it. ``relates_to`` names the dims this axis is a
     function of (wan ti2v: ``N_tok`` relates to ``F_lat``/``H_lat``/
     ``W_lat``); the relation itself is NOT expressed — torch's solver
-    unifies it from the free derived range (ie#566 §5 remedy (a) part 2).
+    unifies it from the free derived range.
     """
 
     name: str
@@ -487,23 +478,13 @@ class Fork(msgspec.Struct, frozen=True):
     unserved: Tuple[ForkValue, ...] = ()
     source: Optional[Tuple[str, str]] = None
     targets: Tuple[str, ...] = ()
-    #: Prose, for humans: the evidence and its citations. KEPT alongside
-    #: ``reason`` rather than replaced — the failure this pair exists to fix
-    #: was prose doing a MACHINE's job, not prose existing.
+    #: Prose, for humans: the evidence and its citations. Kept alongside
+    #: ``reason``, which is the machine-readable half.
     why: str = ""
     #: One of :data:`FORK_REASONS`: the KIND of guarantee that closes the
-    #: unserved arm, for machines. ``None`` means the declaration has not
-    #: answered the question yet.
-    #:
-    #: REQUIRED whenever ``unserved`` is non-empty (pgw#1158 — this is the
-    #: phase 2 the field was staged for). An un-annotated unserved arm is a
-    #: declaration that has not said how strong its own guarantee is, which is
-    #: exactly the state this field exists to end; leaving it optional meant
-    #: the docstring asserted a rule nothing enforced.
-    #:
-    #: ``None`` therefore no longer means "not answered yet" — that state is
-    #: unconstructible. A fork with only served arms still leaves it unset,
-    #: because there is no closed arm to justify.
+    #: unserved arm, for machines. REQUIRED whenever ``unserved`` is non-empty,
+    #: so "not answered yet" is unconstructible. A fork with only served arms
+    #: leaves it unset, because there is no closed arm to justify.
     reason: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -532,10 +513,9 @@ class Fork(msgspec.Struct, frozen=True):
         force(self, "targets", tuple(str(t).strip() for t in self.targets))
         force(self, "why", str(self.why or ""))
         if unserved and self.reason is None:
-            # an unserved arm is a CLOSED arm,
-            # and a declaration that cannot say what closes it has not made
-            # the guarantee it appears to make. Refused where it is written,
-            # at declaration time, so it costs nothing at serve time.
+            # An unserved arm is a CLOSED arm, and a declaration that cannot
+            # say what closes it has not made the guarantee it appears to make.
+            # Refused at declaration time, so it costs nothing at serve time.
             raise DeclarationError(
                 f"Fork {self.name!r} closes arm(s) "
                 f"{sorted(map(repr, unserved))} but declares no reason — name "
@@ -562,8 +542,8 @@ class Fork(msgspec.Struct, frozen=True):
             "source": list(self.source) if self.source else None,
             "targets": list(self.targets),
         }
-        # OMITTED when absent, so every declaration written before
-        # this field existed serialises byte-identically.
+        # OMITTED when absent, so a declaration that does not use the field
+        # serialises byte-identically.
         if self.reason is not None:
             row["reason"] = self.reason
         return row
@@ -574,8 +554,7 @@ class Fork(msgspec.Struct, frozen=True):
 
         ``True`` for ``unpassed_arg`` and ``default_value``. ``None`` reads as
         FALSE deliberately — an unanswered question is not evidence of a weak
-        guarantee, and phase 2 (making ``reason`` required) is what removes
-        the ambiguity rather than a guess here.
+        guarantee.
         """
         return bool(self.unserved) and self.reason in WEAK_FORK_REASONS
 
@@ -608,17 +587,14 @@ class GraphClass(msgspec.Struct, frozen=True):
     are hashable and endpoint generators can dedupe with ``dict.fromkeys``.
 
     ``targets`` scopes the row, exactly as it does on :class:`Input`,
-    :class:`Arg` and :class:`Fork`; empty means every target. A
-    cell's targets are unrelated modules with unrelated call contracts —
-    sdxl's UNet traces 9 aspect rows x 2 CFG arms, its VAE decoder traces
-    the 9 aspect rows at batch 1 (CFG has collapsed by decode time), and its
-    two text encoders trace ONE row each (77 tokens, batch 1, both
-    aspect- and CFG-invariant). Without scoping, ``mint_plans`` hands every
-    target the whole class table, so declaring a text encoder alongside the
-    denoiser would mint 18 identical text-encoder graphs under 18 different
-    entry names and pay for each. That is why the SDK's own
-    ``("transformer", "vae.decode")`` default has never been exercised by a
-    fleet family: it was not expressible, only payable.
+    :class:`Arg` and :class:`Fork`; empty means every target. A cell's targets
+    are unrelated modules with unrelated call contracts — sdxl's UNet traces 9
+    aspect rows x 2 CFG arms, its VAE decoder the 9 aspect rows at batch 1 (CFG
+    has collapsed by decode time), and its two text encoders ONE row each (77
+    tokens, batch 1, aspect- and CFG-invariant). Without scoping, ``mint_plans``
+    hands every target the whole class table, so declaring a text encoder
+    alongside the denoiser mints 18 identical text-encoder graphs under 18
+    entry names and pays for each.
     """
 
     dims: Any
@@ -652,12 +628,11 @@ class GraphClass(msgspec.Struct, frozen=True):
 
     def as_row(self) -> Dict[str, Any]:
         row: Dict[str, Any] = {"dims": dict(self.dims), "fork": dict(self.fork)}
-        # an absent field is OMITTED, so every
-        # declaration written before this vocabulary existed serialises
-        # byte-identically and no published cell re-keys on the SDK change
-        # alone (`Compile.contract_axes` feeds the cell key's contract
-        # digest). A declaration that ADOPTS scoping re-keys, correctly: it
-        # is a different class set.
+        # An absent field is OMITTED, so a declaration that does not scope
+        # serialises byte-identically and no published cell re-keys
+        # (`Compile.contract_axes` feeds the cell key's contract digest). A
+        # declaration that ADOPTS scoping re-keys, correctly: different class
+        # set.
         if self.targets:
             row["targets"] = list(self.targets)
         return row
@@ -675,17 +650,15 @@ class Input(msgspec.Struct, frozen=True):
     scalar timestep, ti2v's float32 per-token one) or the explicit word
     ``"model"`` — the resolved module's own dtype, stated on purpose. There
     is no default: an exported graph is dtype-specialized, so the ingress
-    dtype of every input is part of the class the cell claims to serve, and
-    an omitted dtype used to inherit the module's weight dtype SILENTLY —
-    which is how sdxl's scalar timestep was minted bfloat16 while every real
-    scheduler presents float32, and a 36-entry cell admitted nothing it was
+    dtype of every input is part of the class the cell claims to serve, and a
+    silently inherited weight dtype mints a cell that admits nothing it was
     published for. A guessed fact is not a declaration.
 
     There is NO args/kwargs choice to declare: all-positional example feeds
-    are a MINT OBLIGATION (pod 9, pgw#723 residuals — an AOTI package's call
-    convention mirrors the traced args/kwargs split, and the serve marshal
-    is positional, so a kwarg-traced package silently revokes to eager on
-    first call). The SDK binds each named row to its slot in the traced
+    are a MINT OBLIGATION — an AOTI package's call convention mirrors the
+    traced args/kwargs split and the serve marshal is positional, so a
+    kwarg-traced package silently revokes to eager on first call. The SDK
+    binds each named row to its slot in the traced
     signature and feeds everything positionally; declaring a name the
     target takes only keyword-only is refused at mint time by name.
     ``targets`` scopes the row; empty = every target.
@@ -696,12 +669,10 @@ class Input(msgspec.Struct, frozen=True):
     dtype: str = ""  # required; "" refused in __post_init__
     value: Optional[float] = None
     targets: Tuple[str, ...] = ()
-    #: pgw#853: the parameter is a LIST of this many tensors, each of
-    #: ``shape`` — an :data:`AxisSpec`, so the arity may be a literal, a
-    #: declared :class:`Dim` resolved from the class row, or ``("config",
-    #: field)``. ``None`` (the default) means a single tensor: every
-    #: declaration written before this field existed is unchanged, by
-    #: construction. See :data:`REPEAT_RATIONALE`.
+    #: The parameter is a LIST of this many tensors, each of ``shape`` — an
+    #: :data:`AxisSpec`, so the arity may be a literal, a declared :class:`Dim`
+    #: resolved from the class row, or ``("config", field)``. ``None`` (the
+    #: default) means a single tensor.
     repeat: Optional[AxisSpec] = None
 
     def __post_init__(self) -> None:
@@ -743,8 +714,8 @@ class Input(msgspec.Struct, frozen=True):
             "value": self.value,
             "targets": list(self.targets),
         }
-        # an absent field is OMITTED, so every declaration written
-        # before this vocabulary existed serialises byte-identically.
+        # An absent field is OMITTED, so a declaration not using it serialises
+        # byte-identically.
         if self.repeat is not None:
             row["repeat"] = (list(self.repeat)
                              if isinstance(self.repeat, tuple) else self.repeat)
@@ -754,7 +725,7 @@ class Input(msgspec.Struct, frozen=True):
 class Arg(msgspec.Struct, frozen=True):
     """A non-tensor argument of the export call.
 
-    Two forms, and the second is pgw#853's:
+    Two forms:
 
     * ``value=`` — a LITERAL, declaration-global (``return_dict=False`` — a
       dataclass output is not a valid export output; the consumer re-wraps).
@@ -766,13 +737,9 @@ class Arg(msgspec.Struct, frozen=True):
       itself writes: qwen's ``[[(1, H_pat, W_pat)]] * B`` is
       ``template=[(1, "H_pat", "W_pat")], repeat="B"``.
 
-    ``template`` exists because a real family's traced signature takes one:
-    qwen-image's ``img_shapes`` is ``[[(1, H_pat, W_pat)]] * B`` — literally
-    the class row restated as python ints. ``value`` could not express it on
-    two counts, both structural: its type is a scalar union, and an ``Arg``
-    is declaration-GLOBAL while this value is PER-ROW. That gap is
-    qwen-image's blocker B1, and it is the whole reason the family's
-    declaration carries no ``args`` rows at all.
+    ``template`` exists because ``value`` cannot express a per-row structure
+    on two structural counts: its type is a scalar union, and an ``Arg`` is
+    declaration-GLOBAL while such a value is PER-ROW.
 
     Exactly one of ``value``/``template`` may be given. A specializing
     python scalar that does NOT vary by row stays a ``value``: the point of
@@ -813,8 +780,8 @@ class Arg(msgspec.Struct, frozen=True):
             "name": self.name, "value": self.value,
             "targets": list(self.targets),
         }
-        # absent fields are OMITTED, so every declaration written
-        # before this vocabulary existed serialises byte-identically.
+        # Absent fields are OMITTED, so a declaration not using them
+        # serialises byte-identically.
         if self.template is not None:
             row["template"] = _template_rows(self.template)
         if self.repeat is not None:
@@ -852,8 +819,8 @@ def dims_for_targets(
     That relation is already written down — deriving it beats adding a
     second place for an endpoint to say the same thing and drift.
 
-    Unscoped rows, and any declaration carrying no input templates, keep the
-    original rule: every row states every declared dim.
+    Unscoped rows, and any declaration carrying no input templates, follow the
+    unscoped rule: every row states every declared dim.
     """
     all_names = {d.name for d in dims}
     if not targets or not inputs:
@@ -877,7 +844,7 @@ def forks_for_targets(forks: Tuple[Fork, ...], targets: Sequence[str]) -> Set[st
 
 
 def validate_contract(compile_decl: Any) -> None:
-    """Cross-validate the #739 declaration fields on a ``Compile``.
+    """Cross-validate the export-contract declaration fields on a ``Compile``.
 
     Called from ``Compile.__post_init__`` — a malformed declaration fails at
     endpoint import, never on a mint pod. Every refusal names the offending
@@ -939,9 +906,8 @@ def validate_contract(compile_decl: Any) -> None:
         if cls in seen:
             raise DeclarationError(f"Compile.classes repeats row #{i}: {cls.as_row()!r}")
         seen.add(cls)
-        # a row scoped to a target states that TARGET's dims and
-        # forks. An unscoped row states all of them — the original rule,
-        # unchanged for every declaration written before scoping existed.
+        # A row scoped to a target states that TARGET's dims and forks; an
+        # unscoped row states all of them.
         want_dims = dims_for_targets(dims, inputs, args, cls.targets)
         want_forks = forks_for_targets(forks, cls.targets)
         missing = sorted(want_dims - set(cls.dim_map))
@@ -959,10 +925,10 @@ def validate_contract(compile_decl: Any) -> None:
                 f"and carries dim(s) {extra!r} that no input those targets "
                 f"declare can carry — a coordinate the traced call cannot "
                 f"receive is not a coordinate")
-        # The omitted-fork refusal (#739 red test): a coordinate that varies
-        # on a flag the vocabulary does not declare would be silently
-        # exported into one class; a declared flag a coordinate does not
-        # state is the same defect read the other way.
+        # The omitted-fork refusal: a coordinate that varies on a flag the
+        # vocabulary does not declare would be silently exported into one
+        # class; a declared flag a coordinate does not state is the same defect
+        # read the other way.
         missing_f = sorted(want_forks - set(cls.fork_map))
         if missing_f:
             raise DeclarationError(
@@ -991,16 +957,13 @@ def validate_contract(compile_decl: Any) -> None:
                     f"graph class #{i}: fork {name}={value!r} is not a "
                     f"declared arm (served: {sorted(map(repr, served_by_fork.get(name, set())))})")
 
-    # the SAME question, asked from the arm's end. Every check above
-    # reads class -> arm ("does this class sit on an arm the fork declares?"),
-    # so a SERVED arm no class covers passed silently — the declaration claims
-    # to serve it, the mint traces nothing for it, and the first request on
-    # that arm is a guard miss on a graph that was never exported. Found
-    # empirically while adapting sd15/sd2: a fork claiming both arms with
-    # classes covering one was ACCEPTED.
-    # Only askable of a CLASS-declaring family. A declaration that states its
+    # The SAME question asked from the arm's end. Every check above reads
+    # class -> arm, so a SERVED arm no class covers would pass silently — the
+    # declaration claims to serve it, the mint traces nothing for it, and the
+    # first request on that arm is a guard miss on a graph never exported.
+    # Only askable of a CLASS-declaring family: a declaration that states its
     # shapes instead of its classes has nothing that could cover an arm, and
-    # forks are legal there (they still key the graph) — so an empty class set
+    # forks are legal there (they still key the graph), so an empty class set
     # is silence, not a missing class.
     covered: Dict[str, Set[str]] = {f.name: set() for f in forks}
     for cls in classes:
@@ -1041,7 +1004,7 @@ def validate_contract(compile_decl: Any) -> None:
             f"{DYNAMIC_COLLAPSE!r}), got {strategy!r}")
 
     # Rows are coordinates: with classes declared, a hand-written range on a
-    # named dim is exactly the endpoint hand-math #739 exists to prevent.
+    # named dim is exactly the endpoint hand-math this vocabulary prevents.
     for dd in compile_decl.dynamic:
         if dd.dim in ("batch", "sequence"):
             continue
@@ -1066,13 +1029,9 @@ def validate_contract(compile_decl: Any) -> None:
                 raise DeclarationError(
                     f"Input {inp.name!r} is declared twice for target {target!r}")
             names.add(inp.name)
-        # ...and a declared target must end up with AT LEAST ONE.
-        # `target_inputs` scopes by `not inp.targets or target in inp.targets`,
-        # so a target every row scopes AWAY from mints a plan with no declared
-        # inputs at all — the trace has nothing to feed. This is refused
-        # independently of how the untargeted-row default is later ruled: no
-        # defaulting semantic anyone would choose makes an input-less target
-        # correct, so the refusal cannot freeze that question either way.
+        # ...and a declared target must end up with AT LEAST ONE: a target
+        # every row scopes AWAY from would mint a plan with no declared inputs,
+        # so the trace has nothing to feed.
         if inputs and not names:
             row_scopes = sorted({t for inp in inputs for t in inp.targets})
             raise DeclarationError(
@@ -1083,16 +1042,11 @@ def validate_contract(compile_decl: Any) -> None:
                 f"or leave the rows it needs untargeted")
 
     # A binding may belong to any target's inputs; refuse only when NO
-    # declared row knows the name at all.
-    #
-    # a TEMPLATED Arg is a legal carrier. qwen-image's H_pat/W_pat
-    # genuinely enter the traced call at tuple positions 1 and 2 of
-    # `img_shapes[b][0] = (frames, height, width)` — the endpoint's own
-    # comment says the (name, index) pair is accurate and that "the
-    # vocabulary means 'tensor axis' by it is exactly blocker B1". So the
-    # vocabulary now means either, and `aot_declaration` keeps them apart
-    # where it matters: an Arg-carried extent is a PYTHON INT, which
-    # specializes the graph and can never become a torch symbol.
+    # declared row knows the name at all. A TEMPLATED Arg is a legal carrier
+    # (qwen-image's H_pat/W_pat enter the traced call at tuple positions of
+    # `img_shapes[b][0]`), and `aot_declaration` keeps the two apart where it
+    # matters: an Arg-carried extent is a PYTHON INT, which specializes the
+    # graph and can never become a torch symbol.
     if inputs:
         known = {i.name for i in inputs} | {i.top_name for i in inputs}
         templated = {a.name for a in args if a.template is not None}
@@ -1109,16 +1063,16 @@ def validate_contract(compile_decl: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The export-declaration registry (the #740 pattern: vocabulary here,
-# registrations in the endpoint, derivation in gen_worker.aot_declaration).
+# The export-declaration registry: vocabulary here, registrations in the
+# endpoint, derivation in gen_worker.aot_declaration.
 # ---------------------------------------------------------------------------
 
 _lock = RLock()
 _declared: Dict[str, Any] = {}
 #: (module, "ExcType: message") for every declaration import that FAILED.
-#: pgw#996: the swallow is correct at boot and a lie at build time — a pod
-#: cannot tell "this endpoint declares no AOT" (intake, legitimate) from "the
-#: declaration module blew up" (broken image), because both present as
+#: The swallow is correct at boot and a lie at build time — a pod cannot tell
+#: "this endpoint declares no AOT" (legitimate) from "the declaration module
+#: blew up" (broken image), since both present as
 #: `export_declaration(family) is None`. The build gate reads this and refuses.
 _import_failures: List[Tuple[str, str]] = []
 
@@ -1126,15 +1080,11 @@ _import_failures: List[Tuple[str, str]] = []
 #: The export-contract vocabulary. A ``Compile`` that carries ANY of
 #: these fields is DECLARING AN AOT EXPORT CONTRACT and is registered as one; a
 #: ``Compile`` that carries NONE of them is a dynamo-lane compile block and
-#: declares no export intent at all. That distinction is the tightening: the
-#: gate used to filter on `classes` alone, which silently swallowed a
-#: declaration that named dims/forks/inputs and simply FORGOT its classes —
-#: registered nothing, minted nothing, and read on a pod exactly like an
-#: endpoint that never declared AOT. Six inference endpoints (`ernie`,
-#: `flux.1-dev`, `flux.1-schnell`, `krea-2`, `minimax-h3`, `sd15`) legitimately
-#: ship a thin class-less `compile=`; a classes-required invariant over every
-#: `compile=` would red-line all six, so intent — not the payload — is what
-#: decides.
+#: declares no export intent at all. Filtering on `classes` alone is wrong in
+#: both directions: it silently swallows a declaration that named
+#: dims/forks/inputs and FORGOT its classes, and it would red-line the several
+#: endpoints that legitimately ship a thin class-less `compile=`. Intent, not
+#: the payload, is what decides.
 EXPORT_CONTRACT_FIELDS: Tuple[str, ...] = (
     "classes", "dims", "forks", "inputs", "args", "blockers",
     "shape_strategy", "warm_changes_key",
@@ -1146,7 +1096,7 @@ def declares_export_contract(decl: Any) -> bool:
 
     False for a dynamo-only `compile=` block (shapes/targets/text_len/dynamic/
     regional and nothing else) — legitimate, and registered nowhere. True the
-    moment the author reaches for the pgw#739 export vocabulary, which is when
+    moment the author reaches for the export vocabulary, which is when
     :func:`register_export_declaration`'s classes-and-family invariant applies.
     """
     if decl is None:
@@ -1168,11 +1118,9 @@ def register_export_declaration(
     else. Idempotent for an identical declaration (msgspec Structs are
     value-equal); refuses a conflicting one by name.
 
-    pgw#1107 retired the CALLABLE form (pgw#853's thunk). Its job — letting a
-    family that may not mint yet say so without taking the endpoint down at
-    import — is done by ``Compile(blockers=...)``, which the
-    ``@endpoint(compile=)`` fold can actually carry. A callable cannot survive
-    that fold at all, so it is refused here rather than silently dropped.
+    A CALLABLE form is refused rather than silently dropped: a family that may
+    not mint yet says so with ``Compile(blockers=...)``, which the
+    ``@endpoint(compile=)`` fold can carry and a callable cannot.
     """
     if callable(compile_decl) and not hasattr(compile_decl, "classes"):
         raise DeclarationError(
@@ -1187,11 +1135,8 @@ def register_export_declaration(
     if family is not None and str(family).strip() != fam:
         raise DeclarationError(
             f"family= {family!r} does not match Compile.family {fam!r}")
-    # THE INVARIANT CARRIED OVER FROM `_Thunk.build()`: a
-    # declaration in the export vocabulary that names no graph classes has
-    # nothing to derive from. Before the tightening this could not fire from
-    # the decorator at all — the gate filtered on `classes` and dropped such a
-    # declaration on the floor — so it was reachable only through a thunk.
+    # A declaration in the export vocabulary that names no graph classes has
+    # nothing to derive from.
     if not getattr(compile_decl, "classes", ()):
         raise DeclarationError(
             f"export declaration for {fam!r} carries no graph classes — "
@@ -1210,10 +1155,10 @@ def register_export_declaration(
 def export_declaration(family: str) -> Optional[Any]:
     """The family's ``Compile``, or ``None`` if none is registered.
 
-    A plain registry read since pgw#1107 retired the thunk: nothing is
-    evaluated here and nothing raises. A family that refuses to mint says so
-    in the returned value (``Compile.open_blockers``), so every caller reads
-    the refusal instead of catching it.
+    A plain registry read: nothing is evaluated here and nothing raises. A
+    family that refuses to mint says so in the returned value
+    (``Compile.open_blockers``), so every caller reads the refusal instead of
+    catching it.
     """
     with _lock:
         return _declared.get(str(family or "").strip())
@@ -1223,9 +1168,9 @@ def export_declaration(family: str) -> Optional[Any]:
 def registered_entry(family: str) -> Optional[Any]:
     """The registry entry as stored — a ``Compile`` or ``None``.
 
-    Identical to :func:`export_declaration` since pgw#1107 retired the thunk;
-    kept as the name for callers asking about registration IDENTITY (has this
-    exact declaration already been registered?) rather than about content.
+    Identical to :func:`export_declaration`; kept as the name for callers
+    asking about registration IDENTITY (has this exact declaration already been
+    registered?) rather than about content.
     """
     with _lock:
         return _declared.get(str(family or "").strip())
@@ -1246,19 +1191,13 @@ def registered_export_families() -> Tuple[str, ...]:
 def reset_export_declarations() -> None:
     """Drop every registration. Tests only.
 
-    Deliberately does NOT clear ``families.base._REGISTRY``. That
-    was tried and is wrong for the same reason pgw#1031 was: `@family`
+    Deliberately does NOT clear ``families.base._REGISTRY``: `@family`
     registration is an IMPORT SIDE EFFECT, so a registry emptied here can only
     be refilled by a re-import — and a module already in ``sys.modules``
-    re-imports as a no-op. Clearing it therefore wipes module-level
-    registrations (``test_family_wire_names_pgw692`` imports
-    ``_example_family`` exactly once) permanently, for every test that runs
-    after any reset. Measured: 3 tests died that way.
-
-    The endpoint-suite failure this was meant to fix is closed at the other
-    end instead — ``families.base.family`` now treats a RE-IMPORT of the same
-    declaration as a replacement rather than a collision, so nothing needs
-    clearing for a re-import to succeed.
+    re-imports as a no-op. Clearing it would permanently wipe module-level
+    registrations for every test running after the reset. Re-import collisions
+    are handled at the other end instead: ``families.base.family`` treats a
+    RE-IMPORT of the same declaration as a replacement.
     """
     with _lock:
         _declared.clear()
@@ -1269,10 +1208,9 @@ def declaration_import_failures() -> Tuple[Tuple[str, str], ...]:
     """Every declaration module whose import raised, as (module, exception).
 
     :func:`import_export_declaration` deliberately swallows — an endpoint must
-    come up. The build gate is where that swallow stops being
-    correct: an image whose declaration module cannot import ships an endpoint
-    that declares AOT and mints nothing, and on a pod that is indistinguishable
-    from an endpoint that never declared one.
+    come up. The build gate is where that swallow stops being correct: an image
+    whose declaration module cannot import ships an endpoint that declares AOT
+    and mints nothing, indistinguishable on a pod from one that never declared.
     """
     with _lock:
         return tuple(_import_failures)
@@ -1282,15 +1220,14 @@ def import_export_declaration(
     module: str, *, package: Optional[str] = None,
 ) -> bool:
     """Import a module whose only job is to register a declaration, and NEVER
-    let its failure past this call (pgw#853, backstop (3)).
+    let its failure past this call.
 
     ``Compile(blockers=...)`` covers a family that refuses to MINT; any other
-    module-scope work in a declaration file can still throw at IMPORT, and the
-    two have different blast radii. A compile feature must never be able to
-    break serving, so this
-    reports the failure as a typed ``aot_declaration_import_failed`` activity
-    event carrying the exception and returns ``False`` — the pod serves
-    eager, uncompiled, and says why.
+    module-scope work in a declaration file can still throw at IMPORT. A
+    compile feature must never be able to break serving, so this reports the
+    failure as a typed ``aot_declaration_import_failed`` activity event
+    carrying the exception and returns ``False`` — the pod serves eager,
+    uncompiled, and says why.
 
     Returns ``True`` when the module imported.
     """

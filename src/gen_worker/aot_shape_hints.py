@@ -33,7 +33,7 @@ parent sends them (:func:`symbol_values`) and the child restores them
 (:func:`restore_symbol_values`); nothing re-derives a value, and nothing
 infers one from the serialized expressions. Every save/load site in the mint
 uses this module, so the handoff contract has one spelling — the same
-invariant pgw#993 and pgw#994 settled for the flattening contract.
+invariant the flattening contract holds.
 
 :func:`unhinted_extents` is the safety net: if an extent is still unrealizable
 after the restore, the mint refuses NAMING THE INPUT, THE AXIS AND THE

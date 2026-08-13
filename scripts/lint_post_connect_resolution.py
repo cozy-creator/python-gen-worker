@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pgw#891 / pgw#904: the post-connect resolution surface may not GROW.
+"""The post-connect resolution surface may not GROW.
 
 The threat, named as DESIGN-RULINGS §4.24 requires
 -------------------------------------------------
@@ -12,13 +12,13 @@ declaration and the owner's ladder, never in worker code; the wire contract says
 outright that *"the worker never calls tensorhub for ref resolution; the
 orchestrator is the only resolver"* (`proto/worker_scheduler.proto`, `Snapshot`).
 
-Why a gate now, when the fix is pgw#891
----------------------------------------
-The real repair is pgw#891's exact `ExecutionSpec`, and its schema half is
-th#1457's — so the deletion cannot land yet. What CAN be protected today is the
-SIZE of the job: this gate freezes the census at its current, enumerated set so
-pgw#904's deletion stays a bounded list rather than an open-ended hunt. It is
-deliberately not a behaviour change, and it fails on ADDITION only.
+Why a gate rather than the repair
+---------------------------------
+The real repair is an exact `ExecutionSpec` whose schema half is hub-side, so
+the deletion cannot land yet. What CAN be protected is the SIZE of the job:
+this gate freezes the census at its current, enumerated set so the deletion
+stays a bounded list rather than an open-ended hunt. It is deliberately not a
+behaviour change, and it fails on ADDITION only.
 
 That is the whole claim. This gate does not prevent the second resolver from
 running — the accepted `CONNECTED` sites below run on every boot today. It
@@ -28,33 +28,31 @@ What is watched, and why each one
 ---------------------------------
     discover / _discover_inner / _candidates   catalog listing + sibling ranking
                                                after the Hub already chose
-                                               (pgw#904's `rows[0]` resolver)
+                                               (the `rows[0]` resolver)
     resolve_repo                               worker-side ref resolution
     parse_execution_lane_spec                  the DUAL-form parse; its FAMILY
                                                branch is the coarse-family
                                                expansion §1.31 forbids
 
-Keyed on `<path>::<callee>`, never on a line number. That is not a style
-preference — `scripts/lint_config_reads.py` learned it the hard way: its first
-cut keyed `path:line` and went red within the hour when two sibling PRs shifted
-lines in files nobody in that change had touched. A line number is a fact other
-people change independently.
+Keyed on `<path>::<callee>`, never on a line number: a `path:line` key goes red
+whenever a sibling PR shifts lines in a file nobody in that change touched. A
+line number is a fact other people change independently.
 
 Every accepted site must NAME ITS CLASSIFICATION, which is what stops the
 allowlist decaying into prose:
 
     CONNECTED    reachable from the connected dispatcher — a real second
-                 resolver. Replacement-gated on pgw#891/pgw#904; every line
-                 must say what blocks its deletion.
+                 resolver. Replacement-gated; every line must say what blocks
+                 its deletion.
     STANDALONE   CLI / hub-less only, unreachable from the connected
-                 dispatcher. This is pgw#904's box 5 and it is LEGITIMATE.
-    PUBLISH      publish/declaration-time validation vocabulary, which pgw#891
-                 explicitly retains ("declarations stay as capability
-                 vocabulary for publish/mint validation only").
+                 dispatcher. LEGITIMATE.
+    PUBLISH      publish/declaration-time validation vocabulary, which is
+                 retained ("declarations stay as capability vocabulary for
+                 publish/mint validation only").
     VOCABULARY   parsing/definition with no resolution effect.
 
-Only CONNECTED is a defect. Baselined green on arrival, following th#1383's
-precedent — a gate that fails on day one gets switched off.
+Only CONNECTED is a defect. Baselined green on arrival — a gate that fails on
+day one gets switched off.
 """
 
 from __future__ import annotations

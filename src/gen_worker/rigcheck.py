@@ -2,10 +2,7 @@
 
 A rig measures a rig. When the rig's torch/CUDA line drifts off the fleet's, its
 verdict is about software nobody runs — and it reads as a verdict about
-production. pgw#1081 §R2 closed SageAttention-2 as "not integrable" from a pod on
-``torch 2.9.1+cu129`` while every deployed endpoint had been on ``2.13.0+cu130``
-since 2026-07-13. That was the second occurrence (the B200 re-cell was the first),
-so the rule stops being remembered and becomes mechanical: **every rig calls
+production. So the rule is mechanical: **every rig calls
 :func:`assert_fleet_line` as its first act, and a rig that has not asserted the
 fleet line has produced no evidence.**
 
@@ -433,9 +430,9 @@ def _usability(env: Mapping[str, Any]) -> dict[str, Any]:
     ``torch.version.cuda`` matching the fleet line proves the WHEEL is right and
     nothing about the HOST. RunPod's driver is per-host: on a 570.211.01 host
     (CUDA 12.8) a cu130 torch imports fine, reports every version string
-    correctly, and then dies on the first allocation ~20 minutes later — which is
-    why two lanes read it as a torch bug. So the check is a real allocation, and
-    the result is part of the environment table.
+    correctly, and then dies on the first allocation ~20 minutes later, which
+    reads as a torch bug. So the check is a real allocation, and the result is
+    part of the environment table.
     """
     from gen_worker.cuda_probe import classify_probe_failure, probe_cuda
 
@@ -568,7 +565,7 @@ def assert_fleet_line(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """``python -m gen_worker.rigcheck`` — 0 on the line, 90 off it, 91 when the
-    line is installed but the HOST cannot run it (repair or re-roll, pgw#1120)."""
+    line is installed but the HOST cannot run it (repair or re-roll)."""
     args = list(sys.argv[1:] if argv is None else argv)
     start = args[0] if args else None
     try:

@@ -78,10 +78,9 @@ def diffusers_step_callback(
         nonlocal last_emit
         ctx.raise_if_cancelled()
         step = int(step_index) + 1  # fires after the step ends -> 1-based count
-        # every step end is a timing mark, un-throttled (the emit
-        # below is throttled; the measurement must not be). This is what gives
-        # denoise total + per-step timing on all 14 endpoints wired to this
-        # callback with no endpoint change.
+        # Every step end is a timing mark, un-throttled: the emit below is
+        # throttled, the measurement must not be. This is what gives denoise
+        # total + per-step timing to every endpoint wired to this callback.
         timer = getattr(ctx, "_stages", None)
         if timer is not None:
             timer.mark_step(stage_name, step)

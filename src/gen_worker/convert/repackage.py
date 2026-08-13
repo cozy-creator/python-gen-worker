@@ -7,10 +7,9 @@ refusing a converter whose family disagrees with the tree on disk.
 
 It owns **no family knowledge**. Every rename table, component signature,
 pipeline class and config donor arrives as a :class:`~.repack_spec.RepackageFamily`
-declaration registered by the endpoint that owns the family (pgw#740 C3/B15).
-Before that split this file carried ~430 lines of hand-ported per-family tensor
-surgery and two copies of the SDXL signature that disagreed — the SDXL tree was
-handed to the SD1.5 converter with no exception raised.
+declaration registered by the endpoint that owns the family. Hand-ported
+per-family tensor surgery here means two copies of a family signature that can
+disagree, and a tree handed to the wrong converter with no exception raised.
 """
 
 from __future__ import annotations
@@ -206,8 +205,8 @@ def detect_diffusers_family(model_dir: Path) -> str:
 
     There is exactly ONE copy of each family's signature — the one in its
     declaration, which is also what the converter guard checks. That is what
-    makes the pgw#740 wrong-converter divergence structurally impossible rather
-    than merely fixed: detection and the guard cannot disagree, because they
+    makes a wrong-converter divergence structurally impossible rather than
+    merely fixed: detection and the guard cannot disagree, because they
     read the same field.
 
     Two families claiming one tree is a declaration bug and is refused by name,

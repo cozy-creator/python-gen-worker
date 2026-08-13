@@ -3,9 +3,9 @@
 Multi-lane endpoints dispatch to a lane handler-side, so
 the executor cannot know pre-dispatch which lane a request will run. When the
 lanes overcommit VRAM, one sits demoted in host RAM — and nothing between
-"demoted" and "the handler calls the pipeline" used to re-promote it: the
-pipeline executed with its transformer on cpu and crashed mid-denoise (the
-te#79 addmm / cuda-generator shapes).
+"demoted" and "the handler calls the pipeline" would otherwise re-promote it,
+so the pipeline executes with its transformer on cpu and crashes mid-denoise
+(addmm / cuda-generator shapes).
 
 The gate closes that hole at the shared machinery level: each lane pipeline's
 ``__call__`` is wrapped (dynamic subclass — object identity, isinstance and
@@ -13,9 +13,9 @@ attributes all preserved) to first pin the lane and promote it if demoted,
 LRU-swapping the idle sibling out. Alternating t2i/edit traffic on one worker
 becomes swap-per-alternation: degraded-but-correct, logged loudly with timing.
 When VRAM truly cannot fit, the lane waits for as long as the card keeps
-returning memory (a silence window over free VRAM, gw#666 — never a wall
-budget), then raises the executor-injected retryable error. It never executes
-a cpu-resident lane.
+returning memory (a silence window over free VRAM, never a wall budget), then
+raises the executor-injected retryable error. It never executes a cpu-resident
+lane.
 """
 
 from __future__ import annotations
@@ -228,9 +228,9 @@ def arm_lane_residency_gate(pipe: Any, gate: LaneResidencyGate) -> bool:
             "lane gate could not wrap %s (%s: %s); lane relies on eager "
             "promotion only", cls.__name__, type(exc).__name__, exc,
         )
-        # the te#79 crash class (a demoted lane executing on cpu
-        # mid-denoise) is only prevented by this wrap — its silent absence
-        # is a serving hazard the hub should see.
+        # The crash class (a demoted lane executing on cpu mid-denoise) is
+        # only prevented by this wrap, so its silent absence is a serving
+        # hazard the hub should see.
         activity_mod.emit_event(
             activity_mod.KIND_SERVE_DEGRADE,
             f"ref={gate.ref} label={gate.label} cls={cls.__name__}: lane "

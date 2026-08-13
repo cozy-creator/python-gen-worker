@@ -27,19 +27,16 @@ from .llama import plan_for, resolve_gguf
 
 logger = logging.getLogger(__name__)
 
-# a boot is bounded by SILENCE, never by a clock.
-# The old `_DEFAULT_BOOT_TIMEOUT_S = 600.0` killed the child on a flat deadline
-# whose only liveness check was `proc.poll()` — "has not exited yet", which
-# says nothing about progress — while the engine was printing weight-load
-# progress to a stdout nobody read. A 70B vLLM cold load routinely outlives
-# 600s, and endpoints had already started papering over it with
-# `boot_timeout_s=1800`, which is the same mistake with a bigger number.
+# A boot is bounded by SILENCE, never by a clock. A flat deadline whose only
+# liveness check is `proc.poll()` says nothing about progress, and a 70B vLLM
+# cold load routinely outlives ten minutes — raising the number is the same
+# mistake made bigger.
 #
 # The window below is a SILENCE window over the engine's own output, not a
 # boot budget: an engine that keeps talking boots for as long as it needs, and
 # one that says nothing for 15 minutes is wedged. 900s is orders of magnitude
 # past any real silent phase (CUDA graph capture, torch.compile) and matches
-# the window gw#665 gave the llama.cpp toolchain.
+# the window the llama.cpp toolchain gets.
 _BOOT_STALL_WINDOW_S = 900.0
 _TERM_GRACE_S = 10.0
 

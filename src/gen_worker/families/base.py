@@ -1,4 +1,4 @@
-"""Shared per-family inference-defaults vocabulary (pgw#520 / th#767 / th#767b).
+"""Shared per-family inference-defaults vocabulary.
 
 The MODEL SET is catalog, not code — but the SHAPE of a family's
 inference defaults/constraints (scheduler choices, step counts, guidance
@@ -25,9 +25,8 @@ endpoint that serves it::
 :class:`~gen_worker.api.slot.Slot`'s resolution chain does when repo
 metadata JSON arrives with no code fallback to decode against.
 
-**Kind axis (th#767b / pgw#516 settled foundation).** A family name has (up
-to) two vocabularies: the CHECKPOINT recipe (``kind="checkpoint"``, the
-default — every existing ``@family("sdxl")`` call is unaffected) and the
+**Kind axis.** A family name has (up to) two vocabularies: the CHECKPOINT
+recipe (``kind="checkpoint"``, the default) and the
 LORA overlay's recipe OPINIONS (``kind="lora"``), a separate typed struct
 sharing the same family name::
 
@@ -67,8 +66,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Type, TypeVar
 import msgspec
 
 # Keyed (family_name, kind) — "checkpoint" | "lora" (see module docstring's
-# kind-axis section). Kind is normalized/defaulted to "checkpoint" so every
-# pre-th#767b ``@family("sdxl")`` call site is unaffected.
+# kind-axis section). Kind is normalized/defaulted to "checkpoint", so a bare
+# ``@family("sdxl")`` registers the checkpoint recipe.
 _REGISTRY: Dict[Tuple[str, str], Type["GenerationDefaults"]] = {}
 
 KIND_CHECKPOINT = "checkpoint"
@@ -122,8 +121,7 @@ class GenerationDefaults(
     @property
     def kind(self) -> str:
         """This instance's registered kind (``"checkpoint"`` | ``"lora"``);
-        ``"checkpoint"`` for a subclass that never got a kind (the default,
-        and every pre-th#767b family)."""
+        ``"checkpoint"`` for a subclass that never got a kind."""
         return str(getattr(type(self), "__gen_worker_kind__", "") or KIND_CHECKPOINT)
 
 
@@ -133,8 +131,8 @@ def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Typ
     validation / a :class:`~gen_worker.api.slot.Slot`'s ``Compile(family=)``
     reconciliation all look it up by.
 
-    ``kind`` defaults to ``"checkpoint"`` — every existing ``@family("sdxl")``
-    call is unaffected. A LoRA overlay's vocabulary registers under the SAME
+    ``kind`` defaults to ``"checkpoint"``. A LoRA overlay's vocabulary
+    registers under the SAME
     family name with ``kind="lora"`` (see the module docstring's kind-axis
     section) — it is a separate struct, not a merge of the checkpoint one.
     """
@@ -152,14 +150,12 @@ def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Typ
         key = (fam, knd)
         existing = _REGISTRY.get(key)
         if existing is not None and existing is not cls:
-            # a RE-IMPORT is not a collision. Registration is an
-            # import side effect, so re-importing a declaration module builds a
-            # NEW class object for the same declaration — same module, same
-            # qualname — and an identity check alone reads that as two families
-            # fighting over one name. It is the same one, twice, and the
-            # replacement is what the caller asked for. This was 66 of ie#690's
-            # failures: endpoint suites re-import their declaration modules
-            # between tests and hit "already registered" on their own.
+            # A RE-IMPORT is not a collision. Registration is an import side
+            # effect, so re-importing a declaration module builds a NEW class
+            # object for the same declaration — same module, same qualname —
+            # and an identity check alone reads that as two families fighting
+            # over one name. It is the same one, twice, and the replacement is
+            # what the caller asked for.
             #
             # A different module, or a different class in the same module, is
             # still a genuine collision and still refused: that is two

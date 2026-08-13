@@ -1,8 +1,8 @@
-"""Test helpers for authoring gen-worker endpoints (pgw#524 item 3).
+"""Test helpers for authoring gen-worker endpoints.
 
 Every ``Slot``-declared endpoint needs a ``ctx.slots["<name>"]`` stub to
-unit-test its handler without a live hub — before this module, every
-endpoint hand-rolled its own ``FakeCtx``. :func:`fake_context` builds a real
+unit-test its handler without a live hub, so that no endpoint hand-rolls its
+own ``FakeCtx``. :func:`fake_context` builds a real
 :class:`~gen_worker.request_context.RequestContext` (or a producer-kind
 subclass) with ``ctx.slots`` pre-resolved from plain ``(ref, defaults)``
 pairs::

@@ -31,8 +31,8 @@
 Checkpoint SELECTION is a runtime payload argument, not a build-time fan-out:
 a handler whose payload declares a field typed with a ``ModelChoice`` subclass
 picks, per request, which curated checkpoint runs against the resident base
-(pgw#509 — ``gen_worker.api.model``). Divergent WIRE contracts are separate
-methods; only weight-sharing forces one class.
+(``gen_worker.api.model``). Divergent WIRE contracts are separate methods;
+only weight-sharing forces one class.
 """
 
 from __future__ import annotations
@@ -62,10 +62,9 @@ KINDS = ("inference", "training", "dataset", "conversion", "eval")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 
-# the dotted capability (8.9) is the author-facing unit — the way
-# NVIDIA writes it and the way v1's field did. `sm_89` is accepted because
-# that is how kernels and error messages spell it; the bare SM code is not,
-# because 89 and 8.9 are a silent factor-of-ten apart.
+# The dotted capability (8.9) is the author-facing unit, the way NVIDIA writes
+# it. `sm_89` is accepted because that is how kernels and error messages spell
+# it; the bare SM code is not — 89 and 8.9 are a silent factor-of-ten apart.
 _MAX_COMPUTE_CAPABILITY = 20.0
 
 
@@ -105,44 +104,33 @@ def _normalize_compute_capability(raw: float | str) -> float:
     return round(value, 1)
 
 
-# the parallel mechanisms the PLATFORM implements. Kept in
-# lockstep with the hub's builder ingest (internal/builder/staffing_envelope.go
+# The parallel mechanisms the PLATFORM implements, kept in lockstep with the
+# hub's builder ingest (internal/builder/staffing_envelope.go
 # parallelMechanisms) and orchestrator/topology's Parallel* constants — an
 # unknown token refuses here, at declaration, before a build is spent.
 _PARALLEL_MECHANISMS = frozenset({"sequence", "cfg"})
 
 
 class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
-    """Hardware envelope for one function (SDK v2): ONLY what the endpoint
+    """Hardware envelope for one function: ONLY what the endpoint
     CANNOT RUN WITHOUT — ``Resources(gpu, gpu_count, libraries, vcpus)``.
 
-    v2 hard cut: ``vram_gb`` and ``compute_capability`` are
-    DELETED. th#683's prove-and-profile gate MEASURES the real VRAM
-    requirement per lane and shape, and precision-per-card is the fit
-    ladder's call, never a placement gate. "What it needs to run WELL"
-    belongs to the ladder / residency planner / economics gate — all of
-    which have measurements the endpoint author does not.
+    "What it needs to run WELL" belongs to the fit ladder / residency
+    planner / economics gate — all of which have measurements the endpoint
+    author does not.
 
-    ``vram_gb_hint`` is the one survivor of ``vram_gb``: an OPTIONAL
-    first-build placement hint used only before profiling measurements
-    exist. It is never a gate, never a runtime ceiling, and never a
-    per-load reservation. Declaring it implies ``gpu=True``.
+    ``vram_gb_hint`` is an OPTIONAL first-build placement hint used only
+    before profiling measurements exist. It is never a gate, never a runtime
+    ceiling, and never a per-load reservation. Declaring it implies
+    ``gpu=True``.
 
-    ``min_vram_gb`` is the HARD VRAM floor, and it is the exact
-    twin of ``compute_capability`` above: the v2 cut deleted ``vram_gb`` on
-    the reasoning that th#683 would MEASURE the real requirement, and that
-    reasoning is right about how much VRAM a function wants and wrong about
-    the card it cannot run on at all. The two are not the same question, and
-    only one of them has an answer before the first build exists.
-
-    It is deliberately NOT ``vram_gb_hint`` promoted. The hint's contract —
-    "never a gate" — is what pgw#647 froze, and teaching the scheduler to
-    gate on a value declared as advisory would silently turn every existing
-    hint into a hard refusal. A floor is a different statement, so it gets a
-    different field, named ``min_`` for what it is: a floor the hub may
-    exceed, never a cap (the same reading as ``min_disk_gb``). Declare it
-    ONLY for a genuine incapability — a function that merely runs BETTER
-    with more VRAM declares nothing and lets the fit ladder choose.
+    ``min_vram_gb`` is the HARD VRAM floor: a floor the hub may exceed, never
+    a cap (the same reading as ``min_disk_gb``). It is deliberately NOT
+    ``vram_gb_hint`` promoted — the hint's contract is "never a gate", and
+    teaching the scheduler to gate on a value declared as advisory would
+    silently turn every existing hint into a hard refusal. Declare it ONLY
+    for a genuine incapability; a function that merely runs BETTER with more
+    VRAM declares nothing and lets the fit ladder choose.
 
     Declaring it implies ``gpu=True``. Where both are present the floor must
     not exceed the hint: a hint BELOW the floor is a contradiction (the
@@ -153,43 +141,26 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     the worker-side fit ladder (``models/serve_fit.py``), which by contract
     "never refuses on the recommended-VRAM hint alone" and whose sole author
     opt-out is ``strict_vram``. A floor that also became a runtime refusal
-    would turn a scheduling statement into a serving one and could refuse
-    requests a pod can answer — a separate decision, not a consequence of
-    this one.
+    could refuse requests a pod can answer.
 
-    ``ram_gb_hint`` is its HOST-side twin, restored after the v2
-    cut deleted ``ram_gb`` on the reasoning that host RAM is an
-    opportunistic latency tier. For ltx-video-2.3 it was neither
-    opportunistic nor a guess: ie#484 measured 179-301 s mp4-encode and
-    147 s VAE-decode tails on host-starved allocations at IDENTICAL GPU
-    step-ms, ie#492 sized the floor at 64 GB from that failure, and the hub
-    consumed it (pod-create minimum + th#740 read-back-and-reject). Without
-    it a starved allocation DEGRADES SILENTLY — a slow request, not a
-    refused pod — which is exactly what the declaration existed to prevent.
-    Like ``vram_gb_hint`` it is an ALLOCATION-time ask (the hub's
-    ``min_ram_gb``), never a runtime gate: nothing refuses a request because
-    host RAM is low. It does not imply ``gpu=True`` — the components are
-    pinned host staging, model-load staging, frame/encoder buffers and
-    page-cache headroom, and a CPU-only encode lane needs them too.
-    Asymmetry note: ``vcpus`` survived the v2 cut and covers the CPU side of
-    the very same encode tail, which is what made the RAM deletion read as
-    accidental rather than principled.
+    ``ram_gb_hint`` is its HOST-side twin: without it a host-starved
+    allocation DEGRADES SILENTLY — a slow request, not a refused pod. Like
+    ``vram_gb_hint`` it is an ALLOCATION-time ask (the hub's ``min_ram_gb``),
+    never a runtime gate: nothing refuses a request because host RAM is low.
+    It does not imply ``gpu=True`` — the components are pinned host staging,
+    model-load staging, frame/encoder buffers and page-cache headroom, and a
+    CPU-only encode lane needs them too.
 
-    ``compute_capability`` is the HARD GPU-architecture floor,
-    restored after the v2 cut deleted it. The cut's reasoning — "precision
-    per card is the fit ladder's call, never a placement gate" — is right
-    about precision SELECTION and wrong about INCAPABILITY: a producer whose
-    kernel is ``torch._scaled_mm`` cannot run below sm_89 at any precision,
-    on any rung, ever. With no carrier the hub emitted no
-    ``compute_capability`` in ``requirement_payload_json`` and the scheduler
-    placed the fp8 producer on sm_80 A100s (th#1155 six times; te#125
-    again). Unlike ``vram_gb_hint`` this is NOT a hint and has no ``_hint``
-    suffix: the scheduler filters offers on it and refuses to rent below it.
-    Declare the DOTTED capability the way NVIDIA writes it — ``8.9``,
-    ``"8.9"``, or ``"sm_89"`` — never the bare SM code. Declaring it implies
-    ``gpu=True``. Declare it ONLY for a genuine incapability; a function that
-    merely runs BETTER on newer silicon declares nothing and lets the ladder
-    choose.
+    ``compute_capability`` is the HARD GPU-architecture floor. It states
+    INCAPABILITY, not precision SELECTION: a producer whose kernel is
+    ``torch._scaled_mm`` cannot run below sm_89 at any precision, on any
+    rung, ever. Unlike ``vram_gb_hint`` this is NOT a hint and has no
+    ``_hint`` suffix: the scheduler filters offers on it and refuses to rent
+    below it. Declare the DOTTED capability the way NVIDIA writes it —
+    ``8.9``, ``"8.9"``, or ``"sm_89"`` — never the bare SM code. Declaring it
+    implies ``gpu=True``. Declare it ONLY for a genuine incapability; a
+    function that merely runs BETTER on newer silicon declares nothing and
+    lets the ladder choose.
 
     ``strict_vram=True`` is a genuine incapability declaration for bindings
     that cannot tolerate CPU-resident weights (a compiled fixed-shape
@@ -197,28 +168,23 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     rungs (offload / cpu) outright instead of serving slowly. The on-GPU
     rungs (fp8 storage, emergency 4-bit) remain available.
 
-    ``min_disk_gb`` is the CONTAINER-DISK floor, and it is named
-    for what it is: a floor the hub may exceed, never a cap, so ``min_`` reads
-    truer than a ``_hint`` suffix. th#1233 already sizes a conversion pod's
-    disk from the bytes the job will materialize, so the common case needs no
-    declaration at all. The residue is jobs whose need is NOT derivable from
-    the source — multi-source marries, large intermediate scratch, and the
-    live example, ``mirror_svdq``, which fetches a 13.08 GB nunchaku
-    checkpoint straight from HuggingFace. No catalog read will ever see those
-    bytes; only the author knows they exist. The hub half is already wired and
-    waiting: ``mergeRequestDiskIntoSupply`` honours a per-function
-    ``min_disk_gb`` as an additional floor, exactly like ``min_vram_gb``, and
-    until this axis existed nothing emitted it. Like ``ram_gb_hint`` it is an
-    ALLOCATION-time ask and does not imply ``gpu=True`` — a CPU-only
-    conversion is the case that needed it first.
+    ``min_disk_gb`` is the CONTAINER-DISK floor: a floor the hub may exceed,
+    never a cap. The hub already sizes a conversion pod's disk from the bytes
+    the job will materialize, so the common case needs no declaration at all.
+    The residue is jobs whose need is NOT derivable from the source —
+    multi-source marries, large intermediate scratch, and the live example,
+    ``mirror_svdq``, which fetches a 13.08 GB nunchaku checkpoint straight
+    from HuggingFace; no catalog read will ever see those bytes.
+    ``mergeRequestDiskIntoSupply`` honours it as an additional floor, exactly
+    like ``min_vram_gb``. Like ``ram_gb_hint`` it is an ALLOCATION-time ask
+    and does not imply ``gpu=True``.
 
     ``vcpus`` declares the host-side vCPU ask (CPU-heavy encode);
-    it does not imply ``gpu=True``. ``gpu_count`` (>1 later feeds
-    ``DeviceRequest`` — pgw#648) declares how many devices one instance
-    needs; endpoint code NEVER picks devices.
+    it does not imply ``gpu=True``. ``gpu_count`` declares how many devices
+    one instance needs; endpoint code NEVER picks devices.
 
     ``max_gpu_count`` + ``max_gpus_per_execution_group`` + ``parallel``
- are the author ENVELOPE — the SDK half of the
+    are the author ENVELOPE — the SDK half of the
     hub builder's ``extractStaffingEnvelope`` contract. ``gpu_count`` is the
     floor (devices ONE materialization requires); ``max_gpu_count`` is how
     many GPUs the POD may hold; ``max_gpus_per_execution_group`` is how many
@@ -227,20 +193,17 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     only one with a worker runtime). The author never writes a degree, a
     tier, a packing or a device id — those are the hub's decisions.
 
-    The last two are INDEPENDENT axes, and both exist because the hub used to
-    derive each from the other and so could only ever express ONE execution
-    group::
+    The last two are INDEPENDENT axes::
 
         max_gpu_count=4                                  -> 1x4: one request across 4 cards
         max_gpu_count=4, max_gpus_per_execution_group=2  -> 2x2: two slots, each request across 2
 
     Omitting ``max_gpus_per_execution_group`` means "no opinion on that axis"
-    and lets the hub use the whole ceiling as one group — what every release
-    written before this field already gets. It is NOT defaulted to a legal
-    value: the declared domain is 2 or more, and 0/1 are refused here and at
-    ingest, so "declared nothing" can never be confused with a declaration. Both are elided from the manifest when they
-    carry nothing (``omit_defaults``), so every existing release's payload
-    is byte-identical. Validation mirrors the builder's ingest refusals so a
+    and lets the hub use the whole ceiling as one group. It is NOT defaulted
+    to a legal value: the declared domain is 2 or more, and 0/1 are refused
+    here and at ingest, so "declared nothing" can never be confused with a
+    declaration. Both are elided from the manifest when they carry nothing
+    (``omit_defaults``). Validation mirrors the builder's ingest refusals so a
     contradiction costs a declaration-time ValueError instead of a build.
     """
 
@@ -263,32 +226,21 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
 
         The declaration and the wire name differ for exactly one field: the
         builder's host-floor key is ``ram_gb`` (which it maps to the
-        scheduler's ``min_ram_gb`` — pod-create minimum plus th#740's
-        read-back-and-reject), so ``ram_gb_hint`` is projected under that
-        name. One mapping, in one place, rather than a second spelling for
-        endpoint authors to get wrong.
+        scheduler's ``min_ram_gb``), so ``ram_gb_hint`` is projected under
+        that name. One mapping, in one place, rather than a second spelling
+        for endpoint authors to get wrong.
 
-        ``min_disk_gb`` needs no remap either — it is already the
-        key the hub reads as an additional disk floor
-        (``mergeRequestDiskIntoSupply``), the same spelling on both sides.
-
-        ``min_vram_gb`` needs no remap either, and that is the whole
-        reason the floor is spelled this way: it is already the key
-        ``function_requirements.go`` folds into ``requirement_payload_json``
-        (``for _, key := range []string{"min_vram_gb", "vram_multiplier"}``),
-        from which it reaches ``req.VRAMGB`` → ``MinVRAMGB`` → the GPU
-        candidate filter. The hub reads it as the floor ALREADY — v2 simply
-        stopped emitting anything that landed there, so the gate vanished with
-        no error and no build failure. Note the builder's own fallback,
-        ``vram_gb`` → ``min_vram_gb`` *when the explicit key is absent*: the
-        explicit key wins, so this field can never be shadowed by a v1 remap.
-
-        ``compute_capability`` needs no remap: it is already the key
-        ``internal/builder/function_requirements.go`` parses (scalar or
-        ``{"min": ...}``) into ``FunctionRequirements.ComputeCapabilityMin``.
-        Note ``min_compute_capability`` — v1's author-facing spelling — is
-        typed-REJECTED by the builder (th#1015 ``ErrMinComputeCapabilityRemoved``),
-        so it must never appear on the wire.
+        ``min_disk_gb``, ``min_vram_gb`` and ``compute_capability`` need no
+        remap — they are already the keys the hub reads
+        (``mergeRequestDiskIntoSupply``; ``function_requirements.go``'s fold
+        of ``min_vram_gb`` into ``requirement_payload_json`` and on to
+        ``req.VRAMGB`` → ``MinVRAMGB`` → the GPU candidate filter; and the
+        scalar-or-``{"min": ...}`` parse into
+        ``FunctionRequirements.ComputeCapabilityMin``). The builder's own
+        ``vram_gb`` → ``min_vram_gb`` fallback applies only *when the explicit
+        key is absent*, so this field can never be shadowed by it.
+        ``min_compute_capability`` is typed-REJECTED by the builder
+        (``ErrMinComputeCapabilityRemoved``) and must never appear on the wire.
         """
         raw = msgspec.to_builtins(self)
         out: Dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
@@ -317,9 +269,6 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             if f <= 0:
                 raise ValueError(f"min_vram_gb must be positive, got {f}")
             force(self, "min_vram_gb", f)
-            # A hint below the floor would place the first build under the
-            # value the function says it cannot run below — the declaration
-            # contradicts itself, so it costs a ValueError, not a build.
             if self.vram_gb_hint is not None and self.vram_gb_hint < f:
                 raise ValueError(
                     f"vram_gb_hint {self.vram_gb_hint} is below min_vram_gb {f}: "
@@ -347,8 +296,8 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             if c <= 0:
                 raise ValueError(f"vcpus must be positive, got {c}")
             force(self, "vcpus", c)
-        # pgw#748/th#1285 author envelope — mirror the builder's
-        # extractStaffingEnvelope refusals at declaration time.
+        # Mirror the builder's extractStaffingEnvelope refusals at declaration
+        # time.
         if self.max_gpu_count is not None:
             m = int(self.max_gpu_count)
             if m != self.max_gpu_count or m <= 0:
@@ -360,8 +309,8 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
                     f"max_gpu_count {m} is below gpu_count {n_gpu}")
             force(self, "max_gpu_count", m)
             force(self, "gpu", True)
-        # the degree axis. Legal domain is [2, max_gpu_count];
-        # absence means "no opinion", never a defaulted legal value.
+        # The degree axis: legal domain is [2, max_gpu_count]; absence means
+        # "no opinion", never a defaulted legal value.
         if self.max_gpus_per_execution_group is not None:
             d = int(self.max_gpus_per_execution_group)
             if d != self.max_gpus_per_execution_group:
@@ -400,9 +349,8 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             force(self, "gpu", True)
         elif self.max_gpus_per_execution_group is not None:
             # A group width only bounds a MECHANISM; with none declared the
-            # degree is always 1 and the field is inert. The hub's ingest
-            # refuses this too — mirror it here so it costs a ValueError at
-            # declaration rather than a build.
+            # degree is always 1 and the field is inert. Mirrors the hub's own
+            # ingest refusal.
             raise ValueError(
                 f"max_gpus_per_execution_group "
                 f"{self.max_gpus_per_execution_group} declared without a "
@@ -445,9 +393,8 @@ def _validate_warmup_decl(owner: str, warmup: Optional[NoWarmup]) -> Optional[No
     )
 
 
-# per-function facts live ON the function, not in class-level
-# name-keyed dicts (the stringly-typed indirection v2 eliminated everywhere
-# else). ``@worker_function`` is the one per-handler declaration surface.
+# Per-function facts live ON the function, never in class-level name-keyed
+# dicts; ``@worker_function`` is the one per-handler declaration surface.
 WF_ATTR = "__gen_worker_function__"
 
 
@@ -455,7 +402,7 @@ REFERENCE_MODALITIES = ("image", "video", "audio")
 
 
 class AcceptsReferences(msgspec.Struct, frozen=True, kw_only=True):
-    """th#1757: this handler OPTS IN to the platform reference layer.
+    """This handler OPTS IN to the platform reference layer.
 
     A reference is a tenant-defined character/object/place/style that a user
     writes as ``@handle`` in a prompt. The concept is PLATFORM-side: the hub
@@ -553,7 +500,7 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     turbo lane overlaying a distillation LoRA on standard weights AND
     passing through already-distilled ones).
 
-    ``text_len`` (gap #6) — this handler's pinned text-sequence length,
+    ``text_len`` — this handler's pinned text-sequence length,
     overriding the class ``Compile.text_len`` for its lane. The class cell
     contract digests the UNION of all lanes' pins, so a dual-pin class
     (qwen: 512 t2i / 1024 edit) describes both.
@@ -570,8 +517,8 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     text_len: Optional[int] = None
     warm: Optional[Dict[str, Any]] = None
     warm_reason: str = ""
-    # the opt-in reference contract. None = this handler never sees
-    # the concept and a ref_text sent to it is refused hub-side.
+    # The opt-in reference contract. None = this handler never sees the
+    # concept and a ref_text sent to it is refused hub-side.
     accepts_references: Optional[AcceptsReferences] = None
 
     def __post_init__(self) -> None:
@@ -679,11 +626,11 @@ def worker_function(
 
 
 def _validate_handles(owner: str, handles: Any) -> Tuple[str, ...]:
-    """th#1050 opt-in lane declaration: `handles=["fp8-w8a8-dynamic"]` marks
-    that this endpoint's code BRANCHES on the executing lane (ctx.lane) —
-    behavioral divergence only, never inventory. Tokens are concrete lane
-    BODIES (no `+eager|+compiled`: execution is platform-managed). Nothing
-    declared = fully platform-managed lanes, exactly as before."""
+    """Opt-in lane declaration: `handles=["fp8-w8a8-dynamic"]` marks that this
+    endpoint's code BRANCHES on the executing lane (ctx.lane) — behavioral
+    divergence only, never inventory. Tokens are concrete lane BODIES (no
+    `+eager|+compiled`: execution is platform-managed). Nothing declared =
+    fully platform-managed lanes."""
 
     if handles is None:
         return ()
@@ -722,7 +669,7 @@ _CONFIG_TYPES: Dict[type, str] = {str: "string", int: "int", float: "float", boo
 
 
 class ConfigParam(msgspec.Struct, frozen=True):
-    """th#1087 declared config parameter: code declares the knob (name, type,
+    """Declared config parameter: code declares the knob (name, type,
     default, constraints); the deployer sets values through the hub config
     API (write-time 422 on unknown/invalid); handlers read the effective
     value via ``ctx.config[name]``::
@@ -854,8 +801,8 @@ def _validate_config_decl(owner: str, config: Any) -> Tuple[ConfigParam, ...]:
 
 
 def _validate_env_decl(owner: str, env: Any) -> Tuple[str, ...]:
-    """th#1087 D2: code declares the env names it reads; the hub validates
-    config-layer env writes against this declaration (undeclared-write 422)."""
+    """Code declares the env names it reads; the hub validates config-layer
+    env writes against this declaration (undeclared-write 422)."""
     if env is None:
         return ()
     if isinstance(env, str) or not isinstance(env, (list, tuple)):
@@ -883,7 +830,7 @@ def _validate_env_decl(owner: str, env: Any) -> Tuple[str, ...]:
 
 
 class DynamicDim(msgspec.Struct, frozen=True):
-    """One DECLARED dynamic dim of the compile shape contract (SDK v2).
+    """One DECLARED dynamic dim of the compile shape contract.
 
     ``dim`` names the logical axis (``"batch"`` | ``"sequence"``); ``min``/
     ``max`` bound it. The SDK translates the declaration into explicit
@@ -891,12 +838,9 @@ class DynamicDim(msgspec.Struct, frozen=True):
     dynamism only where declared, never discovered.
 
     ``min`` must be >= 2: torch's 0/1 specialization is not overridable
-    (ie#543 measured — marking a size-1 dim dynamic is refused), so size 1
-    always gets its own free specialized graph and a declared range starts
-    at 2. Measured cost of a declared-dynamic dim: +0.6% to +5.5%, with no
-    fp8 fallback — a viable tool, just not needed for batch today (ie#542:
-    ~1.0x at our operating point; the axis stays SUPPORTED so a future
-    model/GPU with SM headroom turns it on by declaration, not re-plumbing).
+    (marking a size-1 dim dynamic is refused), so size 1 always gets its own
+    free specialized graph and a declared range starts at 2. Measured cost of
+    a declared-dynamic dim: +0.6% to +5.5%.
     """
 
     dim: str
@@ -906,13 +850,11 @@ class DynamicDim(msgspec.Struct, frozen=True):
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
         d = str(self.dim or "").strip()
-        # the old hard-validation to "batch"|"sequence" was the
-        # vocabulary wall wan's latent-spatial axis hit. Any
-        # declared Dim name is now admissible; Compile.__post_init__
-        # cross-validates the name against Compile.dims, so an unknown axis
-        # is still refused — by cross-reference, not by a two-literal list.
-        # The two logical dynamo axes stay case-normalized; declared Dim
-        # names match exactly.
+        # Any declared Dim name is admissible; Compile.__post_init__
+        # cross-validates it against Compile.dims, so an unknown axis is still
+        # refused — by cross-reference, not by a two-literal list. The two
+        # logical dynamo axes stay case-normalized; declared Dim names match
+        # exactly.
         if d.lower() in ("batch", "sequence"):
             d = d.lower()
         if not d.isidentifier():
@@ -935,10 +877,9 @@ class DynamicDim(msgspec.Struct, frozen=True):
 
 
 class Compile(msgspec.Struct, frozen=True):
-    """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384),
-    carrying the DECLARED shape contract (SDK v2, pgw#647): the compiler is
-    TOLD every static bucket and every dynamic range up front; it never
-    discovers a shape from traffic.
+    """Opt-in torch.compile over pre-built per-SKU cache artifacts, carrying
+    the DECLARED shape contract: the compiler is TOLD every static bucket and
+    every dynamic range up front; it never discovers a shape from traffic.
 
     ``Compile(family="flux2-klein-4b", shapes=((768, 768), (1024, 1024)),
     text_len=512)`` names the model FAMILY (caches key on the traced graph,
@@ -948,27 +889,24 @@ class Compile(msgspec.Struct, frozen=True):
     frames)`` for video models. Two-stage presets contribute BOTH
     their base and refined resolutions as rows.
 
-    SHAPES DERIVE FROM THE PAYLOAD PRESET ENUM (ie#345 fleet policy): when
-    the endpoint's payload uses size buckets, ``shapes`` must be exactly
-    that bucket table — one source of truth, 100% cache coverage of legal
-    requests.
+    SHAPES DERIVE FROM THE PAYLOAD PRESET ENUM (fleet policy): when the
+    endpoint's payload uses size buckets, ``shapes`` must be exactly that
+    bucket table — one source of truth, 100% cache coverage of legal requests.
 
-    ``text_len`` is the text-sequence axis ie#544 proved was missing: a
-    prompt-length-dependent sequence dim reaching a statically-compiled
-    denoiser mints a new graph per distinct prompt length — unbounded and
-    un-warmable. Every ``compile=`` endpoint MUST state it (a walk-time
-    lint enforces this): a positive value pins the token length (pad
-    embeddings with :func:`gen_worker.pad_text_sequence` — a pin that fixes
-    only the SIZE is not a pin, dynamo guards on STRIDES); ``0`` declares
-    "this endpoint has no text conditioning" explicitly; alternatively
-    declare the axis dynamic via ``dynamic=(DynamicDim("sequence", min=...,
-    max=...),)``.
+    ``text_len`` is the text-sequence axis: a prompt-length-dependent sequence
+    dim reaching a statically-compiled denoiser mints a new graph per distinct
+    prompt length — unbounded and un-warmable. Every ``compile=`` endpoint
+    MUST state it (a walk-time lint enforces this): a positive value pins the
+    token length (pad embeddings with :func:`gen_worker.pad_text_sequence` — a
+    pin that fixes only the SIZE is not a pin, dynamo guards on STRIDES);
+    ``0`` declares "this endpoint has no text conditioning" explicitly;
+    alternatively declare the axis dynamic via ``dynamic=(DynamicDim(
+    "sequence", min=..., max=...),)``.
 
     CFG graph classes are graph shapes too, but they are a PAYLOAD-FIELD fact:
     annotate the guidance field with :class:`~gen_worker.CompileAxis`
-    equivalence classes (``Compile(guidance_scales=...)`` is deleted in
-    v2). The warm plan derives from the cross-product of axis classes x
-    shape buckets.
+    equivalence classes. The warm plan derives from the cross-product of axis
+    classes x shape buckets.
 
     Declaring this does NOT force compilation: the worker arms
     torch.compile only when a verified cache artifact for (family, SKU,
@@ -979,94 +917,86 @@ class Compile(msgspec.Struct, frozen=True):
     shapes: tuple[tuple[int, ...], ...] = ()
     targets: tuple[str, ...] = ("transformer", "vae.decode")
     family: str = ""
-    # SDK v2 text-sequence axis: None = undeclared (walk-time lint
-    # failure for compile= endpoints); 0 = explicitly unconditioned; >0 =
-    # pinned token length.
+    # Text-sequence axis: None = undeclared (walk-time lint failure for
+    # compile= endpoints); 0 = explicitly unconditioned; >0 = pinned token
+    # length.
     text_len: Optional[int] = None
-    # SDK v2 declared-dynamic dims (min/max ranges -> explicit marks).
+    # Declared-dynamic dims (min/max ranges -> explicit marks).
     dynamic: tuple[DynamicDim, ...] = ()
     # Regional compilation (diffusers compile_repeated_blocks): compile the
     # target's repeated transformer blocks instead of the whole forward.
-    # REQUIRED for big fp8 layerwise-cast models (ie#381, measured on LTX
-    # 22B/H100): whole-graph inductor planning co-materializes per-layer
-    # bf16 upcast buffers and OOMs at the largest shapes; per-block graphs
-    # bound that to one block. Also much faster cold compile (one block
-    # graph per shape, reused across blocks). Cells record the mode — a
-    # mode drift consumer stays eager (cache would miss anyway).
+    # REQUIRED for big fp8 layerwise-cast models (measured on LTX 22B/H100):
+    # whole-graph inductor planning co-materializes per-layer bf16 upcast
+    # buffers and OOMs at the largest shapes; per-block graphs bound that to
+    # one block. Also much faster cold compile (one block graph per shape,
+    # reused across blocks). Cells record the mode — a mode drift consumer
+    # stays eager (cache would miss anyway).
     regional: bool = False
     # ------------------------------------------------------------------
-    # pgw#739 export-declaration vocabulary. Per-family content is a
-    # DECLARATION here, never worker code: named dims with (input, axis)
-    # bindings, graph-class forks, and RESOLVED coordinate rows generated
-    # by the endpoint's own legality oracle. See api/export_contract.py.
+    # Export-declaration vocabulary. Per-family content is a DECLARATION
+    # here, never worker code: named dims with (input, axis) bindings,
+    # graph-class forks, and RESOLVED coordinate rows generated by the
+    # endpoint's own legality oracle. See api/export_contract.py.
     # ------------------------------------------------------------------
     dims: tuple[Dim, ...] = ()
     forks: tuple[Fork, ...] = ()
     classes: tuple[GraphClass, ...] = ()
     inputs: tuple[Input, ...] = ()
     args: tuple[Arg, ...] = ()
-    # #730 ratified: shape strategy is a per-family DECLARED choice —
-    # conv-bearing families "static-rows" (symbolic latent H/W turns off
-    # inductor's channels-last layout opt, +7.2% measured on sdxl), DiTs
-    # "dynamic-collapse". "" = undeclared; refused at mint-plan time, not
-    # defaulted.
+    # Shape strategy is a per-family DECLARED choice — conv-bearing families
+    # "static-rows" (symbolic latent H/W turns off inductor's channels-last
+    # layout opt, +7.2% measured on sdxl), DiTs "dynamic-collapse". "" =
+    # undeclared; refused at mint-plan time, not defaulted.
     shape_strategy: str = ""
-    # Mint-warm canon (#723/#728): whether pre-warming the module changes
-    # the exported graph. A declared per-family FACT, not a ritual — sdxl
-    # measured False, z-image measured True (rope tables: 4327 cold vs
-    # 4285 warmed). None = unmeasured; refused at mint time for declared
-    # families.
+    # Whether pre-warming the module changes the exported graph. A declared
+    # per-family FACT, not a ritual — sdxl measured False, z-image measured
+    # True (rope tables: 4327 cold vs 4285 warmed). None = unmeasured; refused
+    # at mint time for declared families.
     warm_changes_key: Optional[bool] = None
-    # Declared-eager lanes (LTX §2.3): recorded decision, not an omission.
+    # Declared-eager lanes: recorded decision, not an omission.
     eager: tuple[str, ...] = ()
-    # this family's ADOPTION numerics tolerance. A cell
-    # about to arm is run against the eager forward it replaces and judged on
-    # the shared verdict ladder; below `numerics_floor` it REFUSES to arm.
-    # None = the SDK default (0.98 / 0.999), whose derivation is pgw#814's
-    # measured band — see `numerics_ladder.NUMERICS_FLOOR`. Declared per family
-    # because bf16 attention reassociation makes exact equality the wrong bar
-    # and the right bar is not the same for a 25-block fp8 DiT and a
-    # conv-bearing UNet.
+    # This family's ADOPTION numerics tolerance. A cell about to arm is run
+    # against the eager forward it replaces and judged on the shared verdict
+    # ladder; below `numerics_floor` it REFUSES to arm. None = the SDK default
+    # (0.98 / 0.999) — see `numerics_ladder.NUMERICS_FLOOR` for the derivation.
+    # Declared per family because bf16 attention reassociation makes exact
+    # equality the wrong bar, and the right bar is not the same for a 25-block
+    # fp8 DiT and a conv-bearing UNet.
     numerics_floor: Optional[float] = None
     numerics_warn: Optional[float] = None
-    # this family's own compile-vs-eager SPEED
-    # bar — the stage it is read off and the minimum speedup the compiled arm
-    # must clear. Declared here, beside the numerics band, because the hub's
-    # publish-time validation session judges a release against the AUTHOR's bar
-    # and holds none of its own: "responsibility is the author's, verification
-    # is the platform's" is unbuildable if the platform supplies the number it
-    # verifies. Undeclared (the default) resolves `bar_undeclared` at publish —
-    # a named refusal, never a default number. A PAIR: see `validate_speed_bar`.
-    # Deliberately NOT a contract axis — declaring or raising a bar must not
-    # re-key a cell — but it IS a `derive.OVERRIDE_FACTS` entry, so a migration
-    # cannot drop it silently.
+    # This family's own compile-vs-eager SPEED bar — the stage it is read off
+    # and the minimum speedup the compiled arm must clear. Declared by the
+    # AUTHOR because the hub's publish-time validation session judges a release
+    # against the author's bar and holds none of its own. Undeclared (the
+    # default) resolves `bar_undeclared` at publish — a named refusal, never a
+    # default number. A PAIR: see `validate_speed_bar`. Deliberately NOT a
+    # contract axis — declaring or raising a bar must not re-key a cell — but
+    # it IS a `derive.OVERRIDE_FACTS` entry, so a migration cannot drop it
+    # silently.
     speed_metric: str = ""
     min_speedup: Optional[float] = None
-    # DECLARED mint blockers. A family that may not mint yet says so
-    # as DATA here — never as a thunk that raises, which the pgw#1107 fold onto
-    # this decorator cannot carry (`compile=` takes a Compile, never a
+    # DECLARED mint blockers. A family that may not mint yet says so as DATA
+    # here, never as a thunk that raises (`compile=` takes a Compile, never a
     # callable, so a folded refusal would simply vanish). While any blocker is
     # unresolved the mint fails CLOSED and names the ids; serving is untouched.
     # Deliberately NOT a contract axis (`contract_axes()`): resolving a blocker
     # must not re-key a cell.
     blockers: tuple[MintBlocker, ...] = ()
-    #: pgw#1167: the latent divisor the CLASS ROWS were derived at, carried so
-    #: the mint can reconcile it against the pipeline's real `vae_scale_factor`
-    #: before it spends an export. CELL-LEVEL because that is what it is — one
-    #: divisor per declaration, not a fact about any single row.
+    #: The latent divisor the CLASS ROWS were derived at, carried so the mint
+    #: can reconcile it against the pipeline's real `vae_scale_factor` before
+    #: it spends an export. CELL-LEVEL: one divisor per declaration, not a
+    #: fact about any single row.
     #:
     #: NEVER AUTHORED. It is transferred off `derive.cfg_image_classes`'s
     #: return value in `__post_init__`; an author who writes it by hand is
-    #: declaring the same number twice, which is the duplicate-map defect
-    #: in the surface pgw#1158 fenced. `None` means the class
-    #: rows did not come from a deriver that knows the divisor, and the mint
-    #: reports UNRECONCILED — never a pass.
+    #: declaring the same number twice. `None` means the class rows did not
+    #: come from a deriver that knows the divisor, and the mint reports
+    #: UNRECONCILED — never a pass.
     #:
-    #: DELIBERATELY ABSENT FROM :meth:`contract_axes`, and fenced by
-    #: `test_latent_basis_pgw1167`: it is a provenance fact about how the rows
-    #: were COMPUTED, not a shape-contract axis (the latent extents it produced
-    #: are already digested, via `classes`). Adding it there would re-key every
-    #: cell in the fleet.
+    #: DELIBERATELY ABSENT FROM :meth:`contract_axes`: it is a provenance fact
+    #: about how the rows were COMPUTED, not a shape-contract axis (the latent
+    #: extents it produced are already digested, via `classes`). Adding it
+    #: there would re-key every cell in the fleet.
     latent_basis: Optional[int] = None
 
     def __post_init__(self) -> None:
@@ -1108,10 +1038,9 @@ class Compile(msgspec.Struct, frozen=True):
         if len({d.dim for d in dyn}) != len(dyn):
             raise ValueError("Compile.dynamic repeats a dim")
         force(self, "dynamic", dyn)
-        # `regional=True` + `dynamic=(...)` is ADMITTED and, since pgw#1078,
-        # SERVED by both lanes. `regional` is the dynamo/JIT per-block knob
-        #  — the AOT export lane ignores it entirely since pgw#846
-        # retired regional cells; the dynamo regional branch applies the
+        # `regional=True` + `dynamic=(...)` is ADMITTED and served by both
+        # lanes. `regional` is the dynamo/JIT per-block knob — the AOT export
+        # lane ignores it entirely; the dynamo regional branch applies the
         # declared marks at the compiled-block ingress
         # (`compile_cache._mark_regional_blocks`).
         for name, typ in (("dims", Dim), ("forks", Fork),
@@ -1168,9 +1097,9 @@ class Compile(msgspec.Struct, frozen=True):
         return None
 
     def contract_axes(self) -> Dict[str, Any]:
-        """The canonical shape-contract facts (feeds the cell key's
-        contract digest — pgw#647: a worker on a newer contract must never
-        consume an older cell)."""
+        """The canonical shape-contract facts (feeds the cell key's contract
+        digest: a worker on a newer contract must never consume an older
+        cell)."""
         axes: Dict[str, Any] = {
             "shapes": [list(s) for s in self.shapes],
             "targets": list(self.targets),
@@ -1180,8 +1109,8 @@ class Compile(msgspec.Struct, frozen=True):
             ],
             "regional": bool(self.regional),
         }
-        # pgw#739 declaration facts, present only when declared so a family
-        # that has not adopted the vocabulary keeps its existing digest.
+        # Declaration facts, present only when declared so a family that has
+        # not adopted the vocabulary keeps its existing digest.
         if self.dims:
             axes["dims"] = [d.as_row() for d in self.dims]
         if self.forks:
@@ -1216,39 +1145,37 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
     compile: Optional[Compile] = None
-    # the function makes endpoint-to-endpoint
-    # child calls (ctx.call_endpoint / ctx.workflow_checkpoint). The hub
-    # mints the invoke_child credential ONLY for declaring functions.
+    # The function makes endpoint-to-endpoint child calls (ctx.call_endpoint /
+    # ctx.workflow_checkpoint). The hub mints the invoke_child credential ONLY
+    # for declaring functions.
     child_calls: bool = False
-    # handlers on ONE live instance run
-    # SINGLE-FLIGHT by default (one binding set = one materialized graph
-    # with mutable buffers — e.g. a resident LoRA branch; two concurrent
-    # requests would corrupt each other). ``reentrant=True`` is the explicit
-    # opt-in for classes whose handlers genuinely mutate no instance state.
+    # Handlers on ONE live instance run SINGLE-FLIGHT by default (one binding
+    # set = one materialized graph with mutable buffers — e.g. a resident LoRA
+    # branch; two concurrent requests would corrupt each other).
+    # ``reentrant=True`` is the explicit opt-in for classes whose handlers
+    # genuinely mutate no instance state.
     reentrant: bool = False
-    # dynamic-LoRA endpoints declare the resident traced
-    # rank bucket at the DECORATOR (it shapes the graph family and the
-    # resident branch buffers whether or not compile= is present). The
-    # worker serves the branch-bearing graph family: canonical zeroed
-    # rank-<bucket> branches enabled at load (gw#547 compiled-lane
-    # contract), only `<lane>-lora<bucket>` cells adopt, and adapter swaps
-    # stay buffer copies — never a recompile. 0 = branchless.
+    # Dynamic-LoRA endpoints declare the resident traced rank bucket at the
+    # DECORATOR (it shapes the graph family and the resident branch buffers
+    # whether or not compile= is present). The worker serves the branch-bearing
+    # graph family: canonical zeroed rank-<bucket> branches enabled at load,
+    # only `<lane>-lora<bucket>` cells adopt, and adapter swaps stay buffer
+    # copies — never a recompile. 0 = branchless.
     lora_bucket: int = 0
-    # None = the DERIVED warm plan (defaults +
-    # axis cross-product + synthesized required fields, union-deduped per
-    # graph class); NoWarmup(reason) = class-level opt-out. Developer
-    # payload dicts are deleted.
+    # None = the DERIVED warm plan (defaults + axis cross-product +
+    # synthesized required fields, union-deduped per graph class);
+    # NoWarmup(reason) = class-level opt-out.
     warmup: Optional[NoWarmup] = None
-    # opt-in declared lane bodies this endpoint's code branches on
-    # (ctx.lane). Empty = platform-managed behavior only.
+    # Opt-in declared lane bodies this endpoint's code branches on (ctx.lane).
+    # Empty = platform-managed behavior only.
     handles: Tuple[str, ...] = ()
-    # declared compute-time formulas, attr_name -> RuntimeFormula
+    # Declared compute-time formulas, attr_name -> RuntimeFormula
     # (function-shaped endpoints key their single handler under "").
     # Declared via the runtime= kwarg overload; payload-field validation
     # happens at registry walk time when payload types are resolved.
     runtime_formula: Mapping[str, RuntimeFormula] = msgspec.field(default_factory=dict)
-    # declared config parameters (ctx.config) + declared env names
-    # (D2) — the mutable-config surface the hub validates writes against.
+    # Declared config parameters (ctx.config) + declared env names — the
+    # mutable-config surface the hub validates writes against.
     config: Tuple[ConfigParam, ...] = ()
     env: Tuple[str, ...] = ()
 
@@ -1354,9 +1281,9 @@ def _split_slot_like(
 
     A ``Slot`` contributes its ``default_checkpoint`` (if any) to the plain
     binding map every existing model-injection call site (executor, CLI,
-    prefetch) already understands, PLUS itself to the slots map the pgw#520
-    surfaces (discovery emission, the resolution chain) read. A bare binding
-    contributes only to the binding map — it carries no Slot metadata."""
+    prefetch) already understands, PLUS itself to the slots map discovery
+    emission and the resolution chain read. A bare binding contributes only to
+    the binding map — it carries no Slot metadata."""
     if isinstance(v, Slot):
         return v.default_checkpoint, v
     if isinstance(v, BINDING_TYPES):
@@ -1509,8 +1436,8 @@ def _derive_optional_slots(
     """A slot is OPTIONAL exactly when its ``setup()`` parameter has a
     default — the signature is the single declaration, so code and manifest
     can never disagree. Optional slots may be left unbound at deploy time
-    (which lanes a release serves is deploy config, th#980/ie#524); setup
-    then runs with the parameter's own default.
+    (which lanes a release serves is deploy config); setup then runs with the
+    parameter's own default.
 
     A defaulted parameter whose annotation cannot hold that default is a
     decoration-time error: injection is typed off the annotation, and an
@@ -1543,11 +1470,9 @@ def _annotation_admits_none(ann: Any) -> bool:
 
 
 def _validate_root_slot(owner: str, slots: Dict[str, Slot[Any]]) -> None:
-    """pgw#654 gap #7: a multi-slot class must designate ONE root —
-    ambiguity is a decoration-time error, never a silent runtime fallback
-    (the old ``for_request`` swallowed the ambiguous-root ValueError and
-    silently applied no objective, which would drop a v-pred checkpoint's
-    prediction_type)."""
+    """A multi-slot class must designate ONE root — ambiguity is a
+    decoration-time error, never a silent runtime fallback (which would drop
+    e.g. a v-pred checkpoint's prediction_type)."""
     roots = [n for n, s in slots.items() if s.root]
     if len(roots) > 1:
         raise ValueError(
@@ -1565,7 +1490,7 @@ def _validate_root_slot(owner: str, slots: Dict[str, Slot[Any]]) -> None:
 
 
 def _validate_lora_state_dict(owner: str, slots: Dict[str, Slot[Any]], lora_bucket: int) -> None:
-    """pgw#654 gap #9: a ``lora_bucket=`` endpoint whose root pipeline class
+    """A ``lora_bucket=`` endpoint whose root pipeline class
     is NON-introspectable (non-diffusers) must declare
     ``lora_state_dict`` — the adapter normalization path routes through
     ``type(pipe).lora_state_dict``, and without a converter every adapter
@@ -1608,7 +1533,7 @@ def _validate_lora_state_dict(owner: str, slots: Dict[str, Slot[Any]], lora_buck
 def _split_runtime_kwarg(
     owner: str, runtime: Any,
 ) -> Tuple[Optional[str], Dict[str, RuntimeFormula]]:
-    """th#1051 runtime= overload: a str selects an engine runtime (vllm /
+    """runtime= overload: a str selects an engine runtime (vllm /
     llama-server, classes only); a RuntimeFormula declares the compute-time
     formula for every handler ("*"); a mapping declares per-handler formulas
     (classes only). Returns (engine_runtime, {attr_or_"*": formula})."""
@@ -1702,9 +1627,9 @@ def _decorate_class(
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
-    # default-on boot warmup — fail unwarmable GPU inference classes
-    # at import when type hints resolve here (walk time re-checks). Lazy
-    # import: warmup.py imports this module.
+    # Default-on boot warmup — fail unwarmable GPU inference classes at import
+    # when type hints resolve here (walk time re-checks). Lazy import:
+    # warmup.py imports this module.
     from ..warmup import validate_at_decoration
 
     validate_at_decoration(cls, decl)
@@ -1855,20 +1780,16 @@ def endpoint(
             "Compile(dynamic=(DynamicDim('sequence', min=.., max=..),))."
         )
     if compile is not None:
-        # an export declaration is the family's export contract;
-        # registering at decoration is what lets the mint derive export inputs
-        # with zero per-family SDK code.
+        # An export declaration is the family's export contract; registering at
+        # decoration is what lets the mint derive export inputs with zero
+        # per-family SDK code.
         #
-        # the gate asks about INTENT, not about the payload. It used
-        # to read `compile.classes and compile.family`, so a declaration that
-        # named dims/forks/inputs and forgot its classes (or its family) was
-        # dropped on the floor — registered nothing, minted nothing, and on a
-        # pod was indistinguishable from an endpoint that never declared AOT.
-        # Flipping it to "classes required for every compile=" was the other
-        # wrong answer: six endpoints ship a thin class-less `compile=` for the
-        # dynamo lane only and declare no export contract at all. So the
-        # question is whether the author reached for the export vocabulary; if
-        # they did, `register_export_declaration` holds them to it.
+        # The gate asks about INTENT, not about the payload: whether the author
+        # reached for the export vocabulary at all. Requiring `classes` of every
+        # `compile=` would be wrong — endpoints ship a thin class-less
+        # `compile=` for the dynamo lane only and declare no export contract.
+        # If the author did reach for it, `register_export_declaration` holds
+        # them to it.
         from .export_contract import (
             declares_export_contract, register_export_declaration,
         )

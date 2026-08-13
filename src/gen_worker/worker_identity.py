@@ -1,26 +1,18 @@
-"""pgw#1122 (and pgw#1108 before it): WHO THIS POD IS — asked of the process
-that can answer, never of the one that structurally cannot.
+"""WHO THIS POD IS — asked of the process that can answer, never of the one
+that structurally cannot.
 
 THE CLASS OF DEFECT THIS MODULE DELETES
 ---------------------------------------
-The compute child (pgw#783, the only execution model) holds **no worker
-credential by construction**: the parent strips ``WORKER_JWT`` from its
-environment and no frame carries it, so ``ChildTransport.current_worker_jwt``
-returns ``""`` forever (pgw#763 delta 1). Every gate that answers a question
-about *identity* by reading that credential is therefore not merely wrong on
-some pods — it is wrong on **every** real serving pod, always, and it looks
-like a security refusal while it does it.
-
-That has now happened twice on the same seam, one gate apart:
-
-* **pgw#1108** — ``_boot_adopt`` treated "do I hold a bearer?" as "is there a
-  hub to ask?", so boot-adopt never derived a key and ``/v1/worker/cells/
-  resolve`` was called ZERO times on three real pods.
-* **pgw#1122** — the cell RECEIPT trust gate decoded ``cell_read_endpoint_id``
-  / ``cell_read_org_id`` out of *this process's* JWT, got ``""`` for both, and
-  refused every org-tier cell ``publisher_untrusted`` on three real pods that
-  had just resolved and materialized one. The pod then never served, was reaped
-  ``state_blocked_idle``, and a replacement was bought — twice.
+The compute child (the only execution model) holds **no worker credential by
+construction**: the parent strips ``WORKER_JWT`` from its environment and no
+frame carries it, so ``ChildTransport.current_worker_jwt`` returns ``""``
+forever. Every gate that answers a question about *identity* by reading that
+credential is therefore not merely wrong on some pods — it is wrong on
+**every** real serving pod, always, and it looks like a security refusal while
+it does it. (Twice measured: a boot-adopt that read "do I hold a bearer?" as
+"is there a hub to ask?" and never resolved, and a cell-receipt trust gate that
+decoded the viewer claims out of *this process's* JWT and refused every
+org-tier cell ``publisher_untrusted``.)
 
 So identity is not a gate's private business. It is ONE process-wide fact with
 ONE resolver, and this is it. A caller asks :func:`viewer`; it never decodes a
@@ -30,15 +22,15 @@ as if that were an answer.
 HOW IT RESOLVES
 ---------------
 1. **This process's own credential**, when it has one (``worker_credential``,
-   the pgw#848 single source). Single-process/embedded workers, the mint CLI
-   and the control parent all land here.
-2. **The parent**, over the pgw#763 delta-1 control seam — the same seam that
-   already mediates the resolve, the publish and the C2PA signature. The parent
-   decodes ITS credential and returns the two claims. A claim is not a
-   credential: the token itself never crosses.
+   the single source). Single-process/embedded workers, the mint CLI and the
+   control parent all land here.
+2. **The parent**, over the control seam that already mediates the resolve, the
+   publish and the C2PA signature. The parent decodes ITS credential and
+   returns the two claims. A claim is not a credential: the token itself never
+   crosses.
 3. **A typed refusal** (:class:`IdentityUnavailable`) when neither exists.
    Nothing here returns an empty identity to mean "could not ask" — that
-   conflation is exactly what made pgw#1122 read as an attack.
+   conflation is what makes a missing answer read as an attack.
 
 An identity that resolves but names nothing IS an answer, and a legal one: the
 hub stamps the claims only when it can (``cellgrant.Stamp``), and their absence
@@ -148,7 +140,7 @@ def viewer() -> ViewerIdentity:
     Cached after the first successful resolution: the endpoint a pod serves and
     the org that owns it do not change for the life of the process, and a
     credential rotation carries the same two claims (``cellgrant.Stamp`` runs
-    on both mint sites, th#1701).
+    on both mint sites).
 
     Raises :class:`IdentityUnavailable` when nothing can answer. Callers must
     treat that as a refusal with a name — not as an unnamed pod.
@@ -167,8 +159,8 @@ def _resolve() -> ViewerIdentity:
         return from_token(token)
 
     # No local credential. Under the split that is the DESIGNED state, not a
-    # fault: ask the process that holds one. This is the same seam pgw#1108
-    # made the resolve itself use.
+    # fault: ask the process that holds one, over the same seam the resolve
+    # itself uses.
     from .procsplit import broker
 
     if not broker.active():

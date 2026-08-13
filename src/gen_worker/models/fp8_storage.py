@@ -6,8 +6,7 @@ compute dtype". diffusers expresses that as a MUTATION at the forward
 boundary (``LayerwiseCastingHook``: ``module.to(dtype=compute)`` pre,
 ``module.to(dtype=storage)`` post). The identical semantics as structure —
 hold the fp8 tensor, upcast at the use site inside ``forward`` — is strictly
-better on every axis that was measured (pgw#704 S12-c, L4 sm_89, real SDXL
-UNet, 28 steps):
+better on every axis measured (L4 sm_89, real SDXL UNet, 28 steps):
 
 ======================  =========  =========  ==============================
 lane                    eager      dynamo     torch.export
@@ -21,9 +20,9 @@ fp8-storage (structure) 366.1 ms   329.1 ms   OK (6,950 nodes, the upcast
 The mutation lane is COMPILE-HOSTILE: dynamo buys it 0.2% — a *regression* —
 for a 38.9s mint, because ``module.to(dtype=...)`` at every leaf boundary
 defeats the compiler. The restructured lane is **14.8% faster under dynamo**
-than the hook lane, so this is a JIT-lane win on its own; exportability
-(pgw#722's AOT migration) is a bonus. It also removes the ``p.data``
-mutation-aliasing hazard the offload rung shares.
+than the hook lane, so this is a JIT-lane win on its own; exportability is a
+bonus. It also removes the ``p.data`` mutation-aliasing hazard the offload rung
+shares.
 
 **Coverage is upstream's, not ours.** Which leaves get fp8 storage is
 decided by diffusers' rule (``_apply_layerwise_casting``: its supported layer
@@ -48,11 +47,7 @@ imply the second:
    reproduced on CPU at +49.9%. ``_to_storage_buffer`` rebinds the outgoing
    Parameter onto the fp8 storage, which restores the hook lane's property
    that every holder follows the cast. A module-only walk cannot see this
-   failure, which is why the first cut of this lane claimed "identical
-   residency" while a pod said otherwise.
-
-pgw#704 S12-c's "+11.6%" number is separately unusable: that prototype
-swapped ``nn.Linear`` ONLY, leaving convs bf16-resident.
+   failure — it reports "identical residency" while a pod says otherwise.
 
 The restructure is a CLASS PUN: the leaf keeps its identity, parameters,
 FQNs and kernel attributes, and only its ``forward`` changes (``nn.Linear``

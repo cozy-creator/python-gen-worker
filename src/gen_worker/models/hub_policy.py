@@ -76,11 +76,10 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 
 
 # ---------------------------------------------------------------------------
-# Fit-verdict policy (#380) — classify ONE function's Resources on THIS
-# machine. Pure logic over (Resources, capabilities, free VRAM); consumed by
+# Fit-verdict policy — classify ONE function's Resources on THIS machine. Pure
+# logic over (Resources, capabilities, free VRAM); consumed by
 # serve_fit.plan_serve (the executor's flavor-fit ladder) and `run --list`.
-# The old select_variant ranking helper was deleted in pgw#527 — dead since
-# `--variant auto` was removed; ranking now lives hub-side.
+# Ranking lives hub-side, never here.
 # ---------------------------------------------------------------------------
 
 FIT_FITS = "fits"
@@ -93,18 +92,14 @@ FIT_GGUF = "gguf_quant"
 FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
 
-# pgw#1148 (§1.32(d), th#1803): the STORED-PRECISION classification of a
-# binding is gone from this planner. It read `binding.flavor` — the
-# arbitrary-string sub-selector Paul killed — and with that field deleted
-# `svdq_flavor_kind`/`quant_flavor_kind` could only ever have answered "".
-# A binding names a tag or a digest; WHAT THE BYTES ARE is the checkpoint's
+# The STORED-PRECISION classification of a binding is NOT this planner's. A
+# binding names a tag or a digest; WHAT THE BYTES ARE is the checkpoint's
 # TENSOR-LAYOUT CONTRACT (§1.33), which the loaders gate on for real
 # (`@implements_contract`, models/svdq_layout.py, w4a4.py, w8a8.py) instead
 # of trusting a token in a ref. The svdq SM-window and nvfp4-Blackwell
-# refusals therefore live where the artifact declares itself, not here.
-# Re-deriving a LOCAL fit verdict from the resolved checkpoint's contract is
-# a BUILD, filed as a pgw#1148 residual — this planner now answers on
-# resources + declared cast alone, which is what it can honestly know.
+# refusals therefore live where the artifact declares itself, not here. This
+# planner answers on resources + declared cast alone, which is what it can
+# honestly know.
 
 
 def variant_fit(

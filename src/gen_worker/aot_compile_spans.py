@@ -1,21 +1,19 @@
-"""pgw#830: complete span coverage over one entry's compile.
+"""Complete span coverage over one entry's compile.
 
 The defect this closes
 ----------------------
-pgw#757 named FIVE phases by reading dynamo's ``compilation_time_metrics``
-(lowering / codegen / graph passes / host C++ / triton). On attempt nine's
-72-entry regional mint those five summed to **742.6 s of a recorded
-``compile_s`` of 1331.72 s — 56 %.** The other 44 % had no name, and a
-number with no name cannot be optimized, argued about, or defended.
+Reading dynamo's ``compilation_time_metrics`` alone (lowering / codegen /
+graph passes / host C++ / triton) names about 56 % of a recorded ``compile_s``;
+the other 44 % has no name, and a number with no name cannot be optimized,
+argued about, or defended.
 
-The reason the gap existed is structural, not a missing metric key:
-``compile_s`` in the pooled path is the parent's Popen-to-reap wall of an
-entry CHILD PROCESS, while ``phases`` only ever measured the inside of
-``aot_compile``. Everything the child does before and after that call —
-interpreter boot, ``import torch``, ``env_seal.establish``, the device-lock
-install, ``torch.export.load`` of the staged program, the report write, the
-parent's poll granularity — was inside the measured total and outside the
-measured parts.
+The gap is structural, not a missing metric key: ``compile_s`` in the pooled
+path is the parent's Popen-to-reap wall of an entry CHILD PROCESS, while
+``phases`` only measures the inside of ``aot_compile``. Everything the child
+does before and after that call — interpreter boot, ``import torch``,
+``env_seal.establish``, the device-lock install, ``torch.export.load`` of the
+staged program, the report write, the parent's poll granularity — is inside
+the measured total and outside the measured parts.
 
 The model: three nested partitions, each exact
 ----------------------------------------------
@@ -67,12 +65,10 @@ import time
 from typing import Dict, Iterator, List, Mapping, Tuple
 
 #: Bump when the partition changes shape, so a reader never mixes two ledgers.
-#: v2: the outer partition grew its own residual, ``parent_other_s``.
-#: Before it, an unclosable outer split was written into ``reap_lag_s``, so one
-#: NAME meant two things — "the child's exit plus the parent's poll
-#: granularity" on a reporting child, and "everything nobody could attribute"
-#: on a silent one. A reader could not tell which, and one did not: pgw#1085
-#: §5c read the residual branch as poll lag on a 36-entry sdxl mint.
+#: v2: the outer partition has its own residual, ``parent_other_s``. Folding it
+#: into ``reap_lag_s`` makes one NAME mean two things — "the child's exit plus
+#: the parent's poll granularity" on a reporting child, "everything nobody
+#: could attribute" on a silent one — which readers cannot tell apart.
 SPANS_V = 2
 
 #: Disjoint ``compilation_time_metrics`` leaves. These partition the inside of
@@ -82,12 +78,10 @@ SPANS_V = 2
 #: reading them against ``compile_s`` is the trap this program fell into twice.
 #: ``compile_s`` is the parent's Popen-to-reap wall, which also contains the
 #: child's interpreter boot, seal, program load and reap lag. MEASURED on the
-#: standing hub over 20 recorded sdxl entries (pgw#1189, 2026-08-12):
-#: ``compile_s - sum(leaves)`` has median 37.7 s and **minimum −2.9 s**. A
-#: NEGATIVE residual is proof the leaves also OVERLAP each other, so their sum
-#: is not a breakdown of anything and "the unattributed remainder" is not a
-#: quantity. th#1834's P0-E read a ~39 s residual that way and attributed it,
-#: by inference, to a cost on a path it had not established was taken.
+#: standing hub over 20 recorded sdxl entries: ``compile_s - sum(leaves)`` has
+#: median 37.7 s and **minimum −2.9 s**. A NEGATIVE residual is proof the
+#: leaves also OVERLAP each other, so their sum is not a breakdown of anything
+#: and "the unattributed remainder" is not a quantity.
 PARTITION_KEYS: Dict[str, Tuple[str, ...]] = {
     "lowering_s": ("GraphLowering.run",),
     "codegen_s": ("GraphLowering.codegen",),

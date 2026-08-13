@@ -49,13 +49,13 @@ class ProducedFlavor(msgspec.Struct):
       - extra_files: rare escape hatch — sibling artifacts attached to the
         same flavor (e.g. a tokenizer.json next to a non-tree output).
       - flavor: optional PRODUCER-LOCAL label such as ``bf16``, ``fp8`` or
-        ``int4``. pgw#1159: it is NOT published and it names no catalog row —
-        th#1803 deleted the flavor as an address. It classifies the placement
+        ``int4``. It is NOT published and it names no catalog row — a flavor
+        is not an address. It classifies the placement
         stamp and names the publish's activity legs; when empty the
         ``dtype`` attribute is used. What the bytes ARE is stated by the
         ``dtype`` attribute and, when the producer knows it, an
         ``artifact_contract`` attribute (``ns.name@N``, PROVEN hub-side
-        against the safetensors header — th#1580/§1.33).
+        against the safetensors header — §1.33).
 
     A job that emits several artifacts hands over several ``ProducedFlavor``
     entries: N publishes joining ONE tag group. There is no flavor-label set

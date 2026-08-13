@@ -1,4 +1,4 @@
-"""AWQ W4A16 modulation layers in an svdq checkpoint (pgw#685 S2b).
+"""AWQ W4A16 modulation layers in an svdq checkpoint.
 
 An svdq artifact does not quantize everything the same way. The DiT's Linears are
 W4A4 nvfp4 with a low-rank branch (``svdq_layout``), but the adaLN MODULATION
@@ -193,7 +193,7 @@ def is_awq_linear(tensors: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Forward encode (pgw#755, te#137 producer). Adapted from deepcompressor
+# Forward encode. Adapted from deepcompressor
 # (Apache-2.0, mit-han-lab): backend/tinychat/utils.py pack_w4 +
 # convert_to_tinychat_w4x16y16, backend/nunchaku/utils.py adanorm transform —
 # the same upstream code the tests above invert bit-exactly.

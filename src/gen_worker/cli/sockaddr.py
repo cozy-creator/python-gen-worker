@@ -20,12 +20,12 @@ from typing import NamedTuple
 # The default listen/connect address, and the reason this module exists at the
 # bottom of the cli package: `serve` legitimately depends on `run` (it reuses
 # its dispatch, its exit codes and its errors), so `run` and `invoke` may not
-# reach back into `serve` for a constant. It lived there until pgw#981, and the
-# cycle that made cost `import gen_worker.cli.serve` an ImportError whenever it
-# was the first cli module imported.
+# reach back into `serve` for a constant — that cycle makes `import
+# gen_worker.cli.serve` an ImportError whenever it is the first cli module
+# imported.
 DEFAULT_SOCKET_PATH = "./.gen-worker.sock"
 
-#: pgw#1013 — the largest NDJSON line either end will buffer before refusing.
+#: The largest NDJSON line either end will buffer before refusing.
 #:
 #: Both ends read bytes into a `bytearray` until a newline arrives, and neither
 #: end counted them: a peer that never sends `\n` grows that buffer until the

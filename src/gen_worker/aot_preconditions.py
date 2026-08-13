@@ -16,9 +16,8 @@ mode (ruled), and it keeps the dynamo lane.
 
 This module is the ONE spelling of those rows. ``discovery.discover`` stamps
 them into ``endpoint.lock`` and ``discovery.validation`` turns a refusal into a
-build error. pgw#914: this is now the ONLY place the torch floor is decided —
-the mint's second spelling (``aot_mint.lifted_torch_gap``) is deleted, so a
-build cannot prove one thing and a pod discover another.
+build error. This is the ONLY place the torch floor is decided: there is no
+second spelling, so a build cannot prove one thing and a pod discover another.
 
 Four verdicts, and the difference between the last three is the whole point:
 
@@ -57,8 +56,8 @@ logger = logging.getLogger(__name__)
 
 #: torch below this cannot trace the lifted-LoRA fork: 2.9 strict export
 #: refuses ``bind_views``' in-trace setattr ("Mutating module attribute lora_a
-#: during export") that 2.13 traces fine — measured on pod 8 (pgw#723
-#: residuals). A mint PRECONDITION for the bucket-bearing lane, not a taste.
+#: during export") that 2.13 traces fine — measured. A mint PRECONDITION for
+#: the bucket-bearing lane, not a taste.
 LIFTED_LORA_TORCH_FLOOR: Tuple[int, int] = (2, 13)
 
 CHECK_DECLARATION_IMPORT = "declaration_import"
@@ -78,8 +77,8 @@ ADAPTER_BACKEND_DIST = "peft"
 
 #: Distributions that must appear at most once. A second copy of any of them
 #: silently doubles the image by ~7 GB and desyncs the CUDA runtime — the
-#: synthesized Dockerfile asserts this in-image (`torchInvariantLine`), and
-#: until pgw#1017 nothing asked it of a custom Dockerfile.
+#: synthesized Dockerfile asserts this in-image (`torchInvariantLine`); this
+#: check is what asks it of a custom Dockerfile too.
 TORCH_FAMILY: Tuple[str, ...] = ("torch", "torchvision", "torchaudio", "triton")
 
 OK = "ok"
@@ -195,8 +194,8 @@ def static_mint_preconditions(
                     "the registered export declaration evaluated to None — "
                     "there is no Compile to derive graph classes from")))
             continue
-        # the declared block, read as DATA — the one form since
-        # pgw#1107 retired the thunk that used to say it by raising.
+        # The declared block, read as DATA — never a thunk that says it by
+        # raising.
         blocked = open_blockers(decl)
         if blocked:
             rows.append(Precondition(
@@ -259,13 +258,11 @@ def _torch_is_cuda_build() -> bool:
 
 
 def _cuda_root_row(aot_declaring: list[str]) -> Precondition:
-    """pgw#1017 GAP A: `g++` is necessary and NOT sufficient on a CUDA image.
+    """`g++` is necessary and NOT sufficient on a CUDA image.
 
-    The third instance of this issue's own defect class, and the most expensive
-    of the three: the cxx gap refused at build for $0.00, while this one refused
-    NOWHERE. The pod booted, loaded and EXPORTED — the expensive part — before
-    `cpp_extension` said "CUDA_HOME environment variable is not set". Free
-    refusal, paid failure; that asymmetry is the whole reason this row exists.
+    Unasked, this refuses NOWHERE: the pod boots, loads and EXPORTS — the
+    expensive part — before `cpp_extension` says "CUDA_HOME environment
+    variable is not set". Free refusal here, paid failure there.
     """
     from . import cuda_root as cr
 
@@ -295,7 +292,7 @@ def _cuda_root_row(aot_declaring: list[str]) -> Precondition:
 
 
 def _torch_singleton_row() -> Precondition:
-    """pgw#1017 GAP B: one torch-family install, not two.
+    """One torch-family install, not two.
 
     `torchInvariantLine` fails the SYNTHESIZED build when a second copy of a
     torch-family distribution lands — *"silently doubles the image by ~7GB and

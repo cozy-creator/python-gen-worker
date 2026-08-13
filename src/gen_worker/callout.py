@@ -1,4 +1,4 @@
-"""Endpoint-to-endpoint call-out client (th#826, the workflow primitive).
+"""Endpoint-to-endpoint call-out client — the workflow primitive.
 
 The SDK half of the platform's call-out primitive: a function declared with
 ``@endpoint(child_calls=True)`` receives an ``invoke_child`` grant on its
@@ -223,7 +223,7 @@ class CalloutClient:
             self._checkpoint_url(key), headers=self._headers(), timeout=_HTTP_TIMEOUT_S
         )
         if resp.status_code == 404:
-            # te#125/th#1238: "the hub has no checkpoint under this key" and
+            # "The hub has no checkpoint under this key" and
             # "a proxy answered because the hub is restarting" are both 404,
             # and this is the worse of the two conflations — reporting
             # (None, False) for an outage is a SILENT WRONG ANSWER that reads
@@ -264,7 +264,7 @@ class CalloutClient:
 class ChildRequest:
     """Handle for one submitted child request (``wait=False`` variant).
 
-    ``wait_guard`` (worker-internal, pgw#943): a context manager factory the
+    ``wait_guard`` (worker-internal): a context manager factory the
     :meth:`result` wait runs under. The executor's ``RequestContext`` passes
     its child-call slot guard here so a handler parked on ``.result()`` yields
     its GPU permit exactly like ``ctx.call_endpoint(wait=True)`` — the yield

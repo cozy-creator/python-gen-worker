@@ -19,8 +19,7 @@ forfeit.
 Wan 2.2 A14B runs two experts (``transformer`` high-noise, ``transformer_2``
 low-noise) with a mid-schedule handoff, so BOTH need the call — exactly as the
 endpoint's own ``_use_cudnn_attention`` already iterates its expert tuple. A
-group where one expert is sharded and the other is not is the divergence class
-§5.4 is about.
+group where one expert is sharded and the other is not diverges silently.
 
 **CP and CPU offload do not compose** (diffusers #12533: *"Enabling CPU offload
 before enabling parallelism will raise a shape error after the first pipe
@@ -84,9 +83,9 @@ class ContextParallelUnavailable(RuntimeError):
 
 
 class UngatedShardedForward(ContextParallelUnavailable):
-    """A forward through a CP-sharded module outside the group's call gate
-. Raised BY NAME, with the caller's thread, instead of hanging
-    the group in a collective no other rank will ever join."""
+    """A forward through a CP-sharded module outside the group's call gate.
+    Raised BY NAME, with the caller's thread, instead of hanging the group in a
+    collective no other rank will ever join."""
 
 
 @dataclass(frozen=True)
@@ -115,9 +114,9 @@ class _GroupMesh:
     dispatch then use only ``.size()``, ``.get_group()`` and
     ``dist.get_rank/get_world_size(group)``. Ring degree is always 1 here
     (Ulysses only), so the ring axis is a size-1 shim whose ``get_group`` is
-    a typed refusal — nothing may ever run a ring collective through it.
-    ``test_sequence_parallel`` pins this contract against the installed
-    diffusers so an upstream change breaks loudly, not silently.
+    a typed refusal — nothing may ever run a ring collective through it. A test
+    pins this contract against the installed diffusers so an upstream change
+    breaks loudly, not silently.
     """
 
     def __init__(self, pg: Any, size: int, local_rank: int, *, axis: str = "ulysses") -> None:
@@ -367,9 +366,7 @@ def refuse_unless_divisible(
     """The diffusers #12536 assertion, checked BEFORE a pod is committed.
 
     Ulysses shards the sequence across ranks and the head dimension inside the
-    all-to-all, so both must divide the degree. Our T2V shapes divide cleanly
-    (40 heads, 75,600 tokens at 2/4/8); I2V's 769-token concat is what
-    ``_cp_plan``'s own comment disables splitting for.
+    all-to-all, so both must divide the degree.
     """
     d = int(degree)
     if d <= 1:

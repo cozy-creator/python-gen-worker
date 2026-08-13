@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pgw#1143 (§1.33 point 5): CONVERSION IS UPSTREAM OF COMPUTE — no cell re-keys.
+"""CONVERSION IS UPSTREAM OF COMPUTE — no cell re-keys.
 
     Every byte the endpoint's loader/`setup()` observes is in one of the slot's
     DECLARED accepted layouts. Conversion completes strictly before
@@ -29,15 +29,13 @@ way around an import check, so strings count.
 Deliberately NOT banned: `@implements_contract` and `ContractDecoder`. Those are
 the DECODER CENSUS half of the same module — "which decoders does this image
 contain" — which is a property of the wheel that legitimately reaches the
-toolchain closure. The banned set is the demand/conversion half, which is what
-§1.33 point 5 is about.
+toolchain closure. The banned set is the demand/conversion half.
 
-**FENCE 2 — the compatibility RELATION holds no format knowledge.** §1.33's
-extensibility invariant (`f6f95736`): *"Contract CONTENTS evolve; the
-compatibility RELATION never does."* So the functions that compute the rung
-must contain zero literal contract handles. A handle literal appearing there is
-the first line of a per-format special case, which the ruling forbids; it is
-also the shape a similarity heuristic arrives in.
+**FENCE 2 — the compatibility RELATION holds no format knowledge.** The
+extensibility invariant: contract CONTENTS evolve; the compatibility RELATION
+never does. So the functions that compute the rung must contain zero literal
+contract handles. A handle literal appearing there is the first line of a
+per-format special case; it is also the shape a similarity heuristic arrives in.
 
 Run::
 

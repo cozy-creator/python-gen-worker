@@ -356,7 +356,7 @@ def write_video(
                 # Chunks arrive while the producer still owns the GPU; the
                 # encode interleaves (NVENC costs zero SMs). Release the slot
                 # only once decode is done, before the flush + upload tail.
-                # CUDA-tensor chunks take the gw#549 staging pipeline: uint8
+                # CUDA-tensor chunks take the staging pipeline: uint8
                 # conversion on-GPU (2-4x PCIe byte cut) + pinned async D2H
                 # one chunk behind the producer, so chunk N's copy overlaps
                 # chunk N+1's decode and chunk N-1's CPU encode. Other chunk
@@ -390,7 +390,7 @@ def write_video(
                     _release_gpu_slot_for_finalize(ctx)
                     if judged(ctx):
                         with _stage(ctx, "output_integrity"):
-                            guard_frames(arr, ref=ref)  # pgw#1094, pre-encode
+                            guard_frames(arr, ref=ref)  # pre-encode
                     encoder.add(arr)
                     del arr
                     encoder.finish(audio)

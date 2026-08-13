@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""pgw#849 guard 2 — public surface in `gen_worker` that NOTHING in production
-reaches. Whole-package since pgw#1182.
+"""Public surface in `gen_worker` that NOTHING in production reaches.
+Whole-package scope.
 
 This program's dominant defect class is *wiring*, not logic: correct code, green
-unit tests, no production caller. ``entry_workers(peak_rss_bytes=…)`` handled a
-measurement no caller ever passed, so RAM was divided by a 3 GiB constant on
-every mint ever run. ``aot_serve.set_guard_failure_callback`` was never called,
-so every AOT arm ever built was unadvertisable, for weeks. A unit test is
-structurally blind to both, because the unit test IS the caller the production
-path is not.
+unit tests, no production caller. A unit test is structurally blind to it,
+because the unit test IS the caller the production path is not.
 
 So: parse the tree, take every public callable and public keyword parameter
 defined in the guarded modules, and subtract everything a NON-TEST file
@@ -24,30 +20,11 @@ load-bearing: ``compile_cache.build`` looks reached to a name matcher because
 not knowable from the AST), which makes the method half conservative — it
 under-reports rather than crying wolf.
 
-WHAT THIS GUARD DOES NOT CATCH, stated plainly: ``podguard.attend()`` returned
-``lease.attend(api)``, which CONSTRUCTS a Keeper and never starts it — only
-``__enter__`` calls ``start()``. The call site exists and reads correctly; what
-is missing is that the returned object is never entered. No reachability
-analysis sees that, and this guard does not pretend to. It catches the
-"nothing calls it" half of the class, not the "called but never driven" half.
-
-SCOPE. It was the aot / mint / serve modules only, on a pgw#849 measurement that
-whole-package scope was "noisier for no extra yield". **pgw#1182 supersedes
-that**: the noise was two fixable things, not a property of the wider scope —
-
-  1. the resolver mis-resolved every relative import inside an ``__init__.py``
-     (level 1 dropped a component that is not there when the module IS the
-     package), so all five ``cli.*.add_subparser`` and four ``request_context``
-     internals read as unreached while ``cli/__init__.py`` calls them by name;
-  2. there was no way to say *the caller is an endpoint repo*. An endpoint
-     author's code is production and lives where this process cannot see it.
-     ``scripts/author_surface_allowlist.txt`` says so, one symbol at a time,
-     with the call site as proof — after pgw#1179 deleted ``trt_engine.build``
-     and the producer turned out to be a conversion endpoint in
-     ``training-endpoints``.
-
-With both fixed the whole package yields 116 against the 14 this guard watched,
-and the defect class was never confined to the mint path.
+WHAT THIS GUARD DOES NOT CATCH: a call site that exists and reads correctly
+while the object it returns is never driven (e.g. a context manager that is
+constructed but never entered). No reachability analysis sees that. It catches
+the "nothing calls it" half of the class, not the "called but never driven"
+half.
 
 **This is still not a general dead-code linter.** It reports PUBLIC callables
 only, it clears anything an operator script or an endpoint repo reaches, and
@@ -83,9 +60,7 @@ PKG = SRC / "gen_worker"
 POD_ROOTS = (SRC,)
 
 # Operator harnesses. A symbol only these reach is still not on the pod's
-# production path, so it is reported — annotated, not cleared. Calling a
-# benchmark script "production" is how `entry_workers(peak_rss_bytes=…)` would
-# have been argued away.
+# production path, so it is reported — annotated, not cleared.
 TOOL_ROOTS = (REPO / "scripts", REPO / "examples", REPO / "agents",
               REPO / "benchmarks")
 
@@ -93,22 +68,14 @@ TOOL_ROOTS = (REPO / "scripts", REPO / "examples", REPO / "agents",
 # as reach would exempt half the tree.
 SELF = Path(__file__).resolve()
 
-# The RATCHET. Every entry is a live hit measured on 2026-08-01 and
-# recorded rather than silently tolerated: the guard fails on anything NEW, and
-# equally on an entry that has since been wired up and not removed. A baseline
-# nobody has to shrink is a baseline nobody reads.
+# The RATCHET. Every entry is a live hit, recorded rather than silently
+# tolerated: the guard fails on anything NEW, and equally on an entry that has
+# since been wired up and not removed. A baseline nobody has to shrink is a
+# baseline nobody reads.
 BASELINE = REPO / "scripts" / "unreached_surface_baseline.txt"
 
-# The guarded scope: THE WHOLE PACKAGE. It used to be the mint / arm
-# / serve modules only, on a pgw#849 measurement that whole-package scope was
-# "noisier for no extra yield". That measurement is superseded: the noise was
-# two fixable things — a resolver that mis-resolved every relative import inside
-# an `__init__.py`, and no way to say "the caller is an endpoint repo" — and
-# with both fixed the whole package yields 116 findings against the 14 this
-# guard was watching. The defect class is not confined to the mint path and the
-# fence should not be either.
-#
-# `gen_worker.pb` is excluded: generated protobuf stubs, authored by protoc.
+# The guarded scope: THE WHOLE PACKAGE. `gen_worker.pb` is excluded — generated
+# protobuf stubs, authored by protoc.
 GUARDED = re.compile(r"^gen_worker(?!\.pb($|\.))")
 
 # The authored-worker API. Its callers are endpoint repos that vendor the
@@ -118,7 +85,7 @@ EXEMPT_PACKAGES = ("gen_worker.api",)
 # The same fact, one symbol at a time, WITH PROOF. `gen_worker.api` is exempt by
 # package because the whole package is authored-worker surface; these are
 # symbols OUTSIDE it that an endpoint repo nonetheless calls. Each row names the
-# call site. pgw#1179 deleted `trt_engine.build` for want of this file.
+# call site.
 AUTHOR_SURFACE_FILE = REPO / "scripts" / "author_surface_allowlist.txt"
 
 
@@ -231,8 +198,7 @@ def _alias_of(fn: ast.AST) -> Tuple[str, ...]:
     """If the whole body is ``return <expr over private state>``, the private
     names that expression reads. Such a function is a READ ALIAS: if the state
     it exposes is read directly elsewhere in production, a missing caller means
-    duplicated surface, not unwired behavior. Measured: this is the only
-    false-positive class the guard produced on the real tree."""
+    duplicated surface, not unwired behavior."""
     body = [s for s in fn.body if not (
         isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
     if len(body) != 1 or not isinstance(body[0], ast.Return) or body[0].value is None:
@@ -250,8 +216,7 @@ def _alias_of(fn: ast.AST) -> Tuple[str, ...]:
 def _alias_calls(fn: ast.AST) -> Tuple[str, ...]:
     """If the whole body is a single ``return``, every callable it delegates
     to. A one-line wrapper over machinery production already calls is
-    duplicated surface, not unwired behavior — measured, and the second of the
-    two false-positive classes on the real tree."""
+    duplicated surface, not unwired behavior."""
     body = [s for s in fn.body if not (
         isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
     if len(body) != 1 or not isinstance(body[0], ast.Return) or body[0].value is None:
@@ -265,8 +230,7 @@ def _alias_calls(fn: ast.AST) -> Tuple[str, ...]:
             elif isinstance(fnode, ast.Attribute):
                 out.add(fnode.attr)
     # Builtins are not "machinery production already calls" — `return
-    # int(budget_bytes)` is a brand-new entrypoint, not a wrapper. Measured:
-    # without this filter the guard exempted its own red arm.
+    # int(budget_bytes)` is a brand-new entrypoint, not a wrapper.
     return tuple(sorted(out - set(dir(builtins))))
 
 
@@ -354,10 +318,8 @@ class _FileScan(ast.NodeVisitor):
             # A relative import resolves against the importer's PACKAGE. For a
             # module that is the parent (drop one component per level); for a
             # package's own `__init__.py` the package IS `self.mod`, so one
-            # fewer. Getting this wrong made every `from . import x` inside an
-            # `__init__.py` resolve to the grandparent and read as unreached —
-            # `cli/__init__.py` wires all five subcommands that way, and all
-            # five looked dead under `--all`.
+            # fewer. Getting this wrong makes every `from . import x` inside an
+            # `__init__.py` resolve to the grandparent and read as unreached.
             drop = node.level - 1 if self.is_package else node.level
             parts = self.mod.split(".")
             root = ".".join(parts[: len(parts) - drop]) if drop else self.mod
@@ -388,11 +350,10 @@ class _FileScan(ast.NodeVisitor):
             self.reach.qualified.add(f"{self.modules[owner.id]}.{node.attr}")
         self.generic_visit(node)
 
-    # NOTE: a bare identifier-shaped string literal is NOT reach. Half the
-    # tree names some symbol in a log line or an activity kind; treating that
-    # as a call site is how `numerics_ladder.gate` looked wired while nothing
-    # in `src/` imports the module at all. Only a genuine dynamic lookup
-    # counts — see `visit_Call`.
+    # NOTE: a bare identifier-shaped string literal is NOT reach. Half the tree
+    # names some symbol in a log line or an activity kind, and treating that as
+    # a call site makes a module nothing imports look wired. Only a genuine
+    # dynamic lookup counts — see `visit_Call`.
 
     def visit_Assign(self, node: ast.Assign) -> None:
         # `__all__` entries are re-exports, not call sites.
@@ -462,9 +423,8 @@ def py_files(roots) -> List[Path]:
     for root in roots:
         if root.exists():
             # `.venv` is checkout-borne, never tree content: an installed env
-            # under a TOOL_ROOT (examples/from-scratch/.venv, ~10k files) blew
-            # the walk into a RecursionError that a clean `git archive` never
-            # reproduced (pgw#1035's "not reproducible").
+            # under a TOOL_ROOT (~10k files) blows the walk into a
+            # RecursionError that a clean checkout never reproduces.
             out.extend(p for p in root.rglob("*.py")
                        if "__pycache__" not in p.parts
                        and ".venv" not in p.parts
@@ -571,11 +531,10 @@ def reached(d: Definition, reach: Reach) -> bool:
 # THE CROSS-REPO CHECK
 #
 # The finding this whole guard produces is "no non-test call site IN THIS REPO",
-# and that is NOT the claim "no consumer". pgw#1179 deleted `trt_engine.build`
-# on the first reading of the second; its caller is a conversion endpoint in
-# `training-endpoints`, and the function it backs, `produce-trt-engine`, is a
-# PRICED hub product (`e2e/manifests/pricing.yaml`). A symbol behind a priced
-# function has a consumer even when no code in any repo imports it.
+# and that is NOT the claim "no consumer": a symbol whose caller is a conversion
+# endpoint in a sibling repo, or that backs a PRICED hub product
+# (`e2e/manifests/pricing.yaml`), has a consumer even when no code in any repo
+# imports it.
 #
 # CI has none of these checkouts, which is why the answer is a checked-in file
 # (`author_surface_allowlist.txt`) and this mode is the thing that MAINTAINS it.
@@ -678,12 +637,11 @@ def cross_repo_report(findings: List["Finding"], with_branches: bool) -> int:
         parts = target.split(".")
         leaf, mod = parts[-1], ".".join(parts[1:-1])
         modtail = mod.split(".")[-1] if mod else ""
-        # ANY gen_worker module, not just the defining one: packages re-export,
-        # and training-endpoints imports `from gen_worker.convert import
-        # Dataset` while the class is defined in `gen_worker.convert.dataset`.
-        # Requiring the defining path made this check blind to every re-export
-        # — which is the same shape of miss that severed a priced consumer, so
-        # it over-matches on purpose. Over-matching says "do not delete".
+        # ANY gen_worker module, not just the defining one: packages re-export
+        # (a sibling imports `from gen_worker.convert import Dataset` while the
+        # class is defined in `gen_worker.convert.dataset`). Requiring the
+        # defining path would make this check blind to every re-export, so it
+        # over-matches on purpose — over-matching says "do not delete".
         pats = [rf"from gen_worker[.\w]* import [^\n]*\b{re.escape(leaf)}\b",
                 rf"\bctx\.{re.escape(leaf)}\s*\("]
         if modtail:
@@ -770,14 +728,8 @@ def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
 # it must act, and strictly harder to see than an unused function, because
 # every grep for it finds hits.
 #
-# HISTORY, because it decides how much this check is trusted: it was built
-# against z-image's ``warm_changes_key=True`` as a live example, and that
-# example was WITHDRAWN by the lane that filed it — the pre-warm has been
-# performed since pgw#758 (``aot_mint.py``, "The WARM CANON, EXECUTED"). The
-# blocker text was true when written and stale when relayed. So this check has
-# never had a confirmed live instance, and measures 1 hit over 72 declaration
-# fields today (``warm_reason``, a recorded rationale). That is why it reports
-# and does not gate. The shape is real; the example was not.
+# This check has never had a confirmed live instance, which is why it REPORTS
+# and does not gate.
 #
 # So classify each read of a declared field by what the reading site DOES with
 # it. A field whose every read is validate / key / record is INERT: the fleet
@@ -895,10 +847,9 @@ def _upstream_baseline() -> Optional[Set[str]]:
 
     Why a gate reads git: a STALE row is usually not a finding at all. Master
     moves, somebody turns the ratchet there, and every branch that predates the
-    turn goes red on a row that is already gone upstream. Two lanes have now
-    spent time treating that as a real defect. The guard can tell — the row is
-    absent from `origin/master` — so it should say REBASE instead of letting a
-    reader investigate a deletion that has already happened.
+    turn goes red on a row that is already gone upstream. The guard can tell —
+    the row is absent from `origin/master` — so it says REBASE instead of
+    letting a reader investigate a deletion that has already happened.
     """
     import subprocess
     try:
@@ -922,12 +873,9 @@ def rewrite_baseline(current: Set[str]) -> None:
     row is a deletion somebody else OWES.
 
     So the header is kept byte-for-byte, and only rows it does NOT already list
-    are appended. That second half is not a nicety. The documented sections
+    are appended. That second half is not a nicety: the documented sections
     contain DATA rows under their notes, so a writer that appends everything
-    duplicates every documented row — 14 of them, twice now, because I wrote the
-    naive version in pgw#1182, deduped it by hand in pgw#1190, and reintroduced
-    it in pgw#1192 by regenerating again. A hand-fix that a tool re-breaks is
-    not a fix; this is the tool.
+    duplicates every documented row.
     """
     lines = BASELINE.read_text(encoding="utf-8").splitlines()
     comment_idx = [i for i, ln in enumerate(lines) if ln.startswith("#")]
@@ -951,11 +899,10 @@ def rewrite_baseline(current: Set[str]) -> None:
 def baseline_rows() -> Tuple[Set[str], Dict[str, str]]:
     """The ratchet's labels, and the OWNER/EXPIRY note governing each.
 
-    The file already writes those notes as prose above the rows they cover
-    (pgw#1178's block is the model). Parsing them costs nothing and turns a
-    note nobody reads into the first line of the failure that needs it: a row
-    with an owner and an expiry is a deletion somebody OWES, and the reader who
-    trips the gate is usually not that somebody.
+    The file writes those notes as prose above the rows they cover. Parsing
+    them turns a note nobody reads into the first line of the failure that
+    needs it: a row with an owner and an expiry is a deletion somebody OWES,
+    and the reader who trips the gate is usually not that somebody.
     """
     known: Set[str] = set()
     notes: Dict[str, str] = {}
@@ -1065,11 +1012,9 @@ def main() -> int:
               f"      git log --oneline -S {label.rstrip('()').rsplit('.', 1)[-1]!r} -- src/\n"
               f"  If the answer is not your commit, the fix is a baseline row "
               f"WITH AN OWNER AND AN EXPIRY, not a deletion.", file=sys.stderr)
-    # A row goes stale two ways and they need opposite readings. Saying the
-    # wrong one is not a cosmetic problem: `shape_growth.coverage_line()` was
-    # DELETED by pgw#1184 and this guard told master's readers it "now has a
-    # production caller", which is a search for something that does not exist.
-    # A gate's message is part of the gate.
+    # A row goes stale two ways and they need opposite readings: telling a
+    # reader a DELETED symbol "now has a production caller" sends them hunting
+    # for something that does not exist. A gate's message is part of the gate.
     upstream = _upstream_baseline() if stale else None
     for label in stale:
         if upstream is not None and label not in upstream:

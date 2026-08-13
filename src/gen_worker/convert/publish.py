@@ -6,7 +6,7 @@ A conversion / dataset / training endpoint writes files locally, calls
 destination repo (explicit ``destination_repo=`` or the job payload's
 reserved ``destination.repo`` field). Nothing publishes implicitly.
 
-Publishes over the chunked sha256 CAS (th#1303 ``HubClient.publish_v2``).
+Publishes over the chunked sha256 CAS (``HubClient.publish_v2``).
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ def _csv_strs(raw: str) -> tuple[str, ...]:
 
 
 def _placement_block(attrs: Mapping[str, str], label: str) -> dict[str, Any] | None:
-    """th#697: the placement stamp — arch requirements the SKU-aware
-    precision ladder reads back at resolution. Derived from the flavor
+    """The placement stamp — arch requirements the SKU-aware precision
+    ladder reads back at resolution. Derived from the flavor
     token's class defaults; producers may override via explicit
     ``precision_class`` / ``placement_*`` attrs. Base rows stay unstamped
     (bare = runs wherever it fits, by definition)."""
@@ -78,8 +78,8 @@ def _flavor_files(flavor: ProducedFlavor) -> list[CommitFile]:
 
 
 def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None]:
-    """th#1411 restatement default: the pgw#654 stamps of the checkpoint being
-    converted, read from the hub's resolve of ``ctx.source``. Best-effort —
+    """The restatement default: the classification stamps of the checkpoint
+    being converted, read from the hub's resolve of ``ctx.source``. Best-effort —
     on any failure the publish proceeds unstamped and the hub's
     classification gate stays the enforcement."""
     info = getattr(ctx, "source", None) or {}
@@ -127,13 +127,10 @@ def _journal_beside(flavor: ProducedFlavor) -> Path:
 def _publish_leg(dest: str, label: str, stage: str, facts: Mapping[str, Any]) -> None:
     """One typed `convert_publish` event per LEG of the publish protocol.
 
-    `publish_flavors` is what every quantize / fuse / cast job
-    calls — the 2h16m casts — and it used to pass no ``on_stage``, no
-    ``progress`` and no ``part_progress``, so the highest-volume producer on
-    the platform emitted ZERO `worker_activity_events` legs for its whole
-    publish. "Declared 590 objects and is moving 37 GB" and "was refused
-    before a byte left" were the same observation. Modelled on
-    ``fleet_cells._publish_leg``, which already does this correctly.
+    Without these, the highest-volume producer on the platform emits ZERO
+    `worker_activity_events` legs for a multi-hour publish, and "declared 590
+    objects and is moving 37 GB" is indistinguishable from "was refused before
+    a byte left". Mirrors ``fleet_cells._publish_leg``.
     """
     detail = " ".join(f"{k}={v}" for k, v in sorted(dict(facts).items()))
     _activity.emit_event(
@@ -155,16 +152,15 @@ def publish_flavors(
     """Publish each ProducedFlavor as one commit. ``destination_repo`` falls
     back to the reserved-name ``ctx.destination`` payload field.
 
-    ``mode`` defaults to ``"replace"`` (th#597 C2): a producer's flavor
-    export is a complete tree by definition — merging with the repo's prior
-    :latest is how te#44 shipped an #fp8 checkpoint carrying 5.2GB of fp16
-    base weights. Pass ``mode="merge"`` explicitly only for deliberate
-    overlay publishes (e.g. a vae swap on top of an existing tree).
+    ``mode`` defaults to ``"replace"``: a producer's flavor export is a
+    complete tree by definition, and merging with the repo's prior :latest
+    ships a quantized checkpoint carrying the base weights. Pass
+    ``mode="merge"`` explicitly only for deliberate overlay publishes (e.g. a
+    vae swap on top of an existing tree).
 
-    ``journal_path`` is where the in-flight ``publish_id`` is
-    recorded so a retry on this pod re-uploads instead of re-casting. Pass the
-    produced tree's own directory; omit it and the publish is exactly as
-    unrecoverable as it was before."""
+    ``journal_path`` is where the in-flight ``publish_id`` is recorded so a
+    retry on this pod re-uploads instead of re-casting. Pass the produced
+    tree's own directory; omit it and the publish is unrecoverable."""
     dest = str(destination_repo or "").strip()
     if not dest:
         info = getattr(ctx, "destination", None) or {}
@@ -173,12 +169,12 @@ def publish_flavors(
         raise ValueError("destination_repo is required (payload.destination.repo)")
 
     client = HubClient.from_ctx(ctx)
-    # a v2 publish mints a new identity and inherits nothing, so a
-    # publish into a classified repo must restate objective/distilled. Default:
-    # restate the SOURCE checkpoint's hub stamps — this producer just derived
-    # the flavors from exactly that source, and quantize/fuse/cast preserve
-    # objective/distillation, so the restatement is a first-hand declaration,
-    # not the silent inheritance th#1400 forbids. Explicit caller values win.
+    # A v2 publish mints a new identity and inherits nothing, so a publish into
+    # a classified repo must restate objective/distilled. Default: restate the
+    # SOURCE checkpoint's hub stamps — this producer just derived the flavors
+    # from exactly that source, and quantize/fuse/cast preserve
+    # objective/distillation, so the restatement is a first-hand declaration
+    # rather than silent inheritance. Explicit caller values win.
     if objective is None or distilled is None:
         src_objective, src_distilled = _source_stamps(ctx, client)
         if objective is None:
@@ -187,29 +183,27 @@ def publish_flavors(
             distilled = src_distilled
     results: list[CommitResult] = []
     for flavor in flavors:
-        # OUR producers never emit shards, and this is the
-        # last place a conversion / training-promote / cell-publish output can
-        # be checked before it becomes somebody's checkpoint. It is NOT a
-        # universal publish gate — a user's own sharded upload never reaches
-        # this function; it goes to the hub's upload API and is accepted as
-        # given. Checked rather than assumed because save_pretrained shards on
-        # its own.
+        # OUR producers never emit shards, and this is the last place a
+        # conversion / training-promote / cell-publish output can be checked
+        # before it becomes somebody's checkpoint. NOT a universal publish gate
+        # — a user's own sharded upload never reaches this function; it goes to
+        # the hub's upload API and is accepted as given. Checked rather than
+        # assumed because save_pretrained shards on its own.
         assert_one_file_per_component(
             Path(flavor.path), producer=f"publish_flavors[{dest}]")
-        # pgw#1133, the same seam and the same argument: our producers do not
-        # get to publish a component NARROWER than its families.facts pin.
-        # Here there is no source tree to compare against — this path is our
-        # own output, not a mirror — so the pin is enforced outright, and the
-        # per-component precision is published either way.
+        # Same seam, same argument: our producers do not get to publish a
+        # component NARROWER than its families.facts pin. Here there is no
+        # source tree to compare against — this path is our own output, not a
+        # mirror — so the pin is enforced outright, and the per-component
+        # precision is published either way.
         produced_dtypes = verify_produced_tree(Path(flavor.path))
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
-        # a PRODUCER-LOCAL label. It classifies the placement stamp
-        # and names the activity leg; it is NOT sent to the hub and does not
-        # name a catalog row — `dtype` + `artifact_contract` state what the
-        # bytes are (th#1803 §1.32(d)).
+        # A PRODUCER-LOCAL label. It classifies the placement stamp and names
+        # the activity leg; it is NOT sent to the hub and does not name a
+        # catalog row — `dtype` + `artifact_contract` state what the bytes are.
         label = str(flavor.flavor or attrs.get("dtype") or "").strip()
-        # worker-addable provenance stamp fields. Producers declare
-        # quant identity in the flavor attribute bag; it rides the commit's
+        # Worker-addable provenance stamp fields. Producers declare quant
+        # identity in the flavor attribute bag; it rides the commit's
         # `provenance` object onto the checkpoint's node stamp (parents /
         # derivation_op come from the orchestrator's token claim, never here).
         provenance = {
@@ -228,36 +222,28 @@ def publish_flavors(
             meta["placement"] = placement
         if produced_dtypes:
             meta["component_dtypes"] = dict(produced_dtypes)
-        # th#1303 phase 3, producer class 2 of N: the CONVERSION producer.
-        # `publish_flavors` is what every quantize / fuse / cast / distil job
-        # calls, so it is the highest-volume publisher after the mirror — and
-        # it is in the SAME class the mirror flip already crossed (clone.py's
-        # full-clone arm), which is why it goes second and not last.
-        #
-        # Safe here for the reason v2 requires: every file is a real local
-        # file (`_flavor_files` walks the produced tree), so each digest is
-        # PROVEN from bytes in hand rather than asserted. There is no
-        # auto-select and no env knob — naming the protocol at the call site
-        # is what makes "which producers are on v2 today?" answerable by
-        # reading the code instead of by sampling traffic.
+        # v2 is safe here for the reason v2 requires: every file is a real
+        # local file (`_flavor_files` walks the produced tree), so each digest
+        # is PROVEN from bytes in hand rather than asserted. There is no
+        # auto-select and no env knob — naming the protocol at the call site is
+        # what makes "which producers are on v2 today?" answerable by reading
+        # the code instead of by sampling traffic.
         #
         # A `merge` onto a prior blake3 manifest is a typed refusal
         # (`mixed_algorithm_manifest`), not a silent partial; `mode` here
-        # defaults to "replace" (th#597 C2), so the common path is unaffected.
+        # defaults to "replace", so the common path is unaffected.
         results.append(client.publish_v2(
             destination_repo=dest,
             files=_flavor_files(flavor),
             tags=list(tags or []),
             mode=mode,
-            # the conversion producer now puts its own legs on the
-            # wire. (The per-object liveness beat lives in the data plane
-            # itself — `chunk_upload._beat` — so it cannot be lost by a caller
-            # who forgets to pass a callback, which is exactly how it was
-            # lost here.)
+            # The conversion producer's own legs. (The per-object liveness beat
+            # lives in the data plane itself — `chunk_upload._beat` — so it
+            # cannot be lost by a caller who forgets to pass a callback.)
             on_stage=functools.partial(_publish_leg, dest, label),
             journal_path=journal_path or _journal_beside(flavor),
-            # when the producer declares one, the hub PROVES it
-            # against the header before recording it.
+            # When the producer declares one, the hub PROVES it against the
+            # header before recording it.
             artifact_contract=attrs.get("artifact_contract", ""),
             dtype=attrs.get("dtype", ""),
             file_layout=attrs.get("file_layout", ""),

@@ -26,14 +26,12 @@ The publisher's side of the v2 flow. Shape, and why each part is the way it is:
     need-set comes back smaller from ``POST .../grants``, because what landed
     is now accounted for. A kill mid-upload loses at most the in-flight
     objects. That re-plan is also the CAS path's presign re-mint: a grant that
-    outlived ``expires_at`` is not fatal, it is re-planned (pgw#1004 C — the
-    media/dataset domains needed a whole new hub route for this, th#1655; this
-    one always had it and simply never read the expiry).
+    outlived ``expires_at`` is not fatal, it is re-planned.
 *   **Parallel across chunks**, bounded, sharing the process-wide PUT budget so
     file-level and chunk-level fan-out cannot multiply into a retry storm. The
     budget is taken BEFORE the span is read, so it bounds buffer residency and
     not merely socket count.
-*   **Retry hygiene identical to the presigned path** (pgw#1004 A/B):
+*   **Retry hygiene identical to the presigned path**:
     decorrelated-jitter backoff from the one shared helper, classify before
     charging an attempt, and a liveness beat per completed object so a healthy
     multi-hour transfer is not silence to the watchdogs.
@@ -82,17 +80,14 @@ _MAX_ATTEMPTS = 5
 # Total concurrent PUTs across every file and chunk. Two fan-out axes that each
 # look modest multiply into a retry storm otherwise.
 #
-# pgw#1004 D raised these from 4/8. The reference points, all in-repo and all
-# measured rather than guessed: the hub's ranged reader needs SIXTEEN windows in
-# flight to move 3.5 MB/s where one stream moves 0.10 MB/s on the same class of
-# link (`internal/s3/resumable_reader.go:45`), and the SDK transfer path next
-# door has run at 10 workers for as long as it has existed
-# (the retired SDK uploader's `_MULTIPART_MAX_WORKERS`). 8 in flight per publish under a
-# 16-PUT process ceiling sits between the two: it can no longer leave a pod
-# uplink idle, and it still cannot multiply with a second publish into
-# something the store reads as a flood. Chunks are 64 MiB, so the slot is also
-# the buffer bound — 8 × 64 MiB = 512 MiB per publish, unchanged from before,
-# because the OLD code bought its buffer outside the semaphore.
+# Derivation, measured rather than guessed: the hub's ranged reader needs
+# SIXTEEN windows in flight to move 3.5 MB/s where one stream moves 0.10 MB/s on
+# the same class of link (`internal/s3/resumable_reader.go:45`), and the SDK
+# transfer path next door runs at 10 workers. 8 in flight per publish under a
+# 16-PUT process ceiling sits between the two: it cannot leave a pod uplink
+# idle, and it still cannot multiply with a second publish into something the
+# store reads as a flood. Chunks are 64 MiB, so the slot is also the buffer
+# bound — 8 × 64 MiB = 512 MiB per publish.
 _DEFAULT_PARALLEL = 8
 _PUT_BUDGET = 16
 _put_slots = threading.BoundedSemaphore(_PUT_BUDGET)
@@ -160,10 +155,10 @@ def _parse_expires_at(raw: str) -> float:
 class UploadGrant:
     """One `need` entry from the hub: where to PUT, and with which headers.
 
-    ``expires_at`` is the hub's ``ObjectGrant.ExpiresAt`` (RFC3339). It was on
-    the wire and dropped on the floor before pgw#1004; reading it is what makes
-    a 403 attributable — an expired presign re-plans, a substituted claim does
-    not. "" means the hub named none, and then no expiry check is made.
+    ``expires_at`` is the hub's ``ObjectGrant.ExpiresAt`` (RFC3339). Reading it
+    is what makes a 403 attributable — an expired presign re-plans, a
+    substituted claim does not. "" means the hub named none, and then no expiry
+    check is made.
     """
 
     digest: str  # "sha256:<hex>" — also the CAS key
@@ -306,9 +301,8 @@ def _classify_put(grant: UploadGrant, code: int, body_sample: str) -> Optional[E
     the digest we computed (a local bug, or a file that changed under us) and
     403 normally means the grant does not authorize what we sent. Neither is
     fixed by retrying — EXCEPT that S3 also answers 403 for a presign that has
-    simply expired, and pgw#1004 C is that we could not tell the two apart.
-    Now we can: a 403 on a grant already past its stated ``expires_at`` is a
-    re-plan, not a repudiation.
+    simply expired. A 403 on a grant already past its stated ``expires_at`` is
+    a re-plan, not a repudiation.
     """
     verdict = put_verdict(code, presign_expired=grant.expired(margin_s=0.0))
     if verdict == PUT_OK:
@@ -341,10 +335,9 @@ def _put_one(
 
     CLASSIFY BEFORE CHARGING: a terminal status raises on the spot and never
     spends an attempt; only a transient one does, and it pays a
-    decorrelated-jitter sleep first (``hubio.transport.backoff_sleep_s`` —
-    the same helper the presigned path uses). Before pgw#1004 this loop
-    retried five times with NO sleep at all: four threads hammering a store
-    that had just answered 429.
+    decorrelated-jitter sleep first (``hubio.transport.backoff_sleep_s`` — the
+    same helper the presigned path uses). Never retry without the sleep: that
+    is several threads hammering a store that has just answered 429.
     """
     last: Exception = _Transient("no attempt made")
     for attempt in range(1, max_attempts + 1):
@@ -378,7 +371,7 @@ def _put_one(
             grant.digest[:20], attempt, max_attempts, delay, last,
         )
         # Backing off IS work in progress, and the pod must say so: the hub's
-        # activity stall window does not care why we are quiet (pgw#1004 B).
+        # activity stall window does not care why we are quiet.
         _activity.note_progress()
         sleep(delay)
     raise ValueError(
@@ -398,10 +391,8 @@ def _beat(n: int) -> None:
     """Feed the data plane's liveness the way the presigned path does
     (``presigned_upload.py``'s ``_feed``): bytes onto the open activity's
     counter so the 10 s beat carries a moving number, plus proof-of-life.
-
-    Before pgw#1004 the entire multi-GB data plane emitted nothing, so a
-    healthy 37 GB publish and a wedged one were the same silence to the
-    orchestrator's activity stall window.
+    Without it a healthy multi-GB publish and a wedged one are the same silence
+    to the orchestrator's activity stall window.
     """
     act = _activity.current()
     if act is not None:
@@ -444,10 +435,9 @@ def upload_grants(
                 raise ValueError(
                     f"grant for {g.digest[:20]}… is {g.size_bytes} bytes, local span is {length}"
                 )
-            # the slot is taken BEFORE the span is read, so the
-            # PUT budget bounds bytes resident in this process and not merely
-            # sockets open from it. It used to be taken inside _put_one, one
-            # 64 MiB buffer too late.
+            # The slot is taken BEFORE the span is read, so the PUT budget
+            # bounds bytes resident in this process and not merely sockets open
+            # from it.
             with _put_slot():
                 body = _read_span(path, offset, length)
                 # Verify our own bytes before spending the transfer. The store
