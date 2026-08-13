@@ -37,10 +37,23 @@ import re
 from dataclasses import dataclass
 from typing import NewType, Optional
 
-# th#597 C5: `#` fragment charset [a-z0-9][a-z0-9._-]{0,63} (matches
+# th#597 C5: `#` fragment charset [a-z0-9][a-z0-9._-]{0,126} (matches
 # tensorhub's validation.IsValidFlavorToken). Cell fragments only — see the
 # module docstring.
-_TENSORHUB_FRAGMENT_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+#
+# pgw#1213 widened the cap from 64 to 127. The fragment IS where an entry key
+# travels (`aot_serve.parse_cell_ref` -> `cell_key.is_key`), and the
+# `cg-key-v1` scheme makes a key 66 chars — under the old cap the very
+# identity this grammar exists to carry did not parse, which surfaced as
+# `is_aot_ref` returning False for a cell the process had just armed. The cap
+# is shared with tensorhub's Go half and th#1897 carries the identical
+# widening there; the conformance vectors in
+# tests/testdata/ref_grammar_vectors.json pin no length case, so both parsers
+# stay green on every vector while that lands.
+MAX_FRAGMENT_LEN = 127
+_TENSORHUB_FRAGMENT_RE = re.compile(
+    r"[a-z0-9][a-z0-9._-]{0,%d}" % (MAX_FRAGMENT_LEN - 1)
+)
 
 
 class FlavorSelectorRemoved(ValueError):
