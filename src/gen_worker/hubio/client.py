@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
 
-# Connect timeout split from read (mirrors gen_worker._upload_transport and
+# Connect timeout split from read (mirrors gen_worker.hubio.transport and
 # the gw#456 download-side floor): a dead host fails in seconds instead of
 # consuming the whole read budget.
 _CONNECT_TIMEOUT_S = 15.0

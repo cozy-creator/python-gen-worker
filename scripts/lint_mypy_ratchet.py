@@ -53,7 +53,7 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     "implicit_reexport": (17, 34),
     # pgw#1202 PR 2: test modules still dirty at the relaxed test posture.
     # 170 of 486 were already clean and are checked from that commit on.
-    "ignore_errors": (316, 2016),
+    "ignore_errors": (315, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted

@@ -208,23 +208,47 @@ class TransportError(RuntimeError):
         self.status_code = status_code
 
 
-def _classify_response_status(status: int, body_sample: str) -> Optional[TransportError]:
-    """Decide whether an HTTP status from S3 is success / retry / terminal.
+class GrantExpired(Exception):
+    """A presigned grant is (or has just proven to be) expired.
 
-    Mirrors botocore's StandardRetryHandler classification: 2xx is
-    success, 429 + 5xx are retryable, 4xx (other than 429) are terminal.
-    """
+    NOT a failure of the bytes and NOT terminal: an expired presign is fixed
+    by asking the hub for fresh grants (re-plan). Distinguishing this from a
+    substituted-claim 403 is pgw#1004 C; the discrimination lives HERE so
+    every PUT path shares one policy."""
+
+
+#: put_verdict() results — the ONE status classification for presigned PUTs.
+PUT_OK = "ok"
+PUT_EXPIRED = "expired"      # 403 on a presign known to be past expires_at
+PUT_TRANSIENT = "transient"  # retry in place with backoff_sleep_s
+PUT_TERMINAL = "terminal"    # not fixed by retrying
+
+
+def put_verdict(status: int, *, presign_expired: bool = False) -> str:
+    """THE status classification for presigned PUTs (pgw#1206 B).
+
+    2xx ok; 403 on a presign past its stated expiry is a RE-PLAN, never a
+    repudiation (pgw#1004 C); 408/429/5xx transient (botocore's
+    StandardRetryHandler shape); every other 4xx terminal."""
     if 200 <= status < 300:
+        return PUT_OK
+    if status == 403 and presign_expired:
+        return PUT_EXPIRED
+    if status in (408, 429) or status >= 500:
+        return PUT_TRANSIENT
+    return PUT_TERMINAL
+
+
+def _classify_response_status(status: int, body_sample: str) -> Optional[TransportError]:
+    """Engine projection of :func:`put_verdict` (no expiry knowledge here —
+    callers that hold an ``expires_at`` discriminate before raising)."""
+    verdict = put_verdict(status)
+    if verdict == PUT_OK:
         return None
-    if status == 429 or status >= 500:
-        return TransportError(
-            f"S3 part upload retryable status ({status}): {body_sample[:200]}",
-            retryable=True,
-            status_code=status,
-        )
     return TransportError(
-        f"S3 part upload terminal status ({status}): {body_sample[:200]}",
-        retryable=False,
+        f"S3 part upload {'retryable' if verdict == PUT_TRANSIENT else 'terminal'} "
+        f"status ({status}): {body_sample[:200]}",
+        retryable=verdict == PUT_TRANSIENT,
         status_code=status,
     )
 

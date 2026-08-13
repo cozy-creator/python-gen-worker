@@ -123,7 +123,7 @@ class IncrementalSafetensorsWriter:
 
     pgw#1003: bytes go to a same-directory temp and reach ``output_path`` only
     via fsync -> os.replace -> fsync(dir), the durable-finalize shape the
-    download side already uses (``s3_transfer.py``, ``models/cozy_cas.py``).
+    download side already uses (``hubio/fetch.py``, ``models/chunk_cas.py``).
     A hard-killed pod therefore leaves no truncated cast output under the
     real name — the output either exists whole or does not exist. An
     incomplete tensor set is never committed either.

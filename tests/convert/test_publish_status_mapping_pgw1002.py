@@ -112,7 +112,7 @@ def test_the_incremental_writer_finalizes_ATOMICALLY_and_fsyncs(tmp_path, monkey
     """`close()` used to just close the handle — no fsync, no temp+rename — so
     a hard-killed pod could leave a truncated cast output under the real name
     that nothing re-verifies. The download side has done this correctly since
-    gw#408 (`s3_transfer` fsync -> os.replace -> fsync_dir)."""
+    gw#408 (fsync -> os.replace -> fsync_dir, now `hubio.fetch`)."""
     from gen_worker.convert import writer as w
 
     synced: list[str] = []

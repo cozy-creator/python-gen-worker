@@ -37,7 +37,20 @@ from typing import Any, Callable
 
 import psutil
 
-from gen_worker.presigned_upload import blake3_hash_file, presigned_upload_file
+from gen_worker.presigned_upload import STREAM_CHUNK_BYTES, presigned_upload_file
+
+
+def blake3_hash_file(path: "str | Path", chunk_size: int = STREAM_CHUNK_BYTES) -> str:
+    from blake3 import blake3
+
+    h = blake3()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk_size)
+            if not block:
+                break
+            h.update(block)
+    return str(h.hexdigest())
 
 
 @dataclass

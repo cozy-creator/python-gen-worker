@@ -364,7 +364,7 @@ def test_degrading_boot_degrades_on_silence_not_on_a_clock(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C — models/cozy_cas.py: the CAS retry give-up is byte progress
+# C — hubio/fetch.py (was models/cozy_cas.py): the CAS retry give-up is byte progress
 # ---------------------------------------------------------------------------
 
 
@@ -430,20 +430,21 @@ class _FlakyBlobServer:
 
 
 def _fetch(url: str, dst: Path, blob: bytes) -> None:
-    from gen_worker.models import cozy_cas
+    from gen_worker.hubio import fetch
 
-    asyncio.run(cozy_cas._download_one_file(
-        url, dst, len(blob), "sha256:" + hashlib.sha256(blob).hexdigest(),
+    asyncio.run(fetch.afetch_verified(
+        url, dst, expected_size=len(blob),
+        expected_digest="sha256:" + hashlib.sha256(blob).hexdigest(),
     ))
 
 
 @pytest.fixture()
 def fast_cas_retries(monkeypatch) -> None:
-    from gen_worker.models import cozy_cas
+    from gen_worker.hubio import fetch
 
-    monkeypatch.setattr(cozy_cas, "_RETRY_BACKOFF_CAP_S", 0.01)
-    monkeypatch.setattr(cozy_cas, "_RETRY_PROGRESS_FLOOR_BYTES", 4 * 1024 * 1024)
-    monkeypatch.setattr(cozy_cas, "_TRANSIENT_MAX_TRIES", 2)
+    monkeypatch.setattr(fetch, "_RETRY_BACKOFF_CAP_S", 0.01)
+    monkeypatch.setattr(fetch, "_RETRY_PROGRESS_FLOOR_BYTES", 4 * 1024 * 1024)
+    monkeypatch.setattr(fetch, "_TRANSIENT_MAX_TRIES", 2)
 
 
 def test_a_flaky_but_advancing_cas_fetch_outlives_its_retry_cap(
@@ -637,7 +638,7 @@ def test_materialize_gives_up_only_when_the_hub_says_nothing_definite(
     "relpath, gone",
     [
         ("runtimes/server.py", "_DEFAULT_BOOT_TIMEOUT_S"),
-        ("models/cozy_cas.py", "_MAX_RETRY_TIME_S"),
+        ("hubio/fetch.py", "_MAX_RETRY_TIME_S"),
         ("hubio/client.py", "_COMPLETE_NETWORK_MAX_WAIT_S"),
         ("presigned_upload.py", "_COMPLETE_IN_PROGRESS_MAX_WAIT_S"),
         ("request_context/_datasets.py", "_MATERIALIZE_BUDGET_S"),

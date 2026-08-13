@@ -459,7 +459,7 @@ def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) 
         calls["n"] += 1
         dst.write_bytes(content)
 
-    monkeypatch.setattr(snap_mod, "_download_one_file", _fake_dl)
+    monkeypatch.setattr(snap_mod, "afetch_verified", _fake_dl)
     monkeypatch.setattr(_WeightsPipe, "expected", content)
 
     ref = "harness/snapshot-corruption-quarantine"

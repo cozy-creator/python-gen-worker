@@ -275,8 +275,8 @@ def test_no_env_declares_the_trust_class(store: Path) -> None:
 
 
 _FORBIDDEN_IMPORTS = {
-    "gen_worker.s3_transfer", "gen_worker.presigned_upload",
-    "gen_worker._upload_transport", "gen_worker.media_transfer",
+    "gen_worker.presigned_upload",
+    "gen_worker.hubio.transport", "gen_worker.media_transfer",
     "gen_worker.net", "gen_worker.callout", "gen_worker.transport",
     "gen_worker.fleet_cells", "gen_worker.hubio.client",
     "urllib", "urllib.request", "requests", "httpx", "boto3", "aiohttp",

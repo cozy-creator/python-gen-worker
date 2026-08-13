@@ -55,7 +55,9 @@ import requests
 
 from .. import activity as _activity
 from .. import progress as _progress
-from .._upload_transport import backoff_sleep_s
+from ..hubio.transport import backoff_sleep_s
+from ..hubio.transport import GrantExpired as GrantExpired
+from ..hubio.transport import PUT_EXPIRED, PUT_OK, PUT_TERMINAL, put_verdict
 from .chunk_cas import (
     CAS_CHUNK_SIZE_BYTES,
     _READ_CHUNK_BYTES,
@@ -85,7 +87,7 @@ _MAX_ATTEMPTS = 5
 # flight to move 3.5 MB/s where one stream moves 0.10 MB/s on the same class of
 # link (`internal/s3/resumable_reader.go:45`), and the SDK transfer path next
 # door has run at 10 workers for as long as it has existed
-# (`s3_transfer.py:_MULTIPART_MAX_WORKERS`). 8 in flight per publish under a
+# (the retired SDK uploader's `_MULTIPART_MAX_WORKERS`). 8 in flight per publish under a
 # 16-PUT process ceiling sits between the two: it can no longer leave a pod
 # uplink idle, and it still cannot multiply with a second publish into
 # something the store reads as a flood. Chunks are 64 MiB, so the slot is also
@@ -136,15 +138,6 @@ class FileDeclaration:
         return out
 
 
-class GrantExpired(Exception):
-    """This grant's presign is (or has just proven to be) expired.
-
-    NOT a failure of the bytes and NOT terminal: an expired presign is fixed
-    by re-planning, which mints a fresh grant for the same object. Kept apart
-    from ``failures`` so it cannot consume a re-upload pass — pgw#1004 C, where
-    a 403 from an expired URL was indistinguishable from a substituted claim
-    and both were classified terminal.
-    """
 
 
 def _parse_expires_at(raw: str) -> float:
@@ -317,14 +310,15 @@ def _classify_put(grant: UploadGrant, code: int, body_sample: str) -> Optional[E
     Now we can: a 403 on a grant already past its stated ``expires_at`` is a
     re-plan, not a repudiation.
     """
-    if 200 <= code < 300:
+    verdict = put_verdict(code, presign_expired=grant.expired(margin_s=0.0))
+    if verdict == PUT_OK:
         return None
-    if code == 403 and grant.expired(margin_s=0.0):
+    if verdict == PUT_EXPIRED:
         return GrantExpired(
             f"grant for {grant.digest[:20]}… expired at {grant.expires_at} "
             f"(HTTP 403) — re-planning"
         )
-    if 400 <= code < 500 and code not in (408, 429):
+    if verdict == PUT_TERMINAL:
         return ValueError(
             f"chunk {grant.digest[:20]}… refused with HTTP {code}: {body_sample}"
         )
@@ -347,7 +341,7 @@ def _put_one(
 
     CLASSIFY BEFORE CHARGING: a terminal status raises on the spot and never
     spends an attempt; only a transient one does, and it pays a
-    decorrelated-jitter sleep first (``_upload_transport.backoff_sleep_s`` —
+    decorrelated-jitter sleep first (``hubio.transport.backoff_sleep_s`` —
     the same helper the presigned path uses). Before pgw#1004 this loop
     retried five times with NO sleep at all: four threads hammering a store
     that had just answered 429.

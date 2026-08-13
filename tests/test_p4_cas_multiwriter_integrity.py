@@ -24,7 +24,7 @@ import pytest
 import hashlib
 
 import gen_worker.models.cozy_snapshot as snap_mod
-from gen_worker.models.cozy_cas import _download_one_file
+from gen_worker.hubio.fetch import afetch_verified
 from gen_worker.models.cozy_snapshot import ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from gen_worker.models.refs import TensorhubRef
@@ -66,7 +66,7 @@ def test_second_pod_on_shared_cas_root_makes_no_network_call(tmp_path: Path, mon
         if on_bytes is not None:
             on_bytes(len(_PAYLOAD))
 
-    monkeypatch.setattr(snap_mod, "_download_one_file", _public_get)
+    monkeypatch.setattr(snap_mod, "afetch_verified", _public_get)
     shared_root = tmp_path / "volume"
 
     first = asyncio.run(ensure_snapshot_async(
@@ -106,7 +106,7 @@ def _download_worker(start: Any, results: Any, url: str, dst: str) -> None:
         results.put((False, "start barrier timed out"))
         return
     try:
-        asyncio.run(_download_one_file(
+        asyncio.run(afetch_verified(
             url, Path(dst), expected_size=len(_PAYLOAD), expected_digest=_DIGEST,
         ))
         results.put((True, ""))
@@ -223,7 +223,7 @@ def test_fresh_materialization_verifies_the_digest_before_trusting_bytes(tmp_pat
         url = f"http://127.0.0.1:{httpd.server_address[1]}/blob"
 
         with pytest.raises((ValueError, OSError)):
-            asyncio.run(_download_one_file(
+            asyncio.run(afetch_verified(
                 url, dst, expected_size=len(_PAYLOAD), expected_digest=_DIGEST,
             ))
         assert not dst.exists(), "mismatched bytes must never land at the trusted CAS path"

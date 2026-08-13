@@ -1,6 +1,6 @@
 """pgw#945 (tail of pgw#938): three more fixed-name temp paths, classified.
 
-pgw#938 replaced ``s3_transfer``'s ``dest.tmp`` and noticed three siblings
+pgw#938 replaced the SDK uploader's ``dest.tmp`` and noticed three siblings
 without analysing them. Its own finding was that a pod-wide path can be
 CORRECT, so each site here is classified rather than assumed:
 
