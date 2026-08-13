@@ -1,23 +1,21 @@
-"""P8 (th#960/pgw#609 design table): convert/publish contract, hermetic
-(fake tensorhub HTTP server, no torch/GPU, no real weight downloads).
+"""The convert/publish contract, hermetic (fake tensorhub HTTP server, no
+torch/GPU, no real weight downloads).
 
-  * pgw#589/th#901: an explicit dtype mismatch on a publish_as_is
-    (dense-safetensors) source casts for real — never silent passthrough
-    under a correct-looking label; a matching dtype is genuinely zero-work;
-    non-cast-eligible strategies (gguf) still refuse loud.
-  * pgw#593: classifier variant-tag selection against a real-world-shaped
-    filename corpus (a table, not a one-off regression case).
-  * pgw#566 (test-first — fix open): kohya-SGM SDXL adapter normalization
-    must pass ``unet_config`` through **kwargs-only converters (the real
-    diffusers ``StableDiffusionXLPipeline.lora_state_dict`` shape) so the
-    SGM block remap actually runs — currently it only checks for a NAMED
-    parameter and silently skips it.
-  * pgw#569: not covered here — the W8A8 source verifier's one-ULP gate
-    (writer.py's ``verify_w8a8_byte_gate``) operates on real safetensors
-    artifact files with no factored-out standalone comparator; building a
-    hermetic fixture for it needs a real (if tiny) w8a8 production
-    round-trip, out of scope for this pass. Flagged as an open follow-up in
-    the th#960 tracker checkpoint rather than faked or skipped silently.
+  * an explicit dtype mismatch on a publish_as_is (dense-safetensors) source
+    casts for real — never silent passthrough under a correct-looking label; a
+    matching dtype is genuinely zero-work; non-cast-eligible strategies (gguf)
+    still refuse loud.
+  * classifier variant-tag selection against a real-world-shaped filename
+    corpus (a table, not a one-off regression case).
+  * TEST-FIRST, FIX OPEN: kohya-SGM SDXL adapter normalization must pass
+    ``unet_config`` through **kwargs-only converters (the real diffusers
+    ``StableDiffusionXLPipeline.lora_state_dict`` shape) so the SGM block remap
+    actually runs — it currently only checks for a NAMED parameter and silently
+    skips it.
+  * NOT COVERED: the W8A8 source verifier's one-ULP gate (writer.py's
+    ``verify_w8a8_byte_gate``) operates on real safetensors artifact files with
+    no factored-out standalone comparator; a hermetic fixture for it needs a
+    real (if tiny) w8a8 production round-trip.
 """
 
 from __future__ import annotations

@@ -1,21 +1,19 @@
-"""pgw#818: hub and worker must apply THE SAME fabric predicate.
+"""Hub and worker must apply THE SAME fabric predicate.
 
-th#1285 interpretation 4 ruled out a HelloAck demote field because "the worker
-gates on its OWN boot canary interconnect, which is the same measurement the
-hub demotes on, so both sides agree by construction". The fleet survey then
-added a bandwidth floor hub-side (`nvlink AND peer_gbps >= 200`,
-tensorhub topology/interconnect.go SPMinPeerGbps) and the worker's gate kept
-reading `interconnect` alone — so the construction broke. In the disagreement
-band (`interconnect == "nvlink" AND peer_gbps < 200`):
+There is deliberately no HelloAck demote field: both sides gate on the SAME
+boot-canary measurement, so they agree by construction — but only while the
+predicates match. The hub's is two-term (`nvlink AND peer_gbps >= 200`,
+tensorhub topology/interconnect.go SPMinPeerGbps); a worker reading
+`interconnect` alone breaks the construction. In the disagreement band
+(`interconnect == "nvlink" AND peer_gbps < 200`):
 
   - a 2x2 pod: hub re-packs 4x1 and dispatches indices 0..3; the worker still
     holds 2x2, so `group_ordinal_exact` refuses indices 1 and 3 RETRYABLE,
     forever — half the pod is a permanent retry loop;
   - a 1x4 pod: hub sees 4 slots, worker arms 1 group — capacity overstated 4x.
 
-The design stays two independent gates over one measurement (NO HelloAck
-field); the fix is the worker adopting the same two-term predicate, plus the
-survey's standing recommendation: a WEDGED fabric (peer access, exactly zero
+The design stays two independent gates over one measurement: the worker applies
+the same two-term predicate, and a WEDGED fabric (peer access, exactly zero
 bandwidth — the collective hangs with no error) refuses at boot, typed, for
 any multi-GPU topology.
 """

@@ -5,9 +5,8 @@ compute child is allowed to hold, and the child genuinely needs it: inputs it
 fetches and outputs it uploads go child -> object store directly, which is what
 keeps the data plane out of the parent's interpreter.
 
-So this is not a leak, it is a DECISION — and relaying
-``RunJob.worker_capability_token`` verbatim would hand tenant code whatever
-arrived on the stream, unexamined.
+Relaying ``RunJob.worker_capability_token`` verbatim would hand tenant code
+whatever arrived on the stream, unexamined.
 
 The parent cannot mint or re-mint — the hub holds the key — so "downscope"
 here means the narrowest thing a relay CAN do: forward, or withhold. What it

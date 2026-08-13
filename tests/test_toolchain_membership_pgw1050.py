@@ -1,21 +1,18 @@
-"""pgw#1050 — the ``toolchain`` axis's MEMBERSHIP: the compiler, not the
-model libraries.
+"""The ``toolchain`` axis's MEMBERSHIP: the compiler, not the model libraries.
 
-The membership axiom (pgw#1059 amendment 6) has two failure modes and this
-file pins the expensive one. The key must not UNDER-split — that is the arm
-token's and the local-store verdict's problem, and both stay pessimistic. The
-key must also not OVER-split, and it did: ``diffusers``/``transformers``/
-``peft`` rode the ``toolchain`` axis while everything they can do to a cell
-already arrives through the traced ``graph`` axis (pgw#1031 folded the
-node-level witness, so the axis is the COMPUTATION and not the ingress). Every
-model-library patch release therefore re-keyed every cell in the fleet for a
-graph that had not moved.
+Two failure modes; this file pins the expensive one. The key must not
+UNDER-split — that is the arm token's and the local-store verdict's problem,
+and both stay pessimistic. It must also not OVER-split:
+``diffusers``/``transformers``/``peft`` do not belong on the ``toolchain`` axis
+because everything they can do to a cell already arrives through the traced
+``graph`` axis (the axis is the COMPUTATION, not the ingress). Otherwise every
+model-library patch release re-keys every cell in the fleet for a graph that
+has not moved.
 
 The two tests that matter are a matched pair, and neither is meaningful
 without the other:
 
-* an evicted component moves NO key (the over-split, fixed here) — RED on
-  `origin/master`, where each of the three moved the key;
+* an evicted component moves NO key (the over-split);
 * a genuine compiler component still moves the key (the under-split, which
   must never happen) — GREEN on both sides, and it is what makes the first
   test a narrowing rather than a deletion.

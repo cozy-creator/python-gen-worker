@@ -15,8 +15,6 @@ Connects to the running serve via ``./.gen-worker.sock`` (override ``--socket``)
 sends one NDJSON request ``{"function": ..., "payload": ...}``, reads one NDJSON
 response, and prints the result to stdout. Exits non-zero with a clear stderr
 message if no serve is running or the request errored.
-
-The full design lives in ``progress.json`` issue #340.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""pgw#971 / pgw#972: fill BOTH stores at once, and back off.
+"""Fill BOTH stores at once, and back off.
 
 Three properties, all driven through the real `download_chunked_file` /
 `ensure_snapshot_async` over a real threaded HTTP server on localhost — real

@@ -1,10 +1,8 @@
-"""th#1303 phase 3: the CONVERSION producer (`publish_flavors`) publishes v2.
+"""The CONVERSION producer (`publish_flavors`) publishes v2.
 
-The mirror was producer class 1 (`clone.py`'s full-clone arm, shipped in
-0.79.0). This is class 2 — every quantize / fuse / cast / distil job in the
-conversion endpoint reaches the hub through `publish_flavors`, so while it
-still called `commit()` the corpus repoint had a second, higher-volume tap
-still filling the blake3 CAS behind it.
+Every quantize / fuse / cast / distil job in the conversion endpoint reaches
+the hub through `publish_flavors`, so a `commit()` left here is a
+high-volume tap still filling the blake3 CAS.
 
 Driven end to end against the shared fake hub, which ENFORCES LIKE R2 on the
 PUT (bytes that do not hash to the key are refused and nothing is stored) —

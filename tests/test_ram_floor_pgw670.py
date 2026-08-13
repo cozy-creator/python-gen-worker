@@ -1,12 +1,10 @@
-"""pgw#670: a measured HOST-RAM floor has a successor again.
+"""A measured HOST-RAM floor reaches the hub.
 
-The v2 cut deleted ``Resources(ram_gb=)`` on the reasoning that host RAM is an
-opportunistic latency tier. For ltx-video-2.3 it was neither opportunistic nor
-a guess: ie#484 measured 179-301 s mp4-encode and 147 s VAE-decode tails on
-host-starved allocations at IDENTICAL GPU step-ms, ie#492 sized the floor at
-64 GB from that failure, and the hub consumed it as a pod-create minimum plus
-th#740's read-back-and-reject. Without a carrier a starved allocation degrades
-SILENTLY — a slow request, not a refused pod.
+Host RAM is not merely an opportunistic latency tier: a host-starved video
+allocation measured 179-301 s mp4-encode and 147 s VAE-decode tails at
+IDENTICAL GPU step-ms, which sized a 64 GB floor the hub consumes as a
+pod-create minimum plus read-back-and-reject. Without a carrier for it a
+starved allocation degrades SILENTLY — a slow request, not a refused pod.
 
 Tapes go through the REAL discovery manifest builder, because the whole defect
 class is a declaration that never reaches the builder's

@@ -1,14 +1,8 @@
-"""pgw#781 / th#1303: the worker can FILL a manifest-v2 (sha256 / chunked)
-snapshot, and every integrity check on that path actually runs.
+"""The worker can FILL a manifest-v2 (sha256 / chunked) snapshot, and every
+integrity check on that path actually runs.
 
-Before this, ``cozy_snapshot`` was blake3-only end to end: ``_blob_path``
-hardcoded ``blobs/blake3/…``, ``chunk_cas`` was not imported by the fill path
-at all, and a v2 entry died at ``missing blake3 for <path>``. So a v2 publish
-was unconsumable — which makes "publish v2" untestable as an outcome.
-
-th#1303 S1 deleted the v1 arm these also used to pin (the two
-``test_v1_*`` cases): after the repoint nothing resolves to a blake3
-manifest, so a v1 entry is a stale pointer and is REFUSED, not filled.
+Nothing resolves to a blake3 manifest any more, so a v1 entry is a stale pointer
+and is REFUSED, not filled.
 
 These drive the REAL ``ensure_snapshot_async`` over a real localhost HTTP
 server: sockets, threads, files, the actual reassembly. The assertions are

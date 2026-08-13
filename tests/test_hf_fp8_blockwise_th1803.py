@@ -1,4 +1,4 @@
-"""th#1803: the consumer half of the tensor-layout gate.
+"""The consumer half of the tensor-layout gate.
 
 Real tree, real transformers loader, real forward — no mocks. A tiny Llama is
 quantized to ``hf.fp8-blockwise@1`` (128x128 block scales in

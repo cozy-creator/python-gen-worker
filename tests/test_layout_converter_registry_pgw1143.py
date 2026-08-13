@@ -1,5 +1,5 @@
-"""pgw#1143 step 4 + 7 (§1.33): the layout converter registry, and the fence
-that keeps conversion out of cell identity.
+"""The layout converter registry (§1.33), and the fence that keeps conversion
+out of cell identity.
 
 What is proven here, in the order the ruling puts it:
 

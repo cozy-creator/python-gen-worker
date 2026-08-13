@@ -1,20 +1,12 @@
-"""th#1771 part 2: the output-integrity floor is a SERVE-path floor.
+"""The output-integrity floor is a SERVE-path floor.
 
-pgw#1094's whole contract is *"nothing is uploaded unlooked-at"* and *"it
-cannot bank as a successful render"*. A boot-warmup / mint warm forward uploads
-nothing and banks nothing — and its INPUT is the derived warm payload, which is
-`WARMUP_TEXT` plus a flat mid-gray 128px PNG. For a reference-conditioned model
-that input produces a legitimately flat output.
-
-Measured live on minimax-h3 0.4.7 / gen-worker 0.101.0: with part 1's fix the
-warm payload finally BUILT, the warm forward ran a full 4-minute denoise, and
-`ctx.save_video` then refused its own warm output —
-
-    OutputIntegrityError: blank: video video failed the output-integrity floor
-    (integrity blank (adjacent_frame_corr 0.994, frame_std_min 0.00134 …))
-
-— which the worker reported as `JOB_STATUS_FATAL` for the paying request that
-happened to wake the pod. Same shape as part 1, one layer further down.
+The floor's contract is *"nothing is uploaded unlooked-at"* and *"it cannot bank
+as a successful render"*. A boot-warmup / mint warm forward uploads nothing and
+banks nothing — and its INPUT is the derived warm payload, `WARMUP_TEXT` plus a
+flat mid-gray 128px PNG, which for a reference-conditioned model produces a
+legitimately flat output. Judging it refuses the warm forward
+(`OutputIntegrityError: blank`) and the worker reports `JOB_STATUS_FATAL` for
+whichever paying request happened to wake the pod.
 
 So: judge served outputs, never warm ones.
 """

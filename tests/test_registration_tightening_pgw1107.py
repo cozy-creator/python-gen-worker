@@ -15,7 +15,7 @@ families each). Every one would fail a classes-required invariant at import. A
 class-less compile is a DECISION, not an omission.
 
 So the gate asks about INTENT instead: a ``Compile`` that reaches for the
-pgw#739 export vocabulary (``classes``/``dims``/``forks``/``inputs``/``args``/
+export vocabulary (``classes``/``dims``/``forks``/``inputs``/``args``/
 ``blockers``/``shape_strategy``/``warm_changes_key``) is declaring an export
 contract and is held to carrying classes and a family; a ``Compile`` that
 carries none of it is a dynamo-lane block and is registered nowhere.

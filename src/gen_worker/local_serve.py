@@ -1,8 +1,7 @@
 """The cozy-local serve entry: the fleet arming brain, no sink.
 
-DESIGN-RULINGS §4.28 (Paul, 2026-08-10): *"Untrusted hardware (community
-cloud, cozy-local) mints for ITSELF: local cell, local repo-CAS, reused
-across its own boots — never uploaded, never requested."*
+Untrusted hardware (community cloud, cozy-local) mints for ITSELF: local cell,
+local repo-CAS, reused across its own boots — never uploaded, never requested.
 
 This is deliberately a MODULE rather than a line in ``cli/run.py``, because
 the never-publish property has to be STRUCTURAL: ``publisher=None`` at one
