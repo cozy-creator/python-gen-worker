@@ -44,8 +44,11 @@ REPO = Path(__file__).resolve().parents[1]
 HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 69 -> 62: pgw#1202 PR 3 cleared the endpoint-AUTHORING surface
     # (gen_worker.api.* + gen_worker.testing), 30 bare generics.
-    "disallow_any_generics": (62, 285),
-    "warn_return_any": (26, 48),
+    # 62 -> 60: PR 6 cleared request_context (+ ._stream) — the `ctx` object
+    # every handler is handed.
+    "disallow_any_generics": (60, 285),
+    # 26 -> 25: PR 6, request_context.
+    "warn_return_any": (25, 48),
     "disallow_untyped_calls": (20, 37),
     "disallow_untyped_decorators": (3, 9),
     # implicit_reexport is split in two: our modules (a burn-down) and

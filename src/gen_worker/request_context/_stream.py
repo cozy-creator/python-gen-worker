@@ -41,7 +41,7 @@ class _RequestOutputStream:
     def __init__(
         self,
         *,
-        ctx: "RequestContext",
+        ctx: "RequestContext[Any]",
         ref: str,
         kind: str,  # "asset" | "checkpoint"
         format: Optional[str] = None,
