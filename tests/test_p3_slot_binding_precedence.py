@@ -46,6 +46,7 @@ from harness.toy_endpoints import (
     EchoIn,
     EchoOut,
 )
+from gen_worker.models import store as store_mod
 
 _TIMEOUT = 15.0
 
@@ -305,7 +306,7 @@ def test_bare_ref_prefetch_picks_up_declared_binding_files_and_provider(
         calls.append({"ref": r, **kwargs})
         return tmp_path
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
+    monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
 
     def _spec():
         class _Ep:

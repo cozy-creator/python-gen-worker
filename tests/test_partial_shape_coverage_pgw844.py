@@ -62,6 +62,7 @@ from gen_worker.executor import Executor, _Job  # noqa: E402
 from gen_worker.models import provision  # noqa: E402
 from gen_worker.pb import worker_scheduler_pb2 as pb  # noqa: E402
 from gen_worker.registry import extract_specs  # noqa: E402
+from gen_worker.models import store as store_mod
 
 FAMILY = "sdxl"
 FLAVOR = "inductor-l4-torch2.13-w8a8"
@@ -353,7 +354,7 @@ def _boot(
 
     ex = Executor(specs, _send)
     ex.store._cache_dir = tmp_path / "cas"
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision, "load_slot",
         lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True))

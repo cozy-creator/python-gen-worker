@@ -25,7 +25,8 @@ from types import SimpleNamespace
 
 from gen_worker import activity as activity_mod
 from gen_worker.config import Settings
-from gen_worker.executor import Executor, ModelStore
+from gen_worker.executor import Executor
+from gen_worker.models.store import ModelStore
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
 

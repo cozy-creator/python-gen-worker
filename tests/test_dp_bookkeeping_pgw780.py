@@ -9,7 +9,7 @@ here.
 
 from __future__ import annotations
 
-from gen_worker.executor import ModelStore
+from gen_worker.models.store import ModelStore
 from gen_worker.models import staging
 from gen_worker.topology import ExecutionTopology
 

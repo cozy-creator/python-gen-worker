@@ -34,6 +34,7 @@ from gen_worker.executor import Executor
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec, extract_specs
+from gen_worker.models import store as store_mod
 
 FAMILY = "flux2-klein-4b"
 CACHE_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
@@ -554,7 +555,7 @@ def test_production_setup_stamps_cold_active_identity_after_warmup(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == CACHE_REF else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -608,7 +609,7 @@ def test_store_served_boot_with_clean_hits_raises_no_compile_alarm(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == CACHE_REF else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -667,7 +668,7 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == CACHE_REF else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -748,7 +749,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     async def _download(ref, **kwargs):
         return model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -834,7 +835,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     async def _download(ref, **kwargs):
         return model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -921,7 +922,7 @@ def test_boot_warmup_proves_each_compile_object_independently(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == CACHE_REF else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -995,7 +996,7 @@ def test_sdxl_w8a8_boot_proves_both_aliases_through_their_own_runs(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == cell_ref else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1065,7 +1066,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == cell_ref else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1204,7 +1205,7 @@ def test_flux_real_guard_requires_object_activation_and_each_alias_execution(
             "fxgraph_cache_miss": 1,
         }
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1304,7 +1305,7 @@ def test_compile_hit_on_other_object_cannot_certify_primary_object(
             "fxgraph_cache_miss": 1,
         }
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1384,7 +1385,7 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == CACHE_REF else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
     # Torch boundary only: dynamo genuinely holds an entry for the class
@@ -1489,7 +1490,7 @@ def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == cell_ref else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1569,7 +1570,7 @@ def test_w8a8_without_exact_cell_self_mints_and_fails_typed_without_cuda(
     async def _download(ref, **kwargs):
         return model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1647,7 +1648,7 @@ def test_w8a8_custom_warmup_proof_attributes_to_all_compatible_siblings(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == cell_ref else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1722,7 +1723,7 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
     async def _download(ref, **kwargs):
         return artifact.parent if ref == cell_ref else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1786,7 +1787,7 @@ def _wire_merged_execution_lane(ex_cls_specs, tmp_path, monkeypatch):
     async def _download(ref, **kwargs):
         return artifact.parent if ref == cell_ref else model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -1940,7 +1941,7 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
     async def _download(ref, **kwargs):
         return model_dir
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     pipe = _Pipe()
     setattr(pipe, "_cozy_weight_lane", "w8a8")
     monkeypatch.setattr(
@@ -2025,7 +2026,7 @@ def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, mo
     class _SupportObject:
         pass  # no transformer/vae target despite typed setup annotation
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -2103,7 +2104,7 @@ def test_concurrent_same_ref_setups_keep_each_loaded_snapshot_identity(
         downloaded[digest].set()
         return paths[digest]
 
-    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
         provision,
         "load_slot",
@@ -2483,7 +2484,7 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
             calls.append(r)
             return new_dir
 
-        monkeypatch.setattr(executor_mod, "ensure_local", fake_download)
+        monkeypatch.setattr(store_mod, "ensure_local", fake_download)
         # same digest -> cache hit, no download
         got = await store.ensure_local(ref, pb.Snapshot(digest="blake3:aa11"))
         assert got == old_dir and calls == []

@@ -439,7 +439,8 @@ def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) 
     import gen_worker.models.cozy_snapshot as snap_mod
     from gen_worker.api.binding import Hub as HubRef
     from gen_worker.api.decorators import Resources
-    from gen_worker.executor import Executor, ModelStore
+    from gen_worker.executor import Executor
+    from gen_worker.models.store import ModelStore
     from gen_worker.registry import EndpointSpec
 
     def _tiny_safetensors(tag: bytes = b"\x00\x01\x02\x03") -> bytes:

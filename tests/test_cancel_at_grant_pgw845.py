@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from gen_worker.executor import ModelStore
+from gen_worker.models.store import ModelStore
 from gen_worker.lifecycle_intents import IntentRegistry
 from gen_worker.pb import worker_scheduler_pb2 as pb
 

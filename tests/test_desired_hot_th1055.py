@@ -44,6 +44,7 @@ from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.models import store as store_mod
 
 FAMILY = "th1055-fam"
 AUTHORED = Hub("acme/qwen-image", tag="prod")
@@ -178,7 +179,7 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
         return p
 
     import gen_worker.executor as ex_mod
-    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
+    monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
 
     enables: List[Tuple[Any, Optional[Path]]] = []
 

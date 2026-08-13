@@ -87,6 +87,7 @@ from harness.exported_cell import (
     ROWS, RUNTIME, ProbeDenoiser, ProbePackage, ProbePipeline, declaration,
     entry_name,
 )
+from gen_worker.models import store as store_mod
 
 #: The publishing org. PLATFORM tier by default, so the trust rule needs no
 #: viewer identity — the identity half is pgw#1122's and is fenced there.
@@ -510,7 +511,7 @@ class AdoptRig:
             p.mkdir(parents=True, exist_ok=True)
             return p
 
-        self.monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
+        self.monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
 
         from gen_worker import dispatch as dispatch_mod
 

@@ -73,6 +73,7 @@ from gen_worker.registry import extract_specs
 # The rig of the REAL arm path (real artifact, real gate, real ladder).
 import test_numerics_gate_pgw868 as rig868  # noqa: E402
 from test_numerics_gate_pgw868 import ROWS, ProbePackage, arm, entry_name  # noqa: E402
+from gen_worker.models import store as store_mod
 
 #: pgw#868's fixtures, re-exported so this module collects them: `declared`
 #: registers the real export declaration the probe feed is built from, and
@@ -451,7 +452,7 @@ def _boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
+    monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
 
     from gen_worker import dispatch as dispatch_mod
 

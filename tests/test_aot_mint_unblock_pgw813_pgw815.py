@@ -337,7 +337,8 @@ class _Inj:
 
 
 def _executor(tmp_path: Path) -> Any:
-    from gen_worker.executor import Executor, ModelStore
+    from gen_worker.executor import Executor
+    from gen_worker.models.store import ModelStore
 
     async def _send(msg: Any) -> None:
         pass

@@ -16,7 +16,8 @@ from types import SimpleNamespace
 
 import gen_worker.lifecycle as lifecycle_mod
 from gen_worker.config import Settings
-from gen_worker.executor import Executor, ModelStore
+from gen_worker.executor import Executor
+from gen_worker.models.store import ModelStore
 from gen_worker.lifecycle import HEARTBEAT_INTERVAL_MS, Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
