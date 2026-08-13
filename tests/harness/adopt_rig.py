@@ -78,7 +78,7 @@ from gen_worker import (
 from gen_worker import executor as ex_mod
 from gen_worker.executor import Executor
 from gen_worker.models import provision
-from gen_worker.models.refs import normalize_model_ref
+from gen_worker.models.refs import WireRef, normalize_model_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 
@@ -520,7 +520,7 @@ class AdoptRig:
         eff = ex._dispatched_spec(
             spec,
             {"pipeline": dispatch_mod.SlotOrder(ref=MODEL_REF, components=())})
-        snaps: Dict[str, pb.Snapshot] = {normalize_model_ref(MODEL_REF): pb.Snapshot(
+        snaps: Dict[WireRef, pb.Snapshot] = {normalize_model_ref(MODEL_REF): pb.Snapshot(
             digest="d1" * 16,
             files=[pb.SnapshotFile(
                 path="model.safetensors", size_bytes=5, blake3="cd" * 32,

@@ -36,6 +36,7 @@ import hashlib
 import msgspec
 import pytest
 
+from gen_worker.models.refs import WireRef
 from gen_worker import Hub, RequestContext, Slot, endpoint, worker_function
 from gen_worker.executor import Executor, _Job
 from gen_worker.models import staging as staging_mod
@@ -206,8 +207,8 @@ def _pick(ex: Executor, name: str, ref: str) -> Any:
     return ex._dispatched_spec(spec, _orders(run))
 
 
-def _snapshots(ref: str, digest: str) -> Dict[str, pb.Snapshot]:
-    return {ref: pb.Snapshot(digest=digest, files=[pb.SnapshotFile(
+def _snapshots(ref: str, digest: str) -> Dict[WireRef, pb.Snapshot]:
+    return {WireRef(ref): pb.Snapshot(digest=digest, files=[pb.SnapshotFile(
         path="model.safetensors", size_bytes=len(_PLAIN_BYTES),
         digest="sha256:" + hashlib.sha256(_PLAIN_BYTES).hexdigest(),
         url="http://r2.invalid/presigned")])}
@@ -223,7 +224,7 @@ def _instance(fn: str, ref: str) -> pb.DesiredInstance:
 def _seed_preloader(
     ex: Executor,
     instances: List[pb.DesiredInstance],
-    snapshots: Dict[str, pb.Snapshot],
+    snapshots: Dict[WireRef, pb.Snapshot],
 ) -> None:
     """Deterministic state injection: tests drive ``_pass()`` directly
     instead of racing the background task."""
@@ -348,11 +349,11 @@ def _composed_tree_writer(ref: str, p: Path) -> None:
     (v / "weights.bin").write_bytes(_VAE_BYTES)
 
 
-def _composed_snapshot(ref: str, digest: str) -> Dict[str, pb.Snapshot]:
+def _composed_snapshot(ref: str, digest: str) -> Dict[WireRef, pb.Snapshot]:
     def _dig(data: bytes) -> str:
         return "sha256:" + hashlib.sha256(data).hexdigest()
 
-    return {ref: pb.Snapshot(digest=digest, files=[
+    return {WireRef(ref): pb.Snapshot(digest=digest, files=[
         pb.SnapshotFile(path="denoiser/weights.bin",
                         size_bytes=len(_DENOISER_BYTES),
                         digest=_dig(_DENOISER_BYTES),
@@ -542,7 +543,7 @@ def test_stale_generation_ignored(
 ) -> None:
     ex = _executor(tmp_path, monkeypatch, Family)
     pl = ex.preloader
-    snaps_new: Dict[str, pb.Snapshot] = {}
+    snaps_new: Dict[WireRef, pb.Snapshot] = {}
     pl._generation = 5
     pl._hot = (_instance("generate", "acme/current"),)
     pl.update_desired([_instance("generate", "acme/old")], snaps_new, 3)

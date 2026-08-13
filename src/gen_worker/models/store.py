@@ -1078,7 +1078,7 @@ class ModelStore:
         pass's keep-membership/grace filter. Ordering within that set is a
         separate seam, see ``_disk_eviction_order``."""
         now = time.time()
-        out: List[Tuple[float, str]] = []
+        out: List[Tuple[float, WireRef]] = []
         for ref in self.disk_refs():
             if ref in exclude or self.disk_ref_in_use(ref):
                 continue
@@ -1101,8 +1101,9 @@ class ModelStore:
     # behavior, byte-for-byte.
     @staticmethod
     def _default_disk_eviction_order(
-        entries: List[Tuple[float, str]], include_keep: bool, keep_rank: Dict[str, int],
-    ) -> List[str]:
+        entries: List[Tuple[float, WireRef]], include_keep: bool,
+        keep_rank: Dict[str, int],
+    ) -> List[WireRef]:
         if include_keep:
             ordered = sorted(entries, key=lambda item: (-keep_rank[item[1]], item[0], item[1]))
         else:

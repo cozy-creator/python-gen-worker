@@ -1461,7 +1461,9 @@ class Lifecycle:
             # open, plus the typed self-diagnosis on a stalled registry.
             activity_mod.on_beat()
 
-    async def _setup_awaiting_functions(self, awaiting: Dict[str, List[str]]) -> None:
+    async def _setup_awaiting_functions(
+        self, awaiting: Dict[str, List[WireRef]],
+    ) -> None:
         """Complete boot setup for functions whose tensorhub snapshots arrive
         via hub delivery after the startup scan (gw#591), then push a
         StateDelta so ``available_functions`` advertises them."""
