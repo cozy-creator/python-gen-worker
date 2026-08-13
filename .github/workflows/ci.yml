@@ -160,6 +160,25 @@ name: CI
 #
 # The trigger is deliberately bare (no `branches:`/`paths:` filter). A filter
 # that excludes a merge group is indistinguishable from case 1.
+#
+# TWO THINGS MEASURED WHILE TURNING THIS ON, both of which cost a live queue
+# stall and neither of which is in the obvious write-ups:
+#
+#   * **GitHub reads workflows from the MERGE-GROUP ref, not from `master`.**
+#     Verified: with the queue switched on before this trigger had landed, four
+#     entries were queued and exactly ONE run existed — the group for the entry
+#     that carried this file's own edit. The three ahead of it showed
+#     `statusCheckRollup: none` and would have sat until the 60-minute timeout
+#     evicted them. So **enable the queue only AFTER the `merge_group:` trigger
+#     is already on `master`**, or the first entries queued cannot pass.
+#     (Corollary, and the reason the ordering is easy to get wrong: a PR that
+#     ADDS the trigger can validate itself in the queue, because its own group
+#     contains its own edit. That works and still leaves everyone else stuck.)
+#   * **The repo setting "Allow auto-merge" must be ON.** `gh pr merge <n>`
+#     routes a queue merge through `enablePullRequestAutoMerge`, so with it off
+#     the enqueue fails outright with
+#     `Auto merge is not allowed for this repository`. It is a repository
+#     setting, not part of the ruleset, so enabling the queue does not turn it on.
 on:
   workflow_dispatch: {}
   merge_group:
