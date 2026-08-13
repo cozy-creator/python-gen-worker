@@ -46,7 +46,10 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # (gen_worker.api.* + gen_worker.testing), 30 bare generics.
     # 62 -> 60: PR 6 cleared request_context (+ ._stream) — the `ctx` object
     # every handler is handed.
-    "disallow_any_generics": (60, 285),
+    # 60 -> 56: PR 7 cleared the BUILD-TIME surface (registry,
+    # discovery.discover, discovery.execution_lanes, entrypoint) — what an
+    # endpoint image build exercises.
+    "disallow_any_generics": (56, 285),
     # 26 -> 25: PR 6, request_context.
     "warn_return_any": (25, 48),
     "disallow_untyped_calls": (20, 37),

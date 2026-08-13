@@ -10,7 +10,7 @@ import traceback
 import typing
 import types as py_types
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import msgspec
 
@@ -415,7 +415,7 @@ def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
 
 
 def _slot_to_manifest(
-    name: str, slot: Slot, *, family: str,
+    name: str, slot: Slot[Any], *, family: str,
     components: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """One ``functions[].slots[]`` entry (pgw#520 / th#767, SDK v2): the
@@ -591,7 +591,7 @@ class SourceOnlyModuleError(ValueError):
 
 
 def _audit_source_only_imports(
-    *, root: Path, top_level: str, preloaded: frozenset = frozenset(),
+    *, root: Path, top_level: str, preloaded: FrozenSet[str] = frozenset(),
 ) -> None:
     """Fail the bake when the walk leaned on source-tree-only modules.
 

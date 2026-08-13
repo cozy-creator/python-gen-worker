@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+from typing import Any, Dict
 
 import msgspec
 
@@ -206,7 +207,7 @@ def execution_lanes_for_function(
     return tuple(keep), ordered
 
 
-def manifest_block(derived: DerivedExecutionLanes) -> dict:
+def manifest_block(derived: DerivedExecutionLanes) -> Dict[str, Any]:
     """The ``[execution_lanes]`` block as it lands in endpoint.lock."""
     return {
         "derivation": derived.derivation,

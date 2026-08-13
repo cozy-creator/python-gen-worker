@@ -168,7 +168,7 @@ def _log_worker_fatal(
         logger.warning("worker-fatal wire report raised unexpectedly", exc_info=True)
 
 
-def load_manifest(path: Path = MANIFEST_PATH) -> Optional[dict]:
+def load_manifest(path: Path = MANIFEST_PATH) -> Optional[Dict[str, Any]]:
     """Load the function manifest if it exists (baked in at build time)."""
     if not path.exists():
         return None
@@ -183,7 +183,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> Optional[dict]:
         return None
 
 
-def get_modules_from_manifest(manifest: dict) -> List[str]:
+def get_modules_from_manifest(manifest: Dict[str, Any]) -> List[str]:
     """Extract unique module names from the manifest."""
     modules = set()
     for func in manifest.get("functions", []):

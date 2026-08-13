@@ -17,10 +17,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import msgspec
 
 from .api.binding import Binding, ModelRef
-from .api.compile_axis import extract_payload_axes
+from .api.compile_axis import PayloadAxis, extract_payload_axes
 from .api.decorators import (
-    ATTR, VARIANT_ATTR, WF_ATTR, Compile, EndpointDecl, Resources,
-    VariantDecl, WorkerFunctionDecl,
+    ATTR, VARIANT_ATTR, WF_ATTR, Compile, ConfigParam, DynamicDim, EndpointDecl,
+    Resources, VariantDecl, WorkerFunctionDecl,
 )
 from .api.formula import RuntimeFormula
 from .api.slot import Slot
@@ -62,14 +62,14 @@ class CompileCell:
     machinery (compile_cache / fleet_cells / local_cells / aot_serve)
     consumes; raw ``Compile`` never travels past the registry."""
 
-    shapes: tuple
-    targets: tuple
+    shapes: Tuple[Tuple[int, ...], ...]
+    targets: Tuple[str, ...]
     family: str
     regional: bool
     # This FUNCTION's effective text pin (per-lane, gap #6: a
     # @worker_function(text_len=) override wins over the class Compile's).
     text_len: Optional[int]
-    dynamic: tuple
+    dynamic: Tuple[DynamicDim, ...]
     lora_bucket: int
     # CLASS-scoped unions (pgw#654 / pgw#647 gap #1): every sibling
     # function on one class shares one cell family, so the contract facts
@@ -77,8 +77,8 @@ class CompileCell:
     # own view (per-function digests split the cell: turbo fails closed on
     # w8a8 lanes). Union is per CLASS only; sibling @endpoint classes keep
     # their own contracts (two checkpoints = two instances = two cells).
-    guidance_scales: tuple
-    text_lens: tuple = ()
+    guidance_scales: Tuple[float, ...]
+    text_lens: Tuple[int, ...] = ()
     # pgw#1150: the family's DECLARED numerics band, carried through to the
     # gate. `numerics_ladder.declared_thresholds` has one caller
     # (`numerics_probe.probe_cell`) and its `cfg` is always this object, so
@@ -93,7 +93,7 @@ class CompileCell:
     @classmethod
     def from_declaration(
         cls, cfg: Any, *, lora_bucket: int = 0, text_len: Optional[int] = None,
-        guidance_scales: tuple = (), text_lens: tuple = (),
+        guidance_scales: Tuple[float, ...] = (), text_lens: Tuple[int, ...] = (),
     ) -> "CompileCell":
         """THE ``Compile`` -> ``CompileCell`` map, in one place.
 
@@ -121,7 +121,7 @@ class CompileCell:
             numerics_warn=cfg.numerics_warn,
         )
 
-    def contract_text_lens(self) -> tuple:
+    def contract_text_lens(self) -> Tuple[int, ...]:
         if self.text_lens:
             return tuple(sorted({int(v) for v in self.text_lens}))
         return (int(self.text_len),) if self.text_len is not None else ()
@@ -176,7 +176,7 @@ class EndpointSpec:
     # Slot-declared entries in `models` (pgw#520): slot -> Slot metadata
     # (selected_by/default_checkpoint). A subset of `models`'s keys — bare
     # bindings have no entry here.
-    slots: Dict[str, Slot] = field(default_factory=dict)
+    slots: Dict[str, Slot[Any]] = field(default_factory=dict)
     # Resolved family name per Slot (the endpoint's Compile(family=...), or
     # the handler's derived config schema's @family registration) —
     # precomputed once here so ctx.slots doesn't need EndpointDecl.compile.
@@ -193,7 +193,7 @@ class EndpointSpec:
     slot_components: Dict[str, Dict[str, str]] = field(default_factory=dict)
     # SDK v2: compile-graph equivalence classes declared on payload fields
     # (CompileAxis annotations) — replaces Compile(guidance_scales=...).
-    payload_axes: tuple = ()
+    payload_axes: Tuple[PayloadAxis, ...] = ()
     # SDK v2: resident traced LoRA rank bucket (decorator-level; 0 = branchless).
     lora_bucket: int = 0
     runtime: Optional[str] = None
@@ -210,10 +210,10 @@ class EndpointSpec:
     variant_kind: str = ""
     # pgw#654: this handler's declared objective contract (from
     # @worker_function). None = unrestricted / serves either.
-    objectives: Optional[tuple] = None
+    objectives: Optional[Tuple[str, ...]] = None
     # th#1257: this handler's declared serving tasks (@worker_function).
     # None = undeclared, which resolves NO quant approval hub-side.
-    tasks: Optional[tuple] = None
+    tasks: Optional[Tuple[str, ...]] = None
     distilled: Optional[bool] = None
     # th#1757: this handler's opt-in reference contract (@worker_function).
     # None = it never participates in the platform reference layer.
@@ -237,17 +237,17 @@ class EndpointSpec:
     device_group_ordinal: int = 0
     # pgw#654 CLASS-scoped unions (set by extract_specs over the class's
     # sibling specs; a function-shaped endpoint unions with itself).
-    guidance_union: tuple = ()
-    text_lens: tuple = ()
+    guidance_union: Tuple[float, ...] = ()
+    text_lens: Tuple[int, ...] = ()
     # th#1050: declared lane bodies this endpoint's code branches on
     # (ctx.lane). Empty = platform-managed only.
-    handles: tuple = ()
+    handles: Tuple[str, ...] = ()
     # th#1051: declared compute-time formula for this handler; None =
     # undeclared (scalar EWMA fall-through hub-side).
     runtime_formula: Optional["RuntimeFormula"] = None
     # th#1087: declared config parameters (ctx.config) + declared env names.
-    config: tuple = ()
-    env: tuple = ()
+    config: Tuple[ConfigParam, ...] = ()
+    env: Tuple[str, ...] = ()
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -361,7 +361,7 @@ def _is_selected_by_annotation(ann: Any) -> bool:
 
 
 def _validate_slot_selected_by(
-    owner: str, slots: Dict[str, Slot], payload_type: type
+    owner: str, slots: Dict[str, Slot[Any]], payload_type: type
 ) -> None:
     """pgw#520: a Slot's ``selected_by`` must name a plain-``str`` (or
     ``str | ModelRef``, pgw#524 item 5) field on THIS handler's payload —
@@ -450,7 +450,7 @@ def _validate_compile_arms(
 
 def _validate_slot_layout_keys(
     owner: str,
-    slots: Dict[str, Slot],
+    slots: Dict[str, Slot[Any]],
     slot_components: Dict[str, Dict[str, str]],
 ) -> None:
     """Every `Slot(layouts=...)` key is `"*"` or a real component path.
@@ -487,7 +487,7 @@ def _validate_slot_layout_keys(
 
 
 def _slot_is_family_agnostic(
-    name: str, slot: Slot, slots: Dict[str, Slot],
+    name: str, slot: Slot[Any], slots: Dict[str, Slot[Any]],
 ) -> bool:
     """pgw#747: has this slot opted into the family vocabulary at all?
 
@@ -538,7 +538,7 @@ def _spec_for_handler(
     cls: Optional[type],
     attr_name: str,
     models: Dict[str, Binding],
-    slots: Dict[str, Slot],
+    slots: Dict[str, Slot[Any]],
     resources: Resources,
     walked_module: str,
 ) -> EndpointSpec:
