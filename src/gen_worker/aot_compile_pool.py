@@ -1104,6 +1104,14 @@ class EntryCompilePool:
         #: child really costs a card is exactly the question P0-E/P0-F ask; it
         #: is not, and was never, a licence to divide free VRAM by it.
         self.peak_device_bytes = 0
+        #: pgw#1205: the same reading, kept PER ENTRY instead of collapsed.
+        #: `peak_device_bytes` above answers "how big was the biggest compile"
+        #: — one number for a whole cell, which is the wrong granularity for
+        #: the only question anyone asks of it ("what does THIS graph class
+        #: cost a card"). Both survive: the max is what the existing phase-table
+        #: field publishes, and these rows are what gets banked with their
+        #: provenance. entry name -> (allocated, reserved).
+        self.entry_device_peaks: Dict[str, Tuple[int, int]] = {}
         self.peak_concurrency = 0
         # pgw#848: the kernel's OOM-kill counter as it stood before this pool
         # ran. A DELTA over the pool's own wall is evidence; the absolute
@@ -1571,10 +1579,18 @@ class EntryCompilePool:
         have — and K is a question about siblings. A child too old to report
         reserved still contributes its allocated figure rather than nothing.
         """
-        peak = int(report.peak_device_reserved_bytes or 0) \
-            or int(report.peak_device_bytes or 0)
+        allocated = max(0, int(report.peak_device_bytes or 0))
+        reserved = max(0, int(report.peak_device_reserved_bytes or 0))
+        peak = reserved or allocated
         if peak > 0:
             self.peak_device_bytes = max(self.peak_device_bytes, peak)
+        # pgw#1205: and the per-class row, both readings kept apart. Maxed per
+        # field so a retry of the same entry widens rather than replaces.
+        entry = str(report.entry or "").strip()
+        if entry and (allocated > 0 or reserved > 0):
+            held_a, held_r = self.entry_device_peaks.get(entry, (0, 0))
+            self.entry_device_peaks[entry] = (
+                max(held_a, allocated), max(held_r, reserved))
 
     def _collect(self, row: _Running) -> List[str]:
         elapsed = time.monotonic() - row.started

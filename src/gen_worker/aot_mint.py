@@ -2709,6 +2709,56 @@ def _compile_entries_parallel(
     return _pool_facts(pool)
 
 
+#: The mint window `entry_device_peaks` measures. Named on the row rather than
+#: implied, because an EXPORT high-water and an entry COMPILE high-water are
+#: different questions about the same card and maxing them together would
+#: produce a number describing neither (`_ExportFootprint`'s own docstring is
+#: the worked example of that mistake).
+DEVICE_PEAK_PHASE = "entry_compile"
+
+
+def _device_peak_provenance() -> Dict[str, str]:
+    """The conditions every row in this pool's device census was taken under.
+
+    Stated ONCE beside the rows rather than repeated on each: they come from
+    one child, on one card, under one toolchain, so per-row copies could only
+    ever disagree with each other. Read in the CHILD deliberately — it is the
+    process that ran on the card, and on a multi-GPU box the parent's probe can
+    name a different device.
+
+    ``weight_lane`` is NOT here: the parent owns it (it is what it already keys
+    the RSS bank by) and adds it when banking. A fact belongs to whoever knows
+    it first-hand.
+    """
+    from . import cell_key
+    from . import compile_cache as cc
+
+    try:
+        runtime = cc.runtime_key()
+    except Exception:  # noqa: BLE001 — telemetry never fails a mint
+        runtime = {}
+    try:
+        toolchain = cell_key.toolchain_axis_digest(dict(cc.toolchain_digest()))
+    except Exception:  # noqa: BLE001
+        toolchain = ""
+    try:
+        version = cc.gen_worker_version()
+    except Exception:  # noqa: BLE001
+        version = ""
+    return {
+        # Both namings of the card: the SKU a human reads and the arch the
+        # kernels were built for. A cell minted at the wrong arch is
+        # unadoptable, so a reading must never be shared across arches.
+        "card": str(runtime.get("sku") or ""),
+        "sm": str(runtime.get("sm") or ""),
+        # The SAME digest the cell key's toolchain axis uses, so a banked row
+        # and the cell it was measured for agree on what this toolchain is.
+        "toolchain": str(toolchain),
+        "gen_worker": str(version),
+        "phase": DEVICE_PEAK_PHASE,
+    }
+
+
 def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
     """The pool block of the phase table, on BOTH termini (pgw#848).
 
@@ -2727,6 +2777,18 @@ def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
         # the phase table is what survives the mint child, and the mint child
         # is the process that dies.
         "peak_child_device_bytes": int(pool.peak_device_bytes),
+        # pgw#1205: the same reading, PER GRAPH CLASS, with the conditions it
+        # was taken under stated once beside it. `peak_child_device_bytes`
+        # above is the max across a whole cell — one number for 18 classes,
+        # which cannot answer the only question anyone asks of it. These rows
+        # can, and they ride the SAME phase table, so the row the hub receives
+        # and the row this machine banks are the same bytes rather than two
+        # measurements that have to be reconciled.
+        "entry_device_peaks": {
+            name: {"allocated_bytes": int(a), "reserved_bytes": int(r)}
+            for name, (a, r) in sorted(pool.entry_device_peaks.items())
+        },
+        "device_peak_provenance": _device_peak_provenance(),
     }
     if pool.oom_entry:
         facts["oom_entry"] = pool.oom_entry

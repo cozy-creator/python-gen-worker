@@ -28,7 +28,7 @@ ever grows a term it did not measure, it belongs in the deleted module.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 
 #: One entry child's measured HOST high-water, keyed by (family, weight lane).
@@ -54,6 +54,136 @@ def record_entry_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> Non
 def entry_peak_rss(family: str, weight_lane: str) -> int:
     """0 = never measured on this pod; ``entry_workers`` says so in its basis."""
     return _ENTRY_RSS_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
+
+
+# ---------------------------------------------------------------------------
+# pgw#1205: the DEVICE reading, banked per GRAPH CLASS with its provenance
+# ---------------------------------------------------------------------------
+#
+# §4.33 deleted a prediction layer and left one sentence standing: *"an estimate
+# may never act as a floor a measurement is not allowed to correct, and an
+# absent measurement means NO EVIDENCE."* pgw#1199 then deleted the last thing
+# that made a mint weight-scale, so the honest requirement is what a compile
+# actually costs a card — activation scale — and that is a MEASUREMENT nobody
+# was keeping.
+#
+# WHY THE MACHINE, AND NOT THE CELL MANIFEST. The manifest is written when a
+# cell SEALS, and the mint that most needs measuring is the one that OOMed and
+# sealed nothing — a bank whose writer dies exactly when the interesting data
+# exists is not a bank. And the consumer is local: K is decided in the mint
+# child, on this card, so a fleet table reachable only through a hub is the
+# wrong shape to read it from and cozy-local has no hub at all. So the reading
+# goes to two sinks that answer different questions: HERE for "what did this
+# cost on THIS machine", and onto `aot_mint_phases` for the fleet view. One
+# measurement, taken once, in the child that ran it.
+#
+# WHAT THIS IS NOT. It sizes nothing. `entry_workers` is still f(cores,
+# measured child RSS) and no width, placement or admission decision reads a row
+# below. Wiring one in would re-create precisely what §4.33 deleted, and this
+# module's own header says where such a term belongs: the deleted module.
+
+
+class DevicePeak(NamedTuple):
+    """One compile's device high-water, both readings.
+
+    Both, deliberately: ``allocated`` is what the compile needed and
+    ``reserved`` is what the caching allocator HELD and therefore what a
+    concurrent sibling could not have. The GAP between them is allocator
+    fragmentation, which is itself worth seeing and which a single number
+    hides.
+    """
+
+    allocated_bytes: int
+    reserved_bytes: int
+
+
+class DevicePeakKey(NamedTuple):
+    """WHAT was measured, and under WHICH conditions.
+
+    Every axis is here because the number is meaningless without it: the same
+    graph class costs a different amount on a different card, under a different
+    toolchain, at a different weight lane, and in a different PHASE of the mint.
+    A row that cannot say all five is not a measurement, it is a number.
+    """
+
+    graph_class: str
+    #: The card, both ways it can be named: a human-legible SKU slug
+    #: (``h100-80gb-hbm3``) and the arch the kernels were built for
+    #: (``sm_90``). A cell minted at the wrong arch is unadoptable, so the
+    #: reading must not be shared across arches.
+    card: str
+    sm: str
+    #: The SAME digest the cell key's toolchain axis uses
+    #: (``cell_key.toolchain_axis_digest``), so a banked row and the cell it
+    #: was measured for agree about what "this toolchain" means.
+    toolchain: str
+    gen_worker: str
+    weight_lane: str
+    #: WHICH window this high-water covers — an export peak and an entry
+    #: compile peak are different questions and must never be maxed together.
+    phase: str
+
+
+#: The bank. Monotone at the WRITE, exactly as the RSS bank is: a compile that
+#: peaked high once can peak that high again, and a lucky run must not talk the
+#: reading down.
+_DEVICE_PEAKS: Dict[DevicePeakKey, DevicePeak] = {}
+
+
+def record_entry_device_peak(
+    key: DevicePeakKey, allocated_bytes: int, reserved_bytes: int,
+) -> None:
+    """Bank one compile's measured device high-water.
+
+    Written on EVERY outcome including failures — pgw#848's rule for the host
+    half, which applies here with more force: the attempt that ran out of
+    device memory is the one whose reading the next attempt most needs, and it
+    is exactly the attempt that seals no cell.
+
+    Each reading is maxed INDEPENDENTLY. They come from one child and normally
+    move together, but taking ``max`` per field can only ever widen a reading,
+    and a bank that under-reports is the failure mode that matters.
+    """
+    allocated, reserved = max(0, int(allocated_bytes)), max(0, int(reserved_bytes))
+    if allocated <= 0 and reserved <= 0:
+        return
+    if not str(key.graph_class or "").strip():
+        # A row with no subject cannot be looked up and would silently
+        # accumulate every class into one entry.
+        return
+    held = _DEVICE_PEAKS.get(key)
+    if held is None:
+        _DEVICE_PEAKS[key] = DevicePeak(allocated, reserved)
+        return
+    _DEVICE_PEAKS[key] = DevicePeak(
+        max(held.allocated_bytes, allocated),
+        max(held.reserved_bytes, reserved))
+
+
+def entry_device_peak(key: DevicePeakKey) -> Optional[DevicePeak]:
+    """The banked reading, or ``None`` — which means NO EVIDENCE.
+
+    ``None`` rather than a zero-valued row on purpose (§4.33): "never measured
+    here" and "measured at zero" are different facts, and a caller that cannot
+    tell them apart will read the first as the second.
+    """
+    return _DEVICE_PEAKS.get(key)
+
+
+def device_peak_rows() -> Dict[DevicePeakKey, DevicePeak]:
+    """Every row this machine has banked. A copy — the bank is append-and-widen
+    only, and a caller must not be able to lower a reading by holding it."""
+    return dict(_DEVICE_PEAKS)
+
+
+def _forget_device_peaks() -> None:
+    """Drop the bank.
+
+    Private, and meant to stay so: production never un-measures a card, so a
+    public name here would be public surface with no production caller. Tests
+    reach it deliberately.
+    """
+    _DEVICE_PEAKS.clear()
 
 
 def device_of(pipeline: Any) -> Optional[int]:
