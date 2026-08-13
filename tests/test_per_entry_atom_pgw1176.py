@@ -184,7 +184,7 @@ def _arm(tmp_path, monkeypatch, packages, *, entries, declared_names=()):
 def test_a_failing_entry_does_not_un_arm_its_siblings(
     tmp_path, monkeypatch: pytest.MonkeyPatch, declared: Any,
 ) -> None:
-    """THE RED, closed. On master ``load_and_wrap`` bound every entry before
+    """THE RED, closed. On master ``arm_entry`` bound every entry before
     any wrap — "a cell that cannot arm one of its graph classes arms none of
     them" — so one unbindable class cost the whole cell and the pod served
     fully eager. An entry is one graph, so it arms whole or not at all, and a

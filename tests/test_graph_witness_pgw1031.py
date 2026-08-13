@@ -252,7 +252,7 @@ def test_the_key_now_separates_what_the_gates_could_not(
     * the two members derive DIFFERENT keys — pull-by-key never even offers
       cell A to pod B; the collision is a MISS, not a wrong hit;
     * were the wrong cell forced across anyway, ``verify_declared_identity``
-      now REFUSES on the ``graph`` axis (``combined_graph_hash`` differs); and
+      now REFUSES on the ``graph`` axis (this class's ``class_hash`` differs); and
     * the witness backstop still refuses beneath both.
     """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]

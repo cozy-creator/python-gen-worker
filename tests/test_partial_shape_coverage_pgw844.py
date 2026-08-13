@@ -254,7 +254,7 @@ def _arm(pipe: _Pipe, *_args: Any) -> Any:
         meta=meta,
         target="unet",
     )
-    # The pipeline-level format-2 marker `load_and_wrap` publishes — the shape
+    # The pipeline-level format-3 marker `arm_entry` publishes — the shape
     # `is_armed` / `execution_count` / `proven_since` / the guard + refusal
     # callbacks all read.
     module_marker = getattr(pipe.unet, aot_serve._MARKER_ATTR, {})
@@ -331,10 +331,10 @@ def _boot(
     # pgw#1152: an `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
     # arguing this process is "TOLD the flavor is an AOT cell exactly as a
     # Plan's `Arm.artifact` tells a pod". Production is told no such thing — it
-    # LEARNS at the wrap (`load_and_wrap`, pgw#1141b), and the route that
+    # LEARNS at the wrap (`arm_entry`, pgw#1141b), and the route that
     # believed the convention instead is what cost four pods. The line is
     # deleted rather than moved: `_arm` below publishes the pipeline-level
-    # marker `load_and_wrap` publishes, so `holds_exported_cell` answers the
+    # marker `arm_entry` publishes, so `holds_exported_cell` answers the
     # lane question off the OBJECT and the registry is not consulted at all.
     artifact = _cell_snapshot(tmp_path)
     model_dir = tmp_path / "sdxl-model"

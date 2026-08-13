@@ -3,7 +3,7 @@ route passes, and its two terms are reported apart.
 
 pgw#1164 put the measurement in `fleet_cells.adopt_delegated_mint`, i.e. on the
 SELF-MINT adopt only. The boot adopt, the local-store adopt and the re-arm run
-the identical `aot_serve.enable` -> `load_and_wrap` and reported nothing — the
+the identical `aot_serve.enable` -> `arm_entry` and reported nothing — the
 "emitter wired on one of N paths" shape this program keeps producing. It lives
 in `provision.arm_aot` now, which owns both the load and the §4.32 gate.
 

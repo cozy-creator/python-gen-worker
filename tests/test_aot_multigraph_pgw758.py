@@ -414,7 +414,7 @@ def _armed(minted_cell) -> Any:
 
     pgw#1176: this is what accretion looks like from the outside — the second
     call joins the first's registry, the first's target pool and the first's
-    live wrap. The old shape (one `load_and_wrap` over a multi-entry cell) is
+    live wrap. The old shape (one `arm_entry` over a multi-entry cell) is
     gone with the cell.
     """
     pipe = minted_cell["pipe"]
