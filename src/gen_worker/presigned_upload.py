@@ -7,8 +7,8 @@ Upload flow (one file):
   3. TensorHub answers dedup, a store-enforced single PUT (th#1795), or
      presigned multipart part URLs uploaded part-by-part and completed with
      part ETags. The worker NEVER holds store credentials (pgw#1206 B: the
-     credentialed transfer_grant lane had zero hub producers and is gone,
-     boto3 with it); an expired presign is a RE-PLAN, never terminal.
+     credentialed grant lane had zero hub producers and is gone, boto3 with
+     it); an expired presign is a RE-PLAN, never terminal.
 
 Used by worker callers via ctx.save_file / ctx.save_checkpoint. Tensorhub also
 exposes the same upload protocol to
