@@ -153,11 +153,16 @@ def test_a_deterministic_refusal_skips_ONE_class_and_mints_the_rest(
 
     assert len(seen) == 2, "both classes must be ATTEMPTED — one refusing must not stop the loop"
     assert result.timings.get("skipped_entries") == 1.0
-    entries = result.metadata.get("entries") or {}
-    assert len(entries) == 1, "the surviving class must still be packed"
-    assert not any("B=1" in name for name in entries), (
-        "the class that refused must NOT be in the cell — fail-closed is per "
-        "ENTRY, not abandoned")
+    # pgw#1176: a mint produces a SET of independently keyed entry artifacts,
+    # not one cell with an `entries` map — so the surviving class is a packed
+    # ARTIFACT rather than a member of a bundle. The claim is unchanged and
+    # sharper: fail-closed is per ENTRY, and the refusing class simply has no
+    # artifact.
+    names = [row.entry for row in result.entries]
+    assert len(names) == 1, "the surviving class must still be packed"
+    assert not any("B=1" in name for name in names), (
+        "the class that refused must NOT have been packed — fail-closed is "
+        "per ENTRY, not abandoned")
 
 
 def test_the_skipped_class_is_NAMED_with_the_construct_that_refused(

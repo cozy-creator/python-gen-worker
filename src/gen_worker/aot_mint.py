@@ -2629,6 +2629,19 @@ def _mint_cell(
     # CHILD. pgw#1177 measured ~39 s of `env_seal.establish()` per fresh child
     # — ~23 minutes across 36 entries — so a child that compiles several
     # entries in sequence is strictly better and nothing here forbids it.
+    # FAIL-CLOSED SURVIVES THE SPLIT, and pgw#1208's row is what caught that it
+    # nearly did not. `package_cell` used to raise "cannot package a cell with
+    # no entries" because it was called ONCE with the whole set; moving it
+    # inside the per-entry loop meant an all-skipped mint simply never entered
+    # the loop and returned an EMPTY MintResult — a silent success reporting
+    # that a mint produced nothing. Absence is a verdict (pgw#939), and the
+    # verdict for "every declared class refused" is a refusal, not an empty
+    # set. Per-entry fail-closed means each class refuses on its own; it does
+    # not mean the mint stops having a terminal outcome.
+    if not minted:
+        raise MintRefused(
+            "no entries: every declared graph class refused before packaging, "
+            "so this mint produced nothing to key, publish or arm")
     t0 = time.monotonic()
     progress.beat(
         PHASE_SEAL_PUBLISH, len(minted), len(minted),
