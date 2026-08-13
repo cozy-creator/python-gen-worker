@@ -18,7 +18,8 @@ assertions onto the old tree is what makes the red meaningful.
 from __future__ import annotations
 
 import platform
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Sequence, cast
 
 import pytest
 import torch
@@ -124,7 +125,7 @@ def test_a_ck1_key_is_not_an_entry_key() -> None:
 # --- 2. ARTIFACT -----------------------------------------------------------
 
 
-def test_one_artifact_carries_exactly_one_graph(tmp_path) -> None:
+def test_one_artifact_carries_exactly_one_graph(tmp_path: Path) -> None:
     meta = entry_meta(*rig.ROWS[0])
     assert meta["format"] == 3
     assert aot.verify_contract(meta) == ""
@@ -171,12 +172,16 @@ def test_a_format_2_cell_cannot_restate_a_per_entry_identity() -> None:
 # --- 3. ARM ----------------------------------------------------------------
 
 
-class _Unbindable(rig.ProbePackage):
+class _Unbindable(rig.ProbePackage):  # type: ignore[misc]
     def get_constant_fqns(self) -> List[str]:
         return ["weight", "a_constant_the_manifest_never_declared"]
 
 
-def _arm(tmp_path, monkeypatch, packages, *, entries, declared_names=()):
+def _arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    packages: Dict[str, Any], *, entries: List[Any],
+    declared_names: Sequence[str] = (),
+) -> Any:
     """Arm entries one artifact at a time, the way the loop does."""
     from gen_worker.models import provision
 
@@ -201,7 +206,7 @@ def _arm(tmp_path, monkeypatch, packages, *, entries, declared_names=()):
 
 
 def test_a_failing_entry_does_not_un_arm_its_siblings(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
 ) -> None:
     """THE RED, closed. On master ``arm_entry`` bound every entry before
     any wrap — "a cell that cannot arm one of its graph classes arms none of
@@ -232,7 +237,7 @@ def test_a_failing_entry_does_not_un_arm_its_siblings(
 
 
 def test_entries_accrete_into_one_registry_and_one_pool(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
 ) -> None:
     """Coverage accretes: a second arm joins the SAME live wrap, the same
     target pool and the same dispatch. There is no complete state to wait
@@ -253,7 +258,7 @@ def test_entries_accrete_into_one_registry_and_one_pool(
 
 
 def test_the_pool_binds_by_reference_and_never_clones(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
 ) -> None:
     """§4.33 step 4, enforced. ``update_constant_buffer(user_managed=True)``
     makes no copy of its own, so the pool's ``.clone()`` was the ONLY copy in
@@ -284,7 +289,7 @@ def test_a_noncontiguous_resident_is_made_contiguous_not_left_dangling() -> None
 
 
 def test_a_serve_failure_de_arms_ONE_class_and_the_siblings_keep_serving(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
 ) -> None:
     """§4.31 per entry. The old wrapper set ``state['failed']`` for the whole
     target on any artifact error, so one bad graph class took every sibling
@@ -310,7 +315,7 @@ def test_a_serve_failure_de_arms_ONE_class_and_the_siblings_keep_serving(
 
 
 def test_a_de_armed_class_is_not_re_armed(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
 ) -> None:
     """§4.31's de-arm is STICKY for the boot. Per entry that has to be
     enforced where the registry is, or a background compile would cheerfully
@@ -322,13 +327,14 @@ def test_a_de_armed_class_is_not_re_armed(
     assert not aot.armed_entries(pipeline)
     marker = getattr(pipeline, aot._MARKER_ATTR)
     dispatch = aot._dispatch_for(marker, rig.TARGET)
+    assert dispatch is not None
     with pytest.raises(Exception) as exc:
-        dispatch.add(rig.entry_name(*rig.ROWS[0]), object())
+        dispatch.add(rig.entry_name(*rig.ROWS[0]), cast(Any, object()))
     assert "de-armed" in str(exc.value)
 
 
 def test_a_declared_but_uncompiled_class_reports_pending_not_a_shape_gap(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
 ) -> None:
     """Under accretion the commonest reason nothing admits a call is that its
     class has not been compiled YET. Reporting that as a shape gap would ask
@@ -340,6 +346,7 @@ def test_a_declared_but_uncompiled_class_reports_pending_not_a_shape_gap(
         declared_names=names)
     marker = getattr(pipeline, aot._MARKER_ATTR)
     dispatch = aot._dispatch_for(marker, rig.TARGET)
+    assert dispatch is not None
     assert dispatch.pending == (rig.entry_name(*rig.ROWS[1]),)
 
     gaps: List[Any] = []
